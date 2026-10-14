@@ -13,6 +13,7 @@ use sessions_module::{
     },
     state::{RunPhase, SessionEndpoint, SessionIdentity, SessionProvider, SessionSourceBinding},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     composition::runtime_ports::RuntimeDriverDirectory,
@@ -90,40 +91,67 @@ impl OrganizationSessionTerminal {
         self.inner.bind_repair_session(session);
     }
 
-    pub(crate) async fn close_and_join(&self) -> Result<(), tokio::task::JoinError> {
-        self.inner.close_and_join().await
+    pub(crate) async fn close_and_join_checked(
+        &self,
+    ) -> Result<(), organization::OrganizationTerminalCloseError> {
+        self.inner.close_and_join_checked().await
     }
 }
 
 impl SessionTerminalHook for OrganizationSessionTerminal {
-    fn run_terminal(&self, snapshot: SessionRunTerminalSnapshot) {
-        runtime_trace("runtime.team_run.terminal.bridge", || json!({
-            "nativeRunHash": identifier_hash(&snapshot.native_run_id),
-            "deliveryHash": snapshot.delivery_context.as_ref().map(|context| identifier_hash(context.delivery_id.as_str())),
-            "phase": format!("{:?}", snapshot.phase),
-            "candidateCount": snapshot.assistant_texts.len(),
-            "hasDeliveryContext": snapshot.delivery_context.is_some(),
-        }));
-        self.inner
-            .run_terminal(organization::OrganizationRunTerminalSnapshot {
-                identity: platform::endpoint::runtime_address::SessionIdentity::try_new(
-                    platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
-                        snapshot.identity.provider().as_str(),
-                        snapshot.identity.endpoint.runtime_instance_id,
-                    )
-                    .expect("validated session endpoint"),
-                    snapshot.identity.agent_id,
-                    snapshot.identity.session_key,
-                )
-                .expect("validated session identity"),
-                source_binding: snapshot.source_binding,
-                native_run_id: snapshot.native_run_id,
-                delivery_context: snapshot
-                    .delivery_context
-                    .map(|context| (context.delivery_id, context.endpoint_session_id)),
-                phase: run_phase(snapshot.phase),
-                assistant_texts: snapshot.assistant_texts,
-            });
+    fn run_terminal_async<'a>(
+        &'a self,
+        snapshot: SessionRunTerminalSnapshot,
+        cancellation: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionRunTerminalSnapshot>> + Send + 'a>> {
+        Box::pin(async move {
+            let identity = snapshot.identity.clone();
+            let phase = snapshot.phase;
+            self.inner
+                .run_terminal_async(organization_terminal_snapshot(snapshot), cancellation)
+                .await
+                .map_err(|snapshot| SessionRunTerminalSnapshot {
+                    identity,
+                    source_binding: snapshot.source_binding,
+                    native_run_id: snapshot.native_run_id,
+                    delivery_context: snapshot.delivery_context.map(|(delivery_id, endpoint_session_id)| {
+                        SessionDeliveryContext { delivery_id, endpoint_session_id }
+                    }),
+                    phase,
+                    assistant_texts: snapshot.assistant_texts,
+                })
+        })
+    }
+}
+
+fn organization_terminal_snapshot(
+    snapshot: SessionRunTerminalSnapshot,
+) -> organization::OrganizationRunTerminalSnapshot<SessionSourceBinding> {
+    runtime_trace("runtime.team_run.terminal.bridge", || json!({
+        "nativeRunHash": identifier_hash(&snapshot.native_run_id),
+        "deliveryHash": snapshot.delivery_context.as_ref().map(|context| identifier_hash(context.delivery_id.as_str())),
+        "phase": format!("{:?}", snapshot.phase),
+        "candidateCount": snapshot.assistant_texts.len(),
+        "hasDeliveryContext": snapshot.delivery_context.is_some(),
+    }));
+    organization::OrganizationRunTerminalSnapshot {
+        identity: platform::endpoint::runtime_address::SessionIdentity::try_new(
+            platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
+                snapshot.identity.provider().as_str(),
+                snapshot.identity.endpoint.runtime_instance_id,
+            )
+            .expect("validated session endpoint"),
+            snapshot.identity.agent_id,
+            snapshot.identity.session_key,
+        )
+        .expect("validated session identity"),
+        source_binding: snapshot.source_binding,
+        native_run_id: snapshot.native_run_id,
+        delivery_context: snapshot
+            .delivery_context
+            .map(|context| (context.delivery_id, context.endpoint_session_id)),
+        phase: run_phase(snapshot.phase),
+        assistant_texts: snapshot.assistant_texts,
     }
 }
 
@@ -143,6 +171,15 @@ impl organization::TeamMessageRepairSessionPort<SessionSourceBinding> for Sessio
         request: organization::TeamMessageRepairSessionRequest<SessionSourceBinding>,
     ) -> Pin<Box<dyn Future<Output = organization::TeamMessageRepairSessionOutcome> + Send + 'a>>
     {
+        self.send_repair_cancellable(request, CancellationToken::new())
+    }
+
+    fn send_repair_cancellable<'a>(
+        &'a self,
+        request: organization::TeamMessageRepairSessionRequest<SessionSourceBinding>,
+        cancellation: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = organization::TeamMessageRepairSessionOutcome> + Send + 'a>>
+    {
         Box::pin(async move {
             let started = platform::trace::enabled().then(std::time::Instant::now);
             let native_run_hash = platform::trace::enabled().then(|| identifier_hash(&request.requested_run_id));
@@ -156,7 +193,7 @@ impl organization::TeamMessageRepairSessionPort<SessionSourceBinding> for Sessio
                 }));
                 return organization::TeamMessageRepairSessionOutcome::Rejected;
             };
-            let result = self.session.send_session(command).await;
+            let result = self.session.send_session_cancellable(command, cancellation).await;
             runtime_trace("runtime.team_run.repair.send.result", || json!({
                 "nativeRunHash": native_run_hash,
                 "actualNativeRunHash": match &result {
@@ -181,10 +218,11 @@ impl organization::TeamMessageRepairSessionPort<SessionSourceBinding> for Sessio
                         native_run_id: run_id,
                     }
                 }
-                Ok(SessionSendOutcome::Rejected)
-                | Ok(SessionSendOutcome::Unsupported)
-                | Ok(SessionSendOutcome::Unavailable) => {
+                Ok(SessionSendOutcome::Rejected) | Ok(SessionSendOutcome::Unsupported) => {
                     organization::TeamMessageRepairSessionOutcome::Rejected
+                }
+                Ok(SessionSendOutcome::Unavailable) => {
+                    organization::TeamMessageRepairSessionOutcome::NotDelivered
                 }
                 Ok(SessionSendOutcome::Unknown) | Err(_) => {
                     organization::TeamMessageRepairSessionOutcome::Unknown
@@ -340,9 +378,22 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
         &self,
         request: ActivityExecutionRequest,
     ) -> runtime_directory::OwnedRuntimeFuture<ActivityExecutionOutcome> {
+        self.execute_cancellable(request, CancellationToken::new())
+    }
+
+    fn execute_cancellable(
+        &self,
+        request: ActivityExecutionRequest,
+        cancellation: CancellationToken,
+    ) -> runtime_directory::OwnedRuntimeFuture<ActivityExecutionOutcome> {
         let session = self.session.clone();
         let runtime_directory = Arc::clone(&self.runtime_directory);
         Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return ActivityExecutionOutcome::Rejected {
+                    rejection: organization::DeliveryRejection::Retryable,
+                };
+            }
             let trace = |stage: &'static str, outcome: &'static str, kind: &'static str| {
                 runtime_trace(stage, || json!({
                     "runHash": identifier_hash(&request.delivery_request().run_id),
@@ -412,6 +463,11 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
                     return ActivityExecutionOutcome::Unknown;
                 }
             }
+            if cancellation.is_cancelled() {
+                return ActivityExecutionOutcome::Rejected {
+                    rejection: organization::DeliveryRejection::Retryable,
+                };
+            }
             let command = match SessionSendCommand::try_new(
                 session_identity,
                 Some(binding.endpoint_session_id().as_str().to_owned()),
@@ -434,7 +490,7 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
                 }
             };
             trace("runtime.team_run.activity.send", "begin", "send");
-            let result = session.send_session(command).await;
+            let result = session.send_session_cancellable(command, cancellation).await;
             runtime_trace("runtime.team_run.activity.send", || json!({
                 "runHash": identifier_hash(&request.delivery_request().run_id),
                 "activityHash": identifier_hash(request.delivery_request().delivery_id.as_str()),

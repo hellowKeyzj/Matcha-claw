@@ -31,21 +31,35 @@ impl MediaStore {
         handle: MediaHandle,
         content: Vec<u8>,
     ) -> Result<(), ()> {
+        self.insert_batch(session_key, vec![(handle, content)])
+    }
+
+    pub(super) fn insert_batch(
+        &self,
+        session_key: &str,
+        batch: Vec<(MediaHandle, Vec<u8>)>,
+    ) -> Result<(), ()> {
+        if batch.len() > workspace_module::MAX_MEDIA_PATHS {
+            return Err(());
+        }
         let mut entries = self.entries.lock().map_err(|_| ())?;
         let now = Instant::now();
         entries.retain(|_, entry| entry.expires_at > now);
-        if entries.len() == MAX_ENTRIES
-            && let Some(key) = entries.keys().next().cloned()
-        {
+        // Reserve the whole admitted batch before publishing any of its handles.
+        let retained_limit = MAX_ENTRIES.max(batch.len()) - batch.len();
+        while entries.len() > retained_limit {
+            let key = entries.keys().next().cloned().ok_or(())?;
             entries.remove(&key);
         }
-        entries.insert(
-            (session_key.to_owned(), handle),
-            Entry {
-                content,
-                expires_at: now + ENTRY_TTL,
-            },
-        );
+        for (handle, content) in batch {
+            entries.insert(
+                (session_key.to_owned(), handle),
+                Entry {
+                    content,
+                    expires_at: now + ENTRY_TTL,
+                },
+            );
+        }
         Ok(())
     }
 

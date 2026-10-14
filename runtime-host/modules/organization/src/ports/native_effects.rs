@@ -7,7 +7,8 @@ use crate::{GraphRunId, NativeDeletionEvidence, RoleAbortOutcome};
 use super::{
     ActivityExecutionOutcome, ActivityExecutionRequest, DeliveryReceiptReference,
     EndpointSessionId, ManagedAgentReference, MaterializationOperationOutcome,
-    MemberIntroductionError, MemberProfile, RoleSessionReceipt, RunRuntimeReceipt,
+    MemberProfile, RoleSessionReceipt, RunRuntimeReceipt, TeamCreationFailure,
+    TeamCreationFailureReason, TeamCreationStage,
     SessionWindowReference, TeamMaterializationRemoval, TeamMaterializationRequest,
 };
 
@@ -33,8 +34,20 @@ pub trait OrganizationNativeRuntime: Send + Sync {
     fn read_team_member_profiles(
         &self,
         _agents: Vec<ManagedAgentReference>,
-    ) -> OwnedRuntimeFuture<Result<Vec<MemberProfile>, MemberIntroductionError>> {
-        Box::pin(async { Err(MemberIntroductionError::Unsupported) })
+    ) -> OwnedRuntimeFuture<Result<Vec<MemberProfile>, TeamCreationFailure>> {
+        Box::pin(async {
+            Err(TeamCreationFailure::new(TeamCreationStage::ReadingProfiles, TeamCreationFailureReason::Unsupported))
+        })
+    }
+
+    fn read_team_member_profiles_cancellable(
+        &self,
+        _agents: Vec<ManagedAgentReference>,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<Result<Vec<MemberProfile>, TeamCreationFailure>> {
+        Box::pin(async {
+            Err(TeamCreationFailure::new(TeamCreationStage::ReadingProfiles, TeamCreationFailureReason::Unsupported))
+        })
     }
 
     fn materialize_team(
@@ -65,6 +78,14 @@ pub trait OrganizationNativeRuntime: Send + Sync {
         Box::pin(async { MaterializationOperationOutcome::OutcomeUnknown })
     }
 
+    /// Reads only cleanup evidence for the original removal; never repeats native removal.
+    fn recover_team_removal(
+        &self,
+        _removal: TeamMaterializationRemoval,
+    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome> {
+        Box::pin(async { MaterializationOperationOutcome::OutcomeUnknown })
+    }
+
     fn recover_team_materialization(
         &self,
         request: TeamMaterializationRequest,
@@ -87,6 +108,58 @@ pub trait OrganizationNativeRuntime: Send + Sync {
         abort_first: bool,
     ) -> OwnedRuntimeFuture<NativeDeletionEvidence>;
 
+    fn materialize_team_cancellable(
+        &self,
+        request: TeamMaterializationRequest,
+        observer: Option<super::TeamProvisionObserver>,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome> {
+        self.materialize_team_observed(request, observer)
+    }
+
+    fn confirm_team_run_receipt_cancellable(
+        &self,
+        receipt: RunRuntimeReceipt,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<(RuntimeReceiptOutcome, Option<TeamCreationFailure>)> {
+        let confirmation = self.confirm_team_run_receipt(receipt);
+        Box::pin(async move { (confirmation.await, None) })
+    }
+
+    fn abort_role_sessions_cancellable(
+        &self,
+        bindings: Vec<RoleSessionReceipt>,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<RoleAbortOutcome> {
+        self.abort_role_sessions(bindings)
+    }
+
+    fn delete_role_sessions_cancellable(
+        &self,
+        run_id: GraphRunId,
+        bindings: Vec<RoleSessionReceipt>,
+        abort_first: bool,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<NativeDeletionEvidence> {
+        self.delete_role_sessions(run_id, bindings, abort_first)
+    }
+
+    fn remove_team_cancellable(
+        &self,
+        removal: TeamMaterializationRemoval,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome> {
+        self.remove_team(removal)
+    }
+
+    fn remove_unconfirmed_team_cancellable(
+        &self,
+        request: TeamMaterializationRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<MaterializationOperationOutcome> {
+        self.remove_unconfirmed_team(request)
+    }
+
     fn installed_skill_names(&self) -> OwnedRuntimeFuture<Option<Vec<String>>>;
 }
 
@@ -104,6 +177,14 @@ pub trait TeamActivityExecutor: Send + Sync {
         &self,
         request: ActivityExecutionRequest,
     ) -> OwnedRuntimeFuture<ActivityExecutionOutcome>;
+
+    fn execute_cancellable(
+        &self,
+        request: ActivityExecutionRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<ActivityExecutionOutcome> {
+        self.execute(request)
+    }
 
     fn open_claw_ready(&self) -> bool;
 }

@@ -91,11 +91,7 @@ pub use ports::{
     WikiRequestAdmissionClosed,
 };
 
-pub fn wiki_mcp_provider(
-    state_dir: &std::path::Path,
-) -> Result<impl platform::mcp::ToolProvider + use<>, WikiFailure> {
-    adapters::mcp::WikiMcpFacade::open(state_dir)
-}
+pub use adapters::mcp::{WikiMcpFacade, is_wiki_tool};
 
 #[derive(Clone)]
 pub struct WikiModule {

@@ -8,11 +8,14 @@ use std::{
 use foundation::execution::{OperationHandle, TraceContext};
 use organization::{ActivityId, DeliveryId, GraphRunId};
 use platform::trace::{identifier_hash, runtime_trace};
-use runtime_directory::OwnedRuntimeFuture;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use crate::ports::{ActivityExecutionOutcome, ActivityExecutionRequest};
+use crate::ports::ActivityExecutionOutcome;
+#[cfg(test)]
+use crate::ports::ActivityExecutionRequest;
+#[cfg(test)]
+use runtime_directory::OwnedRuntimeFuture;
 
 use super::{
     coordinator::TeamRunCoordinatorInput,
@@ -72,13 +75,14 @@ impl TeamRunActors {
                 .actors
                 .iter_mut()
                 .flat_map(|(run_id, actor)| {
-                    actor.activity_execution.processing.iter_mut().map(
-                        move |(activity_id, work)| {
-                            (
+                    actor.activity_execution.processing.iter_mut().filter_map(
+                        move |(activity_id, work)| match work {
+                            ActivityExecutionWork::Running(operation) => Some((
                                 run_id.clone(),
                                 activity_id.clone(),
-                                Box::pin(work.operation.join()),
-                            )
+                                Box::pin(operation.join()),
+                            )),
+                            ActivityExecutionWork::Settling(_) => None,
                         },
                     )
                 })
@@ -104,12 +108,20 @@ impl TeamRunActors {
             })
             .await
         };
-        self.actors
+        let processing = &mut self.actors
             .get_mut(&completion.run_id)
             .expect("completed activity belongs to a run actor")
             .activity_execution
-            .processing
-            .remove(&completion.activity_id);
+            .processing;
+        match &completion.completion {
+            ActivityExecutionCompletion::Executed { run_id, activity_id, delivery_id, claim, outcome } => {
+                processing.insert(activity_id.clone(), ActivityExecutionWork::Settling(ActivityReceipt {
+                    run_id: run_id.clone(), activity_id: activity_id.clone(), delivery_id: delivery_id.clone(),
+                    claim: claim.clone(), outcome: outcome.clone(),
+                }));
+            }
+            ActivityExecutionCompletion::Observation(_) => { processing.remove(&completion.activity_id); }
+        }
         completion
     }
 
@@ -133,19 +145,38 @@ impl TeamRunActors {
     ) {
         for actor in self.actors.values() {
             for work in actor.activity_execution.processing.values() {
-                work.operation.cancel();
+                if let ActivityExecutionWork::Running(operation) = work {
+                    operation.cancel();
+                }
             }
         }
+        self.retry_settlements(input, receipt_router).await;
         while self
             .actors
             .values()
-            .any(|actor| actor.activity_execution.processing_len() != 0)
+            .any(|actor| actor.activity_execution.processing.values().any(|work| matches!(work, ActivityExecutionWork::Running(_))))
         {
             let completion = self.next_completion().await;
             self.route_completion(input, receipt_router, completion)
                 .await;
         }
-        self.actors.clear();
+        self.actors.retain(|_, actor| actor.activity_execution.processing_len() != 0);
+    }
+
+    pub(super) fn has_pending_settlements(&self) -> bool {
+        self.actors.values().any(|actor| actor.activity_execution.processing_len() != 0)
+    }
+
+    pub(super) async fn retry_settlements(&mut self, input: &TeamRunCoordinatorInput, receipt_router: &mut TeamRunReceiptRouter) {
+        for actor in self.actors.values_mut() {
+            let receipts = actor.activity_execution.processing.values().filter_map(|work| match work {
+                ActivityExecutionWork::Settling(receipt) => Some(receipt.clone()),
+                ActivityExecutionWork::Running(_) => None,
+            }).collect::<Vec<_>>();
+            for receipt in receipts {
+                actor.settle_receipt(input, receipt_router, receipt).await;
+            }
+        }
     }
 
     fn capacity(&self) -> usize {
@@ -194,24 +225,30 @@ impl TeamRunActor {
                 claim,
                 outcome,
             } => {
-                let status = receipt_router
-                    .route_activity_receipt(
-                        input,
-                        ActivityReceipt {
-                            run_id,
-                            activity_id: activity_id.clone(),
-                            delivery_id,
-                            claim,
-                            outcome,
-                        },
-                    )
-                    .await;
+                let status = self.settle_receipt(input, receipt_router, ActivityReceipt {
+                    run_id, activity_id: activity_id.clone(), delivery_id, claim, outcome,
+                }).await;
                 (activity_id, status)
             }
         };
         if status.should_retry_on_wakeup() {
             self.activity_execution.defer(activity_id);
         }
+    }
+
+    async fn settle_receipt(&mut self, input: &TeamRunCoordinatorInput, receipt_router: &mut TeamRunReceiptRouter, receipt: ActivityReceipt) -> ActivityReceiptStatus {
+        let mut status = ActivityReceiptStatus::ActivityError;
+        for _ in 0..3 {
+            status = receipt_router.route_activity_receipt(input, &receipt).await;
+            if !matches!(status, ActivityReceiptStatus::StoreFault | ActivityReceiptStatus::ActivityError) {
+                self.activity_execution.processing.remove(&receipt.activity_id);
+                if status.should_retry_on_wakeup() {
+                    self.activity_execution.defer(receipt.activity_id.clone());
+                }
+                break;
+            }
+        }
+        status
     }
 
     async fn wake_ready_nodes(&mut self, input: &TeamRunCoordinatorInput, now: u64) -> bool {
@@ -334,8 +371,9 @@ enum ActivityExecutionCompletion {
     },
 }
 
-struct ActivityExecutionWork {
-    operation: OperationHandle<ActivityExecutionCompletion>,
+enum ActivityExecutionWork {
+    Running(OperationHandle<ActivityExecutionCompletion>),
+    Settling(ActivityReceipt),
 }
 
 #[derive(Default)]
@@ -372,7 +410,7 @@ impl ActivityExecutionState {
         self.dirty.remove(&activity_id);
         self.deferred.remove(&activity_id);
         self.processing
-            .insert(activity_id, ActivityExecutionWork { operation });
+            .insert(activity_id, ActivityExecutionWork::Running(operation));
     }
 
     fn processing_len(&self) -> usize {
@@ -472,16 +510,12 @@ async fn start_activity_execution(
                 "runHash": identifier_hash(run_id.as_str()),
                 "activityHash": identifier_hash(activity_id.as_str()),
             }));
-            let operation = execute_team_activity(input, request);
+            let executor = std::sync::Arc::clone(&input.activity_executor);
             spawn_activity_operation(
                 input,
                 ACTIVITY_EXECUTION_OPERATION,
                 move |cancellation| async move {
-                    let outcome = tokio::select! {
-                        biased;
-                        outcome = operation => outcome,
-                        _ = cancellation.cancelled() => ActivityExecutionOutcome::Unknown,
-                    };
+                    let outcome = executor.execute_cancellable(request, cancellation).await;
                     ActivityExecutionCompletion::Executed {
                         run_id,
                         activity_id,
@@ -566,13 +600,6 @@ where
     } else {
         OperationHandle::spawn(future).0
     }
-}
-
-fn execute_team_activity(
-    input: &TeamRunCoordinatorInput,
-    request: ActivityExecutionRequest,
-) -> OwnedRuntimeFuture<ActivityExecutionOutcome> {
-    input.activity_executor.execute(request)
 }
 
 fn open_claw_activity_unavailable(input: &TeamRunCoordinatorInput) -> bool {

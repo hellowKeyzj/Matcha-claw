@@ -34,7 +34,7 @@ use foundation::execution::{OwnerRuntimeHandle, TaskHandle};
 use tokio::sync::oneshot;
 
 use crate::{
-    application::commands::{WikiCommand, WikiQuery},
+    application::commands::{IngestMode, WikiCommand, WikiQuery},
     domain::{
         WikiApplyGeneratedPagesInput, WikiApplyGeneratedPagesReceipt, WikiCancelSourceTaskInput,
         WikiCreateProjectInput, WikiDeleteSourceInput, WikiDeleteSourceReceipt, WikiFailure,
@@ -97,12 +97,6 @@ impl WikiHandle {
 
     pub(crate) async fn drain_call_workflows(&self) {
         self.workflows.shutdown().await;
-    }
-
-    pub(crate) async fn reload_mcp_projects(&self) -> Result<(), WikiFailure> {
-        self.request_command(None, |reply| WikiCommand::ReloadProjects { reply })
-            .await
-            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
     pub async fn status(&self) -> Result<WikiStatusReceipt, WikiFailure> {
@@ -238,10 +232,19 @@ impl WikiHandle {
         &self,
         input: WikiImportSourceInput,
     ) -> Result<WikiImportSourceReceipt, WikiFailure> {
+        self.import_source_with_ingest(input, IngestMode::Configured)
+            .await
+    }
+
+    pub(crate) async fn import_source_with_ingest(
+        &self,
+        input: WikiImportSourceInput,
+        ingest: IngestMode,
+    ) -> Result<WikiImportSourceReceipt, WikiFailure> {
         let owner = self.unrecorded();
         self.workflows
             .run(self.recorder(), "import-source", async move {
-                owner.import_source_inline(input).await
+                owner.import_source_inline(input, ingest).await
             })
             .await
     }
@@ -259,7 +262,11 @@ impl WikiHandle {
             .admit(
                 call,
                 operation,
-                async move { owner.import_source_inline(input).await },
+                async move {
+                    owner
+                        .import_source_inline(input, IngestMode::Configured)
+                        .await
+                },
                 |receipt| {
                     WikiWorkflowSummary::Sources(WikiSourceCallCounts::import_source(receipt))
                 },
@@ -270,6 +277,7 @@ impl WikiHandle {
     async fn import_source_inline(
         &self,
         mut input: WikiImportSourceInput,
+        ingest: IngestMode,
     ) -> Result<WikiImportSourceReceipt, WikiFailure> {
         let work = self.begin_source_work(&mut input.project_id).await?;
         let result = async {
@@ -280,7 +288,7 @@ impl WikiHandle {
                 })
                 .await
                 .unwrap_or(Err(WikiFailure::OwnerUnavailable))?;
-            self.import_staged_source(staged, &work).await
+            self.import_staged_source(staged, &work, ingest).await
         }
         .await;
         self.finish_source_work(work, result).await
@@ -290,6 +298,7 @@ impl WikiHandle {
         &self,
         staged: crate::application::commands::WikiStagedImportSource,
         work: &crate::sweep::SourceWork,
+        ingest: IngestMode,
     ) -> Result<WikiImportSourceReceipt, WikiFailure> {
         let execution = staged
             .execution
@@ -299,12 +308,14 @@ impl WikiHandle {
             let parsed = self
                 .request_command(None, |reply| WikiCommand::ParseImportSource {
                     input: staged,
+                    ingest,
                     reply,
                 })
                 .await
                 .unwrap_or(Err(WikiFailure::OwnerUnavailable))?;
             self.request_command(None, |reply| WikiCommand::CommitImportSource {
                 input: parsed,
+                ingest,
                 reply,
             })
             .await
@@ -321,7 +332,7 @@ impl WikiHandle {
         if result.is_err() {
             execution.finish(&result)?;
         } else {
-            work.mark_processed();
+            work.mark_processed(ingest);
         }
         result
     }
@@ -330,10 +341,19 @@ impl WikiHandle {
         &self,
         input: WikiImportFolderInput,
     ) -> Result<WikiImportFolderReceipt, WikiFailure> {
+        self.import_folder_with_ingest(input, IngestMode::Configured)
+            .await
+    }
+
+    pub(crate) async fn import_folder_with_ingest(
+        &self,
+        input: WikiImportFolderInput,
+        ingest: IngestMode,
+    ) -> Result<WikiImportFolderReceipt, WikiFailure> {
         let owner = self.unrecorded();
         self.workflows
             .run(self.recorder(), "import-folder", async move {
-                owner.import_folder_inline(input).await
+                owner.import_folder_inline(input, ingest).await
             })
             .await
     }
@@ -351,7 +371,11 @@ impl WikiHandle {
             .admit(
                 call,
                 operation,
-                async move { owner.import_folder_inline(input).await },
+                async move {
+                    owner
+                        .import_folder_inline(input, IngestMode::Configured)
+                        .await
+                },
                 |receipt| {
                     WikiWorkflowSummary::Sources(WikiSourceCallCounts::import_folder(receipt))
                 },
@@ -362,6 +386,7 @@ impl WikiHandle {
     async fn import_folder_inline(
         &self,
         mut input: WikiImportFolderInput,
+        ingest: IngestMode,
     ) -> Result<WikiImportFolderReceipt, WikiFailure> {
         let work = self.begin_source_work(&mut input.project_id).await?;
         let result = async {
@@ -375,7 +400,10 @@ impl WikiHandle {
             let mut imported = Vec::new();
             let mut skipped = plan.skipped;
             for staged in plan.imports {
-                match self.import_staged_source(staged.clone(), &work).await {
+                match self
+                    .import_staged_source(staged.clone(), &work, ingest)
+                    .await
+                {
                     Ok(receipt) => imported.push(receipt),
                     Err(error) => {
                         skipped.push(crate::domain::WikiSourceSkip::new(
@@ -395,10 +423,19 @@ impl WikiHandle {
         &self,
         input: WikiProjectSelector,
     ) -> Result<WikiRefreshSourcesReceipt, WikiFailure> {
+        self.refresh_sources_with_ingest(input, IngestMode::Configured)
+            .await
+    }
+
+    pub(crate) async fn refresh_sources_with_ingest(
+        &self,
+        input: WikiProjectSelector,
+        ingest: IngestMode,
+    ) -> Result<WikiRefreshSourcesReceipt, WikiFailure> {
         let owner = self.unrecorded();
         self.workflows
             .run(self.recorder(), "refresh-sources", async move {
-                owner.refresh_sources_inline(input).await
+                owner.refresh_sources_inline(input, ingest).await
             })
             .await
     }
@@ -416,7 +453,11 @@ impl WikiHandle {
             .admit(
                 call,
                 operation,
-                async move { owner.refresh_sources_inline(input).await },
+                async move {
+                    owner
+                        .refresh_sources_inline(input, IngestMode::Configured)
+                        .await
+                },
                 |receipt| {
                     WikiWorkflowSummary::Sources(WikiSourceCallCounts::refresh_sources(receipt))
                 },
@@ -427,6 +468,7 @@ impl WikiHandle {
     async fn refresh_sources_inline(
         &self,
         mut input: WikiProjectSelector,
+        ingest: IngestMode,
     ) -> Result<WikiRefreshSourcesReceipt, WikiFailure> {
         let work = self.begin_source_work(&mut input.project_id).await?;
         let result = async {
@@ -437,7 +479,7 @@ impl WikiHandle {
                 })
                 .await
                 .unwrap_or(Err(WikiFailure::OwnerUnavailable))?;
-            self.apply_refresh_plan(plan, true, &work).await
+            self.apply_refresh_plan(plan, true, &work, ingest).await
         }
         .await;
         self.finish_source_work(work, result).await
@@ -478,7 +520,8 @@ impl WikiHandle {
                 })
                 .await
                 .unwrap_or(Err(WikiFailure::OwnerUnavailable))?;
-            self.apply_refresh_plan(plan, auto_ingest, &work).await
+            self.apply_refresh_plan(plan, auto_ingest, &work, IngestMode::Configured)
+                .await
         }
         .await;
         self.finish_source_work(work, result).await
@@ -490,7 +533,10 @@ impl WikiHandle {
         work: &crate::sweep::SourceWork,
     ) -> Result<WikiWorkflowSummary, WikiFailure> {
         let failure = match plan.staged {
-            Some(staged) => self.import_staged_source(staged, work).await.err(),
+            Some(staged) => self
+                .import_staged_source(staged, work, IngestMode::Configured)
+                .await
+                .err(),
             None => None,
         };
         let tasks = self
@@ -539,14 +585,16 @@ impl WikiHandle {
         plan: crate::application::commands::WikiRefreshSourcesPlan,
         auto_ingest: bool,
         work: &crate::sweep::SourceWork,
+        ingest: IngestMode,
     ) -> Result<WikiRefreshSourcesReceipt, WikiFailure> {
         let mut moved = Vec::new();
-        for (old_source_relative_path, new_source_relative_path) in plan.moves {
+        for (old_source_relative_path, new_source_relative_path, cleanup) in plan.moves {
             moved.push(
                 self.request_command(None, |reply| WikiCommand::MigrateSourcePath {
                     project_id: plan.project_id.clone(),
                     old_source_relative_path,
                     new_source_relative_path,
+                    cleanup,
                     reply,
                 })
                 .await
@@ -554,14 +602,19 @@ impl WikiHandle {
             );
         }
         let mut deleted = Vec::new();
-        for source_path in plan.deletions {
+        for (source_path, cleanup) in plan.deletions {
             deleted.push(
-                self.delete_source(WikiDeleteSourceInput {
-                    project_id: Some(plan.project_id.clone()),
-                    source_path,
-                    file_already_deleted: true,
+                self.request_command(None, |reply| WikiCommand::DeleteSource {
+                    input: WikiDeleteSourceInput {
+                        project_id: Some(plan.project_id.clone()),
+                        source_path,
+                        file_already_deleted: true,
+                    },
+                    cleanup: Some(cleanup),
+                    reply,
                 })
-                .await?,
+                .await
+                .unwrap_or(Err(WikiFailure::OwnerUnavailable))?,
             );
         }
         if !plan.wiki_deletions.is_empty() {
@@ -577,7 +630,10 @@ impl WikiHandle {
         let mut skipped = plan.skipped;
         if auto_ingest {
             for staged in plan.imports {
-                match self.import_staged_source(staged.clone(), work).await {
+                match self
+                    .import_staged_source(staged.clone(), work, ingest)
+                    .await
+                {
                     Ok(receipt) => imported.push(receipt),
                     Err(error) => {
                         skipped.push(crate::domain::WikiSourceSkip::new(
@@ -622,6 +678,7 @@ impl WikiHandle {
             .await?;
         self.admit_command(call, operation, true, |reply| WikiCommand::DeleteSource {
             input,
+            cleanup: None,
             reply,
         })
         .await
@@ -654,6 +711,7 @@ impl WikiHandle {
     ) -> Result<WikiDeleteSourceReceipt, WikiFailure> {
         self.request_command(Some("delete-source"), |reply| WikiCommand::DeleteSource {
             input,
+            cleanup: None,
             reply,
         })
         .await

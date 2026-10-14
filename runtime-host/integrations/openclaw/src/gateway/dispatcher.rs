@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     connection::{ExchangeFailure, GatewayConnection, GatewayFrame},
@@ -41,9 +42,16 @@ impl Dispatcher {
         request: RpcRequest,
         deadline: Duration,
     ) -> Result<GatewayResponse, DispatcherError> {
-        self.connection
-            .request(request, deadline)
-            .await
+        self.query_with_deadline_cancellable(request, deadline, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn query_with_deadline_cancellable(
+        &self,
+        request: RpcRequest,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<GatewayResponse, DispatcherError> {
+        self.connection.request_cancellable(request, deadline, cancellation).await
             .map_err(|failure| failure.error)
     }
 
@@ -51,7 +59,15 @@ impl Dispatcher {
         &self,
         request: RpcRequest,
     ) -> Result<GatewayResponse, DispatcherError> {
-        self.connection.ordered_request(request, REQUEST_DEADLINE).await
+        self.ordered_query_cancellable(request, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn ordered_query_cancellable(
+        &self,
+        request: RpcRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<GatewayResponse, DispatcherError> {
+        self.connection.ordered_request_cancellable(request, REQUEST_DEADLINE, cancellation).await
             .map_err(|failure| failure.error)
     }
 
@@ -59,12 +75,29 @@ impl Dispatcher {
         self.mutate_with_deadline(request, REQUEST_DEADLINE).await
     }
 
+    pub(crate) async fn mutate_cancellable(
+        &self,
+        request: RpcRequest,
+        cancellation: &CancellationToken,
+    ) -> MutationDelivery {
+        self.mutate_with_deadline_cancellable(request, REQUEST_DEADLINE, cancellation).await
+    }
+
     pub(crate) async fn mutate_with_deadline(
         &self,
         request: RpcRequest,
         deadline: Duration,
     ) -> MutationDelivery {
-        match self.connection.request(request, deadline).await {
+        self.mutate_with_deadline_cancellable(request, deadline, &CancellationToken::new()).await
+    }
+
+    async fn mutate_with_deadline_cancellable(
+        &self,
+        request: RpcRequest,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+    ) -> MutationDelivery {
+        match self.connection.request_cancellable(request, deadline, cancellation).await {
             Ok(response) => MutationDelivery::Response(response),
             Err(failure) => mutation_failure(failure),
         }
@@ -76,11 +109,17 @@ impl Dispatcher {
         encoded: String,
         deadline: Duration,
     ) -> MutationDelivery {
-        match self
-            .connection
-            .encoded_request(request_id, encoded, deadline)
-            .await
-        {
+        self.mutate_encoded_cancellable(request_id, encoded, deadline, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn mutate_encoded_cancellable(
+        &self,
+        request_id: String,
+        encoded: String,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+    ) -> MutationDelivery {
+        match self.connection.encoded_request_cancellable(request_id, encoded, deadline, cancellation).await {
             Ok(response) => MutationDelivery::Response(response),
             Err(failure) => mutation_failure(failure),
         }
@@ -94,8 +133,8 @@ impl Dispatcher {
         self.connection.closed().await;
     }
 
-    pub(crate) async fn disconnect(&self) {
-        self.connection.disconnect().await;
+    pub(crate) async fn disconnect(&self, expires_at: tokio::time::Instant) {
+        self.connection.disconnect(expires_at).await;
     }
 
     pub(crate) async fn close(self) {

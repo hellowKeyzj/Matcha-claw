@@ -5,7 +5,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use tokio::sync::Mutex;
@@ -42,6 +42,10 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("settings"),
         vec![RouteDescriptor::bound(
             "settings.loopback",
+            &[
+                RoutePath::ExactWithQuery(desired::READ_ENDPOINT),
+                RoutePath::ExactWithQuery(desired::ENDPOINT),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],
@@ -51,8 +55,8 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
     let body_policy = match path {
-        "/api/settings/current" => body_policy_for_get_route(head.method.as_str()),
-        "/api/settings/desired" => body_policy_for_method(head.method.as_str(), 16 * 1024),
+        desired::READ_ENDPOINT => body_policy_for_get_route(head.method.as_str()),
+        desired::ENDPOINT => body_policy_for_method(head.method.as_str(), 16 * 1024),
         _ => return None,
     };
     Some(RouteHeadPlan::new(

@@ -1,27 +1,28 @@
 use std::{sync::Arc, time::Instant};
 
-use futures_util::{StreamExt, TryStreamExt, stream};
-use organization::{ManagedAgentReference, MemberIntroductionError, MemberProfile};
+use futures_util::{StreamExt, stream};
+use organization::{
+    ManagedAgentReference, MemberProfile, TeamCreationFailure, TeamCreationFailureReason,
+    TeamCreationFile, TeamCreationStage,
+};
 use platform::trace::{identifier_hash, session_trace};
 use serde_json::{Value, json};
 
 use crate::{
-    agents::{AgentFile, AgentFileName, OpenClawAgents},
+    agents::{AgentFile, AgentFileName, AgentsReadFailure, OpenClawAgents},
     gateway::{
-        client::{GatewayClient, GatewayClientError},
+        client::GatewayClient,
         wire::{self, GatewayResponse},
     },
 };
 
-use super::{
-    buddy::strip_teamrun_blocks,
-    provider::{ReadFailure, next_request_id},
-};
+use super::{buddy::strip_teamrun_blocks, provider::next_request_id};
 
 pub(super) async fn read(
     gateway: Arc<GatewayClient>,
     requested: Vec<ManagedAgentReference>,
-) -> Result<Vec<MemberProfile>, MemberIntroductionError> {
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<Vec<MemberProfile>, TeamCreationFailure> {
     if requested.is_empty() {
         session_trace(
             "runtime.team.profile.end",
@@ -30,7 +31,7 @@ pub(super) async fn read(
         return Ok(Vec::new());
     }
     let started = platform::trace::enabled().then(Instant::now);
-    let agents = OpenClawAgents::new(Arc::clone(&gateway));
+    let agents = OpenClawAgents::new(Arc::clone(&gateway)).with_cancellation(cancellation.clone());
     session_trace(
         "runtime.team.profile.native-list.request",
         || json!({"count":requested.len()}),
@@ -40,8 +41,8 @@ pub(super) async fn read(
         .await
         .inspect(|native| session_trace("runtime.team.profile.native-list.end", || json!({"outcome":"Succeeded","count":native.agents.len(),"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()})))
         .map_err(|error| {
-            session_trace("runtime.team.profile.native-list.end", || json!({"outcome":format!("{:?}", ReadFailure::from(error)),"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
-            MemberIntroductionError::Unavailable
+            session_trace("runtime.team.profile.native-list.end", || json!({"outcome":format!("{error:?}"),"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
+            rpc_failure(error)
         })?;
     for (index, requested) in requested.iter().enumerate() {
         let agent_hash = || identifier_hash(requested.as_str());
@@ -54,7 +55,10 @@ pub(super) async fn read(
                 "runtime.team.profile.native-check",
                 || json!({"index":index,"agentHash":agent_hash(),"exists":false}),
             );
-            MemberIntroductionError::Unavailable
+            TeamCreationFailure {
+                member_index: Some(index),
+                ..failure(TeamCreationFailureReason::AgentMissing)
+            }
         })?;
         let duplicate = matching.next().is_some();
         // Keep the original short circuit: workspace is only inspected for a unique native agent.
@@ -69,7 +73,14 @@ pub(super) async fn read(
             || json!({"index":index,"agentHash":agent_hash(),"exists":true,"duplicate":duplicate,"workspacePresent":workspace_present}),
         );
         if duplicate || workspace_present == Some(false) {
-            return Err(MemberIntroductionError::Unavailable);
+            return Err(TeamCreationFailure {
+                member_index: Some(index),
+                ..failure(if duplicate {
+                    TeamCreationFailureReason::AgentDuplicate
+                } else {
+                    TeamCreationFailureReason::WorkspaceMissing
+                })
+            });
         }
     }
     session_trace("runtime.team.profile.config-get.request", || json!({}));
@@ -77,15 +88,15 @@ pub(super) async fn read(
     let request = wire::team::config_get_request(next_request_id("member-profiles-config"))
         .map_err(|_| {
             session_trace("runtime.team.profile.config-get.end", || json!({"reason":"request-shape","outcome":"Protocol","elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
-            MemberIntroductionError::Unavailable
+            failure(TeamCreationFailureReason::RpcProtocol)
         })?;
     let response = gateway
-        .rpc_query(request)
+        .rpc_query_cancellable(request, &cancellation)
         .await
         .map_err(|error| {
-            let class = match error { GatewayClientError::Protocol | GatewayClientError::RpcFailed => "Protocol", _ => "Unavailable" };
-            session_trace("runtime.team.profile.config-get.end", || json!({"reason":"transport","outcome":class,"elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
-            MemberIntroductionError::Unavailable
+            let error = AgentsReadFailure::from(error);
+            session_trace("runtime.team.profile.config-get.end", || json!({"reason":"transport","outcome":format!("{error:?}"),"elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
+            rpc_failure(error)
         })?;
     let valid_shape = matches!(&response, GatewayResponse::Success { payload: Some(payload), .. }
         if payload.get("valid") == Some(&Value::Bool(true)));
@@ -98,12 +109,20 @@ pub(super) async fn read(
             "runtime.team.profile.config-get.end",
             || json!({"reason":"success-validshape","outcome":"Unavailable","elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
         );
-        return Err(MemberIntroductionError::Unavailable);
+        return Err(failure(match &response {
+            GatewayResponse::Failure { .. } => TeamCreationFailureReason::RpcRejected,
+            GatewayResponse::Success { payload: Some(payload), .. }
+                if payload.get("valid") == Some(&Value::Bool(false)) =>
+            {
+                TeamCreationFailureReason::InvalidConfig
+            }
+            _ => TeamCreationFailureReason::RpcProtocol,
+        }));
     }
     let (_, document, _) = wire::team::decode_config_get(response)
         .map_err(|_| {
             session_trace("runtime.team.profile.config-get.end", || json!({"reason":"decode","outcome":"Protocol","elapsedMs":config_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
-            MemberIntroductionError::Unavailable
+            failure(TeamCreationFailureReason::RpcProtocol)
         })?
         .into_source_and_runtime_config_parts();
     session_trace(
@@ -125,7 +144,7 @@ pub(super) async fn read(
                 let agents = &agents;
                 async move {
                     let agent_hash = || identifier_hash(agent.as_str());
-                    let read_file = |name, file: &'static str| {
+                    let read_file = |name, file: TeamCreationFile| {
                         let agent = &agent;
                         let agent_hash = &agent_hash;
                         async move {
@@ -133,25 +152,33 @@ pub(super) async fn read(
                             session_trace("runtime.team.profile.file.request", || json!({"index":index,"agentHash":agent_hash(),"file":file}));
                             agents.files_get(agent.as_str().to_owned(), name).await
                                 .inspect(|content| session_trace("runtime.team.profile.file.end", || json!({"index":index,"agentHash":agent_hash(),"file":file,"outcome":"Succeeded","missing":content.missing,"contentBytes":content.content.as_ref().map(String::len),"elapsedMs":file_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()})))
-                                .inspect_err(|error| session_trace("runtime.team.profile.file.end", || json!({"index":index,"agentHash":agent_hash(),"file":file,"outcome":format!("{:?}", ReadFailure::from(*error)),"elapsedMs":file_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()})))
+                                .map_err(|error| {
+                                    session_trace("runtime.team.profile.file.end", || json!({"index":index,"agentHash":agent_hash(),"file":file,"outcome":format!("{error:?}"),"elapsedMs":file_started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}));
+                                    TeamCreationFailure {
+                                        member_index: Some(index),
+                                        file: Some(file),
+                                        ..rpc_failure(error)
+                                    }
+                                })
                         }
                     };
-                    let (agents_file, soul_file) = tokio::try_join!(
-                        read_file(AgentFileName::Agents, "AGENTS"),
-                        read_file(AgentFileName::Soul, "SOUL"),
-                    )
-                    .map_err(|_| MemberIntroductionError::Unavailable)?;
+                    let (agents_file, soul_file) = tokio::join!(
+                        read_file(AgentFileName::Agents, TeamCreationFile::AgentsMarkdown),
+                        read_file(AgentFileName::Soul, TeamCreationFile::SoulMarkdown),
+                    );
                     Ok(MemberProfile {
                         description,
-                        agents_markdown: markdown(agents_file, index, agent.as_str(), "AGENTS")?,
-                        soul_markdown: markdown(soul_file, index, agent.as_str(), "SOUL")?,
+                        agents_markdown: markdown(agents_file?, index, agent.as_str(), TeamCreationFile::AgentsMarkdown)?,
+                        soul_markdown: markdown(soul_file?, index, agent.as_str(), TeamCreationFile::SoulMarkdown)?,
                     })
                 }
             }),
     )
     .buffered(4)
-    .try_collect()
-    .await;
+    .collect::<Vec<Result<_, TeamCreationFailure>>>()
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>();
     session_trace(
         "runtime.team.profile.end",
         || json!({"outcome":if result.is_ok() {"Succeeded"} else {"Unavailable"},"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
@@ -163,14 +190,17 @@ fn description(
     document: &Value,
     agent_id: &str,
     index: usize,
-) -> Result<Option<String>, MemberIntroductionError> {
+) -> Result<Option<String>, TeamCreationFailure> {
     let agent_hash = || identifier_hash(agent_id);
-    let unavailable = |reason| {
+    let invalid_config = |reason, member_index| {
         session_trace(
             "runtime.team.profile.description.end",
             || json!({"index":index,"agentHash":agent_hash(),"outcome":"Unavailable","reason":reason}),
         );
-        MemberIntroductionError::Unavailable
+        TeamCreationFailure {
+            member_index,
+            ..failure(TeamCreationFailureReason::InvalidConfig)
+        }
     };
     let Some(agents) = document.get("agents") else {
         session_trace(
@@ -181,22 +211,22 @@ fn description(
     };
     let agents = agents
         .as_object()
-        .ok_or_else(|| unavailable("agents-shape"))?;
+        .ok_or_else(|| invalid_config("agents-shape", None))?;
     // Same entries-first native config shape as agent_configuration; only inspect the selected description.
     let entry = if let Some(entries) = agents.get("entries") {
         entries
             .as_object()
-            .ok_or_else(|| unavailable("entries-shape"))?
+            .ok_or_else(|| invalid_config("entries-shape", None))?
             .get(agent_id)
     } else if let Some(list) = agents.get("list") {
         let mut matching = list
             .as_array()
-            .ok_or_else(|| unavailable("list-shape"))?
+            .ok_or_else(|| invalid_config("list-shape", None))?
             .iter()
             .filter(|entry| entry.get("id").and_then(Value::as_str) == Some(agent_id));
         let entry = matching.next();
         if matching.next().is_some() {
-            return Err(unavailable("duplicate-entry"));
+            return Err(invalid_config("duplicate-entry", Some(index)));
         }
         entry
     } else {
@@ -211,7 +241,7 @@ fn description(
     };
     let entry = entry
         .as_object()
-        .ok_or_else(|| unavailable("entry-shape"))?;
+        .ok_or_else(|| invalid_config("entry-shape", Some(index)))?;
     match entry.get("description") {
         None | Some(Value::Null) => {
             session_trace("runtime.team.profile.description.end", || json!({"index":index,"agentHash":agent_hash(),"outcome":"Succeeded","reason":"description-missing"}));
@@ -220,8 +250,22 @@ fn description(
         Some(Value::String(content)) => strip_teamrun_blocks(content)
             .inspect(|stripped| session_trace("runtime.team.profile.description.end", || json!({"index":index,"agentHash":agent_hash(),"outcome":"Succeeded","contentBytes":content.len(),"strippedBytes":stripped.len()})))
             .map(Some)
-            .map_err(|_| unavailable("strip-error")),
-        Some(_) => Err(unavailable("description-shape")),
+            .map_err(|_| {
+                session_trace("runtime.team.profile.description.end", || json!({"index":index,"agentHash":agent_hash(),"outcome":"Unavailable","reason":"strip-error"}));
+                TeamCreationFailure {
+                    member_index: Some(index),
+                    file: Some(TeamCreationFile::Description),
+                    ..failure(TeamCreationFailureReason::InvalidTeamRunBlocks)
+                }
+            }),
+        Some(_) => {
+            session_trace("runtime.team.profile.description.end", || json!({"index":index,"agentHash":agent_hash(),"outcome":"Unavailable","reason":"description-shape"}));
+            Err(TeamCreationFailure {
+                member_index: Some(index),
+                file: Some(TeamCreationFile::Description),
+                ..failure(TeamCreationFailureReason::InvalidDescription)
+            })
+        }
     }
 }
 
@@ -229,20 +273,42 @@ fn markdown(
     file: AgentFile,
     index: usize,
     agent_id: &str,
-    name: &'static str,
-) -> Result<Option<String>, MemberIntroductionError> {
+    name: TeamCreationFile,
+) -> Result<Option<String>, TeamCreationFailure> {
     if file.missing {
         return Ok(None);
     }
     let content = file.content.ok_or_else(|| {
         session_trace("runtime.team.profile.file.strip-end", || json!({"index":index,"agentHash":identifier_hash(agent_id),"file":name,"outcome":"Unavailable","reason":"content-missing"}));
-        MemberIntroductionError::Unavailable
+        TeamCreationFailure {
+            member_index: Some(index),
+            file: Some(name),
+            ..failure(TeamCreationFailureReason::InvalidContent)
+        }
     })?;
     strip_teamrun_blocks(&content)
         .inspect(|stripped| session_trace("runtime.team.profile.file.strip-end", || json!({"index":index,"agentHash":identifier_hash(agent_id),"file":name,"outcome":"Succeeded","strippedBytes":stripped.len()})))
         .map(Some)
         .map_err(|_| {
             session_trace("runtime.team.profile.file.strip-end", || json!({"index":index,"agentHash":identifier_hash(agent_id),"file":name,"outcome":"Unavailable","reason":"strip-error"}));
-            MemberIntroductionError::Unavailable
+            TeamCreationFailure {
+                member_index: Some(index),
+                file: Some(name),
+                ..failure(TeamCreationFailureReason::InvalidTeamRunBlocks)
+            }
         })
+}
+
+fn failure(reason: TeamCreationFailureReason) -> TeamCreationFailure {
+    TeamCreationFailure::new(TeamCreationStage::ReadingProfiles, reason)
+}
+
+fn rpc_failure(error: AgentsReadFailure) -> TeamCreationFailure {
+    failure(match error {
+        AgentsReadFailure::Unavailable => TeamCreationFailureReason::RpcUnavailable,
+        AgentsReadFailure::Rejected => TeamCreationFailureReason::RpcRejected,
+        AgentsReadFailure::Protocol => TeamCreationFailureReason::RpcProtocol,
+        AgentsReadFailure::Deadline => TeamCreationFailureReason::RpcDeadline,
+        AgentsReadFailure::Authentication => TeamCreationFailureReason::RpcAuthentication,
+    })
 }

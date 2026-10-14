@@ -334,10 +334,10 @@ pub fn project_config_mutation_effect(
 pub fn project_delete_config_effect(effect: port::DeleteConfigOutcome) -> channel_delete::Outcome {
     match effect {
         port::DeleteConfigOutcome::Confirmed
-        | port::DeleteConfigOutcome::Noop
-        | port::DeleteConfigOutcome::RestartRequired => channel_delete::Outcome::Confirmed,
+        | port::DeleteConfigOutcome::Noop => channel_delete::Outcome::Confirmed,
         port::DeleteConfigOutcome::Rejected => channel_delete::Outcome::TargetRejected,
-        port::DeleteConfigOutcome::Unknown => channel_delete::Outcome::Unknown,
+        port::DeleteConfigOutcome::RestartRequired
+        | port::DeleteConfigOutcome::Unknown => channel_delete::Outcome::Unknown,
     }
 }
 

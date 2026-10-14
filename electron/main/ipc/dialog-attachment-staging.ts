@@ -269,74 +269,81 @@ export async function stageDialogSelectedAttachments(filePaths: string[]): Promi
   };
 
   const attachments: StagedDialogAttachmentPayload[] = [];
-  for (const filePath of filePaths) {
-    const sourcePath = await realpathSelectedPath(filePath);
-    const fileStat = await statSelectedPath(sourcePath);
-    if (fileStat.isDirectory?.() === true) {
-      attachments.push({
-        entryKind: 'directory',
-        fileName: basename(sourcePath) || 'folder',
-        mimeType: DIRECTORY_MIME_TYPE,
-        fileSize: 0,
-        preview: null,
-        sourcePath,
-      });
-      continue;
-    }
-    if (!fileStat.isFile()) {
-      throw new Error('notFound');
+  try {
+    for (const filePath of filePaths) {
+      const sourcePath = await realpathSelectedPath(filePath);
+      const fileStat = await statSelectedPath(sourcePath);
+      if (fileStat.isDirectory?.() === true) {
+        attachments.push({
+          entryKind: 'directory',
+          fileName: basename(sourcePath) || 'folder',
+          mimeType: DIRECTORY_MIME_TYPE,
+          fileSize: 0,
+          preview: null,
+          sourcePath,
+        });
+        continue;
+      }
+      if (!fileStat.isFile()) {
+        throw new Error('notFound');
+      }
+
+      const ext = extname(sourcePath);
+      const mimeType = getMimeType(ext);
+      if (fileStat.size > INLINE_ATTACHMENT_MAX_BYTES) {
+        attachments.push({
+          entryKind: 'file',
+          fileName: basename(sourcePath) || 'file',
+          mimeType,
+          fileSize: fileStat.size,
+          preview: null,
+          sourcePath,
+        });
+        continue;
+      }
+
+      const id = randomUUID();
+      const root = await ensureStagingRoot();
+      const stagedPath = join(root, `${id}${ext}`);
+      let copied = false;
+      try {
+        await copyFile(sourcePath, stagedPath, constants.COPYFILE_EXCL);
+        copied = true;
+        const ownedPath = await realpath(stagedPath);
+        if (!isStagingPath(root, ownedPath)) {
+          throw new Error('invalid');
+        }
+        const metadata = await stat(ownedPath);
+        if (!metadata.isFile() || metadata.size !== fileStat.size || metadata.size > INLINE_ATTACHMENT_MAX_BYTES) {
+          throw new Error('invalid');
+        }
+        const preview = await generateImagePreview(ownedPath, mimeType, metadata.size);
+        stagedAttachmentPaths.set(id, ownedPath);
+        attachments.push({
+          stagedAttachmentId: id,
+          entryKind: 'file',
+          fileName: basename(sourcePath) || 'file',
+          mimeType,
+          fileSize: metadata.size,
+          preview,
+          sourcePath,
+        });
+      } catch (error) {
+        if (copied) {
+          await unlink(stagedPath).catch(() => undefined);
+        }
+        if (error instanceof Error && (error.message === 'invalid' || error.message === 'tooLarge')) {
+          throw error;
+        }
+        throw new Error('invalid', { cause: error });
+      }
     }
 
-    const ext = extname(sourcePath);
-    const mimeType = getMimeType(ext);
-    if (fileStat.size > INLINE_ATTACHMENT_MAX_BYTES) {
-      attachments.push({
-        entryKind: 'file',
-        fileName: basename(sourcePath) || 'file',
-        mimeType,
-        fileSize: fileStat.size,
-        preview: null,
-        sourcePath,
-      });
-      continue;
-    }
-
-    const id = randomUUID();
-    const root = await ensureStagingRoot();
-    const stagedPath = join(root, `${id}${ext}`);
-    let copied = false;
-    try {
-      await copyFile(sourcePath, stagedPath, constants.COPYFILE_EXCL);
-      copied = true;
-      const ownedPath = await realpath(stagedPath);
-      if (!isStagingPath(root, ownedPath)) {
-        throw new Error('invalid');
-      }
-      const metadata = await stat(ownedPath);
-      if (!metadata.isFile() || metadata.size !== fileStat.size || metadata.size > INLINE_ATTACHMENT_MAX_BYTES) {
-        throw new Error('invalid');
-      }
-      const preview = await generateImagePreview(ownedPath, mimeType, metadata.size);
-      stagedAttachmentPaths.set(id, ownedPath);
-      attachments.push({
-        stagedAttachmentId: id,
-        entryKind: 'file',
-        fileName: basename(sourcePath) || 'file',
-        mimeType,
-        fileSize: metadata.size,
-        preview,
-        sourcePath,
-      });
-    } catch (error) {
-      if (copied) {
-        await unlink(stagedPath).catch(() => undefined);
-      }
-      if (error instanceof Error && (error.message === 'invalid' || error.message === 'tooLarge')) {
-        throw error;
-      }
-      throw new Error('invalid', { cause: error });
-    }
+    return attachments;
+  } catch (error) {
+    await releaseStagedAttachments(attachments.flatMap((attachment) => (
+      attachment.stagedAttachmentId ? [attachment.stagedAttachmentId] : []
+    )));
+    throw error;
   }
-
-  return attachments;
 }

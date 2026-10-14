@@ -41,18 +41,24 @@ const DEEPSEEK_DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
 const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
 const MAX_DISCOVERY_RESPONSE_BYTES: u64 = 256 * 1024;
+const GENERATION_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(crate) struct ProviderModelOwner {
     private_resolver: Resolver,
-    llm_client: LlmClient,
+    llm_client: Option<LlmClient>,
 }
 
 impl ProviderModelOwner {
     pub(crate) fn new() -> Self {
         Self {
             private_resolver: Resolver::disabled(),
-            llm_client: LlmClient::new(reqwest::Client::new()),
+            llm_client: reqwest::Client::builder()
+                .connect_timeout(GENERATION_IO_TIMEOUT)
+                .read_timeout(GENERATION_IO_TIMEOUT)
+                .build()
+                .ok()
+                .map(LlmClient::new),
         }
     }
 
@@ -137,6 +143,11 @@ impl ProviderModelOwner {
             }
         };
         session_trace("provider-generation.candidates-resolved", || trace(json!({ "candidateCount": candidates.len() })));
+        let Some(llm_client) = &self.llm_client else {
+            return Ok(ProviderTextGenerationOutcome::Unavailable {
+                reason: ProviderTextGenerationUnavailableReason::ProviderUnavailable,
+            });
+        };
         let mut unavailable = None;
         let mut stream_error = None;
         let mut response_sink = GenerationStreamSink::new(stream);
@@ -174,6 +185,11 @@ impl ProviderModelOwner {
                         "reason": match reason {
                             ProviderTextGenerationUnavailableReason::CredentialMissing => "credential_missing",
                             ProviderTextGenerationUnavailableReason::CredentialUnavailable => "credential_unavailable",
+                            ProviderTextGenerationUnavailableReason::Authentication => "authentication",
+                            ProviderTextGenerationUnavailableReason::PermissionDenied => "permission_denied",
+                            ProviderTextGenerationUnavailableReason::RateLimited => "rate_limited",
+                            ProviderTextGenerationUnavailableReason::Deadline => "deadline",
+                            ProviderTextGenerationUnavailableReason::InvalidResponse => "invalid_response",
                             ProviderTextGenerationUnavailableReason::ProviderUnavailable => "provider_unavailable",
                         },
                     })));
@@ -193,7 +209,7 @@ impl ProviderModelOwner {
             };
             let generation = async {
                 if is_streaming {
-                    self.llm_client
+                    llm_client
                         .stream_generate(request, &mut response_sink)
                         .await?;
                     if response_sink.response.finish_reason.is_none() {
@@ -203,7 +219,7 @@ impl ProviderModelOwner {
                     }
                     Ok(response_sink.response.clone())
                 } else {
-                    self.llm_client.generate(request).await
+                    llm_client.generate(request).await
                 }
             };
             let response = tokio::select! {
@@ -219,7 +235,7 @@ impl ProviderModelOwner {
                                 session_trace("provider-generation.timeout", || candidate_trace(json!({
                                     "reason": "provider_timeout", "timeoutMs": timeout_ms,
                                 })));
-                                Err(LlmClientError::Protocol("provider generation timed out".into()))
+                                Err(LlmClientError::Deadline)
                             }),
                         None => generation.await,
                     }
@@ -254,10 +270,15 @@ impl ProviderModelOwner {
                         "class": match &error {
                             LlmClientError::UnsupportedProtocol => "UnsupportedProtocol",
                             LlmClientError::Http(_) => "Http",
+                            LlmClientError::HttpStatus { .. } => "HttpStatus",
+                            LlmClientError::Deadline => "Deadline",
                             LlmClientError::Protocol(_) => "Protocol",
                             LlmClientError::StreamSink(_) => "StreamSink",
                         },
-                        "statusCode": http.and_then(|error| error.status()).map(|status| status.as_u16()),
+                        "statusCode": match &error {
+                            LlmClientError::HttpStatus { status, .. } => Some(*status),
+                            _ => http.and_then(|error| error.status()).map(|status| status.as_u16()),
+                        },
                         "isTimeout": http.is_some_and(|error| error.is_timeout()),
                         "isConnect": http.is_some_and(|error| error.is_connect()),
                         "isDecode": http.is_some_and(|error| error.is_decode()),
@@ -273,7 +294,7 @@ impl ProviderModelOwner {
                     {
                         return Err(error);
                     }
-                    unavailable = Some(ProviderTextGenerationUnavailableReason::ProviderUnavailable);
+                    unavailable = Some(text_generation_unavailable_reason(&error));
                     if is_streaming {
                         stream_error = Some(error);
                     }
@@ -764,6 +785,34 @@ impl ProviderModelOwner {
                 ProviderCommitOutcome::CommitOutcomeUnknown
             },
         }
+    }
+}
+
+pub(super) fn text_generation_unavailable_reason(
+    error: &LlmClientError,
+) -> ProviderTextGenerationUnavailableReason {
+    use ProviderTextGenerationUnavailableReason::{
+        Authentication, Deadline, InvalidResponse, PermissionDenied, ProviderUnavailable, RateLimited,
+    };
+    let status = match error {
+        LlmClientError::Http(error) => error.status().map(|status| status.as_u16()),
+        LlmClientError::HttpStatus { status, .. } => Some(*status),
+        _ => None,
+    };
+    match status {
+        Some(401) => Authentication,
+        Some(403) => PermissionDenied,
+        Some(429) => RateLimited,
+        _ => match error {
+            LlmClientError::Deadline => Deadline,
+            LlmClientError::Http(error) if error.is_timeout() => Deadline,
+            LlmClientError::Http(error) if error.is_decode() => InvalidResponse,
+            LlmClientError::Protocol(_) => InvalidResponse,
+            LlmClientError::UnsupportedProtocol
+            | LlmClientError::Http(_)
+            | LlmClientError::HttpStatus { .. }
+            | LlmClientError::StreamSink(_) => ProviderUnavailable,
+        },
     }
 }
 

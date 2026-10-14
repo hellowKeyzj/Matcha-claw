@@ -1,5 +1,13 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
+use platform::loopback::{ModuleId, RouteDescriptor, RouteHeadPlan, RoutePath};
 use tokio::sync::RwLock;
 
 use super::{BodyPolicy, Request, RequestHead, Response, RouteOutcome};
@@ -9,81 +17,143 @@ const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(crate) struct Router {
-    routes: Arc<RwLock<Vec<platform::loopback::ModuleDescriptor>>>,
+    routes: Arc<RwLock<RouteIndex>>,
+}
+
+#[derive(Default)]
+struct RouteIndex {
+    exact: HashMap<&'static str, Vec<Arc<RouteSlot>>>,
+    exact_with_query: HashMap<&'static str, Vec<Arc<RouteSlot>>>,
+    prefixes: Vec<(&'static str, Arc<RouteSlot>)>,
+}
+
+struct RouteSlot {
+    ordinal: usize,
+    module_id: ModuleId,
+    descriptor: RouteDescriptor,
+    active: AtomicBool,
+}
+
+pub(super) struct PreparedRoute {
+    plan: RouteHeadPlan,
+    selected: Option<Arc<RouteSlot>>,
+}
+
+impl PreparedRoute {
+    pub(super) fn plan(&self) -> RouteHeadPlan {
+        self.plan
+    }
+
+    pub(super) async fn dispatch(self, request: Request) -> RouteOutcome {
+        match self.selected {
+            // The single body-complete admission check does not revoke a started handler.
+            Some(route) if route.active.load(Ordering::Acquire) => {
+                route.descriptor.dispatch(request).await
+            }
+            _ => RouteOutcome::Response(Response::not_found()),
+        }
+    }
 }
 
 impl Router {
     pub(crate) fn new(routes: Vec<platform::loopback::ModuleDescriptor>) -> Self {
         routes.iter().for_each(validate_module_routes);
-        Self {
-            routes: Arc::new(RwLock::new(routes)),
-        }
-    }
-
-    pub(crate) async fn unregister_route(
-        &self,
-        module_id: platform::loopback::ModuleId,
-        route_id: &'static str,
-    ) {
-        let mut routes = self.routes.write().await;
-        routes.iter_mut().for_each(|module| {
-            if module.id() == module_id {
-                module.unregister_route(route_id);
-            }
-        });
-        routes.retain(|module| !module.routes().is_empty());
-    }
-
-    pub(crate) async fn body_policy(&self, head: &RequestHead) -> BodyPolicy {
-        self.head_plan(head).await.map_or(
-            BodyPolicy::Optional {
-                max_bytes: DEFAULT_REQUEST_BYTES,
-            },
-            |plan| plan.body_policy(),
-        )
-    }
-
-    pub(crate) async fn deadline(&self, head: &RequestHead) -> platform::loopback::RouteDeadline {
-        self.head_plan(head).await.map_or(
-            platform::loopback::RouteDeadline::Request(DEFAULT_DEADLINE),
-            |plan| plan.deadline(),
-        )
-    }
-
-    pub(crate) async fn timeout_response(&self, head: Option<&RequestHead>) -> Response {
-        match head {
-            Some(head) => self
-                .head_plan(head)
-                .await
-                .map_or_else(default_timeout_response, |plan| plan.timeout_response()),
-            None => default_timeout_response(),
-        }
-    }
-
-    pub(crate) async fn route(&self, request: Request) -> RouteOutcome {
-        let route = {
-            let routes = self.routes.read().await;
-            routes.iter().find_map(|module| {
+        let mut index = RouteIndex::default();
+        for (ordinal, (module_id, route)) in routes
+            .iter()
+            .flat_map(|module| {
                 module
                     .routes()
                     .iter()
-                    .find(|route| route.plan_head(&request.head).is_some())
-                    .cloned()
+                    .map(move |route| (module.id(), route))
             })
-        };
-        match route {
-            Some(route) => route.dispatch(request).await,
-            None => RouteOutcome::Response(Response::not_found()),
+            .enumerate()
+        {
+            let slot = Arc::new(RouteSlot {
+                ordinal,
+                module_id,
+                descriptor: route.clone(),
+                active: AtomicBool::new(true),
+            });
+            for &path in route.paths() {
+                match path {
+                    RoutePath::Exact(path) => {
+                        index.exact.entry(path).or_default().push(Arc::clone(&slot));
+                    }
+                    RoutePath::ExactWithQuery(path) => {
+                        index
+                            .exact_with_query
+                            .entry(path)
+                            .or_default()
+                            .push(Arc::clone(&slot));
+                    }
+                    RoutePath::Prefix(prefix) => index.prefixes.push((prefix, Arc::clone(&slot))),
+                }
+            }
+        }
+        Self {
+            routes: Arc::new(RwLock::new(index)),
         }
     }
 
-    async fn head_plan(&self, head: &RequestHead) -> Option<platform::loopback::RouteHeadPlan> {
-        self.routes.read().await.iter().find_map(|module| {
-            module
-                .routes()
-                .iter()
-                .find_map(|route| route.plan_head(head))
-        })
+    pub(crate) async fn unregister_route(&self, module_id: ModuleId, route_id: &'static str) {
+        let mut index = self.routes.write().await;
+        let retain_route = |route: &Arc<RouteSlot>| {
+            if route.module_id == module_id && route.descriptor.id() == route_id {
+                route.active.store(false, Ordering::Release);
+                false
+            } else {
+                true
+            }
+        };
+        let RouteIndex {
+            exact,
+            exact_with_query,
+            prefixes,
+        } = &mut *index;
+        for paths in [exact, exact_with_query] {
+            paths.retain(|_, routes| {
+                routes.retain(&retain_route);
+                !routes.is_empty()
+            });
+        }
+        prefixes.retain(|(_, route)| retain_route(route));
+    }
+
+    pub(super) async fn resolve(&self, head: &RequestHead) -> PreparedRoute {
+        let index = self.routes.read().await;
+        let target = head.path.as_str();
+        let pathname = target.split_once('?').map_or(target, |(path, _)| path);
+        let selected = index
+            .exact
+            .get(target)
+            .into_iter()
+            .flatten()
+            .chain(index.exact_with_query.get(pathname).into_iter().flatten())
+            .chain(
+                index
+                    .prefixes
+                    .iter()
+                    .filter_map(|(prefix, route)| pathname.starts_with(*prefix).then_some(route)),
+            )
+            .filter_map(|route| route.descriptor.plan_head(head).map(|plan| (route, plan)))
+            .min_by_key(|(route, _)| route.ordinal);
+        match selected {
+            Some((route, plan)) => PreparedRoute {
+                plan,
+                selected: Some(Arc::clone(route)),
+            },
+            None => PreparedRoute {
+                plan: RouteHeadPlan::new(
+                    BodyPolicy::Optional {
+                        max_bytes: DEFAULT_REQUEST_BYTES,
+                    },
+                    DEFAULT_DEADLINE,
+                    default_timeout_response,
+                ),
+                selected: None,
+            },
+        }
     }
 }
 

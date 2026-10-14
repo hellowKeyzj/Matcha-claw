@@ -609,6 +609,9 @@ impl ConnectorCatalog {
         }
         connector.validate()?;
         let created = self.get(connector.id()).is_none();
+        if created && self.connectors.len() >= MAX_CONNECTORS {
+            return Err(ConnectorError::Invalid);
+        }
         self.connectors
             .retain(|current| current.id() != connector.id());
         self.connectors.push(connector);

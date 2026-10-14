@@ -60,6 +60,7 @@ import { readLocalSkillImport } from '@/services/local-path-picker';
 import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { trackUiEvent } from '@/lib/telemetry';
+import { createSessionTraceId, logSessionTrace, summarizeIdentifier, summarizeError } from '@/lib/session-trace';
 import { toast } from 'sonner';
 import type { Skill, MarketplaceSkill, SealedSkillCloudPackage, SealedSkillMetadata, SkillMissingRequirements } from '@/types/skill';
 import type { GatewayStatus } from '@/types/gateway';
@@ -81,13 +82,22 @@ async function skillManagementCapabilityExecute<TResult>(
   operationId: string,
   input: Record<string, unknown>,
   target: CapabilityTarget,
+  traceId?: string | null,
 ): Promise<TResult> {
+  const scope = await resolveSingleCapabilityScope(SKILL_MANAGEMENT_CAPABILITY_ID);
+  logSessionTrace('skill.open-path.scope', traceId, () => ({
+    kind: ['app', 'runtime-instance', 'agent', 'session', 'workspace', 'team-run', 'provider-routing'].includes(scope.kind) ? scope.kind : 'unknown',
+    isOpenClawLocal: scope.kind === 'runtime-instance' && scope.endpoint.kind === 'native-runtime'
+      && scope.endpoint.runtimeAdapterId === 'openclaw' && scope.endpoint.runtimeInstanceId === 'local',
+  }));
+  logSessionTrace('skill.open-path.request', traceId, () => ({ capabilityId: SKILL_MANAGEMENT_CAPABILITY_ID, operationId: 'clawhub.openPath' }));
   return await hostApiFetch<TResult>('/api/capabilities/execute', {
     method: 'POST',
+    traceId,
     body: JSON.stringify({
       id: SKILL_MANAGEMENT_CAPABILITY_ID,
       operationId,
-      scope: await resolveSingleCapabilityScope(SKILL_MANAGEMENT_CAPABILITY_ID),
+      scope,
       target,
       input,
     }),
@@ -1606,6 +1616,17 @@ export function Skills() {
   }, [skillById]);
 
   const handleOpenSkillFolder = useCallback(async (skill: Skill) => {
+    const traceId = createSessionTraceId('skill.open-path');
+    logSessionTrace('skill.open-path.click', traceId, () => {
+      const source = (skill.source || '').trim().toLowerCase();
+      return {
+        skillHash: summarizeIdentifier(skill.id).hash,
+        slugHash: summarizeIdentifier(skill.slug).hash,
+        hasBaseDir: Boolean(skill.baseDir),
+        hasFilePath: Boolean(skill.filePath),
+        source: ['bundled', 'managed', 'openclaw-bundled', 'openclaw-managed', 'openclaw-workspace', 'openclaw-extra', 'openclaw-custodian', 'agents-skills-personal', 'agents-skills-project', 'matcha-sealed'].includes(source) ? source : 'unknown',
+      };
+    });
     try {
       const result = await skillManagementCapabilityExecute<{ success: boolean; error?: string }>(
         'clawhub.openPath',
@@ -1616,11 +1637,14 @@ export function Skills() {
           baseDir: skill.baseDir,
         },
         { kind: 'skill', skillId: skill.id, slug: skill.slug },
+        traceId,
       );
+      logSessionTrace('skill.open-path.result', traceId, () => ({ success: result.success }));
       if (!result.success) {
         throw new Error(result.error || t('toast.failedOpenActualFolder'));
       }
     } catch (err) {
+      logSessionTrace('skill.open-path.failed', traceId, () => summarizeError(err));
       toast.error(t('toast.failedOpenActualFolder') + ': ' + String(err));
     }
   }, [t]);

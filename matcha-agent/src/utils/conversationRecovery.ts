@@ -50,6 +50,7 @@ import {
   loadMessageLogs,
   loadTranscriptFile,
   removeExtraFields,
+  type TranscriptDisplayRead,
 } from './sessionStorage.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
 
@@ -440,18 +441,24 @@ export function restoreSkillStateFromMessages(messages: Message[]): void {
  */
 export async function loadTranscriptHistoryFromJsonlPath(
   path: string,
+  displayRead?: TranscriptDisplayRead,
 ): Promise<{
   messages: TranscriptMessage[]
   sessionId: UUID | undefined
 }> {
-  return loadTranscriptChainFromJsonlPath(path)
+  return loadTranscriptChainFromJsonlPath(path, displayRead)
 }
 
-async function loadTranscriptChainFromJsonlPath(path: string): Promise<{
+async function loadTranscriptChainFromJsonlPath(
+  path: string,
+  displayRead?: TranscriptDisplayRead,
+): Promise<{
   messages: TranscriptMessage[]
   sessionId: UUID | undefined
 }> {
-  const { messages: byUuid, leafUuids } = await loadTranscriptFile(path)
+  const { messages: byUuid, leafUuids } = await loadTranscriptFile(path, {
+    displayRead,
+  })
   const tip = findLatestNonSidechainLeaf(byUuid, leafUuids)
   if (!tip) return { messages: [], sessionId: undefined }
   return {

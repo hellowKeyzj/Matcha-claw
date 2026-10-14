@@ -26,8 +26,8 @@ pub fn channel_trace_id(headers: &[(String, String)]) -> Option<String> {
 
 const CATALOG_OPERATION: &str = "channels.catalog.read";
 const CONFIG_OPERATION: &str = "channels.configure";
-const CATALOG_ENDPOINT: &str = "/api/channels/catalog";
-const CONFIG_ENDPOINT: &str = "/api/channels/configure";
+pub(super) const CATALOG_ENDPOINT: &str = "/api/channels/catalog";
+pub(super) const CONFIG_ENDPOINT: &str = "/api/channels/configure";
 const CATALOG_SCOPE: &str = "channels:read";
 const CONFIG_SCOPE: &str = "channels:write";
 

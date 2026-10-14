@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize';
@@ -35,8 +36,9 @@ interface OpenAICodexAuthorizationFlow {
 }
 
 interface OpenAICodexLocalServer {
-  close: () => void;
+  close: () => Promise<void>;
   waitForCode: () => Promise<{ code: string } | null>;
+  waitForCallback: () => Promise<string | undefined>;
 }
 
 function toBase64Url(buffer: Buffer): string {
@@ -143,10 +145,15 @@ async function createAuthorizationFlow(): Promise<OpenAICodexAuthorizationFlow> 
   return { verifier, state, url: url.toString() };
 }
 
-function startLocalOAuthServer(state: string): Promise<OpenAICodexLocalServer | null> {
+async function startLocalOAuthServer(state: string, signal?: AbortSignal): Promise<OpenAICodexLocalServer | null> {
+  signal?.throwIfAborted();
   let lastCode: string | null = null;
+  let resolveCallback!: (code: string | undefined) => void;
+  const callback = new Promise<string | undefined>((resolve) => { resolveCallback = resolve; });
+  const onCallbackAbort = () => { resolveCallback(undefined); };
 
   const server = createServer((req, res) => {
+    res.setHeader('Connection', 'close');
     try {
       const url = new URL(req.url || '', 'http://localhost');
       if (url.pathname !== '/auth/callback') {
@@ -172,41 +179,67 @@ function startLocalOAuthServer(state: string): Promise<OpenAICodexLocalServer | 
       res.statusCode = 200;
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(SUCCESS_HTML);
+      resolveCallback(code);
     } catch {
       res.statusCode = 500;
       res.end('Internal error');
     }
   });
 
-  return new Promise((resolve) => {
-    server
-      .listen(1455, 'localhost', () => {
-        resolve({
-          close: () => server.close(),
-          waitForCode: async () => {
-            const sleep = () => new Promise((r) => setTimeout(r, 100));
-            for (let i = 0; i < 600; i += 1) {
-              if (lastCode) {
-                return { code: lastCode };
-              }
-              await sleep();
-            }
-            return null;
-          },
-        });
-      })
-      .on('error', () => {
-        resolve(null);
-      });
+  const close = () => new Promise<void>((resolve) => {
+    signal?.removeEventListener('abort', onCallbackAbort);
+    resolveCallback(undefined);
+    server.close(() => resolve());
+    server.closeAllConnections();
   });
+  try {
+    const listening = await new Promise<boolean>((resolve, reject) => {
+      const cleanup = () => {
+        server.off('error', onError);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onError = () => { cleanup(); resolve(false); };
+      const onAbort = () => { cleanup(); reject(signal?.reason); };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      server.once('error', onError);
+      server.listen({ port: 1455, host: 'localhost', signal }, () => { cleanup(); resolve(true); });
+    });
+    if (!listening) { await close(); return null; }
+    signal?.throwIfAborted();
+    signal?.addEventListener('abort', onCallbackAbort, { once: true });
+    return {
+      close,
+      waitForCode: async () => {
+        for (let i = 0; i < 600; i += 1) {
+          signal?.throwIfAborted();
+          if (lastCode) return { code: lastCode };
+          await delay(100, undefined, { signal });
+        }
+        signal?.throwIfAborted();
+        return lastCode ? { code: lastCode } : null;
+      },
+      waitForCallback: async () => {
+        signal?.throwIfAborted();
+        const code = await callback;
+        signal?.throwIfAborted();
+        return code;
+      },
+    };
+  } catch (error) {
+    await close();
+    throw error;
+  }
 }
 
 async function exchangeAuthorizationCode(
   code: string,
   verifier: string,
+  signal?: AbortSignal,
 ): Promise<{ access: string; refresh: string; expires: number }> {
+  signal?.throwIfAborted();
   const response = await fetch(TOKEN_URL, {
     method: 'POST',
+    signal,
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'authorization_code',
@@ -240,17 +273,23 @@ async function exchangeAuthorizationCode(
 
 export async function loginOpenAICodexOAuth(options: {
   openUrl: (url: string) => Promise<void>;
+  signal?: AbortSignal;
   onProgress?: (message: string) => void;
   onManualCodeRequired?: (payload: { authorizationUrl: string; reason: 'port_in_use' | 'callback_timeout' }) => void;
   onManualCodeInput?: () => Promise<string>;
 }): Promise<OpenAICodexOAuthCredentials> {
+  const { signal } = options;
+  signal?.throwIfAborted();
   const { verifier, state, url } = await createAuthorizationFlow();
+  signal?.throwIfAborted();
   options.onProgress?.('Opening OpenAI sign-in page…');
 
-  const server = await startLocalOAuthServer(state);
+  const server = await startLocalOAuthServer(state, signal);
 
   try {
+    signal?.throwIfAborted();
     await options.openUrl(url);
+    signal?.throwIfAborted();
     options.onProgress?.(
       server ? 'Waiting for OpenAI OAuth callback…' : 'Callback port unavailable, waiting for manual authorization code…',
     );
@@ -258,18 +297,22 @@ export async function loginOpenAICodexOAuth(options: {
     let code: string | undefined;
     if (server) {
       const result = await server.waitForCode();
+      signal?.throwIfAborted();
       code = result?.code ?? undefined;
       if (!code && options.onManualCodeInput) {
         options.onManualCodeRequired?.({ authorizationUrl: url, reason: 'callback_timeout' });
-        code = await options.onManualCodeInput();
+        signal?.throwIfAborted();
+        code = await Promise.race([server.waitForCallback(), options.onManualCodeInput()]);
       }
     } else {
       if (!options.onManualCodeInput) {
         throw new Error('Cannot start OpenAI OAuth callback server on localhost:1455');
       }
       options.onManualCodeRequired?.({ authorizationUrl: url, reason: 'port_in_use' });
+      signal?.throwIfAborted();
       code = await options.onManualCodeInput();
     }
+    signal?.throwIfAborted();
 
     if (!code) {
       throw new Error('Missing OpenAI authorization code');
@@ -285,7 +328,8 @@ export async function loginOpenAICodexOAuth(options: {
       throw new Error('Missing OpenAI authorization code');
     }
 
-    const token = await exchangeAuthorizationCode(code, verifier);
+    const token = await exchangeAuthorizationCode(code, verifier, signal);
+    signal?.throwIfAborted();
     const accountId = getAccountIdFromAccessToken(token.access);
     if (!accountId) {
       throw new Error('Failed to extract OpenAI accountId from token');
@@ -298,6 +342,6 @@ export async function loginOpenAICodexOAuth(options: {
       accountId,
     };
   } finally {
-    server?.close();
+    await server?.close();
   }
 }

@@ -74,7 +74,7 @@ pub fn abort_pending_approvals(
         approval
             .resolve(
                 ApprovalDecision::Abort,
-                resolved_at,
+                resolved_at.max(approval.facts().requested_at),
                 note.map(str::to_owned),
             )
             .expect("pending approval must be resolvable");

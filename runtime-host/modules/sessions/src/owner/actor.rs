@@ -17,6 +17,7 @@ use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute, 
 use super::observation::Observation;
 use platform::endpoint::runtime_address::RuntimeEndpoint;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::ports::{
     LifecycleOps, RuntimeDriver, RuntimeDriverIdentity, RuntimeOperationFailure,
@@ -27,7 +28,7 @@ use crate::{
     approval::{PendingApprovalsOutcome, SessionApprovalOutcome},
     command::{
         SessionCommand, SessionEnsureOutcome, SessionEvent,
-        SessionEvictOutcome, SessionIngestOutcome, SessionSendRequest, openclaw_agent_lane_key,
+        SessionEvictOutcome, SessionIngestOutcome, SessionSendRequest,
         session_identity_lane_key,
     },
     create::{SessionCreateCommand, SessionCreateOutcome},
@@ -85,15 +86,18 @@ pub struct SessionShared {
     pub(super) snapshot: Arc<ArcSwap<SessionSnapshot>>,
     snapshot_writer: Arc<Mutex<()>>,
     pub(super) session_delta: Option<SessionDeltaSource>,
-    terminal_hook: Option<Arc<dyn SessionTerminalHook>>,
+    pub(super) terminal_hook: Option<Arc<dyn SessionTerminalHook>>,
+    pub(super) terminal_delivery: Arc<super::terminal::TerminalDelivery>,
     pub(super) epoch: u64,
     pub(super) observations: Arc<StdMutex<HashMap<String, Observation>>>,
     pub(super) completion_handle: Arc<OnceLock<OwnerRuntimeHandle<SessionCommand, SessionQuery>>>,
-    pub(super) read_tasks: Arc<StdMutex<Vec<foundation::execution::OwnedTask<()>>>>,
+    pub(super) read_tasks: Arc<StdMutex<Vec<Arc<Mutex<foundation::execution::OwnedTask<()>>>>>>,
 }
 
 pub struct SessionLane {
     pub(super) state: Option<SessionState>,
+    pub(super) terminal_permit: Option<super::terminal::TerminalPermit>,
+    pub(super) completion_custody: Arc<()>,
 }
 
 #[cfg(test)]
@@ -122,6 +126,7 @@ impl SessionOwner {
             snapshot_writer: Arc::new(Mutex::new(())),
             session_delta,
             terminal_hook,
+            terminal_delivery: Arc::new(super::terminal::TerminalDelivery::new()),
             epoch: next_session_epoch(),
             observations: Arc::new(StdMutex::new(HashMap::new())),
             completion_handle: Arc::new(OnceLock::new()),
@@ -129,6 +134,10 @@ impl SessionOwner {
         };
 
         (Self { shared }, snapshot)
+    }
+
+    pub(crate) fn shared(&self) -> SessionShared {
+        self.shared.clone()
     }
 
     pub(crate) fn completion_handle_slot(&self) -> Arc<OnceLock<OwnerRuntimeHandle<SessionCommand, SessionQuery>>> {
@@ -167,9 +176,28 @@ fn next_session_epoch() -> u64 {
 }
 
 impl SessionShared {
+    pub(crate) fn evict_identity(&self, session_key: &str) -> Result<SessionIdentity, SessionEvictOutcome> {
+        let provider = if session_key.starts_with("matcha-agent:") {
+            SessionProvider::MatchaAgent
+        } else {
+            SessionProvider::OpenClaw
+        };
+        let endpoint = crate::state::SessionEndpoint::local(provider);
+        let snapshot = self.snapshot.load();
+        let mut matching = snapshot.states.values().map(|state| state.identity())
+            .filter(|identity| identity.endpoint == endpoint && identity.session_key == session_key);
+        match (matching.next(), matching.next()) {
+            (Some(identity), None) => Ok(identity.clone()),
+            (None, _) => Err(SessionEvictOutcome::NotFound),
+            _ => Err(SessionEvictOutcome::Failed),
+        }
+    }
+
     fn open_lane(&self, key: &str) -> SessionLane {
         SessionLane {
             state: self.snapshot.load().states.get(key).cloned(),
+            terminal_permit: None,
+            completion_custody: Arc::new(()),
         }
     }
 
@@ -184,7 +212,8 @@ impl SessionShared {
 
     pub(super) fn terminal_snapshots(
         delta: &SessionDelta,
-        state: &mut SessionState,
+        state: &SessionState,
+        assistant_texts: impl Fn(&str) -> Vec<String>,
     ) -> Vec<SessionRunTerminalSnapshot> {
         if !state.is_team_source() {
             return Vec::new();
@@ -203,9 +232,9 @@ impl SessionShared {
                     identity: state.identity().clone(),
                     source_binding: state.source_binding().clone(),
                     native_run_id: run_id.clone(),
-                    delivery_context: state.run_delivery_contexts.remove(run_id),
+                    delivery_context: state.run_delivery_contexts.get(run_id).cloned(),
                     phase: *phase,
-                    assistant_texts: state.assistant_texts_for_run_id(run_id),
+                    assistant_texts: assistant_texts(run_id),
                 };
                 crate::trace::log_unscoped("sessions.terminal.snapshot", || serde_json::json!({
                     "identity": crate::trace::identity_shape(state.identity()),
@@ -239,11 +268,7 @@ impl SessionShared {
                 }));
             }
         }
-        if let Some(hook) = &self.terminal_hook {
-            for terminal in terminals {
-                hook.run_terminal(terminal);
-            }
-        }
+        if !terminals.is_empty() { self.terminal_delivery.notify(); }
     }
 
     async fn clear_snapshot_state(&self, lane_key: &str) -> bool {
@@ -647,6 +672,7 @@ impl SessionShared {
     async fn prepare_matcha_send_model_runtime(
         &self,
         command: &SessionSendCommand,
+        cancellation: &CancellationToken,
     ) -> Result<(), SessionSendOutcome> {
         if command.identity.provider() != SessionProvider::MatchaAgent {
             return Ok(());
@@ -657,34 +683,35 @@ impl SessionShared {
         let Some(ops) = driver.session_ops() else {
             return Err(SessionSendOutcome::Unsupported);
         };
-        let Some(model_runtime) = ops.send_model_runtime_command(command).await? else {
+        let Some(model_runtime) = ops.send_model_runtime_command_cancellable(command, cancellation.clone()).await? else {
             return Ok(());
         };
-        let model_runtime = self
-            .resolve_matcha_session_model_runtime(model_runtime)
-            .await
-            .map_err(session_model_runtime_failure)?;
-        match ops.select_session_model(model_runtime).await {
+        if cancellation.is_cancelled() { return Err(SessionSendOutcome::Unavailable); }
+        let model_runtime = self.resolve_matcha_session_model_runtime(model_runtime).await;
+        if cancellation.is_cancelled() { return Err(SessionSendOutcome::Unavailable); }
+        let model_runtime = model_runtime.map_err(session_model_runtime_failure)?;
+        match ops.select_session_model_cancellable(model_runtime, cancellation.clone()).await {
             SessionModelSelectionOutcome::Succeeded { .. } => Ok(()),
             outcome => Err(session_model_runtime_failure(outcome)),
         }
     }
 
     async fn handle_global_command(&self, command: SessionCommand) {
+        let Ok((command, call, _producer)) = crate::call::command_parts(command).await else { return; };
         match command {
             SessionCommand::ConfigurePrivateResolver { resolver, reply } => {
                 *self
                     .private_resolver
                     .lock()
                     .expect("Session private resolver lock poisoned") = resolver;
-                let _ = reply.send(());
+                crate::call::reply(call.as_ref(), reply, ()).await;
             }
             command => command.send_unavailable(),
         }
     }
 
     async fn handle_global_query(&self, query: SessionQuery) {
-        let Ok((query, call)) = crate::call::query_parts(query).await else {
+        let Ok((query, call, _producer)) = crate::call::query_parts(query).await else {
             return;
         };
         match query {
@@ -721,7 +748,7 @@ impl SessionLane {
         command: SessionCommand,
     ) {
         use SessionCommand::*;
-        let Ok((command, call)) = crate::call::command_parts(command).await else {
+        let Ok((command, call, _producer)) = crate::call::command_parts(command).await else {
             return;
         };
         match command {
@@ -760,6 +787,22 @@ impl SessionLane {
                 self.complete_send(shared, command, goal_demand, receive_demand_added, &outcome).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
+            TerminalIngest { identity, event, permit, reply } => {
+                self.terminal_permit = Some(permit);
+                let outcome = self.handle_ingest(shared, &key, identity, event).await;
+                self.terminal_permit.take();
+                let _ = reply.send(outcome);
+            }
+            SyncTerminals { identity, generation, terminals, permit, reply } => {
+                self.terminal_permit = Some(permit);
+                let accepted = self.sync_terminals(shared, &identity, generation, terminals).await;
+                self.terminal_permit.take();
+                let _ = reply.send(accepted);
+            }
+            TerminalDelivered { identity, run_id, reply } => {
+                let delivered = self.terminal_delivered(shared, identity, run_id).await;
+                let _ = reply.send(delivered);
+            }
             Goal { command, reply } => self.start_goal(shared, command, reply, call).await,
             GoalCompleted { command, demand_lease, outcome, reply, call } => {
                 let outcome = self.complete_goal(shared, &command, &demand_lease, outcome).await;
@@ -780,12 +823,12 @@ impl SessionLane {
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             Send { request } => match request {
-                SessionSendRequest::Session { command, reply } => {
-                    self.start_send(shared, command, reply, call).await;
+                SessionSendRequest::Session { command, cancellation, reply } => {
+                    self.start_send(shared, command, cancellation, reply, call).await;
                 }
             },
             Delete { command, reply } => {
-                let outcome = self.handle_delete(shared, command).await;
+                let outcome = self.handle_delete(shared, &key, command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             Rename { command, reply } => {
@@ -807,7 +850,7 @@ impl SessionLane {
             ConfigurePrivateResolver { reply, .. } => {
                 let _ = reply.send(());
             }
-            command @ Audited { .. } => command.send_unavailable(),
+            command @ (Audited { .. } | Producing { .. }) => command.send_unavailable(),
         }
     }
 
@@ -1031,7 +1074,10 @@ impl SessionLane {
 
         match &result {
             crate::state::SessionApplyResult::Applied(delta) => {
-                let terminals = SessionShared::terminal_snapshots(delta, &mut next);
+                let terminals = SessionShared::terminal_snapshots(delta, &next, |run_id| next.assistant_texts_for_run_id(run_id));
+                if !self.retain_terminals(shared, &mut next, &terminals) {
+                    return crate::state::SessionApplyResult::Rejected { reason: crate::state::SessionApplyRejection::InvalidInput };
+                }
                 self.state = Some(next.clone());
                 shared.store_snapshot_state(next).await;
                 if evicted {
@@ -1082,7 +1128,7 @@ impl SessionLane {
         let result = next.apply_native_recovery_bound(binding, run_id, native_cursor, reason);
 
         if let crate::state::SessionApplyResult::Applied(delta) = &result {
-            let terminals = SessionShared::terminal_snapshots(delta, &mut next);
+            let terminals = SessionShared::terminal_snapshots(delta, &next, |run_id| next.assistant_texts_for_run_id(run_id));
             self.state = Some(next.clone());
             shared.store_snapshot_state(next).await;
             shared.emit_session_delta(delta, terminals);
@@ -1353,9 +1399,18 @@ impl SessionLane {
         &mut self,
         shared: &SessionShared,
         command: crate::send::SessionSendCommand,
+        cancellation: CancellationToken,
         reply: tokio::sync::oneshot::Sender<SessionSendOutcome>,
         call: Option<crate::call::SessionCall>,
     ) {
+        if shared.terminal_delivery.is_stopping() {
+            crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
+            return;
+        }
+        if cancellation.is_cancelled() {
+            crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
+            return;
+        }
         if let Some(intent) = &command.intent {
             if command.clone().with_intent(intent.clone()).is_err() {
                 crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
@@ -1444,30 +1499,51 @@ impl SessionLane {
         }
         self.state = Some(next.clone());
         shared.store_snapshot_state(next).await;
+        let producer = match self.completion_producer(shared) {
+            Ok(producer) => producer,
+            Err(()) => {
+                self.complete_send(shared, command, goal_demand, receive_demand_added, &SessionSendOutcome::Rejected).await;
+                crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
+                return;
+            }
+        };
         let shared_for_tasks = shared.clone();
         let shared = shared.clone();
         let (task, _) = foundation::execution::OwnedTask::spawn(move |cancel| async move {
-            let send = async {
-                match shared.prepare_matcha_send_model_runtime(&command).await {
-                    Ok(()) => match shared.running_session_driver(identity_endpoint(&command.identity)) {
-                        Ok(driver) => match driver.session_ops() {
-                            Some(ops) => ops.send_session(command.clone()).await,
-                            None => SessionSendOutcome::Unsupported,
+            let outcome = {
+                let send = async {
+                    if cancellation.is_cancelled() { return SessionSendOutcome::Unavailable; }
+                    match shared.prepare_matcha_send_model_runtime(&command, &cancellation).await {
+                        Ok(()) if cancellation.is_cancelled() => SessionSendOutcome::Unavailable,
+                        Ok(()) => match shared.running_session_driver(identity_endpoint(&command.identity)) {
+                            Ok(driver) => match driver.session_ops() {
+                                Some(ops) => ops.send_session_cancellable(command.clone(), cancellation.clone()).await,
+                                None => SessionSendOutcome::Unsupported,
+                            },
+                            Err(failure) => send_driver_failure(failure),
                         },
-                        Err(failure) => send_driver_failure(failure),
-                    },
-                    Err(outcome) => outcome,
+                        Err(outcome) => outcome,
+                    }
+                };
+                tokio::pin!(send);
+                tokio::select! {
+                    outcome = &mut send => outcome,
+                    _ = cancel.cancelled() => { cancellation.cancel(); send.await },
                 }
             };
-            let outcome = tokio::select! {
-                _ = cancel.cancelled() => { crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unknown).await; return; },
-                outcome = send => outcome,
-            };
-            tokio::select! { _ = cancel.cancelled() => {}, _ = sender.send_command(SessionCommand::SendCompleted { command, goal_demand, receive_demand_added, outcome, reply, call }) => {} }
+            match sender.reserve_control().await {
+                Ok(permit) => {
+                    let _ = permit.send(SessionCommand::Producing {
+                        producer,
+                        command: Box::new(SessionCommand::SendCompleted { command, goal_demand, receive_demand_added, outcome, reply, call }),
+                    });
+                }
+                Err(_) => crate::call::reply(call.as_ref(), reply, outcome).await,
+            }
         });
         let mut tasks = shared_for_tasks.read_tasks.lock().expect("session read tasks lock");
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(task);
+        tasks.retain(|task| task.try_lock().map_or(true, |task| !task.is_finished()));
+        tasks.push(Arc::new(Mutex::new(task)));
     }
 
     async fn complete_send(&mut self, shared: &SessionShared, command: SessionSendCommand, goal_demand: Option<(String, Option<String>)>, receive_demand_added: bool, outcome: &SessionSendOutcome) {
@@ -1475,6 +1551,7 @@ impl SessionLane {
         let requested = command.request_run_identity().map(str::to_owned);
         if let Some(requested) = &requested {
             let remove = receive_demand_added
+                && !self.state.as_ref().is_some_and(|state| state.pending_terminals.iter().any(|snapshot| snapshot.native_run_id == *requested))
                 && !matches!(outcome, SessionSendOutcome::Unknown)
                 && self.send_receive_run(&identity, outcome) != Some(requested.as_str())
                 && self.state.as_ref().and_then(SessionState::active_run_id) != Some(requested.as_str());
@@ -1573,9 +1650,9 @@ impl SessionLane {
     async fn handle_delete(
         &mut self,
         shared: &SessionShared,
+        lane_key: &str,
         command: crate::delete::SessionDeleteCommand,
     ) -> SessionDeleteOutcome {
-        let lane_key = openclaw_agent_lane_key(&command.agent_id, &command.session_key);
         let driver = match shared
             .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
         {
@@ -1585,10 +1662,16 @@ impl SessionLane {
         let Some(ops) = driver.session_ops() else {
             return SessionDeleteOutcome::Unknown;
         };
+        let identity = SessionIdentity {
+            session_key: command.session_key.clone(),
+            endpoint: crate::state::SessionEndpoint::local(SessionProvider::OpenClaw),
+            agent_id: command.agent_id.clone(),
+        };
         let outcome = ops.delete_session(command).await;
         if outcome == SessionDeleteOutcome::Succeeded {
+            self.retire_deleted_receive(shared, &identity);
             self.state = None;
-            shared.clear_snapshot_state(&lane_key).await;
+            shared.clear_snapshot_state(lane_key).await;
         }
         outcome
     }
@@ -1765,7 +1848,7 @@ impl SessionLane {
     }
 
     async fn handle_query(&mut self, shared: &SessionShared, query: SessionQuery) {
-        let Ok((query, call)) = crate::call::query_parts(query).await else {
+        let Ok((query, call, _producer)) = crate::call::query_parts(query).await else {
             return;
         };
         match query {
@@ -1811,8 +1894,8 @@ impl SessionLane {
                         crate::call::reply(call.as_ref(), reply, outcome).await;
                     });
                     let mut tasks = shared_for_tasks.read_tasks.lock().expect("session read tasks lock");
-                    tasks.retain(|task| !task.is_finished());
-                    tasks.push(task);
+                    tasks.retain(|task| task.try_lock().map_or(true, |task| !task.is_finished()));
+                    tasks.push(Arc::new(Mutex::new(task)));
                 }
             }
             SessionQuery::Content { command, reply } => {
@@ -1830,12 +1913,14 @@ impl SessionLane {
                 let outcome = shared.handle_session_catalog(command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
-            query @ (SessionQuery::Abort { .. } | SessionQuery::Audited { .. }) => query.send_unavailable(),
+            query @ (SessionQuery::Abort { .. } | SessionQuery::Audited { .. } | SessionQuery::Producing { .. }) => query.send_unavailable(),
         }
     }
 }
 
 impl OwnerSpec for SessionOwner {
+    const PENDING_LIFECYCLE: bool = true;
+
     type Command = SessionCommand;
     type Query = SessionQuery;
     type Key = String;
@@ -1859,6 +1944,30 @@ impl OwnerSpec for SessionOwner {
         shared.open_lane(key)
     }
 
+    fn keyed_command_ready(
+        shared: &Self::Shared,
+        key: &Self::Key,
+        lane: &Self::LaneState,
+        command: &Self::Command,
+    ) -> bool {
+        let _ = key;
+        !command.requires_terminal_settlement() || (!lane.has_pending_completions()
+            && !lane.state.as_ref().is_some_and(|state| {
+                !state.pending_terminals.is_empty() || shared.terminal_sync_pending(state.identity())
+            }))
+    }
+
+    fn lane_has_pending(
+        shared: &Self::Shared,
+        _key: &Self::Key,
+        lane: &Self::LaneState,
+    ) -> bool {
+        lane.has_pending_completions() || lane.state.as_ref().is_some_and(|state| {
+            !state.pending_terminals.is_empty() || shared.terminal_sync_pending(state.identity())
+        }) || shared.read_tasks.lock().expect("session read tasks lock").iter()
+            .any(|task| task.try_lock().map_or(true, |task| !task.is_finished()))
+    }
+
     async fn handle_keyed_command(
         shared: Self::Shared,
         key: Self::Key,
@@ -1877,7 +1986,7 @@ impl OwnerSpec for SessionOwner {
     }
 
     async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
-        let Ok((query, call)) = crate::call::query_parts(query).await else {
+        let Ok((query, call, _producer)) = crate::call::query_parts(query).await else {
             return;
         };
         match query {
@@ -1932,8 +2041,12 @@ impl OwnerSpec for SessionOwner {
         lanes: Vec<(Self::Key, Self::LaneState)>,
     ) {
         shared.shutdown_observations().await;
-        let tasks = std::mem::take(&mut *shared.read_tasks.lock().expect("session read tasks lock"));
-        for mut task in tasks { let _ = task.cancel_and_join().await; }
+        let tasks = shared.read_tasks.lock().expect("session read tasks lock").clone();
+        for task in tasks { let _ = task.lock().await.cancel_and_join().await; }
+        shared.read_tasks.lock().expect("session read tasks lock").clear();
+        let mut terminal = shared.terminal_delivery.task.lock().await;
+        if let Some(task) = terminal.as_mut() { let _ = task.cancel_and_join().await; }
+        terminal.take();
         for (_key, lane) in lanes {
             if let Some(state) = lane.state {
                 shared.store_snapshot_state(state).await;

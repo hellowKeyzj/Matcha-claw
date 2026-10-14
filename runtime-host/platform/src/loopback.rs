@@ -1,7 +1,7 @@
 use std::{future::Future, io, pin::Pin, sync::Arc, time::Duration};
 
 use serde_json::Value;
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::{io::AsyncWriteExt, net::TcpStream, time::Instant};
 
 #[derive(Clone, Copy)]
 pub enum BodyPolicy {
@@ -17,6 +17,7 @@ pub struct RequestHead {
     pub websocket: bool,
     pub websocket_key: Option<String>,
     content_length: Option<usize>,
+    request_started_at: Instant,
 }
 
 impl RequestHead {
@@ -35,6 +36,7 @@ impl RequestHead {
             websocket,
             websocket_key,
             content_length,
+            request_started_at: Instant::now(),
         }
     }
 
@@ -47,6 +49,14 @@ impl RequestHead {
 
     pub const fn content_length(&self) -> Option<usize> {
         self.content_length
+    }
+
+    pub fn request_started_at(&self) -> Instant {
+        self.request_started_at
+    }
+
+    pub fn set_request_started_at(&mut self, request_started_at: Instant) {
+        self.request_started_at = request_started_at;
     }
 }
 
@@ -315,9 +325,17 @@ impl RouteHeadPlan {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum RoutePath {
+    Exact(&'static str),
+    ExactWithQuery(&'static str),
+    Prefix(&'static str),
+}
+
 #[derive(Clone)]
 pub struct RouteDescriptor {
     id: &'static str,
+    paths: &'static [RoutePath],
     head_plan: RouteHeadPlanFn,
     dispatch: Arc<RouteDispatchFn>,
 }
@@ -325,11 +343,13 @@ pub struct RouteDescriptor {
 impl RouteDescriptor {
     pub fn bound(
         id: &'static str,
+        paths: &'static [RoutePath],
         head_plan: RouteHeadPlanFn,
         dispatch: impl Fn(Request) -> RouteFuture + Send + Sync + 'static,
     ) -> Self {
         Self {
             id,
+            paths,
             head_plan,
             dispatch: Arc::new(dispatch),
         }
@@ -337,6 +357,10 @@ impl RouteDescriptor {
 
     pub const fn id(&self) -> &'static str {
         self.id
+    }
+
+    pub const fn paths(&self) -> &'static [RoutePath] {
+        self.paths
     }
 
     pub fn plan_head(&self, head: &RequestHead) -> Option<RouteHeadPlan> {
@@ -367,9 +391,5 @@ impl ModuleDescriptor {
 
     pub fn routes(&self) -> &[RouteDescriptor] {
         &self.routes
-    }
-
-    pub fn unregister_route(&mut self, route_id: &'static str) {
-        self.routes.retain(|route| route.id() != route_id);
     }
 }

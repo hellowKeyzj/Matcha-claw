@@ -599,7 +599,15 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
             call,
             reply,
         } => {
-            run_call(call.as_ref()).await;
+            if !run_call(
+                call.as_ref(),
+                openclaw::gateway::loopback::GatewayOperation::BrowserRequest,
+            )
+            .await
+            {
+                let _ = reply.send(Ok(openclaw::port::OpenClawGatewayRequestOutcome::Unavailable));
+                return;
+            }
             let result = match shared.admission().admit_request() {
                 Ok(()) => Ok(shared.open_claw().browser_request(request).await),
                 Err(error) => Err(error),
@@ -617,7 +625,15 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
             call,
             reply,
         } => {
-            run_call(call.as_ref()).await;
+            if !run_call(
+                call.as_ref(),
+                openclaw::gateway::loopback::GatewayOperation::McpAppRequest,
+            )
+            .await
+            {
+                let _ = reply.send(Ok(openclaw::port::OpenClawGatewayRequestOutcome::Unavailable));
+                return;
+            }
             let result = match shared.admission().admit_request() {
                 Ok(()) => Ok(shared.open_claw().mcp_app_request(request).await),
                 Err(error) => Err(error),
@@ -642,7 +658,15 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
             call,
             reply,
         } => {
-            run_call(call.as_ref()).await;
+            if !run_call(
+                call.as_ref(),
+                openclaw::gateway::loopback::GatewayOperation::QuestionResolve,
+            )
+            .await
+            {
+                let _ = reply.send(Ok(openclaw::port::OpenClawGatewayRequestOutcome::Unavailable));
+                return;
+            }
             let result = match shared.admission().admit_request() {
                 Ok(()) => Ok(shared.open_claw().question_resolve(request).await),
                 Err(error) => Err(error),
@@ -854,11 +878,31 @@ async fn run_lifecycle_call(call: &RuntimeLifecycleCall, endpoint: &PeerKey) -> 
     true
 }
 
-async fn run_call<D: platform::call::CallDetail>(call: Option<&platform::call::CallContext<D>>) {
-    if let Some(call) = call {
-        record_call_error(call.accepted().await.map(|_| ()));
-        record_call_error(call.running().await);
+async fn run_call(
+    call: Option<&openclaw::gateway::loopback::GatewayCallContext>,
+    operation: openclaw::gateway::loopback::GatewayOperation,
+) -> bool {
+    let Some(call) = call else {
+        return true;
+    };
+    let admission = async {
+        call.accepted().await?;
+        call.running().await
     }
+    .await;
+    if admission.is_err() {
+        record_call_error(admission);
+        record_call_error(
+            openclaw::gateway::loopback::finish_gateway_call_status(
+                call,
+                operation,
+                platform::call::CallStatus::Unknown,
+            )
+            .await,
+        );
+        return false;
+    }
+    true
 }
 
 fn record_call_error(result: Result<(), platform::call::CallLogError>) {

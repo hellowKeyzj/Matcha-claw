@@ -387,7 +387,7 @@ fn write_config(path: &Path, value: &impl Serialize) -> Result<(), WikiFailure> 
     })?;
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|_| WikiFailure::state("Wiki search configuration could not be encoded"))?;
-    fs::write(path, bytes)
+    crate::history::write_store(path, &bytes)
         .map_err(|_| WikiFailure::state("Wiki search configuration could not be written"))
 }
 
@@ -402,7 +402,8 @@ fn write_private_config(path: &Path, config: &PrivateConfig) -> Result<(), WikiF
             WikiFailure::state("Wiki private search storage permission setup failed")
         })?;
     }
-    write_config(path, config)?;
-    set_private_mode(path, PrivateMode::File)
-        .map_err(|_| WikiFailure::state("Wiki private search storage permission setup failed"))
+    let bytes = serde_json::to_vec_pretty(config)
+        .map_err(|_| WikiFailure::state("Wiki private search configuration could not be encoded"))?;
+    crate::history::write_private_store(path, &bytes)
+        .map_err(|_| WikiFailure::state("Wiki private search configuration could not be written"))
 }

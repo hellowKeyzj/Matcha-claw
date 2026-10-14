@@ -18,6 +18,7 @@ use foundation::process::{
     },
 };
 use platform::exchange::InvocationOutcome;
+use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 use tokio::sync::mpsc;
 
@@ -1074,6 +1075,18 @@ impl MatchaPeerSessionHandle {
         self.connect_observer().await
     }
 
+    async fn connect_client_cancellable(&self, cancellation: &CancellationToken) -> InvocationOutcome<AppServerClient, AppServerClientError> {
+        if !receipt_reading_admitted(self.handle.snapshot().phase()) {
+            return InvocationOutcome::TargetRejected(AppServerClientError::ConnectionClosed);
+        }
+        match AppServerClient::connect_and_initialize_cancellable(self.endpoint, &self.secret, None, cancellation).await {
+            InvocationOutcome::Succeeded((client, _)) => InvocationOutcome::Succeeded(client),
+            InvocationOutcome::TargetRejected(error) => InvocationOutcome::TargetRejected(error),
+            InvocationOutcome::Cancelled => InvocationOutcome::Cancelled,
+            InvocationOutcome::Unknown => InvocationOutcome::Unknown,
+        }
+    }
+
     pub async fn list_history(&self) -> HistoryListResult {
         if !receipt_reading_admitted(self.handle.snapshot().phase()) {
             return crate::session::history::HistoryResult::Unavailable;
@@ -1081,26 +1094,30 @@ impl MatchaPeerSessionHandle {
         crate::session::history::list(self.endpoint, &self.secret).await
     }
 
-    pub async fn load_local_history(
+    pub async fn load_history(
         &self,
         session_id: SessionId,
         request: HydrationWindowRequest,
     ) -> HistoryLoadResult {
-        crate::session::history::local::LocalHistoryReader::from_environment()
-            .load(session_id, request)
-            .await
+        if !receipt_reading_admitted(self.handle.snapshot().phase()) {
+            return crate::session::history::HistoryResult::Unavailable;
+        }
+        crate::session::history::load(self.endpoint, &self.secret, session_id, request).await
     }
 
-    pub async fn load_local_history_content(
+    pub async fn load_history_content(
         &self,
         session_id: SessionId,
         content_ref: String,
         offset: u64,
         limit: usize,
     ) -> HistoryContentResult {
-        crate::session::history::local::LocalHistoryReader::from_environment()
-            .load_content(session_id, content_ref, offset, limit)
-            .await
+        if !receipt_reading_admitted(self.handle.snapshot().phase()) {
+            return crate::session::history::HistoryResult::Unavailable;
+        }
+        crate::session::history::load_content(
+            self.endpoint, &self.secret, session_id, content_ref, offset, limit,
+        ).await
     }
 
     pub async fn read_canonical_session(
@@ -1132,8 +1149,25 @@ impl MatchaPeerSessionHandle {
         &self,
         session_id: SessionId,
     ) -> Result<crate::session::model::SessionRecord, AppServerClientError> {
-        let client = self.connect_client().await?;
-        let outcome = client.load_session(SessionLoadParams::new(session_id)).await;
+        match self.load_session_cancellable(session_id, &CancellationToken::new()).await {
+            InvocationOutcome::Succeeded(session) => Ok(session),
+            InvocationOutcome::TargetRejected(error) => Err(error),
+            InvocationOutcome::Cancelled | InvocationOutcome::Unknown => Err(AppServerClientError::ConnectionClosed),
+        }
+    }
+
+    pub(crate) async fn load_session_cancellable(
+        &self,
+        session_id: SessionId,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<crate::session::model::SessionRecord, AppServerClientError> {
+        let client = match self.connect_client_cancellable(cancellation).await {
+            InvocationOutcome::Succeeded(client) => client,
+            InvocationOutcome::TargetRejected(error) => return InvocationOutcome::TargetRejected(error),
+            InvocationOutcome::Cancelled => return InvocationOutcome::Cancelled,
+            InvocationOutcome::Unknown => return InvocationOutcome::Unknown,
+        };
+        let outcome = client.load_session_cancellable(SessionLoadParams::new(session_id), cancellation).await;
         client.finish_with_cleanup(outcome).await
     }
 
@@ -1141,11 +1175,21 @@ impl MatchaPeerSessionHandle {
         &self,
         params: crate::session::request::SessionPromptParams,
     ) -> InvocationOutcome<crate::session::model::SessionPromptResult, AppServerClientError> {
-        let client = match self.connect_client().await {
-            Ok(client) => client,
-            Err(error) => return InvocationOutcome::TargetRejected(error),
+        self.prompt_session_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn prompt_session_cancellable(
+        &self,
+        params: crate::session::request::SessionPromptParams,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<crate::session::model::SessionPromptResult, AppServerClientError> {
+        let client = match self.connect_client_cancellable(cancellation).await {
+            InvocationOutcome::Succeeded(client) => client,
+            InvocationOutcome::TargetRejected(error) => return InvocationOutcome::TargetRejected(error),
+            InvocationOutcome::Cancelled => return InvocationOutcome::Cancelled,
+            InvocationOutcome::Unknown => return InvocationOutcome::Unknown,
         };
-        let outcome = client.prompt_session(params).await;
+        let outcome = client.prompt_session_cancellable(params, cancellation).await;
         client.finish_with_cleanup(outcome).await
     }
 
@@ -1177,11 +1221,21 @@ impl MatchaPeerSessionHandle {
         &self,
         params: SessionSetModelParams,
     ) -> InvocationOutcome<crate::session::model::SessionRecord, AppServerClientError> {
-        let client = match self.connect_client().await {
-            Ok(client) => client,
-            Err(error) => return InvocationOutcome::TargetRejected(error),
+        self.set_session_model_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn set_session_model_cancellable(
+        &self,
+        params: SessionSetModelParams,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<crate::session::model::SessionRecord, AppServerClientError> {
+        let client = match self.connect_client_cancellable(cancellation).await {
+            InvocationOutcome::Succeeded(client) => client,
+            InvocationOutcome::TargetRejected(error) => return InvocationOutcome::TargetRejected(error),
+            InvocationOutcome::Cancelled => return InvocationOutcome::Cancelled,
+            InvocationOutcome::Unknown => return InvocationOutcome::Unknown,
         };
-        let outcome = client.set_session_model(params).await;
+        let outcome = client.set_session_model_cancellable(params, cancellation).await;
         client.finish_with_cleanup(outcome).await
     }
 
@@ -1199,27 +1253,39 @@ impl MatchaPeerSessionHandle {
 }
 
 impl RoleSessionNativeHandle {
-    async fn connect_client(&self) -> Result<AppServerClient, RoleSessionError> {
+    async fn connect_client(&self, cancellation: &CancellationToken) -> InvocationOutcome<AppServerClient, RoleSessionError> {
         if !receipt_reading_admitted(self.handle.snapshot().phase()) {
-            return Err(RoleSessionError::RuntimeUnavailable);
+            return InvocationOutcome::TargetRejected(RoleSessionError::RuntimeUnavailable);
         }
         let (events, _updates) = tokio::sync::mpsc::channel::<SessionEventUpdate>(1);
-        AppServerClient::connect_and_initialize(self.endpoint, &self.secret, events)
-            .await
-            .map(|(client, _)| client)
-            .map_err(RoleSessionError::Client)
+        match AppServerClient::connect_and_initialize_cancellable(self.endpoint, &self.secret, Some(events), cancellation).await {
+            InvocationOutcome::Succeeded((client, _)) => InvocationOutcome::Succeeded(client),
+            InvocationOutcome::TargetRejected(error) => InvocationOutcome::TargetRejected(RoleSessionError::Client(error)),
+            InvocationOutcome::Cancelled => InvocationOutcome::Cancelled,
+            InvocationOutcome::Unknown => InvocationOutcome::Unknown,
+        }
     }
 
     pub async fn cancel_role_session(
         &self,
         session_id: RoleSessionId,
     ) -> InvocationOutcome<(), RoleSessionError> {
-        let client = match self.connect_client().await {
-            Ok(client) => client,
-            Err(error) => return InvocationOutcome::TargetRejected(error),
+        self.cancel_role_session_cancellable(session_id, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn cancel_role_session_cancellable(
+        &self,
+        session_id: RoleSessionId,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<(), RoleSessionError> {
+        let client = match self.connect_client(cancellation).await {
+            InvocationOutcome::Succeeded(client) => client,
+            InvocationOutcome::TargetRejected(error) => return InvocationOutcome::TargetRejected(error),
+            InvocationOutcome::Cancelled => return InvocationOutcome::Cancelled,
+            InvocationOutcome::Unknown => return InvocationOutcome::Unknown,
         };
         let outcome = match client
-            .cancel_session(SessionCancelParams::new(session_id.native()))
+            .cancel_session_cancellable(SessionCancelParams::new(session_id.native()), cancellation)
             .await
         {
             InvocationOutcome::Succeeded(_) => InvocationOutcome::Succeeded(()),
@@ -1236,12 +1302,22 @@ impl RoleSessionNativeHandle {
         &self,
         session_id: RoleSessionId,
     ) -> InvocationOutcome<(), RoleSessionError> {
-        let client = match self.connect_client().await {
-            Ok(client) => client,
-            Err(error) => return InvocationOutcome::TargetRejected(error),
+        self.close_role_session_cancellable(session_id, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn close_role_session_cancellable(
+        &self,
+        session_id: RoleSessionId,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<(), RoleSessionError> {
+        let client = match self.connect_client(cancellation).await {
+            InvocationOutcome::Succeeded(client) => client,
+            InvocationOutcome::TargetRejected(error) => return InvocationOutcome::TargetRejected(error),
+            InvocationOutcome::Cancelled => return InvocationOutcome::Cancelled,
+            InvocationOutcome::Unknown => return InvocationOutcome::Unknown,
         };
         let outcome = match client
-            .close_session(SessionCloseParams::new(session_id.native()))
+            .close_session_cancellable(SessionCloseParams::new(session_id.native()), cancellation)
             .await
         {
             InvocationOutcome::Succeeded(_) => InvocationOutcome::Succeeded(()),

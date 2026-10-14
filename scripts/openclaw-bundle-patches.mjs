@@ -4,7 +4,7 @@ import path from 'node:path';
 import { safeRmSync } from './lib/safe-delete.mjs';
 import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string']);
+const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -2373,6 +2373,22 @@ function readAgentDeletionJournal(agentId, options = {}) {`;
   return patch.changed;
 }
 
+function patchChannelPairingApprovalExport(openclawDir) {
+  const patchId = 'channel-pairing-approval-export';
+  const distDir = path.join(openclawDir, 'dist');
+  const targetFile = path.join(distDir, 'plugin-sdk', 'channel-pairing.js');
+  const producerFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'pairing-store-',
+    markers: ['async function approveChannelPairingCode(params)', 'function resolveChannelPairingRequest(params)'],
+  });
+  const alias = resolveExportAlias(producerFile, 'approveChannelPairingCode', patchId);
+  const exportLine = `export { ${alias} as approveChannelPairingCode } from "${relativeImportSpecifier(targetFile, producerFile)}";`;
+  const source = readText(targetFile);
+  if (source.includes(exportLine)) return { status: 'clean', detail: 'already patched' };
+  writeText(targetFile, `${source.trimEnd()}\n${exportLine}\n`);
+  return { status: 'applied', detail: path.basename(targetFile) };
+}
+
 const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'strip-bundled-channel-plugins',
@@ -2405,6 +2421,10 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'agent-delete-cleanup-identity-string',
     apply: patchAgentDeleteCleanupIdentityString,
+  },
+  {
+    id: 'channel-pairing-approval-export',
+    apply: patchChannelPairingApprovalExport,
   },
 ]);
 

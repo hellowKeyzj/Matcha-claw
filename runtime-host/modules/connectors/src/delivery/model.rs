@@ -334,7 +334,7 @@ pub struct SessionMcpServerEnabledTarget {
 
 impl SessionMcpServerEnabledTarget {
     pub fn is_valid(&self) -> bool {
-        self.session_identity.is_valid() && valid_session_text(&self.server_id)
+        self.session_identity.is_valid() && valid_identity_text(&self.server_id, 512)
     }
 }
 
@@ -342,6 +342,14 @@ impl SessionMcpServerEnabledTarget {
 pub enum SessionMcpServerEnabledOutcome {
     Applied,
     Unavailable,
+}
+
+pub(crate) fn valid_connector_id(value: &str) -> bool {
+    valid_identity_text(value, 128)
+}
+
+fn valid_identity_text(value: &str, max_bytes: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
 }
 
 fn valid_session_text(value: &str) -> bool {

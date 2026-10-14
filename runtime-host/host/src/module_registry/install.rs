@@ -14,16 +14,17 @@ use super::{
     system_modules::{install_plan_capabilities, system_module_install_plan},
 };
 
-const TEAM_MCP_REQUIRES: &[CapabilityKey] = &[
+const MCP_REQUIRES: &[CapabilityKey] = &[
     CapabilityKey::new("organization"),
     CapabilityKey::new("runtime.directory"),
+    CapabilityKey::new("wiki"),
 ];
 
 pub(crate) struct InstallModulesInput<'a> {
     pub(crate) handles: &'a HostHandles,
     pub(crate) verifier: CapabilityVerifier,
     pub(crate) webhook_token: organization::WebhookToken,
-    pub(crate) team_mcp: platform::loopback::ModuleDescriptor,
+    pub(crate) mcp: platform::loopback::ModuleDescriptor,
 }
 
 pub(crate) struct ModuleInstallPlan {
@@ -36,7 +37,7 @@ pub(crate) fn prepare_module_install(input: InstallModulesInput<'_>) -> ModuleIn
         handles,
         verifier,
         webhook_token,
-        team_mcp,
+        mcp,
     } = input;
     let capability_catalog = CapabilityCatalog::new();
     let descriptors = module_descriptors(
@@ -44,7 +45,7 @@ pub(crate) fn prepare_module_install(input: InstallModulesInput<'_>) -> ModuleIn
         verifier,
         webhook_token,
         capability_catalog.clone(),
-        team_mcp,
+        mcp,
     );
     ModuleInstallPlan {
         descriptors,
@@ -78,7 +79,7 @@ fn module_descriptors(
     verifier: CapabilityVerifier,
     webhook_token: organization::WebhookToken,
     capability_catalog: CapabilityCatalog,
-    team_mcp: platform::loopback::ModuleDescriptor,
+    mcp: platform::loopback::ModuleDescriptor,
 ) -> Vec<platform::module::ModuleDescriptor> {
     let (capability_catalog, private_control) =
         system_module_install_plan(verifier.clone(), capability_catalog);
@@ -89,13 +90,13 @@ fn module_descriptors(
     descriptors.push(capability_catalog);
     descriptors.extend(after_capability_catalog);
     descriptors.push(ModuleDescriptor::new(
-        ModuleId::new("host.team-mcp"),
+        ModuleId::new("host.mcp"),
         &[],
-        TEAM_MCP_REQUIRES,
+        MCP_REQUIRES,
         &[EffectKind::Route],
-        &["host.team-mcp.call"],
+        &["host.mcp.team.call", "host.mcp.wiki.call"],
         &[],
-        Some(team_mcp),
+        Some(mcp),
     ));
     descriptors.push(private_control);
     descriptors.extend(process_modules);

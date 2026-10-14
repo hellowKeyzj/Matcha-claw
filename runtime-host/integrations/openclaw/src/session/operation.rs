@@ -6,6 +6,7 @@ use std::{fmt, sync::Arc};
 use platform::exchange::InvocationOutcome;
 use serde::Serialize;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     agents::{AgentsReadFailure, OpenClawAgents},
@@ -40,11 +41,19 @@ impl SessionOperation {
         &self,
         params: SessionsListParams,
     ) -> Result<SessionsListResult, OperationError> {
+        self.list_sessions_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn list_sessions_cancellable(
+        &self,
+        params: SessionsListParams,
+        cancellation: &CancellationToken,
+    ) -> Result<SessionsListResult, OperationError> {
         let request_id = next_request_id("sessions-list")?;
         let request = request(&request_id, protocol::SESSIONS_LIST_METHOD, params)?;
         let response = self
             .gateway
-            .rpc_query(request)
+            .rpc_query_cancellable(request, cancellation)
             .await
             .map_err(OperationError::from)?;
         protocol::decode_sessions_list_result(&request_id, response).map_err(OperationError::from)
@@ -85,11 +94,19 @@ impl SessionOperation {
         &self,
         params: ChatHistoryParams,
     ) -> Result<Value, OperationError> {
+        self.history_payload_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn history_payload_cancellable(
+        &self,
+        params: ChatHistoryParams,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, OperationError> {
         let request_id = next_request_id("chat-history")?;
         let request = request(&request_id, protocol::CHAT_HISTORY_METHOD, params)?;
         let response = self
             .gateway
-            .rpc_ordered_query(request)
+            .rpc_ordered_query_cancellable(request, cancellation)
             .await
             .map_err(OperationError::from)?;
         payload(&request_id, response)
@@ -117,16 +134,24 @@ impl SessionOperation {
         &self,
         params: ChatSendParams,
     ) -> Result<InvocationOutcome<ChatSendResult, OperationError>, OperationError> {
+        self.send_chat_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn send_chat_cancellable(
+        &self,
+        params: ChatSendParams,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutcome<ChatSendResult, OperationError>, OperationError> {
         let request_id = next_request_id("chat-send")?;
         let request = request(&request_id, protocol::CHAT_SEND_METHOD, params)?;
         Ok(self
-            .mutate(request, |response| {
+            .mutate_cancellable(request, |response| {
                 protocol::decode_chat_send_result(&request_id, response)
-            })
+            }, cancellation)
             .await)
     }
 
-    pub(crate) async fn goal_start(&self, params: ChatSendParams) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
+    pub(crate) async fn goal_start_cancellable(&self, params: ChatSendParams, cancellation: &CancellationToken) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
         let request_id = next_request_id("chat-goal-start").map_err(|_| sessions_module::ports::RuntimeOperationFailure::Unavailable)?;
         if super::trace::enabled() {
             super::trace::log_unscoped("openclaw.goal.request", || serde_json::json!({
@@ -137,10 +162,10 @@ impl SessionOperation {
             }));
         }
         let request = request(&request_id, protocol::CHAT_SEND_METHOD, params).map_err(|_| sessions_module::ports::RuntimeOperationFailure::Unavailable)?;
-        self.mutate_goal(request, |response| super::goal::decode_receipt(&request_id, response)).await
+        self.mutate_goal_cancellable(request, |response| super::goal::decode_receipt(&request_id, response), cancellation).await
     }
 
-    pub(crate) async fn mutate_goal_command(&self, command: &sessions_module::goal::SessionGoalCommand) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
+    pub(crate) async fn mutate_goal_command(&self, command: &sessions_module::goal::SessionGoalCommand, cancellation: &CancellationToken) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
         let (method, params) = super::goal::mutation_params(command);
         let request_id = next_request_id("sessions-goal").map_err(|_| sessions_module::ports::RuntimeOperationFailure::Unavailable)?;
         if super::trace::enabled() {
@@ -153,12 +178,12 @@ impl SessionOperation {
             }));
         }
         let request = request(&request_id, method, params).map_err(|_| sessions_module::ports::RuntimeOperationFailure::Unavailable)?;
-        self.mutate_goal(request, |response| super::goal::decode_receipt(&request_id, response)).await
+        self.mutate_goal_cancellable(request, |response| super::goal::decode_receipt(&request_id, response), cancellation).await
     }
 
-    async fn mutate_goal<T>(&self, request: wire::RpcRequest, decode: impl FnOnce(GatewayResponse) -> Result<T, protocol::ProtocolError>) -> Result<InvocationOutcome<T, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
+    async fn mutate_goal_cancellable<T>(&self, request: wire::RpcRequest, decode: impl FnOnce(GatewayResponse) -> Result<T, protocol::ProtocolError>, cancellation: &CancellationToken) -> Result<InvocationOutcome<T, OperationError>, sessions_module::ports::RuntimeOperationFailure> {
         let request_id = request.request_id().to_owned();
-        Ok(match self.gateway.rpc_goal_mutation(request).await? {
+        Ok(match self.gateway.rpc_goal_mutation_cancellable(request, cancellation).await? {
             MutationDelivery::Response(response) if response.request_id() != request_id => InvocationOutcome::Unknown,
             MutationDelivery::Response(GatewayResponse::Failure { error, .. }) => {
                 if super::trace::enabled() {
@@ -187,6 +212,7 @@ impl SessionOperation {
                 Ok(receipt) => InvocationOutcome::Succeeded(receipt),
                 Err(_) => InvocationOutcome::Unknown,
             },
+            MutationDelivery::NotWritten(_) if cancellation.is_cancelled() => InvocationOutcome::Cancelled,
             MutationDelivery::NotWritten(_) | MutationDelivery::MayHaveReached(_) => InvocationOutcome::Unknown,
         })
     }
@@ -195,12 +221,20 @@ impl SessionOperation {
         &self,
         params: ChatAbortParams,
     ) -> Result<InvocationOutcome<ChatAbortResult, OperationError>, OperationError> {
+        self.abort_chat_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn abort_chat_cancellable(
+        &self,
+        params: ChatAbortParams,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutcome<ChatAbortResult, OperationError>, OperationError> {
         let request_id = next_request_id("chat-abort")?;
         let request = request(&request_id, protocol::CHAT_ABORT_METHOD, params)?;
         Ok(self
-            .mutate(request, |response| {
+            .mutate_cancellable(request, |response| {
                 protocol::decode_chat_abort_result(&request_id, response)
-            })
+            }, cancellation)
             .await)
     }
 
@@ -221,13 +255,21 @@ impl SessionOperation {
         &self,
         params: SessionModelPatchParams,
     ) -> Result<InvocationOutcome<SessionModelPatchResult, OperationError>, OperationError> {
+        self.patch_session_model_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn patch_session_model_cancellable(
+        &self,
+        params: SessionModelPatchParams,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutcome<SessionModelPatchResult, OperationError>, OperationError> {
         let expected_key = params.key().clone();
         let request_id = next_request_id("sessions-patch-model")?;
         let request = request(&request_id, protocol::SESSIONS_PATCH_METHOD, params)?;
         Ok(self
-            .mutate(request, |response| {
+            .mutate_cancellable(request, |response| {
                 protocol::decode_session_model_patch_result(&request_id, response, &expected_key)
-            })
+            }, cancellation)
             .await)
     }
 
@@ -286,13 +328,21 @@ impl SessionOperation {
         &self,
         params: SessionCreateParams,
     ) -> Result<InvocationOutcome<SessionCreateResult, OperationError>, OperationError> {
+        self.create_session_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn create_session_cancellable(
+        &self,
+        params: SessionCreateParams,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutcome<SessionCreateResult, OperationError>, OperationError> {
         let expected_key = params.key().clone();
         let request_id = next_request_id("sessions-create")?;
         let request = request(&request_id, protocol::SESSIONS_CREATE_METHOD, params)?;
         Ok(self
-            .mutate(request, |response| {
+            .mutate_cancellable(request, |response| {
                 protocol::decode_session_create_result(&request_id, response, &expected_key)
-            })
+            }, cancellation)
             .await)
     }
 
@@ -300,13 +350,21 @@ impl SessionOperation {
         &self,
         params: SessionDeleteParams,
     ) -> Result<InvocationOutcome<SessionDeleteResult, OperationError>, OperationError> {
+        self.delete_session_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn delete_session_cancellable(
+        &self,
+        params: SessionDeleteParams,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutcome<SessionDeleteResult, OperationError>, OperationError> {
         let expected_key = params.key().clone();
         let request_id = next_request_id("sessions-delete")?;
         let request = request(&request_id, protocol::SESSIONS_DELETE_METHOD, params)?;
         Ok(self
-            .mutate(request, |response| {
+            .mutate_cancellable(request, |response| {
                 protocol::decode_session_delete_result(&request_id, response, &expected_key)
-            })
+            }, cancellation)
             .await)
     }
 
@@ -363,8 +421,17 @@ impl SessionOperation {
         request: wire::RpcRequest,
         decode: impl FnOnce(GatewayResponse) -> Result<T, protocol::ProtocolError>,
     ) -> InvocationOutcome<T, OperationError> {
+        self.mutate_cancellable(request, decode, &CancellationToken::new()).await
+    }
+
+    async fn mutate_cancellable<T>(
+        &self,
+        request: wire::RpcRequest,
+        decode: impl FnOnce(GatewayResponse) -> Result<T, protocol::ProtocolError>,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<T, OperationError> {
         let request_id = request.request_id().to_owned();
-        match self.gateway.rpc_mutation(request).await {
+        match self.gateway.rpc_mutation_cancellable(request, cancellation).await {
             MutationDelivery::Response(response) if response.request_id() != request_id => {
                 InvocationOutcome::Unknown
             }
@@ -375,10 +442,8 @@ impl SessionOperation {
                 Ok(result) => InvocationOutcome::Succeeded(result),
                 Err(_) => InvocationOutcome::Unknown,
             },
-            MutationDelivery::NotWritten(error) | MutationDelivery::MayHaveReached(error) => {
-                let _ = error;
-                InvocationOutcome::Unknown
-            }
+            MutationDelivery::NotWritten(_) if cancellation.is_cancelled() => InvocationOutcome::Cancelled,
+            MutationDelivery::NotWritten(_) | MutationDelivery::MayHaveReached(_) => InvocationOutcome::Unknown,
         }
     }
 }
@@ -463,7 +528,9 @@ impl From<protocol::ValidationError> for OperationError {
 impl From<AgentsReadFailure> for OperationError {
     fn from(value: AgentsReadFailure) -> Self {
         match value {
-            AgentsReadFailure::Unavailable => Self::Transport,
+            AgentsReadFailure::Unavailable
+            | AgentsReadFailure::Deadline
+            | AgentsReadFailure::Authentication => Self::Transport,
             AgentsReadFailure::Protocol => Self::Protocol,
             AgentsReadFailure::Rejected => Self::Rejected,
         }

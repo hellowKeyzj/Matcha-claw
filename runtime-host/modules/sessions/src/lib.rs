@@ -101,7 +101,7 @@ const EFFECTS: &[EffectKind] = &[
 pub use adapters::loopback::{
     SessionEventsAction, SessionEventsStream, events_head_plan, handle_events, trace,
 };
-pub use api::SessionHandle;
+pub use api::{SessionHandle, SessionIngressProducer};
 pub use events::SessionDeltaSource;
 pub use owner::actor::{SessionOwnerInput, SessionSnapshot};
 pub use ports::{
@@ -116,7 +116,7 @@ pub use send_hook::{
     PreparedSessionSend, SessionSendHook, SessionSendHookFuture, SessionSendHookPrepared,
     SessionSendHookSet, SessionSendHookState,
 };
-pub use terminal_hook::{SessionRunTerminalSnapshot, SessionTerminalHook};
+pub use terminal_hook::{SessionRunTerminalSnapshot, SessionTerminalCloseError, SessionTerminalHook};
 
 #[derive(Clone)]
 pub struct SessionModule {
@@ -186,6 +186,7 @@ pub fn spawn_owner(
         input.terminal_hook,
     );
     let completion_handle = owner.completion_handle_slot();
+    let shared = owner.shared();
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(64, SessionOwner::lane_retention()),
@@ -194,8 +195,9 @@ pub fn spawn_owner(
         completion_handle.set(handle.clone()).is_ok(),
         "session completion handle already set"
     );
+    shared.start_terminal_delivery();
     (
-        SessionModule::new(SessionHandle::new(handle, runtime_directory)),
+        SessionModule::new(SessionHandle::new(handle, runtime_directory, shared)),
         task,
     )
 }

@@ -22,7 +22,7 @@ use crate::{
     operation as security_operation,
 };
 
-const PUBLIC_AUDIT_ENDPOINT: &str = "/api/security/audit";
+pub(in crate::adapters::loopback) const PUBLIC_AUDIT_ENDPOINT: &str = "/api/security/audit";
 
 pub async fn handle_route(
     method: &str,

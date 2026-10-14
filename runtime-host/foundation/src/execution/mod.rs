@@ -16,7 +16,8 @@ pub use operation::OperationHandle;
 pub use owner::{Owner, OwnerHandle, SendError, TrySendError, spawn_owner};
 pub use owner_runtime::{
     CommandRoute, LaneRetention, OwnerRoute, OwnerRuntime, OwnerRuntimeConfig, OwnerRuntimeHandle,
-    OwnerRuntimeId, OwnerRuntimeSystem, OwnerSpec, QueryRoute, SendError as OwnerRuntimeSendError,
+    OwnerRuntimeId, OwnerRuntimePermit, OwnerRuntimeSystem, OwnerSpec, QueryRoute,
+    SendError as OwnerRuntimeSendError,
     spawn_owner_runtime,
 };
 pub use service::ServiceHandle;

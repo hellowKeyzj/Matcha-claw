@@ -809,7 +809,7 @@ fn tail(s: &str) -> String {
     if s.len() <= OUTPUT_TAIL {
         s.to_owned()
     } else {
-        s[s.len() - OUTPUT_TAIL..].to_owned()
+        s[s.ceil_char_boundary(s.len() - OUTPUT_TAIL)..].to_owned()
     }
 }
 fn split_image(s: &str) -> (&str, Option<&str>) {

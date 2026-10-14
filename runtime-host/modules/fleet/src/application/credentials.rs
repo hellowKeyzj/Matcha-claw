@@ -379,27 +379,51 @@ impl FleetCredentialVault {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let mut key = [0_u8; KEY_BYTES];
                 random_fill(&mut key).map_err(|_| FleetCredentialVaultError::Crypto)?;
-                match OpenOptions::new()
+                let mut suffix = [0_u8; 8];
+                random_fill(&mut suffix).map_err(|_| FleetCredentialVaultError::Crypto)?;
+                let temporary = self.directory.join(format!(
+                    "credential-key.{}.tmp",
+                    URL_SAFE_NO_PAD.encode(suffix)
+                ));
+                let mut file = OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(&self.key_path)
-                {
-                    Ok(mut file) => {
-                        set_private_mode(&self.key_path, false)?;
-                        file.write_all(&key)
-                            .map_err(|_| FleetCredentialVaultError::Storage)?;
-                        file.sync_all()
-                            .map_err(|_| FleetCredentialVaultError::Storage)?;
-                        Ok(key)
+                    .open(&temporary)
+                    .map_err(|_| FleetCredentialVaultError::Storage)?;
+                let result = (|| {
+                    set_private_mode(&temporary, false)?;
+                    file.write_all(&key)
+                        .and_then(|()| file.sync_all())
+                        .map_err(|_| FleetCredentialVaultError::Storage)?;
+                    drop(file);
+                    // Publish complete private bytes without replacing a concurrent key.
+                    #[cfg(windows)]
+                    let published = platform::state_dir::publish_new_file(&temporary, &self.key_path);
+                    #[cfg(unix)]
+                    let published = fs::hard_link(&temporary, &self.key_path);
+                    match published {
+                        Ok(()) => {
+                            #[cfg(unix)]
+                            File::open(&self.directory)
+                                .and_then(|directory| directory.sync_all())
+                                .map_err(|_| FleetCredentialVaultError::Storage)?;
+                            Ok(key)
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                            decode_fixed::<KEY_BYTES>(
+                                &fs::read(&self.key_path)
+                                    .map_err(|_| FleetCredentialVaultError::Storage)?,
+                            )
+                        }
+                        Err(_) => Err(FleetCredentialVaultError::Storage),
                     }
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                        decode_fixed::<KEY_BYTES>(
-                            &fs::read(&self.key_path)
-                                .map_err(|_| FleetCredentialVaultError::Storage)?,
-                        )
-                    }
-                    Err(_) => Err(FleetCredentialVaultError::Storage),
+                })();
+                match fs::remove_file(&temporary) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(FleetCredentialVaultError::Storage),
                 }
+                result
             }
             Err(_) => Err(FleetCredentialVaultError::Storage),
         }

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use foundation::execution::{OwnedTask, TaskHandle};
-use platform::call::{CallContext, CallLogError, CallReceipt, CallRecorder, CallStatus};
+use futures_util::{FutureExt, future::Shared};
+use platform::call::{CallContext, CallFuture, CallLogError, CallReceipt, CallRecorder, CallStatus};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::{ConfigurationOutcome, Operation, OperationOutcome, call, ports::PluginsPort};
@@ -41,6 +42,7 @@ impl Mutation {
 struct Command {
     mutation: Mutation,
     context: CallContext<call::Detail>,
+    accepted: Shared<CallFuture<CallReceipt>>,
     reply: oneshot::Sender<call::Outcome>,
 }
 
@@ -63,11 +65,15 @@ impl Operations {
                         None => break,
                     },
                 };
-                let outcome = match command.context.running().await {
-                    Ok(()) => execute(worker_plugins.as_ref(), &command.mutation).await,
-                    Err(_) => {
-                        eprintln!("[plugins-call] running transition failed");
-                        call::Outcome::Unknown
+                let outcome = if command.accepted.await.is_err() {
+                    call::Outcome::Rejected
+                } else {
+                    match command.context.running().await {
+                        Ok(()) => execute(worker_plugins.as_ref(), &command.mutation).await,
+                        Err(_) => {
+                            eprintln!("[plugins-call] running transition failed");
+                            call::Outcome::Unknown
+                        }
                     }
                 };
                 let detail = command.mutation.detail(Some(outcome));
@@ -103,10 +109,12 @@ impl Operations {
                 });
             }
         };
+        let admission_context = context.clone();
+        let accepted: CallFuture<CallReceipt> = Box::pin(async move { admission_context.accepted().await });
+        let accepted = accepted.shared();
         let (reply, receiver) = oneshot::channel();
-        permit.send(Command { mutation, context: context.clone(), reply });
-        let receipt = context.accepted().await?;
-        Ok((receipt, receiver))
+        permit.send(Command { mutation, context, accepted: accepted.clone(), reply });
+        Ok((accepted.await?, receiver))
     }
 
     pub(crate) async fn stop(&self) {

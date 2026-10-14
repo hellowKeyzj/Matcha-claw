@@ -9,7 +9,8 @@ use crate::{
         WorkspaceInitialization,
     },
     ports::{
-        SealedAgentError, SealedAgentStorePort, SubagentRequestAdmission, SubagentRuntimeDirectory,
+        SealedAgentError, SealedAgentInstallError, SealedAgentStorePort, SubagentRequestAdmission,
+        SubagentRuntimeDirectory,
     },
 };
 
@@ -222,14 +223,13 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
             if !ops.subagent_runtime_ready() {
                 return Outcome::Unavailable;
             }
+            let removal = shared.sealed_agents.prepare_remove_package(agent_id);
             let outcome = ops.subagents(Command::Delete { endpoint, input }).await;
             match outcome {
                 Outcome::Deleted(mut agent) => {
                     if agent.native_succeeded() {
-                        agent.sealed_purge = match shared.sealed_agents.remove_package(agent_id) {
-                            Ok(_) | Err(SealedAgentError::NotFound) => {
-                                crate::model::SealedPurge::Completed
-                            }
+                        agent.sealed_purge = match removal.and_then(|plan| plan.remove()) {
+                            Ok(_) => crate::model::SealedPurge::Completed,
                             Err(_) => crate::model::SealedPurge::Failed,
                         };
                     }
@@ -320,11 +320,17 @@ async fn install_agent_package(
             .sealed_agents
             .install_prepared_package(package_path, cloud_metadata)
     } else {
-        Err(SealedAgentError::Rejected)
+        Err(SealedAgentInstallError::NotCommitted(
+            SealedAgentError::Rejected,
+        ))
     };
     match result {
         Ok(receipt) => Outcome::PackageInstalled(receipt),
-        Err(error) => {
+        Err(SealedAgentInstallError::Committed { mut receipt, error }) => {
+            receipt.cleanup_failure = Some(package_install_failure(error));
+            Outcome::PackageInstalled(receipt)
+        }
+        Err(SealedAgentInstallError::NotCommitted(error)) => {
             let compensation = ops
                 .subagents(Command::Delete {
                     endpoint,
@@ -334,7 +340,7 @@ async fn install_agent_package(
                     },
                 })
                 .await;
-            use crate::model::{CompensationOutcome, InstallCompensation, PackageInstallFailure};
+            use crate::model::{CompensationOutcome, InstallCompensation};
             let (outcome, failed_count, purge_failed_count) = match compensation {
                 Outcome::Deleted(deleted) => (
                     if deleted.native_succeeded() {
@@ -352,13 +358,7 @@ async fn install_agent_package(
             };
             Outcome::PackageInstallFailed {
                 agent_id: agent.agent_id,
-                failure: match error {
-                    SealedAgentError::NotFound | SealedAgentError::Rejected => {
-                        PackageInstallFailure::Rejected
-                    }
-                    SealedAgentError::AlreadyExists => PackageInstallFailure::OutcomeUnknown,
-                    SealedAgentError::Unknown => PackageInstallFailure::Unavailable,
-                },
+                failure: package_install_failure(error),
                 compensation: InstallCompensation {
                     outcome,
                     failed_count,
@@ -366,6 +366,15 @@ async fn install_agent_package(
                 },
             }
         }
+    }
+}
+
+fn package_install_failure(error: SealedAgentError) -> crate::model::PackageInstallFailure {
+    use crate::model::PackageInstallFailure;
+    match error {
+        SealedAgentError::NotFound | SealedAgentError::Rejected => PackageInstallFailure::Rejected,
+        SealedAgentError::AlreadyExists => PackageInstallFailure::OutcomeUnknown,
+        SealedAgentError::Unknown => PackageInstallFailure::Unavailable,
     }
 }
 

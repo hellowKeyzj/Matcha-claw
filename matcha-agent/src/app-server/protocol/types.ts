@@ -99,10 +99,41 @@ export type SessionCancelParams = {
 
 export type SessionSnapshotParams = {
   sessionId: string
+  includeMessages?: boolean
 }
 
 export type SessionTranscriptParams = {
   sessionId: string
+  direction?: 'latest' | 'older' | 'newer'
+  offset?: number
+  limit?: number
+}
+
+export type SessionTranscriptWindow = {
+  totalItemCount: number
+  windowStartOffset: number
+  windowEndOffset: number
+}
+
+export type SessionTranscriptResult = {
+  lines: string[]
+  window: SessionTranscriptWindow
+}
+
+export type SessionContentParams = {
+  sessionId: string
+  contentRef: string
+  offset: number
+  limit: number
+}
+
+export type SessionContentResult = {
+  contentRef: string
+  offset: number
+  text: string
+  nextOffset: number
+  totalBytes: number
+  complete: boolean
 }
 
 export type EventsReplayParams = {

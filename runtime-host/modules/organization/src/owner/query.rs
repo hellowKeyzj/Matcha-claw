@@ -51,7 +51,10 @@ pub(crate) enum OrganizationQuery {
         run_id: GraphRunId,
         event_cursor: Option<u64>,
         event_limit: Option<u64>,
-        reply: crate::call::CallReply<Option<TeamRunPublicSnapshotQueryOutcome>>,
+        reply: crate::call::CallReply<(
+            Option<TeamRunPublicSnapshotQueryOutcome>,
+            Option<crate::TeamCreationFailure>,
+        )>,
     },
     TeamRunDiagnostics {
         run_id: GraphRunId,
@@ -125,6 +128,9 @@ pub(crate) enum OrganizationQuery {
     TeamMessageTerminalContext {
         native_run_id: String,
         reply: tokio::sync::oneshot::Sender<Option<organization::TeamMessageTerminalContext>>,
+    },
+    PendingTeamMessageRepairs {
+        reply: tokio::sync::oneshot::Sender<bool>,
     },
     ActiveRunIds {
         reply: tokio::sync::oneshot::Sender<Vec<GraphRunId>>,

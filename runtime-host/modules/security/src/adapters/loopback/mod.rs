@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use tokio::sync::Mutex;
@@ -34,6 +34,16 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("security"),
         vec![RouteDescriptor::bound(
             "security.loopback",
+            &[
+                RoutePath::ExactWithQuery(emergency::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(policy::READ_ENDPOINT),
+                RoutePath::ExactWithQuery(policy::AUDIT_ENDPOINT),
+                RoutePath::ExactWithQuery(policy::handler::PUBLIC_AUDIT_ENDPOINT),
+                RoutePath::ExactWithQuery(policy::CATALOG_ENDPOINT),
+                RoutePath::ExactWithQuery(policy::OPERATION_ENDPOINT),
+                RoutePath::ExactWithQuery(policy::ENDPOINT),
+                RoutePath::ExactWithQuery(policy::OPERATION_RECEIPT_ENDPOINT),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],
@@ -42,7 +52,7 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
 
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
-    if path == "/api/security/emergency" {
+    if path == emergency::AUTHORIZATION_ENDPOINT {
         return Some(RouteHeadPlan::new(
             body_policy_for_method(head.method.as_str(), 2),
             SHORT_DEADLINE,
@@ -56,7 +66,7 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
             timeout_response,
         ));
     }
-    if matches!(path, "/api/security/policy/current" | "/api/security/audit" | "/api/security/audit/current") {
+    if matches!(path, policy::READ_ENDPOINT | policy::handler::PUBLIC_AUDIT_ENDPOINT | policy::AUDIT_ENDPOINT) {
         return Some(RouteHeadPlan::body_deadline(
             body_policy_for_get_route(head.method.as_str()), SHORT_DEADLINE, timeout_response,
         ));
@@ -73,7 +83,7 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
         let path = pathname(request.path());
-        if request.method() == "POST" && path == "/api/security/emergency" {
+        if request.method() == "POST" && path == emergency::AUTHORIZATION_ENDPOINT {
             return emergency::handler::handle(
                 request.method(),
                 request.path(),
@@ -115,18 +125,18 @@ fn is_security_policy_route(method: &str, path: &str) -> bool {
     let path = pathname(path);
     matches!(
         (method, path),
-        ("GET", "/api/security/policy/current")
-            | ("GET", "/api/security/audit/current")
-            | ("GET", "/api/security/audit")
-            | ("GET", "/api/security/destructive-rule-catalog/current")
-            | ("POST", "/api/security/operation")
-            | ("POST", "/api/security/policy")
-            | ("POST", "/api/security/operation/receipt")
+        ("GET", policy::READ_ENDPOINT)
+            | ("GET", policy::AUDIT_ENDPOINT)
+            | ("GET", policy::handler::PUBLIC_AUDIT_ENDPOINT)
+            | ("GET", policy::CATALOG_ENDPOINT)
+            | ("POST", policy::OPERATION_ENDPOINT)
+            | ("POST", policy::ENDPOINT)
+            | ("POST", policy::OPERATION_RECEIPT_ENDPOINT)
     )
 }
 
 fn is_security_policy_post_route(path: &str) -> bool {
-    matches!(path, "/api/security/operation" | "/api/security/policy" | "/api/security/operation/receipt")
+    matches!(path, policy::OPERATION_ENDPOINT | policy::ENDPOINT | policy::OPERATION_RECEIPT_ENDPOINT)
 }
 
 fn body_policy_for_method(method: &str, max_bytes: usize) -> BodyPolicy {

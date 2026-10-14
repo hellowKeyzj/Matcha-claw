@@ -99,12 +99,12 @@ describe('runtime-host legacy entrypoint attestation', () => {
 
   it('keeps the supported host and MCP command entrypoints native', () => {
     const hostMain = readFileSync(join(projectRoot, 'runtime-host', 'host', 'src', 'main.rs'), 'utf8');
-    const mcpMain = readFileSync(join(projectRoot, 'runtime-host', 'host', 'src', 'mcp.rs'), 'utf8');
+    const mcpMain = readFileSync(join(projectRoot, 'runtime-host', 'host', 'src', 'mcp', 'stdio.rs'), 'utf8');
     const hostManifest = readFileSync(join(projectRoot, 'runtime-host', 'host', 'Cargo.toml'), 'utf8');
 
     expect(hostMain).toContain('fn main() -> ExitCode');
     expect(hostMain).toContain('command == "mcp"');
-    expect(hostMain).toContain('return mcp::run()');
+    expect(hostMain).toContain('return runtime_host::mcp::run()');
     expect(mcpMain).toContain('run_stdio');
     expect(hostManifest).toContain('name = "runtime-host"');
     expect(hostManifest).not.toContain('name = "runtime-host-mcp"');

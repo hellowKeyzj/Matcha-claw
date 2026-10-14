@@ -317,10 +317,14 @@ export async function handleCapabilityRoutes(
   }
 
   if (body.id === 'skill.management') {
+    const traceId = body.operationId === 'clawhub.openPath' ? readTraceHeader(req.headers) : null;
+    logSessionTrace('skill.open-path.main.received', traceId);
     try {
-      const response = await deps.runtimeHostTransports.skillsManagementTransport.execute(body);
+      const response = await deps.runtimeHostTransports.skillsManagementTransport.execute(body, traceId);
+      logSessionTrace('skill.open-path.main.response', traceId, () => ({ status: response.status }));
       sendJson(res, response.status, response.body);
     } catch {
+      logSessionTrace('skill.open-path.main.failed', traceId);
       sendJson(res, 503, { outcome: 'unknown' });
     }
     return true;

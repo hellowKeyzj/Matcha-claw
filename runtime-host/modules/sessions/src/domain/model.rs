@@ -708,6 +708,14 @@ impl SessionView {
         self.cursor
     }
 
+    pub(crate) fn assistant_texts_for_run_id(&self, run_id: &str) -> Vec<String> {
+        assistant_texts_for_run_id(&self.items, run_id)
+    }
+
+    pub(crate) fn advance_sync_terminal_baseline(&mut self, changes: &SyncTerminalChanges) {
+        changes.apply(&mut self.items, &mut self.runtime);
+    }
+
     pub fn validate(&self) -> Result<(), SessionStateError> {
         if self.session_key != self.identity.session_key
             || self
@@ -1320,6 +1328,43 @@ pub struct SessionDeliveryContext {
     pub endpoint_session_id: organization::EndpointSessionId,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct SyncTerminalChanges {
+    items: Vec<(String, String, ItemStatus, ItemStatus)>,
+    runtime: Option<(SessionFact<RuntimeView>, SessionFact<RuntimeView>)>,
+}
+
+impl SyncTerminalChanges {
+    fn between(before: &SessionState, after: &SessionState) -> Self {
+        let items = list_values(&before.items).iter().filter_map(|item| {
+            let SessionItem::AssistantTurn { item_id, run_id: Some(run_id), status, .. } = item else { return None; };
+            let SessionItem::AssistantTurn { run_id: Some(next_run_id), status: next_status, .. } =
+                list_values(&after.items).iter().find(|next| next.item_id() == item_id)? else { return None; };
+            (run_id == next_run_id && status != next_status)
+                .then(|| (item_id.clone(), run_id.clone(), *status, *next_status))
+        }).collect();
+        let runtime = (before.runtime != after.runtime)
+            .then(|| (before.runtime.clone(), after.runtime.clone()));
+        Self { items, runtime }
+    }
+
+    fn apply(&self, items: &mut SessionFact<Vec<SessionItem>>, runtime: &mut SessionFact<RuntimeView>) {
+        if let SessionFact::Complete(items) | SessionFact::Incomplete { facts: items, .. } = items {
+            for (id, run, before, after) in &self.items {
+                if let Some(SessionItem::AssistantTurn { run_id: Some(run_id), status, .. }) =
+                    items.iter_mut().find(|item| item.item_id() == id)
+                    && run_id == run && status == before
+                {
+                    *status = *after;
+                }
+            }
+        }
+        if let Some((before, after)) = &self.runtime && runtime == before {
+            *runtime = after.clone();
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionState {
     identity: SessionIdentity,
@@ -1337,6 +1382,8 @@ pub struct SessionState {
     completeness: SessionCompleteness,
     terminal_run_ids: HashSet<String>,
     pub(crate) run_delivery_contexts: HashMap<String, SessionDeliveryContext>,
+    pub(crate) pending_terminals: Vec<crate::terminal_hook::SessionRunTerminalSnapshot>,
+    pub(crate) terminal_permit: Option<crate::owner::terminal::TerminalPermit>,
     host_source_epoch: Option<u64>,
     native_source_epoch: Option<u64>,
     source_branch: Option<String>,
@@ -1394,6 +1441,8 @@ impl SessionState {
             completeness: facts.completeness,
             terminal_run_ids,
             run_delivery_contexts: HashMap::new(),
+            pending_terminals: Vec::new(),
+            terminal_permit: None,
             host_source_epoch: None,
             native_source_epoch: None,
             source_branch: None,
@@ -1434,19 +1483,15 @@ impl SessionState {
     }
 
     pub fn assistant_texts_for_run_id(&self, run_id: &str) -> Vec<String> {
-        items_fact_slice(&self.items)
-            .into_iter()
-            .flatten()
-            .filter_map(|item| match item {
-                SessionItem::AssistantTurn {
-                    run_id: Some(candidate_run),
-                    status: ItemStatus::Final,
-                    text,
-                    ..
-                } if candidate_run == run_id => Some(text.clone()),
-                _ => None,
-            })
-            .collect()
+        assistant_texts_for_run_id(&self.items, run_id)
+    }
+
+    pub(crate) fn sync_terminal_changes(&self, before: &Self) -> SyncTerminalChanges {
+        SyncTerminalChanges::between(before, self)
+    }
+
+    pub(crate) fn advance_sync_terminal_baseline(&mut self, changes: &SyncTerminalChanges) {
+        changes.apply(&mut self.items, &mut self.runtime);
     }
 
     pub fn final_assistant_texts_by_run(&self) -> Vec<(String, String)> {
@@ -2545,6 +2590,14 @@ impl SessionState {
             }
         };
     }
+}
+
+fn assistant_texts_for_run_id(fact: &SessionFact<Vec<SessionItem>>, run_id: &str) -> Vec<String> {
+    items_fact_slice(fact).into_iter().flatten().filter_map(|item| match item {
+        SessionItem::AssistantTurn { run_id: Some(candidate_run), status: ItemStatus::Final, text, .. }
+            if candidate_run == run_id => Some(text.clone()),
+        _ => None,
+    }).collect()
 }
 
 fn update_assistant_turn_status_for_run(

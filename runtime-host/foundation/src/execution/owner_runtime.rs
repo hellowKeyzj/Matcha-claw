@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     collections::{HashMap, VecDeque, hash_map::DefaultHasher},
     fmt,
     future::Future,
@@ -6,15 +7,16 @@ use std::{
     panic::AssertUnwindSafe,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc},
+    task::JoinSet,
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
@@ -54,6 +56,7 @@ impl Default for LaneRetention {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandRoute<K> {
     Keyed(K),
+    KeyedControl(K),
     Global,
     Exclusive,
     Shutdown,
@@ -124,6 +127,8 @@ impl Default for OwnerRuntimeConfig {
 }
 
 pub trait OwnerSpec: Send + Sized + 'static {
+    const PENDING_LIFECYCLE: bool = false;
+
     type Command: Send + 'static;
     type Query: Send + 'static;
     type Key: Eq + Hash + Clone + Send + 'static;
@@ -138,6 +143,23 @@ pub trait OwnerSpec: Send + Sized + 'static {
     fn route_query(query: &Self::Query) -> QueryRoute<Self::Key>;
 
     fn open_lane(shared: &Self::Shared, key: &Self::Key) -> Self::LaneState;
+
+    fn keyed_command_ready(
+        _shared: &Self::Shared,
+        _key: &Self::Key,
+        _lane: &Self::LaneState,
+        _command: &Self::Command,
+    ) -> bool {
+        true
+    }
+
+    fn lane_has_pending(
+        _shared: &Self::Shared,
+        _key: &Self::Key,
+        _lane: &Self::LaneState,
+    ) -> bool {
+        false
+    }
 
     fn handle_keyed_command(
         shared: Self::Shared,
@@ -380,6 +402,7 @@ pub struct OwnerRuntimeSystem {
     next_owner_id: Arc<AtomicU64>,
     ready_tx: Option<mpsc::Sender<Runnable>>,
     drain: CancellationToken,
+    cancellation: CancellationToken,
     observation: ObservationSink,
     workers: OwnedTask<Result<(), tokio::task::JoinError>>,
 }
@@ -393,30 +416,34 @@ impl OwnerRuntimeSystem {
         let config = config.normalized();
         let (ready_tx, ready_rx) = mpsc::channel(config.ready_queue_capacity);
         let ready_rx = Arc::new(Mutex::new(ready_rx));
+        let cancellation = CancellationToken::new();
+        let worker_cancellation = cancellation.clone();
         let (workers, _handle) = OwnedTask::spawn(move |cancellation| async move {
-            let mut worker_tasks = Vec::with_capacity(config.worker_count);
+            let mut worker_tasks = JoinSet::new();
             for _ in 0..config.worker_count {
-                worker_tasks.push(tokio::spawn(worker_loop(
+                worker_tasks.spawn(worker_loop(
                     Arc::clone(&ready_rx),
-                    cancellation.clone(),
-                )));
+                    worker_cancellation.clone(),
+                ));
             }
             let mut failure = None;
-            for index in 0..worker_tasks.len() {
-                let result = tokio::select! {
-                    _ = cancellation.cancelled() => {
-                        for worker in &worker_tasks {
-                            worker.abort();
-                        }
-                        for worker in &mut worker_tasks[index..] {
-                            let _ = worker.await;
-                        }
-                        return Ok(());
+            let mut cancelling = false;
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled(), if !cancelling => {
+                        cancelling = true;
+                        worker_cancellation.cancel();
                     }
-                    result = &mut worker_tasks[index] => result,
-                };
-                if let Err(error) = result {
-                    failure.get_or_insert(error);
+                    result = worker_tasks.join_next() => {
+                        match result {
+                            Some(Err(error)) => {
+                                failure.get_or_insert(error);
+                                worker_cancellation.cancel();
+                            }
+                            Some(Ok(())) => {}
+                            None => break,
+                        }
+                    }
                 }
             }
             failure.map_or(Ok(()), Err)
@@ -425,6 +452,7 @@ impl OwnerRuntimeSystem {
             next_owner_id: Arc::new(AtomicU64::new(1)),
             ready_tx: Some(ready_tx),
             drain: CancellationToken::new(),
+            cancellation,
             observation,
             workers,
         }
@@ -441,6 +469,23 @@ impl OwnerRuntimeSystem {
         let config = config.normalized();
         let id = OwnerRuntimeId(self.next_owner_id.fetch_add(1, Ordering::Relaxed));
         let (mailbox_tx, mailbox_rx) = mpsc::channel(config.mailbox_capacity);
+        // Bound all resident work without turning Direct or distinct keyed lanes into one lane.
+        let admission = Arc::new(Semaphore::new(
+            config.mailbox_capacity
+                .saturating_add(config.lane_queue_capacity)
+                .saturating_add(config.global_queue_capacity)
+                .saturating_add(config.ready_queue_capacity)
+                .saturating_add(config.worker_count)
+                .min(Semaphore::MAX_PERMITS),
+        ));
+        // Keyed/global backlog must not consume the capacity needed by Direct queries.
+        let direct_admission = Arc::new(Semaphore::new(
+            config.mailbox_capacity
+                .saturating_add(config.ready_queue_capacity)
+                .saturating_add(config.worker_count)
+                .min(Semaphore::MAX_PERMITS),
+        ));
+        let query_route_failure = Arc::new(QueryRouteFailure::new());
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
         let (shared, global_state) = owner.split();
         let slot = OwnerRuntimeSlot::<O>::new(
@@ -455,6 +500,10 @@ impl OwnerRuntimeSystem {
             self.observation.clone(),
             completion_tx,
             completion_rx,
+            Arc::clone(&admission),
+            Arc::clone(&direct_admission),
+            Arc::clone(&query_route_failure),
+            self.cancellation.clone(),
         );
         observe_owner_runtime::<O>(
             &self.observation,
@@ -476,6 +525,18 @@ impl OwnerRuntimeSystem {
             OwnerRuntimeHandle {
                 id,
                 drain,
+                cancellation: self.cancellation.clone(),
+                admission,
+                direct_admission,
+                classify_command: |command| O::PENDING_LIFECYCLE && matches!(O::route_command(command), CommandRoute::KeyedControl(_)),
+                classify_query: |query| {
+                    let route = O::route_query(query);
+                    ClassifiedQueryRoute {
+                        direct: matches!(&route, QueryRoute::Direct),
+                        route: Box::new(route),
+                    }
+                },
+                query_route_failure,
                 mailbox: mailbox_tx,
             },
             task,
@@ -483,6 +544,7 @@ impl OwnerRuntimeSystem {
     }
 
     pub fn cancel(&self) {
+        self.cancellation.cancel();
         self.workers.cancel();
     }
 
@@ -499,14 +561,48 @@ impl OwnerRuntimeSystem {
     }
 
     pub async fn cancel_and_join(&mut self) -> Result<(), tokio::task::JoinError> {
-        self.workers.cancel_and_join().await?
+        self.cancel();
+        self.workers.join().await?
     }
 }
 
 pub struct OwnerRuntimeHandle<Command, Query = std::convert::Infallible> {
     id: OwnerRuntimeId,
     drain: CancellationToken,
-    mailbox: mpsc::Sender<Mailbox<Command, Query>>,
+    cancellation: CancellationToken,
+    admission: Arc<Semaphore>,
+    direct_admission: Arc<Semaphore>,
+    classify_command: fn(&Command) -> bool,
+    classify_query: fn(&Query) -> ClassifiedQueryRoute,
+    query_route_failure: Arc<QueryRouteFailure>,
+    mailbox: mpsc::Sender<Admitted<Mailbox<Command, Query>>>,
+}
+
+pub struct OwnerRuntimePermit<Command, Query = std::convert::Infallible> {
+    drain: CancellationToken,
+    cancellation: CancellationToken,
+    admission: Arc<Semaphore>,
+    mailbox: mpsc::OwnedPermit<Admitted<Mailbox<Command, Query>>>,
+    permit: OwnedSemaphorePermit,
+    control: bool,
+    classify_command: fn(&Command) -> bool,
+}
+
+impl<Command, Query> OwnerRuntimePermit<Command, Query> {
+    pub fn send(self, command: Command) -> Result<(), SendError> {
+        if (self.drain.is_cancelled() && !self.control)
+            || self.cancellation.is_cancelled()
+            || self.admission.is_closed()
+            || (self.control && !(self.classify_command)(&command))
+        {
+            return Err(SendError::Closed);
+        }
+        self.mailbox.send(Admitted {
+            item: Mailbox::Command { command, control: self.control },
+            permit: self.permit,
+        });
+        Ok(())
+    }
 }
 
 impl<Command, Query> Clone for OwnerRuntimeHandle<Command, Query> {
@@ -514,6 +610,12 @@ impl<Command, Query> Clone for OwnerRuntimeHandle<Command, Query> {
         Self {
             id: self.id,
             drain: self.drain.clone(),
+            cancellation: self.cancellation.clone(),
+            admission: Arc::clone(&self.admission),
+            direct_admission: Arc::clone(&self.direct_admission),
+            classify_command: self.classify_command,
+            classify_query: self.classify_query,
+            query_route_failure: Arc::clone(&self.query_route_failure),
             mailbox: self.mailbox.clone(),
         }
     }
@@ -522,6 +624,66 @@ impl<Command, Query> Clone for OwnerRuntimeHandle<Command, Query> {
 impl<Command, Query> OwnerRuntimeHandle<Command, Query> {
     pub fn id(&self) -> OwnerRuntimeId {
         self.id
+    }
+
+    pub async fn reserve(&self) -> Result<OwnerRuntimePermit<Command, Query>, SendError> {
+        self.reserve_command(false).await
+    }
+
+    pub async fn reserve_control(&self) -> Result<OwnerRuntimePermit<Command, Query>, SendError> {
+        self.reserve_command(true).await
+    }
+
+    async fn reserve_command(&self, control: bool) -> Result<OwnerRuntimePermit<Command, Query>, SendError> {
+        let admission = if control { &self.direct_admission } else { &self.admission };
+        tokio::select! {
+            biased;
+            _ = self.drain.cancelled(), if !control => Err(SendError::Closed),
+            _ = self.cancellation.cancelled() => Err(SendError::Closed),
+            result = async {
+                let permit = Arc::clone(admission)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| SendError::Closed)?;
+                let mailbox = self.mailbox.clone()
+                    .reserve_owned()
+                    .await
+                    .map_err(|_| SendError::Closed)?;
+                Ok(OwnerRuntimePermit {
+                    drain: self.drain.clone(),
+                    cancellation: self.cancellation.clone(),
+                    admission: Arc::clone(admission),
+                    mailbox,
+                    permit,
+                    control,
+                    classify_command: self.classify_command,
+                })
+            } => result,
+        }
+    }
+
+    pub fn try_reserve(&self) -> Result<OwnerRuntimePermit<Command, Query>, SendError> {
+        if self.is_closed() {
+            return Err(SendError::Closed);
+        }
+        let permit = Arc::clone(&self.admission)
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                TryAcquireError::NoPermits => SendError::Full,
+                TryAcquireError::Closed => SendError::Closed,
+            })?;
+        let mailbox = self.mailbox.clone()
+            .try_reserve_owned()
+            .map_err(map_try_send_error)?;
+        Ok(OwnerRuntimePermit {
+            drain: self.drain.clone(),
+            cancellation: self.cancellation.clone(),
+            admission: Arc::clone(&self.admission),
+            mailbox,
+            permit,
+            control: false,
+            classify_command: self.classify_command,
+        })
     }
 
     pub async fn command(&self, command: Command) -> Result<(), SendError> {
@@ -533,7 +695,8 @@ impl<Command, Query> OwnerRuntimeHandle<Command, Query> {
     }
 
     pub async fn send_command(&self, command: Command) -> Result<(), SendError> {
-        self.send_message(Mailbox::Command(command)).await
+        let control = self.classify_command_route(&command)?;
+        self.send_message(Mailbox::Command { command, control }).await
     }
 
     pub fn try_command(&self, command: Command) -> Result<(), SendError> {
@@ -545,7 +708,8 @@ impl<Command, Query> OwnerRuntimeHandle<Command, Query> {
     }
 
     pub fn try_send_command(&self, command: Command) -> Result<(), SendError> {
-        self.try_send_message(Mailbox::Command(command))
+        let control = self.classify_command_route(&command)?;
+        self.try_send_message(Mailbox::Command { command, control })
     }
 
     pub async fn query(&self, query: Query) -> Result<(), SendError> {
@@ -553,7 +717,8 @@ impl<Command, Query> OwnerRuntimeHandle<Command, Query> {
     }
 
     pub async fn send_query(&self, query: Query) -> Result<(), SendError> {
-        self.send_message(Mailbox::Query(query)).await
+        let route = self.classify_query_route(&query)?;
+        self.send_message(Mailbox::Query { query, route }).await
     }
 
     pub fn try_query(&self, query: Query) -> Result<(), SendError> {
@@ -561,26 +726,104 @@ impl<Command, Query> OwnerRuntimeHandle<Command, Query> {
     }
 
     pub fn try_send_query(&self, query: Query) -> Result<(), SendError> {
-        self.try_send_message(Mailbox::Query(query))
+        let route = self.classify_query_route(&query)?;
+        self.try_send_message(Mailbox::Query { query, route })
+    }
+
+    fn classify_command_route(&self, command: &Command) -> Result<bool, SendError> {
+        let mut failure = self.query_route_failure.panic.lock()
+            .expect("query route failure lock poisoned");
+        if self.is_stopped() {
+            return Err(SendError::Closed);
+        }
+        match std::panic::catch_unwind(AssertUnwindSafe(|| (self.classify_command)(command))) {
+            Ok(control) => Ok(control),
+            Err(panic) => {
+                self.admission.close();
+                self.direct_admission.close();
+                *failure = Some(panic);
+                drop(failure);
+                self.query_route_failure.cancellation.cancel();
+                Err(SendError::Closed)
+            }
+        }
+    }
+
+    fn classify_query_route(&self, query: &Query) -> Result<ClassifiedQueryRoute, SendError> {
+        let mut failure = self.query_route_failure.panic.lock()
+            .expect("query route failure lock poisoned");
+        if self.is_closed() {
+            return Err(SendError::Closed);
+        }
+        match std::panic::catch_unwind(AssertUnwindSafe(|| (self.classify_query)(query))) {
+            Ok(route) => Ok(route),
+            Err(panic) => {
+                self.admission.close();
+                self.direct_admission.close();
+                *failure = Some(panic);
+                drop(failure);
+                self.query_route_failure.cancellation.cancel();
+                Err(SendError::Closed)
+            }
+        }
+    }
+
+    fn message_admission(&self, message: &Mailbox<Command, Query>) -> Arc<Semaphore> {
+        match message {
+            Mailbox::Command { control: true, .. } => Arc::clone(&self.direct_admission),
+            Mailbox::Query { route, .. } if route.direct => Arc::clone(&self.direct_admission),
+            _ => Arc::clone(&self.admission),
+        }
     }
 
     async fn send_message(&self, message: Mailbox<Command, Query>) -> Result<(), SendError> {
+        let control = matches!(&message, Mailbox::Command { control: true, .. });
+        if self.is_stopped() || (self.drain.is_cancelled() && !control) {
+            return Err(SendError::Closed);
+        }
+        let admission = self.message_admission(&message);
         tokio::select! {
             biased;
-            _ = self.drain.cancelled() => Err(SendError::Closed),
-            result = self.mailbox.send(message) => result.map_err(|_| SendError::Closed),
+            _ = self.drain.cancelled(), if !control => Err(SendError::Closed),
+            _ = self.cancellation.cancelled() => Err(SendError::Closed),
+            result = async {
+                let permit = admission
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| SendError::Closed)?;
+                self.mailbox
+                    .send(Admitted { item: message, permit })
+                    .await
+                    .map_err(|_| SendError::Closed)
+            } => result,
         }
     }
 
     fn try_send_message(&self, message: Mailbox<Command, Query>) -> Result<(), SendError> {
-        if self.drain.is_cancelled() {
+        let control = matches!(&message, Mailbox::Command { control: true, .. });
+        if self.is_stopped() || (self.drain.is_cancelled() && !control) {
             return Err(SendError::Closed);
         }
-        self.mailbox.try_send(message).map_err(map_try_send_error)
+        let permit = self.message_admission(&message)
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                TryAcquireError::NoPermits => SendError::Full,
+                TryAcquireError::Closed => SendError::Closed,
+            })?;
+        self.mailbox
+            .try_send(Admitted { item: message, permit })
+            .map_err(map_try_send_error)
     }
 
     pub fn is_closed(&self) -> bool {
-        self.drain.is_cancelled() || self.mailbox.is_closed()
+        self.drain.is_cancelled() || self.is_stopped()
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.cancellation.is_cancelled()
+            || self.admission.is_closed()
+            || self.direct_admission.is_closed()
+            || self.mailbox.is_closed()
     }
 }
 
@@ -618,15 +861,23 @@ async fn worker_loop(
     ready_rx: Arc<Mutex<mpsc::Receiver<Runnable>>>,
     cancellation: CancellationToken,
 ) {
-    loop {
-        let runnable = tokio::select! {
-            _ = cancellation.cancelled() => None,
-            runnable = recv_runnable(Arc::clone(&ready_rx)) => runnable,
-        };
-        let Some(runnable) = runnable else {
-            break;
-        };
-        runnable.work.await;
+    let mut active = FuturesUnordered::new();
+    let mut ready_open = true;
+    let mut cancelling = false;
+    while ready_open || !active.is_empty() {
+        tokio::select! {
+            _ = cancellation.cancelled(), if !cancelling => {
+                cancelling = true;
+                ready_rx.lock().await.close();
+            }
+            Some(()) = active.next(), if !active.is_empty() => {}
+            runnable = recv_runnable(Arc::clone(&ready_rx)), if ready_open => {
+                match runnable {
+                    Some(runnable) => active.push(runnable.work),
+                    None => ready_open = false,
+                }
+            }
+        }
     }
 }
 
@@ -635,24 +886,78 @@ async fn recv_runnable(ready_rx: Arc<Mutex<mpsc::Receiver<Runnable>>>) -> Option
     ready_rx.recv().await
 }
 
+struct Admitted<T> {
+    item: T,
+    permit: OwnedSemaphorePermit,
+}
+
+impl<T> Admitted<T> {
+    fn map<U>(self, map: impl FnOnce(T) -> U) -> Admitted<U> {
+        Admitted {
+            item: map(self.item),
+            permit: self.permit,
+        }
+    }
+}
+
+struct ClassifiedQueryRoute {
+    direct: bool,
+    route: Box<dyn Any + Send>,
+}
+
+struct QueryRouteFailure {
+    panic: StdMutex<Option<Box<dyn Any + Send>>>,
+    cancellation: CancellationToken,
+}
+
+impl QueryRouteFailure {
+    fn new() -> Self {
+        Self {
+            panic: StdMutex::new(None),
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    fn take(&self) -> Option<Box<dyn Any + Send>> {
+        self.panic.lock().expect("query route failure lock poisoned").take()
+    }
+}
+
+struct RoutedQuery<Query, Key> {
+    query: Query,
+    route: QueryRoute<Key>,
+}
+
+impl<Query, Key: Send + 'static> RoutedQuery<Query, Key> {
+    fn into_mailbox<Command>(self) -> Mailbox<Command, Query> {
+        Mailbox::Query {
+            query: self.query,
+            route: ClassifiedQueryRoute {
+                direct: matches!(&self.route, QueryRoute::Direct),
+                route: Box::new(self.route),
+            },
+        }
+    }
+}
+
 enum Mailbox<Command, Query> {
-    Command(Command),
-    Query(Query),
+    Command { command: Command, control: bool },
+    Query { query: Query, route: ClassifiedQueryRoute },
 }
 
 enum LaneItem<O: OwnerSpec> {
     Command(O::Command),
-    Query(O::Query),
+    Query(RoutedQuery<O::Query, O::Key>),
 }
 
 enum GlobalItem<O: OwnerSpec> {
     Command(O::Command),
-    Query(O::Query),
+    Query(RoutedQuery<O::Query, O::Key>),
 }
 
 enum ExclusiveItem<O: OwnerSpec> {
     Command(O::Command),
-    Query(O::Query),
+    Query(RoutedQuery<O::Query, O::Key>),
     Shutdown(O::Command),
 }
 
@@ -742,7 +1047,7 @@ fn observe_command_route<O>(
     }
 
     match route {
-        CommandRoute::Keyed(key) => observe_owner_runtime::<O>(
+        CommandRoute::Keyed(key) | CommandRoute::KeyedControl(key) => observe_owner_runtime::<O>(
             observation,
             owner_id,
             OwnerRuntimeStage::Route,
@@ -883,7 +1188,7 @@ where
 
 struct Lane<O: OwnerSpec> {
     state: Option<O::LaneState>,
-    queue: VecDeque<LaneItem<O>>,
+    queue: VecDeque<Admitted<LaneItem<O>>>,
     running: bool,
     cancellation: Option<CancellationToken>,
     idle_since: Option<Instant>,
@@ -893,10 +1198,10 @@ struct OwnerRuntimeSlot<O: OwnerSpec> {
     id: OwnerRuntimeId,
     shared: O::Shared,
     global_state: Option<O::GlobalState>,
-    global_queue: VecDeque<GlobalItem<O>>,
+    global_queue: VecDeque<Admitted<GlobalItem<O>>>,
     global_running: bool,
     global_cancellation: Option<CancellationToken>,
-    exclusive_queue: VecDeque<ExclusiveItem<O>>,
+    exclusive_queue: VecDeque<Admitted<ExclusiveItem<O>>>,
     exclusive_running: bool,
     exclusive_cancellation: Option<CancellationToken>,
     lanes: HashMap<O::Key, Lane<O>>,
@@ -907,8 +1212,14 @@ struct OwnerRuntimeSlot<O: OwnerSpec> {
     global_queue_capacity: usize,
     ready_tx: Option<mpsc::Sender<Runnable>>,
     observation: ObservationSink,
-    completion_tx: mpsc::UnboundedSender<Completion<O>>,
-    completion_rx: mpsc::UnboundedReceiver<Completion<O>>,
+    completion_tx: mpsc::UnboundedSender<Admitted<Completion<O>>>,
+    completion_rx: mpsc::UnboundedReceiver<Admitted<Completion<O>>>,
+    admission: Arc<Semaphore>,
+    direct_admission: Arc<Semaphore>,
+    query_route_failure: Arc<QueryRouteFailure>,
+    system_cancellation: CancellationToken,
+    owner_cancellation: CancellationToken,
+    task_cancellation: CancellationToken,
     closing: bool,
 }
 
@@ -980,8 +1291,12 @@ where
         config: OwnerRuntimeConfig,
         ready_tx: mpsc::Sender<Runnable>,
         observation: ObservationSink,
-        completion_tx: mpsc::UnboundedSender<Completion<O>>,
-        completion_rx: mpsc::UnboundedReceiver<Completion<O>>,
+        completion_tx: mpsc::UnboundedSender<Admitted<Completion<O>>>,
+        completion_rx: mpsc::UnboundedReceiver<Admitted<Completion<O>>>,
+        admission: Arc<Semaphore>,
+        direct_admission: Arc<Semaphore>,
+        query_route_failure: Arc<QueryRouteFailure>,
+        system_cancellation: CancellationToken,
     ) -> Self {
         Self {
             id,
@@ -1003,16 +1318,23 @@ where
             observation,
             completion_tx,
             completion_rx,
+            admission,
+            direct_admission,
+            query_route_failure,
+            owner_cancellation: system_cancellation.child_token(),
+            system_cancellation,
+            task_cancellation: CancellationToken::new(),
             closing: false,
         }
     }
 
     async fn run(
         mut self,
-        mut mailbox_rx: mpsc::Receiver<Mailbox<O::Command, O::Query>>,
+        mut mailbox_rx: mpsc::Receiver<Admitted<Mailbox<O::Command, O::Query>>>,
         cancellation: CancellationToken,
         drain: CancellationToken,
     ) {
+        self.task_cancellation = cancellation.clone();
         let mut mailbox_open = true;
         let mut draining = false;
         let mut pending = None;
@@ -1020,16 +1342,31 @@ where
         eviction_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            if !self.closing
+                && (cancellation.is_cancelled()
+                    || self.system_cancellation.is_cancelled()
+                    || self.query_route_failure.cancellation.is_cancelled())
+            {
+                self.begin_shutdown();
+            }
             if self.closing {
                 pending = None;
                 mailbox_open = false;
+                mailbox_rx.close();
+            }
+            if draining && O::PENDING_LIFECYCLE && !self.closing && pending.is_none() && self.can_shutdown() {
                 mailbox_rx.close();
             }
             if (self.closing || (!mailbox_open && pending.is_none())) && self.can_shutdown() {
                 break;
             }
 
-            self.dispatch_ready().await;
+            if !self.closing {
+                self.dispatch_ready().await;
+                if self.closing {
+                    continue;
+                }
+            }
 
             if let Some(message) = pending.take() {
                 match self.accept(message).await {
@@ -1047,9 +1384,23 @@ where
                     mailbox_rx.close();
                 }
 
+                _ = self.system_cancellation.cancelled(), if !self.closing => {
+                    self.begin_shutdown();
+                    mailbox_open = false;
+                    mailbox_rx.close();
+                }
+
+                _ = self.query_route_failure.cancellation.cancelled(), if !self.closing => {
+                    self.begin_shutdown();
+                    mailbox_open = false;
+                    mailbox_rx.close();
+                }
+
                 _ = drain.cancelled(), if !draining && !self.closing => {
                     draining = true;
-                    mailbox_rx.close();
+                    if !O::PENDING_LIFECYCLE {
+                        mailbox_rx.close();
+                    }
                 }
 
                 Some(completion) = self.completion_rx.recv() => {
@@ -1075,6 +1426,11 @@ where
             }
         }
 
+        self.admission.close();
+        self.direct_admission.close();
+        if let Some(panic) = self.query_route_failure.take() {
+            std::panic::resume_unwind(panic);
+        }
         let mut lanes = Vec::with_capacity(self.lanes.len());
         for (key, mut lane) in self.lanes.drain() {
             if let Some(state) = lane.state.take() {
@@ -1125,51 +1481,68 @@ where
 
     async fn accept(
         &mut self,
-        message: Mailbox<O::Command, O::Query>,
-    ) -> Result<(), Mailbox<O::Command, O::Query>> {
+        message: Admitted<Mailbox<O::Command, O::Query>>,
+    ) -> Result<(), Admitted<Mailbox<O::Command, O::Query>>> {
+        let Admitted { item: message, permit } = message;
         match message {
-            Mailbox::Command(command) => {
+            Mailbox::Command { command, .. } => {
                 let route = O::route_command(&command);
                 observe_command_route::<O>(&self.observation, self.id, &route);
                 match route {
-                    CommandRoute::Keyed(key) => self
-                        .enqueue_keyed(key, LaneItem::Command(command))
-                        .map_err(lane_item_to_mailbox),
+                    CommandRoute::Keyed(key) | CommandRoute::KeyedControl(key) => self
+                        .enqueue_keyed(key, Admitted { item: LaneItem::Command(command), permit })
+                        .map_err(|item| item.map(lane_item_to_mailbox)),
                     CommandRoute::Global => self
-                        .enqueue_global(GlobalItem::Command(command))
-                        .map_err(global_item_to_mailbox),
+                        .enqueue_global(Admitted { item: GlobalItem::Command(command), permit })
+                        .map_err(|item| item.map(global_item_to_mailbox)),
                     CommandRoute::Exclusive => self
-                        .enqueue_exclusive(ExclusiveItem::Command(command))
-                        .map_err(exclusive_item_to_mailbox),
+                        .enqueue_exclusive(Admitted { item: ExclusiveItem::Command(command), permit })
+                        .map_err(|item| item.map(exclusive_item_to_mailbox)),
                     CommandRoute::Shutdown => self
-                        .enqueue_exclusive(ExclusiveItem::Shutdown(command))
-                        .map_err(exclusive_item_to_mailbox),
+                        .enqueue_exclusive(Admitted { item: ExclusiveItem::Shutdown(command), permit })
+                        .map_err(|item| item.map(exclusive_item_to_mailbox)),
                 }
             }
-            Mailbox::Query(query) => {
-                let route = O::route_query(&query);
+            Mailbox::Query { query, route } => {
+                let route = *route.route.downcast::<QueryRoute<O::Key>>()
+                    .unwrap_or_else(|_| unreachable!("query route belongs to its owner"));
                 observe_query_route::<O>(&self.observation, self.id, &route);
                 match route {
                     QueryRoute::Direct => {
-                        self.dispatch_direct_query(query).await;
+                        self.dispatch_direct_query(Admitted { item: query, permit }).await;
                         Ok(())
                     }
                     QueryRoute::Keyed(key) => self
-                        .enqueue_keyed(key, LaneItem::Query(query))
-                        .map_err(lane_item_to_mailbox),
+                        .enqueue_keyed(key.clone(), Admitted {
+                            item: LaneItem::Query(RoutedQuery { query, route: QueryRoute::Keyed(key) }),
+                            permit,
+                        })
+                        .map_err(|item| item.map(lane_item_to_mailbox)),
                     QueryRoute::Global => self
-                        .enqueue_global(GlobalItem::Query(query))
-                        .map_err(global_item_to_mailbox),
+                        .enqueue_global(Admitted {
+                            item: GlobalItem::Query(RoutedQuery { query, route: QueryRoute::Global }),
+                            permit,
+                        })
+                        .map_err(|item| item.map(global_item_to_mailbox)),
                     QueryRoute::Exclusive => self
-                        .enqueue_exclusive(ExclusiveItem::Query(query))
-                        .map_err(exclusive_item_to_mailbox),
+                        .enqueue_exclusive(Admitted {
+                            item: ExclusiveItem::Query(RoutedQuery { query, route: QueryRoute::Exclusive }),
+                            permit,
+                        })
+                        .map_err(|item| item.map(exclusive_item_to_mailbox)),
                 }
             }
         }
     }
 
-    fn enqueue_keyed(&mut self, key: O::Key, item: LaneItem<O>) -> Result<(), LaneItem<O>> {
-        let item_kind = lane_item_observation_item(&item);
+    fn enqueue_keyed(
+        &mut self,
+        key: O::Key,
+        item: Admitted<LaneItem<O>>,
+    ) -> Result<(), Admitted<LaneItem<O>>> {
+        let item_kind = lane_item_observation_item(&item.item);
+        let progress = O::PENDING_LIFECYCLE && (self.has_pending_lanes() || self.lanes.values().any(|lane| lane.running));
+        let control = O::PENDING_LIFECYCLE && matches!(&item.item, LaneItem::Command(command) if matches!(O::route_command(command), CommandRoute::KeyedControl(_)));
         let lane = self.lanes.entry(key.clone()).or_insert_with(|| Lane {
             state: Some(O::open_lane(&self.shared, &key)),
             queue: VecDeque::new(),
@@ -1177,7 +1550,7 @@ where
             cancellation: None,
             idle_since: None,
         });
-        if lane.queue.len() >= self.lane_queue_capacity {
+        if lane.queue.len() >= self.lane_queue_capacity && !control && !progress {
             observe_keyed_owner_runtime::<O>(
                 &self.observation,
                 self.id,
@@ -1205,9 +1578,14 @@ where
         Ok(())
     }
 
-    fn enqueue_global(&mut self, item: GlobalItem<O>) -> Result<(), GlobalItem<O>> {
-        let item_kind = global_item_observation_item(&item);
-        if self.global_queue.len() >= self.global_queue_capacity {
+    fn enqueue_global(
+        &mut self,
+        item: Admitted<GlobalItem<O>>,
+    ) -> Result<(), Admitted<GlobalItem<O>>> {
+        let item_kind = global_item_observation_item(&item.item);
+        if self.global_queue.len() >= self.global_queue_capacity
+            && !(O::PENDING_LIFECYCLE && (self.has_pending_lanes() || self.lanes.values().any(|lane| lane.running)))
+        {
             observe_owner_runtime::<O>(
                 &self.observation,
                 self.id,
@@ -1234,9 +1612,12 @@ where
         Ok(())
     }
 
-    fn enqueue_exclusive(&mut self, item: ExclusiveItem<O>) -> Result<(), ExclusiveItem<O>> {
-        let item_kind = exclusive_item_observation_item(&item);
-        let route = exclusive_item_observation_route(&item);
+    fn enqueue_exclusive(
+        &mut self,
+        item: Admitted<ExclusiveItem<O>>,
+    ) -> Result<(), Admitted<ExclusiveItem<O>>> {
+        let item_kind = exclusive_item_observation_item(&item.item);
+        let route = exclusive_item_observation_route(&item.item);
         if self.exclusive_queue.len() >= self.global_queue_capacity {
             observe_owner_runtime::<O>(
                 &self.observation,
@@ -1264,19 +1645,23 @@ where
         Ok(())
     }
 
-    async fn dispatch_direct_query(&mut self, query: O::Query) {
+    async fn dispatch_direct_query(&mut self, query: Admitted<O::Query>) {
+        let Admitted { item: query, permit } = query;
         let id = self.next_direct_id;
         self.next_direct_id = self.next_direct_id.wrapping_add(1);
-        let cancellation = CancellationToken::new();
+        let cancellation = self.owner_cancellation.child_token();
         self.direct_running.insert(id, cancellation.clone());
         self.send_work(
             OwnerRuntimeItem::Query,
             OwnerRuntimeRoute::Direct,
             None,
-            Work::DirectQuery {
-                id,
-                query,
-                cancellation,
+            Admitted {
+                item: Work::DirectQuery {
+                    id,
+                    query,
+                    cancellation,
+                },
+                permit,
             },
         )
         .await;
@@ -1307,14 +1692,24 @@ where
         if lane.running || lane.queue.is_empty() {
             return;
         }
-        let Some(state) = lane.state.take() else {
+        let Some(state) = lane.state.as_ref() else {
             return;
         };
-        let Some(item) = lane.queue.pop_front() else {
+        let index = match lane.queue.front().map(|item| &item.item) {
+            Some(LaneItem::Command(command)) if !O::keyed_command_ready(&self.shared, &key, state, command) => {
+                let Some(index) = lane.queue.iter().position(|item| {
+                    matches!(&item.item, LaneItem::Command(command) if matches!(O::route_command(command), CommandRoute::KeyedControl(_)))
+                }) else { return; };
+                index
+            }
+            _ => 0,
+        };
+        let state = lane.state.take().expect("ready lane state");
+        let Some(Admitted { item, permit }) = lane.queue.remove(index) else {
             lane.state = Some(state);
             return;
         };
-        let cancellation = CancellationToken::new();
+        let cancellation = self.owner_cancellation.child_token();
         lane.running = true;
         lane.cancellation = Some(cancellation.clone());
         let item_kind = lane_item_observation_item(&item);
@@ -1329,11 +1724,11 @@ where
             LaneItem::Query(query) => Work::KeyedQuery {
                 key,
                 state,
-                query,
+                query: query.query,
                 cancellation,
             },
         };
-        self.send_work(item_kind, OwnerRuntimeRoute::Keyed, key_hash, work)
+        self.send_work(item_kind, OwnerRuntimeRoute::Keyed, key_hash, Admitted { item: work, permit })
             .await;
     }
 
@@ -1344,11 +1739,11 @@ where
         let Some(state) = self.global_state.take() else {
             return;
         };
-        let Some(item) = self.global_queue.pop_front() else {
+        let Some(Admitted { item, permit }) = self.global_queue.pop_front() else {
             self.global_state = Some(state);
             return;
         };
-        let cancellation = CancellationToken::new();
+        let cancellation = self.owner_cancellation.child_token();
         self.global_running = true;
         self.global_cancellation = Some(cancellation.clone());
         let item_kind = global_item_observation_item(&item);
@@ -1361,17 +1756,18 @@ where
             },
             GlobalItem::Query(query) => Work::GlobalQuery {
                 state,
-                query,
+                query: query.query,
                 cancellation,
             },
         };
-        self.send_work(item_kind, OwnerRuntimeRoute::Global, None, work)
+        self.send_work(item_kind, OwnerRuntimeRoute::Global, None, Admitted { item: work, permit })
             .await;
     }
 
     async fn dispatch_exclusive_if_ready(&mut self) {
         if self.exclusive_running
             || self.exclusive_queue.is_empty()
+            || self.has_pending_lanes()
             || !self.direct_running.is_empty()
             || self.global_running
             || !self.global_queue.is_empty()
@@ -1385,11 +1781,11 @@ where
         let Some(state) = self.global_state.take() else {
             return;
         };
-        let Some(item) = self.exclusive_queue.pop_front() else {
+        let Some(Admitted { item, permit }) = self.exclusive_queue.pop_front() else {
             self.global_state = Some(state);
             return;
         };
-        let cancellation = CancellationToken::new();
+        let cancellation = self.owner_cancellation.child_token();
         self.exclusive_running = true;
         self.exclusive_cancellation = Some(cancellation.clone());
         let item_kind = exclusive_item_observation_item(&item);
@@ -1409,11 +1805,11 @@ where
             },
             ExclusiveItem::Query(query) => Work::ExclusiveQuery {
                 state,
-                query,
+                query: query.query,
                 cancellation,
             },
         };
-        self.send_work(item_kind, route, None, work).await;
+        self.send_work(item_kind, route, None, Admitted { item: work, permit }).await;
     }
 
     async fn send_work(
@@ -1421,22 +1817,8 @@ where
         item: OwnerRuntimeItem,
         route: OwnerRuntimeRoute,
         key_hash: Option<u64>,
-        work: Work<O>,
+        work: Admitted<Work<O>>,
     ) {
-        let Some(ready_tx) = &self.ready_tx else {
-            observe_owner_runtime::<O>(
-                &self.observation,
-                self.id,
-                OwnerRuntimeStage::Enqueue,
-                item,
-                route,
-                key_hash,
-                None,
-                Some(OwnerRuntimeReason::ReadyQueueClosed),
-            );
-            self.begin_shutdown();
-            return;
-        };
         observe_owner_runtime::<O>(
             &self.observation,
             self.id,
@@ -1447,6 +1829,7 @@ where
             None,
             Some(OwnerRuntimeReason::Accepted),
         );
+        let Admitted { item: work, permit } = work;
         let runnable = Runnable {
             work: work.boxed(
                 self.id,
@@ -1456,9 +1839,23 @@ where
                 route,
                 key_hash,
                 self.completion_tx.clone(),
+                permit,
             ),
         };
-        if ready_tx.send(runnable).await.is_err() {
+        let ready_tx = self.ready_tx.clone();
+        let reservation = match &ready_tx {
+            Some(ready_tx) => tokio::select! {
+                biased;
+                _ = self.task_cancellation.cancelled() => None,
+                _ = self.system_cancellation.cancelled() => None,
+                _ = self.query_route_failure.cancellation.cancelled() => None,
+                result = ready_tx.reserve() => result.ok(),
+            },
+            None => None,
+        };
+        if let Some(reservation) = reservation {
+            reservation.send(runnable);
+        } else {
             observe_owner_runtime::<O>(
                 &self.observation,
                 self.id,
@@ -1470,10 +1867,13 @@ where
                 Some(OwnerRuntimeReason::ReadyQueueClosed),
             );
             self.begin_shutdown();
+            // A rejected ready send still owes the slot its state and terminal permit.
+            runnable.work.await;
         }
     }
 
-    fn complete(&mut self, completion: Completion<O>) {
+    fn complete(&mut self, completion: Admitted<Completion<O>>) {
+        let Admitted { item: completion, permit } = completion;
         let failed = match completion {
             Completion::Direct { id, failed } => {
                 self.direct_running.remove(&id);
@@ -1517,6 +1917,13 @@ where
         if failed {
             self.begin_shutdown();
         }
+        drop(permit);
+    }
+
+    fn has_pending_lanes(&self) -> bool {
+        self.lanes.iter().any(|(key, lane)| {
+            lane.state.as_ref().is_some_and(|state| O::lane_has_pending(&self.shared, key, state))
+        })
     }
 
     fn exclusive_blocks_mailbox(&self) -> bool {
@@ -1526,14 +1933,16 @@ where
     fn evict_idle_lanes(&mut self) {
         if self.idle_timeout.is_zero() {
             self.lanes
-                .retain(|_, lane| lane.running || !lane.queue.is_empty());
+                .retain(|key, lane| lane.running || !lane.queue.is_empty()
+                    || lane.state.as_ref().is_some_and(|state| O::lane_has_pending(&self.shared, key, state)));
             return;
         }
         let now = Instant::now();
         let idle_timeout = self.idle_timeout;
-        self.lanes.retain(|_, lane| {
+        self.lanes.retain(|key, lane| {
             lane.running
                 || !lane.queue.is_empty()
+                || lane.state.as_ref().is_some_and(|state| O::lane_has_pending(&self.shared, key, state))
                 || lane
                     .idle_since
                     .is_none_or(|idle_since| now.duration_since(idle_since) < idle_timeout)
@@ -1542,6 +1951,9 @@ where
 
     fn begin_shutdown(&mut self) {
         self.closing = true;
+        self.admission.close();
+        self.direct_admission.close();
+        self.owner_cancellation.cancel();
         if let Some(cancellation) = &self.global_cancellation {
             cancellation.cancel();
         }
@@ -1562,7 +1974,8 @@ where
     }
 
     fn can_shutdown(&self) -> bool {
-        self.direct_running.is_empty()
+        (self.closing || !self.has_pending_lanes())
+            && self.direct_running.is_empty()
             && !self.global_running
             && !self.exclusive_running
             && self.global_queue.is_empty()
@@ -1576,15 +1989,18 @@ where
 
 fn lane_item_to_mailbox<O: OwnerSpec>(item: LaneItem<O>) -> Mailbox<O::Command, O::Query> {
     match item {
-        LaneItem::Command(command) => Mailbox::Command(command),
-        LaneItem::Query(query) => Mailbox::Query(query),
+        LaneItem::Command(command) => {
+            let control = O::PENDING_LIFECYCLE && matches!(O::route_command(&command), CommandRoute::KeyedControl(_));
+            Mailbox::Command { command, control }
+        },
+        LaneItem::Query(query) => query.into_mailbox(),
     }
 }
 
 fn global_item_to_mailbox<O: OwnerSpec>(item: GlobalItem<O>) -> Mailbox<O::Command, O::Query> {
     match item {
-        GlobalItem::Command(command) => Mailbox::Command(command),
-        GlobalItem::Query(query) => Mailbox::Query(query),
+        GlobalItem::Command(command) => Mailbox::Command { command, control: false },
+        GlobalItem::Query(query) => query.into_mailbox(),
     }
 }
 
@@ -1593,9 +2009,9 @@ fn exclusive_item_to_mailbox<O: OwnerSpec>(
 ) -> Mailbox<O::Command, O::Query> {
     match item {
         ExclusiveItem::Command(command) | ExclusiveItem::Shutdown(command) => {
-            Mailbox::Command(command)
+            Mailbox::Command { command, control: false }
         }
-        ExclusiveItem::Query(query) => Mailbox::Query(query),
+        ExclusiveItem::Query(query) => query.into_mailbox(),
     }
 }
 
@@ -1623,6 +2039,7 @@ where
         None,
     );
     let reason = tokio::select! {
+        biased;
         _ = cancellation.cancelled() => OwnerRuntimeReason::Cancellation,
         result = AssertUnwindSafe(future).catch_unwind() => {
             if result.is_err() {
@@ -1657,10 +2074,11 @@ where
         item: OwnerRuntimeItem,
         route: OwnerRuntimeRoute,
         key_hash: Option<u64>,
-        completion_tx: mpsc::UnboundedSender<Completion<O>>,
+        completion_tx: mpsc::UnboundedSender<Admitted<Completion<O>>>,
+        permit: OwnedSemaphorePermit,
     ) -> RuntimeWork {
         Box::pin(async move {
-            match self {
+            let completion = match self {
                 Self::DirectQuery {
                     id,
                     query,
@@ -1673,17 +2091,19 @@ where
                         route,
                         key_hash,
                         &cancellation,
-                        O::handle_direct_query(shared, query),
+                        async { O::handle_direct_query(shared, query).await },
                     )
                     .await;
-                    let _ = completion_tx.send(Completion::Direct { id, failed });
+                    Completion::Direct { id, failed }
                 }
                 Self::KeyedCommand {
-                    key,
+                    mut key,
                     mut state,
                     command,
                     cancellation,
                 } => {
+                    let handler_key = &mut key;
+                    let handler_state = &mut state;
                     let failed = run_observed_handler::<O, _>(
                         &observation,
                         owner_id,
@@ -1691,17 +2111,21 @@ where
                         route,
                         key_hash,
                         &cancellation,
-                        O::handle_keyed_command(shared, key.clone(), &mut state, command),
+                        async move {
+                            O::handle_keyed_command(shared, handler_key.clone(), handler_state, command).await;
+                        },
                     )
                     .await;
-                    let _ = completion_tx.send(Completion::Keyed { key, state, failed });
+                    Completion::Keyed { key, state, failed }
                 }
                 Self::KeyedQuery {
-                    key,
+                    mut key,
                     mut state,
                     query,
                     cancellation,
                 } => {
+                    let handler_key = &mut key;
+                    let handler_state = &mut state;
                     let failed = run_observed_handler::<O, _>(
                         &observation,
                         owner_id,
@@ -1709,10 +2133,12 @@ where
                         route,
                         key_hash,
                         &cancellation,
-                        O::handle_keyed_query(shared, key.clone(), &mut state, query),
+                        async move {
+                            O::handle_keyed_query(shared, handler_key.clone(), handler_state, query).await;
+                        },
                     )
                     .await;
-                    let _ = completion_tx.send(Completion::Keyed { key, state, failed });
+                    Completion::Keyed { key, state, failed }
                 }
                 Self::GlobalCommand {
                     mut state,
@@ -1727,14 +2153,14 @@ where
                         route,
                         key_hash,
                         &cancellation,
-                        O::handle_global_command(shared, &mut state, command),
+                        async { O::handle_global_command(shared, &mut state, command).await },
                     )
                     .await;
-                    let _ = completion_tx.send(Completion::Global {
+                    Completion::Global {
                         state,
                         failed,
                         close_after,
-                    });
+                    }
                 }
                 Self::GlobalQuery {
                     mut state,
@@ -1748,14 +2174,14 @@ where
                         route,
                         key_hash,
                         &cancellation,
-                        O::handle_global_query(shared, &mut state, query),
+                        async { O::handle_global_query(shared, &mut state, query).await },
                     )
                     .await;
-                    let _ = completion_tx.send(Completion::Global {
+                    Completion::Global {
                         state,
                         failed,
                         close_after: false,
-                    });
+                    }
                 }
                 Self::ExclusiveQuery {
                     mut state,
@@ -1769,12 +2195,13 @@ where
                         route,
                         key_hash,
                         &cancellation,
-                        O::handle_exclusive_query(shared, &mut state, query),
+                        async { O::handle_exclusive_query(shared, &mut state, query).await },
                     )
                     .await;
-                    let _ = completion_tx.send(Completion::Exclusive { state, failed });
+                    Completion::Exclusive { state, failed }
                 }
-            }
+            };
+            let _ = completion_tx.send(Admitted { item: completion, permit });
         })
     }
 }

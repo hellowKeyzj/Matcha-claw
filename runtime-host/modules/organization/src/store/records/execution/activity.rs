@@ -20,6 +20,148 @@ struct Row {
     phase: Phase,
     completed_attempts: u32,
     next_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settlement: Option<SettlementProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_terminal_claim: Option<Claim>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettlementProof {
+    claim: Claim,
+    receipt: super::delivery::Receipt,
+    settlement: Option<Settlement>,
+    delivery_outcome: DeliveryOutcome,
+    activity_outcome: Option<ActivityOutcome>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+enum Settlement {
+    RetryScheduled {
+        retry_at: u64,
+        observed_at: u64,
+        failure: Failure,
+    },
+    Failed {
+        failed_at: u64,
+        failure: Failure,
+    },
+    OutcomeUnknown(u64),
+}
+#[derive(Serialize, Deserialize)]
+enum DeliveryOutcome {
+    Delivered,
+    RetryScheduled(u64),
+    Failed,
+    OutcomeUnknown,
+}
+#[derive(Serialize, Deserialize)]
+enum ActivityOutcome {
+    RetryScheduled,
+    Failed,
+    OutcomeUnknown,
+}
+impl Settlement {
+    fn from_domain(value: &crate::ActivitySettlement) -> Result<Self, StoreFault> {
+        use crate::ActivitySettlement as S;
+        Ok(match value {
+            S::RetryScheduled { retry_at, observed_at, failure } => Self::RetryScheduled {
+                retry_at: *retry_at,
+                observed_at: *observed_at,
+                failure: Failure::from_domain(*failure),
+            },
+            S::Failed { failed_at, failure } => Self::Failed {
+                failed_at: *failed_at,
+                failure: Failure::from_domain(*failure),
+            },
+            S::OutcomeUnknown { observed_at } => Self::OutcomeUnknown(*observed_at),
+            _ => return Err(StoreFault::InvalidFacts),
+        })
+    }
+    fn into_domain(self) -> crate::ActivitySettlement {
+        use crate::ActivitySettlement as S;
+        match self {
+            Self::RetryScheduled { retry_at, observed_at, failure } => S::RetryScheduled {
+                retry_at,
+                observed_at,
+                failure: failure.into_domain(),
+            },
+            Self::Failed { failed_at, failure } => S::Failed {
+                failed_at,
+                failure: failure.into_domain(),
+            },
+            Self::OutcomeUnknown(observed_at) => S::OutcomeUnknown { observed_at },
+        }
+    }
+}
+impl DeliveryOutcome {
+    fn from_domain(value: crate::DeliveryResolution) -> Self {
+        match value {
+            crate::DeliveryResolution::Delivered => Self::Delivered,
+            crate::DeliveryResolution::RetryScheduled { retry_at } => Self::RetryScheduled(retry_at),
+            crate::DeliveryResolution::Failed => Self::Failed,
+            crate::DeliveryResolution::OutcomeUnknown => Self::OutcomeUnknown,
+        }
+    }
+    fn into_domain(self) -> crate::DeliveryResolution {
+        match self {
+            Self::Delivered => crate::DeliveryResolution::Delivered,
+            Self::RetryScheduled(retry_at) => crate::DeliveryResolution::RetryScheduled { retry_at },
+            Self::Failed => crate::DeliveryResolution::Failed,
+            Self::OutcomeUnknown => crate::DeliveryResolution::OutcomeUnknown,
+        }
+    }
+}
+impl ActivityOutcome {
+    fn from_domain(value: crate::ActivitySettlementOutcome) -> Result<Self, StoreFault> {
+        use crate::ActivitySettlementOutcome as O;
+        Ok(match value {
+            O::RetryScheduled => Self::RetryScheduled,
+            O::Failed => Self::Failed,
+            O::OutcomeUnknown => Self::OutcomeUnknown,
+            _ => return Err(StoreFault::InvalidFacts),
+        })
+    }
+    fn into_domain(self) -> crate::ActivitySettlementOutcome {
+        use crate::ActivitySettlementOutcome as O;
+        match self {
+            Self::RetryScheduled => O::RetryScheduled,
+            Self::Failed => O::Failed,
+            Self::OutcomeUnknown => O::OutcomeUnknown,
+        }
+    }
+}
+impl SettlementProof {
+    fn from_domain(value: &crate::run::activity::SettlementProof) -> Result<Self, StoreFault> {
+        Ok(Self {
+            claim: Claim {
+                id: value.claim.activity_id().as_str().to_owned(),
+                attempt: value.claim.attempt(),
+                generation: value.claim.generation(),
+                claimed_at: value.claim.claimed_at(),
+            },
+            receipt: super::delivery::Receipt::from_domain(&value.receipt),
+            settlement: value.settlement.as_ref()
+                .map(Settlement::from_domain).transpose()?,
+            delivery_outcome: DeliveryOutcome::from_domain(value.delivery_outcome),
+            activity_outcome: value.activity_outcome
+                .map(ActivityOutcome::from_domain).transpose()?,
+        })
+    }
+    fn into_domain(self) -> Result<crate::run::activity::SettlementProof, StoreFault> {
+        Ok(crate::run::activity::SettlementProof {
+            claim: crate::ActivityClaim::restore(
+                valid(ActivityId::new(self.claim.id))?,
+                self.claim.attempt,
+                self.claim.generation,
+                self.claim.claimed_at,
+            ),
+            receipt: self.receipt.into_domain()?,
+            settlement: self.settlement.map(Settlement::into_domain),
+            delivery_outcome: self.delivery_outcome.into_domain(),
+            activity_outcome: self.activity_outcome.map(ActivityOutcome::into_domain),
+        })
+    }
 }
 #[derive(Serialize, Deserialize)]
 enum Kind {
@@ -147,6 +289,9 @@ pub(super) fn encode(value: &Activity, bodies: &Bodies<'_>) -> Result<Vec<u8>, S
         phase,
         completed_attempts: snapshot.completed_attempts(),
         next_generation: snapshot.next_claim_generation(),
+        settlement: snapshot.settlement_proof.as_ref()
+            .map(SettlementProof::from_domain).transpose()?,
+        native_terminal_claim: snapshot.native_terminal_claim.as_ref().map(Claim::from_domain),
     })
 }
 
@@ -204,10 +349,13 @@ pub(super) fn decode(bytes: &[u8], bodies: &Bodies<'_>) -> Result<Activity, Stor
         Phase::OutcomeUnknown(observed_at) => P::OutcomeUnknown { observed_at },
         Phase::Cancelled(cancelled_at) => P::Cancelled { cancelled_at },
     };
-    valid(Activity::restore(ActivitySnapshot::new(
+    let mut snapshot = ActivitySnapshot::new(
         facts,
         phase,
         row.completed_attempts,
         row.next_generation,
-    )))
+    );
+    snapshot.settlement_proof = row.settlement.map(SettlementProof::into_domain).transpose()?;
+    snapshot.native_terminal_claim = row.native_terminal_claim.map(Claim::into_domain).transpose()?;
+    valid(Activity::restore(snapshot))
 }

@@ -20,6 +20,9 @@ pub(crate) async fn shutdown_host(owner: &mut host_actor::Owner) -> Result<(), C
             joined.map_err(|_| ControlError::Shutdown)?;
             return result;
         }
+        if !attempt.retryable {
+            return Err(ControlError::Shutdown);
+        }
         tokio::time::sleep(SHUTDOWN_RETRY_INTERVAL).await;
     }
 }

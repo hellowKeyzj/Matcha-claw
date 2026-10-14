@@ -17,6 +17,23 @@ pub use crate::application::team_message::{
 };
 pub use crate::owner::actor::OrganizationOwnerInput;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrganizationShutdownError {
+    Join,
+    PendingSettlements,
+}
+
+impl std::fmt::Display for OrganizationShutdownError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Join => "organization coordinator join failed",
+            Self::PendingSettlements => "organization has pending durable settlements",
+        })
+    }
+}
+
+impl std::error::Error for OrganizationShutdownError {}
+
 pub struct OrganizationRuntime {
     scope: ModuleScope,
     coordinator: Option<TeamRunCoordinator>,
@@ -59,10 +76,18 @@ impl OrganizationRuntime {
     }
 
     pub async fn quiesce(&mut self) {
+        let _ = self.quiesce_checked().await;
+    }
+
+    pub async fn quiesce_checked(&mut self) -> Result<(), OrganizationShutdownError> {
         if let Some(coordinator) = &mut self.coordinator {
             coordinator.cancel();
-            let _ = coordinator.join().await;
+            coordinator.join().await?;
+            if coordinator.has_pending_settlements() {
+                return Err(OrganizationShutdownError::PendingSettlements);
+            }
         }
+        Ok(())
     }
 
     pub async fn drain_and_join(&mut self) {

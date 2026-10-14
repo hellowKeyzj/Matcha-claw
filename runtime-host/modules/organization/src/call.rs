@@ -35,11 +35,21 @@ pub(crate) struct CallScope {
 pub struct CallReply<T> {
     sender: oneshot::Sender<T>,
     call: Option<CallScope>,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl<T> CallReply<T> {
     pub(crate) fn new(sender: oneshot::Sender<T>, call: Option<CallScope>) -> Self {
-        Self { sender, call }
+        Self { sender, call, cancellation: tokio_util::sync::CancellationToken::new() }
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    pub(crate) fn cancellation(&self) -> tokio_util::sync::CancellationToken {
+        self.cancellation.clone()
     }
 }
 
@@ -49,8 +59,14 @@ impl<T> CallReply<T> {
     }
 
     pub(crate) fn provision_observer(&self) -> Option<crate::TeamProvisionObserver> {
-        let call = self.call.as_ref().filter(|call| call.provision_progress_enabled)?;
+        let call = self.call.as_ref()?;
         Some(Arc::new(call.clone()))
+    }
+
+    pub(crate) async fn creation_failure(&self, failure: crate::TeamCreationFailure) {
+        if let Some(call) = &self.call {
+            call.detail.lock().await.record_creation_failure(failure);
+        }
     }
 
     pub(crate) async fn running(&self) -> bool {
@@ -182,6 +198,8 @@ pub struct OrganizationCallDetail {
     outcome: Option<OrganizationCallOutcome>,
     provision: Option<ProvisionSummary>,
     creation: Option<ProvisionSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    creation_failure: Option<crate::TeamCreationFailure>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -316,6 +334,7 @@ impl CallWorkflows {
                 };
                 match workflow {
                     Some(CallWorkflow::Team { owner, request }) => {
+                        let owner = owner.with_cancellation(shutdown.clone());
                         with_session_trace(owner.call_trace_id(), async {
                             session_trace("runtime.team.workflow.start", || json!({}));
                             let failed = if owner.call_running().await {
@@ -358,6 +377,7 @@ impl CallWorkflows {
                         command,
                         reply,
                     }) => {
+                        let owner = owner.with_cancellation(shutdown.clone());
                         with_session_trace(owner.call_trace_id(), async {
                             session_trace("runtime.team.workflow.start", || json!({}));
                             let outcome = if owner.call_running().await {
@@ -380,6 +400,7 @@ impl CallWorkflows {
                         request,
                         reply,
                     }) => {
+                        let owner = owner.with_cancellation(shutdown.clone());
                         let outcome = if owner.call_running().await {
                             loopback::graph::handle(&owner, request).await
                         } else {
@@ -395,6 +416,7 @@ impl CallWorkflows {
                         resolver,
                         reply,
                     }) => {
+                        let owner = owner.with_cancellation(shutdown.clone());
                         with_session_trace(owner.call_trace_id(), async {
                             session_trace("runtime.team.workflow.start", || json!({}));
                             let outcome = if owner.call_running().await {
@@ -633,8 +655,9 @@ impl CallWorkflows {
         for task in tasks.iter() {
             task.cancel();
         }
-        for mut task in tasks.drain(..) {
+        while let Some(task) = tasks.first_mut() {
             let _ = task.join().await;
+            tasks.remove(0);
         }
     }
 }
@@ -748,41 +771,51 @@ impl crate::TeamProvisionReporter for CallScope {
             if self.finished.load(Ordering::Acquire) {
                 return;
             }
-            let Some(provision) = &mut detail.provision else {
-                return;
-            };
-            match update {
-                crate::TeamProvisionUpdate::Started(progress) => {
-                    if provision.progress.as_ref() == Some(&progress) {
-                        return;
-                    }
-                    provision.progress = Some(progress);
+            if let crate::TeamProvisionUpdate::Failure(failure) = update {
+                if !detail.record_creation_failure(failure) {
+                    return;
                 }
-                crate::TeamProvisionUpdate::Stage(stage) => {
-                    let Some(progress) = &mut provision.progress else {
-                        return;
-                    };
-                    if progress.stage == stage {
-                        return;
-                    }
-                    progress.stage = stage;
+            } else {
+                if !self.provision_progress_enabled {
+                    return;
                 }
-                crate::TeamProvisionUpdate::Member { index, status, error } => {
-                    let Some(progress) = &mut provision.progress else {
-                        return;
-                    };
-                    let Some(member) = progress.members.get_mut(index) else {
-                        return;
-                    };
-                    if *member == status && progress.member_errors.get(&index).copied() == error {
-                        return;
+                let Some(provision) = &mut detail.provision else {
+                    return;
+                };
+                match update {
+                    crate::TeamProvisionUpdate::Started(progress) => {
+                        if provision.progress.as_ref() == Some(&progress) {
+                            return;
+                        }
+                        provision.progress = Some(progress);
                     }
-                    *member = status;
-                    if let Some(error) = error {
-                        progress.member_errors.insert(index, error);
-                    } else {
-                        progress.member_errors.remove(&index);
+                    crate::TeamProvisionUpdate::Stage(stage) => {
+                        let Some(progress) = &mut provision.progress else {
+                            return;
+                        };
+                        if progress.stage == stage {
+                            return;
+                        }
+                        progress.stage = stage;
                     }
+                    crate::TeamProvisionUpdate::Member { index, status, error } => {
+                        let Some(progress) = &mut provision.progress else {
+                            return;
+                        };
+                        let Some(member) = progress.members.get_mut(index) else {
+                            return;
+                        };
+                        if *member == status && progress.member_errors.get(&index).copied() == error {
+                            return;
+                        }
+                        *member = status;
+                        if let Some(error) = error {
+                            progress.member_errors.insert(index, error);
+                        } else {
+                            progress.member_errors.remove(&index);
+                        }
+                    }
+                    crate::TeamProvisionUpdate::Failure(_) => return,
                 }
             }
             if self.context.update(&detail).await.is_err() {
@@ -966,6 +999,14 @@ impl OrganizationCallDetail {
     fn run_reference(&mut self, value: &str) {
         self.run_id = safe_run_reference(value);
         self.run_id_hash = self.run_id.is_none().then(|| format!("{:x}", Sha256::digest(value.as_bytes())));
+    }
+
+    fn record_creation_failure(&mut self, failure: crate::TeamCreationFailure) -> bool {
+        if self.creation_failure.is_some() {
+            return false;
+        }
+        self.creation_failure = Some(failure);
+        true
     }
 
     fn status(&self) -> CallStatus {

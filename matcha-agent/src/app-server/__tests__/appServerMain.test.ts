@@ -213,8 +213,8 @@ function createHistoryStore(
     list: async () => summaries,
     load: async sessionId =>
       summaries.find(summary => summary.sessionId === sessionId) ?? null,
-    transcript: async sessionId => ({
-      lines: summaries.some(summary => summary.sessionId === sessionId)
+    transcript: async ({ sessionId }) => {
+      const lines = summaries.some(summary => summary.sessionId === sessionId)
         ? [
             JSON.stringify({
               timestamp: '2026-01-01T00:00:00.000Z',
@@ -225,8 +225,18 @@ function createHistoryStore(
               },
             }),
           ]
-        : [],
-    }),
+        : []
+      return {
+        lines,
+        window: {
+          totalItemCount: lines.length,
+          windowStartOffset: 0,
+          windowEndOffset: lines.length,
+        },
+      }
+    },
+    content: async () => null,
+    close: () => {},
   }
 }
 

@@ -36,7 +36,15 @@ function createTestPorts(overrides: TestPortsOverrides = {}): AppServerPorts {
       list: () => ({ sessions: [] }),
       close: () => notImplemented('session.close'),
       prompt: () => ({ runId: 'run-1' }),
-      transcript: () => ({ lines: [] }),
+      transcript: () => ({
+        lines: [],
+        window: {
+          totalItemCount: 0,
+          windowStartOffset: 0,
+          windowEndOffset: 0,
+        },
+      }),
+      content: () => null,
       cancel: () => ({ cancelled: true }),
       snapshot: () => notImplemented('session.snapshot'),
       setModel: () => notImplemented('session.setModel'),

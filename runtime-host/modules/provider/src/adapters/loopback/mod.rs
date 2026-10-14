@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use tokio::sync::Mutex;
@@ -19,6 +19,16 @@ mod routing;
 const DEFAULT_REQUEST_BYTES: usize = 64 * 1024;
 const SHORT_DEADLINE: Duration = Duration::from_secs(5);
 const TIMEOUT_ERROR: &str = "Runtime Host request deadline exceeded";
+const PATHS: &[RoutePath] = &[
+    RoutePath::ExactWithQuery(accounts::ENDPOINT),
+    RoutePath::ExactWithQuery(models::ENDPOINT),
+    RoutePath::ExactWithQuery(models::SELECTABLE_ENDPOINT),
+    RoutePath::ExactWithQuery(models::DISCOVERY_RESULT_ENDPOINT),
+    RoutePath::ExactWithQuery(routing::ENDPOINT),
+    RoutePath::ExactWithQuery(recovery::ENDPOINT),
+    RoutePath::ExactWithQuery(recovery::ACKNOWLEDGE_ENDPOINT),
+    RoutePath::Prefix(accounts::ACCOUNT_PREFIX),
+];
 
 #[derive(Clone)]
 pub struct Dependencies {
@@ -46,6 +56,7 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("provider"),
         vec![RouteDescriptor::bound(
             "provider.loopback",
+            PATHS,
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

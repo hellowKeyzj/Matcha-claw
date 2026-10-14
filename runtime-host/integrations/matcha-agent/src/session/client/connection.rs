@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    future::poll_fn,
+    pin::Pin,
     sync::{
         Arc, Mutex as SyncMutex,
         atomic::{AtomicBool, Ordering},
@@ -14,6 +16,7 @@ use tokio::{
     time::{Instant, timeout, timeout_at},
 };
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 
 use crate::protocol::wire::{self, JsonRpcId, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse};
 
@@ -57,58 +60,92 @@ impl Connection {
         }
     }
 
-    pub(super) async fn exchange(
+    pub(super) async fn exchange_cancellable(
         &self,
         request: JsonRpcRequest,
         deadline: Duration,
+        cancellation: &CancellationToken,
     ) -> Result<JsonRpcResponse, ExchangeFailure> {
         let id =
             numeric_id(&request.id).ok_or(ExchangeFailure::not_written(AwaitFailure::Protocol))?;
         let encoded = wire::encode(&JsonRpcMessage::from(request))
             .map_err(|_| ExchangeFailure::not_written(AwaitFailure::Protocol))?;
         let expires_at = Instant::now() + deadline;
-        let mut writer = timeout_at(expires_at, self.writer.lock())
-            .await
-            .map_err(|_| ExchangeFailure::not_written(AwaitFailure::Deadline))?;
-        if self.closed.load(Ordering::Acquire) {
-            return Err(ExchangeFailure::not_written(AwaitFailure::Closed));
-        }
-
-        let (sender, receiver) = oneshot::channel();
-        pending(&self.pending).insert(id, sender);
-        let _registration = PendingRegistration {
-            id,
-            pending: Arc::clone(&self.pending),
+        let mut writer = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ExchangeFailure::not_written(AwaitFailure::Cancelled)),
+            writer = timeout_at(expires_at, self.writer.lock()) => writer
+                .map_err(|_| ExchangeFailure::not_written(AwaitFailure::Deadline))?,
         };
         if self.closed.load(Ordering::Acquire) {
             return Err(ExchangeFailure::not_written(AwaitFailure::Closed));
         }
-        match timeout_at(expires_at, writer.send(Message::Text(encoded.into()))).await {
+        let ready = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ExchangeFailure::not_written(AwaitFailure::Cancelled)),
+            ready = timeout_at(expires_at, poll_fn(|cx| futures_util::Sink::poll_ready(Pin::new(&mut *writer), cx))) => ready,
+        };
+        match ready {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
                 drop(writer);
                 fail_connection(&self.pending, &self.closed, AwaitFailure::Closed);
-                return Err(ExchangeFailure::written(AwaitFailure::Transport));
+                return Err(ExchangeFailure::not_written(AwaitFailure::Transport));
             }
             Err(_) => {
                 drop(writer);
                 fail_connection(&self.pending, &self.closed, AwaitFailure::Deadline);
+                return Err(ExchangeFailure::not_written(AwaitFailure::Deadline));
+            }
+        }
+
+        let (sender, mut receiver) = oneshot::channel();
+        // Retain written ids until their response so cancelling one call cannot fail the reader.
+        pending(&self.pending).insert(id, sender);
+        if cancellation.is_cancelled() {
+            pending(&self.pending).remove(&id);
+            return Err(ExchangeFailure::not_written(AwaitFailure::Cancelled));
+        }
+        if self.closed.load(Ordering::Acquire) {
+            pending(&self.pending).remove(&id);
+            return Err(ExchangeFailure::not_written(AwaitFailure::Closed));
+        }
+        if futures_util::Sink::start_send(Pin::new(&mut *writer), Message::Text(encoded.into())).is_err() {
+            drop(writer);
+            fail_connection(&self.pending, &self.closed, AwaitFailure::Closed);
+            return Err(ExchangeFailure::written(AwaitFailure::Transport));
+        }
+        let flushed = tokio::select! {
+            biased;
+            response = &mut receiver => return received_response(response),
+            _ = cancellation.cancelled() => return cancelled_response(&mut receiver),
+            flushed = timeout_at(expires_at, writer.flush()) => flushed,
+        };
+        drop(writer);
+        match flushed {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                fail_connection(&self.pending, &self.closed, AwaitFailure::Closed);
+                return Err(ExchangeFailure::written(AwaitFailure::Transport));
+            }
+            Err(_) => {
+                fail_connection(&self.pending, &self.closed, AwaitFailure::Deadline);
                 return Err(ExchangeFailure::written(AwaitFailure::Deadline));
             }
         }
-        drop(writer);
-        match timeout_at(expires_at, receiver).await {
-            Ok(Ok(response)) => response.map_err(ExchangeFailure::written),
-            Ok(Err(_)) => Err(ExchangeFailure::written(AwaitFailure::Closed)),
-            Err(_) => {
+        tokio::select! {
+            biased;
+            response = &mut receiver => received_response(response),
+            _ = cancellation.cancelled() => cancelled_response(&mut receiver),
+            _ = tokio::time::sleep_until(expires_at) => {
                 fail_connection(&self.pending, &self.closed, AwaitFailure::Deadline);
                 Err(ExchangeFailure::written(AwaitFailure::Deadline))
-            }
+            },
         }
     }
 
     pub(super) async fn close(mut self) -> Result<(), AppServerClientError> {
-        fail_connection(&self.pending, &self.closed, AwaitFailure::Closed);
+        self.closed.store(true, Ordering::Release);
         let expires_at = Instant::now() + CLOSE_DEADLINE;
         let result = match timeout_at(expires_at, self.writer.lock()).await {
             Ok(mut writer) => match timeout_at(expires_at, writer.send(Message::Close(None))).await
@@ -124,6 +161,7 @@ impl Connection {
             reader.abort();
             let _ = reader.await;
         }
+        fail_connection(&self.pending, &self.closed, AwaitFailure::Closed);
         result
     }
 
@@ -172,10 +210,14 @@ impl ExchangeFailure {
         self.delivery
     }
 
+    pub(super) const fn was_cancelled(self) -> bool {
+        matches!(self.reason, AwaitFailure::Cancelled)
+    }
+
     pub(super) const fn into_client_error(self) -> AppServerClientError {
         match self.reason {
             AwaitFailure::Deadline => AppServerClientError::RequestDeadline,
-            AwaitFailure::Closed => AppServerClientError::ConnectionClosed,
+            AwaitFailure::Cancelled | AwaitFailure::Closed => AppServerClientError::ConnectionClosed,
             AwaitFailure::UnknownResponse => AppServerClientError::UnknownResponse,
             AwaitFailure::Transport => AppServerClientError::Transport,
             AwaitFailure::Protocol => AppServerClientError::Protocol,
@@ -186,20 +228,29 @@ impl ExchangeFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AwaitFailure {
     Deadline,
+    Cancelled,
     Closed,
     UnknownResponse,
     Transport,
     Protocol,
 }
 
-struct PendingRegistration {
-    id: u64,
-    pending: PendingRequests,
+fn received_response(
+    response: Result<AwaitedResponse, oneshot::error::RecvError>,
+) -> Result<JsonRpcResponse, ExchangeFailure> {
+    match response {
+        Ok(response) => response.map_err(ExchangeFailure::written),
+        Err(_) => Err(ExchangeFailure::written(AwaitFailure::Closed)),
+    }
 }
 
-impl Drop for PendingRegistration {
-    fn drop(&mut self) {
-        pending(&self.pending).remove(&self.id);
+fn cancelled_response(
+    receiver: &mut oneshot::Receiver<AwaitedResponse>,
+) -> Result<JsonRpcResponse, ExchangeFailure> {
+    receiver.close();
+    match receiver.try_recv() {
+        Ok(response) => response.map_err(ExchangeFailure::written),
+        Err(_) => Err(ExchangeFailure::written(AwaitFailure::Cancelled)),
     }
 }
 

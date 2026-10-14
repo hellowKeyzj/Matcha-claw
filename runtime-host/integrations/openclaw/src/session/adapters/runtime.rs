@@ -1,4 +1,5 @@
 use super::*;
+use tokio_util::sync::CancellationToken;
 use sessions_module::{
     model_selection::{
         NativeEndpoint, SessionModelSelectionDiagnostic, SessionRuntimeModelCommand,
@@ -267,6 +268,14 @@ impl OpenClawDriver {
         &self,
         command: ResolvedSessionModelSelection,
     ) -> SessionModelSelectionOutcome {
+        self.select_session_model_cancellable(command, CancellationToken::new()).await
+    }
+
+    pub(crate) async fn select_session_model_cancellable(
+        &self,
+        command: ResolvedSessionModelSelection,
+        cancellation: CancellationToken,
+    ) -> SessionModelSelectionOutcome {
         let session_key = match crate::session::protocol::SessionKey::try_new(command.session_key) {
             Ok(session_key) => session_key,
             Err(_) => {
@@ -297,7 +306,7 @@ impl OpenClawDriver {
             crate::session::protocol::SessionModelPatchParams::new(session_key, Some(model));
         match self
             .session_gateway
-            .patch_session_model_diagnostic(params)
+            .patch_session_model_diagnostic_cancellable(params, &cancellation)
             .await
         {
             Ok(InvocationOutcome::Succeeded(result)) => SessionModelSelectionOutcome::Succeeded {
@@ -318,13 +327,25 @@ impl OpenClawDriver {
                     SessionModelSelectionRejection::RuntimeTargetRejected,
                 )
             }
-            Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) | Err(_) => {
+            Ok(InvocationOutcome::Cancelled) => SessionModelSelectionOutcome::Unavailable,
+            Ok(InvocationOutcome::Unknown) | Err(_) => {
                 SessionModelSelectionOutcome::OutcomeUnknown
             }
         }
     }
 
     pub(crate) async fn send_session(&self, command: SessionSendCommand) -> SessionSendOutcome {
+        self.send_session_cancellable(command, CancellationToken::new()).await
+    }
+
+    pub(crate) async fn send_session_cancellable(
+        &self,
+        command: SessionSendCommand,
+        cancellation: CancellationToken,
+    ) -> SessionSendOutcome {
+        if cancellation.is_cancelled() {
+            return SessionSendOutcome::Unavailable;
+        }
         let idempotency_key = match &command.intent {
             Some(sessions_module::goal::SessionSendIntent::GoalStart { .. }) => command.idempotency_key.as_deref(),
             None => command.request_run_identity(),
@@ -340,7 +361,12 @@ impl OpenClawDriver {
                 if *issued_at_ms > sessions_module::state::MAX_SAFE_INTEGER || command.idempotency_key.as_deref() != Some(idempotency_key.as_str()) || idempotency_key.len() > 128 || command.run_id.is_some() || command.message.trim().is_empty() || command.message.encode_utf16().count() > 16_000 || command.system_provenance_receipt.is_some() || command.deliver == Some(true) {
                     return SessionSendOutcome::Rejected;
                 }
-                match self.session_gateway.goal_availability().await {
+                let availability = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return SessionSendOutcome::Unavailable,
+                    availability = self.session_gateway.goal_availability() => availability,
+                };
+                match availability {
                     Ok(()) => Some(*issued_at_ms),
                     Err(sessions_module::ports::RuntimeOperationFailure::Unsupported) => return SessionSendOutcome::Unsupported,
                     Err(_) => return SessionSendOutcome::Unavailable,
@@ -386,13 +412,14 @@ impl OpenClawDriver {
         }
         if let Some(issued_at_ms) = goal_start {
             params = params.with_goal_start(goal_agent_id, goal_session_id.clone(), issued_at_ms);
-            return match self.session_gateway.start_goal(params).await {
+            return match self.session_gateway.start_goal_cancellable(params, &cancellation).await {
                 Ok(InvocationOutcome::Succeeded(receipt)) if receipt.action == sessions_module::goal::SessionGoalAction::Start && receipt.operation_id == goal_operation_id && goal_session_id.as_ref().is_none_or(|session| session == &receipt.session_id) => SessionSendOutcome::Succeeded {
                     run_id: receipt.run_id.clone().expect("validated started Goal receipt"),
                     status: sessions_module::send::SessionSendStatus::Started,
                     goal: Some(receipt),
                 },
                 Ok(InvocationOutcome::TargetRejected(_)) => SessionSendOutcome::Rejected,
+                Ok(InvocationOutcome::Cancelled) => SessionSendOutcome::Unavailable,
                 Ok(_) => SessionSendOutcome::Unknown,
                 Err(sessions_module::ports::RuntimeOperationFailure::Unsupported) => SessionSendOutcome::Unsupported,
                 Err(_) => SessionSendOutcome::Unavailable,
@@ -405,7 +432,7 @@ impl OpenClawDriver {
                 "systemProvenanceReceiptBytes": system_provenance_receipt_bytes.unwrap_or(0),
             }));
         }
-        match self.session_gateway.send_chat(params).await {
+        match self.session_gateway.send_chat_cancellable(params, &cancellation).await {
             Ok(InvocationOutcome::Succeeded(result)) => SessionSendOutcome::Succeeded {
                 run_id: result.run_id.as_str().to_owned(),
                 status: match result.status {
@@ -423,7 +450,8 @@ impl OpenClawDriver {
                 goal: None,
             },
             Ok(InvocationOutcome::TargetRejected(_)) => SessionSendOutcome::Rejected,
-            Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) => SessionSendOutcome::Unknown,
+            Ok(InvocationOutcome::Cancelled) => SessionSendOutcome::Unavailable,
+            Ok(InvocationOutcome::Unknown) => SessionSendOutcome::Unknown,
             Err(_) => SessionSendOutcome::Unavailable,
         }
     }
@@ -945,17 +973,28 @@ impl SessionOps for OpenClawDriver {
     fn supports_goal(&self) -> bool { self.session_gateway.supports_goal() }
 
     fn mutate_session_goal<'a>(&'a self, command: sessions_module::goal::SessionGoalCommand) -> sessions_module::SessionFuture<'a, sessions_module::goal::SessionGoalOutcome> {
+        self.mutate_session_goal_cancellable(command, CancellationToken::new())
+    }
+
+    fn mutate_session_goal_cancellable<'a>(&'a self, command: sessions_module::goal::SessionGoalCommand, cancellation: CancellationToken) -> sessions_module::SessionFuture<'a, sessions_module::goal::SessionGoalOutcome> {
         Box::pin(async move {
             use sessions_module::{goal::SessionGoalOutcome, ports::RuntimeOperationFailure};
             if command.validate().is_err() || !valid_command_identity(&command.identity) { return SessionGoalOutcome::TargetRejected; }
-            match self.session_gateway.goal_availability().await {
+            let availability = self.session_gateway.goal_availability();
+            tokio::pin!(availability);
+            let availability = tokio::select! {
+                result = &mut availability => result,
+                _ = cancellation.cancelled() => return SessionGoalOutcome::Unavailable,
+            };
+            match availability {
                 Ok(()) => {},
                 Err(RuntimeOperationFailure::Unsupported) => return SessionGoalOutcome::Unsupported,
                 Err(_) => return SessionGoalOutcome::Unavailable,
             }
-            match self.session_gateway.mutate_goal(&command).await {
+            match self.session_gateway.mutate_goal_cancellable(&command, &cancellation).await {
                 Ok(InvocationOutcome::Succeeded(receipt)) if receipt.operation_id == command.operation_id && receipt.session_id == command.endpoint_session_id && receipt.goal_id == command.goal_id && receipt.action == crate::session::goal::action(&command.mutation) => SessionGoalOutcome::Succeeded { receipt },
                 Ok(InvocationOutcome::TargetRejected(_)) => SessionGoalOutcome::TargetRejected,
+                Ok(InvocationOutcome::Cancelled) => SessionGoalOutcome::Unavailable,
                 Ok(_) => SessionGoalOutcome::Unknown,
                 Err(RuntimeOperationFailure::Unsupported) => SessionGoalOutcome::Unsupported,
                 Err(_) => SessionGoalOutcome::Unavailable,
@@ -1132,11 +1171,27 @@ impl SessionOps for OpenClawDriver {
         Box::pin(self.send_session(command))
     }
 
+    fn send_session_cancellable<'a>(
+        &'a self,
+        command: SessionSendCommand,
+        cancellation: CancellationToken,
+    ) -> sessions_module::SessionFuture<'a, SessionSendOutcome> {
+        Box::pin(self.send_session_cancellable(command, cancellation))
+    }
+
     fn select_session_model<'a>(
         &'a self,
         command: ResolvedSessionModelSelection,
     ) -> sessions_module::SessionFuture<'a, SessionModelSelectionOutcome> {
         Box::pin(self.select_session_model(command))
+    }
+
+    fn select_session_model_cancellable<'a>(
+        &'a self,
+        command: ResolvedSessionModelSelection,
+        cancellation: CancellationToken,
+    ) -> sessions_module::SessionFuture<'a, SessionModelSelectionOutcome> {
+        Box::pin(self.select_session_model_cancellable(command, cancellation))
     }
 
     fn session_permission<'a>(

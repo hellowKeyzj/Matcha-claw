@@ -56,6 +56,7 @@ export interface CronJob {
   delivery?: CronJobDelivery;
   target?: CronJobTarget;
   enabled: boolean;
+  systemManaged: boolean;
   createdAt: string;
   updatedAt: string;
   lastRun?: CronJobLastRun;

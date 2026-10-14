@@ -8,6 +8,7 @@ mod guardian_process;
 pub(crate) const PRIVATE_CHILD_DESCRIPTOR_FD: std::os::fd::RawFd =
     guardian_descriptors::TARGET_PRIVATE_DESCRIPTOR_FD;
 mod host_protocol;
+mod inherited_environment;
 mod io;
 mod protocol;
 mod protocol_observation_decode;

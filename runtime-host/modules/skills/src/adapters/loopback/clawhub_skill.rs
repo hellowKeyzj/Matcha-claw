@@ -163,8 +163,11 @@ pub(super) async fn handle(
         let terminal_slug = slug.clone();
         let terminal_version = version.clone();
         let receipt = handle
-            .submit_operation(call, async move {
-                let delivery = match worker.install_clawhub_skill(command).await {
+            .submit_cancellable_operation(call, move |cancellation| async move {
+                let delivery = match worker
+                    .install_clawhub_skill_cancellable(command, cancellation)
+                    .await
+                {
                     Ok(SkillInstallOutcome::Accepted { .. }) => {
                         Delivery::accepted(terminal_slug, terminal_version)
                     }

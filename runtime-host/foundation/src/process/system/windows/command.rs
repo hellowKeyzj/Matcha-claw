@@ -28,7 +28,10 @@ impl CreateProcessInput {
                 spec.working_directory().as_os_str(),
                 "working directory contains NUL",
             )?,
-            environment: environment_block(spec.public_environment())?,
+            environment: match spec.inherited_environment() {
+                Some(environment) => environment_block_with_source(environment, true)?,
+                None => environment_block(spec.public_environment())?,
+            },
         })
     }
 }
@@ -100,6 +103,13 @@ struct EnvironmentVariable {
 }
 
 fn environment_block(environment: &[(OsString, OsString)]) -> Result<Vec<u16>> {
+    environment_block_with_source(environment, false)
+}
+
+fn environment_block_with_source(
+    environment: &[(OsString, OsString)],
+    inherited: bool,
+) -> Result<Vec<u16>> {
     let mut variables = Vec::new();
     variables
         .try_reserve_exact(environment.len())
@@ -107,7 +117,7 @@ fn environment_block(environment: &[(OsString, OsString)]) -> Result<Vec<u16>> {
     let mut block_length = 1;
     for (key, value) in environment {
         let variable = EnvironmentVariable {
-            key: validate_environment_key(key)?,
+            key: validate_environment_key(key, inherited)?,
             value: validate_environment_value(value)?,
         };
         block_length = checked_environment_block_length(
@@ -177,13 +187,15 @@ fn environment_units(value: &OsStr) -> Result<Vec<u16>> {
     Ok(units)
 }
 
-fn validate_environment_key(key: &OsStr) -> Result<Vec<u16>> {
+fn validate_environment_key(key: &OsStr, inherited: bool) -> Result<Vec<u16>> {
     let units = environment_units(key)?;
     if units.is_empty() {
         Err(WindowsCustodyError::invalid("environment key is empty"))
     } else if units.contains(&0) {
         Err(WindowsCustodyError::invalid("environment contains NUL"))
-    } else if units.contains(&u16::from(b'=')) {
+    } else if units.iter().enumerate().any(|(index, unit)| {
+        *unit == u16::from(b'=') && !(inherited && index == 0)
+    }) {
         Err(WindowsCustodyError::invalid("environment key contains '='"))
     } else {
         Ok(units)

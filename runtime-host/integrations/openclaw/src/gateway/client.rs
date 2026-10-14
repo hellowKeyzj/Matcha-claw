@@ -23,6 +23,7 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Bytes, Message, Utf8Bytes},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     gateway::device_identity::{DeviceConnectPayloadContext, load_or_create_device_identity},
@@ -65,9 +66,9 @@ impl GatewayControlSupervisor {
 struct ControlDispatcher {
     dispatcher: Dispatcher,
     epoch: Option<super::ingress::GatewayEpoch>,
-    receive_task: StdMutex<Option<OwnedTask<()>>>,
+    receive_task: Mutex<Option<OwnedTask<()>>>,
     supports_goal: bool,
-    metadata_subscription: StdMutex<Option<Result<(), sessions_module::ports::RuntimeOperationFailure>>>,
+    metadata_subscribed: AtomicBool,
 }
 
 impl ControlDispatcher {
@@ -82,6 +83,18 @@ impl ControlDispatcher {
             .await
             .map_err(dispatcher_error)?;
         decode(response).map_err(|_| GatewayClientError::RpcFailed)
+    }
+
+    async fn close(&self) {
+        let expires_at = Instant::now() + CLOSE_DEADLINE;
+        self.dispatcher.disconnect(expires_at).await;
+        let mut receive_task = self.receive_task.lock().await;
+        if let Some(task) = receive_task.as_mut() {
+            if timeout_at(expires_at, task.join()).await.is_err() {
+                let _ = task.cancel_and_join().await;
+            }
+        }
+        receive_task.take();
     }
 }
 
@@ -505,21 +518,11 @@ impl GatewayClient {
 
     async fn describe_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
-        if control.supports_goal {
-            let previous = *control.metadata_subscription.lock().expect("metadata subscription lock poisoned");
-            let result = match previous {
-                Some(result) => result,
-                None => {
-                    let result = async {
-                        let request = wire::sessions_subscribe_request(next_request_id("sessions-subscribe")).map_err(|_| RuntimeOperationFailure::Unknown)?;
-                        let response = control.dispatcher.ordered_query(request).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
-                        wire::decode_sessions_subscribe(response).map_err(|_| RuntimeOperationFailure::Unknown)
-                    }.await;
-                    *control.metadata_subscription.lock().expect("metadata subscription lock poisoned") = Some(result);
-                    result
-                }
-            };
-            result?;
+        if control.supports_goal && !control.metadata_subscribed.load(Ordering::Acquire) {
+            let request = wire::sessions_subscribe_request(next_request_id("sessions-subscribe")).map_err(|_| RuntimeOperationFailure::Unknown)?;
+            let response = control.dispatcher.ordered_query(request).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+            wire::decode_sessions_subscribe(response).map_err(|_| RuntimeOperationFailure::Unknown)?;
+            control.metadata_subscribed.store(true, Ordering::Release);
         }
         let id = next_request_id("sessions-describe");
         let key = SessionKey::try_new(identity.session_key.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
@@ -900,12 +903,16 @@ impl GatewayClient {
     pub async fn close_control_connection(&self) {
         let control = {
             let mut state = self.control_state.lock().await;
+            if matches!(*state, GatewayControlConnectionState::Closed { .. }) {
+                return;
+            }
             self.live_goal_capability.store(false, Ordering::Release);
             let instance_id = state.instance_id().to_owned();
             let previous = std::mem::replace(
                 &mut *state,
                 GatewayControlConnectionState::Closed { instance_id },
             );
+            self.bump_control_readiness();
             match previous {
                 GatewayControlConnectionState::Ready { control, .. } => Some(control),
                 GatewayControlConnectionState::Idle { .. }
@@ -916,29 +923,22 @@ impl GatewayClient {
             }
         };
         if let Some(control) = control {
-            if let Ok(control) = Arc::try_unwrap(control) {
-                let task = control.receive_task.lock().expect("control receive task lock poisoned").take();
-                control.dispatcher.close().await;
-                if let Some(mut task) = task { let _ = task.cancel_and_join().await; }
-            }
+            control.close().await;
         }
     }
 
     async fn ensure_control_ready(&self) -> Result<(), GatewayClientError> {
+        let mut readiness = self.control_readiness();
         self.ensure_control_supervision().await;
         loop {
+            let _ = readiness.borrow_and_update();
             match self.control_readiness_result().await {
                 Ok(()) => return Ok(()),
                 Err(GatewayClientError::Starting) => {
-                    let mut readiness = self.control_readiness();
-                    let current = *readiness.borrow();
-                    while *readiness.borrow() == current {
-                        if !self.control_supervisor_started.load(Ordering::Acquire) {
-                            return Err(GatewayClientError::Starting);
-                        }
-                        if readiness.changed().await.is_err() {
-                            return Err(GatewayClientError::Starting);
-                        }
+                    if !self.control_supervisor_started.load(Ordering::Acquire)
+                        || readiness.changed().await.is_err()
+                    {
+                        return Err(GatewayClientError::Starting);
                     }
                 }
                 Err(error) => return Err(error),
@@ -1002,8 +1002,6 @@ impl GatewayClient {
                             match &*state { GatewayControlConnectionState::Ready { control, .. } => Arc::clone(control), _ => break }
                         };
                         control.dispatcher.closed().await;
-                        let receive_task = control.receive_task.lock().expect("control receive task lock poisoned").take();
-                        if let Some(mut task) = receive_task { let _ = task.join().await; }
                         client.mark_control_reconnecting_if_current(&control).await;
                     }
                 } => false,
@@ -1037,25 +1035,18 @@ impl GatewayClient {
     }
 
     async fn control_readiness_result(&self) -> Result<(), GatewayClientError> {
-        let snapshot = {
-            let state = self.control_state.lock().await;
-            match &*state {
-                GatewayControlConnectionState::Ready { .. } => Ok(()),
-                GatewayControlConnectionState::Closed { .. } => {
-                    Err(GatewayClientError::ConnectionClosed)
-                }
-                GatewayControlConnectionState::Unavailable { error, .. } => Err(*error),
-                GatewayControlConnectionState::Idle { .. }
-                | GatewayControlConnectionState::Connecting { .. }
-                | GatewayControlConnectionState::Reconnecting { .. } => {
-                    Err(GatewayClientError::Starting)
-                }
+        let state = self.control_state.lock().await;
+        match &*state {
+            GatewayControlConnectionState::Ready { .. } => Ok(()),
+            GatewayControlConnectionState::Closed { .. } => {
+                Err(GatewayClientError::ConnectionClosed)
             }
-        };
-        if snapshot.is_ok() {
-            self.send_control_heartbeat_if_due().await
-        } else {
-            snapshot
+            GatewayControlConnectionState::Unavailable { error, .. } => Err(*error),
+            GatewayControlConnectionState::Idle { .. }
+            | GatewayControlConnectionState::Connecting { .. }
+            | GatewayControlConnectionState::Reconnecting { .. } => {
+                Err(GatewayClientError::Starting)
+            }
         }
     }
 
@@ -1110,7 +1101,7 @@ impl GatewayClient {
                         (None, task)
                     };
                     let supports_goal = hello.features.capabilities.iter().any(|capability| capability == crate::session::goal::START_CAPABILITY);
-                    let control = Arc::new(ControlDispatcher { dispatcher, epoch, receive_task: StdMutex::new(Some(receive_task)), supports_goal, metadata_subscription: StdMutex::new(None) });
+                    let control = Arc::new(ControlDispatcher { dispatcher, epoch, receive_task: Mutex::new(Some(receive_task)), supports_goal, metadata_subscribed: AtomicBool::new(false) });
                     {
                         let mut state = self.control_state.lock().await;
                         self.live_goal_capability.store(supports_goal, Ordering::Release);
@@ -1186,14 +1177,6 @@ impl GatewayClient {
             let mut socket = socket;
             close_quietly(&mut socket).await;
             Err(GatewayClientError::Protocol)
-        }
-    }
-
-    async fn send_control_heartbeat_if_due(&self) -> Result<(), GatewayClientError> {
-        if self.control_state.lock().await.view().phase == GatewayControlPhase::Ready {
-            Ok(())
-        } else {
-            Err(GatewayClientError::Starting)
         }
     }
 
@@ -1349,9 +1332,7 @@ impl GatewayClient {
     }
 
     async fn mark_control_reconnecting_if_current(&self, current: &Arc<ControlDispatcher>) {
-        current.dispatcher.disconnect().await;
-        let receive_task = current.receive_task.lock().expect("control receive task lock poisoned").take();
-        if let Some(mut task) = receive_task { let _ = task.join().await; }
+        current.close().await;
         let mut state = self.control_state.lock().await;
         let instance_id = state.instance_id().to_owned();
         if let GatewayControlConnectionState::Ready { control, .. } = &*state {
@@ -1369,6 +1350,14 @@ impl GatewayClient {
             return Err(GatewayClientError::Starting);
         };
         Ok(Arc::clone(control))
+    }
+
+    async fn control_dispatcher_cancellable(&self, cancellation: &CancellationToken) -> Result<Arc<ControlDispatcher>, GatewayClientError> {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(GatewayClientError::ConnectionClosed),
+            result = self.control_dispatcher() => result,
+        }
     }
 
     /// Observes whether the Gateway exposes the fixed Host control contract.
@@ -1436,14 +1425,26 @@ impl GatewayClient {
     }
 
     pub(crate) async fn rpc_ordered_query(&self, request: wire::RpcRequest) -> Result<wire::GatewayResponse, GatewayClientError> {
-        self.control_dispatcher().await?.dispatcher.ordered_query(request).await.map_err(dispatcher_error)
+        self.rpc_ordered_query_cancellable(request, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn rpc_ordered_query_cancellable(&self, request: wire::RpcRequest, cancellation: &CancellationToken) -> Result<wire::GatewayResponse, GatewayClientError> {
+        self.control_dispatcher_cancellable(cancellation).await?.dispatcher.ordered_query_cancellable(request, cancellation).await.map_err(dispatcher_error)
     }
 
     pub(crate) async fn rpc_query(
         &self,
         request: wire::RpcRequest,
     ) -> Result<wire::GatewayResponse, GatewayClientError> {
-        self.rpc_query_with_deadline(request, RPC_DEADLINE).await
+        self.rpc_query_cancellable(request, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn rpc_query_cancellable(
+        &self,
+        request: wire::RpcRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<wire::GatewayResponse, GatewayClientError> {
+        self.rpc_query_with_deadline_cancellable(request, RPC_DEADLINE, cancellation).await
     }
 
     pub(crate) async fn rpc_query_with_deadline(
@@ -1451,61 +1452,73 @@ impl GatewayClient {
         request: wire::RpcRequest,
         deadline: Duration,
     ) -> Result<wire::GatewayResponse, GatewayClientError> {
-        let control = self.control_dispatcher().await?;
-        match control
-            .dispatcher
-            .query_with_deadline(request.clone(), deadline)
-            .await
-            .map_err(dispatcher_error)
-        {
+        self.rpc_query_with_deadline_cancellable(request, deadline, &CancellationToken::new()).await
+    }
+
+    async fn rpc_query_with_deadline_cancellable(
+        &self,
+        request: wire::RpcRequest,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<wire::GatewayResponse, GatewayClientError> {
+        let control = self.control_dispatcher_cancellable(cancellation).await?;
+        match control.dispatcher.query_with_deadline_cancellable(request.clone(), deadline, cancellation).await.map_err(dispatcher_error) {
             Ok(response) => Ok(response),
-            Err(error) if is_retryable_control_connection_error(error) => {
+            Err(error) if !cancellation.is_cancelled() && is_retryable_control_connection_error(error) => {
                 self.mark_control_reconnecting_if_current(&control).await;
-                let control = self.control_dispatcher().await?;
-                control
-                    .dispatcher
-                    .query_with_deadline(request, deadline)
-                    .await
-                    .map_err(dispatcher_error)
+                let control = self.control_dispatcher_cancellable(cancellation).await?;
+                control.dispatcher.query_with_deadline_cancellable(request, deadline, cancellation).await.map_err(dispatcher_error)
             }
             Err(error) => Err(error),
         }
     }
 
     pub(crate) async fn rpc_mutation(&self, request: wire::RpcRequest) -> MutationDelivery {
-        let control = match self.control_dispatcher().await {
+        self.rpc_mutation_cancellable(request, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn rpc_mutation_cancellable(
+        &self,
+        request: wire::RpcRequest,
+        cancellation: &CancellationToken,
+    ) -> MutationDelivery {
+        let control = match self.control_dispatcher_cancellable(cancellation).await {
             Ok(control) => control,
-            Err(error) => {
-                return MutationDelivery::NotWritten(client_error_to_dispatcher_error(error));
-            }
+            Err(error) => return MutationDelivery::NotWritten(client_error_to_dispatcher_error(error)),
         };
-        let delivery = control.dispatcher.mutate(request.clone()).await;
+        let delivery = control.dispatcher.mutate_cancellable(request.clone(), cancellation).await;
         if let MutationDelivery::NotWritten(error) = delivery {
-            if is_retryable_control_connection_error(dispatcher_error(error)) {
+            if !cancellation.is_cancelled() && is_retryable_control_connection_error(dispatcher_error(error)) {
                 self.mark_control_reconnecting_if_current(&control).await;
-                let control = match self.control_dispatcher().await {
+                let control = match self.control_dispatcher_cancellable(cancellation).await {
                     Ok(control) => control,
-                    Err(error) => {
-                        return MutationDelivery::NotWritten(client_error_to_dispatcher_error(
-                            error,
-                        ));
-                    }
+                    Err(error) => return MutationDelivery::NotWritten(client_error_to_dispatcher_error(error)),
                 };
-                return control.dispatcher.mutate(request).await;
+                return control.dispatcher.mutate_cancellable(request, cancellation).await;
             }
         }
         delivery
     }
 
     pub(crate) async fn rpc_goal_mutation(&self, request: wire::RpcRequest) -> Result<MutationDelivery, sessions_module::ports::RuntimeOperationFailure> {
+        self.rpc_goal_mutation_cancellable(request, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn rpc_goal_mutation_cancellable(&self, request: wire::RpcRequest, cancellation: &CancellationToken) -> Result<MutationDelivery, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         for attempt in 0..2 {
-            let control = self.control_dispatcher().await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+            let control = match self.control_dispatcher_cancellable(cancellation).await {
+                Ok(control) => control,
+                Err(error) if cancellation.is_cancelled() => {
+                    return Ok(MutationDelivery::NotWritten(client_error_to_dispatcher_error(error)));
+                }
+                Err(_) => return Err(RuntimeOperationFailure::Unavailable),
+            };
             if !control.supports_goal { return Err(RuntimeOperationFailure::Unsupported); }
-            let delivery = control.dispatcher.mutate(request.clone()).await;
+            let delivery = control.dispatcher.mutate_cancellable(request.clone(), cancellation).await;
             if attempt == 0 {
                 if let MutationDelivery::NotWritten(error) = delivery {
-                    if is_retryable_control_connection_error(dispatcher_error(error)) {
+                    if !cancellation.is_cancelled() && is_retryable_control_connection_error(dispatcher_error(error)) {
                         self.mark_control_reconnecting_if_current(&control).await;
                         continue;
                     }
@@ -1521,8 +1534,16 @@ impl GatewayClient {
         request_id: String,
         encoded: String,
     ) -> MutationDelivery {
-        self.rpc_encoded_mutation_with_deadline(request_id, encoded, RPC_DEADLINE)
-            .await
+        self.rpc_encoded_mutation_cancellable(request_id, encoded, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn rpc_encoded_mutation_cancellable(
+        &self,
+        request_id: String,
+        encoded: String,
+        cancellation: &CancellationToken,
+    ) -> MutationDelivery {
+        self.rpc_encoded_mutation_with_deadline_cancellable(request_id, encoded, RPC_DEADLINE, cancellation).await
     }
 
     pub(crate) async fn rpc_encoded_mutation_with_deadline(
@@ -1531,31 +1552,29 @@ impl GatewayClient {
         encoded: String,
         deadline: Duration,
     ) -> MutationDelivery {
-        let control = match self.control_dispatcher().await {
+        self.rpc_encoded_mutation_with_deadline_cancellable(request_id, encoded, deadline, &CancellationToken::new()).await
+    }
+
+    async fn rpc_encoded_mutation_with_deadline_cancellable(
+        &self,
+        request_id: String,
+        encoded: String,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+    ) -> MutationDelivery {
+        let control = match self.control_dispatcher_cancellable(cancellation).await {
             Ok(control) => control,
-            Err(error) => {
-                return MutationDelivery::NotWritten(client_error_to_dispatcher_error(error));
-            }
+            Err(error) => return MutationDelivery::NotWritten(client_error_to_dispatcher_error(error)),
         };
-        let delivery = control
-            .dispatcher
-            .mutate_encoded(request_id.clone(), encoded.clone(), deadline)
-            .await;
+        let delivery = control.dispatcher.mutate_encoded_cancellable(request_id.clone(), encoded.clone(), deadline, cancellation).await;
         if let MutationDelivery::NotWritten(error) = delivery {
-            if is_retryable_control_connection_error(dispatcher_error(error)) {
+            if !cancellation.is_cancelled() && is_retryable_control_connection_error(dispatcher_error(error)) {
                 self.mark_control_reconnecting_if_current(&control).await;
-                let control = match self.control_dispatcher().await {
+                let control = match self.control_dispatcher_cancellable(cancellation).await {
                     Ok(control) => control,
-                    Err(error) => {
-                        return MutationDelivery::NotWritten(client_error_to_dispatcher_error(
-                            error,
-                        ));
-                    }
+                    Err(error) => return MutationDelivery::NotWritten(client_error_to_dispatcher_error(error)),
                 };
-                return control
-                    .dispatcher
-                    .mutate_encoded(request_id, encoded, deadline)
-                    .await;
+                return control.dispatcher.mutate_encoded_cancellable(request_id, encoded, deadline, cancellation).await;
             }
         }
         delivery

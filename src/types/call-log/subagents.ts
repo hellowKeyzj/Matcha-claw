@@ -21,6 +21,7 @@ export type SubagentsCallOutcome =
   | 'toolConfigurationUpdated'
   | 'packageExported'
   | 'packageInstalled'
+  | 'packageInstalledCleanupFailed'
   | 'staleRevision'
   | 'invalidSkillKeys'
   | 'invalidToolKeys'
@@ -52,7 +53,7 @@ const OUTCOMES: ReadonlySet<string> = new Set<SubagentsCallOutcome>([
   'staleRevision', 'invalidSkillKeys', 'invalidToolKeys', 'unsupported', 'rejected',
   'outcomeUnknown', 'unexpectedOutcome', 'unavailable', 'workspaceInitializationFailed',
   'nativeDeleteFailed', 'sealedPurgeFailed', 'packageInstallFailedCompensated',
-  'packageInstallCompensationUnknown', 'packageInstallCompensationFailed',
+  'packageInstallCompensationUnknown', 'packageInstallCompensationFailed', 'packageInstalledCleanupFailed',
 ]);
 
 export function decodeSubagentsCallDetail(value: unknown): SubagentsCallDetail | null {

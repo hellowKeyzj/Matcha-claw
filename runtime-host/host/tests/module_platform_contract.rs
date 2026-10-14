@@ -307,10 +307,11 @@ fn host_http_router_runs_only_installed_route_descriptors() {
         );
     }
     assert!(
-        HOST_HTTP_ROUTER.contains("Arc<RwLock<Vec<platform::loopback::ModuleDescriptor>>>")
+        HOST_HTTP_ROUTER.contains("Arc<RwLock<RouteIndex>>")
             && HOST_HTTP_ROUTER
                 .contains("pub(crate) fn new(routes: Vec<platform::loopback::ModuleDescriptor>)")
-            && HOST_HTTP_ROUTER.contains("route.dispatch(request).await"),
+            && HOST_HTTP_ROUTER.contains("descriptor: route.clone()")
+            && HOST_HTTP_ROUTER.contains("route.descriptor.dispatch(request).await"),
         "Host HTTP router must execute installed route descriptors from the module registry"
     );
 }

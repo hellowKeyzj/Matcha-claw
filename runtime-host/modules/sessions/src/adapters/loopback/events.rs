@@ -1,6 +1,6 @@
 use platform::{
     capability::CapabilityDecisionVerifier,
-    loopback::{BodyPolicy, Request, RequestHead, Response, RouteHeadPlan},
+    loopback::{BodyPolicy, Request, RequestHead, Response, RouteHeadPlan, RoutePath},
 };
 
 use std::{
@@ -16,6 +16,7 @@ pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 const ENDPOINT: &str = "/api/sessions/events";
+pub(super) const PATHS: &[RoutePath] = &[RoutePath::ExactWithQuery(ENDPOINT)];
 const AUTHORIZATION_SCOPE: &str = "session:events:read";
 const AUTHORIZATION_CAPABILITY: &str = "session.events";
 const AUTHORIZATION_SUBJECT: &str = "session-events";

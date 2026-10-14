@@ -40,10 +40,8 @@ export interface DirectRuntimeHostChild {
   readonly stdout: RuntimeHostControlOutput;
   readonly stderr: RuntimeHostControlOutput;
   readonly kill: (signal: NodeJS.Signals) => boolean;
-  readonly once: {
-    (event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
-    (event: 'error', listener: (error: Error) => void): unknown;
-  };
+  readonly on: (event: 'error', listener: (error: Error) => void) => unknown;
+  readonly once: (event: 'exit' | 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void) => unknown;
 }
 
 export type DirectRuntimeHostSpawner = (
@@ -135,15 +133,13 @@ export async function launchDirectRuntimeHost(
   const stderr = captureLaunchStderr(child.stderr);
   streamRuntimeHostStartupTrace(child.stderr);
   const cronProviderTrace = captureE2ECronProviderTrace(child.stderr);
-  const exit = monitorChildExit(child, stderr);
   const controlClient = new RuntimeHostControlClient({
     stdin: child.stdin,
     stdout: child.stdout,
   });
-  void exit.completion.then(
-    () => controlClient.close(),
-    () => controlClient.close(),
-  );
+  const exit = monitorChildExit(child, stderr, () => controlClient.close());
+  // Publish disconnect before lifecycle observers detach this child's subscriptions.
+  exit.onExit(() => controlClient.close());
 
   try {
     await writeBootstrapFrame(child.stdin, frameBootstrapBytes(launch.bootstrapBytes));
@@ -155,6 +151,7 @@ export async function launchDirectRuntimeHost(
       ...(child.pid === undefined ? {} : { pid: child.pid }),
     }]);
   } catch (error) {
+    controlClient.close();
     await terminateFailedLaunch(child, exit);
     if (error instanceof DirectRuntimeHostDeliveryError) throw error;
     if (error instanceof RuntimeHostControlError) {
@@ -165,9 +162,6 @@ export async function launchDirectRuntimeHost(
     }
     throw new DirectRuntimeHostDeliveryError('CHILD_FAILED');
   }
-
-  // Publish disconnect before lifecycle observers detach this child's subscriptions.
-  exit.onExit(() => controlClient.close());
 
   let gracefulStop: Promise<void> | undefined;
   let forceTermination: Promise<void> | undefined;
@@ -180,11 +174,13 @@ export async function launchDirectRuntimeHost(
     onExit: (handler) => exit.onExit(handler),
     readE2ECronProviderTrace: cronProviderTrace,
     stop: () => {
+      controlClient.close();
       if (forceTermination) return forceTermination;
       gracefulStop ??= stopDirectRuntimeHost(child, exit);
       return gracefulStop;
     },
     forceKill: () => {
+      controlClient.close();
       forceTermination ??= forceTerminateDirectRuntimeHost(child, exit);
       return forceTermination;
     },
@@ -232,6 +228,7 @@ function normalizeEnvironmentName(name: string): string {
 function monitorChildExit(
   child: DirectRuntimeHostChild,
   stderr: () => string,
+  onError: () => void,
 ): ChildExitMonitor {
   let finished = false;
   let observed: DirectRuntimeHostExit | undefined;
@@ -261,13 +258,16 @@ function monitorChildExit(
     }]);
     finish({ kind: 'exited', code, signal });
   });
-  child.once('error', () => {
+  child.on('error', () => {
     traceDebug(() => ['[startup-trace]', {
       source: 'runtime-host',
       phase: 'exit',
       detail: 'process failed',
     }]);
-    finish({ kind: 'failed' });
+    onError();
+  });
+  child.once('close', (code, signal) => {
+    finish(child.pid === undefined ? { kind: 'failed' } : { kind: 'exited', code, signal });
   });
   return {
     completion,
@@ -303,6 +303,10 @@ async function terminateFailedLaunch(
   exit: ChildExitMonitor,
 ): Promise<void> {
   if (exit.isFinished()) return;
+  if (child.pid === undefined) {
+    await exit.completion;
+    return;
+  }
 
   try {
     child.kill('SIGKILL');
@@ -405,7 +409,9 @@ function waitUntilReady(
       return;
     }
 
-    stopWaitingForDisconnect = controlClient.onDisconnect(rejectWhenPending);
+    stopWaitingForDisconnect = controlClient.onDisconnect((error) => {
+      if (!exit.isFinished()) rejectWhenPending(error);
+    });
     if (settled) {
       stopWaitingForDisconnect();
       return;

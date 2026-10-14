@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -10,6 +11,7 @@ use serde_json::{Map, Value};
 
 use super::config_store::{OpenClawConfigMutation, OpenClawConfigStore, OpenClawConfigStoreError};
 use platform::state_dir::CanonicalStateDir;
+use super::plugin_companion::SkillEntryState;
 
 const MANIFEST_PATH: &[&str] = &["resources", "skills", "preinstalled-manifest.json"];
 const PACKAGED_SOURCE_ROOT: &[&str] = &["resources", "preinstalled-skills"];
@@ -70,21 +72,43 @@ pub(crate) fn reconcile(
             .get(&slug)
             .filter(|version| valid_version(version))
             .ok_or(PreinstalledSkillError::LockRejected)?;
-        match install_one(&skills_root, &source_root, &slug, version)? {
+        match install_one(state_dir, &skills_root, &source_root, &slug, version, entry.auto_enable)? {
             SkillInstallState::Installed => {
                 if entry.auto_enable {
-                    auto_enable.push(slug.clone());
+                    auto_enable.push(AutoEnableIntent {
+                        slug: slug.clone(),
+                        version: version.clone(),
+                        previous: read_marker(&skills_root.join(&slug))?
+                            .and_then(|marker| marker.auto_enable_previous),
+                    });
                 }
                 result.installed_slugs.push(slug);
             }
-            SkillInstallState::Unchanged => result.unchanged_slugs.push(slug),
+            SkillInstallState::Unchanged { auto_enable_pending } => {
+                if auto_enable_pending {
+                    auto_enable.push(AutoEnableIntent {
+                        slug: slug.clone(),
+                        version: version.clone(),
+                        previous: read_marker(&skills_root.join(&slug))?
+                            .and_then(|marker| marker.auto_enable_previous),
+                    });
+                }
+                result.unchanged_slugs.push(slug);
+            }
             SkillInstallState::Preserved => result.preserved_slugs.push(slug),
         }
     }
 
     if !auto_enable.is_empty() {
-        apply_auto_enable(state_dir, &auto_enable)?;
-        result.auto_enabled_slugs = auto_enable;
+        result.auto_enabled_slugs = apply_auto_enable(state_dir, &auto_enable)?;
+        for intent in &auto_enable {
+            set_marker_pending(
+                &skills_root.join(&intent.slug),
+                &intent.slug,
+                &intent.version,
+                false,
+            )?;
+        }
     }
     result.sort();
     Ok(result)
@@ -115,19 +139,23 @@ fn preinstalled_source_root(
 }
 
 fn install_one(
+    state_dir: &CanonicalStateDir,
     skills_root: &Path,
     source_root: &Path,
     slug: &str,
     version: &str,
+    auto_enable: bool,
 ) -> Result<SkillInstallState, PreinstalledSkillError> {
     let source = source_root.join(slug);
     validate_source(&source, source_root)?;
     let target = skills_root.join(slug);
     match target_state(&target, slug, version)? {
         TargetState::Missing => {
-            install_missing_target(skills_root, &source, &target, slug, version)
+            install_missing_target(state_dir, skills_root, &source, &target, slug, version, auto_enable)
         }
-        TargetState::Current => Ok(SkillInstallState::Unchanged),
+        TargetState::Current { auto_enable_pending } => {
+            Ok(SkillInstallState::Unchanged { auto_enable_pending })
+        }
         TargetState::Preserve => Ok(SkillInstallState::Preserved),
     }
 }
@@ -150,11 +178,13 @@ fn validate_source(source: &Path, source_root: &Path) -> Result<(), Preinstalled
 }
 
 fn install_missing_target(
+    state_dir: &CanonicalStateDir,
     skills_root: &Path,
     source: &Path,
     target: &Path,
     slug: &str,
     version: &str,
+    auto_enable: bool,
 ) -> Result<SkillInstallState, PreinstalledSkillError> {
     let staging = skills_root.join(format!(
         ".{slug}.preinstalled-{}-{}",
@@ -166,6 +196,22 @@ fn install_missing_target(
     let mut counts = CopyCounts::default();
     copy_directory(source, &staging, source, &mut counts)?;
     write_marker(&staging, slug, version)?;
+    if auto_enable {
+        let mut install_result = Ok(());
+        OpenClawConfigStore::new(state_dir.clone()).try_update_private_document(|document| {
+            install_result = (|| {
+                let previous = SkillEntryState::capture(document, slug, true)
+                    .map_err(PreinstalledSkillError::Config)?;
+                let mut marker = read_marker(&staging)?.ok_or(PreinstalledSkillError::MarkerRejected)?;
+                marker.auto_enable_pending = true;
+                marker.auto_enable_previous = Some(previous);
+                let bytes = serde_json::to_vec_pretty(&marker).map_err(|_| PreinstalledSkillError::MarkerRejected)?;
+                persist_marker(&staging, &bytes)
+            })();
+            Ok(OpenClawConfigMutation::unchanged())
+        }).map_err(PreinstalledSkillError::Config)?;
+        install_result?;
+    }
     match fs::rename(&staging, target) {
         Ok(()) => Ok(SkillInstallState::Installed),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -196,7 +242,7 @@ fn target_state(
         return Ok(TargetState::Preserve);
     };
     if marker.slug == slug && marker.version == version {
-        Ok(TargetState::Current)
+        Ok(TargetState::Current { auto_enable_pending: marker.auto_enable_pending })
     } else {
         Ok(TargetState::Preserve)
     }
@@ -209,7 +255,106 @@ fn write_marker(target: &Path, slug: &str, version: &str) -> Result<(), Preinsta
         version,
     })
     .map_err(|_| PreinstalledSkillError::MarkerRejected)?;
-    fs::write(target.join(MARKER_FILE), bytes).map_err(PreinstalledSkillError::io)
+    persist_marker(target, &bytes)
+}
+
+fn set_marker_pending(
+    target: &Path,
+    slug: &str,
+    version: &str,
+    pending: bool,
+) -> Result<(), PreinstalledSkillError> {
+    let mut marker = read_marker(target)?.ok_or(PreinstalledSkillError::MarkerRejected)?;
+    if marker.slug != slug || marker.version != version {
+        return Err(PreinstalledSkillError::MarkerRejected);
+    }
+    if marker.auto_enable_pending == pending {
+        return Ok(());
+    }
+    marker.auto_enable_pending = pending;
+    if !pending {
+        marker.auto_enable_previous = None;
+    }
+    let bytes = serde_json::to_vec_pretty(&marker)
+        .map_err(|_| PreinstalledSkillError::MarkerRejected)?;
+    persist_marker(target, &bytes)
+}
+
+fn persist_marker(target: &Path, bytes: &[u8]) -> Result<(), PreinstalledSkillError> {
+    let metadata = fs::symlink_metadata(target).map_err(PreinstalledSkillError::io)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || bytes.len() as u64 > MAX_MARKER_BYTES {
+        return Err(PreinstalledSkillError::MarkerRejected);
+    }
+    let marker = target.join(MARKER_FILE);
+    let previous = match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Some(metadata),
+        Ok(_) => return Err(PreinstalledSkillError::MarkerRejected),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(PreinstalledSkillError::Io(error)),
+    };
+    let temporary = target.join(format!(
+        ".preinstalled-marker-{}-{}",
+        std::process::id(),
+        NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary).map_err(PreinstalledSkillError::io)?;
+    let result = (|| {
+        #[cfg(windows)]
+        foundation::storage::set_private_mode(&temporary, foundation::storage::PrivateMode::File)
+            .map_err(|_| PreinstalledSkillError::MarkerRejected)?;
+        #[cfg(unix)]
+        if let Some(metadata) = &previous {
+            file.set_permissions(metadata.permissions()).map_err(PreinstalledSkillError::io)?;
+        }
+        file.write_all(bytes).map_err(PreinstalledSkillError::io)?;
+        file.sync_all().map_err(PreinstalledSkillError::io)
+    })();
+    drop(file);
+    let result = result.and_then(|()| {
+        publish_marker(&temporary, &marker, previous.is_some()).map_err(PreinstalledSkillError::io)
+    });
+    if result.is_err() {
+        match fs::remove_file(&temporary) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PreinstalledSkillError::Io(error)),
+        }
+    }
+    result
+}
+
+#[cfg(unix)]
+fn publish_marker(temporary: &Path, marker: &Path, _replace: bool) -> io::Result<()> {
+    fs::rename(temporary, marker)?;
+    fs::File::open(marker.parent().expect("marker has parent"))?.sync_all()
+}
+
+#[cfg(windows)]
+fn publish_marker(temporary: &Path, marker: &Path, replace: bool) -> io::Result<()> {
+    use std::{os::windows::ffi::OsStrExt, ptr::null_mut};
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    if !replace {
+        return platform::state_dir::publish_new_file(temporary, marker);
+    }
+    let marker: Vec<u16> = marker.as_os_str().encode_wide().chain([0]).collect();
+    let temporary: Vec<u16> = temporary.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: both paths are live NUL-terminated UTF-16 buffers; no backup is requested.
+    if unsafe {
+        ReplaceFileW(marker.as_ptr(), temporary.as_ptr(), std::ptr::null(), 0, null_mut(), null_mut())
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn read_marker(
@@ -286,18 +431,71 @@ fn copy_directory(
 
 fn apply_auto_enable(
     state_dir: &CanonicalStateDir,
-    slugs: &[String],
-) -> Result<(), PreinstalledSkillError> {
+    intents: &[AutoEnableIntent],
+) -> Result<Vec<String>, PreinstalledSkillError> {
+    let mut slugs = Vec::new();
+    let mut invalid = false;
     OpenClawConfigStore::new(state_dir.clone())
-        .update_private_document(|document| {
-            if apply_skill_entries(document, slugs) {
+        .try_update_private_document(|document| {
+            for intent in intents {
+                let marker = read_marker(&state_dir.as_path().join("skills").join(&intent.slug))
+                    .map_err(|_| OpenClawConfigStoreError::ReadFailed)?
+                    .ok_or(OpenClawConfigStoreError::InvalidDocument)?;
+                if marker.slug != intent.slug || marker.version != intent.version || !marker.auto_enable_pending {
+                    return Err(OpenClawConfigStoreError::InvalidDocument);
+                }
+                let eligible = match &intent.previous {
+                    Some(previous) => previous.permits(document, &intent.slug),
+                    None => skill_enabled(document, &intent.slug).map(|enabled| enabled != Some(false)),
+                };
+                match eligible {
+                    Ok(true) => slugs.push(intent.slug.clone()),
+                    Ok(false) => {}
+                    Err(_) => invalid = true,
+                }
+            }
+            if invalid {
+                return Err(OpenClawConfigStoreError::InvalidDocument);
+            }
+            Ok(if apply_skill_entries(document, &slugs) {
                 OpenClawConfigMutation::changed()
             } else {
                 OpenClawConfigMutation::unchanged()
-            }
+            })
         })
-        .map(|_| ())
-        .map_err(PreinstalledSkillError::Config)
+        .map_err(PreinstalledSkillError::Config)?;
+    Ok(slugs)
+}
+
+fn skill_enabled(
+    document: &super::config_store::OpenClawConfigDocument,
+    slug: &str,
+) -> Result<Option<bool>, OpenClawConfigStoreError> {
+    let Some(skills) = document.get("skills") else {
+        return Ok(None);
+    };
+    let Some(entries) = skills
+        .as_object()
+        .ok_or(OpenClawConfigStoreError::InvalidDocument)?
+        .get("entries")
+    else {
+        return Ok(None);
+    };
+    let Some(entry) = entries
+        .as_object()
+        .ok_or(OpenClawConfigStoreError::InvalidDocument)?
+        .get(slug)
+    else {
+        return Ok(None);
+    };
+    let Some(enabled) = entry
+        .as_object()
+        .ok_or(OpenClawConfigStoreError::InvalidDocument)?
+        .get("enabled")
+    else {
+        return Ok(None);
+    };
+    enabled.as_bool().map(Some).ok_or(OpenClawConfigStoreError::InvalidDocument)
 }
 
 fn apply_skill_entries(
@@ -397,14 +595,20 @@ fn object(value: Option<&Value>) -> Map<String, Value> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SkillInstallState {
     Installed,
-    Unchanged,
+    Unchanged { auto_enable_pending: bool },
     Preserved,
+}
+
+struct AutoEnableIntent {
+    slug: String,
+    version: String,
+    previous: Option<SkillEntryState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TargetState {
     Missing,
-    Current,
+    Current { auto_enable_pending: bool },
     Preserve,
 }
 
@@ -457,12 +661,18 @@ struct PreinstalledSkillMarker<'a> {
     version: &'a str,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreinstalledSkillMarkerOwned {
     owner: String,
     slug: String,
     version: String,
+    #[serde(default)]
+    auto_enable_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auto_enable_previous: Option<SkillEntryState>,
+    #[serde(flatten)]
+    metadata: Map<String, Value>,
 }
 
 enum JsonFileError {

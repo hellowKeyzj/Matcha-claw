@@ -26,9 +26,11 @@ pub(super) fn run(
     execution_source: Option<OwnedFd>,
     cleanup_directory: Option<OwnedFd>,
     cleanup_names: Vec<OsString>,
+    environment_descriptor: Option<OwnedFd>,
 ) -> io::Result<()> {
     acquire_cleanup_lease(cleanup_directory.as_ref())?;
-    let hello = match read_hello(host_input.as_raw_fd()) {
+    let hello_deadline = Instant::now() + cleanup_timeout();
+    let hello = match read_hello(host_input.as_raw_fd(), hello_deadline) {
         Ok(hello) => hello,
         Err(error) => {
             cleanup_after_host_loss(cleanup_directory.as_ref(), &cleanup_names)?;
@@ -39,6 +41,23 @@ pub(super) fn run(
         cleanup_after_host_loss(cleanup_directory.as_ref(), &cleanup_names)?;
         return Err(error);
     }
+    let environment = match environment_descriptor
+        .map(|descriptor| {
+            super::inherited_environment::read(
+                descriptor,
+                hello.nonce,
+                hello.request_id,
+                hello_deadline,
+            )
+        })
+        .transpose()
+    {
+        Ok(environment) => environment,
+        Err(error) => {
+            cleanup_after_host_loss(cleanup_directory.as_ref(), &cleanup_names)?;
+            return Err(error);
+        }
+    };
     let (sentinel_liveness, guardian_liveness) = match pipe_cloexec() {
         Ok(descriptors) => descriptors,
         Err(error) => {
@@ -60,6 +79,7 @@ pub(super) fn run(
         target_state_directory,
         private_descriptor,
         execution_source,
+        environment,
     ) {
         Ok(sentinel_pid) => sentinel_pid,
         Err(error) => {
@@ -100,8 +120,8 @@ pub(super) fn run(
     }
 }
 
-fn read_hello(host_input: i32) -> io::Result<Frame> {
-    let hello = read_frame(host_input, Instant::now() + cleanup_timeout())?;
+fn read_hello(host_input: i32, deadline: Instant) -> io::Result<Frame> {
+    let hello = read_frame(host_input, deadline)?;
     if hello.message != Message::Hello {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

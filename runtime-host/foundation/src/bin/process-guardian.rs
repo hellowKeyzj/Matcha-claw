@@ -23,6 +23,9 @@ pub(crate) mod guardian_runtime_descriptors;
 #[path = "../process/system/posix/guardian_timeout.rs"]
 pub(crate) mod guardian_timeout;
 #[cfg(unix)]
+#[path = "../process/system/posix/inherited_environment.rs"]
+pub(crate) mod inherited_environment;
+#[cfg(unix)]
 #[path = "../process/system/posix/io.rs"]
 pub(crate) mod io;
 #[cfg(unix)]
@@ -67,6 +70,7 @@ fn run() -> std::io::Result<()> {
     let target_state_directory = adopt_optional(guardian_descriptors::TARGET_STATE_DIRECTORY_FD)?;
     let private_descriptor = adopt_optional(guardian_descriptors::TARGET_PRIVATE_DESCRIPTOR_FD)?;
     let execution_source = adopt_optional(guardian_descriptors::TARGET_EXECUTION_SOURCE_FD)?;
+    let environment_descriptor = adopt_optional(guardian_descriptors::TARGET_ENVIRONMENT_FD)?;
     let cleanup_directory = adopt_optional(guardian_descriptors::GUARDIAN_CLEANUP_DIRECTORY_FD)?;
     let cleanup_names = match adopt_optional(guardian_descriptors::GUARDIAN_CLEANUP_NAMES_FD)? {
         Some(descriptor) => guardian_cleanup_bootstrap::read_names(descriptor)?,
@@ -87,6 +91,7 @@ fn run() -> std::io::Result<()> {
         execution_source,
         cleanup_directory,
         cleanup_names,
+        environment_descriptor,
     )
 }
 

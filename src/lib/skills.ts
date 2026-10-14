@@ -2,6 +2,7 @@ import { hostApiFetch, hostApiFetchDecoded } from './host-api';
 import { waitForCall } from './call-log-await';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
 import type { CallRecord } from '@/types/call-log';
+import type { WaitForCallOptions } from '@/types/call-log/wait';
 import {
   decodeSkillsOperationResult,
   type SkillBundle,
@@ -16,8 +17,8 @@ export type SkillsMutationResult = {
   invalidKeys?: string[];
 };
 
-async function skillsTerminal(receipt: unknown, command: string, input: Record<string, unknown>): Promise<CallRecord<'skills'>> {
-  const call = await waitForCall(decodeCallReceipt(receipt), 'skills');
+async function skillsTerminal(receipt: unknown, command: string, input: Record<string, unknown>, options?: WaitForCallOptions<'skills'>): Promise<CallRecord<'skills'>> {
+  const call = await waitForCall(decodeCallReceipt(receipt), 'skills', options);
   const access = ['skills.bundles.export', 'skills.exportBundles', 'sealedSkills.export', 'sealedSkills.exportCloud'].includes(command) ? 'read' : 'write';
   if (call.command !== command || call.detail.access !== access) throw new Error('Invalid Skills call identity');
   for (const key of ['skillKey', 'slug', 'version', 'enabled', 'uploadId', 'sha256'] as const) {
@@ -71,8 +72,9 @@ export async function waitForSkillsMutation(
   receipt: unknown,
   command: string,
   input: Record<string, unknown> = {},
+  options?: WaitForCallOptions<'skills'>,
 ): Promise<SkillsMutationResult> {
-  const call = await skillsTerminal(receipt, command, input);
+  const call = await skillsTerminal(receipt, command, input, options);
   const detail = call.detail;
   if (['skills.config', 'skills.updateConfig', 'skills.updateState'].includes(command)) {
     const result = await operationResult(call, input);
@@ -97,9 +99,9 @@ export async function waitForSkillsMutation(
   };
 }
 
-export async function hostSkillsMutation(path: string, input: Record<string, unknown>, command: string): Promise<SkillsMutationResult> {
+export async function hostSkillsMutation(path: string, input: Record<string, unknown>, command: string, options?: WaitForCallOptions<'skills'>): Promise<SkillsMutationResult> {
   const receipt = await hostApiFetch<unknown>(path, { method: 'POST', body: JSON.stringify(input) });
-  return waitForSkillsMutation(receipt, command, input);
+  return waitForSkillsMutation(receipt, command, input, options);
 }
 
 export async function hostExportSkillBundles(skillKeys: string[]): Promise<SkillBundle[]> {

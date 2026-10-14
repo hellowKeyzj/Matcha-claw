@@ -5,10 +5,13 @@ use platform::{
     call::{CallRecorder, CallStatus},
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
-use tokio::sync::Mutex;
+use tokio::{
+    sync::Mutex,
+    time::{Instant, timeout_at},
+};
 
 use crate::{
     RuntimeEndpointDirectorySource, projection::Delivery,
@@ -52,6 +55,7 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("runtime-directory"),
         vec![RouteDescriptor::bound(
             "runtime-directory.loopback",
+            &[RoutePath::ExactWithQuery(RUNTIME_DIRECTORY_ENDPOINT)],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],
@@ -60,7 +64,7 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
 
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     (pathname(&head.path) == RUNTIME_DIRECTORY_ENDPOINT).then(|| {
-        RouteHeadPlan::new(
+        RouteHeadPlan::body_deadline(
             body_policy_for_get_route(head.method.as_str()),
             DEFAULT_DEADLINE,
             timeout_response,
@@ -80,10 +84,14 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
 }
 
 async fn handle_runtime_endpoints(request: &Request, dependencies: Dependencies) -> Response {
+    let deadline = Instant::now() + DEFAULT_DEADLINE;
     let Some(authorization) = request.bearer_authorization() else {
         return runtime_endpoints_unauthorized();
     };
-    let mut verifier = dependencies.verifier.lock().await;
+    let mut verifier = match timeout_at(deadline, dependencies.verifier.lock()).await {
+        Ok(verifier) => verifier,
+        Err(_) => return timeout_response(),
+    };
     if verifier
         .verify(
             authorization,
@@ -115,15 +123,26 @@ async fn handle_runtime_endpoints(request: &Request, dependencies: Dependencies)
             eprintln!("[runtime-directory] call start could not be recorded: {error}");
         }
     }
-    let (status, response) = match dependencies.directory.runtime_endpoint_directory().await {
-        Ok(directory) => {
+    let directory = if Instant::now() >= deadline {
+        Err(())
+    } else {
+        timeout_at(deadline, dependencies.directory.runtime_endpoint_directory())
+            .await
+            .map_err(|_| ())
+    };
+    let (status, response) = match directory {
+        Ok(Ok(directory)) => {
             detail.count = Some(directory.endpoints().len());
             detail.result = Some(RuntimeControlCallResult::Succeeded);
             (CallStatus::Succeeded, Response::json(200, Delivery::Ok(directory).body()))
         }
-        Err(_) => {
+        Ok(Err(_)) => {
             detail.result = Some(RuntimeControlCallResult::Unavailable);
             (CallStatus::Failed, runtime_endpoints_unavailable())
+        }
+        Err(_) => {
+            detail.result = Some(RuntimeControlCallResult::Unknown);
+            (CallStatus::Unknown, timeout_response())
         }
     };
     if let Some(call) = call {

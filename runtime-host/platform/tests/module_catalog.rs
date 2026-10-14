@@ -83,6 +83,7 @@ fn event_descriptor(
 fn route(id: &'static str) -> RouteDescriptor {
     RouteDescriptor::bound(
         id,
+        &[loopback::RoutePath::Exact("/")],
         |_| {
             Some(RouteHeadPlan::new(
                 BodyPolicy::Empty,

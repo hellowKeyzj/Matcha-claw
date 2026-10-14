@@ -154,7 +154,7 @@ export function SelectionAssistantPanel({ projectId, relativePath, selection, mo
         return;
       }
       let callError: unknown;
-      const completion = waitForCall(receipt, 'wiki', { signal: task.controller.signal }).catch((cause: unknown) => { callError = cause; return null; });
+      const completion = waitForCall(receipt, 'wiki', { signal: task.controller.signal, timeoutMs: null }).catch((cause: unknown) => { callError = cause; return null; });
       let terminal: WikiSelectionTask;
       while (true) {
         if (callError) throw callError;

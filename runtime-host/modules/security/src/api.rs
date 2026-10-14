@@ -182,7 +182,10 @@ impl SecurityHandle {
 
     pub(crate) async fn rule_catalog_call(&self) -> Result<(), SecurityOwnerUnavailable> {
         let context = self.begin_call("security.ruleCatalog.read", &SecurityCallDetail::RuleCatalog).await?;
-        context.running().await.map_err(|_| SecurityOwnerUnavailable)?;
+        if context.running().await.is_err() {
+            let _ = context.finish(Effect::Unknown.status(), &SecurityCallDetail::RuleCatalog).await;
+            return Err(SecurityOwnerUnavailable);
+        }
         context.finish(Effect::Confirmed.status(), &SecurityCallDetail::RuleCatalog).await
             .map_err(|_| SecurityOwnerUnavailable)?;
         Ok(())

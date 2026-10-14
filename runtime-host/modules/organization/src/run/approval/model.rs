@@ -252,6 +252,9 @@ impl Approval {
         if self.resolution_for_idempotency(&idempotency_key).is_some() {
             return Err(ApprovalResolutionError::ConflictingIdempotencyKey);
         }
+        if resolved_at < self.facts.requested_at {
+            return Err(ApprovalResolutionError::InvalidResolution);
+        }
         self.status = decision.status();
         self.resolutions.push(ApprovalResolution {
             decision,

@@ -90,7 +90,9 @@ if (gotElectronLock && !isE2EMode) {
       app.exit(0);
     }
   } catch (error) {
-    logger.warn('[single-instance] failed to acquire process file lock, fallback to electron lock only', error);
+    gotFileLock = false;
+    logger.error('[single-instance] failed to acquire process file lock', error);
+    app.exit(1);
   }
 }
 const gotTheLock = gotElectronLock && gotFileLock;

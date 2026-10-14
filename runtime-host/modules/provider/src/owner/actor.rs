@@ -23,7 +23,7 @@ use crate::{
 
 use super::{
     accounts::{ProviderAccountsDesiredOutcome, ProviderAccountsMutation, ProviderAccountsOwner},
-    models::ProviderModelOwner,
+    models::{ProviderModelOwner, text_generation_unavailable_reason},
     routing::ProviderRoutingOwner,
 };
 
@@ -407,6 +407,7 @@ impl ProviderOwner {
     async fn handle_provider_query(&mut self, mut query: ProviderQuery) {
         let mut call = query.take_call();
         if ProviderCall::start(&mut call).await.is_err() {
+            ProviderCall::not_admitted(call).await;
             return;
         }
         match query {
@@ -789,6 +790,7 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
         _ => ProviderCall::start(&mut call).await,
     };
     if started.is_err() {
+        ProviderCall::not_admitted(call).await;
         return;
     }
     match query {
@@ -880,15 +882,14 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
                 let outcome = match outcome {
                     Ok(outcome) => outcome,
                     Err(error) => {
+                        let reason = text_generation_unavailable_reason(&error);
                         if let Some(stream) = &stream {
                             let _ = stream
                                 .0
                                 .send(crate::api::ProviderStreamMessage::Failed(error))
                                 .await;
                         }
-                        crate::ProviderTextGenerationOutcome::Unavailable {
-                            reason: crate::ProviderTextGenerationUnavailableReason::ProviderUnavailable,
-                        }
+                        crate::ProviderTextGenerationOutcome::Unavailable { reason }
                     }
                 };
                 session_trace("provider-generation.direct-completed", || json!({

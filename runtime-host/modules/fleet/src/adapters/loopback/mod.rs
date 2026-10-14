@@ -11,6 +11,7 @@ use platform::{
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request as LoopbackRequest, RequestHead,
         Response as LoopbackResponse, RouteDescriptor, RouteFuture, RouteHeadPlan, RouteOutcome,
+        RoutePath,
     },
 };
 use serde_json::Value;
@@ -66,6 +67,13 @@ pub(crate) fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("fleet"),
         vec![RouteDescriptor::bound(
             "fleet.loopback",
+            &[
+                RoutePath::Exact(authorization::AUTHORIZATION_ENDPOINT),
+                RoutePath::Exact(credentials::PATH),
+                RoutePath::Exact(crate::terminal_stream::PRIVATE_TERMINAL_WEBSOCKET_PATH),
+                RoutePath::Exact(crate::terminal_stream::TERMINAL_WEBSOCKET_PATH),
+                RoutePath::Exact(crate::runtime_agent_ingress::PATH),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],
@@ -475,7 +483,7 @@ impl Response {
 }
 
 fn is_fleet_route(method: &str, path: &str) -> bool {
-    method == "POST" && path == "/api/fleet"
+    method == "POST" && path == authorization::AUTHORIZATION_ENDPOINT
 }
 
 fn max_body_bytes(method: &str, path: &str) -> usize {

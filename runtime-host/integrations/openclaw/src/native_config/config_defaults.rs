@@ -18,9 +18,13 @@ const STARTUP_TOOL_DENY: &[&str] = &[
 ];
 
 pub(crate) fn apply_gateway_startup_defaults(document: &mut OpenClawConfigDocument) -> bool {
-    let agent_defaults_changed = apply_agent_defaults(document);
-    let tool_defaults_changed = apply_tool_defaults(document);
-    agent_defaults_changed || tool_defaults_changed
+    let mut changed = false;
+    if cfg!(windows) {
+        changed |= apply_agent_defaults(document);
+        changed |= apply_tool_defaults(document);
+    }
+    changed |= apply_workshop_defaults(document);
+    changed
 }
 
 fn apply_agent_defaults(document: &mut OpenClawConfigDocument) -> bool {
@@ -60,6 +64,19 @@ fn apply_tool_defaults(document: &mut OpenClawConfigDocument) -> bool {
         return false;
     }
     document.insert("tools".into(), Value::Object(tools));
+    true
+}
+
+fn apply_workshop_defaults(document: &mut OpenClawConfigDocument) -> bool {
+    let mut skills = object(document.get("skills"));
+    let mut workshop = object(skills.get("workshop"));
+    let mut autonomous = object(workshop.get("autonomous"));
+    if !ensure_string_if_missing(&mut autonomous, "mode", "off") {
+        return false;
+    }
+    workshop.insert("autonomous".into(), Value::Object(autonomous));
+    skills.insert("workshop".into(), Value::Object(workshop));
+    document.insert("skills".into(), Value::Object(skills));
     true
 }
 

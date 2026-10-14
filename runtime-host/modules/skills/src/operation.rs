@@ -6,6 +6,7 @@ use platform::{
     loopback::Response,
 };
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use crate::call::{self, Detail};
 
@@ -36,14 +37,15 @@ pub(crate) struct Operations {
 }
 
 impl Operations {
-    pub async fn submit<F>(
+    pub async fn submit<F, U>(
         &mut self,
         call: RecordedCall,
         reservation: Option<(crate::result::ResultAccess, usize)>,
         operation: F,
     ) -> Result<(), CallLogError>
     where
-        F: Future<Output = Response> + Send + 'static,
+        F: FnOnce(CancellationToken) -> U + Send + 'static,
+        U: Future<Output = Response> + Send + 'static,
     {
         let mut index = 0;
         while index < self.pending.len() {
@@ -81,7 +83,7 @@ impl Operations {
         self.tail = Some(completion);
         let context = call.context.clone();
         let call_id = context.id().clone();
-        let (task, _) = OperationHandle::spawn(move |_cancellation| async move {
+        let (task, _) = OperationHandle::spawn(move |cancellation| async move {
             if let Err(error) = call.accepted().await {
                 eprintln!("[skills-call] accepted transition failed: {error}");
                 results.remove(context.id()).await;
@@ -118,7 +120,7 @@ impl Operations {
                         call.command
                     );
                 }
-                let response = operation.await;
+                let response = operation(cancellation).await;
                 let (status, detail) = call::terminal(call.detail, &response);
                 if let Some(started) = started {
                     eprintln!(
@@ -143,6 +145,9 @@ impl Operations {
 
     pub async fn stop(&mut self) {
         self.closed = true;
+        for (_, operation) in &self.pending {
+            operation.cancel();
+        }
         for (_, mut operation) in self.pending.drain(..) {
             if operation.join().await.is_err() {
                 eprintln!("[skills-call] shutdown join failed");

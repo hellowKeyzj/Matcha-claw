@@ -55,7 +55,10 @@ impl Adapter {
             let result = self.await_drain().await;
             let _ = self.record_drain(result);
         }
-        if matches!(self.terminal, Some(Terminal::Drained(_))) {
+        if matches!(
+            self.terminal,
+            Some(Terminal::Drained(_) | Terminal::Terminated(_))
+        ) {
             self.terminal = None;
         }
         if self.custody.is_some() || self.terminal.is_some() {

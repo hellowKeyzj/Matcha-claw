@@ -327,7 +327,7 @@ async function dispatchSessionSend(
       if ('goal' in projected.body && projected.body.goal?.replayed) deps.sessionObservers.releaseSend(demand);
       else deps.sessionObservers.bindSend(demand, projected.body.runId);
     }
-    else if (projected && (projected.status === 400 || ('outcome' in projected.body
+    else if (projected && (projected.status === 400 || (request.input.intent === undefined && projected.status === 503) || ('outcome' in projected.body
       && (projected.body.outcome === 'target_rejected' || projected.body.outcome === 'unavailable'
         || projected.body.outcome === 'unsupported')))) {
       deps.sessionObservers.releaseSend(demand);
@@ -336,15 +336,10 @@ async function dispatchSessionSend(
       status: response.status,
       projected: Boolean(projected),
     }));
-    return projected ?? (request.input.intent === undefined
-      ? { status: 503, body: SESSION_SEND_UNAVAILABLE }
-      : { status: 200, body: { outcome: 'unknown' } });
-  } catch (error) {
-    if (request.input.intent !== undefined) {
-      deps.sessionObservers.retainUnknownGoalSend(demand);
-      return { status: 200, body: { outcome: 'unknown' } };
-    }
-    throw error;
+    return projected ?? { status: 200, body: { outcome: 'unknown' } };
+  } catch {
+    if (request.input.intent !== undefined) deps.sessionObservers.retainUnknownGoalSend(demand);
+    return { status: 200, body: { outcome: 'unknown' } };
   }
 }
 

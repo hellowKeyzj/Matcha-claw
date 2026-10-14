@@ -71,21 +71,12 @@ impl TeamMemberIntroductions for ProviderTeamMemberIntroductions {
                     cancellation.clone(),
                 ),
             );
-            let outcome = tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => {
-                    session_trace("runtime.team.introduction.provider.cancelled", || json!({
-                        "roleHash": role_hash, "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
-                    }));
-                    return Err(MemberIntroductionError::Cancelled);
-                }
-                outcome = generation => outcome.map_err(|_| {
-                    session_trace("runtime.team.introduction.provider.transport-failed", || json!({
-                        "roleHash": role_hash, "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
-                    }));
-                    MemberIntroductionError::Unavailable
-                })?,
-            };
+            let outcome = generation.await.map_err(|_| {
+                session_trace("runtime.team.introduction.provider.transport-failed", || json!({
+                    "roleHash": role_hash, "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
+                }));
+                MemberIntroductionError::Unavailable
+            })?;
             session_trace("runtime.team.introduction.provider.completed", || {
                 let (category, finish_reason, text_bytes, nonempty) = match &outcome {
                     ProviderTextGenerationOutcome::Generated { response, .. } => (
@@ -127,6 +118,21 @@ impl TeamMemberIntroductions for ProviderTeamMemberIntroductions {
                     }
                     ProviderTextGenerationUnavailableReason::CredentialUnavailable => {
                         MemberIntroductionError::CredentialUnavailable
+                    }
+                    ProviderTextGenerationUnavailableReason::Authentication => {
+                        MemberIntroductionError::ModelAuthentication
+                    }
+                    ProviderTextGenerationUnavailableReason::PermissionDenied => {
+                        MemberIntroductionError::ModelPermissionDenied
+                    }
+                    ProviderTextGenerationUnavailableReason::RateLimited => {
+                        MemberIntroductionError::ModelRateLimited
+                    }
+                    ProviderTextGenerationUnavailableReason::Deadline => {
+                        MemberIntroductionError::ModelDeadline
+                    }
+                    ProviderTextGenerationUnavailableReason::InvalidResponse => {
+                        MemberIntroductionError::ModelInvalidResponse
                     }
                     ProviderTextGenerationUnavailableReason::ProviderUnavailable => {
                         MemberIntroductionError::Unavailable

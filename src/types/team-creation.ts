@@ -1,5 +1,9 @@
 import type { ManualTeamCandidate } from '@/stores/teams';
-import type { OrganizationProvisionProgress } from './call-log/organization';
+import type { OrganizationProvisionProgress, TeamCreationFailure } from './call-log/organization';
+
+export interface TeamCreationObserver {
+  onFailure?: (failure: TeamCreationFailure) => void;
+}
 
 export type ManualTeamCreationPhase =
   | 'submitting'
@@ -19,7 +23,7 @@ type ManualTeamCreationSnapshot = {
   phase: ManualTeamCreationPhase;
   preparationObserved: boolean;
   progress: ManualTeamCreationProgress | null;
-  error: string | null;
+  failure: TeamCreationFailure | null;
 };
 
 export type ManualTeamCreation = ManualTeamCreationSnapshot & (

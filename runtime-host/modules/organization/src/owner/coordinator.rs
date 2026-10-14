@@ -23,7 +23,10 @@ pub struct TeamRunCoordinatorHandle {
 }
 
 pub(crate) struct TeamRunCoordinator {
-    service: ServiceHandle<()>,
+    service: ServiceHandle<super::supervisor::TeamRunSupervisor>,
+    retained: Option<super::supervisor::TeamRunSupervisor>,
+    input: TeamRunCoordinatorInput,
+    join_failed: bool,
 }
 
 pub(super) enum TeamRunCoordinatorRequest {
@@ -46,17 +49,36 @@ impl TeamRunCoordinator {
     ) -> (Self, TeamRunCoordinatorHandle) {
         let (requests, receiver) = mpsc::channel(TEAM_RUN_MAINTENANCE_CAPACITY);
         let handle = TeamRunCoordinatorHandle { requests };
+        let recovery_input = input.clone();
         let (service, _) = ServiceHandle::spawn(move |cancellation| async move {
-            super::supervisor::run(input, admission_changes, receiver, cancellation).await;
+            super::supervisor::run(input, admission_changes, receiver, cancellation).await
         });
-        (Self { service }, handle)
+        (Self { service, retained: None, input: recovery_input, join_failed: false }, handle)
     }
 
     pub fn cancel(&self) {
         self.service.cancel();
     }
 
-    pub async fn join(&mut self) -> Result<(), tokio::task::JoinError> {
-        self.service.join().await
+    pub async fn join(&mut self) -> Result<(), crate::api::OrganizationShutdownError> {
+        if self.join_failed {
+            return Err(crate::api::OrganizationShutdownError::Join);
+        }
+        if let Some(retained) = &mut self.retained {
+            retained.retry_settlements(&self.input).await;
+        } else {
+            match self.service.join().await {
+                Ok(supervisor) => self.retained = Some(supervisor),
+                Err(_) => {
+                    self.join_failed = true;
+                    return Err(crate::api::OrganizationShutdownError::Join);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn has_pending_settlements(&self) -> bool {
+        self.retained.as_ref().is_some_and(super::supervisor::TeamRunSupervisor::has_pending_settlements)
     }
 }

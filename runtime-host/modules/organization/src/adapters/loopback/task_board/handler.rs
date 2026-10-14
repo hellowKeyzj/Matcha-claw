@@ -8,7 +8,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-const ROUTE: &str = "/api/team/task-board";
+pub(crate) const ROUTE: &str = "/api/team/task-board";
 
 pub(crate) async fn handle_loopback(
     method: String,

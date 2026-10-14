@@ -5,7 +5,7 @@ use crate::credentials::Outcome;
 use platform::capability::CapabilityDecisionVerifier;
 
 const OPERATION_ID: &str = "channels.credentials.validate";
-const AUTHORIZATION_ENDPOINT: &str = "/api/channels/credentials/validate";
+pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/channels/credentials/validate";
 const AUTHORIZATION_SCOPE: &str = "channels:write";
 const AUTHORIZATION_SUBJECT: &str = "channel-credentials";
 const MAX_CONFIG_KEYS: usize = 64;

@@ -1,12 +1,14 @@
-use std::{sync::Arc, time::Instant};
+use std::{sync::{Arc, OnceLock}, time::Instant};
 
-use foundation::pipeline::{PipelineContext, map_concurrent};
+use foundation::pipeline::map_concurrent;
 use platform::trace::{identifier_hash, session_trace};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     MemberIntroductionError, OrganizationRuntimeDirectory,
     OrganizationFacts, RoleMaterializationAgent, TeamMaterialization, TeamMemberIntroductions,
+    TeamCreationFailure, TeamCreationFailureReason, TeamCreationStage,
     TeamProvisionMemberStatus, TeamProvisionObserver, TeamProvisionProgress, TeamProvisionStage,
     TeamProvisionUpdate, team::LEADER_ROLE_ID,
 };
@@ -17,8 +19,8 @@ const TEAMRUN_MARKER_PREFIX: &str = "<!-- matchaclaw-teamrun:";
 const TEAMRUN_MARKER_SUFFIX: &str = " -->";
 
 pub(super) enum PreparationError {
-    Rejected,
-    Unavailable,
+    Rejected(TeamCreationFailure),
+    Unavailable(TeamCreationFailure),
 }
 
 pub(super) async fn prepare_manual_team(
@@ -27,6 +29,7 @@ pub(super) async fn prepare_manual_team(
     runtimes: &dyn OrganizationRuntimeDirectory,
     introductions: Option<&Arc<dyn TeamMemberIntroductions>>,
     observer: Option<&TeamProvisionObserver>,
+    cancellation: CancellationToken,
 ) -> Result<TeamMaterialization, PreparationError> {
     let started = platform::trace::enabled().then(Instant::now);
     let definition = materialization.definition();
@@ -45,13 +48,17 @@ pub(super) async fn prepare_manual_team(
                     "definition_mismatch"
                 },
             );
-            return Err(PreparationError::Unavailable);
+            return Err(PreparationError::Unavailable(TeamCreationFailure::new(
+                TeamCreationStage::Submitting, TeamCreationFailureReason::StoreConflict,
+            )));
         }
         let saved = facts
             .materialization_recovery_request(team_id)
             .ok_or_else(|| {
                 preparation_end(started, "saved_request_missing");
-                PreparationError::Unavailable
+                PreparationError::Unavailable(TeamCreationFailure::new(
+                    TeamCreationStage::Submitting, TeamCreationFailureReason::StoreInvalid,
+                ))
             })?;
         let saved_markdown = saved
             .intent()
@@ -64,7 +71,9 @@ pub(super) async fn prepare_manual_team(
                 .with_leader_agents_markdown(markdown)
                 .map_err(|_| {
                     preparation_end(started, "saved_markdown_assembly_failed");
-                    PreparationError::Unavailable
+                    PreparationError::Unavailable(TeamCreationFailure::new(
+                        TeamCreationStage::Submitting, TeamCreationFailureReason::StoreInvalid,
+                    ))
                 })?,
             None => materialization,
         };
@@ -88,7 +97,9 @@ pub(super) async fn prepare_manual_team(
             Ok(materialization)
         } else {
             preparation_end(started, "saved_request_mismatch");
-            Err(PreparationError::Unavailable)
+            Err(PreparationError::Unavailable(TeamCreationFailure::new(
+                TeamCreationStage::Submitting, TeamCreationFailureReason::StoreConflict,
+            )))
         };
     }
 
@@ -101,7 +112,9 @@ pub(super) async fn prepare_manual_team(
         })
     {
         preparation_end(started, "unsafe_definition");
-        return Err(PreparationError::Rejected);
+        return Err(PreparationError::Rejected(TeamCreationFailure::new(
+            TeamCreationStage::Submitting, TeamCreationFailureReason::InvalidInput,
+        )));
     }
 
     let mut members = Vec::new();
@@ -116,11 +129,15 @@ pub(super) async fn prepare_manual_team(
             .find(|role| role.role_id() == intent.role())
             .ok_or_else(|| {
                 preparation_end(started, "role_binding_missing");
-                PreparationError::Rejected
+                PreparationError::Rejected(TeamCreationFailure::new(
+                    TeamCreationStage::Submitting, TeamCreationFailureReason::InvalidInput,
+                ))
             })?;
         let RoleMaterializationAgent::External { agent } = intent.agent() else {
             preparation_end(started, "invalid_agent_binding");
-            return Err(PreparationError::Rejected);
+            return Err(PreparationError::Rejected(TeamCreationFailure::new(
+                TeamCreationStage::Submitting, TeamCreationFailureReason::InvalidInput,
+            )));
         };
         members.push((role.name().to_owned(), role.role_id().clone()));
         agents.push(agent.clone());
@@ -143,29 +160,31 @@ pub(super) async fn prepare_manual_team(
     if !members.is_empty() {
         let introductions = introductions.ok_or_else(|| {
             preparation_end(started, "introduction_port_missing");
-            PreparationError::Unavailable
+            PreparationError::Unavailable(TeamCreationFailure::new(
+                TeamCreationStage::GeneratingIntroductions, TeamCreationFailureReason::Unavailable,
+            ))
         })?;
         let runtime = runtimes
             .team_runtime_for_endpoint(materialization.request().intent().endpoint())
             .ok_or_else(|| {
                 preparation_end(started, "runtime_missing");
-                PreparationError::Unavailable
+                PreparationError::Unavailable(TeamCreationFailure::new(
+                    TeamCreationStage::ReadingProfiles, TeamCreationFailureReason::Unavailable,
+                ))
             })?;
-        let pipeline = PipelineContext::silent_in_memory("manual-team-member-introductions");
+        let cancellation = cancellation.child_token();
         let profiles_started = platform::trace::enabled().then(Instant::now);
         session_trace(
             "runtime.team.profiles.start",
             || json!({"memberCount": members.len()}),
         );
-        let profiles = pipeline
-            .step("read-member-profiles", move |_| {
-                Box::pin(async move { runtime.read_team_member_profiles(agents).await })
-            })
+        let profiles = runtime
+            .read_team_member_profiles_cancellable(agents, cancellation.clone())
             .await
             .map_err(|error| {
-                session_trace("runtime.team.profiles.end", || json!({"reason": introduction_error(&error), "elapsedMs": profiles_started.map(|started| started.elapsed().as_millis())}));
+                session_trace("runtime.team.profiles.end", || json!({"failure": error, "elapsedMs": profiles_started.map(|started| started.elapsed().as_millis())}));
                 preparation_end(started, "read_profiles_failed");
-                PreparationError::Unavailable
+                PreparationError::Unavailable(error)
             })?;
         session_trace(
             "runtime.team.profiles.end",
@@ -173,7 +192,9 @@ pub(super) async fn prepare_manual_team(
         );
         if profiles.len() != members.len() {
             preparation_end(started, "profile_count_mismatch");
-            return Err(PreparationError::Unavailable);
+            return Err(PreparationError::Unavailable(TeamCreationFailure::new(
+                TeamCreationStage::ReadingProfiles, TeamCreationFailureReason::InvalidResponse,
+            )));
         }
         if let Some(observer) = observer {
             observer
@@ -188,10 +209,12 @@ pub(super) async fn prepare_manual_team(
             .enumerate()
             .map(|(index, ((name, role_id), profile))| (index, name, role_id, profile))
             .collect();
+        let first_failure = Arc::new(OnceLock::new());
         let sections = map_concurrent(INTRODUCTION_CONCURRENCY, requests, |(index, member_name, member_role_id, profile)| {
-            let pipeline = pipeline.clone();
+            let cancellation = cancellation.clone();
             let introductions = Arc::clone(introductions);
             let observer = observer.cloned();
+            let first_failure = Arc::clone(&first_failure);
             async move {
                 if let Some(observer) = &observer {
                     observer.report(TeamProvisionUpdate::Member {
@@ -205,45 +228,39 @@ pub(super) async fn prepare_manual_team(
                 let role_hash = platform::trace::enabled().then(|| identifier_hash(member_role_id.as_str()));
                 let generated_started = platform::trace::enabled().then(Instant::now);
                 session_trace("runtime.team.introduction.start", || json!({"memberIndex": index, "roleIdHash": role_hash}));
-                let result = pipeline
-                    .step("generate-member-introduction", move |context| {
-                        Box::pin(async move {
-                            let cancellation = context.cancellation();
-                            let output = tokio::select! {
-                                biased;
-                                _ = cancellation.cancelled() => {
-                                    return Err(MemberIntroductionError::Cancelled);
-                                }
-                                output = async {
-                                    let request = crate::application::member_introduction::prepare(
-                                        &member_name,
-                                        member_role_id,
-                                        profile,
-                                    );
-                                    introductions.generate(request, cancellation.clone()).await
-                                } => output?,
-                            };
-                            if !output.complete {
-                                return Err(MemberIntroductionError::InvalidOutput);
-                            }
-                            let output = output.text.trim();
-                            if output.is_empty()
-                                || output.contains(TEAMRUN_MARKER_PREFIX)
-                                || output.len() > MAX_LEADER_MARKDOWN_BYTES
-                            {
-                                session_trace("runtime.team.introduction.output", || json!({
-                                    "memberIndex": index,
-                                    "reason": if output.is_empty() { "empty_output" } else if output.contains(TEAMRUN_MARKER_PREFIX) { "reserved_marker" } else { "output_bytes_exceeded" },
-                                    "outputBytes": output.len(),
-                                }));
-                                return Err(MemberIntroductionError::InvalidOutput);
-                            }
-                            Ok(output.to_owned())
-                        })
-                    })
-                    .await;
-                if result.is_err() {
-                    pipeline.cancel();
+                let result = async {
+                    if cancellation.is_cancelled() {
+                        return Err(MemberIntroductionError::Cancelled);
+                    }
+                    let request = crate::application::member_introduction::prepare(
+                        &member_name,
+                        member_role_id,
+                        profile,
+                    );
+                    let output = introductions.generate(request, cancellation.clone()).await?;
+                    if !output.complete {
+                        return Err(MemberIntroductionError::InvalidOutput);
+                    }
+                    let output = output.text.trim();
+                    if output.is_empty()
+                        || output.contains(TEAMRUN_MARKER_PREFIX)
+                        || output.len() > MAX_LEADER_MARKDOWN_BYTES
+                    {
+                        session_trace("runtime.team.introduction.output", || json!({
+                            "memberIndex": index,
+                            "reason": if output.is_empty() { "empty_output" } else if output.contains(TEAMRUN_MARKER_PREFIX) { "reserved_marker" } else { "output_bytes_exceeded" },
+                            "outputBytes": output.len(),
+                        }));
+                        return Err(MemberIntroductionError::InvalidOutput);
+                    }
+                    Ok(output.to_owned())
+                }
+                .await;
+                if let Err(error) = &result {
+                    if !matches!(error, MemberIntroductionError::Cancelled) {
+                        let _ = first_failure.set(generation_failure(index, error));
+                    }
+                    cancellation.cancel();
                 }
                 if let Some(observer) = &observer {
                     observer.report(TeamProvisionUpdate::Member {
@@ -266,14 +283,16 @@ pub(super) async fn prepare_manual_team(
                     Ok(body) => Ok(format!(
                         "\n\n### {name}\n- role_id：{role_id}\n- 专长与职责：{body}"
                     )),
-                    Err(error) => Err(error),
+                    Err(error) => Err(generation_failure(index, &error)),
                 }
             }
         })
         .await
-        .map_err(|error| {
-            preparation_end(started, if matches!(error, MemberIntroductionError::Cancelled) { "cancelled" } else { "generate_failed" });
-            PreparationError::Unavailable
+        .map_err(|mut failure| {
+            failure.stage = TeamCreationStage::GeneratingIntroductions;
+            let failure = first_failure.get().copied().unwrap_or(failure);
+            preparation_end(started, if failure.reason == TeamCreationFailureReason::Cancelled { "cancelled" } else { "generate_failed" });
+            PreparationError::Unavailable(failure)
         })?;
         for section in sections {
             markdown.push_str(&section);
@@ -281,11 +300,15 @@ pub(super) async fn prepare_manual_team(
     }
     if markdown.len() > MAX_LEADER_MARKDOWN_BYTES {
         preparation_end(started, "total_bytes_exceeded");
-        return Err(PreparationError::Rejected);
+        return Err(PreparationError::Rejected(TeamCreationFailure::new(
+            TeamCreationStage::GeneratingIntroductions, TeamCreationFailureReason::InvalidOutput,
+        )));
     }
     let result = materialization
         .with_leader_agents_markdown(markdown)
-        .map_err(|_| PreparationError::Rejected);
+        .map_err(|_| PreparationError::Rejected(TeamCreationFailure::new(
+            TeamCreationStage::GeneratingIntroductions, TeamCreationFailureReason::InvalidInput,
+        )));
     preparation_end(
         started,
         if result.is_ok() {
@@ -304,10 +327,33 @@ fn preparation_end(started: Option<Instant>, reason: &'static str) {
     );
 }
 
+fn generation_failure(index: usize, error: &MemberIntroductionError) -> TeamCreationFailure {
+    let mut failure = TeamCreationFailure::new(TeamCreationStage::GeneratingIntroductions, match error {
+        MemberIntroductionError::CredentialMissing => TeamCreationFailureReason::CredentialMissing,
+        MemberIntroductionError::CredentialUnavailable => TeamCreationFailureReason::CredentialUnavailable,
+        MemberIntroductionError::ModelAuthentication => TeamCreationFailureReason::ModelAuthentication,
+        MemberIntroductionError::ModelPermissionDenied => TeamCreationFailureReason::ModelPermissionDenied,
+        MemberIntroductionError::ModelRateLimited => TeamCreationFailureReason::ModelRateLimited,
+        MemberIntroductionError::ModelDeadline => TeamCreationFailureReason::ModelDeadline,
+        MemberIntroductionError::ModelInvalidResponse => TeamCreationFailureReason::ModelInvalidResponse,
+        MemberIntroductionError::Unavailable => TeamCreationFailureReason::Unavailable,
+        MemberIntroductionError::Unsupported => TeamCreationFailureReason::Unsupported,
+        MemberIntroductionError::InvalidOutput => TeamCreationFailureReason::InvalidOutput,
+        MemberIntroductionError::Cancelled => TeamCreationFailureReason::Cancelled,
+    });
+    failure.member_index = Some(index);
+    failure
+}
+
 fn introduction_error(error: &MemberIntroductionError) -> &'static str {
     match error {
         MemberIntroductionError::CredentialMissing => "credential_missing",
         MemberIntroductionError::CredentialUnavailable => "credential_unavailable",
+        MemberIntroductionError::ModelAuthentication => "model_authentication",
+        MemberIntroductionError::ModelPermissionDenied => "model_permission_denied",
+        MemberIntroductionError::ModelRateLimited => "model_rate_limited",
+        MemberIntroductionError::ModelDeadline => "model_deadline",
+        MemberIntroductionError::ModelInvalidResponse => "model_invalid_response",
         MemberIntroductionError::Unavailable => "unavailable",
         MemberIntroductionError::Unsupported => "unsupported",
         MemberIntroductionError::InvalidOutput => "invalid_output",

@@ -309,7 +309,8 @@ function isConnectorKind(value: unknown): boolean {
 }
 
 function isConnectorId(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0 && value.length <= 128;
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 128
+    && !/\p{Cc}/u.test(value);
 }
 
 function optionalText(value: unknown): boolean {

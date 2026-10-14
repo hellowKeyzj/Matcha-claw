@@ -383,11 +383,15 @@ impl std::fmt::Debug for PackageExportReceipt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageInstallReceipt {
     agent_id: String,
+    pub(crate) cleanup_failure: Option<PackageInstallFailure>,
 }
 
 impl PackageInstallReceipt {
     pub fn new(agent_id: String) -> Self {
-        Self { agent_id }
+        Self {
+            agent_id,
+            cleanup_failure: None,
+        }
     }
 
     pub fn agent_id(&self) -> &str {
@@ -631,6 +635,7 @@ pub enum ToolSelection {
 pub enum SkillConfigurationOutcome {
     View(SkillConfigurationView),
     Updated(SkillConfigurationView),
+    AppliedReadbackFailed(ConfigurationReadFailure),
     Stale(SkillConfigurationView),
     InvalidSkillKeys {
         unknown_skill_keys: Vec<String>,
@@ -646,6 +651,7 @@ pub enum SkillConfigurationOutcome {
 pub enum ToolConfigurationOutcome {
     View(ToolConfigurationView),
     Updated(ToolConfigurationView),
+    AppliedReadbackFailed(ConfigurationReadFailure),
     Stale(ToolConfigurationView),
     InvalidToolKeys(Vec<String>),
     Unsupported,

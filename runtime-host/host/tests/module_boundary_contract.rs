@@ -748,7 +748,7 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
             .join("modules/organization/src/adapters/start_gate_send_hook.rs"),
     )
     .expect("read organization send hook");
-    let host_mcp = fs::read_to_string(Path::new(HOST_SRC).join("mcp.rs"))
+    let host_mcp = fs::read_to_string(Path::new(HOST_SRC).join("mcp/stdio.rs"))
         .expect("read Host MCP composition");
     let organization_mcp_tools = fs::read_to_string(
         Path::new(RUNTIME_HOST_ROOT).join("modules/organization/src/adapters/mcp/tools.rs"),
@@ -773,8 +773,8 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
         !host_lib.contains("mod artifacts;")
             && !host_lib.contains("pub mod sealed_resource;")
             && !host_lib.contains("mod organization_adapters;")
-            && !host_lib.contains("mod mcp;"),
-        "Host lib must not own migrated second-stage modules or delegate-only MCP wrapper"
+            && host_lib.contains("pub mod mcp;"),
+        "Host lib must expose MCP transport composition without re-owning migrated second-stage business modules"
     );
     assert!(
         sealed_module.contains("SealedResourceModule")
@@ -805,12 +805,14 @@ fn second_stage_owners_live_in_modules_with_host_only_wiring_ports() {
             && organization_send_hook.contains("start_gate_prompt_plan")
             && organization_terminal.contains("team_message_terminal_observed")
             && host_mcp.contains("ToolCatalog::new")
-            && host_mcp.contains("runtime_host::team_mcp::team_provider")
-            && host_mcp.contains("wiki::wiki_mcp_provider")
+            && host_mcp.contains("use organization::TeamRunMcpFacade;")
+            && host_mcp.contains("TeamRunMcpFacade::new")
+            && host_mcp.contains("use wiki::WikiMcpFacade;")
+            && host_mcp.contains("WikiMcpFacade::new")
             && organization_mcp_tools.contains("impl ToolProvider for TeamRunMcpFacade")
             && organization_mcp_tools.contains("\"team_graph_context\"")
             && organization_mcp_tools.contains("\"inputSchema\"")
-            && wiki_module.contains("wiki_mcp_provider")
+            && wiki_module.contains("pub use adapters::mcp::{WikiMcpFacade, is_wiki_tool};")
             && wiki_mcp_tools.contains("impl ToolProvider for WikiMcpFacade")
             && wiki_mcp_tools.contains("\"wiki_retrieve_context\"")
             && wiki_mcp_tools.contains("\"wiki_apply_generated_pages\"")

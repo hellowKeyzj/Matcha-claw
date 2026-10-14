@@ -7,7 +7,7 @@ pub mod handler;
 
 const ACCOUNTS_OPERATION_ID: &str = "channels.status.read";
 const SNAPSHOT_OPERATION_ID: &str = "channels.snapshot.read";
-const AUTHORIZATION_ENDPOINT: &str = "/api/channels/status";
+pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/channels/status";
 const AUTHORIZATION_SCOPE: &str = "channels:read";
 const AUTHORIZATION_SUBJECT: &str = "channel-status";
 

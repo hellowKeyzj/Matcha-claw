@@ -4,16 +4,17 @@ import { waitForCall } from '@/lib/call-log-await';
 import { subscribeBrowserRecovery, subscribeHostEvent } from '@/lib/host-events';
 import { isTeamGraphSourcePortActions, type TeamDesignRecord, type TeamDesignSnapshot, type TeamDesignTarget } from '@/types/team-design';
 import { createSessionTraceId, logSessionTrace, summarizeError, summarizeIdentifier } from '@/lib/session-trace';
-import { matchesOrganizationIdentity } from '@/types/call-log/organization';
+import { matchesOrganizationIdentity, type TeamCreationFailure } from '@/types/call-log/organization';
 import type { CallRecord } from '@/types/call-log';
 import type { WaitForCallOptions } from '@/types/call-log/wait';
-import type { ManualTeamCreation, ManualTeamCreationPhase } from '@/types/team-creation';
+import type { ManualTeamCreation, TeamCreationObserver } from '@/types/team-creation';
 import { useChatStore } from '@/stores/chat';
 import { buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
 import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types';
 import { buildSessionIdentityKey, type SessionIdentity } from '../types/desktop/runtime-address';
 import {
   cancelTeamRun,
+  classifyTeamCreationFailure,
   createTeamRun,
   deleteTeamInstance,
   exportTeamRunGraphYaml,
@@ -147,6 +148,10 @@ export type TeamSkillCreationPlan =
   | { action: 'open_existing'; teamId: string }
   | { action: 'replace_required'; teamId: string; currentVersion: string; incomingVersion: string };
 
+interface TeamOperationOptions {
+  errorFeedback?: 'store' | 'caller';
+}
+
 interface TeamsState {
   teams: TeamMeta[];
   activeTeamId: string | null;
@@ -193,12 +198,12 @@ interface TeamsState {
   replaceTeamSkillVersion: (input: { teamId: string; expectedCurrentVersion: string; candidate: TeamSkillCandidate }) => string;
   setActiveTeam: (teamId: string | null) => void;
   setActiveRun: (teamId: string, runId: string | null) => void;
-  deleteTeam: (teamId: string) => Promise<TeamDeleteResult>;
-  provisionTeamAgents: (teamId: string, options?: Pick<WaitForCallOptions<'organization'>, 'onUpdate'>) => Promise<void>;
-  createRun: (teamId: string, options?: { onPhase?: (phase: 'initializing_sessions' | 'loading_team') => void }) => Promise<TeamRunSummary | undefined>;
+  deleteTeam: (teamId: string, options?: TeamOperationOptions) => Promise<TeamDeleteResult>;
+  provisionTeamAgents: (teamId: string, options?: TeamOperationOptions & TeamCreationObserver & Pick<WaitForCallOptions<'organization'>, 'onUpdate'>) => Promise<void>;
+  createRun: (teamId: string, options?: TeamOperationOptions & TeamCreationObserver & { onPhase?: (phase: 'initializing_sessions' | 'loading_team') => void }) => Promise<TeamRunSummary | undefined>;
   syncRunList: (teamId: string) => Promise<void>;
   deleteRun: (teamId: string, runId?: string) => Promise<void>;
-  refreshSnapshot: (teamId: string, options?: { force?: boolean }) => Promise<void>;
+  refreshSnapshot: (teamId: string, options?: TeamOperationOptions & { force?: boolean }) => Promise<void>;
   submitGraphPatch: (teamId: string, operations: TeamGraphPatchOperation[]) => Promise<void>;
   exportGraphYaml: (teamId: string) => Promise<TeamGraphYamlExportResult>;
   importGraphYaml: (teamId: string, yaml: string) => Promise<TeamGraphYamlImportResult>;
@@ -584,6 +589,12 @@ function freezeManualTeamCandidate(input: ManualTeamCandidate): ManualTeamCandid
 }
 
 class ConfirmedTeamProvisionFailure extends Error {}
+
+function reportTeamError(teamId: string, error: unknown, options?: TeamOperationOptions): void {
+  if (options?.errorFeedback === 'caller') return;
+  const message = error instanceof Error ? error.message : String(error);
+  useTeamsStore.setState((state) => ({ errorByTeamId: { ...state.errorByTeamId, [teamId]: message } }));
+}
 
 function isConfirmedProvisionFailure(call: CallRecord<'organization'>): boolean {
   return (call.status === 'failed' || call.status === 'rejected')
@@ -1236,23 +1247,34 @@ export const useTeamsStore = create<TeamsState>()(
         let teamId: string | null = null;
         let callId: string | null = null;
         let revision = 0;
-        set({ manualTeamCreation: { status: 'running', cleanup: 'none', teamId, candidate, startedAt, endedAt: null, phase: 'submitting', preparationObserved: false, progress: null, error: null } });
-        const updatePhase = (phase: ManualTeamCreationPhase) => set((state) => {
-          const current = state.manualTeamCreation;
-          return current?.candidate === candidate && current.status === 'running'
-            ? { manualTeamCreation: { ...current, phase } } : {};
-        });
+        let runPhase: 'initializing_sessions' | 'loading_team' | null = null;
+        let callbackFailure: TeamCreationFailure | null = null;
+        const memberCount = candidate.manualTeam.members.filter((member) => !member.isLeader).length;
+        const onFailure = (failure: TeamCreationFailure) => {
+          if (failure.memberIndex !== undefined && failure.memberIndex >= memberCount) throw new Error('Manual team failure does not match the selected members');
+          callbackFailure ??= { ...failure };
+        };
+        set({ manualTeamCreation: { status: 'running', cleanup: 'none', teamId, candidate, startedAt, endedAt: null, phase: 'submitting', preparationObserved: false, progress: null, failure: null } });
+        const updatePhase = (phase: 'initializing_sessions' | 'loading_team') => {
+          runPhase = phase;
+          set((state) => {
+            const current = state.manualTeamCreation;
+            return current?.candidate === candidate && current.status === 'running'
+              ? { manualTeamCreation: { ...current, phase } } : {};
+          });
+        };
         try {
           teamId = get().createManualTeam(candidate);
           set((state) => ({ manualTeamCreation: { ...state.manualTeamCreation!, teamId } }));
-          const memberCount = candidate.manualTeam.members.filter((member) => !member.isLeader).length;
-          await get().provisionTeamAgents(teamId, { onUpdate: (call) => {
+          await get().provisionTeamAgents(teamId, { errorFeedback: 'caller', onFailure, onUpdate: (call) => {
             const current = get().manualTeamCreation;
             if (current?.candidate !== candidate || current.status !== 'running') return;
             if (callId !== null && call.callId !== callId) throw new Error('Manual team progress does not match the provision call');
             if (call.revision <= revision) return;
             const progress = call.detail.provision?.progress;
             if (progress && progress.members.length !== memberCount) throw new Error('Manual team progress does not match the selected members');
+            const failure = call.detail.creationFailure;
+            if (failure?.memberIndex !== undefined && failure.memberIndex >= memberCount) throw new Error('Manual team failure does not match the selected members');
             callId = call.callId;
             revision = call.revision;
             set((state) => {
@@ -1263,28 +1285,33 @@ export const useTeamsStore = create<TeamsState>()(
                   phase: progress?.stage ?? current.phase,
                   preparationObserved: current.preparationObserved || progress?.stage === 'reading_profiles' || progress?.stage === 'generating_introductions',
                   progress: progress ? { ...progress, members: [...progress.members], callId: call.callId, revision: call.revision } : null,
+                  failure: current.failure ?? (failure ? { ...failure } : null),
                 } } : {};
             });
           } });
-          await get().createRun(teamId, { onPhase: updatePhase });
+          await get().createRun(teamId, { errorFeedback: 'caller', onFailure, onPhase: updatePhase });
           set({ manualTeamCreation: null });
           return teamId;
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          const current = get().manualTeamCreation!;
+          const observed = get().manualTeamCreation!;
+          const failure: TeamCreationFailure | null = observed.failure ?? callbackFailure
+            ?? (teamId === null ? { stage: 'submitting', reason: 'invalid_input' }
+              : error instanceof ConfirmedTeamProvisionFailure ? null
+                : classifyTeamCreationFailure(error, runPhase ?? 'submitting'));
+          const current = { ...observed, failure };
           if (teamId === null) {
-            set({ manualTeamCreation: { ...current, status: 'failed', cleanup: 'confirmed', error: message, endedAt: Date.now() } });
+            set({ manualTeamCreation: { ...current, status: 'failed', cleanup: 'confirmed', endedAt: Date.now() } });
           } else if (error instanceof ConfirmedTeamProvisionFailure) {
-            set({ manualTeamCreation: { ...current, status: 'cleaning_up', cleanup: 'none', error: message, endedAt: null } });
+            set({ manualTeamCreation: { ...current, status: 'cleaning_up', cleanup: 'none', endedAt: null } });
             try {
-              const result = await get().deleteTeam(teamId);
+              const result = await get().deleteTeam(teamId, { errorFeedback: 'caller' });
               if (result.state !== 'tombstoned' || result.teamId !== teamId) throw new Error('Manual team cleanup was not confirmed', { cause: error });
-              set({ manualTeamCreation: { ...current, status: 'failed', cleanup: 'confirmed', error: message, endedAt: Date.now() } });
+              set({ manualTeamCreation: { ...current, status: 'failed', cleanup: 'confirmed', endedAt: Date.now() } });
             } catch {
-              set({ manualTeamCreation: { ...current, status: 'unconfirmed', cleanup: 'unknown', error: message, endedAt: Date.now() } });
+              set({ manualTeamCreation: { ...current, status: 'unconfirmed', cleanup: 'unknown', endedAt: Date.now() } });
             }
           } else {
-            set({ manualTeamCreation: { ...current, status: 'unconfirmed', cleanup: 'none', error: message, endedAt: Date.now() } });
+            set({ manualTeamCreation: { ...current, status: 'unconfirmed', cleanup: 'none', endedAt: Date.now() } });
           }
           throw error;
         }
@@ -1352,26 +1379,24 @@ export const useTeamsStore = create<TeamsState>()(
           };
         });
       },
-      deleteTeam: async (teamId) => {
+      deleteTeam: async (teamId, options) => {
         const state = get();
         const team = state.teams.find((row) => row.id === teamId);
         if (!team) {
-          const message = `Team not found: ${teamId}`;
-          set((state) => ({
-            errorByTeamId: { ...state.errorByTeamId, [teamId]: message },
-          }));
-          throw new Error(message);
+          const error = new Error(`Team not found: ${teamId}`);
+          reportTeamError(teamId, error, options);
+          throw error;
         }
 
         const storedRunIds = state.runIdsByTeamId[teamId] ?? [];
         const runIds = storedRunIds.length > 0 ? storedRunIds : team.activeRunId ? [team.activeRunId] : [];
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
-          errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
+          ...(options?.errorFeedback === 'caller' ? {} : { errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined } }),
         }));
         try {
           const receipt = await deleteTeamInstance({ teamId });
-          const call = await waitForCall(receipt, 'organization');
+          const call = await waitForCall(receipt, 'organization', { timeoutMs: null });
           if (call.command !== 'team.delete'
             || !await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, teamId)
             || call.status !== 'succeeded' || call.detail.outcome !== 'tombstoned') {
@@ -1421,11 +1446,8 @@ export const useTeamsStore = create<TeamsState>()(
         } catch (error) {
           set((state) => ({
             loadingByTeamId: { ...state.loadingByTeamId, [teamId]: false },
-            errorByTeamId: {
-              ...state.errorByTeamId,
-              [teamId]: error instanceof Error ? error.message : String(error),
-            },
           }));
+          reportTeamError(teamId, error, options);
           throw error;
         }
       },
@@ -1433,6 +1455,8 @@ export const useTeamsStore = create<TeamsState>()(
         const team = resolveTeamMeta(get().teams, teamId);
         let traceId = createSessionTraceId('team-provision');
         const started = traceId ? performance.now() : 0;
+        let admitted = false;
+        let failure: TeamCreationFailure | null = null;
         logSessionTrace('renderer.team.provision.start', traceId, () => ({
           teamHash: summarizeIdentifier(team.id).hash,
           sourceType: team.sourceType,
@@ -1440,7 +1464,7 @@ export const useTeamsStore = create<TeamsState>()(
         }));
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
-          errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
+          ...(options?.errorFeedback === 'caller' ? {} : { errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined } }),
         }));
         try {
           const receipt = await provisionTeamAgents({
@@ -1450,6 +1474,7 @@ export const useTeamsStore = create<TeamsState>()(
             ...(team.sourceType ? { sourceType: team.sourceType } : {}),
             ...(team.manualTeam ? { manualTeam: team.manualTeam } : {}),
           });
+          admitted = true;
           const callTraceId = traceId ? `session-trace:team-call:${receipt.callId.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5')}` : null;
           logSessionTrace('renderer.team.provision.admitted', traceId, () => ({
             callId: receipt.callId,
@@ -1457,13 +1482,13 @@ export const useTeamsStore = create<TeamsState>()(
             elapsedMs: performance.now() - started,
           }));
           traceId = callTraceId;
-          const call = await waitForCall(receipt, 'organization', options?.onUpdate ? { onUpdate: async (call) => {
+          const call = await waitForCall(receipt, 'organization', options?.onUpdate ? { timeoutMs: null, onUpdate: async (call) => {
             if (call.command !== 'team.provisionAgents'
               || !await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, team.id)) {
               throw new Error('Team provision progress does not match the requested team');
             }
             await options.onUpdate!(call);
-          } } : undefined);
+          } } : { timeoutMs: null });
           const identityMatches = call.command === 'team.provisionAgents'
             && await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, team.id);
           logSessionTrace('renderer.team.provision.terminal', traceId, () => ({
@@ -1476,6 +1501,7 @@ export const useTeamsStore = create<TeamsState>()(
             commit: call.detail.provision?.commit ?? null,
             elapsedMs: performance.now() - started,
           }));
+          if (identityMatches && call.detail.creationFailure) failure = { ...call.detail.creationFailure };
           if (call.command !== 'team.provisionAgents'
             || !identityMatches
             || call.status !== 'succeeded' || call.detail.outcome !== 'materialized'
@@ -1484,6 +1510,9 @@ export const useTeamsStore = create<TeamsState>()(
               ? 'Team provision outcome is unknown'
               : 'Team provision was not confirmed';
             if (identityMatches && isConfirmedProvisionFailure(call)) throw new ConfirmedTeamProvisionFailure(message);
+            if (identityMatches && (call.status === 'unknown' || call.detail.outcome === 'outcome_unknown' || call.detail.provision?.commit === 'outcome_unknown')) {
+              failure ??= { stage: 'submitting', reason: 'outcome_unknown' };
+            }
             throw new Error(message);
           }
         } catch (error) {
@@ -1491,12 +1520,11 @@ export const useTeamsStore = create<TeamsState>()(
             error: summarizeError(error),
             elapsedMs: performance.now() - started,
           }));
-          set((state) => ({
-            errorByTeamId: {
-              ...state.errorByTeamId,
-              [teamId]: error instanceof Error ? error.message : String(error),
-            },
-          }));
+          if (!(error instanceof ConfirmedTeamProvisionFailure)) {
+            failure ??= classifyTeamCreationFailure(error, 'submitting', admitted ? 'observation_interrupted' : 'unavailable');
+          }
+          reportTeamError(teamId, error, options);
+          if (failure) options?.onFailure?.(failure);
           throw error;
         } finally {
           set((state) => ({
@@ -1508,34 +1536,37 @@ export const useTeamsStore = create<TeamsState>()(
         const state = get();
         const team = resolveTeamMeta(state.teams, teamId);
         const runId = createGeneratedTeamRunId();
+        let phase: 'initializing_sessions' | 'loading_team' = 'initializing_sessions';
+        let failure: TeamCreationFailure | null = null;
         set((state) => ({
           loadingByTeamId: { ...state.loadingByTeamId, [teamId]: true },
-          errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
+          ...(options?.errorFeedback === 'caller' ? {} : { errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined } }),
         }));
         try {
-          options?.onPhase?.('initializing_sessions');
-          const created = await createTeamRun({
+          options?.onPhase?.(phase);
+          const payload = {
             teamId: team.id,
             packagePath: team.packagePath,
             runId,
             idempotencyKey: idempotencyKey(team.id, `create:${runId}`),
             ...(team.sourceType ? { sourceType: team.sourceType } : {}),
-          });
+          };
+          const created = options?.onFailure
+            ? await createTeamRun(payload, { onFailure: (observed) => { failure ??= { ...observed }; } })
+            : await createTeamRun(payload);
           set((state) => ({
             teams: state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: created.runId, updatedAt: Date.now() } : team),
             runIdsByTeamId: { ...state.runIdsByTeamId, [teamId]: appendRunId(state.runIdsByTeamId[teamId], created.runId) },
           }));
-          options?.onPhase?.('loading_team');
+          phase = 'loading_team';
+          options?.onPhase?.(phase);
           await get().syncRunList(teamId);
-          await get().refreshSnapshot(teamId, { force: true });
+          await get().refreshSnapshot(teamId, { force: true, errorFeedback: 'caller' });
           return get().runByTeamId[teamId] ?? get().runsById[created.runId] ?? created;
         } catch (error) {
-          set((state) => ({
-            errorByTeamId: {
-              ...state.errorByTeamId,
-              [teamId]: error instanceof Error ? error.message : String(error),
-            },
-          }));
+          failure ??= classifyTeamCreationFailure(error, phase);
+          reportTeamError(teamId, error, options);
+          options?.onFailure?.(failure);
           throw error;
         } finally {
           set((state) => ({
@@ -1588,7 +1619,7 @@ export const useTeamsStore = create<TeamsState>()(
         }));
         try {
           const receipt = await deleteTeamRun({ runId });
-          const call = await waitForCall(receipt, 'organization');
+          const call = await waitForCall(receipt, 'organization', { timeoutMs: null });
           if (call.command !== 'team.runDelete'
             || !await matchesOrganizationIdentity(call.detail.runId, call.detail.runIdHash, runId)
             || call.status !== 'succeeded' || call.detail.outcome !== 'purged') {
@@ -1629,57 +1660,61 @@ export const useTeamsStore = create<TeamsState>()(
       },
       refreshSnapshot: async (teamId, options) => {
         const inFlight = snapshotInFlightByTeamId.get(teamId);
+        const entry = inFlight ?? { runId: get().teams.find((team) => team.id === teamId)?.activeRunId, dirty: false, promise: Promise.resolve() };
         if (inFlight) {
           if (options?.force || inFlight.runId !== get().teams.find((team) => team.id === teamId)?.activeRunId) inFlight.dirty = true;
-          return inFlight.promise;
-        }
-        const entry = { runId: get().teams.find((team) => team.id === teamId)?.activeRunId, dirty: false, promise: Promise.resolve() };
-        snapshotInFlightByTeamId.set(teamId, entry);
-        entry.promise = (async () => {
-          do {
-            entry.dirty = false;
-            const state = get();
-            const team = state.teams.find((team) => team.id === teamId);
-            if (!team) return;
-            const runId = team.activeRunId;
-            entry.runId = runId;
-            if (!runId) {
-              set((state) => emptyTeamRunProjection(teamId, state));
-              return;
-            }
-            let snapshot: TeamRunSnapshotRecord;
-            try {
-              snapshot = await readTeamRunSnapshot({
-                runId,
-                eventCursor: state.eventCursorByRunId[runId],
-                eventLimit: 200,
-              });
-            } catch (error) {
+        } else {
+          snapshotInFlightByTeamId.set(teamId, entry);
+          entry.promise = (async () => {
+            do {
+              entry.dirty = false;
+              const state = get();
+              const team = state.teams.find((team) => team.id === teamId);
+              if (!team) return;
+              const runId = team.activeRunId;
+              entry.runId = runId;
+              if (!runId) {
+                set((state) => emptyTeamRunProjection(teamId, state));
+                return;
+              }
+              let snapshot: TeamRunSnapshotRecord;
+              try {
+                snapshot = await readTeamRunSnapshot({
+                  runId,
+                  eventCursor: state.eventCursorByRunId[runId],
+                  eventLimit: 200,
+                });
+              } catch (error) {
+                if (entry.dirty) continue;
+                throw error;
+              }
               if (entry.dirty) continue;
-              if (get().teams.find((team) => team.id === teamId)?.activeRunId === runId) {
-                set((state) => ({ errorByTeamId: { ...state.errorByTeamId, [teamId]: error instanceof Error ? error.message : String(error) } }));
-              }
-              throw error;
-            }
-            if (entry.dirty) continue;
-            set((state) => {
-              if (!state.teams.some((team) => team.id === teamId)) return {};
-              const isRequestedRunStillActive = state.teams.find((team) => team.id === teamId)?.activeRunId === runId;
-              const patch = teamRunSnapshotPatch(teamId, runId, snapshot, state);
-              if (!isRequestedRunStillActive) {
-                return {
-                  runsById: patch.runsById,
-                  eventsByRunId: patch.eventsByRunId,
-                  eventCursorByRunId: patch.eventCursorByRunId,
-                };
-              }
-              return patch;
-            });
-          } while (entry.dirty);
-        })().finally(() => {
-          if (snapshotInFlightByTeamId.get(teamId) === entry) snapshotInFlightByTeamId.delete(teamId);
-        });
-        return entry.promise;
+              set((state) => {
+                if (!state.teams.some((team) => team.id === teamId)) return {};
+                const isRequestedRunStillActive = state.teams.find((team) => team.id === teamId)?.activeRunId === runId;
+                const patch = teamRunSnapshotPatch(teamId, runId, snapshot, state);
+                if (!isRequestedRunStillActive) {
+                  return {
+                    runsById: patch.runsById,
+                    eventsByRunId: patch.eventsByRunId,
+                    eventCursorByRunId: patch.eventCursorByRunId,
+                  };
+                }
+                return patch;
+              });
+            } while (entry.dirty);
+          })().finally(() => {
+            if (snapshotInFlightByTeamId.get(teamId) === entry) snapshotInFlightByTeamId.delete(teamId);
+          });
+        }
+        try {
+          await entry.promise;
+        } catch (error) {
+          if (get().teams.find((team) => team.id === teamId)?.activeRunId === entry.runId) {
+            reportTeamError(teamId, error, options);
+          }
+          throw error;
+        }
       },
       submitGraphPatch: async (teamId, operations) => {
         const state = get();

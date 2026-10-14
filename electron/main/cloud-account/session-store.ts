@@ -57,9 +57,10 @@ export async function clearCloudAccountSession(): Promise<void> {
   sessionStoreWrite = new Promise<void>((resolve) => { release = resolve; });
   await previous;
   try {
-    await unlink(sessionStorePath()).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') throw error;
-    });
+    const path = sessionStorePath();
+    try { await unlink(path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+    await syncContainingDirectory(path);
   } finally {
     release();
   }

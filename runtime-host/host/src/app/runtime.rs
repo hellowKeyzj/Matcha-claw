@@ -23,7 +23,9 @@ pub(crate) struct RuntimeService {
     pub(crate) host: Option<Host>,
     pub(crate) events: Option<crate::composition::HostEvents>,
     pub(crate) owner: Option<host_actor::Owner>,
+    control_events: Option<tokio::sync::mpsc::Receiver<crate::composition::HostEvent>>,
     pub(crate) handles: HostHandles,
+    pub(crate) http_completion: Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>,
     gateway_auto_start: bool,
 }
 
@@ -37,7 +39,9 @@ pub(crate) async fn start(input: HostInput) -> Result<RuntimeService, ControlErr
         host: Some(host),
         events: Some(events),
         owner: None,
+        control_events: None,
         handles,
+        http_completion: None,
         gateway_auto_start,
     })
 }
@@ -73,16 +77,19 @@ where
         .owner
         .as_mut()
         .expect("Host owner must be spawned before private control starts");
-    let owner_events = owner
-        .take_events()
-        .expect("owner event receiver must be taken before control starts");
+    runtime.control_events = Some(
+        owner
+            .take_events()
+            .expect("owner event receiver must be taken before control starts"),
+    );
     run_loop(
         owner.handle(),
-        owner_events,
+        runtime.control_events.as_mut().expect("control event receiver must remain owned until shutdown"),
         runtime.handles.peer.clone(),
         private_control,
         runtime.handles.observation.clone(),
         runtime.gateway_auto_start,
+        &mut runtime.http_completion,
         control_input,
         control_output,
     )
@@ -107,10 +114,11 @@ where
             .expect("test webhook token");
     let install_plan = prepare_module_install(InstallModulesInput {
         handles: &runtime.handles,
-        team_mcp: crate::team_mcp::route::descriptor(
+        mcp: crate::mcp::route::descriptor(
             runtime.handles.organization.clone(),
             verifier.clone(),
             runtime.handles.runtime_directory.clone(),
+            runtime.handles.wiki.handle().clone(),
         ),
         verifier: Arc::new(tokio::sync::Mutex::new(verifier)),
         webhook_token,

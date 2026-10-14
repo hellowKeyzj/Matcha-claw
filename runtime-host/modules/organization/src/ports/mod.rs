@@ -6,6 +6,7 @@ pub mod member_introduction;
 pub mod native_effects;
 pub mod provision_progress;
 pub mod session;
+pub mod team_creation_failure;
 
 pub use delivery::{
     ActivityExecutionOutcome, ActivityExecutionRequest, ActivityExecutionRequestError,
@@ -43,6 +44,10 @@ pub use provision_progress::{
 pub use session::{
     InvalidRoleSessionRef, ROLE_SESSION_REF_INITIAL, RoleSessionIdentityResolver, RoleSessionPort,
     RoleSessionReceipt, RoleSessionRef, RoleSessionSlot, RoleSessionWindow,
+};
+
+pub use team_creation_failure::{
+    TeamCreationFailure, TeamCreationFailureReason, TeamCreationFile, TeamCreationStage,
 };
 
 pub trait TeamRunAdmission: Send + Sync {

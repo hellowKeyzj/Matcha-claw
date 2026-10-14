@@ -98,7 +98,7 @@ export function DedupPanel({ projectId, modelRef, busy, onChanged }: Readonly<{
         await hostWikiCancelDedup({ projectId, taskId: scanTask.taskId }).catch(() => toast.error(t('dedup.cancelFailed')));
         return;
       }
-      const call = await waitForCall(receipt, 'wiki', { signal: scanTask.controller.signal });
+      const call = await waitForCall(receipt, 'wiki', { signal: scanTask.controller.signal, timeoutMs: null });
       if (scanTask.controller.signal.aborted || signal.aborted) return;
       if (call.callId !== receipt.callId || call.command !== 'dedup.detect' || call.detail.operation !== 'dedup.detect' || call.status === 'unknown') throw new Error(t('actions.resultUnconfirmed'));
       terminal = true;
@@ -147,7 +147,7 @@ export function DedupPanel({ projectId, modelRef, busy, onChanged }: Readonly<{
           : await hostWikiResumeDedup({ projectId, taskId: task!.id });
       if (signal.aborted) return;
       await refreshQueue(signal).catch(() => { if (!signal.aborted) setQueueError(t('dedup.queueFailed')); });
-      const call = await waitForCall(receipt, 'wiki', { signal });
+      const call = await waitForCall(receipt, 'wiki', { signal, timeoutMs: null });
       if (signal.aborted) return;
       if (call.callId !== receipt.callId || call.command !== operation || call.detail.operation !== operation || call.status === 'unknown') throw new Error(t('actions.resultUnconfirmed'));
       const completed = call.status === 'succeeded' && call.detail.outcome === 'completed';

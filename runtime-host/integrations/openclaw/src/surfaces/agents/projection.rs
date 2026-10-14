@@ -57,7 +57,12 @@ pub(crate) fn agents_read(
             agents: list.agents.into_iter().map(agent_summary).collect(),
         },
         Err(super::AgentsReadFailure::Rejected) => agents::Outcome::Rejected,
-        Err(super::AgentsReadFailure::Unavailable | super::AgentsReadFailure::Protocol) => {
+        Err(
+            super::AgentsReadFailure::Unavailable
+            | super::AgentsReadFailure::Protocol
+            | super::AgentsReadFailure::Deadline
+            | super::AgentsReadFailure::Authentication,
+        ) => {
             agents::Outcome::Unavailable
         }
     }
@@ -69,7 +74,12 @@ pub(crate) fn agents_files(
     match result {
         Ok(files) => agents::Outcome::Files(agent_files(files)),
         Err(super::AgentsReadFailure::Rejected) => agents::Outcome::Rejected,
-        Err(super::AgentsReadFailure::Unavailable | super::AgentsReadFailure::Protocol) => {
+        Err(
+            super::AgentsReadFailure::Unavailable
+            | super::AgentsReadFailure::Protocol
+            | super::AgentsReadFailure::Deadline
+            | super::AgentsReadFailure::Authentication,
+        ) => {
             agents::Outcome::Unavailable
         }
     }
@@ -81,7 +91,12 @@ pub(crate) fn agents_file(
     match result {
         Ok(file) => agents::Outcome::File(agent_file(file)),
         Err(super::AgentsReadFailure::Rejected) => agents::Outcome::Rejected,
-        Err(super::AgentsReadFailure::Unavailable | super::AgentsReadFailure::Protocol) => {
+        Err(
+            super::AgentsReadFailure::Unavailable
+            | super::AgentsReadFailure::Protocol
+            | super::AgentsReadFailure::Deadline
+            | super::AgentsReadFailure::Authentication,
+        ) => {
             agents::Outcome::Unavailable
         }
     }
@@ -265,6 +280,11 @@ pub(crate) fn skill_configuration_outcome(
         native_agent_configuration::SkillConfigurationOutcome::Updated(view) => {
             agents::SkillConfigurationOutcome::Updated(skill_configuration_view(view))
         }
+        native_agent_configuration::SkillConfigurationOutcome::AppliedReadbackFailed(failure) => {
+            agents::SkillConfigurationOutcome::AppliedReadbackFailed(configuration_read_failure(
+                failure,
+            ))
+        }
         native_agent_configuration::SkillConfigurationOutcome::Stale(view) => {
             agents::SkillConfigurationOutcome::Stale(skill_configuration_view(view))
         }
@@ -357,6 +377,11 @@ pub(crate) fn tool_configuration_outcome(
         }
         native_agent_configuration::ToolConfigurationOutcome::Updated(view) => {
             agents::ToolConfigurationOutcome::Updated(tool_configuration_view(view))
+        }
+        native_agent_configuration::ToolConfigurationOutcome::AppliedReadbackFailed(failure) => {
+            agents::ToolConfigurationOutcome::AppliedReadbackFailed(configuration_read_failure(
+                failure,
+            ))
         }
         native_agent_configuration::ToolConfigurationOutcome::Stale(view) => {
             agents::ToolConfigurationOutcome::Stale(tool_configuration_view(view))

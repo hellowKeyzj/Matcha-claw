@@ -234,6 +234,7 @@ impl ProviderModelProjection {
 struct ProjectionPlan<'a> {
     accounts: BTreeMap<String, &'a ProviderAccount>,
     keys: BTreeMap<String, ProviderKey>,
+    transport: BTreeMap<String, ProviderProjection>,
     removed_transport: Vec<ProviderKey>,
     provider_plugins: BTreeMap<&'static str, bool>,
     text: Vec<agent_models::ProviderModels>,
@@ -280,6 +281,7 @@ impl<'a> ProjectionPlan<'a> {
             }
         }
 
+        let mut transport = BTreeMap::new();
         let mut text = Vec::new();
         let mut empty_text = Vec::new();
         let mut empty_transport = Vec::new();
@@ -291,6 +293,9 @@ impl<'a> ProjectionPlan<'a> {
             let key = keys
                 .get(account_id)
                 .expect("every projected account receives a provider key");
+            if let Some(projection) = transport_projection(account, key)? {
+                transport.insert(account_id.clone(), projection);
+            }
             let models = catalog
                 .models()
                 .iter()
@@ -353,6 +358,7 @@ impl<'a> ProjectionPlan<'a> {
         Ok(Self {
             accounts: projected_accounts,
             keys,
+            transport,
             removed_transport,
             provider_plugins,
             text,
@@ -373,7 +379,16 @@ impl<'a> ProjectionPlan<'a> {
                 .keys
                 .get(account_id)
                 .expect("every projected account receives a provider key");
-            changed |= apply_transport(account, key, document);
+            if let Some(projection) = self.transport.get(account_id) {
+                changed |= projection.apply_to_document(document);
+            } else if matches!(account.configuration().kind(), ProviderAccountKind::Chat)
+                && matches!(
+                    account.provider().as_str(),
+                    "provider:opencode" | "provider:opencode-go"
+                )
+            {
+                changed |= ProviderProjection::remove_from_document(key, document);
+            }
             changed |= apply_native_runtime(account, key, document);
             changed |= apply_keyless_auth_profile(account, key, document);
         }
@@ -565,35 +580,32 @@ fn provider_owns_model_reference(provider: &str, reference: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-fn apply_transport(
+fn transport_projection(
     account: &ProviderAccount,
     key: &ProviderKey,
-    document: &mut OpenClawConfigDocument,
-) -> bool {
+) -> Result<Option<ProviderProjection>, ProviderModelProjectionError> {
     let configuration = account.configuration();
-    if !matches!(configuration.kind(), ProviderAccountKind::Chat) {
-        return false;
-    }
-    if matches!(
-        account.provider().as_str(),
-        "provider:opencode" | "provider:opencode-go"
-    ) {
-        return ProviderProjection::remove_from_document(key, document);
+    if !matches!(configuration.kind(), ProviderAccountKind::Chat)
+        || matches!(
+            account.provider().as_str(),
+            "provider:opencode" | "provider:opencode-go"
+        )
+    {
+        return Ok(None);
     }
     let Some(protocol) = provider_protocol(account) else {
-        return false;
+        return Ok(None);
     };
-    let Some(endpoint) = provider_endpoint(account) else {
-        return false;
+    let Some(endpoint) = provider_endpoint(account)? else {
+        return Ok(None);
     };
-    ProviderProjection::new(
+    Ok(Some(ProviderProjection::new(
         key.clone(),
         endpoint,
         protocol,
         auth_header(account),
         legacy_transport_keys(account),
-    )
-    .apply_to_document(document)
+    )))
 }
 
 fn apply_native_runtime(
@@ -742,27 +754,27 @@ pub fn default_provider_protocol(provider: &str) -> Option<::provider::ProviderA
     }
 }
 
-fn provider_endpoint(account: &ProviderAccount) -> Option<ProviderEndpoint> {
-    if account.provider().as_str() == "provider:openai"
+fn provider_endpoint(
+    account: &ProviderAccount,
+) -> Result<Option<ProviderEndpoint>, ProviderModelProjectionError> {
+    let endpoint = if account.provider().as_str() == "provider:openai"
         && matches!(
             account.configuration().auth_mode(),
             ProviderAccountAuthMode::OAuthBrowser | ProviderAccountAuthMode::OAuthDevice
         )
     {
-        return Some(
-            ProviderEndpoint::try_new(OPENAI_CODEX_OAUTH_BASE_URL.to_owned())
-                .expect("OpenAI Codex OAuth endpoint is valid"),
-        );
-    }
-    account
-        .configuration()
-        .endpoint()
-        .map(|endpoint| endpoint.as_str())
-        .or_else(|| default_provider_endpoint(account.provider().as_str()))
-        .map(|endpoint| {
-            ProviderEndpoint::try_new(endpoint.to_owned())
-                .expect("environment endpoint is valid OpenClaw endpoint")
-        })
+        Some(OPENAI_CODEX_OAUTH_BASE_URL)
+    } else {
+        account
+            .configuration()
+            .endpoint()
+            .map(|endpoint| endpoint.as_str())
+            .or_else(|| default_provider_endpoint(account.provider().as_str()))
+    };
+    endpoint
+        .map(|endpoint| ProviderEndpoint::try_new(endpoint.to_owned()))
+        .transpose()
+        .map_err(|_| ProviderModelProjectionError::AccountConfiguration)
 }
 
 pub fn default_provider_endpoint(provider: &str) -> Option<&'static str> {

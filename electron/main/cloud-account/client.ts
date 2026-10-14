@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import type {
   AuthLogin2FARequest,
@@ -218,8 +218,13 @@ async function downloadCloudPackage(token: string, request: CloudPackageDownload
     const bytes = Buffer.from(await response.arrayBuffer());
     const filename = downloadFilename(response, request);
     const packagePath = await packageDownloadPath(request.destinationPath, filename);
-    await mkdir(dirname(packagePath), { recursive: true });
-    await writeFile(packagePath, bytes);
+    try {
+      await mkdir(dirname(packagePath), { recursive: true });
+      await writeFile(packagePath, bytes);
+    } catch (error) {
+      await removePackageDownload(request, { packagePath });
+      throw error;
+    }
     return {
       packagePath,
       packageVersionId: request.packageVersionId,
@@ -231,6 +236,13 @@ async function downloadCloudPackage(token: string, request: CloudPackageDownload
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function removePackageDownload(request: CloudPackageDownloadRequest, downloaded: Pick<CloudPackageLocalDownload, 'packagePath'>): Promise<void> {
+  const directory = dirname(downloaded.packagePath);
+  if (request.destinationPath?.trim() || resolve(dirname(directory)) !== resolve(tmpdir()) || !basename(directory).startsWith('matcha-package-')) return;
+  await unlink(downloaded.packagePath).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
+  await rmdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
 }
 
 async function packageDownloadPath(destinationPath: string | undefined, filename: string): Promise<string> {

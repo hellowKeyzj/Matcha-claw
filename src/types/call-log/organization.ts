@@ -3,7 +3,40 @@ import type {} from '../call-log';
 export interface OrganizationProvisionProgress {
   stage: 'reading_profiles' | 'generating_introductions' | 'configuring_team' | 'verifying_team' | 'saving_team' | 'rolling_back';
   members: Array<'queued' | 'running' | 'completed' | 'failed'>;
-  memberErrors?: Record<string, 'credential_missing' | 'credential_unavailable' | 'unavailable' | 'unsupported' | 'invalid_output' | 'cancelled'>;
+  memberErrors?: Record<string, 'credential_missing' | 'credential_unavailable' | 'unavailable' | 'unsupported' | 'invalid_output' | 'cancelled'
+    | 'model_authentication' | 'model_permission_denied' | 'model_rate_limited' | 'model_deadline' | 'model_invalid_response'>;
+}
+
+const teamCreationStages = [
+  'submitting', 'reading_profiles', 'generating_introductions', 'configuring_team',
+  'verifying_team', 'saving_team', 'initializing_sessions', 'loading_team',
+] as const;
+
+const teamCreationFailureReasons = [
+  'invalid_input', 'rejected', 'unavailable', 'unsupported', 'invalid_response',
+  'outcome_unknown', 'observation_interrupted', 'rpc_unavailable', 'rpc_rejected',
+  'rpc_protocol', 'rpc_deadline', 'rpc_authentication', 'agent_missing', 'agent_duplicate',
+  'workspace_missing', 'invalid_config', 'invalid_description', 'invalid_content',
+  'invalid_teamrun_blocks', 'credential_missing', 'credential_unavailable', 'invalid_output',
+  'cancelled', 'native_read_failed', 'native_write_failed', 'native_readback_mismatch',
+  'store_read_failed', 'store_write_failed', 'store_conflict', 'store_invalid',
+  'team_missing', 'team_deleted', 'run_missing', 'run_deleted', 'run_team_mismatch',
+  'authorization_invalid', 'permission_denied', 'rate_limited',
+  'model_authentication', 'model_permission_denied', 'model_rate_limited', 'model_deadline', 'model_invalid_response',
+] as const;
+
+const teamCreationFiles = ['description', 'AGENTS.md', 'SOUL.md'] as const;
+
+export type TeamCreationStage = typeof teamCreationStages[number];
+export type TeamCreationFailureReason = typeof teamCreationFailureReasons[number];
+export type TeamCreationFile = typeof teamCreationFiles[number];
+
+export interface TeamCreationFailure {
+  stage: TeamCreationStage;
+  reason: TeamCreationFailureReason;
+  /** Zero-based non-leader input order; absent for leader or whole-team failures. */
+  memberIndex?: number;
+  file?: TeamCreationFile;
 }
 
 type OrganizationCommit = {
@@ -24,6 +57,7 @@ export interface OrganizationCallDetail {
   } | null;
   provision: (OrganizationCommit & { progress?: OrganizationProvisionProgress }) | null;
   creation: OrganizationCommit | null;
+  creationFailure?: TeamCreationFailure;
   /** Operation completion is not native delivery or graph business completion. */
   outcome:
     | 'read' | 'command_committed' | 'materialized' | 'created' | 'started' | 'intake'
@@ -39,7 +73,8 @@ declare module '../call-log' {
 }
 
 export function decodeOrganizationCallDetail(value: unknown): OrganizationCallDetail | null {
-  if (!isRecord(value) || !hasKeys(value, ['teamId', 'runId', 'teamIdHash', 'runIdHash', 'commandId', 'graph', 'outcome', 'provision', 'creation'])
+  if (!isRecord(value) || !hasKeys(value, ['teamId', 'runId', 'teamIdHash', 'runIdHash', 'commandId', 'graph', 'outcome', 'provision', 'creation',
+    ...(Object.hasOwn(value, 'creationFailure') ? ['creationFailure'] : [])])
     || !isReference(value.teamId) || !isRunReference(value.runId) || !isReference(value.commandId)
     || !isHash(value.teamIdHash) || !isHash(value.runIdHash)
     || (value.teamId !== null && value.teamIdHash !== null)
@@ -63,6 +98,8 @@ export function decodeOrganizationCallDetail(value: unknown): OrganizationCallDe
   const provision = decodeProvision(value.provision);
   const creation = decodeCommit(value.creation);
   if (provision === undefined || creation === undefined) return null;
+  const creationFailure = Object.hasOwn(value, 'creationFailure') ? decodeTeamCreationFailure(value.creationFailure) : undefined;
+  if (creationFailure === null) return null;
   return {
     teamId: value.teamId,
     runId: value.runId,
@@ -72,7 +109,24 @@ export function decodeOrganizationCallDetail(value: unknown): OrganizationCallDe
     graph,
     provision,
     creation,
+    ...(creationFailure === undefined ? {} : { creationFailure }),
     outcome: value.outcome as OrganizationCallDetail['outcome'],
+  };
+}
+
+export function decodeTeamCreationFailure(value: unknown): TeamCreationFailure | null {
+  if (!isRecord(value) || !hasKeys(value, ['stage', 'reason',
+    ...(Object.hasOwn(value, 'memberIndex') ? ['memberIndex'] : []),
+    ...(Object.hasOwn(value, 'file') ? ['file'] : [])])
+    || !teamCreationStages.includes(value.stage as TeamCreationStage)
+    || !teamCreationFailureReasons.includes(value.reason as TeamCreationFailureReason)
+    || (Object.hasOwn(value, 'memberIndex') && !isCount(value.memberIndex))
+    || (Object.hasOwn(value, 'file') && !teamCreationFiles.includes(value.file as TeamCreationFile))) return null;
+  return {
+    stage: value.stage as TeamCreationStage,
+    reason: value.reason as TeamCreationFailureReason,
+    ...(Object.hasOwn(value, 'memberIndex') ? { memberIndex: value.memberIndex as number } : {}),
+    ...(Object.hasOwn(value, 'file') ? { file: value.file as TeamCreationFile } : {}),
   };
 }
 
@@ -95,7 +149,8 @@ function decodeProvision(value: unknown): OrganizationCallDetail['provision'] | 
   if (Object.hasOwn(progress, 'memberErrors') && (!isRecord(memberErrors)
     || !Object.entries(memberErrors).every(([index, error]) => /^(0|[1-9][0-9]*)$/.test(index)
       && Number(index) < members.length && members[Number(index)] === 'failed'
-      && ['credential_missing', 'credential_unavailable', 'unavailable', 'unsupported', 'invalid_output', 'cancelled'].includes(error as string)))) return undefined;
+      && ['credential_missing', 'credential_unavailable', 'unavailable', 'unsupported', 'invalid_output', 'cancelled',
+        'model_authentication', 'model_permission_denied', 'model_rate_limited', 'model_deadline', 'model_invalid_response'].includes(error as string)))) return undefined;
   return {
     ...commit,
     progress: {

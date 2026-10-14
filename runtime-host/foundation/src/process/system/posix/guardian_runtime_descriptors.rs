@@ -3,7 +3,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 
 use super::guardian_descriptors::{
     FIRST_UNRESERVED_FD, GUARDIAN_CLEANUP_DIRECTORY_FD, GUARDIAN_CLEANUP_NAMES_FD,
-    SENTINEL_CONTROL_FD, SENTINEL_LIVENESS_FD, TARGET_EXECUTION_SOURCE_FD,
+    SENTINEL_CONTROL_FD, SENTINEL_LIVENESS_FD, TARGET_ENVIRONMENT_FD, TARGET_EXECUTION_SOURCE_FD,
     TARGET_PRIVATE_DESCRIPTOR_FD, TARGET_STATE_DIRECTORY_FD, TARGET_STDERR_FD, TARGET_STDIN_FD,
     TARGET_STDOUT_FD, clear_close_on_exec, close_descriptor, relocate_descriptor,
     reserve_descriptor,
@@ -55,6 +55,7 @@ pub(super) fn isolate_sentinel(
     close_descriptor(libc::STDERR_FILENO)?;
     close_descriptor(GUARDIAN_CLEANUP_DIRECTORY_FD)?;
     close_descriptor(GUARDIAN_CLEANUP_NAMES_FD)?;
+    close_descriptor(TARGET_ENVIRONMENT_FD)?;
     close_from(FIRST_UNRESERVED_FD, descriptor_limit)?;
     Ok((
         guardian_liveness,
@@ -122,6 +123,7 @@ pub(super) fn prepare_target_exec(
         .and_then(|()| close_descriptor(TARGET_STDERR_FD))
         .and_then(|()| close_descriptor(GUARDIAN_CLEANUP_DIRECTORY_FD))
         .and_then(|()| close_descriptor(GUARDIAN_CLEANUP_NAMES_FD))
+        .and_then(|()| close_descriptor(TARGET_ENVIRONMENT_FD))
         .and_then(|()| {
             if execution_source.is_none() {
                 close_descriptor(TARGET_EXECUTION_SOURCE_FD)

@@ -1,4 +1,8 @@
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import { AppError } from '@/lib/error-model';
+import { decodeTeamCreationFailure, type TeamCreationFailure, type TeamCreationStage } from '@/types/call-log/organization';
+import { runtimeEndpointsEqual, validateRuntimeEndpointRef, validateSessionIdentity } from '@/types/desktop/runtime-address';
+import type { TeamCreationObserver } from '@/types/team-creation';
 import {
   createSessionTraceId,
   logSessionTrace,
@@ -917,24 +921,68 @@ export async function deleteTeamInstance(payload: {
   }, decodeCallReceipt);
 }
 
+export function classifyTeamCreationFailure(
+  error: unknown,
+  stage: TeamCreationStage,
+  fallbackReason: 'unavailable' | 'observation_interrupted' = 'unavailable',
+): TeamCreationFailure {
+  const record = isRecord(error) ? error : null;
+  const details = isRecord(record?.details) ? record.details : null;
+  const source = decodeTeamCreationFailure(details?.creationFailure);
+  if (source) return source;
+  if (record?.code === 'TIMEOUT' || record?.code === 'ABORTED'
+    || (error instanceof Error && error.name === 'AbortError')) {
+    return { stage, reason: 'observation_interrupted' };
+  }
+  if (record?.code === 'INVALID_RESPONSE') return { stage, reason: 'invalid_response' };
+  switch (details?.status) {
+    case 401: return { stage, reason: 'authorization_invalid' };
+    case 403: return { stage, reason: 'permission_denied' };
+    case 429: return { stage, reason: 'rate_limited' };
+    case 400: return { stage, reason: 'invalid_input' };
+    default: return { stage, reason: record?.code === 'NETWORK' || record?.code === 'UNAVAILABLE' ? 'unavailable' : fallbackReason };
+  }
+}
+
 export async function createTeamRun(payload: {
   teamId?: string;
   packagePath: string;
   runId?: string;
   idempotencyKey: string;
   sourceType?: TeamSourceType;
-}): Promise<TeamRunSummary> {
-  return await teamRuntimeApi({
-    operationId: 'team.runCreate',
-    target: { kind: 'team', packagePath: payload.packagePath, ...(payload.teamId ? { teamId: payload.teamId } : {}) },
-    input: {
-      ...(payload.teamId ? { teamId: payload.teamId } : {}),
-      packagePath: payload.packagePath,
-      ...(payload.runId ? { runId: payload.runId } : {}),
-      idempotencyKey: payload.idempotencyKey,
-      ...(payload.sourceType ? { sourceType: payload.sourceType } : {}),
-    },
-  }, decodeTeamRunSummary);
+}, options?: TeamCreationObserver): Promise<TeamRunSummary> {
+  let failure: TeamCreationFailure | null = null;
+  try {
+    return await teamRuntimeApi({
+      operationId: 'team.runCreate',
+      target: { kind: 'team', packagePath: payload.packagePath, ...(payload.teamId ? { teamId: payload.teamId } : {}) },
+      input: {
+        ...(payload.teamId ? { teamId: payload.teamId } : {}),
+        packagePath: payload.packagePath,
+        ...(payload.runId ? { runId: payload.runId } : {}),
+        idempotencyKey: payload.idempotencyKey,
+        ...(payload.sourceType ? { sourceType: payload.sourceType } : {}),
+      },
+    }, (response) => {
+      if (isRecord(response) && response.outcome === 'outcome-unknown'
+        && hasExactKeys(response, ['outcome', ...(Object.hasOwn(response, 'creationFailure') ? ['creationFailure'] : [])])) {
+        const source = Object.hasOwn(response, 'creationFailure') ? decodeTeamCreationFailure(response.creationFailure) : undefined;
+        if (source === null) throw new AppError('INVALID_RESPONSE', 'Team runtime response is unavailable');
+        failure = source ?? { stage: 'initializing_sessions', reason: 'outcome_unknown' };
+        throw new Error('Team run creation outcome is unknown');
+      }
+      try {
+        return decodeTeamRunSummary(response);
+      } catch (error) {
+        failure = { stage: 'initializing_sessions', reason: 'invalid_response' };
+        throw error;
+      }
+    });
+  } catch (error) {
+    failure ??= classifyTeamCreationFailure(error, 'initializing_sessions');
+    options?.onFailure?.(failure);
+    throw error;
+  }
 }
 
 export interface TeamRunListItem extends TeamRunRecord {
@@ -948,7 +996,7 @@ export async function listTeamRuns(payload: {
     operationId: 'team.runList',
     target: { kind: 'team', teamId: payload.teamId },
     input: { teamId: payload.teamId },
-  });
+  }, (response) => decodeTeamRunList(response, payload.teamId));
 }
 
 export async function listTeamRunTriggers(payload?: {
@@ -1101,7 +1149,7 @@ export async function readTeamRunSnapshot(payload: {
       ...(typeof payload.eventCursor === 'number' ? { eventCursor: payload.eventCursor } : {}),
       ...(typeof payload.eventLimit === 'number' ? { eventLimit: payload.eventLimit } : {}),
     },
-  });
+  }, (response) => decodeTeamRunSnapshot(response, payload.runId));
 }
 
 export async function readTeamRunDiagnostics(payload: {
@@ -1357,7 +1405,68 @@ function decodeTeamRunSummary(payload: unknown): TeamRunSummary {
     && (payload.replayed === undefined || typeof payload.replayed === 'boolean')) {
     return payload as unknown as TeamRunSummary;
   }
-  return teamRuntimeDecodeFailure();
+  throw new AppError('INVALID_RESPONSE', 'Team runtime response is unavailable');
+}
+
+function isTeamRunRecord(payload: unknown): payload is TeamRunRecord {
+  return isRecord(payload) && isText(payload.runId) && isTeamRunStatus(payload.status)
+    && isSafeNonNegativeInteger(payload.revision)
+    && (payload.currentStageId === undefined || isText(payload.currentStageId))
+    && typeof payload.packageName === 'string' && typeof payload.packageVersion === 'string'
+    && typeof payload.sourcePath === 'string'
+    && isSafeNonNegativeInteger(payload.createdAt) && isSafeNonNegativeInteger(payload.updatedAt);
+}
+
+function isTeamRoleBinding(payload: unknown, runId: string): payload is TeamRoleBindingRecord {
+  return isRecord(payload) && payload.runId === runId && isText(payload.roleId) && isText(payload.agentId)
+    && isText(payload.localSessionId) && isText(payload.endpointSessionId)
+    && validateRuntimeEndpointRef(payload.endpointRef) === null
+    && validateSessionIdentity(payload.sessionIdentity) === null && isRecord(payload.sessionIdentity)
+    && payload.sessionIdentity.agentId === payload.agentId
+    && payload.sessionIdentity.sessionKey === payload.localSessionId
+    && runtimeEndpointsEqual(payload.endpointRef as TeamRoleBindingRecord['endpointRef'], payload.sessionIdentity.endpoint as TeamRoleBindingRecord['endpointRef']);
+}
+
+function decodeTeamRunList(payload: unknown, teamId: string): { teamId: string; runs: TeamRunListItem[] } {
+  if (isTeamDesignFailure(payload)) throw new Error(payload.error, { cause: payload });
+  if (!isRecord(payload) || payload.teamId !== teamId || !Array.isArray(payload.runs)
+    || !payload.runs.every((run) => isTeamRunRecord(run) && isRecord(run) && Array.isArray(run.sessions)
+      && run.sessions.every((role) => isTeamRoleBinding(role, run.runId)))) {
+    throw new AppError('INVALID_RESPONSE', 'Team runtime response is unavailable');
+  }
+  return payload as { teamId: string; runs: TeamRunListItem[] };
+}
+
+function decodeTeamRunSnapshot(payload: unknown, runId: string): TeamRunSnapshot {
+  if (isTeamDesignFailure(payload)) throw new Error(payload.error, { cause: payload });
+  if (!isRecord(payload) || (payload.unavailableSections !== undefined && !isStringArray(payload.unavailableSections))) {
+    throw new AppError('INVALID_RESPONSE', 'Team runtime response is unavailable');
+  }
+  const unavailable = payload.unavailableSections as string[] | undefined;
+  const unavailableSections = [
+    'nodeInputStates', 'roles', 'stages', 'workflowPlan', 'dispatchGroups', 'dispatchTasks',
+    'dispatches', 'dispatchExecutions', 'messages', 'nodePromptDeliveries', 'gates', 'kickbacks',
+  ];
+  const arrays = [
+    'roles', 'stages', 'dispatchGroups', 'dispatchTasks', 'approvals', 'artifacts', 'messages',
+    'nodeExecutions', 'nodePromptDeliveries', 'dispatches', 'dispatchExecutions', 'gates', 'kickbacks', 'decisions', 'events',
+  ];
+  if (unavailable?.some((section) => !unavailableSections.includes(section))
+    || (payload.run !== null && (!isTeamRunRecord(payload.run) || payload.run.runId !== runId))
+    || (payload.graph !== null && (!isRecord(payload.graph)
+      || (payload.graph.runId !== undefined && payload.graph.runId !== runId)
+      || typeof payload.graph.status !== 'string'
+      || !Array.isArray(payload.graph.nodes) || !payload.graph.nodes.every(isRecord)
+      || !Array.isArray(payload.graph.edges) || !payload.graph.edges.every(isRecord)))
+    || !arrays.every((key) => unavailable?.includes(key) || (Array.isArray(payload[key]) && payload[key].every(isRecord)))
+    || (!unavailable?.includes('roles') && !(payload.roles as unknown[]).every((role) => isTeamRoleBinding(role, runId)))
+    || !(payload.events as Record<string, unknown>[]).every((event) => isText(event.eventId) && event.runId === runId
+      && isSafeNonNegativeInteger(event.revision) && isSafeNonNegativeInteger(event.createdAt))
+    || (!unavailable?.includes('workflowPlan') && payload.workflowPlan !== null && !isRecord(payload.workflowPlan))
+    || !isSafeNonNegativeInteger(payload.nextEventCursor)) {
+    throw new AppError('INVALID_RESPONSE', 'Team runtime response is unavailable');
+  }
+  return payload as unknown as TeamRunSnapshot;
 }
 
 function decodeTeamRunDecisionSubmit(payload: unknown): TeamRunDecisionSubmitResult {

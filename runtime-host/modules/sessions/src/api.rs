@@ -3,6 +3,7 @@ use std::sync::Arc;
 use connectors::ConnectorSecretResolverPort;
 use foundation::execution::OwnerRuntimeHandle;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     abort::{SessionAbortCommand, SessionAbortOutcome},
@@ -39,17 +40,38 @@ pub struct SessionHandle {
     owner: OwnerRuntimeHandle<SessionCommand, SessionQuery>,
     runtime_directory: Arc<dyn SessionRuntimeDirectory>,
     call_recorder: Option<platform::call::CallRecorder>,
+    shared: crate::owner::actor::SessionShared,
+}
+
+pub struct SessionIngressProducer {
+    sessions: SessionHandle,
+    producer: crate::owner::terminal::Producer,
+}
+
+impl SessionIngressProducer {
+    pub async fn stopped(&self) { self.producer.stopped().await; }
+
+    pub async fn ingest_ingress_event(&self, event: SessionIngressEvent) -> Result<SessionIngestOutcome, ()> {
+        let (identity, event) = event.into_parts();
+        self.sessions.ingest_event_inner(self.producer.inherited(), identity, event).await
+    }
 }
 
 impl SessionHandle {
+    pub fn ingress_producer(&self) -> Result<SessionIngressProducer, ()> {
+        Ok(SessionIngressProducer { sessions: self.clone(), producer: self.shared.producer()? })
+    }
+
     pub(crate) fn new(
         owner: OwnerRuntimeHandle<SessionCommand, SessionQuery>,
         runtime_directory: Arc<dyn SessionRuntimeDirectory>,
+        shared: crate::owner::actor::SessionShared,
     ) -> Self {
         Self {
             owner,
             runtime_directory,
             call_recorder: None,
+            shared,
         }
     }
 
@@ -113,12 +135,22 @@ impl SessionHandle {
         identity: SessionIdentity,
         event: SessionEvent,
     ) -> Result<SessionIngestOutcome, ()> {
-        self.request_command(|reply| SessionCommand::Ingest {
-            identity,
-            event,
-            reply,
-        })
-        .await
+        self.ingest_event_inner(self.shared.producer()?, identity, event).await
+    }
+
+    async fn ingest_event_inner(
+        &self,
+        producer: crate::owner::terminal::Producer,
+        identity: SessionIdentity,
+        event: SessionEvent,
+    ) -> Result<SessionIngestOutcome, ()> {
+        let permit = if crate::owner::terminal::terminal_event(&event) {
+            Some(self.shared.terminal_permit().await)
+        } else { None };
+        self.request_command_inner(producer, |reply| match permit {
+            Some(permit) => SessionCommand::TerminalIngest { identity, event, permit, reply },
+            None => SessionCommand::Ingest { identity, event, reply },
+        }).await
     }
 
     pub async fn ingest_ingress_event(
@@ -130,8 +162,19 @@ impl SessionHandle {
     }
 
     pub async fn evict_session(&self, session_key: String) -> Result<SessionEvictOutcome, ()> {
-        self.request_command(|reply| SessionCommand::Evict { session_key, reply })
-            .await
+        let producer = self.shared.producer()?;
+        match self.shared.evict_identity(&session_key) {
+            Ok(identity) => self.request_command_inner(producer, |reply| SessionCommand::Evict { identity, reply }).await,
+            Err(outcome) => {
+                let detail = crate::call::SessionsCallDetail::evict(&session_key);
+                let call = self.begin_call(Some(("sessions.evict", detail))).await?;
+                if let Some(call) = &call {
+                    call.running().await.map_err(|_| ())?;
+                    call.finish(&outcome).await;
+                }
+                Ok(outcome)
+            }
+        }
     }
 
     pub fn prepare_create(
@@ -162,10 +205,22 @@ impl SessionHandle {
         &self,
         command: SessionSendCommand,
     ) -> Result<SessionSendOutcome, ()> {
+        self.send_session_cancellable(command, CancellationToken::new()).await
+    }
+
+    pub async fn send_session_cancellable(
+        &self,
+        command: SessionSendCommand,
+        cancellation: CancellationToken,
+    ) -> Result<SessionSendOutcome, ()> {
         self.request_command(|reply| SessionCommand::Send {
-            request: SessionSendRequest::Session { command, reply },
+            request: SessionSendRequest::Session { command, cancellation, reply },
         })
         .await
+    }
+
+    pub async fn close_terminal_delivery(&self) -> Result<(), crate::SessionTerminalCloseError> {
+        self.shared.close_terminal_delivery().await
     }
 
     pub async fn mutate_session_goal(&self, command: crate::goal::SessionGoalCommand) -> Result<crate::goal::SessionGoalOutcome, ()> {
@@ -281,6 +336,15 @@ impl SessionHandle {
         &self,
         command: impl FnOnce(oneshot::Sender<T>) -> SessionCommand,
     ) -> Result<T, ()> {
+        let producer = self.shared.producer()?;
+        self.request_command_inner(producer, command).await
+    }
+
+    async fn request_command_inner<T>(
+        &self,
+        producer: crate::owner::terminal::Producer,
+        command: impl FnOnce(oneshot::Sender<T>) -> SessionCommand,
+    ) -> Result<T, ()> {
         let (reply, response) = oneshot::channel();
         let command = command(reply);
         let call = self.begin_call(command.call_detail()).await?;
@@ -288,6 +352,7 @@ impl SessionHandle {
             Some(call) => SessionCommand::Audited { command: Box::new(command), call: call.clone() },
             None => command,
         };
+        let command = SessionCommand::Producing { command: Box::new(command), producer };
         if self.owner.send_command(command).await.is_err() {
             if let Some(call) = call { call.rejected().await; }
             return Err(());
@@ -299,6 +364,7 @@ impl SessionHandle {
         &self,
         query: impl FnOnce(oneshot::Sender<T>) -> SessionQuery,
     ) -> Result<T, ()> {
+        let producer = self.shared.producer()?;
         let (reply, response) = oneshot::channel();
         let query = query(reply);
         let abort_trace_id = match &query {
@@ -314,6 +380,7 @@ impl SessionHandle {
             None => query,
         };
         crate::trace::log("runtime.abort.api.dispatch", abort_trace_id.as_deref(), || serde_json::json!({ "elapsedMs": started.map(|started| started.elapsed().as_millis()) }));
+        let query = SessionQuery::Producing { query: Box::new(query), producer };
         if self.owner.send_query(query).await.is_err() {
             if let Some(call) = call { call.rejected().await; }
             crate::trace::log("runtime.abort.api.dispatch-failed", abort_trace_id.as_deref(), || serde_json::json!({ "elapsedMs": started.map(|started| started.elapsed().as_millis()) }));

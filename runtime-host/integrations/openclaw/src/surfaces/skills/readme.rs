@@ -126,11 +126,20 @@ impl std::error::Error for SkillReadmeError {}
 
 pub struct SkillReadmeStore {
     state_dir: CanonicalStateDir,
+    bundled_root: Option<PathBuf>,
 }
 
 impl SkillReadmeStore {
     pub fn new(state_dir: CanonicalStateDir) -> Self {
-        Self { state_dir }
+        Self {
+            state_dir,
+            bundled_root: None,
+        }
+    }
+
+    pub(super) fn with_bundled_root(mut self, root: Option<PathBuf>) -> Self {
+        self.bundled_root = root;
+        self
     }
 
     pub fn read(
@@ -157,7 +166,7 @@ impl SkillReadmeStore {
         workspace_roots: &[TrustedWorkspaceDirectory],
     ) -> Result<PathBuf, SkillReadmeError> {
         let managed_root = self.state_dir.as_path().join("skills");
-        let roots = trusted_roots(&managed_root, workspace_roots)?;
+        let roots = trusted_roots(&managed_root, workspace_roots, self.bundled_root.as_deref())?;
         if let Some(file_path) = &request.file_path {
             if !is_manifest(file_path) {
                 return Err(SkillReadmeError::Rejected);
@@ -187,7 +196,7 @@ impl SkillReadmeStore {
         workspace_roots: &[TrustedWorkspaceDirectory],
     ) -> Result<PathBuf, SkillReadmeError> {
         let managed_root = self.state_dir.as_path().join("skills");
-        let roots = trusted_roots(&managed_root, workspace_roots)?;
+        let roots = trusted_roots(&managed_root, workspace_roots, self.bundled_root.as_deref())?;
         if let Some(file_path) = &request.file_path {
             if let Ok(path) = read_readme_candidate(file_path.clone(), &roots) {
                 return Ok(path);
@@ -230,7 +239,7 @@ impl SkillReadmeStore {
         workspace_roots: &[TrustedWorkspaceDirectory],
     ) -> Result<PathBuf, SkillReadmeError> {
         let managed_root = self.state_dir.as_path().join("skills");
-        let roots = trusted_roots(&managed_root, workspace_roots)?;
+        let roots = trusted_roots(&managed_root, workspace_roots, self.bundled_root.as_deref())?;
         if let Some(base_dir) = &request.base_dir {
             if let Some(directory) = existing_directory(base_dir.clone(), &roots)? {
                 return Ok(directory);
@@ -245,7 +254,10 @@ impl SkillReadmeStore {
         }
         match resolve_directory_by_name(&managed_root, request.names(), &roots) {
             Ok(Some(path)) => Ok(path),
-            Ok(None) => Err(SkillReadmeError::Rejected),
+            Ok(None) => {
+                trace_resolution("name-not-found", &managed_root, None);
+                Err(SkillReadmeError::Rejected)
+            }
             Err(error) => Err(error),
         }
     }
@@ -322,8 +334,10 @@ fn is_manifest(path: &Path) -> bool {
 fn trusted_roots(
     managed_root: &Path,
     workspace_roots: &[TrustedWorkspaceDirectory],
+    bundled_root: Option<&Path>,
 ) -> Result<Vec<PathBuf>, SkillReadmeError> {
-    let mut roots = Vec::with_capacity(workspace_roots.len() + 1);
+    let mut roots =
+        Vec::with_capacity(workspace_roots.len() + 1 + usize::from(bundled_root.is_some()));
     if let Some(root) = canonical_root(managed_root)? {
         roots.push(root);
     }
@@ -334,24 +348,57 @@ fn trusted_roots(
             }
         }
     }
+    if let Some(bundled_root) = bundled_root {
+        if let Some(root) = canonical_root(bundled_root)? {
+            if !roots.iter().any(|known| known == &root) {
+                roots.push(root);
+            }
+        }
+    }
+    platform::trace::session_trace("skill.open-path.trusted-roots", || {
+        serde_json::json!({
+            "sources": if bundled_root.is_some() {
+                vec!["managed", "workspace", "bundled"]
+            } else {
+                vec!["managed", "workspace"]
+            },
+            "bundledRootHash": bundled_root.map(|root| {
+                platform::trace::identifier_hash(&root.to_string_lossy())
+            }),
+            "workspaceCount": workspace_roots.len(),
+            "count": roots.len(),
+            "managedRootHash": platform::trace::identifier_hash(&managed_root.to_string_lossy()),
+            "rootHashes": roots.iter().take(16).map(|root| {
+                platform::trace::identifier_hash(&root.to_string_lossy())
+            }).collect::<Vec<_>>(),
+        })
+    });
     Ok(roots)
 }
 
 fn canonical_root(path: &Path) -> Result<Option<PathBuf>, SkillReadmeError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(SkillReadmeError::Unknown),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            trace_resolution("trusted-root-not-found", path, Some(&error));
+            return Ok(None);
+        }
+        Err(error) => {
+            trace_resolution("trusted-root-metadata-failed", path, Some(&error));
+            return Err(SkillReadmeError::Unknown);
+        }
     };
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        trace_resolution("trusted-root-invalid", path, None);
         return Err(SkillReadmeError::Rejected);
     }
     if contains_symlink(path)? {
         return Err(SkillReadmeError::Rejected);
     }
-    fs::canonicalize(path)
-        .map(Some)
-        .map_err(|_| SkillReadmeError::Unknown)
+    fs::canonicalize(path).map(Some).map_err(|error| {
+        trace_resolution("trusted-root-canonicalize-failed", path, Some(&error));
+        SkillReadmeError::Unknown
+    })
 }
 
 fn read_manifest(path: PathBuf, roots: &[PathBuf]) -> Result<PathBuf, SkillReadmeError> {
@@ -398,17 +445,42 @@ fn existing_directory(
     }
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(SkillReadmeError::Unknown),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            trace_resolution("directory-not-found", &path, Some(&error));
+            return Ok(None);
+        }
+        Err(error) => {
+            trace_resolution("directory-metadata-failed", &path, Some(&error));
+            return Err(SkillReadmeError::Unknown);
+        }
     };
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        trace_resolution("not-directory", &path, None);
         return Err(SkillReadmeError::Rejected);
     }
-    let canonical = fs::canonicalize(path).map_err(|_| SkillReadmeError::Unknown)?;
+    let canonical = fs::canonicalize(&path).map_err(|error| {
+        trace_resolution("directory-canonicalize-failed", &path, Some(&error));
+        SkillReadmeError::Unknown
+    })?;
     if !is_inside_roots(&canonical, roots, true) {
+        trace_resolution("outside-trusted-roots", &canonical, None);
         return Err(SkillReadmeError::Rejected);
     }
     Ok(Some(canonical))
+}
+
+fn trace_resolution(reason: &'static str, path: &Path, error: Option<&std::io::Error>) {
+    platform::trace::session_trace("skill.open-path.resolve-candidate", || {
+        let path = path.to_string_lossy();
+        serde_json::json!({
+            "reason": reason,
+            "pathHash": platform::trace::identifier_hash(&path),
+            "pathLength": path.len(),
+            "extendedPath": path.starts_with(r"\\?\"),
+            "ioKind": error.map(|error| format!("{:?}", error.kind())),
+            "rawOsError": error.and_then(std::io::Error::raw_os_error),
+        })
+    });
 }
 
 fn is_inside_roots(path: &Path, roots: &[PathBuf], allow_root: bool) -> bool {
@@ -526,10 +598,16 @@ fn contains_symlink(path: &Path) -> Result<bool, SkillReadmeError> {
     let mut current = path;
     loop {
         match fs::symlink_metadata(current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                trace_resolution("ancestor-symlink", current, None);
+                return Ok(true);
+            }
             Ok(_) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(_) => return Err(SkillReadmeError::Unknown),
+            Err(error) => {
+                trace_resolution("ancestor-metadata-failed", current, Some(&error));
+                return Err(SkillReadmeError::Unknown);
+            }
         }
         let Some(parent) = current.parent() else {
             return Ok(false);

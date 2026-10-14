@@ -234,21 +234,25 @@ impl SessionEventIngest {
         let sender = self.sender.clone();
         let session_events = self.session_events.clone();
         let (task, _) = foundation::execution::OwnedTask::spawn(move |cancel| async move {
-            loop {
-                let frame = tokio::select! { _ = cancel.cancelled() => { observations.deactivate(value); return; }, frame = events.recv() => frame };
-                let Some(frame) = frame else { break };
-                if sender.send(IngestFrame::Socket { epoch, frame, observations: Arc::clone(&observations) }).await.is_err() { break; }
-            }
-            observations.deactivate(value);
-            let reason = match *failure.borrow() {
-                Some(crate::gateway::delivery::DispatcherError::EventBackpressure) => sessions_module::state::RecoveryReason::EventOverflow,
-                Some(crate::gateway::delivery::DispatcherError::Protocol) => sessions_module::state::RecoveryReason::NativeUnknown,
-                _ => sessions_module::state::RecoveryReason::NativeUnavailable,
-            };
-            for (identity, generation) in observation_targets(&observations, value, None) {
-                let binding = sessions_module::state::SessionEventBinding::observed(identity.clone(), generation, Some(value), false).expect("validated observation binding");
-                let event = SessionIngressEvent::new(identity, sessions_module::command::SessionEvent { binding, run_id: None, cursor: None, history_refresh: false, changes: vec![sessions_module::state::SessionChange::RecoveryRequired { reason }] });
-                if observations.enqueue_ingress(&session_events, event).await.is_err() { break; }
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => { observations.deactivate(value); },
+                _ = async {
+                    while let Some(frame) = events.recv().await {
+                        if sender.send(IngestFrame::Socket { epoch, frame, observations: Arc::clone(&observations) }).await.is_err() { break; }
+                    }
+                    observations.deactivate(value);
+                    let reason = match *failure.borrow() {
+                        Some(crate::gateway::delivery::DispatcherError::EventBackpressure) => sessions_module::state::RecoveryReason::EventOverflow,
+                        Some(crate::gateway::delivery::DispatcherError::Protocol) => sessions_module::state::RecoveryReason::NativeUnknown,
+                        _ => sessions_module::state::RecoveryReason::NativeUnavailable,
+                    };
+                    for (identity, generation) in observation_targets(&observations, value, None) {
+                        let binding = sessions_module::state::SessionEventBinding::observed(identity.clone(), generation, Some(value), false).expect("validated observation binding");
+                        let event = SessionIngressEvent::new(identity, sessions_module::command::SessionEvent { binding, run_id: None, cursor: None, history_refresh: false, changes: vec![sessions_module::state::SessionChange::RecoveryRequired { reason }] });
+                        if observations.enqueue_ingress(&session_events, event).await.is_err() { break; }
+                    }
+                } => {},
             }
         });
         (epoch, task)

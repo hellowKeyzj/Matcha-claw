@@ -4,7 +4,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::config_store::{
     OpenClawConfigDocument, OpenClawConfigMutation, OpenClawConfigStore, OpenClawConfigStoreError,
@@ -163,7 +166,6 @@ impl ManifestSkillIntent {
         self.enabled
     }
 
-    #[cfg(test)]
     pub(crate) fn slugs(&self) -> &[String] {
         &self.slugs
     }
@@ -220,16 +222,30 @@ impl ManifestSkillEffect {
 pub struct CompanionSkillEffect {
     state_dir: CanonicalStateDir,
     intent: CompanionSkillIntent,
+    pending_entries: Option<SkillEntryStates>,
 }
 
 impl CompanionSkillEffect {
     pub fn new(state_dir: CanonicalStateDir, intent: CompanionSkillIntent) -> Self {
-        Self { state_dir, intent }
+        Self { state_dir, intent, pending_entries: None }
+    }
+
+    pub(crate) fn pending(mut self, entries: SkillEntryStates) -> Self {
+        self.pending_entries = Some(entries);
+        self
     }
 
     pub fn apply(self, source_root: &Path) -> Result<CompanionSkillOutcome, CompanionSkillError> {
         install_companion_skills(&self.state_dir, &self.intent, source_root)?;
-        let config_changed = apply_config_state(&self.state_dir, &self.intent)?;
+        let config_changed = if let Some(entries) = &self.pending_entries {
+            apply_pending_config_state(&self.state_dir, entries, &self.intent.slugs, &self.intent.plugin_id, self.intent.enabled)
+                .map_err(|error| match error {
+                    OpenClawConfigStoreError::CommittedButNotDurable => CompanionSkillError::ConfigNotDurable,
+                    _ => CompanionSkillError::ConfigStore,
+                })?
+        } else {
+            apply_config_state(&self.state_dir, &self.intent)?
+        };
         Ok(CompanionSkillOutcome {
             plugin_id: self.intent.plugin_id,
             slugs: self.intent.slugs,
@@ -338,6 +354,104 @@ fn apply_config_state_to_document(
     intent: &CompanionSkillIntent,
 ) -> bool {
     apply_skill_entries(document, &intent.slugs, intent.enabled)
+}
+
+pub(super) type SkillEntryStates = std::collections::BTreeMap<String, SkillEntryState>;
+
+#[derive(Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SkillEntryState {
+    before: String,
+    after: String,
+}
+
+impl SkillEntryState {
+    pub(super) fn capture(
+        document: &OpenClawConfigDocument,
+        slug: &str,
+        enabled: bool,
+    ) -> Result<Self, OpenClawConfigStoreError> {
+        Self::from_entry(skill_entries(document)?.and_then(|entries| entries.get(slug)), enabled)
+    }
+
+    fn from_entry(entry: Option<&Value>, enabled: bool) -> Result<Self, OpenClawConfigStoreError> {
+        let before = entry_fingerprint(entry)?;
+        let mut next = match entry {
+            Some(entry) => entry.as_object().cloned().ok_or(OpenClawConfigStoreError::InvalidDocument)?,
+            None => Map::new(),
+        };
+        if next.get("enabled").is_some_and(|value| !value.is_boolean()) {
+            return Err(OpenClawConfigStoreError::InvalidDocument);
+        }
+        next.insert("enabled".into(), Value::Bool(enabled));
+        Ok(Self { before, after: entry_fingerprint(Some(&Value::Object(next)))? })
+    }
+
+    pub(super) fn permits(
+        &self,
+        document: &OpenClawConfigDocument,
+        slug: &str,
+    ) -> Result<bool, OpenClawConfigStoreError> {
+        let current = entry_fingerprint(skill_entries(document)?.and_then(|entries| entries.get(slug)))?;
+        Ok(current == self.before || current == self.after)
+    }
+}
+
+fn skill_entries(
+    document: &OpenClawConfigDocument,
+) -> Result<Option<&Map<String, Value>>, OpenClawConfigStoreError> {
+    let Some(skills) = document.get("skills") else { return Ok(None) };
+    let Some(entries) = skills.as_object().ok_or(OpenClawConfigStoreError::InvalidDocument)?.get("entries") else {
+        return Ok(None);
+    };
+    entries.as_object().map(Some).ok_or(OpenClawConfigStoreError::InvalidDocument)
+}
+
+fn entry_fingerprint(entry: Option<&Value>) -> Result<String, OpenClawConfigStoreError> {
+    let bytes = Zeroizing::new(serde_json::to_vec(&entry).map_err(|_| OpenClawConfigStoreError::InvalidDocument)?);
+    Ok(format!("{:x}", Sha256::digest(bytes.as_slice())))
+}
+
+pub(super) fn capture_skill_entries(
+    document: &OpenClawConfigDocument,
+    slugs: &[String],
+    enabled: bool,
+) -> Result<SkillEntryStates, OpenClawConfigStoreError> {
+    slugs.iter().map(|slug| Ok((slug.clone(), SkillEntryState::capture(document, slug, enabled)?))).collect()
+}
+
+pub(super) fn apply_pending_skill_entries(
+    document: &mut OpenClawConfigDocument,
+    slugs: &[String],
+    enabled: bool,
+    before: &SkillEntryStates,
+) -> Result<bool, OpenClawConfigStoreError> {
+    let mut eligible = Vec::new();
+    for slug in slugs {
+        if let Some(previous) = before.get(slug) {
+            if previous.permits(document, slug)? {
+                eligible.push(slug.clone());
+            }
+        }
+    }
+    Ok(apply_skill_entries(document, &eligible, enabled))
+}
+
+fn apply_pending_config_state(
+    state_dir: &CanonicalStateDir,
+    entries: &SkillEntryStates,
+    slugs: &[String],
+    plugin_id: &str,
+    enabled: bool,
+) -> Result<bool, OpenClawConfigStoreError> {
+    OpenClawConfigStore::new(state_dir.clone()).try_update_private_document(|document| {
+        Ok(if super::plugins::plugin_enabled(document, plugin_id) == enabled
+            && apply_pending_skill_entries(document, slugs, enabled, entries)? {
+            OpenClawConfigMutation::changed()
+        } else {
+            OpenClawConfigMutation::unchanged()
+        })
+    }).map(|update| update.changed)
 }
 
 fn apply_skill_entries(

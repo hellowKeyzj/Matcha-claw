@@ -229,28 +229,32 @@ impl TaskRecord {
         record.result_summary = input.result_summary;
         record.error = input.error;
         record.updated_at = input.updated_at;
-        if matches!(
-            record.status,
-            TaskStatus::Todo | TaskStatus::Blocked | TaskStatus::Done | TaskStatus::Failed
-        ) && (record.owner_agent_id.is_some()
-            || record.claim_session.is_some()
-            || record.lease_until.is_some())
-        {
-            return Err(TaskBoardError::InvalidFacts);
-        }
-        if record.owner_agent_id.is_some() != record.claim_session.is_some() {
-            return Err(TaskBoardError::InvalidFacts);
-        }
-        if matches!(record.status, TaskStatus::Claimed | TaskStatus::Running)
-            && (record.owner_agent_id.is_none()
-                || record.claim_session.is_none()
-                || record.claimed_at.is_none()
-                || record.lease_until.is_none()
-                || record.lease_until <= record.claimed_at)
-        {
-            return Err(TaskBoardError::InvalidFacts);
-        }
+        record.validate_ownership(record.status)?;
         Ok(record)
+    }
+    pub(crate) fn validate_ownership(&self, status: TaskStatus) -> Result<(), TaskBoardError> {
+        if matches!(
+            status,
+            TaskStatus::Todo | TaskStatus::Blocked | TaskStatus::Done | TaskStatus::Failed
+        ) && (self.owner_agent_id.is_some()
+            || self.claim_session.is_some()
+            || self.lease_until.is_some())
+        {
+            return Err(TaskBoardError::InvalidFacts);
+        }
+        if self.owner_agent_id.is_some() != self.claim_session.is_some() {
+            return Err(TaskBoardError::InvalidFacts);
+        }
+        if matches!(status, TaskStatus::Claimed | TaskStatus::Running)
+            && (self.owner_agent_id.is_none()
+                || self.claim_session.is_none()
+                || self.claimed_at.is_none()
+                || self.lease_until.is_none()
+                || self.lease_until <= self.claimed_at)
+        {
+            return Err(TaskBoardError::InvalidFacts);
+        }
+        Ok(())
     }
 }
 
@@ -969,6 +973,7 @@ impl TaskBoardFacts {
     }
     pub fn validate(&self) -> Result<(), TaskBoardError> {
         for task in self.tasks() {
+            task.validate_ownership(task.status())?;
             if task.depends_on().iter().any(|d| d == task.task_id()) {
                 return Err(TaskBoardError::DependencyCycle);
             }

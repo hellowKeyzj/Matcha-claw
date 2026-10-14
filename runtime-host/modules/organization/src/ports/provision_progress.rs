@@ -36,6 +36,7 @@ pub enum TeamProvisionMemberStatus {
 pub enum TeamProvisionUpdate {
     Started(TeamProvisionProgress),
     Stage(TeamProvisionStage),
+    Failure(super::TeamCreationFailure),
     Member {
         index: usize,
         status: TeamProvisionMemberStatus,

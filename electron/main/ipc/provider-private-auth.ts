@@ -15,7 +15,7 @@ import type { ProviderCallDetail } from '../../../src/types/call-log/provider';
 import { decodeCallReceipt } from '../../../src/types/call-log/receipt';
 import { probeAnthropicCliAuth } from './provider-private-auth/anthropic-cli-probe';
 import {
-  beginPrivateAccountTransaction, claimPrivateAccountTransaction, clearPrivateAccountTransactions,
+  beginPrivateAccountTransaction, claimPrivateAccountTransaction, closePrivateAccountTransactions,
   privateAccountTransactionForRequest, settlePrivateAccountTransaction,
   type PrivateAccountTransaction,
 } from './provider-private-auth/account-transactions';
@@ -363,7 +363,7 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
       await closeServer(server);
       await privateStoreWrite;
       await authProfileWrite;
-      clearPrivateAccountTransactions();
+      await closePrivateAccountTransactions(restoreCredential);
     },
   };
 }
@@ -438,9 +438,12 @@ async function loginFlow(flow: Flow, getMainWindow: () => BrowserWindow | null):
 }
 
 async function openAiSecret(flow: Flow, getMainWindow: () => BrowserWindow | null): Promise<PrivateCredential> {
+  const signal = flow.controller.signal;
   const token = await loginOpenAICodexOAuth({
-    openUrl: async (url) => { await shell.openExternal(url); },
+    signal,
+    openUrl: async (url) => { signal.throwIfAborted(); await shell.openExternal(url); },
     onManualCodeRequired: ({ authorizationUrl, reason }) => {
+      if (signal.aborted || activeFlows.get(flow.flowId) !== flow) return;
       publish(getMainWindow, { flowId: flow.flowId, status: 'manual_code_required', authorizationUrl });
       publishLegacy(getMainWindow, 'oauth:code', {
         provider: flow.provider,
@@ -450,7 +453,17 @@ async function openAiSecret(flow: Flow, getMainWindow: () => BrowserWindow | nul
       });
     },
     onManualCodeInput: async () => await new Promise<string>((resolve, reject) => {
-      manualCodes.set(flow.flowId, { resolve, reject });
+      signal.throwIfAborted();
+      const cleanup = () => {
+        if (manualCodes.get(flow.flowId) === pending) manualCodes.delete(flow.flowId);
+        signal.removeEventListener('abort', pending.reject);
+      };
+      const pending = {
+        resolve: (value: string) => { cleanup(); resolve(value); },
+        reject: () => { cleanup(); reject(signal.reason); },
+      };
+      manualCodes.set(flow.flowId, pending);
+      signal.addEventListener('abort', pending.reject, { once: true });
     }),
   });
   return { kind: 'oauth', access: token.access, refresh: token.refresh, expires: token.expires, accountId: token.accountId };
@@ -577,7 +590,7 @@ async function preparePrivateAccountSecret(
   account: AccountIntent, secret?: PrivateCredential,
 ): Promise<PrivateAccountTransaction> {
   const reference = credentialReference(account.id);
-  const transaction = await beginPrivateAccountTransaction(reference, account.revision, () => credentialSnapshot(reference));
+  const transaction = await beginPrivateAccountTransaction(reference, account.revision, () => credentialSnapshot(reference), restoreCredential);
   try {
     if (account.authMode !== 'local' && account.authMode !== 'cliReuse') {
       if (secret) await storeSecret(account.id, secret);
@@ -634,7 +647,7 @@ async function admitPrivateDelete(
 ): Promise<PrivateAccountAdmissionResult> {
   if (!isId(accountId) || !isRevision(revision)) throw new Error('Provider account request is invalid');
   const reference = credentialReference(accountId);
-  const transaction = await beginPrivateAccountTransaction(reference, revision, () => credentialSnapshot(reference));
+  const transaction = await beginPrivateAccountTransaction(reference, revision, () => credentialSnapshot(reference), restoreCredential);
   return admitPrivateMutation(transport, transaction, 'providerAccounts.delete', {
     kind: 'delete', accountId, revision, privateTransactionId: transaction.id,
   });
@@ -739,15 +752,11 @@ function manualCodeMessage(reason: 'port_in_use' | 'callback_timeout'): string {
 }
 
 function resolveManualCode(flowId: string, code: string): void {
-  const pending = manualCodes.get(flowId);
-  manualCodes.delete(flowId);
-  pending?.resolve(code);
+  manualCodes.get(flowId)?.resolve(code);
 }
 
 function rejectManualCode(flowId: string): void {
-  const pending = manualCodes.get(flowId);
-  manualCodes.delete(flowId);
-  pending?.reject();
+  manualCodes.get(flowId)?.reject();
 }
 
 async function credentialSnapshot(reference: string): Promise<string | undefined> {

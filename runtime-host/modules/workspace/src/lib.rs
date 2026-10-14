@@ -20,6 +20,8 @@ use tokio::sync::Mutex;
 use api::WorkspaceHandle;
 use owner::actor::WorkspaceOwner;
 
+pub const MAX_MEDIA_PATHS: usize = 256;
+
 const MODULE_ID: ModuleId = ModuleId::new("workspace");
 const PROVIDES: &[CapabilityKey] = &[
     CapabilityKey::new("workspace.file"),

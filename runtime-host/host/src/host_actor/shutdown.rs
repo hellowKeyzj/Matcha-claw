@@ -29,10 +29,19 @@ pub(super) async fn immediate(host: &mut Host) -> ActorExit {
 async fn attempt(host: &mut Host, reply: ShutdownReply) -> Option<ActorExit> {
     let result = host.shutdown().await;
     let terminal = host.admission_state().phase() == HostPhase::ShutDown;
+    let retryable = result
+        .as_ref()
+        .err()
+        .is_some_and(|error| host.shutdown_is_retryable(error));
     let _ = reply.send(ShutdownAttempt {
         result: result.clone(),
         terminal,
+        retryable,
     });
+    if !terminal && !retryable {
+        // Failed joins cannot be retried or release Host/Events before the app's failure exit.
+        std::future::pending::<()>().await;
+    }
     terminal.then(|| result.map(|_| ()))
 }
 

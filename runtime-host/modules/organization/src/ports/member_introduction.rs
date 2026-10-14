@@ -66,6 +66,11 @@ pub struct MemberIntroductionOutput {
 pub enum MemberIntroductionError {
     CredentialMissing,
     CredentialUnavailable,
+    ModelAuthentication,
+    ModelPermissionDenied,
+    ModelRateLimited,
+    ModelDeadline,
+    ModelInvalidResponse,
     Unavailable,
     Unsupported,
     InvalidOutput,
@@ -77,6 +82,11 @@ impl fmt::Display for MemberIntroductionError {
         formatter.write_str(match self {
             Self::CredentialMissing => "team member introduction credential missing",
             Self::CredentialUnavailable => "team member introduction credential unavailable",
+            Self::ModelAuthentication => "team member introduction model authentication failed",
+            Self::ModelPermissionDenied => "team member introduction model permission denied",
+            Self::ModelRateLimited => "team member introduction model rate limited",
+            Self::ModelDeadline => "team member introduction model deadline exceeded",
+            Self::ModelInvalidResponse => "team member introduction model response invalid",
             Self::Unavailable => "team member introduction unavailable",
             Self::Unsupported => "team member introduction unsupported",
             Self::InvalidOutput => "team member introduction output invalid",

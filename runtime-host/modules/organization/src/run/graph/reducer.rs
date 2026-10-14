@@ -325,6 +325,16 @@ fn apply_graph_patch(
         edges,
     )
     .map_err(ReduceError::InvalidDefinition)?;
+    for node in definition.nodes() {
+        if state.executions().get(node.id()).is_some_and(|history| {
+            history.attempts().iter().any(|attempt| attempt.number() > node.max_attempts())
+        }) {
+            return Err(ReduceError::AttemptLimitExceeded {
+                node_id: node.id().clone(),
+                max_attempts: node.max_attempts(),
+            });
+        }
+    }
     let root_ids = definition.execution_root_ids();
     let mut executions = BTreeMap::new();
     for node in definition.nodes() {

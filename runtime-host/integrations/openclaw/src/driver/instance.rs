@@ -7,7 +7,7 @@ use std::{
 
 #[cfg(unix)]
 use foundation::process::InvalidGuardianExecutable;
-use foundation::process::{ProcessContainment, supervise};
+use foundation::process::{OneShotContainment, ProcessContainment, supervise};
 use platform::{listener_identity::ListenerIdentity, parent_callback::ParentShellOpenPath};
 use tokio::sync::{Mutex, mpsc, watch};
 
@@ -60,6 +60,7 @@ pub struct OpenClawDriver {
     pub(crate) lifecycle_gate: Arc<Mutex<()>>,
     pub(crate) repair_state: StdMutex<runtime_directory::RuntimeRepairSnapshot>,
     pub(crate) doctor_repair: OpenClawDoctorRepair,
+    pub(crate) clawhub_containment: OneShotContainment,
     pub(crate) diagnostic_state: LifecycleDiagnosticState,
     pub(crate) runtime_host_mcp_executable: PathBuf,
     pub(crate) runtime_host_mcp_state_dir: PathBuf,
@@ -397,6 +398,7 @@ impl PreparedOpenClaw {
         #[cfg(unix)]
         let containment = ProcessContainment::guardian(self.guardian_executable)
             .expect("prepared OpenClaw guardian executable must be absolute");
+        let clawhub_containment = OneShotContainment::from_process_containment(containment.clone());
         let supervisor = supervise(
             containment,
             self.launch,
@@ -422,6 +424,7 @@ impl PreparedOpenClaw {
                 failure: None,
             }),
             doctor_repair: self.doctor_repair,
+            clawhub_containment,
             diagnostic_state,
             runtime_host_mcp_executable: self.runtime_host_mcp_executable,
             runtime_host_mcp_state_dir: self.runtime_host_mcp_state_dir,

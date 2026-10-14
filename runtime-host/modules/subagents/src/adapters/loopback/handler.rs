@@ -203,11 +203,14 @@ fn delivery_trace_kind(delivery: &Delivery) -> &'static str {
         Delivery::Files(_) => "files",
         Delivery::File(_) => "file",
         Delivery::Configuration(_) => "configuration",
-        Delivery::ConfigurationApplied => "configurationApplied",
+        Delivery::ConfigurationApplied | Delivery::ConfigurationAppliedReadbackFailed => {
+            "configurationApplied"
+        }
         Delivery::SkillConfiguration(_) => "skillConfiguration",
         Delivery::ToolConfiguration(_) => "toolConfiguration",
         Delivery::PackageExport(_) => "packageExport",
         Delivery::PackageInstall(_) => "packageInstall",
+        Delivery::PackageInstalledCleanupFailed => "packageInstalledCleanupFailed",
         Delivery::Rejected => "rejected",
         Delivery::OutcomeUnknown => "outcomeUnknown",
         Delivery::Unsupported => "unsupported",

@@ -1,3 +1,4 @@
+use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ pub(super) fn spawn(
     target_state_directory: Option<OwnedFd>,
     private_descriptor: Option<OwnedFd>,
     execution_source: Option<OwnedFd>,
+    environment: Option<Vec<CString>>,
 ) -> io::Result<libc::pid_t> {
     let descriptor_limit = super::guardian_descriptors::descriptor_limit()?;
     let sentinel_pid = unsafe { libc::fork() };
@@ -59,6 +61,7 @@ pub(super) fn spawn(
             target_state_directory,
             private_descriptor,
             execution_source,
+            environment,
         );
     }
     drop(target_stdio);
@@ -75,6 +78,7 @@ fn run(
     target_state_directory: Option<OwnedFd>,
     private_descriptor: Option<OwnedFd>,
     execution_source: Option<OwnedFd>,
+    environment: Option<Vec<CString>>,
 ) -> ! {
     let launch_request = match read_control_or_guardian_loss(
         guardian_liveness.as_raw_fd(),
@@ -94,6 +98,7 @@ fn run(
         target_state_directory,
         private_descriptor,
         execution_source,
+        environment,
     ) {
         Ok(target) => target,
         Err(launch::SpawnFailure::Drained(error)) => {

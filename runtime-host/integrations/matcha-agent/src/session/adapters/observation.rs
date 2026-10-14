@@ -25,7 +25,7 @@ use crate::{
     session::{
         client::{AppServerClient, EventSubscription, RawEvent},
         events::SessionEventProjector,
-        hydration::{HydrationWindowMode, HydrationWindowRequest, hydrate_lines},
+        hydration::{HydrationWindowMode, HydrationWindowRequest, hydrate_page},
         model::{RunId, RunStatus, Sequence, SessionId, SessionSnapshot},
         protocol_event::{EventEnvelope, ReplayLimit},
         request::{SessionSnapshotParams, SessionTranscriptParams},
@@ -416,7 +416,7 @@ impl Projection {
             return Err(RuntimeOperationFailure::TargetRejected);
         }
         let snapshot = client
-            .snapshot_session(SessionSnapshotParams::new(self.native_id.clone()))
+            .snapshot_session(SessionSnapshotParams::new(self.native_id.clone()).without_messages())
             .await
             .map_err(|_| RuntimeOperationFailure::Unavailable)?;
         if snapshot.session.session_id != self.native_id
@@ -425,21 +425,19 @@ impl Projection {
             return Err(RuntimeOperationFailure::Unknown);
         }
         let target = snapshot.session.last_seq;
-        // Transcript is a later independent read, not an atomic snapshot cut.
-        let transcript = client
-            .transcript_session(SessionTranscriptParams::new(self.native_id.clone()))
-            .await
-            .map_err(|_| RuntimeOperationFailure::Unavailable)?;
         let mode = match command.direction() {
             timeline::Direction::Latest => HydrationWindowMode::Latest,
             timeline::Direction::Older => HydrationWindowMode::Older,
             timeline::Direction::Newer => HydrationWindowMode::Newer,
         };
-        let transcript = hydrate_lines(
-            &transcript.lines,
-            HydrationWindowRequest::new(mode, command.limit(), command.offset()),
-        )
-        .map_err(|_| RuntimeOperationFailure::Unknown)?;
+        let request = HydrationWindowRequest::new(mode, command.limit(), command.offset());
+        // Transcript is a later independent read, not an atomic snapshot cut.
+        let transcript = client
+            .transcript_session(SessionTranscriptParams::new(self.native_id.clone()).with_window(request))
+            .await
+            .map_err(|_| RuntimeOperationFailure::Unavailable)?;
+        let transcript = hydrate_page(&transcript)
+            .map_err(|_| RuntimeOperationFailure::Unknown)?;
         self.replay(client, target, events, cancel).await?;
         let mut view = super::timeline::project_matcha_hydration_view(
             &self.request.identity,

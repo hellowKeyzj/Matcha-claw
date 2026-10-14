@@ -142,7 +142,7 @@ export function PageLinksPanel({ projectId, relativePath, busy, unsaved, onOpenF
         await cancelCreation(task);
         return;
       }
-      const call = await waitForCall(receipt, 'wiki', { signal: task.controller.signal });
+      const call = await waitForCall(receipt, 'wiki', { signal: task.controller.signal, timeoutMs: draft ? null : undefined });
       if (task.controller.signal.aborted || !isCurrent(scope)) return;
       if (call.callId !== receipt.callId || call.command !== 'missing-page.create' || call.detail.operation !== 'missing-page.create') {
         throw new Error('Wiki call identity mismatch');

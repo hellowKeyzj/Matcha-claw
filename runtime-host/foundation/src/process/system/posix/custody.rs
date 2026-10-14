@@ -14,6 +14,7 @@ use super::guardian_process::{self, GuardianProcess};
 use super::host_protocol::{
     decode_armed_payload, decode_exit_status_payload, encode_launch_payload, encode_stdio_spec,
 };
+use super::inherited_environment::{self, PendingEnvironment};
 use super::io::{read_frame, write_frame};
 use super::protocol::{Frame, Message};
 use super::stdio::HostStdio;
@@ -86,9 +87,13 @@ impl ExchangeTaskOutput {
         request_id: u64,
         payload: Vec<u8>,
         deadline: Instant,
+        environment: Option<PendingEnvironment>,
     ) -> Self {
         let response = Frame::new(message, nonce, request_id, payload).and_then(|request| {
             write_frame(guardian.stdin.as_raw_fd(), &request, deadline)?;
+            if let Some(environment) = environment {
+                environment.write(nonce, request_id, deadline)?;
+            }
             read_frame(guardian.stdout.as_raw_fd(), deadline)
         });
         Self { guardian, response }
@@ -121,6 +126,14 @@ impl NativeCustody {
         execution_source: Option<std::os::fd::OwnedFd>,
     ) -> Result<(Self, HostStdio), SpawnFailure> {
         let nonce = random_nonce().map_err(SpawnFailure::Launch)?;
+        let (environment_descriptor, environment) = match spec.inherited_environment() {
+            Some(environment) => {
+                let (descriptor, pending) = inherited_environment::prepare(environment)
+                    .map_err(SpawnFailure::Launch)?;
+                (Some(descriptor), Some(pending))
+            }
+            None => (None, None),
+        };
         let host_stdio = HostStdio::create(spec.stdio()).map_err(SpawnFailure::Launch)?;
         let (guardian, host_stdio) = match guardian_process::spawn(
             guardian_executable,
@@ -128,6 +141,7 @@ impl NativeCustody {
             custody,
             private_descriptor,
             execution_source,
+            environment_descriptor,
         ) {
             Ok(guardian) => guardian,
             Err(guardian_process::SpawnFailure::BeforeOwnership(error)) => {
@@ -143,9 +157,16 @@ impl NativeCustody {
             next_request_id: 1,
             in_flight: None,
         };
-        let ready = custody
-            .exchange(Message::Hello, encode_stdio_spec(spec.stdio()))
-            .await;
+        let ready = match custody.start_exchange(
+            Message::Hello,
+            encode_stdio_spec(spec.stdio()),
+            Instant::now() + CONTROL_TIMEOUT,
+            None,
+            environment,
+        ) {
+            Ok(()) => custody.await_in_flight().await.map(|completed| completed.frame),
+            Err(error) => Err(error),
+        };
         if !matches!(ready, Ok(frame) if frame.message == Message::Ready) {
             custody.relinquish();
             return Err(SpawnFailure::AuthorityLost);
@@ -269,7 +290,7 @@ impl NativeCustody {
             return Err(CustodyFailure::AuthorityLost);
         }
 
-        self.start_exchange(message, payload, deadline, None)?;
+        self.start_exchange(message, payload, deadline, None, None)?;
         Ok(self.await_in_flight().await?.frame)
     }
 
@@ -279,6 +300,7 @@ impl NativeCustody {
         payload: Vec<u8>,
         deadline: Instant,
         drained_observation: Option<ExitObservation>,
+        environment: Option<PendingEnvironment>,
     ) -> Result<(), CustodyFailure> {
         let request_id = self.next_request_id;
         let Some(next_request_id) = self.next_request_id.checked_add(1) else {
@@ -297,6 +319,7 @@ impl NativeCustody {
                     request_id,
                     task_payload,
                     deadline,
+                    environment,
                 )
             })
             .await
@@ -362,6 +385,7 @@ impl NativeCustody {
                     Vec::new(),
                     Instant::now() + CONTROL_TIMEOUT,
                     Some(observation),
+                    None,
                 )?;
                 self.resume_disarm().await
             }

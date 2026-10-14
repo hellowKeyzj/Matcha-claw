@@ -109,6 +109,7 @@ Methods:
 - `approval.respond`
 - `models.list`
 - `session.transcript`
+- `session.content`
 
 Event envelope:
 
@@ -158,7 +159,13 @@ session.load
   └─ transcript-only history: return read-only summary from matcha-agent history read model
 ```
 
-Transcript-only history is not written to `SessionIndex` by `session.list`, `session.load`, `session.transcript`, or `session.snapshot`. It enters app-server runtime state only when a method needs app-server-owned state, such as `session.prompt` or settings mutation.
+Transcript-only history is not written to `SessionIndex` by `session.list`, `session.load`, `session.transcript`, `session.content`, or `session.snapshot`. It enters app-server runtime state only when a method needs app-server-owned state, such as `session.prompt` or settings mutation.
+
+History reads are native app-server facts: `session.transcript(direction, offset, limit)` returns `lines + window {totalItemCount, windowStartOffset, windowEndOffset}` with a real source span ≤200 and a 512 KiB JSON page budget. The budget counts each line's escaped JSON bytes incrementally; shrinking a page updates its source bounds without repeatedly serializing the whole page. Long text uses `large_text` with a UTF-8 preview ≤4 KiB, a stable session/source/block reference, and real total bytes; `session.content` returns UTF-8 byte-offset chunks ≤64 KiB. Rust hydrates only the returned page, without a local transcript reader or disk fallback. [VERIFY: matcha-agent/src/app-server/protocol/types.ts:105-137] [VERIFY: matcha-agent/src/utils/sessionTranscriptRead.ts:169-353] [VERIFY: matcha-agent/src/utils/sessionHistoryReadModel.ts:264-282] [VERIFY: runtime-host/integrations/matcha-agent/src/session/hydration/mod.rs:33-92]
+
+A native reader lives with app-server services and closes at shutdown. Summary load, transcript, and content share a rebuildable source-span/metadata index, never cached full text. The total cache budgets are 20,000 visible entries, 8 MiB serialized metadata, and 16 sessions; an over-budget index serves the current request without retention. Path/size/mtime/ctime changes invalidate it; cold reads necessarily scan through the native recovery loader (O(file bytes)), while hot pages point-read indexed source lines and validate the fingerprint before/after reading. Catalog list retains its existing summary path. [VERIFY: matcha-agent/src/utils/sessionTranscriptRead.ts:27-167] [VERIFY: matcha-agent/src/utils/sessionTranscriptRead.ts:198-299] [VERIFY: matcha-agent/src/utils/sessionTranscriptRead.ts:354-399] [VERIFY: matcha-agent/src/utils/sessionStoragePortable.ts:473-548] [VERIFY: matcha-agent/src/app-server/main.ts:1407-1413] [VERIFY: matcha-agent/src/app-server/main.ts:1647-1655]
+
+`session.snapshot` defaults to the existing message response; `includeMessages:false` returns `messages:[]` for Rust canonical/live synchronization so transcript body is not transferred twice. Session titles are response previews capped at 512 UTF-8 bytes, not durable-title truncation. Snapshot/transcript reads remain non-atomic, and model recovery/event replay behavior is unchanged. [VERIFY: matcha-agent/src/app-server/main.ts:1384-1402] [VERIFY: matcha-agent/src/app-server/main.ts:1658-1673] [VERIFY: matcha-agent/src/utils/sessionHistoryReadModel.ts:88-107] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/observation.rs:405-484]
 
 ### Prompt
 
@@ -353,14 +360,14 @@ runtime-host MatchaAgentRuntimeAdapter
   ├─ event replay after last seq
   ├─ event subscription for live projection
   ├─ approval.respond forwarding
-  └─ snapshot fallback for hydration
+  └─ snapshot metadata + transcript page for canonical sync
 ```
 
 Adapter responsibilities:
 
 - Map runtime-host session commands to app-server JSON-RPC methods.
-- Use `session.transcript` for live app-server hydration; Rust runtime-host integration may read transcript JSONL directly for cold-start history list/window projection.
-- Use `events.replay`, `events.subscribe`, and `session.snapshot` for app-server runtime synchronization.
+- Use native `session.list`, paged `session.transcript`, and `session.content` for history/content projection; do not read transcript JSONL from Rust. Pure history reads initialize → transcript page → `hydrate_page` → cleanup, without snapshot/replay. [VERIFY: runtime-host/integrations/matcha-agent/src/session/history.rs:165-232]
+- Use `events.replay`, `events.subscribe`, and `session.snapshot(includeMessages:false)` plus a transcript page for canonical/live synchronization; these reads remain non-atomic and ACK is not replay. [VERIFY: runtime-host/integrations/matcha-agent/src/session/hydration/mod.rs:104-130] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/observation.rs:405-484]
 - Persist last seen `seq` per logical session; `seq` is app-server event order, not transcript offset.
 - Project app-server events into runtime-host canonical session view.
 - Keep runtime-host facts independent from worker PID/process details.

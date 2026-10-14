@@ -150,8 +150,8 @@ pub(super) async fn handle_management(
         {
             let worker = handle.clone();
             let receipt = handle
-                .submit_operation(call, async move {
-                    match worker.manage_skills(command).await {
+                .submit_cancellable_operation(call, move |cancellation| async move {
+                    match worker.manage_skills_cancellable(command, cancellation).await {
                         Ok(outcome) => {
                             let (status, body) = response(outcome);
                             platform::loopback::Response::json(status, body)
@@ -187,22 +187,53 @@ pub(super) async fn handle_capability_execute(
         .get("operationId")
         .and_then(Value::as_str)
         .ok_or(RequestError::Invalid)?;
+    let tracing_open_path = platform::trace::enabled() && operation_id == "clawhub.openPath";
     let principal = verifier
         .lock()
         .await
         .verify(
-            bearer(headers).ok_or(RequestError::Unauthorized)?,
+            bearer(headers).ok_or_else(|| {
+                if tracing_open_path {
+                    platform::trace::runtime_trace(
+                        "skill.open-path.auth-rejected",
+                        || json!({ "reason": "missing-bearer" }),
+                    );
+                }
+                RequestError::Unauthorized
+            })?,
             now,
             CAPABILITY_EXECUTE_ENDPOINT,
             "skill.management",
             operation_id,
             "skill-management",
         )
-        .map_err(|_| RequestError::Unauthorized)?
+        .map_err(|_| {
+            if tracing_open_path {
+                platform::trace::runtime_trace(
+                    "skill.open-path.auth-rejected",
+                    || json!({ "reason": "invalid-decision" }),
+                );
+            }
+            RequestError::Unauthorized
+        })?
         .principal()
         .to_owned();
+    if tracing_open_path {
+        platform::trace::runtime_trace("skill.open-path.auth-accepted", || json!({}));
+    }
     let operation_id = operation_id.to_owned();
-    let request = control::decode_management_request(value).map_err(|_| RequestError::Invalid)?;
+    let request = control::decode_management_request(value).map_err(|_| {
+        if tracing_open_path {
+            platform::trace::runtime_trace(
+                "skill.open-path.decode-rejected",
+                || json!({ "reason": "invalid-capability-request" }),
+            );
+        }
+        RequestError::Invalid
+    })?;
+    if tracing_open_path {
+        platform::trace::runtime_trace("skill.open-path.decode-accepted", || json!({}));
+    }
     if matches!(
         request,
         control::ManagementRequest::UpdateConfig(_)

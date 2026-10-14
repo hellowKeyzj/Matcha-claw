@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use serde_json::json;
@@ -45,6 +45,10 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("toolchain"),
         vec![RouteDescriptor::bound(
             "toolchain.loopback",
+            &[
+                RoutePath::ExactWithQuery(STATUS_ENDPOINT),
+                RoutePath::ExactWithQuery(PREPARE_ENDPOINT),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],
@@ -52,8 +56,15 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
 }
 
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
-    matches!(pathname(&head.path), STATUS_ENDPOINT | PREPARE_ENDPOINT)
-        .then(|| RouteHeadPlan::new(BodyPolicy::Empty, DEFAULT_DEADLINE, timeout_response))
+    let path = pathname(&head.path);
+    matches!(path, STATUS_ENDPOINT | PREPARE_ENDPOINT).then(|| {
+        let plan = if head.method == "POST" && path == PREPARE_ENDPOINT {
+            RouteHeadPlan::body_deadline
+        } else {
+            RouteHeadPlan::new
+        };
+        plan(BodyPolicy::Empty, DEFAULT_DEADLINE, timeout_response)
+    })
 }
 
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {

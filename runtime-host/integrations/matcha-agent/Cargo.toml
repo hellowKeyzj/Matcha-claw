@@ -21,7 +21,6 @@ platform = { version = "0.1.0", path = "../../platform" }
 runtime-directory = { version = "0.1.0", path = "../../modules/runtime-directory" }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tokio-util.workspace = true

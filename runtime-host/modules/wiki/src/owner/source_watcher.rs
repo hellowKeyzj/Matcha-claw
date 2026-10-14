@@ -22,7 +22,7 @@ const LINUX_RESCAN_INTERVAL_MS: u64 = 10_000;
 
 #[derive(Clone)]
 pub(crate) struct SourceWatchControl {
-    project: watch::Sender<Option<WatchedProject>>,
+    project: watch::Sender<Result<Option<WatchedProject>, ()>>,
     generation: Arc<AtomicU64>,
 }
 
@@ -34,8 +34,8 @@ pub(crate) struct WatchedProject {
 }
 
 impl SourceWatchControl {
-    pub(crate) fn channel() -> (Self, watch::Receiver<Option<WatchedProject>>) {
-        let (project, receiver) = watch::channel(None);
+    pub(crate) fn channel() -> (Self, watch::Receiver<Result<Option<WatchedProject>, ()>>) {
+        let (project, receiver) = watch::channel(Ok(None));
         (
             Self {
                 project,
@@ -47,16 +47,21 @@ impl SourceWatchControl {
 
     pub(crate) fn watch_project(&self, project_id: String, root_path: String, auto_ingest: bool) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        let _ = self.project.send(Some(WatchedProject {
+        let _ = self.project.send(Ok(Some(WatchedProject {
             project_id,
             root_path: PathBuf::from(root_path),
             auto_ingest,
-        }));
+        })));
     }
 
     pub(crate) fn clear(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        let _ = self.project.send(None);
+        let _ = self.project.send(Ok(None));
+    }
+
+    pub(crate) fn retry_initialization(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let _ = self.project.send(Err(()));
     }
 
     fn generation(&self) -> u64 {
@@ -67,13 +72,18 @@ impl SourceWatchControl {
 pub(crate) fn spawn(
     wiki: WikiHandle,
     control: SourceWatchControl,
-    mut receiver: watch::Receiver<Option<WatchedProject>>,
+    mut receiver: watch::Receiver<Result<Option<WatchedProject>, ()>>,
 ) -> OwnedTask<()> {
     OwnedTask::spawn(|cancellation| async move {
-        let mut current = initial_project(&wiki).await.or_else(|| receiver.borrow().clone());
-        let mut session = current
-            .take()
-            .map(|project| spawn_project_session(wiki.clone(), control.clone(), project));
+        let mut generation = control.generation();
+        let (mut current, mut initialization_failed) = match initial_project(&wiki).await {
+            Ok(project) => (project, false),
+            Err(_) => (None, true),
+        };
+        let mut session = current.clone().map(|project| {
+            spawn_project_session(wiki.clone(), control.clone(), project, generation)
+        });
+        let mut supervision = tokio::time::interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
@@ -90,15 +100,47 @@ pub(crate) fn spawn(
                         }
                         break;
                     }
-                    let next = receiver.borrow().clone();
+                    (current, initialization_failed) = match receiver.borrow().clone() {
+                        Ok(project) => (project, false),
+                        Err(()) => (None, true),
+                    };
+                    generation = control.generation();
                     if session.as_ref().is_some() {
                         if let Some(task) = session.as_mut() {
                             let _ = task.cancel_and_join().await;
                         }
                         session = None;
                     }
-                    if let Some(project) = next {
-                        session = Some(spawn_project_session(wiki.clone(), control.clone(), project));
+                    if let Some(project) = current.clone() {
+                        session = Some(spawn_project_session(
+                            wiki.clone(), control.clone(), project, generation,
+                        ));
+                    }
+                }
+                _ = supervision.tick() => {
+                    if initialization_failed && !cancellation.is_cancelled() {
+                        let retry_generation = control.generation();
+                        if let Ok(project) = initial_project(&wiki).await {
+                            if !cancellation.is_cancelled() && control.generation() == retry_generation {
+                                generation = retry_generation;
+                                current = project;
+                                initialization_failed = false;
+                                session = current.clone().map(|project| {
+                                    spawn_project_session(wiki.clone(), control.clone(), project, generation)
+                                });
+                            }
+                        }
+                    }
+                    if session.as_ref().is_some_and(OwnedTask::is_finished) {
+                        if let Some(task) = session.as_mut() {
+                            let _ = task.join().await;
+                        }
+                        session = None;
+                        if !cancellation.is_cancelled() && control.generation() == generation {
+                            session = current.clone().map(|project| {
+                                spawn_project_session(wiki.clone(), control.clone(), project, generation)
+                            });
+                        }
                     }
                 }
             }
@@ -107,29 +149,30 @@ pub(crate) fn spawn(
     .0
 }
 
-async fn initial_project(wiki: &WikiHandle) -> Option<WatchedProject> {
-    let status = wiki.status().await.ok()?;
-    let project = status.current_project()?;
+async fn initial_project(wiki: &WikiHandle) -> Result<Option<WatchedProject>, WikiFailure> {
+    let status = wiki.status().await?;
+    let Some(project) = status.current_project() else {
+        return Ok(None);
+    };
     let receipt = wiki
         .source_watch_config(crate::domain::WikiProjectSelector {
             project_id: Some(project.project_id().to_owned()),
         })
-        .await
-        .ok()?;
-    receipt.config().enabled().then(|| WatchedProject {
+        .await?;
+    Ok(receipt.config().enabled().then(|| WatchedProject {
         project_id: project.project_id().to_owned(),
         root_path: PathBuf::from(project.root_path()),
         auto_ingest: receipt.config().auto_ingest(),
-    })
+    }))
 }
 
 fn spawn_project_session(
     wiki: WikiHandle,
     control: SourceWatchControl,
     project: WatchedProject,
+    generation: u64,
 ) -> OwnedTask<()> {
-    OwnedTask::spawn(|cancellation| async move {
-        let generation = control.generation();
+    OwnedTask::spawn(move |cancellation| async move {
         let handle = tokio::runtime::Handle::current();
         let join = tokio::task::spawn_blocking(move || {
             if let Err(error) =
@@ -152,16 +195,6 @@ fn run_project_watcher(
     handle: tokio::runtime::Handle,
 ) -> Result<(), WikiFailure> {
     let root = project.root_path.clone();
-    refresh_project_paths(
-        &handle,
-        &wiki,
-        &control,
-        &project.project_id,
-        generation,
-        project.auto_ingest,
-        watch_roots(&root),
-    );
-
     let (tx, rx) = mpsc::sync_channel::<PathBuf>(EVENT_QUEUE_CAPACITY);
     let tx_for_watcher = tx.clone();
     let root_for_overflow = root.clone();
@@ -197,6 +230,16 @@ fn run_project_watcher(
             }
         }
     }
+
+    refresh_project_paths(
+        &handle,
+        &wiki,
+        &control,
+        &project.project_id,
+        generation,
+        project.auto_ingest,
+        watch_roots(&root),
+    );
 
     let mut pending = BTreeSet::<PathBuf>::new();
     let mut last_linux_rescan = crate::domain::now_ms();

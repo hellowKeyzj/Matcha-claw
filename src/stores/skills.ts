@@ -401,7 +401,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
     try {
       const result = await hostSkillsMutation('/api/skills/clawhub/install',
-        { slug, ...(version ? { version } : {}) }, 'skills.clawhub.install');
+        { slug, ...(version ? { version } : {}) }, 'skills.clawhub.install', { timeoutMs: null });
       if (result.outcome !== 'accepted') {
         const appError = normalizeAppError(new Error('Install failed'), {
           module: 'skills',
@@ -453,7 +453,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         ? { content: payload.content }
         : { skillKey, files: payload.files };
       const result = await hostSkillsMutation(endpoint, body,
-        payload.kind === 'markdown' ? 'skills.import.markdown' : 'skills.import.bundle');
+        payload.kind === 'markdown' ? 'skills.import.markdown' : 'skills.import.bundle', { timeoutMs: null });
       if (result.outcome !== 'accepted') {
         throw new Error('Skill import failed');
       }

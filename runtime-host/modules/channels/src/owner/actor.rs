@@ -254,6 +254,7 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
         if let Some(call) = &mut call {
             if let Err(error) = call.running().await {
                 record_error(Err(error));
+                record_error(call.finish(ChannelCallOutcome::Unknown).await);
                 span.finish("unavailable");
                 return;
             }
@@ -381,17 +382,7 @@ async fn handle_keyed_command(
     if let Some(call) = &mut call {
         if let Err(error) = call.running().await {
             record_error(Err(error));
-            if matches!(
-                &command,
-                ChannelCommand::Delete { .. }
-                    | ChannelCommand::Logout { .. }
-                    | ChannelCommand::Control {
-                        action: crate::control::ChannelControlAction::Disconnect,
-                        ..
-                    }
-            ) {
-                record_error(call.finish(ChannelCallOutcome::Unknown).await);
-            }
+            record_error(call.finish(ChannelCallOutcome::Unknown).await);
             return;
         }
     }
@@ -444,17 +435,26 @@ async fn handle_keyed_command(
             timeout_ms,
             agent_id,
             config,
+            cancellation,
             reply,
             ..
         } => {
             lane.insert_login_config(key.clone(), agent_id.clone(), config);
-            let effect = execute_mutation(
-                shared.runtime_directory.as_ref(),
-                key.clone(),
-                ChannelMutation::LoginStart { force, timeout_ms },
-                CancellationToken::new(),
-            )
-            .await;
+            let effect = if cancellation.is_cancelled() {
+                ChannelMutationEffect::Login(ChannelLoginOutcome::Cancelled)
+            } else {
+                tokio::select! {
+                    biased;
+                    effect = execute_mutation(
+                        shared.runtime_directory.as_ref(),
+                        key.clone(),
+                        ChannelMutation::LoginStart { force, timeout_ms },
+                        cancellation.as_ref().clone(),
+                    ) => effect,
+                    _ = cancellation.cancelled() => ChannelMutationEffect::Login(ChannelLoginOutcome::Cancelled),
+                }
+            };
+            drop(cancellation);
             if let Some(call) = &mut call {
                 record_error(call.login_reply(&effect).await);
             }
@@ -482,33 +482,33 @@ async fn handle_keyed_command(
                 session_key,
                 current_qr_data_url,
             };
-            let effect = execute_mutation(
-                shared.runtime_directory.as_ref(),
-                key.clone(),
-                mutation,
-                cancellation.clone(),
-            );
-            tokio::select! {
-                effect = effect => {
-                    if let Some(call) = &mut call {
-                        record_error(call.login_reply(&effect).await);
-                    }
-                    let outcome = match &effect {
-                        ChannelMutationEffect::Login(outcome) => Ok(outcome.clone()),
-                        _ => Err(ChannelOwnerUnavailable),
-                    };
-                    let _ = reply.send(outcome);
-                    finalize_login_effect_after_delivery(shared, lane, key, effect, call).await;
+            let effect = if cancellation.is_cancelled() {
+                ChannelMutationEffect::Login(ChannelLoginOutcome::Cancelled)
+            } else {
+                tokio::select! {
+                    biased;
+                    effect = execute_mutation(
+                        shared.runtime_directory.as_ref(),
+                        key.clone(),
+                        mutation,
+                        cancellation.as_ref().clone(),
+                    ) => effect,
+                    _ = cancellation.cancelled() => ChannelMutationEffect::Login(ChannelLoginOutcome::Cancelled),
                 }
-                _ = cancellation.cancelled() => {
-                    channel_trace("channel.login.wait", || "outcome=cancelled");
-                    lane.clear_login_configs();
-                    if let Some(call) = &mut call {
-                        record_error(call.finish(ChannelCallOutcome::Cancelled).await);
-                    }
-                    let _ = reply.send(Ok(ChannelLoginOutcome::Cancelled));
-                }
+            };
+            drop(cancellation);
+            if matches!(&effect, ChannelMutationEffect::Login(ChannelLoginOutcome::Cancelled)) {
+                lane.clear_login_configs();
             }
+            if let Some(call) = &mut call {
+                record_error(call.login_reply(&effect).await);
+            }
+            let outcome = match &effect {
+                ChannelMutationEffect::Login(outcome) => Ok(outcome.clone()),
+                _ => Err(ChannelOwnerUnavailable),
+            };
+            let _ = reply.send(outcome);
+            finalize_login_effect_after_delivery(shared, lane, key, effect, call).await;
         }
         ChannelCommand::LoginCancel { key, reply, .. } => {
             lane.clear_login_configs();

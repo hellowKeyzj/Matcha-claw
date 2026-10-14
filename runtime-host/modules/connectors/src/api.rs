@@ -182,7 +182,7 @@ impl ConnectorHandle {
         let call = self
             .begin(
                 "externalConnectors.get",
-                ConnectorCallDetail::connector(&id),
+                ConnectorCallDetail::connector(&id)?,
             )
             .await?;
         let (reply, rx) = oneshot::channel();
@@ -211,7 +211,7 @@ impl ConnectorHandle {
         let call = self
             .begin(
                 "externalConnectors.upsert",
-                ConnectorCallDetail::connector(connector.id()),
+                ConnectorCallDetail::connector(connector.id())?,
             )
             .await?;
         let (reply, rx) = oneshot::channel();
@@ -251,7 +251,7 @@ impl ConnectorHandle {
         let call = self
             .begin(
                 "externalConnectors.remove",
-                ConnectorCallDetail::connector(&id),
+                ConnectorCallDetail::connector(&id)?,
             )
             .await?;
         let (reply, rx) = oneshot::channel();
@@ -282,7 +282,7 @@ impl ConnectorHandle {
         let call = self
             .begin(
                 "externalConnectors.probe",
-                ConnectorCallDetail::connector(&id),
+                ConnectorCallDetail::connector(&id)?,
             )
             .await?
             .ok_or(())?;

@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, TryLockError},
     io,
     path::{Path, PathBuf},
 };
@@ -173,9 +173,10 @@ impl ConnectorStore {
         catalog: &ConnectorCatalog,
         revisions: &BTreeMap<String, ConnectorRevision>,
     ) -> Result<(), ConnectorStoreError> {
-        let bytes =
+        let mut bytes =
             serde_json::to_vec_pretty(&ConnectorStoreDocument::from_state(catalog, revisions))
                 .map_err(|_| ConnectorStoreError::Encode)?;
+        bytes.push(b'\n');
         if bytes.len() > MAX_STORE_BYTES as usize {
             return Err(ConnectorStoreError::RecordTooLarge);
         }
@@ -187,10 +188,6 @@ impl ConnectorStore {
             .map_err(|error| ConnectorStoreError::Commit(error.kind()))?;
         use std::io::Write;
         if let Err(error) = file.write_all(&bytes) {
-            let _ = fs::remove_file(&temporary);
-            return Err(ConnectorStoreError::Commit(error.kind()));
-        }
-        if let Err(error) = file.write_all(b"\n") {
             let _ = fs::remove_file(&temporary);
             return Err(ConnectorStoreError::Commit(error.kind()));
         }
@@ -293,27 +290,22 @@ fn remove_stale_temporary(path: &Path) -> Result<(), ConnectorStoreError> {
     }
 }
 pub(super) struct WriterLock {
-    path: PathBuf,
+    _file: File,
 }
 impl WriterLock {
     pub(super) fn acquire(path: &Path) -> Result<Self, ConnectorStoreError> {
-        match File::create_new(path) {
-            Ok(file) => {
-                drop(file);
-                Ok(Self {
-                    path: path.to_owned(),
-                })
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                Err(ConnectorStoreError::WriterBusy)
-            }
-            Err(error) => Err(ConnectorStoreError::Commit(error.kind())),
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|error| ConnectorStoreError::Commit(error.kind()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => Err(ConnectorStoreError::WriterBusy),
+            Err(TryLockError::Error(error)) => Err(ConnectorStoreError::Commit(error.kind())),
         }
-    }
-}
-impl Drop for WriterLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
     }
 }
 

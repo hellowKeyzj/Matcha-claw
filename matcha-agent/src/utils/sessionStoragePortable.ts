@@ -470,6 +470,107 @@ export async function resolveSessionFilePath(
 /** Chunk size for the forward transcript reader. 1 MB balances I/O calls vs buffer growth. */
 const TRANSCRIPT_READ_CHUNK_SIZE = 1024 * 1024
 
+export type TranscriptSourceSpan = { start: number; length: number }
+
+/** Cold history indexing skips native metadata before decoding and yields one batch per chunk. */
+export async function* readTranscriptEntries(
+  filePath: string,
+  fileSize: number,
+): AsyncGenerator<{ entry: unknown; span: TranscriptSourceSpan }[]> {
+  const fd = await fsOpen(filePath, 'r')
+  const chunk = Buffer.allocUnsafe(TRANSCRIPT_READ_CHUNK_SIZE)
+  let carry = Buffer.alloc(0)
+  let skippingMetadata = false
+  let lineStart = 0
+  let filePos = 0
+  try {
+    while (filePos < fileSize) {
+      const { bytesRead } = await fd.read(
+        chunk,
+        0,
+        Math.min(chunk.length, fileSize - filePos),
+        filePos,
+      )
+      if (bytesRead === 0)
+        throw new Error('Session transcript ended before its indexed file size')
+      filePos += bytesRead
+      let chunkStart = 0
+      if (skippingMetadata) {
+        const end = chunk.indexOf(0x0a, 0)
+        if (end < 0 || end >= bytesRead) {
+          lineStart += bytesRead
+          continue
+        }
+        chunkStart = end + 1
+        lineStart += chunkStart
+        skippingMetadata = false
+      }
+      const buf = carry.length
+        ? Buffer.concat([carry, chunk.subarray(chunkStart, bytesRead)])
+        : chunk.subarray(chunkStart, bytesRead)
+      const batch: { entry: unknown; span: TranscriptSourceSpan }[] = []
+      let start = 0
+      for (
+        let end = buf.indexOf(0x0a);
+        end !== -1;
+        end = buf.indexOf(0x0a, start)
+      ) {
+        const length = end - start
+        if (!isDisplayMetadataLine(buf, start, end)) {
+          try {
+            const entry: unknown = JSON.parse(
+              buf.toString('utf8', start, end).replace(/^﻿/, ''),
+            )
+            batch.push({ entry, span: { start: lineStart, length } })
+          } catch {}
+        }
+        start = end + 1
+        lineStart += length + 1
+      }
+      skippingMetadata = isDisplayMetadataLine(buf, start, buf.length)
+      if (skippingMetadata) {
+        lineStart += buf.length - start
+        carry = Buffer.alloc(0)
+      } else {
+        carry = Buffer.from(buf.subarray(start))
+      }
+      if (batch.length) yield batch
+    }
+    if (carry.length) {
+      try {
+        const entry: unknown = JSON.parse(
+          carry.toString('utf8').replace(/^﻿/, ''),
+        )
+        yield [{ entry, span: { start: lineStart, length: carry.length } }]
+      } catch {}
+    }
+  } finally {
+    await fd.close()
+  }
+}
+
+const DISPLAY_TYPE_PREFIX = Buffer.from('{"type":"')
+
+function isDisplayMetadataLine(
+  buf: Buffer,
+  start: number,
+  end: number,
+): boolean {
+  if (hasPrefix(buf, ATTR_SNAP_PREFIX, start, end)) return true
+  if (!hasPrefix(buf, DISPLAY_TYPE_PREFIX, start, end)) return false
+  const valueStart = start + DISPLAY_TYPE_PREFIX.length
+  const valueEnd = buf.indexOf(0x22, valueStart)
+  if (valueEnd < 0 || valueEnd >= end) return false
+  const type = buf.toString('latin1', valueStart, valueEnd)
+  return (
+    type !== 'user' &&
+    type !== 'assistant' &&
+    type !== 'system' &&
+    type !== 'attachment' &&
+    type !== 'progress'
+  )
+}
+
 /**
  * File size below which precompact filtering is skipped.
  * Large sessions (>5 MB) almost always have compact boundaries — they got big

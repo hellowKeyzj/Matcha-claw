@@ -5,7 +5,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor as LoopbackModuleDescriptor, ModuleId as LoopbackModuleId,
-        Request, RequestHead, Response, RouteDescriptor, RouteFuture, RouteHeadPlan,
+        Request, RequestHead, Response, RouteDescriptor, RouteFuture, RouteHeadPlan, RoutePath,
     },
     module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId as CatalogModuleId},
 };
@@ -33,6 +33,14 @@ const CLI_COMMAND_ENDPOINT: &str = "/api/openclaw/cli-command";
 const TOOL_PERMISSION_ENDPOINT: &str = "/api/openclaw/tool-permission-mode";
 const SUBAGENT_TEMPLATES_ENDPOINT: &str = "/api/openclaw/subagent-templates";
 const SUBAGENT_TEMPLATE_DETAIL_ENDPOINT: &str = "/api/openclaw/subagent-template/detail";
+const PATHS: &[RoutePath] = &[
+    RoutePath::ExactWithQuery(STATUS_ENDPOINT),
+    RoutePath::ExactWithQuery(RUNTIME_PATHS_ENDPOINT),
+    RoutePath::ExactWithQuery(CLI_COMMAND_ENDPOINT),
+    RoutePath::ExactWithQuery(TOOL_PERMISSION_ENDPOINT),
+    RoutePath::ExactWithQuery(SUBAGENT_TEMPLATES_ENDPOINT),
+    RoutePath::ExactWithQuery(SUBAGENT_TEMPLATE_DETAIL_ENDPOINT),
+];
 
 const READ_SCOPE: &str = "openclaw.platform:read";
 const WRITE_SCOPE: &str = "openclaw.platform:write";
@@ -101,6 +109,7 @@ fn loopback_descriptor(dependencies: Dependencies) -> LoopbackModuleDescriptor {
         LOOPBACK_MODULE_ID,
         vec![RouteDescriptor::bound(
             "openclaw-platform.loopback",
+            PATHS,
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

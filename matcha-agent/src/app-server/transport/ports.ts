@@ -8,6 +8,8 @@ import type {
   ModelsListParams,
   SessionCancelParams,
   SessionCloseParams,
+  SessionContentParams,
+  SessionContentResult,
   SessionCreateParams,
   SessionLoadParams,
   SessionPromptParams,
@@ -17,6 +19,7 @@ import type {
   SessionSnapshot,
   SessionSnapshotParams,
   SessionTranscriptParams,
+  SessionTranscriptResult,
 } from '../protocol/types.js'
 
 export type SessionListResult = {
@@ -25,10 +28,6 @@ export type SessionListResult = {
 
 export type SessionPromptResult = {
   runId: string
-}
-
-export type SessionTranscriptResult = {
-  lines: string[]
 }
 
 export type EventsReplayResult = {
@@ -65,6 +64,9 @@ export type AppServerPorts = {
     transcript(
       params: SessionTranscriptParams,
     ): SessionTranscriptResult | Promise<SessionTranscriptResult>
+    content(
+      params: SessionContentParams,
+    ): SessionContentResult | null | Promise<SessionContentResult | null>
     cancel(params: SessionCancelParams): unknown | Promise<unknown>
     snapshot(
       params: SessionSnapshotParams,

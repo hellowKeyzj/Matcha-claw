@@ -1,25 +1,32 @@
-#![forbid(unsafe_code)]
-
 use std::{
     io::{self, BufReader},
     path::PathBuf,
     process::ExitCode,
+    rc::Rc,
 };
 
+use organization::TeamRunMcpFacade;
 use platform::mcp::{ToolCatalog, run_stdio};
+use wiki::WikiMcpFacade;
 
-pub(super) fn run() -> ExitCode {
+use super::{Family, client::Client};
+
+pub fn run() -> ExitCode {
     let Ok(config) = McpInvocation::parse() else {
         eprintln!("runtime-host mcp: artifact configuration is invalid");
         return ExitCode::FAILURE;
     };
 
-    let Ok(team_run) = runtime_host::team_mcp::team_provider(&config.state_dir) else {
+    let Ok(client) = Client::new(config.state_dir) else {
         return ExitCode::FAILURE;
     };
-    let Ok(wiki) = wiki::wiki_mcp_provider(&config.state_dir) else {
-        return ExitCode::FAILURE;
-    };
+    let client = Rc::new(client);
+    let team_client = Rc::clone(&client);
+    let team_run = TeamRunMcpFacade::new(move |name, arguments| {
+        team_client.call(Family::Team, name, arguments)
+    });
+    let wiki =
+        WikiMcpFacade::new(move |name, arguments| client.call(Family::Wiki, name, arguments));
     let catalog = ToolCatalog::new(vec![Box::new(team_run), Box::new(wiki)]);
 
     match run_stdio(

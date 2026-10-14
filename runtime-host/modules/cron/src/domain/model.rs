@@ -377,6 +377,7 @@ pub struct CronJobView {
     pub schedule: CronScheduleView,
     pub delivery: CronDeliveryView,
     pub enabled: bool,
+    pub system_managed: bool,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub state: CronJobStateView,

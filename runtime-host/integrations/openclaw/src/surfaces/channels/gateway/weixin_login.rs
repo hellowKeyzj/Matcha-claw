@@ -87,8 +87,9 @@ impl WeixinLogin {
         let api_base_url = self
             .load_config_string(account_id.as_deref(), "baseUrl")
             .unwrap_or_else(|| DEFAULT_WECHAT_BASE_URL.to_owned());
+        let timeout = input.timeout_ms.map(Duration::from_millis);
         let qr = match self
-            .fetch_qr_code(&api_base_url, account_id.as_deref())
+            .fetch_qr_code(&api_base_url, account_id.as_deref(), timeout)
             .await
         {
             Ok(qr) => qr,
@@ -198,7 +199,7 @@ impl WeixinLogin {
             };
             let status = tokio::select! {
                 _ = cancellation.cancelled() => return WebLoginWaitEffect::Cancelled,
-                status = self.poll_qr_status(&current.api_base_url, &current.qrcode, current.account_id.as_deref()) => status,
+                status = self.poll_qr_status(&current.api_base_url, &current.qrcode, current.account_id.as_deref(), deadline.saturating_duration_since(Instant::now())) => status,
             };
             let status = match status {
                 Ok(status) => status,
@@ -210,7 +211,7 @@ impl WeixinLogin {
                 "expired" => {
                     channel_trace("weixin.poll-state", || "outcome=expired action=refresh");
                     return self
-                        .refresh_session(session_key, current, cancellation.clone())
+                        .refresh_session(session_key, current, deadline, cancellation.clone())
                         .await;
                 }
                 "confirmed" => {
@@ -265,7 +266,7 @@ impl WeixinLogin {
             }
             tokio::select! {
                 _ = cancellation.cancelled() => return WebLoginWaitEffect::Cancelled,
-                _ = tokio::time::sleep(QR_POLL_INTERVAL) => {}
+                _ = tokio::time::sleep(QR_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now()))) => {}
             }
         }
     }
@@ -278,6 +279,7 @@ impl WeixinLogin {
         &self,
         session_key: String,
         current: ActiveLogin,
+        deadline: Instant,
         cancellation: CancellationToken,
     ) -> WebLoginWaitEffect {
         channel_trace(
@@ -294,7 +296,7 @@ impl WeixinLogin {
         }
         let qr = tokio::select! {
             _ = cancellation.cancelled() => return WebLoginWaitEffect::Cancelled,
-            qr = self.fetch_qr_code(&current.api_base_url, current.account_id.as_deref()) => qr,
+            qr = self.fetch_qr_code(&current.api_base_url, current.account_id.as_deref(), Some(deadline.saturating_duration_since(Instant::now()))) => qr,
         };
         let qr = match qr {
             Ok(qr) => qr,
@@ -364,6 +366,7 @@ impl WeixinLogin {
         &self,
         api_base_url: &str,
         account_id: Option<&str>,
+        timeout: Option<Duration>,
     ) -> Result<QrCodeResponse, ()> {
         let mut url = ilink_url(api_base_url, "ilink/bot/get_bot_qrcode").map_err(|()| {
             channel_trace("weixin.qr-start-http", || "outcome=rejected error=invalid-url");
@@ -371,6 +374,12 @@ impl WeixinLogin {
         url.query_pairs_mut()
             .append_pair("bot_type", DEFAULT_ILINK_BOT_TYPE);
         let mut request = self.client.get(url);
+        if let Some(timeout) = timeout {
+            if timeout.is_zero() {
+                return Err(());
+            }
+            request = request.timeout(timeout);
+        }
         if let Some(route_tag) = self.load_config_string(account_id, "routeTag") {
             request = request.header("SKRouteTag", route_tag);
         }
@@ -427,16 +436,20 @@ impl WeixinLogin {
         api_base_url: &str,
         qrcode: &str,
         account_id: Option<&str>,
+        timeout: Duration,
     ) -> Result<QrStatusResponse, ()> {
         let mut url = ilink_url(api_base_url, "ilink/bot/get_qrcode_status").map_err(|()| {
             channel_trace("weixin.qr-poll-http", || "outcome=rejected error=invalid-url");
         })?;
         url.query_pairs_mut().append_pair("qrcode", qrcode);
+        if timeout.is_zero() {
+            return Err(());
+        }
         let mut request = self
             .client
             .get(url)
             .header("iLink-App-ClientVersion", "1")
-            .timeout(QR_POLL_REQUEST_TIMEOUT);
+            .timeout(timeout.min(QR_POLL_REQUEST_TIMEOUT));
         if let Some(route_tag) = self.load_config_string(account_id, "routeTag") {
             request = request.header("SKRouteTag", route_tag);
         }
@@ -547,6 +560,8 @@ impl WeixinLogin {
             normalize_account_id(raw_account_id).unwrap_or_else(|| FALLBACK_ACCOUNT_ID.to_owned());
         let state_dir = self.state_dir.as_path().join(WEIXIN_STATE_DIR);
         let accounts_dir = state_dir.join(WEIXIN_ACCOUNTS_DIR);
+        let index_path = state_dir.join(WEIXIN_ACCOUNT_INDEX_FILE);
+        let mut accounts = read_account_index(&index_path)?;
         let started = platform::trace::enabled().then(Instant::now);
         channel_trace("weixin.account-save", || "event=begin accountPresent=true");
         std::fs::create_dir_all(&accounts_dir).map_err(|error| {
@@ -596,11 +611,9 @@ impl WeixinLogin {
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         }
 
-        let index_path = state_dir.join(WEIXIN_ACCOUNT_INDEX_FILE);
-        let mut accounts = read_account_index(&index_path).unwrap_or_default();
         if !accounts.iter().any(|account| account == &account_id) {
             accounts.push(account_id.clone());
-            write_account_index(&state_dir, &index_path, &accounts)?;
+            write_account_index(&state_dir, &accounts)?;
         } else {
             channel_trace(
                 "weixin.account-index-write",
@@ -889,7 +902,7 @@ pub(super) fn clear_account_state(
     let previous_len = accounts.len();
     accounts.retain(|existing| existing != &account_id);
     if accounts.len() != previous_len {
-        write_account_index(&state_dir, &index_path, &accounts)?;
+        write_account_index(&state_dir, &accounts)?;
     } else {
         channel_trace(
             "weixin.account-index-write",
@@ -953,16 +966,16 @@ fn read_account_index(path: &Path) -> Result<Vec<String>, ()> {
             started.map(|started| started.elapsed().as_millis()).unwrap_or_default()
         ),
     );
-    Ok(values
+    values
         .into_iter()
-        .filter_map(|value| match value {
-            Value::String(value) if !value.trim().is_empty() => Some(value),
-            _ => None,
+        .map(|value| match value {
+            Value::String(value) if !value.trim().is_empty() => Ok(value),
+            _ => Err(()),
         })
-        .collect())
+        .collect()
 }
 
-fn write_account_index(state_dir: &Path, path: &Path, accounts: &[String]) -> Result<(), ()> {
+fn write_account_index(state_dir: &Path, accounts: &[String]) -> Result<(), ()> {
     let started = platform::trace::enabled().then(Instant::now);
     channel_trace("weixin.account-index-write", || "event=begin");
     std::fs::create_dir_all(state_dir).map_err(|error| {
@@ -978,7 +991,51 @@ fn write_account_index(state_dir: &Path, path: &Path, accounts: &[String]) -> Re
     let bytes = serde_json::to_vec_pretty(accounts).map_err(|_| {
         channel_trace("weixin.account-index-write", || "event=end error=json-encode");
     })?;
-    std::fs::write(path, bytes).map_err(|error| {
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+
+        let index_path = state_dir.join(WEIXIN_ACCOUNT_INDEX_FILE);
+        // Rename checks the parent, not the target's write access; never truncate the index here.
+        let previous = match std::fs::OpenOptions::new().read(true).write(true).open(&index_path) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let replace = previous.is_some();
+        let temporary_path = state_dir.join(format!(
+            ".accounts-{}.tmp",
+            random_session_key().ok_or(std::io::ErrorKind::Other)?
+        ));
+        let mut temporary = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)?;
+        let written = (|| {
+            #[cfg(unix)]
+            if let Some(previous) = &previous {
+                inherit_account_index_permissions(previous, &temporary)?;
+            }
+            temporary.write_all(&bytes)?;
+            #[cfg(unix)]
+            if let Some(previous) = &previous {
+                temporary.set_permissions(previous.metadata()?.permissions())?;
+            }
+            temporary.sync_all()
+        })();
+        drop(temporary);
+        drop(previous);
+        let result = written.and_then(|()| {
+            publish_account_index(&temporary_path, &index_path, replace)?;
+            #[cfg(unix)]
+            std::fs::File::open(state_dir)?.sync_all()?;
+            Ok(())
+        });
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary_path);
+        }
+        result
+    })();
+    written.map_err(|error| {
         channel_trace(
             "weixin.account-index-write",
             || format!(
@@ -996,6 +1053,116 @@ fn write_account_index(state_dir: &Path, path: &Path, accounts: &[String]) -> Re
         ),
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn inherit_account_index_permissions(
+    previous: &std::fs::File,
+    temporary: &std::fs::File,
+) -> std::io::Result<()> {
+    use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+
+    let metadata = previous.metadata()?;
+    let created = temporary.metadata()?;
+    if metadata.uid() != created.uid() || metadata.gid() != created.gid() {
+        // SAFETY: the descriptor remains open; owner and group come from the original index.
+        if unsafe { libc::fchown(temporary.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    temporary.set_permissions(metadata.permissions())?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    inherit_account_index_acl(previous, temporary)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn inherit_account_index_acl(
+    previous: &std::fs::File,
+    temporary: &std::fs::File,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let name = c"system.posix_acl_access";
+    // SAFETY: the original descriptor is open; a null buffer queries the ACL size.
+    let size = unsafe { libc::fgetxattr(previous.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        let error = std::io::Error::last_os_error();
+        if !matches!(error.raw_os_error(), Some(libc::ENODATA) | Some(libc::EOPNOTSUPP)) {
+            return Err(error);
+        }
+        // SAFETY: the descriptor is open; remove any ACL inherited only by the replacement.
+        if unsafe { libc::fremovexattr(temporary.as_raw_fd(), name.as_ptr()) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if !matches!(error.raw_os_error(), Some(libc::ENODATA) | Some(libc::EOPNOTSUPP)) {
+                return Err(error);
+            }
+        }
+        return Ok(());
+    }
+    let mut acl = vec![0u8; size as usize];
+    // SAFETY: the live buffer has the queried size and the original descriptor is open.
+    let read = unsafe {
+        libc::fgetxattr(previous.as_raw_fd(), name.as_ptr(), acl.as_mut_ptr().cast(), acl.len())
+    };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if read as usize != acl.len() {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    // SAFETY: the buffer contains the returned ACL bytes; the replacement descriptor is open.
+    if unsafe {
+        libc::fsetxattr(temporary.as_raw_fd(), name.as_ptr(), acl.as_ptr().cast(), acl.len(), 0)
+    } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn inherit_account_index_acl(
+    previous: &std::fs::File,
+    temporary: &std::fs::File,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: both descriptors are open; COPYFILE_ACL copies only the original access rules.
+    if unsafe {
+        libc::fcopyfile(
+            previous.as_raw_fd(),
+            temporary.as_raw_fd(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_ACL,
+        )
+    } != 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn publish_account_index(temporary: &Path, index: &Path, _replace: bool) -> std::io::Result<()> {
+    std::fs::rename(temporary, index)
+}
+
+#[cfg(windows)]
+fn publish_account_index(temporary: &Path, index: &Path, replace: bool) -> std::io::Result<()> {
+    use std::{os::windows::ffi::OsStrExt, ptr::null};
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    if !replace {
+        return platform::state_dir::publish_new_file(temporary, index);
+    }
+    let index: Vec<u16> = index.as_os_str().encode_wide().chain([0]).collect();
+    let temporary: Vec<u16> = temporary.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: both paths are live NUL-terminated UTF-16 buffers; flags zero preserves ACL errors.
+    if unsafe { ReplaceFileW(index.as_ptr(), temporary.as_ptr(), null(), 0, null(), null()) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn zeroize_value(value: &mut Map<String, Value>) {

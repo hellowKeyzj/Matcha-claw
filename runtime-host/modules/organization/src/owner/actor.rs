@@ -31,6 +31,7 @@ use runtime_directory::{OwnedRuntimeFuture, RuntimeDriverIdentity};
 
 use crate::{
     ActivityExecutionOutcome, OrganizationNativeRuntime, OrganizationRuntimeDirectory,
+    TeamCreationFailure, TeamCreationFailureReason, TeamCreationStage,
     application::team_runtime::TeamRuntimeStatus,
 };
 
@@ -41,7 +42,8 @@ use super::{
         ManualTeamCreateOutcome, ManualTeamMaterializationInput, TeamDeleteOutcome,
         TeamMaterializationCommandOutcome, TeamRunActivityError, TeamRunActivityOutcome,
         TeamRunActivityStart, TeamRunActivityTarget, TeamRunOwner, TeamTriggerFireResolution,
-        install_prepared_runtime_receipt, prepare_runtime_receipt, settle_public_cancellation,
+        creation_store_failure, install_prepared_runtime_receipt, prepare_runtime_receipt,
+        settle_public_cancellation,
     },
 };
 
@@ -153,9 +155,15 @@ impl OrganizationShared {
         &self,
         request: organization::TeamMaterializationRequest,
         observer: Option<crate::TeamProvisionObserver>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let Some(runtime) = self.team_runtime_for_endpoint(request.intent().endpoint()) else {
-            return Box::pin(async {
+            return Box::pin(async move {
+                if let Some(observer) = observer {
+                    observer.report(crate::TeamProvisionUpdate::Failure(TeamCreationFailure::new(
+                        TeamCreationStage::ConfiguringTeam, TeamCreationFailureReason::Unavailable,
+                    ))).await;
+                }
                 session_trace(
                     "runtime.team.native.materialize.end",
                     || json!({"reason": "runtime_missing", "nativeOutcome": "outcome_unknown"}),
@@ -163,7 +171,7 @@ impl OrganizationShared {
                 organization::MaterializationOperationOutcome::OutcomeUnknown
             });
         };
-        let native = runtime.materialize_team_observed(request, observer);
+        let native = runtime.materialize_team_cancellable(request, observer, cancellation);
         Box::pin(async move {
             let started = platform::trace::enabled().then(Instant::now);
             session_trace("runtime.team.native.materialize.start", || json!({}));
@@ -179,18 +187,20 @@ impl OrganizationShared {
     fn team_remove(
         &self,
         removal: organization::TeamMaterializationRemoval,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let Some(runtime) = self.team_runtime_for_endpoint(removal.receipt().endpoint()) else {
             return Box::pin(async {
                 organization::MaterializationOperationOutcome::OutcomeUnknown
             });
         };
-        runtime.remove_team(removal)
+        runtime.remove_team_cancellable(removal, cancellation)
     }
 
     fn team_remove_unconfirmed(
         &self,
         request: organization::TeamMaterializationRequest,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let Some(runtime) = self.team_runtime_for_endpoint(request.intent().endpoint()) else {
             return Box::pin(async {
@@ -201,7 +211,7 @@ impl OrganizationShared {
                 organization::MaterializationOperationOutcome::OutcomeUnknown
             });
         };
-        let native = runtime.remove_unconfirmed_team(request);
+        let native = runtime.remove_unconfirmed_team_cancellable(request, cancellation);
         Box::pin(async move {
             let started = platform::trace::enabled().then(Instant::now);
             session_trace("runtime.team.native.remove-unconfirmed.start", || json!({}));
@@ -217,24 +227,27 @@ impl OrganizationShared {
     fn team_confirm_receipt(
         &self,
         receipt: organization::RunRuntimeReceipt,
-    ) -> OwnedRuntimeFuture<RuntimeReceiptOutcome> {
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<(RuntimeReceiptOutcome, Option<TeamCreationFailure>)> {
         let Some(runtime) = self.team_runtime_for_bindings(receipt.bindings()) else {
             return Box::pin(async {
                 session_trace(
                     "runtime.team.native.install.end",
                     || json!({"reason": "runtime_missing", "nativeOutcome": "outcome_unknown"}),
                 );
-                RuntimeReceiptOutcome::OutcomeUnknown
+                (RuntimeReceiptOutcome::OutcomeUnknown, Some(TeamCreationFailure::new(
+                    TeamCreationStage::InitializingSessions, TeamCreationFailureReason::Unavailable,
+                )))
             });
         };
-        let native = runtime.confirm_team_run_receipt(receipt);
+        let native = runtime.confirm_team_run_receipt_cancellable(receipt, cancellation);
         Box::pin(async move {
             let started = platform::trace::enabled().then(Instant::now);
             session_trace("runtime.team.native.install.start", || json!({}));
             let outcome = native.await;
             session_trace(
                 "runtime.team.native.install.end",
-                || json!({"nativeOutcome": runtime_receipt_label(&outcome), "elapsedMs": started.map(|started| started.elapsed().as_millis())}),
+                || json!({"nativeOutcome": runtime_receipt_label(&outcome.0), "elapsedMs": started.map(|started| started.elapsed().as_millis())}),
             );
             outcome
         })
@@ -243,11 +256,12 @@ impl OrganizationShared {
     fn team_abort_role_sessions(
         &self,
         bindings: Vec<organization::RoleSessionReceipt>,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<RoleAbortOutcome> {
         let Some(runtime) = self.team_runtime_for_bindings(&bindings) else {
             return Box::pin(async { RoleAbortOutcome::OutcomeUnknown });
         };
-        runtime.abort_role_sessions(bindings)
+        runtime.abort_role_sessions_cancellable(bindings, cancellation)
     }
 
     fn team_delete_role_sessions(
@@ -255,11 +269,12 @@ impl OrganizationShared {
         run_id: GraphRunId,
         bindings: Vec<organization::RoleSessionReceipt>,
         abort_first: bool,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> OwnedRuntimeFuture<NativeDeletionEvidence> {
         let Some(runtime) = self.team_runtime_for_bindings(&bindings) else {
             return Box::pin(async { NativeDeletionEvidence::OutcomeUnknown });
         };
-        runtime.delete_role_sessions(run_id, bindings, abort_first)
+        runtime.delete_role_sessions_cancellable(run_id, bindings, abort_first, cancellation)
     }
 
     fn team_skill_runtime(&self) -> Option<TeamSkillRuntime> {
@@ -277,8 +292,14 @@ impl TeamSkillRuntime {
         .expect("team skill runtime endpoint must be a valid Organization endpoint reference")
     }
 
-    async fn installed_skill_names(&self) -> Option<Vec<String>> {
-        self.runtime.installed_skill_names().await
+    async fn installed_skill_names(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Option<Vec<String>> {
+        tokio::select! {
+            _ = cancellation.cancelled() => None,
+            names = self.runtime.installed_skill_names() => names,
+        }
     }
 }
 
@@ -313,11 +334,12 @@ impl OrganizationGlobalState {
         &mut self,
         shared: &OrganizationShared,
         selection_id: TeamSkillSelectionId,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> TeamSkillDependencyPlanResult {
         let Some(runtime) = shared.team_skill_runtime() else {
             return TeamSkillDependencyPlanResult::Unavailable;
         };
-        let installed_names = match runtime.installed_skill_names().await {
+        let installed_names = match runtime.installed_skill_names(cancellation).await {
             Some(names) => names,
             None => return TeamSkillDependencyPlanResult::Unavailable,
         };
@@ -334,10 +356,14 @@ impl OrganizationGlobalState {
         idempotency_key: IdempotencyKey,
         call: Option<&crate::call::CallReply<TeamMaterializationCommandOutcome>>,
     ) -> TeamMaterializationCommandOutcome {
+        let cancellation = call.map_or_else(
+            tokio_util::sync::CancellationToken::new,
+            crate::call::CallReply::cancellation,
+        );
         let Some(runtime) = shared.team_skill_runtime() else {
             return TeamMaterializationCommandOutcome::Unavailable;
         };
-        let installed_names = match runtime.installed_skill_names().await {
+        let installed_names = match runtime.installed_skill_names(cancellation.clone()).await {
             Some(names) => names,
             None => return TeamMaterializationCommandOutcome::Unavailable,
         };
@@ -380,7 +406,13 @@ impl OrganizationGlobalState {
             Ok((_, request)) => request,
             Err(outcome) => return outcome,
         };
-        let outcome = shared.team_materialize(request, None).await;
+        let outcome = shared
+            .team_materialize(
+                request,
+                None,
+                cancellation,
+            )
+            .await;
         self.settle_team_materialization_outcome(&team, managed_agent_count, outcome, call)
             .await
     }
@@ -410,6 +442,7 @@ impl OrganizationGlobalState {
         }, "elapsedMs": started.map(|started| started.elapsed().as_millis())}),
         );
         if let (Some(call), Err(error)) = (call, &committed) {
+            call.creation_failure(creation_store_failure(TeamCreationStage::Submitting, error)).await;
             call.materialization(None, Err(error)).await;
         }
         match committed {
@@ -442,6 +475,9 @@ impl OrganizationGlobalState {
             &committed,
         );
         if let Some(call) = call {
+            if let Err(error) = &committed {
+                call.creation_failure(creation_store_failure(TeamCreationStage::SavingTeam, error)).await;
+            }
             let installed = match &outcome {
                 organization::MaterializationOperationOutcome::Confirmed { .. } => Some(true),
                 organization::MaterializationOperationOutcome::Rejected { .. } => Some(false),
@@ -501,23 +537,37 @@ impl OrganizationGlobalState {
         );
         let materialization = match compiled {
             Ok(materialization) => materialization,
-            Err(_) => return TeamMaterializationCommandOutcome::Rejected,
+            Err(_) => {
+                if let Some(call) = call {
+                    call.creation_failure(TeamCreationFailure::new(
+                        TeamCreationStage::Submitting, TeamCreationFailureReason::InvalidInput,
+                    )).await;
+                }
+                return TeamMaterializationCommandOutcome::Rejected;
+            }
         };
         let observer = call.and_then(crate::call::CallReply::provision_observer);
+        let cancellation = call.map_or_else(
+            tokio_util::sync::CancellationToken::new,
+            crate::call::CallReply::cancellation,
+        );
         let materialization = match super::member_introduction::prepare_manual_team(
             materialization,
             self.store.facts(),
             shared.runtime_directory.as_ref(),
             shared.member_introductions.as_ref(),
             observer.as_ref(),
+            cancellation.clone(),
         )
         .await
         {
             Ok(materialization) => materialization,
-            Err(super::member_introduction::PreparationError::Rejected) => {
+            Err(super::member_introduction::PreparationError::Rejected(failure)) => {
+                if let Some(call) = call { call.creation_failure(failure).await; }
                 return TeamMaterializationCommandOutcome::Rejected;
             }
-            Err(super::member_introduction::PreparationError::Unavailable) => {
+            Err(super::member_introduction::PreparationError::Unavailable(failure)) => {
+                if let Some(call) = call { call.creation_failure(failure).await; }
                 return TeamMaterializationCommandOutcome::Unavailable;
             }
         };
@@ -527,7 +577,13 @@ impl OrganizationGlobalState {
             Ok((_, request)) => request,
             Err(outcome) => return outcome,
         };
-        let outcome = shared.team_materialize(request, observer.clone()).await;
+        let outcome = shared
+            .team_materialize(
+                request,
+                observer.clone(),
+                cancellation,
+            )
+            .await;
         if matches!(outcome, organization::MaterializationOperationOutcome::Confirmed { .. }) {
             if let Some(observer) = &observer {
                 observer.report(crate::TeamProvisionUpdate::Stage(
@@ -574,22 +630,31 @@ impl OrganizationGlobalState {
         );
         let materialization = match compiled {
             Ok(materialization) => materialization,
-            Err(_) => return ManualTeamCreateOutcome::Rejected,
+            Err(_) => {
+                call.creation_failure(TeamCreationFailure::new(
+                    TeamCreationStage::Submitting, TeamCreationFailureReason::InvalidInput,
+                )).await;
+                return ManualTeamCreateOutcome::Rejected;
+            }
         };
+        let observer = call.provision_observer();
         let materialization = match super::member_introduction::prepare_manual_team(
             materialization,
             self.store.facts(),
             shared.runtime_directory.as_ref(),
             shared.member_introductions.as_ref(),
             None,
+            call.cancellation(),
         )
         .await
         {
             Ok(materialization) => materialization,
-            Err(super::member_introduction::PreparationError::Rejected) => {
+            Err(super::member_introduction::PreparationError::Rejected(failure)) => {
+                call.creation_failure(failure).await;
                 return ManualTeamCreateOutcome::Rejected;
             }
-            Err(super::member_introduction::PreparationError::Unavailable) => {
+            Err(super::member_introduction::PreparationError::Unavailable(failure)) => {
+                call.creation_failure(failure).await;
                 return ManualTeamCreateOutcome::Unavailable;
             }
         };
@@ -612,7 +677,9 @@ impl OrganizationGlobalState {
                 return ManualTeamCreateOutcome::OutcomeUnknown;
             }
         };
-        let outcome = shared.team_materialize(request, None).await;
+        let outcome = shared
+            .team_materialize(request, observer, call.cancellation())
+            .await;
         let started = platform::trace::enabled().then(Instant::now);
         session_trace(
             "runtime.team.materialization.settle.start",
@@ -633,7 +700,8 @@ impl OrganizationGlobalState {
         };
         call.materialization(native, committed.as_ref().map(|_| ()))
             .await;
-        if committed.is_err() {
+        if let Err(error) = &committed {
+            call.creation_failure(creation_store_failure(TeamCreationStage::SavingTeam, error)).await;
             return ManualTeamCreateOutcome::Unavailable;
         }
         if !matches!(
@@ -660,6 +728,7 @@ impl OrganizationGlobalState {
         }, "elapsedMs": started.map(|started| started.elapsed().as_millis())}),
         );
         if let Err(error) = &committed {
+            call.creation_failure(creation_store_failure(TeamCreationStage::InitializingSessions, error)).await;
             call.creation(None, Err(error)).await;
         }
         let created = match committed {
@@ -667,6 +736,9 @@ impl OrganizationGlobalState {
             Err(_) => return ManualTeamCreateOutcome::Unavailable,
         };
         if matches!(created, CreateGraphRunOutcome::ConflictingIdempotency) {
+            call.creation_failure(TeamCreationFailure::new(
+                TeamCreationStage::InitializingSessions, TeamCreationFailureReason::StoreConflict,
+            )).await;
             return ManualTeamCreateOutcome::Unavailable;
         }
         call.creation(None, Ok(())).await;
@@ -675,11 +747,12 @@ impl OrganizationGlobalState {
         let prepared = prepare_runtime_receipt(&self.store, &team_id, &run_id);
         session_trace(
             "runtime.team.install.prepare.end",
-            || json!({"reason": prepared.as_ref().map_or_else(runtime_receipt_label, |_| "prepared"), "elapsedMs": started.map(|started| started.elapsed().as_millis())}),
+            || json!({"reason": prepared.as_ref().map_or_else(|(outcome, _)| runtime_receipt_label(outcome), |_| "prepared"), "elapsedMs": started.map(|started| started.elapsed().as_millis())}),
         );
         let receipt = match prepared {
             Ok(receipt) => receipt,
-            Err(outcome) => {
+            Err((outcome, failure)) => {
+                call.creation_failure(failure).await;
                 call.creation(
                     if matches!(outcome, RuntimeReceiptOutcome::Rejected) {
                         Some(false)
@@ -692,13 +765,18 @@ impl OrganizationGlobalState {
                 return manual_runtime_receipt_outcome(outcome);
             }
         };
-        let outcome = shared.team_confirm_receipt(receipt.clone()).await;
+        let (outcome, creation_failure) = shared
+            .team_confirm_receipt(receipt.clone(), call.cancellation())
+            .await;
         match outcome {
             RuntimeReceiptOutcome::Installed => {
                 let started = platform::trace::enabled().then(Instant::now);
                 session_trace("runtime.team.install.commit.start", || json!({}));
                 let committed = install_prepared_runtime_receipt(&mut self.store, receipt);
                 trace_store_result("runtime.team.install.commit.end", started, &committed);
+                if let Err(error) = &committed {
+                    call.creation_failure(creation_store_failure(TeamCreationStage::InitializingSessions, error)).await;
+                }
                 call.creation(Some(true), committed.as_ref().map(|_| ()))
                     .await;
                 committed.map_or(ManualTeamCreateOutcome::Unavailable, |_| {
@@ -706,6 +784,9 @@ impl OrganizationGlobalState {
                 })
             }
             outcome => {
+                call.creation_failure(creation_failure.unwrap_or_else(|| TeamCreationFailure::new(
+                    TeamCreationStage::InitializingSessions, runtime_receipt_failure_reason(&outcome),
+                ))).await;
                 call.creation(
                     if matches!(outcome, RuntimeReceiptOutcome::Rejected) {
                         Some(false)
@@ -727,6 +808,7 @@ impl OrganizationGlobalState {
         run_id: GraphRunId,
         idempotency_key: IdempotencyKey,
         created_at: u64,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<CreateGraphRunOutcome, TeamRuntimeStatus> {
         let run = self
             .team_run
@@ -746,8 +828,10 @@ impl OrganizationGlobalState {
             return Err(TeamRuntimeStatus::Unavailable);
         }
         let receipt = prepare_runtime_receipt(&self.store, &team_id, &run_id)
-            .map_err(runtime_receipt_status)?;
-        let outcome = shared.team_confirm_receipt(receipt.clone()).await;
+            .map_err(|(outcome, _)| runtime_receipt_status(outcome))?;
+        let (outcome, _) = shared
+            .team_confirm_receipt(receipt.clone(), cancellation)
+            .await;
         match outcome {
             RuntimeReceiptOutcome::Installed => {
                 install_prepared_runtime_receipt(&mut self.store, receipt)
@@ -766,6 +850,7 @@ impl OrganizationGlobalState {
         run_id: GraphRunId,
         idempotency_key: String,
         requested_at: u64,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<BeginCancellationOutcome, StoreFault> {
         let plan = match self.team_run.begin_cancellation(
             &mut self.store,
@@ -779,7 +864,7 @@ impl OrganizationGlobalState {
             outcome => return Ok(outcome),
         };
         let outcome = shared
-            .team_abort_role_sessions(plan.bindings().to_vec())
+            .team_abort_role_sessions(plan.bindings().to_vec(), cancellation)
             .await;
         settle_public_cancellation(
             &mut self.store,
@@ -797,6 +882,7 @@ impl OrganizationGlobalState {
         run_id: GraphRunId,
         idempotency_key: String,
         observed_at: u64,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<organization::GraphRunPurgeOutcome, StoreFault> {
         let (bindings, abort_first) = match self.team_run.begin_cancellation(
             &mut self.store,
@@ -819,7 +905,7 @@ impl OrganizationGlobalState {
             Err(error) => return Err(error),
         };
         let outcome = shared
-            .team_delete_role_sessions(run_id.clone(), bindings, abort_first)
+            .team_delete_role_sessions(run_id.clone(), bindings, abort_first, cancellation)
             .await;
         self.complete_team_run_delete_native_evidence(
             run_id,
@@ -835,6 +921,7 @@ impl OrganizationGlobalState {
         team_id: TeamId,
         idempotency_key: IdempotencyKey,
         observed_at: u64,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<TeamDeleteOutcome, StoreFault> {
         let mut pending_settlement = false;
         for run_id in self.team_run_ids_for_team(&team_id) {
@@ -858,6 +945,7 @@ impl OrganizationGlobalState {
                             true,
                             TeamDeleteRunNativeSettlement::Cancellation,
                             observed_at,
+                            cancellation.clone(),
                         );
                     } else if !self.tombstone_team_delete_run_after_local_cancellation(
                         run_id,
@@ -880,6 +968,7 @@ impl OrganizationGlobalState {
                             false,
                             TeamDeleteRunNativeSettlement::Cancelled,
                             observed_at,
+                            cancellation.clone(),
                         );
                     } else if !self.tombstone_team_delete_cancelled_run(
                         run_id,
@@ -902,6 +991,7 @@ impl OrganizationGlobalState {
                             false,
                             TeamDeleteRunNativeSettlement::Tombstoned,
                             observed_at,
+                            cancellation.clone(),
                         );
                     }
                 }
@@ -915,7 +1005,8 @@ impl OrganizationGlobalState {
         if !team_exists {
             return Ok(TeamDeleteOutcome::Deleted);
         }
-        let removal_started = self.start_team_delete_removal_if_ready(shared, &team_id)?;
+        let removal_started =
+            self.start_team_delete_removal_if_ready(shared, &team_id, cancellation)?;
         if pending_settlement || removal_started {
             return Ok(TeamDeleteOutcome::OutcomeUnknown);
         }
@@ -932,6 +1023,7 @@ impl OrganizationGlobalState {
         abort_first: bool,
         settlement: TeamDeleteRunNativeSettlement,
         observed_at: u64,
+        cancellation: tokio_util::sync::CancellationToken,
     ) {
         self.reap_team_delete_tasks();
         let Some(command_target) = shared.command_target.get().cloned() else {
@@ -944,21 +1036,27 @@ impl OrganizationGlobalState {
         self.team_delete_run_tasks.insert(task_key, team_id.clone());
         let team_id = team_id.clone();
         let idempotency_key = idempotency_key.to_owned();
-        let native = shared.team_delete_role_sessions(run_id.clone(), bindings, abort_first);
-        let (task, _) = OwnedTask::spawn(move |cancellation| async move {
-            tokio::select! {
-                _ = cancellation.cancelled() => {}
-                native = native => {
-                    let _ = command_target.send_command(OrganizationCommand::TeamDeleteRunNativeSettled {
-                        team_id,
-                        run_id,
-                        idempotency_key,
-                        settlement,
-                        native,
-                        observed_at,
-                    }).await;
+        let operation_cancellation = cancellation.child_token();
+        let mut native = shared.team_delete_role_sessions(
+            run_id.clone(), bindings, abort_first, operation_cancellation.clone(),
+        );
+        let (task, _) = OwnedTask::spawn(move |task_cancellation| async move {
+            let native = tokio::select! {
+                native = &mut native => native,
+                _ = task_cancellation.cancelled() => {
+                    operation_cancellation.cancel();
+                    native.await
                 }
-            }
+            };
+            let _ = command_target.send_command(OrganizationCommand::TeamDeleteRunNativeSettled {
+                team_id,
+                run_id,
+                idempotency_key,
+                settlement,
+                native,
+                observed_at,
+                cancellation,
+            }).await;
         });
         self.team_delete_tasks.push(task);
     }
@@ -967,7 +1065,9 @@ impl OrganizationGlobalState {
         &mut self,
         shared: &OrganizationShared,
         team_id: &TeamId,
-        outcome: OwnedRuntimeFuture<organization::MaterializationOperationOutcome>,
+        cancellation: tokio_util::sync::CancellationToken,
+        native: impl FnOnce(tokio_util::sync::CancellationToken)
+            -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome>,
     ) {
         self.reap_team_delete_tasks();
         let Some(command_target) = shared.command_target.get().cloned() else {
@@ -985,17 +1085,21 @@ impl OrganizationGlobalState {
                 .trace_id()
         });
         let team_id = team_id.clone();
-        let (task, _) = OwnedTask::spawn(move |cancellation| {
+        let operation_cancellation = cancellation.child_token();
+        let mut native = native(operation_cancellation.clone());
+        let (task, _) = OwnedTask::spawn(move |task_cancellation| {
             with_session_trace(trace_id, async move {
-                tokio::select! {
-                    _ = cancellation.cancelled() => {}
-                    outcome = outcome => {
-                        let _ = command_target.send_command(OrganizationCommand::TeamDeleteRemovalSettled {
-                            team_id,
-                            outcome,
-                        }).await;
+                let outcome = tokio::select! {
+                    outcome = &mut native => outcome,
+                    _ = task_cancellation.cancelled() => {
+                        operation_cancellation.cancel();
+                        native.await
                     }
-                }
+                };
+                let _ = command_target.send_command(OrganizationCommand::TeamDeleteRemovalSettled {
+                    team_id,
+                    outcome,
+                }).await;
             })
         });
         self.team_delete_tasks.push(task);
@@ -1091,6 +1195,7 @@ impl OrganizationGlobalState {
         &mut self,
         shared: &OrganizationShared,
         team_id: &TeamId,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<bool, StoreFault> {
         if !self
             .store
@@ -1102,7 +1207,9 @@ impl OrganizationGlobalState {
             return Ok(false);
         }
         if let Some(removal) = self.store.team_materialization_removal(team_id) {
-            self.spawn_team_delete_removal_task(shared, team_id, shared.team_remove(removal));
+            self.spawn_team_delete_removal_task(shared, team_id, cancellation, |cancellation| {
+                shared.team_remove(removal, cancellation)
+            });
             return Ok(true);
         }
         if let Some(request) = self
@@ -1112,7 +1219,8 @@ impl OrganizationGlobalState {
             self.spawn_team_delete_removal_task(
                 shared,
                 team_id,
-                shared.team_remove_unconfirmed(request),
+                cancellation,
+                |cancellation| shared.team_remove_unconfirmed(request, cancellation),
             );
             return Ok(true);
         }
@@ -1371,6 +1479,26 @@ impl OrganizationGlobalState {
     }
 
     async fn recover_materialization_receipts(&mut self, shared: &OrganizationShared) {
+        let removals = self.store.facts().materialization_lifecycles().filter_map(|lifecycle| {
+            match lifecycle.cleanup()? {
+                organization::TeamMaterializationCleanup::OutcomeUnknown(removal)
+                    if self.store.facts().runs().filter(|run| run.team() == removal.receipt().team()).all(|run| {
+                        run.runtime().is_none() && matches!(run.lifecycle().state(), GraphRunLifecycleState::Tombstoned { .. })
+                    }) => Some(removal.clone()),
+                _ => None,
+            }
+        }).collect::<Vec<_>>();
+        for removal in removals {
+            let Some(runtime) = shared.team_runtime_for_endpoint(removal.receipt().endpoint()) else {
+                continue;
+            };
+            let outcome = runtime.recover_team_removal(removal.clone()).await;
+            if matches!(&outcome, organization::MaterializationOperationOutcome::Confirmed { receipt } if receipt == removal.receipt()) {
+                let _ = self.store.refresh().and_then(|_| {
+                    self.store.record_team_materialization_cleanup_outcome(removal.receipt().team(), outcome)
+                });
+            }
+        }
         for team_id in self.store.materialization_receipt_recovery_teams() {
             if self.store.facts().materialization(&team_id).is_some() {
                 continue;
@@ -1517,6 +1645,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::PendingRunActivityIds { .. }
             | OrganizationQuery::NativeDeliveryByRun { .. }
             | OrganizationQuery::TeamMessageTerminalContext { .. }
+            | OrganizationQuery::PendingTeamMessageRepairs { .. }
             | OrganizationQuery::ActiveRunIds { .. }
             | OrganizationQuery::ActivityTarget { .. }
             | OrganizationQuery::MatchaTerminalTarget { .. } => QueryRoute::Global,
@@ -1592,67 +1721,43 @@ impl OwnerSpec for OrganizationOwner {
                 created_at,
                 reply,
             } => {
-                let outcome = match OrganizationRunLane::open_store(&mut state.store, &state.store_path) {
-                    Ok(mut store) => {
-                        let run = state
-                            .team_run
-                            .run_from_team_template(
-                                &store,
-                                &team_id,
-                                run_id.clone(),
-                                idempotency_key.as_str(),
-                                created_at,
-                            )
-                            .map_err(|_| TeamRuntimeStatus::Rejected);
-                        match run {
-                            Ok(run) => {
-                                let created = state
-                                    .team_run
-                                    .create(&mut store, run, idempotency_key.as_str())
-                                    .map_err(|_| TeamRuntimeStatus::Unavailable);
-                                match created {
-                                    Ok(created) => {
-                                        if matches!(
-                                            created,
-                                            CreateGraphRunOutcome::ConflictingIdempotency
-                                        ) {
-                                            Err(TeamRuntimeStatus::Unavailable)
-                                        } else {
-                                            match prepare_runtime_receipt(&store, &team_id, &run_id)
-                                                .map_err(runtime_receipt_status)
-                                            {
-                                                Ok(receipt) => match shared
-                                                    .team_confirm_receipt(receipt.clone())
-                                                    .await
-                                                {
-                                                    RuntimeReceiptOutcome::Installed => {
-                                                        install_prepared_runtime_receipt(
-                                                            &mut store, receipt,
-                                                        )
-                                                        .map_err(|_| TeamRuntimeStatus::Unavailable)
-                                                        .map(|_| created)
-                                                    }
-                                                    RuntimeReceiptOutcome::Rejected => {
-                                                        Err(TeamRuntimeStatus::Rejected)
-                                                    }
-                                                    RuntimeReceiptOutcome::OutcomeUnknown => {
-                                                        Err(TeamRuntimeStatus::OutcomeUnknown)
-                                                    }
-                                                    RuntimeReceiptOutcome::Unavailable => {
-                                                        Err(TeamRuntimeStatus::Unavailable)
-                                                    }
-                                                },
-                                                Err(error) => Err(error),
-                                            }
-                                        }
-                                    }
-                                    Err(error) => Err(error),
-                                }
-                            }
-                            Err(error) => Err(error),
-                        }
+                let outcome = async {
+                    let mut store = OrganizationRunLane::open_store(&mut state.store, &state.store_path)
+                        .map_err(|error| (TeamRuntimeStatus::Unavailable,
+                            creation_store_failure(TeamCreationStage::InitializingSessions, &error)))?;
+                    let run = state.team_run.run_from_team_template(
+                        &store, &team_id, run_id.clone(), idempotency_key.as_str(), created_at,
+                    ).map_err(|(_, failure)| (TeamRuntimeStatus::Rejected, failure))?;
+                    let created = state.team_run.create(&mut store, run, idempotency_key.as_str())
+                        .map_err(|error| (TeamRuntimeStatus::Unavailable,
+                            creation_store_failure(TeamCreationStage::InitializingSessions, &error)))?;
+                    if matches!(created, CreateGraphRunOutcome::ConflictingIdempotency) {
+                        return Err((TeamRuntimeStatus::Unavailable, TeamCreationFailure::new(
+                            TeamCreationStage::InitializingSessions, TeamCreationFailureReason::StoreConflict,
+                        )));
                     }
-                    Err(_) => Err(TeamRuntimeStatus::Unavailable),
+                    let receipt = prepare_runtime_receipt(&store, &team_id, &run_id)
+                        .map_err(|(outcome, failure)| (runtime_receipt_status(outcome), failure))?;
+                    let (outcome, creation_failure) = shared
+                        .team_confirm_receipt(receipt.clone(), reply.cancellation()).await;
+                    match outcome {
+                        RuntimeReceiptOutcome::Installed => {
+                            install_prepared_runtime_receipt(&mut store, receipt)
+                                .map_err(|error| (TeamRuntimeStatus::Unavailable,
+                                    creation_store_failure(TeamCreationStage::InitializingSessions, &error)))?;
+                            Ok(created)
+                        }
+                        outcome => Err((runtime_receipt_status(outcome), creation_failure.unwrap_or_else(|| {
+                            TeamCreationFailure::new(TeamCreationStage::InitializingSessions, runtime_receipt_failure_reason(&outcome))
+                        }))),
+                    }
+                }.await;
+                let outcome = match outcome {
+                    Ok(created) => (Ok(created), None),
+                    Err((status, failure)) => {
+                        reply.creation_failure(failure).await;
+                        (Err(status), Some(failure))
+                    }
                 };
                 let _ = reply.send(outcome).await;
             }
@@ -1682,7 +1787,7 @@ impl OwnerSpec for OrganizationOwner {
                             }
                         };
                         let outcome = shared
-                            .team_abort_role_sessions(plan.bindings().to_vec())
+                            .team_abort_role_sessions(plan.bindings().to_vec(), reply.cancellation())
                             .await;
                         settle_public_cancellation(
                             &mut store,
@@ -1816,9 +1921,11 @@ impl OwnerSpec for OrganizationOwner {
                 operation,
                 reply,
             } => {
-                let outcome = OrganizationRunLane::open_store(&mut state.store, &state.store_path).and_then(|mut store| {
-                    crate::application::task_board::mutate(&mut store, team_id, run_id, operation)
-                });
+                let outcome = OrganizationRunLane::open_store(&mut state.store, &state.store_path)
+                    .map_err(crate::application::task_board::MutationError::Store)
+                    .and_then(|mut store| {
+                        crate::application::task_board::mutate(&mut store, team_id, run_id, operation)
+                    });
                 let _ = reply.send(outcome).await;
             }
             OrganizationCommand::ScheduleReadyNodes { run_id, now, reply } => {
@@ -1979,7 +2086,8 @@ impl OwnerSpec for OrganizationOwner {
                     session_trace("runtime.team.refresh.start", || json!({}));
                     let refreshed = state.refresh();
                     trace_store_result("runtime.team.refresh.end", started, &refreshed);
-                    if refreshed.is_err() {
+                    if let Err(error) = &refreshed {
+                        reply.creation_failure(creation_store_failure(TeamCreationStage::Submitting, error)).await;
                         let _ = reply
                             .send(TeamMaterializationCommandOutcome::Unavailable)
                             .await;
@@ -2026,7 +2134,8 @@ impl OwnerSpec for OrganizationOwner {
                     session_trace("runtime.team.refresh.start", || json!({}));
                     let refreshed = state.refresh();
                     trace_store_result("runtime.team.refresh.end", started, &refreshed);
-                    if refreshed.is_err() {
+                    if let Err(error) = &refreshed {
+                        reply.creation_failure(creation_store_failure(TeamCreationStage::Submitting, error)).await;
                         let _ = reply.send(ManualTeamCreateOutcome::Unavailable).await;
                         return;
                     }
@@ -2070,7 +2179,7 @@ impl OwnerSpec for OrganizationOwner {
                     match state.refresh() {
                         Ok(()) => {
                             state
-                                .team_delete(&shared, team_id.clone(), idempotency_key, observed_at)
+                                .team_delete(&shared, team_id.clone(), idempotency_key, observed_at, reply.cancellation())
                                 .await
                         }
                         Err(error) => Err(error),
@@ -2101,6 +2210,7 @@ impl OwnerSpec for OrganizationOwner {
                 settlement,
                 native,
                 observed_at,
+                cancellation,
             } => {
                 let task_key = (run_id.as_str().to_owned(), idempotency_key.clone());
                 let settled = match state.refresh() {
@@ -2113,7 +2223,7 @@ impl OwnerSpec for OrganizationOwner {
                     ) {
                         Ok(organization::GraphRunPurgeOutcome::Purged
                             | organization::GraphRunPurgeOutcome::Replayed) => state
-                            .start_team_delete_removal_if_ready(&shared, &team_id)
+                            .start_team_delete_removal_if_ready(&shared, &team_id, cancellation)
                             .map(|_| TeamDeleteOutcome::Deleted),
                         Ok(_) => Ok(TeamDeleteOutcome::OutcomeUnknown),
                         Err(error) => Err(error),
@@ -2140,7 +2250,7 @@ impl OwnerSpec for OrganizationOwner {
                 let outcome = match state.refresh() {
                     Ok(()) => {
                         state
-                            .run_delete_and_purge(&shared, run_id, idempotency_key, observed_at)
+                            .run_delete_and_purge(&shared, run_id, idempotency_key, observed_at, reply.cancellation())
                             .await
                     }
                     Err(error) => Err(error),
@@ -2339,15 +2449,19 @@ impl OwnerSpec for OrganizationOwner {
                 event_limit,
                 reply,
             } => {
-                let outcome = OrganizationRunLane::open_store(&mut state.store, &state.store_path).ok().and_then(|store| {
-                    crate::application::projection::team_run_public_snapshot(
-                        &store,
-                        team_id,
-                        run_id,
-                        event_cursor,
-                        event_limit,
-                    )
-                });
+                let outcome = match OrganizationRunLane::open_store(&mut state.store, &state.store_path) {
+                    Ok(store) => {
+                        let snapshot = crate::application::projection::team_run_public_snapshot(
+                            &store, team_id, run_id, event_cursor, event_limit,
+                        );
+                        let failure = snapshot.is_none().then(|| TeamCreationFailure::new(
+                            TeamCreationStage::LoadingTeam, TeamCreationFailureReason::InvalidInput,
+                        ));
+                        (snapshot, failure)
+                    }
+                    Err(error) => (None, Some(creation_store_failure(TeamCreationStage::LoadingTeam, &error))),
+                };
+                if let Some(failure) = outcome.1 { reply.creation_failure(failure).await; }
                 let _ = reply.send(outcome).await;
             }
             OrganizationQuery::TeamRunDiagnostics { run_id, reply } => {
@@ -2463,6 +2577,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationQuery::PendingRunActivityIds { .. }
             | OrganizationQuery::NativeDeliveryByRun { .. }
             | OrganizationQuery::TeamMessageTerminalContext { .. }
+            | OrganizationQuery::PendingTeamMessageRepairs { .. }
             | OrganizationQuery::ActiveRunIds { .. }
             | OrganizationQuery::ActivityTarget { .. }
             | OrganizationQuery::MatchaTerminalTarget { .. } => {
@@ -2501,7 +2616,7 @@ impl OwnerSpec for OrganizationOwner {
                 reply,
             } => {
                 let outcome = state
-                    .plan_team_skill_dependencies(&shared, selection_id)
+                    .plan_team_skill_dependencies(&shared, selection_id, reply.cancellation())
                     .await;
                 let _ = reply.send(outcome).await;
             }
@@ -2635,6 +2750,9 @@ impl OwnerSpec for OrganizationOwner {
                     Err(_) => None,
                 };
                 let _ = reply.send(outcome);
+            }
+            OrganizationQuery::PendingTeamMessageRepairs { reply } => {
+                let _ = reply.send(state.terminal_settlement.has_pending_repairs());
             }
             OrganizationQuery::ActiveRunIds { reply } => {
                 let outcome = match state.refresh() {
@@ -2781,6 +2899,14 @@ fn manual_runtime_receipt_outcome(outcome: RuntimeReceiptOutcome) -> ManualTeamC
         RuntimeReceiptOutcome::Rejected => ManualTeamCreateOutcome::Rejected,
         RuntimeReceiptOutcome::OutcomeUnknown => ManualTeamCreateOutcome::OutcomeUnknown,
         RuntimeReceiptOutcome::Unavailable => ManualTeamCreateOutcome::Unavailable,
+    }
+}
+
+fn runtime_receipt_failure_reason(outcome: &RuntimeReceiptOutcome) -> TeamCreationFailureReason {
+    match outcome {
+        RuntimeReceiptOutcome::Installed | RuntimeReceiptOutcome::OutcomeUnknown => TeamCreationFailureReason::OutcomeUnknown,
+        RuntimeReceiptOutcome::Rejected => TeamCreationFailureReason::Rejected,
+        RuntimeReceiptOutcome::Unavailable => TeamCreationFailureReason::Unavailable,
     }
 }
 

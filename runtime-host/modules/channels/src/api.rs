@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex, Weak};
+
 use foundation::execution::OwnerRuntimeHandle;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -36,11 +38,28 @@ pub(crate) enum ControlDelivery {
 pub struct ChannelHandle {
     owner: OwnerRuntimeHandle<ChannelCommand, ChannelQuery>,
     recorder: Option<platform::call::CallRecorder>,
+    login_cancellations: Arc<Mutex<Vec<(ChannelKey, Weak<CancellationToken>)>>>,
 }
 
 impl ChannelHandle {
     pub fn new(owner: OwnerRuntimeHandle<ChannelCommand, ChannelQuery>) -> Self {
-        Self { owner, recorder: None }
+        Self {
+            owner,
+            recorder: None,
+            login_cancellations: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn login_cancellation(
+        &self,
+        key: &ChannelKey,
+        cancellation: CancellationToken,
+    ) -> Arc<CancellationToken> {
+        let cancellation = Arc::new(cancellation.child_token());
+        let mut pending = self.login_cancellations.lock().expect("login cancellation lock");
+        pending.retain(|(_, token)| token.strong_count() != 0);
+        pending.push((key.channel_scope(), Arc::downgrade(&cancellation)));
+        cancellation
     }
 
     pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
@@ -272,6 +291,7 @@ impl ChannelHandle {
         agent_id: Option<String>,
         config: Zeroizing<Vec<u8>>,
     ) -> Result<(ChannelLoginOutcome, Option<platform::call::CallId>), ChannelOwnerUnavailable> {
+        let cancellation = self.login_cancellation(&key, CancellationToken::new());
         let trace = self.trace(ChannelCallDetail::keyed(ChannelCallOperation::LoginStart, &key)).await?;
         let call_id = trace.call.as_ref().map(|call| call.context.id().clone());
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
@@ -283,6 +303,7 @@ impl ChannelHandle {
                 timeout_ms,
                 agent_id,
                 config,
+                cancellation,
                 reply,
             })
             .await
@@ -307,6 +328,7 @@ impl ChannelHandle {
         current_qr_data_url: Option<String>,
         cancellation: CancellationToken,
     ) -> Result<(ChannelLoginOutcome, Option<platform::call::CallId>), ChannelOwnerUnavailable> {
+        let cancellation = self.login_cancellation(&key, cancellation);
         let trace = self.trace(ChannelCallDetail::keyed(ChannelCallOperation::LoginWait, &key)).await?;
         let call_id = trace.call.as_ref().map(|call| call.context.id().clone());
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
@@ -338,6 +360,21 @@ impl ChannelHandle {
         &self,
         key: ChannelKey,
     ) -> Result<ChannelLoginOutcome, ChannelOwnerUnavailable> {
+        {
+            let scope = key.channel_scope();
+            let mut pending = self.login_cancellations.lock().expect("login cancellation lock");
+            pending.retain(|(key, token)| {
+                let Some(token) = token.upgrade() else {
+                    return false;
+                };
+                if *key == scope {
+                    token.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self
             .send_command(ChannelCommand::LoginCancel {

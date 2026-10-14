@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use tokio::sync::Mutex;
@@ -38,6 +38,33 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("skills"),
         vec![RouteDescriptor::bound(
             "skills.loopback",
+            &[
+                RoutePath::ExactWithQuery(management::ENDPOINT),
+                RoutePath::ExactWithQuery(result::ENDPOINT),
+                RoutePath::ExactWithQuery(result::PRIVATE_ENDPOINT),
+                RoutePath::ExactWithQuery(management::CAPABILITY_EXECUTE_ENDPOINT),
+                RoutePath::ExactWithQuery(management::DETAIL_ENDPOINT),
+                RoutePath::ExactWithQuery(management::CONFIG_ENDPOINT),
+                RoutePath::ExactWithQuery(management::CLAWHUB_INSTALL_ENDPOINT),
+                RoutePath::ExactWithQuery(management::CLAWHUB_UPDATE_ENDPOINT),
+                RoutePath::ExactWithQuery(management::UPLOAD_BEGIN_ENDPOINT),
+                RoutePath::ExactWithQuery(management::UPLOAD_CHUNK_ENDPOINT),
+                RoutePath::ExactWithQuery(management::UPLOAD_COMMIT_ENDPOINT),
+                RoutePath::ExactWithQuery(management::UNINSTALL_ENDPOINT),
+                RoutePath::ExactWithQuery(management::IMPORT_MARKDOWN_ENDPOINT),
+                RoutePath::ExactWithQuery(management::IMPORT_BUNDLE_ENDPOINT),
+                RoutePath::ExactWithQuery(management::README_ENDPOINT),
+                RoutePath::ExactWithQuery(clawhub_search::ENDPOINT),
+                RoutePath::ExactWithQuery(clawhub_skill::ENDPOINT),
+                RoutePath::ExactWithQuery(bundle::EXPORT_ENDPOINT),
+                RoutePath::ExactWithQuery(bundle::IMPORT_ENDPOINT),
+                RoutePath::ExactWithQuery(sealed_resource::STATUS_ENDPOINT),
+                RoutePath::ExactWithQuery(sealed_resource::EXPORT_ENDPOINT),
+                RoutePath::ExactWithQuery(sealed_resource::EXPORT_CLOUD_ENDPOINT),
+                RoutePath::ExactWithQuery(sealed_resource::INSTALL_ENDPOINT),
+                RoutePath::ExactWithQuery(sealed_resource::UNINSTALL_ENDPOINT),
+                RoutePath::Prefix(sealed_resource::READ_ENDPOINT_PREFIX),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],
@@ -56,7 +83,28 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 }
 
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
-    Box::pin(async move {
+    let tracing_open_path = platform::trace::enabled()
+        && pathname(request.path()) == management::CAPABILITY_EXECUTE_ENDPOINT
+        && serde_json::from_slice::<serde_json::Value>(&request.body)
+            .ok()
+            .is_some_and(|value| {
+                value.get("operationId").and_then(serde_json::Value::as_str)
+                    == Some("clawhub.openPath")
+            });
+    let trace_id = tracing_open_path
+        .then(|| {
+            request
+                .headers()
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("x-matchaclaw-session-trace"))
+                .map(|(_, value)| value)
+                .filter(|value| {
+                    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+                })
+                .cloned()
+        })
+        .flatten();
+    let dispatch = async move {
         let path = pathname(request.path()).to_owned();
         let recorded = match (
             &dependencies.skills.recorder,
@@ -70,14 +118,17 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
                         command,
                         accepted: Arc::new(tokio::sync::OnceCell::new()),
                     }),
-                    Err(_) => return fixed(503, "Skills call recording is unavailable").into(),
+                    Err(_) => return fixed(503, "Skills call recording is unavailable"),
                 }
             }
             _ => None,
         };
         if let Some(call) = &recorded {
             if !is_long_operation(&path, &request.body) && call.context.running().await.is_err() {
-                return fixed(503, "Skills call recording is unavailable").into();
+                let response = fixed(503, "Skills call recording is unavailable");
+                let (status, detail) = crate::call::terminal(call.detail.clone(), &response);
+                let _ = call.context.finish(status, &detail).await;
+                return response;
             }
         }
         let mut response = match (request.method(), path.as_str()) {
@@ -181,7 +232,24 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
                 }
             }
         }
-        response.into()
+        response
+    };
+    Box::pin(async move {
+        if !tracing_open_path {
+            return dispatch.await.into();
+        }
+        platform::trace::with_session_trace(trace_id, async move {
+            platform::trace::runtime_trace("skill.open-path.runtime-enter", || {
+                serde_json::json!({})
+            });
+            let response = dispatch.await;
+            platform::trace::runtime_trace(
+                "skill.open-path.runtime-response",
+                || serde_json::json!({ "status": response.status() }),
+            );
+            response.into()
+        })
+        .await
     })
 }
 

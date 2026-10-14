@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use foundation::execution::OwnerRuntimeHandle;
+use futures_util::FutureExt;
 use platform::call::{CallContext, CallReceipt, CallRecorder, CallStatus};
 use tokio::sync::oneshot;
 
@@ -106,29 +107,44 @@ impl ToolchainModule {
             .await;
             return Err(());
         }
-        if let Err(error) = self.owner.try_send_command(ToolchainCommand::AdmitPrepare {
-            call: context.clone(),
-        }) {
-            let failure = match error {
-                foundation::execution::OwnerRuntimeSendError::Full => CallFailure::QueueFull,
-                foundation::execution::OwnerRuntimeSendError::Closed => {
-                    CallFailure::OwnerUnavailable
-                }
-            };
+        let permit = match self.owner.try_reserve() {
+            Ok(permit) => permit,
+            Err(error) => {
+                let failure = match error {
+                    foundation::execution::OwnerRuntimeSendError::Full => CallFailure::QueueFull,
+                    foundation::execution::OwnerRuntimeSendError::Closed => {
+                        CallFailure::OwnerUnavailable
+                    }
+                };
+                call::finish(
+                    Some(&context),
+                    CallStatus::Rejected,
+                    &detail.failed(failure),
+                )
+                .await;
+                return Err(());
+            }
+        };
+        let admission_context = context.clone();
+        let accepted: platform::call::CallFuture<CallReceipt> =
+            Box::pin(async move { admission_context.accepted().await });
+        let accepted = accepted.shared();
+        if permit
+            .send(ToolchainCommand::AdmitPrepare {
+                call: context.clone(),
+                accepted: accepted.clone(),
+            })
+            .is_err()
+        {
             call::finish(
                 Some(&context),
                 CallStatus::Rejected,
-                &detail.failed(failure),
+                &detail.failed(CallFailure::OwnerUnavailable),
             )
             .await;
             return Err(());
         }
-        context.accepted().await.map_err(|error| {
-            eprintln!(
-                "[toolchain:call] accepted record failed call_id={} error={error}",
-                context.id().as_str()
-            );
-        })
+        accepted.await.map_err(|_| ())
     }
 
     async fn begin(

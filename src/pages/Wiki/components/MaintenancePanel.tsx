@@ -101,7 +101,7 @@ function MaintenanceBody({ projectId, projectName, modelRef, busy, onChanged }: 
           ? await hostWikiImportArchive({ archivePath: request.archivePath, destination: request.destination })
           : await hostWikiRebuildIndex({ projectId });
       if (signal.aborted) return;
-      const call = await waitForCall(receipt, 'wiki', { signal }).catch(() => {
+      const call = await waitForCall(receipt, 'wiki', { signal, timeoutMs: null }).catch(() => {
         throw new Error(text('unconfirmed', '无法确认操作结果，请刷新查看；不要重复提交。'));
       });
       if (signal.aborted) return;

@@ -290,6 +290,7 @@ pub use adapters::loopback::trigger::WebhookToken;
 pub use adapters::mcp::{TeamRunMcpFacade, is_team_tool};
 pub use adapters::session_terminal::{
     OrganizationRunPhase, OrganizationRunTerminalSnapshot, OrganizationSessionTerminal,
+    OrganizationTerminalCloseError,
     TeamMessageRepairSessionOutcome, TeamMessageRepairSessionPort, TeamMessageRepairSessionRequest,
 };
 pub use adapters::start_gate_send_hook::{
@@ -297,7 +298,7 @@ pub use adapters::start_gate_send_hook::{
     StartGateSendRequest,
 };
 pub use api::{
-    OrganizationModule, OrganizationOwnerInput, OrganizationRuntime, StartGatePromptPlan,
+    OrganizationModule, OrganizationOwnerInput, OrganizationRuntime, OrganizationShutdownError, StartGatePromptPlan,
     StartGateRuntimeBindingLookup,
     TeamMessageRepairDispatch, TeamMessageTerminalContext, TeamMessageTerminalObservation,
     TeamMessageTerminalPlan, plan_team_message_terminal,
@@ -344,6 +345,7 @@ pub use ports::{
     TeamMaterializationRequest, TeamMemberIntroductions, TeamNativeEffectsPort, TeamRunAdmission,
     TeamProvisionMemberStatus, TeamProvisionObserver, TeamProvisionProgress,
     TeamProvisionReporter, TeamProvisionStage, TeamProvisionUpdate,
+    TeamCreationFailure, TeamCreationFailureReason, TeamCreationFile, TeamCreationStage,
 };
 pub use run::delivery::{NativeRunReceiptReference, NativeTerminalStatus};
 pub use run::event::{ApprovalAction, TeamRunWake, TeamRunWakeReason};

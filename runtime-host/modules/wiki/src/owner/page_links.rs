@@ -124,11 +124,6 @@ pub(crate) async fn create(
     // Reuse the owner-maintained recent index without rewriting the model's page content.
     let index_result = (|| {
         wiki_path(root, "wiki/index.md")?;
-        let staged = resolve_project_path(root, "wiki/.index.md.recent.tmp")?;
-        if std::fs::symlink_metadata(staged).is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            return Err(WikiFailure::invalid_path("wiki/.index.md.recent.tmp"));
-        }
         crate::history::record(
             root,
             "wiki/index.md",

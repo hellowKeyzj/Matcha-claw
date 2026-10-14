@@ -1,7 +1,7 @@
 import type { SessionGoalReceipt, SessionSendIntent } from '../../../../../src/types/session-goal';
 import { decodeSessionGoalReceipt, isGoalIdentifier, isGoalObjective, isSessionSendIntent } from './goal';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
-import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { hasExactKeys, isRecord, sendLoopbackJsonDelivery } from '../client';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 
 const ROUTE_PATH = '/api/sessions/send';
@@ -149,7 +149,7 @@ export function createSessionSendTransport(
         idempotencyKey: summarizeIdentifier(request.input.idempotencyKey),
         attachmentCount: request.input.attachments.length,
       }));
-      const response = await sendLoopbackJson({
+      const delivery = await sendLoopbackJsonDelivery({
         port: runtimeHostTransportPort,
         path: ROUTE_PATH,
         issuer,
@@ -164,15 +164,16 @@ export function createSessionSendTransport(
         body: request,
         headers: traceHeader(traceId),
       });
-      if (response === null) {
+      if (delivery.outcome !== 'response') {
         publishE2ESessionSendBoundary(() => ({ stage: 'transport-failure' }));
         logSessionTrace('electron.send.failure', traceId, () => ({
           elapsedMs: Date.now() - startedAt,
         }));
-        return request.input.intent === undefined
+        return delivery.outcome === 'not-attempted' && request.input.intent === undefined
           ? { status: 503, body: UNAVAILABLE }
           : { status: 200, body: { outcome: 'unknown' } };
       }
+      const response = delivery.response;
       const body = response.body;
       publishE2ESessionSendBoundary(() => ({
         stage: 'http-response',
@@ -213,12 +214,20 @@ export function createSessionSendTransport(
           return { status: 200, body };
         }
       }
-      if (response.status === 400) {
+      if (response.status === 400 && (request.input.intent !== undefined || (isRecord(body)
+        && hasExactKeys(body, ['success', 'error'])
+        && body.success === false && body.error === INVALID_REQUEST.error))) {
         return { status: 400, body: INVALID_REQUEST };
       }
-      return request.input.intent === undefined
-        ? { status: 503, body: UNAVAILABLE }
-        : { status: 200, body: { outcome: 'unknown' } };
+      if (isRecord(body) && hasExactKeys(body, ['success', 'error']) && body.success === false
+        && ((response.status === 401 && body.error === 'Session send authorization is invalid')
+          || (response.status === 422 && body.error === 'Session send endpoint is unsupported'))) {
+        return {
+          status: 200,
+          body: { outcome: response.status === 422 && request.input.intent !== undefined ? 'unsupported' : 'target_rejected' },
+        };
+      }
+      return { status: 200, body: { outcome: 'unknown' } };
     },
   };
 }

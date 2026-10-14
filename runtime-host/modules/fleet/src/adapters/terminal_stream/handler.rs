@@ -4,7 +4,12 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD as BASE64},
 };
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Mutex, time::timeout};
+use tokio::{
+    io::{AsyncWrite, AsyncWriteExt},
+    net::TcpStream,
+    sync::Mutex,
+    time::timeout,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::provider::TerminalContext;
@@ -311,7 +316,7 @@ async fn serve_upgrade_inner(
                 serde_json::json!({"type":"terminal.error","code":"invalid_ticket_frame"}),
             )
             .await;
-            let _ = write_frame(&mut stream, 8, &[]).await;
+            let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
             return Ok(());
         }
     };
@@ -323,7 +328,7 @@ async fn serve_upgrade_inner(
                 serde_json::json!({"type":"terminal.error","code":"invalid_ticket"}),
             )
             .await;
-            let _ = write_frame(&mut stream, 8, &[]).await;
+            let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
             return Ok(());
         }
     };
@@ -335,7 +340,7 @@ async fn serve_upgrade_inner(
                 serde_json::json!({"type":"terminal.error","code":"invalid_ticket"}),
             )
             .await;
-            let _ = write_frame(&mut stream, 8, &[]).await;
+            let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
             return Ok(());
         }
     };
@@ -363,7 +368,7 @@ async fn serve_upgrade_inner(
     let cancellation = match cancellation {
         Some(cancellation) => cancellation,
         None => {
-            let _ = write_frame(&mut stream, 8, &[]).await;
+            let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
             return Ok(());
         }
     };
@@ -383,18 +388,18 @@ async fn serve_upgrade_inner(
                     serde_json::json!({"type":"terminal.error","code":"provider_unavailable"}),
                 )
                 .await;
-                let _ = write_frame(&mut stream, 8, &[]).await;
+                let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
                 return Ok(());
             }
         },
         _ = cancellation.cancelled() => {
             finalizer.close(None).await;
-            let _ = write_frame(&mut stream, 8, &[]).await;
+            let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
             return Ok(());
         },
         _ = shutdown.cancelled() => {
             finalizer.close(None).await;
-            let _ = write_frame(&mut stream, 8, &[]).await;
+            let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
             return Ok(());
         },
     };
@@ -409,10 +414,12 @@ async fn serve_upgrade_inner(
         finalizer.close(Some(&mut handle)).await;
         return Ok(());
     }
+    // Keep the event receiver alive until the finalizer drops the command sender.
+    let mut events = opened.events;
     let result = run_session(
         &mut stream,
         &mut handle,
-        opened.events,
+        &mut events,
         cancellation,
         shutdown,
     )
@@ -422,7 +429,7 @@ async fn serve_upgrade_inner(
         Ok(SessionEnd::ProviderFailed) => finalizer.fail(Some(&mut handle)).await,
         Err(_) => finalizer.close(Some(&mut handle)).await,
     }
-    let _ = write_frame(&mut stream, 8, &[]).await;
+    let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
     result.map(|_| ())
 }
 
@@ -435,76 +442,107 @@ enum SessionEnd {
 async fn run_session(
     stream: &mut TcpStream,
     handle: &mut TerminalProviderHandle,
-    mut events: super::provider::ProviderStream,
+    events: &mut super::provider::ProviderStream,
     cancellation: CancellationToken,
     shutdown: CancellationToken,
 ) -> io::Result<SessionEnd> {
     let pending_output = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    loop {
-        tokio::select! {
-            _ = cancellation.cancelled() => return Ok(SessionEnd::Closed),
-            _ = shutdown.cancelled() => return Ok(SessionEnd::Closed),
-            frame = read_frame(stream) => match frame {
+    let (mut reader, writer) = stream.split();
+    let writer = Mutex::new(writer);
+    // Keep frame reads alive across output events and drain output during command backpressure.
+    let input = async {
+        // Command EOF leaves Exit/failure to output while WS close stays readable.
+        let mut command_handle = Some(&*handle);
+        loop {
+            match read_frame(&mut reader).await {
                 Ok(frame) if frame.opcode == 8 => return Ok(SessionEnd::Closed),
-                Ok(frame) if frame.opcode == 9 => { write_frame(stream, 10, &frame.payload).await?; },
+                Ok(frame) if frame.opcode == 9 => {
+                    let mut writer = writer.lock().await;
+                    timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut *writer, 10, &frame.payload))
+                        .await
+                        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "terminal write timed out"))??;
+                },
                 Ok(frame) if frame.opcode == 2 => {
-                    handle.send(ProviderCommand::Input(frame.payload)).await.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "provider unavailable"))?;
+                    if let Some(handle) = command_handle {
+                        if handle.send(ProviderCommand::Input(frame.payload)).await.is_err() {
+                            command_handle = None;
+                        }
+                    }
                 },
                 Ok(frame) if frame.opcode == 1 => {
-                    if process_control(stream, handle, &frame.payload).await? {
-                        return Ok(SessionEnd::Closed);
+                    match process_control(&writer, command_handle, &frame.payload).await? {
+                        InputControl::Continue => {},
+                        InputControl::Closed => return Ok(SessionEnd::Closed),
+                        InputControl::ProviderEnded => command_handle = None,
                     }
                 }
                 Ok(_) => return Ok(SessionEnd::Closed),
                 Err(_) => return Ok(SessionEnd::Closed),
-            },
-            event = events.recv() => match event {
+            }
+        }
+    };
+    let output = async {
+        loop {
+            match events.recv().await {
                 Some(Ok(ProviderEvent::Output(payload))) => {
+                    let mut writer = writer.lock().await;
                     if payload.len() > MAX_PAYLOAD {
-                        let _ = write_json(stream, serde_json::json!({"type":"terminal.error","code":"output_overflow"})).await;
+                        let _ = write_json(&mut *writer, serde_json::json!({"type":"terminal.error","code":"output_overflow"})).await;
                         return Ok(SessionEnd::Closed);
                     }
                     let previous = pending_output.fetch_add(payload.len(), std::sync::atomic::Ordering::AcqRel);
                     if previous.saturating_add(payload.len()) > MAX_SESSION_OUTPUT_BYTES {
                         pending_output.fetch_sub(payload.len(), std::sync::atomic::Ordering::AcqRel);
-                        let _ = write_json(stream, serde_json::json!({"type":"terminal.error","code":"client_slow"})).await;
+                        let _ = write_json(&mut *writer, serde_json::json!({"type":"terminal.error","code":"client_slow"})).await;
                         return Ok(SessionEnd::Closed);
                     }
-                    let write = timeout(OUTPUT_QUEUE_WAIT, write_frame(stream, 2, &payload)).await;
+                    let write = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut *writer, 2, &payload)).await;
                     pending_output.fetch_sub(payload.len(), std::sync::atomic::Ordering::AcqRel);
                     match write {
                         Ok(Ok(())) => {}
                         Ok(Err(_)) | Err(_) => {
-                            let _ = write_json(stream, serde_json::json!({"type":"terminal.error","code":"client_slow"})).await;
+                            let _ = write_json(&mut *writer, serde_json::json!({"type":"terminal.error","code":"client_slow"})).await;
                             return Ok(SessionEnd::Closed);
                         }
                     }
                 },
                 Some(Ok(ProviderEvent::Exit { code })) => {
-                    write_json(stream, terminal_exit_frame(code)).await?;
+                    write_json(&mut *writer.lock().await, terminal_exit_frame(code)).await?;
                     return Ok(SessionEnd::Closed);
                 },
                 Some(Err(_)) | None => {
-                    let _ = write_json(stream, serde_json::json!({"type":"terminal.error","code":"provider_failed"})).await;
+                    let _ = write_json(&mut *writer.lock().await, serde_json::json!({"type":"terminal.error","code":"provider_failed"})).await;
                     return Ok(SessionEnd::ProviderFailed);
                 },
             }
         }
+    };
+    tokio::select! {
+        _ = cancellation.cancelled() => Ok(SessionEnd::Closed),
+        _ = shutdown.cancelled() => Ok(SessionEnd::Closed),
+        result = input => result,
+        result = output => result,
     }
 }
 
-async fn process_control(
-    stream: &mut TcpStream,
-    handle: &TerminalProviderHandle,
+enum InputControl {
+    Continue,
+    Closed,
+    ProviderEnded,
+}
+
+async fn process_control<W: AsyncWrite + Unpin>(
+    stream: &Mutex<W>,
+    handle: Option<&TerminalProviderHandle>,
     payload: &[u8],
-) -> io::Result<bool> {
+) -> io::Result<InputControl> {
     if payload.len() > MAX_CONTROL {
         write_json(
-            stream,
+            &mut *stream.lock().await,
             serde_json::json!({"type":"error","code":"control_too_large"}),
         )
         .await?;
-        return Ok(false);
+        return Ok(InputControl::Continue);
     }
     let value = control(
         std::str::from_utf8(payload)
@@ -524,10 +562,10 @@ async fn process_control(
                     serde_json::Value::String(nonce.to_owned()),
                 );
             }
-            write_json(stream, serde_json::Value::Object(response)).await?;
-            Ok(false)
+            write_json(&mut *stream.lock().await, serde_json::Value::Object(response)).await?;
+            Ok(InputControl::Continue)
         }
-        Some("terminal.close") => Ok(true),
+        Some("terminal.close") => Ok(InputControl::Closed),
         Some("terminal.resize") => {
             let rows = value
                 .get("rows")
@@ -539,38 +577,42 @@ async fn process_control(
                 .and_then(|v| u16::try_from(v).ok());
             match (rows, cols) {
                 (Some(rows @ 1..=1000), Some(cols @ 1..=1000)) => {
-                    handle
-                        .send(ProviderCommand::Resize { rows, cols })
-                        .await
-                        .map_err(|_| {
-                            io::Error::new(io::ErrorKind::BrokenPipe, "provider unavailable")
-                        })?;
-                    Ok(false)
+                    if let Some(handle) = handle {
+                        if handle.send(ProviderCommand::Resize { rows, cols }).await.is_err() {
+                            return Ok(InputControl::ProviderEnded);
+                        }
+                    }
+                    Ok(InputControl::Continue)
                 }
                 _ => {
                     write_json(
-                        stream,
+                        &mut *stream.lock().await,
                         serde_json::json!({"type":"error","code":"invalid_resize"}),
                     )
                     .await?;
-                    Ok(false)
+                    Ok(InputControl::Continue)
                 }
             }
         }
         _ => {
             write_json(
-                stream,
+                &mut *stream.lock().await,
                 serde_json::json!({"type":"error","code":"unknown_control"}),
             )
             .await?;
-            Ok(false)
+            Ok(InputControl::Continue)
         }
     }
 }
 
-async fn write_json(stream: &mut TcpStream, value: serde_json::Value) -> io::Result<()> {
+async fn write_json<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    value: serde_json::Value,
+) -> io::Result<()> {
     let body = value.to_string();
-    write_frame(stream, 1, body.as_bytes()).await
+    timeout(OUTPUT_QUEUE_WAIT, write_frame(stream, 1, body.as_bytes()))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "terminal write timed out"))?
 }
 
 fn terminal_exit_frame(code: Option<i32>) -> serde_json::Value {

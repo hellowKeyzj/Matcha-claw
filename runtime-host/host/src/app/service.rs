@@ -36,12 +36,12 @@ where
         control_input,
         mut control_output,
     } = app;
-    let team_mcp = crate::team_mcp::Discovery::prepare(
+    let mcp = crate::mcp::Discovery::prepare(
         &input.open_claw.runtime_host_mcp_state_dir,
         runtime_host_transport_port,
     )
-    .map_err(|_| ControlError::Transport("team MCP discovery"))?;
-    crate::team_mcp::project_matcha(
+    .map_err(|_| ControlError::Transport("MCP discovery"))?;
+    crate::mcp::project_matcha(
         &input.matcha.storage_root,
         &input.open_claw.runtime_host_mcp_executable,
         &input.open_claw.runtime_host_mcp_state_dir,
@@ -112,9 +112,10 @@ where
         handles: &runtime.handles,
         verifier: Arc::clone(&verifier),
         webhook_token,
-        team_mcp: team_mcp.descriptor(
+        mcp: mcp.descriptor(
             runtime.handles.organization.clone(),
             runtime.handles.runtime_directory.clone(),
+            runtime.handles.wiki.handle().clone(),
         ),
     });
     let route_snapshot = install_plan.route_snapshot();
@@ -143,17 +144,25 @@ where
         }
     };
     runtime.spawn_owner();
-    if team_mcp.publish().is_err() {
+    if mcp.publish().is_err() {
         let _ = shutdown_runtime(&mut runtime).await;
-        return Err(ControlError::Transport("team MCP discovery"));
+        return Err(ControlError::Transport("MCP discovery"));
     }
-    let mut http_server = http_server.into_scoped_extension();
+    let (mut http_server, http_completion) = http_server.into_scoped_extension();
+    runtime.http_completion = Some(http_completion);
     let result =
         runtime::run_private_control(&mut runtime, private_control, control_input, control_output)
             .await;
     http_server.dispose_all_lifo().await;
+    let http_result = match runtime.http_completion.take() {
+        Some(completion) => match completion.await {
+            Ok(Ok(())) => Ok(()),
+            _ => Err(ControlError::Transport("http server")),
+        },
+        None => Ok(()),
+    };
     let shutdown = shutdown_runtime(&mut runtime).await;
-    result.and(shutdown)
+    result.and(http_result).and(shutdown)
 }
 
 async fn shutdown_runtime(runtime: &mut runtime::RuntimeService) -> Result<(), ControlError> {

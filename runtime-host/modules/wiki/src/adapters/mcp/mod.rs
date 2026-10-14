@@ -1,80 +1,49 @@
-use std::{future::Future, path::Path, sync::Arc};
-
-use foundation::execution::{OwnedTask, OwnerRuntimeConfig, OwnerRuntimeSystem};
 use platform::mcp::arguments::{optional_string, require_exact_keys, required_string};
 use platform::mcp::{ToolCallError, ToolCallOutcome, ToolProvider};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use tokio::runtime::Runtime;
 
+use crate::application::commands::IngestMode;
 use crate::domain::{
     WikiApplyGeneratedPagesInput, WikiDeleteSourceInput, WikiGeneratedPageInput,
     WikiImportFolderInput, WikiImportSourceInput,
 };
 use crate::{
     WikiFailure, WikiFilesInput, WikiHandle, WikiPathSelector, WikiProjectSelector, WikiReadInput,
-    WikiRetrieveContextInput, WikiSearchInput, index, spawn_owner,
+    WikiRetrieveContextInput, WikiSearchInput,
 };
 
-pub(crate) struct WikiMcpFacade {
-    wiki: WikiHandle,
-    _owner_task: OwnedTask<()>,
-    _owner_runtime_system: OwnerRuntimeSystem,
-    runtime: Runtime,
+pub struct WikiMcpFacade {
+    call: Box<dyn FnMut(&str, &Map<String, Value>) -> ToolCallOutcome>,
 }
 
 impl WikiMcpFacade {
-    pub(crate) fn open(state_dir: &Path) -> Result<Self, WikiFailure> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| {
-                WikiFailure::state(format!("wiki MCP runtime unavailable: {error}"))
-            })?;
-        let (wiki, _owner_task, _owner_runtime_system) = {
-            let _guard = runtime.enter();
-            let owner_runtime_system = OwnerRuntimeSystem::spawn(OwnerRuntimeConfig::default());
-            let vector_index = Arc::new(
-                index::LanceWikiVectorIndex::new()
-                    .map_err(|_| WikiFailure::state("wiki embedding client unavailable"))?,
-            ) as Arc<dyn index::WikiVectorIndex>;
-            let (module, owner_task) = spawn_owner(
-                &owner_runtime_system,
-                crate::WikiOwnerInput::new(state_dir.to_path_buf())
-                    .with_vector_index(Some(vector_index)),
-            )?;
-            (module.handle().clone(), owner_task, owner_runtime_system)
-        };
-        Ok(Self {
-            wiki,
-            _owner_task,
-            _owner_runtime_system,
-            runtime,
-        })
+    pub fn new(call: impl FnMut(&str, &Map<String, Value>) -> ToolCallOutcome + 'static) -> Self {
+        Self {
+            call: Box::new(call),
+        }
     }
+}
 
-    fn run<T>(&self, future: impl Future<Output = Result<T, WikiFailure>>) -> ToolCallOutcome
-    where
-        T: Serialize,
-    {
-        self.runtime
-            .block_on(async {
-                self.wiki.reload_mcp_projects().await?;
-                future.await
-            })
-            .map_err(map_wiki_error)
-            .and_then(|value| serde_json::to_value(value).map_err(|_| ToolCallError::Internal))
-    }
-
-    fn run_unit(&self, future: impl Future<Output = Result<(), WikiFailure>>) -> ToolCallOutcome {
-        self.runtime
-            .block_on(async {
-                self.wiki.reload_mcp_projects().await?;
-                future.await
-            })
-            .map(|()| json!({ "success": true }))
-            .map_err(map_wiki_error)
-    }
+pub fn is_wiki_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "wiki_status"
+            | "wiki_projects"
+            | "wiki_files"
+            | "wiki_read_file"
+            | "wiki_search"
+            | "wiki_graph"
+            | "wiki_rescan_sources"
+            | "wiki_import_source"
+            | "wiki_import_folder"
+            | "wiki_refresh_sources"
+            | "wiki_apply_generated_pages"
+            | "wiki_delete_source"
+            | "wiki_source_tasks"
+            | "wiki_embed_page"
+            | "wiki_retrieve_context"
+    )
 }
 
 impl ToolProvider for WikiMcpFacade {
@@ -99,61 +68,74 @@ impl ToolProvider for WikiMcpFacade {
     }
 
     fn call(&mut self, name: &str, arguments: &Map<String, Value>) -> Option<ToolCallOutcome> {
-        Some(match name {
+        is_wiki_tool(name).then(|| (self.call)(name, arguments))
+    }
+}
+
+impl WikiHandle {
+    pub async fn execute_mcp(&self, name: &str, arguments: &Map<String, Value>) -> ToolCallOutcome {
+        match name {
             "wiki_status" => {
-                if require_exact_keys(arguments, &[]).is_err() {
-                    return Some(Err(ToolCallError::InvalidParams));
-                }
-                self.run(self.wiki.status())
+                require_exact_keys(arguments, &[]).map_err(|_| ToolCallError::InvalidParams)?;
+                result(self.status().await)
             }
             "wiki_projects" => {
-                if require_exact_keys(arguments, &[]).is_err() {
-                    return Some(Err(ToolCallError::InvalidParams));
-                }
-                self.run(self.wiki.projects())
+                require_exact_keys(arguments, &[]).map_err(|_| ToolCallError::InvalidParams)?;
+                result(self.projects().await)
             }
-            "wiki_files" => parse_files(arguments)
-                .map(|input| self.run(self.wiki.files(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_read_file" => parse_read(arguments)
-                .map(|input| self.run(self.wiki.read(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_search" => parse_search(arguments, 20)
-                .map(|input| self.run(self.wiki.search(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_graph" => parse_project_selector(arguments)
-                .map(|input| self.run(self.wiki.graph(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_rescan_sources" => parse_project_selector(arguments)
-                .map(|input| self.run(self.wiki.rescan(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_import_source" => parse_import_source(arguments)
-                .map(|input| self.run(self.wiki.import_source(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_import_folder" => parse_import_folder(arguments)
-                .map(|input| self.run(self.wiki.import_folder(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_refresh_sources" => parse_project_selector(arguments)
-                .map(|input| self.run(self.wiki.refresh_sources(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_apply_generated_pages" => parse_apply_generated_pages(arguments)
-                .map(|input| self.run(self.wiki.apply_generated_pages(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_delete_source" => parse_delete_source(arguments)
-                .map(|input| self.run(self.wiki.delete_source(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_source_tasks" => parse_project_selector(arguments)
-                .map(|input| self.run(self.wiki.source_tasks(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_embed_page" => parse_path_selector(arguments)
-                .map(|input| self.run_unit(self.wiki.embed_page(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            "wiki_retrieve_context" => parse_retrieve(arguments, 8)
-                .map(|input| self.run(self.wiki.retrieve_context(input)))
-                .unwrap_or(Err(ToolCallError::InvalidParams)),
-            _ => return None,
-        })
+            "wiki_files" => result(self.files(parse_files(arguments)?).await),
+            "wiki_read_file" => result(self.read(parse_read(arguments)?).await),
+            "wiki_search" => result(self.search(parse_search(arguments, 20)?).await),
+            "wiki_graph" => result(self.graph(parse_project_selector(arguments)?).await),
+            "wiki_rescan_sources" => result(self.rescan(parse_project_selector(arguments)?).await),
+            "wiki_import_source" => result(
+                self.import_source_with_ingest(
+                    parse_import_source(arguments)?,
+                    IngestMode::SourceOnly,
+                )
+                .await,
+            ),
+            "wiki_import_folder" => result(
+                self.import_folder_with_ingest(
+                    parse_import_folder(arguments)?,
+                    IngestMode::SourceOnly,
+                )
+                .await,
+            ),
+            "wiki_refresh_sources" => result(
+                self.refresh_sources_with_ingest(
+                    parse_project_selector(arguments)?,
+                    IngestMode::SourceOnly,
+                )
+                .await,
+            ),
+            "wiki_apply_generated_pages" => result(
+                self.apply_generated_pages(parse_apply_generated_pages(arguments)?)
+                    .await,
+            ),
+            "wiki_delete_source" => {
+                result(self.delete_source(parse_delete_source(arguments)?).await)
+            }
+            "wiki_source_tasks" => {
+                result(self.source_tasks(parse_project_selector(arguments)?).await)
+            }
+            "wiki_embed_page" => self
+                .embed_page(parse_path_selector(arguments)?)
+                .await
+                .map(|()| json!({ "success": true }))
+                .map_err(map_wiki_error),
+            "wiki_retrieve_context" => {
+                result(self.retrieve_context(parse_retrieve(arguments, 8)?).await)
+            }
+            _ => Err(ToolCallError::InvalidParams),
+        }
     }
+}
+
+fn result<T: Serialize>(value: Result<T, WikiFailure>) -> ToolCallOutcome {
+    value
+        .map_err(map_wiki_error)
+        .and_then(|value| serde_json::to_value(value).map_err(|_| ToolCallError::Internal))
 }
 
 fn parse_project_selector(

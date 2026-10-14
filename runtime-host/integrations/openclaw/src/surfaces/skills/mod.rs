@@ -11,6 +11,7 @@ use std::{
 use runtime_directory::LifecycleOps as _;
 use serde_json::Value;
 use skills_module::{SkillRuntimeOps as _, projection::clawhub as clawhub_projection};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     driver::OpenClawDriver,
@@ -71,11 +72,22 @@ impl skills_module::ports::SkillsPort for OpenClawSkillsPort {
         &'a self,
         command: skills_module::install::Command,
     ) -> skills_module::ports::SkillsFuture<'a, Result<skills_module::install::Outcome, ()>> {
+        self.install_clawhub_skill_cancellable(command, CancellationToken::new())
+    }
+
+    fn install_clawhub_skill_cancellable<'a>(
+        &'a self,
+        command: skills_module::install::Command,
+        cancellation: CancellationToken,
+    ) -> skills_module::ports::SkillsFuture<'a, Result<skills_module::install::Outcome, ()>> {
         Box::pin(async move {
             if !self.admission.admit_openclaw_skills_request() || !self.open_claw_is_running() {
                 return Ok(skills_module::install::Outcome::Unknown);
             }
-            Ok(self.driver.install_clawhub_skill(command).await)
+            Ok(self
+                .driver
+                .install_clawhub_skill_cancellable(command, cancellation)
+                .await)
         })
     }
 
@@ -95,6 +107,15 @@ impl skills_module::ports::SkillsPort for OpenClawSkillsPort {
         command: skills_module::management::Command,
     ) -> skills_module::ports::SkillsFuture<'a, Result<skills_module::management::Outcome, ()>>
     {
+        self.manage_skills_cancellable(command, CancellationToken::new())
+    }
+
+    fn manage_skills_cancellable<'a>(
+        &'a self,
+        command: skills_module::management::Command,
+        cancellation: CancellationToken,
+    ) -> skills_module::ports::SkillsFuture<'a, Result<skills_module::management::Outcome, ()>>
+    {
         Box::pin(async move {
             let importing = platform::trace::enabled()
                 && matches!(
@@ -102,7 +123,18 @@ impl skills_module::ports::SkillsPort for OpenClawSkillsPort {
                     skills_module::management::Command::ImportMarkdown { .. }
                         | skills_module::management::Command::ImportBundle { .. }
                 );
+            let opening_path = platform::trace::enabled()
+                && matches!(
+                    &command,
+                    skills_module::management::Command::OpenPath { .. }
+                );
             if !self.admission.admit_openclaw_skills_request() {
+                if opening_path {
+                    platform::trace::session_trace(
+                        "skill.open-path.native-rejected",
+                        || serde_json::json!({ "reason": "admission-unavailable" }),
+                    );
+                }
                 if importing {
                     eprintln!(
                         "[startup-trace] source=skills-import phase=admission detail=unavailable"
@@ -111,6 +143,12 @@ impl skills_module::ports::SkillsPort for OpenClawSkillsPort {
                 return Ok(skills_module::management::Outcome::Unavailable);
             }
             if !self.open_claw_is_running() {
+                if opening_path {
+                    platform::trace::session_trace(
+                        "skill.open-path.native-rejected",
+                        || serde_json::json!({ "reason": "runtime-not-ready" }),
+                    );
+                }
                 if importing {
                     eprintln!(
                         "[startup-trace] source=skills-import phase=runtime detail=not-ready"
@@ -118,7 +156,10 @@ impl skills_module::ports::SkillsPort for OpenClawSkillsPort {
                 }
                 return Ok(skills_module::management::Outcome::Unavailable);
             }
-            Ok(self.driver.manage_skills(command).await)
+            Ok(self
+                .driver
+                .manage_skills_cancellable(command, cancellation)
+                .await)
         })
     }
 

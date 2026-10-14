@@ -1120,6 +1120,7 @@ function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }:
             {job.name}
           </p>
           <div className="flex shrink-0 items-center gap-1.5">
+            {job.systemManaged ? <Badge variant="outline" title={t('card.systemManagedDescription')}>{t('card.systemManaged')}</Badge> : null}
             {isRunning ? (
               <Badge variant="default">{t('stats.running')}</Badge>
             ) : !job.enabled ? (
@@ -1173,13 +1174,15 @@ function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }:
       </div>
 
       <div className="flex shrink-0 items-center gap-3">
-        <div data-testid={`cron-job-card-switch-${job.id}`} className="flex shrink-0 items-center">
-          <Switch
-            checked={job.enabled}
-            disabled={isMutating}
-            onCheckedChange={onToggle}
-          />
-        </div>
+        {!job.systemManaged && (
+          <div data-testid={`cron-job-card-switch-${job.id}`} className="flex shrink-0 items-center">
+            <Switch
+              checked={job.enabled}
+              disabled={isMutating}
+              onCheckedChange={onToggle}
+            />
+          </div>
+        )}
         <div className="flex justify-end gap-1">
         <Button
           variant="ghost"
@@ -1196,28 +1199,32 @@ function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }:
             <Play className="h-4 w-4" />
           )}
         </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8"
-          onClick={onEdit}
-          disabled={isMutating}
-          title={t('common:actions.edit', 'Edit')}
-          aria-label={t('common:actions.edit', 'Edit')}
-        >
-          <Edit className="h-4 w-4" />
-        </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-destructive hover:text-destructive"
-            onClick={handleDelete}
-            disabled={isMutating}
-            title={t('common:actions.delete', 'Delete')}
-            aria-label={t('common:actions.delete', 'Delete')}
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
+          {!job.systemManaged && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={onEdit}
+                disabled={isMutating}
+                title={t('common:actions.edit', 'Edit')}
+                aria-label={t('common:actions.edit', 'Edit')}
+              >
+                <Edit className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-destructive hover:text-destructive"
+                onClick={handleDelete}
+                disabled={isMutating}
+                title={t('common:actions.delete', 'Delete')}
+                aria-label={t('common:actions.delete', 'Delete')}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -1294,14 +1301,19 @@ export function Cron({ embedded = false }: CronProps) {
     void loadAgents({ silent: true });
   }, [agentsResource.status, isGatewayRunning, loadAgents]);
 
+  const visibleJobs = useMemo(
+    () => jobs.filter((job) => !job.systemManaged || job.enabled),
+    [jobs],
+  );
+
   // Statistics
   const cronStatusCounts = useMemo(() => ({
-    total: jobs.length,
-    active: jobs.filter((job) => job.enabled).length,
-    running: jobs.filter((job) => Boolean(job.runningAt)).length,
-    paused: jobs.filter((job) => !job.enabled).length,
-    failed: jobs.filter(isFailedCronJob).length,
-  }), [jobs]);
+    total: visibleJobs.length,
+    active: visibleJobs.filter((job) => job.enabled).length,
+    running: visibleJobs.filter((job) => Boolean(job.runningAt)).length,
+    paused: visibleJobs.filter((job) => !job.enabled).length,
+    failed: visibleJobs.filter(isFailedCronJob).length,
+  }), [visibleJobs]);
   const statusFilterOptions = useMemo(() => ([
     {
       value: 'all' as const,
@@ -1330,8 +1342,8 @@ export function Cron({ embedded = false }: CronProps) {
     },
   ]), [cronStatusCounts, t]);
   const filteredJobs = useMemo(
-    () => jobs.filter((job) => matchesCronStatusFilter(job, statusFilter)),
-    [jobs, statusFilter],
+    () => visibleJobs.filter((job) => matchesCronStatusFilter(job, statusFilter)),
+    [visibleJobs, statusFilter],
   );
 
   const handleSave = useCallback(async (input: CronJobCreateInput | CronJobUpdateInput) => {
@@ -1456,7 +1468,7 @@ export function Cron({ embedded = false }: CronProps) {
             </div>
           </div>
         </TaskCenterSurface>
-      ) : jobs.length === 0 ? (
+      ) : visibleJobs.length === 0 ? (
         <TaskCenterSurface>
           <TaskCenterEmptyState
             icon={Clock}

@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use serde::Deserialize;
@@ -44,6 +44,11 @@ pub(crate) fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("sealed-resource"),
         vec![RouteDescriptor::bound(
             "sealed-resource.loopback",
+            &[
+                RoutePath::ExactWithQuery(AUTHORIZE_PACKAGE_ENDPOINT),
+                RoutePath::ExactWithQuery(CLOUD_PACKAGES_ENDPOINT),
+                RoutePath::ExactWithQuery(CLEAR_AUTHORIZATIONS_ENDPOINT),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

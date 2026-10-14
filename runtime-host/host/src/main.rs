@@ -1,7 +1,6 @@
 #![recursion_limit = "512"]
 
 mod bootstrap;
-mod mcp;
 
 use std::{path::PathBuf, process::ExitCode};
 
@@ -13,7 +12,7 @@ fn main() -> ExitCode {
         .nth(1)
         .is_some_and(|command| command == "mcp")
     {
-        return mcp::run();
+        return runtime_host::mcp::run();
     }
     host_main()
 }

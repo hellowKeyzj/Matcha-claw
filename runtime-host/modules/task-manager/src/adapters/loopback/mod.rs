@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use serde::Deserialize;
@@ -56,6 +56,14 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("task-manager"),
         vec![RouteDescriptor::bound(
             "task-manager.loopback",
+            &[
+                RoutePath::ExactWithQuery(LIST_PATH),
+                RoutePath::ExactWithQuery(GET_PATH),
+                RoutePath::ExactWithQuery(CREATE_PATH),
+                RoutePath::ExactWithQuery(UPDATE_PATH),
+                RoutePath::ExactWithQuery(TODOS_GET_PATH),
+                RoutePath::ExactWithQuery(TODOS_WRITE_PATH),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

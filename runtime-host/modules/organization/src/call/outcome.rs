@@ -53,6 +53,15 @@ impl AuditFailure for crate::StoreFault {
     }
 }
 
+impl AuditFailure for crate::application::task_board::MutationError {
+    fn outcome(&self) -> Outcome {
+        match self {
+            Self::Rejected => Outcome::Rejected,
+            Self::Store(error) => error.outcome(),
+        }
+    }
+}
+
 impl AuditFailure for TeamRuntimeStatus {
     fn outcome(&self) -> Outcome {
         match self {
@@ -84,6 +93,13 @@ impl<T: AuditOutcome, E: AuditFailure> AuditOutcome for Result<T, E> {
             Ok(value) => value.summarize(detail),
             Err(error) => detail.set_outcome(error.outcome()),
         }
+    }
+}
+
+impl<T: AuditOutcome> AuditOutcome for (T, Option<crate::TeamCreationFailure>) {
+    fn summarize(&self, detail: &mut OrganizationCallDetail) {
+        self.0.summarize(detail);
+        if let Some(failure) = self.1 { detail.record_creation_failure(failure); }
     }
 }
 
@@ -428,8 +444,14 @@ impl AuditOutcome for crate::TeamRuntimeControlOutcome {
         match self {
             Self::Succeeded(_) => {}
             Self::Unknown(_) => detail.set_outcome(Outcome::OutcomeUnknown),
-            Self::InvalidInput | Self::Failed(_) => detail.set_outcome(Outcome::Rejected),
-            Self::Unavailable => detail.set_outcome(Outcome::Unavailable),
+            Self::InvalidInput(failure) | Self::Failed(_, failure) => {
+                detail.set_outcome(Outcome::Rejected);
+                if let Some(failure) = failure { detail.record_creation_failure(*failure); }
+            }
+            Self::Unavailable(failure) => {
+                detail.set_outcome(Outcome::Unavailable);
+                if let Some(failure) = failure { detail.record_creation_failure(*failure); }
+            },
         }
     }
 }
@@ -466,12 +488,21 @@ impl AuditOutcome for crate::TeamRuntimeCommandOutcome {
             DependencyPlan(value) => value.summarize(detail),
             ProvisionAgents(value) => value.summarize(detail),
             Delete(value) => value.summarize(detail),
-            RunCreate(value) => value.summarize(detail),
+            RunCreate { result, creation_failure } => {
+                result.summarize(detail);
+                if let Some(failure) = creation_failure { detail.record_creation_failure(*failure); }
+            },
             RunList(value) => value.summarize(detail),
             TriggerList(value) => value.summarize(detail),
             WebhookTriggerFire(value) => value.summarize(detail),
-            RunSnapshot { snapshot, .. } => snapshot.summarize(detail),
-            RunSnapshotInvalidInput => detail.set_outcome(Outcome::Rejected),
+            RunSnapshot { snapshot, creation_failure, .. } => {
+                snapshot.summarize(detail);
+                if let Some(failure) = creation_failure { detail.record_creation_failure(*failure); }
+            }
+            RunSnapshotInvalidInput { creation_failure } => {
+                detail.set_outcome(Outcome::Rejected);
+                if let Some(failure) = creation_failure { detail.record_creation_failure(*failure); }
+            },
             GraphSave(value) | GraphPatch(value) | GraphImportYaml(value) => {
                 value.summarize(detail)
             }

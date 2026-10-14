@@ -19,6 +19,7 @@ use platform::{
     module::{CapabilityDescriptorProvider, CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
 };
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 pub use ports::{
     ClawHubSearchPort, ClawHubSearchResult, SealedResourceRead, SealedSkillCatalog,
@@ -84,6 +85,19 @@ impl SkillsModule {
     where
         F: std::future::Future<Output = platform::loopback::Response> + Send + 'static,
     {
+        self.submit_cancellable_operation(call, move |_| operation)
+            .await
+    }
+
+    pub(crate) async fn submit_cancellable_operation<F, U>(
+        &self,
+        call: operation::RecordedCall,
+        operation: F,
+    ) -> Result<CallReceipt, CallLogError>
+    where
+        F: FnOnce(CancellationToken) -> U + Send + 'static,
+        U: std::future::Future<Output = platform::loopback::Response> + Send + 'static,
+    {
         let admission = call.clone();
         self.operations
             .lock()
@@ -110,7 +124,7 @@ impl SkillsModule {
         let results = operations.results.clone();
         let call_id = admission.context.id().clone();
         operations
-            .submit(call, Some((access, budget)), async move {
+            .submit(call, Some((access, budget)), move |_| async move {
                 match operation.await {
                     Ok(result) => {
                         let response = result.response();
@@ -135,6 +149,16 @@ impl SkillsModule {
         self.skills.install_clawhub_skill(command).await
     }
 
+    pub(crate) async fn install_clawhub_skill_cancellable(
+        &self,
+        command: install::Command,
+        cancellation: CancellationToken,
+    ) -> Result<install::Outcome, ()> {
+        self.skills
+            .install_clawhub_skill_cancellable(command, cancellation)
+            .await
+    }
+
     pub async fn skill_status(&self) -> Result<status::Outcome, ()> {
         self.skills.skill_status().await
     }
@@ -144,6 +168,16 @@ impl SkillsModule {
         command: management::Command,
     ) -> Result<management::Outcome, ()> {
         self.skills.manage_skills(command).await
+    }
+
+    pub(crate) async fn manage_skills_cancellable(
+        &self,
+        command: management::Command,
+        cancellation: CancellationToken,
+    ) -> Result<management::Outcome, ()> {
+        self.skills
+            .manage_skills_cancellable(command, cancellation)
+            .await
     }
 
     pub async fn skill_bundles(&self, command: bundle::Command) -> Result<bundle::Outcome, ()> {

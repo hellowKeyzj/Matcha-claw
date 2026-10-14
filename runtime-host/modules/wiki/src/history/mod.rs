@@ -1,6 +1,8 @@
 mod model;
 mod store;
 
+pub(crate) use store::{replace_store, version_id, write_private_store, write_store};
+
 use std::{fs, path::Path, sync::Mutex};
 
 use crate::domain::{
@@ -50,7 +52,7 @@ pub(crate) fn update_settings(
     let previous = store::read_settings(&root)?;
     store::write_settings(&root, &settings)?;
     if previous
-        .is_none_or(|previous| settings.max_versions_per_file < previous.max_versions_per_file)
+        .is_none_or(|previous| settings.max_versions_per_file <= previous.max_versions_per_file)
     {
         store::prune_entries(&root, settings.max_versions_per_file)?;
     }

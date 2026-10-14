@@ -1,3 +1,6 @@
+import { request as httpRequest } from 'node:http';
+import { Readable, addAbortSignal } from 'node:stream';
+import type { HostApiProxyFailureCode } from '../../../src/lib/host-api-transport-contract';
 import { traceDebug } from '../../utils/trace-logger';
 import { ipcMain } from 'electron';
 import { isHostApiRequestAllowed } from '../../api/route-boundary';
@@ -27,12 +30,17 @@ type HostApiAbortRequest = {
 };
 
 const DEFAULT_HOST_API_TIMEOUT_MS = 30_000;
-
-type SafeHostApiProxyFailureCode = 'TIMEOUT' | 'ABORTED' | 'UNAVAILABLE';
+const ASYNC_ADMISSION_PATHS = new Set([
+  '/api/plugins/configuration',
+  '/api/plugins/operation',
+  '/api/toolchain/uv/prepare',
+  '/api/skills/import/markdown',
+  '/api/skills/import/bundle',
+]);
 
 type InflightHostApiRequest = {
   controller: AbortController;
-  failureCode: SafeHostApiProxyFailureCode;
+  failureCode: HostApiProxyFailureCode;
 };
 
 type E2EProcess = typeof process & {
@@ -122,6 +130,41 @@ async function waitForHostApiReadyOrAbort(signal: AbortSignal): Promise<void> {
   }
 }
 
+function fetchAdmission(
+  url: string,
+  headers: Record<string, string>,
+  body: string | undefined,
+  signal: AbortSignal,
+  uploadFinished: () => void,
+  responseStarted: () => void,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    let receivedResponse = false;
+    const request = httpRequest(url, { method: 'POST', headers, signal }, (incoming) => {
+      receivedResponse = true;
+      responseStarted();
+      addAbortSignal(signal, incoming);
+      const responseHeaders = new Headers();
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (Array.isArray(value)) {
+          for (const item of value) responseHeaders.append(name, item);
+        } else if (value !== undefined) {
+          responseHeaders.set(name, value);
+        }
+      }
+      resolve(new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
+        status: incoming.statusCode,
+        headers: responseHeaders,
+      }));
+    });
+    request.once('finish', () => {
+      if (!receivedResponse) uploadFinished();
+    });
+    request.once('error', reject);
+    request.end(body);
+  });
+}
+
 export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionObservationRegistry): void {
   // requestId → AbortController 注册表，让 renderer 通过 hostapi:abort 真正取消正在进行的 upstream fetch，
   // 避免页面切换后还白白等几秒再丢弃响应。
@@ -173,10 +216,10 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
       if (e2eMock) {
         return e2eMock;
       }
-      const timeoutMs =
-        typeof request?.timeoutMs === 'number' && request.timeoutMs > 0
-          ? request.timeoutMs
-          : DEFAULT_HOST_API_TIMEOUT_MS;
+      const explicitTimeout = typeof request?.timeoutMs === 'number' && request.timeoutMs > 0
+        ? request.timeoutMs : undefined;
+      const timeoutMs = explicitTimeout ?? DEFAULT_HOST_API_TIMEOUT_MS;
+      const admission = explicitTimeout === undefined && method === 'POST' && ASYNC_ADMISSION_PATHS.has(routeUrl.pathname);
 
       const controller = new AbortController();
       const pendingRequest: InflightHostApiRequest = { controller, failureCode: 'UNAVAILABLE' };
@@ -184,11 +227,21 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
       if (requestId) {
         inflightRequests.set(requestId, inflightRequest);
       }
-      const timer = setTimeout(() => {
+      const startedAt = performance.now();
+      let remainingMs = timeoutMs;
+      let waitingForAdmission = false;
+      const expire = () => {
         pendingRequest.failureCode = 'TIMEOUT';
         controller.abort();
-      }, timeoutMs);
+      };
+      let timer = setTimeout(expire, timeoutMs);
+      const senderClosed = () => {
+        pendingRequest.failureCode = 'ABORTED';
+        controller.abort();
+      };
+      if (admission) event.sender.once('destroyed', senderClosed);
       try {
+        if (admission && event.sender.isDestroyed()) senderClosed();
         trace('ready.start');
         await waitForHostApiReadyOrAbort(controller.signal);
         trace('ready.end', () => ({ outcome: 'ready' }));
@@ -223,18 +276,27 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
         }
 
         trace('fetch.request');
-        const response = await proxyAwareFetch(`${getHostApiBaseUrl()}${normalizedPath}`, {
-          method,
-          headers,
-          body,
-          signal: controller.signal,
-        });
+        const url = `${getHostApiBaseUrl()}${normalizedPath}`;
+        const response = admission
+          ? await fetchAdmission(url, headers, body, controller.signal, () => {
+            // Only owner admission is outside the readiness/body I/O budget.
+            clearTimeout(timer);
+            remainingMs -= performance.now() - startedAt;
+            waitingForAdmission = true;
+            if (remainingMs <= 0) expire();
+          }, () => {
+            if (waitingForAdmission) timer = setTimeout(expire, Math.max(0, remainingMs));
+          })
+          : await proxyAwareFetch(url, { method, headers, body, signal: controller.signal });
 
         trace('fetch.headers', () => ({ status: response.status }));
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
         if (contentType.includes('application/json')) {
           trace('body.start', () => ({ outcome: 'json', status: response.status }));
-          const json = await response.json();
+          const json = await response.json().catch((error: unknown) => {
+            if (error instanceof SyntaxError) pendingRequest.failureCode = 'INVALID_RESPONSE';
+            throw error;
+          });
           trace('body.end', () => ({ outcome: 'json', status: response.status }));
           if (normalizedPath === '/api/sealed-skills/export') {
             traceDebug(() => ['[startup-trace]', {
@@ -276,6 +338,7 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
         };
       } finally {
         clearTimeout(timer);
+        if (admission) event.sender.removeListener('destroyed', senderClosed);
         if (requestId) {
           inflightRequests.delete(requestId);
         }

@@ -1,13 +1,12 @@
 use std::{
     collections::HashMap,
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
 
 use arrow_array::{
-    ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
+    Array, ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
     RecordBatchReader, StringArray, UInt32Array,
 };
 use arrow_schema::{DataType, Field, Schema};
@@ -16,7 +15,7 @@ use futures_util::TryStreamExt;
 use lancedb::{
     connect,
     database::CreateTableMode,
-    query::{ExecutableQuery, QueryBase},
+    query::{ExecutableQuery, QueryBase, Select},
     table::{CompactionOptions, OptimizeAction},
 };
 use sha2::{Digest, Sha256};
@@ -28,7 +27,6 @@ const MAX_PAGE_ID_CHARS: usize = 256;
 const REVISION_DIR: &str = ".llm-wiki/embedding-revisions";
 
 static DB_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>> = OnceLock::new();
-static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct ChunkEmbedding {
@@ -137,17 +135,18 @@ pub async fn upsert_page_chunks(
 
     let schema = chunk_schema(dim, space_key)?;
     let batch = chunk_batch(schema.clone(), page_id, chunks, dim)?;
+    let revision = CachedRevision {
+        fingerprint: fingerprint.to_owned(),
+        rows_signature: Some(rows_signature(std::slice::from_ref(&batch))?),
+    };
     let db = connect(&db_uri(project_path))
         .execute()
         .await
         .map_err(|err| format!("DB connect error: {err}"))?;
 
+    invalidate_revision_unlocked(project_path, page_id)?;
     upsert_batch(&db, page_id, batch, schema).await?;
-
-    save_revision_unlocked(project_path, page_id, fingerprint).map_err(|err| {
-        let _ = invalidate_revision_unlocked(project_path, page_id);
-        err
-    })
+    save_revision_unlocked(project_path, page_id, &revision)
 }
 
 async fn upsert_batch(
@@ -198,7 +197,7 @@ async fn upsert_batch(
 
 fn prepare_batches(
     pages: Vec<crate::index::PreparedPageEmbedding>,
-) -> Result<(Arc<Schema>, Vec<(String, String, RecordBatch)>), String> {
+) -> Result<(Arc<Schema>, Vec<(String, CachedRevision, RecordBatch)>), String> {
     if pages.is_empty() {
         return Ok((Arc::new(Schema::empty()), Vec::new()));
     }
@@ -224,7 +223,11 @@ fn prepare_batches(
             return Err("prepared page has no chunks or revision fingerprint".to_owned());
         }
         let batch = chunk_batch(schema.clone(), &page.page_id, page.rows, dimension)?;
-        batches.push((page.page_id, page.fingerprint, batch));
+        let revision = CachedRevision {
+            fingerprint: page.fingerprint,
+            rows_signature: Some(rows_signature(std::slice::from_ref(&batch))?),
+        };
+        batches.push((page.page_id, revision, batch));
     }
     Ok((schema, batches))
 }
@@ -279,11 +282,8 @@ pub(crate) async fn replace_pages(
         .execute()
         .await
         .map_err(|err| format!("Atomic index replacement failed: {err}"))?;
-    for (page_id, fingerprint, _) in prepared {
-        if save_revision_unlocked(project_path, &page_id, &fingerprint).is_err() {
-            let _ = invalidate_revision_unlocked(project_path, &page_id);
-            eprintln!("[WikiEmbedding] rebuilt_revision_cache_write_failed");
-        }
+    for (page_id, revision, _) in prepared {
+        let _ = save_revision_unlocked(project_path, &page_id, &revision);
     }
     Ok(count)
 }
@@ -335,7 +335,7 @@ pub(crate) async fn update_pages(
     }
     let mut count = 0;
     let mut failure = None;
-    for (page_id, fingerprint, batch) in prepared {
+    for (page_id, revision, batch) in prepared {
         if let Err(error) = invalidate_revision_unlocked(project_path, &page_id) {
             failure.get_or_insert(error);
             continue;
@@ -344,10 +344,7 @@ pub(crate) async fn update_pages(
             Ok(()) => {
                 count += 1;
                 on_written(count);
-                if save_revision_unlocked(project_path, &page_id, &fingerprint).is_err() {
-                    let _ = invalidate_revision_unlocked(project_path, &page_id);
-                    eprintln!("[WikiEmbedding] partial_revision_cache_write_failed");
-                }
+                let _ = save_revision_unlocked(project_path, &page_id, &revision);
             }
             Err(error) => {
                 failure.get_or_insert(error);
@@ -454,6 +451,7 @@ pub async fn delete_page(project_path: impl AsRef<Path>, page_id: &str) -> Resul
         .execute()
         .await
         .map_err(|err| format!("List tables error: {err}"))?;
+    invalidate_revision_unlocked(project_path, page_id)?;
     if has_table(&tables, TABLE_CHUNKS_V2) {
         db.open_table(TABLE_CHUNKS_V2)
             .execute()
@@ -463,7 +461,7 @@ pub async fn delete_page(project_path: impl AsRef<Path>, page_id: &str) -> Resul
             .await
             .map_err(|err| format!("Delete error: {err}"))?;
     }
-    invalidate_revision_unlocked(project_path, page_id)
+    Ok(())
 }
 
 pub async fn count_chunks(project_path: impl AsRef<Path>) -> Result<usize, String> {
@@ -506,12 +504,13 @@ pub async fn clear(project_path: impl AsRef<Path>) -> Result<(), String> {
         .execute()
         .await
         .map_err(|err| format!("List tables error: {err}"))?;
+    invalidate_all_revisions_unlocked(project_path)?;
     if has_table(&tables, TABLE_CHUNKS_V2) {
         db.drop_table(TABLE_CHUNKS_V2, &[])
             .await
             .map_err(|err| format!("Drop chunk table error: {err}"))?;
     }
-    invalidate_all_revisions_unlocked(project_path)
+    Ok(())
 }
 
 pub async fn optimize(project_path: impl AsRef<Path>) -> Result<(), String> {
@@ -585,14 +584,18 @@ pub(crate) async fn page_revision_matches(
         .await
         .map_err(|err| format!("Read schema error: {err}"))?;
     check_embedding_space(&schema, space_key, None)?;
-    if load_revision_unlocked(project_path, page_id)?.as_deref() != Some(fingerprint) {
+    let Some(revision) = load_revision_unlocked(project_path, page_id)? else {
+        return Ok(false);
+    };
+    if revision.fingerprint != fingerprint {
         return Ok(false);
     }
-    let rows = table
-        .count_rows(Some(page_id_filter(page_id)))
-        .await
-        .map_err(|err| format!("Count page chunks error: {err}"))?;
-    Ok(rows > 0)
+    let Some(stored_signature) = revision.rows_signature else {
+        return Ok(false);
+    };
+    let batches = page_batches(&table, page_id).await?;
+    Ok(batches.iter().any(|batch| batch.num_rows() > 0)
+        && rows_signature(&batches)? == stored_signature)
 }
 
 pub async fn load_revision(
@@ -603,7 +606,7 @@ pub async fn load_revision(
     let project_path = project_path.as_ref();
     let lock = db_lock(project_path);
     let _guard = lock.read().await;
-    load_revision_unlocked(project_path, page_id)
+    Ok(load_revision_unlocked(project_path, page_id)?.map(|revision| revision.fingerprint))
 }
 
 pub async fn save_revision(
@@ -618,7 +621,11 @@ pub async fn save_revision(
     let project_path = project_path.as_ref();
     let lock = db_lock(project_path);
     let _guard = lock.write().await;
-    save_revision_unlocked(project_path, page_id, fingerprint)
+    let revision = CachedRevision {
+        fingerprint: fingerprint.to_owned(),
+        rows_signature: None,
+    };
+    save_revision_unlocked(project_path, page_id, &revision)
 }
 
 pub async fn invalidate_revision(
@@ -787,48 +794,123 @@ fn revision_path(project_path: &Path, page_id: &str) -> PathBuf {
         .join(format!("{key}.revision"))
 }
 
-fn load_revision_unlocked(project_path: &Path, page_id: &str) -> Result<Option<String>, String> {
-    match fs::read_to_string(revision_path(project_path, page_id)) {
-        Ok(value) => Ok(Some(value.trim().to_string()).filter(|value| !value.is_empty())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(format!("Failed to read embedding revision: {err}")),
+async fn page_batches(table: &lancedb::Table, page_id: &str) -> Result<Vec<RecordBatch>, String> {
+    table
+        .query()
+        .only_if(page_id_filter(page_id))
+        .select(Select::columns(&[
+            "chunk_id", "page_id", "chunk_index", "chunk_text", "heading_path", "vector",
+        ]))
+        .execute()
+        .await
+        .map_err(|err| format!("Read page chunks error: {err}"))?
+        .try_collect()
+        .await
+        .map_err(|err| format!("Collect page chunks error: {err}"))
+}
+
+// Physical row/batch order can change on compaction; chunk_index and every stored value must not.
+fn rows_signature(batches: &[RecordBatch]) -> Result<String, String> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        let strings = [
+            string_column(batch, "chunk_id")?,
+            string_column(batch, "page_id")?,
+            string_column(batch, "chunk_text")?,
+            string_column(batch, "heading_path")?,
+        ];
+        let indexes = batch
+            .column_by_name("chunk_index")
+            .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+            .ok_or_else(|| "Missing chunk_index column".to_owned())?;
+        let vectors = batch
+            .column_by_name("vector")
+            .and_then(|column| column.as_any().downcast_ref::<FixedSizeListArray>())
+            .ok_or_else(|| "Missing vector column".to_owned())?;
+        let values = vectors
+            .values()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .ok_or_else(|| "Invalid vector values".to_owned())?;
+        for index in 0..batch.num_rows() {
+            let mut signature = Sha256::new();
+            for column in strings {
+                let text = column.value(index).as_bytes();
+                signature.update([u8::from(column.is_valid(index))]);
+                signature.update((text.len() as u64).to_le_bytes());
+                signature.update(text);
+            }
+            signature.update([u8::from(indexes.is_valid(index))]);
+            signature.update(indexes.value(index).to_le_bytes());
+            signature.update([u8::from(vectors.is_valid(index))]);
+            signature.update(vectors.value_length().to_le_bytes());
+            let offset = vectors.value_offset(index) as usize;
+            for index in offset..offset + vectors.value_length() as usize {
+                signature.update([u8::from(values.is_valid(index))]);
+                signature.update(values.value(index).to_bits().to_le_bytes());
+            }
+            let signature: [u8; 32] = signature.finalize().into();
+            rows.push((indexes.value(index), signature));
+        }
     }
+    rows.sort_unstable();
+    let mut signature = Sha256::new();
+    signature.update((rows.len() as u64).to_le_bytes());
+    for (_, row) in rows {
+        signature.update(row);
+    }
+    Ok(format!("{:x}", signature.finalize()))
+}
+
+struct CachedRevision {
+    fingerprint: String,
+    rows_signature: Option<String>,
+}
+
+fn load_revision_unlocked(
+    project_path: &Path,
+    page_id: &str,
+) -> Result<Option<CachedRevision>, String> {
+    let value = match fs::read_to_string(revision_path(project_path, page_id)) {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("Failed to read embedding revision: {err}")),
+    };
+    let Some((rows_signature, fingerprint)) = value.split_once('\n') else {
+        return Ok(None);
+    };
+    let fingerprint = fingerprint.trim();
+    if fingerprint.is_empty()
+        || (!rows_signature.is_empty()
+            && (rows_signature.len() != 64
+                || !rows_signature.bytes().all(|byte| byte.is_ascii_hexdigit())))
+    {
+        return Ok(None);
+    }
+    Ok(Some(CachedRevision {
+        fingerprint: fingerprint.to_owned(),
+        rows_signature: (!rows_signature.is_empty()).then(|| rows_signature.to_owned()),
+    }))
 }
 
 fn save_revision_unlocked(
     project_path: &Path,
     page_id: &str,
-    fingerprint: &str,
+    revision: &CachedRevision,
 ) -> Result<(), String> {
-    let path = revision_path(project_path, page_id);
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Invalid embedding revision path".to_string())?;
-    fs::create_dir_all(parent)
-        .map_err(|err| format!("Failed to create revision directory: {err}"))?;
-
-    let temporary = temporary_revision_path(&path);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|err| format!("Failed to write embedding revision temp file: {err}"))?;
-    if let Err(err) = file.write_all(fingerprint.as_bytes()) {
-        let _ = fs::remove_file(&temporary);
-        return Err(format!(
-            "Failed to write embedding revision temp file: {err}"
-        ));
-    }
-    if let Err(err) = file.sync_data() {
-        let _ = fs::remove_file(&temporary);
-        return Err(format!(
-            "Failed to sync embedding revision temp file: {err}"
-        ));
-    }
-    drop(file);
-
-    replace_file(&temporary, &path)
-        .map_err(|err| format!("Failed to save embedding revision: {err}"))
+    let value = format!(
+        "{}\n{}",
+        revision.rows_signature.as_deref().unwrap_or_default(),
+        revision.fingerprint,
+    );
+    crate::history::replace_store(&revision_path(project_path, page_id), value.as_bytes())
+        .map_err(|error| match error {
+            crate::WikiFailure::Io { message, .. }
+            | crate::WikiFailure::StateUnavailable { message } => {
+                format!("Failed to save embedding revision: {message}")
+            }
+            _ => "Failed to save embedding revision".to_owned(),
+        })
 }
 
 fn invalidate_revision_unlocked(project_path: &Path, page_id: &str) -> Result<(), String> {
@@ -844,39 +926,6 @@ fn invalidate_all_revisions_unlocked(project_path: &Path) -> Result<(), String> 
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(format!("Failed to invalidate embedding revisions: {err}")),
-    }
-}
-
-fn temporary_revision_path(path: &Path) -> PathBuf {
-    let counter = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    path.with_extension(format!(
-        "revision.tmp-{}-{millis}-{counter}",
-        std::process::id()
-    ))
-}
-
-fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    match fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(_) if to.exists() => {
-            let previous = fs::read(to).ok();
-            fs::remove_file(to)?;
-            if let Err(second_error) = fs::rename(from, to) {
-                if let Some(previous) = previous {
-                    let _ = fs::write(to, previous);
-                }
-                return Err(second_error);
-            }
-            Ok(())
-        }
-        Err(first_error) => {
-            let _ = fs::remove_file(from);
-            Err(first_error)
-        }
     }
 }
 

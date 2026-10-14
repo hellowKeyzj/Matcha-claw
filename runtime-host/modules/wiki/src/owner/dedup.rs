@@ -247,7 +247,7 @@ pub(crate) async fn complete(
             if let Some(task) = queue
                 .tasks
                 .iter_mut()
-                .find(|task| task.id == task_id && !task.paused)
+                .find(|task| task.id == task_id)
             {
                 task.status = WikiDedupTaskStatus::Failed;
                 task.error = Some(failure_message(failure));
@@ -314,12 +314,8 @@ async fn complete_inner(
         dedup::check_cancelled(&plan.cancellation)?;
         let path = resolve_project_path(&plan.root, relative)?;
         crate::history::record(&plan.root, relative, "baseline", "before.dedup.merge")?;
-        if std::fs::remove_file(&path).is_err() {
-            eprintln!(
-                "[wiki:dedup] merged page deletion failed; preserved backup remains available"
-            );
-            continue;
-        }
+        std::fs::remove_file(&path)
+            .map_err(|error| WikiFailure::io(path.to_string_lossy(), error))?;
         refresh_file_snapshot(&plan.root, &[relative.as_str()])?;
         if crate::vector::delete_page(&plan.root, &stable_content_hash(relative.as_bytes()))
             .await
@@ -387,9 +383,13 @@ async fn complete_inner(
     let queue = projects
         .get_mut(&plan.project_id)
         .expect("loaded dedup queue");
+    let previous = queue.tasks.clone();
     queue.tasks.retain(|task| task.id != plan.task_id);
+    if let Err(error) = queue.save() {
+        queue.tasks = previous;
+        return Err(error);
+    }
     queue.cancellations.remove(&plan.task_id);
-    queue.save()?;
     Ok(WikiDedupState {
         project_id: plan.project_id,
         tasks: queue.tasks.clone(),

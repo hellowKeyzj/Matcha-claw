@@ -272,6 +272,13 @@ impl OrganizationFacts {
         for key in self.control_resolutions.changed_keys() {
             if let Some(resolution) = self.control_resolutions.resolution(key) { validate_control_node_resolution(&self.runs, resolution)?; }
         }
+        for key in self.task_board.changed_keys() {
+            if let crate::run::task_board::TaskBoardKey::Task { team, run, id } = key
+                && let Some((_, task)) = self.task_board.task_record(team, run, id)
+            {
+                task.validate_ownership(task.status()).map_err(|_| OrganizationFactsError::InvalidTaskBoard)?;
+            }
+        }
         self.validate_trigger_deltas()?;
         self.validate_changed_approvals()?;
         Ok(())
@@ -350,9 +357,7 @@ impl OrganizationFacts {
             if let ApprovalUndo::Removed(old) = undo {
                 if approval != old { return Err(OrganizationFactsError::ApprovalChanged); }
             }
-            if matches!(undo, ApprovalUndo::Inserted) {
-                Approval::restore(approval.durable_snapshot()).map_err(|_| OrganizationFactsError::InvalidApprovalLedger)?;
-            }
+            Approval::restore(approval.durable_snapshot()).map_err(|_| OrganizationFactsError::InvalidApprovalLedger)?;
             let facts = approval.facts();
             let run = self.runs.get(&facts.run_id).ok_or(OrganizationFactsError::UnknownApprovalRun)?;
             for receipt in approval.new_resolutions() {

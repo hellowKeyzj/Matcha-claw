@@ -33,14 +33,47 @@ type OrganizationModule = organization::OrganizationModule;
 
 pub(in crate::composition::host) struct OwnerRuntimeTasks {
     pub(in crate::composition::host) system: OwnerRuntimeSystem,
-    provider_system: OwnerRuntimeSystem,
     pub(in crate::composition::host) peer: OwnedTask<()>,
     pub(in crate::composition::host) module_scopes: Vec<ModuleScope>,
     organization_calls: OrganizationModule,
     wiki_calls: wiki::WikiHandle,
     join_failures: Arc<Mutex<Vec<&'static str>>>,
     pub(in crate::composition::host) organization: organization::OrganizationRuntime,
-    closed: bool,
+    session: SessionHandle,
+    session_terminal: Arc<super::super::ports::organization::OrganizationSessionTerminal>,
+    shutdown_stage: OwnerShutdownStage,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::composition::host) enum OwnerRuntimeShutdownError {
+    Join,
+    Organization(organization::OrganizationShutdownError),
+    OrganizationTerminal(organization::OrganizationTerminalCloseError),
+    SessionsTerminal(sessions_module::SessionTerminalCloseError),
+}
+
+impl OwnerRuntimeShutdownError {
+    pub(in crate::composition::host) const fn is_join_failure(self) -> bool {
+        matches!(
+            self,
+            Self::Join
+                | Self::Organization(organization::OrganizationShutdownError::Join)
+                | Self::OrganizationTerminal(organization::OrganizationTerminalCloseError::Join)
+                | Self::SessionsTerminal(sessions_module::SessionTerminalCloseError::Join)
+        )
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum OwnerShutdownStage {
+    Running,
+    OperationsClosed,
+    CoordinatorQuiesced,
+    SourceClosed,
+    ConsumerClosed,
+    PeerClosed,
+    ProviderClosed,
+    Closed,
 }
 
 impl OwnerRuntimeTasks {
@@ -58,39 +91,90 @@ impl OwnerRuntimeTasks {
             .collect()
     }
 
-    pub(in crate::composition::host) async fn drain_and_join(&mut self) {
-        if self.closed {
-            return;
+    pub(in crate::composition::host) async fn drain_and_join(
+        &mut self,
+    ) -> Result<(), OwnerRuntimeShutdownError> {
+        self.check_joins()?;
+        if self.shutdown_stage == OwnerShutdownStage::Closed {
+            return Ok(());
         }
-        self.organization_calls.shutdown_call_workflows().await;
-        self.wiki_calls.shutdown_call_workflows().await;
-        self.dispose_module_scope("skills").await;
-        self.dispose_module_scope("plugins").await;
-        self.organization.quiesce().await;
-        for scope in self
-            .module_scopes
-            .iter_mut()
-            .rev()
-            .filter(|scope| !is_runtime_dependency_scope(scope.id()))
-        {
-            scope.dispose_all_lifo().await;
+        if self.shutdown_stage == OwnerShutdownStage::Running {
+            self.organization_calls.shutdown_call_workflows().await;
+            self.wiki_calls.shutdown_call_workflows().await;
+            self.dispose_module_scope("skills").await;
+            self.check_joins()?;
+            self.dispose_module_scope("plugins").await;
+            self.check_joins()?;
+            self.shutdown_stage = OwnerShutdownStage::OperationsClosed;
         }
-        if self.peer.drain_and_join().await.is_err() {
-            record_join_failure(&self.join_failures, "peer");
+        if self.shutdown_stage == OwnerShutdownStage::OperationsClosed {
+            self.organization
+                .quiesce_checked()
+                .await
+                .map_err(OwnerRuntimeShutdownError::Organization)?;
+            self.shutdown_stage = OwnerShutdownStage::CoordinatorQuiesced;
         }
-        self.dispose_module_scope("settings").await;
-        self.dispose_module_scope("security").await;
-        self.dispose_module_scope("sessions").await;
-        self.dispose_module_scope("provider").await;
-        if self.provider_system.drain_and_join().await.is_err() {
-            record_join_failure(&self.join_failures, "provider-runtime-system");
+        if self.shutdown_stage == OwnerShutdownStage::CoordinatorQuiesced {
+            self.session
+                .close_terminal_delivery()
+                .await
+                .map_err(OwnerRuntimeShutdownError::SessionsTerminal)?;
+            self.shutdown_stage = OwnerShutdownStage::SourceClosed;
+        }
+        if self.shutdown_stage == OwnerShutdownStage::SourceClosed {
+            self.session_terminal
+                .close_and_join_checked()
+                .await
+                .map_err(OwnerRuntimeShutdownError::OrganizationTerminal)?;
+            self.shutdown_stage = OwnerShutdownStage::ConsumerClosed;
+        }
+        if self.shutdown_stage == OwnerShutdownStage::ConsumerClosed {
+            for index in (0..self.module_scopes.len()).rev() {
+                if is_runtime_dependency_scope(self.module_scopes[index].id()) {
+                    continue;
+                }
+                self.module_scopes[index].dispose_all_lifo().await;
+                self.check_joins()?;
+            }
+            if self.peer.drain_and_join().await.is_err() {
+                record_join_failure(&self.join_failures, "peer");
+                return Err(OwnerRuntimeShutdownError::Join);
+            }
+            self.shutdown_stage = OwnerShutdownStage::PeerClosed;
+        }
+        if self.shutdown_stage == OwnerShutdownStage::PeerClosed {
+            self.dispose_module_scope("settings").await;
+            self.check_joins()?;
+            self.dispose_module_scope("security").await;
+            self.check_joins()?;
+            self.dispose_module_scope("sessions").await;
+            self.check_joins()?;
+            self.dispose_module_scope("provider").await;
+            self.check_joins()?;
+            self.shutdown_stage = OwnerShutdownStage::ProviderClosed;
         }
         self.organization.drain_and_join().await;
+        self.check_joins()?;
         self.dispose_module_scope("runtime-directory").await;
         if self.system.drain_and_join().await.is_err() {
             record_join_failure(&self.join_failures, "owner-runtime-system");
+            return Err(OwnerRuntimeShutdownError::Join);
         }
-        self.closed = true;
+        self.shutdown_stage = OwnerShutdownStage::Closed;
+        Ok(())
+    }
+
+    fn check_joins(&self) -> Result<(), OwnerRuntimeShutdownError> {
+        if self
+            .join_failures
+            .lock()
+            .expect("owner join failure state lock poisoned")
+            .is_empty()
+        {
+            Ok(())
+        } else {
+            Err(OwnerRuntimeShutdownError::Join)
+        }
     }
 
     pub(in crate::composition::host) fn module_scope_mut(
@@ -320,17 +404,8 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     .map_err(|_| ConstructionError::Settings)?;
     let settings = settings.with_call_recorder(calls.clone());
 
-    let provider_system = OwnerRuntimeSystem::spawn_observed(
-        foundation::execution::OwnerRuntimeConfig {
-            mailbox_capacity: 64,
-            worker_count: 4,
-            ready_queue_capacity: 8,
-            ..foundation::execution::OwnerRuntimeConfig::default()
-        },
-        runtime_observation.sink(),
-    );
     let (provider_module, provider_task) = provider_module::spawn_owner(
-        &provider_system,
+        &owner_runtime_system,
         provider_module::ProviderOwnerInput {
             cascade: provider_cascade,
             runtime_directory: runtime_directory.clone(),
@@ -370,7 +445,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     organization_runtime
         .scope_mut()
         .register_event_subscription("sessions.run-terminal", move || async move {
-            let _ = session_terminal_scope.close_and_join().await;
+            drop(session_terminal_scope);
         });
 
     let (session_module, session_task) = sessions_module::spawn_owner(
@@ -530,7 +605,6 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     Ok(RuntimeOwners {
         tasks: OwnerRuntimeTasks {
             system: owner_runtime_system,
-            provider_system,
             peer: peer_task,
             module_scopes: vec![
                 module_scope("provider", provider_task),
@@ -557,13 +631,15 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
                 route_only_scope("plugins"),
                 route_only_scope("sealed-resource"),
                 route_only_scope("skills"),
-                route_only_scope("host.team-mcp"),
+                route_only_scope("host.mcp"),
             ],
             organization_calls: organization_module.clone(),
             wiki_calls: wiki.handle().clone(),
             join_failures,
             organization: organization_runtime,
-            closed: false,
+            session: session_handle.clone(),
+            session_terminal,
+            shutdown_stage: OwnerShutdownStage::Running,
         },
         runtime_directory,
         peer_startup,

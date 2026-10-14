@@ -71,6 +71,7 @@ pub(crate) enum OrganizationCommand {
         settlement: TeamDeleteRunNativeSettlement,
         native: organization::NativeDeletionEvidence,
         observed_at: u64,
+        cancellation: tokio_util::sync::CancellationToken,
     },
     TeamDeleteRemovalSettled {
         team_id: TeamId,
@@ -91,7 +92,10 @@ pub(crate) enum OrganizationCommand {
         run_id: GraphRunId,
         idempotency_key: IdempotencyKey,
         created_at: u64,
-        reply: crate::call::CallReply<Result<CreateGraphRunOutcome, TeamRuntimeStatus>>,
+        reply: crate::call::CallReply<(
+            Result<CreateGraphRunOutcome, TeamRuntimeStatus>,
+            Option<crate::TeamCreationFailure>,
+        )>,
     },
     RunCancel {
         run_id: GraphRunId,
@@ -185,7 +189,7 @@ pub(crate) enum OrganizationCommand {
         team_id: TeamId,
         run_id: GraphRunId,
         operation: crate::application::task_board::TaskBoardMutation,
-        reply: crate::call::CallReply<Result<crate::application::task_board::MutationResult, StoreFault>>,
+        reply: crate::call::CallReply<Result<crate::application::task_board::MutationResult, crate::application::task_board::MutationError>>,
     },
     ScheduleReadyNodes {
         run_id: GraphRunId,

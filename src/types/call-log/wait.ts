@@ -6,10 +6,13 @@ export type CallObservationEvent = CallChanged | 'resync' | 'disconnected';
 export type SubscribeCalls = (listener: (event: CallObservationEvent) => void) => () => void;
 export interface WaitForCallOptions<M extends CallModule> {
   signal?: AbortSignal;
+  /** Maximum observation silence; only a newer persisted revision renews it. Null disables the limit. */
+  timeoutMs?: number | null;
   onUpdate?: (call: CallRecord<M>) => void | Promise<void>;
 }
 
 const terminalStatuses = new Set(['succeeded', 'failed', 'rejected', 'unknown']);
+const DEFAULT_OBSERVATION_TIMEOUT_MS = 5 * 60_000;
 
 /** Abort stops observation only; it never settles or cancels the owner operation. */
 export function waitForCallRecord<M extends CallModule>(
@@ -22,6 +25,10 @@ export function waitForCallRecord<M extends CallModule>(
   if (!isCallId(receipt.callId) || receipt.accepted !== true || !isCallModule(module)) {
     return Promise.reject(new Error('Invalid call receipt or module'));
   }
+  const timeoutMs = options?.timeoutMs === undefined ? DEFAULT_OBSERVATION_TIMEOUT_MS : options.timeoutMs;
+  if (timeoutMs !== null && (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647)) {
+    return Promise.reject(new Error('Invalid call observation timeout'));
+  }
   const signal = options?.signal;
   if (signal?.aborted) return Promise.reject(signal.reason ?? new DOMException('Call waiting was stopped', 'AbortError'));
 
@@ -31,9 +38,18 @@ export function waitForCallRecord<M extends CallModule>(
     let readRequested = false;
     let revision = 0;
     let unsubscribe = () => {};
+    let timeout: ReturnType<typeof setTimeout> | undefined;
 
+    function renewObservation(): void {
+      if (timeoutMs === null) return;
+      clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        fail(new Error('Call observation timed out; the operation outcome is unconfirmed'));
+      }, timeoutMs);
+    }
     function cleanup(): void {
       stopped = true;
+      clearTimeout(timeout);
       unsubscribe();
       signal?.removeEventListener('abort', onAbort);
     }
@@ -61,6 +77,7 @@ export function waitForCallRecord<M extends CallModule>(
         }
         if (call.revision <= revision) return;
         revision = call.revision;
+        renewObservation();
         await options?.onUpdate?.(call as CallRecord<M>);
         if (stopped) return;
         if (terminalStatuses.has(call.status)) {
@@ -75,6 +92,7 @@ export function waitForCallRecord<M extends CallModule>(
       }
     }
 
+    renewObservation();
     signal?.addEventListener('abort', onAbort, { once: true });
     try {
       unsubscribe = subscribe((event) => {

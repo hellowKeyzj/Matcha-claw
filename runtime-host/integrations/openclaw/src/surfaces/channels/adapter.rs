@@ -401,11 +401,19 @@ impl OpenClawDriver {
     ) -> crate::port::DeleteConfigOutcome {
         let runtime_running =
             self.supervisor_handle().snapshot().phase() == SupervisorPhase::Running;
-        self.gateway
+        let outcome = self
+            .gateway
             .lock()
             .await
             .delete_channel_config(channel, account_id, runtime_running)
-            .await
+            .await;
+        if matches!(outcome, crate::port::DeleteConfigOutcome::RestartRequired) {
+            return match self.restart_gateway_after_openclaw_receipt().await {
+                Ok(()) => crate::port::DeleteConfigOutcome::Confirmed,
+                Err(()) => crate::port::DeleteConfigOutcome::Unknown,
+            };
+        }
+        outcome
     }
 }
 
@@ -495,11 +503,7 @@ impl ChannelOps for OpenClawDriver {
                     .web_login_wait_with_cancellation(channel.clone(), input, cancellation.clone())
                     .await
             };
-            let outcome = if cancellation.is_cancelled() {
-                channels::login::Outcome::Cancelled
-            } else {
-                crate::surfaces::channels::project_login_wait_effect(channel, effect)
-            };
+            let outcome = crate::surfaces::channels::project_login_wait_effect(channel, effect);
             span.finish(outcome.trace_outcome());
             outcome
         }))

@@ -29,11 +29,12 @@ static NEXT_CONTROL_TRACE: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) async fn run_loop<R, W>(
     owner: host_actor::Handle,
-    mut owner_events: tokio::sync::mpsc::Receiver<HostEvent>,
+    owner_events: &mut tokio::sync::mpsc::Receiver<HostEvent>,
     peer: PeerHandle,
     private_control: PrivateControlRegistry,
     observation: ObservationSink,
     gateway_auto_start: bool,
+    http_completion: &mut Option<tokio::sync::oneshot::Receiver<std::io::Result<()>>>,
     control_input: R,
     mut control_output: W,
 ) -> Result<(), ControlError>
@@ -83,9 +84,20 @@ where
     let mut events_open = true;
     let shutdown_signal = system_shutdown();
     tokio::pin!(shutdown_signal);
+    let http_finished = async {
+        match http_completion.as_mut() {
+            Some(completion) => {
+                let _ = completion.await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+        http_completion.take();
+    };
+    tokio::pin!(http_finished);
 
     let result = loop {
         tokio::select! {
+            _ = &mut http_finished => break Err(ControlError::Transport("http server")),
             _ = &mut shutdown_signal => break Ok(()),
             input = input_receiver.recv() => match input {
                 Some(Input::Frame(mut frame)) => {

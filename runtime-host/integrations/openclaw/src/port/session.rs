@@ -2,6 +2,7 @@ use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 
 use platform::exchange::InvocationOutcome;
 use platform::state_dir::CanonicalStateDir;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     OpenClawGateway,
@@ -62,8 +63,16 @@ impl OpenClawGateway {
         &mut self,
         params: SessionsListParams,
     ) -> Result<SessionsListResult, OpenClawSessionError> {
+        self.list_sessions_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub async fn list_sessions_cancellable(
+        &mut self,
+        params: SessionsListParams,
+        cancellation: &CancellationToken,
+    ) -> Result<SessionsListResult, OpenClawSessionError> {
         SessionOperation::new(Arc::clone(&self.client))
-            .list_sessions(params)
+            .list_sessions_cancellable(params, cancellation)
             .await
             .map_err(Into::into)
     }
@@ -83,8 +92,17 @@ impl OpenClawGateway {
         params: ChatHistoryParams,
         request: PageRequest,
     ) -> Result<SessionWindow, OpenClawSessionError> {
+        self.history_window_cancellable(params, request, &CancellationToken::new()).await
+    }
+
+    pub async fn history_window_cancellable(
+        &mut self,
+        params: ChatHistoryParams,
+        request: PageRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<SessionWindow, OpenClawSessionError> {
         let payload = SessionOperation::new(Arc::clone(&self.client))
-            .history_payload(params)
+            .history_payload_cancellable(params, cancellation)
             .await
             .map_err(OpenClawSessionError::from)?;
         window::decode_window(payload, request)
@@ -156,8 +174,19 @@ impl OpenClawGateway {
         InvocationOutcome<ChatAbortResult, OpenClawSessionMutationFailure>,
         OpenClawSessionError,
     > {
+        self.abort_chat_diagnostic_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub async fn abort_chat_diagnostic_cancellable(
+        &mut self,
+        params: ChatAbortParams,
+        cancellation: &CancellationToken,
+    ) -> Result<
+        InvocationOutcome<ChatAbortResult, OpenClawSessionMutationFailure>,
+        OpenClawSessionError,
+    > {
         let outcome = SessionOperation::new(Arc::clone(&self.client))
-            .abort_chat(params)
+            .abort_chat_cancellable(params, cancellation)
             .await
             .map_err(OpenClawSessionError::from)?;
         Ok(session_mutation_outcome(outcome))
@@ -187,8 +216,19 @@ impl OpenClawGateway {
         InvocationOutcome<SessionModelPatchResult, SessionModelPatchFailure>,
         OpenClawSessionError,
     > {
+        self.patch_session_model_diagnostic_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn patch_session_model_diagnostic_cancellable(
+        &mut self,
+        params: SessionModelPatchParams,
+        cancellation: &CancellationToken,
+    ) -> Result<
+        InvocationOutcome<SessionModelPatchResult, SessionModelPatchFailure>,
+        OpenClawSessionError,
+    > {
         let outcome = SessionOperation::new(Arc::clone(&self.client))
-            .patch_session_model(params)
+            .patch_session_model_cancellable(params, cancellation)
             .await
             .map_err(OpenClawSessionError::from)?;
         Ok(session_model_patch_outcome(outcome))
@@ -237,8 +277,17 @@ impl OpenClawGateway {
         params: SessionCreateParams,
     ) -> Result<InvocationOutcome<SessionCreateResult, OpenClawSessionError>, OpenClawSessionError>
     {
+        self.create_session_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub async fn create_session_cancellable(
+        &mut self,
+        params: SessionCreateParams,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutcome<SessionCreateResult, OpenClawSessionError>, OpenClawSessionError>
+    {
         SessionOperation::new(Arc::clone(&self.client))
-            .create_session(params)
+            .create_session_cancellable(params, cancellation)
             .await
             .map(port_outcome)
             .map_err(Into::into)
@@ -263,8 +312,19 @@ impl OpenClawGateway {
         InvocationOutcome<SessionDeleteResult, OpenClawSessionMutationFailure>,
         OpenClawSessionError,
     > {
+        self.delete_session_diagnostic_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub async fn delete_session_diagnostic_cancellable(
+        &mut self,
+        params: SessionDeleteParams,
+        cancellation: &CancellationToken,
+    ) -> Result<
+        InvocationOutcome<SessionDeleteResult, OpenClawSessionMutationFailure>,
+        OpenClawSessionError,
+    > {
         let outcome = SessionOperation::new(Arc::clone(&self.client))
-            .delete_session(params)
+            .delete_session_cancellable(params, cancellation)
             .await
             .map_err(OpenClawSessionError::from)?;
         Ok(session_mutation_outcome(outcome))
@@ -329,12 +389,12 @@ impl OpenClawSessionGateway {
 
     pub(crate) async fn goal_availability(&self) -> Result<(), sessions_module::ports::RuntimeOperationFailure> { self.client.goal_availability().await }
 
-    pub(crate) async fn start_goal(&self, params: ChatSendParams) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OpenClawSessionError>, sessions_module::ports::RuntimeOperationFailure> {
-        SessionOperation::new(Arc::clone(&self.client)).goal_start(params).await.map(port_outcome)
+    pub(crate) async fn start_goal_cancellable(&self, params: ChatSendParams, cancellation: &CancellationToken) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OpenClawSessionError>, sessions_module::ports::RuntimeOperationFailure> {
+        SessionOperation::new(Arc::clone(&self.client)).goal_start_cancellable(params, cancellation).await.map(port_outcome)
     }
 
-    pub(crate) async fn mutate_goal(&self, command: &sessions_module::goal::SessionGoalCommand) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OpenClawSessionError>, sessions_module::ports::RuntimeOperationFailure> {
-        SessionOperation::new(Arc::clone(&self.client)).mutate_goal_command(command).await.map(port_outcome)
+    pub(crate) async fn mutate_goal_cancellable(&self, command: &sessions_module::goal::SessionGoalCommand, cancellation: &CancellationToken) -> Result<InvocationOutcome<sessions_module::goal::SessionGoalReceipt, OpenClawSessionError>, sessions_module::ports::RuntimeOperationFailure> {
+        SessionOperation::new(Arc::clone(&self.client)).mutate_goal_command(command, cancellation).await.map(port_outcome)
     }
 
     pub(crate) fn prepare_observation(&self, request: sessions_module::ports::SessionObservationRequest) -> Result<Arc<dyn sessions_module::ports::SessionObservation>, sessions_module::ports::RuntimeOperationFailure> {
@@ -482,8 +542,16 @@ impl OpenClawSessionGateway {
         &self,
         params: ChatSendParams,
     ) -> Result<InvocationOutcome<ChatSendResult, OpenClawSessionError>, OpenClawSessionError> {
+        self.send_chat_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn send_chat_cancellable(
+        &self,
+        params: ChatSendParams,
+        cancellation: &CancellationToken,
+    ) -> Result<InvocationOutcome<ChatSendResult, OpenClawSessionError>, OpenClawSessionError> {
         SessionOperation::new(Arc::clone(&self.client))
-            .send_chat(params)
+            .send_chat_cancellable(params, cancellation)
             .await
             .map(port_outcome)
             .map_err(Into::into)
@@ -558,8 +626,19 @@ impl OpenClawSessionGateway {
         InvocationOutcome<SessionModelPatchResult, SessionModelPatchFailure>,
         OpenClawSessionError,
     > {
+        self.patch_session_model_diagnostic_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn patch_session_model_diagnostic_cancellable(
+        &self,
+        params: SessionModelPatchParams,
+        cancellation: &CancellationToken,
+    ) -> Result<
+        InvocationOutcome<SessionModelPatchResult, SessionModelPatchFailure>,
+        OpenClawSessionError,
+    > {
         let outcome = SessionOperation::new(Arc::clone(&self.client))
-            .patch_session_model(params)
+            .patch_session_model_cancellable(params, cancellation)
             .await
             .map_err(OpenClawSessionError::from)?;
         Ok(session_model_patch_outcome(outcome))

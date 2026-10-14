@@ -114,6 +114,14 @@ export interface RuntimeHostControlInput {
     chunk: Uint8Array,
     callback: (error?: Error | null) => void,
   ): boolean;
+  on(
+    event: 'close' | 'error',
+    listener: (...arguments_: readonly unknown[]) => void,
+  ): unknown;
+  removeListener(
+    event: 'close' | 'error',
+    listener: (...arguments_: readonly unknown[]) => void,
+  ): unknown;
 }
 
 export interface RuntimeHostControlOutput {
@@ -183,9 +191,11 @@ export class RuntimeHostControlClient {
       'maxPendingCommands',
     );
 
+    this.stdin.on('error', this.handleInputError);
+    this.stdin.on('close', this.handleInputClose);
     this.stdout.on('data', this.handleOutputData);
     this.stdout.on('end', this.handleOutputDisconnect);
-    this.stdout.on('close', this.handleOutputDisconnect);
+    this.stdout.on('close', this.handleOutputClose);
     this.stdout.on('error', this.handleOutputDisconnect);
   }
 
@@ -234,10 +244,10 @@ export class RuntimeHostControlClient {
       try {
         pending.hasAttemptedWrite = true;
         this.stdin.write(frame, (error) => {
-          if (error) this.rejectPending(id, 'write-failed');
+          if (error) this.disconnect('write-failed');
         });
       } catch {
-        this.rejectPending(id, 'write-failed');
+        this.disconnect('write-failed');
       }
     });
   }
@@ -300,8 +310,24 @@ export class RuntimeHostControlClient {
     }
   };
 
+  private readonly handleInputError = (): void => {
+    this.disconnect('write-failed');
+  };
+
+  private readonly handleInputClose = (): void => {
+    this.disconnect('disconnected');
+    this.stdin.removeListener('error', this.handleInputError);
+    this.stdin.removeListener('close', this.handleInputClose);
+  };
+
   private readonly handleOutputDisconnect = (): void => {
     this.disconnect('disconnected');
+  };
+
+  private readonly handleOutputClose = (): void => {
+    this.disconnect('disconnected');
+    this.stdout.removeListener('close', this.handleOutputClose);
+    this.stdout.removeListener('error', this.handleOutputDisconnect);
   };
 
   private appendFrameBytes(input: Buffer, offset: number, totalFrameBytes: number): number {
@@ -365,7 +391,7 @@ export class RuntimeHostControlClient {
     ));
   }
 
-  private disconnect(kind: Extract<RuntimeHostControlErrorKind, 'disconnected' | 'protocol-invalid' | 'provider-migration-failed'>): void {
+  private disconnect(kind: Extract<RuntimeHostControlErrorKind, 'disconnected' | 'write-failed' | 'protocol-invalid' | 'provider-migration-failed'>): void {
     if (this.isClosed) return;
 
     const error = new RuntimeHostControlError(kind, 'not-delivered');
@@ -375,8 +401,6 @@ export class RuntimeHostControlClient {
     this.expectedFrameBytes = undefined;
     this.stdout.removeListener('data', this.handleOutputData);
     this.stdout.removeListener('end', this.handleOutputDisconnect);
-    this.stdout.removeListener('close', this.handleOutputDisconnect);
-    this.stdout.removeListener('error', this.handleOutputDisconnect);
 
     for (const handler of this.disconnectHandlers) handler(error);
     for (const id of this.pendingCommands.keys()) this.rejectPending(id, kind);

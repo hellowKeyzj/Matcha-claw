@@ -253,7 +253,10 @@ impl AgentConfiguration {
             MutationOutcome::OutcomeUnknown => SkillConfigurationOutcome::OutcomeUnknown,
             MutationOutcome::Applied => match self.skill_configuration(agent_id).await {
                 SkillConfigurationOutcome::View(view) => SkillConfigurationOutcome::Updated(view),
-                outcome => outcome,
+                SkillConfigurationOutcome::Unavailable(failure) => {
+                    SkillConfigurationOutcome::AppliedReadbackFailed(failure)
+                }
+                _ => SkillConfigurationOutcome::AppliedReadbackFailed(ReadFailure::Protocol),
             },
         }
     }
@@ -385,7 +388,10 @@ impl AgentConfiguration {
             MutationOutcome::OutcomeUnknown => ToolConfigurationOutcome::OutcomeUnknown,
             MutationOutcome::Applied => match self.tool_configuration(agent_id).await {
                 ToolConfigurationOutcome::View(view) => ToolConfigurationOutcome::Updated(view),
-                outcome => outcome,
+                ToolConfigurationOutcome::Unavailable(failure) => {
+                    ToolConfigurationOutcome::AppliedReadbackFailed(failure)
+                }
+                _ => ToolConfigurationOutcome::AppliedReadbackFailed(ReadFailure::Protocol),
             },
         }
     }
@@ -689,6 +695,7 @@ pub enum ToolSelection {
 pub enum SkillConfigurationOutcome {
     View(SkillConfigurationView),
     Updated(SkillConfigurationView),
+    AppliedReadbackFailed(ReadFailure),
     Stale(SkillConfigurationView),
     InvalidSkillKeys {
         unknown_skill_keys: Vec<String>,
@@ -704,6 +711,7 @@ pub enum SkillConfigurationOutcome {
 pub enum ToolConfigurationOutcome {
     View(ToolConfigurationView),
     Updated(ToolConfigurationView),
+    AppliedReadbackFailed(ReadFailure),
     Stale(ToolConfigurationView),
     InvalidToolKeys(Vec<String>),
     Unsupported,

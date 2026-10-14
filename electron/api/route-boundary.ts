@@ -194,6 +194,7 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/external-connectors/probe',
   '/api/external-connectors/observation-result',
   '/api/external-connectors/session-status',
+  '/api/external-connectors/session-mcp-server-enabled',
   '/api/external-connectors/upsert',
   '/api/external-connectors/remove',
   '/api/plugins/catalog',
@@ -475,6 +476,7 @@ const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freez
   ['POST', '/api/external-connectors/probe'],
   ['POST', '/api/external-connectors/observation-result'],
   ['POST', '/api/external-connectors/session-status'],
+  ['POST', '/api/external-connectors/session-mcp-server-enabled'],
   ['POST', '/api/external-connectors/upsert'],
   ['POST', '/api/external-connectors/remove'],
   ['GET', '/api/plugins/catalog'],
@@ -637,6 +639,7 @@ const HOST_API_ALLOWED_DYNAMIC_REQUESTS = Object.freeze([
   ['GET', '/api/billing/orders/:orderId'],
   ['GET', '/api/channels/pairing/:channelType'],
   ['GET', '/api/openclaw/subagent-templates/:templateId'],
+  ['POST', '/api/packages/:packageVersionId/publish'],
   ['GET', '/api/settings/:key'],
   ['GET', '/api/provider-accounts/:accountId/has-api-key'],
 ] as const satisfies readonly HostApiAllowedRequest[]);

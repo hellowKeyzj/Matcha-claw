@@ -4,7 +4,7 @@ use crate::config_read::{Outcome, valid_identity};
 use platform::capability::CapabilityDecisionVerifier;
 
 const OPERATION_ID: &str = "channels.config.read";
-const AUTHORIZATION_ENDPOINT: &str = "/api/channels/config/read";
+pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/channels/config/read";
 const AUTHORIZATION_SCOPE: &str = "channels:read";
 const AUTHORIZATION_SUBJECT: &str = "channel-config-read";
 

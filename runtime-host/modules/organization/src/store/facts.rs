@@ -820,6 +820,12 @@ impl OrganizationFacts {
             .map_err(OrganizationFactsError::InvalidActivityLedger)?;
         for activity in activities.activities() {
             validate_activity(&run_facts, activity)?;
+            if let Some(proof) = activity.settlement_proof() {
+                validate_agent_activity_settlement(&deliveries, activity, proof)?;
+            }
+            if let Some(claim) = activity.native_terminal_claim() {
+                validate_native_confirmed_activity_claim(&run_facts, &deliveries, activity, claim)?;
+            }
         }
         let triggers = TriggerLedger::restore(triggers)
             .map_err(OrganizationFactsError::InvalidTriggerLedger)?;
@@ -2616,6 +2622,14 @@ impl OrganizationFacts {
         native_terminal: NativeTerminalStatus,
         observed_at: u64,
     ) -> Result<TerminalObservationOutcome, TerminalObservationError> {
+        let activity_id = ActivityId::new(delivery_id.as_str())
+            .map_err(|_| TerminalObservationError::DeliveryMismatch)?;
+        let terminal_claim = self.activities.activity(&activity_id).and_then(|activity| {
+            let claim = activity.active_claim()?;
+            validate_native_confirmed_activity_claim(&self.runs, &self.deliveries, activity, claim)
+                .ok()?;
+            Some(claim.clone())
+        });
         let mut delivery = self
             .deliveries
             .delivery(delivery_id)
@@ -2690,6 +2704,11 @@ impl OrganizationFacts {
                                 "outcome": "error", "reason": "active_claim_missing",
                             }));
                         })?;
+                    if terminal_claim.as_ref() == Some(&claim)
+                        && !activity.retain_native_terminal_claim(&claim)
+                    {
+                        return Err(TerminalObservationError::StaleFence);
+                    }
                     let result = crate::settle_activity(activity, &claim, settlement);
                     runtime_trace("runtime.team_run.terminal.facts.activity", || json!({
                         "deliveryHash": identifier_hash(delivery_id.as_str()), "phase": "observe",
@@ -2708,6 +2727,12 @@ impl OrganizationFacts {
             .deliveries
             .delivery_mut(delivery_id)
             .expect("delivery ledger preserves its delivery identity index") = delivery;
+        if let Some(activity) = self.activities.activity(&activity_id)
+            && let Some(claim) = activity.native_terminal_claim()
+        {
+            validate_native_confirmed_activity_claim(&self.runs, &self.deliveries, activity, claim)
+                .map_err(|_| TerminalObservationError::StaleFence)?;
+        }
         Ok(outcome)
     }
 
@@ -3658,6 +3683,41 @@ impl OrganizationFacts {
         crate::settle_activity(activity, claim, settlement)
     }
 
+    pub(crate) fn validate_native_confirmed_activity_claim(
+        &self,
+        activity: &Activity,
+        claim: &ActivityClaim,
+    ) -> Result<(), OrganizationFactsError> {
+        validate_native_confirmed_activity_claim(&self.runs, &self.deliveries, activity, claim)
+    }
+
+    pub(crate) fn validate_agent_activity_settlement(
+        &self,
+        activity: &Activity,
+        proof: &crate::run::activity::SettlementProof,
+    ) -> Result<(), OrganizationFactsError> {
+        validate_agent_activity_settlement(&self.deliveries, activity, proof)
+    }
+
+    pub(crate) fn record_agent_activity_settlement(
+        &mut self,
+        proof: crate::run::activity::SettlementProof,
+    ) -> Result<(), OrganizationFactsError> {
+        let activity = self
+            .activities
+            .activity(proof.claim.activity_id())
+            .ok_or(OrganizationFactsError::UnknownActivity)?;
+        validate_agent_activity_settlement(&self.deliveries, activity, &proof)?;
+        let activity = self
+            .activities
+            .activity_mut(proof.claim.activity_id())
+            .ok_or(OrganizationFactsError::UnknownActivity)?;
+        if !activity.record_settlement_proof(proof) {
+            return Err(OrganizationFactsError::InvalidActivityTransition);
+        }
+        Ok(())
+    }
+
     pub(crate) fn claim_delivery(
         &mut self,
         delivery_id: &crate::DeliveryId,
@@ -4204,6 +4264,178 @@ pub enum OrganizationFactsError {
     WorkflowPlanAdmissionIdempotencyConflict,
 }
 
+fn validate_native_confirmed_activity_claim(
+    runs: &BTreeMap<String, GraphRunFacts>,
+    deliveries: &DeliveryLedger,
+    activity: &Activity,
+    claim: &ActivityClaim,
+) -> Result<(), OrganizationFactsError> {
+    let invalid = OrganizationFactsError::InvalidActivityTransition;
+    let delivery_id = crate::DeliveryId::new(claim.activity_id().as_str())
+        .map_err(|_| OrganizationFactsError::InvalidActivityTransition)?;
+    let delivery = deliveries.delivery(&delivery_id)
+        .ok_or(OrganizationFactsError::InvalidActivityTransition)?;
+    let facts = activity.facts();
+    let request = delivery.facts();
+    let run = runs.get(facts.run_id.as_str())
+        .ok_or(OrganizationFactsError::UnknownActivityRun)?;
+    let snapshot = delivery.snapshot();
+    if claim.activity_id() != &facts.activity_id
+        || claim.attempt() == 0
+        || claim.attempt() > facts.max_attempts
+        || claim.generation() != u64::from(claim.attempt())
+        || claim.generation().checked_add(1) != Some(activity.snapshot().next_claim_generation())
+        || snapshot.completed_attempts() != claim.attempt()
+        || claim.generation().checked_add(1) != Some(snapshot.next_claim_generation())
+        || request.team_id != run.team().as_str()
+        || request.run_id != facts.run_id.as_str()
+        || request.node_id != facts.node_id.as_str()
+        || request.node_execution_id != facts.fence.node_execution_id().as_str()
+        || request.idempotency_key != facts.idempotency_key
+        || request.max_attempts != facts.max_attempts
+    {
+        return Err(invalid);
+    }
+    let ActivityKind::AgentTask { task_id, role_id, session_ref, .. } = &facts.activity_kind else {
+        return Err(invalid);
+    };
+    if request.task_id.as_str() != task_id
+        || request.role_id.as_str() != role_id
+        || request.session_ref.as_str() != session_ref
+    {
+        return Err(invalid);
+    }
+    let binding = run.runtime().and_then(|runtime| runtime.bindings().iter().find(|binding| {
+        binding.role().as_str() == role_id && binding.session_ref().as_str() == session_ref
+    })).ok_or(OrganizationFactsError::InvalidActivityTarget)?;
+    let correlation = match delivery.phase() {
+        DeliveryPhase::Delivered { accepted_at, native_correlation: Some(correlation), .. }
+            if activity.active_claim() == Some(claim)
+                && matches!(activity.phase(), ActivityPhase::Dispatched(_))
+                && activity.completed_attempts() == claim.attempt() - 1
+                && *accepted_at == claim.claimed_at() => correlation,
+        DeliveryPhase::TerminalObserved { observation }
+            if activity.native_terminal_claim() == Some(claim)
+                && activity.valid_native_terminal_claim()
+                && observation.fence() == &facts.fence => {
+            validate_terminal_observation(delivery, run, observation)?;
+            let matching_phase = match (observation.resolution(), activity.phase()) {
+                (
+                    TerminalObservationResolution::AwaitingAuthorizedGraphResolution,
+                    ActivityPhase::TerminalObserved { observed_at },
+                ) => *observed_at == observation.observed_at(),
+                (
+                    TerminalObservationResolution::GraphResolved(resolution),
+                    ActivityPhase::Completed { completed_at },
+                ) => resolution.outcome() == crate::AuthorizedGraphOutcome::Completed
+                    && *completed_at == resolution.resolved_at(),
+                (
+                    TerminalObservationResolution::GraphResolved(resolution),
+                    ActivityPhase::Failed { failed_at, failure: crate::ActivityFailure::Rejected },
+                ) => resolution.outcome() == crate::AuthorizedGraphOutcome::Failed
+                    && *failed_at == resolution.resolved_at(),
+                (
+                    TerminalObservationResolution::NodeCancelled,
+                    ActivityPhase::Cancelled { cancelled_at },
+                ) => *cancelled_at == observation.observed_at(),
+                _ => false,
+            };
+            if !matching_phase {
+                return Err(invalid);
+            }
+            observation.correlation()
+        }
+        _ => return Err(invalid),
+    };
+    if correlation.endpoint_session_id() != binding.endpoint_session_id() {
+        return Err(invalid);
+    }
+    Ok(())
+}
+
+fn validate_agent_activity_settlement(
+    deliveries: &DeliveryLedger,
+    activity: &Activity,
+    proof: &crate::run::activity::SettlementProof,
+) -> Result<(), OrganizationFactsError> {
+    let invalid = OrganizationFactsError::InvalidActivityTransition;
+    if !proof.valid_for(activity) || !activity.valid_native_terminal_claim() {
+        return Err(invalid);
+    }
+    let delivery_id = crate::DeliveryId::new(proof.claim.activity_id().as_str())
+        .map_err(|_| OrganizationFactsError::InvalidActivityTransition)?;
+    let delivery = deliveries
+        .delivery(&delivery_id)
+        .ok_or(OrganizationFactsError::InvalidActivityTransition)?;
+    let request = delivery.facts();
+    let facts = activity.facts();
+    let snapshot = delivery.snapshot();
+    let claim = &proof.claim;
+    if request.run_id != facts.run_id.as_str()
+        || request.node_id != facts.node_id.as_str()
+        || request.node_execution_id != facts.fence.node_execution_id().as_str()
+        || request.idempotency_key != facts.idempotency_key
+        || request.max_attempts != facts.max_attempts
+        || snapshot.completed_attempts() != claim.attempt()
+        || claim.generation().checked_add(1) != Some(snapshot.next_claim_generation())
+    {
+        return Err(invalid);
+    }
+    use crate::{DeliveryReceipt as R, DeliveryResolution as D};
+    let matches = match (&proof.receipt, delivery.phase()) {
+        (
+            R::Accepted { receipt, native_correlation, accepted_at },
+            DeliveryPhase::Delivered {
+                receipt: stored,
+                native_correlation: correlation,
+                accepted_at: stored_at,
+            },
+        ) => receipt == stored && native_correlation == correlation && accepted_at == stored_at,
+        (
+            R::Accepted { receipt, native_correlation, .. },
+            DeliveryPhase::TerminalObserved { observation },
+        ) => {
+            observation.delivered_receipt() == receipt
+                && native_correlation.as_ref() == Some(observation.correlation())
+                && observation.fence() == &facts.fence
+        }
+        (
+            R::Rejected { failure, observed_at },
+            DeliveryPhase::RetryScheduled { retry_at, failure: stored },
+        ) => {
+            failure == stored
+                && proof.delivery_outcome == (D::RetryScheduled { retry_at: *retry_at })
+                && *retry_at == crate::run::delivery::delivery_retry_at(*observed_at)
+        }
+        (
+            R::Rejected { failure, observed_at },
+            DeliveryPhase::Failed { failed_at, failure: stored },
+        ) => failure == stored && observed_at == failed_at && proof.delivery_outcome == D::Failed,
+        (R::Rejected { .. }, DeliveryPhase::Cancelled { cancelled_at }) => {
+            matches!(proof.delivery_outcome, D::RetryScheduled { .. })
+                && matches!(activity.phase(), ActivityPhase::Cancelled { cancelled_at: at } if at == cancelled_at)
+        }
+        (
+            R::OutcomeUnknown { observed_at },
+            DeliveryPhase::OutcomeUnknown { observed_at: stored },
+        ) => observed_at == stored,
+        // Runtime-native confirmation can advance an already committed unknown receipt.
+        (
+            R::OutcomeUnknown { observed_at },
+            DeliveryPhase::Delivered { accepted_at, .. },
+        ) => observed_at == accepted_at,
+        (R::OutcomeUnknown { .. }, DeliveryPhase::TerminalObserved { observation }) => {
+            observation.fence() == &facts.fence
+        }
+        _ => false,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(invalid)
+    }
+}
+
 fn validate_activity(
     runs: &BTreeMap<String, GraphRunFacts>,
     activity: &Activity,
@@ -4398,6 +4630,13 @@ fn validate_activity_transition(
         | (ActivityPhase::Dispatched(_), ActivityPhase::Failed { .. })
         | (ActivityPhase::Dispatched(_), ActivityPhase::OutcomeUnknown { .. })
         | (ActivityPhase::Dispatched(_), ActivityPhase::Cancelled { .. }) => Ok(()),
+        (ActivityPhase::RetryScheduled { retry_at, .. }, ActivityPhase::Dispatched(dispatch))
+            if previous.completed_attempts() == current.completed_attempts()
+                && dispatch.claim().generation() == previous.snapshot().next_claim_generation()
+                && dispatch.claim().claimed_at() >= *retry_at
+                && dispatch.dispatched_at() == dispatch.claim().claimed_at()
+                && current.settlement_proof().is_none()
+                && Activity::restore(current.snapshot()).is_ok() => Ok(()),
         (ActivityPhase::RetryScheduled { .. }, ActivityPhase::RetryScheduled { .. })
         | (ActivityPhase::RetryScheduled { .. }, ActivityPhase::Claimed(_))
         | (ActivityPhase::RetryScheduled { .. }, ActivityPhase::Cancelled { .. }) => Ok(()),

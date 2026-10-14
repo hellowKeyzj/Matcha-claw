@@ -14,6 +14,8 @@ use platform::state_dir::CanonicalStateDir;
 #[path = "plugin_peer_link.rs"]
 mod peer_link;
 pub(super) use peer_link::repair_channel_peer_link;
+#[path = "managed_removal.rs"]
+mod managed_removal;
 
 const MANIFEST: &str = "openclaw.plugin.json";
 const PACKAGE: &str = "package.json";
@@ -221,7 +223,7 @@ pub(super) fn managed_target_exists(
         Err(error) => return Err(PluginReconcileError::Io(error)),
     };
     let target = extensions.join(target_id);
-    removable_marked_target(&extensions, &target, target_id)
+    Ok(open_removable_target(&extensions, &target, target_id, false)?.is_some())
 }
 
 pub(super) fn remove_managed_target(
@@ -242,11 +244,18 @@ fn remove_marked_target(
     target: &Path,
     target_id: &str,
 ) -> Result<bool, PluginReconcileError> {
-    if !removable_marked_target(extensions, target, target_id)? {
+    let Some(custody) = open_removable_target(extensions, target, target_id, true)? else {
         return Ok(false);
-    }
+    };
     let deletion_root = target.canonicalize().map_err(PluginReconcileError::io)?;
-    safe_remove_tree(extensions, &deletion_root, target)?;
+    let marker = target.join(MANAGED_MARKER);
+    for entry in fs::read_dir(target).map_err(PluginReconcileError::io)? {
+        let path = entry.map_err(PluginReconcileError::io)?.path();
+        if path != marker {
+            safe_remove_tree(extensions, &deletion_root, &path)?;
+        }
+    }
+    custody.finish_removal(target).map_err(PluginReconcileError::io)?;
     Ok(true)
 }
 
@@ -274,35 +283,34 @@ fn replaceable_unmarked_target(
         && canonical_target.file_name().and_then(|name| name.to_str()) == Some(target_id))
 }
 
-fn removable_marked_target(
+fn open_removable_target(
     extensions: &Path,
     target: &Path,
     target_id: &str,
-) -> Result<bool, PluginReconcileError> {
+    removing: bool,
+) -> Result<Option<managed_removal::MarkerCustody>, PluginReconcileError> {
     if target.file_name().and_then(|name| name.to_str()) != Some(target_id) {
-        return Ok(false);
+        return Ok(None);
     }
     let metadata = match fs::symlink_metadata(target) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(PluginReconcileError::Io(error)),
     };
     if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
-        return Ok(false);
+        return Ok(None);
     }
     let Ok(canonical_target) = target.canonicalize() else {
-        return Ok(false);
+        return Ok(None);
     };
     if canonical_target == extensions || !canonical_target.starts_with(extensions) {
-        return Ok(false);
+        return Ok(None);
     }
     if canonical_target.file_name().and_then(|name| name.to_str()) != Some(target_id) {
-        return Ok(false);
+        return Ok(None);
     }
-    let Some(_) = read_managed_marker(target, target_id).map_err(PluginReconcileError::io)? else {
-        return Ok(false);
-    };
-    Ok(true)
+    managed_removal::MarkerCustody::open(extensions, target_id, removing)
+        .map_err(PluginReconcileError::io)
 }
 
 fn safe_remove_tree(
@@ -706,6 +714,10 @@ pub(super) fn read_managed_marker(
         return Ok(None);
     }
     let contents = fs::read_to_string(marker)?;
+    Ok(parse_managed_marker(&contents, id))
+}
+
+fn parse_managed_marker(contents: &str, id: &str) -> Option<ManagedMarker> {
     let mut lines = contents.lines();
     let marker_id = lines.next().unwrap_or_default();
     let version = lines.next().unwrap_or_default().trim();
@@ -715,12 +727,12 @@ pub(super) fn read_managed_marker(
         || !valid_content_signature(content_signature)
         || lines.next().is_some()
     {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(ManagedMarker {
+    Some(ManagedMarker {
         version: version.to_owned(),
         content_signature: content_signature.to_owned(),
-    }))
+    })
 }
 
 fn valid_content_signature(value: &str) -> bool {
@@ -855,41 +867,33 @@ fn replace_plugin_id(content: &str, source_id: &str, canonical_id: &str) -> Stri
             cursor = start + 2;
             continue;
         }
-        let rest = &content[start + 2..];
-        let whitespace = rest.len() - rest.trim_start().len();
-        let rest = &rest[whitespace..];
+        let rest = content[start + 2..].trim_start();
         if !rest.starts_with(':') {
             output.push_str(&content[cursor..start + 2]);
             cursor = start + 2;
             continue;
         }
-        let rest = &rest[1..];
-        let whitespace = rest.len() - rest.trim_start().len();
-        let rest = &rest[whitespace..];
+        let rest = rest[1..].trim_start();
         let Some(quote) = rest.chars().next().filter(|c| *c == '\'' || *c == '"') else {
             output.push_str(&content[cursor..start + 2]);
             cursor = start + 2;
             continue;
         };
-        let value_start = 1;
-        let Some(end) = rest[value_start..].find(quote) else {
+        let Some(end) = rest[1..].find(quote) else {
             output.push_str(&content[cursor..]);
             return output;
         };
-        let value = &rest[value_start..value_start + end];
-        output.push_str(&content[cursor..start]);
-        output.push_str(
-            &content[start..start + 2 + whitespace + 1 + (rest.len() - rest[value_start..].len())],
-        );
-        output.push(quote);
+        let value_start = content.len() - rest.len() + 1;
+        let value_end = value_start + end;
+        let value = &content[value_start..value_end];
+        output.push_str(&content[cursor..value_start]);
         if value == source_id {
             output.push_str(canonical_id);
         } else {
             output.push_str(value);
         }
         output.push(quote);
-        cursor =
-            start + 2 + whitespace + 1 + (rest.len() - rest[value_start..].len()) + 1 + end + 1;
+        cursor = value_end + 1;
     }
     output.push_str(&content[cursor..]);
     output

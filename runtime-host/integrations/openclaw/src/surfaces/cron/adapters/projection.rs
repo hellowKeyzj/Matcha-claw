@@ -218,6 +218,7 @@ pub(crate) fn project_cron_job(job: crate::gateway::wire::CronJob) -> ::cron::Cr
         schedule: project_cron_schedule(job.schedule),
         delivery: project_cron_delivery(job.delivery),
         enabled: job.enabled,
+        system_managed: job.system_managed,
         created_at_ms: job.created_at_ms,
         updated_at_ms: job.updated_at_ms,
         state: ::cron::CronJobStateView {

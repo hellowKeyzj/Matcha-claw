@@ -23,10 +23,12 @@ pub(crate) enum Delivery {
     File(AgentFileResponse),
     Configuration(ConfigurationResponse),
     ConfigurationApplied,
+    ConfigurationAppliedReadbackFailed,
     SkillConfiguration(Value),
     ToolConfiguration(Value),
     PackageExport(PackageExportResponse),
     PackageInstall(PackageInstallResponse),
+    PackageInstalledCleanupFailed,
     Rejected,
     OutcomeUnknown,
     Unsupported,
@@ -56,7 +58,9 @@ impl Delivery {
             },
             Self::Rejected => 422,
             Self::OutcomeUnknown | Self::Unsupported => 409,
-            Self::Unavailable => 503,
+            Self::ConfigurationAppliedReadbackFailed
+            | Self::PackageInstalledCleanupFailed
+            | Self::Unavailable => 503,
         }
     }
 
@@ -96,12 +100,18 @@ impl Delivery {
                 "agents": configuration.agents,
             }),
             Self::ConfigurationApplied => serde_json::json!({ "success": true }),
+            Self::ConfigurationAppliedReadbackFailed => {
+                error("Agent configuration was applied, but readback failed")
+            }
             Self::SkillConfiguration(view) | Self::ToolConfiguration(view) => view.clone(),
             Self::PackageExport(package) => {
                 serde_json::json!({ "success": true, "package": package })
             }
             Self::PackageInstall(package) => {
                 serde_json::json!({ "success": true, "package": package })
+            }
+            Self::PackageInstalledCleanupFailed => {
+                error("Subagent package was installed, but cleanup failed")
             }
             Self::Rejected => error("Subagent request was rejected"),
             Self::OutcomeUnknown => error("Subagent mutation outcome is unknown"),
@@ -231,7 +241,11 @@ pub(crate) fn map_outcome(outcome: agents::Outcome) -> Delivery {
             Delivery::PackageExport(package_export(package))
         }
         agents::Outcome::PackageInstalled(package) => {
-            Delivery::PackageInstall(package_install(package))
+            if package.cleanup_failure.is_some() {
+                Delivery::PackageInstalledCleanupFailed
+            } else {
+                Delivery::PackageInstall(package_install(package))
+            }
         }
         agents::Outcome::Rejected => Delivery::Rejected,
         agents::Outcome::Unknown => Delivery::OutcomeUnknown,
@@ -269,6 +283,9 @@ fn skill_configuration_delivery(outcome: agents::SkillConfigurationOutcome) -> D
         SkillConfigurationOutcome::Rejected => Delivery::Rejected,
         SkillConfigurationOutcome::OutcomeUnknown => Delivery::OutcomeUnknown,
         SkillConfigurationOutcome::Unavailable(_) => Delivery::Unavailable,
+        SkillConfigurationOutcome::AppliedReadbackFailed(_) => {
+            Delivery::ConfigurationAppliedReadbackFailed
+        }
     }
 }
 
@@ -297,6 +314,9 @@ fn tool_configuration_delivery(outcome: agents::ToolConfigurationOutcome) -> Del
         ToolConfigurationOutcome::Rejected => Delivery::Rejected,
         ToolConfigurationOutcome::OutcomeUnknown => Delivery::OutcomeUnknown,
         ToolConfigurationOutcome::Unavailable(_) => Delivery::Unavailable,
+        ToolConfigurationOutcome::AppliedReadbackFailed(_) => {
+            Delivery::ConfigurationAppliedReadbackFailed
+        }
     }
 }
 

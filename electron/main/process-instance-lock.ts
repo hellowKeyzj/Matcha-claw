@@ -79,19 +79,15 @@ function parseStructuredLockContent(raw: string): StructuredLockContent | undefi
 }
 
 function readLockOwner(lockPath: string): ParsedLockOwner {
-  try {
-    const raw = readFileSync(lockPath, 'utf8').trim();
-    const legacyPid = parsePositivePid(raw);
-    if (legacyPid !== undefined) {
-      return { kind: 'legacy', pid: legacyPid };
-    }
+  const raw = readFileSync(lockPath, 'utf8').trim();
+  const legacyPid = parsePositivePid(raw);
+  if (legacyPid !== undefined) {
+    return { kind: 'legacy', pid: legacyPid };
+  }
 
-    const structured = parseStructuredLockContent(raw);
-    if (structured) {
-      return { kind: 'structured', pid: structured.pid };
-    }
-  } catch {
-    // ignore read errors
+  const structured = parseStructuredLockContent(raw);
+  if (structured) {
+    return { kind: 'structured', pid: structured.pid };
   }
 
   return { kind: 'unknown' };
@@ -108,11 +104,7 @@ export function acquireProcessInstanceFileLock(
 
   if (options.force && existsSync(lockPath)) {
     const staleOwner = readLockOwner(lockPath);
-    try {
-      rmSync(lockPath, { force: true });
-    } catch {
-      // best-effort, fall through to normal acquisition
-    }
+    rmSync(lockPath, { force: true });
     if (staleOwner.kind !== 'unknown') {
       console.info(
         `[MatchaClaw] Force-cleaned stale instance lock (pid=${staleOwner.pid}, format=${staleOwner.kind})`,
@@ -160,7 +152,7 @@ export function acquireProcessInstanceFileLock(
     } catch (error) {
       const errno = (error as NodeJS.ErrnoException).code;
       if (errno !== 'EEXIST') {
-        break;
+        throw error;
       }
 
       const owner = readLockOwner(lockPath);
@@ -175,12 +167,8 @@ export function acquireProcessInstanceFileLock(
         (owner.kind === 'legacy' || owner.kind === 'structured')
         && !isPidAlive(owner.pid);
       if (shouldTreatAsStale && existsSync(lockPath)) {
-        try {
-          rmSync(lockPath, { force: true });
-          continue;
-        } catch {
-          // If deletion fails, treat lock as held.
-        }
+        rmSync(lockPath, { force: true });
+        continue;
       }
 
       break;

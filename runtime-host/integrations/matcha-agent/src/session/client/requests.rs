@@ -1,4 +1,5 @@
 use platform::exchange::InvocationOutcome;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     protocol::wire::{JsonRpcId, JsonRpcRequest, JsonRpcResponse},
@@ -11,7 +12,7 @@ use crate::{
             session_close_request,
         },
         model::{
-            Sequence, SessionCancelResult, SessionId, SessionListResult, SessionPromptResult,
+            Sequence, SessionCancelResult, SessionContentResult, SessionId, SessionListResult, SessionPromptResult,
             SessionRecord, SessionSnapshot, SessionTranscriptResult,
         },
         models::{
@@ -23,13 +24,14 @@ use crate::{
             events_subscribe_request,
         },
         request::{
-            ResponseError, SessionCancelParams, SessionCreateParams, SessionLoadParams,
+            ResponseError, SessionCancelParams, SessionContentParams, SessionCreateParams, SessionLoadParams,
             SessionPromptParams, SessionSetModeParams, SessionSetModelParams,
             SessionSnapshotParams, SessionTranscriptParams, decode_session_cancel_result,
             decode_session_create_result, decode_session_list_result, decode_session_load_result,
             decode_session_prompt_result, decode_session_set_mode_result,
             decode_session_set_model_result, decode_session_snapshot_result,
-            decode_session_transcript_result, session_cancel_request, session_create_request,
+            decode_session_content_result, decode_session_transcript_result, session_cancel_request,
+            session_content_request, session_create_request,
             session_list_request, session_load_request, session_prompt_request,
             session_set_mode_request, session_set_model_request, session_snapshot_request,
             session_transcript_request,
@@ -93,9 +95,27 @@ impl AppServerClient {
         &self,
         params: SessionLoadParams,
     ) -> Result<SessionRecord, AppServerClientError> {
-        let request = session_load_request(next_json_rpc_id()?, params)
-            .map_err(|_| AppServerClientError::Protocol)?;
-        self.read(request, decode_session_load_result).await
+        match self.load_session_cancellable(params, &CancellationToken::new()).await {
+            InvocationOutcome::Succeeded(session) => Ok(session),
+            InvocationOutcome::TargetRejected(error) => Err(error),
+            InvocationOutcome::Cancelled | InvocationOutcome::Unknown => Err(AppServerClientError::ConnectionClosed),
+        }
+    }
+
+    pub(crate) async fn load_session_cancellable(
+        &self,
+        params: SessionLoadParams,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<SessionRecord, AppServerClientError> {
+        let id = match next_json_rpc_id() {
+            Ok(id) => id,
+            Err(error) => return InvocationOutcome::TargetRejected(error),
+        };
+        let request = match session_load_request(id, params) {
+            Ok(request) => request,
+            Err(_) => return InvocationOutcome::TargetRejected(AppServerClientError::Protocol),
+        };
+        self.read_cancellable(request, decode_session_load_result, cancellation).await
     }
 
     pub async fn list_sessions(&self) -> Result<SessionListResult, AppServerClientError> {
@@ -115,9 +135,30 @@ impl AppServerClient {
         self.read(request, decode_session_transcript_result).await
     }
 
+    pub async fn load_content(
+        &self,
+        params: SessionContentParams,
+    ) -> Result<Option<SessionContentResult>, AppServerClientError> {
+        let request = session_content_request(next_json_rpc_id()?, params.clone())
+            .map_err(|_| AppServerClientError::Protocol)?;
+        let chunk = self.read(request, decode_session_content_result).await?;
+        if chunk.as_ref().is_some_and(|chunk| !params.accepts(chunk)) {
+            return Err(AppServerClientError::Protocol);
+        }
+        Ok(chunk)
+    }
+
     pub async fn prompt_session(
         &self,
         params: SessionPromptParams,
+    ) -> InvocationOutcome<SessionPromptResult, AppServerClientError> {
+        self.prompt_session_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn prompt_session_cancellable(
+        &self,
+        params: SessionPromptParams,
+        cancellation: &CancellationToken,
     ) -> InvocationOutcome<SessionPromptResult, AppServerClientError> {
         let id = match next_json_rpc_id() {
             Ok(id) => id,
@@ -127,12 +168,20 @@ impl AppServerClient {
             Ok(request) => request,
             Err(_) => return InvocationOutcome::TargetRejected(AppServerClientError::Protocol),
         };
-        self.mutate(request, decode_session_prompt_result).await
+        self.mutate_cancellable(request, decode_session_prompt_result, cancellation).await
     }
 
     pub async fn cancel_session(
         &self,
         params: SessionCancelParams,
+    ) -> InvocationOutcome<SessionCancelResult, AppServerClientError> {
+        self.cancel_session_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn cancel_session_cancellable(
+        &self,
+        params: SessionCancelParams,
+        cancellation: &CancellationToken,
     ) -> InvocationOutcome<SessionCancelResult, AppServerClientError> {
         let id = match next_json_rpc_id() {
             Ok(id) => id,
@@ -142,7 +191,7 @@ impl AppServerClient {
             Ok(request) => request,
             Err(_) => return InvocationOutcome::TargetRejected(AppServerClientError::Protocol),
         };
-        self.mutate(request, decode_session_cancel_result).await
+        self.mutate_cancellable(request, decode_session_cancel_result, cancellation).await
     }
 
     /// Closes one logical session through the native app-server owner.
@@ -159,6 +208,14 @@ impl AppServerClient {
         &self,
         params: SessionCloseParams,
     ) -> InvocationOutcome<SessionCloseResult, AppServerClientError> {
+        self.close_session_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn close_session_cancellable(
+        &self,
+        params: SessionCloseParams,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<SessionCloseResult, AppServerClientError> {
         let id = match next_json_rpc_id() {
             Ok(id) => id,
             Err(error) => return InvocationOutcome::TargetRejected(error),
@@ -167,7 +224,7 @@ impl AppServerClient {
             Ok(request) => request,
             Err(_) => return InvocationOutcome::TargetRejected(AppServerClientError::Protocol),
         };
-        self.mutate(request, decode_session_close_result).await
+        self.mutate_cancellable(request, decode_session_close_result, cancellation).await
     }
 
     /// Lists native app-server model identifiers without exposing a wire payload.
@@ -212,6 +269,14 @@ impl AppServerClient {
         &self,
         params: SessionSetModelParams,
     ) -> InvocationOutcome<SessionRecord, AppServerClientError> {
+        self.set_session_model_cancellable(params, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn set_session_model_cancellable(
+        &self,
+        params: SessionSetModelParams,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<SessionRecord, AppServerClientError> {
         let id = match next_json_rpc_id() {
             Ok(id) => id,
             Err(error) => return InvocationOutcome::TargetRejected(error),
@@ -220,7 +285,7 @@ impl AppServerClient {
             Ok(request) => request,
             Err(_) => return InvocationOutcome::TargetRejected(AppServerClientError::Protocol),
         };
-        self.mutate(request, decode_session_set_model_result).await
+        self.mutate_cancellable(request, decode_session_set_model_result, cancellation).await
     }
 
     pub async fn set_session_mode(
@@ -402,13 +467,38 @@ impl AppServerClient {
         request: JsonRpcRequest,
         decode: fn(&JsonRpcId, JsonRpcResponse) -> Result<T, ResponseError>,
     ) -> Result<T, AppServerClientError> {
+        match self.read_cancellable(request, decode, &CancellationToken::new()).await {
+            InvocationOutcome::Succeeded(result) => Ok(result),
+            InvocationOutcome::TargetRejected(error) => Err(error),
+            InvocationOutcome::Cancelled | InvocationOutcome::Unknown => Err(AppServerClientError::ConnectionClosed),
+        }
+    }
+
+    async fn read_cancellable<T>(
+        &self,
+        request: JsonRpcRequest,
+        decode: fn(&JsonRpcId, JsonRpcResponse) -> Result<T, ResponseError>,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<T, AppServerClientError> {
         let expected_id = request.id.clone();
-        let response = self
+        match self
             .connection
-            .exchange(request, super::REQUEST_DEADLINE)
+            .exchange_cancellable(request, super::REQUEST_DEADLINE, cancellation)
             .await
-            .map_err(AppServerClientError::from_exchange)?;
-        decode(&expected_id, response).map_err(AppServerClientError::from_response)
+        {
+            Ok(response) => match decode(&expected_id, response) {
+                Ok(result) => InvocationOutcome::Succeeded(result),
+                Err(error) => InvocationOutcome::TargetRejected(AppServerClientError::from_response(error)),
+            },
+            Err(failure) if failure.was_cancelled() => {
+                if failure.delivery() == Delivery::NotWritten {
+                    InvocationOutcome::Cancelled
+                } else {
+                    InvocationOutcome::Unknown
+                }
+            }
+            Err(failure) => InvocationOutcome::TargetRejected(AppServerClientError::from_exchange(failure)),
+        }
     }
 
     async fn mutate<T>(
@@ -416,10 +506,19 @@ impl AppServerClient {
         request: JsonRpcRequest,
         decode: fn(&JsonRpcId, JsonRpcResponse) -> Result<T, ResponseError>,
     ) -> InvocationOutcome<T, AppServerClientError> {
+        self.mutate_cancellable(request, decode, &CancellationToken::new()).await
+    }
+
+    async fn mutate_cancellable<T>(
+        &self,
+        request: JsonRpcRequest,
+        decode: fn(&JsonRpcId, JsonRpcResponse) -> Result<T, ResponseError>,
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<T, AppServerClientError> {
         let expected_id = request.id.clone();
         match self
             .connection
-            .exchange(request, super::REQUEST_DEADLINE)
+            .exchange_cancellable(request, super::REQUEST_DEADLINE, cancellation)
             .await
         {
             Ok(response) => match decode(&expected_id, response) {
@@ -434,6 +533,9 @@ impl AppServerClient {
                 }) => InvocationOutcome::TargetRejected(AppServerClientError::PeerRejected),
                 Err(_) => InvocationOutcome::Unknown,
             },
+            Err(failure) if failure.delivery() == Delivery::NotWritten && failure.was_cancelled() => {
+                InvocationOutcome::Cancelled
+            }
             Err(failure) if failure.delivery() == Delivery::NotWritten => {
                 InvocationOutcome::TargetRejected(AppServerClientError::from_exchange(failure))
             }

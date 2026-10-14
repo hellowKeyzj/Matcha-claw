@@ -9,9 +9,14 @@ import {
   type ClassifiedError,
   type ProviderRuntimeConfig,
   type RunRecord,
+  type SessionContentParams,
+  type SessionContentResult,
   type SessionRecord,
   type SessionSetModelParams,
   type SessionSnapshot,
+  type SessionSnapshotParams,
+  type SessionTranscriptParams,
+  type SessionTranscriptResult,
   type StopReason,
   type UsageSummary,
   type WorkerApprovalRequest,
@@ -52,14 +57,12 @@ import {
   logProcessSessionTrace,
 } from '../query/runTrace.js'
 import {
-  listSessionHistorySummaries,
-  loadSessionHistorySummary,
-  readSessionTranscriptReplayLines,
+  createSessionHistoryReader,
+  sessionHistoryTitlePreview,
   type SessionHistorySummary,
 } from '../utils/sessionHistoryReadModel.js'
 
 const SESSION_HISTORY_LIST_LIMIT = 200
-const SESSION_TRANSCRIPT_MAX_LINES = 10_000
 const WORKER_SHUTDOWN_TIMEOUT_MS = 2_000
 function workerProcessEnvironment(): NodeJS.ProcessEnv {
   return createWorkerProcessEnvironment()
@@ -104,7 +107,9 @@ export type AppServerServices = {
 export type AppServerSessionHistoryStore = {
   list(): Promise<SessionHistorySummary[]>
   load(sessionId: string): Promise<SessionHistorySummary | null>
-  transcript(sessionId: string): Promise<{ lines: string[] }>
+  transcript(params: SessionTranscriptParams): Promise<SessionTranscriptResult>
+  content(params: SessionContentParams): Promise<SessionContentResult | null>
+  close(): void
 }
 
 export function createAppServerRuntime(deps: AppServerDeps): AppServerRuntime {
@@ -776,13 +781,13 @@ export function createDefaultAppServerServices(options: {
           session: created.session,
         })
         return loadSessionRuntimeState(created.session.sessionId).then(
-          session => session ?? created.session,
+          session => sessionRecordPreview(session ?? created.session),
         )
       },
       load: async params => {
         const session = await loadSessionForRead(params.sessionId)
         if (!session) throw new Error(`Session not found: ${params.sessionId}`)
-        return session
+        return sessionRecordPreview(session)
       },
       list: async () => {
         for (const record of await sessionIndex.readAll()) {
@@ -798,12 +803,16 @@ export function createDefaultAppServerServices(options: {
           sessions: mergeSessionRecords(
             sessionRegistry.list(),
             (await sessionHistoryStore.list()).map(historySessionRecord),
-          ),
+          ).map(sessionRecordPreview),
         }
       },
       close: async params => {
         const runtimeSession = await loadSessionRuntimeState(params.sessionId)
-        if (!runtimeSession) return ensureSessionExists(params.sessionId)
+        if (!runtimeSession) {
+          return sessionRecordPreview(
+            await ensureSessionExists(params.sessionId),
+          )
+        }
 
         await cancelSessionApprovals(params.sessionId)
         await cancelSessionRuns(params.sessionId, 'session closed')
@@ -815,7 +824,7 @@ export function createDefaultAppServerServices(options: {
         await sessionIndex.remove(params.sessionId)
         providerRuntimeBySessionId.delete(params.sessionId)
         sessionRegistry.close(params.sessionId)
-        return runtimeSession
+        return sessionRecordPreview(runtimeSession)
       },
       prompt: async params => {
         const session = await ensureSessionRuntimeState(params.sessionId)
@@ -838,14 +847,13 @@ export function createDefaultAppServerServices(options: {
         return { runId: enqueued.queuedRun.run.runId }
       },
       transcript: async params => {
-        const transcript = await sessionHistoryStore.transcript(
-          params.sessionId,
-        )
+        const transcript = await sessionHistoryStore.transcript(params)
         if (transcript.lines.length === 0) {
           await ensureSessionExists(params.sessionId)
         }
         return transcript
       },
+      content: params => sessionHistoryStore.content(params),
       cancel: async params => {
         await ensureSessionExists(params.sessionId)
         const reason = params.reason ?? 'cancelled by client'
@@ -942,17 +950,19 @@ export function createDefaultAppServerServices(options: {
         return { cancelledRunIds, workerResponse }
       },
       snapshot: async params => {
-        return buildSnapshot(params.sessionId)
+        return buildSnapshot(params)
       },
       setModel: async params => {
-        return updateSessionModel(params)
+        return sessionRecordPreview(await updateSessionModel(params))
       },
       setMode: async params => {
-        return updateSessionSettings(params.sessionId, session => ({
-          ...session,
-          permissionMode: params.mode,
-          updatedAt: new Date().toISOString(),
-        }))
+        return sessionRecordPreview(
+          await updateSessionSettings(params.sessionId, session => ({
+            ...session,
+            permissionMode: params.mode,
+            updatedAt: new Date().toISOString(),
+          })),
+        )
       },
     },
     events: {
@@ -1371,13 +1381,16 @@ export function createDefaultAppServerServices(options: {
     return result
   }
 
-  async function buildSnapshot(sessionId: string): Promise<SessionSnapshot> {
+  async function buildSnapshot({
+    sessionId,
+    includeMessages = true,
+  }: SessionSnapshotParams): Promise<SessionSnapshot> {
     const session = await loadSessionForRead(sessionId)
     if (!session) throw new Error(`Session not found: ${sessionId}`)
 
     const existing = await snapshotStore.readLatest(sessionId)
     if (existing && existing.session.updatedAt === session.updatedAt) {
-      return existing
+      return snapshotResponse(existing, includeMessages)
     }
 
     const events = await eventStore.replay(sessionId)
@@ -1385,13 +1398,19 @@ export function createDefaultAppServerServices(options: {
     if (snapshot.version > 0) {
       await snapshotStore.writeLatest(sessionId, snapshot)
     }
-    return snapshot
+    return snapshotResponse(snapshot, includeMessages)
   }
 
   return {
     ports,
     workerSupervisor,
-    shutdown: () => workerSupervisor.shutdownAll('serverShutdown'),
+    shutdown: async () => {
+      try {
+        await workerSupervisor.shutdownAll('serverShutdown')
+      } finally {
+        sessionHistoryStore.close()
+      }
+    },
   }
 }
 
@@ -1612,20 +1631,44 @@ function createEmptySessionHistoryStore(): AppServerSessionHistoryStore {
   return {
     list: async () => [],
     load: async () => null,
-    transcript: async () => ({ lines: [] }),
+    transcript: async () => ({
+      lines: [],
+      window: {
+        totalItemCount: 0,
+        windowStartOffset: 0,
+        windowEndOffset: 0,
+      },
+    }),
+    content: async () => null,
+    close: () => {},
   }
 }
 
 function createMatchaAgentSessionHistoryStore(): AppServerSessionHistoryStore {
+  const reader = createSessionHistoryReader()
   return {
-    list: () => listSessionHistorySummaries(SESSION_HISTORY_LIST_LIMIT),
-    load: sessionId => loadSessionHistorySummary(sessionId),
-    transcript: async sessionId => ({
-      lines: await readSessionTranscriptReplayLines(
-        sessionId,
-        SESSION_TRANSCRIPT_MAX_LINES,
-      ),
-    }),
+    list: () => reader.list(SESSION_HISTORY_LIST_LIMIT),
+    load: sessionId => reader.load(sessionId),
+    transcript: params => reader.transcript(params),
+    content: params => reader.content(params),
+    close: () => reader.close(),
+  }
+}
+
+function sessionRecordPreview(session: SessionRecord): SessionRecord {
+  return session.title === undefined
+    ? session
+    : { ...session, title: sessionHistoryTitlePreview(session.title) }
+}
+
+function snapshotResponse(
+  snapshot: SessionSnapshot,
+  includeMessages: boolean,
+): SessionSnapshot {
+  return {
+    ...snapshot,
+    session: sessionRecordPreview(snapshot.session),
+    ...(!includeMessages ? { messages: [] } : {}),
   }
 }
 

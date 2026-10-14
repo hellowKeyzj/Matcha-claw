@@ -49,10 +49,16 @@ export function ManualTeamCreationProgress({ creation }: { creation: ManualTeamC
   const activePhase = creation.phase;
   const rollingBack = activePhase === 'rolling_back';
   const currentStep = creationSteps.findIndex((step) => step === activePhase);
+  const failure = creation.failure;
+  const failureLocated = failure !== null && !(creation.status === 'unconfirmed' && creation.cleanup === 'none')
+    && failure.reason !== 'observation_interrupted' && failure.reason !== 'outcome_unknown';
+  const failureStep = failureLocated ? creationSteps.findIndex((step) => step === failure.stage) : -1;
+  const failureMember = failure?.memberIndex === undefined ? null : members[failure.memberIndex];
   const isActive = creation.status === 'running' || creation.status === 'cleaning_up';
   const endedAt = creation.endedAt;
   const preparationSkipped = members.length === 0;
   const preparationNotObserved = !preparationSkipped && !creation.preparationObserved
+    && failure?.stage !== 'reading_profiles' && failure?.stage !== 'generating_introductions'
     && (rollingBack || currentStep >= creationSteps.indexOf('configuring_team'));
   const currentStageLabel = t(`create.manualProgress.stages.${activePhase}`);
 
@@ -81,29 +87,40 @@ export function ManualTeamCreationProgress({ creation }: { creation: ManualTeamC
             const preparationStep = step === 'reading_profiles' || step === 'generating_introductions';
             const skipped = preparationSkipped && preparationStep;
             const notObserved = preparationNotObserved && preparationStep;
-            const status: StepStatus = skipped ? 'skipped'
-              : notObserved ? 'unconfirmed'
-              : rollingBack ? index <= creationSteps.indexOf('generating_introductions') ? 'completed'
-                : step === 'configuring_team' || step === 'verifying_team' || step === 'saving_team' ? 'unconfirmed' : 'queued'
-              : index < currentStep ? 'completed'
-                : index > currentStep ? 'queued'
-                  : creation.status === 'failed' ? 'failed'
-                    : creation.status === 'unconfirmed' ? 'unconfirmed'
-                      : creation.status === 'cleaning_up' ? 'failed' : 'running';
+            const stepFailure = failure?.stage === step ? failure : null;
+            const status: StepStatus = index === failureStep ? 'failed'
+              : stepFailure ? 'unconfirmed'
+                : skipped ? 'skipped'
+                  : notObserved ? 'unconfirmed'
+                    : failureStep >= 0 ? index < failureStep ? 'completed' : 'queued'
+                      : rollingBack ? index <= creationSteps.indexOf('generating_introductions') ? 'completed'
+                        : step === 'configuring_team' || step === 'verifying_team' || step === 'saving_team' ? 'unconfirmed' : 'queued'
+                        : index < currentStep ? 'completed'
+                          : index > currentStep ? 'queued'
+                            : creation.status !== 'running' ? 'unconfirmed' : 'running';
             return (
-              <li key={step} aria-current={index === currentStep ? 'step' : undefined} className="relative flex items-center gap-3 py-2">
-                {index < creationSteps.length - 1 ? <span aria-hidden="true" className="absolute left-4 top-9 h-4 w-px bg-border" /> : null}
-                <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${status === 'completed' ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : status === 'failed' ? 'bg-destructive/10 text-destructive' : status === 'unconfirmed' ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300' : status === 'running' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>
-                  <StatusIcon status={status} />
-                </span>
-                <span className="min-w-0 flex-1 text-sm text-foreground">{t(`create.manualProgress.stages.${step}`)}</span>
-                <span className="text-xs text-muted-foreground">{notObserved ? t('create.manualProgress.stepNotObserved') : status === 'completed' ? t('create.manualProgress.stepCompleted') : t(`create.manualProgress.memberStatus.${status}`)}</span>
+              <li key={step} aria-current={index === currentStep ? 'step' : undefined} className="relative py-2">
+                {index < creationSteps.length - 1 ? <span aria-hidden="true" className="absolute bottom-0 left-4 top-9 w-px bg-border" /> : null}
+                <div className="flex items-center gap-3">
+                  <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${status === 'completed' ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : status === 'failed' ? 'bg-destructive/10 text-destructive' : status === 'unconfirmed' ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300' : status === 'running' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>
+                    <StatusIcon status={status} />
+                  </span>
+                  <span className="min-w-0 flex-1 text-sm text-foreground">{t(`create.manualProgress.stages.${step}`)}</span>
+                  <span className="text-xs text-muted-foreground">{notObserved && !stepFailure ? t('create.manualProgress.stepNotObserved') : status === 'completed' ? t('create.manualProgress.stepCompleted') : t(`create.manualProgress.memberStatus.${status}`)}</span>
+                </div>
+                {stepFailure ? (
+                  <div className={`ml-11 mt-1 space-y-1 text-xs leading-5 ${failureLocated ? 'text-destructive' : 'text-amber-800 dark:text-amber-200'}`}>
+                    {failureMember ? <p>{t('create.manualProgress.failureMember', { member: failureMember.agentName })}</p> : null}
+                    {stepFailure.file ? <p>{t('create.manualProgress.failureFile', { file: t(`create.manualProgress.files.${stepFailure.file}`) })}</p> : null}
+                    <p>{t(`create.manualProgress.failureReasons.${stepFailure.reason}`)}</p>
+                  </div>
+                ) : null}
               </li>
             );
           })}
           {rollingBack ? (
             <li aria-current="step" className="flex items-center gap-3 py-2 text-sm text-amber-800 dark:text-amber-200">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/10"><StatusIcon status={isActive ? 'running' : creation.status === 'failed' ? 'failed' : 'unconfirmed'} /></span>
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/10"><StatusIcon status={isActive ? 'running' : 'unconfirmed'} /></span>
               <span>{currentStageLabel}</span>
             </li>
           ) : null}
@@ -144,11 +161,8 @@ export function ManualTeamCreationProgress({ creation }: { creation: ManualTeamC
         </div>
       </div>
 
-      {creation.error ? (
-        <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-          <div className="font-medium">{t('create.manualProgress.originalError')}</div>
-          <p className="mt-1 break-words">{creation.error}</p>
-        </div>
+      {creation.status !== 'running' && failure === null ? (
+        <p className="text-sm leading-6 text-muted-foreground">{t('create.manualProgress.failureNotRecorded')}</p>
       ) : null}
       {creation.status !== 'running' ? (
         <div className={`rounded-xl border px-4 py-3 text-sm ${creation.status === 'failed' ? 'border-border bg-muted/25 text-muted-foreground' : 'border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-200'}`}>

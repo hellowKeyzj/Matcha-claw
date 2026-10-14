@@ -1,4 +1,5 @@
-use platform::call::CallContext;
+use futures_util::future::Shared;
+use platform::call::{CallContext, CallFuture, CallReceipt};
 use tokio::sync::oneshot;
 
 use crate::{PrepareOutcome, ToolchainRequestAdmissionClosed, ToolchainStatus};
@@ -8,6 +9,7 @@ use super::call::ToolchainCallDetail;
 pub(crate) enum ToolchainCommand {
     AdmitPrepare {
         call: CallContext<ToolchainCallDetail>,
+        accepted: Shared<CallFuture<CallReceipt>>,
     },
     Prepare {
         call: Option<CallContext<ToolchainCallDetail>>,

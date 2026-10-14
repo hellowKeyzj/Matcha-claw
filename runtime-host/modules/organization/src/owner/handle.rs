@@ -53,17 +53,22 @@ use super::{
 pub struct OrganizationHandle {
     inner: OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>,
     schedule_changes: tokio::sync::watch::Sender<TeamRunWake>,
+    terminal_recovery: tokio::sync::watch::Sender<()>,
     call: Option<crate::call::CallScope>,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl OrganizationHandle {
     pub(crate) fn new(inner: OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>) -> Self {
         let (schedule_changes, _) =
             tokio::sync::watch::channel(TeamRunWake::new(TeamRunWakeReason::GraphChanged, None));
+        let (terminal_recovery, _) = tokio::sync::watch::channel(());
         Self {
             inner,
             schedule_changes,
+            terminal_recovery,
             call: None,
+            cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -72,13 +77,26 @@ impl OrganizationHandle {
         self
     }
 
+    pub(crate) fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
     fn reply_channel<T>(&self) -> (crate::call::CallReply<T>, tokio::sync::oneshot::Receiver<T>) {
         let (reply, receiver) = tokio::sync::oneshot::channel();
-        (crate::call::CallReply::new(reply, self.call.clone()), receiver)
+        (crate::call::CallReply::new(reply, self.call.clone()).with_cancellation(self.cancellation.clone()), receiver)
     }
 
     pub fn subscribe_schedule_changes(&self) -> tokio::sync::watch::Receiver<TeamRunWake> {
         self.schedule_changes.subscribe()
+    }
+
+    pub(crate) fn subscribe_terminal_recovery(&self) -> tokio::sync::watch::Receiver<()> {
+        self.terminal_recovery.subscribe()
+    }
+
+    pub(super) fn retry_terminal_deliveries(&self) {
+        self.terminal_recovery.send_replace(());
     }
 
     fn publish_team_run_wake(&self, reason: TeamRunWakeReason, run_id: Option<GraphRunId>) {
@@ -169,7 +187,7 @@ impl OrganizationHandle {
             let tasks = receiver.await.map_err(|_| closed_error())?;
             if tasks.is_empty() { return Ok(()); }
             for mut task in tasks {
-                let _ = task.join().await;
+                let _ = task.cancel_and_join().await;
             }
             // The next exclusive command follows all settlements sent by the joined producers.
         }
@@ -457,7 +475,7 @@ impl OrganizationHandle {
         run_id: GraphRunId,
         idempotency_key: IdempotencyKey,
         created_at: u64,
-    ) -> Result<Result<CreateGraphRunOutcome, TeamRuntimeStatus>, RequestAdmissionClosed> {
+    ) -> Result<(Result<CreateGraphRunOutcome, TeamRuntimeStatus>, Option<crate::TeamCreationFailure>), RequestAdmissionClosed> {
         if let Some(call) = &self.call {
             call.references(Some(team_id.as_str()), Some(run_id.as_str()), None).await;
         }
@@ -475,7 +493,7 @@ impl OrganizationHandle {
             .map_err(closed)?;
         self.call_admitted().await;
         let outcome = reply_rx.await.map_err(|_| closed_error())?;
-        if outcome.is_ok() {
+        if outcome.0.is_ok() {
             self.publish_team_run_wake(TeamRunWakeReason::RunStarted, Some(wake_run_id));
         }
         Ok(outcome)
@@ -531,7 +549,7 @@ impl OrganizationHandle {
         run_id: GraphRunId,
         event_cursor: Option<u64>,
         event_limit: Option<u64>,
-    ) -> Result<Option<TeamRunPublicSnapshotQueryOutcome>, RequestAdmissionClosed> {
+    ) -> Result<(Option<TeamRunPublicSnapshotQueryOutcome>, Option<crate::TeamCreationFailure>), RequestAdmissionClosed> {
         let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TeamRunPublicSnapshot {
@@ -1074,7 +1092,7 @@ impl OrganizationHandle {
         run_id: GraphRunId,
         operation: crate::application::task_board::TaskBoardMutation,
     ) -> Result<
-        Result<crate::application::task_board::MutationResult, StoreFault>,
+        Result<crate::application::task_board::MutationResult, crate::application::task_board::MutationError>,
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = self.reply_channel();
@@ -1256,14 +1274,30 @@ impl OrganizationHandle {
             }));
             closed_error()
         })?;
-        if outcome.is_ok() {
+        let published = matches!(
+            &outcome,
+            Ok(organization::TeamMessageTerminalObservation::Settled
+                | organization::TeamMessageTerminalObservation::Repair(_))
+        );
+        if published {
             self.publish_team_run_wake(TeamRunWakeReason::TerminalSettled, None);
         }
         platform::trace::runtime_trace("runtime.team_run.terminal.wake", || serde_json::json!({
-            "nativeRunHash": native_run_hash, "published": outcome.is_ok(), "reason": "terminal_settled",
+            "nativeRunHash": native_run_hash, "published": published, "reason": "terminal_settled",
             "error": outcome.as_ref().err().map(crate::trace::terminal_error),
         }));
         Ok(outcome)
+    }
+
+    pub(crate) async fn has_pending_team_message_repairs(
+        &self,
+    ) -> Result<bool, RequestAdmissionClosed> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_query(OrganizationQuery::PendingTeamMessageRepairs { reply })
+            .await
+            .map_err(closed)?;
+        receiver.await.map_err(|_| closed_error())
     }
 
     pub(crate) async fn team_message_repair_queued(
@@ -1492,19 +1526,21 @@ async fn execute_team_runtime(
             let run_id = run_id.unwrap_or_else(|| {
                 GraphRunId::new(format!("team-run:{}", idempotency_key.as_str()))
             });
+            let failed = |status, reason| TeamRuntimeCommandOutcome::RunCreate {
+                result: Err(status),
+                creation_failure: Some(crate::TeamCreationFailure::new(
+                    crate::TeamCreationStage::InitializingSessions, reason,
+                )),
+            };
             match source {
                 TeamRuntimeCreateSource::TeamSkill => {
                     let selection_id = match owner.team_skill_authorize(package_root).await.ok()? {
                         Ok(selection_id) => selection_id,
                         Err(TeamSkillSelectionError::InvalidSelection) => {
-                            return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
-                                TeamRuntimeStatus::Rejected,
-                            )));
+                            return Some(failed(TeamRuntimeStatus::Rejected, crate::TeamCreationFailureReason::InvalidInput));
                         }
                         Err(TeamSkillSelectionError::Unavailable) => {
-                            return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
-                                TeamRuntimeStatus::Unavailable,
-                            )));
+                            return Some(failed(TeamRuntimeStatus::Unavailable, crate::TeamCreationFailureReason::Unavailable));
                         }
                     };
                     let team_id = match team_id {
@@ -1517,22 +1553,14 @@ async fn execute_team_runtime(
                             TeamSkillPackageValidation::Valid { package } => {
                                 match TeamId::try_new(package.name().to_owned()) {
                                     Ok(team_id) => team_id,
-                                    Err(_) => {
-                                        return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
-                                            TeamRuntimeStatus::Rejected,
-                                        )));
-                                    }
+                                    Err(_) => return Some(failed(TeamRuntimeStatus::Rejected, crate::TeamCreationFailureReason::InvalidInput)),
                                 }
                             }
                             TeamSkillPackageValidation::Invalid => {
-                                return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
-                                    TeamRuntimeStatus::Rejected,
-                                )));
+                                return Some(failed(TeamRuntimeStatus::Rejected, crate::TeamCreationFailureReason::InvalidInput));
                             }
                             TeamSkillPackageValidation::Unavailable => {
-                                return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
-                                    TeamRuntimeStatus::Unavailable,
-                                )));
+                                return Some(failed(TeamRuntimeStatus::Unavailable, crate::TeamCreationFailureReason::Unavailable));
                             }
                         },
                     };
@@ -1546,40 +1574,30 @@ async fn execute_team_runtime(
                         .ok()?
                     {
                         TeamMaterializationCommandOutcome::Materialized { .. } => {
-                            TeamRuntimeCommandOutcome::RunCreate(
-                                owner
-                                    .run_create_from_team_template(
-                                        team_id,
-                                        run_id,
-                                        idempotency_key,
-                                        now_millis(),
-                                    )
-                                    .await
-                                    .ok()?,
-                            )
+                            let (result, creation_failure) = owner
+                                .run_create_from_team_template(team_id, run_id, idempotency_key, now_millis())
+                                .await.ok()?;
+                            TeamRuntimeCommandOutcome::RunCreate { result, creation_failure }
                         }
-                        outcome => TeamRuntimeCommandOutcome::RunCreate(Err(
-                            team_materialization_status(outcome),
-                        )),
+                        outcome => {
+                            let status = team_materialization_status(outcome);
+                            let reason = match &status {
+                                TeamRuntimeStatus::Rejected => crate::TeamCreationFailureReason::Rejected,
+                                TeamRuntimeStatus::Unavailable => crate::TeamCreationFailureReason::Unavailable,
+                                TeamRuntimeStatus::OutcomeUnknown => crate::TeamCreationFailureReason::OutcomeUnknown,
+                            };
+                            failed(status, reason)
+                        }
                     }
                 }
                 TeamRuntimeCreateSource::Manual => {
                     let Some(team_id) = team_id else {
-                        return Some(TeamRuntimeCommandOutcome::RunCreate(Err(
-                            TeamRuntimeStatus::Rejected,
-                        )));
+                        return Some(failed(TeamRuntimeStatus::Rejected, crate::TeamCreationFailureReason::InvalidInput));
                     };
-                    TeamRuntimeCommandOutcome::RunCreate(
-                        owner
-                            .run_create_from_team_template(
-                                team_id,
-                                run_id,
-                                idempotency_key,
-                                now_millis(),
-                            )
-                            .await
-                            .ok()?,
-                    )
+                    let (result, creation_failure) = owner
+                        .run_create_from_team_template(team_id, run_id, idempotency_key, now_millis())
+                        .await.ok()?;
+                    TeamRuntimeCommandOutcome::RunCreate { result, creation_failure }
                 }
             }
         }
@@ -1609,7 +1627,7 @@ async fn execute_team_runtime(
             .await
             .ok()?
         {
-            Some(snapshot) => {
+            (Some(snapshot), creation_failure) => {
                 let query_team_id = match (&team_id, &snapshot) {
                     (Some(team_id), _) => Some(team_id.clone()),
                     (None, TeamRunPublicSnapshotQueryOutcome::Available(snapshot)) => {
@@ -1638,9 +1656,10 @@ async fn execute_team_runtime(
                 TeamRuntimeCommandOutcome::RunSnapshot {
                     snapshot,
                     role_sessions,
+                    creation_failure,
                 }
             }
-            None => TeamRuntimeCommandOutcome::RunSnapshotInvalidInput,
+            (None, creation_failure) => TeamRuntimeCommandOutcome::RunSnapshotInvalidInput { creation_failure },
         },
         TeamRuntimeCommand::GraphSave {
             command,

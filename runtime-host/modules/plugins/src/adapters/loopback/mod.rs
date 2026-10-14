@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use tokio::sync::Mutex;
@@ -33,6 +33,12 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("plugins"),
         vec![RouteDescriptor::bound(
             "plugins.loopback",
+            &[
+                RoutePath::ExactWithQuery(handler::CATALOG_ENDPOINT),
+                RoutePath::ExactWithQuery(handler::RUNTIME_ENDPOINT),
+                RoutePath::ExactWithQuery(handler::CONFIGURATION_ENDPOINT),
+                RoutePath::ExactWithQuery(handler::OPERATION_ENDPOINT),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],
@@ -42,7 +48,14 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
     is_route(path).then(|| {
-        RouteHeadPlan::new(
+        let plan = if head.method == "POST"
+            && matches!(path, handler::CONFIGURATION_ENDPOINT | handler::OPERATION_ENDPOINT)
+        {
+            RouteHeadPlan::body_deadline
+        } else {
+            RouteHeadPlan::new
+        };
+        plan(
             body_policy_for_method(head.method.as_str(), path),
             SHORT_DEADLINE,
             timeout_response,

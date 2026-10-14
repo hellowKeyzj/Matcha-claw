@@ -241,10 +241,10 @@ pub(crate) fn read_dismissed(root: &Path) -> Result<BTreeSet<String>, WikiFailur
 pub(crate) fn dismiss(root: &Path, key: &str) -> Result<(), WikiFailure> {
     let mut dismissed_keys = read_dismissed(root)?;
     if dismissed_keys.insert(key.to_owned()) {
-        crate::owner::actor::write_json(
-            root.join(".llm-wiki/graph-insights.json"),
-            &DismissedInsights { dismissed_keys },
-        )?;
+        let path = root.join(".llm-wiki/graph-insights.json");
+        let bytes = serde_json::to_vec_pretty(&DismissedInsights { dismissed_keys })
+            .map_err(|error| WikiFailure::state(error.to_string()))?;
+        crate::history::write_store(&path, &bytes)?;
     }
     Ok(())
 }

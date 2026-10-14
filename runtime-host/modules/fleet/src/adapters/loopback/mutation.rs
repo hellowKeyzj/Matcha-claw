@@ -499,7 +499,11 @@ async fn lifecycle_runtime(owner: &FleetHandle, payload: CommandIdPayload, step:
 }
 
 fn mutation_result(result: Result<Value, fleet::FleetDeliveryError>) -> Delivery {
-    result.map_or(Delivery::Invalid, Delivery::Mutation)
+    match result {
+        Ok(value) => Delivery::Mutation(value),
+        Err(error) if crate::call::delivery_error_is_unknown(&error) => Delivery::Unavailable,
+        Err(_) => Delivery::Invalid,
+    }
 }
 
 fn parse_connection(payload: ConnectionUpsertPayload) -> Result<ConnectionRecord, ()> {

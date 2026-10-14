@@ -211,10 +211,10 @@ async fn named_session_commands_send_typed_requests_and_decode_results() {
 
         let transcript = read_json(&mut socket).await;
         assert_eq!(transcript["method"], "session.transcript");
-        assert_eq!(transcript["params"], json!({"sessionId":"session-1"}));
+        assert_eq!(transcript["params"], json!({"sessionId":"session-1","direction":"latest","limit":80}));
         send_json(
             &mut socket,
-            json!({"jsonrpc":"2.0","id":transcript["id"],"result":{"lines":["line-1"]}}),
+            json!({"jsonrpc":"2.0","id":transcript["id"],"result":{"lines":["line-1"],"window":{"totalItemCount":1,"windowStartOffset":0,"windowEndOffset":1}}}),
         )
         .await;
 

@@ -7,8 +7,8 @@ use crate::domain::{
 
 const REVIEW_FILE: &str = ".llm-wiki/review.json";
 
-pub(super) fn reviews(root: &Path) -> WikiReviewsReceipt {
-    WikiReviewsReceipt::new(read_review_items(root))
+pub(super) fn reviews(root: &Path) -> Result<WikiReviewsReceipt, WikiFailure> {
+    Ok(WikiReviewsReceipt::new(read_review_items(root)?))
 }
 
 pub(super) fn append_review_items(
@@ -18,7 +18,7 @@ pub(super) fn append_review_items(
     if incoming.is_empty() {
         return Ok(());
     }
-    let mut items = read_review_items(root);
+    let mut items = read_review_items(root)?;
     items.extend(incoming);
     write_review_items(root, normalize_review_items(items))
 }
@@ -27,7 +27,7 @@ pub(super) fn resolve_review(
     root: &Path,
     input: WikiReviewResolveInput,
 ) -> Result<WikiReviewsReceipt, WikiFailure> {
-    let mut items = read_review_items(root);
+    let mut items = read_review_items(root)?;
     if let Some(item) = items.iter_mut().find(|item| item.id == input.id) {
         item.resolved = true;
         item.resolved_action = Some(input.action);
@@ -45,7 +45,7 @@ pub(super) fn resolve_pending_reviews(
     if ids.is_empty() {
         return Ok(());
     }
-    let mut items = read_review_items(root);
+    let mut items = read_review_items(root)?;
     let mut changed = false;
     for item in &mut items {
         if !item.resolved && ids.contains(&item.id) {
@@ -64,7 +64,7 @@ pub(super) fn dismiss_review(
     root: &Path,
     input: WikiReviewDismissInput,
 ) -> Result<WikiReviewsReceipt, WikiFailure> {
-    let items = read_review_items(root)
+    let items = read_review_items(root)?
         .into_iter()
         .filter(|item| item.id != input.id)
         .collect::<Vec<_>>();
@@ -76,7 +76,7 @@ pub(super) fn clear_resolved_reviews(
     root: &Path,
     _input: WikiReviewClearResolvedInput,
 ) -> Result<WikiReviewsReceipt, WikiFailure> {
-    let items = read_review_items(root)
+    let items = read_review_items(root)?
         .into_iter()
         .filter(|item| !item.resolved)
         .collect::<Vec<_>>();
@@ -84,23 +84,20 @@ pub(super) fn clear_resolved_reviews(
     Ok(WikiReviewsReceipt::new(items))
 }
 
-fn read_review_items(root: &Path) -> Vec<WikiReviewItem> {
-    std::fs::read_to_string(root.join(REVIEW_FILE))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Vec<WikiReviewItem>>(&raw).ok())
-        .map(normalize_review_items)
-        .unwrap_or_default()
+fn read_review_items(root: &Path) -> Result<Vec<WikiReviewItem>, WikiFailure> {
+    let path = root.join(REVIEW_FILE);
+    match std::fs::read(&path) {
+        Ok(raw) => serde_json::from_slice::<Vec<WikiReviewItem>>(&raw)
+            .map(normalize_review_items)
+            .map_err(|_| WikiFailure::state("Invalid Wiki review store")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(WikiFailure::io(path_text(&path), error)),
+    }
 }
 
 fn write_review_items(root: &Path, items: Vec<WikiReviewItem>) -> Result<(), WikiFailure> {
     let path = root.join(REVIEW_FILE);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| WikiFailure::io(path_text(parent), error))?;
-    }
-    let raw = serde_json::to_string_pretty(&items)
-        .map_err(|error| WikiFailure::state(format!("review encode failed: {error}")))?;
-    std::fs::write(&path, raw).map_err(|error| WikiFailure::io(path_text(&path), error))
+    super::actor::write_json(path, &items)
 }
 
 fn normalize_review_items(items: Vec<WikiReviewItem>) -> Vec<WikiReviewItem> {

@@ -18,8 +18,9 @@ use crate::{
     call::{AuthorizationValidity, SealedResourceCallDetail, safe_digest},
     domain::{AgentKey, PackageRelativePath, SkillKey},
     store::{
-        SealedAgentCatalogEntry, SealedAgentInstallPlan, SealedAgentPackageExport,
-        SealedAgentRuntimeProjection, SealedAgentStore, SealedSkillCatalog,
+        SealedAgentCatalogEntry, SealedAgentInstallError, SealedAgentInstallPlan,
+        SealedAgentPackageExport, SealedAgentRemoval, SealedAgentRuntimeProjection, SealedAgentStore,
+        SealedSkillCatalog,
         SealedSkillCatalogEntry, SealedSkillPackageExport, SealedSkillStore,
     },
 };
@@ -420,6 +421,19 @@ impl SealedAgentStoreAdapter {
     }
 }
 
+struct PreparedAgentRemoval {
+    store: Arc<SealedAgentStore>,
+    removal: SealedAgentRemoval,
+}
+
+impl subagents::ports::SealedAgentRemovalPlan for PreparedAgentRemoval {
+    fn remove(self: Box<Self>) -> Result<bool, subagents::SealedAgentError> {
+        self.store
+            .remove_prepared_package(self.removal)
+            .map_err(project_agent_error)
+    }
+}
+
 impl subagents::SealedAgentStorePort for SealedAgentStoreAdapter {
     fn export_package(
         &self,
@@ -469,16 +483,29 @@ impl subagents::SealedAgentStorePort for SealedAgentStoreAdapter {
         &self,
         package_path: String,
         cloud_metadata: Option<subagents::CloudPackageMetadata>,
-    ) -> Result<subagents::PackageInstallReceipt, subagents::SealedAgentError> {
+    ) -> Result<subagents::PackageInstallReceipt, subagents::ports::SealedAgentInstallError> {
         match cloud_metadata {
-            Some(metadata) => self.store.install_package_path_with_cloud_metadata(
+            Some(metadata) => self.store.install_package_path_with_cloud_metadata_outcome(
                 PathBuf::from(package_path),
-                agent_cloud_metadata(metadata)?,
+                agent_cloud_metadata(metadata)
+                    .map_err(subagents::ports::SealedAgentInstallError::NotCommitted)?,
             ),
-            None => self.store.install_package_path(PathBuf::from(package_path)),
+            None => self.store.install_package_path_outcome(PathBuf::from(package_path)),
         }
         .map(|entry| subagents::PackageInstallReceipt::new(entry.agent_key().as_str().to_owned()))
-        .map_err(project_agent_error)
+        .map_err(|error| match error {
+            SealedAgentInstallError::NotCommitted(error) => {
+                subagents::ports::SealedAgentInstallError::NotCommitted(project_agent_error(error))
+            }
+            SealedAgentInstallError::Committed { entry, error } => {
+                subagents::ports::SealedAgentInstallError::Committed {
+                    receipt: subagents::PackageInstallReceipt::new(
+                        entry.agent_key().as_str().to_owned(),
+                    ),
+                    error: project_agent_error(error),
+                }
+            }
+        })
     }
 
     fn remove_package(&self, agent_id: String) -> Result<bool, subagents::SealedAgentError> {
@@ -487,6 +514,22 @@ impl subagents::SealedAgentStorePort for SealedAgentStoreAdapter {
         self.store
             .remove_package(agent_key)
             .map_err(project_agent_error)
+    }
+
+    fn prepare_remove_package(
+        &self,
+        agent_id: String,
+    ) -> Result<Box<dyn subagents::ports::SealedAgentRemovalPlan>, subagents::SealedAgentError> {
+        let agent_key =
+            AgentKey::parse(agent_id).map_err(|_| subagents::SealedAgentError::Rejected)?;
+        let removal = self
+            .store
+            .prepare_remove_package(agent_key)
+            .map_err(project_agent_error)?;
+        Ok(Box::new(PreparedAgentRemoval {
+            store: Arc::clone(&self.store),
+            removal,
+        }))
     }
 
     fn agents_using_sealed_source(

@@ -1,5 +1,7 @@
 use std::{future::Future, path::PathBuf, pin::Pin};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{bundle, install, management, status};
 
 pub type SkillsFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -52,12 +54,28 @@ pub trait SkillRuntimeOps: Send + Sync {
         command: install::Command,
     ) -> SkillsFuture<'a, install::Outcome>;
 
+    fn install_clawhub_skill_cancellable<'a>(
+        &'a self,
+        command: install::Command,
+        _cancellation: CancellationToken,
+    ) -> SkillsFuture<'a, install::Outcome> {
+        self.install_clawhub_skill(command)
+    }
+
     fn skill_status<'a>(&'a self) -> SkillsFuture<'a, status::Outcome>;
 
     fn manage_skills<'a>(
         &'a self,
         command: management::Command,
     ) -> SkillsFuture<'a, management::Outcome>;
+
+    fn manage_skills_cancellable<'a>(
+        &'a self,
+        command: management::Command,
+        _cancellation: CancellationToken,
+    ) -> SkillsFuture<'a, management::Outcome> {
+        self.manage_skills(command)
+    }
 
     fn skill_bundles<'a>(&'a self, command: bundle::Command) -> SkillsFuture<'a, bundle::Outcome>;
 }
@@ -68,12 +86,28 @@ pub trait SkillsPort: Send + Sync {
         command: install::Command,
     ) -> SkillsFuture<'a, Result<install::Outcome, ()>>;
 
+    fn install_clawhub_skill_cancellable<'a>(
+        &'a self,
+        command: install::Command,
+        _cancellation: CancellationToken,
+    ) -> SkillsFuture<'a, Result<install::Outcome, ()>> {
+        self.install_clawhub_skill(command)
+    }
+
     fn skill_status<'a>(&'a self) -> SkillsFuture<'a, Result<status::Outcome, ()>>;
 
     fn manage_skills<'a>(
         &'a self,
         command: management::Command,
     ) -> SkillsFuture<'a, Result<management::Outcome, ()>>;
+
+    fn manage_skills_cancellable<'a>(
+        &'a self,
+        command: management::Command,
+        _cancellation: CancellationToken,
+    ) -> SkillsFuture<'a, Result<management::Outcome, ()>> {
+        self.manage_skills(command)
+    }
 
     fn skill_bundles<'a>(
         &'a self,

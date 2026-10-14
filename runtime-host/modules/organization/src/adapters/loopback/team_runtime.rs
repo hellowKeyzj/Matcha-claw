@@ -44,14 +44,19 @@ pub(crate) async fn handle_loopback(
         Ok(value) => value,
         Err(_) => return invalid_request(),
     };
+    let creation_stage = match value.get("operationId").and_then(Value::as_str) {
+        Some("team.runCreate") => Some(crate::TeamCreationStage::InitializingSessions),
+        Some("team.runList" | "team.runSnapshot") => Some(crate::TeamCreationStage::LoadingTeam),
+        _ => None,
+    };
     let request = match crate::decode_team_runtime_capability_request(value) {
         Ok(request) => request,
-        Err(error) => return decode_error(error),
+        Err(error) => return decode_error(error, creation_stage),
     };
     if matches!(request.operation_id(), "team.provisionAgents" | "team.delete" | "team.runDelete") {
         return match owner.admit_team_capability(resolver, request).await {
             Ok(receipt) => Response::json(202, json!(receipt)),
-            Err(error) => decode_error(error),
+            Err(error) => decode_error(error, None),
         };
     }
     let outcome = match owner
@@ -59,7 +64,7 @@ pub(crate) async fn handle_loopback(
         .await
     {
         Ok((_, outcome)) => outcome,
-        Err(error) => return decode_error(error),
+        Err(error) => return decode_error(error, creation_stage),
     };
     project_outcome(outcome)
 }
@@ -68,17 +73,27 @@ fn project_outcome(outcome: crate::TeamRuntimeControlOutcome) -> Response {
     match outcome {
         crate::TeamRuntimeControlOutcome::Succeeded(result)
         | crate::TeamRuntimeControlOutcome::Unknown(result) => Response::json(200, result),
-        crate::TeamRuntimeControlOutcome::Unavailable => unavailable(),
-        crate::TeamRuntimeControlOutcome::InvalidInput => invalid_request(),
-        crate::TeamRuntimeControlOutcome::Failed(message) => failed(message),
+        crate::TeamRuntimeControlOutcome::Unavailable(failure) => failure_response(
+            503, "Team runtime operation is unavailable", failure,
+        ),
+        crate::TeamRuntimeControlOutcome::InvalidInput(failure) => failure_response(
+            400, "Team runtime request is invalid", failure,
+        ),
+        crate::TeamRuntimeControlOutcome::Failed(message, failure) => failure_response(400, message, failure),
     }
 }
 
-fn decode_error(error: crate::TeamRuntimeDecodeError) -> Response {
+fn decode_error(error: crate::TeamRuntimeDecodeError, creation_stage: Option<crate::TeamCreationStage>) -> Response {
     match error {
         crate::TeamRuntimeDecodeError::InvalidInput
-        | crate::TeamRuntimeDecodeError::InvalidField { .. } => invalid_request(),
-        crate::TeamRuntimeDecodeError::Unavailable => unavailable(),
+        | crate::TeamRuntimeDecodeError::InvalidField { .. } => failure_response(
+            400, "Team runtime request is invalid",
+            creation_stage.map(|stage| crate::TeamCreationFailure::new(stage, crate::TeamCreationFailureReason::InvalidInput)),
+        ),
+        crate::TeamRuntimeDecodeError::Unavailable => failure_response(
+            503, "Team runtime operation is unavailable",
+            creation_stage.map(|stage| crate::TeamCreationFailure::new(stage, crate::TeamCreationFailureReason::Unavailable)),
+        ),
         crate::TeamRuntimeDecodeError::GraphDefinition(error) => Response::json(
             200,
             crate::application::team_mcp::design_rejected(crate::StoreFault::GraphPatch(
@@ -102,15 +117,10 @@ fn unauthorized() -> Response {
     )
 }
 
-fn unavailable() -> Response {
-    Response::json(
-        503,
-        json!({ "success": false, "error": "Team runtime operation is unavailable" }),
-    )
-}
-
-fn failed(message: &'static str) -> Response {
-    Response::json(400, json!({ "success": false, "error": message }))
+fn failure_response(status: u16, message: &'static str, failure: Option<crate::TeamCreationFailure>) -> Response {
+    let mut body = json!({ "success": false, "error": message });
+    if let Some(failure) = failure { body["creationFailure"] = json!(failure); }
+    Response::json(status, body)
 }
 
 fn now_millis() -> u64 {

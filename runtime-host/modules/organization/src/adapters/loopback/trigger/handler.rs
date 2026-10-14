@@ -23,6 +23,7 @@ pub(crate) const MAX_WEBHOOK_BODY_BYTES: usize = 64 * 1024;
 pub(crate) const MANAGEMENT_ROUTE: &str = "/api/team/trigger";
 pub(crate) const WEBHOOK_AUTH_ROUTE: &str = "/api/team/webhook-auth";
 pub(crate) const WEBHOOK_ROUTE_PREFIX: &str = "/api/team-runtime/webhooks";
+pub(crate) const WEBHOOK_SUBROUTE_PREFIX: &str = "/api/team-runtime/webhooks/";
 
 pub(crate) async fn handle_loopback(
     method: String,
@@ -169,7 +170,7 @@ fn bearer_token(value: &str) -> Option<&str> {
 }
 
 pub(crate) fn is_webhook_route(path: &str) -> bool {
-    path == WEBHOOK_ROUTE_PREFIX || path.starts_with(&format!("{WEBHOOK_ROUTE_PREFIX}/"))
+    path == WEBHOOK_ROUTE_PREFIX || path.starts_with(WEBHOOK_SUBROUTE_PREFIX)
 }
 
 fn webhook_path(value: &str) -> Option<String> {

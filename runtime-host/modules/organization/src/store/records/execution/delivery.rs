@@ -28,7 +28,7 @@ struct Row {
     next_generation: u64,
 }
 #[derive(Serialize, Deserialize)]
-struct Correlation {
+pub(super) struct Correlation {
     session: String,
     receipt: String,
 }
@@ -47,7 +47,59 @@ impl Correlation {
     }
 }
 #[derive(Serialize, Deserialize)]
-enum Failure {
+#[serde(deny_unknown_fields)]
+pub(super) enum Receipt {
+    Accepted {
+        receipt: String,
+        correlation: Option<Correlation>,
+        accepted_at: u64,
+    },
+    Rejected {
+        failure: Failure,
+        observed_at: u64,
+    },
+    OutcomeUnknown {
+        observed_at: u64,
+    },
+}
+impl Receipt {
+    pub(super) fn from_domain(value: &crate::DeliveryReceipt) -> Self {
+        match value {
+            crate::DeliveryReceipt::Accepted { receipt, native_correlation, accepted_at } => {
+                Self::Accepted {
+                    receipt: receipt.as_str().to_owned(),
+                    correlation: native_correlation.as_ref().map(Correlation::from_domain),
+                    accepted_at: *accepted_at,
+                }
+            }
+            crate::DeliveryReceipt::Rejected { failure, observed_at } => Self::Rejected {
+                failure: Failure::from_domain(*failure),
+                observed_at: *observed_at,
+            },
+            crate::DeliveryReceipt::OutcomeUnknown { observed_at } => Self::OutcomeUnknown {
+                observed_at: *observed_at,
+            },
+        }
+    }
+    pub(super) fn into_domain(self) -> Result<crate::DeliveryReceipt, StoreFault> {
+        Ok(match self {
+            Self::Accepted { receipt, correlation, accepted_at } => crate::DeliveryReceipt::Accepted {
+                receipt: valid(DeliveryReceiptReference::try_new(receipt))?,
+                native_correlation: correlation.map(Correlation::into_domain).transpose()?,
+                accepted_at,
+            },
+            Self::Rejected { failure, observed_at } => crate::DeliveryReceipt::Rejected {
+                failure: failure.into_domain(),
+                observed_at,
+            },
+            Self::OutcomeUnknown { observed_at } => crate::DeliveryReceipt::OutcomeUnknown {
+                observed_at,
+            },
+        })
+    }
+}
+#[derive(Serialize, Deserialize)]
+pub(super) enum Failure {
     ReceiverRejected,
     PolicyRejected,
     Unavailable,

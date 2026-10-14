@@ -6,7 +6,7 @@ use std::{
 use platform::{
     loopback::{
         BodyPolicy, ModuleDescriptor as LoopbackModuleDescriptor, ModuleId as LoopbackModuleId,
-        Request, RequestHead, Response, RouteDescriptor, RouteFuture, RouteHeadPlan,
+        Request, RequestHead, Response, RouteDescriptor, RouteFuture, RouteHeadPlan, RoutePath,
     },
     module::{
         CapabilityCatalogSnapshot, CapabilityDescribeOutcome, CapabilityKey, EffectKind,
@@ -27,6 +27,10 @@ const MAX_DESCRIBE_BYTES: usize = 64 * 1024;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 const CAPABILITIES_LIST_PATH: &str = "/api/capabilities/list";
 const CAPABILITIES_DESCRIBE_PATH: &str = "/api/capabilities/describe";
+const PATHS: &[RoutePath] = &[
+    RoutePath::ExactWithQuery(CAPABILITIES_LIST_PATH),
+    RoutePath::ExactWithQuery(CAPABILITIES_DESCRIBE_PATH),
+];
 const CAPABILITY_CATALOG_SCOPE: &str = "capability-directory:read";
 const CAPABILITY_CATALOG_LIST_CAPABILITY: &str = "capability.directory.list";
 const CAPABILITY_CATALOG_DESCRIBE_CAPABILITY: &str = "capability.directory.describe";
@@ -104,6 +108,7 @@ impl CapabilityCatalog {
             LoopbackModuleId::new("capability-catalog"),
             vec![RouteDescriptor::bound(
                 "capability-catalog.loopback",
+                PATHS,
                 head_plan,
                 move |request| route(catalog.clone(), Arc::clone(&verifier), request),
             )],

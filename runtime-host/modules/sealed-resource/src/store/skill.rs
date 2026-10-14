@@ -359,21 +359,27 @@ impl SealedSkillStore {
                 return Err(error);
             }
         };
+        let replacement_packages = match self.replacement_packages_locked(&skill_key) {
+            Ok(packages) => packages,
+            Err(error) => {
+                trace_export_error("replacement-scan", &skill_key, error);
+                return Err(error);
+            }
+        };
         let file_name = super::export::package_file_name(
             &root,
             package.descriptor().name(),
             SEALED_SKILL_PACKAGE_EXTENSION,
         )?;
-        let installed_path = match self.install_receipt_locked(&receipt, &file_name) {
-            Ok(path) => path,
-            Err(error) => {
-                trace_export_error("install", &skill_key, error);
+        if let Err(error) = self.install_receipt_locked(&receipt, &file_name) {
+            trace_export_error("install", &skill_key, error);
+            return Err(error);
+        }
+        for (path, package_sha256) in replacement_packages {
+            if let Err(error) = self.remove_package_path_locked(&path, &package_sha256) {
+                trace_export_error("cleanup", &skill_key, error);
                 return Err(error);
             }
-        };
-        if let Err(error) = self.remove_other_packages_locked(&skill_key, &installed_path) {
-            trace_export_error("cleanup", &skill_key, error);
-            return Err(error);
         }
         if platform::trace::enabled() {
             eprintln!(
@@ -443,6 +449,9 @@ impl SealedSkillStore {
         let Some((path, package_sha256)) = self.find_sealed_package_locked(&skill_key)? else {
             return Ok(false);
         };
+        if self.cloud_metadata(&package_sha256)?.is_none() {
+            self.open_package_path_locked(&path)?;
+        }
         self.remove_package_path_locked(&path, &package_sha256)?;
         Ok(true)
     }
@@ -650,20 +659,13 @@ impl SealedSkillStore {
     ) -> Result<(SkillKey, SealedSkillTarget, String), SealedResourceError> {
         let bytes = read_package_file(path, SealedResourceError::Unknown)?;
         let package_sha256 = hex_digest(&bytes);
+        let manifest = SealedSkillPackage::open_manifest(&bytes)?;
         if let Some(metadata) = self.cloud_metadata(&package_sha256)? {
             metadata.ensure_matches(SealedCloudPackageType::Skill, &package_sha256)?;
-            let manifest = SealedSkillPackage::open_manifest(&bytes)?;
-            return Ok((
-                manifest.skill_key().clone(),
-                manifest.target(),
-                package_sha256,
-            ));
         }
-        let authorization_key = self.read_authorization_key_for_package_bytes(&bytes)?;
-        let package = SealedSkillPackage::open(&bytes, &authorization_key)?;
         Ok((
-            package.skill_key().clone(),
-            package.target(),
+            manifest.skill_key().clone(),
+            manifest.target(),
             package_sha256,
         ))
     }
@@ -688,26 +690,26 @@ impl SealedSkillStore {
         SealedSkillPackage::open(&bytes, &authorization_key)
     }
 
-    fn remove_other_packages_locked(
+    fn replacement_packages_locked(
         &self,
         skill_key: &SkillKey,
-        keep_path: &Path,
-    ) -> Result<(), SealedResourceError> {
+    ) -> Result<Vec<(PathBuf, String)>, SealedResourceError> {
         let Some(root) = existing_skills_directory(self.root.skills_directory())? else {
-            return Ok(());
+            return Ok(Vec::new());
         };
+        let mut packages = Vec::new();
         for entry in fs::read_dir(root).map_err(|_| SealedResourceError::Unknown)? {
             let entry = entry.map_err(|_| SealedResourceError::Unknown)?;
             let path = entry.path();
-            if path == keep_path || !sealed_package_file(&path)? {
+            if !sealed_package_file(&path)? {
                 continue;
             }
             let (key, target, package_sha256) = self.package_identity_path_locked(&path)?;
             if target == self.root.target() && &key == skill_key {
-                self.remove_package_path_locked(&path, &package_sha256)?;
+                packages.push((path, package_sha256));
             }
         }
-        Ok(())
+        Ok(packages)
     }
 
     fn read_authorization_key_for_package_bytes(

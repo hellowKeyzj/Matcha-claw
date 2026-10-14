@@ -4,6 +4,8 @@ use std::fmt;
 pub enum LlmClientError {
     UnsupportedProtocol,
     Http(reqwest::Error),
+    HttpStatus { status: u16, message: String },
+    Deadline,
     Protocol(String),
     StreamSink(String),
 }
@@ -15,7 +17,10 @@ impl fmt::Display for LlmClientError {
                 formatter.write_str("provider LLM protocol is not supported")
             }
             Self::Http(error) => write!(formatter, "provider LLM HTTP request failed: {error}"),
-            Self::Protocol(message) => write!(formatter, "provider LLM protocol error: {message}"),
+            Self::HttpStatus { message, .. } | Self::Protocol(message) => {
+                write!(formatter, "provider LLM protocol error: {message}")
+            }
+            Self::Deadline => formatter.write_str("provider generation timed out"),
             Self::StreamSink(message) => {
                 write!(formatter, "provider LLM stream sink error: {message}")
             }
@@ -27,7 +32,11 @@ impl std::error::Error for LlmClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Http(error) => Some(error),
-            Self::UnsupportedProtocol | Self::Protocol(_) | Self::StreamSink(_) => None,
+            Self::UnsupportedProtocol
+            | Self::HttpStatus { .. }
+            | Self::Deadline
+            | Self::Protocol(_)
+            | Self::StreamSink(_) => None,
         }
     }
 }

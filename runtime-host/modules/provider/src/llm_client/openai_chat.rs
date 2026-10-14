@@ -57,7 +57,10 @@ pub async fn stream_generate(
             .ok()
             .and_then(|payload| parse_openai_chat_error(&payload))
             .unwrap_or_else(|| format!("OpenAI chat stream failed with HTTP {status}"));
-        return Err(LlmClientError::Protocol(error));
+        return Err(LlmClientError::HttpStatus {
+            status: status.as_u16(),
+            message: error,
+        });
     }
 
     super::consume_sse(response, sink, parse_openai_chat_sse_chunk).await
@@ -171,15 +174,24 @@ async fn send_json(
     let text = response.text().await?;
     let payload = serde_json::from_str::<Value>(&text).map_err(|error| {
         eprintln!("[provider] phase=runtime.team.provider.http.parse-failed protocol=open_ai_completions class=JsonDecode");
-        LlmClientError::Protocol(format!("invalid OpenAI chat JSON response: {error}"))
+        let message = format!("invalid OpenAI chat JSON response: {error}");
+        if status.is_success() {
+            LlmClientError::Protocol(message)
+        } else {
+            LlmClientError::HttpStatus {
+                status: status.as_u16(),
+                message,
+            }
+        }
     })?;
     if status.is_success() {
         Ok(payload)
     } else {
-        Err(LlmClientError::Protocol(
-            parse_openai_chat_error(&payload)
+        Err(LlmClientError::HttpStatus {
+            status: status.as_u16(),
+            message: parse_openai_chat_error(&payload)
                 .unwrap_or_else(|| format!("OpenAI chat request failed with HTTP {status}")),
-        ))
+        })
     }
 }
 

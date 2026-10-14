@@ -192,6 +192,7 @@ impl OneShotRunner {
             }
         };
         let completion = tokio::select! {
+            biased;
             result = timeout_at(deadline_at, execution) => match result {
                 Ok(Ok(completion)) => completion,
                 Ok(Err(_)) | Err(_) => OneShotCompletion::OutcomeUnknown,

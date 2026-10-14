@@ -32,7 +32,7 @@ const CHANNELS_PAIRING_LIST_METHOD: &str = "channels.pairing.list";
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PAIRING_REQUESTS: usize = 3;
 const MAX_CODE_BYTES: usize = 128;
-const APPROVE_PROGRAM: &str = "import { approveChannelPairingCode } from 'openclaw/plugin-sdk/conversation-runtime'; import { readFileSync } from 'node:fs'; const [channel, account] = process.argv.slice(1); const code = readFileSync(0, 'utf8').trim(); if (!channel || !code) process.exit(2); const approved = account ? await approveChannelPairingCode({channel, accountId: account, code}) : await approveChannelPairingCode({channel, code}); process.stdout.write(JSON.stringify(approved));";
+const APPROVE_PROGRAM: &str = "import { approveChannelPairingCode } from 'openclaw/plugin-sdk/channel-pairing'; import { readFileSync } from 'node:fs'; const [channel, account] = process.argv.slice(1); const code = readFileSync(0, 'utf8').trim(); if (!channel || !code) process.exit(2); const approved = account ? await approveChannelPairingCode({channel, accountId: account, code}) : await approveChannelPairingCode({channel, code}); if (!approved) process.exit(3); process.stdout.write('{\"approved\":true}');";
 
 /// Source-backed OpenClaw channel pairing operations.
 ///
@@ -80,9 +80,11 @@ impl ChannelPairingOperation {
         }
         let command = self.command.approve(&channel, account.as_deref(), code);
         match task::spawn_blocking(move || command.run()).await {
-            Ok(Ok(_)) => ChannelPairingApprovalEffect::Confirmed,
+            Ok(Ok(output)) if output.as_slice() == br#"{"approved":true}"# => {
+                ChannelPairingApprovalEffect::Confirmed
+            }
             Ok(Err(PairingExecution::Rejected)) => ChannelPairingApprovalEffect::TargetRejected,
-            Ok(Err(PairingExecution::Unknown)) | Err(_) => {
+            Ok(Ok(_)) | Ok(Err(PairingExecution::Unknown)) | Err(_) => {
                 ChannelPairingApprovalEffect::OutcomeUnknown
             }
         }

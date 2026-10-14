@@ -211,7 +211,14 @@ impl OwnerSpec for SettingsOwner {
         match query {
             SettingsQuery::DesiredReadModel { call, reply } => {
                 let result = async {
-                    call.running().await?;
+                    if let Err(error) = call.running().await {
+                        call.finish(
+                            platform::call::CallStatus::Unknown,
+                            &SettingsCallDetail::new(SettingsOperation::ReadCurrent),
+                        )
+                        .await?;
+                        return Err(error);
+                    }
                     let snapshot = state.desired_read_model();
                     call.finish(
                         platform::call::CallStatus::Succeeded,

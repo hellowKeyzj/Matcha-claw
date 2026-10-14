@@ -1,6 +1,7 @@
 use super::model as session_adapter;
 use super::timeline::{load_matcha_content, load_matcha_timeline};
 use super::*;
+use tokio_util::sync::CancellationToken;
 
 impl SessionOps for MatchaRuntimeDriver {
     fn admission(&self) -> SessionAdmission {
@@ -65,8 +66,19 @@ impl SessionOps for MatchaRuntimeDriver {
         'a,
         Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome>,
     > {
+        self.send_model_runtime_command_cancellable(command, CancellationToken::new())
+    }
+
+    fn send_model_runtime_command_cancellable<'a>(
+        &'a self,
+        command: &'a SessionSendCommand,
+        cancellation: CancellationToken,
+    ) -> sessions_module::SessionFuture<
+        'a,
+        Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome>,
+    > {
         let session = self.session_handle();
-        Box::pin(async move { send_model_runtime_command(session, command).await })
+        Box::pin(async move { send_model_runtime_command(session, command, cancellation).await })
     }
 
     fn load_session_history<'a>(
@@ -114,16 +126,32 @@ impl SessionOps for MatchaRuntimeDriver {
         &'a self,
         command: SessionSendCommand,
     ) -> sessions_module::SessionFuture<'a, SessionSendOutcome> {
+        self.send_session_cancellable(command, CancellationToken::new())
+    }
+
+    fn send_session_cancellable<'a>(
+        &'a self,
+        command: SessionSendCommand,
+        cancellation: CancellationToken,
+    ) -> sessions_module::SessionFuture<'a, SessionSendOutcome> {
         let session = self.session_handle();
-        Box::pin(async move { send_session_with_handle(session, command).await })
+        Box::pin(async move { send_session_with_handle(session, command, cancellation).await })
     }
 
     fn select_session_model<'a>(
         &'a self,
         command: ResolvedSessionModelSelection,
     ) -> sessions_module::SessionFuture<'a, SessionModelSelectionOutcome> {
+        self.select_session_model_cancellable(command, CancellationToken::new())
+    }
+
+    fn select_session_model_cancellable<'a>(
+        &'a self,
+        command: ResolvedSessionModelSelection,
+        cancellation: CancellationToken,
+    ) -> sessions_module::SessionFuture<'a, SessionModelSelectionOutcome> {
         let session = self.session_handle();
-        Box::pin(async move { select_session_model_with_handle(session, command).await })
+        Box::pin(async move { select_session_model_with_handle(session, command, cancellation).await })
     }
 
     fn session_permission<'a>(
@@ -225,6 +253,7 @@ pub(super) async fn respond_to_approval_with_handle(
 pub(super) async fn select_session_model_with_handle(
     session: MatchaPeerSessionHandle,
     command: ResolvedSessionModelSelection,
+    cancellation: CancellationToken,
 ) -> SessionModelSelectionOutcome {
     let trace_id = command.trace_id.as_deref();
     let diagnostic = &command.diagnostic;
@@ -302,7 +331,7 @@ pub(super) async fn select_session_model_with_handle(
                 );
             }
         };
-    let outcome = match session.set_session_model(params).await {
+    let outcome = match session.set_session_model_cancellable(params, &cancellation).await {
         InvocationOutcome::Succeeded(_) => SessionModelSelectionOutcome::Succeeded {
             model_state: sessions_module::state::SessionModelState::selected_from_ref(
                 model.as_str(),
@@ -317,9 +346,8 @@ pub(super) async fn select_session_model_with_handle(
         InvocationOutcome::TargetRejected(_) => SessionModelSelectionOutcome::target_rejected(
             SessionModelSelectionRejection::RuntimeTargetRejected,
         ),
-        InvocationOutcome::Cancelled | InvocationOutcome::Unknown => {
-            SessionModelSelectionOutcome::OutcomeUnknown
-        }
+        InvocationOutcome::Cancelled => SessionModelSelectionOutcome::Unavailable,
+        InvocationOutcome::Unknown => SessionModelSelectionOutcome::OutcomeUnknown,
     };
     session_trace::log(
         "runtime.matcha.model-selection.set-model.outcome",
@@ -337,6 +365,7 @@ pub(super) async fn select_session_model_with_handle(
 pub(super) async fn send_model_runtime_command(
     session: MatchaPeerSessionHandle,
     command: &SessionSendCommand,
+    cancellation: CancellationToken,
 ) -> Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome> {
     let Some(session_id) = command
         .endpoint_session_id
@@ -345,10 +374,12 @@ pub(super) async fn send_model_runtime_command(
     else {
         return Err(SessionSendOutcome::Rejected);
     };
-    let session = session
-        .load_session(session_id)
-        .await
-        .map_err(session_adapter::load_session_failure_outcome)?;
+    let session = match session.load_session_cancellable(session_id, &cancellation).await {
+        InvocationOutcome::Succeeded(session) => session,
+        InvocationOutcome::TargetRejected(error) => return Err(session_adapter::load_session_failure_outcome(error)),
+        InvocationOutcome::Cancelled => return Err(SessionSendOutcome::Unavailable),
+        InvocationOutcome::Unknown => return Err(SessionSendOutcome::Unknown),
+    };
     if !matches!(
         session.worker_state,
         crate::session::model::WorkerRuntimeState::Unloaded { .. }
@@ -461,23 +492,11 @@ pub(super) async fn load_session_history(
         .and_then(|limit| usize::try_from(limit).ok())
         .unwrap_or(HydrationWindowRequest::MAX_LIMIT);
     let request = HydrationWindowRequest::new(HydrationWindowMode::Latest, limit, None);
-    match session
-        .load_local_history(session_id.clone(), request)
-        .await
-    {
-        HistoryResult::Complete(snapshot) => {
-            return SessionHistoryOutcome::Loaded(project_matcha_hydration(&snapshot));
-        }
-        HistoryResult::NotFound | HistoryResult::Unavailable => {}
-        HistoryResult::Unknown | HistoryResult::Incomplete(_) => {
-            return SessionHistoryOutcome::Failed(SessionHistoryFailure::Protocol);
-        }
-    }
-    let result = session.read_canonical_session(session_id, request).await;
+    let result = session.load_history(session_id, request).await;
     match result {
-        HistoryResult::Complete(facts) => SessionHistoryOutcome::Loaded(project_matcha_hydration(
-            CanonicalSessionAssembler::project(&facts).transcript(),
-        )),
+        HistoryResult::Complete(snapshot) => {
+            SessionHistoryOutcome::Loaded(project_matcha_hydration(&snapshot))
+        }
         HistoryResult::Unavailable => {
             SessionHistoryOutcome::Failed(SessionHistoryFailure::Unavailable)
         }
@@ -510,6 +529,7 @@ fn project_matcha_hydration(snapshot: &HydrationSnapshot) -> SessionHistoryView 
 pub(super) async fn send_session_with_handle(
     session: MatchaPeerSessionHandle,
     command: SessionSendCommand,
+    cancellation: CancellationToken,
 ) -> SessionSendOutcome {
     if command.intent.is_some() {
         return SessionSendOutcome::Unsupported;
@@ -525,7 +545,7 @@ pub(super) async fn send_session_with_handle(
         Ok(params) => params,
         Err(()) => return SessionSendOutcome::Rejected,
     };
-    match session.prompt_session(params).await {
+    match session.prompt_session_cancellable(params, &cancellation).await {
         InvocationOutcome::Succeeded(result) => SessionSendOutcome::Succeeded {
             run_id: result.run_id.as_str().to_owned(), status: SessionSendStatus::Started,
             goal: None,
@@ -535,6 +555,7 @@ pub(super) async fn send_session_with_handle(
                 || serde_json::json!({ "error": session_adapter::app_server_client_error_kind(error) }));
             SessionSendOutcome::Rejected
         }
-        InvocationOutcome::Cancelled | InvocationOutcome::Unknown => SessionSendOutcome::Unknown,
+        InvocationOutcome::Cancelled => SessionSendOutcome::Unavailable,
+        InvocationOutcome::Unknown => SessionSendOutcome::Unknown,
     }
 }

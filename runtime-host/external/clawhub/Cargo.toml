@@ -9,7 +9,9 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+foundation = { version = "0.1.0", path = "../../foundation" }
 reqwest.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true

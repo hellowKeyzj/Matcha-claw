@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
+import { isSessionTraceEnabled, logSessionTrace, readTraceHeader } from './sessions/trace';
 
 const LOOPBACK_ORIGIN = 'http://127.0.0.1';
 const DECISION_TTL_MS = 30_000;
@@ -32,6 +33,10 @@ export type LoopbackJsonResponse = Readonly<{
   body: unknown;
 }>;
 
+export type LoopbackJsonDelivery =
+  | Readonly<{ outcome: 'response'; response: LoopbackJsonResponse }>
+  | Readonly<{ outcome: 'not-attempted' | 'unknown'; reason?: 'invalid_response' | 'observation_interrupted' }>;
+
 export function loopbackUrl(
   port: number,
   path: string,
@@ -61,11 +66,25 @@ export function decisionHeaders(
 export async function sendLoopbackJson(
   request: LoopbackJsonRequest,
 ): Promise<LoopbackJsonResponse | null> {
+  const delivery = await sendLoopbackJsonDelivery(request);
+  return delivery.outcome === 'response' ? delivery.response : null;
+}
+
+export async function sendLoopbackJsonDelivery(
+  request: LoopbackJsonRequest,
+): Promise<LoopbackJsonDelivery> {
   const timeout = request.timeoutMs === undefined
     ? undefined
     : createRequestTimeout(request.timeoutMs, request.signal);
+  const traceId = isSessionTraceEnabled()
+    && request.path === '/api/skills/capability/execute'
+    && request.decision.capability === 'clawhub.openPath'
+    ? readTraceHeader(request.headers ?? {}) : null;
+  let attempted = false;
+  let phase = 'prepare';
   try {
-    const response = await request.fetcher(loopbackUrl(request.port, request.path, request.query), {
+    const url = loopbackUrl(request.port, request.path, request.query);
+    const init = {
       method: request.method,
       headers: {
         ...decisionHeaders(request.issuer, request.decision),
@@ -75,10 +94,26 @@ export async function sendLoopbackJson(
       },
       ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
       signal: timeout?.signal ?? request.signal,
-    });
-    return { status: response.status, body: await response.json() };
-  } catch {
-    return null;
+    };
+    attempted = true;
+    phase = 'fetch';
+    logSessionTrace('skill.open-path.loopback.dispatch', traceId);
+    const response = await request.fetcher(url, init);
+    logSessionTrace('skill.open-path.loopback.headers', traceId, () => ({ status: response.status }));
+    phase = 'decode-response';
+    return { outcome: 'response', response: { status: response.status, body: await response.json() } };
+  } catch (error) {
+    logSessionTrace('skill.open-path.loopback.failed', traceId, () => ({
+      phase,
+      attempted,
+      category: error instanceof SyntaxError ? 'invalid-json'
+        : error instanceof Error && error.name === 'AbortError' ? 'aborted'
+        : error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'transport-error',
+    }));
+    const reason = phase === 'decode-response' && error instanceof SyntaxError ? 'invalid_response'
+      : error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
+        ? 'observation_interrupted' : undefined;
+    return { outcome: attempted ? 'unknown' : 'not-attempted', ...(reason ? { reason } : {}) };
   } finally {
     timeout?.close();
   }

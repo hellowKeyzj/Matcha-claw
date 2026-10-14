@@ -23,7 +23,7 @@ enum Next {
     Request(Option<TeamRunCoordinatorRequest>),
 }
 
-struct TeamRunSupervisor {
+pub(super) struct TeamRunSupervisor {
     run_actors: TeamRunActors,
     receipt_router: TeamRunReceiptRouter,
 }
@@ -47,6 +47,9 @@ impl TeamRunSupervisor {
             "clockUnit": "milliseconds",
             "retryDeferred": retry_deferred,
         }));
+        if retry_deferred {
+            self.run_actors.retry_settlements(input, &mut self.receipt_router).await;
+        }
         match input.organization.active_run_ids().await {
             Ok(run_ids) => {
                 runtime_trace("runtime.team_run.active_runs.result", || json!({
@@ -63,6 +66,14 @@ impl TeamRunSupervisor {
         }
     }
 
+    pub(super) async fn retry_settlements(&mut self, input: &TeamRunCoordinatorInput) {
+        self.run_actors.retry_settlements(input, &mut self.receipt_router).await;
+    }
+
+    pub(super) fn has_pending_settlements(&self) -> bool {
+        self.run_actors.has_pending_settlements()
+    }
+
     async fn cancel_and_join(&mut self, input: &TeamRunCoordinatorInput) {
         self.run_actors
             .cancel_and_join(input, &mut self.receipt_router)
@@ -75,7 +86,7 @@ pub(super) async fn run<T: Send + Sync + 'static>(
     mut admission_changes: tokio::sync::watch::Receiver<T>,
     mut requests: mpsc::Receiver<TeamRunCoordinatorRequest>,
     cancellation: CancellationToken,
-) {
+) -> TeamRunSupervisor {
     let mut requests_open = true;
     let mut schedule_changes = input.organization.subscribe_schedule_changes();
     let mut team_trigger_cron = TeamTriggerCron::default();
@@ -104,7 +115,7 @@ pub(super) async fn run<T: Send + Sync + 'static>(
             Next::Shutdown => {
                 supervisor.cancel_and_join(&input).await;
                 runtime_trace("runtime.team_run.coordinator.stopped", || json!({}));
-                return;
+                return supervisor;
             }
             Next::Tick => {
                 runtime_trace("runtime.team_run.coordinator.wake", || json!({
@@ -126,6 +137,7 @@ pub(super) async fn run<T: Send + Sync + 'static>(
                     "runHash": wake.run_id().map(|id| identifier_hash(id.as_str())),
                     "admitted": input.admission.is_admitted(),
                 }));
+                supervisor.retry_settlements(&input).await;
                 if input.admission.is_admitted() {
                     supervisor
                         .wake_active_runs(&input, now_millis(), false)
@@ -144,6 +156,7 @@ pub(super) async fn run<T: Send + Sync + 'static>(
                 }
             }
             Next::Request(Some(TeamRunCoordinatorRequest::RecoverMaterializationReceipts)) => {
+                supervisor.run_actors.retry_settlements(&input, &mut supervisor.receipt_router).await;
                 if input.admission.is_admitted() {
                     let _ = input.organization.recover_materialization_receipts().await;
                 }
@@ -196,6 +209,7 @@ async fn reconcile(
     if !input.admission.is_admitted() {
         return;
     }
+    input.organization.retry_terminal_deliveries();
     let now = now_millis();
     reconcile_team_trigger_cron(input, team_trigger_cron, now).await;
     supervisor.wake_active_runs(input, now, true).await;

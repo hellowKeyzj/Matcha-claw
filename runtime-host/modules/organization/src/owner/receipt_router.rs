@@ -45,6 +45,7 @@ impl ActivityReceiptStatus {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct ActivityReceipt {
     pub(super) run_id: GraphRunId,
     pub(super) activity_id: ActivityId,
@@ -86,11 +87,11 @@ impl TeamRunReceiptRouter {
     pub(super) async fn route_activity_receipt(
         &mut self,
         input: &TeamRunCoordinatorInput,
-        receipt: ActivityReceipt,
+        receipt: &ActivityReceipt,
     ) -> ActivityReceiptStatus {
         let status = match input
             .organization
-            .settle_activity(receipt.run_id.clone(), receipt.claim, receipt.outcome)
+            .settle_activity(receipt.run_id.clone(), receipt.claim.clone(), receipt.outcome.clone())
             .await
         {
             Ok(Ok(outcome)) => ActivityReceiptStatus::from_activity_outcome(&outcome),
@@ -98,9 +99,9 @@ impl TeamRunReceiptRouter {
             Ok(Err(_)) | Err(_) => ActivityReceiptStatus::ActivityError,
         };
         self.record(ActivityReceiptObservation {
-            run_id: receipt.run_id,
-            activity_id: receipt.activity_id,
-            delivery_id: receipt.delivery_id,
+            run_id: receipt.run_id.clone(),
+            activity_id: receipt.activity_id.clone(),
+            delivery_id: receipt.delivery_id.clone(),
             status,
         });
         status

@@ -14,7 +14,7 @@ use crate::{
 const STATE_FILE: &str = "settings-desired.v1.json";
 const MAX_STATE_BYTES: u64 = 64 * 1024;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedDesired {
     revision: u64,
@@ -176,18 +176,20 @@ impl DesiredState {
             );
         }
 
-        self.persisted.revision = self.persisted.revision.saturating_add(1);
-        self.persisted.browser_mode = PersistedBrowserMode::from_domain(desired.browser_mode);
-        self.persisted.proxy = PersistedProxy::from_domain(desired.proxy);
-        self.persisted.launch_at_startup = desired.launch_at_startup;
-        self.persisted.gateway_auto_start = desired.gateway_auto_start;
-        self.persisted.effect = PersistedEffect::Pending;
-        remember(&mut self.persisted.correlations, &correlation);
+        let mut candidate = self.persisted.clone();
+        candidate.revision = candidate.revision.saturating_add(1);
+        candidate.browser_mode = PersistedBrowserMode::from_domain(desired.browser_mode);
+        candidate.proxy = PersistedProxy::from_domain(desired.proxy);
+        candidate.launch_at_startup = desired.launch_at_startup;
+        candidate.gateway_auto_start = desired.gateway_auto_start;
+        candidate.effect = PersistedEffect::Pending;
+        remember(&mut candidate.correlations, &correlation);
 
-        if persist(&self.state_dir, &self.persisted).is_err() {
+        if persist(&self.state_dir, &candidate).is_err() {
             return (self.persisted.revision, Some(Outcome::Unknown));
         }
 
+        self.persisted = candidate;
         (self.persisted.revision, None)
     }
 
@@ -350,10 +352,13 @@ fn load(state_dir: &Path) -> Result<PersistedDesired, StateFileError> {
     if temporary.exists() {
         let _ = fs::remove_file(&temporary);
     }
-    if !path.exists() {
-        return Ok(PersistedDesired::default());
-    }
-    let metadata = fs::metadata(&path).map_err(|_| StateFileError::CannotRead)?;
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PersistedDesired::default());
+        }
+        Err(_) => return Err(StateFileError::CannotRead),
+    };
     if !metadata.is_file() || metadata.len() > MAX_STATE_BYTES {
         return Err(StateFileError::CannotRead);
     }

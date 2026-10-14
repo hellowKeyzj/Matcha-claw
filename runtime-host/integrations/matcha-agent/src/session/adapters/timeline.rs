@@ -1,6 +1,6 @@
 use super::*;
 use sessions_module::state::{
-    ApprovalPhase, ApprovalView, ItemStatus, MissingFact, OmissionReason, RunPhase, RuntimeView,
+    ItemStatus, MissingFact, OmissionReason, RunPhase, RuntimeView,
     SessionCompleteness, SessionContent, SessionFact, SessionIdentity, SessionItem,
     SessionView, SessionWindow, ToolPhase, ToolView,
 };
@@ -21,49 +21,12 @@ pub(super) async fn load_matcha_timeline(
         session_timeline::Direction::Newer => HydrationWindowMode::Newer,
     };
     let request = HydrationWindowRequest::new(mode, command.limit(), command.offset());
-    let local_history = session
-        .load_local_history(session_id.clone(), request)
-        .await;
-    match local_history {
-        HistoryResult::Complete(snapshot) => {
-            let identity = command.identity().clone();
-            if identity.validate().is_err() {
-                return session_timeline::Outcome::unavailable(
-                    session_timeline::UnavailableReason::MatchaIdentityInvalid,
-                );
-            };
-            return project_matcha_hydration_view(
-                &identity,
-                command.endpoint_session_id().map(str::to_owned),
-                &snapshot,
-                epoch,
-            )
-            .map(session_timeline::Outcome::Incomplete)
-            .unwrap_or_else(|| {
-                session_timeline::Outcome::unavailable(
-                    session_timeline::UnavailableReason::MatchaProjectionInvalid,
-                )
-            });
-        }
+    let snapshot = match session.load_history(session_id, request).await {
+        HistoryResult::Complete(snapshot) => snapshot,
         HistoryResult::Incomplete(reason) => {
             return session_timeline::Outcome::unavailable_with_diagnostic(
                 session_timeline::UnavailableReason::MatchaReadIncomplete,
-                matcha_hydration_diagnostic("matcha.local-history", reason),
-            );
-        }
-        HistoryResult::Unknown => {
-            return session_timeline::Outcome::unavailable(
-                session_timeline::UnavailableReason::MatchaReadUnknown,
-            );
-        }
-        HistoryResult::NotFound | HistoryResult::Unavailable => {}
-    }
-    let facts = match session.read_canonical_session(session_id, request).await {
-        HistoryResult::Complete(facts) => facts,
-        HistoryResult::Incomplete(reason) => {
-            return session_timeline::Outcome::unavailable_with_diagnostic(
-                session_timeline::UnavailableReason::MatchaReadIncomplete,
-                matcha_hydration_diagnostic("matcha.canonical", reason),
+                matcha_hydration_diagnostic("matcha.transcript", reason),
             );
         }
         HistoryResult::NotFound => {
@@ -88,10 +51,10 @@ pub(super) async fn load_matcha_timeline(
             session_timeline::UnavailableReason::MatchaIdentityInvalid,
         );
     };
-    project_matcha_view(
+    project_matcha_hydration_view(
         &identity,
         command.endpoint_session_id().map(str::to_owned),
-        &facts,
+        &snapshot,
         epoch,
     )
     .map(session_timeline::Outcome::Incomplete)
@@ -112,7 +75,7 @@ pub(super) async fn load_matcha_content(
         );
     };
     match session
-        .load_local_history_content(
+        .load_history_content(
             session_id,
             command.content_ref().to_owned(),
             command.offset(),
@@ -191,101 +154,6 @@ const fn matcha_hydration_reason(
             "connection_close_failed"
         }
     }
-}
-
-fn project_matcha_view(
-    identity: &SessionIdentity,
-    endpoint_session_id: Option<String>,
-    facts: &crate::session::facts::NativeSessionFacts,
-    epoch: u64,
-) -> Option<SessionView> {
-    let projection = CanonicalSessionAssembler::project(facts);
-    let transcript = projection.transcript_window();
-    let messages = projection.transcript_messages();
-    let items = matcha_items(messages);
-    let tools = matcha_tools(messages);
-    let approvals = matcha_approvals(&projection);
-    let (phase, active_run_id) = match projection.native_worker_state() {
-        crate::session::model::WorkerRuntimeState::Running { run_id, .. } => {
-            (RunPhase::Started, Some(run_id.as_str().to_owned()))
-        }
-        crate::session::model::WorkerRuntimeState::WaitingForApproval { run_id, .. } => (
-            RunPhase::WaitingForApproval,
-            Some(run_id.as_str().to_owned()),
-        ),
-        _ if !projection.pending_approvals().is_empty() => (
-            RunPhase::WaitingForApproval,
-            projection
-                .runs()
-                .iter()
-                .rev()
-                .find(|run| {
-                    matches!(
-                        &run.status,
-                        crate::session::model::RunStatus::WaitingForApproval { .. }
-                    )
-                })
-                .map(|run| run.run_id.as_str().to_owned()),
-        ),
-        _ => {
-            let queued_run_id = projection
-                .runs()
-                .iter()
-                .rev()
-                .find(|run| matches!(&run.status, crate::session::model::RunStatus::Queued { .. }))
-                .map(|run| run.run_id.as_str().to_owned());
-
-            match queued_run_id {
-                Some(run_id) => (RunPhase::Queued, Some(run_id)),
-                None => (RunPhase::Completed, None),
-            }
-        }
-    };
-    let runtime = RuntimeView {
-        phase,
-        active_run_id,
-        issue: None,
-        run_progress: None,
-        runtime_activity: None,
-        error_detail: None,
-    };
-    let mut missing = vec![
-        MissingFact::Artifacts,
-        MissingFact::ContextTokens,
-        MissingFact::Tasks,
-        MissingFact::PartialRuntime,
-    ];
-    if projection.usage().is_none() {
-        missing.push(MissingFact::Usage);
-    }
-    let view = SessionView {
-        session_key: identity.session_key.clone(),
-        endpoint_session_id,
-        ownership: None,
-        model_state: None,
-        goal: sessions_module::goal::SessionGoalView::Unsupported,
-        identity: identity.clone(),
-        epoch,
-        seq: 0,
-        cursor: 0,
-        items: SessionFact::Complete(items),
-        tools: SessionFact::Complete(tools),
-        approvals: SessionFact::Complete(approvals),
-        runtime: SessionFact::Incomplete {
-            facts: runtime,
-            gaps: vec![MissingFact::PartialRuntime],
-        },
-        window: SessionFact::Complete(SessionWindow {
-            total_item_count: transcript.total_item_count() as u64,
-            window_start_offset: transcript.window_start_offset() as u64,
-            window_end_offset: transcript.window_end_offset() as u64,
-            has_more: transcript.has_more(),
-            has_newer: transcript.has_newer(),
-            is_at_latest: transcript.is_at_latest(),
-        }),
-        completeness: SessionCompleteness::Incomplete { missing },
-    };
-    view.validate().ok().map(|_| view)
 }
 
 pub(super) fn project_matcha_hydration_view(
@@ -525,22 +393,4 @@ const fn matcha_tool_result_phase(is_error: Option<bool>) -> ToolPhase {
     } else {
         ToolPhase::Completed
     }
-}
-
-fn matcha_approvals(
-    view: &crate::session::canonical::CanonicalSessionView<'_>,
-) -> Vec<ApprovalView> {
-    view.pending_approvals()
-        .iter()
-        .map(|approval| ApprovalView {
-            approval_id: approval.approval_id().as_str().to_owned(),
-            run_id: approval.run_id().map(|id| id.as_str().to_owned()),
-            phase: ApprovalPhase::Requested,
-            option_ids: approval
-                .option_ids()
-                .iter()
-                .map(|option| option.as_str().to_owned())
-                .collect(),
-        })
-        .collect()
 }

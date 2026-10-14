@@ -123,7 +123,7 @@ impl Store {
 
     pub(crate) fn append(
         &mut self,
-        change: CallAppend,
+        change: &CallAppend,
     ) -> Result<Option<CallChanged>, CallLogError> {
         let transaction = self.connection.transaction().map_err(persist_error)?;
         let previous = transaction
@@ -171,6 +171,7 @@ impl Store {
         } else {
             change
                 .detail
+                .as_ref()
                 .map(|detail| detail.encode())
                 .transpose()?
                 .unwrap_or_else(|| previous.2.clone())
@@ -205,7 +206,7 @@ impl Store {
         )?;
         transaction.commit().map_err(persist_error)?;
         Ok(Some(CallChanged {
-            call_id: change.call_id,
+            call_id: change.call_id.clone(),
             revision,
         }))
     }

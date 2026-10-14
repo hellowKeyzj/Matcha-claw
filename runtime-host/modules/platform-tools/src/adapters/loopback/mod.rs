@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use tokio::sync::Mutex;
@@ -37,6 +37,7 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("platform-tools"),
         vec![RouteDescriptor::bound(
             "platform-tools.loopback",
+            &[RoutePath::ExactWithQuery(AUTHORIZATION_ENDPOINT)],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

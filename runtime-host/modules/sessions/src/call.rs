@@ -73,8 +73,12 @@ impl SessionCall {
     }
 
     pub(crate) async fn running(&self) -> Result<(), platform::call::CallLogError> {
-        self.context.accepted().await?;
-        self.context.running().await
+        let result = async {
+            self.context.accepted().await?;
+            self.context.running().await
+        }.await;
+        if result.is_err() { self.rejected().await; }
+        result
     }
 
     pub(crate) async fn rejected(&self) {
@@ -100,26 +104,34 @@ fn audit_error(error: platform::call::CallLogError) {
 
 pub(crate) async fn command_parts(
     command: SessionCommand,
-) -> Result<(SessionCommand, Option<SessionCall>), ()> {
+) -> Result<(SessionCommand, Option<SessionCall>, Option<crate::owner::terminal::Producer>), ()> {
+    let (command, producer) = match command {
+        SessionCommand::Producing { command, producer } => (*command, Some(producer)),
+        command => (command, None),
+    };
     match command {
         SessionCommand::Audited { command, call } => {
             // Drop the original reply on audit failure so the handle returns admission unavailable.
             call.running().await.map_err(audit_error)?;
-            Ok((*command, Some(call)))
+            Ok((*command, Some(call), producer))
         }
-        command => Ok((command, None)),
+        command => Ok((command, None, producer)),
     }
 }
 
 pub(crate) async fn query_parts(
     query: SessionQuery,
-) -> Result<(SessionQuery, Option<SessionCall>), ()> {
+) -> Result<(SessionQuery, Option<SessionCall>, Option<crate::owner::terminal::Producer>), ()> {
+    let (query, producer) = match query {
+        SessionQuery::Producing { query, producer } => (*query, Some(producer)),
+        query => (query, None),
+    };
     match query {
         SessionQuery::Audited { query, call } => {
             call.running().await.map_err(audit_error)?;
-            Ok((*query, Some(call)))
+            Ok((*query, Some(call), producer))
         }
-        query => Ok((query, None)),
+        query => Ok((query, None, producer)),
     }
 }
 
@@ -139,6 +151,10 @@ fn reference(value: &str) -> String {
 }
 
 impl SessionsCallDetail {
+    pub(crate) fn evict(session_key: &str) -> Self {
+        Self { session_ref: Some(reference(session_key)), ..Self::default() }
+    }
+
     fn session(provider: SessionProvider, session_key: &str, native_id: Option<&str>) -> Self {
         Self {
             provider: Some(provider),
@@ -180,12 +196,9 @@ impl SessionCommand {
     pub(crate) fn call_detail(&self) -> Option<(&'static str, SessionsCallDetail)> {
         use SessionCommand::*;
         let (command, detail) = match self {
-            Evict { session_key, .. } => (
+            Evict { identity, .. } => (
                 "sessions.evict",
-                SessionsCallDetail {
-                    session_ref: Some(reference(session_key)),
-                    ..SessionsCallDetail::default()
-                },
+                SessionsCallDetail::evict(identity.session_key()),
             ),
             Create { command, .. } => (
                 "sessions.create",
@@ -249,8 +262,9 @@ impl SessionCommand {
                 "sessions.release",
                 SessionsCallDetail::session(identity.provider(), identity.session_key(), None),
             ),
-            Ensure { .. } | Ingest { .. } | SendCompleted { .. } | GoalCompleted { .. } | SyncCompleted { .. } | ObservationClosed { .. }
-            | ConfigurePrivateResolver { .. } | Audited { .. } => {
+            Ensure { .. } | Ingest { .. } | TerminalIngest { .. } | SyncTerminals { .. } | TerminalDelivered { .. }
+            | SendCompleted { .. } | GoalCompleted { .. } | SyncCompleted { .. } | ObservationClosed { .. }
+            | ConfigurePrivateResolver { .. } | Audited { .. } | Producing { .. } => {
                 return None;
             }
         };
@@ -338,7 +352,7 @@ impl SessionQuery {
                     command.endpoint_session_id(),
                 ),
             ),
-            Audited { .. } => return None,
+            Audited { .. } | Producing { .. } => return None,
         })
     }
 }

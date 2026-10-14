@@ -6,6 +6,7 @@ export type AppErrorCode =
   | 'PERMISSION'
   | 'CHANNEL_UNAVAILABLE'
   | 'UNAVAILABLE'
+  | 'INVALID_RESPONSE'
   | 'NETWORK'
   | 'CONFIG'
   | 'GATEWAY'
@@ -32,6 +33,8 @@ export function mapBackendErrorCode(code?: string): AppErrorCode {
       return 'ABORTED';
     case 'UNAVAILABLE':
       return 'UNAVAILABLE';
+    case 'INVALID_RESPONSE':
+      return 'INVALID_RESPONSE';
     case 'PERMISSION':
       return 'PERMISSION';
     case 'GATEWAY':

@@ -1,5 +1,5 @@
 import { isTraceEnabled, traceDebug } from '../../utils/trace-logger';
-import { CloudAccountClientError } from './client';
+import { CloudAccountClientError, removePackageDownload } from './client';
 import { unwrapCloudPackageDeviceEnvelope } from './device-key-store';
 import type { CloudPackageAuthorization, CloudPackageDownloadRequest, CloudPackageLocalDownload } from './types';
 import type { SealedResourceAuthorizationTransport, SealedResourceCloudPackage } from '../runtime-host-delivery/transport/sealed-resource';
@@ -252,13 +252,14 @@ export function createPackageAuthorizationLifecycle(
         throw new CloudAccountClientError(409, 'PACKAGE_INSTALL_QUEUE_FULL', 'Confirm pending package installs before installing another package');
       }
       installReservations.add(reservation);
+      let downloaded: CloudPackageLocalDownload | undefined;
       try {
         const authorization = await authorize(request);
         assertCurrent(expected);
         assertAuthorization(request.packageVersionId, request.packageType, authorization);
         const key = await unwrap(authorization);
         assertCurrent(expected);
-        const downloaded = await download({ ...request, packageType: authorization.packageType });
+        downloaded = await download({ ...request, packageType: authorization.packageType });
         assertCurrent(expected);
         if (downloaded.packageVersionId !== request.packageVersionId || !/^[a-f0-9]{64}$/i.test(downloaded.packageSha256)
           || !downloaded.filename || !downloaded.packagePath.toLowerCase().endsWith(`.matcha-${authorization.packageType}pkg`)) {
@@ -274,6 +275,9 @@ export function createPackageAuthorizationLifecycle(
         const prepared = { download: downloaded, cloudMetadata: metadata, epoch: expected, leaseExpiresAt: authorization.leaseExpiresAt };
         installReservations.add(prepared);
         return prepared;
+      } catch (error) {
+        if (downloaded) await removePackageDownload(request, downloaded);
+        throw error;
       } finally {
         installReservations.delete(reservation);
       }

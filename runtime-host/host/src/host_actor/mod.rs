@@ -51,6 +51,7 @@ pub(crate) struct Handle {
 pub(crate) struct ShutdownAttempt {
     pub(crate) result: Result<ShutdownReport, HostShutdownError>,
     pub(crate) terminal: bool,
+    pub(crate) retryable: bool,
 }
 
 impl Owner {

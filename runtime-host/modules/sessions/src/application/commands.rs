@@ -5,6 +5,7 @@ use crate::goal::{SessionGoalCommand, SessionGoalOutcome};
 use connectors::ConnectorSecretResolverPort;
 use foundation::execution::CommandRoute;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     approval::{SessionApprovalCommand, SessionApprovalOutcome},
@@ -85,11 +86,16 @@ impl SessionIngressEvent {
 pub enum SessionSendRequest {
     Session {
         command: SessionSendCommand,
+        cancellation: CancellationToken,
         reply: oneshot::Sender<SessionSendOutcome>,
     },
 }
 
 pub enum SessionCommand {
+    Producing {
+        command: Box<SessionCommand>,
+        producer: crate::owner::terminal::Producer,
+    },
     Audited {
         command: Box<SessionCommand>,
         call: crate::call::SessionCall,
@@ -109,6 +115,24 @@ pub enum SessionCommand {
         generation: u64,
         result: Result<SessionSync, RuntimeOperationFailure>,
     },
+    SyncTerminals {
+        identity: SessionIdentity,
+        generation: u64,
+        terminals: Vec<(crate::ports::SessionTerminalRun, Vec<String>)>,
+        permit: crate::owner::terminal::TerminalPermit,
+        reply: oneshot::Sender<Option<crate::state::SyncTerminalChanges>>,
+    },
+    TerminalIngest {
+        identity: SessionIdentity,
+        event: SessionEvent,
+        permit: crate::owner::terminal::TerminalPermit,
+        reply: oneshot::Sender<SessionIngestOutcome>,
+    },
+    TerminalDelivered {
+        identity: SessionIdentity,
+        run_id: String,
+        reply: oneshot::Sender<bool>,
+    },
     ObservationClosed {
         identity: SessionIdentity,
         generation: u64,
@@ -120,7 +144,7 @@ pub enum SessionCommand {
         reply: oneshot::Sender<SessionReleaseOutcome>,
     },
     Evict {
-        session_key: String,
+        identity: SessionIdentity,
         reply: oneshot::Sender<SessionEvictOutcome>,
     },
     Create {
@@ -176,16 +200,26 @@ pub enum SessionCommand {
 }
 
 impl SessionCommand {
+    pub(crate) fn requires_terminal_settlement(&self) -> bool {
+        match self {
+            Self::Audited { command, .. } | Self::Producing { command, .. } => command.requires_terminal_settlement(),
+            Self::Create { .. } | Self::Delete { .. } | Self::Evict { .. } => true,
+            _ => false,
+        }
+    }
+
     pub fn send_unavailable(self) {
         match self {
-            Self::Audited { command, .. } => command.send_unavailable(),
+            Self::Audited { command, .. } | Self::Producing { command, .. } => command.send_unavailable(),
             Self::Ensure { reply, .. } => {
                 let _ = reply.send(SessionEnsureOutcome::Failed);
             }
-            Self::Ingest { reply, .. } => {
+            Self::Ingest { reply, .. } | Self::TerminalIngest { reply, .. } => {
                 let _ = reply.send(SessionIngestOutcome::RuntimeNotFound);
             }
             Self::SyncCompleted { .. } | Self::ObservationClosed { .. } => {}
+            Self::SyncTerminals { reply, .. } => { let _ = reply.send(None); }
+            Self::TerminalDelivered { reply, .. } => { let _ = reply.send(false); }
             Self::Release { reply, .. } => {
                 let _ = reply.send(SessionReleaseOutcome::Unavailable);
             }
@@ -229,16 +263,20 @@ impl SessionCommand {
 
     pub fn route(&self) -> CommandRoute<String> {
         match self {
-            Self::Audited { command, .. } => command.route(),
-            Self::Ensure { identity, .. }
-            | Self::Ingest { identity, .. }
-            | Self::SyncCompleted { identity, .. }
-            | Self::ObservationClosed { identity, .. }
-            | Self::Release { identity, .. } => {
+            Self::Audited { command, .. } | Self::Producing { command, .. } => command.route(),
+            Self::Ensure { identity, .. } | Self::Release { identity, .. } => {
                 CommandRoute::Keyed(session_identity_lane_key(identity))
             }
-            Self::Evict { session_key, .. } => {
-                CommandRoute::Keyed(inferred_session_lane_key(session_key))
+            Self::Ingest { identity, .. }
+            | Self::SyncCompleted { identity, .. }
+            | Self::SyncTerminals { identity, .. }
+            | Self::TerminalIngest { identity, .. }
+            | Self::TerminalDelivered { identity, .. }
+            | Self::ObservationClosed { identity, .. } => {
+                CommandRoute::KeyedControl(session_identity_lane_key(identity))
+            }
+            Self::Evict { identity, .. } => {
+                CommandRoute::Keyed(session_identity_lane_key(identity))
             }
             Self::Delete {
                 command:
@@ -256,7 +294,11 @@ impl SessionCommand {
                         ..
                     },
                 ..
-            } => CommandRoute::Keyed(openclaw_agent_lane_key(agent_id, session_key)),
+            } => CommandRoute::Keyed(session_identity_lane_key(&SessionIdentity {
+                session_key: session_key.clone(),
+                endpoint: super::state::SessionEndpoint::local(SessionProvider::OpenClaw),
+                agent_id: agent_id.clone(),
+            })),
             Self::ModelSelection {
                 command:
                     super::model_selection::SessionModelSelectionCommand {
@@ -270,8 +312,11 @@ impl SessionCommand {
                 command.endpoint.provider(),
                 command.session_key(),
             )),
-            Self::Goal { command, .. } | Self::GoalCompleted { command, .. } => {
+            Self::Goal { command, .. } => {
                 CommandRoute::Keyed(session_identity_lane_key(&command.identity))
+            }
+            Self::GoalCompleted { command, .. } => {
+                CommandRoute::KeyedControl(session_identity_lane_key(&command.identity))
             }
             Self::ConfigurePrivateResolver { .. } => CommandRoute::Global,
             Self::Create { command, .. } => {
@@ -283,7 +328,7 @@ impl SessionCommand {
                 }
             },
             Self::SendCompleted { command, .. } => {
-                CommandRoute::Keyed(session_identity_lane_key(&command.identity))
+                CommandRoute::KeyedControl(session_identity_lane_key(&command.identity))
             }
             Self::Approval { command, .. } => CommandRoute::Keyed(session_lane_key(
                 command.endpoint.provider(),
@@ -305,17 +350,6 @@ pub fn inferred_session_lane_key(session_key: &str) -> String {
         session_lane_key(SessionProvider::MatchaAgent, session_key)
     } else {
         session_lane_key(SessionProvider::OpenClaw, session_key)
-    }
-}
-
-pub fn openclaw_agent_lane_key(agent_id: &str, session_key: &str) -> String {
-    if session_key.starts_with("agent:") {
-        session_lane_key(SessionProvider::OpenClaw, session_key)
-    } else {
-        session_lane_key(
-            SessionProvider::OpenClaw,
-            &format!("agent:{agent_id}:{session_key}"),
-        )
     }
 }
 

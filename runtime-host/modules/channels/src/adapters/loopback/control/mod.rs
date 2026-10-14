@@ -6,7 +6,7 @@ use platform::capability::CapabilityDecisionVerifier;
 pub mod handler;
 
 const OPERATION_ID: &str = "channels.runtime.control";
-const AUTHORIZATION_ENDPOINT: &str = "/api/channels/control";
+pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/channels/control";
 const AUTHORIZATION_SCOPE: &str = "channels:write";
 const AUTHORIZATION_SUBJECT: &str = "channel-control";
 const MAX_IDENTITY_LENGTH: usize = 128;

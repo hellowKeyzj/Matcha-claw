@@ -33,24 +33,30 @@ impl WorkspaceMedia {
         relative_path: &str,
         mime_type: &str,
     ) -> Result<WorkspaceMediaReceipt, WorkspaceMediaFailure> {
+        let (receipt, content) = Self::prepare_file(files, relative_path, mime_type)?;
+        self.store
+            .insert(session_key, receipt.handle.clone(), content)
+            .map_err(|_| WorkspaceMediaFailure::Unavailable)?;
+        Ok(receipt)
+    }
+
+    fn prepare_file(
+        files: &WorkspaceFiles,
+        relative_path: &str,
+        mime_type: &str,
+    ) -> Result<(WorkspaceMediaReceipt, Vec<u8>), WorkspaceMediaFailure> {
         let binary = files
             .read_binary(relative_path, MAX_MEDIA_BYTES)
             .map_err(WorkspaceMediaFailure::from)?;
         let mime_type = normalized_mime_type(mime_type, relative_path, &binary.content)?;
-        let handle = MediaHandle::generate()?;
-        let name = file_name(relative_path);
-        let size = binary.size;
-        let preview = image_preview(&binary.content, &mime_type);
-        self.store
-            .insert(session_key, handle.clone(), binary.content)
-            .map_err(|_| WorkspaceMediaFailure::Unavailable)?;
-        Ok(WorkspaceMediaReceipt {
-            handle,
-            name,
+        let receipt = WorkspaceMediaReceipt {
+            handle: MediaHandle::generate()?,
+            name: file_name(relative_path),
+            size: binary.size,
+            preview: image_preview(&binary.content, &mime_type),
             mime_type,
-            size,
-            preview,
-        })
+        };
+        Ok((receipt, binary.content))
     }
 
     pub(super) fn resolve(
@@ -186,10 +192,24 @@ impl WorkspaceMedia {
         files: &WorkspaceFiles,
         paths: &[WorkspaceMediaPath],
     ) -> Result<Vec<WorkspaceMediaReceipt>, WorkspaceMediaFailure> {
-        paths
+        if paths.len() > workspace_module::MAX_MEDIA_PATHS {
+            return Err(WorkspaceMediaFailure::TooLarge);
+        }
+        let prepared = paths
             .iter()
-            .map(|path| self.prepare(session_key, files, path.relative_path(), path.mime_type()))
-            .collect()
+            .map(|path| Self::prepare_file(files, path.relative_path(), path.mime_type()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (receipts, content): (Vec<_>, Vec<_>) = prepared
+            .into_iter()
+            .map(|(receipt, content)| {
+                let handle = receipt.handle.clone();
+                (receipt, (handle, content))
+            })
+            .unzip();
+        self.store
+            .insert_batch(session_key, content)
+            .map_err(|_| WorkspaceMediaFailure::Unavailable)?;
+        Ok(receipts)
     }
 
     pub fn stage_buffer(

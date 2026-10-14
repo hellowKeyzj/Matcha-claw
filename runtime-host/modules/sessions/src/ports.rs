@@ -2,6 +2,7 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use platform::endpoint::runtime_address::{RuntimeEndpoint, SessionIdentity};
 pub use runtime_directory::{LifecycleOps, RuntimeDriverIdentity};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     abort::{SessionAbortCommand, SessionAbortOutcome},
@@ -219,7 +220,21 @@ pub trait SessionOps: Send + Sync {
 
     fn send_model_runtime_command<'a>(
         &'a self,
+        command: &'a SessionSendCommand,
+    ) -> SessionFuture<
+        'a,
+        Result<
+            Option<crate::model_selection::MatchaSessionModelRuntimeCommand>,
+            SessionSendOutcome,
+        >,
+    > {
+        self.send_model_runtime_command_cancellable(command, CancellationToken::new())
+    }
+
+    fn send_model_runtime_command_cancellable<'a>(
+        &'a self,
         _command: &'a SessionSendCommand,
+        _cancellation: CancellationToken,
     ) -> SessionFuture<
         'a,
         Result<
@@ -268,9 +283,21 @@ pub trait SessionOps: Send + Sync {
         command: SessionSendCommand,
     ) -> SessionFuture<'a, SessionSendOutcome>;
 
+    fn send_session_cancellable<'a>(
+        &'a self,
+        command: SessionSendCommand,
+        cancellation: CancellationToken,
+    ) -> SessionFuture<'a, SessionSendOutcome>;
+
     fn select_session_model<'a>(
         &'a self,
         command: ResolvedSessionModelSelection,
+    ) -> SessionFuture<'a, SessionModelSelectionOutcome>;
+
+    fn select_session_model_cancellable<'a>(
+        &'a self,
+        command: ResolvedSessionModelSelection,
+        cancellation: CancellationToken,
     ) -> SessionFuture<'a, SessionModelSelectionOutcome>;
 
     fn supports_goal(&self) -> bool {
@@ -279,7 +306,15 @@ pub trait SessionOps: Send + Sync {
 
     fn mutate_session_goal<'a>(
         &'a self,
+        command: SessionGoalCommand,
+    ) -> SessionFuture<'a, SessionGoalOutcome> {
+        self.mutate_session_goal_cancellable(command, CancellationToken::new())
+    }
+
+    fn mutate_session_goal_cancellable<'a>(
+        &'a self,
         _command: SessionGoalCommand,
+        _cancellation: CancellationToken,
     ) -> SessionFuture<'a, SessionGoalOutcome> {
         Box::pin(async { SessionGoalOutcome::Unsupported })
     }

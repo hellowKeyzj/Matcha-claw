@@ -20,7 +20,7 @@ impl TeamAgents {
     pub(crate) fn resolve_external_workspaces(
         &self,
         requested: Vec<TeamOwnedAgentId>,
-    ) -> Result<TeamExternalWorkspaces, TeamInputError> {
+    ) -> Result<TeamExternalWorkspaces, organization::TeamCreationFailureReason> {
         TeamExternalWorkspaces::for_agents(&self.agents, requested)
     }
 

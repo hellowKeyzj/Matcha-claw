@@ -30,6 +30,7 @@ function buildCronJob(overrides: Partial<CronJob> = {}): CronJob {
     message: '__openclaw_memory_core_short_term_promotion_pipeline__step_overflow_check__',
     schedule: { kind: 'cron', expr: '0 3 * * *' },
     enabled: true,
+    systemManaged: false,
     createdAt: '2026-04-30T03:00:00.000Z',
     updatedAt: '2026-04-30T03:00:00.000Z',
     ...overrides,

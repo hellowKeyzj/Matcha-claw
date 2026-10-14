@@ -112,7 +112,6 @@ impl OpenClawLaunchInput {
             sealed_runtime_host,
         };
         factory.validate_spec()?;
-        #[cfg(windows)]
         crate::native_config::config_store::OpenClawConfigStore::new(factory.state_dir.clone())
             .ensure_canonical_document()
             .map_err(|_| LaunchError::InvalidInput)?;

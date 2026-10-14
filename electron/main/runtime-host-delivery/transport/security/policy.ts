@@ -369,8 +369,11 @@ function isBoundedOperationResponse(
     case 'security.quickAudit':
       return hasExactKeys(value, ['backend', 'startupAudit', 'integrity', 'skillScan', 'advisories'])
         && isStartupAudit(value.startupAudit)
+        && isExactRecord(value.integrity, ['checked', 'tampered', 'missing', 'noBaseline', 'items'])
         && isIntegrity(value.integrity)
+        && isExactRecord(value.skillScan, ['total', 'suspicious', 'clean', 'skills'])
         && isSkillScan(value.skillScan)
+        && isExactRecord(value.advisories, ['reachable', 'advisories', 'criticalOrHigh'])
         && isAdvisories(value.advisories);
     case 'security.checkIntegrity':
       return hasExactKeys(value, ['backend', 'checked', 'tampered', 'missing', 'noBaseline', 'items'])
@@ -411,7 +414,6 @@ function isStartupAudit(value: unknown): boolean {
 
 function isIntegrity(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['checked', 'tampered', 'missing', 'noBaseline', 'items'])
     && isBoundedCount(value.checked)
     && isBoundedCount(value.tampered)
     && isBoundedCount(value.missing)
@@ -428,7 +430,6 @@ function isIntegrityItem(value: unknown): boolean {
 
 function isSkillScan(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['total', 'suspicious', 'clean', 'skills'])
     && isBoundedCount(value.total)
     && isBoundedCount(value.suspicious)
     && isBoundedCount(value.clean)
@@ -452,7 +453,6 @@ function isSkillIssue(value: unknown): boolean {
 
 function isAdvisories(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['reachable', 'advisories', 'criticalOrHigh'])
     && typeof value.reachable === 'boolean'
     && isBoundedArray(value.advisories, isAdvisory)
     && isBoundedArray(value.criticalOrHigh, isAdvisory);

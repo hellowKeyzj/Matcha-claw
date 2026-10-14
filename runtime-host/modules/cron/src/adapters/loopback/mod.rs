@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor, RouteFuture,
-        RouteHeadPlan,
+        RouteHeadPlan, RoutePath,
     },
 };
 use tokio::sync::Mutex;
@@ -31,6 +31,16 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("cron"),
         vec![RouteDescriptor::bound(
             "cron.loopback",
+            &[
+                RoutePath::ExactWithQuery(wire::LIST_PATH),
+                RoutePath::ExactWithQuery(wire::CREATE_PATH),
+                RoutePath::ExactWithQuery(wire::UPDATE_PATH),
+                RoutePath::ExactWithQuery(wire::DELETE_PATH),
+                RoutePath::ExactWithQuery(wire::TOGGLE_PATH),
+                RoutePath::ExactWithQuery(wire::TRIGGER_PATH),
+                RoutePath::ExactWithQuery(wire::SESSION_HISTORY_PATH),
+                RoutePath::ExactWithQuery(wire::RESULT_PATH),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

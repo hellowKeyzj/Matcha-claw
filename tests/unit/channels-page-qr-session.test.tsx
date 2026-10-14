@@ -665,7 +665,7 @@ describe('Channels page QR session lifecycle', () => {
       const deleteButton = document.querySelector('button.text-destructive');
       expect(deleteButton).toBeInstanceOf(HTMLButtonElement);
       fireEvent.click(deleteButton as HTMLButtonElement);
-      expect(screen.getByText('Are you sure you want to delete this channel?')).toBeInTheDocument();
+      expect(screen.getByText('Are you sure you want to delete this channel and all its accounts?')).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 
       await waitFor(() => {
@@ -698,12 +698,12 @@ describe('Channels page QR session lifecycle', () => {
       const deleteButton = document.querySelector('button.text-destructive');
       expect(deleteButton).toBeInstanceOf(HTMLButtonElement);
       fireEvent.click(deleteButton as HTMLButtonElement);
-      expect(screen.getByText('Are you sure you want to delete this channel?')).toBeInTheDocument();
+      expect(screen.getByText('Are you sure you want to delete this channel and all its accounts?')).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 
       await waitFor(() => {
         expect(hostChannelsDeleteConfigMock).toHaveBeenCalledWith('feishu', undefined, { traceId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i) });
-        expect(screen.queryByText('Are you sure you want to delete this channel?')).not.toBeInTheDocument();
+        expect(screen.queryByText('Are you sure you want to delete this channel and all its accounts?')).not.toBeInTheDocument();
       });
       expect(screen.getByText('Feishu', { exact: true })).toBeInTheDocument();
       expect(screen.getByText(`Channel deletion outcome was ${outcome}`)).toBeInTheDocument();

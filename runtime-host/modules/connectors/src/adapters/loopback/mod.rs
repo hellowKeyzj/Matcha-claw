@@ -7,7 +7,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use serde_json::{Value, json};
@@ -44,6 +44,10 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("connectors"),
         vec![RouteDescriptor::bound(
             "connectors.loopback",
+            &[
+                RoutePath::ExactWithQuery(external::ENDPOINT),
+                RoutePath::ExactWithQuery(openclaw_mcp_servers::ENDPOINT),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

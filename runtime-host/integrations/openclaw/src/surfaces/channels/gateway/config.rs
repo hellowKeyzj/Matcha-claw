@@ -518,7 +518,9 @@ impl ChannelConfigOperation {
                 .await;
             if !matches!(
                 outcome,
-                DeleteConfigOutcome::Confirmed | DeleteConfigOutcome::Noop
+                DeleteConfigOutcome::Confirmed
+                    | DeleteConfigOutcome::Noop
+                    | DeleteConfigOutcome::RestartRequired
             ) {
                 return outcome;
             }
@@ -535,6 +537,7 @@ impl ChannelConfigOperation {
             })
             .await
             {
+                Ok(Ok(())) if matches!(outcome, DeleteConfigOutcome::RestartRequired) => outcome,
                 Ok(Ok(())) => DeleteConfigOutcome::Confirmed,
                 Ok(Err(())) => DeleteConfigOutcome::Unknown,
                 Err(_) => {

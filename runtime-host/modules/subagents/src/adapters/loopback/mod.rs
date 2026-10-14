@@ -5,7 +5,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use serde::Deserialize;
@@ -69,6 +69,12 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("subagents"),
         vec![RouteDescriptor::bound(
             "subagents.loopback",
+            &[
+                RoutePath::ExactWithQuery(AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(results::ENDPOINT),
+                RoutePath::ExactWithQuery(results::PRIVATE_ENDPOINT),
+                RoutePath::Prefix(SEALED_AGENT_READ_ENDPOINT_PREFIX),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

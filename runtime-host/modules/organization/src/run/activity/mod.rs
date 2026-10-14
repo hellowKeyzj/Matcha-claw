@@ -6,6 +6,7 @@ mod transition;
 pub use ledger::{
     ActivityLedger, ActivityLedgerSnapshot, ActivityRegistrationOutcome, RestoreActivityLedgerError,
 };
+pub(crate) use model::SettlementProof;
 pub use model::{
     Activity, ActivityClaim, ActivityDispatch, ActivityFailure, ActivityId, ActivityIdError,
     ActivityKind, ActivityPhase, ActivityRequest, ActivityRequestError, ActivityTarget,

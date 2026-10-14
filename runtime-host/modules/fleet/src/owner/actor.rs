@@ -1835,6 +1835,20 @@ impl OwnerSpec for FleetOwner {
             }
         };
         match command {
+            FleetCommand::PutTarget { id, config, reply } => {
+                let result = owner.put_target(id, config);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
+            }
+            FleetCommand::RemoveTarget { id, reply } => {
+                let result = owner.remove_target(&id);
+                if let Some(call) = &call {
+                    call.finish(&result).await;
+                }
+                let _ = reply.send(result);
+            }
             FleetCommand::TerminalProviderOpen {
                 target_id,
                 context,
@@ -2428,19 +2442,8 @@ impl OwnerSpec for FleetOwner {
                 }
                 let _ = reply.send(result);
             }
-            FleetCommand::PutTarget { id, config, reply } => {
-                let result = global.put_target(id, config);
-                if let Some(call) = &call {
-                    call.finish(&result).await;
-                }
-                let _ = reply.send(result);
-            }
-            FleetCommand::RemoveTarget { id, reply } => {
-                let result = global.remove_target(&id);
-                if let Some(call) = &call {
-                    call.finish(&result).await;
-                }
-                let _ = reply.send(result);
+            FleetCommand::PutTarget { .. } | FleetCommand::RemoveTarget { .. } => {
+                unreachable!("Fleet target mutations are keyed")
             }
             FleetCommand::Submit { request, reply } => {
                 let result = global.submit(request, now);
@@ -3307,6 +3310,12 @@ fn send_query_delivery_error(query: FleetQuery, error: FleetDeliveryError) {
 
 fn send_keyed_delivery_error(command: FleetCommand, error: FleetDeliveryError) {
     match command {
+        FleetCommand::PutTarget { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        FleetCommand::RemoveTarget { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
         FleetCommand::TerminalProviderOpen { reply, .. } => {
             let _ = reply.send(Err(()));
         }

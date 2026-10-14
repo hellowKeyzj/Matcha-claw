@@ -1,12 +1,13 @@
 mod decode;
 mod model;
 
+#[cfg(test)]
 use std::collections::VecDeque;
 
 use crate::session::{
     client::{AppServerClient, AppServerClientError, EventReplay, EventReplayPayload},
     facts::NativeSessionFacts,
-    model::{Sequence, SessionId, SessionRecord},
+    model::{Sequence, SessionId, SessionRecord, SessionTranscriptResult},
     protocol_event::ReplayLimit,
     request::{SessionSnapshotParams, SessionTranscriptParams},
 };
@@ -20,18 +21,6 @@ pub use model::{
 
 const REPLAY_PAGE_LIMIT: f64 = 128.0;
 
-pub(crate) async fn hydrate_connected_for_history(
-    client: &AppServerClient,
-    session: SessionRecord,
-    request: HydrationWindowRequest,
-) -> HydrationResult {
-    let session_id = session.session_id.clone();
-    match hydrate_loaded(client, session, session_id, request).await {
-        Ok(facts) => HydrationResult::Complete(facts.transcript().clone()),
-        Err(reason) => HydrationResult::Incomplete(reason),
-    }
-}
-
 pub(crate) async fn hydrate_connected_for_canonical(
     client: &AppServerClient,
     session: SessionRecord,
@@ -41,6 +30,68 @@ pub(crate) async fn hydrate_connected_for_canonical(
     hydrate_loaded(client, session, session_id, request).await
 }
 
+pub(crate) fn hydrate_page(
+    transcript: &SessionTranscriptResult,
+) -> Result<HydrationSnapshot, HydrationIncomplete> {
+    decode_transcript_page(transcript).map_err(|rejection| {
+        sessions_module::trace::log_unscoped("runtime.matcha.hydration.rejected", || {
+            serde_json::json!({
+                "messageIndex": rejection.message_index(),
+                "blockIndex": rejection.block_index(),
+                "blockType": rejection.block_type(),
+                "field": rejection.field(),
+                "reason": rejection.reason(),
+                "actual": rejection.actual(),
+            })
+        });
+        HydrationIncomplete::TranscriptRejected(rejection)
+    })
+}
+
+fn decode_transcript_page(
+    transcript: &SessionTranscriptResult,
+) -> Result<HydrationSnapshot, TranscriptRejection> {
+    let window = transcript.window;
+    let start = window.window_start_offset;
+    let end = window.window_end_offset;
+    if window.total_item_count as u64 > 9_007_199_254_740_991
+        || start > end
+        || end > window.total_item_count
+        || end - start > HydrationWindowRequest::MAX_LIMIT
+        || transcript.lines.len() != end - start
+    {
+        return Err(TranscriptRejection::new(
+            None, None, None, "transcript.window", model::DecodeFailure::InvalidShape,
+            "invalid_page_range",
+        ));
+    }
+    if transcript.lines.iter().map(String::len).sum::<usize>() > 512 * 1024 {
+        return Err(TranscriptRejection::new(
+            None, None, None, "transcript.lines", model::DecodeFailure::TranscriptTooLarge,
+            "page_bytes_too_large",
+        ));
+    }
+    let mut messages = Vec::with_capacity(transcript.lines.len());
+    for (index, line) in transcript.lines.iter().enumerate() {
+        let source_index = start + index;
+        let message = decode::decode_transcript_line(line).map_err(|failure| {
+            TranscriptRejection::new(
+                Some(source_index), failure.block_index(), failure.block_type(),
+                failure.field(), failure.reason(), failure.actual(),
+            )
+        })?.ok_or_else(|| TranscriptRejection::new(
+            Some(source_index), None, None, "message.content", model::DecodeFailure::EmptyContent,
+            "empty_page_item",
+        ))?;
+        messages.push(message.with_source_index(source_index));
+    }
+    Ok(HydrationSnapshot::new(
+        messages,
+        HydrationWindow::new(window.total_item_count, start, end),
+    ))
+}
+
+#[cfg(test)]
 pub(crate) fn hydrate_lines(
     lines: &[String],
     request: HydrationWindowRequest,
@@ -57,14 +108,14 @@ async fn hydrate_loaded(
     request: HydrationWindowRequest,
 ) -> Result<NativeSessionFacts, HydrationIncomplete> {
     let transcript = match client
-        .transcript_session(SessionTranscriptParams::new(session_id.clone()))
+        .transcript_session(SessionTranscriptParams::new(session_id.clone()).with_window(request))
         .await
     {
         Ok(transcript) => transcript,
         Err(error) => return Err(client_failure(error)),
     };
     let snapshot = match client
-        .snapshot_session(SessionSnapshotParams::new(session_id.clone()))
+        .snapshot_session(SessionSnapshotParams::new(session_id.clone()).without_messages())
         .await
     {
         Ok(snapshot) if snapshot.session.session_id == session_id => snapshot,
@@ -73,11 +124,7 @@ async fn hydrate_loaded(
     };
     let replay = replay_to_snapshot(&session_id, snapshot.session.last_seq, client).await?;
 
-    let (messages, window) = match decode_transcript_window(&transcript.lines, request) {
-        Ok(window) => window,
-        Err(rejection) => return Err(HydrationIncomplete::TranscriptRejected(rejection)),
-    };
-    let transcript = HydrationSnapshot::new(messages, window);
+    let transcript = hydrate_page(&transcript)?;
     let facts = NativeSessionFacts::from_native(session, snapshot, transcript.clone(), replay)
         .map_err(|_| HydrationIncomplete::ProtocolRejected)?;
     Ok(facts)
@@ -152,9 +199,11 @@ fn client_failure(error: AppServerClientError) -> HydrationIncomplete {
 
 const MAX_TRANSCRIPT_LINES: usize = 10_000;
 
+#[cfg(test)]
 type DecodedTranscriptWindow =
     Result<(Vec<model::HydratedMessage>, HydrationWindow), TranscriptRejection>;
 
+#[cfg(test)]
 fn decode_transcript_window(
     lines: &[String],
     request: HydrationWindowRequest,
@@ -233,6 +282,7 @@ fn decode_transcript_window(
     Ok((messages, HydrationWindow::new(decoded_count, start, end)))
 }
 
+#[cfg(test)]
 fn window_bounds(total: usize, request: HydrationWindowRequest) -> (usize, usize) {
     let limit = request.limit();
     match request.mode() {

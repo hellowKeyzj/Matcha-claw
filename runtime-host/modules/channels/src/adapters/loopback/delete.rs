@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use platform::capability::CapabilityDecisionVerifier;
 
 const OPERATION_ID: &str = "channels.config.delete";
-const AUTHORIZATION_ENDPOINT: &str = "/api/channels/delete-config";
+pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/channels/delete-config";
 const AUTHORIZATION_SCOPE: &str = "channels:write";
 const AUTHORIZATION_SUBJECT: &str = "channel-config-delete";
 const MAX_IDENTITY_LENGTH: usize = 128;

@@ -4,23 +4,28 @@ use crate::session::events::TerminalOutcome;
 impl Body {
     pub(super) fn finish_observed(&mut self, run: &str, message: &Message, cache: &OpenClawReplayProjection) -> Option<bool> {
         let Some(stream) = self.streams.get(run) else { return Some(false); };
+        // Closed byte ranges transfer only to a continuation of their own text baseline.
+        let parts = stream.closed.iter().filter(|closed| message.text().starts_with(&closed.text))
+            .flat_map(|closed| &closed.parts).chain(&stream.parts);
         if message.identity_message_id().is_some() || message.identity_sequence().is_some()
             || message.display_item_id().is_some() || message.is_imported() || message.hidden_control_reply()
             || message.identity_run_id() != Some(run) || message.after_sequence() == Some(None)
             || message.text().is_empty() || stream.text() != Some(message.text())
             || !stream.closed.iter().any(|closed| closed.tool_boundary || closed.boundary_run_id.is_some())
-            || !stream.all_parts().any(|part| part.id.is_some())
+            || !parts.clone().any(|part| part.id.is_some())
         { return Some(false); }
         let Some(SessionItem::AssistantTurn { mut segments, .. }) = transcript_session_item(message, self.items.len(), cache) else {
             return Some(false);
         };
-        let stream = self.streams.get_mut(run)?;
-        let last = stream.all_parts().last()?.id.clone();
+        let last = parts.clone().last()?.id.clone();
         segments.retain(|segment| !matches!(segment, SessionContent::ToolUse { tool_call_id, .. }
             if self.items.iter().any(|item| matches!(item, SessionItem::AssistantTurn { item_id, segments, .. }
-                if !stream.all_parts().any(|part| part.id.as_ref() == Some(item_id))
+                if !parts.clone().any(|part| part.id.as_ref() == Some(item_id))
                     && segments.iter().any(|existing| matches!(existing, SessionContent::ToolUse { tool_call_id: id, .. } if id == tool_call_id))))));
-        for part in stream.all_parts_mut() {
+        let stream = self.streams.get_mut(run)?;
+        let parts = stream.closed.iter_mut().filter(|closed| message.text().starts_with(&closed.text))
+            .flat_map(|closed| &mut closed.parts).chain(&mut stream.parts);
+        for part in parts {
             part.observed = true;
             let mut position = 0;
             part.content_before = false;

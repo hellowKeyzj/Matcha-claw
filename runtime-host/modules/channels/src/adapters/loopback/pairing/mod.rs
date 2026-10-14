@@ -8,7 +8,7 @@ pub mod handler;
 
 const LIST_OPERATION_ID: &str = "channels.pairing.list";
 const APPROVE_OPERATION_ID: &str = "channels.pairing.approve";
-const AUTHORIZATION_ENDPOINT: &str = "/api/channels/pairing";
+pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/channels/pairing";
 const LIST_AUTHORIZATION_SCOPE: &str = "channels:read";
 const APPROVE_AUTHORIZATION_SCOPE: &str = "channels:write";
 const AUTHORIZATION_SUBJECT: &str = "channel-pairing";

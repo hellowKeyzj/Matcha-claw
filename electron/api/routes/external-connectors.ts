@@ -210,5 +210,6 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
 }
 
 function isConnectorId(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0 && value.length <= 128;
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 128
+    && !/\p{Cc}/u.test(value);
 }

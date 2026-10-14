@@ -63,18 +63,41 @@ pub(super) fn write_if_missing(
     path: &Path,
     content: &str,
 ) -> Result<bool, WorkspaceProjectionError> {
-    let mut output = match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            read_regular(path)?;
-            return Ok(false);
-        }
-        Err(_) => return Err(WorkspaceProjectionError::WorkspaceUnavailable),
-    };
-    output
-        .write_all(content.as_bytes())
+    if read_regular(path)?.is_some() {
+        return Ok(false);
+    }
+    let parent = path
+        .parent()
+        .ok_or(WorkspaceProjectionError::WorkspaceUnavailable)?;
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy).map_err(|_| WorkspaceProjectionError::WorkspaceUnavailable)?;
+    let temporary = parent.join(format!(
+        ".matcha-seed-{:032x}.tmp",
+        u128::from_le_bytes(entropy)
+    ));
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
         .map_err(|_| WorkspaceProjectionError::WorkspaceUnavailable)?;
-    Ok(true)
+    let result = (|| {
+        output
+            .write_all(content.as_bytes())
+            .and_then(|()| output.sync_all())
+            .map_err(|_| WorkspaceProjectionError::WorkspaceUnavailable)?;
+        drop(output);
+        // Publish complete bytes without replacing a concurrently created user file.
+        match fs::hard_link(&temporary, path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                read_regular(path)?;
+                Ok(false)
+            }
+            Err(_) => Err(WorkspaceProjectionError::WorkspaceUnavailable),
+        }
+    })();
+    fs::remove_file(&temporary).map_err(|_| WorkspaceProjectionError::WorkspaceUnavailable)?;
+    result
 }
 
 pub(super) fn remove_regular(path: &Path) -> Result<(), WorkspaceProjectionError> {

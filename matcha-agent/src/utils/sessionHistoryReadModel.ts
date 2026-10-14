@@ -3,16 +3,13 @@ import type {
   SerializedMessage,
   TranscriptMessage,
 } from '../types/logs.js'
-import {
-  loadMessagesFromJsonlPath,
-  loadTranscriptHistoryFromJsonlPath,
-} from './conversationRecovery.js'
+export { createSessionHistoryReader } from './sessionTranscriptRead.js'
+export type { SessionHistoryReader } from './sessionTranscriptRead.js'
 import {
   getSessionIdFromLog,
   loadAllProjectsMessageLogs,
 } from './sessionStorage.js'
 import { hasRealUserMessage } from './sessionConversationEligibility.js'
-import { resolveSessionFilePath } from './sessionStoragePortable.js'
 
 const EPOCH_ISO = new Date(0).toISOString()
 const TRANSCRIPT_IMAGE_MEDIA_TYPES = new Set([
@@ -43,32 +40,6 @@ export async function listSessionHistorySummaries(
   })
 }
 
-export async function loadSessionHistorySummary(
-  sessionId: string,
-): Promise<SessionHistorySummary | null> {
-  const resolved = await resolveSessionFilePath(sessionId)
-  if (!resolved) return null
-  const loaded = await loadMessagesFromJsonlPath(resolved.filePath)
-  return sessionHistorySummaryFromMessages(
-    sessionId,
-    resolved.projectPath,
-    loaded.messages,
-  )
-}
-
-export async function readSessionTranscriptReplayLines(
-  sessionId: string,
-  maxLines: number,
-): Promise<string[]> {
-  const resolved = await resolveSessionFilePath(sessionId)
-  if (!resolved) return []
-  const loaded = await loadTranscriptHistoryFromJsonlPath(resolved.filePath)
-  return loaded.messages.slice(-maxLines).flatMap(message => {
-    const line = transcriptReplayLineFromTranscriptMessage(message)
-    return line ? [line] : []
-  })
-}
-
 function sessionHistorySummaryFromLog(
   log: LogOption,
 ): SessionHistorySummary | null {
@@ -80,13 +51,15 @@ function sessionHistorySummaryFromLog(
     createdAt: log.created.toISOString(),
     updatedAt: log.modified.toISOString(),
     ...(log.customTitle || log.firstPrompt
-      ? { title: log.customTitle || log.firstPrompt }
+      ? {
+          title: sessionHistoryTitlePreview(log.customTitle || log.firstPrompt),
+        }
       : {}),
     ...(hasConversationFromLog(log) ? { hasConversation: true } : {}),
   }
 }
 
-function sessionHistorySummaryFromMessages(
+export function sessionHistorySummaryFromMessages(
   sessionId: string,
   projectPath: string | undefined,
   messages: SerializedMessage[],
@@ -99,7 +72,7 @@ function sessionHistorySummaryFromMessages(
     workspaceRoot: projectPath ?? firstMessage?.cwd ?? '',
     createdAt: firstMessage?.timestamp ?? EPOCH_ISO,
     updatedAt: lastMessage?.timestamp ?? firstMessage?.timestamp ?? EPOCH_ISO,
-    ...(title ? { title } : {}),
+    ...(title ? { title: sessionHistoryTitlePreview(title) } : {}),
     ...(hasConversationFromMessages(messages) ? { hasConversation: true } : {}),
   }
 }
@@ -112,12 +85,45 @@ function hasConversationFromMessages(messages: SerializedMessage[]): boolean {
   return messages.some(hasRealUserMessage)
 }
 
-function transcriptReplayLineFromTranscriptMessage(
+export function sessionHistoryTitlePreview(title: string): string {
+  return transcriptTextPreview(title, 512)
+}
+
+export function transcriptTextPreview(text: string, maxBytes: number): string {
+  let prefixEnd = Math.min(text.length, maxBytes)
+  if (
+    prefixEnd < text.length &&
+    prefixEnd > 0 &&
+    text.charCodeAt(prefixEnd - 1) >= 0xd800 &&
+    text.charCodeAt(prefixEnd - 1) <= 0xdbff
+  )
+    prefixEnd--
+  const bytes = Buffer.from(text.slice(0, prefixEnd))
+  if (bytes.length <= maxBytes)
+    return prefixEnd === text.length ? text : bytes.toString('utf8')
+  let end = maxBytes
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--
+  return bytes.toString('utf8', 0, end)
+}
+
+export function hasTranscriptReplayContent(
   message: TranscriptMessage,
+  sessionId: string,
+): boolean {
+  return (
+    transcriptReplayRole(message) !== null &&
+    transcriptReplayContent(message, sessionId, 64) !== null
+  )
+}
+
+export function transcriptReplayLineFromTranscriptMessage(
+  message: TranscriptMessage,
+  sessionId: string,
+  previewBytes = 4096,
 ): string | null {
   const role = transcriptReplayRole(message)
   if (!role) return null
-  const content = transcriptReplayContent(message)
+  const content = transcriptReplayContent(message, sessionId, previewBytes)
   if (content === null) return null
   const messageId = readMessageId(message)
   const parentMessageId = readParentMessageId(message)
@@ -175,12 +181,48 @@ type TranscriptReplayContentBlock = Record<string, unknown>
 
 function transcriptReplayContent(
   message: SerializedMessage,
+  sessionId: string,
+  previewBytes: number,
 ): string | TranscriptReplayContentBlock[] | null {
   const content = messageContent(message)
-  if (typeof content === 'string') return content ? content : null
+  const record = message as unknown as Record<string, unknown>
+  const root =
+    isRecord(record.message) && Object.hasOwn(record.message, 'content')
+      ? 'm'
+      : 'c'
+  if (typeof content === 'string') {
+    if (!content) return null
+    const text = transcriptReplayTextBlock(
+      { text: content },
+      sessionId,
+      message.uuid,
+      root,
+      null,
+      previewBytes,
+    )!
+    return text.type === 'text' ? content : [text]
+  }
   if (!Array.isArray(content)) return null
-  const blocks = content.flatMap(block => {
-    const replayBlock = transcriptReplayContentBlock(block)
+  const textCount = content.filter(
+    block => isRecord(block) && block.type === 'text',
+  ).length
+  const textPreviewBytes = Math.min(
+    previewBytes,
+    Math.floor(
+      (128 * 1024 - Math.max(0, textCount - 1)) / Math.max(1, textCount),
+    ),
+  )
+  const blocks = content.flatMap((block, index) => {
+    const replayBlock = transcriptReplayContentBlock(
+      block,
+      sessionId,
+      message.uuid,
+      root,
+      index,
+      isRecord(block) && block.type === 'text'
+        ? textPreviewBytes
+        : previewBytes,
+    )
     return replayBlock ? [replayBlock] : []
   })
   return blocks.length > 0 ? blocks : null
@@ -188,18 +230,30 @@ function transcriptReplayContent(
 
 function transcriptReplayContentBlock(
   block: unknown,
+  sessionId: string,
+  uuid: string,
+  root: string,
+  index: number,
+  previewBytes: number,
 ): TranscriptReplayContentBlock | null {
   if (!isRecord(block) || typeof block.type !== 'string') return null
   switch (block.type) {
     case 'text':
-      return transcriptReplayTextBlock(block)
+      return transcriptReplayTextBlock(
+        block,
+        sessionId,
+        uuid,
+        root,
+        index,
+        previewBytes,
+      )
     case 'thinking':
-      return transcriptReplayThinkingBlock(block)
+      return transcriptReplayThinkingBlock(block, previewBytes)
     case 'tool_use':
       return transcriptReplayToolUseBlock(block)
     case 'tool_result':
     case 'tool_use_result':
-      return transcriptReplayToolResultBlock(block)
+      return transcriptReplayToolResultBlock(block, previewBytes)
     case 'image':
       return transcriptReplayImageBlock(block)
     default:
@@ -209,14 +263,27 @@ function transcriptReplayContentBlock(
 
 function transcriptReplayTextBlock(
   block: Record<string, unknown>,
+  sessionId: string,
+  uuid: string,
+  root: string,
+  index: number | null,
+  previewBytes: number,
 ): TranscriptReplayContentBlock | null {
-  return typeof block.text === 'string' && block.text
-    ? { type: 'text', text: block.text }
-    : null
+  if (typeof block.text !== 'string' || !block.text) return null
+  const text = transcriptTextPreview(block.text, previewBytes)
+  return text === block.text
+    ? { type: 'text', text }
+    : {
+        type: 'large_text',
+        text,
+        content_ref: `mt1:${Buffer.from(JSON.stringify([sessionId, uuid, root, index])).toString('base64url')}`,
+        total_bytes: Buffer.byteLength(block.text),
+      }
 }
 
 function transcriptReplayThinkingBlock(
   block: Record<string, unknown>,
+  previewBytes: number,
 ): TranscriptReplayContentBlock | null {
   const text =
     typeof block.text === 'string'
@@ -224,7 +291,9 @@ function transcriptReplayThinkingBlock(
       : typeof block.thinking === 'string'
         ? block.thinking
         : ''
-  return text ? { type: 'thinking', thinking: text } : null
+  return text
+    ? { type: 'thinking', thinking: transcriptTextPreview(text, previewBytes) }
+    : null
 }
 
 function transcriptReplayToolUseBlock(
@@ -248,12 +317,13 @@ function transcriptReplayToolInput(value: unknown): Record<string, null> {
 
 function transcriptReplayToolResultBlock(
   block: Record<string, unknown>,
+  previewBytes: number,
 ): TranscriptReplayContentBlock | null {
   const replayBlock: TranscriptReplayContentBlock = { type: block.type }
   for (const key of ['tool_use_id', 'toolUseId', 'id'] as const) {
     if (typeof block[key] === 'string') replayBlock[key] = block[key]
   }
-  const content = transcriptReplayToolResultContent(block.content)
+  const content = transcriptReplayToolResultContent(block.content, previewBytes)
   if (content !== undefined) replayBlock.content = content
   if (typeof block.is_error === 'boolean') replayBlock.is_error = block.is_error
   if (typeof block.isError === 'boolean') replayBlock.isError = block.isError
@@ -262,13 +332,28 @@ function transcriptReplayToolResultBlock(
 
 function transcriptReplayToolResultContent(
   content: unknown,
+  previewBytes: number,
 ): string | TranscriptReplayContentBlock[] | undefined {
-  if (typeof content === 'string') return content
+  if (typeof content === 'string')
+    return transcriptTextPreview(content, previewBytes)
   if (!Array.isArray(content)) return undefined
+  const textCount = content.filter(
+    block => isRecord(block) && typeof block.text === 'string' && block.text,
+  ).length
+  const textPreviewBytes = Math.min(
+    previewBytes,
+    Math.floor(
+      (64 * 1024 - Math.max(0, textCount - 1)) / Math.max(1, textCount),
+    ),
+  )
   const blocks = content.flatMap(block => {
-    const replayBlock = isRecord(block)
-      ? transcriptReplayTextBlock(block)
-      : null
+    const replayBlock =
+      isRecord(block) && typeof block.text === 'string' && block.text
+        ? {
+            type: 'text',
+            text: transcriptTextPreview(block.text, textPreviewBytes),
+          }
+        : null
     return replayBlock ? [replayBlock] : []
   })
   return blocks.length > 0 ? blocks : undefined
@@ -334,7 +419,7 @@ function readParentMessageId(message: TranscriptMessage): string | undefined {
   return message.parentUuid ?? undefined
 }
 
-function firstPromptFromMessages(
+export function firstPromptFromMessages(
   messages: SerializedMessage[],
 ): string | undefined {
   for (const message of messages) {

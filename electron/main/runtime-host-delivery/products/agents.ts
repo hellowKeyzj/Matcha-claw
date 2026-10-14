@@ -293,7 +293,11 @@ function isResultResponse(value: unknown, request: ResultRequest): boolean {
   return isFailure(body) && (body.error === 'Subagent request was rejected'
     || body.error === 'Subagent mutation outcome is unknown'
     || body.error === 'Subagent management is unsupported for this runtime'
-    || body.error === 'Subagent management is unavailable');
+    || body.error === 'Subagent management is unavailable'
+    || (value.status === 503 && request.operationId === 'subagents.package.install'
+      && body.error === 'Subagent package was installed, but cleanup failed')
+    || (value.status === 503 && (request.operationId === 'subagentSkills.set' || request.operationId === 'subagentTools.set')
+      && body.error === 'Agent configuration was applied, but readback failed'));
 }
 
 function isMutationResult(value: Record<string, unknown>, operation: Operation): boolean {

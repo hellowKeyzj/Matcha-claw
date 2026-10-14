@@ -5,10 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::config_store::{OpenClawConfigDocument, OpenClawConfigMutation, OpenClawConfigStore};
+use super::config_store::{
+    OpenClawConfigDocument, OpenClawConfigMutation, OpenClawConfigStore, OpenClawConfigStoreError,
+};
 use platform::state_dir::CanonicalStateDir;
 
 use super::plugin_companion::{CompanionSkillEffect, CompanionSkillIntent, companion_skill_slugs};
@@ -20,6 +22,42 @@ pub use managed_reconcile::{ManagedPluginReconcile, PluginReconcileError};
 const MANIFEST: &str = "openclaw.plugin.json";
 const PACKAGE: &str = "package.json";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
+const EFFECT_RECEIPTS_FILE: &str = ".matcha-plugin-effects.json";
+const MAX_EFFECT_RECEIPTS_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingPluginEffects {
+    enabled: bool,
+    companion_pending: bool,
+    manifest_pending: bool,
+    companion_entries: Option<super::plugin_companion::SkillEntryStates>,
+    manifest_entries: Option<super::plugin_companion::SkillEntryStates>,
+}
+
+type PluginEffectReceipts = BTreeMap<String, PendingPluginEffects>;
+
+fn read_effect_receipts(state_dir: &CanonicalStateDir) -> Result<PluginEffectReceipts, OpenClawConfigStoreError> {
+    let Some(bytes) = state_dir.read_regular_file_bounded(EFFECT_RECEIPTS_FILE, MAX_EFFECT_RECEIPTS_BYTES)
+        .map_err(|_| OpenClawConfigStoreError::ReadFailed)? else { return Ok(BTreeMap::new()) };
+    let receipts: PluginEffectReceipts = serde_json::from_slice(&bytes)
+        .map_err(|_| OpenClawConfigStoreError::InvalidDocument)?;
+    if receipts.len() > MANAGED_PLUGIN_IDS.len()
+        || receipts.keys().any(|id| !MANAGED_PLUGIN_IDS.contains(&id.as_str()))
+    {
+        return Err(OpenClawConfigStoreError::InvalidDocument);
+    }
+    Ok(receipts)
+}
+
+fn write_effect_receipts(
+    state_dir: &CanonicalStateDir,
+    receipts: &PluginEffectReceipts,
+) -> Result<(), OpenClawConfigStoreError> {
+    let bytes = serde_json::to_vec(receipts).map_err(|_| OpenClawConfigStoreError::DocumentTooLarge)?;
+    state_dir.replace_regular_file_bounded(EFFECT_RECEIPTS_FILE, &bytes, MAX_EFFECT_RECEIPTS_BYTES)
+        .map_err(|_| OpenClawConfigStoreError::ReplaceFailed)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -348,20 +386,133 @@ impl PluginProjection {
             &store,
             &transition,
             set_plugin_enabled_config,
+            |_| {
+                if transition.newly_disabled_plugin_ids.is_empty() && transition.newly_enabled_plugin_ids.is_empty() {
+                    return Ok(());
+                }
+                let mut receipts = read_effect_receipts(&self.state_dir)?;
+                for (ids, enabled) in [(&transition.newly_disabled_plugin_ids, false), (&transition.newly_enabled_plugin_ids, true)] {
+                    for plugin_id in ids {
+                        if !MANAGED_PLUGIN_IDS.contains(&plugin_id.as_str()) {
+                            return Err(OpenClawConfigStoreError::InvalidDocument);
+                        }
+                        receipts.insert(plugin_id.clone(), PendingPluginEffects {
+                            enabled,
+                            companion_pending: true,
+                            manifest_pending: true,
+                            companion_entries: None,
+                            manifest_entries: None,
+                        });
+                    }
+                }
+                write_effect_receipts(&self.state_dir, &receipts)
+            },
         )
         .map_err(|_| PluginError::Config)?;
-        for plugin_id in &transition.newly_disabled_plugin_ids {
-            self.apply_companion(plugin_id, false)?;
-            self.apply_manifest_skills(plugin_id, false)?;
-        }
-        for plugin_id in &transition.newly_enabled_plugin_ids {
-            self.apply_companion(plugin_id, true)?;
-            self.apply_manifest_skills(plugin_id, true)?;
+        for plugin_id in transition.newly_disabled_plugin_ids.iter().chain(&transition.newly_enabled_plugin_ids) {
+            self.resume_pending_effects(plugin_id)?;
         }
         Ok(())
     }
 
+    fn resume_pending_effects(&self, plugin_id: &str) -> Result<(), PluginError> {
+        let store = OpenClawConfigStore::new(self.state_dir.clone());
+        let mut pending = None;
+        store.try_update_private_document(|document| {
+            let mut receipts = read_effect_receipts(&self.state_dir)?;
+            if let Some(receipt) = receipts.get(plugin_id) {
+                if plugin_enabled(document, plugin_id) == receipt.enabled {
+                    pending = Some(receipt.clone());
+                } else {
+                    receipts.remove(plugin_id);
+                    write_effect_receipts(&self.state_dir, &receipts)?;
+                }
+            }
+            Ok(OpenClawConfigMutation::unchanged())
+        }).map_err(|_| PluginError::Config)?;
+        let Some(mut receipt) = pending else { return Ok(()) };
+        if receipt.companion_pending {
+            if let Ok(intent) = CompanionSkillIntent::resolve(plugin_id, receipt.enabled) {
+                self.prepare_pending_entries(plugin_id, &mut receipt, intent.slugs(), true)?;
+                CompanionSkillEffect::new(self.state_dir.clone(), intent)
+                    .pending(receipt.companion_entries.clone().ok_or(PluginError::Config)?)
+                    .apply(&self.companion_skill_source_root)
+                    .map_err(|_| PluginError::Config)?;
+            }
+            self.ack_pending_effect(plugin_id, &receipt, true)?;
+            receipt.companion_pending = false;
+        }
+        if receipt.manifest_pending {
+            if let Some(intent) = self.manifest_skill_intent(plugin_id, receipt.enabled)? {
+                self.prepare_pending_entries(plugin_id, &mut receipt, intent.slugs(), false)?;
+                store.try_update_private_document(|document| {
+                    let changed = plugin_enabled(document, plugin_id) == receipt.enabled
+                        && super::plugin_companion::apply_pending_skill_entries(
+                            document, intent.slugs(), receipt.enabled,
+                            receipt.manifest_entries.as_ref().ok_or(OpenClawConfigStoreError::InvalidDocument)?,
+                        )?;
+                    Ok(if changed { OpenClawConfigMutation::changed() } else { OpenClawConfigMutation::unchanged() })
+                }).map_err(|_| PluginError::Config)?;
+            }
+            self.ack_pending_effect(plugin_id, &receipt, false)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_pending_entries(
+        &self,
+        plugin_id: &str,
+        receipt: &mut PendingPluginEffects,
+        slugs: &[String],
+        companion: bool,
+    ) -> Result<(), PluginError> {
+        if if companion { receipt.companion_entries.is_some() } else { receipt.manifest_entries.is_some() } {
+            return Ok(());
+        }
+        OpenClawConfigStore::new(self.state_dir.clone()).try_update_private_document(|document| {
+            let mut receipts = read_effect_receipts(&self.state_dir)?;
+            if receipts.get(plugin_id) != Some(receipt) || plugin_enabled(document, plugin_id) != receipt.enabled {
+                return Err(OpenClawConfigStoreError::InvalidDocument);
+            }
+            let entries = super::plugin_companion::capture_skill_entries(document, slugs, receipt.enabled)?;
+            if companion { receipt.companion_entries = Some(entries) } else { receipt.manifest_entries = Some(entries) }
+            receipts.insert(plugin_id.to_owned(), receipt.clone());
+            write_effect_receipts(&self.state_dir, &receipts)?;
+            Ok(OpenClawConfigMutation::unchanged())
+        }).map(|_| ()).map_err(|_| PluginError::Config)
+    }
+
+    fn ack_pending_effect(
+        &self,
+        plugin_id: &str,
+        expected: &PendingPluginEffects,
+        companion: bool,
+    ) -> Result<(), PluginError> {
+        OpenClawConfigStore::new(self.state_dir.clone()).try_update_private_document(|_| {
+            let mut receipts = read_effect_receipts(&self.state_dir)?;
+            if receipts.get(plugin_id) == Some(expected) {
+                let receipt = receipts.get_mut(plugin_id).expect("matched pending receipt");
+                if companion { receipt.companion_pending = false } else { receipt.manifest_pending = false }
+                if !receipt.companion_pending && !receipt.manifest_pending {
+                    receipts.remove(plugin_id);
+                }
+                write_effect_receipts(&self.state_dir, &receipts)?;
+            }
+            Ok(OpenClawConfigMutation::unchanged())
+        }).map(|_| ()).map_err(|_| PluginError::Config)
+    }
+
     fn apply_manifest_skills(&self, plugin_id: &str, enabled: bool) -> Result<(), PluginError> {
+        let Some(intent) = self.manifest_skill_intent(plugin_id, enabled)? else { return Ok(()) };
+        super::plugin_companion::ManifestSkillEffect::new(self.state_dir.clone(), intent)
+            .apply().map_err(|_| PluginError::Config)
+    }
+
+    fn manifest_skill_intent(
+        &self,
+        plugin_id: &str,
+        enabled: bool,
+    ) -> Result<Option<super::plugin_companion::ManifestSkillIntent>, PluginError> {
         let canonical_id = canonical_plugin_id(plugin_id).ok_or(PluginError::Config)?;
         if !is_safe_plugin_target_id(canonical_id) {
             return Err(PluginError::Config);
@@ -373,7 +524,7 @@ impl PluginProjection {
             .join(canonical_id);
         let metadata = match fs::symlink_metadata(&target) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(PluginError::Config),
         };
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -385,12 +536,10 @@ impl PluginProjection {
             &target,
         ) {
             Ok(intent) => intent,
-            Err(super::plugin_companion::ManifestSkillError::ManifestMissing) => return Ok(()),
+            Err(super::plugin_companion::ManifestSkillError::ManifestMissing) => return Ok(None),
             Err(_) => return Err(PluginError::Config),
         };
-        super::plugin_companion::ManifestSkillEffect::new(self.state_dir.clone(), intent)
-            .apply()
-            .map_err(|_| PluginError::Config)
+        Ok(Some(intent))
     }
 
     fn apply_companion(&self, plugin_id: &str, enabled: bool) -> Result<(), PluginError> {
@@ -427,7 +576,9 @@ impl PluginProjection {
         } else {
             next.retain(|id| id != plugin_id);
         }
-        match self.apply_transition_lifecycle(&previous, &next) {
+        let result = self.apply_transition_lifecycle(&previous, &next)
+            .and_then(|()| self.resume_pending_effects(plugin_id));
+        match result {
             Ok(()) => SetEnabledOutcome::Configured,
             Err(PluginError::Config) => SetEnabledOutcome::Unknown,
         }
@@ -461,11 +612,7 @@ impl PluginProjection {
             }
             PluginOperation::Uninstall => {
                 match managed_reconcile::managed_target_exists(&extensions, plugin_id) {
-                    Ok(true) => match self.apply_transition_lifecycle(&[plugin_id.to_owned()], &[])
-                    {
-                        Ok(()) => PluginOperationOutcome::Configured,
-                        Err(_) => PluginOperationOutcome::Unknown,
-                    },
+                    Ok(true) => self.set_enabled(plugin_id, false).into_operation_outcome(),
                     Ok(false) => PluginOperationOutcome::Rejected,
                     Err(_) => PluginOperationOutcome::Unknown,
                 }
@@ -764,6 +911,10 @@ fn canonical_plugin_id(id: &str) -> Option<&str> {
         "qqbot" => "openclaw-qqbot",
         id => id,
     })
+}
+
+pub(super) fn plugin_enabled(document: &OpenClawConfigDocument, id: &str) -> bool {
+    enabled_ids(document, &BTreeSet::from([id])).contains(id)
 }
 
 fn is_manually_configurable_plugin(id: &str) -> bool {

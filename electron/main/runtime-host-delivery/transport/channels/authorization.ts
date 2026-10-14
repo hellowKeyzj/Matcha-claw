@@ -62,8 +62,11 @@ type Session = {
   controller: AbortController;
   progress: ChannelAuthorizationProgress;
   result: Promise<CredentialResult>;
+  finalization?: Promise<ChannelAuthorizationTransportResponse>;
   stop?: () => void;
 };
+
+type SessionBase = Omit<Session, 'progress' | 'result' | 'finalization'>;
 
 type QrCodeModule = Readonly<{
   toDataURL: (text: string, options?: Record<string, unknown>) => Promise<string>;
@@ -99,14 +102,22 @@ export function createChannelAuthorizationTransport(
 ): ChannelAuthorizationTransport {
   const require = createRequire(import.meta.url);
   const sessions = new Map<string, Session>();
-  const activeSessions = new Map<string, string>();
+  const activeSessions = new Map<string, SessionBase>();
 
-  const cancelSession = (session: Session) => {
-    session.stop?.();
-    session.controller.abort();
+  const removeSession = (session: SessionBase) => {
     sessions.delete(session.key);
-    if (activeSessions.get(session.activeKey) === session.key) activeSessions.delete(session.activeKey);
+    if (activeSessions.get(session.activeKey)?.key === session.key) activeSessions.delete(session.activeKey);
   };
+
+  const cancelSession = (session: SessionBase) => {
+    removeSession(session);
+    session.controller.abort(new Error('authorization cancelled'));
+  };
+
+  const cancelledResponse = (session: SessionBase): ChannelAuthorizationTransportResponse => ({
+    status: 200,
+    body: { outcome: 'cancelled', channel: session.channel, accountId: session.accountId, sessionKey: session.key },
+  });
 
   const toQrDataUrl = async (value: string): Promise<string> => {
     const qr = require('qrcode') as QrCodeModule;
@@ -118,31 +129,24 @@ export function createChannelAuthorizationTransport(
     values: Record<string, unknown>,
     traceId: string | undefined,
   ): Promise<ChannelAuthorizationTransportResponse> => {
-    const response = await configureTransport.apply({
-      channel: session.channel,
-      accountId: session.accountId,
-      ...(session.agentId ? { agentId: session.agentId } : {}),
-      values: { ...session.config, ...values },
-    }, traceId);
-
-    sessions.delete(session.key);
-    if (activeSessions.get(session.activeKey) === session.key) activeSessions.delete(session.activeKey);
-
-    const body = response.body;
-    if (response.status === 202 && 'callId' in body) {
-      return {
-        status: 200,
-        body: {
-          outcome: 'connected',
-          channel: session.channel,
-          accountId: session.accountId,
-          sessionKey: session.key,
-          callId: body.callId,
-        },
-      };
+    if (session.finalization) return await session.finalization;
+    if (session.controller.signal.aborted
+      || sessions.get(session.key) !== session
+      || activeSessions.get(session.activeKey)?.key !== session.key) {
+      return cancelledResponse(session);
     }
-    if (response.status === 200 && isConfigureOutcome(body)) {
-      if (body.outcome === 'confirmed') {
+
+    removeSession(session);
+    session.finalization = (async (): Promise<ChannelAuthorizationTransportResponse> => {
+      const response = await configureTransport.apply({
+        channel: session.channel,
+        accountId: session.accountId,
+        ...(session.agentId ? { agentId: session.agentId } : {}),
+        values: { ...session.config, ...values },
+      }, traceId);
+
+      const body = response.body;
+      if (response.status === 202 && 'callId' in body) {
         return {
           status: 200,
           body: {
@@ -150,29 +154,44 @@ export function createChannelAuthorizationTransport(
             channel: session.channel,
             accountId: session.accountId,
             sessionKey: session.key,
+            callId: body.callId,
           },
         };
       }
+      if (response.status === 200 && isConfigureOutcome(body)) {
+        if (body.outcome === 'confirmed') {
+          return {
+            status: 200,
+            body: {
+              outcome: 'connected',
+              channel: session.channel,
+              accountId: session.accountId,
+              sessionKey: session.key,
+            },
+          };
+        }
+        return {
+          status: 200,
+          body: {
+            outcome: body.outcome === 'target_rejected' ? 'target_rejected' : 'unknown',
+            channel: session.channel,
+            accountId: session.accountId,
+            sessionKey: session.key,
+          },
+        };
+      }
+
       return {
-        status: 200,
+        status: 503,
         body: {
-          outcome: body.outcome === 'target_rejected' ? 'target_rejected' : 'unknown',
+          outcome: 'unknown',
           channel: session.channel,
           accountId: session.accountId,
           sessionKey: session.key,
         },
       };
-    }
-
-    return {
-      status: 503,
-      body: {
-        outcome: 'unknown',
-        channel: session.channel,
-        accountId: session.accountId,
-        sessionKey: session.key,
-      },
-    };
+    })();
+    return await session.finalization;
   };
 
   const startSession = async (
@@ -183,12 +202,9 @@ export function createChannelAuthorizationTransport(
     const key = randomUUID();
     const activeKey = `${input.channel}:${accountId}`;
     const previous = activeSessions.get(activeKey);
-    if (previous) {
-      const session = sessions.get(previous);
-      if (session) cancelSession(session);
-    }
+    if (previous) cancelSession(previous);
 
-    const sessionBase = {
+    const sessionBase: SessionBase = {
       key,
       activeKey,
       channel: input.channel,
@@ -196,26 +212,39 @@ export function createChannelAuthorizationTransport(
       ...(input.agentId ? { agentId: input.agentId } : {}),
       config: input.config ?? {},
       controller: new AbortController(),
-    } satisfies Omit<Session, 'progress' | 'result' | 'stop'>;
+    };
+    activeSessions.set(activeKey, sessionBase);
 
-    let session: Session;
-    if (input.channel === 'qqbot') {
-      session = await startQqbotSession(sessionBase, require, toQrDataUrl);
-    } else if (input.channel === 'dingtalk') {
-      session = await startDingtalkSession(sessionBase, toQrDataUrl);
-    } else {
-      session = await startFeishuSession(sessionBase, toQrDataUrl);
+    try {
+      let session: Session;
+      if (input.channel === 'qqbot') {
+        session = await startQqbotSession(sessionBase, require, toQrDataUrl);
+      } else if (input.channel === 'dingtalk') {
+        session = await startDingtalkSession(sessionBase, toQrDataUrl);
+      } else {
+        session = await startFeishuSession(sessionBase, toQrDataUrl);
+      }
+
+      void session.result.catch(() => removeSession(session));
+      if (sessionBase.controller.signal.aborted || activeSessions.get(activeKey)?.key !== key) {
+        cancelSession(session);
+        return cancelledResponse(session);
+      }
+      sessions.set(key, session);
+      activeSessions.set(activeKey, session);
+
+      if (session.progress.outcome === 'connected') {
+        const result = await session.result;
+        return await finishAuthorization(session, result.values, traceId);
+      }
+
+      return { status: 200, body: session.progress };
+    } catch (error) {
+      const cancelled = sessionBase.controller.signal.aborted;
+      cancelSession(sessionBase);
+      if (cancelled) return cancelledResponse(sessionBase);
+      throw error;
     }
-
-    sessions.set(key, session);
-    activeSessions.set(activeKey, key);
-
-    if (session.progress.outcome === 'connected') {
-      const result = await session.result;
-      return await finishAuthorization(session, result.values, traceId);
-    }
-
-    return { status: 200, body: session.progress };
   };
 
   return {
@@ -236,19 +265,18 @@ export function createChannelAuthorizationTransport(
             response = { status: 503, body: { ...UNKNOWN, channel: input.channel } };
           } else if (input.action === 'cancel') {
             cancelSession(session);
-            response = { status: 200, body: { outcome: 'cancelled', channel: session.channel, accountId: session.accountId, sessionKey: session.key } };
+            response = cancelledResponse(session);
           } else {
             try {
               const result = await waitForResult(session.result, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS);
-              response = result
-                ? await finishAuthorization(session, result.values, traceId)
-                : { status: 200, body: session.progress };
+              response = session.controller.signal.aborted
+                ? cancelledResponse(session)
+                : result
+                  ? await finishAuthorization(session, result.values, traceId)
+                  : { status: 200, body: session.progress };
             } catch (error) {
-              if (!isAuthorizationCancelled(error)) throw error;
-              response = {
-                status: 200,
-                body: { outcome: 'cancelled', channel: session.channel, accountId: session.accountId, sessionKey: session.key },
-              };
+              if (!session.controller.signal.aborted) throw error;
+              response = cancelledResponse(session);
             }
           }
         }
@@ -264,12 +292,12 @@ export function createChannelAuthorizationTransport(
 }
 
 async function startQqbotSession(
-  base: Omit<Session, 'progress' | 'result' | 'stop'>,
+  base: SessionBase,
   require: NodeRequire,
   toQrDataUrl: (value: string) => Promise<string>,
 ): Promise<Session> {
   const connector = await loadQqbotConnector(require);
-  let stop: (() => void) | undefined;
+  base.controller.signal.throwIfAborted();
   let progressReady!: (progress: ChannelAuthorizationProgress) => void;
   let progressFailed!: (error: Error) => void;
   const progress = new Promise<ChannelAuthorizationProgress>((resolve, reject) => {
@@ -277,9 +305,21 @@ async function startQqbotSession(
     progressFailed = reject;
   });
 
+  let settled = false;
+  let onAbort!: () => void;
   const result = new Promise<CredentialResult>((resolve, reject) => {
-    stop = connector.startQrConnect({
+    const fail = (error: Error) => {
+      progressFailed(error);
+      if (settled) return;
+      settled = true;
+      reject(error);
+      base.stop?.();
+    };
+    onAbort = () => fail(new Error('authorization cancelled'));
+    base.controller.signal.addEventListener('abort', onAbort, { once: true });
+    base.stop = connector.startQrConnect({
       onQrDisplayed(url) {
+        if (settled) return;
         void toQrDataUrl(url).then((qrDataUrl) => {
           progressReady({
             outcome: 'progress',
@@ -289,27 +329,32 @@ async function startQqbotSession(
             qrDataUrl,
             authorizationUrl: url,
           });
-        }).catch(progressFailed);
+        }).catch(fail);
       },
       onSuccess(credentials) {
+        if (settled) return;
         const credential = credentials[0];
         if (!credential?.appId || !credential.appSecret) {
-          reject(new Error('QQ Bot binding completed without credentials'));
+          fail(new Error('QQ Bot binding completed without credentials'));
           return;
         }
+        settled = true;
         resolve({ values: { appId: credential.appId, clientSecret: credential.appSecret } });
       },
       onFailure(error) {
-        reject(error);
+        fail(base.controller.signal.aborted ? new Error('authorization cancelled') : error);
       },
       onQrExpired() {
         // The connector refreshes and emits a new QR URL; keep the last stable prompt meanwhile.
       },
     }, { displayQrCodeToConsole: false, signal: base.controller.signal, source: QQ_CONNECTOR_SOURCE });
   });
+  void Promise.all([progress, result]).catch(progressFailed).finally(() => {
+    base.controller.signal.removeEventListener('abort', onAbort);
+  });
 
   const initialProgress = await progress;
-  return { ...base, progress: initialProgress, result, ...(stop ? { stop } : {}) };
+  return { ...base, progress: initialProgress, result };
 }
 
 async function loadQqbotConnector(require: NodeRequire): Promise<QqbotConnector> {
@@ -322,16 +367,16 @@ async function loadQqbotConnector(require: NodeRequire): Promise<QqbotConnector>
 }
 
 async function startDingtalkSession(
-  base: Omit<Session, 'progress' | 'result' | 'stop'>,
+  base: SessionBase,
   toQrDataUrl: (value: string) => Promise<string>,
 ): Promise<Session> {
   const nonceBody = await postJson<Record<string, unknown>>(`${DINGTALK_REGISTRATION_BASE_URL}/app/registration/init`, {
     source: DINGTALK_REGISTRATION_SOURCE,
-  });
+  }, base.controller.signal);
   const nonce = readNonEmptyString(nonceBody.nonce);
   if (!nonce) throw new Error('DingTalk registration init did not return a nonce');
 
-  const beginBody = await postJson<Record<string, unknown>>(`${DINGTALK_REGISTRATION_BASE_URL}/app/registration/begin`, { nonce });
+  const beginBody = await postJson<Record<string, unknown>>(`${DINGTALK_REGISTRATION_BASE_URL}/app/registration/begin`, { nonce }, base.controller.signal);
   const deviceCode = readNonEmptyString(beginBody.device_code);
   const authorizationUrl = readNonEmptyString(beginBody.verification_uri_complete);
   if (!deviceCode || !authorizationUrl) throw new Error('DingTalk registration did not return an authorization URL');
@@ -367,7 +412,7 @@ async function waitForDingtalkCredentials(
 ): Promise<Record<string, unknown>> {
   while (Date.now() < expiresAt) {
     await sleep(intervalSeconds * 1000, signal);
-    const poll = await pollDingtalk(deviceCode);
+    const poll = await pollDingtalk(deviceCode, signal);
     if (poll.status === 'WAITING') continue;
     if (poll.status === 'SUCCESS') {
       if (!poll.clientId || !poll.clientSecret) throw new Error('DingTalk authorization completed without credentials');
@@ -379,10 +424,10 @@ async function waitForDingtalkCredentials(
   throw new Error('DingTalk authorization timed out');
 }
 
-async function pollDingtalk(deviceCode: string): Promise<DingtalkPollResult> {
+async function pollDingtalk(deviceCode: string, signal: AbortSignal): Promise<DingtalkPollResult> {
   const body = await postJson<Record<string, unknown>>(`${DINGTALK_REGISTRATION_BASE_URL}/app/registration/poll`, {
     device_code: deviceCode,
-  });
+  }, signal);
   const status = readNonEmptyString(body.status)?.toUpperCase();
   return {
     status: status === 'WAITING' || status === 'SUCCESS' || status === 'EXPIRED' ? status : 'FAIL',
@@ -393,17 +438,17 @@ async function pollDingtalk(deviceCode: string): Promise<DingtalkPollResult> {
 }
 
 async function startFeishuSession(
-  base: Omit<Session, 'progress' | 'result' | 'stop'>,
+  base: SessionBase,
   toQrDataUrl: (value: string) => Promise<string>,
 ): Promise<Session> {
   const initialDomain = base.config.domain === 'lark' ? 'lark' : 'feishu';
-  await postFeishuRegistration(initialDomain, { action: 'init' });
+  await postFeishuRegistration(initialDomain, { action: 'init' }, base.controller.signal);
   const begin = await postFeishuRegistration<Record<string, unknown>>(initialDomain, {
     action: 'begin',
     archetype: 'PersonalAgent',
     auth_method: 'client_secret',
     request_user_info: 'open_id',
-  });
+  }, base.controller.signal);
 
   const deviceCode = readNonEmptyString(begin.device_code);
   const rawAuthorizationUrl = readNonEmptyString(begin.verification_uri_complete);
@@ -454,7 +499,7 @@ async function waitForFeishuCredentials(params: {
 
   while (Date.now() < params.expiresAt) {
     await sleep(intervalSeconds * 1000, params.signal);
-    const outcome = await pollFeishu(params.deviceCode, domain);
+    const outcome = await pollFeishu(params.deviceCode, domain, params.signal);
     if (outcome.status === 'pending') continue;
     if (outcome.status === 'success') return outcome.values;
     if (outcome.status === 'error' && outcome.message === 'tenant_brand:lark' && !domainSwitched) {
@@ -471,12 +516,12 @@ async function waitForFeishuCredentials(params: {
   throw new Error('Feishu authorization timed out');
 }
 
-async function pollFeishu(deviceCode: string, domain: FeishuDomain): Promise<FeishuPollOutcome> {
+async function pollFeishu(deviceCode: string, domain: FeishuDomain, signal: AbortSignal): Promise<FeishuPollOutcome> {
   const body = await postFeishuRegistration<Record<string, unknown>>(domain, {
     action: 'poll',
     device_code: deviceCode,
     tp: FEISHU_REGISTRATION_TP,
-  });
+  }, signal);
 
   const tenantBrand = isRecord(body.user_info) ? readNonEmptyString(body.user_info.tenant_brand) : undefined;
   if (tenantBrand === 'lark' && domain !== 'lark') return { status: 'error', message: 'tenant_brand:lark' };
@@ -508,14 +553,17 @@ async function pollFeishu(deviceCode: string, domain: FeishuDomain): Promise<Fei
 async function postFeishuRegistration<T extends Record<string, unknown>>(
   domain: FeishuDomain,
   body: Record<string, string>,
+  signal: AbortSignal,
 ): Promise<T> {
   const baseUrl = domain === 'lark' ? LARK_ACCOUNTS_URL : FEISHU_ACCOUNTS_URL;
   const response = await fetch(`${baseUrl}${FEISHU_REGISTRATION_PATH}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(body).toString(),
+    signal,
   });
   const json = await response.json() as unknown;
+  signal.throwIfAborted();
   if (!isRecord(json)) throw new Error('Feishu registration returned invalid JSON');
   return json as T;
 }
@@ -523,23 +571,22 @@ async function postFeishuRegistration<T extends Record<string, unknown>>(
 async function postJson<T extends Record<string, unknown>>(
   url: string,
   body: Record<string, unknown>,
+  signal: AbortSignal,
 ): Promise<T> {
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(body),
+    signal,
   });
   const json = await response.json() as unknown;
+  signal.throwIfAborted();
   if (!isRecord(json)) throw new Error('Channel authorization returned invalid JSON');
   const code = json.errcode;
   if (code !== undefined && code !== 0) {
     throw new Error(readNonEmptyString(json.errmsg) || 'Channel authorization request failed');
   }
   return json as T;
-}
-
-function isAuthorizationCancelled(error: unknown): boolean {
-  return error instanceof Error && error.message === 'authorization cancelled';
 }
 
 function waitForResult<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
@@ -561,11 +608,15 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
       reject(new Error('authorization cancelled'));
       return;
     }
-    const timeout = setTimeout(resolve, ms);
-    signal.addEventListener('abort', () => {
+    const onAbort = () => {
       clearTimeout(timeout);
       reject(new Error('authorization cancelled'));
-    }, { once: true });
+    };
+    const timeout = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
   });
 }
 

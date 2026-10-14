@@ -15,6 +15,10 @@ use super::{
     },
 };
 pub enum SessionQuery {
+    Producing {
+        query: Box<SessionQuery>,
+        producer: crate::owner::terminal::Producer,
+    },
     Audited {
         query: Box<SessionQuery>,
         call: crate::call::SessionCall,
@@ -69,7 +73,7 @@ pub enum SessionQuery {
 impl SessionQuery {
     pub fn send_unavailable(self) {
         match self {
-            Self::Audited { query, .. } => query.send_unavailable(),
+            Self::Audited { query, .. } | Self::Producing { query, .. } => query.send_unavailable(),
             Self::BoundaryOutcome { outcome, reply, .. } => {
                 let _ = reply.send(outcome);
             }
@@ -116,7 +120,7 @@ impl SessionQuery {
 impl SessionQuery {
     pub fn route(&self) -> QueryRoute<String> {
         match self {
-            Self::Audited { query, .. } => query.route(),
+            Self::Audited { query, .. } | Self::Producing { query, .. } => query.route(),
             Self::Abort { .. }
             | Self::BoundaryOutcome { .. }
             | Self::EventsSubscribed { .. }

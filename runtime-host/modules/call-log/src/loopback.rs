@@ -8,7 +8,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
     module::{CapabilityKey, EffectKind},
 };
@@ -16,6 +16,10 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::CallLogModule;
+
+const LIST_PATH: &str = "/api/calls/list";
+const GET_PATH: &str = "/api/calls/get";
+const HISTORY_PATH: &str = "/api/calls/history";
 
 const ROUTES: &[&str] = &["call-log.loopback"];
 const PROVIDES: &[CapabilityKey] = &[CapabilityKey::new("call-log.read")];
@@ -33,6 +37,11 @@ pub(crate) fn descriptor(
         ModuleId::new("call-log"),
         vec![RouteDescriptor::bound(
             "call-log.loopback",
+            &[
+                RoutePath::Exact(LIST_PATH),
+                RoutePath::Exact(GET_PATH),
+                RoutePath::Exact(HISTORY_PATH),
+            ],
             head_plan,
             move |request| route(module.clone(), verifier.clone(), request),
         )],
@@ -49,11 +58,7 @@ pub(crate) fn descriptor(
 }
 
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
-    matches!(
-        head.path.as_str(),
-        "/api/calls/list" | "/api/calls/get" | "/api/calls/history"
-    )
-    .then(|| {
+    matches!(head.path.as_str(), LIST_PATH | GET_PATH | HISTORY_PATH).then(|| {
         RouteHeadPlan::new(
             BodyPolicy::Required { max_bytes: 4096 },
             Duration::from_secs(5),
@@ -128,18 +133,18 @@ async fn query(
     body: &[u8],
 ) -> Result<serde_json::Value, CallLogError> {
     match path {
-        "/api/calls/list" => {
+        LIST_PATH => {
             let query: CallQuery =
                 serde_json::from_slice(body).map_err(|_| CallLogError::InvalidInput)?;
             serde_json::to_value(module.list(query).await?).map_err(|_| CallLogError::Unavailable)
         }
-        "/api/calls/get" => {
+        GET_PATH => {
             let query: GetRequest =
                 serde_json::from_slice(body).map_err(|_| CallLogError::InvalidInput)?;
             serde_json::to_value(module.get(query.call_id).await?)
                 .map_err(|_| CallLogError::Unavailable)
         }
-        "/api/calls/history" => {
+        HISTORY_PATH => {
             let query: HistoryRequest =
                 serde_json::from_slice(body).map_err(|_| CallLogError::InvalidInput)?;
             serde_json::to_value(

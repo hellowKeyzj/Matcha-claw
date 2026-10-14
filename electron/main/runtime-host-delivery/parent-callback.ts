@@ -9,6 +9,7 @@ import { posix, win32 } from 'node:path';
 import { shell } from 'electron';
 import type { HostEventBus } from '../../api/event-bus';
 import { parseJsonBody, sendJson } from '../../api/route-utils';
+import { isSessionTraceEnabled, logSessionTrace, readTraceHeader, summarizeIdentifier } from './transport/sessions/trace';
 
 const CALLBACK_VERSION = 1;
 const DISPATCH_TOKEN_HEADER = 'x-runtime-host-dispatch-token';
@@ -75,19 +76,29 @@ async function handleParentCallbackRequest(
   eventBus: HostEventBus,
 ): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+  const traceId = isSessionTraceEnabled() && pathname === SHELL_ACTION_PATH ? readTraceHeader(req.headers) : null;
+  logSessionTrace('skill.open-path.callback.received', traceId);
+  if (traceId) {
+    res.once('finish', () => {
+      logSessionTrace('skill.open-path.callback.response', traceId, () => ({ status: res.statusCode }));
+    });
+  }
   if (pathname !== GATEWAY_EVENT_PATH && pathname !== SHELL_ACTION_PATH) {
     sendJson(res, 404, { version: CALLBACK_VERSION, success: false, status: 404 });
     return;
   }
   if (req.method !== 'POST') {
+    logSessionTrace('skill.open-path.callback.rejected', traceId, () => ({ category: 'method' }));
     sendJson(res, 405, { version: CALLBACK_VERSION, success: false, status: 405 });
     return;
   }
   if (!hasDispatchToken(req, dispatchToken)) {
+    logSessionTrace('skill.open-path.callback.rejected', traceId, () => ({ category: 'dispatch-token' }));
     sendJson(res, 403, { version: CALLBACK_VERSION, success: false, status: 403 });
     return;
   }
   if (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+    logSessionTrace('skill.open-path.callback.rejected', traceId, () => ({ category: 'content-type' }));
     sendJson(res, 415, { version: CALLBACK_VERSION, success: false, status: 415 });
     return;
   }
@@ -96,12 +107,13 @@ async function handleParentCallbackRequest(
   try {
     body = await parseJsonBody<unknown>(req);
   } catch {
+    logSessionTrace('skill.open-path.callback.rejected', traceId, () => ({ category: 'invalid-json' }));
     sendJson(res, 400, { version: CALLBACK_VERSION, success: false, status: 400 });
     return;
   }
 
   if (pathname === SHELL_ACTION_PATH) {
-    await handleParentShellAction(res, body);
+    await handleParentShellAction(res, body, traceId);
     return;
   }
 
@@ -127,24 +139,52 @@ async function handleParentCallbackRequest(
 async function handleParentShellAction(
   res: ServerResponse,
   body: unknown,
+  traceId: string | null,
 ): Promise<void> {
   if (!isParentShellAction(body)) {
+    logSessionTrace('skill.open-path.callback.rejected', traceId, () => ({ category: 'action-contract' }));
     sendJson(res, 400, { version: CALLBACK_VERSION, success: false, status: 400 });
     return;
   }
 
   if (body.action !== SHELL_OPEN_PATH_ACTION) {
+    logSessionTrace('skill.open-path.callback.rejected', traceId, () => ({ category: 'unsupported-action' }));
     sendJson(res, 400, { version: CALLBACK_VERSION, success: false, status: 400 });
     return;
   }
 
   const pathToOpen = parseShellOpenPathPayload(body.payload);
   if (!pathToOpen) {
+    logSessionTrace('skill.open-path.callback.rejected', traceId, () => ({ category: 'path-contract' }));
     sendJson(res, 400, { version: CALLBACK_VERSION, success: false, status: 400 });
     return;
   }
 
-  const openError = await shell.openPath(pathToOpen);
+  const started = traceId ? Date.now() : 0;
+  logSessionTrace('skill.open-path.shell.dispatch', traceId, () => ({
+    pathHash: summarizeIdentifier(pathToOpen).hash,
+    extendedPath: pathToOpen.startsWith('\\\\?\\'),
+    uncPath: pathToOpen.startsWith('\\\\'),
+  }));
+  let openError: string;
+  try {
+    openError = await shell.openPath(pathToOpen);
+  } catch (error) {
+    logSessionTrace('skill.open-path.shell.failed', traceId, () => ({
+      category: 'exception',
+      elapsedMs: Date.now() - started,
+      errorHash: summarizeIdentifier(error instanceof Error ? error.message : String(error)).hash,
+    }));
+    throw error;
+  }
+  logSessionTrace('skill.open-path.shell.result', traceId, () => ({
+    success: openError.length === 0,
+    category: !openError ? 'opened' : /not found|does not exist|cannot find/i.test(openError) ? 'not-found'
+      : /access.*denied|permission/i.test(openError) ? 'access-denied'
+      : /no application|no associated|association/i.test(openError) ? 'no-association' : 'shell-error',
+    errorHash: summarizeIdentifier(openError).hash,
+    elapsedMs: Date.now() - started,
+  }));
   if (openError) {
     sendJson(res, 500, {
       version: CALLBACK_VERSION,
@@ -184,6 +224,10 @@ function parseShellOpenPathPayload(payload: unknown): string | null {
   const trimmedPath = pathValue.trim();
   if (!trimmedPath || trimmedPath.includes('\0')) return null;
   if (!win32.isAbsolute(trimmedPath) && !posix.isAbsolute(trimmedPath)) return null;
+  if (process.platform === 'win32') {
+    if (trimmedPath.startsWith('\\\\?\\UNC\\')) return `\\\\${trimmedPath.slice(8)}`;
+    if (trimmedPath.startsWith('\\\\?\\') && /^[A-Za-z]:\\/.test(trimmedPath.slice(4))) return trimmedPath.slice(4);
+  }
   return trimmedPath;
 }
 

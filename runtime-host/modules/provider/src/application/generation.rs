@@ -42,5 +42,10 @@ pub enum ProviderTextGenerationOutcome {
 pub enum ProviderTextGenerationUnavailableReason {
     CredentialMissing,
     CredentialUnavailable,
+    Authentication,
+    PermissionDenied,
+    RateLimited,
+    Deadline,
+    InvalidResponse,
     ProviderUnavailable,
 }

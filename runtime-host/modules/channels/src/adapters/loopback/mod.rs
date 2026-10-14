@@ -5,7 +5,7 @@ use platform::{
     endpoint::runtime_address::RuntimeEndpoint,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use tokio::sync::Mutex;
@@ -56,6 +56,17 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("channel"),
         vec![RouteDescriptor::bound(
             "channel.loopback",
+            &[
+                RoutePath::ExactWithQuery(status::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(pairing::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(catalog::CATALOG_ENDPOINT),
+                RoutePath::ExactWithQuery(catalog::CONFIG_ENDPOINT),
+                RoutePath::ExactWithQuery(config_read::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(credentials::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(control::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(login::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(delete::AUTHORIZATION_ENDPOINT),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],
@@ -83,7 +94,7 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
     is_route(path).then(|| {
         let plan = if head.method == "POST"
-            && matches!(path, "/api/channels/configure" | "/api/channels/delete-config")
+            && matches!(path, catalog::CONFIG_ENDPOINT | delete::AUTHORIZATION_ENDPOINT)
         {
             RouteHeadPlan::body_deadline
         } else {
@@ -100,7 +111,7 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
         let response = match pathname(request.path()) {
-            "/api/channels/status" => {
+            status::AUTHORIZATION_ENDPOINT => {
                 status::handler::handle(
                     request.method(),
                     request.path(),
@@ -112,7 +123,7 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
                 )
                 .await
             }
-            "/api/channels/pairing" => {
+            pairing::AUTHORIZATION_ENDPOINT => {
                 pairing::handler::handle(
                     request.method(),
                     request.path(),
@@ -124,10 +135,10 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
                 )
                 .await
             }
-            "/api/channels/catalog"
-            | "/api/channels/configure"
-            | "/api/channels/config/read"
-            | "/api/channels/credentials/validate" => {
+            catalog::CATALOG_ENDPOINT
+            | catalog::CONFIG_ENDPOINT
+            | config_read::AUTHORIZATION_ENDPOINT
+            | credentials::AUTHORIZATION_ENDPOINT => {
                 catalog::handler::handle(
                     request.method(),
                     request.path(),
@@ -139,7 +150,7 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
                 )
                 .await
             }
-            "/api/channels/control" | "/api/channels/login" | "/api/channels/delete-config" => {
+            control::AUTHORIZATION_ENDPOINT | login::AUTHORIZATION_ENDPOINT | delete::AUTHORIZATION_ENDPOINT => {
                 control::handler::handle(
                     request.method(),
                     request.path(),
@@ -186,31 +197,31 @@ fn timeout_response() -> Response {
 fn is_route(path: &str) -> bool {
     matches!(
         path,
-        "/api/channels/status"
-            | "/api/channels/pairing"
-            | "/api/channels/catalog"
-            | "/api/channels/configure"
-            | "/api/channels/config/read"
-            | "/api/channels/credentials/validate"
-            | "/api/channels/control"
-            | "/api/channels/login"
-            | "/api/channels/delete-config"
+        status::AUTHORIZATION_ENDPOINT
+            | pairing::AUTHORIZATION_ENDPOINT
+            | catalog::CATALOG_ENDPOINT
+            | catalog::CONFIG_ENDPOINT
+            | config_read::AUTHORIZATION_ENDPOINT
+            | credentials::AUTHORIZATION_ENDPOINT
+            | control::AUTHORIZATION_ENDPOINT
+            | login::AUTHORIZATION_ENDPOINT
+            | delete::AUTHORIZATION_ENDPOINT
     )
 }
 
 fn body_limit(path: &str) -> usize {
     match path {
-        "/api/channels/status" | "/api/channels/pairing" => TINY_REQUEST_BYTES,
-        "/api/channels/control" | "/api/channels/login" | "/api/channels/delete-config" => {
+        status::AUTHORIZATION_ENDPOINT | pairing::AUTHORIZATION_ENDPOINT => TINY_REQUEST_BYTES,
+        control::AUTHORIZATION_ENDPOINT | login::AUTHORIZATION_ENDPOINT | delete::AUTHORIZATION_ENDPOINT => {
             CONTROL_REQUEST_BYTES
         }
-        "/api/channels/credentials/validate" => CREDENTIALS_REQUEST_BYTES,
+        credentials::AUTHORIZATION_ENDPOINT => CREDENTIALS_REQUEST_BYTES,
         _ => CATALOG_REQUEST_BYTES,
     }
 }
 
 fn deadline(path: &str) -> Duration {
-    if path == "/api/channels/login" {
+    if path == login::AUTHORIZATION_ENDPOINT {
         LOGIN_DEADLINE
     } else {
         SHORT_DEADLINE

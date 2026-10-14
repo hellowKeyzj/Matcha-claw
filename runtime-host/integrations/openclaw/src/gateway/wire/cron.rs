@@ -938,6 +938,7 @@ pub struct CronJob {
     pub schedule: CronScheduleView,
     pub delivery: CronDeliveryView,
     pub enabled: bool,
+    pub system_managed: bool,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub(crate) session_target: CronSessionTargetWire,
@@ -1197,7 +1198,7 @@ pub fn decode_list(response: GatewayResponse) -> Result<CronJobs, WireError> {
     Ok(CronJobs {
         jobs: jobs
             .into_iter()
-            .filter(CronJobWire::is_ui_crud_projection)
+            .filter(CronJobWire::is_ui_projection)
             .map(CronJobWire::into_public)
             .collect(),
         total,
@@ -1211,7 +1212,7 @@ pub fn decode_list(response: GatewayResponse) -> Result<CronJobs, WireError> {
 pub fn decode_add(response: GatewayResponse) -> Result<CronJob, WireError> {
     let payload = success_payload(response, WireError::InvalidCronAdd)?;
     let payload = decode_job_mutation_payload(payload, WireError::InvalidCronAdd)?;
-    (payload.is_valid() && payload.is_ui_crud_projection())
+    (payload.is_valid() && payload.is_ui_projection())
         .then(|| payload.into_public())
         .ok_or(WireError::InvalidCronAdd)
 }
@@ -1219,7 +1220,7 @@ pub fn decode_add(response: GatewayResponse) -> Result<CronJob, WireError> {
 pub fn decode_update(response: GatewayResponse) -> Result<CronJob, WireError> {
     let payload = success_payload(response, WireError::InvalidCronUpdate)?;
     let payload = decode_job_mutation_payload(payload, WireError::InvalidCronUpdate)?;
-    (payload.is_valid() && payload.is_ui_crud_projection())
+    (payload.is_valid() && payload.is_ui_projection())
         .then(|| payload.into_public())
         .ok_or(WireError::InvalidCronUpdate)
 }
@@ -1496,7 +1497,7 @@ impl CronJobWire {
                 .is_none_or(CronDeliveryPreviewWire::is_valid)
     }
 
-    fn is_ui_crud_projection(&self) -> bool {
+    fn is_ui_projection(&self) -> bool {
         matches!(
             cron_session_target(&self.session_target),
             Some(CronSessionTargetWire::Isolated)
@@ -1511,6 +1512,9 @@ impl CronJobWire {
     }
 
     fn into_public(self) -> CronJob {
+        let system_managed = self.declaration_key.as_deref().is_some_and(|key| {
+            key.starts_with("heartbeat:") || key.starts_with("skill-collection-review:")
+        });
         let session_target = cron_session_target(&self.session_target)
             .expect("validated cron session target must project");
         let payload_kind = self.payload.kind();
@@ -1532,6 +1536,7 @@ impl CronJobWire {
             schedule: self.schedule.into_view(),
             delivery,
             enabled: self.enabled,
+            system_managed,
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
             session_target,

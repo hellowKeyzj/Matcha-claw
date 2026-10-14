@@ -11,6 +11,8 @@ pub struct ActivitySnapshot {
     phase: ActivityPhaseSnapshot,
     completed_attempts: u32,
     next_claim_generation: u64,
+    pub(crate) settlement_proof: Option<super::SettlementProof>,
+    pub(crate) native_terminal_claim: Option<ActivityClaimSnapshot>,
 }
 
 impl fmt::Debug for ActivitySnapshot {
@@ -37,6 +39,8 @@ impl ActivitySnapshot {
             phase,
             completed_attempts,
             next_claim_generation,
+            settlement_proof: None,
+            native_terminal_claim: None,
         }
     }
 
@@ -238,22 +242,38 @@ impl fmt::Debug for RestoreActivityError {
 
 impl Activity {
     pub fn snapshot(&self) -> ActivitySnapshot {
-        ActivitySnapshot::new(
+        let mut snapshot = ActivitySnapshot::new(
             self.facts.clone(),
             ActivityPhaseSnapshot::from_phase(&self.phase),
             self.completed_attempts,
             self.next_claim_generation,
-        )
+        );
+        snapshot.settlement_proof = self.settlement_proof.clone();
+        snapshot.native_terminal_claim = self.native_terminal_claim.as_ref()
+            .map(ActivityClaimSnapshot::from_claim);
+        snapshot
     }
 
     pub fn restore(snapshot: ActivitySnapshot) -> Result<Self, RestoreActivityError> {
         validate_snapshot(&snapshot)?;
-        Ok(Self {
+        let activity = Self {
             facts: snapshot.facts,
             phase: snapshot.phase.into_phase(),
             completed_attempts: snapshot.completed_attempts,
             next_claim_generation: snapshot.next_claim_generation,
-        })
+            settlement_proof: snapshot.settlement_proof,
+            native_terminal_claim: snapshot.native_terminal_claim
+                .map(ActivityClaimSnapshot::into_claim),
+        };
+        if !activity.valid_native_terminal_claim()
+            || activity
+                .settlement_proof
+                .as_ref()
+                .is_some_and(|proof| !proof.valid_for(&activity))
+        {
+            return Err(RestoreActivityError::TerminalAttemptMismatch);
+        }
+        Ok(activity)
     }
 }
 

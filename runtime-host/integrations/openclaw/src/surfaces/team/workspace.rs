@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use organization::{RoleId, TeamId, TeamMaterializationRequest};
+use organization::{RoleId, TeamCreationFailureReason, TeamId, TeamMaterializationRequest};
 
 use super::agent::{TeamAgent, TeamInputError, TeamOwnedAgentId};
 
@@ -16,13 +16,13 @@ impl TeamExternalWorkspaces {
     pub(crate) fn for_agents(
         agents: &[TeamAgent],
         requested: Vec<TeamOwnedAgentId>,
-    ) -> Result<Self, TeamInputError> {
+    ) -> Result<Self, TeamCreationFailureReason> {
         let mut requested_ids = BTreeSet::new();
         if requested
             .iter()
             .any(|agent| !requested_ids.insert(agent.as_str()))
         {
-            return Err(TeamInputError::Invalid);
+            return Err(TeamCreationFailureReason::InvalidInput);
         }
 
         let mut resolved = BTreeMap::new();
@@ -32,16 +32,16 @@ impl TeamExternalWorkspaces {
                 .iter()
                 .filter(|agent| agent.id().as_str() == agent_id.as_str());
             let Some(agent) = matches.next() else {
-                return Err(TeamInputError::Invalid);
+                return Err(TeamCreationFailureReason::AgentMissing);
             };
             if matches.next().is_some() {
-                return Err(TeamInputError::Invalid);
+                return Err(TeamCreationFailureReason::AgentDuplicate);
             }
             let Some(workspace) = agent.workspace().cloned() else {
-                return Err(TeamInputError::Invalid);
+                return Err(TeamCreationFailureReason::WorkspaceMissing);
             };
             if !workspaces.insert(workspace.as_str().to_owned()) {
-                return Err(TeamInputError::Invalid);
+                return Err(TeamCreationFailureReason::InvalidConfig);
             }
             resolved.insert(agent_id, workspace);
         }

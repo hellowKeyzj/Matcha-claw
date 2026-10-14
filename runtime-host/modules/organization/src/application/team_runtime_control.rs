@@ -70,9 +70,9 @@ impl TeamRuntimeCapabilityRequest {
 pub enum TeamRuntimeControlOutcome {
     Succeeded(Value),
     Unknown(Value),
-    InvalidInput,
-    Unavailable,
-    Failed(&'static str),
+    InvalidInput(Option<organization::TeamCreationFailure>),
+    Unavailable(Option<organization::TeamCreationFailure>),
+    Failed(&'static str, Option<organization::TeamCreationFailure>),
 }
 
 impl TeamRuntimeControlOutcome {
@@ -85,7 +85,22 @@ impl TeamRuntimeControlOutcome {
     }
 
     fn rejected(_: TeamRuntimeProjectionRejection, message: &'static str) -> Self {
-        Self::Failed(message)
+        Self::Failed(message, None)
+    }
+
+    fn with_creation_failure(self, creation_failure: Option<organization::TeamCreationFailure>) -> Self {
+        match self {
+            Self::InvalidInput(_) => Self::InvalidInput(creation_failure),
+            Self::Unavailable(_) => Self::Unavailable(creation_failure),
+            Self::Failed(message, _) => Self::Failed(message, creation_failure),
+            Self::Unknown(mut result) => {
+                if let Some(failure) = creation_failure {
+                    result["creationFailure"] = json!(failure);
+                }
+                Self::Unknown(result)
+            }
+            succeeded => succeeded,
+        }
     }
 }
 
@@ -259,9 +274,9 @@ pub fn summarize_team_runtime_control_outcome(
             "outcome": "unknown",
             "contract": team_runtime_result_contract(result),
         }),
-        TeamRuntimeControlOutcome::Failed(_)
-        | TeamRuntimeControlOutcome::InvalidInput
-        | TeamRuntimeControlOutcome::Unavailable => json!({
+        TeamRuntimeControlOutcome::Failed(_, _)
+        | TeamRuntimeControlOutcome::InvalidInput(_)
+        | TeamRuntimeControlOutcome::Unavailable(_) => json!({
             "operationId": operation_id,
             "outcome": "rejected",
         }),
@@ -269,11 +284,11 @@ pub fn summarize_team_runtime_control_outcome(
 }
 
 fn invalid_input() -> TeamRuntimeControlOutcome {
-    TeamRuntimeControlOutcome::InvalidInput
+    TeamRuntimeControlOutcome::InvalidInput(None)
 }
 
 fn unavailable() -> TeamRuntimeControlOutcome {
-    TeamRuntimeControlOutcome::Unavailable
+    TeamRuntimeControlOutcome::Unavailable(None)
 }
 
 pub enum TeamRuntimeProjectionContext {
@@ -420,7 +435,13 @@ fn team_runtime_outcome_with_context(
                 "Team deletion was rejected.",
             ),
         },
-        TeamRuntimeCommandOutcome::RunCreate(result) => match result {
+        TeamRuntimeCommandOutcome::RunCreate { result, creation_failure } => {
+            let creation_failure = creation_failure.or_else(|| matches!(&result,
+                Ok(organization::CreateGraphRunOutcome::ExistingRun | organization::CreateGraphRunOutcome::ConflictingIdempotency),
+            ).then(|| organization::TeamCreationFailure::new(
+                organization::TeamCreationStage::InitializingSessions, organization::TeamCreationFailureReason::StoreConflict,
+            )));
+            let outcome = match result {
             Ok(organization::CreateGraphRunOutcome::Created(run_id)) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
                 "runId": run_id.as_str(),
                 "status": "created",
@@ -441,13 +462,17 @@ fn team_runtime_outcome_with_context(
                 TeamRuntimeProjectionOutcome::unknown(TeamRuntimePrivateResult::private(json!({ "outcome": "outcome-unknown" })))
             }
             Err(TeamRuntimeStatus::Unavailable) => unavailable(),
+            };
+            outcome.with_creation_failure(creation_failure)
         },
         TeamRuntimeCommandOutcome::RunList(runs) => match runs {
             Ok(runs) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({
                 "teamId": team_id,
                 "runs": runs.iter().map(|run| team_run_list_item_json(run, resolver)).collect::<Vec<_>>(),
             }))),
-            Err(_) => unavailable(),
+            Err(error) => unavailable().with_creation_failure(Some(crate::owner::team_run::creation_store_failure(
+                organization::TeamCreationStage::LoadingTeam, &error,
+            ))),
         },
         TeamRuntimeCommandOutcome::Resume {
             team_id,
@@ -475,15 +500,30 @@ fn team_runtime_outcome_with_context(
             Ok(result) => team_run_trigger_outcome(result),
             Err(_) => TeamRuntimeProjectionOutcome::rejected(TeamRuntimeProjectionRejection::Failed, "Team trigger was rejected."),
         },
-        TeamRuntimeCommandOutcome::RunSnapshotInvalidInput => invalid_input(),
+        TeamRuntimeCommandOutcome::RunSnapshotInvalidInput { creation_failure } => {
+            invalid_input().with_creation_failure(creation_failure)
+        }
         TeamRuntimeCommandOutcome::RunSnapshot {
             snapshot,
             role_sessions,
+            creation_failure,
         } => match snapshot {
             organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Available(snapshot) => {
                 TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(team_run_public_snapshot_legacy_json(&snapshot, role_sessions.as_deref(), resolver)))
             }
-            organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Unavailable(_) => unavailable(),
+            organization::run::public_projection::TeamRunPublicSnapshotQueryOutcome::Unavailable(reason) => {
+                use organization::run::public_projection::TeamRunPublicSnapshotUnavailable::*;
+                let reason = match reason {
+                    MissingTeam => organization::TeamCreationFailureReason::TeamMissing,
+                    TombstonedTeam => organization::TeamCreationFailureReason::TeamDeleted,
+                    MissingRun => organization::TeamCreationFailureReason::RunMissing,
+                    ForeignRun => organization::TeamCreationFailureReason::RunTeamMismatch,
+                    TombstonedRun => organization::TeamCreationFailureReason::RunDeleted,
+                };
+                unavailable().with_creation_failure(creation_failure.or_else(|| Some(organization::TeamCreationFailure::new(
+                    organization::TeamCreationStage::LoadingTeam, reason,
+                ))))
+            }
         },
         TeamRuntimeCommandOutcome::GraphExportYaml(result) => match result {
             Ok(yaml) => TeamRuntimeProjectionOutcome::succeeded(TeamRuntimePrivateResult::private(json!({

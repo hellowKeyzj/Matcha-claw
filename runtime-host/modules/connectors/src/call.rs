@@ -152,8 +152,11 @@ impl ConnectorCall {
 }
 
 impl ConnectorCallDetail {
-    pub(crate) fn connector(id: &str) -> Self {
-        Self { connector_id: Some(id.to_owned()), ..Self::default() }
+    pub(crate) fn connector(id: &str) -> Result<Self, ()> {
+        if !crate::delivery::valid_connector_id(id) {
+            return Err(());
+        }
+        Ok(Self { connector_id: Some(id.to_owned()), ..Self::default() })
     }
 
     pub(crate) fn mutation(&mut self, outcome: &ConnectorMutationReceipt) -> CallStatus {

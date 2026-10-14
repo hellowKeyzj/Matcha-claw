@@ -153,9 +153,15 @@ async fn materializing_a_missing_canonical_config_preserves_it_after_attempt_cle
 
     let attempt = launch.materialize().await.unwrap();
 
-    assert_eq!(fs::read(&canonical).unwrap(), b"{}\n");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&canonical).unwrap()).unwrap(),
+        serde_json::json!({ "skills": { "workshop": { "autonomous": { "mode": "off" } } } })
+    );
     drop(attempt);
-    assert_eq!(fs::read(canonical).unwrap(), b"{}\n");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(canonical).unwrap()).unwrap(),
+        serde_json::json!({ "skills": { "workshop": { "autonomous": { "mode": "off" } } } })
+    );
 }
 
 #[cfg(windows)]

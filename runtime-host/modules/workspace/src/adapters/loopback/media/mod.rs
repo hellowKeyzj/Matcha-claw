@@ -18,12 +18,12 @@ const THUMBNAIL_OPERATION_ID: &str = "media.thumbnail";
 const THUMBNAILS_OPERATION_ID: &str = "media.thumbnails";
 const STAGE_PATHS_OPERATION_ID: &str = "media.stagePaths";
 const STAGE_BUFFER_OPERATION_ID: &str = "media.stageBuffer";
-const AUTHORIZATION_ENDPOINT: &str = "/api/workspace/media";
+pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/workspace/media";
 const AUTHORIZATION_SCOPE: &str = "workspace-media:read";
 const AUTHORIZATION_SUBJECT: &str = "workspace-media";
 const MAX_MEDIA_BYTES: usize = 50 * 1024 * 1024;
 const MAX_BASE64_BYTES: usize = ((MAX_MEDIA_BYTES + 2) / 3) * 4;
-const MAX_PATHS: usize = 256;
+const MAX_PATHS: usize = crate::MAX_MEDIA_PATHS;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]

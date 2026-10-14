@@ -22,6 +22,14 @@ impl SessionLane {
         reply: oneshot::Sender<SessionGoalOutcome>,
         call: Option<SessionCall>,
     ) {
+        if shared.terminal_delivery.is_stopping() {
+            crate::call::reply(call.as_ref(), reply, SessionGoalOutcome::Unavailable).await;
+            return;
+        }
+        let producer = match self.completion_producer(shared) {
+            Ok(producer) => producer,
+            Err(()) => { crate::call::reply(call.as_ref(), reply, SessionGoalOutcome::Unavailable).await; return; },
+        };
         if command.validate().is_err() {
             crate::call::reply(call.as_ref(), reply, SessionGoalOutcome::TargetRejected).await;
             return;
@@ -76,15 +84,9 @@ impl SessionLane {
         };
         let shared_for_tasks = shared.clone();
         let (task, _) = OwnedTask::spawn(move |cancel| async move {
-            let mutation = async {
-                match driver.session_ops() {
-                    Some(ops) => ops.mutate_session_goal(command.clone()).await,
-                    None => SessionGoalOutcome::Unsupported,
-                }
-            };
-            let outcome = tokio::select! {
-                _ = cancel.cancelled() => { crate::call::reply(call.as_ref(), reply, SessionGoalOutcome::Unknown).await; return; },
-                outcome = mutation => outcome,
+            let outcome = match driver.session_ops() {
+                Some(ops) => ops.mutate_session_goal_cancellable(command.clone(), cancel).await,
+                None => SessionGoalOutcome::Unsupported,
             };
             let outcome = match outcome {
                 SessionGoalOutcome::Succeeded { receipt } if !valid_receipt(&command, &receipt) => {
@@ -92,17 +94,20 @@ impl SessionLane {
                 }
                 outcome => outcome,
             };
-            tokio::select! {
-                _ = cancel.cancelled() => {},
-                _ = sender.send_command(SessionCommand::GoalCompleted { command, demand_lease, outcome, reply, call }) => {},
+            match sender.reserve_control().await {
+                Ok(slot) => { let _ = slot.send(SessionCommand::Producing {
+                    producer,
+                    command: Box::new(SessionCommand::GoalCompleted { command, demand_lease, outcome, reply, call }),
+                }); },
+                Err(_) => crate::call::reply(call.as_ref(), reply, outcome).await,
             }
         });
         let mut tasks = shared_for_tasks
             .read_tasks
             .lock()
             .expect("session read tasks lock");
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(task);
+        tasks.retain(|task| task.try_lock().map_or(true, |task| !task.is_finished()));
+        tasks.push(std::sync::Arc::new(tokio::sync::Mutex::new(task)));
     }
 
     pub(super) async fn complete_goal(

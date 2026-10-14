@@ -2,13 +2,14 @@ use std::{
     collections::HashSet,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
 
-use foundation::execution::OwnedTask;
+use foundation::execution::{OwnedTask, TaskHandle};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::actor::{SessionLane, SessionShared};
 use crate::{
@@ -37,18 +38,21 @@ fn command_shape(command: &timeline::Command) -> serde_json::Value {
 
 pub(super) struct Observation {
     handle: Option<Arc<dyn SessionObservation>>,
-    task: Option<OwnedTask<()>>,
+    task: Option<TaskHandle>,
     baseline: Option<SessionState>,
     active_command: Option<timeline::Command>,
     committed_command: Option<timeline::Command>,
     committed_view: Option<SessionView>,
     generation: u64,
     closing: bool,
+    terminal_sync: Arc<AtomicBool>,
+    close_after_sync: Option<bool>,
     restart_after_close: bool,
     recovery_available: bool,
     needs_sync: bool,
     leases: HashSet<String>,
     runs: HashSet<String>,
+    pending_sends: usize,
     unknown_send: bool,
     notified_terminals: HashSet<String>,
     waiters: Vec<Waiter>,
@@ -69,11 +73,16 @@ enum WaiterReply {
     Timeline(oneshot::Sender<timeline::Outcome>),
     Send {
         command: SessionSendCommand,
+        cancellation: CancellationToken,
         reply: oneshot::Sender<SessionSendOutcome>,
     },
 }
 
 impl Observation {
+    pub(super) fn cancel_task(&self) {
+        if let Some(task) = &self.task { task.cancel(); }
+    }
+
     fn take_failed_waiters(&mut self) -> Vec<Waiter> {
         let waiters = std::mem::take(&mut self.waiters);
         for waiter in &waiters {
@@ -92,6 +101,7 @@ impl Observation {
     fn demanded(&self) -> bool {
         !self.leases.is_empty()
             || !self.runs.is_empty()
+            || self.pending_sends > 0
             || self.unknown_send
             || !self.waiters.is_empty()
     }
@@ -105,6 +115,12 @@ pub(super) fn valid_lease_id(value: &str) -> bool {
 }
 
 impl SessionShared {
+    pub(super) fn terminal_sync_pending(&self, identity: &SessionIdentity) -> bool {
+        self.observations.lock().expect("session observation lock")
+            .get(&session_identity_lane_key(identity))
+            .is_some_and(|entry| entry.terminal_sync.load(Ordering::Acquire))
+    }
+
     pub(super) fn observation_generation(&self, identity: &SessionIdentity) -> Option<u64> {
         self.observations
             .lock()
@@ -170,8 +186,8 @@ impl SessionShared {
                 .await;
         });
         let mut tasks = self.read_tasks.lock().expect("session read tasks lock");
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(task);
+        tasks.retain(|task| task.try_lock().map_or(true, |task| !task.is_finished()));
+        tasks.push(Arc::new(tokio::sync::Mutex::new(task)));
         forward
     }
 
@@ -183,13 +199,19 @@ impl SessionShared {
             .is_some_and(|entry| entry.notified_terminals.contains(run_id))
     }
 
+    pub(super) async fn stop_observation_waiters(&self) {
+        let waiters = {
+            let mut entries = self.observations.lock().expect("session observation lock");
+            entries.values_mut().flat_map(Observation::take_failed_waiters).collect::<Vec<_>>()
+        };
+        for waiter in waiters { finish_waiter(waiter, None).await; }
+    }
+
     pub(super) async fn shutdown_observations(&self) {
         let entries =
             std::mem::take(&mut *self.observations.lock().expect("session observation lock"));
         for (_, mut entry) in entries {
-            if let Some(task) = entry.task.as_mut() {
-                let _ = task.cancel_and_join().await;
-            }
+            if let Some(task) = &entry.task { task.cancel(); }
             if let Some(handle) = entry.handle {
                 handle.close().await;
             }
@@ -206,6 +228,7 @@ impl SessionLane {
         shared: &SessionShared,
         identity: &SessionIdentity,
     ) -> Result<(), RuntimeOperationFailure> {
+        if shared.terminal_delivery.is_stopping() { return Err(RuntimeOperationFailure::Unavailable); }
         let key = session_identity_lane_key(identity);
         if shared
             .observations
@@ -258,11 +281,14 @@ impl SessionLane {
                     committed_view: None,
                     generation,
                     closing: false,
+                    terminal_sync: Arc::new(AtomicBool::new(false)),
+                    close_after_sync: None,
                     restart_after_close: false,
                     recovery_available: true,
                     needs_sync: false,
                     leases: HashSet::new(),
                     runs: HashSet::new(),
+                    pending_sends: 0,
                     unknown_send: false,
                     notified_terminals: HashSet::new(),
                     waiters: Vec::new(),
@@ -321,17 +347,25 @@ impl SessionLane {
                 "reason": if !entry.waiters.is_empty() { "waiter_request" } else if entry.needs_sync { "needs_sync" } else { "demand_without_committed_view" },
             }));
         }
+        let Ok(mut producer) = shared.producer() else { return; };
         entry.baseline = Some(baseline);
         entry.active_command = Some(command.clone());
         if command.direction() == timeline::Direction::Latest {
             entry.needs_sync = false;
         }
+        let shared = shared.clone();
         let identity = identity.clone();
         let generation = entry.generation;
         let epoch = shared.epoch;
-        let (task, _) = OwnedTask::spawn(move |cancel| async move {
+        entry.terminal_sync.store(true, Ordering::Release);
+        let tasks_owner = shared.clone();
+        let (task, task_handle) = OwnedTask::spawn(move |cancel| async move {
             let started = crate::trace::enabled().then(Instant::now);
-            let result = tokio::select! { _ = cancel.cancelled() => return, result = handle.sync(command, epoch) => result };
+            let mut result = tokio::select! {
+                biased;
+                result = handle.sync(command, epoch) => result,
+                _ = cancel.cancelled() => Err(RuntimeOperationFailure::Unavailable),
+            };
             if let Some(started) = started {
                 let elapsed = started.elapsed().as_secs_f64() * 1000.0;
                 crate::trace::log_unscoped("sessions.sync.runtime_returned", || serde_json::json!({
@@ -340,9 +374,46 @@ impl SessionLane {
                     "succeeded": result.is_ok(),
                 }));
             }
-            tokio::select! { _ = cancel.cancelled() => {}, _ = sender.send_command(SessionCommand::SyncCompleted { identity, generation, result }) => {} }
+            if let Ok(sync) = &mut result && sync.view.identity == identity {
+                for terminals in sync.terminal_runs.chunks(crate::state::MAX_CHANGE_COUNT) {
+                    let terminals: Vec<_> = terminals.iter().map(|terminal|
+                        (terminal.clone(), sync.view.assistant_texts_for_run_id(&terminal.run_id))
+                    ).collect();
+                    loop {
+                        let epoch = producer.retry_epoch();
+                        let permit = shared.terminal_permit().await;
+                        let (reply, received) = oneshot::channel();
+                        if let Ok(slot) = sender.reserve_control().await {
+                            let _ = slot.send(SessionCommand::SyncTerminals {
+                                identity: identity.clone(), generation, terminals: terminals.clone(), permit, reply,
+                            });
+                            if let Ok(Some(changes)) = received.await {
+                                if let Some(baseline) = &mut sync.replay_baseline {
+                                    baseline.advance_sync_terminal_baseline(&changes);
+                                }
+                                break;
+                            }
+                        }
+                        producer.wait_retry(epoch).await;
+                    }
+                }
+                if !sync.terminal_runs.is_empty() { drop(shared.terminal_permit().await); }
+            }
+            loop {
+                let epoch = producer.retry_epoch();
+                if let Ok(slot) = sender.reserve_control().await {
+                    if slot.send(SessionCommand::Producing {
+                        producer: producer.inherited(),
+                        command: Box::new(SessionCommand::SyncCompleted { identity: identity.clone(), generation, result: result.clone() }),
+                    }).is_ok() { break; }
+                }
+                producer.wait_retry(epoch).await;
+            }
         });
-        entry.task = Some(task);
+        entry.task = Some(task_handle);
+        let mut tasks = tasks_owner.read_tasks.lock().expect("session read tasks lock");
+        tasks.retain(|task| task.try_lock().map_or(true, |task| !task.is_finished()));
+        tasks.push(Arc::new(tokio::sync::Mutex::new(task)));
     }
 
     fn latest_command(
@@ -545,9 +616,18 @@ impl SessionLane {
         &mut self,
         shared: &SessionShared,
         command: SessionSendCommand,
+        cancellation: CancellationToken,
         reply: oneshot::Sender<SessionSendOutcome>,
         call: Option<SessionCall>,
     ) {
+        if shared.terminal_delivery.is_stopping() {
+            crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
+            return;
+        }
+        if cancellation.is_cancelled() {
+            crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
+            return;
+        }
         if reply.is_closed() {
             crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
             return;
@@ -563,7 +643,7 @@ impl SessionLane {
                     || entry.waiters.iter().any(|waiter| matches!(&waiter.reply, WaiterReply::Send { .. }))
             });
         if !waiting {
-            self.resume_send(shared, command, reply, call).await;
+            self.resume_send(shared, command, cancellation, reply, call).await;
             return;
         }
         if self.state.is_none() {
@@ -571,7 +651,7 @@ impl SessionLane {
         }
         let waiter = Waiter {
             command: self.latest_command(&identity, timeline::WindowRequest::latest()),
-            reply: WaiterReply::Send { command, reply },
+            reply: WaiterReply::Send { command, cancellation, reply },
             call,
         };
         let rejected = {
@@ -623,7 +703,8 @@ impl SessionLane {
             let demand_added = if let Some(run_id) = run_id {
                 !entry.notified_terminals.contains(run_id) && entry.runs.insert(run_id.to_owned())
             } else {
-                !std::mem::replace(&mut entry.unknown_send, true)
+                entry.pending_sends += 1;
+                true
             };
             (entry.committed_view.is_none() || entry.needs_sync, demand_added)
         };
@@ -721,16 +802,18 @@ impl SessionLane {
             .expect("session observation lock")
             .get_mut(&session_identity_lane_key(identity))
         {
+            if requested.is_none() && demand_added {
+                entry.pending_sends -= 1;
+            }
             if matches!(outcome, Unknown) {
+                if requested.is_none() {
+                    entry.unknown_send = true;
+                }
                 return;
             }
-            if demand_added {
-                if let Some(requested) = requested {
-                    if self.state.as_ref().and_then(SessionState::active_run_id) != Some(requested) {
-                        entry.runs.remove(requested);
-                    }
-                } else {
-                    entry.unknown_send = false;
+            if demand_added && let Some(requested) = requested {
+                if self.state.as_ref().and_then(SessionState::active_run_id) != Some(requested) {
+                    entry.runs.remove(requested);
                 }
             }
             if let Some(run_id) = self.send_receive_run(identity, outcome)
@@ -782,6 +865,17 @@ impl SessionLane {
         }
     }
 
+    pub(super) fn retire_deleted_receive(&self, shared: &SessionShared, identity: &SessionIdentity) {
+        if let Some(entry) = shared.observations.lock().expect("session observation lock")
+            .get_mut(&session_identity_lane_key(identity))
+        {
+            entry.unknown_send = false;
+            entry.runs.clear();
+            entry.needs_sync = false;
+        }
+        self.close_if_idle(shared, identity);
+    }
+
     pub(super) fn close_if_idle(&self, shared: &SessionShared, identity: &SessionIdentity) {
         let idle = shared
             .observations
@@ -797,6 +891,7 @@ impl SessionLane {
     }
 
     fn close_observation(&self, shared: &SessionShared, identity: &SessionIdentity, restart: bool) {
+        if shared.terminal_delivery.is_stopping() { return; }
         let Some(sender) = shared.completion_handle.get().cloned() else {
             return;
         };
@@ -807,6 +902,10 @@ impl SessionLane {
         let Some(entry) = entries.get_mut(&session_identity_lane_key(identity)) else {
             return;
         };
+        if entry.terminal_sync.load(Ordering::Acquire) {
+            entry.close_after_sync = Some(entry.close_after_sync.unwrap_or(false) || restart);
+            return;
+        }
         if entry.closing {
             if crate::trace::enabled() {
                 crate::trace::log_unscoped("sessions.observation.close_skip", || serde_json::json!({
@@ -818,6 +917,7 @@ impl SessionLane {
             entry.restart_after_close |= restart;
             return;
         }
+        let Ok(mut producer) = shared.producer() else { return; };
         let handle = if restart { entry.handle.clone() } else { entry.handle.take() };
         let Some(handle) = handle else {
             return;
@@ -830,19 +930,17 @@ impl SessionLane {
                 "leases": entry.leases.len(), "runs": entry.runs.len(), "unknownSend": entry.unknown_send,
             }));
         }
+        entry.close_after_sync.take();
         entry.closing = true;
         entry.restart_after_close = restart;
         entry.baseline = None;
         entry.active_command = None;
         entry.committed_view = None;
         entry.committed_command = None;
-        let mut previous = entry.task.take();
+        if let Some(previous) = entry.task.take() { previous.cancel(); }
         let identity = identity.clone();
         let generation = entry.generation;
-        let (task, _) = OwnedTask::spawn(move |cancel| async move {
-            if let Some(task) = previous.as_mut() {
-                let _ = task.cancel_and_join().await;
-            }
+        let (task, task_handle) = OwnedTask::spawn(move |_cancel| async move {
             let restarted = if restart {
                 let next_generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
                 if crate::trace::enabled() {
@@ -864,9 +962,21 @@ impl SessionLane {
                 handle.close().await;
                 None
             };
-            tokio::select! { _ = cancel.cancelled() => {}, _ = sender.send_command(SessionCommand::ObservationClosed { identity, generation, restarted }) => {} }
+            loop {
+                let epoch = producer.retry_epoch();
+                if let Ok(slot) = sender.reserve_control().await {
+                    if slot.send(SessionCommand::Producing {
+                        producer: producer.inherited(),
+                        command: Box::new(SessionCommand::ObservationClosed { identity: identity.clone(), generation, restarted }),
+                    }).is_ok() { break; }
+                }
+                producer.wait_retry(epoch).await;
+            }
         });
-        entry.task = Some(task);
+        entry.task = Some(task_handle);
+        let mut tasks = shared.read_tasks.lock().expect("session read tasks lock");
+        tasks.retain(|task| task.try_lock().map_or(true, |task| !task.is_finished()));
+        tasks.push(Arc::new(tokio::sync::Mutex::new(task)));
     }
 
     pub(super) async fn observation_closed(
@@ -1002,6 +1112,44 @@ impl SessionLane {
         }
     }
 
+    pub(super) async fn sync_terminals(
+        &mut self,
+        shared: &SessionShared,
+        identity: &SessionIdentity,
+        generation: u64,
+        terminals: Vec<(crate::ports::SessionTerminalRun, Vec<String>)>,
+    ) -> Option<crate::state::SyncTerminalChanges> {
+        if shared.observation_generation(identity) != Some(generation) { return None; }
+        let before = self.state.as_ref()?;
+        let mut next = before.clone();
+        let mut committed = Vec::new();
+        for (terminal, assistant_texts) in terminals {
+            if next.has_terminal_run(&terminal.run_id) { continue; }
+            let cursor = next.cursor().checked_add(1)?;
+            let binding = crate::state::SessionEventBinding::new(identity.clone(), None)
+                .expect("validated sync identity");
+            let crate::state::SessionApplyResult::Applied(delta) = next.apply_bound(
+                binding, None, cursor, vec![SessionChange::RunPhaseChanged { run_id: terminal.run_id, phase: terminal.phase }],
+            ) else { return None; };
+            let snapshots = SessionShared::terminal_snapshots(&delta, &next, |_| assistant_texts.clone());
+            if !self.retain_terminals(shared, &mut next, &snapshots) { return None; }
+            committed.push((delta, snapshots));
+        }
+        let changes = next.sync_terminal_changes(before);
+        self.state = Some(next.clone());
+        shared.store_snapshot_state(next).await;
+        if let Some(baseline) = shared.observations.lock().expect("session observation lock")
+            .get_mut(&session_identity_lane_key(identity)).and_then(|entry| entry.baseline.as_mut())
+        {
+            baseline.advance_sync_terminal_baseline(&changes);
+        }
+        for (delta, snapshots) in committed {
+            shared.receive_event(identity, &delta.changes);
+            shared.emit_session_delta(&delta, snapshots);
+        }
+        Some(changes)
+    }
+
     pub(super) async fn sync_completed(
         &mut self,
         shared: &SessionShared,
@@ -1047,6 +1195,8 @@ impl SessionLane {
             };
             let items_mode = entry.handle.as_ref().expect("sync observation handle").items_sync_mode();
             entry.task.take();
+            entry.terminal_sync.store(false, Ordering::Release);
+            shared.terminal_delivery.notify();
             (baseline, command, items_mode)
         };
         let input_trace_started = crate::trace::enabled().then(Instant::now);
@@ -1082,40 +1232,7 @@ impl SessionLane {
                 )
                 .await;
                 let mut next = self.state.clone().unwrap_or_else(|| baseline.clone());
-                let mut terminal_commit_failed = false;
-                for terminal in &sync.terminal_runs {
-                    if next.has_terminal_run(&terminal.run_id) {
-                        continue;
-                    }
-                    let current = next.view();
-                    let Some(cursor) = current.cursor.checked_add(1) else {
-                        terminal_commit_failed = true;
-                        break;
-                    };
-                    let binding = crate::state::SessionEventBinding::new(identity.clone(), None)
-                        .expect("validated sync identity");
-                    match next.apply_bound(
-                        binding,
-                        None,
-                        cursor,
-                        vec![SessionChange::RunPhaseChanged {
-                            run_id: terminal.run_id.clone(),
-                            phase: terminal.phase,
-                        }],
-                    ) {
-                        crate::state::SessionApplyResult::Applied(delta) => {
-                            let terminals = SessionShared::terminal_snapshots(&delta, &mut next);
-                            self.state = Some(next.clone());
-                            shared.store_snapshot_state(next.clone()).await;
-                            shared.receive_event(&identity, &delta.changes);
-                            shared.emit_session_delta(&delta, terminals);
-                        }
-                        _ => {
-                            terminal_commit_failed = true;
-                            break;
-                        }
-                    }
-                }
+                let terminal_commit_failed = sync.terminal_runs.iter().any(|terminal| !next.has_terminal_run(&terminal.run_id));
                 let reconciled = if terminal_commit_failed {
                     Err(crate::state::SessionStateError::InvalidFacts)
                 } else if crate::trace::enabled() {
@@ -1207,7 +1324,13 @@ impl SessionLane {
                 None
             },
         };
+        let deferred_close = shared.observations.lock().expect("session observation lock")
+            .get_mut(&session_identity_lane_key(&identity)).and_then(|entry| entry.close_after_sync.take());
         if view.is_none() {
+            if let Some(restart) = deferred_close {
+                self.close_observation(shared, &identity, restart);
+                return;
+            }
             if failure == RuntimeOperationFailure::HistoryRetryPending {
                 let retained = {
                     let mut entries = shared.observations.lock().expect("session observation lock");
@@ -1263,6 +1386,10 @@ impl SessionLane {
             self.close_observation(shared, &identity, restart);
             return;
         }
+        if let Some(restart) = deferred_close {
+            self.close_observation(shared, &identity, restart);
+            return;
+        }
         // Retain the remaining waiters as demand while each send resumes.
         loop {
             let waiter = {
@@ -1278,11 +1405,11 @@ impl SessionLane {
             };
             let Some(waiter) = waiter else { break; };
             match waiter {
-                Waiter { reply: WaiterReply::Send { command, reply }, call, .. } => {
+                Waiter { reply: WaiterReply::Send { command, cancellation, reply }, call, .. } => {
                     if reply.is_closed() {
                         crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
                     } else {
-                        self.resume_send(shared, command, reply, call).await;
+                        self.resume_send(shared, command, cancellation, reply, call).await;
                     }
                 }
                 waiter => finish_waiter(waiter, view.clone()).await,

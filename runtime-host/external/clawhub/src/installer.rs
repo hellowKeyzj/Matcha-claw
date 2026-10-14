@@ -1,11 +1,20 @@
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    time::Duration,
 };
+
+use foundation::process::{
+    LaunchSpec, OneShotCompletion, OneShotContainment, OneShotRun, OneShotRunner, StdioMode,
+    StdioSpec,
+};
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 const MANAGED_MARKER: &str = ".matchaclaw-managed";
 const CLAWHUB_METADATA_DIRS: [&str; 2] = [".clawhub", ".clawdhub"];
+const INSTALL_BUDGET: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ClawHubInstallRequest {
@@ -97,6 +106,7 @@ pub struct ClawHubCliInstaller {
     work_dir: PathBuf,
     cli_entries: Vec<PathBuf>,
     registries: Vec<String>,
+    containment: Option<OneShotContainment>,
 }
 
 impl ClawHubCliInstaller {
@@ -111,14 +121,54 @@ impl ClawHubCliInstaller {
             work_dir,
             cli_entries,
             registries,
+            containment: None,
         }
     }
 
+    pub fn with_containment(mut self, containment: OneShotContainment) -> Self {
+        self.containment = Some(containment);
+        self
+    }
+
     pub async fn install(&self, request: ClawHubInstallRequest) -> Result<(), ()> {
-        let installer = self.clone();
-        tokio::task::spawn_blocking(move || installer.install_blocking(request))
+        self.install_cancellable(request, CancellationToken::new())
             .await
-            .map_err(|_| ())?
+    }
+
+    pub async fn install_cancellable(
+        &self,
+        request: ClawHubInstallRequest,
+        cancellation: CancellationToken,
+    ) -> Result<(), ()> {
+        let deadline = Instant::now() + INSTALL_BUDGET;
+        let Some(containment) = &self.containment else {
+            return Err(());
+        };
+        let Some(entry) = self.cli_entries.iter().find(|entry| entry.is_file()) else {
+            return Err(());
+        };
+        let args = request.args();
+        for registry in &self.registries {
+            if cancellation.is_cancelled() || Instant::now() >= deadline {
+                return Err(());
+            }
+            match self
+                .run(
+                    entry,
+                    &args,
+                    registry,
+                    containment.clone(),
+                    deadline,
+                    &cancellation,
+                )
+                .await
+            {
+                OneShotCompletion::Succeeded => return Ok(()),
+                OneShotCompletion::UnavailableBeforeDispatch | OneShotCompletion::Failed => {}
+                OneShotCompletion::OutcomeUnknown => return Err(()),
+            }
+        }
+        Err(())
     }
 
     pub async fn uninstall(&self, request: ClawHubUninstallRequest) -> ClawHubUninstallOutcome {
@@ -126,19 +176,6 @@ impl ClawHubCliInstaller {
         tokio::task::spawn_blocking(move || installer.uninstall_blocking(request))
             .await
             .unwrap_or(ClawHubUninstallOutcome::Unknown)
-    }
-
-    fn install_blocking(self, request: ClawHubInstallRequest) -> Result<(), ()> {
-        let Some(entry) = self.cli_entries.iter().find(|entry| entry.is_file()) else {
-            return Err(());
-        };
-        let args = request.args();
-        for registry in &self.registries {
-            if self.run(entry, &args, registry).is_ok() {
-                return Ok(());
-            }
-        }
-        Err(())
     }
 
     fn uninstall_blocking(self, request: ClawHubUninstallRequest) -> ClawHubUninstallOutcome {
@@ -165,19 +202,56 @@ impl ClawHubCliInstaller {
         }
     }
 
-    fn run(&self, entry: &PathBuf, args: &[String], registry: &str) -> Result<(), ()> {
-        let mut command = Command::new(&self.electron_image);
+    async fn run(
+        &self,
+        entry: &PathBuf,
+        args: &[String],
+        registry: &str,
+        containment: OneShotContainment,
+        deadline: Instant,
+        cancellation: &CancellationToken,
+    ) -> OneShotCompletion {
+        let mut command = std::process::Command::new(&self.electron_image);
         command.arg(entry);
         command.args(args);
         command.current_dir(&self.work_dir);
-        command.envs(std::env::vars_os());
         command.env("ELECTRON_RUN_AS_NODE", "1");
         command.env("CI", "true");
         command.env("FORCE_COLOR", "0");
         command.env("CLAWHUB_WORKDIR", &self.work_dir);
         command.env("CLAWHUB_REGISTRY", registry);
-        let output = command.output().map_err(|_| ())?;
-        output.status.success().then_some(()).ok_or(())
+        let launch = match LaunchSpec::try_new_inheriting_environment(
+            self.electron_image.clone(),
+            self.work_dir.clone(),
+            command.get_args().map(OsString::from),
+            command.get_envs().filter_map(|(key, value)| {
+                value.map(|value| (key.to_os_string(), value.to_os_string()))
+            }),
+            StdioSpec::new(StdioMode::Null, StdioMode::Null, StdioMode::Null),
+        ) {
+            Ok(launch) => launch,
+            Err(_) => return OneShotCompletion::UnavailableBeforeDispatch,
+        };
+        if cancellation.is_cancelled() || Instant::now() >= deadline {
+            return OneShotCompletion::OutcomeUnknown;
+        }
+        let run = match OneShotRun::try_new(
+            launch,
+            containment,
+            deadline.saturating_duration_since(Instant::now()),
+        ) {
+            Ok(run) => run,
+            Err(_) => return OneShotCompletion::UnavailableBeforeDispatch,
+        };
+        let mut operation = match OneShotRunner::new().start(run) {
+            Ok(operation) => operation,
+            Err(_) => return OneShotCompletion::UnavailableBeforeDispatch,
+        };
+        tokio::select! {
+            biased;
+            completion = operation.wait() => completion,
+            _ = cancellation.cancelled() => operation.cancel_and_join().await,
+        }
     }
 }
 

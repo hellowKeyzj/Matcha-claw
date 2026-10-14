@@ -20,6 +20,14 @@ pub(crate) struct WriteTransaction<'connection> {
 
 impl Database {
     pub(crate) fn open(path: &Path) -> Result<Self, StoreFault> {
+        Self::open_with_initialization(path, false)
+    }
+
+    pub(crate) fn open_new(path: &Path) -> Result<Self, StoreFault> {
+        Self::open_with_initialization(path, true)
+    }
+
+    fn open_with_initialization(path: &Path, initialize: bool) -> Result<Self, StoreFault> {
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -50,7 +58,19 @@ impl Database {
                 .pragma_update(None, "user_version", schema::VERSION)
                 .map_err(write_error)?;
         }
-        transaction.commit().map_err(commit_error)?;
+        if initialize {
+            let (epoch, initialized) = metadata(&transaction)?;
+            let mut transaction = WriteTransaction {
+                transaction,
+                epoch,
+                initialized,
+                changed: false,
+            };
+            transaction.mark_initialized()?;
+            transaction.commit()?;
+        } else {
+            transaction.commit().map_err(commit_error)?;
+        }
         Ok(Self { connection })
     }
 

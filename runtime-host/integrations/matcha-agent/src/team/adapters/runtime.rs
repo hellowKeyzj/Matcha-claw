@@ -1,13 +1,19 @@
 use super::*;
+use tokio_util::sync::CancellationToken;
 
 impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
     fn read_team_member_profiles(
         &self,
         _agents: Vec<organization::ManagedAgentReference>,
     ) -> OwnedRuntimeFuture<
-        Result<Vec<organization::MemberProfile>, organization::MemberIntroductionError>,
+        Result<Vec<organization::MemberProfile>, organization::TeamCreationFailure>,
     > {
-        Box::pin(async { Err(organization::MemberIntroductionError::Unsupported) })
+        Box::pin(async {
+            Err(organization::TeamCreationFailure::new(
+                organization::TeamCreationStage::ReadingProfiles,
+                organization::TeamCreationFailureReason::Unsupported,
+            ))
+        })
     }
 
     fn materialize_team(
@@ -37,14 +43,42 @@ impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
 
     fn confirm_team_run_receipt(
         &self,
-        _receipt: organization::RunRuntimeReceipt,
+        receipt: organization::RunRuntimeReceipt,
     ) -> OwnedRuntimeFuture<organization::RuntimeReceiptOutcome> {
-        Box::pin(async { organization::RuntimeReceiptOutcome::OutcomeUnknown })
+        let confirmation = self.confirm_team_run_receipt_cancellable(receipt, CancellationToken::new());
+        Box::pin(async move { confirmation.await.0 })
+    }
+
+    fn confirm_team_run_receipt_cancellable(
+        &self,
+        _receipt: organization::RunRuntimeReceipt,
+        _cancellation: CancellationToken,
+    ) -> OwnedRuntimeFuture<(
+        organization::RuntimeReceiptOutcome,
+        Option<organization::TeamCreationFailure>,
+    )> {
+        Box::pin(async {
+            (
+                organization::RuntimeReceiptOutcome::OutcomeUnknown,
+                Some(organization::TeamCreationFailure::new(
+                    organization::TeamCreationStage::InitializingSessions,
+                    organization::TeamCreationFailureReason::Unsupported,
+                )),
+            )
+        })
     }
 
     fn abort_role_sessions(
         &self,
         bindings: Vec<organization::RoleSessionReceipt>,
+    ) -> OwnedRuntimeFuture<organization::RoleAbortOutcome> {
+        self.abort_role_sessions_cancellable(bindings, CancellationToken::new())
+    }
+
+    fn abort_role_sessions_cancellable(
+        &self,
+        bindings: Vec<organization::RoleSessionReceipt>,
+        cancellation: CancellationToken,
     ) -> OwnedRuntimeFuture<organization::RoleAbortOutcome> {
         let native = self.native_handle();
         Box::pin(async move {
@@ -55,7 +89,7 @@ impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
                     Ok(session) => session,
                     Err(_) => return organization::RoleAbortOutcome::OutcomeUnknown,
                 };
-                match native.cancel_role_session(session).await {
+                match native.cancel_role_session_cancellable(session, &cancellation).await {
                     InvocationOutcome::Succeeded(()) => {}
                     InvocationOutcome::TargetRejected(_)
                     | InvocationOutcome::Cancelled
@@ -74,6 +108,16 @@ impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
         bindings: Vec<organization::RoleSessionReceipt>,
         abort_first: bool,
     ) -> OwnedRuntimeFuture<organization::NativeDeletionEvidence> {
+        self.delete_role_sessions_cancellable(run_id, bindings, abort_first, CancellationToken::new())
+    }
+
+    fn delete_role_sessions_cancellable(
+        &self,
+        run_id: organization::GraphRunId,
+        bindings: Vec<organization::RoleSessionReceipt>,
+        abort_first: bool,
+        cancellation: CancellationToken,
+    ) -> OwnedRuntimeFuture<organization::NativeDeletionEvidence> {
         let native = self.native_handle();
         Box::pin(async move {
             if abort_first {
@@ -84,7 +128,7 @@ impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
                         Ok(session) => session,
                         Err(_) => return organization::NativeDeletionEvidence::OutcomeUnknown,
                     };
-                    match native.cancel_role_session(session).await {
+                    match native.cancel_role_session_cancellable(session, &cancellation).await {
                         InvocationOutcome::Succeeded(()) => {}
                         InvocationOutcome::TargetRejected(_)
                         | InvocationOutcome::Cancelled
@@ -102,7 +146,7 @@ impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
                     Ok(session) => session,
                     Err(_) => return organization::NativeDeletionEvidence::Rejected,
                 };
-                match native.close_role_session(session).await {
+                match native.close_role_session_cancellable(session, &cancellation).await {
                     InvocationOutcome::Succeeded(()) => {
                         let receipt = organization::RoleSessionDeleteReceipt::new(
                             binding.endpoint_session_id().clone(),

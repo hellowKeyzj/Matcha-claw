@@ -73,14 +73,25 @@ impl OrganizationStore {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
             Err(error) => return Err(StoreFault::Commit(error.kind())),
         };
-        let mut database = Database::open(&path)?;
-        if fresh {
-            let mut transaction = database.begin()?;
-            transaction.mark_initialized()?;
-            transaction.commit()?;
-        } else if !database.initialized()? {
-            return Err(StoreFault::MigrationRequired);
-        }
+        let mut database = if fresh {
+            match Database::open_new(&path) {
+                Ok(database) => database,
+                Err(error) => {
+                    // A failed COMMIT may already be durable; never remove that database.
+                    if !matches!(error, StoreFault::CommitOutcomeUnknown(_)) {
+                        fs::remove_file(&path)
+                            .map_err(|error| StoreFault::Recovery(error.kind()))?;
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            let database = Database::open(&path)?;
+            if !database.initialized()? {
+                return Err(StoreFault::MigrationRequired);
+            }
+            database
+        };
         let contents =
             ContentStore::new(path.parent().unwrap_or_else(|| Path::new(".")).to_owned());
         let (epoch, records) = database.read_all()?;
@@ -694,6 +705,50 @@ impl OrganizationStore {
                 .activities()
                 .activity(claim.activity_id())
                 .ok_or(StoreFault::InvalidFacts)?;
+            if let Some(proof) = activity.settlement_proof() {
+                facts.validate_agent_activity_settlement(activity, proof)
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+                if let Some(terminal_claim) = activity.native_terminal_claim() {
+                    facts.validate_native_confirmed_activity_claim(activity, terminal_claim)
+                        .map_err(|_| StoreFault::InvalidFacts)?;
+                }
+                if &proof.claim == claim
+                    && proof.receipt == receipt
+                    && proof.settlement == activity_settlement
+                {
+                    return Ok((proof.delivery_outcome, proof.activity_outcome));
+                }
+                return Err(StoreFault::InvalidFacts);
+            }
+            if let (
+                DeliveryReceipt::OutcomeUnknown { observed_at },
+                Some(ActivitySettlement::OutcomeUnknown { observed_at: settled_at }),
+            ) = (&receipt, &activity_settlement)
+                && *observed_at == claim.claimed_at()
+                && settled_at == observed_at
+                && matches!(delivery.phase(), crate::DeliveryPhase::Delivered { .. }
+                    | crate::DeliveryPhase::TerminalObserved { .. })
+            {
+                facts.validate_native_confirmed_activity_claim(activity, claim)
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+                let activity_outcome = if activity.active_claim() == Some(claim) {
+                    facts.settle_activity(
+                        claim,
+                        activity_settlement.clone().ok_or(StoreFault::InvalidFacts)?,
+                    ).map_err(|_| StoreFault::InvalidFacts)?
+                } else {
+                    ActivitySettlementOutcome::OutcomeUnknown
+                };
+                let delivery_outcome = DeliveryResolution::OutcomeUnknown;
+                facts.record_agent_activity_settlement(crate::run::activity::SettlementProof {
+                    claim: claim.clone(),
+                    receipt,
+                    settlement: activity_settlement,
+                    delivery_outcome,
+                    activity_outcome: Some(activity_outcome),
+                }).map_err(|_| StoreFault::InvalidFacts)?;
+                return Ok((delivery_outcome, Some(activity_outcome)));
+            }
             if let DeliveryReceipt::Accepted {
                 receipt,
                 native_correlation,
@@ -724,6 +779,106 @@ impl OrganizationStore {
                     return Ok((DeliveryResolution::Delivered, None));
                 }
             }
+            if activity.active_claim().is_none() {
+                let matching_time = match (&receipt, &activity_settlement) {
+                    (
+                        DeliveryReceipt::Rejected { observed_at, .. },
+                        Some(ActivitySettlement::RetryScheduled {
+                            retry_at,
+                            observed_at: activity_observed_at,
+                            ..
+                        }),
+                    ) => {
+                        *observed_at == claim.claimed_at()
+                            && activity_observed_at == observed_at
+                            && *retry_at == crate::run::delivery::delivery_retry_at(*observed_at)
+                            // A saturated retry deadline no longer proves the original claim time.
+                            && (*retry_at < u64::MAX
+                                || matches!(delivery.phase(), crate::DeliveryPhase::Failed { .. }))
+                    }
+                    (
+                        DeliveryReceipt::Rejected { observed_at, .. },
+                        Some(ActivitySettlement::Failed { failed_at, .. }),
+                    ) => *observed_at == claim.claimed_at() && failed_at == observed_at,
+                    (
+                        DeliveryReceipt::OutcomeUnknown { observed_at },
+                        Some(ActivitySettlement::OutcomeUnknown {
+                            observed_at: activity_observed_at,
+                        }),
+                    ) => *observed_at == claim.claimed_at() && activity_observed_at == observed_at,
+                    _ => false,
+                };
+                let activity_request = activity.facts();
+                let delivery_request = delivery.facts();
+                if matching_time
+                    && delivery_request.run_id == activity_request.run_id.as_str()
+                    && delivery_request.node_id == activity_request.node_id.as_str()
+                    && delivery_request.node_execution_id
+                        == activity_request.fence.node_execution_id().as_str()
+                    && delivery_request.idempotency_key == activity_request.idempotency_key
+                    && delivery_request.max_attempts == activity_request.max_attempts
+                {
+                    let completed_attempts = claim
+                        .attempt()
+                        .checked_sub(1)
+                        .ok_or(StoreFault::InvalidFacts)?;
+                    let next_generation = claim
+                        .generation()
+                        .checked_add(1)
+                        .ok_or(StoreFault::InvalidFacts)?;
+                    let dispatch = crate::ActivityDispatchSnapshot::new(
+                        crate::ActivityClaimSnapshot::new(
+                            claim.activity_id().clone(),
+                            claim.attempt(),
+                            claim.generation(),
+                            claim.claimed_at(),
+                        ),
+                        claim.claimed_at(),
+                    );
+                    let mut settled_activity = crate::Activity::restore(
+                        crate::ActivitySnapshot::new(
+                            activity_request.clone(),
+                            crate::ActivityPhaseSnapshot::Dispatched(dispatch),
+                            completed_attempts,
+                            next_generation,
+                        ),
+                    )
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+                    let delivery_claim = crate::DeliveryClaimSnapshot::new(
+                        delivery_id,
+                        claim.attempt(),
+                        claim.generation(),
+                        claim.claimed_at(),
+                    );
+                    let mut settled_delivery = crate::Delivery::restore(crate::DeliverySnapshot::new(
+                        delivery_request.clone(),
+                        crate::DeliveryPhaseSnapshot::Delivering(delivery_claim),
+                        completed_attempts,
+                        next_generation,
+                    ))
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+                    let delivery_claim = settled_delivery
+                        .active_claim()
+                        .cloned()
+                        .ok_or(StoreFault::InvalidFacts)?;
+                    let delivery_outcome = crate::settle_delivery(
+                        &mut settled_delivery,
+                        &delivery_claim,
+                        receipt.clone(),
+                        0,
+                    )
+                    .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?;
+                    let activity_outcome = crate::settle_activity(
+                        &mut settled_activity,
+                        claim,
+                        activity_settlement.clone().ok_or(StoreFault::InvalidFacts)?,
+                    )
+                    .map_err(|_| StoreFault::InvalidFacts)?;
+                    if settled_delivery == *delivery && settled_activity == *activity {
+                        return Ok((delivery_outcome, Some(activity_outcome)));
+                    }
+                }
+            }
             if activity.active_claim() != Some(claim) {
                 return Err(StoreFault::InvalidFacts);
             }
@@ -732,6 +887,8 @@ impl OrganizationStore {
                 .cloned()
                 .ok_or(StoreFault::InvalidFacts)?;
 
+            let retained_receipt = receipt.clone();
+            let retained_settlement = activity_settlement.clone();
             let delivery = facts
                 .settle_delivery(&delivery_claim, receipt, 0)
                 .map_err(|error| StoreFault::DeliveryReceipt(Box::new(error)))?;
@@ -750,6 +907,15 @@ impl OrganizationStore {
                 .run_id
                 .clone();
             facts.cancel_superseded_pending_activities(&run_id);
+            facts
+                .record_agent_activity_settlement(crate::run::activity::SettlementProof {
+                    claim: claim.clone(),
+                    receipt: retained_receipt,
+                    settlement: retained_settlement,
+                    delivery_outcome: delivery,
+                    activity_outcome: activity,
+                })
+                .map_err(|_| StoreFault::InvalidFacts)?;
 
             Ok((delivery, activity))
         })

@@ -68,11 +68,11 @@ pub(super) struct RecoveredFacts {
     pub(super) had_interrupted_delivery: bool,
 }
 
-pub(super) fn initialize_log(mut output: impl Write) -> Result<(), StoreFault> {
+pub(super) fn initialize_log(mut output: impl Write, base_epoch: u64) -> Result<(), StoreFault> {
     output
         .write_all(&LOG_MAGIC)
         .and_then(|()| output.write_all(&[CURRENT_SCHEMA_VERSION]))
-        .and_then(|()| output.write_all(&0_u64.to_le_bytes()))
+        .and_then(|()| output.write_all(&base_epoch.to_le_bytes()))
         .map_err(|error| StoreFault::Commit(error.kind()))
 }
 

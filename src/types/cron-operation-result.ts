@@ -22,10 +22,10 @@ export function isCronDeleteResult(value: unknown): value is CronDeleteResult {
 export function isCronJob(value: unknown): value is CronJob {
   return isRecord(value)
     && hasAllowedKeys(value, [
-      'id', 'name', 'agentId', 'message', 'model', 'schedule', 'delivery', 'target', 'enabled',
+      'id', 'name', 'agentId', 'message', 'model', 'schedule', 'delivery', 'target', 'enabled', 'systemManaged',
       'createdAt', 'updatedAt', 'lastRun', 'nextRun', 'runningAt',
     ], [
-      'id', 'name', 'agentId', 'message', 'schedule', 'delivery', 'enabled', 'createdAt', 'updatedAt',
+      'id', 'name', 'agentId', 'message', 'schedule', 'delivery', 'enabled', 'systemManaged', 'createdAt', 'updatedAt',
     ])
     && isNonEmptyString(value.id)
     && isNonEmptyString(value.name)
@@ -36,6 +36,7 @@ export function isCronJob(value: unknown): value is CronJob {
     && isDelivery(value.delivery)
     && (value.target === undefined || isTargetProjection(value.target))
     && typeof value.enabled === 'boolean'
+    && typeof value.systemManaged === 'boolean'
     && isIsoTimestamp(value.createdAt)
     && isIsoTimestamp(value.updatedAt)
     && (value.lastRun === undefined || isLastRun(value.lastRun))

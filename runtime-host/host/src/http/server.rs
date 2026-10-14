@@ -4,8 +4,9 @@ use foundation::{execution::OwnedTask, lifecycle::ModuleScope};
 use platform::loopback::RouteDeadline;
 use tokio::{
     net::{TcpListener, TcpStream},
+    sync::oneshot,
     task::JoinSet,
-    time::timeout,
+    time::{Instant, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -30,24 +31,37 @@ impl Server {
         })
     }
 
-    pub(crate) fn into_scoped_extension(self) -> ModuleScope {
+    pub(crate) fn into_scoped_extension(self) -> (ModuleScope, oneshot::Receiver<io::Result<()>>) {
         let mut scope = ModuleScope::new(HOST_HTTP_EXTENSION_SCOPE_ID);
-        let (task, handle) = OwnedTask::spawn(|cancellation| self.run(cancellation));
+        let (finished, completion) = oneshot::channel();
+        let (task, handle) = OwnedTask::spawn(|cancellation| async move {
+            let _ = finished.send(self.run(cancellation).await);
+        });
         scope.register_owned_task(task);
         scope.register_listener(HTTP_LISTENER_EFFECT_ID, move || async move {
             handle.cancel();
         });
-        scope
+        (scope, completion)
     }
 
     async fn run(self, cancellation: CancellationToken) -> io::Result<()> {
         let Self { listener, router } = self;
         let mut connections = JoinSet::new();
-        loop {
+        let result = loop {
             tokio::select! {
-                _ = cancellation.cancelled() => break,
+                _ = cancellation.cancelled() => break Ok(()),
                 accepted = listener.accept() => {
-                    let (stream, _) = accepted?;
+                    let (stream, _) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) if matches!(
+                            error.kind(),
+                            io::ErrorKind::Interrupted
+                                | io::ErrorKind::WouldBlock
+                                | io::ErrorKind::ConnectionAborted
+                                | io::ErrorKind::ConnectionReset
+                        ) => continue,
+                        Err(error) => break Err(error),
+                    };
                     let router = Arc::clone(&router);
                     connections.spawn(async move {
                         let _ = serve(stream, router).await;
@@ -55,10 +69,10 @@ impl Server {
                 }
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
             }
-        }
+        };
         connections.abort_all();
         while connections.join_next().await.is_some() {}
-        Ok(())
+        result
     }
 
     #[cfg(test)]
@@ -71,19 +85,22 @@ impl Server {
 }
 
 async fn serve(mut stream: TcpStream, router: Arc<Router>) -> io::Result<()> {
-    let parts = match read_head(&mut stream).await? {
+    let mut parts = match read_head(&mut stream).await? {
         Ok(parts) => parts,
         Err(response) => return RouteOutcome::Response(response).write(stream).await,
     };
-    let deadline = router.deadline(&parts.head).await;
-    let policy = router.body_policy(&parts.head).await;
-    let timeout_response = router.timeout_response(Some(&parts.head)).await;
-    let outcome = match deadline {
+    let route = router.resolve(&parts.head).await;
+    let plan = route.plan();
+    let policy = plan.body_policy();
+    let timeout_response = plan.timeout_response();
+    let request_started_at = Instant::now();
+    parts.head.set_request_started_at(request_started_at);
+    let outcome = match plan.deadline() {
         RouteDeadline::Request(deadline) => {
-            match timeout(deadline, async {
+            match timeout_at(request_started_at + deadline, async {
                 let request = finish_request(&mut stream, parts, policy).await?;
                 Ok::<_, io::Error>(match request {
-                    Ok(request) => router.route(request).await,
+                    Ok(request) => route.dispatch(request).await,
                     Err(response) => RouteOutcome::Response(response),
                 })
             })
@@ -94,8 +111,13 @@ async fn serve(mut stream: TcpStream, router: Arc<Router>) -> io::Result<()> {
             }
         }
         RouteDeadline::Body(deadline) => {
-            match timeout(deadline, finish_request(&mut stream, parts, policy)).await {
-                Ok(Ok(Ok(request))) => router.route(request).await,
+            match timeout_at(
+                request_started_at + deadline,
+                finish_request(&mut stream, parts, policy),
+            )
+            .await
+            {
+                Ok(Ok(Ok(request))) => route.dispatch(request).await,
                 Ok(Ok(Err(response))) => RouteOutcome::Response(response),
                 Ok(Err(error)) => return Err(error),
                 Err(_) => RouteOutcome::Response(timeout_response),

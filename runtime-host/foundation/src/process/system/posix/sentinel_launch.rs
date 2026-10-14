@@ -31,6 +31,7 @@ pub(super) fn spawn_target(
     target_state_directory: Option<OwnedFd>,
     private_descriptor: Option<OwnedFd>,
     execution_source: Option<OwnedFd>,
+    environment: Option<Vec<CString>>,
 ) -> Result<SpawnedTarget, SpawnFailure> {
     spawn_target_until(
         payload,
@@ -38,6 +39,7 @@ pub(super) fn spawn_target(
         target_state_directory,
         private_descriptor,
         execution_source,
+        environment,
         Instant::now() + cleanup_timeout(),
     )
 }
@@ -48,6 +50,7 @@ fn spawn_target_until(
     target_state_directory: Option<OwnedFd>,
     private_descriptor: Option<OwnedFd>,
     execution_source: Option<OwnedFd>,
+    environment: Option<Vec<CString>>,
     deadline: Instant,
 ) -> Result<SpawnedTarget, SpawnFailure> {
     let request = decode_launch_payload(payload).map_err(SpawnFailure::Drained)?;
@@ -74,8 +77,10 @@ fn spawn_target_until(
     }
     let working_directory = CString::new(request.working_directory.into_encoded_bytes())
         .map_err(|_| SpawnFailure::Drained(invalid_launch("custody launch contains a nul byte")))?;
-    let environment =
-        exact_environment(request.public_environment).map_err(SpawnFailure::Drained)?;
+    let environment = match environment {
+        Some(environment) => environment,
+        None => exact_environment(request.public_environment).map_err(SpawnFailure::Drained)?,
+    };
     let mut argv = Vec::with_capacity(arguments.len() + 2);
     argv.push(program.as_ptr().cast_mut());
     argv.extend(
@@ -84,10 +89,18 @@ fn spawn_target_until(
             .map(|argument| argument.as_ptr().cast_mut()),
     );
     argv.push(std::ptr::null_mut());
-    let mut envp = environment
-        .iter()
-        .map(|entry| entry.as_ptr().cast_mut())
-        .collect::<Vec<_>>();
+    let environment_count = environment
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| SpawnFailure::Drained(invalid_launch("environment is too large")))?;
+    let mut envp = Vec::new();
+    envp.try_reserve_exact(environment_count).map_err(|_| {
+        SpawnFailure::Drained(io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            "environment allocation failed",
+        ))
+    })?;
+    envp.extend(environment.iter().map(|entry| entry.as_ptr().cast_mut()));
     envp.push(std::ptr::null_mut());
 
     let descriptor_limit =

@@ -2,18 +2,19 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
     time::Duration,
 };
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{Mutex, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, timeout, timeout_at},
 };
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     client::GatewaySocket,
@@ -27,6 +28,9 @@ const MAX_PENDING_REQUESTS: usize = 128;
 const MAX_QUEUED_REQUESTS: usize = 64;
 const CLOSE_DEADLINE: Duration = Duration::from_secs(1);
 const MIN_REQUEST_DEADLINE: Duration = Duration::from_secs(1);
+const REQUEST_QUEUED: u8 = 0;
+const REQUEST_WRITING: u8 = 1;
+const REQUEST_CANCELLED: u8 = 2;
 
 pub(crate) type Reply = oneshot::Sender<Result<GatewayResponse, ExchangeFailure>>;
 
@@ -40,7 +44,7 @@ type Pending = HashMap<String, PendingRequest>;
 struct PendingRequest {
     request: Option<OutboundRequest>,
     reply: Reply,
-    sent: Arc<AtomicBool>,
+    sent: Arc<AtomicU8>,
     ordered: bool,
 }
 
@@ -90,25 +94,44 @@ pub(crate) struct ExchangeFailure {
 enum Command {
     Request {
         request: OutboundRequest,
-        sent: Arc<AtomicBool>,
+        sent: Arc<AtomicU8>,
         reply: Reply,
         ordered: bool,
     },
     Cancel {
         request_id: String,
     },
-    Close,
 }
 
 struct ExchangeGuard<'a> {
     commands: &'a mpsc::Sender<Command>,
     request_id: Option<String>,
     receiver: oneshot::Receiver<Result<GatewayResponse, ExchangeFailure>>,
+    sent: Arc<AtomicU8>,
+}
+
+impl ExchangeGuard<'_> {
+    fn settle(&mut self, error: DispatcherError) -> Result<GatewayResponse, ExchangeFailure> {
+        self.receiver.close();
+        if let Ok(result) = self.receiver.try_recv() {
+            self.request_id = None;
+            return result;
+        }
+        Err(ExchangeFailure { error, sent: self.settle_sent() })
+    }
+
+    fn settle_sent(&self) -> bool {
+        // Only one side can win: cancellation fences future writes, writing keeps Unknown.
+        self.sent.compare_exchange(
+            REQUEST_QUEUED, REQUEST_CANCELLED, Ordering::AcqRel, Ordering::Acquire,
+        ).err() == Some(REQUEST_WRITING)
+    }
 }
 
 impl Drop for ExchangeGuard<'_> {
     fn drop(&mut self) {
         self.receiver.close();
+        self.settle_sent();
         if let Some(request_id) = self.request_id.take() {
             let _ = self.commands.try_send(Command::Cancel { request_id });
         }
@@ -117,11 +140,12 @@ impl Drop for ExchangeGuard<'_> {
 
 /// The single owner of a connected gateway socket.
 ///
-/// Callers only interact with the command channel; frame reads and writes are
+/// Requests travel through the command channel; frame reads and writes are
 /// serialized by the actor and responses are correlated by request id.
 pub(crate) struct GatewayConnection {
     commands: mpsc::Sender<Command>,
-    actor: Option<JoinHandle<()>>,
+    actor: Mutex<Option<JoinHandle<()>>>,
+    cancellation: CancellationToken,
     failure: watch::Receiver<Option<DispatcherError>>,
 }
 
@@ -129,10 +153,12 @@ impl GatewayConnection {
     pub(crate) fn spawn(socket: GatewaySocket, events: mpsc::Sender<GatewayFrame>) -> Self {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (failure, failure_receiver) = watch::channel(None);
-        let actor = tokio::spawn(run_actor(socket, receiver, events, failure));
+        let cancellation = CancellationToken::new();
+        let actor = tokio::spawn(run_actor(socket, receiver, events, failure, cancellation.clone()));
         Self {
             commands,
-            actor: Some(actor),
+            actor: Mutex::new(Some(actor)),
+            cancellation,
             failure: failure_receiver,
         }
     }
@@ -142,7 +168,16 @@ impl GatewayConnection {
         request: RpcRequest,
         deadline: Duration,
     ) -> Result<GatewayResponse, ExchangeFailure> {
-        self.exchange(OutboundRequest::rpc(request), deadline, false).await
+        self.request_cancellable(request, deadline, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn request_cancellable(
+        &self,
+        request: RpcRequest,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<GatewayResponse, ExchangeFailure> {
+        self.exchange(OutboundRequest::rpc(request), deadline, false, cancellation).await
     }
 
     pub(crate) async fn encoded_request(
@@ -151,8 +186,17 @@ impl GatewayConnection {
         encoded: String,
         deadline: Duration,
     ) -> Result<GatewayResponse, ExchangeFailure> {
-        self.exchange(OutboundRequest::encoded(request_id, encoded), deadline, false)
-            .await
+        self.encoded_request_cancellable(request_id, encoded, deadline, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn encoded_request_cancellable(
+        &self,
+        request_id: String,
+        encoded: String,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<GatewayResponse, ExchangeFailure> {
+        self.exchange(OutboundRequest::encoded(request_id, encoded), deadline, false, cancellation).await
     }
 
     pub(crate) async fn ordered_request(
@@ -160,7 +204,16 @@ impl GatewayConnection {
         request: RpcRequest,
         deadline: Duration,
     ) -> Result<GatewayResponse, ExchangeFailure> {
-        self.exchange(OutboundRequest::rpc(request), deadline, true).await
+        self.ordered_request_cancellable(request, deadline, &CancellationToken::new()).await
+    }
+
+    pub(crate) async fn ordered_request_cancellable(
+        &self,
+        request: RpcRequest,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<GatewayResponse, ExchangeFailure> {
+        self.exchange(OutboundRequest::rpc(request), deadline, true, cancellation).await
     }
 
     async fn exchange(
@@ -168,57 +221,45 @@ impl GatewayConnection {
         request: OutboundRequest,
         deadline: Duration,
         ordered: bool,
+        cancellation: &CancellationToken,
     ) -> Result<GatewayResponse, ExchangeFailure> {
         let request_id = request.request_id().to_owned();
-        let sent = Arc::new(AtomicBool::new(false));
+        let sent = Arc::new(AtomicU8::new(REQUEST_QUEUED));
         let (reply, receiver) = oneshot::channel();
         let expires_at = Instant::now() + deadline.max(MIN_REQUEST_DEADLINE);
-        match timeout_at(
-            expires_at,
-            self.commands.send(Command::Request {
-                request,
-                sent: Arc::clone(&sent),
-                reply,
-                ordered,
+        let admission = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ExchangeFailure {
+                error: DispatcherError::ConnectionClosed, sent: false,
             }),
-        )
-        .await
-        {
+            result = timeout_at(expires_at, self.commands.send(Command::Request {
+                request, sent: Arc::clone(&sent), reply, ordered,
+            })) => result,
+        };
+        match admission {
             Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                return Err(ExchangeFailure {
-                    error: DispatcherError::ConnectionClosed,
-                    sent: false,
-                });
-            }
-            Err(_) => {
-                return Err(ExchangeFailure {
-                    error: DispatcherError::Deadline,
-                    sent: false,
-                });
-            }
+            Ok(Err(_)) => return Err(ExchangeFailure {
+                error: DispatcherError::ConnectionClosed, sent: false,
+            }),
+            Err(_) => return Err(ExchangeFailure {
+                error: DispatcherError::Deadline, sent: false,
+            }),
         }
 
         let mut guard = ExchangeGuard {
             commands: &self.commands,
             request_id: Some(request_id),
             receiver,
+            sent,
         };
-        let result = timeout_at(expires_at, &mut guard.receiver).await;
-        if result.is_ok() {
-            guard.request_id = None;
-        }
-        drop(guard);
-        match result {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(ExchangeFailure {
-                error: DispatcherError::ConnectionClosed,
-                sent: sent.load(Ordering::Acquire),
-            }),
-            Err(_) => Err(ExchangeFailure {
-                error: DispatcherError::Deadline,
-                sent: sent.load(Ordering::Acquire),
-            }),
+        tokio::select! {
+            biased;
+            result = &mut guard.receiver => match result {
+                Ok(result) => { guard.request_id = None; result },
+                Err(_) => guard.settle(DispatcherError::ConnectionClosed),
+            },
+            _ = cancellation.cancelled() => guard.settle(DispatcherError::ConnectionClosed),
+            _ = tokio::time::sleep_until(expires_at) => guard.settle(DispatcherError::Deadline),
         }
     }
 
@@ -230,24 +271,27 @@ impl GatewayConnection {
         self.commands.closed().await;
     }
 
-    pub(crate) async fn disconnect(&self) {
-        let _ = self.commands.send(Command::Close).await;
-    }
-
-    pub(crate) async fn close(mut self) {
-        let _ = self.commands.send(Command::Close).await;
-        if let Some(mut actor) = self.actor.take() {
-            if timeout(CLOSE_DEADLINE, &mut actor).await.is_err() {
-                actor.abort();
-                let _ = actor.await;
+    pub(crate) async fn disconnect(&self, expires_at: Instant) {
+        self.cancellation.cancel();
+        let mut actor = self.actor.lock().await;
+        if let Some(task) = actor.as_mut() {
+            if timeout_at(expires_at, &mut *task).await.is_err() {
+                task.abort();
+                let _ = task.await;
             }
         }
+        actor.take();
+    }
+
+    pub(crate) async fn close(self) {
+        self.disconnect(Instant::now() + CLOSE_DEADLINE).await;
     }
 }
 
 impl Drop for GatewayConnection {
     fn drop(&mut self) {
-        if let Some(actor) = self.actor.take() {
+        self.cancellation.cancel();
+        if let Some(actor) = self.actor.get_mut().take() {
             actor.abort();
         }
     }
@@ -258,99 +302,109 @@ async fn run_actor(
     mut commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<GatewayFrame>,
     terminal_failure: watch::Sender<Option<DispatcherError>>,
+    cancellation: CancellationToken,
 ) {
-    let mut closing = false;
     let mut pending = Pending::new();
     let mut queued = VecDeque::new();
-    let failure = loop {
-        // A full command channel can reject Cancel; closed replies remain authoritative.
-        let previous_pending = pending.len();
-        pending.retain(|_, request| !request.reply.is_closed());
-        if pending.len() != previous_pending {
-            queued.retain(|request_id| pending.contains_key(request_id));
-            if let Err(error) = activate_queued(&mut socket, &mut pending, &mut queued).await {
-                break error;
-            }
-        }
-        tokio::select! {
-            command = commands.recv() => match command {
-                Some(Command::Request { request, sent, reply, ordered }) => {
-                    if reply.is_closed() {
-                        continue;
-                    }
-                    let request_id = request.request_id().to_owned();
-                    if pending.contains_key(&request_id) || pending.len() >= MAX_PENDING_REQUESTS {
-                        let _ = reply.send(Err(ExchangeFailure {
-                            error: if pending.contains_key(&request_id) {
-                                DispatcherError::Protocol
-                            } else {
-                                DispatcherError::Saturated
-                            },
-                            sent: false,
-                        }));
-                        continue;
-                    }
-                    pending.insert(request_id.clone(), PendingRequest {
-                        request: Some(request),
-                        reply,
-                        sent: Arc::clone(&sent),
-                        ordered,
-                    });
-                    if active_count(&pending) >= MAX_ACTIVE_REQUESTS {
-                        if queued.len() >= MAX_QUEUED_REQUESTS {
-                            let request = pending.remove(&request_id).expect("request was inserted");
-                            let _ = request.reply.send(Err(ExchangeFailure {
-                                error: DispatcherError::Saturated,
-                                sent: false,
-                            }));
-                        } else {
-                            queued.push_back(request_id);
-                        }
-                    } else if let Err(error) = activate_request(&mut socket, &mut pending, &request_id).await {
-                        break error;
-                    }
-                }
-                Some(Command::Cancel { request_id }) => {
-                    pending.remove(&request_id);
-                    while queued.iter().any(|queued_id| queued_id == &request_id) {
-                        queued.retain(|queued_id| queued_id != &request_id);
-                    }
+    let (failure, closing) = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => (DispatcherError::ConnectionClosed, true),
+        result = async {
+            let mut closing = false;
+            let failure = loop {
+                // A full command channel can reject Cancel; closed replies remain authoritative.
+                let previous_pending = pending.len();
+                pending.retain(|_, request| !request.reply.is_closed());
+                if pending.len() != previous_pending {
+                    queued.retain(|request_id| pending.contains_key(request_id));
                     if let Err(error) = activate_queued(&mut socket, &mut pending, &mut queued).await {
                         break error;
                     }
                 }
-                Some(Command::Close) | None => {
-                    closing = true;
-                    break DispatcherError::ConnectionClosed;
-                }
-            },
-            frame = socket.next() => match frame {
-                Some(Ok(Message::Text(text))) => {
-                    match route_text(text.as_str(), &mut pending, &events).await {
-                        Ok(true) => {
+                tokio::select! {
+                    command = commands.recv() => match command {
+                        Some(Command::Request { request, sent, reply, ordered }) => {
+                            if reply.is_closed() {
+                                continue;
+                            }
+                            let request_id = request.request_id().to_owned();
+                            if pending.contains_key(&request_id) || pending.len() >= MAX_PENDING_REQUESTS {
+                                let _ = reply.send(Err(ExchangeFailure {
+                                    error: if pending.contains_key(&request_id) {
+                                        DispatcherError::Protocol
+                                    } else {
+                                        DispatcherError::Saturated
+                                    },
+                                    sent: false,
+                                }));
+                                continue;
+                            }
+                            pending.insert(request_id.clone(), PendingRequest {
+                                request: Some(request),
+                                reply,
+                                sent: Arc::clone(&sent),
+                                ordered,
+                            });
+                            if active_count(&pending) >= MAX_ACTIVE_REQUESTS {
+                                if queued.len() >= MAX_QUEUED_REQUESTS {
+                                    let request = pending.remove(&request_id).expect("request was inserted");
+                                    let _ = request.reply.send(Err(ExchangeFailure {
+                                        error: DispatcherError::Saturated,
+                                        sent: false,
+                                    }));
+                                } else {
+                                    queued.push_back(request_id);
+                                }
+                            } else if let Err(error) = activate_request(&mut socket, &mut pending, &request_id).await {
+                                break error;
+                            }
+                        }
+                        Some(Command::Cancel { request_id }) => {
+                            pending.remove(&request_id);
+                            while queued.iter().any(|queued_id| queued_id == &request_id) {
+                                queued.retain(|queued_id| queued_id != &request_id);
+                            }
                             if let Err(error) = activate_queued(&mut socket, &mut pending, &mut queued).await {
                                 break error;
                             }
                         }
-                        Ok(false) => {}
-                        Err(error) => break error,
-                    }
+                        None => {
+                            closing = true;
+                            break DispatcherError::ConnectionClosed;
+                        }
+                    },
+                    frame = socket.next() => match frame {
+                        Some(Ok(Message::Text(text))) => {
+                            match route_text(text.as_str(), &mut pending, &events).await {
+                                Ok(true) => {
+                                    if let Err(error) = activate_queued(&mut socket, &mut pending, &mut queued).await {
+                                        break error;
+                                    }
+                                }
+                                Ok(false) => {}
+                                Err(error) => break error,
+                            }
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            if socket.send(Message::Pong(payload)).await.is_err() {
+                                break DispatcherError::Transport;
+                            }
+                        }
+                        Some(Ok(Message::Pong(_))) => {}
+                        Some(Ok(Message::Close(_))) | None => break DispatcherError::ConnectionClosed,
+                        Some(Ok(Message::Binary(_) | Message::Frame(_))) => break DispatcherError::Protocol,
+                        Some(Err(_)) => break DispatcherError::Transport,
+                    },
                 }
-                Some(Ok(Message::Ping(payload))) => {
-                    if socket.send(Message::Pong(payload)).await.is_err() {
-                        break DispatcherError::Transport;
-                    }
-                }
-                Some(Ok(Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_))) | None => break DispatcherError::ConnectionClosed,
-                Some(Ok(Message::Binary(_) | Message::Frame(_))) => break DispatcherError::Protocol,
-                Some(Err(_)) => break DispatcherError::Transport,
-            },
-        }
+            };
+            (failure, closing)
+        } => result,
     };
 
+    commands.close();
     terminal_failure.send_replace(Some(failure));
     fail_pending(&mut pending, failure);
+    drop(events);
     if closing {
         let _ = timeout(CLOSE_DEADLINE, socket.close(None)).await;
     }
@@ -388,7 +442,12 @@ async fn activate_request(
         return Ok(());
     };
     let encoded = request.encode()?;
-    pending_request.sent.store(true, Ordering::Release);
+    if pending_request.sent.compare_exchange(
+        REQUEST_QUEUED, REQUEST_WRITING, Ordering::AcqRel, Ordering::Acquire,
+    ).is_err() {
+        pending.remove(request_id);
+        return Ok(());
+    }
     socket
         .send(Message::Text(encoded.into()))
         .await
@@ -448,7 +507,7 @@ fn fail_pending(pending: &mut Pending, error: DispatcherError) {
     for (_, request) in pending.drain() {
         let _ = request.reply.send(Err(ExchangeFailure {
             error,
-            sent: request.sent.load(Ordering::Acquire),
+            sent: request.sent.load(Ordering::Acquire) == REQUEST_WRITING,
         }));
     }
 }

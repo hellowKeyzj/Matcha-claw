@@ -1720,10 +1720,12 @@ dependencies = [
 name = "clawhub"
 version = "0.1.0"
 dependencies = [
+ "foundation",
  "reqwest",
  "serde_json",
  "serde_yaml",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -6623,7 +6625,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sessions",
- "sha2 0.10.9",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
@@ -7880,6 +7881,7 @@ dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
  "foundation",
+ "futures-util",
  "platform",
  "runtime-directory",
  "serde",
@@ -9355,6 +9357,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -9538,6 +9541,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -10345,6 +10349,7 @@ name = "toolchain"
 version = "0.1.0"
 dependencies = [
  "foundation",
+ "futures-util",
  "platform",
  "serde",
  "serde_json",

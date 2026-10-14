@@ -156,6 +156,7 @@ pub enum ParentCallbackConfigError {
     UnsupportedScheme,
     MissingHost,
     EmptyDispatchToken,
+    HttpClient,
 }
 
 impl fmt::Display for ParentCallbackConfigError {
@@ -166,6 +167,7 @@ impl fmt::Display for ParentCallbackConfigError {
             Self::UnsupportedScheme => "parent callback base URL must use HTTP or HTTPS",
             Self::MissingHost => "parent callback base URL must include a host",
             Self::EmptyDispatchToken => "parent callback dispatch token must not be empty",
+            Self::HttpClient => "parent callback HTTP client could not be constructed",
         };
         formatter.write_str(message)
     }
@@ -389,7 +391,7 @@ impl ParentCallbackHandle {
         let http_client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .expect("parent callback HTTP client must build");
+            .map_err(|_| ParentCallbackConfigError::HttpClient)?;
         Ok(Self::with_timeouts(
             parent_api_base_url,
             dispatch_token.to_owned(),
@@ -420,16 +422,47 @@ impl ParentShellOpenPath for ParentCallbackHandle {
     fn open_path<'a>(&'a self, path: std::path::PathBuf) -> ParentCallbackFuture<'a, bool> {
         Box::pin(async move {
             let Some(path) = path.to_str().map(str::to_owned) else {
+                platform::trace::session_trace(
+                    "skill.open-path.callback.failed",
+                    || json!({ "category": "path-not-utf8" }),
+                );
                 return false;
             };
-            matches!(
-                self.request_parent_shell_action(
+            platform::trace::session_trace("skill.open-path.callback.dispatch", || {
+                json!({
+                    "pathHash": platform::trace::identifier_hash(&path),
+                    "extendedPath": path.starts_with(r"\\?\"),
+                })
+            });
+            let result = self
+                .request_parent_shell_action(
                     ParentShellAction::ShellOpenPath,
                     Some(json!({ "path": path })),
                 )
-                .await,
-                Ok(ParentShellActionResponse::Success { status, .. }) if (200..300).contains(&status)
-            )
+                .await;
+            platform::trace::session_trace("skill.open-path.callback.result", || match &result {
+                Ok(ParentShellActionResponse::Success { status, .. }) => {
+                    json!({ "category": "success-envelope", "status": status })
+                }
+                Ok(ParentShellActionResponse::Failure { status, .. }) => {
+                    json!({ "category": "failure-envelope", "status": status })
+                }
+                Err(ParentCallbackError::InvalidResponse { reason, .. }) => {
+                    json!({ "category": "invalid-response", "reason": format!("{reason:?}") })
+                }
+                Err(ParentCallbackError::RequestTimeout { .. }) => json!({ "category": "timeout" }),
+                Err(ParentCallbackError::RequestFailed { .. }) => {
+                    json!({ "category": "transport-error" })
+                }
+                Err(ParentCallbackError::ResponseBodyRead { .. }) => {
+                    json!({ "category": "body-read" })
+                }
+                Err(ParentCallbackError::PayloadSerialization { .. }) => {
+                    json!({ "category": "serialization" })
+                }
+                Err(_) => json!({ "category": "unsupported" }),
+            });
+            matches!(result, Ok(ParentShellActionResponse::Success { status, .. }) if (200..300).contains(&status))
         })
     }
 }
@@ -459,6 +492,12 @@ impl ParentCallbackHandle {
         let response = self
             .send_json(endpoint, body, self.shell_action_timeout)
             .await?;
+        if action == ParentShellAction::ShellOpenPath {
+            platform::trace::session_trace(
+                "skill.open-path.callback.http",
+                || json!({ "status": response.status().as_u16() }),
+            );
+        }
         let body = response.bytes().await.map_err(|error| {
             if error.is_timeout() {
                 ParentCallbackError::RequestTimeout { endpoint }
@@ -509,21 +548,25 @@ impl ParentCallbackHandle {
         body: Vec<u8>,
         timeout: Duration,
     ) -> Result<Response, ParentCallbackError> {
-        self.http_client
+        let mut request = self
+            .http_client
             .post(self.endpoint_url(endpoint))
             .header("Content-Type", "application/json")
             .header(DISPATCH_TOKEN_HEADER, self.dispatch_token.as_ref())
             .timeout(timeout)
-            .body(body)
-            .send()
-            .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    ParentCallbackError::RequestTimeout { endpoint }
-                } else {
-                    ParentCallbackError::RequestFailed { endpoint }
-                }
-            })
+            .body(body);
+        if endpoint == ParentCallbackEndpoint::ShellActions && platform::trace::enabled() {
+            if let Some(trace_id) = platform::trace::current_session_trace() {
+                request = request.header("X-MatchaClaw-Session-Trace", trace_id);
+            }
+        }
+        request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                ParentCallbackError::RequestTimeout { endpoint }
+            } else {
+                ParentCallbackError::RequestFailed { endpoint }
+            }
+        })
     }
 }
 

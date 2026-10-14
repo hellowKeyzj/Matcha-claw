@@ -142,7 +142,7 @@ pub fn release(
     *s = None;
     *c = None;
     *l = None;
-    if task.status() == TaskStatus::Claimed {
+    if matches!(task.status(), TaskStatus::Claimed | TaskStatus::Running) {
         *task.status_mut() = TaskStatus::Todo
     }
     *task.updated_mut() = now;
@@ -183,6 +183,9 @@ pub fn transition(
     if !allowed {
         return Err(TaskBoardError::InvalidTransition);
     }
+    if matches!(next, TaskStatus::Claimed | TaskStatus::Running) {
+        task.validate_ownership(next).map_err(|_| TaskBoardError::InvalidTransition)?;
+    }
     *task.status_mut() = next;
     if next == TaskStatus::Running && previous != TaskStatus::Running {
         *task.attempt_mut() = task.attempt().saturating_add(1)
@@ -195,7 +198,7 @@ pub fn transition(
     }
     if matches!(
         next,
-        TaskStatus::Todo | TaskStatus::Done | TaskStatus::Failed
+        TaskStatus::Todo | TaskStatus::Blocked | TaskStatus::Done | TaskStatus::Failed
     ) {
         let (o, s, c, l) = task.owner_mut();
         *o = None;

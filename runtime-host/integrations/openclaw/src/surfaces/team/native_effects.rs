@@ -4,8 +4,8 @@ use organization::{
     MaterializationOperationOutcome, NativeEffectFailure, RoleSessionAbortOutcome,
     RoleSessionAbortReceipt, RoleSessionDeleteOutcome, RoleSessionDeleteReceipt,
     RoleSessionReadbackOutcome, RoleSessionReadbackReceipt, RoleSessionReceipt,
-    SessionWindowReference, TeamMaterializationRemoval, TeamMaterializationRequest,
-    TeamNativeEffectsPort, TeamProvisionObserver,
+    SessionWindowReference, TeamCreationFailureReason, TeamMaterializationRemoval,
+    TeamMaterializationRequest, TeamNativeEffectsPort, TeamProvisionObserver,
 };
 use platform::exchange::InvocationOutcome;
 
@@ -24,11 +24,75 @@ use crate::{
 /// the OpenClaw integration.
 pub struct OpenClawTeamNativeEffects<'gateway> {
     gateway: &'gateway mut OpenClawGateway,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl<'gateway> OpenClawTeamNativeEffects<'gateway> {
     pub fn new(gateway: &'gateway mut OpenClawGateway) -> Self {
-        Self { gateway }
+        Self { gateway, cancellation: tokio_util::sync::CancellationToken::new() }
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    pub(crate) fn readback_diagnostic(
+        &mut self,
+        receipt: &RoleSessionReceipt,
+    ) -> Pin<Box<dyn Future<Output = (RoleSessionReadbackOutcome, Option<TeamCreationFailureReason>)> + Send + '_>> {
+        let session = receipt.endpoint_session_id().clone();
+        let key = match scoped_session_key(receipt) {
+            Ok(key) => key,
+            Err(failure) => {
+                return Box::pin(async move {
+                    (RoleSessionReadbackOutcome::Failed { failure }, Some(TeamCreationFailureReason::InvalidConfig))
+                });
+            }
+        };
+        let window = SessionWindowReference::try_new(format!(
+            "openclaw-window:{}",
+            receipt.endpoint_session_id().as_str()
+        ));
+        let Ok(window) = window else {
+            return Box::pin(async {
+                (
+                    RoleSessionReadbackOutcome::Failed { failure: NativeEffectFailure::InvalidInput },
+                    Some(TeamCreationFailureReason::InvalidConfig),
+                )
+            });
+        };
+        let gateway = &mut *self.gateway;
+        let cancellation = self.cancellation.clone();
+        Box::pin(async move {
+            match gateway
+                .history_window_cancellable(
+                    ChatHistoryParams::new(key),
+                    crate::session::window::PageRequest::latest(),
+                    &cancellation,
+                )
+                .await
+            {
+                Ok(_) => (
+                    RoleSessionReadbackOutcome::Confirmed {
+                        receipt: RoleSessionReadbackReceipt::new(session, window),
+                    },
+                    None,
+                ),
+                Err(error) => {
+                    let outcome = match error {
+                        OpenClawSessionError::TargetRejected => RoleSessionReadbackOutcome::Failed {
+                            failure: NativeEffectFailure::Rejected,
+                        },
+                        OpenClawSessionError::SessionConnection => RoleSessionReadbackOutcome::Failed {
+                            failure: NativeEffectFailure::Unavailable,
+                        },
+                        _ => RoleSessionReadbackOutcome::OutcomeUnknown,
+                    };
+                    (outcome, Some(session_read_failure_reason(error)))
+                }
+            }
+        })
     }
 }
 
@@ -89,10 +153,11 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
             }
         };
         let gateway = &mut *self.gateway;
+        let cancellation = self.cancellation.clone();
         Box::pin(async move {
             map_abort(
                 gateway
-                    .abort_chat_diagnostic(ChatAbortParams::new(key))
+                    .abort_chat_diagnostic_cancellable(ChatAbortParams::new(key), &cancellation)
                     .await,
                 session,
             )
@@ -111,10 +176,11 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
             }
         };
         let gateway = &mut *self.gateway;
+        let cancellation = self.cancellation.clone();
         Box::pin(async move {
             map_delete(
                 gateway
-                    .delete_session_diagnostic(SessionDeleteParams::new(key))
+                    .delete_session_diagnostic_cancellable(SessionDeleteParams::new(key), &cancellation)
                     .await,
                 session,
             )
@@ -125,47 +191,23 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
         &mut self,
         receipt: &RoleSessionReceipt,
     ) -> Pin<Box<dyn Future<Output = RoleSessionReadbackOutcome> + Send + '_>> {
-        let session = receipt.endpoint_session_id().clone();
-        let key = match scoped_session_key(receipt) {
-            Ok(key) => key,
-            Err(failure) => {
-                return Box::pin(async move { RoleSessionReadbackOutcome::Failed { failure } });
-            }
-        };
-        let window = SessionWindowReference::try_new(format!(
-            "openclaw-window:{}",
-            receipt.endpoint_session_id().as_str()
-        ));
-        let Ok(window) = window else {
-            return Box::pin(async {
-                RoleSessionReadbackOutcome::Failed {
-                    failure: NativeEffectFailure::InvalidInput,
-                }
-            });
-        };
-        let gateway = &mut *self.gateway;
-        Box::pin(async move {
-            match gateway
-                .history_window(
-                    ChatHistoryParams::new(key),
-                    crate::session::window::PageRequest::latest(),
-                )
-                .await
-            {
-                Ok(_) => RoleSessionReadbackOutcome::Confirmed {
-                    receipt: RoleSessionReadbackReceipt::new(session, window),
-                },
-                Err(OpenClawSessionError::TargetRejected) => RoleSessionReadbackOutcome::Failed {
-                    failure: NativeEffectFailure::Rejected,
-                },
-                Err(OpenClawSessionError::SessionConnection) => {
-                    RoleSessionReadbackOutcome::Failed {
-                        failure: NativeEffectFailure::Unavailable,
-                    }
-                }
-                Err(_) => RoleSessionReadbackOutcome::OutcomeUnknown,
-            }
-        })
+        let readback = self.readback_diagnostic(receipt);
+        Box::pin(async move { readback.await.0 })
+    }
+}
+
+pub(super) fn session_read_failure_reason(error: OpenClawSessionError) -> TeamCreationFailureReason {
+    match error {
+        OpenClawSessionError::TargetRejected => TeamCreationFailureReason::RpcRejected,
+        OpenClawSessionError::Protocol(_) | OpenClawSessionError::UnknownResponse => {
+            TeamCreationFailureReason::RpcProtocol
+        }
+        OpenClawSessionError::RequestDeadline => TeamCreationFailureReason::RpcDeadline,
+        OpenClawSessionError::SessionConnection
+        | OpenClawSessionError::RequestIdExhausted
+        | OpenClawSessionError::ConnectionClosed
+        | OpenClawSessionError::Transport
+        | OpenClawSessionError::EventBackpressure => TeamCreationFailureReason::RpcUnavailable,
     }
 }
 

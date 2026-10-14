@@ -1000,7 +1000,7 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
       if (payload.command?.status === 'queued'
         && (path === '/api/remote-fleet/probe-connection' || path === '/api/remote-fleet/delete-environment')) {
         if (!isCallId(response.callId) || response.accepted !== true) throw new Error('Fleet admission is missing its call receipt');
-        const call = await waitForCall({ callId: response.callId, accepted: true }, 'fleet');
+        const call = await waitForCall({ callId: response.callId, accepted: true }, 'fleet', { timeoutMs: path === '/api/remote-fleet/delete-environment' ? null : undefined });
         const snapshot = normalizeSnapshot(await hostApiFetch<unknown>('/api/remote-fleet/snapshot'));
         const deleting = path === '/api/remote-fleet/delete-environment';
         const entityId = deleting ? body.environmentId : body.connectionId;

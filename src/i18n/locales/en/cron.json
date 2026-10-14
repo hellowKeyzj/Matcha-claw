@@ -31,6 +31,8 @@
         "create": "Create Your First Task"
     },
     "card": {
+        "systemManaged": "System-managed",
+        "systemManagedDescription": "System tasks are managed through global configuration.",
         "runNow": "Run Now",
         "deleteConfirm": "Are you sure you want to delete this task?",
         "last": "Last",

@@ -83,7 +83,20 @@ impl OwnerSpec for ToolchainOwner {
         command: Self::Command,
     ) {
         match command {
-            ToolchainCommand::AdmitPrepare { call } => {
+            ToolchainCommand::AdmitPrepare { call, accepted } => {
+                if let Err(error) = accepted.await {
+                    eprintln!(
+                        "[toolchain:call] accepted record failed call_id={} error={error}",
+                        call.id().as_str()
+                    );
+                    call::finish(
+                        Some(&call),
+                        CallStatus::Rejected,
+                        &ToolchainCallDetail::prepare().failed(CallFailure::RecordingUnavailable),
+                    )
+                    .await;
+                    return;
+                }
                 if let Err(error) = call.running().await {
                     eprintln!(
                         "[toolchain:call] running record failed call_id={} error={error}",

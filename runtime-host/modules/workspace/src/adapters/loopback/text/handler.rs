@@ -15,7 +15,7 @@ pub(crate) async fn handle(
 }
 
 async fn handle_request(request: Request, dependencies: super::super::Dependencies) -> Response {
-    if request.method() != "POST" || request.path() != "/api/workspace/files/read-text" {
+    if request.method() != "POST" || request.path() != super::AUTHORIZATION_ENDPOINT {
         return Response::not_found();
     }
     let Some(authorization) = request

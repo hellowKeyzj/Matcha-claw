@@ -27,6 +27,7 @@ pub(super) fn spawn(
     custody: Option<PosixLaunchCustody>,
     private_descriptor: Option<OwnedFd>,
     execution_source: Option<OwnedFd>,
+    inherited_environment: Option<OwnedFd>,
 ) -> Result<(GuardianProcess, HostStdio), SpawnFailure> {
     if !executable.is_absolute() {
         return Err(SpawnFailure::BeforeOwnership(io::Error::new(
@@ -62,6 +63,7 @@ pub(super) fn spawn(
     let mut target_state_directory = target_state_directory;
     let mut private_descriptor = private_descriptor;
     let mut execution_source = execution_source;
+    let mut inherited_environment = inherited_environment;
     let mut cleanup_directory = cleanup_directory;
     let mut cleanup_names = cleanup_names;
     let mut command = Command::new(executable);
@@ -82,6 +84,7 @@ pub(super) fn spawn(
                 execution_source.take(),
                 cleanup_directory.take(),
                 cleanup_names.take(),
+                inherited_environment.take(),
                 descriptor_limit,
             )
         });
@@ -164,6 +167,7 @@ fn prepare_guardian_exec(
     execution_source: Option<OwnedFd>,
     cleanup_directory: Option<OwnedFd>,
     cleanup_names: Option<OwnedFd>,
+    inherited_environment: Option<OwnedFd>,
     descriptor_limit: RawFd,
 ) -> io::Result<()> {
     let [target_stdin, target_stdout, target_stderr] = target_stdio;
@@ -189,6 +193,10 @@ fn prepare_guardian_exec(
     retain_optional_descriptor(
         cleanup_names,
         super::guardian_descriptors::GUARDIAN_CLEANUP_NAMES_FD,
+    )?;
+    retain_optional_descriptor(
+        inherited_environment,
+        super::guardian_descriptors::TARGET_ENVIRONMENT_FD,
     )?;
     super::guardian_descriptors::clear_close_on_exec(libc::STDIN_FILENO)?;
     super::guardian_descriptors::clear_close_on_exec(libc::STDOUT_FILENO)?;

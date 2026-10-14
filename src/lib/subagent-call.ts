@@ -55,6 +55,20 @@ export async function waitForSubagentResult(
   }
   if (body.success === false) {
     const failureOutcomes = ['rejected', 'outcomeUnknown', 'unsupported', 'unavailable', 'unexpectedOutcome'];
+    if (body.error === 'Agent configuration was applied, but readback failed') {
+      if ((operationId !== 'subagentSkills.set' && operationId !== 'subagentTools.set')
+        || record.status !== 503 || Object.keys(body).length !== 2 || detail.readFailure === null) {
+        throw new Error('Invalid Subagent mutation terminal outcome');
+      }
+      failureOutcomes.splice(0, failureOutcomes.length, 'configurationApplied');
+    }
+    if (body.error === 'Subagent package was installed, but cleanup failed') {
+      if (operationId !== 'subagents.package.install' || record.status !== 503
+        || Object.keys(body).length !== 2 || detail.agentId === null) {
+        throw new Error('Invalid Subagent mutation terminal outcome');
+      }
+      failureOutcomes.splice(0, failureOutcomes.length, 'packageInstalledCleanupFailed');
+    }
     if (operationId === 'subagents.create' && body.agent) failureOutcomes.splice(0, failureOutcomes.length, 'workspaceInitializationFailed');
     if (operationId === 'subagents.delete' && body.kind === 'deleted') {
       const nativeSucceeded = body.nativeOk === true && body.failedCount === 0 && body.purgeFailedCount === 0;

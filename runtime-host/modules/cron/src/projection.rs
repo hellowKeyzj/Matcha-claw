@@ -11,6 +11,7 @@ pub(crate) struct JobResponse {
     delivery: DeliveryResponse,
     target: Option<TargetResponse>,
     enabled: bool,
+    system_managed: bool,
     created_at: String,
     updated_at: String,
     last_run: Option<LastRunResponse>,
@@ -142,6 +143,7 @@ impl TryFrom<crate::model::CronJobView> for JobResponse {
             delivery,
             target,
             enabled: job.enabled,
+            system_managed: job.system_managed,
             created_at: iso_timestamp(job.created_at_ms).map_err(|_| "createdAt.invalid")?,
             updated_at: iso_timestamp(job.updated_at_ms).map_err(|_| "updatedAt.invalid")?,
             last_run,
@@ -172,6 +174,7 @@ pub(crate) fn project_job_response(job: JobResponse) -> Value {
         value.insert("target".to_owned(), project_target_response(target));
     }
     value.insert("enabled".to_owned(), Value::Bool(job.enabled));
+    value.insert("systemManaged".to_owned(), Value::Bool(job.system_managed));
     value.insert("createdAt".to_owned(), Value::String(job.created_at));
     value.insert("updatedAt".to_owned(), Value::String(job.updated_at));
     if let Some(last_run) = job.last_run {

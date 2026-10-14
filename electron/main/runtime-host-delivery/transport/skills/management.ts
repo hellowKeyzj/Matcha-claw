@@ -4,6 +4,7 @@ import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import { isCallId } from '../../../../../src/types/call-log/decode';
 import { decodeSkillsOperationResult, type SkillsOperationResultResponse } from '../../../../../src/types/skills-operation-result';
 import { createCallLogTransport } from '../call-log';
+import { logSessionTrace, summarizeIdentifier, traceHeader } from '../sessions/trace';
 import { hasExactKeys, isBoundedText, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from '../client';
 
 export const SKILLS_ENDPOINTS = Object.freeze({
@@ -232,7 +233,7 @@ export type SkillCapabilityTransportResponse = Readonly<{
 }>;
 
 export interface SkillsManagementTransport {
-  execute(request: unknown): Promise<SkillCapabilityTransportResponse>;
+  execute(request: unknown, traceId?: string | null): Promise<SkillCapabilityTransportResponse>;
   operationResult(request: unknown): Promise<SkillsTransportResponse<SkillsOperationResultResponse>>;
   readStatus(): Promise<SkillsStatusTransportResponse>;
   detail(request: unknown): Promise<SkillsDetailTransportResponse>;
@@ -254,7 +255,7 @@ export function createSkillsManagementTransport(
   fetcher: typeof fetch = fetch,
 ): SkillsManagementTransport {
   return {
-    execute: (request) => executeCapability(issuer, runtimeHostTransportPort, fetcher, request),
+    execute: (request, traceId) => executeCapability(issuer, runtimeHostTransportPort, fetcher, request, traceId),
     async operationResult(request) {
       if (!isRecord(request) || !hasExactKeys(request, ['callId']) || !isCallId(request.callId)) return rejectedResponse();
       const observed = await createCallLogTransport(issuer, runtimeHostTransportPort, fetcher).get(request);
@@ -307,8 +308,26 @@ async function executeCapability(
   runtimeHostTransportPort: number,
   fetcher: typeof fetch,
   request: unknown,
+  traceId?: string | null,
 ): Promise<SkillCapabilityTransportResponse> {
-  if (!isSkillCapabilityRequest(request)) return { status: 400, body: CAPABILITY_REJECTED };
+  const valid = isSkillCapabilityRequest(request);
+  logSessionTrace('skill.open-path.main.validation', traceId, () => {
+    const input = isRecord(request) && isRecord(request.input) ? request.input : null;
+    const target = isRecord(request) && isRecord(request.target) ? request.target : null;
+    return {
+      valid,
+      exactKeys: isRecord(request) && hasExactKeys(request, ['id', 'operationId', 'scope', 'target', 'input']),
+      scopeValid: isRecord(request) && isNativeRuntimeScope(request.scope),
+      targetValid: target !== null && skillTargetId(target) !== null,
+      skillMatches: input?.skillKey === target?.skillId,
+      slugMatches: input?.slug === undefined || input.slug === target?.slug,
+      baseDirValid: input?.baseDir === undefined || isSkillReferencePath(input.baseDir),
+      filePathValid: input?.filePath === undefined || (isSkillReferencePath(input.filePath) && isManifestPath(input.filePath)),
+      inputKeysValid: input !== null && hasOnlyKeys(input, ['skillKey', 'slug', 'baseDir', 'filePath']),
+      skillHash: summarizeIdentifier(typeof input?.skillKey === 'string' ? input.skillKey : null).hash,
+    };
+  });
+  if (!valid) return { status: 400, body: CAPABILITY_REJECTED };
   const response = await sendLoopbackJson({
     port: runtimeHostTransportPort,
     path: CAPABILITY_EXECUTE_ENDPOINT,
@@ -322,7 +341,12 @@ async function executeCapability(
     method: 'POST',
     fetcher,
     body: request,
+    headers: traceHeader(traceId),
   });
+  logSessionTrace('skill.open-path.main.loopback-response', traceId, () => ({
+    status: response?.status ?? null,
+    success: isRecord(response?.body) && response.body.success === true,
+  }));
   if (response?.status === 401) return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
   if (response?.status === 400) return { status: 400, body: CAPABILITY_REJECTED };
   if (['skills.updateConfig', 'skills.updateState', 'skills.updateBatchState', 'skills.exportBundles', 'skills.importBundles'].includes(request.operationId)) {

@@ -10,6 +10,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    application::commands::IngestMode,
     domain::WikiReviewItem,
     ports::{
         WikiIngestLlm, WikiIngestLlmMessage, WikiIngestLlmOptions, WikiIngestLlmRequest,
@@ -31,7 +32,7 @@ struct SweepState {
 #[derive(Default)]
 struct Drain {
     active: usize,
-    processed: bool,
+    processed: Option<IngestMode>,
     epoch: u64,
     cancellation: Option<CancellationToken>,
 }
@@ -83,25 +84,25 @@ impl ReviewSweeps {
         }
     }
 
-    pub(crate) fn claim(&self, project_id: &str) -> Option<CancellationToken> {
+    pub(crate) fn claim(&self, project_id: &str) -> Option<(CancellationToken, IngestMode)> {
         let mut state = self.state.lock().unwrap();
         if state.closed {
             return None;
         }
         let drain = state.projects.get_mut(project_id)?;
-        if drain.active != 0 || !drain.processed {
+        if drain.active != 0 {
             return None;
         }
-        drain.processed = false;
+        let ingest = drain.processed.take()?;
         let cancellation = CancellationToken::new();
         drain.cancellation = Some(cancellation.clone());
-        Some(cancellation)
+        Some((cancellation, ingest))
     }
 }
 
 fn invalidate(drain: &mut Drain) {
     drain.epoch += 1;
-    drain.processed = false;
+    drain.processed = None;
     if let Some(cancellation) = drain.cancellation.take() {
         cancellation.cancel();
     }
@@ -112,11 +113,11 @@ impl SourceWork {
         &self.project_id
     }
 
-    pub(crate) fn mark_processed(&self) {
+    pub(crate) fn mark_processed(&self, ingest: IngestMode) {
         let mut state = self.sweeps.state.lock().unwrap();
         let drain = state.projects.get_mut(&self.project_id).unwrap();
-        if drain.epoch == self.epoch {
-            drain.processed = true;
+        if drain.epoch == self.epoch && drain.processed != Some(IngestMode::Configured) {
+            drain.processed = Some(ingest);
         }
     }
 }

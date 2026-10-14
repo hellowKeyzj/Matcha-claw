@@ -98,7 +98,7 @@ impl FleetCall {
                     }
                 }
             }
-            Err(_) => self.outcome("rejected", CallStatus::Rejected).await,
+            Err(error) => self.finish(&Err::<(), _>(error)).await,
         }
     }
 
@@ -138,9 +138,10 @@ impl FleetCall {
             Ok(FleetLifecycleOutcome::Unknown(_)) => {
                 self.outcome("outcomeUnknown", CallStatus::Unknown).await
             }
-            Ok(FleetLifecycleOutcome::Rejected(_)) | Err(_) => {
+            Ok(FleetLifecycleOutcome::Rejected(_)) => {
                 self.outcome("rejected", CallStatus::Rejected).await
             }
+            Err(error) => self.finish(&Err::<(), _>(error)).await,
         }
     }
 
@@ -162,9 +163,10 @@ impl FleetCall {
             Ok(FleetConnectionLifecycleOutcome::Unknown(_)) => {
                 self.outcome("outcomeUnknown", CallStatus::Unknown).await
             }
-            Ok(FleetConnectionLifecycleOutcome::Rejected(_)) | Err(_) => {
+            Ok(FleetConnectionLifecycleOutcome::Rejected(_)) => {
                 self.outcome("rejected", CallStatus::Rejected).await
             }
+            Err(error) => self.finish(&Err::<(), _>(error)).await,
         }
     }
 
@@ -172,32 +174,63 @@ impl FleetCall {
         &self,
         result: &Result<crate::environment::ManagedResourceMutation, crate::FleetDeliveryError>,
     ) {
-        match result {
-            Err(crate::FleetDeliveryError::DeliveryOutcomeUnknown)
-            | Err(crate::FleetDeliveryError::Store(
-                crate::store::StoreFault::CommitOutcomeUnknown(_),
-            )) => self.outcome("outcomeUnknown", CallStatus::Unknown).await,
-            _ => self.finish(result).await,
-        }
+        self.finish(result).await;
     }
 
-    pub(crate) async fn finish<T, E>(&self, result: &Result<T, E>) {
-        let mut detail = self.detail.clone();
-        detail.outcome = Some(if result.is_ok() {
-            "completed"
-        } else {
-            "rejected"
-        });
-        let status = if result.is_ok() {
-            CallStatus::Succeeded
-        } else {
-            CallStatus::Rejected
+    pub(crate) async fn finish<T, E: CallError>(&self, result: &Result<T, E>) {
+        let (outcome, status) = match result {
+            Ok(_) => ("completed", CallStatus::Succeeded),
+            Err(error) if error.outcome_is_unknown() => ("outcomeUnknown", CallStatus::Unknown),
+            Err(_) => ("rejected", CallStatus::Rejected),
         };
-        if self.context.finish(status, &detail).await.is_err() {
-            audit_failure();
-        }
+        self.outcome(outcome, status).await;
     }
 }
+
+pub(crate) fn delivery_error_is_unknown(error: &crate::FleetDeliveryError) -> bool {
+    use crate::{FleetDeliveryError, store::StoreFault};
+    matches!(
+        error,
+        FleetDeliveryError::DeliveryOutcomeUnknown
+            | FleetDeliveryError::Store(
+                StoreFault::WriterBusy
+                    | StoreFault::Lock(_)
+                    | StoreFault::Read(_)
+                    | StoreFault::Recovery(_)
+                    | StoreFault::Commit(_)
+                    | StoreFault::CommitOutcomeUnknown(_)
+                    | StoreFault::RecoveryRequired
+            )
+    )
+}
+
+pub(crate) trait CallError {
+    fn outcome_is_unknown(&self) -> bool {
+        false
+    }
+}
+
+impl CallError for crate::FleetDeliveryError {
+    fn outcome_is_unknown(&self) -> bool {
+        delivery_error_is_unknown(self)
+    }
+}
+
+impl<E: CallError + ?Sized> CallError for &E {
+    fn outcome_is_unknown(&self) -> bool {
+        (**self).outcome_is_unknown()
+    }
+}
+
+impl CallError for std::io::Error {
+    fn outcome_is_unknown(&self) -> bool {
+        true
+    }
+}
+
+impl CallError for () {}
+impl CallError for crate::terminal::TerminalSessionError {}
+impl CallError for crate::application::credentials::FleetCredentialVaultError {}
 
 fn audit_failure() {
     eprintln!("Fleet call audit persistence failed");

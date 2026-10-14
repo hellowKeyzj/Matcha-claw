@@ -11,7 +11,7 @@ use fleet::{
     CustomTargetConfig, FleetSecretResolution, FleetSecretResolverPort, command::CommandKind,
 };
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::timeout;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
@@ -23,6 +23,8 @@ use super::terminal::{
 };
 
 const CUSTOM_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+// Bound a stalled socket write, not idle time or the terminal session lifetime.
+const CUSTOM_SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const CUSTOM_TERMINAL_PROTOCOL: &str = "remote-fleet-terminal/v1";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const TERMINAL_CLOSE: &str = "terminal.close";
@@ -265,30 +267,75 @@ fn header_value(value: &str) -> Result<header::HeaderValue, ProviderError> {
 }
 
 type CustomSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type CustomWriter = Mutex<futures_util::stream::SplitSink<CustomSocket, Message>>;
 
 async fn run_socket(
-    mut socket: CustomSocket,
+    socket: CustomSocket,
     mut commands: mpsc::Receiver<ProviderCommand>,
     events: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
 ) {
-    loop {
-        tokio::select! {
-            command = commands.recv() => match command {
-                Some(ProviderCommand::Input(data)) if data.len() <= MAX_FRAME_BYTES => { if socket.send(Message::Binary(data.into())).await.is_err() { break; } }
-                Some(ProviderCommand::Resize { rows, cols }) => { if socket.send(TerminalControlFrame::resize(rows, cols).into_message()).await.is_err() { break; } }
-                Some(ProviderCommand::Input(_)) => { let _ = events.send(Err(ProviderError::message("custom terminal input is too large"))).await; break; }
-                None => { let _ = socket.send(TerminalControlFrame::close().into_message()).await; let _ = socket.close(None).await; break; }
-            },
-            message = socket.next() => match message {
-                Some(Ok(Message::Binary(data))) if data.len() <= MAX_FRAME_BYTES => { if events.send(Ok(ProviderEvent::Output(data.to_vec()))).await.is_err() { break; } }
-                Some(Ok(Message::Text(text))) => match parse_control(text.as_ref(), &mut socket, &events).await { ControlResult::Continue => {}, ControlResult::Exit => break },
-                Some(Ok(Message::Ping(payload))) => { if socket.send(Message::Pong(payload)).await.is_err() { break; } }
-                Some(Ok(Message::Close(frame))) => { let _ = events.send(Ok(ProviderEvent::Exit { code: frame.and_then(|f| i32::try_from(u16::from(f.code)).ok()) })).await; break; }
-                Some(Ok(_)) => {}
-                Some(Err(_)) | None => { let _ = events.send(Err(ProviderError::message("custom terminal websocket failed"))).await; break; }
+    let result = {
+        let (writer, mut reader) = socket.split();
+        let writer = Mutex::new(writer);
+        // Drain both bounded directions; stalled writes terminate this socket.
+        let send = async {
+            loop {
+                match commands.recv().await {
+                    Some(ProviderCommand::Input(data)) if data.len() <= MAX_FRAME_BYTES => { write_socket(&writer, Message::Binary(data.into()), false).await?; }
+                    Some(ProviderCommand::Resize { rows, cols }) => { write_socket(&writer, TerminalControlFrame::resize(rows, cols).into_message(), false).await?; }
+                    Some(ProviderCommand::Input(_)) => return Err(ProviderError::message("custom terminal input is too large")),
+                    None => return Ok(()),
+                }
             }
+        };
+        let receive = async {
+            loop {
+                match reader.next().await {
+                    Some(Ok(Message::Binary(data))) if data.len() <= MAX_FRAME_BYTES => { if events.send(Ok(ProviderEvent::Output(data.to_vec()))).await.is_err() { return Ok(()); } }
+                    Some(Ok(Message::Text(text))) => match parse_control(text.as_ref(), &writer, &events).await? { ControlResult::Continue => {}, ControlResult::Exit => return Ok(()) },
+                    Some(Ok(Message::Ping(payload))) => { write_socket(&writer, Message::Pong(payload), false).await?; }
+                    Some(Ok(Message::Close(frame))) => { let _ = events.send(Ok(ProviderEvent::Exit { code: frame.and_then(|f| i32::try_from(u16::from(f.code)).ok()) })).await; return Ok(()); }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => return Err(ProviderError::message("custom terminal websocket failed")),
+                }
+            }
+        };
+        let result = tokio::select! {
+            _ = events.closed() => Ok(()),
+            result = send => result,
+            result = receive => result,
+        };
+        // A dropped command sender owns both close frames, whichever future ended first.
+        if commands.is_closed() {
+            result.and(write_socket(&writer, TerminalControlFrame::close().into_message(), true).await)
+        } else if events.is_closed() {
+            result.and(Err(ProviderError::message("custom terminal event channel is closed")))
+        } else {
+            result
         }
+    };
+    if let Err(error) = result {
+        // The socket is already dropped; a full event queue still closes as failure.
+        let _ = events.try_send(Err(error));
     }
+}
+
+async fn write_socket(
+    writer: &CustomWriter,
+    message: Message,
+    close: bool,
+) -> Result<(), ProviderError> {
+    timeout(CUSTOM_SOCKET_WRITE_TIMEOUT, async {
+        let mut writer = writer.lock().await;
+        writer.send(message).await?;
+        if close {
+            writer.close().await?;
+        }
+        Ok::<(), tokio_tungstenite::tungstenite::Error>(())
+    })
+    .await
+    .map_err(|_| ProviderError::message("custom terminal websocket write timed out"))?
+    .map_err(|_| ProviderError::message("custom terminal websocket write failed"))
 }
 
 struct TerminalControlFrame(serde_json::Value);
@@ -317,50 +364,30 @@ enum ControlResult {
 }
 async fn parse_control(
     text: &str,
-    socket: &mut CustomSocket,
+    writer: &CustomWriter,
     events: &mpsc::Sender<Result<ProviderEvent, ProviderError>>,
-) -> ControlResult {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        let _ = events
-            .send(Err(ProviderError::message(
-                "custom terminal control frame is invalid",
-            )))
-            .await;
-        return ControlResult::Exit;
-    };
+) -> Result<ControlResult, ProviderError> {
+    let value = serde_json::from_str::<serde_json::Value>(text)
+        .map_err(|_| ProviderError::message("custom terminal control frame is invalid"))?;
     match value.get("type").and_then(serde_json::Value::as_str) {
-        Some(TERMINAL_ERROR) => {
-            let _ = events
-                .send(Err(ProviderError::message("custom terminal remote error")))
-                .await;
-            ControlResult::Exit
-        }
+        Some(TERMINAL_ERROR) => Err(ProviderError::message("custom terminal remote error")),
         Some(TERMINAL_EXIT) | Some(TERMINAL_CLOSE) => {
             let code = value
                 .get("exitCode")
                 .and_then(serde_json::Value::as_i64)
                 .and_then(|v| i32::try_from(v).ok());
             let _ = events.send(Ok(ProviderEvent::Exit { code })).await;
-            ControlResult::Exit
+            Ok(ControlResult::Exit)
         }
         Some(TERMINAL_PING) => {
             let nonce = value.get("nonce").and_then(serde_json::Value::as_str);
-            let _ = socket
-                .send(TerminalControlFrame::pong(nonce).into_message())
-                .await;
-            ControlResult::Continue
+            write_socket(writer, TerminalControlFrame::pong(nonce).into_message(), false).await?;
+            Ok(ControlResult::Continue)
         }
         Some(TERMINAL_READY) | Some(TERMINAL_RESIZE) | Some(TERMINAL_PONG) => {
-            ControlResult::Continue
+            Ok(ControlResult::Continue)
         }
-        _ => {
-            let _ = events
-                .send(Err(ProviderError::message(
-                    "custom terminal control frame is invalid",
-                )))
-                .await;
-            ControlResult::Exit
-        }
+        _ => Err(ProviderError::message("custom terminal control frame is invalid")),
     }
 }
 

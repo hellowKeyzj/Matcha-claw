@@ -105,11 +105,19 @@ impl SubagentCallDetail {
             }
             Outcome::PackageInstalled(package) => {
                 self.agent_id = safe_id(package.agent_id());
-                (Succeeded, "packageInstalled")
+                if package.cleanup_failure.is_some() {
+                    (Failed, "packageInstalledCleanupFailed")
+                } else {
+                    (Succeeded, "packageInstalled")
+                }
             }
             Outcome::SkillConfiguration(result) => match result {
                 SkillConfigurationOutcome::View(_) => (Succeeded, "skillConfigurationRead"),
                 SkillConfigurationOutcome::Updated(_) => (Succeeded, "skillConfigurationUpdated"),
+                SkillConfigurationOutcome::AppliedReadbackFailed(failure) => {
+                    self.read_failure = Some(read_failure(*failure));
+                    (Failed, "configurationApplied")
+                }
                 SkillConfigurationOutcome::Stale(_) => (Rejected, "staleRevision"),
                 SkillConfigurationOutcome::InvalidSkillKeys { .. } => {
                     (Rejected, "invalidSkillKeys")
@@ -125,6 +133,10 @@ impl SubagentCallDetail {
             Outcome::ToolConfiguration(result) => match result {
                 ToolConfigurationOutcome::View(_) => (Succeeded, "toolConfigurationRead"),
                 ToolConfigurationOutcome::Updated(_) => (Succeeded, "toolConfigurationUpdated"),
+                ToolConfigurationOutcome::AppliedReadbackFailed(failure) => {
+                    self.read_failure = Some(read_failure(*failure));
+                    (Failed, "configurationApplied")
+                }
                 ToolConfigurationOutcome::Stale(_) => (Rejected, "staleRevision"),
                 ToolConfigurationOutcome::InvalidToolKeys(_) => (Rejected, "invalidToolKeys"),
                 ToolConfigurationOutcome::Unsupported => (Rejected, "unsupported"),

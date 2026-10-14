@@ -3,9 +3,9 @@ mod composition;
 mod control;
 mod host_actor;
 mod http;
+pub mod mcp;
 mod module_registry;
 mod parent_callback;
-pub mod team_mcp;
 
 pub use ::diagnostics::{
     HostLifecycle, HostState, RuntimeFailure, RuntimeLifecycle, RuntimeObservationConfig,

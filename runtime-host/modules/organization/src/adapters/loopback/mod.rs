@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use tokio::sync::Mutex;
@@ -68,12 +68,32 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
     ModuleDescriptor::new(
         ModuleId::new("organization"),
         vec![
-            RouteDescriptor::bound("organization.loopback.team", head_plan, {
-                let dependencies = dependencies.clone();
-                move |request| route(dependencies.clone(), request)
-            }),
+            RouteDescriptor::bound(
+                "organization.loopback.team",
+                &[
+                    RoutePath::ExactWithQuery(public::handler::ROUTE),
+                    RoutePath::ExactWithQuery(role_sessions::handler::ROUTE),
+                    RoutePath::ExactWithQuery(approvals::handler::ROUTE),
+                    RoutePath::ExactWithQuery(task_board::handler::ROUTE),
+                    RoutePath::ExactWithQuery(decision::handler::ROUTE),
+                    RoutePath::ExactWithQuery(lifecycle::handler::ROUTE),
+                    RoutePath::ExactWithQuery(graph::handler::ROUTE),
+                    RoutePath::ExactWithQuery(skill::handler::ROUTE),
+                    RoutePath::ExactWithQuery(manual::handler::ROUTE),
+                    RoutePath::ExactWithQuery(trigger::handler::MANAGEMENT_ROUTE),
+                    RoutePath::ExactWithQuery(trigger::handler::WEBHOOK_AUTH_ROUTE),
+                    RoutePath::ExactWithQuery(trigger::handler::WEBHOOK_ROUTE_PREFIX),
+                    RoutePath::Prefix(trigger::handler::WEBHOOK_SUBROUTE_PREFIX),
+                ],
+                head_plan,
+                {
+                    let dependencies = dependencies.clone();
+                    move |request| route(dependencies.clone(), request)
+                },
+            ),
             RouteDescriptor::bound(
                 "organization.loopback.team-runtime",
+                &[RoutePath::ExactWithQuery(team_runtime::ROUTE)],
                 team_runtime_head_plan,
                 move |request| team_runtime_route(dependencies.clone(), request),
             ),
@@ -118,7 +138,7 @@ pub(crate) async fn dispatch_team(dependencies: Dependencies, request: Request) 
         let headers = request.headers().to_vec();
         let body = request.body;
         let response = match pathname.as_str() {
-            "/api/team/public" => {
+            public::handler::ROUTE => {
                 public::handler::handle_loopback(
                     method,
                     path,
@@ -129,7 +149,7 @@ pub(crate) async fn dispatch_team(dependencies: Dependencies, request: Request) 
                 )
                 .await
             }
-            "/api/team/role-sessions" => {
+            role_sessions::handler::ROUTE => {
                 role_sessions::handler::handle_loopback(
                     method,
                     path,
@@ -141,7 +161,7 @@ pub(crate) async fn dispatch_team(dependencies: Dependencies, request: Request) 
                 )
                 .await
             }
-            "/api/team/approvals" => {
+            approvals::handler::ROUTE => {
                 approvals::handler::handle_loopback(
                     method,
                     path,
@@ -152,7 +172,7 @@ pub(crate) async fn dispatch_team(dependencies: Dependencies, request: Request) 
                 )
                 .await
             }
-            "/api/team/task-board" => {
+            task_board::handler::ROUTE => {
                 task_board::handler::handle_loopback(
                     method,
                     path,
@@ -163,7 +183,7 @@ pub(crate) async fn dispatch_team(dependencies: Dependencies, request: Request) 
                 )
                 .await
             }
-            "/api/team/decision" => {
+            decision::handler::ROUTE => {
                 decision::handler::handle_loopback(
                     method,
                     path,
@@ -174,7 +194,7 @@ pub(crate) async fn dispatch_team(dependencies: Dependencies, request: Request) 
                 )
                 .await
             }
-            "/api/team/lifecycle" => {
+            lifecycle::handler::ROUTE => {
                 lifecycle::handler::handle_loopback(
                     method,
                     path,
@@ -185,7 +205,7 @@ pub(crate) async fn dispatch_team(dependencies: Dependencies, request: Request) 
                 )
                 .await
             }
-            "/api/team/graph" => {
+            graph::handler::ROUTE => {
                 graph::handler::handle_loopback(
                     method,
                     path,
@@ -196,7 +216,7 @@ pub(crate) async fn dispatch_team(dependencies: Dependencies, request: Request) 
                 )
                 .await
             }
-            "/api/team/skill" => {
+            skill::handler::ROUTE => {
                 skill::handler::handle_loopback(
                     method,
                     path,
@@ -207,7 +227,7 @@ pub(crate) async fn dispatch_team(dependencies: Dependencies, request: Request) 
                 )
                 .await
             }
-            "/api/team/manual-materialize-and-create" => {
+            manual::handler::ROUTE => {
                 manual::handler::handle_loopback(
                     method,
                     path,
@@ -272,7 +292,7 @@ fn body_policy_for_method(method: &str, max_bytes: usize) -> BodyPolicy {
 fn timeout_response() -> Response {
     Response::json(
         503,
-        serde_json::json!({ "success": false, "error": "Runtime Host request deadline exceeded" }),
+        serde_json::json!({ "success": false, "error": "Runtime Host request deadline exceeded", "code": "TIMEOUT" }),
     )
 }
 
@@ -283,15 +303,15 @@ fn pathname(path: &str) -> &str {
 fn is_team_route(path: &str) -> bool {
     matches!(
         path,
-        "/api/team/public"
-            | "/api/team/role-sessions"
-            | "/api/team/approvals"
-            | "/api/team/task-board"
-            | "/api/team/decision"
-            | "/api/team/lifecycle"
-            | "/api/team/graph"
-            | "/api/team/skill"
-            | "/api/team/manual-materialize-and-create"
+        public::handler::ROUTE
+            | role_sessions::handler::ROUTE
+            | approvals::handler::ROUTE
+            | task_board::handler::ROUTE
+            | decision::handler::ROUTE
+            | lifecycle::handler::ROUTE
+            | graph::handler::ROUTE
+            | skill::handler::ROUTE
+            | manual::handler::ROUTE
     ) || is_trigger_route(path)
 }
 
@@ -300,16 +320,18 @@ fn team_body_limit(path: &str) -> usize {
         trigger::handler::max_body_bytes(path)
     } else {
         match path {
-            "/api/team/graph" => TEAM_GRAPH_REQUEST_BYTES,
-            "/api/team/manual-materialize-and-create" => TEAM_MANUAL_REQUEST_BYTES,
+            graph::handler::ROUTE => TEAM_GRAPH_REQUEST_BYTES,
+            manual::handler::ROUTE => TEAM_MANUAL_REQUEST_BYTES,
             _ => TEAM_SMALL_REQUEST_BYTES,
         }
     }
 }
 
 fn is_trigger_route(path: &str) -> bool {
-    matches!(path, "/api/team/trigger" | "/api/team/webhook-auth")
-        || trigger::handler::is_webhook_route(path)
+    matches!(
+        path,
+        trigger::handler::MANAGEMENT_ROUTE | trigger::handler::WEBHOOK_AUTH_ROUTE
+    ) || trigger::handler::is_webhook_route(path)
 }
 
 pub use role_sessions::role_session_json;

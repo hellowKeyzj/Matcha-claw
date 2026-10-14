@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use platform::{call::CallStatus, loopback::Response};
 use runtime_directory::{
@@ -12,6 +12,7 @@ use runtime_directory::{
     },
 };
 use serde_json::{Value, json};
+use tokio::time::{Instant, timeout_at};
 
 use crate::driver::OpenClawDriver;
 
@@ -27,21 +28,16 @@ impl OpenClawRuntimeControlRoute {
     ) -> Self {
         Self { driver, lifecycle }
     }
-}
 
-impl RuntimeControlRouteFragment for OpenClawRuntimeControlRoute {
-    fn endpoint(&self) -> platform::endpoint::runtime_address::RuntimeEndpoint {
-        RuntimeDriverIdentity::open_claw().endpoint()
-    }
-
-    fn handle(
+    fn handle_impl(
         &self,
         operation: RuntimeControlOperation,
         request: RuntimeControlRequest,
+        deadline: Option<Instant>,
     ) -> Option<RuntimeControlRouteFuture> {
         match operation {
             RuntimeControlOperation::LifecycleStatus => {
-                Some(lifecycle_status(Arc::clone(&self.lifecycle), request))
+                Some(lifecycle_status(Arc::clone(&self.lifecycle), request, deadline))
             }
             RuntimeControlOperation::LifecycleStart => {
                 Some(lifecycle_start(Arc::clone(&self.lifecycle), request))
@@ -56,31 +52,81 @@ impl RuntimeControlRouteFragment for OpenClawRuntimeControlRoute {
                 Some(lifecycle_repair(Arc::clone(&self.lifecycle), request))
             }
             RuntimeControlOperation::RepairStatus => {
-                Some(repair_status(Arc::clone(&self.lifecycle), request))
+                Some(repair_status(Arc::clone(&self.lifecycle), request, deadline))
             }
-            RuntimeControlOperation::Logs => Some(logs(Arc::clone(&self.driver), request)),
+            RuntimeControlOperation::Logs => Some(logs(Arc::clone(&self.driver), request, deadline)),
             RuntimeControlOperation::ControlReady => {
-                Some(control_ready(Arc::clone(&self.driver), request))
+                Some(control_ready(Arc::clone(&self.driver), request, deadline))
             }
             RuntimeControlOperation::GatewayHealth => {
-                Some(gateway_health(Arc::clone(&self.driver), request))
+                Some(gateway_health(Arc::clone(&self.driver), request, deadline))
             }
             RuntimeControlOperation::GatewayStatus => {
-                Some(gateway_status(Arc::clone(&self.driver), request))
+                Some(gateway_status(Arc::clone(&self.driver), request, deadline))
             }
             RuntimeControlOperation::ControlUiUrl => {
-                Some(control_ui_url(Arc::clone(&self.driver), request))
+                Some(control_ui_url(Arc::clone(&self.driver), request, deadline))
             }
         }
     }
 }
 
+impl RuntimeControlRouteFragment for OpenClawRuntimeControlRoute {
+    fn endpoint(&self) -> platform::endpoint::runtime_address::RuntimeEndpoint {
+        RuntimeDriverIdentity::open_claw().endpoint()
+    }
+
+    fn handle(
+        &self,
+        operation: RuntimeControlOperation,
+        request: RuntimeControlRequest,
+    ) -> Option<RuntimeControlRouteFuture> {
+        self.handle_impl(operation, request, None)
+    }
+
+    fn handle_read(
+        &self,
+        operation: RuntimeControlOperation,
+        request: RuntimeControlRequest,
+        deadline: Instant,
+    ) -> Option<RuntimeControlRouteFuture> {
+        self.handle_impl(operation, request, Some(deadline))
+    }
+}
+
+async fn read_with_deadline<T>(
+    deadline: Option<Instant>,
+    read: impl Future<Output = T>,
+) -> Result<T, ()> {
+    match deadline {
+        Some(deadline) if Instant::now() >= deadline => Err(()),
+        Some(deadline) => timeout_at(deadline, read).await.map_err(|_| ()),
+        None => Ok(read.await),
+    }
+}
+
+async fn finish_read_timeout(request: RuntimeControlRequest) -> Response {
+    let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
+    detail.result = Some(RuntimeControlCallResult::Unknown);
+    finish_runtime_control_call(request.call, CallStatus::Unknown, &detail).await;
+    Response::error(503, "Runtime Host request deadline exceeded")
+}
+
 fn lifecycle_status(
     lifecycle: Arc<dyn RuntimeControlLifecyclePort>,
     request: RuntimeControlRequest,
+    deadline: Option<Instant>,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        let result = lifecycle.lifecycle_status(request.endpoint.clone()).await;
+        let result = match read_with_deadline(
+            deadline,
+            lifecycle.lifecycle_status(request.endpoint.clone()),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(()) => return finish_read_timeout(request).await,
+        };
         let (status, detail) = RuntimeControlCallDetail::lifecycle_result(
             &request.endpoint,
             RuntimeControlOperation::LifecycleStatus,
@@ -163,9 +209,18 @@ fn lifecycle_repair(
 fn repair_status(
     lifecycle: Arc<dyn RuntimeControlLifecyclePort>,
     request: RuntimeControlRequest,
+    deadline: Option<Instant>,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        let result = lifecycle.repair_status(request.endpoint.clone()).await;
+        let result = match read_with_deadline(
+            deadline,
+            lifecycle.repair_status(request.endpoint.clone()),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(()) => return finish_read_timeout(request).await,
+        };
         let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
         detail.repair = result.as_ref().ok().copied();
         let (status, outcome) = match &result {
@@ -214,9 +269,21 @@ async fn finish_read<T>(
     finish_runtime_control_call(request.call, status, &detail).await;
 }
 
-fn logs(driver: Arc<OpenClawDriver>, request: RuntimeControlRequest) -> RuntimeControlRouteFuture {
+fn logs(
+    driver: Arc<OpenClawDriver>,
+    request: RuntimeControlRequest,
+    deadline: Option<Instant>,
+) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        let result = RuntimeControlOps::logs(driver.as_ref(), request.cursor).await;
+        let result = match read_with_deadline(
+            deadline,
+            RuntimeControlOps::logs(driver.as_ref(), request.cursor),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(()) => return finish_read_timeout(request).await,
+        };
         let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
         detail.count = result.as_ref().ok().map(|logs| logs.entries.len());
         finish_read(request, &result, detail).await;
@@ -230,9 +297,18 @@ fn logs(driver: Arc<OpenClawDriver>, request: RuntimeControlRequest) -> RuntimeC
 fn control_ready(
     driver: Arc<OpenClawDriver>,
     request: RuntimeControlRequest,
+    deadline: Option<Instant>,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        let result = RuntimeControlOps::control_readiness(driver.as_ref()).await;
+        let result = match read_with_deadline(
+            deadline,
+            RuntimeControlOps::control_readiness(driver.as_ref()),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(()) => return finish_read_timeout(request).await,
+        };
         let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
         detail.ready = result
             .as_ref()
@@ -249,11 +325,18 @@ fn control_ready(
 fn gateway_health(
     driver: Arc<OpenClawDriver>,
     request: RuntimeControlRequest,
+    deadline: Option<Instant>,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        let result =
-            RuntimeControlOps::gateway_health(driver.as_ref(), request.probe.unwrap_or(false))
-                .await;
+        let result = match read_with_deadline(
+            deadline,
+            RuntimeControlOps::gateway_health(driver.as_ref(), request.probe.unwrap_or(false)),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(()) => return finish_read_timeout(request).await,
+        };
         let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
         detail.healthy = result.as_ref().ok().map(|health| health.ok);
         finish_read(request, &result, detail).await;
@@ -267,13 +350,21 @@ fn gateway_health(
 fn gateway_status(
     driver: Arc<OpenClawDriver>,
     request: RuntimeControlRequest,
+    deadline: Option<Instant>,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        let result = RuntimeControlOps::gateway_status(
-            driver.as_ref(),
-            request.include_channel_summary.unwrap_or(true),
+        let result = match read_with_deadline(
+            deadline,
+            RuntimeControlOps::gateway_status(
+                driver.as_ref(),
+                request.include_channel_summary.unwrap_or(true),
+            ),
         )
-        .await;
+        .await
+        {
+            Ok(result) => result,
+            Err(()) => return finish_read_timeout(request).await,
+        };
         let mut detail = RuntimeControlCallDetail::new(&request.endpoint);
         detail.count = result.as_ref().ok().map(|status| status.session_count);
         finish_read(request, &result, detail).await;
@@ -287,9 +378,18 @@ fn gateway_status(
 fn control_ui_url(
     driver: Arc<OpenClawDriver>,
     request: RuntimeControlRequest,
+    deadline: Option<Instant>,
 ) -> RuntimeControlRouteFuture {
     Box::pin(async move {
-        let result = RuntimeControlOps::control_ui_url(driver.as_ref()).await;
+        let result = match read_with_deadline(
+            deadline,
+            RuntimeControlOps::control_ui_url(driver.as_ref()),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(()) => return finish_read_timeout(request).await,
+        };
         let detail = RuntimeControlCallDetail::new(&request.endpoint);
         finish_read(request, &result, detail).await;
         match result {

@@ -574,7 +574,12 @@ impl crate::ProviderTextGenerationUnavailableReason {
                 ProviderCallDiagnosticReason::PrivateResolverUnavailable,
                 Some(ProviderCallPrivateResolverCode::Unknown),
             ),
-            Self::ProviderUnavailable => (ProviderCallDiagnosticReason::Unknown, None),
+            Self::Authentication
+            | Self::PermissionDenied
+            | Self::RateLimited
+            | Self::Deadline
+            | Self::InvalidResponse
+            | Self::ProviderUnavailable => (ProviderCallDiagnosticReason::Unknown, None),
         }
     }
 }

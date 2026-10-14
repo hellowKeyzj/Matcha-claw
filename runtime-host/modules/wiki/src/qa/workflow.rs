@@ -19,37 +19,37 @@ pub(crate) async fn run(
     plan: QuestionPlan,
 ) -> Result<WikiQuestionTaskReceipt, WikiFailure> {
     let result = execute(&owner, &plan).await;
-    let terminal = if let Err(error) = &result {
-        plan.tasks
-            .update(
-                &plan.project_root,
-                &plan.project_id,
-                &plan.task.id,
-                |task| {
-                    if task.status != WikiQuestionStatus::Cancelled {
-                        task.status = if error.is_cancelled() {
-                            WikiQuestionStatus::Cancelled
-                        } else {
-                            WikiQuestionStatus::Error
-                        };
-                        task.error = (!error.is_cancelled()).then(|| failure_message(error));
-                    }
-                },
-            )
-            .await
-            .map(|_| ())
-    } else {
-        Ok(())
+    let (status, error) = match &result {
+        Ok(()) => (WikiQuestionStatus::Done, None),
+        Err(error) if error.is_cancelled() => (WikiQuestionStatus::Cancelled, None),
+        Err(error) => (WikiQuestionStatus::Error, Some(failure_message(error))),
     };
+    let terminal = plan
+        .tasks
+        .finish(
+            &plan.project_root,
+            &plan.project_id,
+            &plan.task.id,
+            status,
+            error,
+        )
+        .await;
     plan.tasks.release(&plan.project_id, &plan.task.id).await;
-    terminal?;
-    result
+    let task = terminal?;
+    if task.status == WikiQuestionStatus::Cancelled {
+        return Err(WikiFailure::cancelled());
+    }
+    result?;
+    Ok(WikiQuestionTaskReceipt {
+        project_id: plan.project_id.clone(),
+        task,
+    })
 }
 
 async fn execute(
     owner: &WikiHandle,
     plan: &QuestionPlan,
-) -> Result<WikiQuestionTaskReceipt, WikiFailure> {
+) -> Result<(), WikiFailure> {
     ensure_active(plan)?;
     plan.tasks
         .update(
@@ -101,25 +101,7 @@ async fn execute(
             "The question model returned no answer. Check the Wiki model and ask again.",
         ));
     }
-    let task = plan
-        .tasks
-        .update(
-            &plan.project_root,
-            &plan.project_id,
-            &plan.task.id,
-            |task| {
-                task.status = WikiQuestionStatus::Done;
-                task.error = None;
-            },
-        )
-        .await?;
-    if task.status == WikiQuestionStatus::Cancelled {
-        return Err(WikiFailure::cancelled());
-    }
-    Ok(WikiQuestionTaskReceipt {
-        project_id: plan.project_id.clone(),
-        task,
-    })
+    Ok(())
 }
 
 fn ensure_active(plan: &QuestionPlan) -> Result<(), WikiFailure> {

@@ -31,6 +31,7 @@ pub(crate) enum Delivery {
     Mutated(crate::application::task_board::MutationResult),
     Rejected,
     Unavailable,
+    OutcomeUnknown,
 }
 
 impl Delivery {
@@ -38,7 +39,7 @@ impl Delivery {
         match self {
             Self::Read(_) | Self::Mutated(_) => 200,
             Self::Rejected => 409,
-            Self::Unavailable => 503,
+            Self::Unavailable | Self::OutcomeUnknown => 503,
         }
     }
     pub(crate) fn body(&self) -> Value {
@@ -49,6 +50,7 @@ impl Delivery {
                 json!({"success":false,"error":"Team task board request was rejected"})
             }
             Self::Unavailable => json!({"success":false,"error":"Team task board is unavailable"}),
+            Self::OutcomeUnknown => json!({"success":false,"error":"Team task board mutation outcome is unknown"}),
         }
     }
 }
@@ -426,8 +428,11 @@ pub(crate) async fn handle(owner: &OrganizationHandle, request: Request) -> Deli
             operation,
         } => match owner.task_board_mutate(team_id, run_id, operation).await {
             Ok(Ok(result)) => Delivery::Mutated(result),
-            Ok(Err(_)) => Delivery::Rejected,
-            Err(_) => Delivery::Unavailable,
+            Ok(Err(crate::application::task_board::MutationError::Rejected)) => Delivery::Rejected,
+            Ok(Err(crate::application::task_board::MutationError::Store(
+                crate::StoreFault::CommitOutcomeUnknown(_) | crate::StoreFault::RecoveryRequired,
+            ))) => Delivery::OutcomeUnknown,
+            Ok(Err(crate::application::task_board::MutationError::Store(_))) | Err(_) => Delivery::Unavailable,
         },
     }
 }

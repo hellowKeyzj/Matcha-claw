@@ -699,6 +699,7 @@ mod tests {
                 account_id: "account".into(),
             },
             enabled: true,
+            system_managed: false,
             created_at_ms: 1,
             updated_at_ms: 2,
             state: crate::model::CronJobStateView {
@@ -913,6 +914,7 @@ mod tests {
                     "recipient": "recipient",
                 },
                 "enabled": true,
+                "systemManaged": false,
                 "createdAt": "1970-01-01T00:00:00.001Z",
                 "updatedAt": "1970-01-01T00:00:00.002Z",
                 "lastRun": {

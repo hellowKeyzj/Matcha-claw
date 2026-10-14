@@ -30,7 +30,14 @@ pub struct LaunchSpec {
     working_directory: PathBuf,
     arguments: Vec<OsString>,
     public_environment: Vec<(OsString, OsString)>,
+    environment_source: EnvironmentSource,
     stdio: StdioSpec,
+}
+
+#[derive(Clone)]
+enum EnvironmentSource {
+    Exact,
+    ParentSnapshot(Vec<(OsString, OsString)>),
 }
 
 pub type LaunchAttemptFuture = Pin<
@@ -311,8 +318,49 @@ impl LaunchSpec {
             working_directory,
             arguments,
             public_environment,
+            environment_source: EnvironmentSource::Exact,
             stdio,
         })
+    }
+
+    pub fn try_new_inheriting_environment(
+        executable: PathBuf,
+        working_directory: PathBuf,
+        arguments: impl IntoIterator<Item = OsString>,
+        environment_overrides: impl IntoIterator<Item = (OsString, OsString)>,
+        stdio: StdioSpec,
+    ) -> Result<Self, InvalidLaunchSpec> {
+        let mut spec = Self::try_new(
+            executable,
+            working_directory,
+            arguments,
+            environment_overrides,
+            stdio,
+        )?;
+        let mut command = std::process::Command::new(&spec.executable);
+        command.envs(std::env::vars_os());
+        command.envs(spec.public_environment.iter().cloned());
+        let environment = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| (key.to_os_string(), value.to_os_string()))
+            })
+            .collect::<Vec<_>>();
+        for (key, value) in &environment {
+            validate_environment_key_with_source(key, true)?;
+            validate_environment_value(value)?;
+        }
+        validate_public_environment_keys(&environment)?;
+        spec.environment_source = EnvironmentSource::ParentSnapshot(environment);
+        Ok(spec)
+    }
+
+    #[cfg(any(unix, windows))]
+    pub(crate) fn inherited_environment(&self) -> Option<&[(OsString, OsString)]> {
+        match &self.environment_source {
+            EnvironmentSource::Exact => None,
+            EnvironmentSource::ParentSnapshot(environment) => Some(environment),
+        }
     }
 
     pub fn executable(&self) -> &Path {
@@ -392,13 +440,22 @@ fn validate_path(
 }
 
 fn validate_environment_key(key: &OsStr) -> Result<(), InvalidLaunchSpec> {
+    validate_environment_key_with_source(key, false)
+}
+
+fn validate_environment_key_with_source(
+    key: &OsStr,
+    inherited: bool,
+) -> Result<(), InvalidLaunchSpec> {
     if key.is_empty() {
         return Err(InvalidLaunchSpec::EnvironmentKeyEmpty);
     }
     if contains_nul(key) {
         return Err(InvalidLaunchSpec::EnvironmentKeyContainsNul);
     }
-    if key.as_encoded_bytes().contains(&b'=') {
+    if key.as_encoded_bytes().iter().enumerate().any(|(index, byte)| {
+        *byte == b'=' && !(cfg!(windows) && inherited && index == 0)
+    }) {
         return Err(InvalidLaunchSpec::EnvironmentKeyContainsEquals);
     }
     Ok(())

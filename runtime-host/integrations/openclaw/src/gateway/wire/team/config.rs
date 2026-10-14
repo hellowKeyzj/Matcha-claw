@@ -21,6 +21,32 @@ impl ConfigSnapshot {
         })
     }
 
+    pub(crate) fn created_agent_facts(
+        &self,
+        agents: &[(&str, &str, &str)],
+    ) -> Result<ConfigRestoreFacts, WireError> {
+        if !self.valid {
+            return Err(WireError::InvalidConfigGet);
+        }
+        let entries = self.source_config.pointer("/agents/entries")
+            .and_then(Value::as_object).ok_or(WireError::InvalidConfigGet)?;
+        let facts = agents.iter().map(|(agent, name, workspace)| {
+            let entry = entries.get(*agent).ok_or(WireError::InvalidConfigGet)?;
+            if entry.get("name").and_then(Value::as_str) != Some(*name)
+                || entry.get("workspace").and_then(Value::as_str) != Some(*workspace)
+            {
+                return Err(WireError::InvalidConfigGet);
+            }
+            Ok(ConfigRestoreFact {
+                agent_id: (*agent).to_owned(),
+                expected_entry: entry.clone(),
+                prior_entry: Some(entry.clone()),
+                external: false,
+            })
+        }).collect::<Result<Vec<_>, _>>()?;
+        Ok(ConfigRestoreFacts(facts))
+    }
+
     pub(crate) fn matches_agents(&self, facts: &ConfigRestoreFacts) -> bool {
         let entries = self
             .source_config
@@ -30,6 +56,35 @@ impl ConfigSnapshot {
             && facts.0.iter().all(|fact| {
                 entries.and_then(|entries| entries.get(&fact.agent_id))
                     == Some(&fact.expected_entry)
+            })
+    }
+
+    pub(crate) fn matches_compensation(
+        &self,
+        facts: &ConfigRestoreFacts,
+        absent_agents: &[&str],
+        config_applied: bool,
+    ) -> bool {
+        let entries = self
+            .source_config
+            .pointer("/agents/entries")
+            .and_then(Value::as_object);
+        self.valid
+            && absent_agents.iter().all(|agent| {
+                facts.0.iter().any(|fact| fact.agent_id == *agent && !fact.external)
+            })
+            && facts.0.iter().all(|fact| {
+                let current = entries.and_then(|entries| entries.get(&fact.agent_id));
+                if fact.external {
+                    current == fact.prior_entry.as_ref()
+                        || (config_applied && current == Some(&fact.expected_entry))
+                } else if absent_agents.contains(&fact.agent_id.as_str()) {
+                    current.is_none()
+                } else if config_applied {
+                    current == Some(&fact.expected_entry)
+                } else {
+                    current == fact.prior_entry.as_ref()
+                }
             })
     }
 

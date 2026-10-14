@@ -605,15 +605,21 @@ pub enum TeamRuntimeCommandOutcome {
     DependencyPlan(TeamSkillDependencyPlanResult),
     ProvisionAgents(TeamMaterializationCommandOutcome),
     Delete(Result<TeamDeleteOutcome, StoreFault>),
-    RunCreate(Result<CreateGraphRunOutcome, TeamRuntimeStatus>),
+    RunCreate {
+        result: Result<CreateGraphRunOutcome, TeamRuntimeStatus>,
+        creation_failure: Option<organization::TeamCreationFailure>,
+    },
     RunList(Result<Vec<TeamRunListEntry>, StoreFault>),
     TriggerList(Vec<ArmedTrigger>),
     WebhookTriggerFire(Result<TeamTriggerFireOutcome, TeamRuntimeStatus>),
     RunSnapshot {
         snapshot: TeamRunPublicSnapshotQueryOutcome,
         role_sessions: Option<Vec<organization::RoleSessionReceipt>>,
+        creation_failure: Option<organization::TeamCreationFailure>,
     },
-    RunSnapshotInvalidInput,
+    RunSnapshotInvalidInput {
+        creation_failure: Option<organization::TeamCreationFailure>,
+    },
     GraphSave(Result<TeamRunCommandOutcome, StoreFault>),
     GraphPatch(Result<TeamRunCommandOutcome, StoreFault>),
     GraphContext(TeamGraphContextResult),

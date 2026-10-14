@@ -5,7 +5,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor as LoopbackModuleDescriptor, ModuleId as LoopbackModuleId,
-        Request, RequestHead, Response, RouteDescriptor, RouteFuture, RouteHeadPlan,
+        Request, RequestHead, Response, RouteDescriptor, RouteFuture, RouteHeadPlan, RoutePath,
     },
     module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId as CatalogModuleId},
 };
@@ -32,6 +32,7 @@ const ROUTES: &[&str] = &["openclaw-gateway.loopback"];
 const EVENTS: &[&str] = &[];
 
 const EXECUTE_ENDPOINT: &str = "/api/capabilities/execute";
+const PATHS: &[RoutePath] = &[RoutePath::ExactWithQuery(EXECUTE_ENDPOINT)];
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_EXECUTE_BYTES: usize = 1_000_000;
 const BROWSER_SCOPE: &str = "openclaw.browser";
@@ -172,6 +173,7 @@ fn loopback_descriptor(dependencies: Dependencies) -> LoopbackModuleDescriptor {
         LOOPBACK_MODULE_ID,
         vec![RouteDescriptor::bound(
             "openclaw-gateway.loopback",
+            PATHS,
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

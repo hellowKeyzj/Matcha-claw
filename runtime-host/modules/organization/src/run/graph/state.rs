@@ -749,7 +749,9 @@ impl GraphState {
         }
         if changes.definition {
             for (node, history) in &self.executions {
+                let definition = self.definition.node(node).ok_or(())?;
                 for attempt in history.attempts() {
+                    if attempt.number() > definition.max_attempts() { return Err(()); }
                     super::durable::validate_attempt(self, node, attempt).map_err(|_| ())?;
                 }
             }

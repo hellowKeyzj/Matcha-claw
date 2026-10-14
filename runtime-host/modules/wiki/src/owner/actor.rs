@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     application::commands::{
-        WikiCommand, WikiImportFolderPlan, WikiOwnerKey, WikiParsedImportImage,
+        IngestMode, WikiCommand, WikiImportFolderPlan, WikiOwnerKey, WikiParsedImportImage,
         WikiParsedImportSource, WikiQuery, WikiRefreshSourcesPlan, WikiStagedImportSource,
     },
     domain::{
@@ -44,7 +44,7 @@ use crate::{
 
 use super::{
     source_lifecycle::{
-        self, DEFAULT_WATCH_MAX_BYTES, append_source_task_paths,
+        self, DEFAULT_WATCH_MAX_BYTES, FileSnapshot, FileSnapshotEntry, SourceCleanup,
         append_source_tasks, cleanup_deleted_wiki_pages, collect_regular_files,
         identify_source_moves, is_default_watch_allowed_source_path, is_default_watch_descend_dir,
         is_default_watch_tracked_file, is_deleted_raw_source_path, is_deleted_wiki_page_path,
@@ -353,19 +353,6 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
                 .send_missing_page_created(super::page_links::create(&shared, &state, plan).await)
                 .await;
         }
-        WikiCommand::ReloadProjects { reply } => {
-            let result = async {
-                let registry = read_json(state.state_root.join(PROJECT_REGISTRY_FILE))?;
-                let current =
-                    read_json::<CurrentProjectFile>(state.state_root.join(CURRENT_PROJECT_FILE))?;
-                let mut state = shared.state.write().await;
-                state.registry = registry;
-                state.current_project_id = current.project_id;
-                Ok(())
-            }
-            .await;
-            let _ = reply.send(result).await;
-        }
         WikiCommand::RestoreHistory { input, reply } => {
             let result =
                 selected_project(&state, input.project_id.as_deref()).and_then(|project| {
@@ -542,12 +529,22 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
         WikiCommand::StageImportSource { input, reply } => {
             let _ = reply.send(stage_import_source(&state, input)).await;
         }
-        WikiCommand::ParseImportSource { input, reply } => {
-            let _ = reply.send(parse_import_source(&shared, input).await).await;
-        }
-        WikiCommand::CommitImportSource { input, reply } => {
+        WikiCommand::ParseImportSource {
+            input,
+            ingest,
+            reply,
+        } => {
             let _ = reply
-                .send(commit_import_source(&state, &shared, input).await)
+                .send(parse_import_source(&shared, input, ingest).await)
+                .await;
+        }
+        WikiCommand::CommitImportSource {
+            input,
+            ingest,
+            reply,
+        } => {
+            let _ = reply
+                .send(commit_import_source(&state, &shared, input, ingest).await)
                 .await;
         }
         WikiCommand::StageImportFolder { input, reply } => {
@@ -591,13 +588,14 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             };
             reply.send_page_deleted(result).await;
         }
-        WikiCommand::DeleteSource { input, reply } => {
-            reply.send_deleted(delete_source(&state, input).await).await;
+        WikiCommand::DeleteSource { input, cleanup, reply } => {
+            reply.send_deleted(delete_source(&state, input, cleanup.as_ref()).await).await;
         }
         WikiCommand::MigrateSourcePath {
             project_id,
             old_source_relative_path,
             new_source_relative_path,
+            cleanup,
             reply,
         } => {
             let _ = reply
@@ -606,6 +604,7 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
                     &project_id,
                     &old_source_relative_path,
                     &new_source_relative_path,
+                    &cleanup,
                 ))
                 .await;
         }
@@ -1053,7 +1052,7 @@ fn sync_source_watch(shared: &WikiShared, state: &WikiState) {
         Ok(_) => shared.source_watch_control.clear(),
         Err(error) => {
             eprintln!("[wiki] source watcher config unavailable: {error:?}");
-            shared.source_watch_control.clear();
+            shared.source_watch_control.retry_initialization();
         }
     }
 }
@@ -1246,14 +1245,39 @@ pub(super) fn write_file_with_history(
         "baseline",
         &format!("before.{tool}"),
     )?;
-    std::fs::write(&path, input.content.as_bytes())
-        .map_err(|error| WikiFailure::io(path_text(&path), error))?;
+    let previous = match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(WikiFailure::io(path_text(&path), error)),
+    };
+    crate::history::write_store(&path, input.content.as_bytes())?;
     if crate::history::record(root, &input.relative_path, author, tool).is_err() {
         eprintln!("[wiki] file written; history recording failed");
     }
-    refresh_file_snapshot(root, &[input.relative_path.as_str()])?;
-    let metadata =
-        std::fs::metadata(&path).map_err(|error| WikiFailure::io(path_text(&path), error))?;
+    let committed: Result<_, WikiFailure> = (|| {
+        let metadata = std::fs::metadata(&path)
+            .map_err(|error| WikiFailure::io(path_text(&path), error))?;
+        refresh_file_snapshot(root, &[input.relative_path.as_str()])?;
+        Ok(metadata)
+    })();
+    let metadata = match committed {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let current = std::fs::read(&path)
+                .map_err(|read_error| WikiFailure::io(path_text(&path), read_error))?;
+            if current != input.content.as_bytes() {
+                return Err(WikiFailure::state(format!(
+                    "File commit failed ({error:?}); a later edit was preserved instead of restoring the previous content"
+                )));
+            }
+            match previous {
+                Some(bytes) => crate::history::write_store(&path, &bytes)?,
+                None => std::fs::remove_file(&path)
+                    .map_err(|restore_error| WikiFailure::io(path_text(&path), restore_error))?,
+            }
+            return Err(error);
+        }
+    };
     Ok(WikiWriteReceipt::new(
         input.relative_path,
         WikiRevision::for_bytes(
@@ -1467,8 +1491,13 @@ fn stage_refresh_sources(
     let project_id = project.project_id().to_owned();
     let root = project_root(project);
     ensure_project_layout(root).map_err(|error| WikiFailure::io(path_text(root), error))?;
+    source_lifecycle::recover_source_tasks(root)?;
     let previous = read_json::<FileSnapshot>(root.join(FILE_SNAPSHOT))?;
-    let mut current = FileSnapshot::default();
+    let mut current = FileSnapshot {
+        pending_source_task_settlements: previous.pending_source_task_settlements.clone(),
+        pending_cleanup_paths: previous.pending_cleanup_paths.clone(),
+        ..FileSnapshot::default()
+    };
     collect_snapshot_entries(root, root, &mut current.entries)?;
 
     let mut created_or_modified = Vec::new();
@@ -1573,25 +1602,28 @@ fn stage_refresh_sources(
         .filter(|relative_path| !moved_old.contains(relative_path))
         .collect::<Vec<_>>();
 
+    let observed = previous.entries.keys().chain(current.entries.keys())
+        .chain(previous.pending_cleanup_paths.keys()).cloned().collect();
+    source_lifecycle::stage_source_cleanups(root, &project_id, &previous, &mut current,
+        &observed, &deletions, &wiki_deletions, &moves)?;
     append_source_tasks(root, &project_id, &mut imports, true)?;
-    append_source_task_paths(root, &project_id, &deletions, WikiSourceTaskKind::Deleted)?;
-    append_source_task_paths(
-        root,
-        &project_id,
-        &moves
-            .iter()
-            .map(|(_, new_path)| new_path.clone())
-            .collect::<Vec<_>>(),
-        WikiSourceTaskKind::Moved,
-    )?;
-    write_json(root.join(FILE_SNAPSHOT), &current)?;
     write_json(root.join(FILE_CHANGE_QUEUE), &changes)?;
+    write_json(root.join(FILE_SNAPSHOT), &current)?;
     Ok(WikiRefreshSourcesPlan {
         project_id,
         imports,
-        deletions,
-        wiki_deletions,
-        moves,
+        deletions: deletions.into_iter().map(|path| {
+            let cleanup = current.pending_cleanup_paths[&path].clone();
+            (path, cleanup)
+        }).collect(),
+        wiki_deletions: wiki_deletions.into_iter().map(|path| {
+            let cleanup = current.pending_cleanup_paths[&path].clone();
+            (path, cleanup)
+        }).collect(),
+        moves: moves.into_iter().map(|(old, new)| {
+            let cleanup = current.pending_cleanup_paths[&old].clone();
+            (old, new, cleanup)
+        }).collect(),
         skipped,
     })
 }
@@ -1606,11 +1638,16 @@ fn stage_refresh_source_paths(
     let project_id = project.project_id().to_owned();
     let root = project_root(project);
     ensure_project_layout(root).map_err(|error| WikiFailure::io(path_text(root), error))?;
+    source_lifecycle::recover_source_tasks(root)?;
     let previous = read_json::<FileSnapshot>(root.join(FILE_SNAPSHOT))?;
     let mut relative_paths = BTreeSet::new();
     for path in paths {
         collect_changed_snapshot_paths(root, &path, &previous, &mut relative_paths)?;
     }
+    let cleanup_paths = relative_paths.iter()
+        .filter_map(|path| previous.pending_cleanup_paths.get(path))
+        .flat_map(|cleanup| cleanup.before.keys().cloned()).collect::<Vec<_>>();
+    relative_paths.extend(cleanup_paths);
     if relative_paths.is_empty() {
         return Ok(WikiRefreshSourcesPlan {
             project_id,
@@ -1629,7 +1666,8 @@ fn stage_refresh_source_paths(
     let mut changes = Vec::new();
     let mut skipped = Vec::new();
     let mut current_move_entries = BTreeMap::new();
-    for relative_path in relative_paths {
+    for relative_path in &relative_paths {
+        let relative_path = relative_path.clone();
         let old = previous.entries.get(&relative_path).cloned();
         let new = read_snapshot_entry(root, &relative_path)?;
         if old.as_ref().map(|entry| &entry.revision) == new.as_ref().map(|entry| &entry.revision) {
@@ -1727,27 +1765,38 @@ fn stage_refresh_source_paths(
         .filter(|relative_path| !moved_old.contains(relative_path))
         .collect::<Vec<_>>();
 
+    source_lifecycle::stage_source_cleanups(root, &project_id, &previous, &mut snapshot,
+        &relative_paths, &deletions, &wiki_deletions, &moves)?;
     append_source_tasks(root, &project_id, &mut imports, auto_ingest)?;
-    append_source_task_paths(root, &project_id, &deletions, WikiSourceTaskKind::Deleted)?;
-    append_source_task_paths(
-        root,
-        &project_id,
-        &moves
-            .iter()
-            .map(|(_, new_path)| new_path.clone())
-            .collect::<Vec<_>>(),
-        WikiSourceTaskKind::Moved,
-    )?;
-    write_json(root.join(FILE_SNAPSHOT), &snapshot)?;
     write_json(root.join(FILE_CHANGE_QUEUE), &changes)?;
+    write_json(root.join(FILE_SNAPSHOT), &snapshot)?;
     Ok(WikiRefreshSourcesPlan {
         project_id,
         imports,
-        deletions,
-        wiki_deletions,
-        moves,
+        deletions: deletions.into_iter().map(|path| {
+            let cleanup = snapshot.pending_cleanup_paths[&path].clone();
+            (path, cleanup)
+        }).collect(),
+        wiki_deletions: wiki_deletions.into_iter().map(|path| {
+            let cleanup = snapshot.pending_cleanup_paths[&path].clone();
+            (path, cleanup)
+        }).collect(),
+        moves: moves.into_iter().map(|(old, new)| {
+            let cleanup = snapshot.pending_cleanup_paths[&old].clone();
+            (old, new, cleanup)
+        }).collect(),
         skipped,
     })
+}
+
+fn retain_pending_cleanup_snapshot(snapshot: &mut FileSnapshot) {
+    for (path, cleanup) in &snapshot.pending_cleanup_paths {
+        if let Some(entry) = cleanup.before.get(path).and_then(Option::as_ref) {
+            snapshot.entries.insert(path.clone(), entry.clone());
+        } else {
+            snapshot.entries.remove(path);
+        }
+    }
 }
 
 fn collect_changed_snapshot_paths(
@@ -1760,6 +1809,8 @@ fn collect_changed_snapshot_paths(
         let mut entries = BTreeMap::new();
         collect_snapshot_entries(root, path, &mut entries)?;
         out.extend(entries.into_keys());
+        out.extend(previous.pending_cleanup_paths.keys()
+            .filter(|known| root.join(known).starts_with(path)).cloned());
         return Ok(());
     }
     if path.is_file() {
@@ -1775,7 +1826,7 @@ fn collect_changed_snapshot_paths(
         return Ok(());
     };
     let relative_path = normalize_relative_path(relative);
-    for known in previous.entries.keys() {
+    for known in previous.entries.keys().chain(previous.pending_cleanup_paths.keys()) {
         if known == &relative_path || known.starts_with(&format!("{relative_path}/")) {
             out.insert(known.clone());
         }
@@ -1783,7 +1834,7 @@ fn collect_changed_snapshot_paths(
     Ok(())
 }
 
-fn read_snapshot_entry(
+pub(super) fn read_snapshot_entry(
     root: &Path,
     relative_path: &str,
 ) -> Result<Option<FileSnapshotEntry>, WikiFailure> {
@@ -1807,9 +1858,17 @@ fn read_snapshot_entry(
 async fn parse_import_source(
     shared: &WikiShared,
     input: WikiStagedImportSource,
+    ingest: IngestMode,
 ) -> Result<WikiParsedImportSource, WikiFailure> {
     let execution = source_execution(&input)?;
-    let result = execution.observe(parse_import_source_inner(shared, input, execution.cancellation())).await;
+    let result = execution
+        .observe(parse_import_source_inner(
+            shared,
+            input,
+            ingest,
+            execution.cancellation(),
+        ))
+        .await;
     if result.is_err() {
         execution.finish(&result)?;
     }
@@ -1819,6 +1878,7 @@ async fn parse_import_source(
 async fn parse_import_source_inner(
     shared: &WikiShared,
     input: WikiStagedImportSource,
+    ingest: IngestMode,
     cancellation: CancellationToken,
 ) -> Result<WikiParsedImportSource, WikiFailure> {
     reject_cancelled_source_task(&input, &cancellation)?;
@@ -1831,7 +1891,11 @@ async fn parse_import_source_inner(
     let state = shared.snapshot().await;
     let private = read_mineru_private_config(&state, &input.project_id)?;
     let config = read_source_watch_config(&input.project_root).unwrap_or_default();
-    if shared.ingest_llm.is_some() {
+    let llm = match ingest {
+        IngestMode::Configured => shared.ingest_llm.clone(),
+        IngestMode::SourceOnly => None,
+    };
+    if llm.is_some() {
         validate_ingest_model_config(&config)?;
     }
     let parsed = read_import_source_text(&input, &config, &private, cancellation.clone()).await?;
@@ -2636,7 +2700,7 @@ fn safe_mineru_asset_segment(segment: &str) -> String {
             .map(|extension| format!(".{extension}"))
             .unwrap_or_default();
         let keep = 80usize.saturating_sub(extension.len());
-        out.truncate(keep);
+        out.truncate(out.floor_char_boundary(keep));
         out.push_str(&extension);
     }
     out
@@ -2886,9 +2950,18 @@ async fn commit_import_source(
     global: &WikiState,
     shared: &WikiShared,
     input: WikiParsedImportSource,
+    ingest: IngestMode,
 ) -> Result<WikiImportSourceReceipt, WikiFailure> {
     let execution = source_execution(&input.staged)?;
-    let result = execution.observe(commit_import_source_inner(global, shared, input, execution.cancellation())).await;
+    let result = execution
+        .observe(commit_import_source_inner(
+            global,
+            shared,
+            input,
+            ingest,
+            execution.cancellation(),
+        ))
+        .await;
     execution.finish(&result)?;
     result
 }
@@ -2897,6 +2970,7 @@ async fn commit_import_source_inner(
     global: &WikiState,
     shared: &WikiShared,
     input: WikiParsedImportSource,
+    ingest: IngestMode,
     cancellation: CancellationToken,
 ) -> Result<WikiImportSourceReceipt, WikiFailure> {
     reject_cancelled_source_task(&input.staged, &cancellation)?;
@@ -2910,7 +2984,11 @@ async fn commit_import_source_inner(
     let root = project_root(project);
     let source_hash = source_content_hash(&input.text);
     let source_config = read_source_watch_config(root).unwrap_or_default();
-    if shared.ingest_llm.is_some() {
+    let llm = match ingest {
+        IngestMode::Configured => shared.ingest_llm.clone(),
+        IngestMode::SourceOnly => None,
+    };
+    if llm.is_some() {
         validate_ingest_model_config(&source_config)?;
     }
     let output_language = configured_output_language(source_config.output_language());
@@ -2920,7 +2998,7 @@ async fn commit_import_source_inner(
     let (text, markdown_images) = extract_markdown_local_images(&input.staged, &input.text)?;
     images.extend(markdown_images);
     persist_parsed_source(&input.staged, &text, &images)?;
-    if shared.ingest_llm.is_some()
+    if llm.is_some()
         && source_config.caption_enabled()
         && !images.is_empty()
         && caption_model_ref.is_none()
@@ -2942,7 +3020,7 @@ async fn commit_import_source_inner(
     if source_config.caption_enabled() && !images.is_empty() {
         reject_cancelled_source_task(&input.staged, &cancellation)?;
         caption_import_images(
-            shared.ingest_llm.clone(),
+            llm.clone(),
             root,
             &mut images,
             &text,
@@ -2959,7 +3037,7 @@ async fn commit_import_source_inner(
     } else {
         strip_markdown_image_refs(&text)
     };
-    if shared.ingest_llm.is_none() {
+    if llm.is_none() {
         if let Some(receipt) = cached_import_receipt(root, &input.staged, &source_hash)? {
             return Ok(receipt);
         }
@@ -2969,7 +3047,7 @@ async fn commit_import_source_inner(
     generation_input.text = source_text;
     reject_cancelled_source_task(&input.staged, &cancellation)?;
     let generated_pages = crate::ingest::generate_imported_pages(
-        shared.ingest_llm.clone(),
+        llm.clone(),
         root,
         &generation_input,
         output_language,
@@ -3013,7 +3091,7 @@ async fn commit_import_source_inner(
         },
         source_summary_fallback,
         Some(source_hash),
-        shared.ingest_llm.clone(),
+        llm,
         generation_model_ref,
         Some(cancellation.clone()),
         &input.staged.task_id,
@@ -3280,9 +3358,10 @@ fn inject_import_images(content: &str, images: &[ImportedImage]) -> String {
 async fn delete_source(
     global: &WikiState,
     input: WikiDeleteSourceInput,
+    cleanup: Option<&SourceCleanup>,
 ) -> Result<WikiDeleteSourceReceipt, WikiFailure> {
     let project = selected_project(global, input.project_id.as_deref())?;
-    source_lifecycle::delete_source(project_root(project), project.project_id(), input).await
+    source_lifecycle::delete_source(project_root(project), project.project_id(), input, cleanup).await
 }
 
 fn migrate_source_path(
@@ -3290,6 +3369,7 @@ fn migrate_source_path(
     project_id: &str,
     old_source_relative_path: &str,
     new_source_relative_path: &str,
+    cleanup: &SourceCleanup,
 ) -> Result<WikiSourceMoveReceipt, WikiFailure> {
     let project = selected_project(global, Some(project_id))?;
     source_lifecycle::migrate_source_path(
@@ -3297,13 +3377,14 @@ fn migrate_source_path(
         project.project_id(),
         old_source_relative_path,
         new_source_relative_path,
+        cleanup,
     )
 }
 
 async fn cleanup_deleted_wiki_pages_for_project(
     global: &WikiState,
     project_id: &str,
-    paths: &[String],
+    paths: &[(String, SourceCleanup)],
 ) -> Result<(), WikiFailure> {
     let project = selected_project(global, Some(project_id))?;
     cleanup_deleted_wiki_pages(project_root(project), paths).await
@@ -3356,7 +3437,7 @@ fn reviews(
     input: WikiProjectSelector,
 ) -> Result<WikiReviewsReceipt, WikiFailure> {
     let project = selected_project(global, input.project_id.as_deref())?;
-    Ok(super::review_lifecycle::reviews(project_root(project)))
+    super::review_lifecycle::reviews(project_root(project))
 }
 
 fn resolve_review(
@@ -4610,7 +4691,11 @@ fn pending_change_count(root: &Path) -> Result<usize, WikiFailure> {
 pub(super) fn write_file_snapshot(root: &Path) -> Result<(), WikiFailure> {
     ensure_project_layout(root).map_err(|error| WikiFailure::io(path_text(root), error))?;
     let previous = read_json::<FileSnapshot>(root.join(FILE_SNAPSHOT))?;
-    let mut current = FileSnapshot::default();
+    let mut current = FileSnapshot {
+        pending_source_task_settlements: previous.pending_source_task_settlements.clone(),
+        pending_cleanup_paths: previous.pending_cleanup_paths.clone(),
+        ..FileSnapshot::default()
+    };
     collect_snapshot_entries(root, root, &mut current.entries)?;
 
     let mut changes = Vec::new();
@@ -4634,6 +4719,7 @@ pub(super) fn write_file_snapshot(root: &Path) -> Result<(), WikiFailure> {
             changes.push(FileChange::new("deleted", path.clone(), String::new()));
         }
     }
+    retain_pending_cleanup_snapshot(&mut current);
     write_json(root.join(FILE_SNAPSHOT), &current)?;
     write_json(root.join(FILE_CHANGE_QUEUE), &changes)
 }
@@ -4693,14 +4779,9 @@ pub(crate) fn write_json(
     path: impl AsRef<Path>,
     value: &impl Serialize,
 ) -> Result<(), WikiFailure> {
-    let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| WikiFailure::io(path_text(parent), error))?;
-    }
     let bytes =
         serde_json::to_vec_pretty(value).map_err(|error| WikiFailure::state(error.to_string()))?;
-    std::fs::write(path, bytes).map_err(|error| WikiFailure::io(path_text(path), error))
+    crate::history::write_store(path.as_ref(), &bytes)
 }
 
 fn map_read_error(path: &Path, error: std::io::Error) -> WikiFailure {
@@ -4781,20 +4862,6 @@ fn validate_source_watch_config(config: &WikiSourceWatchConfig) -> Result<(), Wi
 #[serde(rename_all = "camelCase")]
 struct CurrentProjectFile {
     project_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FileSnapshot {
-    entries: BTreeMap<String, FileSnapshotEntry>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FileSnapshotEntry {
-    revision: String,
-    size: u64,
-    modified_at_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

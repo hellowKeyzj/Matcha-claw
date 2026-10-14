@@ -8,8 +8,9 @@ use crate::protocol::wire::{
 };
 
 use super::model::{
-    InitializeResult, RunId, SessionCancelResult, SessionId, SessionListResult,
-    SessionPromptResult, SessionRecord, SessionSnapshot, SessionTranscriptResult, ValidationError,
+    InitializeResult, RunId, SessionCancelResult, SessionContentResult, SessionId,
+    SessionListResult, SessionPromptResult, SessionRecord, SessionSnapshot,
+    SessionTranscriptResult, ValidationError,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -121,8 +122,127 @@ macro_rules! session_params {
 }
 
 session_params!(SessionLoadParams);
-session_params!(SessionSnapshotParams);
-session_params!(SessionTranscriptParams);
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSnapshotParams {
+    session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include_messages: Option<bool>,
+}
+
+impl SessionSnapshotParams {
+    pub fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            include_messages: None,
+        }
+    }
+
+    pub fn without_messages(mut self) -> Self {
+        self.include_messages = Some(false);
+        self
+    }
+}
+
+impl fmt::Debug for SessionSnapshotParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionSnapshotParams")
+            .field("has_session_id", &true)
+            .field("include_messages", &self.include_messages)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTranscriptParams {
+    session_id: SessionId,
+    direction: &'static str,
+    limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offset: Option<usize>,
+}
+
+impl SessionTranscriptParams {
+    pub fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            direction: "latest",
+            limit: super::hydration::HydrationWindowRequest::DEFAULT_LIMIT,
+            offset: None,
+        }
+    }
+
+    pub fn with_window(mut self, request: super::hydration::HydrationWindowRequest) -> Self {
+        use super::hydration::HydrationWindowMode;
+        self.direction = match request.mode() {
+            HydrationWindowMode::Latest => "latest",
+            HydrationWindowMode::Older => "older",
+            HydrationWindowMode::Newer => "newer",
+        };
+        self.limit = request.limit();
+        self.offset = request.offset();
+        self
+    }
+}
+
+impl fmt::Debug for SessionTranscriptParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionTranscriptParams")
+            .field("has_session_id", &true)
+            .field("direction", &self.direction)
+            .field("limit", &self.limit)
+            .field("offset", &self.offset)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContentParams {
+    session_id: SessionId,
+    content_ref: String,
+    offset: u64,
+    limit: usize,
+}
+
+impl SessionContentParams {
+    pub fn new(session_id: SessionId, content_ref: String, offset: u64, limit: usize) -> Self {
+        Self {
+            session_id,
+            content_ref,
+            offset,
+            limit,
+        }
+    }
+
+    pub(crate) fn accepts(&self, chunk: &SessionContentResult) -> bool {
+        let bytes = chunk.text.len() as u64;
+        chunk.content_ref == self.content_ref
+            && chunk.offset == self.offset
+            && bytes <= self.limit.min(64 * 1024) as u64
+            && self.offset.checked_add(bytes) == Some(chunk.next_offset)
+            && chunk.next_offset <= chunk.total_bytes
+            && chunk.total_bytes <= 9_007_199_254_740_991
+            && chunk.complete == (chunk.next_offset == chunk.total_bytes)
+            && (bytes > 0 || chunk.complete)
+    }
+}
+
+impl fmt::Debug for SessionContentParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionContentParams")
+            .field("has_session_id", &true)
+            .field("has_content_ref", &true)
+            .field("offset", &self.offset)
+            .field("limit", &self.limit)
+            .finish()
+    }
+}
 
 const ATTACHMENT_PROMPT_PAYLOAD_VERSION: &str = "attachments-v1";
 const MAX_ATTACHMENTS: usize = 16;
@@ -631,6 +751,11 @@ request_helper!(
     SessionTranscriptParams
 );
 request_helper!(
+    session_content_request,
+    "session.content",
+    SessionContentParams
+);
+request_helper!(
     session_cancel_request,
     "session.cancel",
     SessionCancelParams
@@ -686,6 +811,11 @@ response_helper!(
     decode_session_transcript_result,
     "session.transcript",
     SessionTranscriptResult
+);
+response_helper!(
+    decode_session_content_result,
+    "session.content",
+    Option<SessionContentResult>
 );
 response_helper!(
     decode_session_cancel_result,
@@ -939,7 +1069,7 @@ mod tests {
 
         assert!(debug.contains("SessionCreateParams { has_cwd: true"));
         assert!(debug.contains("SessionLoadParams { has_session_id: true }"));
-        assert!(debug.contains("SessionTranscriptParams { has_session_id: true }"));
+        assert!(debug.contains("SessionTranscriptParams { has_session_id: true, direction: \"latest\", limit: 80, offset: None }"));
         assert!(debug.contains("SessionPromptParams { has_session_id: true, has_prompt: true"));
         assert!(debug.contains("has_run_id: true, has_attachments: true }"));
         assert!(debug.contains("SessionCancelParams { has_session_id: true, has_run_id: true"));

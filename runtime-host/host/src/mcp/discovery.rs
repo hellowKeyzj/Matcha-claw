@@ -48,7 +48,7 @@ impl Discovery {
         use zeroize::Zeroize;
         metadata.signing_key.zeroize();
         Ok(Self {
-            path: private_dir.join("team-mcp.json"),
+            path: private_dir.join("mcp.json"),
             metadata: bytes,
             verifier,
         })
@@ -56,10 +56,11 @@ impl Discovery {
 
     pub(crate) fn descriptor(
         &self,
-        owner: organization::OrganizationHandle,
+        org: organization::OrganizationHandle,
         resolver: std::sync::Arc<dyn organization::RoleSessionIdentityResolver>,
+        wiki: wiki::WikiHandle,
     ) -> platform::loopback::ModuleDescriptor {
-        super::route::descriptor(owner, self.verifier.clone(), resolver)
+        super::route::descriptor(org, self.verifier.clone(), resolver, wiki)
     }
 
     pub(crate) fn publish(&self) -> Result<(), ()> {
@@ -104,7 +105,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), ()> {
 }
 
 pub(super) fn read(state_dir: &Path) -> Result<Metadata, ()> {
-    let path = state_dir.join("mcp-private/team-mcp.json");
+    let path = state_dir.join("mcp-private/mcp.json");
     let bytes = Zeroizing::new(fs::read(&path).map_err(|_| ())?);
     let metadata: Metadata = serde_json::from_slice(&bytes).map_err(|_| ())?;
     if metadata.port == 0 {

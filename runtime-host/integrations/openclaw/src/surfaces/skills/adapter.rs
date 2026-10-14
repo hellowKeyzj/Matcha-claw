@@ -1,5 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
+use tokio_util::sync::CancellationToken;
+
 use super::OpenClawSkillProvider;
 use crate::{driver::OpenClawDriver, port::OpenClawDriverParentCallbackHandle};
 
@@ -11,6 +13,7 @@ impl OpenClawDriver {
             self.working_directory.clone(),
             self.state_dir.clone(),
         )
+        .with_clawhub_containment(self.clawhub_containment.clone())
     }
 }
 
@@ -38,7 +41,19 @@ impl skills_module::SkillRuntimeOps for OpenClawDriver {
         &'a self,
         command: skills_module::install::Command,
     ) -> skills_module::ports::SkillsFuture<'a, skills_module::install::Outcome> {
-        Box::pin(async move { self.skill_provider().install_clawhub(command).await })
+        self.install_clawhub_skill_cancellable(command, CancellationToken::new())
+    }
+
+    fn install_clawhub_skill_cancellable<'a>(
+        &'a self,
+        command: skills_module::install::Command,
+        cancellation: CancellationToken,
+    ) -> skills_module::ports::SkillsFuture<'a, skills_module::install::Outcome> {
+        Box::pin(async move {
+            self.skill_provider()
+                .install_clawhub_cancellable(command, cancellation)
+                .await
+        })
     }
 
     fn skill_status<'a>(
@@ -51,10 +66,22 @@ impl skills_module::SkillRuntimeOps for OpenClawDriver {
         &'a self,
         command: skills_module::management::Command,
     ) -> skills_module::ports::SkillsFuture<'a, skills_module::management::Outcome> {
+        self.manage_skills_cancellable(command, CancellationToken::new())
+    }
+
+    fn manage_skills_cancellable<'a>(
+        &'a self,
+        command: skills_module::management::Command,
+        cancellation: CancellationToken,
+    ) -> skills_module::ports::SkillsFuture<'a, skills_module::management::Outcome> {
         Box::pin(async move {
             let parent_callback = self.parent_callback.clone();
             self.skill_provider()
-                .manage(command, move |path| open_parent_path(parent_callback, path))
+                .manage_cancellable(
+                    command,
+                    move |path| open_parent_path(parent_callback, path),
+                    cancellation,
+                )
                 .await
         })
     }

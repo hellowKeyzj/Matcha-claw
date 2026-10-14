@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use reqwest::{Client, Url, header};
 use serde_json::Value;
@@ -12,7 +12,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 pub struct ClawHubRegistryClient {
-    http: Client,
+    http: Result<Client, Arc<reqwest::Error>>,
     registries: Vec<String>,
     settings_file: PathBuf,
 }
@@ -90,7 +90,7 @@ impl ClawHubRegistryClient {
         let http = Client::builder()
             .timeout(DEFAULT_TIMEOUT)
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .map_err(Arc::new);
         Self {
             http,
             registries: resolve_registry_bases(),
@@ -150,6 +150,8 @@ impl ClawHubRegistryClient {
 
         let mut request = self
             .http
+            .as_ref()
+            .map_err(|_| ())?
             .get(url)
             .header(header::ACCEPT, "application/json");
         if let Some(token) = token {

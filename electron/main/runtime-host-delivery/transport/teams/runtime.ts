@@ -1,7 +1,8 @@
+import type { TeamCreationFailure } from '../../../../../src/types/call-log/organization';
 import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import { decodeTeamDesignMutation, decodeTeamDesignSnapshot, isTeamDesignFailure } from '../../../../../src/types/team-design';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
-import { isRecord, sendLoopbackJson } from '../client';
+import { isRecord, sendLoopbackJsonDelivery } from '../client';
 
 const ENDPOINT = '/api/team/runtime/execute';
 const INVALID = { success: false, error: 'Team runtime request is invalid' } as const;
@@ -23,7 +24,7 @@ export function createTeamRuntimeTransport(
 ): TeamRuntimeTransport {
   return {
     async execute(request, traceId): Promise<TeamRuntimeTransportResponse> {
-      const response = await sendLoopbackJson({
+      const delivery = await sendLoopbackJsonDelivery({
         port: runtimeHostTransportPort,
         path: ENDPOINT,
         issuer,
@@ -37,15 +38,19 @@ export function createTeamRuntimeTransport(
         fetcher,
         body: withTrace(request, traceId),
       });
+      if (delivery.outcome !== 'response') {
+        return { status: 503, body: withCreationFailure(UNAVAILABLE, request, delivery.reason) };
+      }
+      const response = delivery.response;
       if (isRecord(request) && (request.operationId === 'team.provisionAgents' || request.operationId === 'team.delete' || request.operationId === 'team.runDelete')) {
         if (response?.status === 202) {
           try {
             return { status: 202, body: decodeCallReceipt(response.body) };
           } catch {
-            return { status: 503, body: UNAVAILABLE };
+            return { status: 503, body: withCreationFailure(UNAVAILABLE, request, 'invalid_response') };
           }
         }
-        if (response?.status === 200) return { status: 503, body: UNAVAILABLE };
+        if (response?.status === 200) return { status: 503, body: withCreationFailure(UNAVAILABLE, request, 'invalid_response') };
       } else if (response?.status === 200) {
         if (isRecord(request) && (request.operationId === 'team.designStart' || request.operationId === 'team.runStart' || request.operationId === 'team.designExit' || request.operationId === 'team.designSnapshot' || request.operationId === 'team.designGraphPatch')) {
           if (isTeamDesignFailure(response.body)) return { status: 200, body: response.body };
@@ -64,9 +69,19 @@ export function createTeamRuntimeTransport(
       }
       if (response?.status === 400) return { status: 400, body: response.body ?? INVALID };
       if (response?.status === 500) return { status: 500, body: response.body ?? UNAVAILABLE };
-      return { status: 503, body: response?.body ?? UNAVAILABLE };
+      const reason = response.status === 401 ? 'authorization_invalid'
+        : response.status === 503 && isRecord(response.body) && response.body.code === 'TIMEOUT' ? 'observation_interrupted' : undefined;
+      return { status: 503, body: withCreationFailure(response.body ?? UNAVAILABLE, request, reason) };
     },
   };
+}
+
+function withCreationFailure(body: unknown, request: unknown, reason: TeamCreationFailure['reason'] | undefined): unknown {
+  if (!reason || !isRecord(request) || !isRecord(body) || Object.hasOwn(body, 'creationFailure')) return body;
+  const stage: TeamCreationFailure['stage'] | undefined = request.operationId === 'team.provisionAgents' ? 'submitting'
+    : request.operationId === 'team.runCreate' ? 'initializing_sessions'
+      : request.operationId === 'team.runList' || request.operationId === 'team.runSnapshot' ? 'loading_team' : undefined;
+  return stage ? { ...body, creationFailure: { stage, reason } satisfies TeamCreationFailure } : body;
 }
 
 function withTrace(request: unknown, traceId: string | undefined): unknown {

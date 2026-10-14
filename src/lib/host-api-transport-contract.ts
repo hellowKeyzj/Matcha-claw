@@ -1,4 +1,5 @@
-import { normalizeAppError } from './error-model';
+import { AppError, normalizeAppError } from './error-model';
+import { decodeTeamCreationFailure } from '../types/call-log/organization';
 
 export type HostApiProxySuccessData = {
   status: number;
@@ -12,7 +13,7 @@ export type HostApiProxySuccessEnvelope = {
   data: HostApiProxySuccessData;
 };
 
-export type HostApiProxyFailureCode = 'TIMEOUT' | 'ABORTED' | 'UNAVAILABLE';
+export type HostApiProxyFailureCode = 'TIMEOUT' | 'ABORTED' | 'UNAVAILABLE' | 'INVALID_RESPONSE';
 
 export type HostApiProxyFailureEnvelope = {
   ok: false;
@@ -26,7 +27,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isHostApiProxyFailureCode(value: unknown): value is HostApiProxyFailureCode {
-  return value === 'TIMEOUT' || value === 'ABORTED' || value === 'UNAVAILABLE';
+  return value === 'TIMEOUT' || value === 'ABORTED' || value === 'UNAVAILABLE' || value === 'INVALID_RESPONSE';
 }
 
 function extractHostApiErrorMessage(payload: unknown, fallback: string): string {
@@ -66,23 +67,23 @@ export function resolveHostApiProxyErrorCode(
 
 export function decodeHostApiProxyEnvelope(payload: unknown): HostApiProxyEnvelope {
   if (!isRecord(payload)) {
-    throw new Error('Invalid hostapi proxy envelope: expected object');
+    throw new AppError('INVALID_RESPONSE', 'Invalid hostapi proxy envelope: expected object');
   }
 
   if (payload.ok === true) {
     if (!isRecord(payload.data)) {
-      throw new Error('Invalid hostapi proxy envelope: success response missing data object');
+      throw new AppError('INVALID_RESPONSE', 'Invalid hostapi proxy envelope: success response missing data object');
     }
     const status = payload.data.status;
     const ok = payload.data.ok;
     if (typeof status !== 'number' || !Number.isFinite(status)) {
-      throw new Error('Invalid hostapi proxy envelope: success response missing numeric status');
+      throw new AppError('INVALID_RESPONSE', 'Invalid hostapi proxy envelope: success response missing numeric status');
     }
     if (typeof ok !== 'boolean') {
-      throw new Error('Invalid hostapi proxy envelope: success response missing boolean ok');
+      throw new AppError('INVALID_RESPONSE', 'Invalid hostapi proxy envelope: success response missing boolean ok');
     }
     if (payload.data.text !== undefined && typeof payload.data.text !== 'string') {
-      throw new Error('Invalid hostapi proxy envelope: success response text must be string');
+      throw new AppError('INVALID_RESPONSE', 'Invalid hostapi proxy envelope: success response text must be string');
     }
     return {
       ok: true,
@@ -101,7 +102,7 @@ export function decodeHostApiProxyEnvelope(payload: unknown): HostApiProxyEnvelo
       !(typeof error === 'string' && error.trim())
       && !(isRecord(error) && typeof error.message === 'string' && error.message.trim())
     ) {
-      throw new Error('Invalid hostapi proxy envelope: failure response missing error message');
+      throw new AppError('INVALID_RESPONSE', 'Invalid hostapi proxy envelope: failure response missing error message');
     }
     return {
       ok: false,
@@ -114,7 +115,7 @@ export function decodeHostApiProxyEnvelope(payload: unknown): HostApiProxyEnvelo
     };
   }
 
-  throw new Error('Invalid hostapi proxy envelope: missing boolean ok');
+  throw new AppError('INVALID_RESPONSE', 'Invalid hostapi proxy envelope: missing boolean ok');
 }
 
 export function unwrapHostApiProxyEnvelope<T>(
@@ -133,7 +134,11 @@ export function unwrapHostApiProxyEnvelope<T>(
   const { status, ok, json, text } = envelope.data;
   if (status >= 400 || ok === false) {
     const fallbackMessage = text || `Host API request failed: ${context.method} ${context.path} (HTTP ${status})`;
-    throw normalizeAppError(new Error(extractHostApiErrorMessage(json, fallbackMessage)), { ...context, status });
+    const creationFailure = isRecord(json) ? decodeTeamCreationFailure(json.creationFailure) : null;
+    throw normalizeAppError(new Error(extractHostApiErrorMessage(json, fallbackMessage)), {
+      ...context, status,
+      ...(creationFailure ? { creationFailure } : {}),
+    });
   }
 
   if (status === 204) {

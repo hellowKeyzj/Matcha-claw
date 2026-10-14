@@ -67,7 +67,7 @@ function ReindexBody({ projectId, busy }: ReindexProgressProps): JSX.Element {
           if (next.taskId !== receipt.callId) {
             shouldContinue = true;
           } else if (next.status === 'done' || next.status === 'error') {
-            const call = await waitForCall(receipt, 'wiki', { signal: controller.signal });
+            const call = await waitForCall(receipt, 'wiki', { signal: controller.signal, timeoutMs: null });
             if (controller.signal.aborted) return;
             if (call.command !== 'embedding.reindex' || call.detail.operation !== 'embedding.reindex' || call.status === 'unknown') throw unconfirmed();
             if (next.status === 'done' && (call.status !== 'succeeded' || call.detail.outcome !== 'completed')) throw unconfirmed();

@@ -31,6 +31,8 @@
         "create": "创建第一个任务"
     },
     "card": {
+        "systemManaged": "系统管理",
+        "systemManagedDescription": "系统任务由全局配置管理。",
         "runNow": "立即运行",
         "deleteConfirm": "确定要删除此任务吗？",
         "last": "上次运行",

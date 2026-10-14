@@ -4,6 +4,7 @@ use super::{
     source_lifecycle::{source_tasks, wiki_markdown_files},
 };
 use crate::{
+    application::commands::IngestMode,
     domain::{WikiFailure, WikiProjectSelector, WikiSourceTaskStatus},
     ingest::write::parse_frontmatter_scalar,
     sweep::{PageSummary, ReviewSweepPlan, SourceWork, resolved_by_rules},
@@ -28,10 +29,10 @@ pub(super) fn stage(
     if has_pending_sources(root, &project_id)? {
         return Ok(None);
     }
-    let Some(cancellation) = shared.review_sweeps.claim(&project_id) else {
+    let Some((cancellation, ingest)) = shared.review_sweeps.claim(&project_id) else {
         return Ok(None);
     };
-    let pending = reviews(root)
+    let pending = reviews(root)?
         .items()
         .iter()
         .filter(|review| !review.resolved)
@@ -73,7 +74,10 @@ pub(super) fn stage(
         root: root.to_path_buf(),
         pending,
         pages,
-        llm: shared.ingest_llm.clone(),
+        llm: match ingest {
+            IngestMode::Configured => shared.ingest_llm.clone(),
+            IngestMode::SourceOnly => None,
+        },
         model_ref,
         cancellation,
     }))
@@ -93,7 +97,7 @@ pub(super) fn complete(
     if root != plan.root || has_pending_sources(root, &plan.project_id)? {
         return Ok(());
     }
-    let current = reviews(root);
+    let current = reviews(root)?;
     let ids = resolved_ids
         .into_iter()
         .filter(|id| {

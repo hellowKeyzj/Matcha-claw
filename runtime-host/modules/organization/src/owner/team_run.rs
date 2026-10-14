@@ -25,7 +25,7 @@ use organization::{
 use crate::ports::RuntimeReceiptOutcome;
 use crate::{
     ActivityExecutionOutcome, ActivityExecutionRequest, ActivityExecutionRequestError,
-    NativeRunSettled,
+    NativeRunSettled, TeamCreationFailure, TeamCreationFailureReason, TeamCreationStage,
 };
 
 /// Organization-owned TeamRun semantic seam over the durable facts store.
@@ -294,17 +294,16 @@ pub(crate) fn prepare_runtime_receipt(
     store: &OrganizationStore,
     team: &TeamId,
     run_id: &GraphRunId,
-) -> Result<RunRuntimeReceipt, RuntimeReceiptOutcome> {
+) -> Result<RunRuntimeReceipt, (RuntimeReceiptOutcome, TeamCreationFailure)> {
+    let failure = |reason| (
+        RuntimeReceiptOutcome::Unavailable,
+        TeamCreationFailure::new(TeamCreationStage::InitializingSessions, reason),
+    );
     let Some(materialization) = store.facts().materialization(team) else {
-        return Err(RuntimeReceiptOutcome::Unavailable);
+        return Err(failure(TeamCreationFailureReason::StoreInvalid));
     };
-    if store.facts().run(run_id).is_none() {
-        return Err(RuntimeReceiptOutcome::Unavailable);
-    }
-    let run = store
-        .facts()
-        .run(run_id)
-        .ok_or(RuntimeReceiptOutcome::Unavailable)?;
+    let run = store.facts().run(run_id)
+        .ok_or_else(|| failure(TeamCreationFailureReason::RunMissing))?;
     let mut slots = BTreeSet::new();
     for role in materialization.roles() {
         slots.insert((role.role().as_str().to_owned(), RoleSessionRef::initial()));
@@ -329,7 +328,7 @@ pub(crate) fn prepare_runtime_receipt(
             .roles()
             .iter()
             .find(|role| role.role().as_str() == role_id)
-            .ok_or(RuntimeReceiptOutcome::Unavailable)?;
+            .ok_or_else(|| failure(TeamCreationFailureReason::StoreInvalid))?;
         bindings.push(RoleSessionReceipt::new(
             team.clone(),
             run_id.clone(),
@@ -340,7 +339,20 @@ pub(crate) fn prepare_runtime_receipt(
         ));
     }
     RunRuntimeReceipt::try_new(run_id.clone(), bindings)
-        .map_err(|_| RuntimeReceiptOutcome::Unavailable)
+        .map_err(|_| failure(TeamCreationFailureReason::StoreInvalid))
+}
+
+pub(crate) fn creation_store_failure(stage: TeamCreationStage, error: &StoreFault) -> TeamCreationFailure {
+    let reason = match error {
+        StoreFault::CommitOutcomeUnknown(_) | StoreFault::RecoveryRequired => TeamCreationFailureReason::OutcomeUnknown,
+        StoreFault::WriterBusy | StoreFault::Lock(_)
+        | StoreFault::RuntimeReceipt(crate::OrganizationFactsError::RuntimeAlreadyInstalled) => TeamCreationFailureReason::StoreConflict,
+        StoreFault::Read(_) | StoreFault::Recovery(_) => TeamCreationFailureReason::StoreReadFailed,
+        StoreFault::Commit(_) | StoreFault::RecordTooLarge | StoreFault::LogFull
+        | StoreFault::EpochOverflow => TeamCreationFailureReason::StoreWriteFailed,
+        _ => TeamCreationFailureReason::StoreInvalid,
+    };
+    TeamCreationFailure::new(stage, reason)
 }
 
 pub(crate) fn install_prepared_runtime_receipt(
@@ -426,11 +438,13 @@ impl TeamRunOwner {
         run_id: GraphRunId,
         idempotency_key: &str,
         created_at: u64,
-    ) -> Result<GraphRunFacts, StoreFault> {
+    ) -> Result<GraphRunFacts, (StoreFault, TeamCreationFailure)> {
         let team = store
             .facts()
             .team(team_id)
-            .ok_or(StoreFault::InvalidFacts)?;
+            .ok_or_else(|| (StoreFault::InvalidFacts, TeamCreationFailure::new(
+                TeamCreationStage::InitializingSessions, TeamCreationFailureReason::TeamMissing,
+            )))?;
         let (template, layout) =
             persisted_graph_template(store.facts(), team_id).unwrap_or_else(|| {
                 (
@@ -438,14 +452,20 @@ impl TeamRunOwner {
                     GraphLayout::empty(),
                 )
             });
-        let definition = instantiate_graph_template(&template, run_id, idempotency_key)?;
+        let definition = instantiate_graph_template(&template, run_id, idempotency_key)
+            .map_err(|error| {
+                let failure = creation_store_failure(TeamCreationStage::InitializingSessions, &error);
+                (error, failure)
+            })?;
         GraphRunFacts::new(
             team_id.clone(),
             team.revision(),
             GraphState::initialize_with_layout(definition, layout, created_at),
             None,
         )
-        .map_err(|_| StoreFault::InvalidFacts)
+        .map_err(|_| (StoreFault::InvalidFacts, TeamCreationFailure::new(
+            TeamCreationStage::InitializingSessions, TeamCreationFailureReason::StoreInvalid,
+        )))
     }
 
     pub(crate) fn create_from_team_template(
@@ -457,7 +477,8 @@ impl TeamRunOwner {
         created_at: u64,
     ) -> Result<CreateGraphRunOutcome, StoreFault> {
         let run =
-            self.run_from_team_template(store, team_id, run_id, idempotency_key, created_at)?;
+            self.run_from_team_template(store, team_id, run_id, idempotency_key, created_at)
+                .map_err(|(error, _)| error)?;
         self.create(store, run, idempotency_key)
     }
 

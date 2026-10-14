@@ -229,8 +229,11 @@ export type FleetResource = Readonly<{
   id: string;
   connectionId: string;
   environmentId: string;
+  nodeId: string | null;
   provider: 'docker' | 'kubernetes' | 'ssh' | 'vm' | 'custom';
   remoteResourceId: string;
+  displayName: string | null;
+  labels: readonly string[] | null;
   kind:
     | 'dockerContainer'
     | 'kubernetesWorkload'
@@ -246,6 +249,7 @@ export type FleetResource = Readonly<{
   tombstone: boolean;
   createdAt: string;
   updatedAt: string;
+  lastObservedAt: string | null;
 }>;
 
 export type FleetTerminalSession = Readonly<{
@@ -358,14 +362,18 @@ type FleetSnapshotManagedResource = Readonly<{
   id: string;
   connectionId: string;
   environmentId: string;
+  nodeId: string | null;
   providerKind: 'docker' | 'k8s' | 'ssh' | 'vm' | 'custom';
   resourceKind: 'docker-container' | 'k8s-workload' | 'k8s-deployment' | 'k8s-service' | 'k8s-secret' | 'ssh-agent-installation' | 'vm-agent-installation' | 'custom';
   remoteResourceId: string;
+  displayName: string | null;
   status: 'observed' | 'provisioning' | 'ready' | 'deleting' | 'deleted' | 'conflict' | 'failed';
   ownership: 'matchaManaged' | 'unverified' | 'external';
   cleanupPolicy: 'deleteOnEnvironmentDelete' | 'uninstallAgentOnly' | 'orphan' | 'none';
+  labels: readonly string[] | null;
   createdAt: string;
   updatedAt: string;
+  lastObservedAt: string | null;
 }>;
 
 type FleetSnapshotNode = Readonly<{
@@ -1037,20 +1045,23 @@ function isFleetSnapshotEnvironment(value: unknown): value is FleetSnapshotEnvir
 function isFleetSnapshotManagedResource(value: unknown): value is FleetSnapshotManagedResource {
   return isRecord(value)
     && hasExactKeys(value, [
-      'id', 'connectionId', 'environmentId', 'providerKind', 'resourceKind', 'remoteResourceId',
-      'status', 'ownership', 'cleanupPolicy', 'createdAt', 'updatedAt',
+      'id', 'connectionId', 'environmentId', 'nodeId', 'providerKind', 'resourceKind', 'remoteResourceId',
+      'displayName', 'status', 'ownership', 'cleanupPolicy', 'labels', 'createdAt', 'updatedAt', 'lastObservedAt',
     ])
     && isIdentifier(value.id) && isIdentifier(value.connectionId) && isIdentifier(value.environmentId)
+    && isNullableIdentifier(value.nodeId)
     && isOneOf(value.providerKind, ['docker', 'k8s', 'ssh', 'vm', 'custom'])
     && isOneOf(value.resourceKind, [
       'docker-container', 'k8s-workload', 'k8s-deployment', 'k8s-service', 'k8s-secret',
       'ssh-agent-installation', 'vm-agent-installation', 'custom',
     ])
-    && isText(value.remoteResourceId)
+    && isText(value.remoteResourceId) && (value.displayName === null || isText(value.displayName))
     && isOneOf(value.status, ['observed', 'provisioning', 'ready', 'deleting', 'deleted', 'conflict', 'failed'])
     && isOneOf(value.ownership, ['matchaManaged', 'unverified', 'external'])
     && isOneOf(value.cleanupPolicy, ['deleteOnEnvironmentDelete', 'uninstallAgentOnly', 'orphan', 'none'])
-    && isTimestamp(value.createdAt) && isTimestamp(value.updatedAt);
+    && (value.labels === null || isTextArray(value.labels))
+    && isTimestamp(value.createdAt) && isTimestamp(value.updatedAt)
+    && (value.lastObservedAt === null || isTimestamp(value.lastObservedAt));
 }
 
 function isFleetSnapshotNode(value: unknown): value is FleetSnapshotNode {
@@ -1327,14 +1338,18 @@ function isEnvironment(value: unknown): value is FleetEnvironment {
 }
 
 function isResource(value: unknown): value is FleetResource {
-  return isRecord(value) && hasExactKeys(value, ['id', 'connectionId', 'environmentId', 'provider', 'kind', 'ownership', 'cleanupPolicy', 'state', 'tombstone', 'createdAt', 'updatedAt'])
+  return isRecord(value) && hasExactKeys(value, ['id', 'connectionId', 'environmentId', 'nodeId', 'provider', 'kind', 'remoteResourceId', 'displayName', 'ownership', 'cleanupPolicy', 'labels', 'state', 'tombstone', 'createdAt', 'updatedAt', 'lastObservedAt'])
     && isIdentifier(value.id) && isIdentifier(value.connectionId) && isIdentifier(value.environmentId)
+    && isNullableIdentifier(value.nodeId)
     && isOneOf(value.provider, ['docker', 'kubernetes', 'ssh', 'vm', 'custom'])
     && isOneOf(value.kind, ['dockerContainer', 'kubernetesWorkload', 'kubernetesDeployment', 'kubernetesService', 'kubernetesSecret', 'sshAgentInstallation', 'vmAgentInstallation', 'custom'])
+    && isText(value.remoteResourceId) && (value.displayName === null || isText(value.displayName))
     && isOneOf(value.ownership, ['matchaManaged', 'unverified', 'external'])
     && isOneOf(value.cleanupPolicy, ['deleteOnEnvironmentDelete', 'uninstallAgentOnly', 'orphan', 'none'])
+    && (value.labels === null || isTextArray(value.labels))
     && isResourceState(value.state) && typeof value.tombstone === 'boolean'
-    && isTimestamp(value.createdAt) && isTimestamp(value.updatedAt);
+    && isTimestamp(value.createdAt) && isTimestamp(value.updatedAt)
+    && (value.lastObservedAt === null || isTimestamp(value.lastObservedAt));
 }
 
 function isCommand(value: unknown): value is FleetCommand {

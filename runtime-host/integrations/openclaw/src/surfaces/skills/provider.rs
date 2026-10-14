@@ -12,6 +12,7 @@ use skills_module::{
     management::{Command as SkillManagementCommand, Outcome as SkillManagementOutcome},
 };
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     MissingSkillRequirementCategory, SkillConfigRemoveOutcome, SkillDetail, SkillDetailRequest,
@@ -26,6 +27,7 @@ pub struct OpenClawSkillProvider {
     electron_image: PathBuf,
     working_directory: PathBuf,
     state_dir: CanonicalStateDir,
+    clawhub_containment: Option<foundation::process::OneShotContainment>,
 }
 
 impl OpenClawSkillProvider {
@@ -40,7 +42,16 @@ impl OpenClawSkillProvider {
             electron_image,
             working_directory,
             state_dir,
+            clawhub_containment: None,
         }
+    }
+
+    pub(crate) fn with_clawhub_containment(
+        mut self,
+        containment: foundation::process::OneShotContainment,
+    ) -> Self {
+        self.clawhub_containment = Some(containment);
+        self
     }
 
     pub async fn installed_skill_catalog(&self) -> Option<super::InstalledSkillCatalog> {
@@ -48,6 +59,15 @@ impl OpenClawSkillProvider {
     }
 
     pub async fn install_clawhub(&self, command: SkillInstallCommand) -> SkillInstallOutcome {
+        self.install_clawhub_cancellable(command, CancellationToken::new())
+            .await
+    }
+
+    pub(crate) async fn install_clawhub_cancellable(
+        &self,
+        command: SkillInstallCommand,
+        cancellation: CancellationToken,
+    ) -> SkillInstallOutcome {
         let (slug, version, force) = command.into_parts();
         let request = match clawhub::ClawHubInstallRequest::try_new(slug, version, force) {
             Ok(request) => request,
@@ -55,7 +75,7 @@ impl OpenClawSkillProvider {
         };
         let slug = request.slug().to_owned();
         let version = request.version().map(str::to_owned);
-        match self.install_clawhub_skill(request).await {
+        match self.install_clawhub_skill(request, cancellation).await {
             Ok(()) => SkillInstallOutcome::accepted(slug, version),
             Err(()) => SkillInstallOutcome::Unknown,
         }
@@ -88,6 +108,20 @@ impl OpenClawSkillProvider {
         &self,
         command: SkillManagementCommand,
         open_path: OpenPath,
+    ) -> SkillManagementOutcome
+    where
+        OpenPath: FnOnce(PathBuf) -> OpenPathFuture + Send,
+        OpenPathFuture: Future<Output = bool> + Send,
+    {
+        self.manage_cancellable(command, open_path, CancellationToken::new())
+            .await
+    }
+
+    pub(crate) async fn manage_cancellable<OpenPath, OpenPathFuture>(
+        &self,
+        command: SkillManagementCommand,
+        open_path: OpenPath,
+        cancellation: CancellationToken,
     ) -> SkillManagementOutcome
     where
         OpenPath: FnOnce(PathBuf) -> OpenPathFuture + Send,
@@ -157,7 +191,7 @@ impl OpenClawSkillProvider {
                     Ok(request) => request,
                     Err(_) => return SkillManagementOutcome::Rejected,
                 };
-                let outcome = match self.install_clawhub_skill(request).await {
+                let outcome = match self.install_clawhub_skill(request, cancellation).await {
                     Ok(()) => skills_module::management::MutationOutcome::Accepted,
                     Err(()) => skills_module::management::MutationOutcome::Unknown,
                 };
@@ -272,8 +306,8 @@ impl OpenClawSkillProvider {
                 file_path,
                 base_dir,
             } => {
-                let request = match self
-                    .readme_request(skill_key, slug, file_path, base_dir)
+                let (request, store) = match self
+                    .readme_context(skill_key, slug, file_path, base_dir)
                     .await
                 {
                     Ok(request) => request,
@@ -290,7 +324,7 @@ impl OpenClawSkillProvider {
                     }
                 };
                 SkillManagementOutcome::Readme(
-                    self.skill_readme()
+                    store
                         .read(request, &workspace_roots)
                         .map(project_readme_receipt)
                         .map_err(map_readme_error),
@@ -302,8 +336,8 @@ impl OpenClawSkillProvider {
                 file_path,
                 base_dir,
             } => {
-                let request = match self
-                    .readme_request(skill_key, slug, file_path, base_dir)
+                let (request, store) = match self
+                    .readme_context(skill_key, slug, file_path, base_dir)
                     .await
                 {
                     Ok(request) => request,
@@ -319,10 +353,7 @@ impl OpenClawSkillProvider {
                         ));
                     }
                 };
-                let receipt = match self
-                    .skill_readme()
-                    .read_readme_target(request, &workspace_roots)
-                {
+                let receipt = match store.read_readme_target(request, &workspace_roots) {
                     Ok(receipt) => receipt,
                     Err(error) => {
                         return SkillManagementOutcome::Readme(Err(map_readme_error(error)));
@@ -342,33 +373,90 @@ impl OpenClawSkillProvider {
                 file_path,
                 base_dir,
             } => {
-                let request = match self
-                    .readme_request(skill_key, slug, file_path, base_dir)
+                platform::trace::session_trace("skill.open-path.provider-request", || {
+                    serde_json::json!({
+                        "skillHash": platform::trace::identifier_hash(&skill_key),
+                        "slugHash": slug.as_deref().map(platform::trace::identifier_hash),
+                        "hasFilePath": file_path.is_some(),
+                        "hasBaseDir": base_dir.is_some(),
+                        "baseDirHash": base_dir.as_deref().map(platform::trace::identifier_hash),
+                        "baseDirLength": base_dir.as_ref().map(String::len),
+                        "extendedPath": base_dir.as_deref().is_some_and(|path| path.starts_with(r"\\?\")),
+                    })
+                });
+                let (request, store) = match self
+                    .readme_context(skill_key, slug, file_path, base_dir)
                     .await
                 {
                     Ok(request) => request,
                     Err(error) => {
+                        platform::trace::session_trace(
+                            "skill.open-path.provider-request-result",
+                            || {
+                                serde_json::json!({ "outcome": match error {
+                                native_readme::SkillReadmeError::Rejected => "rejected",
+                                native_readme::SkillReadmeError::Unknown => "unknown",
+                            } })
+                            },
+                        );
                         return SkillManagementOutcome::OpenPath(Err(map_readme_error(error)));
                     }
                 };
+                platform::trace::session_trace("skill.open-path.provider-request-result", || {
+                    serde_json::json!({
+                        "outcome": "accepted",
+                        "hasFilePath": request.file_path().is_some(),
+                        "hasBaseDir": request.base_dir().is_some(),
+                    })
+                });
                 let workspace_roots = match self.workspace_roots() {
-                    Ok(roots) => roots,
+                    Ok(roots) => {
+                        platform::trace::session_trace(
+                            "skill.open-path.workspace-roots",
+                            || serde_json::json!({ "outcome": "available", "count": roots.len() }),
+                        );
+                        roots
+                    }
                     Err(_) => {
+                        platform::trace::session_trace(
+                            "skill.open-path.workspace-roots",
+                            || serde_json::json!({ "outcome": "unavailable" }),
+                        );
                         return SkillManagementOutcome::OpenPath(Err(
                             skills_module::management::ReadmeError::Unknown,
                         ));
                     }
                 };
-                let path = match self
-                    .skill_readme()
-                    .resolve_directory(&request, &workspace_roots)
-                {
+                let path = match store.resolve_directory(&request, &workspace_roots) {
                     Ok(path) => path,
                     Err(error) => {
+                        platform::trace::session_trace("skill.open-path.resolve-result", || {
+                            serde_json::json!({ "outcome": match error {
+                                native_readme::SkillReadmeError::Rejected => "rejected",
+                                native_readme::SkillReadmeError::Unknown => "unknown",
+                            } })
+                        });
                         return SkillManagementOutcome::OpenPath(Err(map_readme_error(error)));
                     }
                 };
-                if !open_path(path).await {
+                platform::trace::session_trace(
+                    "skill.open-path.resolve-result",
+                    || serde_json::json!({ "outcome": "resolved" }),
+                );
+                platform::trace::session_trace("skill.open-path.shell-callback", || {
+                    let path = path.to_string_lossy();
+                    serde_json::json!({
+                        "pathHash": platform::trace::identifier_hash(&path),
+                        "pathLength": path.len(),
+                        "extendedPath": path.starts_with(r"\\?\"),
+                    })
+                });
+                let opened = open_path(path).await;
+                platform::trace::session_trace(
+                    "skill.open-path.shell-callback-result",
+                    || serde_json::json!({ "opened": opened }),
+                );
+                if !opened {
                     return SkillManagementOutcome::OpenPath(Err(
                         skills_module::management::ReadmeError::Unknown,
                     ));
@@ -449,11 +537,14 @@ impl OpenClawSkillProvider {
     async fn install_clawhub_skill(
         &self,
         request: clawhub::ClawHubInstallRequest,
+        cancellation: CancellationToken,
     ) -> Result<(), ()> {
         let registries = clawhub::ClawHubRegistryClient::new(self.state_dir.as_path().to_owned())
             .registry_bases()
             .to_vec();
-        self.clawhub_installer(registries).install(request).await
+        self.clawhub_installer(registries)
+            .install_cancellable(request, cancellation)
+            .await
     }
 
     async fn uninstall_clawhub_skill(
@@ -464,12 +555,16 @@ impl OpenClawSkillProvider {
     }
 
     fn clawhub_installer(&self, registries: Vec<String>) -> clawhub::ClawHubCliInstaller {
-        clawhub::ClawHubCliInstaller::new(
+        let installer = clawhub::ClawHubCliInstaller::new(
             self.electron_image.clone(),
             self.state_dir.as_path().to_owned(),
             self.clawhub_cli_entries(),
             registries,
-        )
+        );
+        match &self.clawhub_containment {
+            Some(containment) => installer.with_containment(containment.clone()),
+            None => installer,
+        }
     }
 
     fn clawhub_cli_entries(&self) -> Vec<PathBuf> {
@@ -493,10 +588,6 @@ impl OpenClawSkillProvider {
         native_bundle::SkillBundleStore::new(self.state_dir.clone())
     }
 
-    fn skill_readme(&self) -> native_readme::SkillReadmeStore {
-        native_readme::SkillReadmeStore::new(self.state_dir.clone())
-    }
-
     fn workspace_roots(
         &self,
     ) -> Result<Vec<crate::surfaces::workspace::TrustedWorkspaceDirectory>, ()> {
@@ -505,28 +596,43 @@ impl OpenClawSkillProvider {
             .map_err(|_| ())
     }
 
-    async fn readme_request(
+    async fn readme_context(
         &self,
         skill_key: String,
         slug: Option<String>,
         file_path: Option<String>,
         base_dir: Option<String>,
-    ) -> Result<native_readme::SkillReadmeRequest, native_readme::SkillReadmeError> {
-        if file_path.is_none() && base_dir.is_none() {
-            let (file_path, base_dir) = match self.skill_status_catalog().await {
-                Ok(catalog) => catalog.locator(&skill_key).map_or((None, None), |locator| {
-                    (
-                        locator.file_path().map(str::to_owned),
-                        locator.base_dir().map(str::to_owned),
-                    )
-                }),
-                Err(_) => (None, None),
-            };
-            return native_readme::SkillReadmeRequest::try_new(
-                skill_key, slug, file_path, base_dir,
-            );
+    ) -> Result<
+        (
+            native_readme::SkillReadmeRequest,
+            native_readme::SkillReadmeStore,
+        ),
+        native_readme::SkillReadmeError,
+    > {
+        let mut request =
+            native_readme::SkillReadmeRequest::try_new(skill_key, slug, file_path, base_dir)?;
+        let store = native_readme::SkillReadmeStore::new(self.state_dir.clone());
+        let Ok(catalog) = self.skill_status_catalog().await else {
+            return Ok((request, store));
+        };
+        if !request.uses_source_path() {
+            if let Some(locator) = catalog.locator(request.skill_key()) {
+                request = native_readme::SkillReadmeRequest::try_new(
+                    request.skill_key().to_owned(),
+                    request.fallback_slug().map(str::to_owned),
+                    locator.file_path().map(str::to_owned),
+                    locator.base_dir().map(str::to_owned),
+                )?;
+            }
         }
-        native_readme::SkillReadmeRequest::try_new(skill_key, slug, file_path, base_dir)
+        let bundled_root = catalog
+            .entries()
+            .iter()
+            .find(|entry| entry.key() == request.skill_key() && entry.bundled() == Some(true))
+            .and_then(|entry| catalog.locator(entry.key()))
+            .and_then(|locator| locator.base_dir())
+            .map(PathBuf::from);
+        Ok((request, store.with_bundled_root(bundled_root)))
     }
 
     async fn openclaw_managed_skill_base_dir(

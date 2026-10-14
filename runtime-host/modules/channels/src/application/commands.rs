@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use foundation::execution::CommandRoute;
 use tokio::sync::oneshot;
@@ -33,6 +33,7 @@ pub enum ChannelCommand {
         timeout_ms: Option<u64>,
         agent_id: Option<String>,
         config: Zeroizing<Vec<u8>>,
+        cancellation: Arc<tokio_util::sync::CancellationToken>,
         reply: oneshot::Sender<Result<ChannelLoginOutcome, ChannelOwnerUnavailable>>,
     },
     LoginWait {
@@ -41,7 +42,7 @@ pub enum ChannelCommand {
         timeout_ms: Option<u64>,
         session_key: Option<String>,
         current_qr_data_url: Option<String>,
-        cancellation: tokio_util::sync::CancellationToken,
+        cancellation: Arc<tokio_util::sync::CancellationToken>,
         reply: oneshot::Sender<Result<ChannelLoginOutcome, ChannelOwnerUnavailable>>,
     },
     LoginCancel {

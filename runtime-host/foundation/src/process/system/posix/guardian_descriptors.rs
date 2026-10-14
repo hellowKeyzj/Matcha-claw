@@ -11,7 +11,8 @@ pub(super) const TARGET_PRIVATE_DESCRIPTOR_FD: RawFd = 9;
 pub(super) const GUARDIAN_CLEANUP_DIRECTORY_FD: RawFd = 10;
 pub(super) const GUARDIAN_CLEANUP_NAMES_FD: RawFd = 11;
 pub(super) const TARGET_EXECUTION_SOURCE_FD: RawFd = 12;
-pub(super) const FIRST_UNRESERVED_FD: RawFd = 13;
+pub(super) const TARGET_ENVIRONMENT_FD: RawFd = 13;
+pub(super) const FIRST_UNRESERVED_FD: RawFd = 14;
 
 pub(super) fn clear_close_on_exec(descriptor: RawFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };

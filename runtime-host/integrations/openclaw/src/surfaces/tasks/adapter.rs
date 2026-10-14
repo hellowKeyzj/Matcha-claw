@@ -34,7 +34,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     };
                     ::task_manager::TaskOutcome::Get(project_read(
                         self.gateway.lock().await.get_task(scope, task_id).await,
-                        |task| project_task(&task),
+                        |task| Ok(project_task(&task)),
                     ))
                 }
                 ::task_manager::TaskCommand::Create { target, input } => {
@@ -230,10 +230,13 @@ fn project_metadata(value: &::task_manager::TaskMetadata) -> openclaw_tasks::Tas
 
 fn project_read<T, U>(
     result: Result<T, openclaw_tasks::TaskReadFailure>,
-    project: impl FnOnce(T) -> U,
+    project: impl FnOnce(T) -> Result<U, ()>,
 ) -> ::task_manager::TaskReadOutcome<U> {
     match result {
-        Ok(value) => ::task_manager::TaskReadOutcome::Found(project(value)),
+        Ok(value) => match project(value) {
+            Ok(value) => ::task_manager::TaskReadOutcome::Found(value),
+            Err(()) => ::task_manager::TaskReadOutcome::Protocol,
+        },
         Err(openclaw_tasks::TaskReadFailure::NotFound) => ::task_manager::TaskReadOutcome::NotFound,
         Err(openclaw_tasks::TaskReadFailure::Unavailable) => {
             ::task_manager::TaskReadOutcome::Unavailable
@@ -245,12 +248,13 @@ fn project_read<T, U>(
 
 fn project_mutation<T, U>(
     outcome: openclaw_tasks::TaskMutationOutcome<T>,
-    project: impl FnOnce(T) -> U,
+    project: impl FnOnce(T) -> Result<U, ()>,
 ) -> ::task_manager::TaskMutationOutcome<U> {
     match outcome {
-        openclaw_tasks::TaskMutationOutcome::Applied(value) => {
-            ::task_manager::TaskMutationOutcome::Applied(project(value))
-        }
+        openclaw_tasks::TaskMutationOutcome::Applied(value) => match project(value) {
+            Ok(value) => ::task_manager::TaskMutationOutcome::Applied(value),
+            Err(()) => ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+        },
         openclaw_tasks::TaskMutationOutcome::Rejected => {
             ::task_manager::TaskMutationOutcome::Rejected
         }
@@ -262,25 +266,37 @@ fn project_mutation<T, U>(
 
 fn project_create_receipt(
     receipt: openclaw_tasks::TaskCreateReceipt,
-) -> ::task_manager::TaskCreateReceipt {
-    ::task_manager::TaskCreateReceipt::new(
+) -> Result<::task_manager::TaskCreateReceipt, ()> {
+    Ok(::task_manager::TaskCreateReceipt::new(
         project_task(receipt.task()),
-        project_snapshot(receipt.snapshot().clone()),
-    )
+        project_snapshot(receipt.snapshot().clone())?,
+    ))
 }
 
-fn project_snapshot(snapshot: openclaw_tasks::TaskSnapshot) -> ::task_manager::TaskSnapshot {
-    ::task_manager::TaskSnapshot::new(
+fn project_snapshot(
+    snapshot: openclaw_tasks::TaskSnapshot,
+) -> Result<::task_manager::TaskSnapshot, ()> {
+    Ok(::task_manager::TaskSnapshot::new(
         snapshot.tasks().iter().map(project_task).collect(),
-        snapshot.todos().iter().map(project_todo).collect(),
-    )
+        snapshot
+            .todos()
+            .iter()
+            .map(project_todo)
+            .collect::<Result<_, _>>()?,
+    ))
 }
 
-fn project_todo_snapshot(snapshot: openclaw_tasks::TodoSnapshot) -> ::task_manager::TodoSnapshot {
-    ::task_manager::TodoSnapshot::new(
-        snapshot.todos().iter().map(project_todo).collect(),
+fn project_todo_snapshot(
+    snapshot: openclaw_tasks::TodoSnapshot,
+) -> Result<::task_manager::TodoSnapshot, ()> {
+    Ok(::task_manager::TodoSnapshot::new(
+        snapshot
+            .todos()
+            .iter()
+            .map(project_todo)
+            .collect::<Result<_, _>>()?,
         snapshot.updated_at(),
-    )
+    ))
 }
 
 fn project_task(task: &openclaw_tasks::Task) -> ::task_manager::Task {
@@ -300,7 +316,7 @@ fn project_task(task: &openclaw_tasks::Task) -> ::task_manager::Task {
     )
 }
 
-fn project_todo(todo: &openclaw_tasks::Todo) -> ::task_manager::Todo {
+fn project_todo(todo: &openclaw_tasks::Todo) -> Result<::task_manager::Todo, ()> {
     ::task_manager::Todo::try_new(
         todo.id().map(str::to_owned),
         todo.content().to_owned(),
@@ -308,7 +324,7 @@ fn project_todo(todo: &openclaw_tasks::Todo) -> ::task_manager::Todo {
         project_todo_status_from_openclaw(todo.status()),
         todo.owner().map(str::to_owned),
     )
-    .expect("OpenClaw todo already passed native validation")
+    .map_err(|_| ())
 }
 
 fn project_task_status(status: ::task_manager::TaskStatus) -> openclaw_tasks::TaskStatus {

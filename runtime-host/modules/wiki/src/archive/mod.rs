@@ -209,7 +209,17 @@ pub fn update_recent_wiki_index(
     }
 
     let index_path = wiki.join("index.md");
-    let index = fs::read_to_string(&index_path).unwrap_or_else(|_| "# Wiki Index\n".to_owned());
+    let index = match fs::read_to_string(&index_path) {
+        Ok(index) => index,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => "# Wiki Index\n".to_owned(),
+        Err(source) => {
+            return Err(ArchiveError::Io {
+                action: "read wiki index",
+                path: index_path,
+                source,
+            });
+        }
+    };
     let known = index_wikilink_targets(&index);
     let mut additions = Vec::new();
     for path in candidates {
@@ -237,8 +247,7 @@ pub fn update_recent_wiki_index(
     }
 
     let next = update_bounded_recent_index_section(&index, additions);
-    let temporary_path = wiki.join(".index.md.recent.tmp");
-    write_rebuilt_index(&temporary_path, &index_path, next.as_bytes())?;
+    write_rebuilt_index(&index_path, next.as_bytes())?;
     Ok(true)
 }
 
@@ -276,8 +285,7 @@ pub fn rebuild_wiki_index(
     }
 
     let index_path = wiki.join("index.md");
-    let temporary_path = wiki.join(".index.md.rebuild.tmp");
-    write_rebuilt_index(&temporary_path, &index_path, output.as_bytes())?;
+    write_rebuilt_index(&index_path, output.as_bytes())?;
     Ok(WikiIndexRebuild {
         pages,
         groups: groups.len(),
@@ -682,39 +690,13 @@ fn frontmatter_value(content: &str, key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn write_rebuilt_index(
-    temporary_path: &Path,
-    index_path: &Path,
-    content: &[u8],
-) -> Result<(), ArchiveError> {
-    reject_symlink(temporary_path)?;
+fn write_rebuilt_index(index_path: &Path, content: &[u8]) -> Result<(), ArchiveError> {
     reject_symlink(index_path)?;
-    let mut file = create_file(temporary_path)?;
-    file.write_all(content).map_err(|source| ArchiveError::Io {
-        action: "write rebuilt wiki index",
-        path: temporary_path.to_path_buf(),
-        source,
-    })?;
-    file.sync_all().map_err(|source| ArchiveError::Io {
-        action: "sync rebuilt wiki index",
-        path: temporary_path.to_path_buf(),
-        source,
-    })?;
-    drop(file);
-    #[cfg(windows)]
-    if index_path.exists() {
-        fs::remove_file(index_path).map_err(|source| ArchiveError::Io {
-            action: "replace wiki index",
-            path: index_path.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::rename(temporary_path, index_path).map_err(|source| ArchiveError::Io {
+    crate::history::replace_store(index_path, content).map_err(|error| ArchiveError::Io {
         action: "publish rebuilt wiki index",
         path: index_path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
+        source: std::io::Error::other(format!("{error:?}")),
+    })
 }
 
 fn archive_relative_path(name: &str) -> Result<PathBuf, ArchiveError> {

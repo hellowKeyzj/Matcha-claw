@@ -45,8 +45,12 @@ pub trait SealedAgentStorePort: Send + Sync {
         &self,
         package_path: String,
         cloud_metadata: Option<CloudPackageMetadata>,
-    ) -> Result<PackageInstallReceipt, SealedAgentError>;
+    ) -> Result<PackageInstallReceipt, SealedAgentInstallError>;
     fn remove_package(&self, agent_id: String) -> Result<bool, SealedAgentError>;
+    fn prepare_remove_package(
+        &self,
+        agent_id: String,
+    ) -> Result<Box<dyn SealedAgentRemovalPlan>, SealedAgentError>;
     fn agents_using_sealed_source(&self, agent_ids: &[String]) -> Result<Vec<String>, SealedAgentError>;
     fn read_file(
         &self,
@@ -54,6 +58,10 @@ pub trait SealedAgentStorePort: Send + Sync {
         agent_id: String,
         path: String,
     ) -> Result<SealedAgentRead, SealedAgentError>;
+}
+
+pub trait SealedAgentRemovalPlan: Send {
+    fn remove(self: Box<Self>) -> Result<bool, SealedAgentError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,6 +85,15 @@ impl SealedAgentRead {
     pub fn metering_binding(&self) -> Option<&str> {
         self.metering_binding.as_deref()
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SealedAgentInstallError {
+    NotCommitted(SealedAgentError),
+    Committed {
+        receipt: PackageInstallReceipt,
+        error: SealedAgentError,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

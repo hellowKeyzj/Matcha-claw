@@ -89,6 +89,10 @@ Provider model discovery/import 的 Renderer/Electron public DTO 不扩展：dis
 
 `OPEN`: 这不是对每个 operation input/output 的替代类型定义；对应 Renderer wrapper 和 runtime capability descriptor 是字段级权威。后续 Rust cutover 应以 operation family 为单元采集实际 request/response fixture。
 
+### Cron 系统管理投影
+
+Cron list 与 create/update result 的 `CronJob` 必填 `systemManaged:boolean`，两端严格校验，不接受缺失或原生 `declarationKey/owner`。页面隐藏已停用系统任务，列表、统计与空态判断共用同一可见集合；已启用系统任务显示但不提供启停、编辑、删除，普通暂停任务仍显示。原生任务与手动运行契约不变，原生保护仍有效。该字段是管理性质，不代表执行成功或替代授权。[VERIFY: src/types/cron.ts:49-65] [VERIFY: src/types/cron-operation-result.ts:22-43] [VERIFY: runtime-host/modules/cron/src/projection.rs:177] [VERIFY: src/pages/Cron/index.tsx:1177-1231] [VERIFY: src/pages/Cron/index.tsx:1304-1347] [VERIFY: src/pages/Cron/index.tsx:1471]
+
 ### ExistingTeam 工作流设计增量
 
 既有 `team.runtime` 提供以下设计与统一启动 operation；`team.designRun`、`team.designContinue` 和 proposal confirm/continue/cancel 已删除。target 必须 exact `{kind:'team',teamId}`，与 input.teamId 相等；input 必须具有下表全部字段，不能缺省或附加字段，不能仅在 target 携带 teamId。不新建 capability、Team/roles 或执行 queue。[VERIFY: src/services/openclaw/team-runtime-client.ts:946-1008] [VERIFY: electron/api/routes/team-runtime-capability.ts:109-133] [VERIFY: runtime-host/modules/organization/src/application/team_runtime.rs:485-512] [VERIFY: runtime-host/modules/organization/src/application/design.rs:50-125]
@@ -131,9 +135,17 @@ Cron 编辑草稿区分简化周期与原始表达式：只有简化控件可以
 
 ### TeamRun 运行中任务正文与 Renderer 边界
 
-运行中读写复用 MCP `team_graph_context` / `team_graph_patch`，不新增工具或 Renderer operation，上表设计/启动 input 与 `TeamDesignSnapshot` 不变。模型从 `<team_run_context>` 传入 teamId/runId/nodeId/nodeExecutionId；这些字段定位业务执行，不证明调用者身份。Host 直接发送原任务正文，不追加执行凭据；MCP 到 Host 的原签名通信认证继续保留，`team-mcp-local` 仍只是本机 transport principal。Organization 按传入标识校验当前执行事实，不通过 session 猜当前 Run，不新增插件、原生私有字段或授权存储。[VERIFY: runtime-host/host/src/composition/host/ports/organization.rs:395-410] [VERIFY: runtime-host/host/src/team_mcp/route.rs:81-98] [VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs] [VERIFY: runtime-host/modules/organization/src/store/runtime_graph.rs]
+运行中读写复用 MCP `team_graph_context` / `team_graph_patch`，不新增工具或 Renderer operation，上表设计/启动 input 与 `TeamDesignSnapshot` 不变。模型从 `<team_run_context>` 传入 teamId/runId/nodeId/nodeExecutionId；这些字段定位业务执行，不证明调用者身份。Host 直接发送原任务正文，不追加执行凭据；MCP 到 Host 的原签名通信认证继续保留，`team-mcp-local` 仍只是本机 transport principal。Organization 按传入标识校验当前执行事实，不通过 session 猜当前 Run，不新增插件、原生私有字段或授权存储。[VERIFY: runtime-host/host/src/composition/host/ports/organization.rs:395-410] [VERIFY: runtime-host/host/src/mcp/route.rs:124-165] [VERIFY: runtime-host/modules/organization/src/adapters/mcp/tools.rs] [VERIFY: runtime-host/modules/organization/src/store/runtime_graph.rs]
 
 运行期读写与画布仍共享 Organization canonical graph；MCP 只改 work/review prompt，不扩 Renderer 图编辑操作。patch 不驱动调度，已有 Activity/同次 retry 保留原快照，新 Activity/rework 消费新正文；节点 completion 的在线 `<team_message>` 仅接受 summary/decision，仍由原 scheduler 推进。完整 MCP 输入与结果见 [Team MCP 契约](README.md#team-mcp-同-owner-契约增量)。[VERIFY: runtime-host/modules/organization/src/store/runtime_graph.rs] [VERIFY: runtime-host/modules/organization/src/owner/handle.rs:642-661] [VERIFY: runtime-host/modules/organization/src/store/facts.rs:2023-2041] [VERIFY: runtime-host/modules/organization/src/run/delivery/model.rs:405-443]
+
+### Team 创建安全失败契约
+
+`TeamCreationFailure` 固定为 `{stage,reason,memberIndex?,file?}`：8 个失败 stage（无 rolling_back）、43 个闭合安全 reason、3 个 file（description/AGENTS.md/SOUL.md）；memberIndex 为非 leader 输入零基索引。strict decoder 拒绝额外字段、未知枚举、null 可选值及非安全非负整数索引，不允许 raw id/name/path/message/config/prompt/正文/secret。模型五个 `model_*` reason 与 Host 授权/权限/限流类别分开；它是已确定安全分类，不是完整领域根因或 native effect 结论。[VERIFY: src/types/call-log/organization.ts:10-40] [VERIFY: src/types/call-log/organization.ts:117-130] [VERIFY: src/types/call-log/organization.ts:204-206]
+
+异步 provision/manual 沿同次 Organization owner → CallLog detail/history → 原 wait 的 typed observation 回流首因。仅同步 `team.runCreate / team.runList / team.runSnapshot` 的 source 失败另经原 HTTP 错误 body 可选 `creationFailure` → 同一 strict decoder → `AppError.details.creationFailure` → 唯一 `classifyTeamCreationFailure` → `TeamCreationObserver.onFailure` → 本次 snapshot/UI；CallLog 不是同步产品结果读源。source fact 优先；缺省时按 code/status 表达边界，400 为 invalid_input，不按 message 猜 native 原因。实际 deadline TIMEOUT/ABORTED/AbortError 仅表示观察中断，实际 JSON SyntaxError、畸形 envelope/业务响应为 INVALID_RESPONSE，不将任意 HTTP 错误变成解析失败。[VERIFY: runtime-host/modules/organization/src/adapters/loopback/team_runtime.rs:47-103] [VERIFY: runtime-host/modules/organization/src/adapters/loopback/team_runtime.rs:120-123] [VERIFY: runtime-host/modules/organization/src/adapters/loopback/mod.rs:292-297] [VERIFY: electron/main/runtime-host-delivery/transport/teams/runtime.ts:41-84] [VERIFY: electron/main/ipc/hostapi-proxy-ipc.ts:233-240] [VERIFY: electron/main/ipc/hostapi-proxy-ipc.ts:293-299] [VERIFY: src/lib/host-api-transport-contract.ts:68-140] [VERIFY: src/types/team-creation.ts:4-6] [VERIFY: src/services/openclaw/team-runtime-client.ts:924-985] [VERIFY: src/stores/teams.ts:1243-1316] [VERIFY: src/stores/teams.ts:1539-1570]
+
+HTTP status、success DTO、202 receipt、原 throw、执行/rollback/cleanup 与 Unknown 保持；200 runCreate outcome-unknown 可携安全 failure，仍是 Unknown。首因不被成员取消、回滚或 cleanup 覆盖，不新增错误框架/store/queue/RPC/retry。已知安全原因与结果确认分开：unconfirmed+cleanup:none 的步骤保持黄色未确认，具体 reason 照显但不证明 native effect 已失败。[VERIFY: runtime-host/modules/organization/src/application/team_runtime_control.rs:438-476] [VERIFY: runtime-host/modules/organization/src/application/team_runtime_control.rs:503-527] [VERIFY: src/stores/teams.ts:1295-1316] [VERIFY: src/pages/Teams/ManualTeamCreationProgress.tsx:49-55] [VERIFY: src/pages/Teams/ManualTeamCreationProgress.tsx:85-115]
 
 ### TeamSkill dependencyPlan 响应
 

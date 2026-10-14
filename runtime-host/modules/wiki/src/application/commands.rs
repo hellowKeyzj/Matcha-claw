@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::owner::source_lifecycle::SourceCleanup;
+
 use crate::call::{CallReply, WikiCallAcceptance, WikiCallDetail};
 use platform::call::CallContext;
 
@@ -16,6 +18,12 @@ use crate::domain::{
     WikiSourceTaskKind, WikiSourceTasksReceipt, WikiSourceWatchConfigInput,
     WikiSourceWatchConfigReceipt, WikiStatusReceipt, WikiWriteInput, WikiWriteReceipt,
 };
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum IngestMode {
+    Configured,
+    SourceOnly,
+}
 
 pub(crate) enum WikiCommand {
     ApplySelection {
@@ -72,9 +80,6 @@ pub(crate) enum WikiCommand {
     CreateMissingPage {
         plan: crate::page_links::MissingPagePlan,
         reply: CallReply<crate::WikiMissingPageReceipt>,
-    },
-    ReloadProjects {
-        reply: CallReply<()>,
     },
     RestoreHistory {
         input: crate::history::WikiRestoreFileHistoryInput,
@@ -175,10 +180,12 @@ pub(crate) enum WikiCommand {
     },
     ParseImportSource {
         input: WikiStagedImportSource,
+        ingest: IngestMode,
         reply: CallReply<WikiParsedImportSource>,
     },
     CommitImportSource {
         input: WikiParsedImportSource,
+        ingest: IngestMode,
         reply: CallReply<WikiImportSourceReceipt>,
     },
     StageImportFolder {
@@ -197,7 +204,7 @@ pub(crate) enum WikiCommand {
     },
     CleanupDeletedWikiPages {
         project_id: String,
-        paths: Vec<String>,
+        paths: Vec<(String, SourceCleanup)>,
         reply: CallReply<()>,
     },
     DeletePage {
@@ -206,12 +213,14 @@ pub(crate) enum WikiCommand {
     },
     DeleteSource {
         input: WikiDeleteSourceInput,
+        cleanup: Option<SourceCleanup>,
         reply: CallReply<WikiDeleteSourceReceipt>,
     },
     MigrateSourcePath {
         project_id: String,
         old_source_relative_path: String,
         new_source_relative_path: String,
+        cleanup: SourceCleanup,
         reply: CallReply<WikiSourceMoveReceipt>,
     },
     ApplyGeneratedPages {
@@ -302,9 +311,9 @@ pub(crate) struct WikiImportFolderPlan {
 pub(crate) struct WikiRefreshSourcesPlan {
     pub project_id: String,
     pub imports: Vec<WikiStagedImportSource>,
-    pub deletions: Vec<String>,
-    pub wiki_deletions: Vec<String>,
-    pub moves: Vec<(String, String)>,
+    pub deletions: Vec<(String, SourceCleanup)>,
+    pub wiki_deletions: Vec<(String, SourceCleanup)>,
+    pub moves: Vec<(String, String, SourceCleanup)>,
     pub skipped: Vec<WikiSourceSkip>,
 }
 
@@ -495,9 +504,6 @@ impl WikiCommand {
             Self::CreateMissingPage { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
-            Self::ReloadProjects { reply } => {
-                let _ = reply.send(Err(error)).await;
-            }
             Self::RestoreHistory { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -667,7 +673,6 @@ impl WikiCommand {
             Self::ExcludeDuplicates { reply, .. } => reply.call.as_ref(),
             Self::ApplySelection { reply, .. } => reply.call.as_ref(),
             Self::CreateMissingPage { reply, .. } => reply.call.as_ref(),
-            Self::ReloadProjects { reply } => reply.call.as_ref(),
             Self::RestoreHistory { reply, .. } => reply.call.as_ref(),
             Self::UpdateHistoryConfig { reply, .. } => reply.call.as_ref(),
             Self::ClearHistory { reply, .. } => reply.call.as_ref(),
@@ -728,7 +733,6 @@ impl WikiCommand {
             Self::ExcludeDuplicates { reply, .. } => reply.call = call,
             Self::ApplySelection { reply, .. } => reply.call = call,
             Self::CreateMissingPage { reply, .. } => reply.call = call,
-            Self::ReloadProjects { reply } => reply.call = call,
             Self::RestoreHistory { reply, .. } => reply.call = call,
             Self::UpdateHistoryConfig { reply, .. } => reply.call = call,
             Self::ClearHistory { reply, .. } => reply.call = call,
@@ -921,8 +925,7 @@ impl WikiCommand {
                 Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
                 None => CommandRoute::Global,
             },
-            Self::ReloadProjects { .. }
-            | Self::CreateProject { .. }
+            Self::CreateProject { .. }
             | Self::OpenProject { .. }
             | Self::SetCurrentProject { .. } => CommandRoute::Global,
             Self::UpdateSourceWatchConfig { input, .. } => match input.project_id.as_deref() {
@@ -1316,6 +1319,7 @@ mod tests {
         assert_eq!(
             WikiCommand::ParseImportSource {
                 input: staged.clone(),
+                ingest: IngestMode::Configured,
                 reply: reply(),
             }
             .route(),
@@ -1328,6 +1332,7 @@ mod tests {
                     text: "alpha".to_owned(),
                     images: Vec::new(),
                 },
+                ingest: IngestMode::Configured,
                 reply: reply(),
             }
             .route(),

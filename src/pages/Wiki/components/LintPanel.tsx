@@ -192,7 +192,7 @@ function LintBody({ projectId, busy, initialModelRef, onOpenFile, onFilesChanged
       const next = await readState(signal);
       if (!next || signal.aborted) return;
       if (next.taskId !== receipt.callId) throw unconfirmed();
-      const call = await waitForCall(receipt, 'wiki', { signal });
+      const call = await waitForCall(receipt, 'wiki', { signal, timeoutMs: null });
       if (signal.aborted) return;
       const finished = await readState(signal);
       if (call.command !== 'lint.run' || call.detail.operation !== 'lint.run' || call.status === 'unknown') throw unconfirmed();
@@ -224,7 +224,7 @@ function LintBody({ projectId, busy, initialModelRef, onOpenFile, onFilesChanged
       setDeleteItem(null);
       const receipt = await (operation === 'lint.fix' ? hostWikiFixLint : operation === 'lint.review' ? hostWikiReviewLint : hostWikiDeleteLint)({ projectId, ids });
       if (signal.aborted) return;
-      const call = await waitForCall(receipt, 'wiki', { signal });
+      const call = await waitForCall(receipt, 'wiki', { signal, timeoutMs: operation === 'lint.fix' ? null : undefined });
       if (signal.aborted) return;
       if (call.command !== operation || call.detail.operation !== operation || call.status === 'unknown') throw unconfirmed();
       if (call.status !== 'succeeded' || call.detail.outcome !== 'completed') throw new Error(text('fixFailed', '修复未完成，请刷新检查结果。'));

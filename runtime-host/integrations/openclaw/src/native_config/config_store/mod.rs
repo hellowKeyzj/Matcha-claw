@@ -88,7 +88,6 @@ impl OpenClawConfigStore {
         self.state_dir.as_path()
     }
 
-    #[cfg(windows)]
     pub(crate) fn ensure_canonical_document(&self) -> Result<(), OpenClawConfigStoreError> {
         self.update_private_document(|document| {
             if super::config_defaults::apply_gateway_startup_defaults(document) {
@@ -104,12 +103,23 @@ impl OpenClawConfigStore {
         &self,
         mutate: impl FnOnce(&mut OpenClawConfigDocument) -> OpenClawConfigMutation,
     ) -> Result<OpenClawConfigUpdate, OpenClawConfigStoreError> {
-        self.update_with(read_private_document, serialize_private_document, mutate)
+        self.update_with(read_private_document, serialize_private_document, |document| {
+            Ok(mutate(document))
+        })
     }
 
     pub(crate) fn update_private_document(
         &self,
         mutate: impl FnOnce(&mut OpenClawConfigDocument) -> OpenClawConfigMutation,
+    ) -> Result<OpenClawConfigUpdate, OpenClawConfigStoreError> {
+        self.update_with(read_private_document, serialize_private_document, |document| {
+            Ok(mutate(document))
+        })
+    }
+
+    pub(crate) fn try_update_private_document(
+        &self,
+        mutate: impl FnOnce(&mut OpenClawConfigDocument) -> Result<OpenClawConfigMutation, OpenClawConfigStoreError>,
     ) -> Result<OpenClawConfigUpdate, OpenClawConfigStoreError> {
         self.update_with(read_private_document, serialize_private_document, mutate)
     }
@@ -122,7 +132,7 @@ impl OpenClawConfigStore {
         serialize: impl FnOnce(
             &OpenClawConfigDocument,
         ) -> Result<Zeroizing<Vec<u8>>, OpenClawConfigStoreError>,
-        mutate: impl FnOnce(&mut OpenClawConfigDocument) -> OpenClawConfigMutation,
+        mutate: impl FnOnce(&mut OpenClawConfigDocument) -> Result<OpenClawConfigMutation, OpenClawConfigStoreError>,
     ) -> Result<OpenClawConfigUpdate, OpenClawConfigStoreError> {
         if WRITER_ACTIVE.with(Cell::get) {
             return Err(OpenClawConfigStoreError::ReentrantUpdate);
@@ -137,7 +147,7 @@ impl OpenClawConfigStore {
             .open()
             .map_err(|_| OpenClawConfigStoreError::StateDirectoryRejected)?;
         let mut document = read(&state_dir)?;
-        let mutation = mutate(&mut document);
+        let mutation = mutate(&mut document)?;
         if mutation.changed {
             let bytes = serialize(&document)?;
             persist::replace(&state_dir, &bytes).map_err(OpenClawConfigStoreError::from)?;

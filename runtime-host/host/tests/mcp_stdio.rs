@@ -435,7 +435,7 @@ fn rejects_malformed_framing_and_unknown_tool_arguments_without_leaking_input() 
 
 #[test]
 fn artifact_contains_no_store_opening_or_static_signing_material() {
-    let source = include_str!("../src/mcp.rs");
+    let source = include_str!("../src/mcp/stdio.rs");
     for forbidden in [
         "open_organization_store",
         "OrganizationStore",
@@ -449,7 +449,7 @@ fn artifact_contains_no_store_opening_or_static_signing_material() {
         );
     }
     assert!(source.contains("ToolCatalog::new"));
-    assert!(source.contains("runtime_host::team_mcp::team_provider"));
+    assert!(source.contains("TeamRunMcpFacade::new"));
 }
 
 #[test]

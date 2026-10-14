@@ -22,11 +22,17 @@ pub use crate::gateway::wire::agents::{
 };
 pub(crate) struct OpenClawAgents {
     gateway: Arc<GatewayClient>,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl OpenClawAgents {
     pub(crate) fn new(gateway: Arc<GatewayClient>) -> Self {
-        Self { gateway }
+        Self { gateway, cancellation: tokio_util::sync::CancellationToken::new() }
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     pub(crate) async fn list(&self) -> Result<AgentsList, AgentsReadFailure> {
@@ -159,10 +165,10 @@ impl OpenClawAgents {
         _methods: &[&str],
         decode: impl FnOnce(GatewayResponse) -> Result<T, wire::WireError>,
     ) -> Result<T, AgentsReadFailure> {
-        match self.gateway.rpc_query(request).await {
+        match self.gateway.rpc_query_cancellable(request, &self.cancellation).await {
             Ok(GatewayResponse::Failure { .. }) => Err(AgentsReadFailure::Rejected),
             Ok(response) => decode(response).map_err(|_| AgentsReadFailure::Protocol),
-            Err(error) => Err(map_read_connection_failure(error)),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -200,6 +206,8 @@ pub enum AgentsReadFailure {
     Unavailable,
     Rejected,
     Protocol,
+    Deadline,
+    Authentication,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -216,10 +224,17 @@ pub enum AgentsMutationOutcome<T> {
     OutcomeUnknown,
 }
 
-fn map_read_connection_failure(error: GatewayClientError) -> AgentsReadFailure {
-    match error {
-        GatewayClientError::Protocol | GatewayClientError::RpcFailed => AgentsReadFailure::Protocol,
-        _ => AgentsReadFailure::Unavailable,
+impl From<GatewayClientError> for AgentsReadFailure {
+    fn from(error: GatewayClientError) -> Self {
+        match error {
+            GatewayClientError::Protocol | GatewayClientError::RpcFailed => Self::Protocol,
+            GatewayClientError::UpgradeDeadline
+            | GatewayClientError::ChallengeDeadline
+            | GatewayClientError::ConnectDeadline
+            | GatewayClientError::RpcDeadline => Self::Deadline,
+            GatewayClientError::Authentication => Self::Authentication,
+            _ => Self::Unavailable,
+        }
     }
 }
 

@@ -31,6 +31,8 @@
         "create": "最初のタスクを作成"
     },
     "card": {
+        "systemManaged": "システム管理",
+        "systemManagedDescription": "システムタスクはグローバル設定で管理されます。",
         "runNow": "今すぐ実行",
         "deleteConfirm": "このタスクを削除してもよろしいですか？",
         "last": "前回",

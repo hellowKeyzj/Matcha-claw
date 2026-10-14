@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use serde::Serialize;
@@ -42,6 +42,10 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("usage"),
         vec![RouteDescriptor::bound(
             "usage.loopback",
+            &[
+                RoutePath::ExactWithQuery(RECENT_PATH),
+                RoutePath::ExactWithQuery(SESSION_TIMESERIES_PATH),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

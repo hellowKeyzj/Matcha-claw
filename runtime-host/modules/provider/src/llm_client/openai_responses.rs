@@ -59,10 +59,10 @@ pub async fn stream_generate(
         "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
     }));
     if !response.status().is_success() {
-        return Err(LlmClientError::Protocol(format!(
-            "OpenAI Responses stream failed with HTTP {}",
-            response.status()
-        )));
+        return Err(LlmClientError::HttpStatus {
+            status: response.status().as_u16(),
+            message: format!("OpenAI Responses stream failed with HTTP {}", response.status()),
+        });
     }
     super::consume_sse(response, sink, parse_openai_responses_sse_chunk).await
 }
@@ -184,7 +184,10 @@ async fn send_text(
         .ok()
         .and_then(|payload| parse_openai_responses_error(&payload))
         .unwrap_or_else(|| format!("OpenAI Responses request failed with HTTP {status}"));
-    Err(LlmClientError::Protocol(message))
+    Err(LlmClientError::HttpStatus {
+        status: status.as_u16(),
+        message,
+    })
 }
 
 fn openai_responses_request(request: LlmRequest, stream: bool) -> OpenAiResponsesRequest {

@@ -25,7 +25,7 @@
     "configured": "已配置频道",
     "configuredDesc": "管理已完成配置的频道",
     "configuredBadge": "已配置",
-    "deleteConfirm": "确定要删除此频道吗？",
+    "deleteConfirm": "确定要删除此渠道及其所有账号吗？",
     "showAll": "显示全部",
     "pluginBadge": "插件",
     "pairing": {

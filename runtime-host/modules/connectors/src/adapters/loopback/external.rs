@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::delivery::{
     CatalogOutcome, ConnectorObservation, ConnectorProjectionEffect, ConnectorReadModel,
     GetOutcome, ListOutcome, MutationOutcome, SessionIdentity, SessionMcpServerEnabledOutcome,
-    SessionMcpServerEnabledTarget, SessionStatusTarget,
+    SessionMcpServerEnabledTarget, SessionStatusTarget, valid_connector_id,
 };
 
 pub(crate) const ENDPOINT: &str = "/api/external-connectors";
@@ -315,7 +315,7 @@ impl Request {
                 .is_valid(),
                 (Input::Probe { connector_id }, "probe")
                 | (Input::Get { connector_id }, "get")
-                | (Input::Remove { connector_id }, "remove") => valid_id(connector_id),
+                | (Input::Remove { connector_id }, "remove") => valid_connector_id(connector_id),
                 (Input::Upsert { connector }, "upsert") => {
                     connector.validate().is_ok() && !is_private_system_runtime_connector(connector)
                 }
@@ -366,10 +366,6 @@ fn operation_name(operation: &str) -> Option<&'static str> {
         "externalConnectors.remove" => Some("remove"),
         _ => None,
     }
-}
-
-fn valid_id(value: &str) -> bool {
-    !value.trim().is_empty() && value.len() <= 128
 }
 
 fn is_private_system_runtime_connector(connector: &Connector) -> bool {

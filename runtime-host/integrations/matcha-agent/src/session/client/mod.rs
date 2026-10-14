@@ -15,8 +15,12 @@ use std::{
     time::Duration,
 };
 
-use platform::endpoint::runtime_address::{RuntimeEndpoint, RuntimeScope, SessionIdentity};
+use platform::{
+    endpoint::runtime_address::{RuntimeEndpoint, RuntimeScope, SessionIdentity},
+    exchange::InvocationOutcome,
+};
 use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::{lifecycle::secret::Secret, protocol::wire::JsonRpcId, session::model::SessionId};
 
@@ -127,22 +131,38 @@ impl AppServerClient {
         secret: &Secret,
         events: mpsc::Sender<SessionEventUpdate>,
     ) -> Result<(Self, InitializeResult), AppServerClientError> {
-        Self::connect_and_initialize_with_summary(endpoint, secret, Some(events)).await
+        match Self::connect_and_initialize_cancellable(endpoint, secret, Some(events), &CancellationToken::new()).await {
+            InvocationOutcome::Succeeded(initialized) => Ok(initialized),
+            InvocationOutcome::TargetRejected(error) => Err(error),
+            InvocationOutcome::Cancelled | InvocationOutcome::Unknown => Err(AppServerClientError::ConnectionClosed),
+        }
     }
 
     pub(crate) async fn connect_and_initialize_raw_only(
         endpoint: AppServerEndpoint,
         secret: &Secret,
     ) -> Result<(Self, InitializeResult), AppServerClientError> {
-        Self::connect_and_initialize_with_summary(endpoint, secret, None).await
+        match Self::connect_and_initialize_cancellable(endpoint, secret, None, &CancellationToken::new()).await {
+            InvocationOutcome::Succeeded(initialized) => Ok(initialized),
+            InvocationOutcome::TargetRejected(error) => Err(error),
+            InvocationOutcome::Cancelled | InvocationOutcome::Unknown => Err(AppServerClientError::ConnectionClosed),
+        }
     }
 
-    async fn connect_and_initialize_with_summary(
+    pub(crate) async fn connect_and_initialize_cancellable(
         endpoint: AppServerEndpoint,
         secret: &Secret,
         updates: Option<mpsc::Sender<SessionEventUpdate>>,
-    ) -> Result<(Self, InitializeResult), AppServerClientError> {
-        let socket = websocket::connect(endpoint, secret).await?;
+        cancellation: &CancellationToken,
+    ) -> InvocationOutcome<(Self, InitializeResult), AppServerClientError> {
+        let socket = match tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return InvocationOutcome::Cancelled,
+            socket = websocket::connect(endpoint, secret) => socket,
+        } {
+            Ok(socket) => socket,
+            Err(error) => return InvocationOutcome::TargetRejected(error),
+        };
         let ingress = EventIngress::new(updates);
         let client = Self {
             endpoint,
@@ -150,17 +170,37 @@ impl AppServerClient {
             ingress,
         };
 
-        let request = initialize_request(next_json_rpc_id()?, InitializeParams::new(CLIENT_NAME))
-            .map_err(|_| AppServerClientError::Protocol)?;
-        let expected_id = request.id.clone();
-        let response = client
-            .connection
-            .exchange(request, REQUEST_DEADLINE)
-            .await
-            .map_err(AppServerClientError::from_exchange)?;
-        let initialized = decode_initialize_result(&expected_id, response)
-            .map_err(|_| AppServerClientError::InitializeFailed)?;
-        Ok((client, initialized))
+        let initialized = async {
+            let id = match next_json_rpc_id() {
+                Ok(id) => id,
+                Err(error) => return InvocationOutcome::TargetRejected(error),
+            };
+            let request = match initialize_request(id, InitializeParams::new(CLIENT_NAME)) {
+                Ok(request) => request,
+                Err(_) => return InvocationOutcome::TargetRejected(AppServerClientError::Protocol),
+            };
+            let expected_id = request.id.clone();
+            let response = match client
+                .connection
+                .exchange_cancellable(request, REQUEST_DEADLINE, cancellation)
+                .await
+            {
+                Ok(response) => response,
+                // Initialization cannot deliver the subsequent session command.
+                Err(failure) if failure.was_cancelled() => return InvocationOutcome::Cancelled,
+                Err(failure) => return InvocationOutcome::TargetRejected(AppServerClientError::from_exchange(failure)),
+            };
+            match decode_initialize_result(&expected_id, response) {
+                Ok(initialized) => InvocationOutcome::Succeeded(initialized),
+                Err(_) => InvocationOutcome::TargetRejected(AppServerClientError::InitializeFailed),
+            }
+        }.await;
+        match initialized {
+            InvocationOutcome::Succeeded(initialized) => InvocationOutcome::Succeeded((client, initialized)),
+            InvocationOutcome::TargetRejected(error) => client.finish_with_cleanup(InvocationOutcome::TargetRejected(error)).await,
+            InvocationOutcome::Cancelled => client.finish_with_cleanup(InvocationOutcome::Cancelled).await,
+            InvocationOutcome::Unknown => client.finish_with_cleanup(InvocationOutcome::Unknown).await,
+        }
     }
 
     pub fn is_closed(&self) -> bool {

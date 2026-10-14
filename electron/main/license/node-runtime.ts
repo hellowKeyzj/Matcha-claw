@@ -259,8 +259,11 @@ async function writeEncryptedLicenseKey(
     // ignore backup failures
   }
 
-  await rm(filePath, { force: true });
-  await rename(tmpFilePath, filePath);
+  try {
+    await rename(tmpFilePath, filePath);
+  } finally {
+    await rm(tmpFilePath, { force: true });
+  }
 }
 
 async function removeEncryptedLicenseFile(filePath: string): Promise<void> {

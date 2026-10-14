@@ -29,7 +29,6 @@ use crate::{
     driver::MatchaRuntimeDriver,
     peer::MatchaPeerSessionHandle,
     session::{
-        canonical::CanonicalSessionAssembler,
         history::HistoryResult,
         hydration::{
             HydratedMessageRole, HydrationSnapshot, HydrationWindowMode, HydrationWindowRequest,

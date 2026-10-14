@@ -3,7 +3,7 @@ use platform::{
     endpoint::runtime_address::{RuntimeEndpoint, SessionIdentity},
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan, RouteOutcome, StreamResponse,
+        RouteFuture, RouteHeadPlan, RouteOutcome, RoutePath, StreamResponse,
     },
 };
 
@@ -47,6 +47,41 @@ const DEFAULT_REQUEST_BYTES: usize = 64 * 1024;
 const SESSIONS_REQUEST_BYTES: usize =
     (20_usize * 1024 * 1024).div_ceil(3) * 4 + 64 * 1024 + 128 * 1024;
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
+const CREATE_PATH: &str = "/api/sessions/create";
+const DELETE_PATH: &str = "/api/sessions/delete";
+const RENAME_PATH: &str = "/api/sessions/rename";
+const PERMISSION_PATH: &str = "/api/sessions/permission";
+const SEND_PATH: &str = "/api/sessions/send";
+const ABORT_PATH: &str = "/api/sessions/abort";
+const GOAL_PATH: &str = "/api/sessions/goal";
+const OBSERVE_PATH: &str = "/api/sessions/observe";
+const RELEASE_PATH: &str = "/api/sessions/release";
+const APPROVAL_LIST_PATH: &str = "/api/sessions/approvals/list";
+const APPROVAL_RESPOND_PATH: &str = "/api/sessions/approvals/respond";
+const MODEL_PATH: &str = "/api/sessions/model";
+const LOAD_PATH: &str = "/api/sessions/load";
+const WINDOW_PATH: &str = "/api/sessions/window";
+const CONTENT_PATH: &str = "/api/sessions/content";
+const HISTORY_PATH: &str = "/api/sessions/history";
+const PATHS: &[RoutePath] = &[
+    RoutePath::ExactWithQuery(CREATE_PATH),
+    RoutePath::ExactWithQuery(DELETE_PATH),
+    RoutePath::ExactWithQuery(RENAME_PATH),
+    RoutePath::ExactWithQuery(PERMISSION_PATH),
+    RoutePath::ExactWithQuery(SEND_PATH),
+    RoutePath::ExactWithQuery(ABORT_PATH),
+    RoutePath::ExactWithQuery(GOAL_PATH),
+    RoutePath::ExactWithQuery(OBSERVE_PATH),
+    RoutePath::ExactWithQuery(RELEASE_PATH),
+    RoutePath::ExactWithQuery(APPROVAL_LIST_PATH),
+    RoutePath::ExactWithQuery(APPROVAL_RESPOND_PATH),
+    RoutePath::ExactWithQuery(MODEL_PATH),
+    RoutePath::ExactWithQuery(LOAD_PATH),
+    RoutePath::ExactWithQuery(WINDOW_PATH),
+    RoutePath::ExactWithQuery(CONTENT_PATH),
+    RoutePath::ExactWithQuery(HISTORY_PATH),
+    RoutePath::ExactWithQuery(AUTHORIZATION_ENDPOINT),
+];
 
 #[derive(Clone)]
 pub struct Dependencies {
@@ -76,13 +111,16 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
     ModuleDescriptor::new(
         ModuleId::new("sessions"),
         vec![
-            RouteDescriptor::bound("sessions.loopback", head_plan, {
+            RouteDescriptor::bound("sessions.loopback", PATHS, head_plan, {
                 let dependencies = dependencies.clone();
                 move |request| route(dependencies.clone(), request)
             }),
-            RouteDescriptor::bound("sessions.events", events::head_plan, move |request| {
-                route_events(dependencies.clone(), request)
-            }),
+            RouteDescriptor::bound(
+                "sessions.events",
+                events::PATHS,
+                events::head_plan,
+                move |request| route_events(dependencies.clone(), request),
+            ),
         ],
     )
 }
@@ -112,10 +150,10 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
-        if request.method() == "POST" && matches!(request.path(), "/api/sessions/observe" | "/api/sessions/release") {
+        if request.method() == "POST" && matches!(request.path(), OBSERVE_PATH | RELEASE_PATH) {
             return observation::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
         }
-        if request.method() == "POST" && request.path() == "/api/sessions/goal" {
+        if request.method() == "POST" && request.path() == GOAL_PATH {
             return goal::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
         }
         let response = handler::handle_loopback(
@@ -176,23 +214,23 @@ fn timeout_response() -> Response {
 fn is_session_route(path: &str) -> bool {
     matches!(
         path,
-        "/api/sessions/create"
-            | "/api/sessions/delete"
-            | "/api/sessions/rename"
-            | "/api/sessions/permission"
-            | "/api/sessions/send"
-            | "/api/sessions/abort"
-            | "/api/sessions/goal"
-            | "/api/sessions/observe"
-            | "/api/sessions/release"
-            | "/api/sessions/approvals/list"
-            | "/api/sessions/approvals/respond"
-            | "/api/sessions/model"
-            | "/api/sessions/load"
-            | "/api/sessions/window"
-            | "/api/sessions/content"
-            | "/api/sessions/history"
-            | "/api/sessions"
+        CREATE_PATH
+            | DELETE_PATH
+            | RENAME_PATH
+            | PERMISSION_PATH
+            | SEND_PATH
+            | ABORT_PATH
+            | GOAL_PATH
+            | OBSERVE_PATH
+            | RELEASE_PATH
+            | APPROVAL_LIST_PATH
+            | APPROVAL_RESPOND_PATH
+            | MODEL_PATH
+            | LOAD_PATH
+            | WINDOW_PATH
+            | CONTENT_PATH
+            | HISTORY_PATH
+            | AUTHORIZATION_ENDPOINT
     )
 }
 

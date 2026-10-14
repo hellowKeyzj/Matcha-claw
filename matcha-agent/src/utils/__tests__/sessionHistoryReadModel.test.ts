@@ -4,8 +4,7 @@ import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import {
   listSessionHistorySummaries,
-  loadSessionHistorySummary,
-  readSessionTranscriptReplayLines,
+  createSessionHistoryReader,
 } from '../sessionHistoryReadModel'
 
 const SESSION_ID = '10000000-0000-4000-8000-000000000001'
@@ -19,8 +18,10 @@ const TOOL_CALL_ID = 'toolu_01HISTORYSOURCE'
 let tempHome = ''
 let configDir = ''
 let previousConfigDir: string | undefined
+let historyReader = createSessionHistoryReader()
 
 beforeEach(async () => {
+  historyReader = createSessionHistoryReader()
   previousConfigDir = process.env.CLAUDE_CONFIG_DIR
   tempHome = await mkdtemp(join(tmpdir(), 'session-history-read-model-'))
   configDir = join(tempHome, '.claude')
@@ -30,6 +31,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  historyReader.close()
   if (previousConfigDir === undefined) {
     delete process.env.CLAUDE_CONFIG_DIR
   } else {
@@ -55,7 +57,7 @@ type ReplayLine = {
   }
 }
 
-describe('readSessionTranscriptReplayLines', () => {
+describe('SessionHistoryReader', () => {
   test('replays the recovered Claude JSONL parent chain and preserves tool results', async () => {
     const sessionFile = join(
       configDir,
@@ -195,7 +197,10 @@ describe('readSessionTranscriptReplayLines', () => {
       `${transcriptEntries.map(entry => JSON.stringify(entry)).join('\n')}\n`,
     )
 
-    const replayLines = await readSessionTranscriptReplayLines(SESSION_ID, 4)
+    const { lines: replayLines } = await historyReader.transcript({
+      sessionId: SESSION_ID,
+      limit: 4,
+    })
     const replay = replayLines.map(line => JSON.parse(line) as ReplayLine)
     const expectedChain = [
       { id: HUMAN_MESSAGE_ID, parentId: undefined, role: 'user' },
@@ -348,7 +353,10 @@ describe('readSessionTranscriptReplayLines', () => {
       `${transcriptEntries.map(entry => JSON.stringify(entry)).join('\n')}\n`,
     )
 
-    const replayLines = await readSessionTranscriptReplayLines(sessionId, 10)
+    const { lines: replayLines } = await historyReader.transcript({
+      sessionId,
+      limit: 10,
+    })
     const replay = replayLines.map(line => JSON.parse(line) as ReplayLine)
 
     expect(replay.map(line => line.id)).toEqual([
@@ -450,13 +458,11 @@ describe('readSessionTranscriptReplayLines', () => {
       summaries.find(summary => summary.sessionId === metadataSessionId),
     ).not.toMatchObject({ hasConversation: true })
 
-    await expect(
-      loadSessionHistorySummary(realUserSessionId),
-    ).resolves.toMatchObject({
+    await expect(historyReader.load(realUserSessionId)).resolves.toMatchObject({
       hasConversation: true,
     })
     await expect(
-      loadSessionHistorySummary(toolResultSessionId),
+      historyReader.load(toolResultSessionId),
     ).resolves.not.toMatchObject({ hasConversation: true })
   })
 })

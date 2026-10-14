@@ -9,7 +9,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use serde_json::Value;
@@ -57,6 +57,10 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("diagnostics"),
         vec![RouteDescriptor::bound(
             "diagnostics.loopback",
+            &[
+                RoutePath::ExactWithQuery(ARCHIVE_PATH),
+                RoutePath::ExactWithQuery(DOWNLOAD_PATH),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],

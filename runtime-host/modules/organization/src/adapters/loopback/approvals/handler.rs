@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use super::{DecodeError, Delivery, decode, read};
 
 const AUTHORIZATION_HEADER: &str = "authorization";
-const ROUTE: &str = "/api/team/approvals";
+pub(crate) const ROUTE: &str = "/api/team/approvals";
 const BEARER_PREFIX: &str = "Bearer ";
 
 pub(crate) async fn handle_loopback(

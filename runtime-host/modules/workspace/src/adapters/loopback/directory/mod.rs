@@ -12,7 +12,7 @@ const OPERATION_ID: &str = "files.listDir";
 const RUNTIME_KIND: &str = "native-runtime";
 const SCOPE_KIND: &str = "session";
 const TARGET_KIND: &str = "workspace-file";
-const AUTHORIZATION_ENDPOINT: &str = "/api/workspace/files/list-dir";
+pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/workspace/files/list-dir";
 const AUTHORIZATION_SCOPE: &str = "workspace-files:list";
 const AUTHORIZATION_SUBJECT: &str = "workspace-directory";
 

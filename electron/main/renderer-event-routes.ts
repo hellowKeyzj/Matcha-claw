@@ -19,6 +19,8 @@ type ObservationLease = {
   nativeLeaseId: string;
   pending: number;
   acquired: boolean;
+  revoked: boolean;
+  releasing?: Promise<void>;
 };
 type Observation = {
   lease: ObservationLease;
@@ -42,7 +44,6 @@ export class RendererSessionObservationRegistry {
   private readonly operations = new Set<Promise<unknown>>();
   private readonly releases = new Set<Promise<void>>();
   private closed = false;
-  private releaseFailed = false;
   private closing?: Promise<void>;
 
   attach(contents: WebContents): void {
@@ -81,11 +82,11 @@ export class RendererSessionObservationRegistry {
     this.requirePage(page, identity);
     let lease = [...this.observations].find((entry) => entry.leaseId === leaseId);
     if (lease) {
-      if (lease.page !== page || !sameSessionIdentity(lease.identity, identity)) {
+      if (lease.page !== page || !sameSessionIdentity(lease.identity, identity) || lease.revoked) {
         throw new Error('Session observation lease is not authorized');
       }
     } else {
-      lease = { page, identity, leaseId, nativeLeaseId: randomBytes(24).toString('base64url'), pending: 0, acquired: false };
+      lease = { page, identity, leaseId, nativeLeaseId: randomBytes(24).toString('base64url'), pending: 0, acquired: false, revoked: false };
       this.observations.add(lease);
     }
     lease.pending += 1;
@@ -94,7 +95,7 @@ export class RendererSessionObservationRegistry {
 
   completeObservation(entry: Observation, nativeLeaseId: string): boolean {
     const { lease } = entry;
-    if (entry.settled || nativeLeaseId !== entry.nativeLeaseId || !this.observations.has(lease) || !this.isCurrent(lease.page)) return false;
+    if (entry.settled || nativeLeaseId !== entry.nativeLeaseId || lease.revoked || !this.observations.has(lease) || !this.isCurrent(lease.page)) return false;
     entry.settled = true;
     lease.pending -= 1;
     lease.acquired = true;
@@ -108,9 +109,9 @@ export class RendererSessionObservationRegistry {
   async rollbackObservation(entry: Observation): Promise<void> {
     const { lease } = entry;
     if (!entry.settled) { entry.settled = true; lease.pending -= 1; }
-    if (this.observations.has(lease) && (lease.acquired || lease.pending > 0)) return;
-    this.observations.delete(lease);
-    await this.releaseLease(lease.identity, lease.nativeLeaseId);
+    if (this.observations.has(lease) && !lease.revoked && (lease.acquired || lease.pending > 0)) return;
+    if (lease.releasing) await lease.releasing.catch(() => undefined);
+    await this.releaseObservationLease(lease);
   }
 
   async releaseObservation(page: SessionPage | undefined, identity: SessionIdentity, leaseId: string): Promise<boolean> {
@@ -118,8 +119,7 @@ export class RendererSessionObservationRegistry {
     const entry = [...this.observations].find((candidate) => candidate.page === page
       && candidate.leaseId === leaseId && sameSessionIdentity(candidate.identity, identity));
     if (!entry) return false;
-    this.observations.delete(entry);
-    await this.releaseLease(entry.identity, entry.nativeLeaseId);
+    await this.releaseObservationLease(entry);
     return true;
   }
 
@@ -151,7 +151,7 @@ export class RendererSessionObservationRegistry {
   retainUnknownGoalSend(entry: SendDemand): void {
     if (!this.sends.has(entry)) return;
     entry.goalOutcomeUnknown = true;
-    if ([...this.observations].some((lease) => lease.acquired && lease.page === entry.page
+    if ([...this.observations].some((lease) => !lease.revoked && lease.acquired && lease.page === entry.page
       && sameSessionIdentity(lease.identity, entry.identity))) this.sends.delete(entry);
   }
 
@@ -199,7 +199,7 @@ export class RendererSessionObservationRegistry {
 
   active(): readonly Readonly<{ page: SessionPage; identity: SessionIdentity }>[] {
     const entries = new Map<string, { page: SessionPage; identity: SessionIdentity }>();
-    for (const { page, identity } of [...this.observations, ...this.sends]) {
+    for (const { page, identity } of [...[...this.observations].filter((lease) => !lease.revoked), ...this.sends]) {
       if (this.isCurrent(page)) entries.set(JSON.stringify([page.token, identity.endpoint.kind, identity.endpoint.runtimeAdapterId,
         identity.endpoint.runtimeInstanceId, identity.agentId, identity.sessionKey]), { page, identity });
     }
@@ -208,8 +208,11 @@ export class RendererSessionObservationRegistry {
 
   async resync(observe: (identity: SessionIdentity, leaseId: string) => Promise<SessionObservationResult<{ epoch: number; seq: number; runtime: unknown }> | null>): Promise<void> {
     if (this.closed) return;
+    for (const lease of this.observations) {
+      if (lease.revoked) void this.releaseObservationLease(lease).catch(() => undefined);
+    }
     await this.trackOperation(() => Promise.allSettled(this.active().map(async ({ page, identity }) => {
-      const entry = [...this.observations].find((candidate) => candidate.page === page && sameSessionIdentity(candidate.identity, identity));
+      const entry = [...this.observations].find((candidate) => !candidate.revoked && candidate.page === page && sameSessionIdentity(candidate.identity, identity));
       if (entry && !entry.acquired) {
         if (isSessionTraceEnabled()) logSessionTrace('electron.session.route.resync.drop', 'session-route-boundary', {
           identity: summarizeSessionIdentity(identity), pageHash: summarizeIdentifier(page.token).hash, reason: 'observation-pending',
@@ -262,8 +265,10 @@ export class RendererSessionObservationRegistry {
           }
         } else trace('electron.session.route.resync.drop', () => ({ epoch: result.view.epoch, seq: result.view.seq, reason: 'no-active-demand' }));
       } finally {
-        if (!attempt) await this.releaseLease(identity, leaseId);
-        else if (!completed) await this.rollbackObservation(attempt);
+        if (!attempt) {
+          const lease = { page, identity, leaseId, nativeLeaseId: leaseId, pending: 0, acquired: false, revoked: true };
+          await this.releaseObservationLease(lease);
+        } else if (!completed) await this.rollbackObservation(attempt);
       }
     }))).then(() => undefined);
   }
@@ -275,8 +280,9 @@ export class RendererSessionObservationRegistry {
     this.closing = (async () => {
       await Promise.allSettled([...this.operations]);
       while (this.releases.size > 0) await Promise.allSettled([...this.releases]);
-      if (this.releaseFailed) throw new Error('Session observation release failed');
-    })();
+      await Promise.allSettled([...this.observations].map((lease) => this.releaseObservationLease(lease)));
+      if (this.observations.size > 0) throw new Error('Session observation release failed');
+    })().catch((error) => { this.closing = undefined; throw error; });
     return this.closing;
   }
 
@@ -299,13 +305,25 @@ export class RendererSessionObservationRegistry {
     this.pages.delete(page.token);
     for (const entry of this.observations) {
       if (entry.page === page) {
-        this.observations.delete(entry);
-        void this.releaseLease(entry.identity, entry.nativeLeaseId).catch(() => undefined);
+        void this.releaseObservationLease(entry).catch(() => undefined);
       }
     }
     for (const entry of this.sends) {
       if (entry.page === page) this.sends.delete(entry);
     }
+  }
+
+  private releaseObservationLease(lease: ObservationLease): Promise<void> {
+    lease.revoked = true;
+    lease.acquired = false;
+    this.observations.add(lease);
+    if (lease.releasing) return lease.releasing;
+    const pending = this.releaseLease(lease.identity, lease.nativeLeaseId).then(() => {
+      if (lease.pending === 0) this.observations.delete(lease);
+    });
+    lease.releasing = pending;
+    void pending.then(() => { lease.releasing = undefined; }, () => { lease.releasing = undefined; });
+    return pending;
   }
 
   private releaseLease(identity: SessionIdentity, leaseId: string): Promise<void> {
@@ -316,7 +334,6 @@ export class RendererSessionObservationRegistry {
     this.releases.add(pending);
     void pending.then(() => this.releases.delete(pending), () => {
       this.releases.delete(pending);
-      this.releaseFailed = true;
       logger.warn('Session observation native lease release failed');
     });
     return pending;

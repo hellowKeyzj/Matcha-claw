@@ -4,7 +4,7 @@ use platform::{
     capability::CapabilityDecisionVerifier,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
-        RouteFuture, RouteHeadPlan,
+        RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
 use tokio::sync::Mutex;
@@ -45,6 +45,13 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
         ModuleId::new("workspace"),
         vec![RouteDescriptor::bound(
             "workspace.loopback",
+            &[
+                RoutePath::ExactWithQuery(text::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(binary::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(directory::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(write::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(media::AUTHORIZATION_ENDPOINT),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],
@@ -54,11 +61,11 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
     let max_bytes = match path {
-        "/api/workspace/files/write-text" => WORKSPACE_WRITE_REQUEST_BYTES,
-        "/api/workspace/media" => WORKSPACE_MEDIA_REQUEST_BYTES,
-        "/api/workspace/files/read-text"
-        | "/api/workspace/files/binary"
-        | "/api/workspace/files/list-dir" => DEFAULT_REQUEST_BYTES,
+        write::AUTHORIZATION_ENDPOINT => WORKSPACE_WRITE_REQUEST_BYTES,
+        media::AUTHORIZATION_ENDPOINT => WORKSPACE_MEDIA_REQUEST_BYTES,
+        text::AUTHORIZATION_ENDPOINT
+        | binary::AUTHORIZATION_ENDPOINT
+        | directory::AUTHORIZATION_ENDPOINT => DEFAULT_REQUEST_BYTES,
         _ => return None,
     };
     Some(RouteHeadPlan::new(
@@ -71,15 +78,15 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
         (match pathname(request.path()) {
-            "/api/workspace/files/read-text" => text::handler::handle(request, dependencies).await,
-            "/api/workspace/files/binary" => binary::handler::handle(request, dependencies).await,
-            "/api/workspace/files/list-dir" => {
+            text::AUTHORIZATION_ENDPOINT => text::handler::handle(request, dependencies).await,
+            binary::AUTHORIZATION_ENDPOINT => binary::handler::handle(request, dependencies).await,
+            directory::AUTHORIZATION_ENDPOINT => {
                 directory::handler::handle(request, dependencies).await
             }
-            "/api/workspace/files/write-text" => {
+            write::AUTHORIZATION_ENDPOINT => {
                 write::handler::handle(request, dependencies).await
             }
-            "/api/workspace/media" => media::handler::handle(request, dependencies).await,
+            media::AUTHORIZATION_ENDPOINT => media::handler::handle(request, dependencies).await,
             _ => Response::not_found(),
         })
         .into()

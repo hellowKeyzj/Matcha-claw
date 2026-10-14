@@ -202,6 +202,142 @@ pub struct Activity {
     pub(super) phase: ActivityPhase,
     pub(super) completed_attempts: u32,
     pub(super) next_claim_generation: u64,
+    pub(super) settlement_proof: Option<SettlementProof>,
+    pub(super) native_terminal_claim: Option<ActivityClaim>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SettlementProof {
+    pub(crate) claim: ActivityClaim,
+    pub(crate) receipt: crate::DeliveryReceipt,
+    pub(crate) settlement: Option<super::ActivitySettlement>,
+    pub(crate) delivery_outcome: crate::DeliveryResolution,
+    pub(crate) activity_outcome: Option<super::ActivitySettlementOutcome>,
+}
+
+impl SettlementProof {
+    pub(crate) fn valid_for(&self, activity: &Activity) -> bool {
+        let claim = &self.claim;
+        if claim.activity_id() != &activity.facts.activity_id
+            || claim.attempt() == 0
+            || claim.attempt() > activity.facts.max_attempts
+            || claim.generation() != u64::from(claim.attempt())
+            || claim.generation().checked_add(1) != Some(activity.next_claim_generation)
+            || activity.native_terminal_claim.as_ref().is_some_and(|stored| stored != claim)
+        {
+            return false;
+        }
+        let unsettled = (self.settlement.is_none()
+            && (activity.active_claim() == Some(claim)
+                || matches!(activity.phase(), ActivityPhase::Cancelled { .. })))
+            || (matches!(self.receipt, crate::DeliveryReceipt::OutcomeUnknown { .. })
+                && activity.native_terminal_claim.as_ref() == Some(claim)
+                && matches!(activity.phase(), ActivityPhase::Cancelled { .. }));
+        if activity.active_claim().is_some() && activity.active_claim() != Some(claim) {
+            return false;
+        }
+        if activity.completed_attempts != claim.attempt()
+            && !(unsettled && activity.completed_attempts == claim.attempt() - 1)
+        {
+            return false;
+        }
+        use crate::{DeliveryReceipt as R, DeliveryResolution as D};
+        let delivery_outcome = match &self.receipt {
+            R::Accepted { accepted_at, .. } if *accepted_at == claim.claimed_at() => D::Delivered,
+            R::Rejected { failure, observed_at } if *observed_at == claim.claimed_at() => {
+                if failure.is_retryable() && claim.attempt() < activity.facts.max_attempts {
+                    D::RetryScheduled {
+                        retry_at: crate::run::delivery::delivery_retry_at(*observed_at),
+                    }
+                } else {
+                    D::Failed
+                }
+            }
+            R::OutcomeUnknown { observed_at } if *observed_at == claim.claimed_at() => {
+                D::OutcomeUnknown
+            }
+            _ => return false,
+        };
+        use super::ActivitySettlement as S;
+        let matching_settlement = match (&self.receipt, &self.settlement) {
+            (R::Accepted { .. }, None) => true,
+            (
+                R::Rejected {
+                    failure: crate::DeliveryFailure::Unavailable,
+                    observed_at,
+                },
+                Some(S::RetryScheduled {
+                    retry_at,
+                    observed_at: settled_at,
+                    failure: ActivityFailure::Unavailable,
+                }),
+            )
+            | (
+                R::Rejected {
+                    failure: crate::DeliveryFailure::TimedOut,
+                    observed_at,
+                },
+                Some(S::RetryScheduled {
+                    retry_at,
+                    observed_at: settled_at,
+                    failure: ActivityFailure::TimedOut,
+                }),
+            ) => settled_at == observed_at
+                && *retry_at == crate::run::delivery::delivery_retry_at(*observed_at),
+            (
+                R::Rejected {
+                    failure: crate::DeliveryFailure::PolicyRejected,
+                    observed_at,
+                },
+                Some(S::Failed {
+                    failed_at,
+                    failure: ActivityFailure::Rejected,
+                }),
+            ) => failed_at == observed_at,
+            (
+                R::OutcomeUnknown { observed_at },
+                Some(S::OutcomeUnknown { observed_at: settled_at }),
+            ) => settled_at == observed_at,
+            _ => false,
+        };
+        if !matching_settlement || self.delivery_outcome != delivery_outcome {
+            return false;
+        }
+        let mut settled = Activity {
+            facts: activity.facts.clone(),
+            phase: ActivityPhase::Dispatched(ActivityDispatch {
+                claim: claim.clone(),
+                dispatched_at: claim.claimed_at(),
+            }),
+            completed_attempts: claim.attempt() - 1,
+            next_claim_generation: activity.next_claim_generation,
+            settlement_proof: None,
+            native_terminal_claim: None,
+        };
+        let outcome = self
+            .settlement
+            .clone()
+            .map(|settlement| super::settle_activity(&mut settled, claim, settlement))
+            .transpose();
+        let Ok(outcome) = outcome else {
+            return false;
+        };
+        if self.activity_outcome != outcome {
+            return false;
+        }
+        match &self.receipt {
+            R::Accepted { .. } => true,
+            R::OutcomeUnknown { observed_at } => match activity.phase() {
+                ActivityPhase::OutcomeUnknown { observed_at: stored } => observed_at == stored,
+                ActivityPhase::TerminalObserved { .. } | ActivityPhase::Completed { .. }
+                    | ActivityPhase::Failed { .. } | ActivityPhase::Cancelled { .. } => true,
+                _ => false,
+            },
+            R::Rejected { .. } => activity.phase == settled.phase
+                || (matches!(settled.phase, ActivityPhase::RetryScheduled { .. })
+                    && matches!(activity.phase, ActivityPhase::Cancelled { .. })),
+        }
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -341,11 +477,61 @@ impl Activity {
             phase: ActivityPhase::Pending,
             completed_attempts: 0,
             next_claim_generation: 1,
+            settlement_proof: None,
+            native_terminal_claim: None,
         })
     }
 
     pub fn facts(&self) -> &ActivityRequest {
         &self.facts
+    }
+
+    pub(crate) fn settlement_proof(&self) -> Option<&SettlementProof> {
+        self.settlement_proof.as_ref()
+    }
+
+    pub(crate) fn record_settlement_proof(&mut self, proof: SettlementProof) -> bool {
+        if !proof.valid_for(self) || self.settlement_proof.is_some() {
+            return false;
+        }
+        self.settlement_proof = Some(proof);
+        true
+    }
+
+    pub(crate) fn native_terminal_claim(&self) -> Option<&ActivityClaim> {
+        self.native_terminal_claim.as_ref()
+    }
+
+    pub(crate) fn retain_native_terminal_claim(&mut self, claim: &ActivityClaim) -> bool {
+        if self.active_claim() != Some(claim)
+            || !matches!(self.phase(), ActivityPhase::Dispatched(_))
+            || self.native_terminal_claim.as_ref().is_some_and(|stored| stored != claim)
+        {
+            return false;
+        }
+        self.native_terminal_claim = Some(claim.clone());
+        true
+    }
+
+    pub(crate) fn valid_native_terminal_claim(&self) -> bool {
+        let Some(claim) = self.native_terminal_claim.as_ref() else {
+            return true;
+        };
+        claim.activity_id() == &self.facts.activity_id
+            && claim.attempt() > 0
+            && claim.attempt() <= self.facts.max_attempts
+            && claim.generation() == u64::from(claim.attempt())
+            && claim.generation().checked_add(1) == Some(self.next_claim_generation)
+            && self.settlement_proof.as_ref().is_none_or(|proof| &proof.claim == claim)
+            && match self.phase() {
+                ActivityPhase::TerminalObserved { .. } | ActivityPhase::Completed { .. }
+                    | ActivityPhase::Failed { .. } => self.completed_attempts == claim.attempt(),
+                ActivityPhase::Cancelled { .. } => {
+                    self.completed_attempts == claim.attempt()
+                        || self.completed_attempts == claim.attempt() - 1
+                }
+                _ => false,
+            }
     }
 
     pub fn phase(&self) -> &ActivityPhase {
@@ -381,6 +567,8 @@ impl Activity {
             claimed_at,
         };
         self.next_claim_generation += 1;
+        self.settlement_proof = None;
+        self.native_terminal_claim = None;
         self.phase = ActivityPhase::Claimed(claim.clone());
         claim
     }
@@ -469,7 +657,7 @@ impl Activity {
 }
 
 impl ActivityClaim {
-    pub(super) fn restore(
+    pub(crate) fn restore(
         activity_id: ActivityId,
         attempt: u32,
         generation: u64,

@@ -65,10 +65,10 @@ pub async fn stream_generate(
         "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
     }));
     if !response.status().is_success() {
-        return Err(LlmClientError::Protocol(format!(
-            "Anthropic Messages stream failed with HTTP {}",
-            response.status()
-        )));
+        return Err(LlmClientError::HttpStatus {
+            status: response.status().as_u16(),
+            message: format!("Anthropic Messages stream failed with HTTP {}", response.status()),
+        });
     }
     super::consume_sse(response, sink, parse_anthropic_messages_sse_chunk).await
 }
@@ -193,7 +193,10 @@ async fn send_text(
         .ok()
         .and_then(|payload| parse_anthropic_messages_error(&payload))
         .unwrap_or_else(|| format!("Anthropic Messages request failed with HTTP {status}"));
-    Err(LlmClientError::Protocol(message))
+    Err(LlmClientError::HttpStatus {
+        status: status.as_u16(),
+        message,
+    })
 }
 
 fn anthropic_request(request: LlmRequest, stream: bool) -> AnthropicMessagesRequest {

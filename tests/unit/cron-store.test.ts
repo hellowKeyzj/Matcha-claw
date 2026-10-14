@@ -42,6 +42,7 @@ function projectedJob(id: string, updatedAtMs = 1): CronJob {
     schedule: { kind: 'cron', expr: '0 9 * * *' },
     delivery: { mode: 'none' },
     enabled: true,
+    systemManaged: false,
     createdAt: new Date(1).toISOString(),
     updatedAt: new Date(updatedAtMs).toISOString(),
   };

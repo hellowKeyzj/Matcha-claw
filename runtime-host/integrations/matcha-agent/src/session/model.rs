@@ -364,9 +364,41 @@ impl fmt::Debug for SessionPromptResult {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTranscriptWindow {
+    pub total_item_count: usize,
+    pub window_start_offset: usize,
+    pub window_end_offset: usize,
+}
+
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionTranscriptResult {
     pub lines: Vec<String>,
+    pub window: SessionTranscriptWindow,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContentResult {
+    pub content_ref: String,
+    pub offset: u64,
+    pub text: String,
+    pub next_offset: u64,
+    pub total_bytes: u64,
+    pub complete: bool,
+}
+
+impl fmt::Debug for SessionContentResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionContentResult")
+            .field("offset", &self.offset)
+            .field("next_offset", &self.next_offset)
+            .field("total_bytes", &self.total_bytes)
+            .field("complete", &self.complete)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for SessionTranscriptResult {
@@ -799,6 +831,11 @@ mod tests {
         assert_debug_redacts(
             &SessionTranscriptResult {
                 lines: vec!["transcript-line-canary".into()],
+                window: SessionTranscriptWindow {
+                    total_item_count: 1,
+                    window_start_offset: 0,
+                    window_end_offset: 1,
+                },
             },
             &["transcript-line-canary"],
         );

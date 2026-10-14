@@ -83,14 +83,22 @@ pub(crate) enum MutationResult {
     Changed,
 }
 
+#[derive(Debug)]
+pub(crate) enum MutationError {
+    Rejected,
+    Store(StoreFault),
+}
+
 pub(crate) fn mutate(
     store: &mut OrganizationStore,
     team_id: TeamId,
     run_id: GraphRunId,
     operation: TaskBoardMutation,
-) -> Result<MutationResult, StoreFault> {
+) -> Result<MutationResult, MutationError> {
+    let mut rejected = false;
     store
-        .task_board_mutate(|board| match operation {
+        .task_board_mutate(|board| {
+            let result = (|| match operation {
             TaskBoardMutation::ClaimNext {
                 agent_id,
                 session,
@@ -216,6 +224,9 @@ pub(crate) fn mutate(
                 organization::run::task_board::upsert_plan(board, plan, now, &fingerprint)
                     .map(|task_ids| MutationResult::Plan { task_ids })
             }
+            })();
+            rejected = result.is_err();
+            result
         })
-        .map_err(|_| StoreFault::InvalidFacts)
+        .map_err(|error| if rejected { MutationError::Rejected } else { MutationError::Store(error) })
 }

@@ -29,6 +29,7 @@ import type {
   ProviderRuntimeConfig,
   SessionCancelParams,
   SessionCloseParams,
+  SessionContentParams,
   SessionCreateParams,
   SessionLoadParams,
   SessionPromptParams,
@@ -197,6 +198,10 @@ export class ProtocolGateway {
     'session.transcript': async (_clientId, params) =>
       this.callWithParams(params, parseSessionTranscriptParams, value =>
         this.ports.session.transcript(value),
+      ),
+    'session.content': async (_clientId, params) =>
+      this.callWithParams(params, parseSessionContentParams, value =>
+        this.ports.session.content(value),
       ),
     'events.replay': async (_clientId, params) =>
       this.handleEventsReplay(params),
@@ -398,13 +403,100 @@ function parseSessionCloseParams(
 function parseSessionSnapshotParams(
   params: unknown,
 ): ParamsParseResult<SessionSnapshotParams> {
-  return parseSessionIdOnlyParams(params)
+  const parsed = requireObjectParams(params)
+  if (parsed.resultType === 'invalidParams') return parsed
+
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
+  if (sessionId.resultType === 'invalidParams') return sessionId
+  const includeMessages = parsed.params.includeMessages
+  if (includeMessages !== undefined && typeof includeMessages !== 'boolean') {
+    return {
+      resultType: 'invalidParams',
+      message: 'includeMessages must be a boolean',
+    }
+  }
+  return {
+    resultType: 'success',
+    params: {
+      sessionId: sessionId.value,
+      ...(includeMessages !== undefined ? { includeMessages } : {}),
+    },
+  }
 }
 
 function parseSessionTranscriptParams(
   params: unknown,
 ): ParamsParseResult<SessionTranscriptParams> {
-  return parseSessionIdOnlyParams(params)
+  const parsed = requireObjectParams(params)
+  if (parsed.resultType === 'invalidParams') return parsed
+
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
+  if (sessionId.resultType === 'invalidParams') return sessionId
+  const direction = optionalString(parsed.params, 'direction')
+  if (direction.resultType === 'invalidParams') return direction
+  if (
+    direction.value !== undefined &&
+    direction.value !== 'latest' &&
+    direction.value !== 'older' &&
+    direction.value !== 'newer'
+  ) {
+    return {
+      resultType: 'invalidParams',
+      message: 'direction must be latest, older, or newer',
+    }
+  }
+  const offset = optionalSafeInteger(parsed.params, 'offset')
+  if (offset.resultType === 'invalidParams') return offset
+  const limit = optionalSafeInteger(parsed.params, 'limit', 0, 200)
+  if (limit.resultType === 'invalidParams') return limit
+
+  return {
+    resultType: 'success',
+    params: {
+      sessionId: sessionId.value,
+      ...(direction.value !== undefined ? { direction: direction.value } : {}),
+      ...(offset.value !== undefined ? { offset: offset.value } : {}),
+      ...(limit.value !== undefined ? { limit: limit.value } : {}),
+    },
+  }
+}
+
+function parseSessionContentParams(
+  params: unknown,
+): ParamsParseResult<SessionContentParams> {
+  const parsed = requireObjectParams(params)
+  if (parsed.resultType === 'invalidParams') return parsed
+
+  const sessionId = requiredNativeSessionId(parsed.params, 'sessionId')
+  if (sessionId.resultType === 'invalidParams') return sessionId
+  const contentRef = requiredString(parsed.params, 'contentRef')
+  if (contentRef.resultType === 'invalidParams') return contentRef
+  if (Buffer.byteLength(contentRef.value, 'utf8') > 512) {
+    return {
+      resultType: 'invalidParams',
+      message: 'contentRef must not exceed 512 bytes',
+    }
+  }
+  const offset = optionalSafeInteger(parsed.params, 'offset')
+  if (offset.resultType === 'invalidParams') return offset
+  if (offset.value === undefined) {
+    return { resultType: 'invalidParams', message: 'offset is required' }
+  }
+  const limit = optionalSafeInteger(parsed.params, 'limit', 1, 64 * 1024)
+  if (limit.resultType === 'invalidParams') return limit
+  if (limit.value === undefined) {
+    return { resultType: 'invalidParams', message: 'limit is required' }
+  }
+
+  return {
+    resultType: 'success',
+    params: {
+      sessionId: sessionId.value,
+      contentRef: contentRef.value,
+      offset: offset.value,
+      limit: limit.value,
+    },
+  }
 }
 
 function parseSessionPromptParams(
@@ -773,6 +865,29 @@ function optionalFiniteNumber(
   return { resultType: 'success', value }
 }
 
+function optionalSafeInteger(
+  params: Record<string, unknown>,
+  key: string,
+  minimum = 0,
+  maximum = Number.MAX_SAFE_INTEGER,
+): ScalarParseResult<number | undefined> {
+  const parsed = optionalFiniteNumber(params, key)
+  if (parsed.resultType === 'invalidParams' || parsed.value === undefined) {
+    return parsed
+  }
+  if (
+    !Number.isSafeInteger(parsed.value) ||
+    parsed.value < minimum ||
+    parsed.value > maximum
+  ) {
+    return {
+      resultType: 'invalidParams',
+      message: `${key} must be a safe integer between ${minimum} and ${maximum}`,
+    }
+  }
+  return parsed
+}
+
 export type {
   ApprovalRespondParams,
   EventsReplayParams,
@@ -781,6 +896,7 @@ export type {
   ModelsListParams,
   SessionCancelParams,
   SessionCloseParams,
+  SessionContentParams,
   SessionCreateParams,
   SessionLoadParams,
   SessionPromptParams,

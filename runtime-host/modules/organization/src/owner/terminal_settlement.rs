@@ -13,6 +13,7 @@ pub(crate) struct TeamRunTerminalSettlement {
     repairs: BTreeMap<String, PendingTeamMessageRepair>,
 }
 
+#[derive(Clone)]
 struct PendingTeamMessageRepair {
     context: organization::TeamMessageTerminalContext,
     status: organization::NativeTerminalStatus,
@@ -25,6 +26,10 @@ impl TeamRunTerminalSettlement {
         Self { repairs: BTreeMap::new() }
     }
 
+    pub(crate) fn has_pending_repairs(&self) -> bool {
+        !self.repairs.is_empty()
+    }
+
     pub(crate) fn observe_team_message_terminal(
         &mut self,
         store: &mut OrganizationStore,
@@ -35,7 +40,8 @@ impl TeamRunTerminalSettlement {
         assistant_texts: Vec<String>,
         settled_at: u64,
     ) -> Result<TeamMessageTerminalObservation, StoreFault> {
-        if let Some(pending) = self.repairs.remove(&native_run_id) {
+        store.refresh()?;
+        if let Some(pending) = self.repairs.get(&native_run_id).cloned() {
             runtime_trace("runtime.team_run.repair.match", || json!({
                 "nativeRunHash": identifier_hash(&native_run_id),
                 "deliveryHash": identifier_hash(pending.context.delivery_id().as_str()),
@@ -46,14 +52,17 @@ impl TeamRunTerminalSettlement {
             }));
             if status != organization::NativeTerminalStatus::Completed {
                 settle_native_run(store, team_run, pending, Err(TeamMessageFailure::RepairFailed))?;
+                self.repairs.remove(&native_run_id);
                 return Ok(TeamMessageTerminalObservation::Settled);
             }
-            return self.plan_and_settle(store, team_run, pending, assistant_texts).inspect_err(|error| {
+            let outcome = self.plan_and_settle(store, team_run, pending, assistant_texts).inspect_err(|error| {
                 runtime_trace("runtime.team_run.terminal.error", || json!({
                     "nativeRunHash": identifier_hash(&native_run_id),
                     "boundary": "repair_plan_and_settle", "error": crate::trace::terminal_error(error),
                 }));
-            });
+            })?;
+            self.repairs.remove(&native_run_id);
+            return Ok(outcome);
         }
         runtime_trace("runtime.team_run.repair.match", || json!({
             "nativeRunHash": identifier_hash(&native_run_id), "matched": false,
@@ -143,7 +152,8 @@ impl TeamRunTerminalSettlement {
         team_run: &TeamRunOwner,
         repair: &organization::TeamMessageRepairDispatch,
     ) -> Result<(), StoreFault> {
-        let pending = self.repairs.remove(repair.requested_run_id());
+        store.refresh()?;
+        let pending = self.repairs.get(repair.requested_run_id()).cloned();
         runtime_trace("runtime.team_run.repair.rejected", || json!({
             "nativeRunHash": identifier_hash(repair.requested_run_id()),
             "attempt": repair.attempt(), "matched": pending.is_some(),
@@ -152,6 +162,7 @@ impl TeamRunTerminalSettlement {
         }));
         if let Some(pending) = pending {
             settle_native_run(store, team_run, pending, Err(TeamMessageFailure::RepairRejected))?;
+            self.repairs.remove(repair.requested_run_id());
         }
         Ok(())
     }

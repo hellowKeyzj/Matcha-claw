@@ -855,7 +855,7 @@ export default function WikiPage() {
     if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     await run('import-source', async () => {
       const call = await hostWikiImportSource({ projectId, sourcePath: path })
-        .then((receipt) => waitForCall(receipt, 'wiki'))
+        .then((receipt) => waitForCall(receipt, 'wiki', { timeoutMs: null }))
         .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
       if (call.command !== 'import-source' || call.detail.operation !== 'import-source' || call.status === 'unknown') {
         throw new Error(t('actions.resultUnconfirmed'));
@@ -883,7 +883,7 @@ export default function WikiPage() {
     if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     await run('import-folder', async () => {
       const call = await hostWikiImportFolder({ projectId, folderPath: path })
-        .then((receipt) => waitForCall(receipt, 'wiki'))
+        .then((receipt) => waitForCall(receipt, 'wiki', { timeoutMs: null }))
         .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
       if (call.command !== 'import-folder' || call.detail.operation !== 'import-folder' || call.status === 'unknown') {
         throw new Error(t('actions.resultUnconfirmed'));
@@ -936,7 +936,7 @@ export default function WikiPage() {
     if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     await run('refresh-sources', async () => {
       const call = await hostWikiRefreshSources({ projectId })
-        .then((receipt) => waitForCall(receipt, 'wiki'))
+        .then((receipt) => waitForCall(receipt, 'wiki', { timeoutMs: null }))
         .catch(() => { throw new Error(t('actions.resultUnconfirmed')); });
       if (call.command !== 'refresh-sources' || call.detail.operation !== 'refresh-sources' || call.status === 'unknown') {
         throw new Error(t('actions.resultUnconfirmed'));

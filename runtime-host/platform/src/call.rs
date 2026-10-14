@@ -288,7 +288,7 @@ impl<D: CallDetail> CallContext<D> {
         &self.call_id
     }
 
-    /// Call only after the concrete owner's bounded queue accepted the command.
+    /// Reserve the concrete owner's bounded capacity first; execute only after this commits.
     pub async fn accepted(&self) -> Result<CallReceipt, CallLogError> {
         self.append(Some(CallStatus::Accepted), None).await?;
         Ok(CallReceipt {
@@ -310,6 +310,7 @@ impl<D: CallDetail> CallContext<D> {
             .await
     }
 
+    /// Ok confirms durable commit. A persistence error must retain the terminal for audit recovery.
     pub async fn finish(&self, status: CallStatus, detail: &D) -> Result<(), CallLogError> {
         if !status.is_terminal() {
             return Err(CallLogError::InvalidTransition);

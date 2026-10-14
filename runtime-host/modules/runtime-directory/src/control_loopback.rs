@@ -6,12 +6,15 @@ use platform::{
     endpoint::runtime_address::RuntimeEndpoint,
     loopback::{
         BodyPolicy, ModuleDescriptor as LoopbackModuleDescriptor, ModuleId as LoopbackModuleId,
-        Request, RequestHead, Response, RouteDescriptor, RouteFuture, RouteHeadPlan,
+        Request, RequestHead, Response, RouteDescriptor, RouteFuture, RouteHeadPlan, RoutePath,
     },
     module::{CapabilityKey, EffectKind, ModuleDescriptor, ModuleId as CatalogModuleId},
 };
 use serde::{Deserialize, de};
-use tokio::sync::Mutex;
+use tokio::{
+    sync::Mutex,
+    time::{Instant, timeout_at},
+};
 
 use crate::{
     RuntimeControlFailure, RuntimeControlLifecycleError, RuntimeControlLifecycleStatus,
@@ -104,6 +107,16 @@ impl RuntimeControlOperation {
             Self::ControlUiUrl => "control-ui.url",
         }
     }
+
+    const fn is_read(self) -> bool {
+        !matches!(
+            self,
+            Self::LifecycleStart
+                | Self::LifecycleStop
+                | Self::LifecycleRestart
+                | Self::LifecycleRepair
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -123,6 +136,15 @@ pub trait RuntimeControlRouteFragment: Send + Sync {
         operation: RuntimeControlOperation,
         request: RuntimeControlRequest,
     ) -> Option<RuntimeControlRouteFuture>;
+
+    fn handle_read(
+        &self,
+        operation: RuntimeControlOperation,
+        request: RuntimeControlRequest,
+        _deadline: Instant,
+    ) -> Option<RuntimeControlRouteFuture> {
+        self.handle(operation, request)
+    }
 }
 
 pub trait RuntimeControlLifecyclePort: Send + Sync {
@@ -230,6 +252,19 @@ fn descriptor(dependencies: Dependencies) -> LoopbackModuleDescriptor {
         LOOPBACK_MODULE_ID,
         vec![RouteDescriptor::bound(
             "runtime-control.loopback",
+            &[
+                RoutePath::ExactWithQuery(LIFECYCLE_STATUS_ENDPOINT),
+                RoutePath::ExactWithQuery(LIFECYCLE_START_ENDPOINT),
+                RoutePath::ExactWithQuery(LIFECYCLE_STOP_ENDPOINT),
+                RoutePath::ExactWithQuery(LIFECYCLE_RESTART_ENDPOINT),
+                RoutePath::ExactWithQuery(LIFECYCLE_REPAIR_ENDPOINT),
+                RoutePath::ExactWithQuery(REPAIR_STATUS_ENDPOINT),
+                RoutePath::ExactWithQuery(LOGS_ENDPOINT),
+                RoutePath::ExactWithQuery(CONTROL_READY_ENDPOINT),
+                RoutePath::ExactWithQuery(GATEWAY_HEALTH_ENDPOINT),
+                RoutePath::ExactWithQuery(GATEWAY_STATUS_ENDPOINT),
+                RoutePath::ExactWithQuery(CONTROL_UI_URL_ENDPOINT),
+            ],
             head_plan,
             move |request| route(dependencies.clone(), request),
         )],
@@ -237,26 +272,36 @@ fn descriptor(dependencies: Dependencies) -> LoopbackModuleDescriptor {
 }
 
 fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
-    operation_for(head.method.as_str(), pathname(&head.path)).map(|_| {
-        RouteHeadPlan::new(
-            BodyPolicy::Required {
-                max_bytes: DEFAULT_REQUEST_BYTES,
-            },
-            DEFAULT_DEADLINE,
-            timeout_response,
-        )
+    operation_for(head.method.as_str(), pathname(&head.path)).map(|operation| {
+        let body = BodyPolicy::Required {
+            max_bytes: DEFAULT_REQUEST_BYTES,
+        };
+        if operation.is_read() {
+            RouteHeadPlan::body_deadline(body, DEFAULT_DEADLINE, timeout_response)
+        } else {
+            RouteHeadPlan::new(body, DEFAULT_DEADLINE, timeout_response)
+        }
     })
 }
 
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
+        let deadline = request.head.request_started_at() + DEFAULT_DEADLINE;
         let Some((operation, authorization)) =
             route_authorization(request.method(), pathname(request.path()))
         else {
             return Response::not_found().into();
         };
-        let mut input = match authorized_input(request, dependencies.verifier, authorization).await
-        {
+        let authorization = authorized_input(request, dependencies.verifier, authorization);
+        let authorization = if operation.is_read() {
+            match timeout_at(deadline, authorization).await {
+                Ok(result) => result,
+                Err(_) => return timeout_response().into(),
+            }
+        } else {
+            authorization.await
+        };
+        let mut input = match authorization {
             Ok(input) => input,
             Err(response) => return response.into(),
         };
@@ -274,13 +319,7 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
             }
         };
         let call = input.call.clone();
-        if !matches!(
-            operation,
-            RuntimeControlOperation::LifecycleStart
-                | RuntimeControlOperation::LifecycleStop
-                | RuntimeControlOperation::LifecycleRestart
-                | RuntimeControlOperation::LifecycleRepair
-        ) {
+        if operation.is_read() {
             if let Some(call) = &call {
                 if let Err(error) = call.running().await {
                     eprintln!("[runtime-control] call start could not be recorded: {error}");
@@ -288,11 +327,22 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
             }
         }
         let mut detail = RuntimeControlCallDetail::new(&input.endpoint);
+        if operation.is_read() && Instant::now() >= deadline {
+            detail.result = Some(RuntimeControlCallResult::Unknown);
+            finish_runtime_control_call(call, CallStatus::Unknown, &detail).await;
+            return timeout_response().into();
+        }
         let response = dependencies
             .fragments
             .iter()
             .find(|fragment| fragment.endpoint() == input.endpoint)
-            .and_then(|fragment| fragment.handle(operation, input));
+            .and_then(|fragment| {
+                if operation.is_read() {
+                    fragment.handle_read(operation, input, deadline)
+                } else {
+                    fragment.handle(operation, input)
+                }
+            });
         match response {
             Some(response) => response.await.into(),
             None => {

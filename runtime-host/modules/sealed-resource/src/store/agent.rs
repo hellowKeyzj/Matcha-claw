@@ -188,6 +188,34 @@ impl fmt::Debug for SealedAgentInstallPlan {
     }
 }
 
+pub(crate) enum SealedAgentInstallError {
+    NotCommitted(SealedResourceError),
+    Committed {
+        entry: SealedAgentCatalogEntry,
+        error: SealedResourceError,
+    },
+}
+
+impl From<SealedResourceError> for SealedAgentInstallError {
+    fn from(error: SealedResourceError) -> Self {
+        Self::NotCommitted(error)
+    }
+}
+
+impl SealedAgentInstallError {
+    pub(crate) fn into_resource_error(self) -> SealedResourceError {
+        match self {
+            Self::NotCommitted(error) | Self::Committed { error, .. } => error,
+        }
+    }
+}
+
+pub(crate) struct SealedAgentRemoval {
+    agent_key: AgentKey,
+    workspace: Option<PathBuf>,
+    package: Option<(PathBuf, String)>,
+}
+
 pub struct SealedAgentStore {
     root: SealedAgentRoot,
     private_directory: PathBuf,
@@ -507,6 +535,14 @@ impl SealedAgentStore {
         &self,
         package_path: PathBuf,
     ) -> Result<SealedAgentCatalogEntry, SealedResourceError> {
+        self.install_package_path_outcome(package_path)
+            .map_err(SealedAgentInstallError::into_resource_error)
+    }
+
+    pub(crate) fn install_package_path_outcome(
+        &self,
+        package_path: PathBuf,
+    ) -> Result<SealedAgentCatalogEntry, SealedAgentInstallError> {
         let _guard = self
             .operation_lock
             .lock()
@@ -527,6 +563,7 @@ impl SealedAgentStore {
             .map_err(|_| SealedResourceError::Unknown)?;
         let bytes = read_install_package(&package_path)?;
         self.install_package_bytes_locked(bytes, authorization_key)
+            .map_err(SealedAgentInstallError::into_resource_error)
     }
 
     pub fn install_package_path_with_cloud_metadata(
@@ -534,6 +571,15 @@ impl SealedAgentStore {
         package_path: PathBuf,
         metadata: SealedCloudPackageMetadata,
     ) -> Result<SealedAgentCatalogEntry, SealedResourceError> {
+        self.install_package_path_with_cloud_metadata_outcome(package_path, metadata)
+            .map_err(SealedAgentInstallError::into_resource_error)
+    }
+
+    pub(crate) fn install_package_path_with_cloud_metadata_outcome(
+        &self,
+        package_path: PathBuf,
+        metadata: SealedCloudPackageMetadata,
+    ) -> Result<SealedAgentCatalogEntry, SealedAgentInstallError> {
         let _guard = self
             .operation_lock
             .lock()
@@ -550,11 +596,82 @@ impl SealedAgentStore {
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let Some((path, package_sha256)) = self.find_sealed_package_locked(&agent_key)? else {
+        let removal = self.prepare_remove_package_locked(agent_key)?;
+        self.remove_prepared_package_locked(removal)
+    }
+
+    pub(crate) fn prepare_remove_package(
+        &self,
+        agent_key: AgentKey,
+    ) -> Result<SealedAgentRemoval, SealedResourceError> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| SealedResourceError::Unknown)?;
+        self.prepare_remove_package_locked(agent_key)
+    }
+
+    pub(crate) fn remove_prepared_package(
+        &self,
+        removal: SealedAgentRemoval,
+    ) -> Result<bool, SealedResourceError> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| SealedResourceError::Unknown)?;
+        self.remove_prepared_package_locked(removal)
+    }
+
+    fn prepare_remove_package_locked(
+        &self,
+        agent_key: AgentKey,
+    ) -> Result<SealedAgentRemoval, SealedResourceError> {
+        let workspace = self.root.workspace_directory(&agent_key)?;
+        let workspace = existing_workspace_directory(&workspace)?;
+        let package = match workspace.as_ref() {
+            Some(workspace) => self.find_sealed_package_in_workspace_locked(&agent_key, workspace)?,
+            None => None,
+        };
+        Ok(SealedAgentRemoval {
+            agent_key,
+            workspace,
+            package,
+        })
+    }
+
+    fn remove_prepared_package_locked(
+        &self,
+        removal: SealedAgentRemoval,
+    ) -> Result<bool, SealedResourceError> {
+        let Some(workspace) = removal.workspace else {
             return Ok(false);
         };
-        self.remove_package_path_locked(&path, &package_sha256)?;
-        Ok(true)
+        match existing_workspace_directory(&workspace)? {
+            Some(current) if current == workspace => {}
+            None => {
+                let Some((_, digest)) = removal.package else {
+                    return Ok(false);
+                };
+                self.remove_package_binding_locked(&digest)?;
+                return Ok(true);
+            }
+            _ => return Err(SealedResourceError::Rejected),
+        }
+        let current = self.find_sealed_package_in_workspace_locked(&removal.agent_key, &workspace)?;
+        match (removal.package, current) {
+            (None, None) => Ok(false),
+            (Some((path, digest)), Some((current_path, current_digest)))
+                if path == current_path && digest == current_digest => {
+                    self.remove_package_path_locked(&path, &digest)?;
+                    Ok(true)
+                }
+            (Some((path, digest)), None) => {
+                ensure_missing(&path)?;
+                self.remove_package_binding_locked(&digest)?;
+                Ok(true)
+            }
+            _ => Err(SealedResourceError::Rejected),
+        }
     }
 
     fn prepare_install_package_locked(
@@ -574,7 +691,7 @@ impl SealedAgentStore {
         &self,
         bytes: Vec<u8>,
         authorization_key: SealedPackageAuthorizationKey,
-    ) -> Result<SealedAgentCatalogEntry, SealedResourceError> {
+    ) -> Result<SealedAgentCatalogEntry, SealedAgentInstallError> {
         let receipt = SealAgentPackageReceipt::from_package_bytes(bytes, authorization_key);
         self.install_package_receipt_locked(receipt, None)
     }
@@ -584,7 +701,7 @@ impl SealedAgentStore {
         bytes: Vec<u8>,
         authorization_key: SealedPackageAuthorizationKey,
         metadata: SealedCloudPackageMetadata,
-    ) -> Result<SealedAgentCatalogEntry, SealedResourceError> {
+    ) -> Result<SealedAgentCatalogEntry, SealedAgentInstallError> {
         let receipt = SealAgentPackageReceipt::from_package_bytes(bytes, authorization_key);
         self.install_package_receipt_locked(receipt, Some(metadata))
     }
@@ -593,7 +710,7 @@ impl SealedAgentStore {
         &self,
         receipt: SealAgentPackageReceipt,
         metadata: Option<SealedCloudPackageMetadata>,
-    ) -> Result<SealedAgentCatalogEntry, SealedResourceError> {
+    ) -> Result<SealedAgentCatalogEntry, SealedAgentInstallError> {
         let package = self.open_install_package_bytes_locked(
             receipt.package_bytes(),
             receipt.authorization_key(),
@@ -607,36 +724,54 @@ impl SealedAgentStore {
         let workspace = self.root.workspace_directory(package.agent_key())?;
         let workspace_preexisted = existing_workspace_directory(&workspace)?.is_some();
         let workspace = ensure_workspace_directory(&workspace)?;
-        remove_agent_bootstrap_files(&workspace)?;
-        let install_result = match metadata.as_ref() {
-            Some(metadata) => self.install_cloud_receipt_locked(&workspace, &receipt, metadata),
-            None => self.install_receipt_locked(&workspace, &receipt, receipt.package_file_name()),
-        };
-        match install_result {
-            Ok(_) => {}
-            Err(SealedResourceError::AlreadyExists) => {
-                let expected_path = workspace.join(receipt.package_file_name());
-                match self.find_sealed_package_locked(package.agent_key())? {
-                    Some((path, _)) if path == expected_path => {}
-                    _ => return Err(SealedResourceError::AlreadyExists),
-                }
+        let mut files = AgentInstallFiles::default();
+        let result = (|| {
+            for name in AGENT_BOOTSTRAP_FILES {
+                files.remove(&workspace.join(name))?;
             }
-            Err(error) => {
-                if !workspace_preexisted {
-                    let _ = fs::remove_dir(&workspace);
+            let install_result = match metadata.as_ref() {
+                Some(metadata) => {
+                    self.install_cloud_receipt_locked(&workspace, &receipt, metadata, &mut files)
                 }
-                return Err(error);
+                None => self.write_receipt_locked(
+                    &workspace,
+                    &receipt,
+                    receipt.package_file_name(),
+                    &mut files,
+                ),
+            };
+            match install_result {
+                Ok(_) => {}
+                Err(SealedResourceError::AlreadyExists) => {
+                    let expected_path = workspace.join(receipt.package_file_name());
+                    match self.find_sealed_package_locked(package.agent_key())? {
+                        Some((path, _)) if path == expected_path => {}
+                        _ => return Err(SealedResourceError::AlreadyExists),
+                    }
+                }
+                Err(error) => return Err(error),
             }
+            Ok(())
+        })();
+        let result = files.finish(result);
+        if result.is_err() && !workspace_preexisted {
+            let _ = fs::remove_dir(&workspace);
         }
+        result?;
+        let entry = SealedAgentCatalogEntry {
+            agent_key: package.agent_key().clone(),
+            target: package.target(),
+        };
         self.remove_other_packages_locked(
             package.agent_key(),
             &workspace,
             &workspace.join(receipt.package_file_name()),
-        )?;
-        Ok(SealedAgentCatalogEntry {
-            agent_key: package.agent_key().clone(),
-            target: package.target(),
-        })
+        )
+        .map_err(|error| SealedAgentInstallError::Committed {
+            entry: entry.clone(),
+            error,
+        })?;
+        Ok(entry)
     }
 
     fn catalog_directory_locked(
@@ -713,6 +848,14 @@ impl SealedAgentStore {
         let Some(workspace) = existing_workspace_directory(&workspace)? else {
             return Ok(None);
         };
+        self.find_sealed_package_in_workspace_locked(agent_key, &workspace)
+    }
+
+    fn find_sealed_package_in_workspace_locked(
+        &self,
+        agent_key: &AgentKey,
+        workspace: &Path,
+    ) -> Result<Option<(PathBuf, String)>, SealedResourceError> {
         let mut found = None;
         for entry in fs::read_dir(workspace).map_err(|_| SealedResourceError::Unknown)? {
             let entry = entry.map_err(|_| SealedResourceError::Unknown)?;
@@ -802,6 +945,13 @@ impl SealedAgentStore {
         package_sha256: &str,
     ) -> Result<(), SealedResourceError> {
         fs::remove_file(path).map_err(|_| SealedResourceError::Unknown)?;
+        self.remove_package_binding_locked(package_sha256)
+    }
+
+    fn remove_package_binding_locked(
+        &self,
+        package_sha256: &str,
+    ) -> Result<(), SealedResourceError> {
         remove_authorization_key_file(&self.authorization_key_path(package_sha256))?;
         remove_authorization_key_file(&self.cloud_metadata_path(package_sha256))?;
         self.authorization_keyring.remove(package_sha256)
@@ -841,24 +991,28 @@ impl SealedAgentStore {
         package: &SealAgentPackageReceipt,
         file_name: &str,
     ) -> Result<PathBuf, SealedResourceError> {
+        let mut files = AgentInstallFiles::default();
+        let result = self.write_receipt_locked(workspace, package, file_name, &mut files);
+        files.finish(result)
+    }
+
+    fn write_receipt_locked(
+        &self,
+        workspace: &Path,
+        package: &SealAgentPackageReceipt,
+        file_name: &str,
+        files: &mut AgentInstallFiles,
+    ) -> Result<PathBuf, SealedResourceError> {
         let workspace = ensure_workspace_directory(workspace)?;
         let path = workspace.join(file_name);
         ensure_missing(&path)?;
-        let staging = workspace.join(format!(".{}.tmp", package.package_file_name()));
         let key_path = self.authorization_key_path(package.package_sha256());
-        let key_staging = self.authorization_key_staging_path(package.package_sha256());
-        let result = (|| {
-            write_private_file(&key_staging, package.authorization_key().as_bytes())?;
-            write_private_file(&staging, package.package_bytes())?;
-            fs::rename(&key_staging, &key_path).map_err(|_| SealedResourceError::Unknown)?;
-            fs::rename(&staging, &path).map_err(|_| SealedResourceError::Unknown)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&staging);
-            let _ = fs::remove_file(&key_staging);
-            let _ = fs::remove_file(&key_path);
-        }
-        result.map(|_| path)
+        let key_staging = files.stage(&key_path, package.authorization_key().as_bytes(), None)?;
+        let package_staging = files.stage(&path, package.package_bytes(), None)?;
+        files.remove(&key_path)?;
+        files.publish_staged(&key_path, key_staging)?;
+        files.publish_staged(&path, package_staging)?;
+        Ok(path)
     }
 
     fn install_cloud_receipt_locked(
@@ -866,28 +1020,20 @@ impl SealedAgentStore {
         workspace: &Path,
         package: &SealAgentPackageReceipt,
         metadata: &SealedCloudPackageMetadata,
+        files: &mut AgentInstallFiles,
     ) -> Result<PathBuf, SealedResourceError> {
         let workspace = ensure_workspace_directory(workspace)?;
         let path = workspace.join(package.package_file_name());
         ensure_missing(&path)?;
-        let staging = workspace.join(format!(".{}.tmp", package.package_file_name()));
         let metadata_path = self.cloud_metadata_path(package.package_sha256());
-        let metadata_staging = self.cloud_metadata_staging_path(package.package_sha256());
-        let key_path = self.authorization_key_path(package.package_sha256());
-        let result = (|| {
-            write_cloud_metadata_file(&metadata_staging, metadata)?;
-            write_private_file(&staging, package.package_bytes())?;
-            fs::rename(&metadata_staging, &metadata_path)
-                .map_err(|_| SealedResourceError::Unknown)?;
-            remove_authorization_key_file(&key_path)?;
-            fs::rename(&staging, &path).map_err(|_| SealedResourceError::Unknown)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&staging);
-            let _ = fs::remove_file(&metadata_staging);
-            let _ = fs::remove_file(&metadata_path);
-        }
-        result.map(|_| path)
+        let bytes = serde_json::to_vec(metadata).map_err(|_| SealedResourceError::Unknown)?;
+        let metadata_staging = files.stage(&metadata_path, &bytes, None)?;
+        let package_staging = files.stage(&path, package.package_bytes(), None)?;
+        files.remove(&metadata_path)?;
+        files.publish_staged(&metadata_path, metadata_staging)?;
+        files.remove(&self.authorization_key_path(package.package_sha256()))?;
+        files.publish_staged(&path, package_staging)?;
+        Ok(path)
     }
 
     fn remove_other_packages_locked(
@@ -959,21 +1105,11 @@ impl SealedAgentStore {
             .join(format!("{package_sha256}.{AUTHORIZATION_KEY_EXTENSION}"))
     }
 
-    fn authorization_key_staging_path(&self, package_sha256: &str) -> PathBuf {
-        self.private_directory.join(format!(
-            ".{package_sha256}.{AUTHORIZATION_KEY_EXTENSION}.tmp"
-        ))
-    }
-
     fn cloud_metadata_path(&self, package_sha256: &str) -> PathBuf {
         self.private_directory
             .join(format!("{package_sha256}.{CLOUD_METADATA_EXTENSION}"))
     }
 
-    fn cloud_metadata_staging_path(&self, package_sha256: &str) -> PathBuf {
-        self.private_directory
-            .join(format!(".{package_sha256}.{CLOUD_METADATA_EXTENSION}.tmp"))
-    }
 }
 
 impl fmt::Debug for SealedAgentStore {
@@ -1028,20 +1164,155 @@ fn collect_agent_files(
     Ok(files)
 }
 
-fn remove_agent_bootstrap_files(workspace: &Path) -> Result<(), SealedResourceError> {
-    for name in AGENT_BOOTSTRAP_FILES {
-        let path = workspace.join(name);
-        let metadata = match fs::symlink_metadata(&path) {
+#[derive(Default)]
+struct AgentInstallFiles {
+    writes: Vec<AgentInstallWrite>,
+    removed: Vec<(PathBuf, usize)>,
+}
+
+struct AgentInstallWrite {
+    path: PathBuf,
+    contents: Vec<u8>,
+    temporary: bool,
+    retained: bool,
+}
+
+impl AgentInstallFiles {
+    fn stage(
+        &mut self,
+        path: &Path,
+        contents: &[u8],
+        permissions: Option<fs::Permissions>,
+    ) -> Result<usize, SealedResourceError> {
+        let mut nonce = [0; 16];
+        getrandom::fill(&mut nonce).map_err(|_| SealedResourceError::Unknown)?;
+        let temporary = path
+            .parent()
+            .ok_or(SealedResourceError::Rejected)?
+            .join(format!(".agent-install-{}.tmp", hex_digest(&nonce)));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|_| SealedResourceError::Unknown)?;
+        let index = self.writes.len();
+        self.writes.push(AgentInstallWrite {
+            path: temporary.clone(),
+            contents: Vec::new(),
+            temporary: true,
+            retained: false,
+        });
+        set_private_mode(&temporary, false)?;
+        while self.writes[index].contents.len() < contents.len() {
+            let offset = self.writes[index].contents.len();
+            let written = file
+                .write(&contents[offset..])
+                .map_err(|_| SealedResourceError::Unknown)?;
+            if written == 0 {
+                return Err(SealedResourceError::Unknown);
+            }
+            self.writes[index].contents.extend_from_slice(&contents[offset..offset + written]);
+        }
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions).map_err(|_| SealedResourceError::Unknown)?;
+        }
+        file.sync_all().map_err(|_| SealedResourceError::Unknown)?;
+        Ok(index)
+    }
+
+    fn publish_staged(&mut self, path: &Path, index: usize) -> Result<(), SealedResourceError> {
+        if !install_file_matches(&self.writes[index].path, &self.writes[index].contents)? {
+            return Err(SealedResourceError::Unknown);
+        }
+        fs::hard_link(&self.writes[index].path, path).map_err(|_| SealedResourceError::Unknown)?;
+        let contents = self.writes[index].contents.clone();
+        self.writes.push(AgentInstallWrite {
+            path: path.to_owned(),
+            contents,
+            temporary: false,
+            retained: false,
+        });
+        Ok(())
+    }
+
+    fn remove(&mut self, path: &Path) -> Result<(), SealedResourceError> {
+        let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(_) => return Err(SealedResourceError::Unknown),
         };
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(SealedResourceError::Rejected);
         }
+        let contents = fs::read(path).map_err(|_| SealedResourceError::Unknown)?;
+        let index = self.stage(path, &contents, Some(metadata.permissions()))?;
+        if !install_file_matches(path, &contents)? {
+            return Err(SealedResourceError::Unknown);
+        }
         fs::remove_file(path).map_err(|_| SealedResourceError::Unknown)?;
+        self.removed.push((path.to_owned(), index));
+        Ok(())
     }
-    Ok(())
+
+    fn finish<T>(mut self, result: Result<T, SealedResourceError>) -> Result<T, SealedResourceError> {
+        // Package publication commits the install; later temp cleanup cannot roll it back.
+        let committed = result.is_ok();
+        let mut failed = false;
+        if !committed {
+            for write in self.writes.iter().rev().filter(|write| !write.temporary) {
+                failed |= remove_install_write(write).is_err();
+            }
+            for (path, index) in self.removed.iter().rev() {
+                let preimage = &mut self.writes[*index];
+                let restored = (|| {
+                    if install_file_matches(path, &preimage.contents)? {
+                        return Ok(());
+                    }
+                    ensure_missing(path)?;
+                    if !install_file_matches(&preimage.path, &preimage.contents)? {
+                        return Err(SealedResourceError::Unknown);
+                    }
+                    fs::hard_link(&preimage.path, path).map_err(|_| SealedResourceError::Unknown)
+                })();
+                if restored.is_err() {
+                    preimage.retained = true;
+                    failed = true;
+                }
+            }
+        }
+        for write in self.writes.iter().filter(|write| write.temporary && !write.retained) {
+            failed |= remove_install_write(write).is_err();
+        }
+        if failed && !committed {
+            Err(SealedResourceError::Unknown)
+        } else {
+            result
+        }
+    }
+}
+
+fn install_file_matches(path: &Path, contents: &[u8]) -> Result<bool, SealedResourceError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(SealedResourceError::Unknown),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != contents.len() as u64 {
+        return Ok(false);
+    }
+    fs::read(path).map(|current| current == contents).map_err(|_| SealedResourceError::Unknown)
+}
+
+fn remove_install_write(write: &AgentInstallWrite) -> Result<(), SealedResourceError> {
+    match fs::symlink_metadata(&write.path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(SealedResourceError::Unknown),
+        Ok(_) => {}
+    }
+    if !install_file_matches(&write.path, &write.contents)? {
+        return Err(SealedResourceError::Unknown);
+    }
+    fs::remove_file(&write.path).map_err(|_| SealedResourceError::Unknown)
 }
 
 fn existing_workspace_directory(path: &Path) -> Result<Option<PathBuf>, SealedResourceError> {
@@ -1102,6 +1373,7 @@ fn read_cloud_metadata_file(
         .map_err(|_| SealedResourceError::Rejected)
 }
 
+#[cfg(test)]
 fn write_cloud_metadata_file(
     path: &Path,
     metadata: &SealedCloudPackageMetadata,
@@ -1118,6 +1390,7 @@ fn ensure_missing(path: &Path) -> Result<(), SealedResourceError> {
     }
 }
 
+#[cfg(test)]
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), SealedResourceError> {
     let mut file = OpenOptions::new()
         .write(true)

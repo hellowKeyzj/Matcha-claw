@@ -9,6 +9,8 @@ use chrono::Local;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio_util::sync::CancellationToken;
 
+use super::actor::write_json;
+
 use crate::{
     application::commands::{WikiSourceTaskRunPlan, WikiStagedImportSource},
     domain::{
@@ -16,7 +18,7 @@ use crate::{
         WikiApplyGeneratedPagesReceipt, WikiDeleteSourceInput, WikiDeleteSourceReceipt,
         WikiFailure, WikiProjectSelector, WikiRevision, WikiSourceMoveReceipt, WikiSourceTask,
         WikiSourceTaskKind, WikiSourceTaskStatus, WikiSourceTasksReceipt, WikiSourceWatchConfig,
-        WikiWriteReceipt, normalize_relative_path, now_ms, resolve_project_path,
+        WikiWriteReceipt, normalize_relative_path, now_ms, project_id_for_root, resolve_project_path,
         stable_content_hash, system_time_ms,
     },
     ingest::{parser::is_safe_ingest_path, prompts, write as ingest_write},
@@ -156,7 +158,7 @@ pub(super) fn source_summary_slug(identity: &str) -> String {
         return slug;
     }
     let readable_limit = 120usize.saturating_sub(hash.len() + 2);
-    let prefix = slug[..slug.len().min(readable_limit)]
+    let prefix = slug[..slug.floor_char_boundary(readable_limit)]
         .trim_end_matches('-')
         .to_owned();
     format!(
@@ -451,6 +453,97 @@ pub(super) fn append_source_task_paths(
     write_json(root.join(SOURCE_TASKS_FILE), &tasks)
 }
 
+pub(super) fn stage_source_cleanups(
+    root: &Path,
+    project_id: &str,
+    previous: &FileSnapshot,
+    snapshot: &mut FileSnapshot,
+    observed: &BTreeSet<String>,
+    deletions: &[String],
+    wiki_deletions: &[String],
+    moves: &[(String, String)],
+) -> Result<(), WikiFailure> {
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
+    recover_source_tasks_unlocked(root, &mut tasks)?;
+    let mut pending = previous.pending_cleanup_paths.clone();
+    pending.retain(|path, _| !observed.contains(path));
+    let effects = deletions.iter().map(|path| (vec![path.clone()], Some(WikiSourceTaskKind::Deleted)))
+        .chain(wiki_deletions.iter().map(|path| (vec![path.clone()], None)))
+        .chain(moves.iter().map(|(old, new)| (vec![old.clone(), new.clone()], Some(WikiSourceTaskKind::Moved))));
+    for (paths, kind) in effects {
+        let before = paths.iter().map(|path| (path.clone(), previous.entries.get(path).cloned())).collect();
+        let after = paths.iter().map(|path| (path.clone(), snapshot.entries.get(path).cloned())).collect();
+        let mut cleanup = SourceCleanup { id: String::new(), before, after };
+        let previous_cleanup = previous.pending_cleanup_paths.get(&paths[0])
+            .filter(|old| old.before == cleanup.before && old.after == cleanup.after
+                && paths.iter().all(|path| previous.pending_cleanup_paths.get(path) == Some(*old)));
+        let mut execution_locks = Vec::new();
+        for path in &paths {
+            execution_locks.push(super::source_execution::try_source_execution_lock(root, path)?
+                .ok_or_else(|| WikiFailure::state("source already has an active execution"))?);
+        }
+        cleanup.id = if let Some(kind) = kind {
+            let task_path = paths.last().expect("source cleanup has a path");
+            if let Some(old) = previous_cleanup
+                && latest_source_task_mut(&mut tasks, project_id, task_path)
+                    .is_some_and(|task| task.id() == old.id && task.kind() == &kind && task_is_open(task))
+            {
+                old.id.clone()
+            } else {
+                let id = crate::history::version_id();
+                tasks.retain(|task| !(task.project_id() == project_id
+                    && task.source_path() == task_path && task_is_open(task)
+                    && !previous.pending_source_task_settlements.contains(task.id())));
+                let now = now_ms();
+                tasks.push(WikiSourceTask::new(id.clone(), project_id.to_owned(), task_path.clone(),
+                    kind, WikiSourceTaskStatus::Pending, now, now, 0, None));
+                id
+            }
+        } else {
+            previous_cleanup.map(|old| old.id.clone()).unwrap_or_else(crate::history::version_id)
+        };
+        for path in paths {
+            pending.insert(path, cleanup.clone());
+        }
+    }
+    let replaced = previous.pending_cleanup_paths.values().filter(|old| {
+        old.before.keys().any(|path| pending.get(path) != Some(*old))
+    }).map(|old| old.id.clone()).collect::<BTreeSet<_>>();
+    pending.retain(|_, cleanup| !replaced.contains(&cleanup.id));
+    let retained_ids = pending.values().map(|cleanup| cleanup.id.as_str()).collect::<BTreeSet<_>>();
+    let retired_ids = previous.pending_cleanup_paths.values()
+        .filter(|cleanup| !retained_ids.contains(cleanup.id.as_str()))
+        .map(|cleanup| cleanup.id.as_str()).collect::<BTreeSet<_>>();
+    let mut retirement_locks = Vec::new();
+    for task in &tasks {
+        if task.project_id() == project_id && task_is_open(task) && retired_ids.contains(task.id())
+            && !previous.pending_source_task_settlements.contains(task.id())
+        {
+            retirement_locks.push(super::source_execution::try_source_execution_lock(root, task.source_path())?
+                .ok_or_else(|| WikiFailure::state("source already has an active execution"))?);
+        }
+    }
+    tasks.retain(|task| !(task.project_id() == project_id && task_is_open(task)
+        && matches!(task.kind(), WikiSourceTaskKind::Deleted | WikiSourceTaskKind::Moved)
+        && retired_ids.contains(task.id()) && !previous.pending_source_task_settlements.contains(task.id())));
+    write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
+    snapshot.pending_source_task_settlements.retain(|task_id| !tasks.iter().any(|task| {
+        task.id() == task_id && task.project_id() == project_id
+            && matches!(task.kind(), WikiSourceTaskKind::Deleted | WikiSourceTaskKind::Moved)
+            && task.status() == &WikiSourceTaskStatus::Done
+    }));
+    snapshot.pending_cleanup_paths = pending;
+    for (path, cleanup) in &snapshot.pending_cleanup_paths {
+        if let Some(entry) = cleanup.before.get(path).and_then(Option::as_ref) {
+            snapshot.entries.insert(path.clone(), entry.clone());
+        } else {
+            snapshot.entries.remove(path);
+        }
+    }
+    Ok(())
+}
+
 fn upsert_source_task(
     tasks: &mut Vec<WikiSourceTask>,
     project_id: &str,
@@ -743,13 +836,57 @@ pub(super) fn source_tasks(
     Ok(WikiSourceTasksReceipt::new(tasks))
 }
 
+fn cleanup_is_current(root: &Path, snapshot: &FileSnapshot, cleanup: &SourceCleanup) -> Result<bool, WikiFailure> {
+    for (path, before) in &cleanup.before {
+        if snapshot.pending_cleanup_paths.get(path) != Some(cleanup)
+            || snapshot.entries.get(path) != before.as_ref()
+            || super::actor::read_snapshot_entry(root, path)?.as_ref() != cleanup.after.get(path).and_then(Option::as_ref)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn source_cleanup_is_current(
+    root: &Path,
+    project_id: &str,
+    source_path: &str,
+    kind: &WikiSourceTaskKind,
+    cleanup: &SourceCleanup,
+) -> Result<bool, WikiFailure> {
+    let _tasks_lock = lock_source_tasks(root)?;
+    let mut tasks = read_source_tasks_unlocked(root)?;
+    if recover_source_tasks_unlocked(root, &mut tasks)? {
+        write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
+    }
+    let snapshot = read_json::<FileSnapshot>(root.join(FILE_SNAPSHOT))?;
+    if snapshot.pending_source_task_settlements.contains(&cleanup.id) {
+        return Ok(false);
+    }
+    let task_matches = tasks.iter().any(|task| task.id() == cleanup.id
+        && task.project_id() == project_id && task.source_path() == source_path
+        && task.kind() == kind && task_is_open(task));
+    Ok(task_matches && cleanup_is_current(root, &snapshot, cleanup)?)
+}
+
 pub(super) async fn delete_source(
     root: &Path,
     project_id: &str,
     input: WikiDeleteSourceInput,
+    cleanup: Option<&SourceCleanup>,
 ) -> Result<WikiDeleteSourceReceipt, WikiFailure> {
     let source_relative_path = source_relative_path(root, &input.source_path)?;
-    let (_execution_locks, task_id) = lock_source_mutations(root, project_id, &[&source_relative_path])?;
+    if cleanup.is_some() {
+        recover_source_tasks(root)?;
+    }
+    let (_execution_locks, mut task_id) = lock_source_mutations(root, project_id, &[&source_relative_path])?;
+    if let Some(cleanup) = cleanup {
+        if !source_cleanup_is_current(root, project_id, &source_relative_path, &WikiSourceTaskKind::Deleted, cleanup)? {
+            return Ok(WikiDeleteSourceReceipt::new(source_relative_path, Vec::new(), Vec::new(), Vec::new()));
+        }
+        task_id = Some(cleanup.id.clone());
+    }
     let identity = source_identity(&source_relative_path).to_owned();
     if !input.file_already_deleted {
         let path = resolve_project_path(root, &source_relative_path)?;
@@ -817,14 +954,14 @@ pub(super) async fn delete_source(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(WikiFailure::io(path_text(&media), error)),
     }
-    mark_source_task_done(root, task_id.as_deref())?;
     let mut snapshot_paths = vec![source_relative_path.as_str()];
     if log_updated {
         snapshot_paths.push("wiki/log.md");
     }
     snapshot_paths.extend(updated_pages.iter().map(String::as_str));
     snapshot_paths.extend(deleted_pages.iter().map(String::as_str));
-    refresh_file_snapshot(root, &snapshot_paths)?;
+    refresh_file_snapshot_for_source(root, &snapshot_paths, project_id, task_id.as_deref(), &[&source_relative_path], cleanup)?;
+    mark_source_task_done(root, task_id.as_deref())?;
     Ok(WikiDeleteSourceReceipt::new(
         source_relative_path,
         deleted_pages,
@@ -835,8 +972,19 @@ pub(super) async fn delete_source(
 
 pub(super) async fn cleanup_deleted_wiki_pages(
     root: &Path,
-    relative_paths: &[String],
+    paths: &[(String, SourceCleanup)],
 ) -> Result<(), WikiFailure> {
+    let snapshot = read_json::<FileSnapshot>(root.join(FILE_SNAPSHOT))?;
+    let mut current = Vec::new();
+    for (path, cleanup) in paths {
+        if cleanup_is_current(root, &snapshot, cleanup)? {
+            current.push((path.as_str(), cleanup));
+        }
+    }
+    if current.is_empty() {
+        return Ok(());
+    }
+    let relative_paths = current.iter().map(|(path, _)| (*path).to_owned()).collect::<Vec<_>>();
     let deleted_keys = relative_paths
         .iter()
         .filter_map(|path| wiki_page_stem(path))
@@ -844,10 +992,11 @@ pub(super) async fn cleanup_deleted_wiki_pages(
         .flat_map(|slug| [normalize_wiki_ref_key(&slug)])
         .collect::<BTreeSet<_>>();
     if deleted_keys.is_empty() {
-        return Ok(());
+        let snapshot_paths = relative_paths.iter().map(String::as_str).collect::<Vec<_>>();
+        return refresh_file_snapshot_inner(root, &snapshot_paths, None, &current);
     }
 
-    for relative_path in relative_paths {
+    for relative_path in &relative_paths {
         if let Some(slug) = wiki_page_stem(relative_path) {
             let page_id = stable_content_hash(relative_path.as_bytes());
             let _ = crate::vector::delete_page(root, &page_id).await;
@@ -890,8 +1039,8 @@ pub(super) async fn cleanup_deleted_wiki_pages(
             refreshed.push(relative_path);
         }
     }
-    let snapshot_paths = refreshed.iter().map(String::as_str).collect::<Vec<_>>();
-    refresh_file_snapshot(root, &snapshot_paths)
+    let snapshot_paths = refreshed.iter().chain(&relative_paths).map(String::as_str).collect::<Vec<_>>();
+    refresh_file_snapshot_inner(root, &snapshot_paths, None, &current)
 }
 
 pub(super) fn migrate_source_path(
@@ -899,8 +1048,14 @@ pub(super) fn migrate_source_path(
     project_id: &str,
     old_source_relative_path: &str,
     new_source_relative_path: &str,
+    cleanup: &SourceCleanup,
 ) -> Result<WikiSourceMoveReceipt, WikiFailure> {
-    let (_execution_locks, task_id) = lock_source_mutations(root, project_id, &[old_source_relative_path, new_source_relative_path])?;
+    recover_source_tasks(root)?;
+    let (_execution_locks, _) = lock_source_mutations(root, project_id, &[old_source_relative_path, new_source_relative_path])?;
+    if !source_cleanup_is_current(root, project_id, new_source_relative_path, &WikiSourceTaskKind::Moved, cleanup)? {
+        return Ok(WikiSourceMoveReceipt::new(old_source_relative_path.to_owned(), new_source_relative_path.to_owned(), Vec::new(), None));
+    }
+    let task_id = Some(cleanup.id.clone());
     let old_identity = source_identity(old_source_relative_path).to_owned();
     let new_identity = source_identity(new_source_relative_path).to_owned();
     if old_identity == new_identity {
@@ -1050,7 +1205,14 @@ pub(super) fn migrate_source_path(
         rollback_page_updates(root, &page_updates, &updated_pages);
         return Err(error);
     }
-    if let Err(error) = mark_source_task_done(root, task_id.as_deref()) {
+    let mut snapshot_paths = vec![old_source_relative_path, new_source_relative_path];
+    snapshot_paths.extend(updated_pages.iter().map(String::as_str));
+    if let Some(summary) = moved_summary.as_deref() {
+        record_written_wiki_page(root, summary);
+        snapshot_paths.push(&old_summary);
+        snapshot_paths.push(summary);
+    }
+    if let Err(error) = refresh_file_snapshot_for_source(root, &snapshot_paths, project_id, task_id.as_deref(), &[old_source_relative_path, new_source_relative_path], Some(cleanup)) {
         let _ = move_source_media(root, &new_identity, &old_identity);
         let _ = move_parsed_markdown(root, new_source_relative_path, old_source_relative_path);
         rollback_source_cache_move(
@@ -1068,14 +1230,7 @@ pub(super) fn migrate_source_path(
         rollback_page_updates(root, &page_updates, &updated_pages);
         return Err(error);
     }
-    let mut snapshot_paths = vec![old_source_relative_path, new_source_relative_path];
-    snapshot_paths.extend(updated_pages.iter().map(String::as_str));
-    if let Some(summary) = moved_summary.as_deref() {
-        record_written_wiki_page(root, summary);
-        snapshot_paths.push(&old_summary);
-        snapshot_paths.push(summary);
-    }
-    refresh_file_snapshot(root, &snapshot_paths)?;
+    mark_source_task_done(root, task_id.as_deref())?;
     Ok(WikiSourceMoveReceipt::new(
         old_source_relative_path.to_owned(),
         new_source_relative_path.to_owned(),
@@ -3014,6 +3169,7 @@ pub(super) fn recover_source_tasks(root: &Path) -> Result<(), WikiFailure> {
 }
 
 fn recover_source_tasks_unlocked(root: &Path, tasks: &mut [WikiSourceTask]) -> Result<bool, WikiFailure> {
+    settle_source_tasks_unlocked(root, tasks)?;
     let mut changed = false;
     for task in tasks {
         if task.is_paused() || !(task.status() == &WikiSourceTaskStatus::Running
@@ -3030,6 +3186,31 @@ fn recover_source_tasks_unlocked(root: &Path, tasks: &mut [WikiSourceTask]) -> R
         }
     }
     Ok(changed)
+}
+
+fn settle_source_tasks_unlocked(root: &Path, tasks: &mut [WikiSourceTask]) -> Result<(), WikiFailure> {
+    let snapshot = read_json::<FileSnapshot>(root.join(FILE_SNAPSHOT))?;
+    let project_id = project_id_for_root(root);
+    let mut tasks_changed = false;
+    for task_id in &snapshot.pending_source_task_settlements {
+        let task = tasks.iter_mut().find(|task| task.id() == task_id)
+            .ok_or_else(|| WikiFailure::state("source settlement task no longer exists"))?;
+        if task.project_id() != project_id
+            || !matches!(task.kind(), WikiSourceTaskKind::Deleted | WikiSourceTaskKind::Moved)
+        {
+            return Err(WikiFailure::state("Invalid source task settlement"));
+        }
+        if task_is_open(task) && !task.is_paused()
+            && let Some(_execution_lock) = super::source_execution::try_source_execution_lock(root, task.source_path())?
+        {
+            task.mark_done();
+            tasks_changed = true;
+        }
+    }
+    if tasks_changed {
+        write_json(root.join(SOURCE_TASKS_FILE), &tasks)?;
+    }
+    Ok(())
 }
 
 fn read_source_tasks_unlocked(root: &Path) -> Result<Vec<WikiSourceTask>, WikiFailure> {
@@ -3054,11 +3235,14 @@ fn update_source_task_for_run(
             let lock = super::source_execution::try_source_execution_lock(root, task.source_path())?
                 .ok_or_else(|| WikiFailure::state("source already has an active execution"))?;
             staged = task_staged_source(root, task)?;
-            task.restart();
             if let Some(staged) = staged.as_mut() {
+                task.restart();
                 staged.task_id = task.id().to_owned();
                 staged.execution = Some(super::source_execution::SourceExecution::new(lock, root, staged.task_id.clone()));
                 task.mark_pending(Some("queued".to_owned()));
+            } else {
+                task.mark_pending(None);
+                task.mark_failed("Source task has no executable source; restore the source before retrying.".to_owned());
             }
         }
     }
@@ -3221,8 +3405,60 @@ pub(super) fn refresh_file_snapshot(
     root: &Path,
     relative_paths: &[&str],
 ) -> Result<(), WikiFailure> {
+    refresh_file_snapshot_inner(root, relative_paths, None, &[])
+}
+
+fn refresh_file_snapshot_for_source(
+    root: &Path,
+    relative_paths: &[&str],
+    project_id: &str,
+    task_id: Option<&str>,
+    acknowledged: &[&str],
+    cleanup: Option<&SourceCleanup>,
+) -> Result<(), WikiFailure> {
+    let _tasks_lock = lock_source_tasks(root)?;
+    let tasks = read_source_tasks_unlocked(root)?;
+    let settlement = task_id.map(|task_id| {
+        let task = tasks.iter().find(|task| task.id() == task_id)
+            .ok_or_else(|| WikiFailure::state("source task no longer exists"))?;
+        if task.project_id() != project_id || !relative_paths.contains(&task.source_path()) {
+            return Err(WikiFailure::state("Invalid source task settlement"));
+        }
+        Ok((matches!(task.kind(), WikiSourceTaskKind::Deleted | WikiSourceTaskKind::Moved)
+            && task_is_open(task) && !task.is_paused()).then_some(task_id))
+    }).transpose()?.flatten();
+    let snapshot = read_json::<FileSnapshot>(root.join(FILE_SNAPSHOT))?;
+    let acknowledged = acknowledged.iter().filter_map(|path| {
+        let pending = snapshot.pending_cleanup_paths.get(*path)?;
+        if cleanup.is_none_or(|cleanup| cleanup == pending) {
+            Some((*path, pending))
+        } else {
+            None
+        }
+    }).collect::<Vec<_>>();
+    refresh_file_snapshot_inner(root, relative_paths, settlement, &acknowledged)
+}
+
+fn refresh_file_snapshot_inner(
+    root: &Path,
+    relative_paths: &[&str],
+    settlement: Option<&str>,
+    acknowledged: &[(&str, &SourceCleanup)],
+) -> Result<(), WikiFailure> {
     let mut snapshot = read_json::<FileSnapshot>(root.join(FILE_SNAPSHOT))?;
+    if let Some(task_id) = settlement {
+        snapshot.pending_source_task_settlements.insert(task_id.to_owned());
+    }
+    let mut changes = read_json::<Vec<FileChange>>(root.join(FILE_CHANGE_QUEUE))?;
+    for (relative_path, cleanup) in acknowledged {
+        if snapshot.pending_cleanup_paths.get(*relative_path) == Some(*cleanup) {
+            snapshot.pending_cleanup_paths.remove(*relative_path);
+        }
+    }
     for relative_path in relative_paths {
+        if snapshot.pending_cleanup_paths.contains_key(*relative_path) {
+            continue;
+        }
         if !is_default_watch_tracked_file(relative_path) {
             snapshot.entries.remove(*relative_path);
             continue;
@@ -3245,14 +3481,14 @@ pub(super) fn refresh_file_snapshot(
             snapshot.entries.remove(*relative_path);
         }
     }
-    write_json(root.join(FILE_SNAPSHOT), &snapshot)?;
-    let mut changes = read_json::<Vec<FileChange>>(root.join(FILE_CHANGE_QUEUE))?;
     changes.retain(|change| {
-        !relative_paths
-            .iter()
-            .any(|relative_path| change.relative_path == *relative_path)
+        snapshot.pending_cleanup_paths.contains_key(&change.relative_path)
+            || !relative_paths
+                .iter()
+                .any(|relative_path| change.relative_path == *relative_path)
     });
-    write_json(root.join(FILE_CHANGE_QUEUE), &changes)
+    write_json(root.join(FILE_CHANGE_QUEUE), &changes)?;
+    write_json(root.join(FILE_SNAPSHOT), &snapshot)
 }
 
 fn is_snapshot_ignored(relative_path: &str) -> bool {
@@ -3267,16 +3503,28 @@ fn is_snapshot_ignored(relative_path: &str) -> bool {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct FileSnapshot {
-    entries: BTreeMap<String, FileSnapshotEntry>,
+pub(crate) struct FileSnapshot {
+    pub entries: BTreeMap<String, FileSnapshotEntry>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub pending_source_task_settlements: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_cleanup_paths: BTreeMap<String, SourceCleanup>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct FileSnapshotEntry {
-    revision: String,
-    size: u64,
-    modified_at_ms: u64,
+pub(crate) struct SourceCleanup {
+    pub id: String,
+    pub before: BTreeMap<String, Option<FileSnapshotEntry>>,
+    pub after: BTreeMap<String, Option<FileSnapshotEntry>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FileSnapshotEntry {
+    pub revision: String,
+    pub size: u64,
+    pub modified_at_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3294,17 +3542,6 @@ fn read_json<T: DeserializeOwned + Default>(path: impl AsRef<Path>) -> Result<T,
     }
     let bytes = std::fs::read(path).map_err(|error| WikiFailure::io(path_text(path), error))?;
     serde_json::from_slice(&bytes).map_err(|error| WikiFailure::state(error.to_string()))
-}
-
-fn write_json(path: impl AsRef<Path>, value: &impl Serialize) -> Result<(), WikiFailure> {
-    let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| WikiFailure::io(path_text(parent), error))?;
-    }
-    let bytes =
-        serde_json::to_vec_pretty(value).map_err(|error| WikiFailure::state(error.to_string()))?;
-    std::fs::write(path, bytes).map_err(|error| WikiFailure::io(path_text(path), error))
 }
 
 fn path_text(path: &Path) -> String {

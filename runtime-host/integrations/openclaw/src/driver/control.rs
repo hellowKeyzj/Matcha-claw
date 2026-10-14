@@ -271,8 +271,13 @@ impl ControlLease {
             ControlLeaseInner::Probe { lease, .. } if lease.is_cancelled() => {
                 OpenClawControlReadiness::Unavailable
             }
-            ControlLeaseInner::Probe { gateway, .. } => {
-                gateway.lock().await.control_readiness_snapshot().await
+            ControlLeaseInner::Probe { gateway, lease } => {
+                let readiness = gateway.lock().await.control_readiness_snapshot().await;
+                if lease.is_cancelled() {
+                    OpenClawControlReadiness::Unavailable
+                } else {
+                    readiness
+                }
             }
         }
     }

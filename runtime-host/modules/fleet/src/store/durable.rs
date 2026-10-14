@@ -1,8 +1,8 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, TryLockError},
     io::{self, Write},
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 const WRITER_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
@@ -104,13 +104,14 @@ impl FleetStore {
             truncate_to_recovered_prefix(&path, committed_len)?;
         }
         let epoch = if schema != CURRENT_SCHEMA_VERSION {
-            rewrite_migrated_facts(&path, &facts)?
+            rewrite_snapshot(&path, 0, &encode_frame(1, &facts)?)?;
+            1
         } else {
             epoch
         };
         let epoch = if recover_interrupted_delivery && had_interrupted_delivery {
             facts.recover_interrupted_deliveries();
-            commit_recovered_facts(&path, epoch, &facts)?
+            commit_facts(&path, epoch, &facts)?
         } else {
             epoch
         };
@@ -179,7 +180,9 @@ impl FleetStore {
         self.refresh_locked()?;
         let mut candidate = self.facts.clone();
         let result = mutation(&mut candidate)?;
-        self.commit_locked(&lock, candidate)?;
+        if candidate != self.facts {
+            self.commit_locked(&lock, candidate)?;
+        }
         Ok(result)
     }
 
@@ -201,28 +204,16 @@ impl FleetStore {
         Ok(())
     }
 
-    fn commit_locked(&mut self, lock: &WriterLock, facts: FleetFacts) -> Result<(), StoreFault> {
-        let next_epoch = self.epoch.checked_add(1).ok_or(StoreFault::EpochOverflow)?;
-        let frame = encode_frame(next_epoch, &facts)?;
-        let log_len = lock.log_len(&self.path)?;
-        let projected_len = log_len
-            .checked_add(u64::try_from(frame.len()).map_err(|_| StoreFault::LogFull)?)
-            .ok_or(StoreFault::LogFull)?;
-        if projected_len > MAX_LOG_BYTES {
-            return Err(StoreFault::LogFull);
-        }
-
-        let mut log = OpenOptions::new()
-            .append(true)
-            .open(&self.path)
-            .map_err(|error| StoreFault::Commit(error.kind()))?;
-        if let Err(error) = log.write_all(&frame) {
-            return Err(StoreFault::Commit(error.kind()));
-        }
-        if let Err(error) = log.sync_data() {
-            self.requires_reopen = true;
-            return Err(StoreFault::CommitOutcomeUnknown(error.kind()));
-        }
+    fn commit_locked(&mut self, _lock: &WriterLock, facts: FleetFacts) -> Result<(), StoreFault> {
+        let next_epoch = match commit_facts(&self.path, self.epoch, &facts) {
+            Ok(epoch) => epoch,
+            Err(error) => {
+                if matches!(error, StoreFault::CommitOutcomeUnknown(_)) {
+                    self.requires_reopen = true;
+                }
+                return Err(error);
+            }
+        };
         self.facts = facts;
         self.epoch = next_epoch;
         Ok(())
@@ -249,7 +240,7 @@ fn recover_or_initialize(path: &Path) -> Result<RecoveredFacts, StoreFault> {
 fn initialize_log_file(path: &Path) -> Result<RecoveredFacts, StoreFault> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => {
-            initialize_log(&mut file)?;
+            initialize_log(&mut file, 0)?;
             file.sync_all()
                 .map_err(|error| StoreFault::CommitOutcomeUnknown(error.kind()))?;
             Ok(RecoveredFacts {
@@ -269,26 +260,45 @@ fn initialize_log_file(path: &Path) -> Result<RecoveredFacts, StoreFault> {
     }
 }
 
-/// Replaces a complete v5 log with one v6 snapshot. The replacement is written
-/// and synced before its header becomes visible, so v5 cannot be mixed with v6
-/// frames after an interrupted upgrade.
-fn rewrite_migrated_facts(path: &Path, facts: &FleetFacts) -> Result<u64, StoreFault> {
-    let temporary = migration_temporary_path(path)?;
+/// Publishes a complete snapshot for schema migration or bounded-log compaction.
+fn rewrite_snapshot(path: &Path, base_epoch: u64, frame: &[u8]) -> Result<(), StoreFault> {
+    let parent = path
+        .parent()
+        .ok_or(StoreFault::Commit(io::ErrorKind::NotFound))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(StoreFault::Commit(io::ErrorKind::InvalidInput))?;
+    let mut suffix = [0_u8; 16];
+    getrandom::fill(&mut suffix).map_err(|_| StoreFault::Commit(io::ErrorKind::Other))?;
+    let temporary = parent.join(format!(".{name}.{:032x}.snapshot", u128::from_le_bytes(suffix)));
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| StoreFault::Commit(error.kind()))?;
     let result = (|| {
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|error| StoreFault::Recovery(error.kind()))?;
-        initialize_log(&mut output)?;
-        let frame = encode_frame(1, facts)?;
         output
-            .write_all(&frame)
-            .and_then(|()| output.sync_all())
-            .map_err(|error| StoreFault::Recovery(error.kind()))?;
+            .set_permissions(
+                fs::metadata(path)
+                    .map_err(|error| StoreFault::Commit(error.kind()))?
+                    .permissions(),
+            )
+            .map_err(|error| StoreFault::Commit(error.kind()))?;
+        initialize_log(&mut output, base_epoch)?;
+        output
+            .write_all(frame)
+            .map_err(|error| StoreFault::Commit(error.kind()))?;
+        output
+            .sync_all()
+            .map_err(|error| StoreFault::CommitOutcomeUnknown(error.kind()))?;
         drop(output);
-        replace_migrated_log(&temporary, path)?;
-        Ok(1)
+        replace_snapshot_log(&temporary, path)?;
+        #[cfg(unix)]
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| StoreFault::CommitOutcomeUnknown(error.kind()))?;
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -296,24 +306,13 @@ fn rewrite_migrated_facts(path: &Path, facts: &FleetFacts) -> Result<u64, StoreF
     result
 }
 
-fn migration_temporary_path(path: &Path) -> Result<PathBuf, StoreFault> {
-    let parent = path
-        .parent()
-        .ok_or(StoreFault::Recovery(io::ErrorKind::NotFound))?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or(StoreFault::Recovery(io::ErrorKind::InvalidInput))?;
-    Ok(parent.join(format!(".{name}.v6-migration")))
-}
-
 #[cfg(unix)]
-fn replace_migrated_log(temporary: &Path, path: &Path) -> Result<(), StoreFault> {
-    fs::rename(temporary, path).map_err(|error| StoreFault::Recovery(error.kind()))
+fn replace_snapshot_log(temporary: &Path, path: &Path) -> Result<(), StoreFault> {
+    fs::rename(temporary, path).map_err(|error| StoreFault::CommitOutcomeUnknown(error.kind()))
 }
 
 #[cfg(windows)]
-fn replace_migrated_log(temporary: &Path, path: &Path) -> Result<(), StoreFault> {
+fn replace_snapshot_log(temporary: &Path, path: &Path) -> Result<(), StoreFault> {
     use std::{
         os::windows::ffi::OsStrExt,
         ptr::{null, null_mut},
@@ -321,7 +320,8 @@ fn replace_migrated_log(temporary: &Path, path: &Path) -> Result<(), StoreFault>
     use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
 
     if !path.exists() {
-        return fs::rename(temporary, path).map_err(|error| StoreFault::Recovery(error.kind()));
+        return fs::rename(temporary, path)
+            .map_err(|error| StoreFault::CommitOutcomeUnknown(error.kind()));
     }
     let replaced: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
     let replacement: Vec<u16> = temporary.as_os_str().encode_wide().chain([0]).collect();
@@ -336,12 +336,14 @@ fn replace_migrated_log(temporary: &Path, path: &Path) -> Result<(), StoreFault>
         )
     } == 0
     {
-        return Err(StoreFault::Recovery(io::ErrorKind::Other));
+        return Err(StoreFault::CommitOutcomeUnknown(
+            io::Error::last_os_error().kind(),
+        ));
     }
     Ok(())
 }
 
-fn commit_recovered_facts(path: &Path, epoch: u64, facts: &FleetFacts) -> Result<u64, StoreFault> {
+fn commit_facts(path: &Path, epoch: u64, facts: &FleetFacts) -> Result<u64, StoreFault> {
     let next_epoch = epoch.checked_add(1).ok_or(StoreFault::EpochOverflow)?;
     let frame = encode_frame(next_epoch, facts)?;
     let log_len = fs::metadata(path)
@@ -351,7 +353,8 @@ fn commit_recovered_facts(path: &Path, epoch: u64, facts: &FleetFacts) -> Result
         .checked_add(u64::try_from(frame.len()).map_err(|_| StoreFault::LogFull)?)
         .ok_or(StoreFault::LogFull)?;
     if projected_len > MAX_LOG_BYTES {
-        return Err(StoreFault::LogFull);
+        rewrite_snapshot(path, epoch, &frame)?;
+        return Ok(next_epoch);
     }
 
     let mut log = OpenOptions::new()
@@ -383,41 +386,31 @@ fn lock_path(path: &Path) -> PathBuf {
 }
 
 struct WriterLock {
-    path: PathBuf,
+    _file: File,
 }
 
 impl WriterLock {
     fn acquire(path: &Path) -> Result<Self, StoreFault> {
-        let started = SystemTime::now();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|error| StoreFault::Lock(error.kind()))?;
+        let started = Instant::now();
         loop {
-            match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(file) => {
-                    drop(file);
-                    return Ok(Self {
-                        path: path.to_owned(),
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let elapsed = started.elapsed().unwrap_or_default();
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(TryLockError::WouldBlock) => {
+                    let elapsed = started.elapsed();
                     if elapsed >= WRITER_LOCK_TIMEOUT {
                         return Err(StoreFault::WriterBusy);
                     }
                     std::thread::sleep(WRITER_LOCK_POLL.min(WRITER_LOCK_TIMEOUT - elapsed));
                 }
-                Err(error) => return Err(StoreFault::Lock(error.kind())),
+                Err(TryLockError::Error(error)) => return Err(StoreFault::Lock(error.kind())),
             }
         }
-    }
-
-    fn log_len(&self, path: &Path) -> Result<u64, StoreFault> {
-        fs::metadata(path)
-            .map(|metadata| metadata.len())
-            .map_err(|error| StoreFault::Commit(error.kind()))
-    }
-}
-
-impl Drop for WriterLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
     }
 }

@@ -1,5 +1,3 @@
-pub mod local;
-
 use std::fmt;
 
 use crate::{
@@ -10,12 +8,10 @@ use crate::{
             AppServerClient, AppServerClientError, AppServerEndpoint, EventRecovery,
             EventRecoveryCursor,
         },
-        hydration::{
-            self, HydrationIncomplete, HydrationResult, HydrationSnapshot, HydrationWindowRequest,
-        },
+        hydration::{self, HydrationIncomplete, HydrationSnapshot, HydrationWindowRequest},
         model::{SessionId, SessionListResult, SessionRecord},
         protocol_event::ReplayLimit,
-        request::SessionLoadParams,
+        request::{SessionContentParams, SessionTranscriptParams},
     },
 };
 
@@ -39,7 +35,7 @@ pub type HistoryContentResult = HistoryResult<HistoryContentChunk>;
 pub type HistoryRecoveryResult = HistoryResult<EventRecovery>;
 
 /// One bounded chunk of native transcript content.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct HistoryContentChunk {
     content_ref: String,
     offset: u64,
@@ -89,6 +85,18 @@ impl HistoryContentChunk {
 
     pub const fn complete(&self) -> bool {
         self.complete
+    }
+}
+
+impl fmt::Debug for HistoryContentChunk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HistoryContentChunk")
+            .field("offset", &self.offset)
+            .field("next_offset", &self.next_offset)
+            .field("total_bytes", &self.total_bytes)
+            .field("complete", &self.complete)
+            .finish_non_exhaustive()
     }
 }
 
@@ -170,9 +178,8 @@ pub async fn list(endpoint: AppServerEndpoint, secret: &Secret) -> HistoryListRe
 
 /// Loads a bounded, renderer-safe native transcript window.
 ///
-/// Bounded decoding and native replay alignment are delegated to the existing
-/// hydration owner. This wrapper adds history-level unavailable/unknown
-/// projection without creating a transcript or event-store shadow.
+/// This read consumes one native transcript page; snapshot/replay alignment
+/// remains with canonical readback and live observation.
 pub async fn load(
     endpoint: AppServerEndpoint,
     secret: &Secret,
@@ -186,23 +193,39 @@ pub async fn load(
     };
 
     let result = match client
-        .load_session(SessionLoadParams::new(session_id.clone()))
+        .transcript_session(SessionTranscriptParams::new(session_id).with_window(request))
         .await
     {
-        Ok(session) if session.session_id == session_id => {
-            let hydration =
-                hydration::hydrate_connected_for_history(&client, session, request).await;
-            match hydration {
-                HydrationResult::Complete(snapshot) => HistoryResult::Complete(snapshot),
-                HydrationResult::Incomplete(reason) => match reason {
-                    HydrationIncomplete::ConnectionInterrupted => HistoryResult::Unknown,
-                    HydrationIncomplete::SourceUnavailable => HistoryResult::Unavailable,
-                    reason => HistoryResult::Incomplete(reason),
-                },
-            }
-        }
-        Ok(_) => HistoryResult::Incomplete(HydrationIncomplete::ProtocolRejected),
-        Err(AppServerClientError::SessionNotFound) => HistoryResult::NotFound,
+        Ok(transcript) => match hydration::hydrate_page(&transcript) {
+            Ok(snapshot) => HistoryResult::Complete(snapshot),
+            Err(reason) => HistoryResult::Incomplete(reason),
+        },
+        Err(error) => HistoryResult::from_read_error(error),
+    };
+    client.finish_with_cleanup(result).await
+}
+
+/// Reads bounded content from the same native transcript source as history.
+pub async fn load_content(
+    endpoint: AppServerEndpoint,
+    secret: &Secret,
+    session_id: SessionId,
+    content_ref: String,
+    offset: u64,
+    limit: usize,
+) -> HistoryContentResult {
+    let (client, _) = match AppServerClient::connect_and_initialize_raw_only(endpoint, secret).await {
+        Ok(connection) => connection,
+        Err(error) => return HistoryResult::from_connect_error(error),
+    };
+    let result = match client
+        .load_content(SessionContentParams::new(session_id, content_ref, offset, limit))
+        .await
+    {
+        Ok(Some(chunk)) => HistoryResult::Complete(HistoryContentChunk::new(
+            chunk.content_ref, chunk.offset, chunk.text, chunk.next_offset, chunk.total_bytes,
+        )),
+        Ok(None) => HistoryResult::NotFound,
         Err(error) => HistoryResult::from_read_error(error),
     };
     client.finish_with_cleanup(result).await
@@ -409,7 +432,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn load_pages_replay_until_the_snapshot_cursor() {
         let (endpoint, server) = test_server(TestServerScript::LoadPaged).await;
-        let result = load(
+        let result = crate::session::canonical::read(
             endpoint,
             &Secret::new("history-load-token".into()).unwrap(),
             SessionId::try_new("history-session").unwrap(),
@@ -527,67 +550,21 @@ mod tests {
     }
 
     async fn serve_load(socket: &mut TestSocket) {
-        let load = read_json(socket).await;
-        assert_eq!(load["method"], "session.load");
-        assert_eq!(load["params"], json!({"sessionId": "history-session"}));
-        send_json(
-            socket,
-            json!({
-                "jsonrpc": "2.0",
-                "id": load["id"],
-                "result": session_record_at("history-session", "private-model", 1)
-            }),
-        )
-        .await;
-
         let transcript = read_json(socket).await;
         assert_eq!(transcript["method"], "session.transcript");
         assert_eq!(
             transcript["params"],
-            json!({"sessionId": "history-session"})
+            json!({"sessionId": "history-session", "direction": "latest", "limit": 20})
         );
         send_json(
             socket,
             json!({
                 "jsonrpc": "2.0",
                 "id": transcript["id"],
-                "result": {"lines": [r#"{"message":{"role":"user","content":"visible-history"}}"#]}
-            }),
-        )
-        .await;
-
-        let snapshot = read_json(socket).await;
-        assert_eq!(snapshot["method"], "session.snapshot");
-        assert_eq!(snapshot["params"], json!({"sessionId": "history-session"}));
-        send_json(
-            socket,
-            json!({
-                "jsonrpc": "2.0",
-                "id": snapshot["id"],
                 "result": {
-                    "session": session_record_at("history-session", "private-model", 1),
-                    "version": 1,
-                    "updatedAt": "now",
-                    "runs": [],
-                    "messages": [],
-                    "pendingApprovals": []
+                    "lines": [r#"{"message":{"role":"user","content":"visible-history"}}"#],
+                    "window": {"totalItemCount": 1, "windowStartOffset": 0, "windowEndOffset": 1}
                 }
-            }),
-        )
-        .await;
-
-        let replay = read_json(socket).await;
-        assert_eq!(replay["method"], "events.replay");
-        assert_eq!(
-            replay["params"],
-            json!({"sessionId": "history-session", "afterSeq": 0, "limit": 128.0})
-        );
-        send_json(
-            socket,
-            json!({
-                "jsonrpc": "2.0",
-                "id": replay["id"],
-                "result": {"events": [event_envelope(1, "history-event")]}
             }),
         )
         .await;
@@ -613,7 +590,10 @@ mod tests {
             json!({
                 "jsonrpc": "2.0",
                 "id": transcript["id"],
-                "result": {"lines": [r#"{"message":{"role":"user","content":"visible-history"}}"#]}
+                "result": {
+                    "lines": [r#"{"message":{"role":"user","content":"visible-history"}}"#],
+                    "window": {"totalItemCount": 1, "windowStartOffset": 0, "windowEndOffset": 1}
+                }
             }),
         )
         .await;
@@ -644,7 +624,7 @@ mod tests {
 
     async fn serve_load_not_found(socket: &mut TestSocket) {
         let load = read_json(socket).await;
-        assert_eq!(load["method"], "session.load");
+        assert_eq!(load["method"], "session.transcript");
         send_json(
             socket,
             json!({

@@ -8,7 +8,7 @@ pub mod handler;
 
 const CAPABILITY_ID: &str = "security.emergency";
 const OPERATION_ID: &str = CAPABILITY_ID;
-const AUTHORIZATION_ENDPOINT: &str = "/api/security/emergency";
+pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/security/emergency";
 const AUTHORIZATION_SCOPE: &str = "security:write";
 const AUTHORIZATION_SUBJECT: &str = "security-emergency";
 
