@@ -69,11 +69,12 @@ impl OwnerSpec for TaskOwner {
     }
 
     async fn handle_keyed_command(
-        _shared: Self::Shared,
+        shared: Self::Shared,
         _key: Self::Key,
         _lane: &mut Self::LaneState,
-        _command: Self::Command,
+        command: Self::Command,
     ) {
+        execute_command(&shared, command).await;
     }
 
     async fn handle_global_command(
@@ -81,25 +82,7 @@ impl OwnerSpec for TaskOwner {
         _global: &mut Self::GlobalState,
         command: Self::Command,
     ) {
-        match command {
-            TaskCommand::Execute {
-                command,
-                mut call,
-                reply,
-            } => {
-                if let Some(call) = &call {
-                    record_error(call.context.accepted().await.map(|_| ()));
-                    record_error(call.context.running().await);
-                }
-                let (outcome, failure) = execute_task(&shared, command).await;
-                if let Some(call) = &mut call {
-                    call.detail.failure = failure;
-                    let status = call.detail.finish(&outcome);
-                    record_error(call.context.finish(status, &call.detail).await);
-                }
-                let _ = reply.send(outcome);
-            }
-        }
+        execute_command(&shared, command).await;
     }
 
     async fn handle_direct_query(_shared: Self::Shared, _query: Self::Query) {}
@@ -125,6 +108,28 @@ impl OwnerSpec for TaskOwner {
         query: Self::Query,
     ) {
         Self::handle_global_query(shared, global, query).await;
+    }
+}
+
+async fn execute_command(shared: &TaskShared, command: TaskCommand) {
+    match command {
+        TaskCommand::Execute {
+            command,
+            mut call,
+            reply,
+        } => {
+            if let Some(call) = &call {
+                record_error(call.context.accepted().await.map(|_| ()));
+                record_error(call.context.running().await);
+            }
+            let (outcome, failure) = execute_task(shared, command).await;
+            if let Some(call) = &mut call {
+                call.detail.failure = failure;
+                let status = call.detail.finish(&outcome);
+                record_error(call.context.finish(status, &call.detail).await);
+            }
+            let _ = reply.send(outcome);
+        }
     }
 }
 

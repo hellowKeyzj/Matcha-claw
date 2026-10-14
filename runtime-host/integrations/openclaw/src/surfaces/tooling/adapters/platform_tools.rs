@@ -10,7 +10,7 @@ impl platform_tools::PlatformToolsOps for OpenClawDriver {
 
     fn platform_tools(&self) -> platform_tools::PlatformToolsFuture<'_> {
         Box::pin(async move {
-            platform_tools_catalog(self.gateway.lock().await.platform_tools_catalog().await)
+            platform_tools_catalog(self.gateway.platform_tools_catalog().await)
         })
     }
 }

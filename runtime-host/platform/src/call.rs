@@ -222,6 +222,8 @@ pub struct CallAppend {
 pub trait CallLog: Send + Sync {
     fn begin(&self, call: CallBegin) -> CallFuture<CallId>;
     fn append(&self, change: CallAppend) -> CallFuture<()>;
+    /// Relinquish the last context; the audit owner retains any already submitted terminal.
+    fn abandon(&self, call_id: &CallId);
 }
 
 #[derive(Clone)]
@@ -251,8 +253,10 @@ impl CallRecorder {
             })
             .await?;
         Ok(CallContext {
-            call_id,
-            log: self.log.clone(),
+            custody: Arc::new(CallCustody {
+                call_id,
+                log: self.log.clone(),
+            }),
             detail: PhantomData,
         })
     }
@@ -266,18 +270,27 @@ fn valid_label(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':'))
 }
 
-/// Pass explicitly into the owner command. Dropping an HTTP future changes no audit status.
+/// Pass explicitly into the owner command; an owner-held clone survives HTTP cancellation.
 pub struct CallContext<D: CallDetail> {
+    custody: Arc<CallCustody>,
+    detail: PhantomData<fn() -> D>,
+}
+
+struct CallCustody {
     call_id: CallId,
     log: Arc<dyn CallLog>,
-    detail: PhantomData<fn() -> D>,
+}
+
+impl Drop for CallCustody {
+    fn drop(&mut self) {
+        self.log.abandon(&self.call_id);
+    }
 }
 
 impl<D: CallDetail> Clone for CallContext<D> {
     fn clone(&self) -> Self {
         Self {
-            call_id: self.call_id.clone(),
-            log: self.log.clone(),
+            custody: self.custody.clone(),
             detail: PhantomData,
         }
     }
@@ -285,14 +298,14 @@ impl<D: CallDetail> Clone for CallContext<D> {
 
 impl<D: CallDetail> CallContext<D> {
     pub fn id(&self) -> &CallId {
-        &self.call_id
+        &self.custody.call_id
     }
 
     /// Reserve the concrete owner's bounded capacity first; execute only after this commits.
     pub async fn accepted(&self) -> Result<CallReceipt, CallLogError> {
         self.append(Some(CallStatus::Accepted), None).await?;
         Ok(CallReceipt {
-            call_id: self.call_id.clone(),
+            call_id: self.id().clone(),
             accepted: true,
         })
     }
@@ -324,9 +337,10 @@ impl<D: CallDetail> CallContext<D> {
         status: Option<CallStatus>,
         detail: Option<ErasedCallDetail>,
     ) -> Result<(), CallLogError> {
-        self.log
+        self.custody
+            .log
             .append(CallAppend {
-                call_id: self.call_id.clone(),
+                call_id: self.id().clone(),
                 status,
                 detail,
             })

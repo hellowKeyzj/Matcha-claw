@@ -2,11 +2,14 @@ pub(crate) mod adapters;
 
 use platform::state_dir::CanonicalStateDir;
 mod access;
+mod binding;
 mod directory;
 pub mod media;
 mod selection;
 
-use std::fmt;
+use std::{fmt, sync::Arc};
+
+pub use binding::OpenClawWorkspaceBinding;
 
 use self::{
     access::{WorkspaceFileError, WorkspaceFiles},
@@ -17,17 +20,18 @@ use crate::native_config::config_store::OpenClawConfigStore;
 #[cfg(any(test, feature = "test-support"))]
 pub use crate::native_config::workspace::WorkspaceProjectionFixture;
 pub(crate) use access::replace_regular_file;
+pub(crate) use directory::workspace_resource_key;
 
 pub struct OpenClawWorkspaceAccess {
     config: OpenClawConfigStore,
-    media: media::WorkspaceMedia,
+    media: Arc<media::WorkspaceMedia>,
 }
 
 impl OpenClawWorkspaceAccess {
     pub fn new(state_dir: CanonicalStateDir) -> Self {
         Self {
             config: OpenClawConfigStore::new(state_dir),
-            media: media::WorkspaceMedia::new(),
+            media: Arc::new(media::WorkspaceMedia::new()),
         }
     }
 
@@ -45,53 +49,17 @@ impl OpenClawWorkspaceAccess {
         Ok(TrustedWorkspaceDirectory(directory.to_owned()))
     }
 
-    pub fn read_text(
+    pub fn bind_workspace(
         &self,
         session_key: &str,
-        relative_path: &str,
-        limit: usize,
-    ) -> Result<WorkspaceTextReceipt, WorkspaceReadFailure> {
-        let files = self.files(session_key)?;
-        let text = files
-            .read_text_with_limit(relative_path, limit)
-            .map_err(WorkspaceReadFailure::from)?;
-        Ok(WorkspaceTextReceipt {
-            name: text.name,
-            content: text.content,
-            size: text.size,
+    ) -> Result<OpenClawWorkspaceBinding, WorkspaceDirectoryFailure> {
+        let selection = self.selection(session_key)
+            .map_err(|_| WorkspaceDirectoryFailure::Unavailable)?;
+        Ok(OpenClawWorkspaceBinding {
+            files: WorkspaceFiles::new(selection),
+            media: Arc::clone(&self.media),
+            state_dir: self.config.state_dir(),
         })
-    }
-
-    pub fn read_binary(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        limit: usize,
-    ) -> Result<WorkspaceBinaryReceipt, WorkspaceBinaryFailure> {
-        let files = self
-            .files(session_key)
-            .map_err(WorkspaceBinaryFailure::from)?;
-        let binary = files
-            .read_binary(relative_path, limit)
-            .map_err(WorkspaceBinaryFailure::from)?;
-        Ok(WorkspaceBinaryReceipt {
-            name: binary.name,
-            content: binary.content,
-            size: binary.size,
-        })
-    }
-
-    pub fn prepare_media(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        mime_type: &str,
-    ) -> Result<media::WorkspaceMediaReceipt, media::WorkspaceMediaFailure> {
-        let files = self
-            .files(session_key)
-            .map_err(|_| media::WorkspaceMediaFailure::Unavailable)?;
-        self.media
-            .prepare(session_key, &files, relative_path, mime_type)
     }
 
     pub fn resolve_media(
@@ -118,45 +86,6 @@ impl OpenClawWorkspaceAccess {
         )
     }
 
-    pub fn thumbnail_media(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        mime_type: &str,
-    ) -> Result<media::WorkspaceMediaThumbnail, media::WorkspaceMediaFailure> {
-        let files = self
-            .files(session_key)
-            .map_err(|_| media::WorkspaceMediaFailure::Unavailable)?;
-        self.media.thumbnail(&files, relative_path, mime_type)
-    }
-
-    pub fn thumbnails_media(
-        &self,
-        session_key: &str,
-        paths: &[media::WorkspaceMediaPath],
-    ) -> Result<Vec<media::WorkspaceMediaThumbnailEntry>, media::WorkspaceMediaFailure> {
-        let files = self
-            .files(session_key)
-            .map_err(|_| media::WorkspaceMediaFailure::Unavailable)?;
-        Ok(self.media.thumbnails_with_gateway_context(
-            &self.config.state_dir(),
-            session_key,
-            &files,
-            paths,
-        ))
-    }
-
-    pub fn stage_paths_media(
-        &self,
-        session_key: &str,
-        paths: &[media::WorkspaceMediaPath],
-    ) -> Result<Vec<media::WorkspaceMediaReceipt>, media::WorkspaceMediaFailure> {
-        let files = self
-            .files(session_key)
-            .map_err(|_| media::WorkspaceMediaFailure::Unavailable)?;
-        self.media.stage_paths(session_key, &files, paths)
-    }
-
     pub fn stage_buffer_media(
         &self,
         session_key: &str,
@@ -166,66 +95,6 @@ impl OpenClawWorkspaceAccess {
     ) -> Result<media::WorkspaceMediaReceipt, media::WorkspaceMediaFailure> {
         self.media
             .stage_buffer(session_key, base64, file_name, mime_type)
-    }
-
-    pub fn stat(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-    ) -> Result<WorkspaceStatReceipt, WorkspaceStatFailure> {
-        let files = self
-            .files(session_key)
-            .map_err(WorkspaceStatFailure::from)?;
-        let entry = files
-            .stat(relative_path)
-            .map_err(WorkspaceStatFailure::from)?;
-        Ok(WorkspaceStatReceipt {
-            name: entry.name,
-            is_directory: entry.kind == access::WorkspaceEntryKind::Directory,
-            size: entry.size,
-            mtime_ms: entry.mtime_ms,
-        })
-    }
-
-    pub fn list_dir(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-    ) -> Result<WorkspaceDirectoryReceipt, WorkspaceListFailure> {
-        self.list_dir_with_options(session_key, relative_path, false)
-    }
-
-    pub fn list_dir_with_options(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        include_hidden: bool,
-    ) -> Result<WorkspaceDirectoryReceipt, WorkspaceListFailure> {
-        let relative_path = relative_path.replace('\\', "/");
-        let files = self
-            .files(session_key)
-            .map_err(WorkspaceListFailure::from)?;
-        let entries = if relative_path.is_empty() {
-            files.list_root_dir_with_options(include_hidden)
-        } else {
-            files.list_dir_with_options(&relative_path, include_hidden)
-        }
-        .map_err(WorkspaceListFailure::from)?;
-        Ok(WorkspaceDirectoryReceipt {
-            entries: entries
-                .into_iter()
-                .map(|entry| WorkspaceDirectoryEntry {
-                    relative_path: if relative_path.is_empty() {
-                        entry.name.clone()
-                    } else {
-                        format!("{relative_path}/{}", entry.name)
-                    },
-                    display: entry.name,
-                    is_directory: entry.kind == access::WorkspaceEntryKind::Directory,
-                    size: entry.size,
-                })
-                .collect(),
-        })
     }
 
     pub fn maintenance_workspace_directories(
@@ -248,29 +117,6 @@ impl OpenClawWorkspaceAccess {
                     .ok_or(WorkspaceDirectoryFailure::Unavailable)
             })
             .collect()
-    }
-
-    pub fn write_text(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        content: &str,
-    ) -> Result<WorkspaceTextReceipt, WorkspaceWriteFailure> {
-        let files = self
-            .files(session_key)
-            .map_err(WorkspaceWriteFailure::from)?;
-        let text = files
-            .write_text(relative_path, content)
-            .map_err(WorkspaceWriteFailure::from)?;
-        Ok(WorkspaceTextReceipt {
-            name: text.name,
-            content: text.content,
-            size: text.size,
-        })
-    }
-
-    fn files(&self, session_key: &str) -> Result<WorkspaceFiles, WorkspaceReadFailure> {
-        Ok(WorkspaceFiles::new(self.selection(session_key)?))
     }
 
     fn selection(

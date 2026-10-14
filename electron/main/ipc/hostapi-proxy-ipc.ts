@@ -1,7 +1,7 @@
 import { request as httpRequest } from 'node:http';
 import { Readable, addAbortSignal } from 'node:stream';
-import type { HostApiProxyFailureCode } from '../../../src/lib/host-api-transport-contract';
-import { traceDebug } from '../../utils/trace-logger';
+import { HOST_API_STARTUP_PATHS, HOST_API_STARTUP_TRACE_HEADER, type HostApiProxyFailureCode } from '../../../src/lib/host-api-transport-contract';
+import { isTraceEnabled, startupTrace, traceDebug } from '../../utils/trace-logger';
 import { ipcMain } from 'electron';
 import { isHostApiRequestAllowed } from '../../api/route-boundary';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
@@ -196,7 +196,19 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
     const method = (request?.method || 'GET').toUpperCase();
     const traceActive = traceStartedAt !== 0 && sessionTraceId !== null
       && normalizedPath.split(/[?#]/, 1)[0] === '/api/capabilities/execute';
-    const requestIdHash = traceActive ? summarizeIdentifier(requestId).hash : null;
+    const startupPath = isTraceEnabled() ? normalizedPath.split(/[?#]/, 1)[0] : '';
+    const startupTracing = isTraceEnabled() && method === 'GET' && HOST_API_STARTUP_PATHS.has(startupPath);
+    const startupStartedAt = startupTracing ? performance.now() : 0;
+    const requestIdHash = traceActive || startupTracing ? summarizeIdentifier(requestId).hash : null;
+    const traceStartup = (phase: string, detail?: () => Record<string, unknown>): void => {
+      if (!startupTracing) return;
+      startupTrace('electron.hostapi.proxy', phase, () => ({
+        path: startupPath, method: 'GET', requestIdHash,
+        elapsedMs: Math.round(performance.now() - startupStartedAt), ...detail?.(),
+      }));
+    };
+    let startupStage: 'boundary' | 'e2e' | 'ready' | 'fetch' | 'body' | null = 'boundary';
+    let startupStatus: number | null = null;
     const trace = (stage: string, payload: () => Record<string, unknown> = () => ({})): void => {
       if (!traceActive) return;
       logSessionTrace(`electron.hostapi.proxy.${stage}`, sessionTraceId, {
@@ -204,16 +216,24 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
       });
     };
     trace('received');
+    traceStartup('received');
     let inflightRequest: InflightHostApiRequest | null = null;
     try {
+      traceStartup('boundary.start');
       const routeUrl = new URL(normalizedPath, 'http://127.0.0.1');
       if (!isHostApiRequestAllowed(method, routeUrl.pathname)) {
         throw new Error(`hostapi route is not available: ${method} ${routeUrl.pathname}`);
       }
+      traceStartup('boundary.end', () => ({ outcome: 'passed' }));
+      startupStage = 'e2e';
       trace('e2e.start');
+      traceStartup('e2e.start');
       const e2eMock = await handleE2EHostApiFetch(request);
       trace('e2e.end', () => ({ outcome: e2eMock ? 'mocked' : 'passthrough' }));
+      traceStartup('e2e.end', () => ({ outcome: e2eMock ? 'mocked' : 'passthrough' }));
+      startupStage = null;
       if (e2eMock) {
+        traceStartup('return', () => ({ outcome: 'mocked' }));
         return e2eMock;
       }
       const explicitTimeout = typeof request?.timeoutMs === 'number' && request.timeoutMs > 0
@@ -243,8 +263,12 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
       try {
         if (admission && event.sender.isDestroyed()) senderClosed();
         trace('ready.start');
+        startupStage = 'ready';
+        traceStartup('ready.start');
         await waitForHostApiReadyOrAbort(controller.signal);
         trace('ready.end', () => ({ outcome: 'ready' }));
+        traceStartup('ready.end', () => ({ outcome: 'ready' }));
+        startupStage = null;
 
         if (normalizedPath === '/api/sealed-skills/export') {
           traceDebug(() => ['[startup-trace]', {
@@ -256,7 +280,11 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
           }]);
         }
 
-        const headers = withoutRendererAuthenticationHeaders(request?.headers);
+        let headers = withoutRendererAuthenticationHeaders(request?.headers);
+        if (startupTracing) {
+          headers = Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== HOST_API_STARTUP_TRACE_HEADER.toLowerCase()));
+          if (requestIdHash) headers[HOST_API_STARTUP_TRACE_HEADER] = requestIdHash;
+        }
         const traceId = typeof request?.headers?.[SESSION_TRACE_HEADER] === 'string'
           ? request.headers[SESSION_TRACE_HEADER]
           : typeof request?.headers?.[SESSION_TRACE_HEADER.toLowerCase()] === 'string'
@@ -276,6 +304,8 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
         }
 
         trace('fetch.request');
+        startupStage = 'fetch';
+        traceStartup('fetch.request');
         const url = `${getHostApiBaseUrl()}${normalizedPath}`;
         const response = admission
           ? await fetchAdmission(url, headers, body, controller.signal, () => {
@@ -290,14 +320,21 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
           : await proxyAwareFetch(url, { method, headers, body, signal: controller.signal });
 
         trace('fetch.headers', () => ({ status: response.status }));
+        startupStatus = response.status;
+        traceStartup('fetch.headers', () => ({ status: startupStatus }));
+        startupStage = null;
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
         if (contentType.includes('application/json')) {
           trace('body.start', () => ({ outcome: 'json', status: response.status }));
+          startupStage = 'body';
+          traceStartup('body.start', () => ({ outcome: 'json', status: startupStatus }));
           const json = await response.json().catch((error: unknown) => {
             if (error instanceof SyntaxError) pendingRequest.failureCode = 'INVALID_RESPONSE';
             throw error;
           });
           trace('body.end', () => ({ outcome: 'json', status: response.status }));
+          traceStartup('body.end', () => ({ outcome: 'json', status: startupStatus }));
+          startupStage = null;
           if (normalizedPath === '/api/sealed-skills/export') {
             traceDebug(() => ['[startup-trace]', {
               source: 'sealed-skills-export',
@@ -307,6 +344,7 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
               outcome: outcomeFromHostApiBody(json),
             }]);
           }
+          traceStartup('return', () => ({ outcome: 'received', status: startupStatus }));
           return {
             ok: true,
             data: {
@@ -318,8 +356,12 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
         }
 
         trace('body.start', () => ({ outcome: 'text', status: response.status }));
+        startupStage = 'body';
+        traceStartup('body.start', () => ({ outcome: 'text', status: startupStatus }));
         const text = await response.text();
         trace('body.end', () => ({ outcome: 'text', status: response.status }));
+        traceStartup('body.end', () => ({ outcome: 'text', status: startupStatus }));
+        startupStage = null;
         if (normalizedPath === '/api/sealed-skills/export') {
           traceDebug(() => ['[startup-trace]', {
             source: 'sealed-skills-export',
@@ -328,6 +370,7 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
             status: response.status,
           }]);
         }
+        traceStartup('return', () => ({ outcome: 'received', status: startupStatus }));
         return {
           ok: true,
           data: {
@@ -345,6 +388,8 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
       }
     } catch {
       trace('failure', () => ({ outcome: inflightRequest?.failureCode ?? 'UNAVAILABLE' }));
+      if (startupStage) traceStartup(`${startupStage}.end`, () => ({ outcome: 'failed', status: startupStatus }));
+      traceStartup('error', () => ({ code: inflightRequest?.failureCode ?? 'UNAVAILABLE', status: startupStatus }));
       if (normalizedPath === '/api/sealed-skills/export') {
         traceDebug(() => ['[startup-trace]', {
           source: 'sealed-skills-export',

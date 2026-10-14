@@ -7,6 +7,15 @@ import {
   isSafeNonNegativeInteger,
   sendLoopbackJson,
 } from '../client';
+import {
+  type Endpoint,
+  type FileTarget,
+  type SessionScope,
+  isEndpoint,
+  isFileRelativePath,
+  isFileTarget,
+  isSessionScope,
+} from './contract';
 
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const ROUTE_PATH = '/api/workspace/files/read-text';
@@ -18,22 +27,10 @@ const UNAVAILABLE = {
 type WorkspaceTextRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.readText';
-  scope: Readonly<{
-    kind: 'session';
-    endpoint: Readonly<{
-      kind: 'native-runtime';
-      runtimeAdapterId: 'openclaw';
-      runtimeInstanceId: 'local';
-    }>;
-    sessionKey: string;
-  }>;
-  target: Readonly<{ kind: 'workspace-file' }>;
+  scope: SessionScope;
+  target: FileTarget;
   input: Readonly<{
-    endpoint: Readonly<{
-      kind: 'native-runtime';
-      runtimeAdapterId: 'openclaw';
-      runtimeInstanceId: 'local';
-    }>;
+    endpoint: Endpoint;
     sessionKey: string;
     relativePath: string;
     maxBytes?: number;
@@ -90,22 +87,10 @@ function isWorkspaceTextRequest(value: unknown): value is WorkspaceTextRequest {
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && value.operationId === 'files.readText'
-    && isScope(value.scope)
-    && isTarget(value.target)
+    && isSessionScope(value.scope)
+    && isFileTarget(value.target)
     && isInput(value.input)
     && value.scope.sessionKey === value.input.sessionKey;
-}
-
-function isScope(value: unknown): value is WorkspaceTextRequest['scope'] {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'endpoint', 'sessionKey'])
-    && value.kind === 'session'
-    && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.sessionKey);
-}
-
-function isTarget(value: unknown): boolean {
-  return isRecord(value) && hasExactKeys(value, ['kind']) && value.kind === 'workspace-file';
 }
 
 function withBoundedMaxBytes(request: WorkspaceTextRequest): WorkspaceTextRequest {
@@ -130,24 +115,8 @@ function isInput(value: unknown): value is WorkspaceTextRequest['input'] {
   return hasRequiredFields
     && isEndpoint(value.endpoint)
     && isNonEmptyBoundedText(value.sessionKey)
-    && isRelativePath(value.relativePath)
+    && isFileRelativePath(value.relativePath)
     && (value.maxBytes === undefined || isSafeInteger(value.maxBytes));
-}
-
-function isRelativePath(value: unknown): value is string {
-  return isNonEmptyBoundedText(value)
-    && !value.startsWith('/')
-    && !value.startsWith('\\')
-    && !value.includes(':')
-    && value.split(/[\\/]/).every((component) => component !== '' && component !== '.' && component !== '..');
-}
-
-function isEndpoint(value: unknown): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && value.runtimeAdapterId === 'openclaw'
-    && value.runtimeInstanceId === 'local';
 }
 
 function isWorkspaceTextResponse(value: unknown): boolean {

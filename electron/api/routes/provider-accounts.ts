@@ -8,14 +8,19 @@ import type {
   ProviderAccountsTransport,
 } from '../../main/runtime-host-delivery/transport/providers/accounts';
 import { isProviderAccountIdentifier } from '../../main/runtime-host-delivery/transport/providers/accounts';
+import { isRecord } from '../../main/runtime-host-delivery/transport/client';
 import { sendJson } from '../route-utils';
 
+const INVALID = {
+  success: false,
+  error: 'Provider account request is invalid',
+} as const;
 const UNAVAILABLE = {
   success: false,
   error: 'Provider accounts are unavailable',
 } as const;
 
-const LIST_REQUEST: ProviderAccountsListRequest = Object.freeze({
+const LIST_REQUEST = Object.freeze<ProviderAccountsListRequest>({
   id: 'provider.accounts',
   operationId: 'providerAccounts.list',
   scope: { kind: 'provider-account-catalog' },
@@ -24,9 +29,7 @@ const LIST_REQUEST: ProviderAccountsListRequest = Object.freeze({
 });
 
 function isHasApiKeyResponse(value: unknown): value is ProviderCredentialStatusResponse {
-  return value !== null
-    && typeof value === 'object'
-    && !Array.isArray(value)
+  return isRecord(value)
     && Object.keys(value).length === 1
     && Object.hasOwn(value, 'hasKey')
     && typeof value.hasKey === 'boolean';

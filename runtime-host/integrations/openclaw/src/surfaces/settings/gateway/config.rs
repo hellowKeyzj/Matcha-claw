@@ -26,6 +26,7 @@ impl SettingsConfigOperation {
     }
 
     pub async fn apply(&self, projection: &SettingsProjection) -> SettingsConfigMutationOutcome {
+        let _transaction = self.gateway.config_transaction().await;
         let get = match wire::team::config_get_request(next_request_id("settings-config-get")) {
             Ok(request) => request,
             Err(_) => return SettingsConfigMutationOutcome::Unknown,

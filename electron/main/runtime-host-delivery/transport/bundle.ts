@@ -1,4 +1,3 @@
-import type { RuntimeHostTransports } from './host-api-transports';
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { createAgentsTransport } from '../products/agents';
 import { createSettingsDesiredTransport } from '../products/settings/desired';
@@ -25,7 +24,7 @@ import { createSessionApprovalTransport } from './sessions/approvals';
 import { createSessionContentTransport } from './sessions/content';
 import { createSessionCreateTransport } from './sessions/create';
 import { createSessionDeleteTransport } from './sessions/delete';
-import { createSessionEventsTransport, type SessionEventsTransport } from './sessions/events';
+import { createSessionEventsTransport } from './sessions/events';
 import { createSessionHistoryTransport } from './sessions/history';
 import { createSessionGoalTransport } from './sessions/goal';
 import { createSessionListTransport } from './sessions/list';
@@ -84,15 +83,11 @@ export type RuntimeHostTransportBundleInput = Readonly<{
   reportE2ECronTrace?: CronE2ETraceReporter;
 }>;
 
-export type RuntimeHostTransportBundle = Readonly<{
-  hostApiTransports: RuntimeHostTransports;
-  sessionEventsTransport: SessionEventsTransport;
-  close: () => void;
-}>;
+export type RuntimeHostTransportBundle = ReturnType<typeof createRuntimeHostTransportBundle>;
 
 export function createRuntimeHostTransportBundle(
   input: RuntimeHostTransportBundleInput,
-): RuntimeHostTransportBundle {
+) {
   const { issuer, runtimeHostTransportPort } = input;
   const sessionEventsTransport = createSessionEventsTransport(issuer, runtimeHostTransportPort);
   const channelCatalogTransport = createChannelCatalogTransport(issuer, runtimeHostTransportPort);
@@ -102,7 +97,7 @@ export function createRuntimeHostTransportBundle(
         reportE2ETrace: input.reportE2ECronTrace,
       });
 
-  const hostApiTransports: RuntimeHostTransports = {
+  const hostApiTransports = {
     sessionListTransport: createSessionListTransport(issuer, runtimeHostTransportPort),
     capabilityDirectoryTransport: createCapabilityDirectoryTransport(issuer, runtimeHostTransportPort),
     runtimeDirectoryTransport: createRuntimeEndpointDirectoryTransport(issuer, runtimeHostTransportPort),
@@ -181,5 +176,5 @@ export function createRuntimeHostTransportBundle(
     hostApiTransports,
     sessionEventsTransport,
     close: () => sessionEventsTransport.close(),
-  };
+  } as const;
 }

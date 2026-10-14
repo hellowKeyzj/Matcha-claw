@@ -96,6 +96,7 @@ pub(super) async fn handle_management(
         .to_owned();
     let value = serde_json::from_slice::<Value>(body).map_err(|_| RequestError::Invalid)?;
     let command = decode(endpoint, value).map_err(|_| RequestError::Invalid)?;
+    let effect = crate::operation::Effect::management(&command);
     if matches!(
         command,
         Command::Config { .. } | Command::UploadCommit { .. }
@@ -114,6 +115,7 @@ pub(super) async fn handle_management(
         let receipt = handle
             .submit_result(
                 call,
+                effect,
                 access,
                 crate::result::SMALL_RESULT_BUDGET,
                 async move {
@@ -150,7 +152,7 @@ pub(super) async fn handle_management(
         {
             let worker = handle.clone();
             let receipt = handle
-                .submit_cancellable_operation(call, move |cancellation| async move {
+                .submit_cancellable_operation(call, effect, move |cancellation| async move {
                     match worker.manage_skills_cancellable(command, cancellation).await {
                         Ok(outcome) => {
                             let (status, body) = response(outcome);
@@ -234,6 +236,20 @@ pub(super) async fn handle_capability_execute(
     if tracing_open_path {
         platform::trace::runtime_trace("skill.open-path.decode-accepted", || json!({}));
     }
+    let effect = match &request {
+        control::ManagementRequest::UpdateConfig(command)
+        | control::ManagementRequest::UpdateState(command) => {
+            crate::operation::Effect::management(command)
+        }
+        control::ManagementRequest::UpdateBatchState { skill_keys, .. } => {
+            crate::operation::Effect::Config(skill_keys.clone())
+        }
+        control::ManagementRequest::ExportBundles(command)
+        | control::ManagementRequest::ImportBundles(command) => {
+            crate::operation::Effect::bundles(command)
+        }
+        _ => crate::operation::Effect::Independent,
+    };
     if matches!(
         request,
         control::ManagementRequest::UpdateConfig(_)
@@ -258,7 +274,7 @@ pub(super) async fn handle_capability_execute(
         };
         let worker = handle.clone();
         let receipt = handle
-            .submit_result(call, access, budget, async move {
+            .submit_result(call, effect, access, budget, async move {
                 Ok(match request {
                     control::ManagementRequest::UpdateConfig(command)
                     | control::ManagementRequest::UpdateState(command) => {
@@ -286,7 +302,7 @@ pub(super) async fn handle_capability_execute(
         {
             let worker = handle.clone();
             let receipt = handle
-                .submit_operation(call, async move {
+                .submit_operation(call, effect, async move {
                     super::capability_response(
                         control::dispatch_management_request(&worker, request).await,
                     )

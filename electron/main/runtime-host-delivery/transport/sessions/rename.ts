@@ -1,23 +1,13 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { isOpenClawSessionIdentity, isOpenClawSessionScope, type OpenClawSessionIdentity as SessionIdentity } from './management-contract';
+import { sameSessionIdentity } from './session-contract';
 
 const ROUTE = '/api/sessions/rename';
 const UNAVAILABLE = {
   success: false,
   error: 'Session rename is unavailable',
 } as const;
-
-type Endpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw';
-  runtimeInstanceId: 'local';
-}>;
-
-type SessionIdentity = Readonly<{
-  endpoint: Endpoint;
-  agentId: string;
-  sessionKey: string;
-}>;
 
 export type SessionRenameRequest = Readonly<{
   id: 'session.management';
@@ -94,57 +84,17 @@ function isSessionRenameRequest(value: unknown): value is SessionRenameRequest {
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'session.management'
     && value.operationId === 'sessions.rename'
-    && isSessionScope(value.scope)
-    && isSessionTarget(value.target)
+    && isOpenClawSessionScope(value.scope)
+    && isOpenClawSessionScope(value.target)
     && isSessionRenameInput(value.input)
-    && sameIdentity(value.scope.identity, value.target.identity)
-    && sameIdentity(value.scope.identity, value.input.sessionIdentity);
-}
-
-function isSessionScope(value: unknown): value is SessionRenameRequest['scope'] {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'identity'])
-    && value.kind === 'session'
-    && isSessionIdentity(value.identity);
-}
-
-function isSessionTarget(value: unknown): value is SessionRenameRequest['target'] {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'identity'])
-    && value.kind === 'session'
-    && isSessionIdentity(value.identity);
+    && sameSessionIdentity(value.scope.identity, value.target.identity)
+    && sameSessionIdentity(value.scope.identity, value.input.sessionIdentity);
 }
 
 function isSessionRenameInput(value: unknown): value is SessionRenameRequest['input'] {
   return isRecord(value)
     && hasExactKeys(value, ['sessionIdentity', 'label'])
-    && isSessionIdentity(value.sessionIdentity)
+    && isOpenClawSessionIdentity(value.sessionIdentity)
     && typeof value.label === 'string'
     && value.label.trim().length > 0;
-}
-
-function isSessionIdentity(value: unknown): value is SessionIdentity {
-  return isRecord(value)
-    && hasExactKeys(value, ['endpoint', 'agentId', 'sessionKey'])
-    && isEndpoint(value.endpoint)
-    && typeof value.agentId === 'string'
-    && value.agentId.length > 0
-    && typeof value.sessionKey === 'string'
-    && value.sessionKey.length > 0;
-}
-
-function sameIdentity(left: SessionIdentity, right: SessionIdentity): boolean {
-  return left.agentId === right.agentId
-    && left.sessionKey === right.sessionKey
-    && left.endpoint.kind === right.endpoint.kind
-    && left.endpoint.runtimeAdapterId === right.endpoint.runtimeAdapterId
-    && left.endpoint.runtimeInstanceId === right.endpoint.runtimeInstanceId;
-}
-
-function isEndpoint(value: unknown): value is Endpoint {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && value.runtimeAdapterId === 'openclaw'
-    && value.runtimeInstanceId === 'local';
 }

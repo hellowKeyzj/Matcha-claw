@@ -205,6 +205,7 @@ function isTeamRun(value: unknown): value is TeamRun {
       && value.state === 'available'
       && isIdentifier(value.teamId)
       && isIdentifier(value.runId)
+      && typeof value.teamRevision === 'number'
       && Number.isInteger(value.teamRevision)
       && value.teamRevision > 0
       && isGraphStatus(value.graphStatus))

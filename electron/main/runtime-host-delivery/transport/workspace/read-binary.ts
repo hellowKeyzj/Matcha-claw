@@ -7,6 +7,15 @@ import {
   isSafeNonNegativeInteger,
   sendLoopbackJson,
 } from '../client';
+import {
+  type Endpoint,
+  type FileTarget,
+  type SessionScope,
+  isEndpoint,
+  isFileRelativePath,
+  isFileTarget,
+  isSessionScope,
+} from './contract';
 
 const MAX_BINARY_BYTES = 50 * 1024 * 1024;
 const ROUTE_PATH = '/api/workspace/files/binary';
@@ -15,21 +24,11 @@ const UNAVAILABLE = {
   error: 'Workspace binary is unavailable',
 } as const;
 
-type Endpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw';
-  runtimeInstanceId: 'local';
-}>;
-
 type WorkspaceBinaryRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.readBinary' | 'files.stat';
-  scope: Readonly<{
-    kind: 'session';
-    endpoint: Endpoint;
-    sessionKey: string;
-  }>;
-  target: Readonly<{ kind: 'workspace-file' }>;
+  scope: SessionScope;
+  target: FileTarget;
   input: Readonly<{
     endpoint: Endpoint;
     sessionKey: string;
@@ -88,22 +87,10 @@ function isWorkspaceBinaryRequest(value: unknown): value is WorkspaceBinaryReque
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && (value.operationId === 'files.readBinary' || value.operationId === 'files.stat')
-    && isScope(value.scope)
-    && isTarget(value.target)
+    && isSessionScope(value.scope)
+    && isFileTarget(value.target)
     && isInput(value.input, value.operationId)
     && value.scope.sessionKey === value.input.sessionKey;
-}
-
-function isScope(value: unknown): value is WorkspaceBinaryRequest['scope'] {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'endpoint', 'sessionKey'])
-    && value.kind === 'session'
-    && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.sessionKey);
-}
-
-function isTarget(value: unknown): boolean {
-  return isRecord(value) && hasExactKeys(value, ['kind']) && value.kind === 'workspace-file';
 }
 
 function withBoundedMaxBytes(request: WorkspaceBinaryRequest): WorkspaceBinaryRequest {
@@ -133,24 +120,8 @@ function isInput(
   return hasRequiredFields
     && isEndpoint(value.endpoint)
     && isNonEmptyBoundedText(value.sessionKey)
-    && isRelativePath(value.relativePath)
+    && isFileRelativePath(value.relativePath)
     && (operationId === 'files.stat' || value.maxBytes === undefined || isSafeInteger(value.maxBytes));
-}
-
-function isRelativePath(value: unknown): value is string {
-  return isNonEmptyBoundedText(value)
-    && !value.startsWith('/')
-    && !value.startsWith('\\')
-    && !value.includes(':')
-    && value.split(/[\\/]/).every((component) => component !== '' && component !== '.' && component !== '..');
-}
-
-function isEndpoint(value: unknown): value is Endpoint {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && value.runtimeAdapterId === 'openclaw'
-    && value.runtimeInstanceId === 'local';
 }
 
 function isWorkspaceBinaryResponse(

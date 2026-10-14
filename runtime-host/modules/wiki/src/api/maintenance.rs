@@ -28,11 +28,41 @@ impl WikiHandle {
             .begin(operation.command(), &WikiCallDetail::new(operation))
             .await
             .map_err(|_| WikiFailure::OwnerUnavailable)?;
-        self.admit_command(call, operation, true, |reply| WikiCommand::ImportArchive {
-            input,
-            reply,
-        })
-        .await
+        let reservation = match self.results.reserve(call.id()) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                call::reject_admission(
+                    &call,
+                    operation,
+                    foundation::execution::OwnerRuntimeSendError::Full,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        let owner = self.unrecorded();
+        self.workflows
+            .admit(
+                call,
+                operation,
+                async move {
+                    let root = owner.shared.blocking.run(move || {
+                        crate::owner::maintenance::prepare_import_archive(input)
+                    }).await?;
+                    let result = owner.request_command(None, |reply| WikiCommand::ImportArchive {
+                        root,
+                        reply,
+                    }).await.unwrap_or(Err(WikiFailure::OwnerUnavailable));
+                    if let Ok(receipt) = &result {
+                        reservation.complete(crate::call_result::WikiCallResult::ProjectImport(
+                            receipt.clone(),
+                        ));
+                    }
+                    result
+                },
+                |_| WikiWorkflowSummary::ProjectImport,
+            )
+            .await
     }
 
     pub(crate) async fn admit_rebuild_index(

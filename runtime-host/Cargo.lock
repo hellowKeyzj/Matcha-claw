@@ -238,6 +238,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8758,6 +8764,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "fleet",
  "foundation",
+ "futures-util",
  "getrandom 0.3.4",
  "matcha-agent",
  "openclaw",
@@ -9038,6 +9045,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "ryu-js"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
+
+[[package]]
 name = "salsa20"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9063,6 +9076,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "saphyr-parser"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f54c7c96aa2abeb55dbdcda75287722d5e454f020aaa817895d4d62b9785073a"
+dependencies = [
+ "arraydeque",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -9144,9 +9167,10 @@ dependencies = [
  "getrandom 0.3.4",
  "platform",
  "rsa 0.10.0-rc.18",
+ "ryu-js",
+ "saphyr-parser",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.10.9",
  "skills",
  "subagents",
@@ -10919,6 +10943,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "unicode-normalization",
+ "windows-sys 0.61.2",
  "zip 2.4.2",
 ]
 

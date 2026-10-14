@@ -550,7 +550,7 @@ export function sameSessionIdentity(left: SessionIdentity, right: SessionIdentit
     && left.endpoint.runtimeInstanceId === right.endpoint.runtimeInstanceId;
 }
 
-function isEndpoint(value: unknown): boolean {
+export function isEndpoint(value: unknown): value is SessionIdentity['endpoint'] {
   return isRecord(value)
     && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
     && value.kind === 'native-runtime'
@@ -614,7 +614,7 @@ function isMissingFact(value: unknown): boolean {
     || value === 'event_only';
 }
 
-function isSessionKey(value: unknown): value is string {
+export function isSessionKey(value: unknown): value is string {
   return typeof value === 'string' && isBoundedString(value, MAX_SESSION_KEY_BYTES, true);
 }
 

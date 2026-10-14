@@ -1,12 +1,10 @@
 import { traceDebug, isTraceEnabled } from '../../utils/trace-logger';
 import { summarizeIdentifier } from '../runtime-host-delivery/transport/sessions/trace';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { createServer, type Server, type ServerResponse } from 'node:http';
-import { existsSync } from 'node:fs';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { platform } from 'node:process';
-import { DatabaseSync } from 'node:sqlite';
 import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron';
 
 import type { ProviderAccountsTransport } from '../runtime-host-delivery/transport/providers/accounts';
@@ -14,6 +12,7 @@ import type { CallReceipt, CallRecord } from '../../../src/types/call-log';
 import type { ProviderCallDetail } from '../../../src/types/call-log/provider';
 import { decodeCallReceipt } from '../../../src/types/call-log/receipt';
 import { probeAnthropicCliAuth } from './provider-private-auth/anthropic-cli-probe';
+import { AuthProfileSqliteError, AuthProfileSqliteWriter } from './provider-private-auth/auth-profile-sqlite';
 import {
   beginPrivateAccountTransaction, claimPrivateAccountTransaction, closePrivateAccountTransactions,
   privateAccountTransactionForRequest, settlePrivateAccountTransaction,
@@ -32,16 +31,9 @@ const STORE_FILE = 'provider-private-auth.v1.json';
 const MAX_SECRET_BYTES = 16 * 1024;
 const MAX_ID_BYTES = 128;
 const MAX_PRIVATE_REQUEST_BYTES = 1024;
+const MAX_PRIVATE_RESOLVER_REQUESTS = 64;
 const MAX_AUTH_PROFILES_BYTES = 1024 * 1024;
 const MAX_PROVIDER_KEY_BYTES = 256;
-const OPENCLAW_SQLITE_BUSY_TIMEOUT_MS = 5_000;
-const OPENCLAW_AUTH_PROFILE_WRITE_RETRY_DELAYS_MS = [50, 100, 200] as const;
-const OPENCLAW_STATE_DB_FILE = 'openclaw.sqlite';
-const OPENCLAW_STATE_DB_DIR = 'state';
-const AUTH_SHARED_STORE_STATE_KEY = 'auth.sharedStore';
-const AUTH_PROFILES_STORE_STATE_KEY = 'authProfiles.store';
-const AUTH_PROFILES_STATE_STATE_KEY = 'authProfiles.state';
-const AUTH_SHARED_STORE_STATE_VALUE = { location: 'state-db' } as const;
 const OAUTH_ERROR_MESSAGE = 'Provider OAuth authentication failed';
 
 type PrivateResolverFailureCode =
@@ -69,25 +61,7 @@ type AccountKind = 'chat' | 'media';
 type ApiProtocol = 'anthropicMessages' | 'googleGenerativeAi' | 'openAiCompletions' | 'openAiResponses';
 type MediaProtocol = 'google' | 'openAi' | 'openRouter';
 type PrivateStore = Record<string, string>;
-type SecretRef = Readonly<{ source: 'env' | 'file' | 'exec'; provider: string; id: string }>;
 type AuthProfile = Record<string, unknown>;
-type AuthProfileOrder = Record<string, string[]>;
-type AuthProfileLastGood = Record<string, string>;
-type MutableAuthProfileStore = {
-  version: 1;
-  profiles: Record<string, AuthProfile>;
-};
-type AuthProfileStore = Readonly<MutableAuthProfileStore>;
-type MutableAuthProfileState = {
-  version: 1;
-  order?: AuthProfileOrder;
-  lastGood?: AuthProfileLastGood;
-};
-type AuthProfileState = Readonly<MutableAuthProfileState>;
-type MutableAuthProfileProjection = {
-  store: MutableAuthProfileStore;
-  state: MutableAuthProfileState;
-};
 export type ProviderAccountIntent = Readonly<{
   id: string;
   provider: string;
@@ -109,7 +83,6 @@ export type ProviderPrivateAccountDependencies = Readonly<{ transport: ProviderA
 const activeFlows = new Map<string, Flow>();
 const manualCodes = new Map<string, { resolve: (value: string) => void; reject: () => void }>();
 let privateStoreWrite = Promise.resolve();
-let authProfileWrite = Promise.resolve();
 
 export type ProviderPrivateCredentialResolver = Readonly<{
   endpoint: string;
@@ -124,20 +97,27 @@ export async function migrateLegacyProviderPrivateAuth(legacyProviderStoreFilePa
   if (!filePath || !safeStorage.isEncryptionAvailable()) return;
   const legacy = await readLegacyProviderStore(filePath);
   if (!legacy) return;
-  for (const [accountId, account] of Object.entries(legacy.accounts)) {
-    const provider = storedAccountProvider(account);
-    const authMode = storedAccountAuthMode(account);
-    if (!isId(accountId) || !provider || !authMode || authMode === 'local' || authMode === 'cliReuse') continue;
-    const reference = credentialReference(accountId);
-    const existing = await credentialSnapshot(reference);
-    const key = legacy.apiKeys[accountId];
-    if (!existing && (authMode !== 'apiKey' || !isSecret(key))) continue;
-    try {
-      if (!existing) await storeSecret(accountId, { kind: 'apiKey', provider, key });
-      await applyPrivateProfile(reference, openClawProviderKey(provider, accountId, authMode), provider, authMode, openClawStateDir);
-    } catch {
-      if (!existing) await removeCredentialReference(reference).catch(() => undefined);
+  let authProfiles: AuthProfileSqliteWriter;
+  try { authProfiles = await AuthProfileSqliteWriter.start(openClawStateDir); }
+  catch { return; }
+  try {
+    for (const [accountId, account] of Object.entries(legacy.accounts)) {
+      const provider = storedAccountProvider(account);
+      const authMode = storedAccountAuthMode(account);
+      if (!isId(accountId) || !provider || !authMode || authMode === 'local' || authMode === 'cliReuse') continue;
+      const reference = credentialReference(accountId);
+      const existing = await credentialSnapshot(reference);
+      const key = legacy.apiKeys[accountId];
+      if (!existing && (authMode !== 'apiKey' || !isSecret(key))) continue;
+      try {
+        if (!existing) await storeSecret(accountId, { kind: 'apiKey', provider, key });
+        await applyPrivateProfile(reference, openClawProviderKey(provider, accountId, authMode), provider, authMode, authProfiles);
+      } catch {
+        if (!existing) await removeCredentialReference(reference).catch(() => undefined);
+      }
     }
+  } finally {
+    await authProfiles.close().catch(() => undefined);
   }
 }
 
@@ -238,8 +218,11 @@ function sendPrivateResolverFailure(response: ServerResponse, code: PrivateResol
 }
 
 export async function startProviderPrivateCredentialResolver(openClawStateDir: string): Promise<ProviderPrivateCredentialResolver> {
+  const authProfiles = await AuthProfileSqliteWriter.start(openClawStateDir);
   const authorization = randomBytes(32).toString('base64url');
-  const server = createServer(async (request, response) => {
+  const requests = new Set<Promise<void>>();
+  let closing: Promise<void> | undefined;
+  const handleRequest = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     if ((request.method !== 'POST' && request.method !== 'DELETE' && request.method !== 'PUT')
       || request.url !== '/resolve'
       || !authorized(request.headers.authorization, authorization)) {
@@ -294,14 +277,14 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
           sendPrivateResolverFailure(response, 'invalid-request', 400);
           return;
         }
-        await deletePrivateAccount(reference, profileProvider, openClawStateDir);
+        await deletePrivateAccount(reference, profileProvider, authProfiles);
         response.writeHead(204).end();
       } else if (request.method === 'PUT') {
         if (!revision || !profileProvider) {
           sendPrivateResolverFailure(response, 'invalid-request', 400);
           return;
         }
-        await removePrivateProfile(reference, profileProvider, openClawStateDir);
+        await removePrivateProfile(reference, profileProvider, authProfiles);
         await removeCredentialReference(reference);
         response.writeHead(204).end();
       } else if (!revision) {
@@ -326,13 +309,13 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
           sendPrivateResolverFailure(response, 'invalid-request', 400);
           return;
         }
-        await applyPrivateProfile(reference, provider, credentialProvider, authMode, openClawStateDir);
+        await applyPrivateProfile(reference, provider, credentialProvider, authMode, authProfiles);
         response.writeHead(204).end();
       }
     } catch (error) {
       traceResolve('electron.private-credential.resolve.result', () => ({
         outcome: 'private-error', status: 503,
-        code: error instanceof ProviderPrivateResolverError && [
+        code: (error instanceof ProviderPrivateResolverError || error instanceof AuthProfileSqliteError) && [
           'invalid-request', 'credential-missing', 'credential-decrypt-failed',
           'credential-provider-mismatch', 'credential-invalid', 'auth-profile-read-invalid',
           'auth-profile-write-failed', 'credential-store-unavailable', 'unknown',
@@ -340,30 +323,55 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
       }));
       sendPrivateResolverFailure(
         response,
-        error instanceof ProviderPrivateResolverError ? error.code : 'unknown',
+        error instanceof ProviderPrivateResolverError || error instanceof AuthProfileSqliteError ? error.code : 'unknown',
       );
     }
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', reject);
-      resolve();
+  };
+  const server = createServer((request, response) => {
+    if (closing || requests.size >= MAX_PRIVATE_RESOLVER_REQUESTS) {
+      sendPrivateResolverFailure(response, 'auth-profile-write-failed');
+      request.resume();
+      return;
+    }
+    // A disconnected observer does not cancel an admitted SQLite side effect.
+    const pending = handleRequest(request, response).catch(() => {
+      if (!response.headersSent) sendPrivateResolverFailure(response, 'unknown');
     });
+    requests.add(pending);
+    void pending.then(() => { requests.delete(pending); });
   });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+  } catch (error) {
+    await authProfiles.close().catch(() => undefined);
+    throw error;
+  }
   const address = server.address();
   if (!address || typeof address === 'string') {
-    await closeServer(server);
+    try { await closeServer(server); } finally { await authProfiles.close(); }
     throw new Error('Provider credential storage is unavailable');
   }
   return {
     endpoint: `http://127.0.0.1:${address.port}/resolve`,
     authorization,
-    close: async () => {
-      await closeServer(server);
-      await privateStoreWrite;
-      await authProfileWrite;
-      await closePrivateAccountTransactions(restoreCredential);
+    close: () => {
+      closing ??= (async () => {
+        try {
+          await closeServer(server);
+          await Promise.all(requests);
+          await privateStoreWrite;
+          await closePrivateAccountTransactions(restoreCredential);
+        } finally {
+          await authProfiles.close();
+        }
+      })();
+      return closing;
     },
   };
 }
@@ -782,8 +790,8 @@ async function storeSecret(accountId: string, secret: unknown): Promise<string> 
   return reference;
 }
 
-async function deletePrivateAccount(reference: string, profileProvider: string, openClawStateDir: string): Promise<void> {
-  await removePrivateProfile(reference, profileProvider, openClawStateDir);
+async function deletePrivateAccount(reference: string, profileProvider: string, authProfiles: AuthProfileSqliteWriter): Promise<void> {
+  await removePrivateProfile(reference, profileProvider, authProfiles);
   await removeCredentialReference(reference);
 }
 
@@ -853,7 +861,7 @@ async function applyPrivateProfile(
   profileProvider: string,
   credentialProvider: string,
   authMode: CredentialAuthMode,
-  openClawStateDir: string,
+  authProfiles: AuthProfileSqliteWriter,
 ): Promise<void> {
   providerPrivateAuthTrace('store.private-profile-before', () => ({
     provider: profileProvider,
@@ -882,14 +890,7 @@ async function applyPrivateProfile(
     );
   }
 
-  await updateAuthProfileProjection(openClawStateDir, ({ store, state }) => {
-    store.profiles[profileId] = profile;
-    if (legacyProfileId !== profileId) {
-      delete store.profiles[legacyProfileId];
-      removeProfileReferences(state, legacyProfileId);
-    }
-    markProfileCurrent(state, profileProvider, profileId);
-  });
+  await authProfiles.update({ type: 'apply', provider: profileProvider, profileId, legacyProfileId, profile });
   providerPrivateAuthTrace('store.private-profile-after', () => ({
     provider: profileProvider,
     sourceProvider: credentialProvider,
@@ -908,7 +909,7 @@ function oauthProfile(
   return { ...profile, type: 'oauth', provider };
 }
 
-async function removePrivateProfile(reference: string, profileProvider: string, openClawStateDir: string): Promise<void> {
+async function removePrivateProfile(reference: string, profileProvider: string, authProfiles: AuthProfileSqliteWriter): Promise<void> {
   const profileId = privateProfileId(profileProvider);
   const legacyProfileId = legacyPrivateProfileId(reference);
   providerPrivateAuthTrace('delete.private-profile-before', () => ({
@@ -917,14 +918,7 @@ async function removePrivateProfile(reference: string, profileProvider: string, 
     profileId: idShape(profileId),
     legacyProfileId: idShape(legacyProfileId),
   }));
-  await updateAuthProfileProjection(openClawStateDir, ({ store, state }) => {
-    delete store.profiles[profileId];
-    removeProfileReferences(state, profileId);
-    if (legacyProfileId !== profileId) {
-      delete store.profiles[legacyProfileId];
-      removeProfileReferences(state, legacyProfileId);
-    }
-  });
+  await authProfiles.update({ type: 'remove', profileId, legacyProfileId });
   providerPrivateAuthTrace('delete.private-profile-after', () => ({
     provider: profileProvider,
     reference: idShape(reference),
@@ -977,34 +971,6 @@ function privateProfileId(provider: string): string {
 
 function legacyPrivateProfileId(reference: string): string {
   return reference.slice('credential:v1:'.length);
-}
-
-function markProfileCurrent(state: MutableAuthProfileState, provider: string, profileId: string): void {
-  state.order ??= {};
-  state.order[provider] ??= [];
-  if (!state.order[provider].includes(profileId)) {
-    state.order[provider].push(profileId);
-  }
-  state.lastGood ??= {};
-  state.lastGood[provider] = profileId;
-}
-
-function removeProfileReferences(state: MutableAuthProfileState, profileId: string): void {
-  if (state.order) {
-    for (const [provider, profileIds] of Object.entries(state.order)) {
-      const next = profileIds.filter((id) => id !== profileId);
-      if (next.length > 0) {
-        state.order[provider] = next;
-      } else {
-        delete state.order[provider];
-      }
-    }
-  }
-  if (state.lastGood) {
-    for (const [provider, currentProfileId] of Object.entries(state.lastGood)) {
-      if (currentProfileId === profileId) delete state.lastGood[provider];
-    }
-  }
 }
 
 function parsePrivateCredential(value: string):
@@ -1060,315 +1026,6 @@ function parsePrivateCredential(value: string):
 function optionalCredentialText(record: Record<string, unknown>, key: string): Record<string, string> {
   const value = record[key];
   return typeof value === 'string' ? { [key]: value } : {};
-}
-
-function openClawStateDbPath(openClawStateDir: string): string {
-  return join(openClawStateDir, OPENCLAW_STATE_DB_DIR, OPENCLAW_STATE_DB_FILE);
-}
-
-async function updateAuthProfileProjection(
-  openClawStateDir: string,
-  mutate: (projection: MutableAuthProfileProjection) => void,
-): Promise<boolean> {
-  const previous = authProfileWrite;
-  let release!: () => void;
-  authProfileWrite = new Promise<void>((resolve) => { release = resolve; });
-  await previous;
-  try {
-    return await writeAuthProfileProjection(openClawStateDir, mutate);
-  } finally {
-    release();
-  }
-}
-
-async function writeAuthProfileProjection(
-  openClawStateDir: string,
-  mutate: (projection: MutableAuthProfileProjection) => void,
-): Promise<boolean> {
-  try {
-    const path = openClawStateDbPath(openClawStateDir);
-    if (authProfileProjectionAlreadyMatches(path, mutate)) return false;
-    await mkdir(dirname(path), { recursive: true });
-    return await retryAuthProfileSqliteBusy(async () => {
-      const database = new DatabaseSync(path);
-      try {
-        database.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS}`);
-        database.exec('BEGIN IMMEDIATE');
-        try {
-          ensureAuthProfileStateTable(database);
-          const projection = readAuthProfileProjection(database);
-          const before = authProfileProjectionSnapshot(projection);
-          mutate(projection);
-          const after = authProfileProjectionSnapshot(projection);
-          if (after === before && sharedAuthStoreIsCurrent(database)) {
-            database.exec('COMMIT');
-            return false;
-          }
-          writeAuthProfileCells(database, projection);
-          database.exec('COMMIT');
-          return true;
-        } catch (error) {
-          rollbackAuthProfileProjection(database);
-          throw error;
-        }
-      } finally {
-        database.close();
-      }
-    });
-  } catch (error) {
-    if (error instanceof ProviderPrivateResolverError) throw error;
-    throw new ProviderPrivateResolverError('auth-profile-write-failed', error);
-  }
-}
-
-async function retryAuthProfileSqliteBusy<T>(operation: () => T | Promise<T>): Promise<T> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (!isSqliteBusy(error)) throw error;
-      if (attempt >= OPENCLAW_AUTH_PROFILE_WRITE_RETRY_DELAYS_MS.length) {
-        throw new ProviderPrivateResolverError('auth-profile-write-failed', error);
-      }
-      await delay(OPENCLAW_AUTH_PROFILE_WRITE_RETRY_DELAYS_MS[attempt]);
-    }
-  }
-}
-
-function authProfileProjectionAlreadyMatches(
-  path: string,
-  mutate: (projection: MutableAuthProfileProjection) => void,
-): boolean {
-  if (!existsSync(path)) return false;
-  try {
-    const database = new DatabaseSync(path, { readOnly: true });
-    try {
-      database.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS}`);
-      if (!hasAuthProfileStateTable(database)) return false;
-      if (!sharedAuthStoreIsCurrent(database)) return false;
-      const projection = readAuthProfileProjection(database);
-      const before = authProfileProjectionSnapshot(projection);
-      mutate(projection);
-      return authProfileProjectionSnapshot(projection) === before;
-    } finally {
-      database.close();
-    }
-  } catch (error) {
-    if (isSqliteBusy(error)) return false;
-    throw error;
-  }
-}
-
-function ensureAuthProfileStateTable(database: DatabaseSync): void {
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS config_machine_state (
-      state_key TEXT NOT NULL PRIMARY KEY,
-      value_json TEXT NOT NULL,
-      updated_at_ms INTEGER NOT NULL
-    ) STRICT;
-  `);
-}
-
-function hasAuthProfileStateTable(database: DatabaseSync): boolean {
-  return database
-    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'config_machine_state' LIMIT 1")
-    .get() !== undefined;
-}
-
-function readAuthProfileProjection(database: DatabaseSync): MutableAuthProfileProjection {
-  return {
-    store: readAuthProfileStoreCell(database),
-    state: readAuthProfileStateCell(database),
-  };
-}
-
-function readAuthProfileStoreCell(database: DatabaseSync): MutableAuthProfileStore {
-  const value = readAuthProfileCell(database, AUTH_PROFILES_STORE_STATE_KEY);
-  if (value === undefined) return { version: 1, profiles: {} };
-  if (!isAuthProfileStore(value)) throw new ProviderPrivateResolverError('auth-profile-read-invalid');
-  return {
-    version: 1,
-    profiles: { ...value.profiles },
-  };
-}
-
-function readAuthProfileStateCell(database: DatabaseSync): MutableAuthProfileState {
-  const value = readAuthProfileCell(database, AUTH_PROFILES_STATE_STATE_KEY);
-  if (value === undefined) return { version: 1 };
-  if (!isAuthProfileState(value)) throw new ProviderPrivateResolverError('auth-profile-read-invalid');
-  return {
-    version: 1,
-    order: value.order ? cloneAuthProfileOrder(value.order) : undefined,
-    lastGood: value.lastGood ? { ...value.lastGood } : undefined,
-  };
-}
-
-function readAuthProfileCell(database: DatabaseSync, stateKey: string): unknown | undefined {
-  const row = database
-    .prepare('SELECT value_json FROM config_machine_state WHERE state_key = ?')
-    .get(stateKey) as { value_json?: unknown } | undefined;
-  if (typeof row?.value_json !== 'string') return undefined;
-  if (Buffer.byteLength(row.value_json) > MAX_AUTH_PROFILES_BYTES) {
-    throw new ProviderPrivateResolverError('auth-profile-read-invalid');
-  }
-  try {
-    return JSON.parse(row.value_json) as unknown;
-  } catch (error) {
-    throw new ProviderPrivateResolverError('auth-profile-read-invalid', error);
-  }
-}
-
-function writeAuthProfileCells(database: DatabaseSync, projection: MutableAuthProfileProjection): void {
-  writeAuthProfileCell(database, AUTH_SHARED_STORE_STATE_KEY, AUTH_SHARED_STORE_STATE_VALUE);
-  writeAuthProfileCell(database, AUTH_PROFILES_STORE_STATE_KEY, projection.store);
-  writeAuthProfileCell(database, AUTH_PROFILES_STATE_STATE_KEY, normalizeAuthProfileState(projection.state));
-}
-
-function sharedAuthStoreIsCurrent(database: DatabaseSync): boolean {
-  const row = database
-    .prepare('SELECT value_json FROM config_machine_state WHERE state_key = ?')
-    .get(AUTH_SHARED_STORE_STATE_KEY) as { value_json?: unknown } | undefined;
-  return row?.value_json === JSON.stringify(AUTH_SHARED_STORE_STATE_VALUE);
-}
-
-function authProfileProjectionSnapshot(projection: MutableAuthProfileProjection): string {
-  return JSON.stringify({
-    store: projection.store,
-    state: normalizeAuthProfileState(projection.state),
-  });
-}
-
-function writeAuthProfileCell(database: DatabaseSync, stateKey: string, value: unknown): void {
-  const valueJson = JSON.stringify(value);
-  if (valueJson === undefined || Buffer.byteLength(valueJson) > MAX_AUTH_PROFILES_BYTES) {
-    throw new ProviderPrivateResolverError('auth-profile-write-failed');
-  }
-  database
-    .prepare(`
-      INSERT INTO config_machine_state (state_key, value_json, updated_at_ms)
-      VALUES (?, ?, ?)
-      ON CONFLICT(state_key) DO UPDATE SET
-        value_json = excluded.value_json,
-        updated_at_ms = excluded.updated_at_ms
-    `)
-    .run(stateKey, valueJson, Date.now());
-}
-
-function normalizeAuthProfileState(state: MutableAuthProfileState): AuthProfileState {
-  const next: MutableAuthProfileState = { version: 1 };
-  if (state.order && Object.keys(state.order).length > 0) next.order = state.order;
-  if (state.lastGood && Object.keys(state.lastGood).length > 0) next.lastGood = state.lastGood;
-  return next;
-}
-
-function rollbackAuthProfileProjection(database: DatabaseSync): void {
-  try {
-    if (database.isTransaction) database.exec('ROLLBACK');
-  } catch {
-    // Ignore rollback failure; the original write/read error is the useful boundary.
-  }
-}
-
-function cloneAuthProfileOrder(order: AuthProfileOrder): AuthProfileOrder {
-  return Object.fromEntries(Object.entries(order).map(([provider, profileIds]) => [provider, [...profileIds]]));
-}
-
-function isSqliteBusy(error: unknown): boolean {
-  return isRecord(error) && (error.code === 'SQLITE_BUSY' || error.code === 'SQLITE_LOCKED');
-}
-
-async function delay(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isAuthProfileStore(value: unknown): value is AuthProfileStore {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const store = value as Record<string, unknown>;
-  if (store.version !== 1 || !store.profiles || typeof store.profiles !== 'object' || Array.isArray(store.profiles)) {
-    return false;
-  }
-  return Object.entries(store.profiles).every(([id, profile]) => isId(id) && isAuthProfile(profile));
-}
-
-function isAuthProfileState(value: unknown): value is AuthProfileState {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const state = value as Record<string, unknown>;
-  return state.version === 1
-    && (state.order === undefined || isAuthProfileOrder(state.order))
-    && (state.lastGood === undefined || isAuthProfileLastGood(state.lastGood));
-}
-
-function isAuthProfileOrder(value: unknown): value is AuthProfileOrder {
-  return !!value
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.entries(value).every(([provider, profileIds]) => isProfileProviderName(provider)
-      && Array.isArray(profileIds)
-      && profileIds.every(isId));
-}
-
-function isAuthProfileLastGood(value: unknown): value is AuthProfileLastGood {
-  return !!value
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.entries(value).every(([provider, profileId]) => isProfileProviderName(provider) && isId(profileId));
-}
-
-function isAuthProfile(value: unknown): value is AuthProfile {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const profile = value as Record<string, unknown>;
-  if (!isProfileProviderName(profile.provider)) return false;
-  if (profile.type === 'api_key') {
-    return hasOneSecret(profile.key, profile.keyRef)
-      && Object.entries(profile).every(([key, profileValue]) => isCommonAuthProfileField(key, profileValue)
-        || key === 'key' && isSecret(profileValue)
-        || key === 'keyRef' && isSecretRef(profileValue));
-  }
-  if (profile.type === 'token') {
-    return hasOneSecret(profile.token, profile.tokenRef)
-      && Object.entries(profile).every(([key, profileValue]) => isCommonAuthProfileField(key, profileValue)
-        || key === 'token' && isSecret(profileValue)
-        || key === 'tokenRef' && isSecretRef(profileValue)
-        || key === 'expires' && isRevision(profileValue));
-  }
-  if (profile.type !== 'oauth'
-    || !isSecret(profile.access)
-    || !isSecret(profile.refresh)
-    || !isRevision(profile.expires)) {
-    return false;
-  }
-  return Object.entries(profile).every(([key, profileValue]) => isCommonAuthProfileField(key, profileValue)
-    || ['access', 'refresh'].includes(key) && isSecret(profileValue)
-    || key === 'expires' && isRevision(profileValue)
-    || ['clientId', 'enterpriseUrl', 'projectId', 'accountId', 'chatgptPlanType', 'idToken'].includes(key) && typeof profileValue === 'string');
-}
-
-function isSecretRef(value: unknown): value is SecretRef {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const ref = value as Record<string, unknown>;
-  return (ref.source === 'env' || ref.source === 'file' || ref.source === 'exec')
-    && isProfileProviderName(ref.provider)
-    && isSecret(ref.id);
-}
-
-function hasOneSecret(left: unknown, right: unknown): boolean {
-  return (isSecret(left) && right === undefined) || (left === undefined && isSecretRef(right));
-}
-
-function isCommonAuthProfileField(key: string, value: unknown): boolean {
-  if (key === 'type') return value === 'api_key' || value === 'token' || value === 'oauth';
-  if (key === 'provider') return isProfileProviderName(value);
-  if (key === 'copyToAgents') return typeof value === 'boolean';
-  if (key === 'email' || key === 'displayName') return typeof value === 'string';
-  if (key === 'metadata') return isStringRecord(value);
-  return false;
-}
-
-function isStringRecord(value: unknown): value is Record<string, string> {
-  return !!value
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.values(value).every((entry) => typeof entry === 'string');
 }
 
 async function removeCredentialReference(reference: string): Promise<void> {

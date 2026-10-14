@@ -46,6 +46,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSkillsStore } from '@/stores/skills';
 import { getSealedSkillCloudPackageKey, useSealedSkillsStore } from '@/stores/sealed-skills';
 import { useGatewayStore } from '@/stores/gateway';
+import { useAccountStore } from '@/stores/account';
 import {
   hostApiFetch,
   hostOpenClawGetSkillsDir,
@@ -54,6 +55,8 @@ import {
 import type { CapabilityTarget } from '../../types/desktop/capability-target';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { waitForSkillsMutation } from '@/lib/skills';
+import { sealedSkillErrorMessage } from '@/lib/sealed-skills-error';
+import { AppError } from '@/lib/error-model';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
 import { readLocalSkillImport } from '@/services/local-path-picker';
@@ -1287,16 +1290,19 @@ export function Skills() {
   const searchError = useSkillsStore((state) => state.searchError);
   const installing = useSkillsStore((state) => state.installing);
   const sealedSkills = useSealedSkillsStore((state) => state.skills);
+  const sealedSkillIssues = useSealedSkillsStore((state) => state.issues);
   const cloudPackages = useSealedSkillsStore((state) => state.cloudPackages);
   const installedCloudPackages = useSealedSkillsStore((state) => state.installedCloudPackages);
   const myCloudPackages = useSealedSkillsStore((state) => state.myCloudPackages);
   const myCloudLoading = useSealedSkillsStore((state) => state.myCloudLoading);
+  const myCloudLoaded = useSealedSkillsStore((state) => state.myCloudLoaded);
   const myCloudError = useSealedSkillsStore((state) => state.myCloudError);
   const cloudPublishingByVersionId = useSealedSkillsStore((state) => state.cloudPublishingByVersionId);
   const fetchMyCloudSkillPackages = useSealedSkillsStore((state) => state.fetchMyCloudSkillPackages);
   const publishCloudSkillPackage = useSealedSkillsStore((state) => state.publishCloudSkillPackage);
   const sealedSkillsLoading = useSealedSkillsStore((state) => state.loading);
   const sealedCloudLoading = useSealedSkillsStore((state) => state.cloudLoading);
+  const sealedCloudLoaded = useSealedSkillsStore((state) => state.cloudLoaded);
   const localPackageInstalling = useSealedSkillsStore((state) => state.localPackageInstalling);
   const sealedSkillsError = useSealedSkillsStore((state) => state.error);
   const sealedCloudError = useSealedSkillsStore((state) => state.cloudError);
@@ -1312,6 +1318,8 @@ export function Skills() {
   const installLocalSkillPackage = useSealedSkillsStore((state) => state.installLocalSkillPackage);
   const downloadAndInstallCloudSkillPackage = useSealedSkillsStore((state) => state.downloadAndInstallCloudSkillPackage);
   const { t } = useTranslation('skills');
+  const cloudAccountUserId = useAccountStore((state) => state.user?.id);
+  const cloudAccountSignedOut = useAccountStore((state) => state.status === 'signedOut' || state.status === 'requires2fa');
   const gatewayStatus = useGatewayStore((state) => state.status);
   const [searchParams, setSearchParams] = useSearchParams();
   const updateQuery = (key: string, value: string) => {
@@ -1433,7 +1441,7 @@ export function Skills() {
 
   useEffect(() => {
     if (isSealedTabActive) refreshPackagePanel();
-  }, [isSealedTabActive, refreshPackagePanel]);
+  }, [isSealedTabActive, refreshPackagePanel, cloudAccountUserId, cloudAccountSignedOut]);
 
   useEffect(() => {
     if (skillsHeavyContentReady) {
@@ -1552,10 +1560,13 @@ export function Skills() {
 
   const handleExportSkillPackage = useCallback(async (skillId: string) => {
     try {
-      await exportSkillPackage(skillId);
-      toast.success(t('sealed.exported'));
+      const result = await exportSkillPackage(skillId);
+      if (!result) return;
+      if (result.warning) toast.warning(t(result.refreshed ? 'sealed.exportedCleanupFailed' : 'sealed.exportedCleanupRefreshFailed'));
+      else if (result.refreshed) toast.success(t('sealed.exported'));
+      else toast.warning(t('sealed.exportedRefreshFailed'));
     } catch (err) {
-      toast.error(t('sealed.exportFailed') + ': ' + String(err));
+      toast.error(sealedSkillErrorMessage(err, t, 'sealed.exportFailed'));
     }
   }, [exportSkillPackage, t]);
 
@@ -1565,7 +1576,9 @@ export function Skills() {
     }
     await uninstallSealedSkill(sealedSkillToDelete.skillKey);
     setSealedSkillToDelete(null);
-    toast.success(t('toast.uninstalled'));
+    const state = useSealedSkillsStore.getState();
+    if (state.error || state.cloudError) toast.warning(t('sealed.uninstalledRefreshFailed'));
+    else toast.success(t('toast.uninstalled'));
   }, [sealedSkillToDelete, uninstallSealedSkill, t]);
 
   const handleUninstallSealedSkillQuick = useCallback((skillId: string) => {
@@ -1654,11 +1667,7 @@ export function Skills() {
   }, [handleToggle]);
 
   const hasInstalledSkills = useMemo(() => safeSkills.some((s) => !s.isBundled), [safeSkills]);
-  const cloudPackageErrorMessage = useCallback((error: unknown, fallback: string) => {
-    const message = error instanceof Error ? error.message : String(error);
-    const code = ['MATCHA_PACKAGE_CLOUD_ENVELOPE_REQUIRED', 'MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE'].find((value) => message.includes(value));
-    return t(code ? `sealed.errors.${code}` : fallback);
-  }, [t]);
+  const cloudPackageErrorMessage = useCallback((error: unknown, fallback: string) => sealedSkillErrorMessage(error, t, fallback), [t]);
 
   const handleOpenSkillsFolder = useCallback(async () => {
     try {
@@ -1783,18 +1792,23 @@ export function Skills() {
       if (!installed) {
         return;
       }
-      toast.success(t('sealed.installedLocal'));
+      if (useSealedSkillsStore.getState().error) toast.warning(t('sealed.installedRefreshFailed'));
+      else toast.success(t('sealed.installedLocal'));
       resetLocalSkillPackageInstallDialog();
       await fetchSkills({ force: true, fresh: true });
     } catch (error) {
-      toast.error(t('sealed.installLocalFailed') + ': ' + String(error));
+      toast.error(sealedSkillErrorMessage(error, t, 'sealed.installLocalFailed'));
     }
   }, [fetchSkills, installLocalSkillPackage, localPackageInstalling, resetLocalSkillPackageInstallDialog, t]);
 
   const handleUploadInstalledSkillPackageToCloud = useCallback(async (skillKey: string) => {
     try {
-      await uploadInstalledSkillPackageToCloud(skillKey);
-      toast.success(t('sealed.uploaded'), {
+      const result = await uploadInstalledSkillPackageToCloud(skillKey);
+      if (!result) return;
+      const notify = result.warning || !result.refreshed ? toast.warning : toast.success;
+      notify(t(result.warning
+        ? result.refreshed ? 'sealed.uploadedCleanupFailed' : 'sealed.uploadedCleanupRefreshFailed'
+        : result.refreshed ? 'sealed.uploaded' : 'sealed.uploadedRefreshFailed'), {
         action: {
           label: t('sealed.viewCloudPackages'),
           onClick: () => setSearchParams((params) => {
@@ -1807,14 +1821,19 @@ export function Skills() {
         },
       });
     } catch (error) {
-      toast.error(cloudPackageErrorMessage(error, 'sealed.uploadFailed'));
+      toast.error(cloudPackageErrorMessage(error, 'sealed.uploadFailed'), {
+        ...(error instanceof AppError && error.details?.exportWarning === 'cleanup-failed'
+          ? { description: t('sealed.exportedCleanupFailed') } : {}),
+      });
     }
   }, [cloudPackageErrorMessage, setSearchParams, t, uploadInstalledSkillPackageToCloud]);
 
   const handlePublishCloudSkillPackage = async (packageVersionId: string) => {
     try {
-      await publishCloudSkillPackage(packageVersionId);
-      toast.success(t('sealed.published'));
+      const result = await publishCloudSkillPackage(packageVersionId);
+      if (!result) return;
+      if (!result.refreshed) toast.warning(t('sealed.publishedRefreshFailed'));
+      else toast.success(t('sealed.published'));
     } catch (error) {
       toast.error(cloudPackageErrorMessage(error, 'sealed.publishFailed'));
     }
@@ -1823,7 +1842,9 @@ export function Skills() {
   const handleInstallCloudSkillPackage = useCallback(async (packageInfo: SealedSkillCloudPackage) => {
     try {
       await downloadAndInstallCloudSkillPackage(packageInfo);
-      toast.success(t('sealed.installedFromCloud'));
+      const state = useSealedSkillsStore.getState();
+      if (state.error || state.cloudError) toast.warning(t('sealed.installedRefreshFailed'));
+      else toast.success(t('sealed.installedFromCloud'));
       setSearchParams((params) => {
         const next = new URLSearchParams(params);
         next.set('packageTab', 'installed');
@@ -1935,7 +1956,8 @@ export function Skills() {
   const exportQuery = exportSearch.trim().toLowerCase();
   const filteredExportableSkills = exportableSkills.filter((skill) => [skill.name, skill.id, skill.description].some((value) => value?.toLowerCase().includes(exportQuery)));
   const packagePanelLoading = packageTab === 'installed' ? sealedSkillsLoading : packageTab === 'mine' ? myCloudLoading : sealedCloudLoading;
-  const packagePanelError = packageTab === 'installed' ? sealedSkillsError || error : packageTab === 'mine' ? myCloudError : sealedCloudError;
+  const cloudPanelUnknown = packageTab === 'mine' ? !myCloudLoaded : packageTab === 'market' && !sealedCloudLoaded;
+  const packagePanelError = packageTab === 'installed' ? sealedSkillsError : packageTab === 'mine' ? myCloudError : sealedCloudError;
   const packagePanelCount = packageTab === 'installed' ? sealedSkills.length : packageTab === 'mine' ? myCloudPackages.length : cloudPackages.length;
   const packagePanelFilteredCount = packageTab === 'installed' ? filteredSealedSkillCardModels.length : packageTab === 'mine' ? filteredMyCloudPackages.length : filteredCloudPackages.length;
   const packageSearchLabel = t(packageTab === 'installed' ? 'sealed.searchInstalled' : packageTab === 'mine' ? 'sealed.searchMine' : 'sealed.searchMarket');
@@ -2161,11 +2183,29 @@ export function Skills() {
                 {packagePanelError && (
                   <div role="alert" className="flex flex-wrap items-center gap-2 text-sm">
                     <AlertCircle className="size-4 shrink-0 text-destructive" aria-hidden="true" />
-                    <span className="min-w-0 flex-1 break-words text-destructive">{packageTab === 'installed' ? packagePanelError : t('sealed.cloudUnavailableDescription')}</span>
+                    <span className="min-w-0 flex-1 break-words text-destructive">{sealedSkillErrorMessage(packagePanelError, t, 'sealed.errors.listFailed')}</span>
                     <Button variant="outline" size="sm" disabled={packagePanelLoading} onClick={refreshPackagePanel}>{t('sealed.retry')}</Button>
                   </div>
                 )}
-                {packagePanelLoading && packagePanelCount === 0 ? (
+                {packageTab === 'installed' && sealedSkillIssues.length > 0 && (
+                  <ul className="space-y-2" aria-label={t('sealed.catalogIssues')}>
+                    {sealedSkillIssues.map((issue) => (
+                      <li key={issue.fileName} className="flex items-start gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 text-sm">
+                        <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                        <div className="min-w-0 space-y-1">
+                          <p className="break-all font-medium">{issue.fileName}{issue.skillKey && <span className="ml-2 font-normal text-muted-foreground">{issue.skillKey}</span>}</p>
+                          <p className="break-words text-muted-foreground">{t(`sealed.issues.${issue.reason}`)}</p>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {cloudPanelUnknown ? (
+                  <p role="status" className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+                    <RefreshCw className="size-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                    {t('sealed.cloudLoading')}
+                  </p>
+                ) : packageTab === 'installed' && packagePanelLoading && packagePanelCount === 0 ? (
                   <AgentResourceGrid className={resourceGridClassName} aria-busy="true" aria-label={t('common:status.loading')}>
                     {Array.from({ length: 6 }, (_, index) => (
                       <AgentResourceCard key={index} className="gap-3 p-4" aria-hidden="true">
@@ -2423,7 +2463,7 @@ export function Skills() {
         onConfirm={handleConfirmUninstallSealedSkill}
         onCancel={() => setSealedSkillToDelete(null)}
         onError={(error) => {
-          toast.error(t('toast.failedUninstall') + ': ' + String(error));
+          toast.error(sealedSkillErrorMessage(error, t, 'toast.failedUninstall'));
         }}
       />
     </AgentPage>

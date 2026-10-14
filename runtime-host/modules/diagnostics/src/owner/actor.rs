@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use foundation::execution::{LaneRetention, OwnerSpec};
+use tokio::{sync::oneshot, task::JoinSet};
 
 use crate::{
     DiagnosticsArchiveError, DiagnosticsArchiveProducer, DiagnosticsArchiveReceipt,
@@ -24,6 +25,7 @@ pub(crate) struct DiagnosticsShared {
     admission: Arc<dyn DiagnosticsRequestAdmission>,
     producer: DiagnosticsArchiveProducer,
     archive: ArchiveCollection,
+    downloads: Arc<Mutex<JoinSet<()>>>,
 }
 
 pub(crate) struct DiagnosticsGlobalState;
@@ -40,6 +42,7 @@ impl DiagnosticsOwner {
                 admission: input.admission,
                 producer: input.producer,
                 archive: ArchiveCollection::new(input.host),
+                downloads: Arc::new(Mutex::new(JoinSet::new())),
             },
         }
     }
@@ -105,21 +108,7 @@ impl OwnerSpec for DiagnosticsOwner {
         }
     }
 
-    async fn handle_direct_query(_shared: Self::Shared, _query: Self::Query) {}
-
-    async fn handle_keyed_query(
-        _shared: Self::Shared,
-        _key: Self::Key,
-        _lane: &mut Self::LaneState,
-        _query: Self::Query,
-    ) {
-    }
-
-    async fn handle_global_query(
-        shared: Self::Shared,
-        _global: &mut Self::GlobalState,
-        query: Self::Query,
-    ) {
+    async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
         match query {
             DiagnosticsQuery::DownloadArchive {
                 call,
@@ -130,7 +119,7 @@ impl OwnerSpec for DiagnosticsOwner {
                 let result = if call::running(call.as_ref()).await.is_err() {
                     Err(DiagnosticsArchiveError::OutputUnavailable)
                 } else {
-                    download_archive(&shared, archive_id)
+                    download_archive(&shared, archive_id).await
                 };
                 let status = match &result {
                     Ok(image) => {
@@ -150,12 +139,41 @@ impl OwnerSpec for DiagnosticsOwner {
         }
     }
 
-    async fn handle_exclusive_query(
-        shared: Self::Shared,
-        global: &mut Self::GlobalState,
-        query: Self::Query,
+    async fn handle_keyed_query(
+        _shared: Self::Shared,
+        _key: Self::Key,
+        _lane: &mut Self::LaneState,
+        _query: Self::Query,
     ) {
-        Self::handle_global_query(shared, global, query).await;
+    }
+
+    async fn handle_global_query(
+        _shared: Self::Shared,
+        _global: &mut Self::GlobalState,
+        _query: Self::Query,
+    ) {
+    }
+
+    async fn handle_exclusive_query(
+        _shared: Self::Shared,
+        _global: &mut Self::GlobalState,
+        _query: Self::Query,
+    ) {
+    }
+
+    async fn shutdown(
+        shared: Self::Shared,
+        _global: &mut Self::GlobalState,
+        _lanes: Vec<(Self::Key, Self::LaneState)>,
+    ) {
+        let mut downloads = {
+            let mut downloads = shared
+                .downloads
+                .lock()
+                .expect("diagnostics download task lock poisoned");
+            std::mem::take(&mut *downloads)
+        };
+        while downloads.join_next().await.is_some() {}
     }
 }
 
@@ -169,12 +187,34 @@ async fn collect_archive(
         .await
 }
 
-fn download_archive(
+async fn download_archive(
     shared: &DiagnosticsShared,
     archive_id: String,
 ) -> Result<Vec<u8>, DiagnosticsArchiveError> {
     if shared.admission.admit_diagnostics_request().is_err() {
         return Err(DiagnosticsArchiveError::OutputUnavailable);
     }
-    shared.producer.download(&archive_id)
+    let producer = shared.producer.clone();
+    let (reply, response) = oneshot::channel();
+    {
+        let mut downloads = shared
+            .downloads
+            .lock()
+            .expect("diagnostics download task lock poisoned");
+        while downloads.try_join_next().is_some() {}
+        downloads.spawn_blocking(move || {
+            let _ = reply.send(producer.download(&archive_id));
+        });
+    }
+    let result = response
+        .await
+        .unwrap_or(Err(DiagnosticsArchiveError::OutputUnavailable));
+    {
+        let mut downloads = shared
+            .downloads
+            .lock()
+            .expect("diagnostics download task lock poisoned");
+        while downloads.try_join_next().is_some() {}
+    }
+    result
 }

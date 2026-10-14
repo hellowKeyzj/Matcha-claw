@@ -1,5 +1,6 @@
 mod authority;
 mod factory;
+mod input;
 mod launch;
 mod observation;
 mod one_shot;
@@ -13,6 +14,7 @@ mod system;
 
 pub use authority::{AuthorityClass, AuthorityScope, ProcessIdentity, Provenance, ScopeId};
 pub use factory::{ProcessContainment, supervise};
+pub use input::StdinReader;
 pub(crate) use launch::LaunchRequest;
 #[cfg(unix)]
 pub use launch::PosixLaunchCustody;

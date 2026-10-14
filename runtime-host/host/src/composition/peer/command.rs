@@ -8,7 +8,7 @@ use foundation::execution::CommandRoute;
 
 use crate::{RuntimeState, composition::runtime_ports::RuntimeDriverIdentity};
 
-use super::PeerKey;
+use super::{PeerKey, PeerLaneKey};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeStartCommandError {
@@ -90,7 +90,7 @@ pub(crate) enum PeerCommand {
 
 impl PeerCommand {
     pub(super) fn reserve_lifecycle(&mut self, driver: &openclaw::driver::OpenClawDriver) -> bool {
-        if !matches!(self.route_command(), CommandRoute::Keyed(key) if key == RuntimeDriverIdentity::open_claw().endpoint()) {
+        if !matches!(self.route_command(), CommandRoute::Keyed(PeerLaneKey::Lifecycle(key)) if key == RuntimeDriverIdentity::open_claw().endpoint()) {
             return true;
         }
         let Some(permit) = driver.try_reserve_lifecycle() else {
@@ -109,18 +109,17 @@ impl PeerCommand {
         true
     }
 
-    pub(crate) fn route_command(&self) -> CommandRoute<PeerKey> {
-        match self {
-            Self::AutostartMatcha => {
-                CommandRoute::Keyed(RuntimeDriverIdentity::matcha_agent().endpoint())
-            }
+    pub(crate) fn route_command(&self) -> CommandRoute<PeerLaneKey> {
+        let endpoint = match self {
+            Self::AutostartMatcha => RuntimeDriverIdentity::matcha_agent().endpoint(),
             Self::AutostartOpenClaw { .. } | Self::RestartOpenClawAfterPluginChange { .. } => {
-                CommandRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())
+                RuntimeDriverIdentity::open_claw().endpoint()
             }
             Self::StartRuntime { endpoint, .. }
             | Self::StopRuntime { endpoint, .. }
             | Self::RestartRuntime { endpoint, .. }
-            | Self::RepairRuntime { endpoint, .. } => CommandRoute::Keyed(endpoint.clone()),
-        }
+            | Self::RepairRuntime { endpoint, .. } => endpoint.clone(),
+        };
+        CommandRoute::Keyed(PeerLaneKey::Lifecycle(endpoint))
     }
 }

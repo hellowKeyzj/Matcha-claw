@@ -1211,31 +1211,38 @@ function adaptSessionRenameRequest(body: Record<string, unknown>): Record<string
   };
 }
 
+function isSessionPermissionRequest(
+  body: Record<string, unknown>,
+  operationId: SessionPermissionOperationId,
+): body is SessionPermissionRequest {
+  return hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
+    && body.id === 'session.management'
+    && body.operationId === operationId
+    && isRecord(body.scope)
+    && hasExactKeys(body.scope, ['kind', 'identity'])
+    && body.scope.kind === 'session'
+    && isSessionIdentity(body.scope.identity)
+    && isRecord(body.target)
+    && hasExactKeys(body.target, ['kind', 'identity'])
+    && body.target.kind === 'session'
+    && isSessionIdentity(body.target.identity)
+    && sameIdentity(body.scope.identity, body.target.identity)
+    && isRecord(body.input)
+    && hasExactKeys(body.input, operationId === 'sessions.permission.get'
+      ? ['sessionKey', 'sessionIdentity']
+      : ['sessionKey', 'sessionIdentity', 'permissionMode'])
+    && isSessionIdentity(body.input.sessionIdentity)
+    && sameIdentity(body.scope.identity, body.input.sessionIdentity)
+    && body.input.sessionKey === body.scope.identity.sessionKey
+    && (operationId === 'sessions.permission.get' || isSessionPermissionMode(body.input.permissionMode));
+}
+
 function adaptSessionPermissionRequest(
   body: Record<string, unknown>,
   operationId: SessionPermissionOperationId,
   traceId?: string | null,
 ): SessionPermissionRequest {
-  if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
-    || body.id !== 'session.management'
-    || body.operationId !== operationId
-    || !isRecord(body.scope)
-    || !hasExactKeys(body.scope, ['kind', 'identity'])
-    || body.scope.kind !== 'session'
-    || !isSessionIdentity(body.scope.identity)
-    || !isRecord(body.target)
-    || !hasExactKeys(body.target, ['kind', 'identity'])
-    || body.target.kind !== 'session'
-    || !isSessionIdentity(body.target.identity)
-    || !sameIdentity(body.scope.identity, body.target.identity)
-    || !isRecord(body.input)
-    || !hasExactKeys(body.input, operationId === 'sessions.permission.get'
-      ? ['sessionKey', 'sessionIdentity']
-      : ['sessionKey', 'sessionIdentity', 'permissionMode'])
-    || !isSessionIdentity(body.input.sessionIdentity)
-    || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
-    || body.input.sessionKey !== body.scope.identity.sessionKey
-    || (operationId === 'sessions.permission.set' && !isSessionPermissionMode(body.input.permissionMode))) {
+  if (!isSessionPermissionRequest(body, operationId)) {
     logSessionTrace('electron.permission.route.invalid', traceId, () => ({
       operationId,
       envelope: summarizePermissionBody(body),
@@ -1244,26 +1251,31 @@ function adaptSessionPermissionRequest(
   }
   const request = {
     id: 'session.management',
-    operationId,
     scope: { kind: 'session', identity: body.scope.identity },
     target: { kind: 'session', identity: body.target.identity },
-    input: operationId === 'sessions.permission.get'
+    ...(body.operationId === 'sessions.permission.get'
       ? {
-          sessionKey: body.input.sessionKey,
-          sessionIdentity: body.input.sessionIdentity,
+          operationId: body.operationId,
+          input: {
+            sessionKey: body.input.sessionKey,
+            sessionIdentity: body.input.sessionIdentity,
+          },
         }
       : {
-          sessionKey: body.input.sessionKey,
-          sessionIdentity: body.input.sessionIdentity,
-          permissionMode: body.input.permissionMode,
-        },
+          operationId: body.operationId,
+          input: {
+            sessionKey: body.input.sessionKey,
+            sessionIdentity: body.input.sessionIdentity,
+            permissionMode: body.input.permissionMode,
+          },
+        }),
   } satisfies SessionPermissionRequest;
   if (isSessionTraceEnabled()) logSessionTrace('electron.permission.route.adapted', traceId, {
     operationId,
     adapter: body.scope.identity.endpoint.runtimeAdapterId,
     instance: body.scope.identity.endpoint.runtimeInstanceId,
-    sessionKey: summarizeIdentifier(body.input.sessionKey as string),
-    permissionMode: operationId === 'sessions.permission.set' ? body.input.permissionMode : null,
+    sessionKey: summarizeIdentifier(body.input.sessionKey),
+    permissionMode: body.operationId === 'sessions.permission.set' ? body.input.permissionMode : null,
   });
   return request;
 }

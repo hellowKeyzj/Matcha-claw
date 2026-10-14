@@ -111,8 +111,10 @@ pub(super) async fn terminal_open_delivery(
         Err(()) => return Delivery::Invalid,
     };
     match owner.terminal_open_allocated(selector, dimensions).await {
-        Err(_) => Delivery::Unavailable,
-        Ok(Err(_)) => Delivery::Invalid,
+        Err(_) | Ok(Err(crate::owner::actor::FleetTerminalOpenError::Delivery(_))) => {
+            Delivery::Unavailable
+        }
+        Ok(Err(crate::owner::actor::FleetTerminalOpenError::Session(_))) => Delivery::Invalid,
         Ok(Ok(opened)) => Delivery::Mutation(terminal_session_json(
             "terminalOpened",
             &opened.opened,

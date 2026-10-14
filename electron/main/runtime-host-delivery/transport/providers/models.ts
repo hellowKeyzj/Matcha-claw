@@ -320,16 +320,7 @@ function isProviderModel(value: unknown): value is ProviderModel {
   if (!isRecord(value) || !Object.keys(value).every((key) => PROVIDER_MODEL_KEYS.includes(key))) return false;
   return isIdentifier(value.accountId)
     && isBoundedText(value.label, 256)
-    && isModelId(value.modelId)
-    && Array.isArray(value.capabilities)
-    && value.capabilities.length > 0
-    && value.capabilities.every(isProviderModelCapability)
-    && optionalPositive(value.contextWindow)
-    && optionalPositive(value.maxTokens)
-    && optionalPositive(value.timeoutMs)
-    && optionalText(value.aspectRatio)
-    && optionalText(value.resolution)
-    && optionalText(value.quality);
+    && hasModelFields(value);
 }
 
 function isSelectableProviderModel(value: unknown): value is SelectableProviderModel {
@@ -340,24 +331,19 @@ function isSelectableProviderModel(value: unknown): value is SelectableProviderM
     || !Array.isArray(value.modelReferences)
     || value.modelReferences.length === 0
     || !value.modelReferences.every((item) => isBoundedText(item, 2048))) return false;
-  return isProviderModel({
-    accountId: value.accountId,
-    label: value.label,
-    modelId: value.modelId,
-    capabilities: value.capabilities,
-    ...(Object.hasOwn(value, 'contextWindow') ? { contextWindow: value.contextWindow } : {}),
-    ...(Object.hasOwn(value, 'maxTokens') ? { maxTokens: value.maxTokens } : {}),
-    ...(Object.hasOwn(value, 'timeoutMs') ? { timeoutMs: value.timeoutMs } : {}),
-    ...(Object.hasOwn(value, 'aspectRatio') ? { aspectRatio: value.aspectRatio } : {}),
-    ...(Object.hasOwn(value, 'resolution') ? { resolution: value.resolution } : {}),
-    ...(Object.hasOwn(value, 'quality') ? { quality: value.quality } : {}),
-  });
+  return isIdentifier(value.accountId)
+    && isBoundedText(value.label, 256)
+    && hasModelFields(value);
 }
 
 function isModelDraft(value: unknown): value is ModelDraft {
   return isRecord(value)
     && Object.keys(value).every((key) => MODEL_DRAFT_KEYS.includes(key))
-    && isModelId(value.modelId)
+    && hasModelFields(value);
+}
+
+function hasModelFields(value: Record<string, unknown>): boolean {
+  return isModelId(value.modelId)
     && Array.isArray(value.capabilities)
     && value.capabilities.length > 0
     && value.capabilities.every(isProviderModelCapability)

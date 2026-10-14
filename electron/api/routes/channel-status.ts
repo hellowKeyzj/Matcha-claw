@@ -57,7 +57,7 @@ export async function handleChannelStatusRoutes(
 
   try {
     const response = await transport.read();
-    if (response.status === 200 && isRecord(response.body) && Array.isArray(response.body.accounts)) {
+    if (response.status === 200 && isRecord(response.body) && 'accounts' in response.body && Array.isArray(response.body.accounts)) {
       sendJson(res, 200, response.body);
     } else {
       sendJson(res, 503, UNAVAILABLE);

@@ -157,7 +157,7 @@ function isPublicText(value: unknown, maxLength: number): value is string {
 }
 
 function containsCandidateSecret(
-  value: ChannelCredentialsValidation,
+  value: Record<string, unknown>,
   config: Readonly<Record<string, string>>,
 ): boolean {
   const publicText = JSON.stringify({

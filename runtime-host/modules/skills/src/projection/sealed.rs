@@ -1,11 +1,13 @@
 use crate::ports::{
-    SealedResourceRead, SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillError,
+    SealedResourceRead, SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillCatalogIssue,
+    SealedSkillError,
 };
 
 pub trait SealedCatalogProjection {
     type Entry: SealedEntryProjection;
 
     fn entries(&self) -> &[Self::Entry];
+    fn issues(&self) -> &[SealedSkillCatalogIssue];
 }
 
 pub trait SealedEntryProjection {
@@ -37,7 +39,10 @@ pub fn project_catalog<C>(catalog: C) -> SealedSkillCatalog
 where
     C: SealedCatalogProjection,
 {
-    SealedSkillCatalog::new(catalog.entries().iter().map(project_entry_ref).collect())
+    SealedSkillCatalog::new(
+        catalog.entries().iter().map(project_entry_ref).collect(),
+        catalog.issues().to_vec(),
+    )
 }
 
 pub fn project_entry<E>(entry: E) -> SealedSkillCatalogEntry

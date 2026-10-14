@@ -26,6 +26,12 @@ pub(crate) struct Request {
     roles: Vec<organization::ManualTeamRoleBinding>,
 }
 
+impl Request {
+    pub(crate) fn workflow_scope(&self) -> (&organization::TeamId, &organization::IdempotencyKey) {
+        (&self.team_id, &self.idempotency_key)
+    }
+}
+
 pub(crate) enum Delivery {
     Materialized,
     Rejected,

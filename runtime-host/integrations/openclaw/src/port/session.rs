@@ -60,14 +60,14 @@ impl OpenClawGateway {
     }
 
     pub async fn list_sessions(
-        &mut self,
+        &self,
         params: SessionsListParams,
     ) -> Result<SessionsListResult, OpenClawSessionError> {
         self.list_sessions_cancellable(params, &CancellationToken::new()).await
     }
 
     pub async fn list_sessions_cancellable(
-        &mut self,
+        &self,
         params: SessionsListParams,
         cancellation: &CancellationToken,
     ) -> Result<SessionsListResult, OpenClawSessionError> {
@@ -78,7 +78,7 @@ impl OpenClawGateway {
     }
 
     pub async fn history(
-        &mut self,
+        &self,
         params: ChatHistoryParams,
     ) -> Result<ChatHistoryResult, OpenClawSessionError> {
         SessionOperation::new(Arc::clone(&self.client))
@@ -88,7 +88,7 @@ impl OpenClawGateway {
     }
 
     pub async fn history_window(
-        &mut self,
+        &self,
         params: ChatHistoryParams,
         request: PageRequest,
     ) -> Result<SessionWindow, OpenClawSessionError> {
@@ -96,7 +96,7 @@ impl OpenClawGateway {
     }
 
     pub async fn history_window_cancellable(
-        &mut self,
+        &self,
         params: ChatHistoryParams,
         request: PageRequest,
         cancellation: &CancellationToken,
@@ -133,7 +133,7 @@ impl OpenClawGateway {
     }
 
     pub async fn enqueue_chat(
-        &mut self,
+        &self,
         params: ChatSendParams,
     ) -> Result<ChatSendResult, OpenClawSessionError> {
         match SessionOperation::new(Arc::clone(&self.client)).send_chat(params).await {
@@ -145,7 +145,7 @@ impl OpenClawGateway {
     }
 
     pub async fn send_chat(
-        &mut self,
+        &self,
         params: ChatSendParams,
     ) -> Result<InvocationOutcome<ChatSendResult, OpenClawSessionError>, OpenClawSessionError> {
         SessionOperation::new(Arc::clone(&self.client))
@@ -156,7 +156,7 @@ impl OpenClawGateway {
     }
 
     pub async fn abort_chat(
-        &mut self,
+        &self,
         params: ChatAbortParams,
     ) -> Result<InvocationOutcome<ChatAbortResult, OpenClawSessionError>, OpenClawSessionError>
     {
@@ -168,7 +168,7 @@ impl OpenClawGateway {
     }
 
     pub async fn abort_chat_diagnostic(
-        &mut self,
+        &self,
         params: ChatAbortParams,
     ) -> Result<
         InvocationOutcome<ChatAbortResult, OpenClawSessionMutationFailure>,
@@ -178,7 +178,7 @@ impl OpenClawGateway {
     }
 
     pub async fn abort_chat_diagnostic_cancellable(
-        &mut self,
+        &self,
         params: ChatAbortParams,
         cancellation: &CancellationToken,
     ) -> Result<
@@ -193,7 +193,7 @@ impl OpenClawGateway {
     }
 
     pub async fn patch_session_model(
-        &mut self,
+        &self,
         params: SessionModelPatchParams,
     ) -> Result<
         InvocationOutcome<SessionModelPatchResult, OpenClawSessionError>,
@@ -210,7 +210,7 @@ impl OpenClawGateway {
     }
 
     pub async fn patch_session_model_diagnostic(
-        &mut self,
+        &self,
         params: SessionModelPatchParams,
     ) -> Result<
         InvocationOutcome<SessionModelPatchResult, SessionModelPatchFailure>,
@@ -220,7 +220,7 @@ impl OpenClawGateway {
     }
 
     pub(crate) async fn patch_session_model_diagnostic_cancellable(
-        &mut self,
+        &self,
         params: SessionModelPatchParams,
         cancellation: &CancellationToken,
     ) -> Result<
@@ -235,7 +235,7 @@ impl OpenClawGateway {
     }
 
     pub async fn patch_session_label(
-        &mut self,
+        &self,
         params: SessionLabelPatchParams,
     ) -> Result<
         InvocationOutcome<SessionLabelPatchResult, OpenClawSessionError>,
@@ -249,7 +249,7 @@ impl OpenClawGateway {
     }
 
     pub async fn get_session_permission(
-        &mut self,
+        &self,
         session_key: SessionKey,
     ) -> Result<SessionPermissionProjection, OpenClawSessionError> {
         SessionOperation::new(Arc::clone(&self.client))
@@ -259,7 +259,7 @@ impl OpenClawGateway {
     }
 
     pub async fn set_session_permission(
-        &mut self,
+        &self,
         params: SessionPermissionPatchParams,
     ) -> Result<
         InvocationOutcome<SessionPermissionProjection, OpenClawSessionError>,
@@ -273,7 +273,7 @@ impl OpenClawGateway {
     }
 
     pub async fn create_session(
-        &mut self,
+        &self,
         params: SessionCreateParams,
     ) -> Result<InvocationOutcome<SessionCreateResult, OpenClawSessionError>, OpenClawSessionError>
     {
@@ -281,7 +281,7 @@ impl OpenClawGateway {
     }
 
     pub async fn create_session_cancellable(
-        &mut self,
+        &self,
         params: SessionCreateParams,
         cancellation: &CancellationToken,
     ) -> Result<InvocationOutcome<SessionCreateResult, OpenClawSessionError>, OpenClawSessionError>
@@ -294,7 +294,7 @@ impl OpenClawGateway {
     }
 
     pub async fn delete_session(
-        &mut self,
+        &self,
         params: SessionDeleteParams,
     ) -> Result<InvocationOutcome<SessionDeleteResult, OpenClawSessionError>, OpenClawSessionError>
     {
@@ -306,7 +306,7 @@ impl OpenClawGateway {
     }
 
     pub async fn delete_session_diagnostic(
-        &mut self,
+        &self,
         params: SessionDeleteParams,
     ) -> Result<
         InvocationOutcome<SessionDeleteResult, OpenClawSessionMutationFailure>,
@@ -316,7 +316,7 @@ impl OpenClawGateway {
     }
 
     pub async fn delete_session_diagnostic_cancellable(
-        &mut self,
+        &self,
         params: SessionDeleteParams,
         cancellation: &CancellationToken,
     ) -> Result<

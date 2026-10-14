@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { isTraceEnabled, startupTrace } from '@/lib/trace-logger';
 import {
   fetchAccountSession,
   fetchPublicCloudSettings,
@@ -278,21 +279,66 @@ export const useAccountStore = create<AccountStoreState>((set, get) => ({
   ...initialAccountProjection,
 
   init: async () => {
+    const traceEnabled = isTraceEnabled();
+    const startedAt = traceEnabled ? performance.now() : 0;
     if (initTask) {
-      await initTask;
+      startupTrace('renderer.account', 'init.join.start');
+      try {
+        await initTask;
+      } finally {
+        startupTrace('renderer.account', 'init.join.end', () => ({
+          durationMs: Math.round(performance.now() - startedAt),
+          accountStatus: get().status,
+        }));
+      }
       return;
     }
 
     const requestId = ++latestAccountRequestId;
     const publicSettingsRequestId = ++latestPublicSettingsRequestId;
+    startupTrace('renderer.account', 'init.start', () => ({ requestId }));
     set(projectChecking(get()));
 
     initTask = (async () => {
+      const publicSettingsStartedAt = traceEnabled ? performance.now() : 0;
+      startupTrace('renderer.account', 'public-settings.start', () => ({ requestId }));
+      const publicSettingsTask = fetchPublicCloudSettings();
+      if (traceEnabled) {
+        void publicSettingsTask.then(
+          () => startupTrace('renderer.account', 'public-settings.settled', () => ({
+            requestId, outcome: 'fulfilled', durationMs: Math.round(performance.now() - publicSettingsStartedAt),
+          })),
+          () => startupTrace('renderer.account', 'public-settings.settled', () => ({
+            requestId, outcome: 'rejected', durationMs: Math.round(performance.now() - publicSettingsStartedAt),
+          })),
+        );
+      }
+      const sessionStartedAt = traceEnabled ? performance.now() : 0;
+      startupTrace('renderer.account', 'session.start', () => ({ requestId }));
+      const sessionTask = fetchAccountSession();
+      if (traceEnabled) {
+        void sessionTask.then(
+          () => startupTrace('renderer.account', 'session.settled', () => ({
+            requestId, outcome: 'fulfilled', durationMs: Math.round(performance.now() - sessionStartedAt),
+          })),
+          () => startupTrace('renderer.account', 'session.settled', () => ({
+            requestId, outcome: 'rejected', durationMs: Math.round(performance.now() - sessionStartedAt),
+          })),
+        );
+      }
+      startupTrace('renderer.account', 'all-settled.start', () => ({ requestId }));
       const [publicSettingsResult, sessionResult] = await Promise.allSettled([
-        fetchPublicCloudSettings(),
-        fetchAccountSession(),
+        publicSettingsTask,
+        sessionTask,
       ]);
-      if (requestId !== latestAccountRequestId) return;
+      startupTrace('renderer.account', 'all-settled.end', () => ({
+        requestId, durationMs: Math.round(performance.now() - startedAt),
+        publicSettings: publicSettingsResult.status, session: sessionResult.status,
+      }));
+      if (requestId !== latestAccountRequestId) {
+        startupTrace('renderer.account', 'projection.stale', () => ({ requestId }));
+        return;
+      }
 
       let projection = sessionResult.status === 'fulfilled'
         ? projectAccountSession(sessionResult.value, get())
@@ -305,6 +351,11 @@ export const useAccountStore = create<AccountStoreState>((set, get) => ({
       }
 
       set(projection);
+      startupTrace('renderer.account', 'projection.applied', () => ({
+        requestId, accountStatus: projection.status,
+        publicSettingsStale: publicSettingsRequestId !== latestPublicSettingsRequestId,
+        outcome: projection.errorMessage ? 'error' : 'settled',
+      }));
 
       if (projection.status === 'signedIn') {
         void refreshSubscriptionStoreAfterSignedIn(requestId);
@@ -315,6 +366,10 @@ export const useAccountStore = create<AccountStoreState>((set, get) => ({
       await initTask;
     } finally {
       initTask = null;
+      startupTrace('renderer.account', 'init.end', () => ({
+        requestId, durationMs: Math.round(performance.now() - startedAt),
+        accountStatus: get().status,
+      }));
     }
   },
 

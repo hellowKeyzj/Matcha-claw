@@ -13,8 +13,8 @@ use zeroize::Zeroize;
 pub use crate::descriptor::SealedSkillDescriptor;
 pub use crate::store::{
     SealedAgentCatalog, SealedAgentCatalogEntry, SealedAgentInstallPlan, SealedAgentPackageExport,
-    SealedAgentStore, SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillPackageExport,
-    SealedSkillStore,
+    SealedAgentStore, SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillCatalogIssue,
+    SealedSkillPackageExport, SealedSkillStore,
 };
 
 const AUTHORIZATION_KEY_BYTES: usize = 32;

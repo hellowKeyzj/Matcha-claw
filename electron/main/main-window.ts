@@ -1,7 +1,7 @@
 import { app, BrowserWindow, nativeImage, nativeTheme, shell } from 'electron';
 import { join } from 'path';
 import { logger } from '../utils/logger';
-import { isTraceEnabled, traceDebug } from '../utils/trace-logger';
+import { isTraceEnabled, startupTrace, traceDebug } from '../utils/trace-logger';
 import { getMacTrafficLightPosition } from './traffic-light-layout';
 import { getWindowThemeBackgroundColor } from './window';
 import { registerZoomShortcuts } from './zoom-shortcuts';
@@ -60,6 +60,8 @@ function forwardRendererStartupTrace(win: BrowserWindow): void {
 }
 
 export function createMainWindow(options: { showOnReady?: boolean } = {}): BrowserWindow {
+  const startedAt = isTraceEnabled() ? performance.now() : 0;
+  startupTrace('main-window', 'create.start');
   const isMac = process.platform === 'darwin';
   const isWindows = process.platform === 'win32';
   const useCustomTitleBar = isWindows;
@@ -86,6 +88,37 @@ export function createMainWindow(options: { showOnReady?: boolean } = {}): Brows
 
   registerZoomShortcuts(win);
   forwardRendererStartupTrace(win);
+  startupTrace('main-window', 'create.end', () => ({
+    windowId: win.id, elapsedMs: Math.round(performance.now() - startedAt),
+  }));
+  if (isTraceEnabled()) {
+    const trace = (phase: string, detail?: () => Record<string, unknown>) => {
+      startupTrace('main-window', phase, () => ({
+        windowId: win.id, elapsedMs: Math.round(performance.now() - startedAt), ...detail?.(),
+      }));
+    };
+    win.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+      if (isMainFrame) trace('navigation.start', () => ({ isInPlace }));
+    });
+    win.webContents.on('did-navigate', () => trace('navigation.committed'));
+    win.webContents.on('did-start-loading', () => trace('loading.start'));
+    win.webContents.on('dom-ready', () => trace('dom.ready'));
+    win.webContents.on('did-finish-load', () => trace('load.finished'));
+    win.webContents.on('did-stop-loading', () => trace('loading.end'));
+    win.webContents.on('did-fail-provisional-load', (_event, errorCode, _description, _url, isMainFrame) => {
+      if (isMainFrame) trace('navigation.error', () => ({ errorCode }));
+    });
+    win.webContents.on('did-fail-load', (_event, errorCode, _description, _url, isMainFrame) => {
+      if (isMainFrame) trace('load.error', () => ({ errorCode }));
+    });
+    win.webContents.on('render-process-gone', (_event, details) => {
+      trace('renderer.gone', () => ({ reason: details.reason, exitCode: details.exitCode }));
+    });
+    win.once('ready-to-show', () => trace('ready-to-show'));
+    win.on('show', () => trace('shown'));
+    win.on('unresponsive', () => trace('renderer.unresponsive'));
+    win.on('responsive', () => trace('renderer.responsive'));
+  }
 
   if (options.showOnReady ?? true) {
     win.once('ready-to-show', () => {
@@ -116,6 +149,9 @@ export function loadMainWindowContent(win: BrowserWindow): void {
     return;
   }
 
+  startupTrace('main-window', 'load.request', () => ({
+    windowId: win.id, mode: process.env.VITE_DEV_SERVER_URL ? 'dev-server' : 'file',
+  }));
   if (process.env.VITE_DEV_SERVER_URL) {
     void win.loadURL(process.env.VITE_DEV_SERVER_URL);
     win.webContents.openDevTools({ mode: 'detach' });

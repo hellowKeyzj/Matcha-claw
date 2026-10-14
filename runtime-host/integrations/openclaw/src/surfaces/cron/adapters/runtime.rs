@@ -4,7 +4,7 @@ use super::*;
 impl ::cron::CronOps for OpenClawDriver {
     fn list_cron_jobs<'a>(&'a self) -> ::cron::ports::CronFuture<'a, ::cron::CronListOutcome> {
         Box::pin(async move {
-            match self.gateway.lock().await.list_cron_jobs().await {
+            match self.gateway.list_cron_jobs().await {
                 Ok(jobs) => ::cron::CronListOutcome::Listed(project_cron_list(jobs)),
                 Err(crate::port::CronReadFailure::Unavailable) => {
                     ::cron::CronListOutcome::Unavailable
@@ -25,8 +25,6 @@ impl ::cron::CronOps for OpenClawDriver {
     > {
         Box::pin(async move {
             self.gateway
-                .lock()
-                .await
                 .cron_run_history(job_id, limit)
                 .await
                 .map(|receipts| {
@@ -47,7 +45,7 @@ impl ::cron::CronOps for OpenClawDriver {
         Result<Result<::cron::CronExecutionAdmission, ::cron::CronTriggerResult>, ()>,
     > {
         Box::pin(async move {
-            match self.gateway.lock().await.admit_cron_execution(job_id).await {
+            match self.gateway.admit_cron_execution(job_id).await {
                 Ok(Ok(admission)) => project_cron_execution_admission(admission).map(Ok),
                 Ok(Err(outcome)) => Ok(Err(project_cron_trigger_result(outcome))),
                 Err(_) => Err(()),
@@ -64,7 +62,7 @@ impl ::cron::CronOps for OpenClawDriver {
                 Ok(job) => job,
                 Err(_) => return ::cron::CronJobMutationOutcome::Rejected,
             };
-            project_cron_mutation(self.gateway.lock().await.add_cron_job(job).await)
+            project_cron_mutation(self.gateway.add_cron_job(job).await)
         })
     }
 
@@ -80,8 +78,6 @@ impl ::cron::CronOps for OpenClawDriver {
             };
             project_cron_mutation(
                 self.gateway
-                    .lock()
-                    .await
                     .update_cron_job(job_id, patch, expected_config_revision)
                     .await,
             )
@@ -95,8 +91,6 @@ impl ::cron::CronOps for OpenClawDriver {
         Box::pin(async move {
             project_cron_delete(
                 self.gateway
-                    .lock()
-                    .await
                     .remove_cron_job(command.job_id)
                     .await,
             )

@@ -96,6 +96,14 @@ impl TeamProvider {
         self
     }
 
+    async fn config_transaction(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => None,
+            transaction = self.gateway.config_transaction() => Some(transaction),
+        }
+    }
+
     pub(crate) async fn list_agents(&self) -> Result<TeamAgents, ReadFailure> {
         let started = platform::trace::enabled().then(Instant::now);
         session_trace("runtime.team.native-list.request", || json!({}));
@@ -131,6 +139,11 @@ impl TeamProvider {
         &self,
         request: TeamMaterializationRequest,
     ) -> MaterializationOperationOutcome {
+        let Some(_lifecycle) = self.gateway.team_lifecycle(
+            request.intent().endpoint().as_str(), request.intent().team().as_str(), &self.cancellation,
+        ).await else {
+            return MaterializationOperationOutcome::OutcomeUnknown;
+        };
         self.recover_materialization_observed(request, None).await
     }
 
@@ -367,6 +380,12 @@ impl TeamProvider {
         request: TeamMaterializationRequest,
         observer: Option<TeamProvisionObserver>,
     ) -> MaterializationOperationOutcome {
+        let Some(_lifecycle) = self.gateway.team_lifecycle(
+            request.intent().endpoint().as_str(), request.intent().team().as_str(), &self.cancellation,
+        ).await else {
+            report_failure(observer.as_ref(), CreationStage::ConfiguringTeam, FailureReason::Cancelled, None).await;
+            return MaterializationOperationOutcome::OutcomeUnknown;
+        };
         let started = platform::trace::enabled().then(Instant::now);
         session_trace(
             "runtime.team.materialize.request",
@@ -547,6 +566,9 @@ impl TeamProvider {
             }
         }
         if !config_agents.is_empty() {
+            let Some(transaction) = self.config_transaction().await else {
+                return MaterializationOperationOutcome::OutcomeUnknown;
+            };
             let snapshot = match self.config_snapshot().await {
                 Ok(snapshot) => snapshot,
                 Err(failure) => {
@@ -554,6 +576,7 @@ impl TeamProvider {
                         "runtime.team.materialize.failed",
                         || json!({"reason":"config-read","outcome":"OutcomeUnknown"}),
                     );
+                    drop(transaction);
                     report_failure(observer, CreationStage::ConfiguringTeam, read_failure_reason(failure), None).await;
                     return self
                         .fail_materialization(&mut progress, permanent_rejection(), observer)
@@ -584,7 +607,7 @@ impl TeamProvider {
                     .collect(),
             )
             .expect("validated materialization roles");
-            match self
+            let outcome = self
                 .apply_config_agents(
                     snapshot,
                     config_agents,
@@ -593,8 +616,9 @@ impl TeamProvider {
                     &mut progress,
                     observer,
                 )
-                .await
-            {
+                .await;
+            drop(transaction);
+            match outcome {
                 MutationOutcome::Applied(()) => {}
                 MutationOutcome::Rejected => {
                     session_trace(
@@ -771,6 +795,9 @@ impl TeamProvider {
         let RoleMaterializationAgent::Managed { name } = role.agent() else {
             return (MutationOutcome::Rejected, None);
         };
+        let Some(_transaction) = self.config_transaction().await else {
+            return (MutationOutcome::OutcomeUnknown, None);
+        };
         let state_dir = self.config.state_dir();
         if let Some(undo) = progress.config_restore.as_mut() {
             if undo.provisioning_effects(&state_dir, false).is_err() {
@@ -867,6 +894,11 @@ impl TeamProvider {
         &self,
         request: TeamMaterializationRequest,
     ) -> MaterializationOperationOutcome {
+        let Some(_lifecycle) = self.gateway.team_lifecycle(
+            request.intent().endpoint().as_str(), request.intent().team().as_str(), &self.cancellation,
+        ).await else {
+            return MaterializationOperationOutcome::OutcomeUnknown;
+        };
         let started = platform::trace::enabled().then(Instant::now);
         let unknown = |reason| {
             session_trace(
@@ -933,6 +965,11 @@ impl TeamProvider {
         removal: TeamMaterializationRemoval,
     ) -> MaterializationOperationOutcome {
         let receipt = removal.receipt();
+        let Some(_lifecycle) = self.gateway.team_lifecycle(
+            receipt.endpoint().as_str(), receipt.team().as_str(), &self.cancellation,
+        ).await else {
+            return MaterializationOperationOutcome::OutcomeUnknown;
+        };
         let undo = match ConfigUndo::load(&self.config.state_dir(), receipt.team()) {
             Ok(Some(undo)) if undo.matches_receipt(receipt) => undo,
             _ => return MaterializationOperationOutcome::OutcomeUnknown,
@@ -984,6 +1021,11 @@ impl TeamProvider {
         &self,
         removal: TeamMaterializationRemoval,
     ) -> MaterializationOperationOutcome {
+        let Some(_lifecycle) = self.gateway.team_lifecycle(
+            removal.receipt().endpoint().as_str(), removal.receipt().team().as_str(), &self.cancellation,
+        ).await else {
+            return MaterializationOperationOutcome::OutcomeUnknown;
+        };
         self.remove_request(removal).await
     }
 
@@ -1028,6 +1070,9 @@ impl TeamProvider {
                 return MaterializationOperationOutcome::OutcomeUnknown;
             }
             if role.ownership() == RoleMaterializationOwnership::Managed && !undo.is_compensated() {
+                let Some(_transaction) = self.config_transaction().await else {
+                    return MaterializationOperationOutcome::OutcomeUnknown;
+                };
                 match undo.removal_agent(role.agent().as_str()) {
                     Some(CompensationState::Deleted) => continue,
                     Some(CompensationState::Pending) => {}
@@ -1414,6 +1459,9 @@ impl TeamProvider {
         if !undo.has_external_roles() {
             return MutationOutcome::Applied(());
         }
+        let Some(_transaction) = self.config_transaction().await else {
+            return MutationOutcome::OutcomeUnknown;
+        };
         // At most one full replacement and one removal patch; each uses a fresh hash.
         // A final read proves restoration even when the previous write outcome was lost.
         for step in 0..=2 {
@@ -1545,6 +1593,9 @@ impl TeamProvider {
     }
 
     async fn compensate_config_undo(&self, undo: &mut ConfigUndo) -> bool {
+        let Some(transaction) = self.config_transaction().await else {
+            return false;
+        };
         let state_dir = self.config.state_dir();
         if undo.persist(&state_dir).is_err() {
             return false;
@@ -1614,6 +1665,7 @@ impl TeamProvider {
         if !confirmed || self.compensation_readback(undo).await.is_err() {
             return false;
         }
+        drop(transaction);
         let (Ok(roles), Ok(team)) = (undo.roles(), undo.team()) else {
             return false;
         };

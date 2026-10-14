@@ -17,6 +17,10 @@ use crate::application::start_gate_control::{StartGatePromptPlan, StartGateRunti
 use super::team_run::{ArmedTrigger, TeamRunActivityTarget};
 
 pub(crate) enum OrganizationQuery {
+    WorkflowRunTeam {
+        run_id: GraphRunId,
+        reply: tokio::sync::oneshot::Sender<Option<TeamId>>,
+    },
     TeamSkillValidate {
         package_root: PathBuf,
         reply: crate::call::CallReply<TeamSkillPackageValidation>,

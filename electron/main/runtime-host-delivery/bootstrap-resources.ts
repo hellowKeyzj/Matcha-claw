@@ -8,7 +8,21 @@ import {
   type ResolveRuntimeHostBinaryOptions,
   type RuntimeHostBinaryResolverDependencies,
 } from './binary';
-import type { RuntimeHostBootstrapInput } from './bootstrap';
+import type {
+  RuntimeHostBootstrapInput,
+  UnixRuntimeHostBootstrapInput,
+  WindowsRuntimeHostBootstrapInput,
+} from './bootstrap';
+
+type RuntimeHostBootstrapDeliveryField =
+  | 'deliveryVerificationKey'
+  | 'parentCallbackBaseUrl'
+  | 'parentCallbackDispatchToken'
+  | 'providerCredentialResolver';
+
+type RuntimeHostBootstrapResources =
+  | Omit<UnixRuntimeHostBootstrapInput, RuntimeHostBootstrapDeliveryField>
+  | Omit<WindowsRuntimeHostBootstrapInput, RuntimeHostBootstrapDeliveryField>;
 
 type BootstrapPlatform = 'unix' | 'win32';
 type DeliveryPath = typeof posix | typeof win32;
@@ -65,7 +79,7 @@ function getRuntimeHostBootstrapPort(name: RuntimeHostPortName): number {
 
 export function resolveRuntimeHostBootstrap(
   dependencies: RuntimeHostBootstrapResolverDependencies = {}
-): RuntimeHostBootstrapInput {
+): RuntimeHostBootstrapResources {
   const application = dependencies.app ?? app;
   const currentProcess = dependencies.process ?? runtimeHostProcess;
   const platform = bootstrapPlatform(currentProcess.platform);

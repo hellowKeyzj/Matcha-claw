@@ -69,6 +69,11 @@ impl TeamRunReceiptRouter {
         }
     }
 
+    pub(super) fn absorb(&mut self, other: Self) {
+        if let Some(failure) = other.last_failure { self.last_failure = Some(failure); }
+        if let Some(last) = other.last { self.last = Some(last); }
+    }
+
     pub(super) fn record_activity_observation(
         &mut self,
         run_id: GraphRunId,

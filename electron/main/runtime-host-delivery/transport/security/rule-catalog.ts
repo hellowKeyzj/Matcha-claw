@@ -79,7 +79,7 @@ export function createSecurityRuleCatalogTransport(
         fetcher,
       });
       if (response?.status === 200 && isSecurityRuleCatalogResponse(response.body)) {
-        return { status: 200, body: projectSecurityRuleCatalog(response.body) };
+        return { status: 200, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
@@ -105,20 +105,6 @@ function isSecurityRuleCatalogItem(value: unknown): value is SecurityRuleCatalog
     && isSecurityRuleCatalogCategory(value.category)
     && isSecurityCatalogSeverity(value.severity)
     && isSecurityCatalogText(value.reason);
-}
-
-function projectSecurityRuleCatalog(value: SecurityRuleCatalogResponse): SecurityRuleCatalogResponse {
-  return {
-    success: true,
-    total: value.total,
-    items: value.items.map((item) => ({
-      platform: item.platform,
-      command: item.command,
-      category: item.category,
-      severity: item.severity,
-      reason: item.reason,
-    })),
-  };
 }
 
 function isSecurityRuleCatalogPlatform(value: unknown): value is SecurityRuleCatalogPlatform {

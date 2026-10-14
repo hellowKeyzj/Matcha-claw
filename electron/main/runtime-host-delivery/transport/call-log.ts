@@ -1,3 +1,4 @@
+import { logger } from '../../../utils/logger';
 import type { CallHistory, CallPage, CallRecord } from '../../../../src/types/call-log';
 import { decodeCallHistory, decodeCallPage, decodeCallRecord, isCallId, isCallStatus } from '../../../../src/types/call-log/decode';
 import { isCallModule } from '../../../../src/types/call-log/modules';
@@ -7,7 +8,8 @@ import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } fr
 const INVALID = { success: false, error: 'Call log input is invalid' } as const;
 const UNAVAILABLE = { success: false, error: 'Call log is unavailable' } as const;
 const NOT_FOUND = { success: false, error: 'Call record was not found' } as const;
-type Failure = typeof INVALID | typeof UNAVAILABLE | typeof NOT_FOUND;
+const INVALID_RESPONSE = { success: false, error: 'Call log response is invalid' } as const;
+type Failure = typeof INVALID | typeof UNAVAILABLE | typeof NOT_FOUND | typeof INVALID_RESPONSE;
 type Response<T> = Readonly<{ status: number; body: T | Failure }>;
 
 export interface CallLogTransport {
@@ -27,7 +29,11 @@ export function createCallLogTransport(
       decision: { endpoint: path, scope: 'call-log:read', capability: 'call-log.read', subject: 'host-call-log' },
     });
     if (response?.status === 200) {
-      try { return { status: 200, body: decode(response.body) }; } catch { /* closed public boundary */ }
+      try { return { status: 200, body: decode(response.body) }; }
+      catch {
+        logger.warn('[CallLog] Invalid response', { path });
+        return { status: 502, body: INVALID_RESPONSE };
+      }
     }
     if (response?.status === 400) return { status: 400, body: INVALID };
     if (response?.status === 404) return { status: 404, body: NOT_FOUND };

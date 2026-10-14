@@ -9,6 +9,13 @@ import {
   isRetainedOnceChannel,
 } from './ipc-contract';
 
+const traceEnabled = process.env.MATCHACLAW_TRACE === '1';
+if (traceEnabled) {
+  console.info(`[startup-trace] ${JSON.stringify({
+    source: 'preload', phase: 'entry', at: Date.now(), navigationMs: Math.round(performance.now()),
+  })}`);
+}
+
 /**
  * IPC renderer methods exposed to the renderer process
  */
@@ -90,7 +97,7 @@ const electronAPI = {
    */
   writeFleetCredential: (input: unknown) => ipcRenderer.invoke('fleet:writeCredential', input),
   platform: process.platform,
-  traceEnabled: process.env.MATCHACLAW_TRACE === '1',
+  traceEnabled,
 
   /**
    * Check if running in development
@@ -100,6 +107,11 @@ const electronAPI = {
 
 // Expose the API to the renderer process
 contextBridge.exposeInMainWorld('electron', electronAPI);
+if (traceEnabled) {
+  console.info(`[startup-trace] ${JSON.stringify({
+    source: 'preload', phase: 'bridge.ready', at: Date.now(), navigationMs: Math.round(performance.now()),
+  })}`);
+}
 
 // Type declarations for the renderer process
 export type ElectronAPI = typeof electronAPI;

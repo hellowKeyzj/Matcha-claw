@@ -1,4 +1,4 @@
-use serde::Deserialize;
+mod frontmatter;
 
 const MAX_DESCRIPTOR_NAME_BYTES: usize = 256;
 const MAX_DESCRIPTOR_DESCRIPTION_BYTES: usize = 8 * 1024;
@@ -29,14 +29,18 @@ impl SealedSkillDescriptor {
         })
     }
 
-    pub fn parse_skill_manifest(content: &str) -> Result<Self, ()> {
-        let frontmatter = manifest_frontmatter(content).ok_or(())?;
-        let wire: DescriptorFrontmatter = serde_yaml::from_str(frontmatter).map_err(|_| ())?;
+    pub fn parse_skill_manifest(content: &str, directory_name: &str) -> Result<Self, ()> {
+        let fields = frontmatter::parse(content)?;
+        let name = fields
+            .get("name")
+            .map(|value| frontmatter::trim(value))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| frontmatter::trim(directory_name));
         Self::try_new(
-            wire.name.ok_or(())?,
-            wire.description.ok_or(())?,
-            wire.user_invocable,
-            wire.disable_model_invocation,
+            name,
+            fields.get("description").ok_or(())?.as_str(),
+            Some(frontmatter::boolean(fields.get("user-invocable"), true)),
+            Some(frontmatter::boolean(fields.get("disable-model-invocation"), false)),
         )
     }
 
@@ -57,30 +61,8 @@ impl SealedSkillDescriptor {
     }
 }
 
-#[derive(Deserialize)]
-struct DescriptorFrontmatter {
-    name: Option<String>,
-    description: Option<String>,
-    #[serde(rename = "user-invocable")]
-    user_invocable: Option<bool>,
-    #[serde(rename = "disable-model-invocation")]
-    disable_model_invocation: Option<bool>,
-}
-
-fn manifest_frontmatter(content: &str) -> Option<&str> {
-    content
-        .strip_prefix("---\n")
-        .or_else(|| content.strip_prefix("---\r\n"))
-        .and_then(|content| {
-            content
-                .split_once("\n---")
-                .or_else(|| content.split_once("\r\n---"))
-        })
-        .map(|(frontmatter, _)| frontmatter)
-}
-
 fn clean_text(value: Option<String>, max_bytes: usize) -> Option<String> {
-    let value = value?.trim().to_owned();
+    let value = frontmatter::trim(&value?).to_owned();
     (!value.is_empty() && value.len() <= max_bytes && !value.contains('\0')).then_some(value)
 }
 
@@ -92,6 +74,7 @@ mod tests {
     fn parses_yaml_block_scalar_description() {
         let descriptor = SealedSkillDescriptor::parse_skill_manifest(
             "---\nname: llm-wiki\ndescription: |\n  line one\n  line two\n---\n",
+            "llm-wiki",
         )
         .unwrap();
 
@@ -103,6 +86,7 @@ mod tests {
     fn parses_yaml_folded_scalar_description() {
         let descriptor = SealedSkillDescriptor::parse_skill_manifest(
             "---\nname: folded\ndescription: >\n  line one\n  line two\n---\n",
+            "folded",
         )
         .unwrap();
 

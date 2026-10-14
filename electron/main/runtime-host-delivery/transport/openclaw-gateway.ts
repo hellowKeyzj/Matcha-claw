@@ -5,7 +5,7 @@ import {
   isOpenClawQuestionResolveInput,
 } from '../../../../src/types/openclaw-question';
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
-import { hasExactKeys, isRecord, sendLoopbackJson } from './client';
+import { hasExactKeys, isJsonValue, isRecord, sendLoopbackJson } from './client';
 
 const EXECUTE_PATH = '/api/capabilities/execute';
 const INVALID = { success: false, error: 'OpenClaw gateway capability request is invalid' } as const;
@@ -91,19 +91,4 @@ function isOpenClawLocalScope(value: unknown): boolean {
     && isRecord(value.endpoint) && hasExactKeys(value.endpoint, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
     && value.endpoint.kind === 'native-runtime' && value.endpoint.runtimeAdapterId === 'openclaw'
     && value.endpoint.runtimeInstanceId === 'local';
-}
-
-function isJsonValue(value: unknown, seen: Set<object>): boolean {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (typeof value !== 'object' || seen.has(value)) return false;
-  seen.add(value);
-  try {
-    if (Array.isArray(value)) return value.every((entry) => isJsonValue(entry, seen));
-    const prototype = Object.getPrototypeOf(value);
-    return (prototype === Object.prototype || prototype === null)
-      && Object.values(value).every((entry) => isJsonValue(entry, seen));
-  } finally {
-    seen.delete(value);
-  }
 }

@@ -1,5 +1,12 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
-import { hasExactKeys as exact, isNonEmptyBoundedText as isNonEmptyString, isRecord, sendLoopbackJson } from '../client';
+import { hasExactKeys as exact, isNonEmptyBoundedText as isNonEmptyString, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
+import {
+  type Endpoint,
+  type SessionScope,
+  isEndpoint,
+  isFileRelativePath,
+  isSessionScope,
+} from './contract';
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
 const MAX_PATHS = 256;
 const UNAVAILABLE = { success: false, error: 'Workspace media is unavailable' } as const;
@@ -58,15 +65,10 @@ export type WorkspaceMediaPath = Readonly<{
   agentId: string;
 }>;
 
-type Endpoint = {
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw';
-  runtimeInstanceId: 'local';
-};
 type Request = {
   id: 'workspace.media';
   operationId: WorkspaceMediaOperationId;
-  scope: { kind: 'session'; endpoint: Endpoint; sessionKey: string };
+  scope: SessionScope;
   target: { kind: 'workspace-media' };
   input: {
     endpoint: Endpoint;
@@ -97,7 +99,7 @@ function isRequest(value: unknown): value is Request {
     || !exact(value, ['id', 'operationId', 'scope', 'target', 'input'])
     || value.id !== 'workspace.media'
     || !isOperationId(value.operationId)
-    || !isScope(value.scope)
+    || !isSessionScope(value.scope)
     || !isRecord(value.target)
     || !exact(value.target, ['kind'])
     || value.target.kind !== 'workspace-media'
@@ -110,11 +112,11 @@ function isRequest(value: unknown): value is Request {
   switch (value.operationId) {
     case 'media.prepare':
       return exact(input, ['endpoint', 'sessionKey', 'relativePath', 'mimeType'])
-        && isRelativePath(input.relativePath)
+        && isFileRelativePath(input.relativePath)
         && isMimeType(input.mimeType);
     case 'media.thumbnail':
       return (exact(input, ['endpoint', 'sessionKey', 'relativePath', 'mimeType'])
-        && isRelativePath(input.relativePath)
+        && isFileRelativePath(input.relativePath)
         && isMimeType(input.mimeType))
         || (exact(input, ['endpoint', 'sessionKey', 'gatewayUrl', 'mimeType', 'agentId'])
           && isGatewayUrl(input.gatewayUrl)
@@ -165,7 +167,7 @@ function isMediaPath(value: unknown): value is WorkspaceMediaPath {
   return isRecord(value)
     && isNonEmptyString(value.key)
     && ((exact(value, ['key', 'relativePath', 'mimeType'])
-      && isRelativePath(value.relativePath)
+      && isFileRelativePath(value.relativePath)
       && isMimeType(value.mimeType))
       || (exact(value, ['key', 'gatewayUrl', 'mimeType', 'agentId'])
         && isGatewayUrl(value.gatewayUrl)
@@ -177,7 +179,7 @@ function isRelativeMediaPath(value: unknown): value is Extract<WorkspaceMediaPat
   return isRecord(value)
     && isNonEmptyString(value.key)
     && exact(value, ['key', 'relativePath', 'mimeType'])
-    && isRelativePath(value.relativePath)
+    && isFileRelativePath(value.relativePath)
     && isMimeType(value.mimeType);
 }
 
@@ -187,8 +189,7 @@ function isMediaReceipt(value: unknown): value is MediaReceipt {
     && isReference(value.reference)
     && isSafeFileName(value.name)
     && isMimeType(value.mimeType)
-    && Number.isSafeInteger(value.size)
-    && value.size >= 0
+    && isSafeNonNegativeInteger(value.size)
     && value.size <= MAX_MEDIA_BYTES
     && (typeof value.preview === 'string' || value.preview === null);
 }
@@ -197,8 +198,7 @@ function isThumbnail(value: unknown): value is Thumbnail {
   return isRecord(value)
     && exact(value, ['preview', 'fileSize'])
     && (typeof value.preview === 'string' || value.preview === null)
-    && Number.isSafeInteger(value.fileSize)
-    && value.fileSize >= 0
+    && isSafeNonNegativeInteger(value.fileSize)
     && value.fileSize <= MAX_MEDIA_BYTES;
 }
 
@@ -216,30 +216,6 @@ function isOperationId(value: unknown): value is WorkspaceMediaOperationId {
     || value === 'media.thumbnails'
     || value === 'media.stagePaths'
     || value === 'media.stageBuffer';
-}
-
-function isScope(value: unknown): value is Request['scope'] {
-  return isRecord(value)
-    && exact(value, ['kind', 'endpoint', 'sessionKey'])
-    && value.kind === 'session'
-    && isEndpoint(value.endpoint)
-    && isNonEmptyString(value.sessionKey);
-}
-
-function isEndpoint(value: unknown): value is Endpoint {
-  return isRecord(value)
-    && exact(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && value.runtimeAdapterId === 'openclaw'
-    && value.runtimeInstanceId === 'local';
-}
-
-function isRelativePath(value: unknown): value is string {
-  return isNonEmptyString(value)
-    && !value.startsWith('/')
-    && !value.startsWith('\\')
-    && !value.includes(':')
-    && value.split(/[\\/]/).every((part) => part !== '' && part !== '.' && part !== '..');
 }
 
 function isGatewayUrl(value: unknown): value is string {

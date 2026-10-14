@@ -91,21 +91,18 @@ pub(super) async fn export(
         subject: AUTHORIZATION_SUBJECT.into(),
         private: false,
     };
+    let command = Command::Export {
+        skill_keys: request.skill_keys,
+    };
+    let effect = crate::operation::Effect::bundles(&command);
     let worker = handle.clone();
     let receipt = handle
         .submit_result(
             call,
+            effect,
             access,
             crate::result::BUNDLE_RESULT_BUDGET,
-            async move {
-                Ok(crate::result::export_bundles(
-                    &worker,
-                    Command::Export {
-                        skill_keys: request.skill_keys,
-                    },
-                )
-                .await)
-            },
+            async move { Ok(crate::result::export_bundles(&worker, command).await) },
         )
         .await
         .map_err(RequestError::Admission)?;
@@ -141,10 +138,12 @@ pub(super) async fn import(
         platform::call::CallLogError::Unavailable,
     ))?;
     {
+        let command = Command::Import { bundles };
+        let effect = crate::operation::Effect::bundles(&command);
         let worker = handle.clone();
         let receipt = handle
-            .submit_operation(call, async move {
-                let body = import_response(worker.skill_bundles(Command::Import { bundles }).await);
+            .submit_operation(call, effect, async move {
+                let body = import_response(worker.skill_bundles(command).await);
                 platform::loopback::Response::json(200, body)
             })
             .await

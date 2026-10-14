@@ -1,6 +1,8 @@
 import { isSessionOwnership, type SessionOwnership } from '../../../../../src/types/desktop/session-ownership';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { isSessionModelState } from './model-state-contract';
+import { isEndpoint, type SessionIdentity, type SessionModelState } from './session-contract';
 
 const ROUTE = '/api/sessions';
 const UNAVAILABLE = {
@@ -8,30 +10,7 @@ const UNAVAILABLE = {
   error: 'Session catalog is unavailable',
 } as const;
 
-type RuntimeEndpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw' | 'matcha-agent';
-  runtimeInstanceId: 'local';
-}>;
-
-type SessionIdentity = Readonly<{
-  endpoint: RuntimeEndpoint;
-  agentId: string;
-  sessionKey: string;
-}>;
-
-type SessionModelIdentity = Readonly<{
-  provider?: string;
-  model: string;
-  ref: string;
-}>;
-
-type SessionModelState = Readonly<{
-  selected?: SessionModelIdentity;
-  active?: SessionModelIdentity;
-  overrideSource?: 'user' | 'auto';
-  selectionId?: string;
-}>;
+type RuntimeEndpoint = SessionIdentity['endpoint'];
 
 type SessionSummary = Readonly<{
   key: string;
@@ -153,24 +132,6 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     && value.sessionIdentity.sessionKey === value.key;
 }
 
-function isSessionModelIdentity(value: unknown): value is SessionModelIdentity {
-  return isRecord(value)
-    && requiredKeys(value, ['model', 'ref'])
-    && allowedKeys(value, ['provider', 'model', 'ref'])
-    && typeof value.model === 'string'
-    && typeof value.ref === 'string'
-    && (value.provider === undefined || typeof value.provider === 'string');
-}
-
-function isSessionModelState(value: unknown): value is SessionModelState {
-  return isRecord(value)
-    && allowedKeys(value, ['selected', 'active', 'overrideSource', 'selectionId'])
-    && (value.selected === undefined || isSessionModelIdentity(value.selected))
-    && (value.active === undefined || isSessionModelIdentity(value.active))
-    && (value.overrideSource === undefined || value.overrideSource === 'user' || value.overrideSource === 'auto')
-    && (value.selectionId === undefined || typeof value.selectionId === 'string');
-}
-
 function isSessionIdentity(value: unknown): value is SessionIdentity {
   return isRecord(value)
     && hasExactKeys(value, ['endpoint', 'agentId', 'sessionKey'])
@@ -198,7 +159,7 @@ function isSessionListRequest(value: unknown): value is SessionListRequest {
     && sameEndpoint(value.scope.endpoint, value.input.endpoint);
 }
 
-function isScope(value: unknown): boolean {
+function isScope(value: unknown): value is SessionListRequest['scope'] {
   return isRecord(value)
     && hasExactKeys(value, ['kind', 'endpoint'])
     && value.kind === 'runtime-instance'
@@ -209,28 +170,12 @@ function isTarget(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['kind']) && value.kind === 'runtime-endpoint';
 }
 
-function isInput(value: unknown): boolean {
+function isInput(value: unknown): value is SessionListRequest['input'] {
   return isRecord(value) && hasExactKeys(value, ['endpoint']) && isEndpoint(value.endpoint);
-}
-
-function isEndpoint(value: unknown): value is RuntimeEndpoint {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
-    && value.runtimeInstanceId === 'local';
 }
 
 function sameEndpoint(left: RuntimeEndpoint, right: RuntimeEndpoint): boolean {
   return left.kind === right.kind
     && left.runtimeAdapterId === right.runtimeAdapterId
     && left.runtimeInstanceId === right.runtimeInstanceId;
-}
-
-function requiredKeys(value: Record<string, unknown>, required: readonly string[]): boolean {
-  return required.every((key) => Object.hasOwn(value, key));
-}
-
-function allowedKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
 }

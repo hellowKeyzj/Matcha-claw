@@ -1,27 +1,18 @@
 import type { CallDetailByModule } from '../call-log';
 
+const outcomes = [
+  null, 'queued', 'started', 'succeeded', 'responded', 'subscribed', 'released', 'complete', 'incomplete', 'notFound',
+  'rejected', 'unknown', 'unsupported', 'unavailable', 'protocol', 'deadline',
+] as const;
+const validOutcomes = new Set<unknown>(outcomes);
+
 /** Opaque SHA-256 references are not native IDs, message identity or call identity. */
 export interface SessionsCallDetail {
   provider: 'openclaw' | 'matcha-agent' | null;
   sessionRef: string | null;
   nativeSessionRef: string | null;
   runRef: string | null;
-  outcome:
-    | 'queued'
-    | 'started'
-    | 'succeeded'
-    | 'responded'
-    | 'subscribed'
-    | 'complete'
-    | 'incomplete'
-    | 'notFound'
-    | 'rejected'
-    | 'unknown'
-    | 'unsupported'
-    | 'unavailable'
-    | 'protocol'
-    | 'deadline'
-    | null;
+  outcome: typeof outcomes[number];
   count: number | null;
   seq: number | null;
 }
@@ -35,10 +26,6 @@ declare module '../call-log' {
 export type SessionsCallSummary = CallDetailByModule['sessions'];
 
 const fields = ['provider', 'sessionRef', 'nativeSessionRef', 'runRef', 'outcome', 'count', 'seq'];
-const outcomes = new Set<unknown>([
-  null, 'queued', 'started', 'succeeded', 'responded', 'subscribed', 'complete', 'incomplete', 'notFound',
-  'rejected', 'unknown', 'unsupported', 'unavailable', 'protocol', 'deadline',
-]);
 
 export function decodeSessionsCallDetail(value: unknown): SessionsCallDetail | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
@@ -49,7 +36,7 @@ export function decodeSessionsCallDetail(value: unknown): SessionsCallDetail | u
     || ![detail.sessionRef, detail.nativeSessionRef, detail.runRef].every(
       (reference) => reference === null || (typeof reference === 'string' && /^[a-f0-9]{64}$/.test(reference)),
     )
-    || !outcomes.has(detail.outcome)
+    || !validOutcomes.has(detail.outcome)
     || ![detail.count, detail.seq].every(
       (count) => count === null || (typeof count === 'number' && Number.isSafeInteger(count) && count >= 0),
     )) return undefined;

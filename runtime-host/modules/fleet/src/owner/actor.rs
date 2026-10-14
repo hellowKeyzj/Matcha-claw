@@ -166,6 +166,12 @@ pub(crate) struct FleetTerminalOpenResult {
     pub(crate) context: crate::application::terminal::TerminalContext,
 }
 
+#[derive(Debug)]
+pub(crate) enum FleetTerminalOpenError {
+    Session(TerminalSessionError),
+    Delivery(FleetDeliveryError),
+}
+
 impl DurableReachabilityMutation for FleetOwner {
     type Error = FleetDeliveryError;
 
@@ -259,38 +265,42 @@ impl FleetOwner {
         selector: &FleetTerminalTargetSelector,
         dimensions: TerminalDimensions,
         now: SystemTime,
-    ) -> Result<FleetTerminalOpenResult, TerminalSessionError> {
-        let (target, endpoint) = self
-            .resolve_terminal_target_endpoint(selector)
-            .ok_or(TerminalSessionError::InvalidState)?;
-        let provider = match self.target_config(&target) {
-            Some(FleetTargetConfig::Docker(_)) => "docker",
-            Some(FleetTargetConfig::Ssh(_)) => "ssh",
-            Some(FleetTargetConfig::Custom(_)) => "custom",
-            Some(FleetTargetConfig::Kubernetes(_)) | None => {
-                return Err(TerminalSessionError::InvalidState);
-            }
-        };
-        let provider = TerminalProviderId::try_new(provider)
-            .map_err(|_| TerminalSessionError::InvalidState)?;
-        let node = endpoint.node_id().clone();
-        let endpoint_id = endpoint.id().clone();
-        let target = TerminalTargetId::try_new(target.as_str())
-            .map_err(|_| TerminalSessionError::InvalidState)?;
-        let opened = self
-            .terminal
-            .open_allocated(target, provider, dimensions, now)?;
-        let context = crate::application::terminal::TerminalContext {
-            session: opened.session.id().clone(),
-            target: opened.session.target().clone(),
-            provider: opened.session.provider().clone(),
-            generation: opened.session.generation(),
-            node,
-            endpoint: endpoint_id,
-            rows: opened.session.dimensions().rows(),
-            cols: opened.session.dimensions().cols(),
-        };
-        Ok(FleetTerminalOpenResult { opened, context })
+    ) -> Result<FleetTerminalOpenResult, FleetTerminalOpenError> {
+        let terminal = &mut self.terminal;
+        // Keep target/endpoint validation and local allocation atomic with facts writers.
+        self.delivery
+            .read_current(|facts| {
+                let (target, endpoint) = Self::resolve_terminal_target_endpoint(facts, selector)
+                    .ok_or(TerminalSessionError::InvalidState)?;
+                let provider = match facts.target_configuration(&target) {
+                    Some(FleetTargetConfig::Docker(_)) => "docker",
+                    Some(FleetTargetConfig::Ssh(_)) => "ssh",
+                    Some(FleetTargetConfig::Custom(_)) => "custom",
+                    Some(FleetTargetConfig::Kubernetes(_)) | None => {
+                        return Err(TerminalSessionError::InvalidState);
+                    }
+                };
+                let provider = TerminalProviderId::try_new(provider)
+                    .map_err(|_| TerminalSessionError::InvalidState)?;
+                let node = endpoint.node_id().clone();
+                let endpoint_id = endpoint.id().clone();
+                let target = TerminalTargetId::try_new(target.as_str())
+                    .map_err(|_| TerminalSessionError::InvalidState)?;
+                let opened = terminal.open_allocated(target, provider, dimensions, now)?;
+                let context = crate::application::terminal::TerminalContext {
+                    session: opened.session.id().clone(),
+                    target: opened.session.target().clone(),
+                    provider: opened.session.provider().clone(),
+                    generation: opened.session.generation(),
+                    node,
+                    endpoint: endpoint_id,
+                    rows: opened.session.dimensions().rows(),
+                    cols: opened.session.dimensions().cols(),
+                };
+                Ok(FleetTerminalOpenResult { opened, context })
+            })
+            .map_err(FleetTerminalOpenError::Delivery)?
+            .map_err(FleetTerminalOpenError::Session)
     }
 
     pub(crate) fn terminal_reconnect(
@@ -579,11 +589,10 @@ impl FleetOwner {
         )
     }
 
-    fn resolve_terminal_target_endpoint(
-        &self,
+    fn resolve_terminal_target_endpoint<'a>(
+        facts: &'a fleet::store::FleetFacts,
         selector: &FleetTerminalTargetSelector,
-    ) -> Option<(TargetId, &EndpointObservation)> {
-        let facts = self.delivery.facts();
+    ) -> Option<(TargetId, &'a EndpointObservation)> {
         let topology = facts.topology();
         let identity_exists = match selector {
             FleetTerminalTargetSelector::Target(_) => true,
@@ -642,7 +651,7 @@ impl FleetOwner {
         &self,
         selector: &FleetTerminalTargetSelector,
     ) -> Option<TerminalTargetId> {
-        self.resolve_terminal_target_endpoint(selector)
+        Self::resolve_terminal_target_endpoint(self.delivery.facts(), selector)
             .and_then(|(target, _)| TerminalTargetId::try_new(target.as_str()).ok())
     }
 
@@ -651,7 +660,15 @@ impl FleetOwner {
         selector: &FleetTerminalTargetSelector,
         summary: &SessionSummary,
     ) -> Option<crate::application::terminal::TerminalContext> {
-        let (target, endpoint) = self.resolve_terminal_target_endpoint(selector)?;
+        Self::resolve_terminal_context_from_facts(self.delivery.facts(), selector, summary)
+    }
+
+    fn resolve_terminal_context_from_facts(
+        facts: &fleet::store::FleetFacts,
+        selector: &FleetTerminalTargetSelector,
+        summary: &SessionSummary,
+    ) -> Option<crate::application::terminal::TerminalContext> {
+        let (target, endpoint) = Self::resolve_terminal_target_endpoint(facts, selector)?;
         if summary.target().as_str() != target.as_str() {
             return None;
         }
@@ -3129,7 +3146,13 @@ impl OwnerSpec for FleetOwner {
             FleetQuery::Recorded { .. } => unreachable!("recorded query was unwrapped"),
             FleetQuery::Live { .. } => unreachable!("live queries are direct"),
             FleetQuery::TerminalContext { summary, reply } => {
-                let result = Ok(global.terminal_context(&summary));
+                let result = global.delivery.read_current(|facts| {
+                    Self::resolve_terminal_context_from_facts(
+                        facts,
+                        &FleetTerminalTargetSelector::Target(summary.target().clone()),
+                        &summary,
+                    )
+                });
                 if let Some(call) = &call {
                     call.finish(&result).await;
                 }
@@ -3140,7 +3163,9 @@ impl OwnerSpec for FleetOwner {
                 summary,
                 reply,
             } => {
-                let result = Ok(global.resolve_terminal_context(&selector, &summary));
+                let result = global.delivery.read_current(|facts| {
+                    Self::resolve_terminal_context_from_facts(facts, &selector, &summary)
+                });
                 if let Some(call) = &call {
                     call.finish(&result).await;
                 }

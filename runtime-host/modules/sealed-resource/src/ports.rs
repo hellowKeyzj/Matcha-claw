@@ -324,26 +324,34 @@ impl skills_module::SealedSkillStorePort for SealedSkillStoreAdapter {
     fn export_sealed_skill_package(
         &self,
         skill_key: String,
-    ) -> Result<skills_module::SealedSkillCatalogEntry, skills_module::SealedSkillError> {
+        directory: PathBuf,
+    ) -> Result<skills_module::SealedSkillExport, skills_module::SealedSkillError> {
         let skill_key =
             SkillKey::parse(skill_key).map_err(|_| skill_projection::rejected_error())?;
         self.store
-            .export_plain_directory_package(skill_key)
-            .map(SealedSkillCatalogEntryProjectionInput)
-            .map(skill_projection::project_entry)
+            .export_plain_directory_package(skill_key, &directory)
+            .map(|export| {
+                skills_module::SealedSkillExport::new(
+                    skill_projection::project_entry(SealedSkillCatalogEntryProjectionInput(
+                        export.entry().clone(),
+                    )),
+                    export.cleanup_failed(),
+                )
+            })
             .map_err(project_skill_error)
     }
 
     fn export_cloud_sealed_skill_package(
         &self,
         skill_key: String,
+        directory: PathBuf,
         cloud_public_key: String,
         cloud_key_id: String,
     ) -> Result<skills_module::SealedSkillPackageExport, skills_module::SealedSkillError> {
         let skill_key =
             SkillKey::parse(skill_key).map_err(|_| skill_projection::rejected_error())?;
         self.store
-            .export_cloud_directory_package(skill_key, cloud_public_key, cloud_key_id)
+            .export_cloud_directory_package(skill_key, &directory, cloud_public_key, cloud_key_id)
             .map(project_skill_export)
             .map_err(project_skill_error)
     }
@@ -583,6 +591,7 @@ impl subagents::SealedAgentStorePort for SealedAgentStoreAdapter {
 
 struct SealedSkillCatalogProjectionInput {
     entries: Vec<SealedSkillCatalogEntryProjectionInput>,
+    issues: Vec<skills_module::ports::SealedSkillCatalogIssue>,
 }
 
 impl SealedSkillCatalogProjectionInput {
@@ -594,6 +603,17 @@ impl SealedSkillCatalogProjectionInput {
                 .cloned()
                 .map(SealedSkillCatalogEntryProjectionInput)
                 .collect(),
+            issues: catalog
+                .issues()
+                .iter()
+                .map(|issue| {
+                    skills_module::ports::SealedSkillCatalogIssue::new(
+                        issue.file_name().to_owned(),
+                        issue.skill_key().map(|key| key.as_str().to_owned()),
+                        issue.reason(),
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -603,6 +623,10 @@ impl skill_projection::SealedCatalogProjection for SealedSkillCatalogProjectionI
 
     fn entries(&self) -> &[Self::Entry] {
         &self.entries
+    }
+
+    fn issues(&self) -> &[skills_module::ports::SealedSkillCatalogIssue] {
+        &self.issues
     }
 }
 
@@ -669,11 +693,13 @@ fn project_skill_error(error: SealedResourceError) -> skills_module::SealedSkill
 fn project_skill_export(
     export: SealedSkillPackageExport,
 ) -> skills_module::SealedSkillPackageExport {
+    let cleanup_failed = export.cleanup_failed();
     skills_module::SealedSkillPackageExport::new(
         export.entry().skill_key().as_str().to_owned(),
         export.file_name().to_owned(),
         export.package_sha256().to_owned(),
         export.into_package_bytes(),
+        cleanup_failed,
     )
 }
 

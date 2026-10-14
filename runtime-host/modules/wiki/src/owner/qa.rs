@@ -64,12 +64,16 @@ pub(crate) async fn stage_question(
     };
     let history_start = input.history.len().saturating_sub(10);
     let history = input.history.drain(history_start..).collect();
-    let overview = read_optional(&root.join("overview.md"))?
-        .or(read_optional(&root.join("wiki/overview.md"))?)
-        .unwrap_or_default();
-    let schema = read_optional(&root.join("schema.md"))?
-        .or(read_optional(&root.join("wiki/schema.md"))?)
-        .unwrap_or_default();
+    let context_root = root.to_path_buf();
+    let (overview, schema) = shared.blocking.run(move || {
+        let overview = read_optional(&context_root.join("overview.md"))?
+            .or(read_optional(&context_root.join("wiki/overview.md"))?)
+            .unwrap_or_default();
+        let schema = read_optional(&context_root.join("schema.md"))?
+            .or(read_optional(&context_root.join("wiki/schema.md"))?)
+            .unwrap_or_default();
+        Ok((overview, schema))
+    }).await?;
     shared
         .question_tasks
         .stage(root, task.clone(), cancellation.clone())
@@ -237,9 +241,12 @@ pub(crate) async fn save_question(
     }
     shared
         .question_tasks
-        .update(root, project_id, &task.id, |task| {
-            task.saved_path = Some(saved_path.clone());
-            task.error = None;
+        .update(root, project_id, &task.id, {
+            let saved_path = saved_path.clone();
+            move |task| {
+                task.saved_path = Some(saved_path);
+                task.error = None;
+            }
         })
         .await?;
     if embed_page(

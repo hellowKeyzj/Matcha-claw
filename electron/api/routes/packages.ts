@@ -100,7 +100,7 @@ export async function handlePackageRoutes(
       const install: SkillInstallResult = confirmed
         ? { outcome: 'accepted', skillKey: call.detail.skillKey }
         : { outcome: call.status === 'failed' && call.detail.outcome === 'notFound' ? 'notFound'
-          : call.status === 'rejected' && call.detail.outcome === 'rejected' ? 'rejected' : 'unknown' };
+          : (call.status === 'failed' || call.status === 'rejected') && call.detail.outcome === 'rejected' ? 'rejected' : 'unknown' };
       ctx.cloudAccountService.acknowledgePackageInstall(body.callId, confirmed);
       sendJson(res, 200, { install });
       return true;

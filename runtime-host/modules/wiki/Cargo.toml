@@ -39,6 +39,9 @@ tokio-util.workspace = true
 tokenizers.workspace = true
 zip.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 # Newer LanceDB releases dropped Intel macOS support: lancedb/lancedb#2836.
 [target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
 arrow-array = "56.2"

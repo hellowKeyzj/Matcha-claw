@@ -1,5 +1,5 @@
 use platform::mcp::arguments::{optional_string, require_exact_keys, required_string};
-use platform::mcp::{ToolCallError, ToolCallOutcome, ToolProvider};
+use platform::mcp::{ToolCallError, ToolCallFuture, ToolCallOutcome, ToolProvider};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -14,11 +14,13 @@ use crate::{
 };
 
 pub struct WikiMcpFacade {
-    call: Box<dyn FnMut(&str, &Map<String, Value>) -> ToolCallOutcome>,
+    call: Box<dyn for<'a> Fn(&'a str, &'a Map<String, Value>) -> ToolCallFuture<'a> + Send + Sync>,
 }
 
 impl WikiMcpFacade {
-    pub fn new(call: impl FnMut(&str, &Map<String, Value>) -> ToolCallOutcome + 'static) -> Self {
+    pub fn new(
+        call: impl for<'a> Fn(&'a str, &'a Map<String, Value>) -> ToolCallFuture<'a> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             call: Box::new(call),
         }
@@ -67,7 +69,11 @@ impl ToolProvider for WikiMcpFacade {
         ]
     }
 
-    fn call(&mut self, name: &str, arguments: &Map<String, Value>) -> Option<ToolCallOutcome> {
+    fn call<'a>(
+        &'a self,
+        name: &'a str,
+        arguments: &'a Map<String, Value>,
+    ) -> Option<ToolCallFuture<'a>> {
         is_wiki_tool(name).then(|| (self.call)(name, arguments))
     }
 }

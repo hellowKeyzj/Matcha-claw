@@ -6,6 +6,15 @@ import {
   isSafeNonNegativeInteger,
   sendLoopbackJson,
 } from '../client';
+import {
+  type Endpoint,
+  type FileTarget,
+  type SessionScope,
+  isEndpoint,
+  isFileRelativePath,
+  isFileTarget,
+  isSessionScope,
+} from './contract';
 
 const ROUTE_PATH = '/api/workspace/files/list-dir';
 const UNAVAILABLE = {
@@ -16,24 +25,14 @@ const UNAVAILABLE = {
 type WorkspaceDirectoryRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.listDir';
-  scope: Readonly<{
-    kind: 'session';
-    endpoint: Endpoint;
-    sessionKey: string;
-  }>;
-  target: Readonly<{ kind: 'workspace-file' }>;
+  scope: SessionScope;
+  target: FileTarget;
   input: Readonly<{
     endpoint: Endpoint;
     sessionKey: string;
     relativePath: string;
     includeHidden: boolean;
   }>;
-}>;
-
-type Endpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw';
-  runtimeInstanceId: 'local';
 }>;
 
 export type WorkspaceDirectoryTransportResponse = Readonly<{
@@ -85,22 +84,10 @@ function isWorkspaceDirectoryRequest(value: unknown): value is WorkspaceDirector
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && value.operationId === 'files.listDir'
-    && isScope(value.scope)
-    && isTarget(value.target)
+    && isSessionScope(value.scope)
+    && isFileTarget(value.target)
     && isInput(value.input)
     && value.scope.sessionKey === value.input.sessionKey;
-}
-
-function isScope(value: unknown): value is WorkspaceDirectoryRequest['scope'] {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'endpoint', 'sessionKey'])
-    && value.kind === 'session'
-    && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.sessionKey);
-}
-
-function isTarget(value: unknown): boolean {
-  return isRecord(value) && hasExactKeys(value, ['kind']) && value.kind === 'workspace-file';
 }
 
 function isInput(value: unknown): value is WorkspaceDirectoryRequest['input'] {
@@ -108,24 +95,8 @@ function isInput(value: unknown): value is WorkspaceDirectoryRequest['input'] {
     && hasExactKeys(value, ['endpoint', 'sessionKey', 'relativePath', 'includeHidden'])
     && isEndpoint(value.endpoint)
     && isNonEmptyBoundedText(value.sessionKey)
-    && isDirectoryRelativePath(value.relativePath)
+    && (value.relativePath === '' || isFileRelativePath(value.relativePath))
     && typeof value.includeHidden === 'boolean';
-}
-
-function isDirectoryRelativePath(value: unknown): value is string {
-  return (value === '' || isNonEmptyBoundedText(value))
-    && !value.startsWith('/')
-    && !value.startsWith('\\')
-    && !value.includes(':')
-    && (value === '' || value.split(/[\\/]/).every((component) => component !== '' && component !== '.' && component !== '..'));
-}
-
-function isEndpoint(value: unknown): value is Endpoint {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && value.runtimeAdapterId === 'openclaw'
-    && value.runtimeInstanceId === 'local';
 }
 
 function isWorkspaceDirectoryResponse(value: unknown): boolean {

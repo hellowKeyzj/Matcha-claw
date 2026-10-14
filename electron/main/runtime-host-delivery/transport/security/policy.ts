@@ -514,10 +514,6 @@ function isPublicPathLike(value: string): boolean {
     || /^file:/i.test(value);
 }
 
-function isPolicy(value: unknown): value is Record<string, unknown> {
-  return policyContract(value) === 'policy';
-}
-
 function policyContract(value: unknown): string {
   if (!isRecord(value)) return 'not-object';
   if (!hasExactKeys(value, ['preset', 'securityPolicyVersion', 'runtime'])) return 'policy-keys';

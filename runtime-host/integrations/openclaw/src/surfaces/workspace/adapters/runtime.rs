@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
-use crate::driver::OpenClawDriver;
+use crate::{driver::OpenClawDriver, surfaces::workspace::OpenClawWorkspaceBinding};
 
 use super::projection::{
     native_workspace_media_path, resolved_workspace_media, workspace_binary_failure,
@@ -81,75 +81,12 @@ impl workspace_module::WorkspaceOps for OpenClawDriver {
             .map_err(workspace_directory_failure)
     }
 
-    fn read_text(
+    fn bind_workspace(
         &self,
         session_key: &str,
-        relative_path: &str,
-        limit: usize,
-    ) -> Result<WorkspaceTextReceipt, DriverWorkspaceReadFailure> {
-        self.workspace
-            .read_text(session_key, relative_path, limit)
-            .map(workspace_text_receipt)
-            .map_err(workspace_read_failure)
-    }
-
-    fn read_binary(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        limit: usize,
-    ) -> Result<WorkspaceBinaryReceipt, DriverWorkspaceBinaryFailure> {
-        self.workspace
-            .read_binary(session_key, relative_path, limit)
-            .map(workspace_binary_receipt)
-            .map_err(workspace_binary_failure)
-    }
-
-    fn stat_file(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-    ) -> Result<WorkspaceStatReceipt, DriverWorkspaceStatFailure> {
-        self.workspace
-            .stat(session_key, relative_path)
-            .map(workspace_stat_receipt)
-            .map_err(workspace_stat_failure)
-    }
-
-    fn list_directory(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        include_hidden: bool,
-    ) -> Result<WorkspaceDirectoryReceipt, DriverWorkspaceListFailure> {
-        self.workspace
-            .list_dir_with_options(session_key, relative_path, include_hidden)
-            .map(workspace_directory_receipt)
-            .map_err(workspace_list_failure)
-    }
-
-    fn write_text(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        content: &str,
-    ) -> Result<WorkspaceWriteReceipt, DriverWorkspaceWriteFailure> {
-        self.workspace
-            .write_text(session_key, relative_path, content)
-            .map(workspace_write_receipt)
-            .map_err(workspace_write_failure)
-    }
-
-    fn prepare_media(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        mime_type: &str,
-    ) -> Result<WorkspaceMediaReceipt, DriverWorkspaceMediaFailure> {
-        self.workspace
-            .prepare_media(session_key, relative_path, mime_type)
-            .map(workspace_media_receipt)
-            .map_err(workspace_media_failure)
+    ) -> Result<Arc<dyn workspace_module::WorkspaceBinding>, DriverWorkspaceDirectoryFailure> {
+        let workspace = self.workspace.bind_workspace(session_key).map_err(workspace_directory_failure)?;
+        Ok(Arc::new(WorkspaceBinding { workspace }))
     }
 
     fn resolve_media(
@@ -163,18 +100,6 @@ impl workspace_module::WorkspaceOps for OpenClawDriver {
             .map_err(workspace_media_failure)
     }
 
-    fn thumbnail_media(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        mime_type: &str,
-    ) -> Result<WorkspaceMediaThumbnail, DriverWorkspaceMediaFailure> {
-        self.workspace
-            .thumbnail_media(session_key, relative_path, mime_type)
-            .map(workspace_media_thumbnail)
-            .map_err(workspace_media_failure)
-    }
-
     fn thumbnail_media_gateway(
         &self,
         session_key: &str,
@@ -185,41 +110,6 @@ impl workspace_module::WorkspaceOps for OpenClawDriver {
         self.workspace
             .thumbnail_media_gateway(session_key, gateway_url, mime_type, agent_id)
             .map(workspace_media_thumbnail)
-            .map_err(workspace_media_failure)
-    }
-
-    fn thumbnails_media(
-        &self,
-        session_key: &str,
-        paths: &[WorkspaceMediaPath],
-    ) -> Result<Vec<WorkspaceMediaThumbnailEntry>, DriverWorkspaceMediaFailure> {
-        let native_paths = paths
-            .iter()
-            .map(native_workspace_media_path)
-            .collect::<Vec<_>>();
-        self.workspace
-            .thumbnails_media(session_key, &native_paths)
-            .map(|entries| {
-                entries
-                    .into_iter()
-                    .map(workspace_media_thumbnail_entry)
-                    .collect()
-            })
-            .map_err(workspace_media_failure)
-    }
-
-    fn stage_paths_media(
-        &self,
-        session_key: &str,
-        paths: &[WorkspaceMediaPath],
-    ) -> Result<Vec<WorkspaceMediaReceipt>, DriverWorkspaceMediaFailure> {
-        let native_paths = paths
-            .iter()
-            .map(native_workspace_media_path)
-            .collect::<Vec<_>>();
-        self.workspace
-            .stage_paths_media(session_key, &native_paths)
-            .map(|receipts| receipts.into_iter().map(workspace_media_receipt).collect())
             .map_err(workspace_media_failure)
     }
 
@@ -239,5 +129,97 @@ impl workspace_module::WorkspaceOps for OpenClawDriver {
     fn workspace_runtime_ready(&self) -> bool {
         self.owner().snapshot().phase()
             == foundation::process::supervision::SupervisorPhase::Running
+    }
+}
+
+struct WorkspaceBinding {
+    workspace: OpenClawWorkspaceBinding,
+}
+
+impl workspace_module::WorkspaceBinding for WorkspaceBinding {
+    fn resource_key(&self) -> Option<&str> {
+        self.workspace.resource_key()
+    }
+
+    fn read_text(
+        &self,
+        relative_path: &str,
+        limit: usize,
+    ) -> Result<WorkspaceTextReceipt, DriverWorkspaceReadFailure> {
+        self.workspace.read_text(relative_path, limit)
+            .map(workspace_text_receipt).map_err(workspace_read_failure)
+    }
+
+    fn read_binary(
+        &self,
+        relative_path: &str,
+        limit: usize,
+    ) -> Result<WorkspaceBinaryReceipt, DriverWorkspaceBinaryFailure> {
+        self.workspace.read_binary(relative_path, limit)
+            .map(workspace_binary_receipt).map_err(workspace_binary_failure)
+    }
+
+    fn stat_file(&self, relative_path: &str) -> Result<WorkspaceStatReceipt, DriverWorkspaceStatFailure> {
+        self.workspace.stat(relative_path)
+            .map(workspace_stat_receipt).map_err(workspace_stat_failure)
+    }
+
+    fn list_directory(
+        &self,
+        relative_path: &str,
+        include_hidden: bool,
+    ) -> Result<WorkspaceDirectoryReceipt, DriverWorkspaceListFailure> {
+        self.workspace.list_dir_with_options(relative_path, include_hidden)
+            .map(workspace_directory_receipt).map_err(workspace_list_failure)
+    }
+
+    fn write_text(
+        &self,
+        relative_path: &str,
+        content: &str,
+    ) -> Result<WorkspaceWriteReceipt, DriverWorkspaceWriteFailure> {
+        self.workspace.write_text(relative_path, content)
+            .map(workspace_write_receipt).map_err(workspace_write_failure)
+    }
+
+    fn prepare_media(
+        &self,
+        session_key: &str,
+        relative_path: &str,
+        mime_type: &str,
+    ) -> Result<WorkspaceMediaReceipt, DriverWorkspaceMediaFailure> {
+        self.workspace.prepare_media(session_key, relative_path, mime_type)
+            .map(workspace_media_receipt).map_err(workspace_media_failure)
+    }
+
+    fn thumbnail_media(
+        &self,
+        relative_path: &str,
+        mime_type: &str,
+    ) -> Result<WorkspaceMediaThumbnail, DriverWorkspaceMediaFailure> {
+        self.workspace.thumbnail_media(relative_path, mime_type)
+            .map(workspace_media_thumbnail).map_err(workspace_media_failure)
+    }
+
+    fn thumbnails_media(
+        &self,
+        session_key: &str,
+        paths: &[WorkspaceMediaPath],
+    ) -> Result<Vec<WorkspaceMediaThumbnailEntry>, DriverWorkspaceMediaFailure> {
+        let native_paths = paths.iter().map(native_workspace_media_path).collect::<Vec<_>>();
+        self.workspace.thumbnails_media(session_key, &native_paths)
+            .map(|entries| entries.into_iter().map(workspace_media_thumbnail_entry).collect())
+            .map_err(workspace_media_failure)
+    }
+
+    fn stage_paths_media(
+        &self,
+        session_key: &str,
+        paths: &[WorkspaceMediaPath],
+    ) -> Result<Vec<WorkspaceMediaReceipt>, DriverWorkspaceMediaFailure> {
+        let native_paths = paths.iter().map(native_workspace_media_path).collect::<Vec<_>>();
+        self.workspace.stage_paths_media(session_key, &native_paths)
+            .map(|receipts| receipts.into_iter().map(workspace_media_receipt).collect())
+            .map_err(workspace_media_failure)
     }
 }

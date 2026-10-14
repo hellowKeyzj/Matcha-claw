@@ -56,15 +56,19 @@ export async function executePackageOperation<K extends CloudPackageOperationKin
       const call = await transports.callLogTransport.get({ callId });
       session.assertCurrent();
       if (call.status !== 200 || !('module' in call.body) || call.body.callId !== callId || call.body.module !== 'skills'
-        || call.body.command !== 'sealedSkills.exportCloud' || call.body.status !== 'succeeded'
-        || call.body.detail.access !== 'read' || call.body.detail.outcome !== 'accepted') {
+        || call.body.command !== 'sealedSkills.exportCloud' || call.body.detail.access !== 'read'
+        || typeof call.body.detail.skillKey !== 'string' || call.body.detail.resultReady !== true
+        || !((call.body.status === 'succeeded' && call.body.detail.outcome === 'accepted'
+          && call.body.detail.result === 'accepted' && call.body.detail.reason === undefined)
+          || (call.body.status === 'failed' && call.body.detail.outcome === 'partial'
+            && call.body.detail.result === 'partial' && call.body.detail.reason === 'cleanup-failed'))) {
         throw new PackageOperationError('exportUnconfirmed', 409, 'Cloud skill export is not confirmed');
       }
       const exported = await transports.sealedSkillsTransport.exportCloudResult(callId);
       session.assertCurrent();
       if (exported.status !== 200 || !('result' in exported.body) || exported.body.callId !== callId
         || exported.body.command !== 'sealedSkills.exportCloud' || exported.body.result.kind !== 'sealedCloudExport'
-        || exported.body.result.skillKey !== call.body.detail.skillKey) {
+        || exported.body.result.skillKey !== call.body.detail.skillKey || exported.body.result.reason !== call.body.detail.reason) {
         throw new PackageOperationError('artifactUnavailable', 502, 'Cloud skill export artifact is unavailable');
       }
       const { fileName, packageSha256, packageBase64 } = exported.body.result;

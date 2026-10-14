@@ -34,6 +34,7 @@ sessions-module = { package = "sessions", version = "0.1.0", path = "../modules/
 runtime-directory = { version = "0.1.0", path = "../modules/runtime-directory" }
 clawhub = { version = "0.1.0", path = "../external/clawhub" }
 foundation = { version = "0.1.0", path = "../foundation" }
+futures-util.workspace = true
 toolchain = { version = "0.1.0", path = "../modules/toolchain" }
 getrandom.workspace = true
 matcha-agent = { version = "0.1.0", path = "../integrations/matcha-agent" }

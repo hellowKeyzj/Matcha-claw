@@ -1,8 +1,9 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt, fs, io,
     ops::Range,
-    path::{Path, PathBuf},
+    path::Path,
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use organization::{RoleId, TeamId};
@@ -10,6 +11,40 @@ use organization::{RoleId, TeamId};
 const AGENTS_FILE: &str = "AGENTS.md";
 const MARKER_PREFIX: &str = "<!-- matchaclaw-teamrun:";
 const MARKER_SUFFIX: &str = " -->";
+
+static MARKER_FILES: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+
+fn with_agents_file<T>(
+    workspace: &Path,
+    create: bool,
+    operation: impl FnOnce(&Path) -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    if create {
+        fs::create_dir_all(workspace)?;
+    } else {
+        match fs::metadata(workspace) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    let key = crate::surfaces::workspace::workspace_resource_key(workspace)?;
+    let file = {
+        let mut files = MARKER_FILES.get_or_init(|| Mutex::new(HashMap::new()))
+            .lock().expect("TeamRun marker registry lock poisoned");
+        files.retain(|_, file| file.strong_count() != 0);
+        match files.get(&key).and_then(Weak::upgrade) {
+            Some(file) => file,
+            None => {
+                let file = Arc::new(Mutex::new(()));
+                files.insert(key, Arc::downgrade(&file));
+                file
+            }
+        }
+    };
+    let _file = file.lock().expect("TeamRun marker file lock poisoned");
+    operation(&workspace.join(AGENTS_FILE)).map(Some)
+}
 
 pub(crate) struct TeamBuddyMarker {
     label: String,
@@ -30,56 +65,62 @@ impl TeamBuddyMarker {
     }
 
     pub(crate) fn write(&self, workspace: &Path) -> io::Result<()> {
-        let path = workspace.join(AGENTS_FILE);
-        let mut content = read_if_exists(&path)?;
         let block = self.block()?;
-        let existing = teamrun_blocks(&content)?
-            .into_iter()
-            .find(|(label, _)| *label == self.label);
-        if let Some((_, range)) = existing {
-            content.replace_range(range, &block);
-        } else {
-            if !content.is_empty() {
-                if !content.ends_with('\n') {
-                    content.push('\n');
+        with_agents_file(workspace, true, |path| {
+            let mut content = read_if_exists(path)?;
+            let existing = teamrun_blocks(&content)?
+                .into_iter()
+                .find(|(label, _)| *label == self.label);
+            if let Some((_, range)) = existing {
+                content.replace_range(range, &block);
+            } else {
+                if !content.is_empty() {
+                    if !content.ends_with('\n') {
+                        content.push('\n');
+                    }
+                    if !content.ends_with("\n\n") && !content.ends_with("\r\n\r\n") {
+                        content.push('\n');
+                    }
                 }
-                if !content.ends_with("\n\n") && !content.ends_with("\r\n\r\n") {
-                    content.push('\n');
-                }
+                content.push_str(&block);
+                content.push('\n');
             }
-            content.push_str(&block);
-            content.push('\n');
-        }
-        replace_file(path, content.as_bytes())
+            replace_file(path, content.as_bytes())
+        }).map(|_| ())
     }
 
     pub(crate) fn recover(&self, workspace: &Path) -> io::Result<bool> {
-        let content = read_if_exists(&workspace.join(AGENTS_FILE))?;
         let block = self.block()?;
-        Ok(teamrun_blocks(&content)?
-            .into_iter()
-            .find(|(label, _)| *label == self.label)
-            .is_some_and(|(_, range)| content[range] == block))
+        Ok(with_agents_file(workspace, false, |path| {
+            let content = read_if_exists(path)?;
+            Ok(teamrun_blocks(&content)?
+                .into_iter()
+                .find(|(label, _)| *label == self.label)
+                .is_some_and(|(_, range)| content[range] == block))
+        })?.unwrap_or(false))
     }
 
     pub(crate) fn has_marker(&self, workspace: &Path) -> io::Result<bool> {
-        let content = read_if_exists(&workspace.join(AGENTS_FILE))?;
-        Ok(teamrun_blocks(&content)?
-            .into_iter()
-            .any(|(label, _)| label == self.label))
+        Ok(with_agents_file(workspace, false, |path| {
+            let content = read_if_exists(path)?;
+            Ok(teamrun_blocks(&content)?
+                .into_iter()
+                .any(|(label, _)| label == self.label))
+        })?.unwrap_or(false))
     }
 
     pub(crate) fn remove(&self, workspace: &Path) -> io::Result<()> {
-        let path = workspace.join(AGENTS_FILE);
-        let mut content = read_if_exists(&path)?;
-        let existing = teamrun_blocks(&content)?
-            .into_iter()
-            .find(|(label, _)| *label == self.label);
-        if let Some((_, range)) = existing {
-            content.replace_range(range, "");
-            replace_file(path, content.as_bytes())?;
-        }
-        Ok(())
+        with_agents_file(workspace, false, |path| {
+            let mut content = read_if_exists(path)?;
+            let existing = teamrun_blocks(&content)?
+                .into_iter()
+                .find(|(label, _)| *label == self.label);
+            if let Some((_, range)) = existing {
+                content.replace_range(range, "");
+                replace_file(path, content.as_bytes())?;
+            }
+            Ok(())
+        }).map(|_| ())
     }
 
     fn block(&self) -> io::Result<String> {
@@ -176,11 +217,15 @@ fn read_if_exists(path: &Path) -> io::Result<String> {
     }
 }
 
-fn replace_file(path: PathBuf, content: &[u8]) -> io::Result<()> {
+fn replace_file(path: &Path, content: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, content)?;
-    fs::rename(temporary, path)
+    fs::rename(temporary, path)?;
+    if fs::read(path)? != content {
+        return Err(io::Error::other("TeamRun marker readback mismatch"));
+    }
+    Ok(())
 }

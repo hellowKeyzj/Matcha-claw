@@ -16,7 +16,7 @@ use super::{
         WorkflowPlanSubmitOutcome,
     },
     records,
-    schema::RecordChange,
+    schema::{RecordChange, RecordKey, RecordKind},
     sqlite::Database,
 };
 use crate::{
@@ -104,6 +104,17 @@ impl OrganizationStore {
             epoch,
             requires_reopen: false,
         })
+    }
+
+    pub(crate) fn read_run_team(path: &Path, run: &GraphRunId) -> Result<Option<TeamId>, StoreFault> {
+        let key = RecordKey {
+            kind: RecordKind::RunHeader,
+            scope: run.as_str().to_owned(),
+            id: String::new(),
+        };
+        Database::read_record(path, &key)?
+            .map(|record| records::run::decode_header(&record).map(|header| header.team))
+            .transpose()
     }
 
     pub(crate) fn facts(&self) -> &OrganizationFacts {

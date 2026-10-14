@@ -161,7 +161,7 @@ function isRequest(value: Record<string, unknown>): boolean {
     && isYaml(value.yaml);
 }
 
-function isGraphDefinition(value: unknown): value is TeamGraphDefinition {
+export function isGraphDefinition(value: unknown): value is TeamGraphDefinition {
   if (!isRecord(value)
     || !hasExactKeys(value, ['graphId', 'workflowPlanId', 'runId', 'title', 'nodes', 'edges'])
     || !isIdentifier(value.graphId)

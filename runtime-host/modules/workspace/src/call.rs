@@ -103,7 +103,7 @@ impl RecordedCall {
     pub(crate) async fn execute<T, E: Copy + Into<Outcome>>(
         mut self,
         unavailable: E,
-        effect: impl FnOnce() -> Result<T, E>,
+        effect: impl std::future::Future<Output = Result<T, E>>,
     ) -> Result<T, E> {
         // The original owner queue owns admission and execution, not the HTTP waiter.
         if let Err(error) = self.context.accepted().await {
@@ -116,7 +116,7 @@ impl RecordedCall {
             self.finish(CallStatus::Failed, Outcome::Unavailable).await;
             return Err(unavailable);
         }
-        let result = effect();
+        let result = effect.await;
         let outcome = match &result {
             Ok(_) => Outcome::Completed,
             Err(error) => (*error).into(),

@@ -21,6 +21,7 @@ export interface SkillsCallDetail {
   invalidCount?: number;
   failedCount?: number;
   outcome?: 'accepted' | 'partial' | 'removed' | 'notFound' | 'succeeded' | 'rejected' | 'unknown' | 'unavailable';
+  reason?: string;
 }
 
 declare module '../call-log' {
@@ -32,6 +33,13 @@ declare module '../call-log' {
 const textFields = new Set(['skillKey', 'slug', 'version', 'uploadId']);
 const numberFields = new Set(['sizeBytes', 'offset', 'receivedBytes', 'expiresAt', 'bundleCount', 'fileCount', 'requestedCount', 'updatedCount', 'invalidCount', 'failedCount']);
 const outcomes = new Set(['accepted', 'partial', 'removed', 'notFound', 'succeeded', 'rejected', 'unknown', 'unavailable']);
+const reasons = new Set(['invalid-path', 'file-too-large', 'empty', 'too-many-files', 'duplicate-path',
+  'total-overflow', 'total-too-large', 'missing-skill-md', 'invalid-skill-md', 'filename-conflict',
+  'duplicate-package', 'already-exists', 'not-found', 'package-changed', 'cleanup-failed', 'rejected', 'unavailable']);
+
+export function isSkillsCallReason(value: unknown): value is string {
+  return typeof value === 'string' && reasons.has(value);
+}
 
 export function decodeSkillsCallDetail(value: unknown): CallDetailByModule['skills'] {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -53,6 +61,7 @@ export function decodeSkillsCallDetail(value: unknown): CallDetailByModule['skil
     else if (key === 'result') valid = typeof field === 'string' && ['accepted', 'partial', 'rejected', 'unknown'].includes(field);
     else if (key === 'sha256') valid = typeof field === 'string' && /^[0-9a-fA-F]{64}$/.test(field);
     else if (key === 'outcome') valid = typeof field === 'string' && outcomes.has(field);
+    else if (key === 'reason') valid = isSkillsCallReason(field);
     else valid = false;
     if (!valid) throw new Error('Invalid Skills call detail field');
   }

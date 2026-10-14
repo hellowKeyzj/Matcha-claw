@@ -85,7 +85,17 @@ impl OwnerSpec for UsageOwner {
         match command {}
     }
 
-    async fn handle_direct_query(_shared: Self::Shared, _query: Self::Query) {}
+    async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
+        match query {
+            UsageQuery::DefaultLimit { reply } => {
+                let _ = reply.send(default_limit(&shared));
+            }
+            UsageQuery::MaxLimit { reply } => {
+                let _ = reply.send(max_limit(&shared));
+            }
+            UsageQuery::Recent { .. } | UsageQuery::SessionTimeseries { .. } => unreachable!(),
+        }
+    }
 
     async fn handle_keyed_query(
         _shared: Self::Shared,
@@ -113,12 +123,7 @@ impl OwnerSpec for UsageOwner {
                 let _ = reply
                     .send(session_timeseries(&shared, &agent_id, &session_id, call.as_ref()).await);
             }
-            UsageQuery::DefaultLimit { reply } => {
-                let _ = reply.send(default_limit(&shared));
-            }
-            UsageQuery::MaxLimit { reply } => {
-                let _ = reply.send(max_limit(&shared));
-            }
+            UsageQuery::DefaultLimit { .. } | UsageQuery::MaxLimit { .. } => unreachable!(),
         }
     }
 

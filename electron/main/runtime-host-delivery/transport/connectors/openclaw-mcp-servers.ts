@@ -53,7 +53,7 @@ export function createOpenClawMcpServersTransport(
         body: request,
       });
       if (response?.status === 200 && isSuccessResponse(request.operationId, response.body)) {
-        return { status: 200, body: projectPublicResponse(request.operationId, response.body) };
+        return { status: 200, body: response.body };
       }
       if (response?.status === 400) return { status: 400, body: INVALID_REQUEST };
       return { status: 503, body: UNAVAILABLE };
@@ -85,11 +85,6 @@ function isSuccessResponse(_operation: Operation, value: unknown): boolean {
     && value.servers.every(isServerSummary);
 }
 
-function projectPublicResponse(_operation: Operation, value: unknown): unknown {
-  if (!isRecord(value)) return value;
-  return { servers: (value.servers as Record<string, unknown>[]).map(projectServerSummary) };
-}
-
 function isServerSummary(value: unknown): boolean {
   if (!isRecord(value)
     || !hasExpectedKeys(
@@ -107,21 +102,6 @@ function isServerSummary(value: unknown): boolean {
     && typeof value.managed === 'boolean'
     && typeof value.editable === 'boolean'
     && typeof value.removable === 'boolean';
-}
-
-function projectServerSummary(value: Record<string, unknown>): Record<string, unknown> {
-  return {
-    serverId: value.serverId,
-    ...(value.connectorId === undefined ? {} : { connectorId: value.connectorId }),
-    displayName: value.displayName,
-    ...(value.description === undefined ? {} : { description: value.description }),
-    kind: value.kind,
-    source: value.source,
-    enabled: value.enabled,
-    managed: value.managed,
-    editable: value.editable,
-    removable: value.removable,
-  };
 }
 
 

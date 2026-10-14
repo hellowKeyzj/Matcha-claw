@@ -45,13 +45,13 @@ impl SettingsOps for OpenClawDriver {
                     )
                 }
                 SupervisorPhase::Running => {
-                    if control_lease.snapshot_control().await != OpenClawControlReadiness::Ready {
+                    if gateway.observe_control().await != OpenClawControlReadiness::Ready
+                        || control_lease.snapshot_control().await != OpenClawControlReadiness::Ready
+                    {
                         return Err(::settings::ports::SettingsRuntimeFailure::Unknown);
                     }
                     let artifact_changed = prepare_settings_relay_plugin(&plugins, browser_mode)?;
                     let outcome = gateway
-                        .lock()
-                        .await
                         .apply_settings_config_projection(browser_mode, proxy_endpoint)
                         .await;
                     project_settings_config_outcome(

@@ -216,6 +216,15 @@ impl CallError for crate::FleetDeliveryError {
     }
 }
 
+impl CallError for crate::owner::actor::FleetTerminalOpenError {
+    fn outcome_is_unknown(&self) -> bool {
+        match self {
+            Self::Session(error) => error.outcome_is_unknown(),
+            Self::Delivery(error) => delivery_error_is_unknown(error),
+        }
+    }
+}
+
 impl<E: CallError + ?Sized> CallError for &E {
     fn outcome_is_unknown(&self) -> bool {
         (**self).outcome_is_unknown()

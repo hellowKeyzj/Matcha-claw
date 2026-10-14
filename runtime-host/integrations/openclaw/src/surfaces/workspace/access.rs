@@ -22,7 +22,8 @@ const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENT_BYTES: usize = 255;
 
 pub(super) struct WorkspaceFiles {
-    selection: WorkspaceSelection,
+    workspace: Result<DirectoryHandle, WorkspaceFileError>,
+    resource_key: Option<String>,
 }
 
 pub(crate) fn replace_regular_file(
@@ -47,7 +48,23 @@ impl WorkspaceFiles {
     }
 
     pub(super) fn new(selection: WorkspaceSelection) -> Self {
-        Self { selection }
+        let opened = open(selection.as_path())
+            .map_err(|_| WorkspaceFileError::Unavailable)
+            .and_then(|workspace| {
+                let key = workspace.resource_key().map_err(|_| WorkspaceFileError::Unavailable)?;
+                Ok((workspace.into_handle(), key))
+            });
+        match opened {
+            Ok((workspace, resource_key)) => Self {
+                workspace: Ok(workspace),
+                resource_key: Some(resource_key),
+            },
+            Err(error) => Self { workspace: Err(error), resource_key: None },
+        }
+    }
+
+    pub(super) fn resource_key(&self) -> Option<&str> {
+        self.resource_key.as_deref()
     }
 
     pub(super) fn read_text_with_limit(
@@ -56,9 +73,9 @@ impl WorkspaceFiles {
         limit: usize,
     ) -> Result<WorkspaceText, WorkspaceFileError> {
         let path = RelativePath::try_new(relative_path)?;
-        let workspace = self.resolve()?;
+        let workspace = self.workspace.as_ref().map_err(|error| *error)?;
         let (content, size) =
-            platform::read_file(&workspace, path.components(), limit.min(MAX_TEXT_BYTES))?;
+            platform::read_file(workspace, path.components(), limit.min(MAX_TEXT_BYTES))?;
         if content.contains(&0) {
             return Err(WorkspaceFileError::Binary);
         }
@@ -76,9 +93,9 @@ impl WorkspaceFiles {
         limit: usize,
     ) -> Result<WorkspaceBinary, WorkspaceFileError> {
         let path = RelativePath::try_new(relative_path)?;
-        let workspace = self.resolve()?;
+        let workspace = self.workspace.as_ref().map_err(|error| *error)?;
         let (content, size) =
-            platform::read_file(&workspace, path.components(), limit.min(MAX_BINARY_BYTES))?;
+            platform::read_file(workspace, path.components(), limit.min(MAX_BINARY_BYTES))?;
         Ok(WorkspaceBinary {
             name: path.into_string(),
             content,
@@ -88,8 +105,8 @@ impl WorkspaceFiles {
 
     pub(super) fn stat(&self, relative_path: &str) -> Result<WorkspaceEntry, WorkspaceFileError> {
         let path = RelativePath::try_new(relative_path)?;
-        let workspace = self.resolve()?;
-        let entry = platform::stat(&workspace, path.components())?;
+        let workspace = self.workspace.as_ref().map_err(|error| *error)?;
+        let entry = platform::stat(workspace, path.components())?;
         Ok(WorkspaceEntry {
             name: path.into_string(),
             kind: entry.kind,
@@ -119,8 +136,8 @@ impl WorkspaceFiles {
         components: &[String],
         include_hidden: bool,
     ) -> Result<Vec<WorkspaceEntry>, WorkspaceFileError> {
-        let workspace = self.resolve()?;
-        platform::list_dir(&workspace, components, include_hidden)
+        let workspace = self.workspace.as_ref().map_err(|error| *error)?;
+        platform::list_dir(workspace, components, include_hidden)
     }
 
     pub(super) fn write_text(
@@ -132,8 +149,8 @@ impl WorkspaceFiles {
             return Err(WorkspaceFileError::TooLarge);
         }
         let path = RelativePath::try_new(relative_path)?;
-        let workspace = self.resolve()?;
-        platform::write_file(&workspace, path.components(), content.as_bytes())?;
+        let workspace = self.workspace.as_ref().map_err(|error| *error)?;
+        platform::write_file(workspace, path.components(), content.as_bytes())?;
         Ok(WorkspaceText {
             name: path.into_string(),
             content: content.to_owned(),
@@ -141,11 +158,6 @@ impl WorkspaceFiles {
         })
     }
 
-    fn resolve(&self) -> Result<DirectoryHandle, WorkspaceFileError> {
-        open(self.selection.as_path())
-            .map(|workspace| workspace.into_handle())
-            .map_err(|_| WorkspaceFileError::Unavailable)
-    }
 }
 
 impl fmt::Debug for WorkspaceFiles {

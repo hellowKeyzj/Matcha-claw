@@ -6,6 +6,15 @@ import {
   isSafeNonNegativeInteger,
   sendLoopbackJson,
 } from '../client';
+import {
+  type Endpoint,
+  type FileTarget,
+  type SessionScope,
+  isEndpoint,
+  isFileRelativePath,
+  isFileTarget,
+  isSessionScope,
+} from './contract';
 
 const MAX_CONTENT_BYTES = 2 * 1024 * 1024;
 const ROUTE_PATH = '/api/workspace/files/write-text';
@@ -17,24 +26,14 @@ const UNAVAILABLE = {
 type WorkspaceWriteRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.writeText';
-  scope: Readonly<{
-    kind: 'session';
-    endpoint: Endpoint;
-    sessionKey: string;
-  }>;
-  target: Readonly<{ kind: 'workspace-file' }>;
+  scope: SessionScope;
+  target: FileTarget;
   input: Readonly<{
     endpoint: Endpoint;
     sessionKey: string;
     relativePath: string;
     content: string;
   }>;
-}>;
-
-type Endpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw';
-  runtimeInstanceId: 'local';
 }>;
 
 export type WorkspaceWriteTransportResponse = Readonly<{
@@ -86,22 +85,10 @@ function isWorkspaceWriteRequest(value: unknown): value is WorkspaceWriteRequest
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && value.operationId === 'files.writeText'
-    && isScope(value.scope)
-    && isTarget(value.target)
+    && isSessionScope(value.scope)
+    && isFileTarget(value.target)
     && isInput(value.input)
     && value.scope.sessionKey === value.input.sessionKey;
-}
-
-function isScope(value: unknown): value is WorkspaceWriteRequest['scope'] {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'endpoint', 'sessionKey'])
-    && value.kind === 'session'
-    && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.sessionKey);
-}
-
-function isTarget(value: unknown): boolean {
-  return isRecord(value) && hasExactKeys(value, ['kind']) && value.kind === 'workspace-file';
 }
 
 function isInput(value: unknown): value is WorkspaceWriteRequest['input'] {
@@ -112,22 +99,6 @@ function isInput(value: unknown): value is WorkspaceWriteRequest['input'] {
     && isFileRelativePath(value.relativePath)
     && typeof value.content === 'string'
     && Buffer.byteLength(value.content, 'utf8') <= MAX_CONTENT_BYTES;
-}
-
-function isFileRelativePath(value: unknown): value is string {
-  return isNonEmptyBoundedText(value)
-    && !value.startsWith('/')
-    && !value.startsWith('\\')
-    && !value.includes(':')
-    && value.split(/[\\/]/).every((component) => component !== '' && component !== '.' && component !== '..');
-}
-
-function isEndpoint(value: unknown): value is Endpoint {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && value.runtimeAdapterId === 'openclaw'
-    && value.runtimeInstanceId === 'local';
 }
 
 function isWorkspaceWriteResponse(value: unknown): boolean {

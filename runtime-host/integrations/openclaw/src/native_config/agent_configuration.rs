@@ -185,6 +185,7 @@ impl AgentConfiguration {
                 "revision": id_shape(Some(&revision)),
             }),
         );
+        let _transaction = self.gateway.config_transaction().await;
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => return SkillConfigurationOutcome::Unavailable(error),
@@ -326,6 +327,7 @@ impl AgentConfiguration {
                 "revision": id_shape(Some(&revision)),
             }),
         );
+        let _transaction = self.gateway.config_transaction().await;
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => return ToolConfigurationOutcome::Unavailable(error),
@@ -461,6 +463,7 @@ impl AgentConfiguration {
         if !valid_identifier(&agent_id) || !patch.is_valid() {
             return MutationOutcome::Rejected;
         }
+        let _transaction = self.gateway.config_transaction().await;
         let snapshot = match self.read_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(ReadFailure::Rejected) => return MutationOutcome::Rejected,

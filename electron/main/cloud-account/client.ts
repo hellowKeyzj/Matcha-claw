@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
+import { isTraceEnabled, startupTrace } from '../../utils/trace-logger';
 
 import type {
   AuthLogin2FARequest,
@@ -39,6 +40,13 @@ import type {
 
 const DEFAULT_CLOUD_BASE_URL = 'http://47.251.94.80:8080/api/v1';
 const REQUEST_TIMEOUT_MS = 30_000;
+let requestTraceSeq = 0;
+
+type CloudRequestTrace = Readonly<{
+  operation: 'public-settings' | 'refresh' | 'profile' | 'bootstrap';
+  seq: number;
+  startedAt: number;
+}>;
 
 type HttpMethod = 'GET' | 'POST';
 
@@ -272,8 +280,16 @@ function packageExtension(packageType: string | undefined): string {
 }
 
 async function requestCloud<T>(path: string, options: CloudRequestOptions = {}): Promise<T> {
+  const operation = !isTraceEnabled() ? undefined
+    : path === '/settings/public' ? 'public-settings' : path === '/auth/refresh' ? 'refresh'
+    : path === '/auth/me' ? 'profile' : path === '/client/bootstrap' ? 'bootstrap' : undefined;
+  const trace: CloudRequestTrace | undefined = operation ? { operation, seq: ++requestTraceSeq, startedAt: performance.now() } : undefined;
+  if (trace) startupTrace('cloud-account-client', 'request.start', () => ({ operation: trace.operation, seq: trace.seq }));
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => {
+    controller.abort();
+    if (trace) startupTrace('cloud-account-client', 'request.timeout', () => ({ operation: trace.operation, seq: trace.seq, elapsedMs: Math.round(performance.now() - trace.startedAt) }));
+  }, REQUEST_TIMEOUT_MS);
   try {
     const response = await fetch(`${cloudBaseUrl()}${path}`, {
       method: options.method ?? 'GET',
@@ -281,7 +297,8 @@ async function requestCloud<T>(path: string, options: CloudRequestOptions = {}):
       headers: requestHeaders(options),
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
     });
-    const payload = await readEnvelope<T>(response);
+    if (trace) startupTrace('cloud-account-client', 'fetch.headers', () => ({ operation: trace.operation, seq: trace.seq, status: response.status, elapsedMs: Math.round(performance.now() - trace.startedAt) }));
+    const payload = await readEnvelope<T>(response, trace);
     if (!response.ok || payload.code !== 0) {
       throw new CloudAccountClientError(
         response.status,
@@ -290,7 +307,11 @@ async function requestCloud<T>(path: string, options: CloudRequestOptions = {}):
         payload.reason,
       );
     }
+    if (trace) startupTrace('cloud-account-client', 'request.success', () => ({ operation: trace.operation, seq: trace.seq, status: response.status, elapsedMs: Math.round(performance.now() - trace.startedAt) }));
     return payload.data as T;
+  } catch (error) {
+    if (trace) startupTrace('cloud-account-client', 'request.error', () => ({ operation: trace.operation, seq: trace.seq, outcome: error instanceof CloudAccountClientError ? 'cloud-error' : controller.signal.aborted ? 'timeout' : 'network-error', ...(error instanceof CloudAccountClientError ? { status: error.status } : {}), elapsedMs: Math.round(performance.now() - trace.startedAt) }));
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
@@ -304,12 +325,16 @@ function requestHeaders(options: CloudRequestOptions): Record<string, string> {
   };
 }
 
-async function readEnvelope<T>(response: Response): Promise<CloudEnvelope<T>> {
+async function readEnvelope<T>(response: Response, trace?: CloudRequestTrace): Promise<CloudEnvelope<T>> {
+  const startedAt = trace ? performance.now() : 0;
+  if (trace) startupTrace('cloud-account-client', 'body.start', () => ({ operation: trace.operation, seq: trace.seq }));
   try {
     const value: unknown = await response.json();
+    if (trace) startupTrace('cloud-account-client', 'body.end', () => ({ operation: trace.operation, seq: trace.seq, outcome: 'decoded', status: response.status, elapsedMs: Math.round(performance.now() - startedAt) }));
     if (isRecord(value) && (typeof value.code === 'number' || typeof value.code === 'string')) return value as CloudEnvelope<T>;
     return { code: response.ok ? 0 : response.status, message: response.statusText, data: value as T };
-  } catch {
+  } catch (error) {
+    if (trace) startupTrace('cloud-account-client', 'body.end', () => ({ operation: trace.operation, seq: trace.seq, outcome: error instanceof SyntaxError ? 'decode-error' : 'body-error', status: response.status, elapsedMs: Math.round(performance.now() - startedAt) }));
     return { code: response.ok ? 0 : response.status, message: response.statusText };
   }
 }

@@ -1,10 +1,13 @@
 import { create } from 'zustand';
+import { useAccountStore } from '@/stores/account';
 import { hostApiFetch } from '@/lib/host-api';
 import { waitForSkillsMutation } from '@/lib/skills';
+import { AppError, normalizeAppError } from '@/lib/error-model';
+import { sealedSkillMutationError } from '@/lib/sealed-skills-error';
 import { runCloudPackageOperation } from '@/lib/cloud-package-call';
 import type { CloudPackageDownloadInput } from '@/types/cloud-package-operation';
 import type { CallReceipt } from '@/types/call-log';
-import type { SealedSkillCloudPackage, SealedSkillMetadata } from '@/types/skill';
+import type { SealedSkillCatalogIssue, SealedSkillCloudPackage, SealedSkillMetadata } from '@/types/skill';
 import type { CloudPackageListPage, CloudPackageVersion, InstalledCloudPackage, InstalledCloudPackageList } from '@/types/cloud-package';
 
 export const SEALED_SKILL_CLOUD_ENDPOINTS = {
@@ -24,6 +27,7 @@ type SealedSkillStatusEntry = SealedSkillMetadata;
 
 type SealedSkillsStatusResult = {
   skills?: SealedSkillStatusEntry[];
+  issues?: SealedSkillCatalogIssue[];
   error?: string | null;
 };
 
@@ -37,34 +41,38 @@ type SealedSkillCloudMutationResult = {
   success?: boolean;
   outcome?: 'accepted' | 'rejected' | 'unknown' | 'notFound' | 'canceled';
   package?: SealedSkillCloudPackage;
-  install?: { outcome?: 'accepted' | 'rejected' | 'unknown' | 'notFound'; skillKey?: string };
+  reason?: string;
+  install?: { outcome?: 'accepted' | 'rejected' | 'unknown' | 'notFound'; skillKey?: string; reason?: string };
   error?: string | null;
 };
 
 interface SealedSkillsState {
   skills: SealedSkillMetadata[];
+  issues: SealedSkillCatalogIssue[];
   cloudPackages: SealedSkillCloudPackage[];
   installedCloudPackages: InstalledCloudPackage[];
   myCloudPackages: CloudPackageVersion[];
   myCloudLoading: boolean;
-  myCloudError: string | null;
+  myCloudLoaded: boolean;
+  myCloudError: AppError | string | null;
   cloudPublishingByVersionId: Record<string, boolean>;
   loading: boolean;
   cloudLoading: boolean;
+  cloudLoaded: boolean;
   localPackageInstalling: boolean;
   exportingBySkillKey: Record<string, boolean>;
   uninstallingBySkillKey: Record<string, boolean>;
   cloudUploadingBySkillKey: Record<string, boolean>;
   cloudInstallingByPackageKey: Record<string, boolean>;
-  error: string | null;
-  cloudError: string | null;
+  error: AppError | string | null;
+  cloudError: AppError | string | null;
   fetchSealedSkills: () => Promise<void>;
   fetchCloudSkillPackages: () => Promise<void>;
   fetchMyCloudSkillPackages: () => Promise<void>;
-  publishCloudSkillPackage: (packageVersionId: string) => Promise<void>;
-  exportSkillPackage: (skillKey: string) => Promise<void>;
+  publishCloudSkillPackage: (packageVersionId: string) => Promise<{ refreshed: boolean } | undefined>;
+  exportSkillPackage: (skillKey: string) => Promise<{ refreshed: boolean; warning?: 'cleanup-failed' } | undefined>;
   uninstallSealedSkill: (skillKey: string) => Promise<void>;
-  uploadInstalledSkillPackageToCloud: (skillKey: string) => Promise<void>;
+  uploadInstalledSkillPackageToCloud: (skillKey: string) => Promise<{ refreshed: boolean; warning?: 'cleanup-failed' } | undefined>;
   installLocalSkillPackage: () => Promise<boolean>;
   downloadAndInstallCloudSkillPackage: (packageInfo: SealedSkillCloudPackage) => Promise<void>;
 }
@@ -116,13 +124,10 @@ function buildCloudPackageRequest(packageInfo: SealedSkillCloudPackage): CloudPa
   };
 }
 
-function assertCloudMutationAccepted(result: SealedSkillCloudMutationResult, fallbackError: string): void {
-  if (result.success === false || result.error) {
-    throw new Error(result.error || fallbackError);
-  }
+function assertCloudMutationAccepted(result: SealedSkillCloudMutationResult): void {
   const outcome = result.install?.outcome ?? result.outcome;
-  if (outcome && outcome !== 'accepted') {
-    throw new Error(fallbackError);
+  if (result.success === false || result.error || (outcome && outcome !== 'accepted')) {
+    throw sealedSkillMutationError({ outcome: outcome ?? 'rejected', reason: result.install?.reason ?? result.reason });
   }
 }
 
@@ -130,14 +135,24 @@ async function hostListCloudSkillPackages(): Promise<SealedSkillCloudPackagesRes
   return hostApiFetch<SealedSkillCloudPackagesResult>(SEALED_SKILL_CLOUD_ENDPOINTS.list);
 }
 
-async function hostUploadInstalledSkillPackageToCloud(skillKey: string): Promise<CloudPackageVersion> {
+async function hostUploadInstalledSkillPackageToCloud(skillKey: string): Promise<{ package: CloudPackageVersion; warning?: 'cleanup-failed' }> {
   const receipt = await hostApiFetch<CallReceipt>(SEALED_SKILL_CLOUD_ENDPOINTS.uploadInstalledPackage, {
     method: 'POST',
     body: JSON.stringify({ skillKey }),
   });
   const exported = await waitForSkillsMutation(receipt, 'sealedSkills.exportCloud', { skillKey });
-  if (exported.outcome !== 'accepted') throw new Error('Failed to export cloud skill package');
-  return runCloudPackageOperation('confirmSealedSkillUpload', { callId: receipt.callId });
+  const warning: 'cleanup-failed' | undefined = exported.outcome === 'partial' && exported.reason === 'cleanup-failed' ? 'cleanup-failed' : undefined;
+  if (exported.outcome !== 'accepted' && !warning) throw sealedSkillMutationError(exported);
+  try {
+    const uploaded = await runCloudPackageOperation('confirmSealedSkillUpload', { callId: receipt.callId });
+    return { package: uploaded, ...(warning ? { warning } : {}) };
+  } catch (error) {
+    if (!warning) throw error;
+    throw normalizeAppError(error, {
+      ...(error && typeof error === 'object' && 'status' in error && typeof error.status === 'number' ? { status: error.status } : {}),
+      exportWarning: warning,
+    });
+  }
 }
 
 async function hostInstallLocalSkillPackage(): Promise<SealedSkillCloudMutationResult> {
@@ -164,7 +179,7 @@ async function hostInstallCloudSkillPackage(packageInfo: SealedSkillCloudPackage
     || (installed.outcome === 'accepted' && confirmed.install.skillKey !== installed.skillKey)) {
     throw new Error('Invalid cloud skill install confirmation');
   }
-  return { ...response, install: confirmed.install };
+  return { ...response, install: { ...confirmed.install, reason: installed.reason } };
 }
 
 async function hostUninstallSealedSkill(skillKey: string) {
@@ -175,16 +190,40 @@ async function hostUninstallSealedSkill(skillKey: string) {
   return waitForSkillsMutation(receipt, 'sealedSkills.uninstall', { skillKey });
 }
 
+let cloudAccountRevision = 0;
+let cloudFetchTask: Promise<void> | null = null;
+let myCloudFetchTask: Promise<void> | null = null;
+
+function clearCloudAccountPackages(error: AppError | null = null): void {
+  cloudAccountRevision += 1;
+  cloudFetchTask = null;
+  myCloudFetchTask = null;
+  useSealedSkillsStore.setState({
+    cloudPackages: [],
+    installedCloudPackages: [],
+    myCloudPackages: [],
+    cloudLoading: false,
+    myCloudLoading: false,
+    cloudLoaded: error !== null,
+    myCloudLoaded: error !== null,
+    cloudError: error,
+    myCloudError: error,
+  });
+}
+
 export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
   skills: [],
+  issues: [],
   cloudPackages: [],
   installedCloudPackages: [],
   myCloudPackages: [],
   myCloudLoading: false,
+  myCloudLoaded: false,
   myCloudError: null,
   cloudPublishingByVersionId: {},
   loading: false,
   cloudLoading: false,
+  cloudLoaded: false,
   localPackageInstalling: false,
   exportingBySkillKey: {},
   uninstallingBySkillKey: {},
@@ -199,55 +238,97 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
       const result = await hostApiFetch<SealedSkillsStatusResult>('/api/sealed-skills/status');
       set({
         skills: Array.isArray(result.skills) ? result.skills.map(toSealedSkillMetadata) : [],
+        issues: result.issues ?? [],
         error: result.error ?? null,
       });
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      set({ error: normalizeAppError(error) });
     } finally {
       set({ loading: false });
     }
   },
 
-  fetchCloudSkillPackages: async () => {
-    set({ cloudLoading: true, cloudError: null });
-    try {
-      const [result, installed] = await Promise.all([
-        hostListCloudSkillPackages(),
-        hostApiFetch<InstalledCloudPackageList>('/api/packages/installed'),
-      ]);
-      set({
-        installedCloudPackages: installed.packages,
-        cloudPackages: Array.isArray(result.items)
-          ? result.items.map(toSealedSkillCloudPackage)
-          : Array.isArray(result.packages) ? result.packages : [],
-        cloudError: result.error ?? null,
-      });
-    } catch {
-      set({ cloudPackages: [], installedCloudPackages: [], cloudError: SEALED_SKILL_CLOUD_UNAVAILABLE_ERROR });
-    } finally {
-      set({ cloudLoading: false });
-    }
+  fetchCloudSkillPackages: () => {
+    if (cloudFetchTask) return cloudFetchTask;
+    const revision = cloudAccountRevision;
+    set({ cloudLoading: true });
+    cloudFetchTask = Promise.resolve().then(async () => {
+      try {
+        const [result, installed] = await Promise.all([
+          hostListCloudSkillPackages(),
+          hostApiFetch<InstalledCloudPackageList>('/api/packages/installed'),
+        ]);
+        if (revision !== cloudAccountRevision) return;
+        if (result.error) {
+          set({ cloudError: result.error });
+          return;
+        }
+        set({
+          installedCloudPackages: installed.packages,
+          cloudPackages: Array.isArray(result.items)
+            ? result.items.map(toSealedSkillCloudPackage)
+            : Array.isArray(result.packages) ? result.packages : [],
+          cloudError: null,
+        });
+      } catch (error) {
+        if (revision !== cloudAccountRevision) return;
+        const failure = normalizeAppError(error);
+        if (failure.details?.status === 401) clearCloudAccountPackages(failure);
+        else set({ cloudError: failure });
+      } finally {
+        if (revision === cloudAccountRevision) {
+          cloudFetchTask = null;
+          set({ cloudLoading: false, cloudLoaded: true });
+        }
+      }
+    });
+    return cloudFetchTask;
   },
 
-  fetchMyCloudSkillPackages: async () => {
-    set({ myCloudLoading: true, myCloudError: null });
-    try {
-      const result = await hostApiFetch<CloudPackageListPage>(SEALED_SKILL_CLOUD_ENDPOINTS.mine);
-      set({ myCloudPackages: result.items });
-    } catch {
-      set({ myCloudError: SEALED_SKILL_CLOUD_UNAVAILABLE_ERROR });
-    } finally {
-      set({ myCloudLoading: false });
-    }
+  fetchMyCloudSkillPackages: () => {
+    if (myCloudFetchTask) return myCloudFetchTask;
+    const revision = cloudAccountRevision;
+    set({ myCloudLoading: true });
+    myCloudFetchTask = Promise.resolve().then(async () => {
+      try {
+        const result = await hostApiFetch<CloudPackageListPage>(SEALED_SKILL_CLOUD_ENDPOINTS.mine);
+        if (revision !== cloudAccountRevision) return;
+        set((state) => ({
+          myCloudPackages: result.items.map((item) => {
+            const published = state.cloudPublishingByVersionId[item.packageVersionId]
+              && state.myCloudPackages.find((current) => current.packageVersionId === item.packageVersionId && current.status === 'published');
+            return item.status === 'draft' && published ? published : item;
+          }),
+          myCloudError: null,
+        }));
+      } catch (error) {
+        if (revision !== cloudAccountRevision) return;
+        const failure = normalizeAppError(error);
+        if (failure.details?.status === 401) clearCloudAccountPackages(failure);
+        else set({ myCloudError: failure });
+      } finally {
+        if (revision === cloudAccountRevision) {
+          myCloudFetchTask = null;
+          set({ myCloudLoading: false, myCloudLoaded: true });
+        }
+      }
+    });
+    return myCloudFetchTask;
   },
 
   publishCloudSkillPackage: async (packageVersionId) => {
     if (get().cloudPublishingByVersionId[packageVersionId]) return;
     set((state) => ({ cloudPublishingByVersionId: { ...state.cloudPublishingByVersionId, [packageVersionId]: true } }));
+    const revision = cloudAccountRevision;
     try {
       const published = await hostApiFetch<CloudPackageVersion>(`/api/packages/${encodeURIComponent(packageVersionId)}/publish`, { method: 'POST' });
+      if (revision !== cloudAccountRevision) return;
       set((state) => ({ myCloudPackages: state.myCloudPackages.map((item) => item.packageVersionId === packageVersionId ? published : item) }));
-      await get().fetchCloudSkillPackages();
+      await Promise.all([myCloudFetchTask, cloudFetchTask]);
+      if (revision !== cloudAccountRevision) return;
+      await Promise.all([get().fetchMyCloudSkillPackages(), get().fetchCloudSkillPackages()]);
+      if (revision !== cloudAccountRevision) return;
+      return { refreshed: get().myCloudError === null && get().cloudError === null };
     } finally {
       set((state) => {
         const next = { ...state.cloudPublishingByVersionId };
@@ -265,7 +346,6 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
 
     set((state) => ({
       exportingBySkillKey: { ...state.exportingBySkillKey, [normalizedSkillKey]: true },
-      error: null,
     }));
 
     try {
@@ -274,13 +354,12 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
         body: JSON.stringify({ skillKey: normalizedSkillKey }),
       });
       const result = await waitForSkillsMutation(receipt, 'sealedSkills.export', { skillKey: normalizedSkillKey });
-      if (result.outcome !== 'accepted') {
-        throw new Error('Failed to export skill package');
+      const warning: 'cleanup-failed' | undefined = result.outcome === 'partial' && result.reason === 'cleanup-failed' ? 'cleanup-failed' : undefined;
+      if (result.outcome !== 'accepted' && !warning) {
+        throw sealedSkillMutationError(result);
       }
       await get().fetchSealedSkills();
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
-      throw error;
+      return { refreshed: get().error === null, ...(warning ? { warning } : {}) };
     } finally {
       set((state) => {
         const nextExporting = { ...state.exportingBySkillKey };
@@ -298,19 +377,16 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
 
     set((state) => ({
       uninstallingBySkillKey: { ...state.uninstallingBySkillKey, [normalizedSkillKey]: true },
-      error: null,
     }));
 
     try {
       const result = await hostUninstallSealedSkill(normalizedSkillKey);
       if (result.outcome !== 'removed') {
-        throw new Error('Failed to uninstall skill package');
+        throw sealedSkillMutationError(result);
       }
       await get().fetchSealedSkills();
+      await cloudFetchTask;
       await get().fetchCloudSkillPackages();
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
-      throw error;
     } finally {
       set((state) => {
         const nextUninstalling = { ...state.uninstallingBySkillKey };
@@ -330,8 +406,10 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
       cloudUploadingBySkillKey: { ...state.cloudUploadingBySkillKey, [normalizedSkillKey]: true },
     }));
     try {
-      await hostUploadInstalledSkillPackageToCloud(normalizedSkillKey);
+      const result = await hostUploadInstalledSkillPackageToCloud(normalizedSkillKey);
+      await myCloudFetchTask;
       await get().fetchMyCloudSkillPackages();
+      return { refreshed: get().myCloudError === null, ...(result.warning ? { warning: result.warning } : {}) };
     } finally {
       set((state) => {
         const nextUploading = { ...state.cloudUploadingBySkillKey };
@@ -346,18 +424,15 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
       return false;
     }
 
-    set({ localPackageInstalling: true, error: null });
+    set({ localPackageInstalling: true });
     try {
       const result = await hostInstallLocalSkillPackage();
       if (result.outcome === 'canceled') {
         return false;
       }
-      assertCloudMutationAccepted(result, 'Failed to install skill package');
+      assertCloudMutationAccepted(result);
       await get().fetchSealedSkills();
       return true;
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
-      throw error;
     } finally {
       set({ localPackageInstalling: false });
     }
@@ -375,8 +450,9 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
 
     try {
       const result = await hostInstallCloudSkillPackage(packageInfo);
-      assertCloudMutationAccepted(result, 'Failed to install cloud skill package');
+      assertCloudMutationAccepted(result);
       await get().fetchSealedSkills();
+      await cloudFetchTask;
       await get().fetchCloudSkillPackages();
     } finally {
       set((state) => {
@@ -387,3 +463,9 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
     }
   },
 }));
+
+useAccountStore.subscribe((account, previous) => {
+  const sessionInvalidated = (account.status === 'signedOut' || account.status === 'requires2fa')
+    && account.status !== previous.status;
+  if (account.user?.id !== previous.user?.id || sessionInvalidated) clearCloudAccountPackages();
+});

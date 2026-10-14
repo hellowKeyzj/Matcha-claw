@@ -15,6 +15,7 @@ export type SkillsMutationResult = {
   slug?: string;
   version?: string;
   invalidKeys?: string[];
+  reason?: string;
 };
 
 async function skillsTerminal(receipt: unknown, command: string, input: Record<string, unknown>, options?: WaitForCallOptions<'skills'>): Promise<CallRecord<'skills'>> {
@@ -83,8 +84,11 @@ export async function waitForSkillsMutation(
   }
   let outcome: SkillsMutationResult['outcome'];
   if (call.status === 'unknown') outcome = 'unknown';
-  else if (call.status === 'rejected' && detail.outcome === 'rejected') outcome = 'rejected';
+  else if ((call.status === 'rejected' || call.status === 'failed') && detail.outcome === 'rejected') outcome = 'rejected';
   else if (call.status === 'failed' && detail.outcome === 'notFound') outcome = 'notFound';
+  else if (call.status === 'failed' && detail.outcome === 'partial' && detail.reason === 'cleanup-failed'
+    && (command === 'sealedSkills.export' || (command === 'sealedSkills.exportCloud'
+      && detail.resultReady === true && detail.result === 'partial'))) outcome = 'partial';
   else if (call.status === 'failed') outcome = 'unknown';
   else if (call.status === 'succeeded' && detail.outcome === 'removed' && ['skills.uninstall', 'sealedSkills.uninstall'].includes(command)) outcome = 'removed';
   else if (call.status === 'succeeded' && (detail.outcome === 'accepted'
@@ -96,6 +100,7 @@ export async function waitForSkillsMutation(
     ...(detail.skillKey === undefined ? {} : { skillKey: detail.skillKey }),
     ...(detail.slug === undefined ? {} : { slug: detail.slug }),
     ...(detail.version === undefined ? {} : { version: detail.version }),
+    ...(detail.reason === undefined ? {} : { reason: detail.reason }),
   };
 }
 

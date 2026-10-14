@@ -1422,6 +1422,18 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
+    pub(crate) async fn workflow_run_team(
+        &self,
+        run_id: GraphRunId,
+    ) -> Result<Option<TeamId>, RequestAdmissionClosed> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        self.inner
+            .send_query(OrganizationQuery::WorkflowRunTeam { run_id, reply })
+            .await
+            .map_err(closed)?;
+        receiver.await.map_err(|_| closed_error())
+    }
+
     pub(crate) async fn native_terminal_target(
         &self,
         delivery_id: DeliveryId,

@@ -23,12 +23,12 @@ use crate::{
 /// workspaces, config snapshots, history messages, and protocol DTOs remain inside
 /// the OpenClaw integration.
 pub struct OpenClawTeamNativeEffects<'gateway> {
-    gateway: &'gateway mut OpenClawGateway,
+    gateway: &'gateway OpenClawGateway,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl<'gateway> OpenClawTeamNativeEffects<'gateway> {
-    pub fn new(gateway: &'gateway mut OpenClawGateway) -> Self {
+    pub fn new(gateway: &'gateway OpenClawGateway) -> Self {
         Self { gateway, cancellation: tokio_util::sync::CancellationToken::new() }
     }
 
@@ -62,7 +62,7 @@ impl<'gateway> OpenClawTeamNativeEffects<'gateway> {
                 )
             });
         };
-        let gateway = &mut *self.gateway;
+        let gateway = self.gateway;
         let cancellation = self.cancellation.clone();
         Box::pin(async move {
             match gateway
@@ -152,7 +152,7 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
                 return Box::pin(async move { RoleSessionAbortOutcome::Failed { failure } });
             }
         };
-        let gateway = &mut *self.gateway;
+        let gateway = self.gateway;
         let cancellation = self.cancellation.clone();
         Box::pin(async move {
             map_abort(
@@ -175,7 +175,7 @@ impl TeamNativeEffectsPort for OpenClawTeamNativeEffects<'_> {
                 return Box::pin(async move { RoleSessionDeleteOutcome::Failed { failure } });
             }
         };
-        let gateway = &mut *self.gateway;
+        let gateway = self.gateway;
         let cancellation = self.cancellation.clone();
         Box::pin(async move {
             map_delete(
@@ -216,7 +216,7 @@ fn scoped_session_key(receipt: &RoleSessionReceipt) -> Result<SessionKey, Native
     SessionKey::try_new(key.as_str().to_owned()).map_err(|_| NativeEffectFailure::InvalidInput)
 }
 
-fn agent_scoped_session_key(
+pub(super) fn agent_scoped_session_key(
     receipt: &RoleSessionReceipt,
 ) -> Result<AgentScopedSessionKey, NativeEffectFailure> {
     let agent = AgentId::try_new(receipt.agent().as_str().to_owned())

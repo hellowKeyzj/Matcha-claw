@@ -225,7 +225,10 @@ impl FleetHandle {
         selector: crate::owner::actor::FleetTerminalTargetSelector,
         dimensions: fleet::terminal::Dimensions,
     ) -> Result<
-        Result<crate::owner::actor::FleetTerminalOpenResult, fleet::terminal::TerminalSessionError>,
+        Result<
+            crate::owner::actor::FleetTerminalOpenResult,
+            crate::owner::actor::FleetTerminalOpenError,
+        >,
         RequestAdmissionClosed,
     > {
         let (reply, reply_rx) = oneshot::channel();

@@ -727,14 +727,6 @@ impl SessionShared {
             SessionQuery::GetSession { session_key, reply } => {
                 crate::call::reply(call.as_ref(), reply, self.get_session_view(&session_key).await).await;
             }
-            SessionQuery::Catalog { command, reply } => {
-                let outcome = self.handle_session_catalog(command).await;
-                crate::call::reply(call.as_ref(), reply, outcome).await;
-            }
-            SessionQuery::History { command, reply } => {
-                let outcome = self.handle_session_history(command).await;
-                crate::call::reply(call.as_ref(), reply, outcome).await;
-            }
             query => query.send_unavailable(),
         }
     }

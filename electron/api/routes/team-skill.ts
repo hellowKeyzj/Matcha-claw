@@ -13,7 +13,8 @@ const UNAVAILABLE = {
 
 type TeamSkillRequest =
   | Readonly<{ operation: 'team.skill.authorize'; packageRoot: string }>
-  | Readonly<{ operation: 'team.skill.validate' | 'team.skill.dependency-plan'; selectionId: string }>
+  | Readonly<{ operation: 'team.skill.validate'; selectionId: string }>
+  | Readonly<{ operation: 'team.skill.dependency-plan'; selectionId: string }>
   | Readonly<{
       operation: 'team.skill.materialize';
       selectionId: string;

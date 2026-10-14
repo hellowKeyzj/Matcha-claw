@@ -221,6 +221,7 @@ pub(crate) enum WikiCallTaskState {
 
 #[derive(Clone)]
 pub(crate) enum WikiWorkflowSummary {
+    ProjectImport,
     Selection,
     Question,
     Lint,
@@ -420,18 +421,6 @@ impl CallReply<crate::WikiMissingPageReceipt> {
     ) {
         self.send_result(result, |value| {
             crate::call_result::WikiCallResult::MissingPageCreate(value.clone())
-        })
-        .await;
-    }
-}
-
-impl CallReply<crate::WikiProjectsReceipt> {
-    pub(crate) async fn send_project_imported(
-        self,
-        result: Result<crate::WikiProjectsReceipt, WikiFailure>,
-    ) {
-        self.send_result(result, |value| {
-            crate::call_result::WikiCallResult::ProjectImport(value.clone())
         })
         .await;
     }

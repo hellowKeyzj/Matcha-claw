@@ -73,7 +73,8 @@ export async function handleBillingRoutes(
       sendJson(res, 400, INVALID_VERIFY);
       return true;
     }
-    return sendBillingResult(res, ctx, (service) => service.verifyPaymentOrder(body.outTradeNo));
+    const outTradeNo = body.outTradeNo;
+    return sendBillingResult(res, ctx, (service) => service.verifyPaymentOrder(outTradeNo));
   }
 
   const orderId = matchOrderId(url.pathname);

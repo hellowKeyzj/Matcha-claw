@@ -22,6 +22,18 @@ export type HostApiProxyFailureEnvelope = {
 
 export type HostApiProxyEnvelope = HostApiProxySuccessEnvelope | HostApiProxyFailureEnvelope;
 
+export const HOST_API_STARTUP_TRACE_HEADER = 'X-MatchaClaw-Startup-Trace';
+export const HOST_API_STARTUP_PATHS: ReadonlySet<string> = new Set([
+  '/api/account/public-settings',
+  '/api/account/session',
+  '/api/provider-accounts',
+  '/api/gateway/status',
+  '/api/runtime-host/status',
+  '/api/runtime-endpoints/list',
+  '/api/capabilities/list',
+  '/api/license/gate',
+]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

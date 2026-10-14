@@ -8,7 +8,7 @@ use platform::call::{
     CallAppend, CallBegin, CallChanged, CallHistory, CallId, CallLogError, CallPage, CallQuery,
     CallRecord, CallStatus, CallTransition, ErasedCallDetail, MAX_PAGE_SIZE,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 pub(crate) struct Store {
     connection: Connection,
@@ -211,6 +211,49 @@ impl Store {
         }))
     }
 
+    pub(crate) fn close(self) -> Result<(), CallLogError> {
+        self.connection
+            .close()
+            .map_err(|_| CallLogError::PersistFailed)
+    }
+}
+
+pub(crate) struct ReadConnection {
+    connection: Connection,
+}
+
+impl ReadConnection {
+    pub(crate) fn open(state_dir: &Path) -> Result<Self, CallLogError> {
+        let connection = Connection::open_with_flags(
+            state_dir.join("call-log.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(persist_error)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(persist_error)?;
+        Ok(Self { connection })
+    }
+
+    pub(crate) fn snapshot(&mut self) -> Result<Snapshot<'_>, CallLogError> {
+        Ok(Snapshot {
+            connection: self.connection.transaction().map_err(persist_error)?,
+        })
+    }
+
+    pub(crate) fn close(self) -> Result<(), CallLogError> {
+        self.connection
+            .close()
+            .map_err(|_| CallLogError::PersistFailed)
+    }
+}
+
+/// A single request observes one committed WAL snapshot, including cursor/existence lookups.
+pub(crate) struct Snapshot<'connection> {
+    connection: Transaction<'connection>,
+}
+
+impl Snapshot<'_> {
     pub(crate) fn get(&self, call_id: &CallId) -> Result<CallRecord, CallLogError> {
         let row = self.connection.query_row(
             "SELECT call_id,module,command,status,start,end,revision,detail FROM calls WHERE call_id=?1",
@@ -331,12 +374,6 @@ impl Store {
             None
         };
         Ok(CallHistory { items, next })
-    }
-
-    pub(crate) fn close(self) -> Result<(), CallLogError> {
-        self.connection
-            .close()
-            .map_err(|_| CallLogError::PersistFailed)
     }
 }
 

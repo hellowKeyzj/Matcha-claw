@@ -33,16 +33,24 @@ impl ReadinessProbe for OpenClawReadiness {
             eprintln!("[startup-trace] source=openclaw-launch phase=process-start stage=activated");
         }
         let client = Arc::clone(&self.client);
-        Box::pin(wait_for_gateway_stability(
-            cancellation,
-            move || {
-                let client = Arc::clone(&client);
-                async move { client.http_ready().await }
-            },
-            Instant::now() + STARTUP_PROBE_DEADLINE,
-            STARTUP_PROBE_TIMEOUT,
-            STARTUP_PROBE_RETRY_DELAY,
-        ))
+        let deadline = Instant::now() + STARTUP_PROBE_DEADLINE;
+        Box::pin(async move {
+            let readiness = wait_for_gateway_stability(
+                cancellation,
+                || {
+                    let client = Arc::clone(&client);
+                    async move { client.http_ready().await }
+                },
+                deadline,
+                STARTUP_PROBE_TIMEOUT,
+                STARTUP_PROBE_RETRY_DELAY,
+            )
+            .await;
+            if readiness == ReadinessResult::Ready {
+                client.ensure_control_supervision().await;
+            }
+            readiness
+        })
     }
 }
 

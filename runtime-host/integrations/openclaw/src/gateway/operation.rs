@@ -1,4 +1,33 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{Arc, Mutex as StdMutex, Weak, atomic::{AtomicU64, Ordering}},
+};
+
+use tokio::sync::{Mutex, OwnedMutexGuard};
+
+#[derive(Default)]
+pub(crate) struct NativeTransactions<K> {
+    locks: StdMutex<HashMap<K, Weak<Mutex<()>>>>,
+}
+
+impl<K: Eq + Hash> NativeTransactions<K> {
+    pub(crate) async fn lock(&self, key: K) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.locks.lock().expect("native transaction registry lock poisoned");
+            locks.retain(|_, lock| lock.strong_count() != 0);
+            match locks.get(&key).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    locks.insert(key, Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        lock.lock_owned().await
+    }
+}
 
 use crate::gateway::{
     client::{GatewayClient, GatewayClientError},

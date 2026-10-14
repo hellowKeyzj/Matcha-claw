@@ -23,8 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 pub use ports::{
     ClawHubSearchPort, ClawHubSearchResult, SealedResourceRead, SealedSkillCatalog,
-    SealedSkillCatalogEntry, SealedSkillError, SealedSkillPackageExport, SealedSkillStorePort,
-    SkillRuntimeOps, SkillsPort,
+    SealedSkillCatalogEntry, SealedSkillError, SealedSkillExport, SealedSkillPackageExport,
+    SealedSkillStorePort, SkillRuntimeOps, SkillsPort,
 };
 
 const MODULE_ID: ModuleId = ModuleId::new("skills");
@@ -80,18 +80,20 @@ impl SkillsModule {
     pub(crate) async fn submit_operation<F>(
         &self,
         call: operation::RecordedCall,
+        effect: operation::Effect,
         operation: F,
     ) -> Result<CallReceipt, CallLogError>
     where
         F: std::future::Future<Output = platform::loopback::Response> + Send + 'static,
     {
-        self.submit_cancellable_operation(call, move |_| operation)
+        self.submit_cancellable_operation(call, effect, move |_| operation)
             .await
     }
 
     pub(crate) async fn submit_cancellable_operation<F, U>(
         &self,
         call: operation::RecordedCall,
+        effect: operation::Effect,
         operation: F,
     ) -> Result<CallReceipt, CallLogError>
     where
@@ -102,7 +104,7 @@ impl SkillsModule {
         self.operations
             .lock()
             .await
-            .submit(call, None, operation)
+            .submit(call, effect, None, operation)
             .await?;
         admission.accepted().await
     }
@@ -110,6 +112,7 @@ impl SkillsModule {
     pub(crate) async fn submit_result<F>(
         &self,
         call: operation::RecordedCall,
+        effect: operation::Effect,
         access: result::ResultAccess,
         budget: usize,
         operation: F,
@@ -124,7 +127,7 @@ impl SkillsModule {
         let results = operations.results.clone();
         let call_id = admission.context.id().clone();
         operations
-            .submit(call, Some((access, budget)), move |_| async move {
+            .submit(call, effect, Some((access, budget)), move |_| async move {
                 match operation.await {
                     Ok(result) => {
                         let response = result.response();
@@ -196,21 +199,66 @@ impl SkillsModule {
         self.sealed.sealed_catalog()
     }
 
-    pub fn export_sealed_skill_package(
+    pub async fn export_sealed_skill_package(
         &self,
         skill_key: String,
-    ) -> Result<ports::SealedSkillCatalogEntry, ports::SealedSkillError> {
-        self.sealed.export_sealed_skill_package(skill_key)
+    ) -> Result<ports::SealedSkillExport, ports::SealedSkillError> {
+        let directory = self.skill_directory(&skill_key).await?;
+        let sealed = Arc::clone(&self.sealed);
+        tokio::task::spawn_blocking(move || {
+            sealed.export_sealed_skill_package(skill_key, directory)
+        })
+        .await
+        .map_err(|_| ports::SealedSkillError::Unknown)?
     }
 
-    pub fn export_cloud_sealed_skill_package(
+    pub async fn export_cloud_sealed_skill_package(
         &self,
         skill_key: String,
         cloud_public_key: String,
         cloud_key_id: String,
     ) -> Result<ports::SealedSkillPackageExport, ports::SealedSkillError> {
-        self.sealed
-            .export_cloud_sealed_skill_package(skill_key, cloud_public_key, cloud_key_id)
+        let directory = self.skill_directory(&skill_key).await?;
+        let sealed = Arc::clone(&self.sealed);
+        tokio::task::spawn_blocking(move || {
+            sealed.export_cloud_sealed_skill_package(
+                skill_key,
+                directory,
+                cloud_public_key,
+                cloud_key_id,
+            )
+        })
+        .await
+        .map_err(|_| ports::SealedSkillError::Unknown)?
+    }
+
+    async fn skill_directory(&self, skill_key: &str) -> Result<PathBuf, ports::SealedSkillError> {
+        let skill_key = skill_key.trim();
+        let status::Outcome::Available(catalog) = self
+            .skills
+            .skill_status()
+            .await
+            .map_err(|_| ports::SealedSkillError::Unknown)?
+        else {
+            return Err(ports::SealedSkillError::Unknown);
+        };
+        let entry = catalog
+            .entries
+            .into_iter()
+            .find(|entry| entry.key == skill_key)
+            .ok_or(ports::SealedSkillError::NotFound)?;
+        if entry.bundled == Some(true)
+            || matches!(
+                entry.source.as_deref(),
+                Some("bundled" | "openclaw-bundled" | "matcha-sealed")
+            )
+        {
+            return Err(ports::SealedSkillError::Rejected);
+        }
+        entry
+            .base_dir
+            .map(PathBuf::from)
+            .ok_or(ports::SealedSkillError::NotFound)
     }
 
     pub fn install_sealed_skill(

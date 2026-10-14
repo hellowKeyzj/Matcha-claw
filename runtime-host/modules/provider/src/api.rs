@@ -894,12 +894,12 @@ impl ProviderQuery {
             | Self::ListModels { .. }
             | Self::SelectableModels { .. }
             | Self::ListRouting { .. }
+            | Self::TextGenerationModelLimits { .. }
             | Self::GenerateText { .. } => QueryRoute::Direct,
             Self::SelectSessionModel { .. }
             | Self::SelectMatchaSessionModelRuntime { .. }
             | Self::AcceptSessionRuntimeModels { .. }
-            | Self::SelectSessionModelRebound { .. }
-            | Self::TextGenerationModelLimits { .. } => QueryRoute::Global,
+            | Self::SelectSessionModelRebound { .. } => QueryRoute::Global,
         }
     }
 }

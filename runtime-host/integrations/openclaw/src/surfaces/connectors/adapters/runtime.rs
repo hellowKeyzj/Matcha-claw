@@ -55,8 +55,8 @@ impl ConnectorOps for OpenClawDriver {
         >,
     > {
         Box::pin(async move {
-            let mut gateway = self.gateway.lock().await;
-            crate::surfaces::connectors::observe_mcp_server_status(&mut *gateway, session_key).await
+            let gateway = self.gateway.as_ref();
+            crate::surfaces::connectors::observe_mcp_server_status(gateway, session_key).await
         })
     }
 
@@ -70,9 +70,9 @@ impl ConnectorOps for OpenClawDriver {
         Result<(), ::connectors::ports::ConnectorOperationFailure>,
     > {
         Box::pin(async move {
-            let mut gateway = self.gateway.lock().await;
+            let gateway = self.gateway.as_ref();
             crate::surfaces::connectors::set_mcp_session_server_enabled(
-                &mut *gateway,
+                gateway,
                 session_key,
                 server_name,
                 enabled,

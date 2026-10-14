@@ -24,8 +24,6 @@ impl RuntimeControlOps for OpenClawDriver {
             let gateway = if running {
                 Some(
                     gateway
-                        .lock()
-                        .await
                         .tail_logs(cursor, 500, 250_000)
                         .await
                         .map_err(|_| RuntimeControlFailure::Unavailable)?,

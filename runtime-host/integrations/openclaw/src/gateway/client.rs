@@ -35,6 +35,7 @@ use super::{
     delivery::{DispatcherError, MutationDelivery},
     dispatcher::Dispatcher,
     observation::{Observations, OrderedContext, identity_key},
+    operation::NativeTransactions,
     wire,
 };
 
@@ -68,7 +69,7 @@ struct ControlDispatcher {
     epoch: Option<super::ingress::GatewayEpoch>,
     receive_task: Mutex<Option<OwnedTask<()>>>,
     supports_goal: bool,
-    metadata_subscribed: AtomicBool,
+    metadata_subscribed: Mutex<bool>,
 }
 
 impl ControlDispatcher {
@@ -345,6 +346,9 @@ pub struct GatewayClient {
     metadata: GatewayClientMetadata,
     control_profile: Arc<GatewayControlProfile>,
     control_state: Arc<Mutex<GatewayControlConnectionState>>,
+    config_writes: Arc<Mutex<()>>,
+    team_lifecycles: Arc<NativeTransactions<(String, String)>>,
+    role_sessions: Arc<NativeTransactions<String>>,
     control_readiness: watch::Sender<u64>,
     control_readiness_sequence: Arc<AtomicU64>,
     control_supervisor: Arc<StdMutex<Option<GatewayControlSupervisor>>>,
@@ -400,6 +404,9 @@ impl GatewayClient {
             metadata,
             control_profile,
             control_state,
+            config_writes: Arc::new(Mutex::new(())),
+            team_lifecycles: Arc::new(NativeTransactions::default()),
+            role_sessions: Arc::new(NativeTransactions::default()),
             control_readiness,
             control_readiness_sequence: Arc::new(AtomicU64::new(0)),
             control_supervisor: Arc::new(StdMutex::new(None)),
@@ -410,6 +417,42 @@ impl GatewayClient {
             event_ingest: None,
             observations: Observations::new(),
         }
+    }
+
+    pub(crate) async fn config_transaction(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.config_writes.lock().await
+    }
+
+    pub(crate) async fn team_lifecycle(
+        &self,
+        endpoint: &str,
+        team: &str,
+        cancellation: &CancellationToken,
+    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => None,
+            guard = self.team_lifecycles.lock((endpoint.to_owned(), team.to_owned())) => Some(guard),
+        }
+    }
+
+    pub(crate) async fn role_session_transactions(
+        &self,
+        mut keys: Vec<String>,
+        cancellation: &CancellationToken,
+    ) -> Option<Vec<tokio::sync::OwnedMutexGuard<()>>> {
+        keys.sort_unstable();
+        keys.dedup();
+        let mut guards = Vec::with_capacity(keys.len());
+        for key in keys {
+            let guard = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return None,
+                guard = self.role_sessions.lock(key) => guard,
+            };
+            guards.push(guard);
+        }
+        Some(guards)
     }
 
     pub(crate) fn supports_goal(&self) -> bool {
@@ -518,11 +561,14 @@ impl GatewayClient {
 
     async fn describe_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
-        if control.supports_goal && !control.metadata_subscribed.load(Ordering::Acquire) {
-            let request = wire::sessions_subscribe_request(next_request_id("sessions-subscribe")).map_err(|_| RuntimeOperationFailure::Unknown)?;
-            let response = control.dispatcher.ordered_query(request).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
-            wire::decode_sessions_subscribe(response).map_err(|_| RuntimeOperationFailure::Unknown)?;
-            control.metadata_subscribed.store(true, Ordering::Release);
+        if control.supports_goal {
+            let mut subscribed = control.metadata_subscribed.lock().await;
+            if !*subscribed {
+                let request = wire::sessions_subscribe_request(next_request_id("sessions-subscribe")).map_err(|_| RuntimeOperationFailure::Unknown)?;
+                let response = control.dispatcher.ordered_query(request).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
+                wire::decode_sessions_subscribe(response).map_err(|_| RuntimeOperationFailure::Unknown)?;
+                *subscribed = true;
+            }
         }
         let id = next_request_id("sessions-describe");
         let key = SessionKey::try_new(identity.session_key.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
@@ -703,7 +749,7 @@ impl GatewayClient {
             RuntimeOperationFailure::Unavailable
         })?;
         let native_wait_started = trace::enabled().then(std::time::Instant::now);
-        let _native = self.observations.native.lock().await;
+        let _native = self.observations.lock_native(identity).await;
         let native_wait_elapsed_ms = native_wait_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
         if trace::enabled() {
             trace::log_unscoped("runtime.openclaw.observation.sync.native_acquired", || serde_json::json!({
@@ -758,7 +804,7 @@ impl GatewayClient {
             trace::log_unscoped("runtime.openclaw.observation.restart.request", || serde_json::json!({
                 "identity": sessions_module::trace::identity_shape(identity), "generation": generation, "nextGeneration": next_generation }));
         }
-        let _native = self.observations.native.lock().await;
+        let _native = self.observations.lock_native(identity).await;
         if !self.observations.contains(identity, generation, None) {
             if trace::enabled() {
                 trace::log_unscoped("runtime.openclaw.observation.restart.rejected", || serde_json::json!({
@@ -798,7 +844,7 @@ impl GatewayClient {
     }
 
     pub(crate) async fn close_observation(&self, identity: sessions_module::state::SessionIdentity, generation: u64) {
-        let _native = self.observations.native.lock().await;
+        let _native = self.observations.lock_native(&identity).await;
         self.close_observation_locked(identity, generation).await;
     }
 
@@ -1027,7 +1073,6 @@ impl GatewayClient {
     }
 
     pub async fn control_readiness_snapshot(&self) -> GatewayControlReadiness {
-        self.ensure_control_supervision().await;
         match self.control_readiness_result().await {
             Ok(()) => GatewayControlReadiness::Ready,
             Err(error) => GatewayControlReadiness::from_connection_error(error),
@@ -1101,7 +1146,7 @@ impl GatewayClient {
                         (None, task)
                     };
                     let supports_goal = hello.features.capabilities.iter().any(|capability| capability == crate::session::goal::START_CAPABILITY);
-                    let control = Arc::new(ControlDispatcher { dispatcher, epoch, receive_task: Mutex::new(Some(receive_task)), supports_goal, metadata_subscribed: AtomicBool::new(false) });
+                    let control = Arc::new(ControlDispatcher { dispatcher, epoch, receive_task: Mutex::new(Some(receive_task)), supports_goal, metadata_subscribed: Mutex::new(false) });
                     {
                         let mut state = self.control_state.lock().await;
                         self.live_goal_capability.store(supports_goal, Ordering::Release);
@@ -1311,7 +1356,18 @@ impl GatewayClient {
         request: wire::RpcRequest,
         decode: fn(wire::GatewayResponse) -> Result<T, wire::WireError>,
     ) -> Result<T, GatewayClientError> {
-        self.run_retriable_control_query(request, decode).await
+        let control = {
+            let state = self.control_state.lock().await;
+            match &*state {
+                GatewayControlConnectionState::Ready { control, .. } => Arc::clone(control),
+                GatewayControlConnectionState::Closed { .. } => {
+                    return Err(GatewayClientError::ConnectionClosed);
+                }
+                GatewayControlConnectionState::Unavailable { error, .. } => return Err(*error),
+                _ => return Err(GatewayClientError::Starting),
+            }
+        };
+        control.query(request, decode).await
     }
 
     async fn run_retriable_control_query<T>(
@@ -1776,7 +1832,6 @@ fn is_retryable_control_connection_error(error: GatewayClientError) -> bool {
             | GatewayClientError::ChallengeDeadline
             | GatewayClientError::ConnectDeadline
             | GatewayClientError::Starting
-            | GatewayClientError::RpcDeadline
             | GatewayClientError::ConnectionClosed
             | GatewayClientError::Transport
     )

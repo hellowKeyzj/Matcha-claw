@@ -1,5 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
-import { hasExactKeys, isNonEmptyBoundedText as isString, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from './client';
+import { hasExactKeys, isJsonValue, isNonEmptyBoundedText as isString, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from './client';
 const UNAVAILABLE = { success: false, error: 'Task manager is unavailable' } as const;
 
 type Operation =
@@ -153,20 +153,6 @@ function isTodo(value: unknown): boolean {
 }
 function isTaskMetadata(value: unknown): boolean {
   return isRecord(value) && isJsonValue(value, new Set<object>());
-}
-function isJsonValue(value: unknown, seen: Set<object>): boolean {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (typeof value !== 'object' || seen.has(value)) return false;
-  seen.add(value);
-  try {
-    if (Array.isArray(value)) return value.every((entry) => isJsonValue(entry, seen));
-    const prototype = Object.getPrototypeOf(value);
-    return (prototype === Object.prototype || prototype === null)
-      && Object.values(value).every((entry) => isJsonValue(entry, seen));
-  } finally {
-    seen.delete(value);
-  }
 }
 function isIdentity(value: unknown): value is Identity {
   return isRecord(value) && hasExactKeys(value, ['endpoint', 'agentId', 'sessionKey']) && isEndpoint(value.endpoint)

@@ -1,4 +1,6 @@
 use std::{
+    collections::VecDeque,
+    task::Poll,
     future::Future,
     pin::Pin,
     sync::{Arc, atomic::{AtomicBool, Ordering}},
@@ -14,7 +16,7 @@ use platform::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use crate::adapters::loopback::{self, Dependencies};
 
@@ -265,8 +267,11 @@ enum OrganizationCallOutcome {
 }
 
 pub(crate) struct CallWorkflows {
-    sender: mpsc::Sender<CallWorkflow>,
-    reads: mpsc::Sender<CallWorkflow>,
+    sender: mpsc::Sender<QueuedWorkflow>,
+    reads: mpsc::Sender<QueuedWorkflow>,
+    slots: Arc<Semaphore>,
+    read_slots: Arc<Semaphore>,
+    admission: Mutex<()>,
     tasks: Mutex<Vec<OwnedTask<()>>>,
     recorder: CallRecorder,
 }
@@ -310,139 +315,271 @@ enum CallWorkflow {
     },
 }
 
+#[derive(Default)]
+struct WorkflowScope {
+    global: bool,
+    team: Option<crate::TeamId>,
+    run: Option<crate::GraphRunId>,
+    idempotency: Option<String>,
+}
+
+impl WorkflowScope {
+    fn conflicts(&self, other: &Self) -> bool {
+        self.global || other.global
+            || self.team.as_ref().is_some_and(|team| other.team.as_ref() == Some(team))
+            || self.run.as_ref().is_some_and(|run| other.run.as_ref() == Some(run))
+            || self.idempotency.as_ref().is_some_and(|key| other.idempotency.as_ref() == Some(key))
+    }
+}
+
+struct QueuedWorkflow {
+    workflow: CallWorkflow,
+    scope: WorkflowScope,
+    _slot: OwnedSemaphorePermit,
+}
+
+impl CallWorkflow {
+    async fn scope(&self) -> WorkflowScope {
+        use crate::TeamRuntimeCommand;
+        let (owner, command) = match self {
+            Self::Runtime { owner, command, .. } => (owner, command),
+            Self::Capability { owner, request, .. } => (owner, request.workflow_command()),
+            Self::Team { owner, request } => {
+                return match request {
+                    TeamWorkflow::Manual(request) => {
+                        let (team, key) = request.workflow_scope();
+                        WorkflowScope {
+                            team: Some(team.clone()),
+                            run: Some(crate::GraphRunId::new(format!("manual:{}", key.as_str()))),
+                            idempotency: Some(key.as_str().to_owned()),
+                            ..Default::default()
+                        }
+                    }
+                    TeamWorkflow::Skill(loopback::skill::Request::Materialize { team_id, idempotency_key, .. }) => WorkflowScope {
+                        team: Some(team_id.clone()), idempotency: Some(idempotency_key.as_str().to_owned()), ..Default::default()
+                    },
+                    TeamWorkflow::RunDelete { run_id, idempotency_key, .. } => {
+                        let team = owner.workflow_run_team(run_id.clone()).await.ok().flatten();
+                        WorkflowScope { global: team.is_none(), team, run: Some(run_id.clone()), idempotency: Some(idempotency_key.clone()) }
+                    }
+                    _ => WorkflowScope { global: true, ..Default::default() },
+                };
+            }
+            Self::Graph { .. } => return WorkflowScope { global: true, ..Default::default() },
+        };
+        if matches!(command, TeamRuntimeCommand::RunCreate { team_id: None, .. }) {
+            return WorkflowScope { global: true, ..Default::default() };
+        }
+        let mut scope = match command {
+            TeamRuntimeCommand::ProvisionAgents { team_id, idempotency_key, .. } => WorkflowScope {
+                team: team_id.clone(), idempotency: Some(idempotency_key.as_str().to_owned()), ..Default::default()
+            },
+            TeamRuntimeCommand::Delete { team_id, idempotency_key, .. } => WorkflowScope {
+                team: Some(team_id.clone()), idempotency: Some(idempotency_key.as_str().to_owned()), ..Default::default()
+            },
+            TeamRuntimeCommand::RunCreate { team_id, run_id, idempotency_key, .. } => WorkflowScope {
+                team: team_id.clone(),
+                run: Some(run_id.clone().unwrap_or_else(|| crate::GraphRunId::new(format!("team-run:{}", idempotency_key.as_str())))),
+                idempotency: Some(idempotency_key.as_str().to_owned()), ..Default::default()
+            },
+            TeamRuntimeCommand::Resume { team_id } => WorkflowScope { team: Some(team_id.clone()), ..Default::default() },
+            TeamRuntimeCommand::RunDelete { run_id, idempotency_key, .. } => WorkflowScope {
+                run: Some(run_id.clone()), idempotency: Some(idempotency_key.as_str().to_owned()), ..Default::default()
+            },
+            TeamRuntimeCommand::RunSnapshot { team_id, run_id, .. } => WorkflowScope {
+                team: team_id.clone(), run: Some(run_id.clone()), ..Default::default()
+            },
+            _ => WorkflowScope { global: true, ..Default::default() },
+        };
+        if scope.team.is_none() {
+            if let Some(run) = &scope.run {
+                scope.team = owner.workflow_run_team(run.clone()).await.ok().flatten();
+            }
+            scope.global = scope.team.is_none();
+        }
+        scope
+    }
+}
+
 impl CallWorkflows {
     pub(crate) fn start(recorder: CallRecorder) -> Arc<Self> {
-        let (sender, receiver) = mpsc::channel::<CallWorkflow>(64);
-        let (reads, read_receiver) = mpsc::channel::<CallWorkflow>(64);
+        let (sender, receiver) = mpsc::channel::<QueuedWorkflow>(64);
+        let (reads, read_receiver) = mpsc::channel::<QueuedWorkflow>(64);
         Arc::new(Self {
             sender,
             reads,
+            slots: Arc::new(Semaphore::new(64)),
+            read_slots: Arc::new(Semaphore::new(64)),
+            admission: Mutex::new(()),
             tasks: Mutex::new(vec![Self::spawn(receiver), Self::spawn(read_receiver)]),
             recorder,
         })
     }
 
-    fn spawn(mut receiver: mpsc::Receiver<CallWorkflow>) -> OwnedTask<()> {
+    async fn enqueue(&self, workflow: CallWorkflow, read: bool) -> Result<(), ()> {
+        let slots = if read { &self.read_slots } else { &self.slots };
+        let slot = Arc::clone(slots).try_acquire_owned().map_err(|_| ())?;
+        let _admission = self.admission.lock().await;
+        let scope = workflow.scope().await;
+        let sender = if read { &self.reads } else { &self.sender };
+        sender.try_send(QueuedWorkflow { workflow, scope, _slot: slot }).map_err(|_| ())
+    }
+
+    fn spawn(mut receiver: mpsc::Receiver<QueuedWorkflow>) -> OwnedTask<()> {
         let (task, _) = OwnedTask::spawn(move |shutdown| async move {
+            let mut pending = VecDeque::<QueuedWorkflow>::new();
+            let mut running = Vec::<(WorkflowScope, OwnedTask<()>, OwnedSemaphorePermit)>::new();
+            let mut open = true;
             loop {
-                let workflow = tokio::select! {
-                    _ = shutdown.cancelled() => {
+                let mut index = 0;
+                while index < pending.len() {
+                    let scope = &pending[index].scope;
+                    if running.iter().any(|(active, _, _)| scope.conflicts(active))
+                        || pending.iter().take(index).any(|earlier| scope.conflicts(&earlier.scope))
+                    {
+                        index += 1;
+                        continue;
+                    }
+                    let QueuedWorkflow { workflow, scope, _slot } = pending.remove(index).expect("pending workflow exists");
+                    let cancellation = shutdown.clone();
+                    let (task, _) = OwnedTask::spawn(move |_| async move {
+                        Self::execute_workflow(workflow, cancellation).await;
+                    });
+                    running.push((scope, task, _slot));
+                }
+                if !open && pending.is_empty() && running.is_empty() { break; }
+                tokio::select! {
+                    _ = shutdown.cancelled(), if open => {
                         receiver.close();
-                        receiver.recv().await
+                        open = false;
+                        while let Some(workflow) = receiver.recv().await { pending.push_back(workflow); }
                     }
-                    workflow = receiver.recv() => workflow,
-                };
-                match workflow {
-                    Some(CallWorkflow::Team { owner, request }) => {
-                        let owner = owner.with_cancellation(shutdown.clone());
-                        with_session_trace(owner.call_trace_id(), async {
-                            session_trace("runtime.team.workflow.start", || json!({}));
-                            let failed = if owner.call_running().await {
-                                match request {
-                                    TeamWorkflow::Skill(request) => {
-                                        matches!(
-                                            loopback::skill::dispatch(&owner, request).await,
-                                            loopback::skill::Delivery::Unavailable
-                                        )
-                                    }
-                                    TeamWorkflow::Manual(request) => {
-                                        let outcome =
-                                            loopback::manual::dispatch(&owner, request).await;
-                                        if matches!(outcome, loopback::manual::Delivery::Rejected) {
-                                            owner
-                                                .summarize_call(&crate::TeamRuntimeStatus::Rejected)
-                                                .await;
-                                        }
-                                        matches!(outcome, loopback::manual::Delivery::Unavailable)
-                                    }
-                                    TeamWorkflow::RunDelete {
-                                        run_id,
-                                        idempotency_key,
-                                        observed_at,
-                                    } => owner
-                                        .run_delete_and_purge(run_id, idempotency_key, observed_at)
-                                        .await
-                                        .is_err(),
-                                }
-                            } else {
-                                true
-                            };
-                            owner.finish_workflow(failed).await;
-                            session_trace("runtime.team.workflow.end", || json!({}));
-                        })
-                        .await;
-                    }
-                    Some(CallWorkflow::Runtime {
-                        owner,
-                        command,
-                        reply,
-                    }) => {
-                        let owner = owner.with_cancellation(shutdown.clone());
-                        with_session_trace(owner.call_trace_id(), async {
-                            session_trace("runtime.team.workflow.start", || json!({}));
-                            let outcome = if owner.call_running().await {
-                                owner.execute_team_runtime_inline(command).await
-                            } else {
-                                Err(crate::owner::handle::closed_error())
-                            };
-                            owner.finish_workflow(outcome.is_err()).await;
-                            let sent = reply.send(outcome).is_ok();
-                            session_trace(
-                                "runtime.team.workflow.reply",
-                                || json!({"sent": sent}),
-                            );
-                            session_trace("runtime.team.workflow.end", || json!({}));
-                        })
-                        .await;
-                    }
-                    Some(CallWorkflow::Graph {
-                        owner,
-                        request,
-                        reply,
-                    }) => {
-                        let owner = owner.with_cancellation(shutdown.clone());
-                        let outcome = if owner.call_running().await {
-                            loopback::graph::handle(&owner, request).await
-                        } else {
-                            loopback::graph::Delivery::Unavailable
-                        };
-                        owner.summarize_call(&outcome).await;
-                        owner.finish_workflow(false).await;
-                        let _ = reply.send(outcome);
-                    }
-                    Some(CallWorkflow::Capability {
-                        owner,
-                        request,
-                        resolver,
-                        reply,
-                    }) => {
-                        let owner = owner.with_cancellation(shutdown.clone());
-                        with_session_trace(owner.call_trace_id(), async {
-                            session_trace("runtime.team.workflow.start", || json!({}));
-                            let outcome = if owner.call_running().await {
-                                owner
-                                    .execute_runtime_capability_inline(resolver, request)
-                                    .await
-                            } else {
-                                Err(crate::TeamRuntimeDecodeError::Unavailable)
-                            };
-                            owner.finish_workflow(outcome.is_err()).await;
-                            if let Some(reply) = reply {
-                                let sent = reply.send(outcome).is_ok();
-                                session_trace(
-                                    "runtime.team.workflow.reply",
-                                    || json!({"sent": sent}),
-                                );
+                    workflow = receiver.recv(), if open => match workflow {
+                        Some(workflow) => pending.push_back(workflow),
+                        None => open = false,
+                    },
+                    index = std::future::poll_fn(|context| {
+                        for (index, (_, task, _)) in running.iter_mut().enumerate() {
+                            if std::pin::pin!(task.join()).poll(context).is_ready() {
+                                return Poll::Ready(index);
                             }
-                            session_trace("runtime.team.workflow.end", || json!({}));
-                        })
-                        .await;
-                    }
-                    None => break,
+                        }
+                        Poll::Pending
+                    }), if !running.is_empty() => { drop(running.remove(index)); }
                 }
             }
         });
         task
+    }
+
+    async fn execute_workflow(workflow: CallWorkflow, shutdown: tokio_util::sync::CancellationToken) {
+        match workflow {
+            CallWorkflow::Team { owner, request } => {
+                let owner = owner.with_cancellation(shutdown.clone());
+                with_session_trace(owner.call_trace_id(), async {
+                    session_trace("runtime.team.workflow.start", || json!({}));
+                    let failed = if owner.call_running().await {
+                        match request {
+                            TeamWorkflow::Skill(request) => {
+                                matches!(
+                                    loopback::skill::dispatch(&owner, request).await,
+                                    loopback::skill::Delivery::Unavailable
+                                )
+                            }
+                            TeamWorkflow::Manual(request) => {
+                                let outcome =
+                                    loopback::manual::dispatch(&owner, request).await;
+                                if matches!(outcome, loopback::manual::Delivery::Rejected) {
+                                    owner
+                                        .summarize_call(&crate::TeamRuntimeStatus::Rejected)
+                                        .await;
+                                }
+                                matches!(outcome, loopback::manual::Delivery::Unavailable)
+                            }
+                            TeamWorkflow::RunDelete {
+                                run_id,
+                                idempotency_key,
+                                observed_at,
+                            } => owner
+                                .run_delete_and_purge(run_id, idempotency_key, observed_at)
+                                .await
+                                .is_err(),
+                        }
+                    } else {
+                        true
+                    };
+                    owner.finish_workflow(failed).await;
+                    session_trace("runtime.team.workflow.end", || json!({}));
+                })
+                .await;
+            }
+            CallWorkflow::Runtime {
+                owner,
+                command,
+                reply,
+            } => {
+                let owner = owner.with_cancellation(shutdown.clone());
+                with_session_trace(owner.call_trace_id(), async {
+                    session_trace("runtime.team.workflow.start", || json!({}));
+                    let outcome = if owner.call_running().await {
+                        owner.execute_team_runtime_inline(command).await
+                    } else {
+                        Err(crate::owner::handle::closed_error())
+                    };
+                    owner.finish_workflow(outcome.is_err()).await;
+                    let sent = reply.send(outcome).is_ok();
+                    session_trace(
+                        "runtime.team.workflow.reply",
+                        || json!({"sent": sent}),
+                    );
+                    session_trace("runtime.team.workflow.end", || json!({}));
+                })
+                .await;
+            }
+            CallWorkflow::Graph {
+                owner,
+                request,
+                reply,
+            } => {
+                let owner = owner.with_cancellation(shutdown.clone());
+                let outcome = if owner.call_running().await {
+                    loopback::graph::handle(&owner, request).await
+                } else {
+                    loopback::graph::Delivery::Unavailable
+                };
+                owner.summarize_call(&outcome).await;
+                owner.finish_workflow(false).await;
+                let _ = reply.send(outcome);
+            }
+            CallWorkflow::Capability {
+                owner,
+                request,
+                resolver,
+                reply,
+            } => {
+                let owner = owner.with_cancellation(shutdown.clone());
+                with_session_trace(owner.call_trace_id(), async {
+                    session_trace("runtime.team.workflow.start", || json!({}));
+                    let outcome = if owner.call_running().await {
+                        owner
+                            .execute_runtime_capability_inline(resolver, request)
+                            .await
+                    } else {
+                        Err(crate::TeamRuntimeDecodeError::Unavailable)
+                    };
+                    owner.finish_workflow(outcome.is_err()).await;
+                    if let Some(reply) = reply {
+                        let sent = reply.send(outcome).is_ok();
+                        session_trace(
+                            "runtime.team.workflow.reply",
+                            || json!({"sent": sent}),
+                        );
+                    }
+                    session_trace("runtime.team.workflow.end", || json!({}));
+                })
+                .await;
+            }
+        }
     }
 
     pub(crate) async fn runtime(
@@ -451,17 +588,9 @@ impl CallWorkflows {
         command: crate::TeamRuntimeCommand,
     ) -> Result<crate::TeamRuntimeCommandOutcome, crate::RequestAdmissionClosed> {
         let (reply, outcome) = oneshot::channel();
-        let sender = if matches!(command, crate::TeamRuntimeCommand::RunSnapshot { .. }) {
-            &self.reads
-        } else {
-            &self.sender
-        };
-        sender
-            .try_send(CallWorkflow::Runtime {
-                owner: owner.clone(),
-                command,
-                reply,
-            })
+        let read = matches!(command, crate::TeamRuntimeCommand::RunSnapshot { .. });
+        self.enqueue(CallWorkflow::Runtime { owner: owner.clone(), command, reply }, read)
+            .await
             .map_err(|_| {
                 session_trace(
                     "runtime.team.workflow.enqueue",
@@ -482,14 +611,7 @@ impl CallWorkflows {
         request: loopback::graph::Request,
     ) -> loopback::graph::Delivery {
         let (reply, outcome) = oneshot::channel();
-        if self
-            .sender
-            .try_send(CallWorkflow::Graph {
-                owner: owner.clone(),
-                request,
-                reply,
-            })
-            .is_err()
+        if self.enqueue(CallWorkflow::Graph { owner: owner.clone(), request, reply }, false).await.is_err()
         {
             return loopback::graph::Delivery::Unavailable;
         }
@@ -506,18 +628,9 @@ impl CallWorkflows {
         resolver: Arc<dyn crate::RoleSessionIdentityResolver>,
     ) -> Result<(String, crate::TeamRuntimeControlOutcome), crate::TeamRuntimeDecodeError> {
         let (reply, outcome) = oneshot::channel();
-        let sender = if request.operation_id() == "team.runSnapshot" {
-            &self.reads
-        } else {
-            &self.sender
-        };
-        sender
-            .try_send(CallWorkflow::Capability {
-                owner: owner.clone(),
-                request,
-                resolver,
-                reply: Some(reply),
-            })
+        let read = request.operation_id() == "team.runSnapshot";
+        self.enqueue(CallWorkflow::Capability { owner: owner.clone(), request, resolver, reply: Some(reply) }, read)
+            .await
             .map_err(|_| {
                 session_trace(
                     "runtime.team.workflow.enqueue",
@@ -560,7 +673,7 @@ impl CallWorkflows {
         workflow: CallWorkflow,
     ) -> Result<CallReceipt, crate::TeamRuntimeDecodeError> {
         let mut state = call.state.lock().await;
-        self.sender.try_send(workflow).map_err(|_| {
+        self.enqueue(workflow, false).await.map_err(|_| {
             session_trace(
                 "runtime.team.workflow.enqueue",
                 || json!({"reason": "admission_closed"}),

@@ -19,7 +19,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                         }
                     };
                     ::task_manager::TaskOutcome::List(project_read(
-                        self.gateway.lock().await.list_tasks(scope).await,
+                        self.gateway.list_tasks(scope).await,
                         project_snapshot,
                     ))
                 }
@@ -33,7 +33,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                         }
                     };
                     ::task_manager::TaskOutcome::Get(project_read(
-                        self.gateway.lock().await.get_task(scope, task_id).await,
+                        self.gateway.get_task(scope, task_id).await,
                         |task| Ok(project_task(&task)),
                     ))
                 }
@@ -55,7 +55,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                         }
                     };
                     ::task_manager::TaskOutcome::Create(project_mutation(
-                        self.gateway.lock().await.create_task(scope, input).await,
+                        self.gateway.create_task(scope, input).await,
                         project_create_receipt,
                     ))
                 }
@@ -77,7 +77,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                         }
                     };
                     ::task_manager::TaskOutcome::Update(project_mutation(
-                        self.gateway.lock().await.update_task(scope, input).await,
+                        self.gateway.update_task(scope, input).await,
                         project_snapshot,
                     ))
                 }
@@ -112,8 +112,6 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     };
                     ::task_manager::TaskOutcome::TodoWrite(project_mutation(
                         self.gateway
-                            .lock()
-                            .await
                             .write_todos(scope, old_todos, new_todos)
                             .await,
                         project_todo_snapshot,
@@ -129,7 +127,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                         }
                     };
                     ::task_manager::TaskOutcome::TodoGet(project_read(
-                        self.gateway.lock().await.get_todos(scope).await,
+                        self.gateway.get_todos(scope).await,
                         project_todo_snapshot,
                     ))
                 }

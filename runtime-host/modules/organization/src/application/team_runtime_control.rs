@@ -57,6 +57,10 @@ impl TeamRuntimeCapabilityRequest {
         self.run_id.as_deref()
     }
 
+    pub(crate) fn workflow_command(&self) -> &TeamRuntimeCommand {
+        &self.command
+    }
+
     pub(crate) fn single_stage(&self) -> bool {
         crate::call::runtime_single_stage(&self.command)
     }

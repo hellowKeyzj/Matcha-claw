@@ -24,15 +24,13 @@ use crate::{
 use runtime_directory::OwnedRuntimeFuture;
 
 async fn confirm_runtime_receipt_native(
-    gateway: &tokio::sync::Mutex<OpenClawGateway>,
+    gateway: &OpenClawGateway,
     receipt: RunRuntimeReceipt,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> (RuntimeReceiptOutcome, Option<TeamCreationFailure>) {
-    let mut gateway = tokio::select! {
-        biased;
-        gateway = gateway.lock() => gateway,
-        _ = cancellation.cancelled() => return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::ObservationInterrupted),
-    };
+    if cancellation.is_cancelled() {
+        return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::ObservationInterrupted);
+    }
     for binding in receipt.bindings() {
         let agent = match AgentId::try_new(binding.agent().as_str().to_owned()) {
             Ok(agent) => agent,
@@ -49,7 +47,12 @@ async fn confirm_runtime_receipt_native(
                 Err(_) => return receipt_failure(RuntimeReceiptOutcome::Rejected, FailureReason::InvalidConfig),
             };
 
-        let exists = match native_session_exists(&mut gateway, &agent, &session_key, cancellation).await {
+        let Some(_binding) = gateway.client().role_session_transactions(
+            vec![session_key.as_str().to_owned()], cancellation,
+        ).await else {
+            return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::ObservationInterrupted);
+        };
+        let exists = match native_session_exists(gateway, &agent, &session_key, cancellation).await {
             Ok(exists) => exists,
             Err(outcome) => return outcome,
         };
@@ -97,14 +100,14 @@ async fn confirm_runtime_receipt_native(
                 }
                 Err(error) => return map_runtime_receipt_error(error),
             }
-            match native_session_exists(&mut gateway, &agent, &session_key, cancellation).await {
+            match native_session_exists(gateway, &agent, &session_key, cancellation).await {
                 Ok(true) => {}
                 Ok(false) => return receipt_failure(RuntimeReceiptOutcome::OutcomeUnknown, FailureReason::NativeReadbackMismatch),
                 Err(outcome) => return outcome,
             }
         }
 
-        match readback_native_session(&mut gateway, binding, cancellation).await {
+        match readback_native_session(gateway, binding, cancellation).await {
             (RuntimeReceiptOutcome::Installed, _) => {}
             outcome => return outcome,
         }
@@ -120,7 +123,7 @@ fn receipt_failure(
 }
 
 async fn readback_native_session(
-    gateway: &mut OpenClawGateway,
+    gateway: &OpenClawGateway,
     binding: &RoleSessionReceipt,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> (RuntimeReceiptOutcome, Option<TeamCreationFailure>) {
@@ -148,7 +151,7 @@ fn map_native_effect_failure(failure: NativeEffectFailure) -> RuntimeReceiptOutc
 }
 
 async fn native_session_exists(
-    gateway: &mut OpenClawGateway,
+    gateway: &OpenClawGateway,
     agent: &AgentId,
     key: &AgentScopedSessionKey,
     cancellation: &tokio_util::sync::CancellationToken,
@@ -238,14 +241,13 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
         Box::pin(async move {
             let started = platform::trace::enabled().then(Instant::now);
             session_trace("runtime.team.profile.gateway-lock.request", || json!({}));
-            let client = tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => return Err(organization::TeamCreationFailure::new(
+            if cancellation.is_cancelled() {
+                return Err(organization::TeamCreationFailure::new(
                     organization::TeamCreationStage::ReadingProfiles,
                     organization::TeamCreationFailureReason::Cancelled,
-                )),
-                gateway = gateway.lock() => gateway.client(),
-            };
+                ));
+            }
+            let client = gateway.client();
             session_trace(
                 "runtime.team.profile.gateway-lock.end",
                 || json!({"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
@@ -284,18 +286,14 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
         Box::pin(async move {
             let started = platform::trace::enabled().then(Instant::now);
             session_trace("runtime.team.materialize.gateway-lock.request", || json!({}));
-            let gateway = tokio::select! {
-                biased;
-                gateway = gateway.lock() => gateway,
-                _ = cancellation.cancelled() => {
-                    if let Some(observer) = &observer {
-                        observer.report(organization::TeamProvisionUpdate::Failure(TeamCreationFailure::new(
-                            TeamCreationStage::ConfiguringTeam, FailureReason::Cancelled,
-                        ))).await;
-                    }
-                    return organization::MaterializationOperationOutcome::OutcomeUnknown;
+            if cancellation.is_cancelled() {
+                if let Some(observer) = &observer {
+                    observer.report(organization::TeamProvisionUpdate::Failure(TeamCreationFailure::new(
+                        TeamCreationStage::ConfiguringTeam, FailureReason::Cancelled,
+                    ))).await;
                 }
-            };
+                return organization::MaterializationOperationOutcome::OutcomeUnknown;
+            }
             session_trace(
                 "runtime.team.materialize.gateway-lock.end",
                 || json!({"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
@@ -333,11 +331,9 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
-            let gateway = tokio::select! {
-                biased;
-                gateway = gateway.lock() => gateway,
-                _ = cancellation.cancelled() => return organization::MaterializationOperationOutcome::OutcomeUnknown,
-            };
+            if cancellation.is_cancelled() {
+                return organization::MaterializationOperationOutcome::OutcomeUnknown;
+            }
             let Some(state_dir) = gateway.team_state_dir() else {
                 return organization::MaterializationOperationOutcome::OutcomeUnknown;
             };
@@ -366,11 +362,9 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
                 "runtime.team.unconfirmed-remove.gateway-lock.request",
                 || json!({}),
             );
-            let gateway = tokio::select! {
-                biased;
-                gateway = gateway.lock() => gateway,
-                _ = cancellation.cancelled() => return organization::MaterializationOperationOutcome::OutcomeUnknown,
-            };
+            if cancellation.is_cancelled() {
+                return organization::MaterializationOperationOutcome::OutcomeUnknown;
+            }
             let Some(state_dir) = gateway.team_state_dir() else {
                 return organization::MaterializationOperationOutcome::OutcomeUnknown;
             };
@@ -391,7 +385,6 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
     ) -> OwnedRuntimeFuture<organization::MaterializationOperationOutcome> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
-            let gateway = gateway.lock().await;
             let Some(state_dir) = gateway.team_state_dir() else {
                 return organization::MaterializationOperationOutcome::OutcomeUnknown;
             };
@@ -408,12 +401,11 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
         Box::pin(async move {
             let started = platform::trace::enabled().then(Instant::now);
             session_trace("runtime.team.recovery.gateway-lock.request", || json!({}));
-            let mut gateway = gateway.lock().await;
             session_trace(
                 "runtime.team.recovery.gateway-lock.end",
                 || json!({"elapsedMs":started.map(|started| started.elapsed().as_millis()).unwrap_or_default()}),
             );
-            let outcome = crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
+            let outcome = crate::surfaces::team::OpenClawTeamNativeEffects::new(&gateway)
                 .recover_materialization(request)
                 .await;
             session_trace(
@@ -455,12 +447,17 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
     ) -> OwnedRuntimeFuture<organization::RoleAbortOutcome> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
-            let mut gateway = tokio::select! {
-                biased;
-                gateway = gateway.lock() => gateway,
-                _ = cancellation.cancelled() => return organization::RoleAbortOutcome::OutcomeUnknown,
+            let keys = bindings.iter().map(|binding| {
+                super::super::native_effects::agent_scoped_session_key(binding)
+                    .map(|key| key.as_str().to_owned())
+            }).collect::<Result<Vec<_>, _>>();
+            let Ok(keys) = keys else {
+                return organization::RoleAbortOutcome::OutcomeUnknown;
             };
-            let mut effects = crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
+            let Some(_bindings) = gateway.client().role_session_transactions(keys, &cancellation).await else {
+                return organization::RoleAbortOutcome::OutcomeUnknown;
+            };
+            let mut effects = crate::surfaces::team::OpenClawTeamNativeEffects::new(&gateway)
                 .with_cancellation(cancellation);
             for binding in &bindings {
                 match effects.abort(binding).await {
@@ -493,12 +490,17 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
     ) -> OwnedRuntimeFuture<organization::NativeDeletionEvidence> {
         let gateway = Arc::clone(&self.gateway);
         Box::pin(async move {
-            let mut gateway = tokio::select! {
-                biased;
-                gateway = gateway.lock() => gateway,
-                _ = cancellation.cancelled() => return organization::NativeDeletionEvidence::OutcomeUnknown,
+            let keys = bindings.iter().map(|binding| {
+                super::super::native_effects::agent_scoped_session_key(binding)
+                    .map(|key| key.as_str().to_owned())
+            }).collect::<Result<Vec<_>, _>>();
+            let Ok(keys) = keys else {
+                return organization::NativeDeletionEvidence::Rejected;
             };
-            let mut effects = crate::surfaces::team::OpenClawTeamNativeEffects::new(&mut gateway)
+            let Some(_bindings) = gateway.client().role_session_transactions(keys, &cancellation).await else {
+                return organization::NativeDeletionEvidence::OutcomeUnknown;
+            };
+            let mut effects = crate::surfaces::team::OpenClawTeamNativeEffects::new(&gateway)
                 .with_cancellation(cancellation);
             if abort_first {
                 for binding in &bindings {

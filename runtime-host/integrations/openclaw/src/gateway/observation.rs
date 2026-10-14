@@ -1,7 +1,9 @@
 use std::{collections::HashMap, sync::{Arc, Mutex as StdMutex, atomic::{AtomicU64, Ordering}}};
 
 use sessions_module::{command::SessionIngressEvent, ports::{RuntimeOperationFailure, SessionObservationRequest, SessionSync}, state::SessionIdentity};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
+
+use super::operation::NativeTransactions;
 
 use crate::session::{trace, window::{PageRequest, SessionWindow}};
 
@@ -35,13 +37,17 @@ pub(crate) enum OrderedContext {
 pub(crate) struct Observations {
     pub(crate) entries: StdMutex<HashMap<String, Observation>>,
     pub(crate) pending: StdMutex<HashMap<String, OrderedContext>>,
-    pub(crate) native: Mutex<()>,
+    native: NativeTransactions<String>,
     current_epoch: AtomicU64,
 }
 
 impl Observations {
     pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self { entries: StdMutex::new(HashMap::new()), pending: StdMutex::new(HashMap::new()), native: Mutex::new(()), current_epoch: AtomicU64::new(0) })
+        Arc::new(Self { entries: StdMutex::new(HashMap::new()), pending: StdMutex::new(HashMap::new()), native: NativeTransactions::default(), current_epoch: AtomicU64::new(0) })
+    }
+
+    pub(crate) async fn lock_native(&self, identity: &SessionIdentity) -> tokio::sync::OwnedMutexGuard<()> {
+        self.native.lock(identity_key(identity)).await
     }
 
     pub(crate) fn prepare(&self, request: SessionObservationRequest) -> Result<(), RuntimeOperationFailure> {

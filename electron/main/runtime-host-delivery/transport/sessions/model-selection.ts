@@ -1,6 +1,8 @@
 import { logger } from '../../../../utils/logger';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { isSessionModelState } from './model-state-contract';
+import { isEndpoint, type SessionIdentity, type SessionModelState } from './session-contract';
 import {
   isSessionTraceEnabled,
   logSessionTrace,
@@ -32,25 +34,7 @@ const UNSUPPORTED = {
   error: 'Session model selection endpoint is unsupported',
 } as const;
 
-type Endpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw' | 'matcha-agent';
-  runtimeInstanceId: 'local';
-}>;
-
-type SessionModelIdentity = Readonly<{
-  provider?: string;
-  model: string;
-  ref: string;
-}>;
-
-type SessionModelState = Readonly<{
-  selected?: SessionModelIdentity;
-  active?: SessionModelIdentity;
-  overrideSource?: 'user' | 'auto';
-  selectionId?: string;
-}>;
-
+type Endpoint = SessionIdentity['endpoint'];
 export type SessionModelSelectionRequest = Readonly<{
   id: 'session.modelSelection';
   operationId: 'sessions.patchModel';
@@ -102,7 +86,7 @@ export function createSessionModelSelectionTransport(
         endpointSessionId: summarizeIdentifier(request.input.endpointSessionId),
         modelSelectionId: summarizeIdentifier(request.input.modelSelectionId),
       }));
-      let diagnosticHeaders: Headers | null = null;
+      const responseMetadata: { headers: Headers | null } = { headers: null };
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: ROUTE_PATH,
@@ -116,7 +100,7 @@ export function createSessionModelSelectionTransport(
         method: 'POST',
         fetcher: async (input, init) => {
           const fetched = await fetcher(input, init);
-          diagnosticHeaders = fetched.headers;
+          responseMetadata.headers = fetched.headers;
           return fetched;
         },
         body: request,
@@ -128,6 +112,7 @@ export function createSessionModelSelectionTransport(
         }));
         return { status: 503, body: UNAVAILABLE };
       }
+      const diagnosticHeaders = responseMetadata.headers;
       const body = response.body;
       logSessionTrace('electron.model-selection.response', traceId, () => {
         const valid = response.status === 200 && isSessionModelSelectionResponse(body);
@@ -186,24 +171,6 @@ function isSessionModelSelectionResponse(value: unknown): value is SessionModelS
   }
   return hasExactKeys(value, ['outcome'])
     && (value.outcome === 'target_rejected' || value.outcome === 'outcome_unknown');
-}
-
-function isSessionModelIdentity(value: unknown): value is SessionModelIdentity {
-  return isRecord(value)
-    && requiredKeys(value, ['model', 'ref'])
-    && allowedKeys(value, ['provider', 'model', 'ref'])
-    && typeof value.model === 'string'
-    && typeof value.ref === 'string'
-    && (value.provider === undefined || typeof value.provider === 'string');
-}
-
-function isSessionModelState(value: unknown): value is SessionModelState {
-  return isRecord(value)
-    && allowedKeys(value, ['selected', 'active', 'overrideSource', 'selectionId'])
-    && (value.selected === undefined || isSessionModelIdentity(value.selected))
-    && (value.active === undefined || isSessionModelIdentity(value.active))
-    && (value.overrideSource === undefined || value.overrideSource === 'user' || value.overrideSource === 'auto')
-    && (value.selectionId === undefined || typeof value.selectionId === 'string');
 }
 
 function summarizeRejectionDiagnostic(headers: Headers | null) {
@@ -277,14 +244,6 @@ function isSessionScope(value: unknown): value is SessionModelSelectionRequest['
     && value.sessionKey.length > 0;
 }
 
-function isEndpoint(value: unknown): value is Endpoint {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime'
-    && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
-    && value.runtimeInstanceId === 'local';
-}
-
 function isIdentifier(value: unknown): value is string {
   return typeof value === 'string'
     && value.length > 0
@@ -304,12 +263,4 @@ function hasAllowedKeys(
   const allowed = new Set([...required, ...optional]);
   return required.every((key) => Object.hasOwn(value, key))
     && Object.keys(value).every((key) => allowed.has(key));
-}
-
-function requiredKeys(value: Record<string, unknown>, required: readonly string[]): boolean {
-  return required.every((key) => Object.hasOwn(value, key));
-}
-
-function allowedKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
 }

@@ -98,7 +98,7 @@ pub(crate) enum WikiCommand {
         reply: CallReply<()>,
     },
     ImportArchive {
-        input: crate::WikiArchiveImportInput,
+        root: PathBuf,
         reply: CallReply<WikiProjectsReceipt>,
     },
     RebuildIndex {
@@ -109,10 +109,6 @@ pub(crate) enum WikiCommand {
         input: crate::WikiQuestionInput,
         cancellation: tokio_util::sync::CancellationToken,
         reply: CallReply<crate::qa::QuestionPlan>,
-    },
-    CancelQuestion {
-        input: crate::WikiQuestionTaskSelector,
-        reply: CallReply<crate::WikiQuestionTaskReceipt>,
     },
     SaveQuestion {
         input: crate::WikiQuestionTaskSelector,
@@ -525,9 +521,6 @@ impl WikiCommand {
             Self::StageQuestion { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
-            Self::CancelQuestion { reply, .. } => {
-                let _ = reply.send(Err(error)).await;
-            }
             Self::SaveQuestion { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -680,7 +673,6 @@ impl WikiCommand {
             Self::ImportArchive { reply, .. } => reply.call.as_ref(),
             Self::RebuildIndex { reply, .. } => reply.call.as_ref(),
             Self::StageQuestion { reply, .. } => reply.call.as_ref(),
-            Self::CancelQuestion { reply, .. } => reply.call.as_ref(),
             Self::SaveQuestion { reply, .. } => reply.call.as_ref(),
             Self::StageReindex { reply, .. } => reply.call.as_ref(),
             Self::StageLint { reply, .. } => reply.call.as_ref(),
@@ -740,7 +732,6 @@ impl WikiCommand {
             Self::ImportArchive { reply, .. } => reply.call = call,
             Self::RebuildIndex { reply, .. } => reply.call = call,
             Self::StageQuestion { reply, .. } => reply.call = call,
-            Self::CancelQuestion { reply, .. } => reply.call = call,
             Self::SaveQuestion { reply, .. } => reply.call = call,
             Self::StageReindex { reply, .. } => reply.call = call,
             Self::StageLint { reply, .. } => reply.call = call,
@@ -796,7 +787,6 @@ impl WikiCommand {
             Self::ExportArchive { input, .. } => Some(&mut input.project_id),
             Self::RebuildIndex { input, .. } => Some(&mut input.project_id),
             Self::StageQuestion { input, .. } => Some(&mut input.project_id),
-            Self::CancelQuestion { input, .. } => Some(&mut input.project_id),
             Self::SaveQuestion { input, .. } => Some(&mut input.project_id),
             Self::StageReindex { input, .. } => Some(&mut input.project_id),
             Self::StageLint { input, .. } => Some(&mut input.project_id),
@@ -894,10 +884,6 @@ impl WikiCommand {
                 None => CommandRoute::Global,
             },
             Self::StageQuestion { input, .. } => match input.project_id.as_deref() {
-                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
-                None => CommandRoute::Global,
-            },
-            Self::CancelQuestion { input, .. } => match input.project_id.as_deref() {
                 Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
                 None => CommandRoute::Global,
             },

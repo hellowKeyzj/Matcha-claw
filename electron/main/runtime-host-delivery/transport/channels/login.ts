@@ -120,7 +120,7 @@ export function createChannelLoginTransport(
 
 function isRequest(value: unknown): value is ChannelLoginRequest {
   if (!isRecord(value) || !isIdentity(value.channel)) return false;
-  if (!['start', 'wait', 'cancel', 'logout'].includes(value.action)) return false;
+  if (typeof value.action !== 'string' || !['start', 'wait', 'cancel', 'logout'].includes(value.action)) return false;
   if (value.accountId !== undefined && !isIdentity(value.accountId)) return false;
   const keys = Object.keys(value);
   if (value.action === 'cancel' || value.action === 'logout') {

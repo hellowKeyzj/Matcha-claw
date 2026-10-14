@@ -7,6 +7,97 @@
     <meta name="color-scheme" content="light dark" />
     <script>
       (() => {
+        if (window.electron?.traceEnabled !== true) return;
+        const startedAt = performance.now();
+        const trace = (phase, detail = {}) => console.info(`[startup-trace] ${JSON.stringify({
+          source: 'renderer.html', phase, at: Date.now(), navigationMs: Math.round(performance.now()), ...detail,
+        })}`);
+        trace('inline.start', { readyState: document.readyState });
+        const resourceKind = (entry) => {
+          if (!['script', 'link', 'css'].includes(entry.initiatorType)) return null;
+          const url = new URL(entry.name);
+          if (url.origin !== location.origin || url.protocol !== location.protocol) return null;
+          if (url.pathname === '/@vite/client' || url.pathname === '/@react-refresh') return 'vite-client';
+          if (!/\.(?:[cm]?js|[jt]sx?|css)$/.test(url.pathname)) return null;
+          if (url.pathname.startsWith('/src/')) return url.pathname.endsWith('.css') ? 'stylesheet' : 'source-module';
+          if (url.pathname.startsWith('/node_modules/')) return url.pathname.endsWith('.css') ? 'stylesheet' : 'vite-dependency';
+          if (url.pathname.startsWith(new URL('./assets/', location.href).pathname)) {
+            return url.pathname.endsWith('.css') ? 'stylesheet' : 'bundle-script';
+          }
+          return null;
+        };
+        let resourceCount = 0;
+        const reportResources = (entries) => {
+          for (const entry of entries) {
+            if (resourceCount >= 8 || entry.duration < 100) continue;
+            const kind = resourceKind(entry);
+            if (!kind) continue;
+            resourceCount += 1;
+            trace('resource.slow', {
+              kind, startTime: Math.round(entry.startTime), requestStart: Math.round(entry.requestStart),
+              responseStart: Math.round(entry.responseStart), responseEnd: Math.round(entry.responseEnd),
+              durationMs: Math.round(entry.duration),
+            });
+          }
+        };
+        const resources = new PerformanceObserver((list) => reportResources(list.getEntries()));
+        resources.observe({ type: 'resource', buffered: true });
+        let longTaskCount = 0;
+        const reportLongTasks = (entries) => {
+          for (const entry of entries) {
+            if (longTaskCount >= 8) break;
+            longTaskCount += 1;
+            trace('long-task', { startTime: Math.round(entry.startTime), durationMs: Math.round(entry.duration) });
+          }
+        };
+        const longTasks = new PerformanceObserver((list) => reportLongTasks(list.getEntries()));
+        if (PerformanceObserver.supportedEntryTypes.includes('longtask')) longTasks.observe({ type: 'longtask', buffered: true });
+        const paints = new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            if (entry.name !== 'first-paint' && entry.name !== 'first-contentful-paint') continue;
+            trace('paint', { kind: entry.name, startTime: Math.round(entry.startTime) });
+            if (entry.name === 'first-contentful-paint') paints.disconnect();
+          }
+        });
+        paints.observe({ type: 'paint', buffered: true });
+        window.addEventListener('pagehide', () => paints.disconnect(), { once: true });
+        const onError = () => trace('window.error', { outcome: 'error' });
+        const onRejection = () => trace('window.unhandled-rejection', { outcome: 'error' });
+        window.addEventListener('error', onError, true);
+        window.addEventListener('unhandledrejection', onRejection);
+        document.addEventListener('DOMContentLoaded', () => trace('dom.content-loaded', {
+          durationMs: Math.round(performance.now() - startedAt),
+        }), { once: true });
+        window.addEventListener('load', () => {
+          trace('window.load', { durationMs: Math.round(performance.now() - startedAt) });
+          reportResources(resources.takeRecords());
+          reportLongTasks(longTasks.takeRecords());
+          resources.disconnect();
+          longTasks.disconnect();
+          window.removeEventListener('error', onError, true);
+          window.removeEventListener('unhandledrejection', onRejection);
+          const navigation = performance.getEntriesByType('navigation')[0];
+          if (navigation) trace('navigation.timing', {
+            fetchStart: Math.round(navigation.fetchStart), requestStart: Math.round(navigation.requestStart),
+            responseStart: Math.round(navigation.responseStart), responseEnd: Math.round(navigation.responseEnd),
+            domInteractive: Math.round(navigation.domInteractive),
+            domContentLoaded: Math.round(navigation.domContentLoadedEventStart),
+            loadStart: Math.round(navigation.loadEventStart),
+          });
+          const moduleBody = performance.getEntriesByName('matchaclaw.renderer.module-body')[0]?.startTime;
+          const staticResources = performance.getEntriesByType('resource').filter((entry) => resourceKind(entry));
+          const beforeModule = staticResources.filter((entry) => moduleBody !== undefined && entry.responseEnd <= moduleBody);
+          const lastResponseEnd = beforeModule.reduce((latest, entry) => Math.max(latest, entry.responseEnd), 0);
+          trace('resource.summary', {
+            count: staticResources.length, lastResponseEnd: Math.round(lastResponseEnd),
+            moduleBodyMs: moduleBody === undefined ? null : Math.round(moduleBody),
+            afterLastResponseMs: moduleBody === undefined ? null : Math.round(moduleBody - lastResponseEnd),
+          });
+        }, { once: true });
+      })();
+    </script>
+    <script>
+      (() => {
         const lightSurface = '#ffffff';
         const darkSurface = '#1e1e20';
         const readSettings = () => {
@@ -183,6 +274,13 @@
     <title>MatchaClaw</title>
   </head>
   <body>
+    <script>
+      if (window.electron?.traceEnabled === true) {
+        console.info(`[startup-trace] ${JSON.stringify({
+          source: 'renderer.html', phase: 'boot-shell.before', at: Date.now(), navigationMs: Math.round(performance.now()),
+        })}`);
+      }
+    </script>
     <div id="root">
       <main class="initial-boot-shell" role="status" aria-live="polite" aria-label="正在初始化工作区">
         <section class="initial-boot-core">
@@ -200,6 +298,24 @@
         </section>
       </main>
     </div>
+    <script>
+      if (window.electron?.traceEnabled === true) {
+        performance.mark('matchaclaw.html.module-tag.before');
+        console.info(`[startup-trace] ${JSON.stringify({
+          source: 'renderer.html', phase: 'boot-shell.ready', at: Date.now(), navigationMs: Math.round(performance.now()),
+        })}`);
+        console.info(`[startup-trace] ${JSON.stringify({
+          source: 'renderer.html', phase: 'module-tag.before', at: Date.now(), navigationMs: Math.round(performance.now()),
+        })}`);
+      }
+    </script>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      if (window.electron?.traceEnabled === true) {
+        console.info(`[startup-trace] ${JSON.stringify({
+          source: 'renderer.html', phase: 'module-tag.after', at: Date.now(), navigationMs: Math.round(performance.now()),
+        })}`);
+      }
+    </script>
   </body>
 </html>

@@ -4,12 +4,12 @@ use crate::{
     archive::{self, ArchiveError},
     domain::{
         WikiArchiveExportInput, WikiArchiveImportInput, WikiFailure, WikiOpenProjectInput,
-        WikiProjectSelector, WikiProjectsReceipt, WikiRebuildIndexReceipt,
+        WikiProjectSelector, WikiRebuildIndexReceipt,
     },
 };
 
 use super::actor::{
-    WikiShared, WikiState, open_project, project_root, selected_project, write_file_snapshot,
+    WikiState, prepare_open_project, project_root, selected_project, write_file_snapshot,
 };
 
 pub(crate) fn export_archive(
@@ -21,24 +21,15 @@ pub(crate) fn export_archive(
         .map_err(archive_failure)
 }
 
-pub(crate) async fn import_archive(
-    shared: &WikiShared,
+pub(crate) fn prepare_import_archive(
     input: WikiArchiveImportInput,
-) -> Result<WikiProjectsReceipt, WikiFailure> {
-    let root: PathBuf = tokio::task::spawn_blocking(move || {
-        archive::import_project_archive(input.archive_path, input.destination)
-            .map_err(archive_failure)
+) -> Result<PathBuf, WikiFailure> {
+    let root = archive::import_project_archive(input.archive_path, input.destination)
+        .map_err(archive_failure)?;
+    prepare_open_project(WikiOpenProjectInput {
+        root_path: root.to_string_lossy().into_owned(),
+        title: None,
     })
-    .await
-    .map_err(|_| WikiFailure::state("Wiki project import task failed"))??;
-    open_project(
-        shared,
-        WikiOpenProjectInput {
-            root_path: root.to_string_lossy().into_owned(),
-            title: None,
-        },
-    )
-    .await
     .map_err(|_| WikiFailure::state("Imported Wiki project could not be registered"))
 }
 

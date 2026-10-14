@@ -140,10 +140,10 @@ export function isChannelSnapshot(value: unknown): value is ChannelSnapshot {
     || !Object.hasOwn(value, 'channels')
     || !Object.hasOwn(value, 'channelAccounts')
     || !Object.hasOwn(value, 'channelDefaultAccountId')
-    || !isOptionalSnapshotBoolean(value, 'ready')
-    || !isOptionalSnapshotBoolean(value, 'refreshing')
+    || !isOptionalBoolean(value, 'ready')
+    || !isOptionalBoolean(value, 'refreshing')
     || !isOptionalPublicError(value, 'error')
-    || !isSafeTimestamp(value.ts)
+    || !isSafeNonNegativeInteger(value.ts)
     || !Array.isArray(value.channelOrder)
     || !value.channelOrder.every(isIdentifier)
     || !isRecord(value.channels)
@@ -152,25 +152,22 @@ export function isChannelSnapshot(value: unknown): value is ChannelSnapshot {
     return false;
   }
 
-  const channelOrder = value.channelOrder;
+  const { channelOrder, channels, channelAccounts, channelDefaultAccountId } = value;
   if (new Set(channelOrder).size !== channelOrder.length
-    || !hasExactMapKeys(value.channels, channelOrder)
-    || !hasExactMapKeys(value.channelAccounts, channelOrder)
-    || !hasExactMapKeys(value.channelDefaultAccountId, channelOrder)) {
+    || !hasExactKeys(channels, channelOrder)
+    || !hasExactKeys(channelAccounts, channelOrder)
+    || !hasExactKeys(channelDefaultAccountId, channelOrder)) {
     return false;
   }
 
-  return channelOrder.every((channel) => isChannelSummary(value.channels[channel])
-    && Array.isArray(value.channelAccounts[channel])
-    && value.channelAccounts[channel].every(isChannelAccountSnapshot)
-    && hasUniqueAccountIds(value.channelAccounts[channel])
-    && isIdentifier(value.channelDefaultAccountId[channel]));
-}
-
-function hasUniqueAccountIds(value: unknown): boolean {
-  return Array.isArray(value)
-    && value.every(isChannelAccountSnapshot)
-    && new Set(value.map((account) => account.accountId)).size === value.length;
+  return channelOrder.every((channel) => {
+    const accounts = channelAccounts[channel];
+    return isChannelSummary(channels[channel])
+      && Array.isArray(accounts)
+      && accounts.every(isChannelAccountSnapshot)
+      && new Set(accounts.map((account) => account.accountId)).size === accounts.length
+      && isIdentifier(channelDefaultAccountId[channel]);
+  });
 }
 
 function isChannelSummary(value: unknown): value is ChannelSummarySnapshot {
@@ -206,10 +203,6 @@ function isOptionalBoolean(value: Record<string, unknown>, key: string): boolean
   return !Object.hasOwn(value, key) || typeof value[key] === 'boolean';
 }
 
-function isOptionalSnapshotBoolean(value: Record<string, unknown>, key: string): boolean {
-  return !Object.hasOwn(value, key) || typeof value[key] === 'boolean';
-}
-
 function isOptionalPublicError(value: Record<string, unknown>, key: string): boolean {
   return !Object.hasOwn(value, key) || value[key] === PUBLIC_STATUS_ERROR;
 }
@@ -219,7 +212,7 @@ function isOptionalText(value: Record<string, unknown>, key: string): boolean {
 }
 
 function isOptionalTimestamp(value: Record<string, unknown>, key: string): boolean {
-  return !Object.hasOwn(value, key) || value[key] === null || isSafeTimestamp(value[key]);
+  return !Object.hasOwn(value, key) || value[key] === null || isSafeNonNegativeInteger(value[key]);
 }
 
 function isOptionalProbe(value: Record<string, unknown>, key: string): boolean {
@@ -239,14 +232,6 @@ function isText(value: unknown): value is string {
     && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
-function isSafeTimestamp(value: unknown): value is number {
-  return isSafeNonNegativeInteger(value);
-}
-
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowed.includes(key));
-}
-
-function hasExactMapKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  return hasExactKeys(value, expected);
 }

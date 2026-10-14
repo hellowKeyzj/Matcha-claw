@@ -1,6 +1,7 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
-import { decodeSessionContentLoadResponse } from './session-contract';
+import { decodeSessionContentLoadResponse, sameSessionIdentity, type SessionIdentity } from './session-contract';
+import { isBoundedId, isTimelineIdentity, isTimelineScope } from './timeline-contract';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 const UNAVAILABLE = { success: false, error: 'Session content is unavailable' } as const;
 const ENDPOINT = '/api/sessions/content';
@@ -11,11 +12,11 @@ export type SessionContentLoadTransportResponse = Readonly<{ status: 200 | 503; 
 export type SessionContentLoadRequest = Readonly<{
   id: 'session.management';
   operationId: 'sessions.content.load';
-  scope: Readonly<{ kind: 'session'; identity: Identity }>;
-  target: Readonly<{ kind: 'session'; identity: Identity }>;
+  scope: Readonly<{ kind: 'session'; identity: SessionIdentity }>;
+  target: Readonly<{ kind: 'session'; identity: SessionIdentity }>;
   input: Readonly<{
     sessionKey: string;
-    sessionIdentity: Identity;
+    sessionIdentity: SessionIdentity;
     endpointSessionId?: string;
     contentRef: string;
     offset: number;
@@ -26,14 +27,6 @@ export type SessionContentLoadRequest = Readonly<{
 export interface SessionContentTransport {
   load(request: unknown, traceId?: string | null): Promise<SessionContentLoadTransportResponse>;
 }
-
-type Endpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw' | 'matcha-agent';
-  runtimeInstanceId: 'local';
-}>;
-
-type Identity = Readonly<{ endpoint: Endpoint; agentId: string; sessionKey: string }>;
 
 export function createSessionContentTransport(
   issuer: RuntimeHostDeliveryIssuer,
@@ -98,64 +91,27 @@ function isRequest(value: unknown): value is SessionContentLoadRequest {
     || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     || value.id !== 'session.management'
     || value.operationId !== 'sessions.content.load'
-    || !isScope(value.scope)
-    || !isTarget(value.target)
+    || !isTimelineScope(value.scope)
+    || !isTimelineScope(value.target)
     || !isInput(value.input)) return false;
-  return sameIdentity(value.scope.identity, value.target.identity)
-    && sameIdentity(value.scope.identity, value.input.sessionIdentity)
+  return sameSessionIdentity(value.scope.identity, value.target.identity)
+    && sameSessionIdentity(value.scope.identity, value.input.sessionIdentity)
     && value.input.sessionKey === value.scope.identity.sessionKey;
-}
-
-function isScope(value: unknown): value is { kind: 'session'; identity: Identity } {
-  return isRecord(value) && hasExactKeys(value, ['kind', 'identity'])
-    && value.kind === 'session' && isIdentity(value.identity);
-}
-
-function isTarget(value: unknown): value is { kind: 'session'; identity: Identity } {
-  return isRecord(value) && hasExactKeys(value, ['kind', 'identity'])
-    && value.kind === 'session' && isIdentity(value.identity);
 }
 
 function isInput(value: unknown): value is SessionContentLoadRequest['input'] {
   return isRecord(value)
     && hasAllowedKeys(value, ['sessionKey', 'sessionIdentity', 'contentRef', 'offset'], ['endpointSessionId', 'limit'])
     && typeof value.sessionKey === 'string'
-    && isIdentity(value.sessionIdentity)
+    && isTimelineIdentity(value.sessionIdentity)
     && isContentRef(value.contentRef)
     && isSafeNonNegativeInteger(value.offset)
     && (value.endpointSessionId === undefined || isBoundedId(value.endpointSessionId))
     && (value.limit === undefined || isContentLimit(value.limit));
 }
 
-function isIdentity(value: unknown): value is Identity {
-  return isRecord(value) && hasExactKeys(value, ['endpoint', 'agentId', 'sessionKey'])
-    && isEndpoint(value.endpoint)
-    && isBoundedId(value.agentId)
-    && isBoundedId(value.sessionKey);
-}
-
-function isEndpoint(value: unknown): value is Endpoint {
-  return isRecord(value) && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime' && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
-    && value.runtimeInstanceId === 'local';
-}
-
-function sameIdentity(left: Identity, right: Identity): boolean {
-  return left.agentId === right.agentId && left.sessionKey === right.sessionKey
-    && left.endpoint.runtimeAdapterId === right.endpoint.runtimeAdapterId
-    && left.endpoint.runtimeInstanceId === right.endpoint.runtimeInstanceId;
-}
-
 function isContentLimit(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 64 * 1024;
-}
-
-function isBoundedId(value: unknown): value is string {
-  return typeof value === 'string'
-    && value.length > 0
-    && Buffer.byteLength(value, 'utf8') <= 4096
-    && value.trim() === value
-    && !value.includes('\0');
 }
 
 function isContentRef(value: unknown): value is string {

@@ -8,7 +8,9 @@ use crate::model::{
 use crate::{call::CronCall, ports::CronRequestAdmissionClosed};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum CronOwnerKey {}
+pub(crate) enum CronOwnerKey {
+    Job(String),
+}
 
 pub(crate) enum MutationCommand {
     Create(CronCreateCommand),
@@ -83,9 +85,14 @@ pub(crate) enum CronQuery {
 impl CronCommand {
     pub(crate) fn route(&self) -> CommandRoute<CronOwnerKey> {
         match self {
-            Self::Mutate { .. } | Self::Trigger { .. } | Self::CancelOperations { .. } => {
-                CommandRoute::Global
+            Self::Mutate { command, .. } => match command.job_id() {
+                Some(job_id) => CommandRoute::Keyed(CronOwnerKey::Job(job_id.to_owned())),
+                None => CommandRoute::Exclusive,
+            },
+            Self::Trigger { job_id, .. } => {
+                CommandRoute::Keyed(CronOwnerKey::Job(job_id.clone()))
             }
+            Self::CancelOperations { .. } => CommandRoute::Exclusive,
         }
     }
 }
@@ -93,7 +100,10 @@ impl CronCommand {
 impl CronQuery {
     pub(crate) fn route(&self) -> QueryRoute<CronOwnerKey> {
         match self {
-            Self::List { .. } | Self::LoadHistory { .. } => QueryRoute::Global,
+            Self::List { .. } => QueryRoute::Exclusive,
+            Self::LoadHistory { command, .. } => {
+                QueryRoute::Keyed(CronOwnerKey::Job(command.job_id().to_owned()))
+            }
         }
     }
 }

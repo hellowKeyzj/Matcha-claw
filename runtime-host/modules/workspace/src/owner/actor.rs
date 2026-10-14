@@ -2,17 +2,19 @@ use std::sync::Arc;
 
 use foundation::execution::{LaneRetention, OwnerSpec};
 use platform::endpoint::runtime_address::RuntimeEndpoint;
+use tokio::{
+    sync::{Mutex, oneshot},
+    task::JoinSet,
+};
 
 use crate::{
-    application::commands::{WorkspaceCommand, WorkspaceOwnerKey, WorkspaceQuery},
+    application::commands::{WorkspaceCommand, WorkspaceOperation, WorkspaceOwnerKey, WorkspaceQuery},
+    call::{Outcome, RecordedCall},
     domain::model::{
-        ResolvedWorkspaceMedia, WorkspaceBinaryFailure, WorkspaceBinaryReceipt,
-        WorkspaceDirectoryReceipt, WorkspaceListFailure, WorkspaceMediaFailure, WorkspaceMediaPath,
-        WorkspaceMediaReceipt, WorkspaceMediaThumbnail, WorkspaceMediaThumbnailEntry,
-        WorkspaceReadFailure, WorkspaceStatFailure, WorkspaceStatReceipt, WorkspaceTextReceipt,
-        WorkspaceWriteFailure, WorkspaceWriteReceipt,
+        WorkspaceBinaryFailure, WorkspaceListFailure, WorkspaceMediaFailure, WorkspaceReadFailure,
+        WorkspaceStatFailure, WorkspaceWriteFailure,
     },
-    ports::{WorkspaceRequestAdmission, WorkspaceRuntimeDirectory},
+    ports::{WorkspaceBinding, WorkspaceRequestAdmission, WorkspaceRuntimeDirectory},
 };
 
 pub struct WorkspaceOwnerInput {
@@ -24,6 +26,13 @@ pub struct WorkspaceOwnerInput {
 pub(crate) struct WorkspaceShared {
     admission: Arc<dyn WorkspaceRequestAdmission>,
     runtime_directory: Arc<dyn WorkspaceRuntimeDirectory>,
+    pub(crate) ingress: Arc<Mutex<()>>,
+    blocking: Arc<Mutex<BlockingWork>>,
+}
+
+struct BlockingWork {
+    tasks: Option<JoinSet<()>>,
+    panic: Option<Box<dyn std::any::Any + Send>>,
 }
 
 pub(crate) struct WorkspaceGlobalState;
@@ -39,8 +48,17 @@ impl WorkspaceOwner {
             shared: WorkspaceShared {
                 admission: input.admission,
                 runtime_directory: input.runtime_directory,
+                ingress: Arc::new(Mutex::new(())),
+                blocking: Arc::new(Mutex::new(BlockingWork {
+                    tasks: Some(JoinSet::new()),
+                    panic: None,
+                })),
             },
         }
+    }
+
+    pub(crate) fn shared(&self) -> WorkspaceShared {
+        self.shared.clone()
     }
 
     pub const fn lane_retention() -> LaneRetention {
@@ -73,11 +91,12 @@ impl OwnerSpec for WorkspaceOwner {
     }
 
     async fn handle_keyed_command(
-        _shared: Self::Shared,
+        shared: Self::Shared,
         _key: Self::Key,
         _lane: &mut Self::LaneState,
-        _command: Self::Command,
+        command: Self::Command,
     ) {
+        Self::handle_global_command(shared, &mut WorkspaceGlobalState, command).await;
     }
 
     async fn handle_global_command(
@@ -85,221 +104,78 @@ impl OwnerSpec for WorkspaceOwner {
         _global: &mut Self::GlobalState,
         command: Self::Command,
     ) {
-        match command {
-            WorkspaceCommand::ReadText {
-                endpoint,
-                session_key,
-                relative_path,
-                limit,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceReadFailure::Unavailable, || {
-                        execute_read_text(&shared, &endpoint, &session_key, &relative_path, limit)
-                    })
-                    .await;
+        let WorkspaceCommand { binding, operation, call, .. } = command;
+        match operation {
+            WorkspaceOperation::ReadText { endpoint, relative_path, limit, reply, .. } => {
+                let result = shared.execute(call, endpoint, WorkspaceReadFailure::Unavailable, move |_| {
+                    binding.ok_or(WorkspaceReadFailure::Unavailable)?.read_text(&relative_path, limit)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::ReadBinary {
-                endpoint,
-                session_key,
-                relative_path,
-                limit,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceBinaryFailure::Unavailable, || {
-                        execute_read_binary(&shared, &endpoint, &session_key, &relative_path, limit)
-                    })
-                    .await;
+            WorkspaceOperation::ReadBinary { endpoint, relative_path, limit, reply, .. } => {
+                let result = shared.execute(call, endpoint, WorkspaceBinaryFailure::Unavailable, move |_| {
+                    binding.ok_or(WorkspaceBinaryFailure::Unavailable)?.read_binary(&relative_path, limit)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::StatFile {
-                endpoint,
-                session_key,
-                relative_path,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceStatFailure::Unavailable, || {
-                        execute_stat_file(&shared, &endpoint, &session_key, &relative_path)
-                    })
-                    .await;
+            WorkspaceOperation::StatFile { endpoint, relative_path, reply, .. } => {
+                let result = shared.execute(call, endpoint, WorkspaceStatFailure::Unavailable, move |_| {
+                    binding.ok_or(WorkspaceStatFailure::Unavailable)?.stat_file(&relative_path)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::ListDirectory {
-                endpoint,
-                session_key,
-                relative_path,
-                include_hidden,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceListFailure::Unavailable, || {
-                        execute_list_directory(
-                            &shared,
-                            &endpoint,
-                            &session_key,
-                            &relative_path,
-                            include_hidden,
-                        )
-                    })
-                    .await;
+            WorkspaceOperation::ListDirectory { endpoint, relative_path, include_hidden, reply, .. } => {
+                let result = shared.execute(call, endpoint, WorkspaceListFailure::Unavailable, move |_| {
+                    binding.ok_or(WorkspaceListFailure::Unavailable)?.list_directory(&relative_path, include_hidden)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::WriteText {
-                endpoint,
-                session_key,
-                relative_path,
-                content,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceWriteFailure::Unavailable, || {
-                        execute_write_text(
-                            &shared,
-                            &endpoint,
-                            &session_key,
-                            &relative_path,
-                            &content,
-                        )
-                    })
-                    .await;
+            WorkspaceOperation::WriteText { endpoint, relative_path, content, reply, .. } => {
+                let result = shared.execute(call, endpoint, WorkspaceWriteFailure::Unavailable, move |_| {
+                    binding.ok_or(WorkspaceWriteFailure::Unavailable)?.write_text(&relative_path, &content)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::PrepareMedia {
-                endpoint,
-                session_key,
-                relative_path,
-                mime_type,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceMediaFailure::Unavailable, || {
-                        execute_prepare_media(
-                            &shared,
-                            &endpoint,
-                            &session_key,
-                            &relative_path,
-                            &mime_type,
-                        )
-                    })
-                    .await;
+            WorkspaceOperation::PrepareMedia { endpoint, session_key, relative_path, mime_type, reply } => {
+                let result = shared.execute(call, endpoint, WorkspaceMediaFailure::Unavailable, move |_| {
+                    binding.ok_or(WorkspaceMediaFailure::Unavailable)?.prepare_media(&session_key, &relative_path, &mime_type)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::ResolveMedia {
-                endpoint,
-                session_key,
-                reference,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceMediaFailure::Unavailable, || {
-                        execute_resolve_media(&shared, &endpoint, &session_key, &reference)
-                    })
-                    .await;
+            WorkspaceOperation::ResolveMedia { endpoint, session_key, reference, reply } => {
+                let result = shared.execute(call, endpoint, WorkspaceMediaFailure::Unavailable, move |ops| {
+                    ops.resolve_media(&session_key, &reference)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::ThumbnailMedia {
-                endpoint,
-                session_key,
-                relative_path,
-                mime_type,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceMediaFailure::Unavailable, || {
-                        execute_thumbnail_media(
-                            &shared,
-                            &endpoint,
-                            &session_key,
-                            &relative_path,
-                            &mime_type,
-                        )
-                    })
-                    .await;
+            WorkspaceOperation::ThumbnailMedia { endpoint, relative_path, mime_type, reply, .. } => {
+                let result = shared.execute(call, endpoint, WorkspaceMediaFailure::Unavailable, move |_| {
+                    binding.ok_or(WorkspaceMediaFailure::Unavailable)?.thumbnail_media(&relative_path, &mime_type)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::ThumbnailMediaGateway {
-                endpoint,
-                session_key,
-                gateway_url,
-                mime_type,
-                agent_id,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceMediaFailure::Unavailable, || {
-                        execute_thumbnail_media_gateway(
-                            &shared,
-                            &endpoint,
-                            &session_key,
-                            &gateway_url,
-                            &mime_type,
-                            &agent_id,
-                        )
-                    })
-                    .await;
+            WorkspaceOperation::ThumbnailMediaGateway { endpoint, session_key, gateway_url, mime_type, agent_id, reply } => {
+                let result = shared.execute(call, endpoint, WorkspaceMediaFailure::Unavailable, move |ops| {
+                    ops.thumbnail_media_gateway(&session_key, &gateway_url, &mime_type, &agent_id)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::ThumbnailsMedia {
-                endpoint,
-                session_key,
-                paths,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceMediaFailure::Unavailable, || {
-                        execute_thumbnails_media(&shared, &endpoint, &session_key, &paths)
-                    })
-                    .await;
+            WorkspaceOperation::ThumbnailsMedia { endpoint, session_key, paths, reply } => {
+                let result = shared.execute(call, endpoint, WorkspaceMediaFailure::Unavailable, move |_| {
+                    binding.ok_or(WorkspaceMediaFailure::Unavailable)?.thumbnails_media(&session_key, &paths)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::StagePathsMedia {
-                endpoint,
-                session_key,
-                paths,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceMediaFailure::Unavailable, || {
-                        execute_stage_paths_media(&shared, &endpoint, &session_key, &paths)
-                    })
-                    .await;
+            WorkspaceOperation::StagePathsMedia { endpoint, session_key, paths, reply } => {
+                let result = shared.execute(call, endpoint, WorkspaceMediaFailure::Unavailable, move |_| {
+                    binding.ok_or(WorkspaceMediaFailure::Unavailable)?.stage_paths_media(&session_key, &paths)
+                }).await;
                 let _ = reply.send(result);
             }
-            WorkspaceCommand::StageBufferMedia {
-                endpoint,
-                session_key,
-                base64,
-                file_name,
-                mime_type,
-                reply,
-                call,
-            } => {
-                let result = call
-                    .execute(WorkspaceMediaFailure::Unavailable, || {
-                        execute_stage_buffer_media(
-                            &shared,
-                            &endpoint,
-                            &session_key,
-                            &base64,
-                            &file_name,
-                            &mime_type,
-                        )
-                    })
-                    .await;
+            WorkspaceOperation::StageBufferMedia { endpoint, session_key, base64, file_name, mime_type, reply } => {
+                let result = shared.execute(call, endpoint, WorkspaceMediaFailure::Unavailable, move |ops| {
+                    ops.stage_buffer_media(&session_key, &base64, &file_name, &mime_type)
+                }).await;
                 let _ = reply.send(result);
             }
         }
@@ -329,191 +205,99 @@ impl OwnerSpec for WorkspaceOwner {
     ) {
         Self::handle_global_query(shared, global, query).await;
     }
-}
 
-fn execute_read_text(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    relative_path: &str,
-    limit: usize,
-) -> Result<WorkspaceTextReceipt, WorkspaceReadFailure> {
-    with_workspace_ops(shared, endpoint, WorkspaceReadFailure::Unavailable, |ops| {
-        ops.read_text(session_key, relative_path, limit)
-    })
-}
-
-fn execute_read_binary(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    relative_path: &str,
-    limit: usize,
-) -> Result<WorkspaceBinaryReceipt, WorkspaceBinaryFailure> {
-    with_workspace_ops(
-        shared,
-        endpoint,
-        WorkspaceBinaryFailure::Unavailable,
-        |ops| ops.read_binary(session_key, relative_path, limit),
-    )
-}
-
-fn execute_stat_file(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    relative_path: &str,
-) -> Result<WorkspaceStatReceipt, WorkspaceStatFailure> {
-    with_workspace_ops(shared, endpoint, WorkspaceStatFailure::Unavailable, |ops| {
-        ops.stat_file(session_key, relative_path)
-    })
-}
-
-fn execute_list_directory(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    relative_path: &str,
-    include_hidden: bool,
-) -> Result<WorkspaceDirectoryReceipt, WorkspaceListFailure> {
-    with_workspace_ops(shared, endpoint, WorkspaceListFailure::Unavailable, |ops| {
-        ops.list_directory(session_key, relative_path, include_hidden)
-    })
-}
-
-fn execute_write_text(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    relative_path: &str,
-    content: &str,
-) -> Result<WorkspaceWriteReceipt, WorkspaceWriteFailure> {
-    with_workspace_ops(
-        shared,
-        endpoint,
-        WorkspaceWriteFailure::Unavailable,
-        |ops| ops.write_text(session_key, relative_path, content),
-    )
-}
-
-fn execute_prepare_media(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    relative_path: &str,
-    mime_type: &str,
-) -> Result<WorkspaceMediaReceipt, WorkspaceMediaFailure> {
-    with_workspace_ops(
-        shared,
-        endpoint,
-        WorkspaceMediaFailure::Unavailable,
-        |ops| ops.prepare_media(session_key, relative_path, mime_type),
-    )
-}
-
-fn execute_resolve_media(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    reference: &str,
-) -> Result<ResolvedWorkspaceMedia, WorkspaceMediaFailure> {
-    with_workspace_ops(
-        shared,
-        endpoint,
-        WorkspaceMediaFailure::Unavailable,
-        |ops| ops.resolve_media(session_key, reference),
-    )
-}
-
-fn execute_thumbnail_media(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    relative_path: &str,
-    mime_type: &str,
-) -> Result<WorkspaceMediaThumbnail, WorkspaceMediaFailure> {
-    with_workspace_ops(
-        shared,
-        endpoint,
-        WorkspaceMediaFailure::Unavailable,
-        |ops| ops.thumbnail_media(session_key, relative_path, mime_type),
-    )
-}
-
-fn execute_thumbnail_media_gateway(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    gateway_url: &str,
-    mime_type: &str,
-    agent_id: &str,
-) -> Result<WorkspaceMediaThumbnail, WorkspaceMediaFailure> {
-    with_workspace_ops(
-        shared,
-        endpoint,
-        WorkspaceMediaFailure::Unavailable,
-        |ops| ops.thumbnail_media_gateway(session_key, gateway_url, mime_type, agent_id),
-    )
-}
-
-fn execute_thumbnails_media(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    paths: &[WorkspaceMediaPath],
-) -> Result<Vec<WorkspaceMediaThumbnailEntry>, WorkspaceMediaFailure> {
-    with_workspace_ops(
-        shared,
-        endpoint,
-        WorkspaceMediaFailure::Unavailable,
-        |ops| ops.thumbnails_media(session_key, paths),
-    )
-}
-
-fn execute_stage_paths_media(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    paths: &[WorkspaceMediaPath],
-) -> Result<Vec<WorkspaceMediaReceipt>, WorkspaceMediaFailure> {
-    with_workspace_ops(
-        shared,
-        endpoint,
-        WorkspaceMediaFailure::Unavailable,
-        |ops| ops.stage_paths_media(session_key, paths),
-    )
-}
-
-fn execute_stage_buffer_media(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    session_key: &str,
-    base64: &str,
-    file_name: &str,
-    mime_type: &str,
-) -> Result<WorkspaceMediaReceipt, WorkspaceMediaFailure> {
-    with_workspace_ops(
-        shared,
-        endpoint,
-        WorkspaceMediaFailure::Unavailable,
-        |ops| ops.stage_buffer_media(session_key, base64, file_name, mime_type),
-    )
-}
-
-fn with_workspace_ops<T, E: Copy>(
-    shared: &WorkspaceShared,
-    endpoint: &RuntimeEndpoint,
-    unavailable: E,
-    read: impl FnOnce(&dyn crate::ports::WorkspaceOps) -> Result<T, E>,
-) -> Result<T, E> {
-    if shared.admission.admit_workspace_request().is_err() {
-        return Err(unavailable);
+    async fn shutdown(
+        shared: Self::Shared,
+        _global: &mut Self::GlobalState,
+        _lanes: Vec<(Self::Key, Self::LaneState)>,
+    ) {
+        let (mut blocking, mut panic) = {
+            let mut custody = shared.blocking.lock().await;
+            let Some(tasks) = custody.tasks.take() else {
+                return;
+            };
+            (tasks, custody.panic.take())
+        };
+        while let Some(result) = blocking.join_next().await {
+            if let Err(error) = result {
+                if error.is_panic() && panic.is_none() {
+                    panic = Some(error.into_panic());
+                }
+            }
+        }
+        if let Some(panic) = panic {
+            std::panic::resume_unwind(panic);
+        }
     }
-    let Some(ops) = shared.runtime_directory.workspace_ops(endpoint) else {
-        return Err(unavailable);
-    };
-    if !ops.workspace_runtime_ready() {
-        return Err(unavailable);
+}
+
+impl WorkspaceShared {
+    pub(crate) fn bind(
+        &self,
+        endpoint: &RuntimeEndpoint,
+        session_key: &str,
+    ) -> Option<Arc<dyn WorkspaceBinding>> {
+        self.with_ops(endpoint, (), |ops| ops.bind_workspace(session_key).map_err(|_| ())).ok()
     }
-    read(ops)
+
+    pub(crate) async fn blocking<T: Send + 'static>(
+        &self,
+        effect: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, ()> {
+        let (reply, response) = oneshot::channel();
+        {
+            let mut custody = self.blocking.lock().await;
+            let BlockingWork { tasks, panic } = &mut *custody;
+            let tasks = tasks.as_mut().ok_or(())?;
+            while let Some(result) = tasks.try_join_next() {
+                if let Err(error) = result {
+                    if error.is_panic() && panic.is_none() {
+                        *panic = Some(error.into_panic());
+                    }
+                }
+            }
+            // Registration closes before shutdown joins, including ingress bindings.
+            tasks.spawn_blocking(move || {
+                let _ = reply.send(effect());
+            });
+        }
+        response.await.map_err(|_| ())
+    }
+
+    async fn execute<T, E>(
+        &self,
+        call: RecordedCall,
+        endpoint: RuntimeEndpoint,
+        unavailable: E,
+        effect: impl FnOnce(&dyn crate::ports::WorkspaceOps) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: Copy + Into<Outcome> + Send + 'static,
+    {
+        let shared = self.clone();
+        call.execute(unavailable, async {
+            self.blocking(move || shared.with_ops(&endpoint, unavailable, effect))
+                .await
+                .unwrap_or(Err(unavailable))
+        }).await
+    }
+
+    fn with_ops<T, E: Copy>(
+        &self,
+        endpoint: &RuntimeEndpoint,
+        unavailable: E,
+        effect: impl FnOnce(&dyn crate::ports::WorkspaceOps) -> Result<T, E>,
+    ) -> Result<T, E> {
+        if self.admission.admit_workspace_request().is_err() {
+            return Err(unavailable);
+        }
+        let Some(ops) = self.runtime_directory.workspace_ops(endpoint) else {
+            return Err(unavailable);
+        };
+        if !ops.workspace_runtime_ready() {
+            return Err(unavailable);
+        }
+        effect(ops)
+    }
 }

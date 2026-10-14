@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
 use foundation::execution::{LaneRetention, OwnerSpec};
+use tokio::{
+    sync::{Mutex, oneshot},
+    task::JoinSet,
+};
 
 use crate::{
     application::commands::{SubagentCommandEnvelope, SubagentOwnerKey, SubagentQuery},
@@ -26,6 +30,7 @@ pub(crate) struct SubagentShared {
     runtime_directory: Arc<dyn SubagentRuntimeDirectory>,
     sealed_agents: Arc<dyn SealedAgentStorePort>,
     results: crate::application::results::MutationResults,
+    blocking: Arc<Mutex<JoinSet<()>>>,
 }
 
 pub(crate) struct SubagentGlobalState;
@@ -46,6 +51,7 @@ impl SubagentOwner {
                 runtime_directory: input.runtime_directory,
                 sealed_agents: input.sealed_agents,
                 results,
+                blocking: Arc::new(Mutex::new(JoinSet::new())),
             },
         }
     }
@@ -80,11 +86,12 @@ impl OwnerSpec for SubagentOwner {
     }
 
     async fn handle_keyed_command(
-        _shared: Self::Shared,
+        shared: Self::Shared,
         _key: Self::Key,
         _lane: &mut Self::LaneState,
-        _command: Self::Command,
+        command: Self::Command,
     ) {
+        Self::handle_global_command(shared, &mut SubagentGlobalState, command).await;
     }
 
     async fn handle_global_command(
@@ -157,6 +164,49 @@ impl OwnerSpec for SubagentOwner {
     ) {
         Self::handle_global_query(shared, global, query).await;
     }
+
+    async fn shutdown(
+        shared: Self::Shared,
+        _global: &mut Self::GlobalState,
+        _lanes: Vec<(Self::Key, Self::LaneState)>,
+    ) {
+        let mut blocking = shared.blocking.lock().await;
+        let mut panic = None;
+        while let Some(result) = blocking.join_next().await {
+            if let Err(error) = result {
+                if error.is_panic() && panic.is_none() {
+                    panic = Some(error.into_panic());
+                }
+            }
+        }
+        if let Some(panic) = panic {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+impl SubagentShared {
+    async fn blocking<T: Send + 'static>(
+        &self,
+        effect: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, ()> {
+        let (reply, response) = oneshot::channel();
+        {
+            let mut blocking = self.blocking.lock().await;
+            while let Some(result) = blocking.try_join_next() {
+                if let Err(error) = result {
+                    if error.is_panic() {
+                        std::panic::resume_unwind(error.into_panic());
+                    }
+                }
+            }
+            // Keep custody after owner-handler cancellation; shutdown joins the real work.
+            blocking.spawn_blocking(move || {
+                let _ = reply.send(effect());
+            });
+        }
+        response.await.map_err(|_| ())
+    }
 }
 
 async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome {
@@ -173,10 +223,9 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
                 Err(outcome) => return outcome,
             };
             let sealed_agents = Arc::clone(&shared.sealed_agents);
-            return match tokio::task::spawn_blocking(move || {
-                sealed_agents.export_package(agent_id, agent_name)
-            })
-            .await
+            return match shared
+                .blocking(move || sealed_agents.export_package(agent_id, agent_name))
+                .await
             {
                 Ok(result) => sealed_outcome(result, Outcome::PackageExported),
                 Err(_) => Outcome::Unavailable,
@@ -196,15 +245,16 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
                 Err(outcome) => return outcome,
             };
             let sealed_agents = Arc::clone(&shared.sealed_agents);
-            return match tokio::task::spawn_blocking(move || {
-                sealed_agents.export_cloud_package(
-                    agent_id,
-                    agent_name,
-                    cloud_public_key,
-                    cloud_key_id,
-                )
-            })
-            .await
+            return match shared
+                .blocking(move || {
+                    sealed_agents.export_cloud_package(
+                        agent_id,
+                        agent_name,
+                        cloud_public_key,
+                        cloud_key_id,
+                    )
+                })
+                .await
             {
                 Ok(result) => sealed_outcome(result, Outcome::PackageExported),
                 Err(_) => Outcome::Unavailable,
@@ -223,14 +273,21 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
             if !ops.subagent_runtime_ready() {
                 return Outcome::Unavailable;
             }
-            let removal = shared.sealed_agents.prepare_remove_package(agent_id);
+            let sealed_agents = Arc::clone(&shared.sealed_agents);
+            let removal = shared
+                .blocking(move || sealed_agents.prepare_remove_package(agent_id))
+                .await
+                .unwrap_or(Err(SealedAgentError::Unknown));
             let outcome = ops.subagents(Command::Delete { endpoint, input }).await;
             match outcome {
                 Outcome::Deleted(mut agent) => {
                     if agent.native_succeeded() {
-                        agent.sealed_purge = match removal.and_then(|plan| plan.remove()) {
-                            Ok(_) => crate::model::SealedPurge::Completed,
-                            Err(_) => crate::model::SealedPurge::Failed,
+                        agent.sealed_purge = match shared
+                            .blocking(move || removal.and_then(|plan| plan.remove()))
+                            .await
+                        {
+                            Ok(Ok(_)) => crate::model::SealedPurge::Completed,
+                            _ => crate::model::SealedPurge::Failed,
                         };
                     }
                     Outcome::Deleted(agent)
@@ -246,7 +303,14 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
                 return Outcome::Unavailable;
             }
             let outcome = ops.subagents(command).await;
-            project_sealed_state(&*shared.sealed_agents, outcome)
+            if !matches!(outcome, Outcome::Agents { .. }) {
+                return outcome;
+            }
+            let sealed_agents = Arc::clone(&shared.sealed_agents);
+            shared
+                .blocking(move || project_sealed_state(&*sealed_agents, outcome))
+                .await
+                .unwrap_or(Outcome::Unavailable)
         }
     }
 }
@@ -294,12 +358,16 @@ async fn install_agent_package(
     if !ops.subagent_runtime_ready() {
         return Outcome::Unavailable;
     }
+    let sealed_agents = Arc::clone(&shared.sealed_agents);
+    let prepare_path = package_path.clone();
+    let prepare_metadata = cloud_metadata.clone();
     let plan = match shared
-        .sealed_agents
-        .prepare_install(package_path.clone(), cloud_metadata.clone())
+        .blocking(move || sealed_agents.prepare_install(prepare_path, prepare_metadata))
+        .await
     {
-        Ok(plan) => plan,
-        Err(error) => return sealed_error(error),
+        Ok(Ok(plan)) => plan,
+        Ok(Err(error)) => return sealed_error(error),
+        Err(()) => return Outcome::Unavailable,
     };
     let outcome = ops
         .subagents(Command::Create {
@@ -316,9 +384,14 @@ async fn install_agent_package(
         return outcome;
     };
     let result = if agent.agent_id == plan.agent_id() {
-        shared
-            .sealed_agents
-            .install_prepared_package(package_path, cloud_metadata)
+        let sealed_agents = Arc::clone(&shared.sealed_agents);
+        match shared
+            .blocking(move || sealed_agents.install_prepared_package(package_path, cloud_metadata))
+            .await
+        {
+            Ok(result) => result,
+            Err(()) => return Outcome::Unavailable,
+        }
     } else {
         Err(SealedAgentInstallError::NotCommitted(
             SealedAgentError::Rejected,

@@ -13,10 +13,6 @@ impl SkillKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    pub(crate) fn safe_directory_component(&self) -> Option<&str> {
-        safe_directory_component(&self.0)
-    }
 }
 
 impl fmt::Debug for SkillKey {

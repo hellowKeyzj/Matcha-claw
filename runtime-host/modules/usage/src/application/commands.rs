@@ -38,6 +38,13 @@ impl UsageCommand {
 
 impl UsageQuery {
     pub(crate) fn route(&self) -> foundation::execution::QueryRoute<UsageOwnerKey> {
-        foundation::execution::QueryRoute::Global
+        match self {
+            Self::Recent { .. } | Self::SessionTimeseries { .. } => {
+                foundation::execution::QueryRoute::Global
+            }
+            Self::DefaultLimit { .. } | Self::MaxLimit { .. } => {
+                foundation::execution::QueryRoute::Direct
+            }
+        }
     }
 }

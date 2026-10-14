@@ -891,15 +891,6 @@ struct Admitted<T> {
     permit: OwnedSemaphorePermit,
 }
 
-impl<T> Admitted<T> {
-    fn map<U>(self, map: impl FnOnce(T) -> U) -> Admitted<U> {
-        Admitted {
-            item: map(self.item),
-            permit: self.permit,
-        }
-    }
-}
-
 struct ClassifiedQueryRoute {
     direct: bool,
     route: Box<dyn Any + Send>,
@@ -923,23 +914,6 @@ impl QueryRouteFailure {
     }
 }
 
-struct RoutedQuery<Query, Key> {
-    query: Query,
-    route: QueryRoute<Key>,
-}
-
-impl<Query, Key: Send + 'static> RoutedQuery<Query, Key> {
-    fn into_mailbox<Command>(self) -> Mailbox<Command, Query> {
-        Mailbox::Query {
-            query: self.query,
-            route: ClassifiedQueryRoute {
-                direct: matches!(&self.route, QueryRoute::Direct),
-                route: Box::new(self.route),
-            },
-        }
-    }
-}
-
 enum Mailbox<Command, Query> {
     Command { command: Command, control: bool },
     Query { query: Query, route: ClassifiedQueryRoute },
@@ -947,17 +921,17 @@ enum Mailbox<Command, Query> {
 
 enum LaneItem<O: OwnerSpec> {
     Command(O::Command),
-    Query(RoutedQuery<O::Query, O::Key>),
+    Query(O::Query),
 }
 
 enum GlobalItem<O: OwnerSpec> {
     Command(O::Command),
-    Query(RoutedQuery<O::Query, O::Key>),
+    Query(O::Query),
 }
 
 enum ExclusiveItem<O: OwnerSpec> {
     Command(O::Command),
-    Query(RoutedQuery<O::Query, O::Key>),
+    Query(O::Query),
     Shutdown(O::Command),
 }
 
@@ -1189,6 +1163,8 @@ where
 struct Lane<O: OwnerSpec> {
     state: Option<O::LaneState>,
     queue: VecDeque<Admitted<LaneItem<O>>>,
+    // Waiting is the FIFO tail; each item retains its existing admission permit.
+    waiting: VecDeque<Admitted<LaneItem<O>>>,
     running: bool,
     cancellation: Option<CancellationToken>,
     idle_since: Option<Instant>,
@@ -1199,6 +1175,7 @@ struct OwnerRuntimeSlot<O: OwnerSpec> {
     shared: O::Shared,
     global_state: Option<O::GlobalState>,
     global_queue: VecDeque<Admitted<GlobalItem<O>>>,
+    global_waiting: VecDeque<Admitted<GlobalItem<O>>>,
     global_running: bool,
     global_cancellation: Option<CancellationToken>,
     exclusive_queue: VecDeque<Admitted<ExclusiveItem<O>>>,
@@ -1303,6 +1280,7 @@ where
             shared,
             global_state: Some(global_state),
             global_queue: VecDeque::new(),
+            global_waiting: VecDeque::new(),
             global_running: false,
             global_cancellation: None,
             exclusive_queue: VecDeque::new(),
@@ -1335,9 +1313,86 @@ where
         drain: CancellationToken,
     ) {
         self.task_cancellation = cancellation.clone();
+        let mut panic = AssertUnwindSafe(self.run_mailbox(&mut mailbox_rx, cancellation, drain))
+            .catch_unwind()
+            .await
+            .err();
+        if panic.is_some() {
+            self.begin_shutdown();
+            mailbox_rx.close();
+            while !self.can_shutdown() {
+                let completion = self.completion_rx.recv().await
+                    .expect("active owner work returns its state");
+                self.complete(completion);
+            }
+        }
+        self.admission.close();
+        self.direct_admission.close();
+        drop(mailbox_rx);
+        if let Some(route_panic) = self.query_route_failure.take() {
+            panic.get_or_insert(route_panic);
+        }
+        let mut lanes = Vec::with_capacity(self.lanes.len());
+        for (key, mut lane) in self.lanes.drain() {
+            if let Some(state) = lane.state.take() {
+                lanes.push((key, state));
+            }
+        }
+        if let Some(mut global_state) = self.global_state.take() {
+            observe_owner_runtime::<O>(
+                &self.observation,
+                self.id,
+                OwnerRuntimeStage::ShutdownStart,
+                OwnerRuntimeItem::Shutdown,
+                OwnerRuntimeRoute::Shutdown,
+                None,
+                None,
+                Some(OwnerRuntimeReason::Accepted),
+            );
+            match AssertUnwindSafe(async {
+                O::shutdown(self.shared, &mut global_state, lanes).await;
+            })
+                .catch_unwind()
+                .await
+            {
+                Ok(()) => observe_owner_runtime::<O>(
+                    &self.observation,
+                    self.id,
+                    OwnerRuntimeStage::ShutdownSettle,
+                    OwnerRuntimeItem::Shutdown,
+                    OwnerRuntimeRoute::Shutdown,
+                    None,
+                    None,
+                    Some(OwnerRuntimeReason::Accepted),
+                ),
+                Err(shutdown_panic) => {
+                    observe_owner_runtime::<O>(
+                        &self.observation,
+                        self.id,
+                        OwnerRuntimeStage::ShutdownSettle,
+                        OwnerRuntimeItem::Shutdown,
+                        OwnerRuntimeRoute::Shutdown,
+                        None,
+                        None,
+                        Some(OwnerRuntimeReason::Panic),
+                    );
+                    panic.get_or_insert(shutdown_panic);
+                }
+            }
+        }
+        if let Some(panic) = panic {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn run_mailbox(
+        &mut self,
+        mailbox_rx: &mut mpsc::Receiver<Admitted<Mailbox<O::Command, O::Query>>>,
+        cancellation: CancellationToken,
+        drain: CancellationToken,
+    ) {
         let mut mailbox_open = true;
         let mut draining = false;
-        let mut pending = None;
         let mut eviction_interval = tokio::time::interval(Duration::from_secs(5));
         eviction_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -1350,14 +1405,13 @@ where
                 self.begin_shutdown();
             }
             if self.closing {
-                pending = None;
                 mailbox_open = false;
                 mailbox_rx.close();
             }
-            if draining && O::PENDING_LIFECYCLE && !self.closing && pending.is_none() && self.can_shutdown() {
+            if draining && O::PENDING_LIFECYCLE && !self.closing && self.can_shutdown() {
                 mailbox_rx.close();
             }
-            if (self.closing || (!mailbox_open && pending.is_none())) && self.can_shutdown() {
+            if (self.closing || !mailbox_open) && self.can_shutdown() {
                 break;
             }
 
@@ -1365,13 +1419,6 @@ where
                 self.dispatch_ready().await;
                 if self.closing {
                     continue;
-                }
-            }
-
-            if let Some(message) = pending.take() {
-                match self.accept(message).await {
-                    Ok(()) => continue,
-                    Err(message) => pending = Some(message),
                 }
             }
 
@@ -1407,13 +1454,9 @@ where
                     self.complete(completion);
                 }
 
-                message = mailbox_rx.recv(), if mailbox_open && pending.is_none() && !self.exclusive_blocks_mailbox() => {
+                message = mailbox_rx.recv(), if mailbox_open && !self.exclusive_blocks_mailbox() => {
                     match message {
-                        Some(message) => {
-                            if let Err(message) = self.accept(message).await {
-                                pending = Some(message);
-                            }
-                        }
+                        Some(message) => self.accept(message).await,
                         None => {
                             mailbox_open = false;
                         }
@@ -1425,64 +1468,9 @@ where
                 }
             }
         }
-
-        self.admission.close();
-        self.direct_admission.close();
-        if let Some(panic) = self.query_route_failure.take() {
-            std::panic::resume_unwind(panic);
-        }
-        let mut lanes = Vec::with_capacity(self.lanes.len());
-        for (key, mut lane) in self.lanes.drain() {
-            if let Some(state) = lane.state.take() {
-                lanes.push((key, state));
-            }
-        }
-        if let Some(mut global_state) = self.global_state.take() {
-            observe_owner_runtime::<O>(
-                &self.observation,
-                self.id,
-                OwnerRuntimeStage::ShutdownStart,
-                OwnerRuntimeItem::Shutdown,
-                OwnerRuntimeRoute::Shutdown,
-                None,
-                None,
-                Some(OwnerRuntimeReason::Accepted),
-            );
-            match AssertUnwindSafe(O::shutdown(self.shared, &mut global_state, lanes))
-                .catch_unwind()
-                .await
-            {
-                Ok(()) => observe_owner_runtime::<O>(
-                    &self.observation,
-                    self.id,
-                    OwnerRuntimeStage::ShutdownSettle,
-                    OwnerRuntimeItem::Shutdown,
-                    OwnerRuntimeRoute::Shutdown,
-                    None,
-                    None,
-                    Some(OwnerRuntimeReason::Accepted),
-                ),
-                Err(panic) => {
-                    observe_owner_runtime::<O>(
-                        &self.observation,
-                        self.id,
-                        OwnerRuntimeStage::ShutdownSettle,
-                        OwnerRuntimeItem::Shutdown,
-                        OwnerRuntimeRoute::Shutdown,
-                        None,
-                        None,
-                        Some(OwnerRuntimeReason::Panic),
-                    );
-                    std::panic::resume_unwind(panic);
-                }
-            }
-        }
     }
 
-    async fn accept(
-        &mut self,
-        message: Admitted<Mailbox<O::Command, O::Query>>,
-    ) -> Result<(), Admitted<Mailbox<O::Command, O::Query>>> {
+    async fn accept(&mut self, message: Admitted<Mailbox<O::Command, O::Query>>) {
         let Admitted { item: message, permit } = message;
         match message {
             Mailbox::Command { command, .. } => {
@@ -1490,17 +1478,13 @@ where
                 observe_command_route::<O>(&self.observation, self.id, &route);
                 match route {
                     CommandRoute::Keyed(key) | CommandRoute::KeyedControl(key) => self
-                        .enqueue_keyed(key, Admitted { item: LaneItem::Command(command), permit })
-                        .map_err(|item| item.map(lane_item_to_mailbox)),
+                        .enqueue_keyed(key, Admitted { item: LaneItem::Command(command), permit }),
                     CommandRoute::Global => self
-                        .enqueue_global(Admitted { item: GlobalItem::Command(command), permit })
-                        .map_err(|item| item.map(global_item_to_mailbox)),
+                        .enqueue_global(Admitted { item: GlobalItem::Command(command), permit }),
                     CommandRoute::Exclusive => self
-                        .enqueue_exclusive(Admitted { item: ExclusiveItem::Command(command), permit })
-                        .map_err(|item| item.map(exclusive_item_to_mailbox)),
+                        .enqueue_exclusive(Admitted { item: ExclusiveItem::Command(command), permit }),
                     CommandRoute::Shutdown => self
-                        .enqueue_exclusive(Admitted { item: ExclusiveItem::Shutdown(command), permit })
-                        .map_err(|item| item.map(exclusive_item_to_mailbox)),
+                        .enqueue_exclusive(Admitted { item: ExclusiveItem::Shutdown(command), permit }),
                 }
             }
             Mailbox::Query { query, route } => {
@@ -1510,61 +1494,36 @@ where
                 match route {
                     QueryRoute::Direct => {
                         self.dispatch_direct_query(Admitted { item: query, permit }).await;
-                        Ok(())
                     }
                     QueryRoute::Keyed(key) => self
-                        .enqueue_keyed(key.clone(), Admitted {
-                            item: LaneItem::Query(RoutedQuery { query, route: QueryRoute::Keyed(key) }),
-                            permit,
-                        })
-                        .map_err(|item| item.map(lane_item_to_mailbox)),
+                        .enqueue_keyed(key, Admitted { item: LaneItem::Query(query), permit }),
                     QueryRoute::Global => self
-                        .enqueue_global(Admitted {
-                            item: GlobalItem::Query(RoutedQuery { query, route: QueryRoute::Global }),
-                            permit,
-                        })
-                        .map_err(|item| item.map(global_item_to_mailbox)),
+                        .enqueue_global(Admitted { item: GlobalItem::Query(query), permit }),
                     QueryRoute::Exclusive => self
-                        .enqueue_exclusive(Admitted {
-                            item: ExclusiveItem::Query(RoutedQuery { query, route: QueryRoute::Exclusive }),
-                            permit,
-                        })
-                        .map_err(|item| item.map(exclusive_item_to_mailbox)),
+                        .enqueue_exclusive(Admitted { item: ExclusiveItem::Query(query), permit }),
                 }
             }
         }
     }
 
-    fn enqueue_keyed(
-        &mut self,
-        key: O::Key,
-        item: Admitted<LaneItem<O>>,
-    ) -> Result<(), Admitted<LaneItem<O>>> {
+    fn enqueue_keyed(&mut self, key: O::Key, item: Admitted<LaneItem<O>>) {
         let item_kind = lane_item_observation_item(&item.item);
-        let progress = O::PENDING_LIFECYCLE && (self.has_pending_lanes() || self.lanes.values().any(|lane| lane.running));
-        let control = O::PENDING_LIFECYCLE && matches!(&item.item, LaneItem::Command(command) if matches!(O::route_command(command), CommandRoute::KeyedControl(_)));
         let lane = self.lanes.entry(key.clone()).or_insert_with(|| Lane {
             state: Some(O::open_lane(&self.shared, &key)),
             queue: VecDeque::new(),
+            waiting: VecDeque::new(),
             running: false,
             cancellation: None,
             idle_since: None,
         });
-        if lane.queue.len() >= self.lane_queue_capacity && !control && !progress {
-            observe_keyed_owner_runtime::<O>(
-                &self.observation,
-                self.id,
-                OwnerRuntimeStage::Enqueue,
-                item_kind,
-                OwnerRuntimeRoute::Keyed,
-                &key,
-                Some(lane.queue.len()),
-                Some(OwnerRuntimeReason::QueueFull),
-            );
-            return Err(item);
-        }
         lane.idle_since = None;
-        lane.queue.push_back(item);
+        let reason = if lane.queue.len() >= self.lane_queue_capacity || !lane.waiting.is_empty() {
+            lane.waiting.push_back(item);
+            OwnerRuntimeReason::QueueFull
+        } else {
+            lane.queue.push_back(item);
+            OwnerRuntimeReason::Accepted
+        };
         observe_keyed_owner_runtime::<O>(
             &self.observation,
             self.id,
@@ -1572,33 +1531,20 @@ where
             item_kind,
             OwnerRuntimeRoute::Keyed,
             &key,
-            Some(lane.queue.len()),
-            Some(OwnerRuntimeReason::Accepted),
+            Some(lane.queue.len() + lane.waiting.len()),
+            Some(reason),
         );
-        Ok(())
     }
 
-    fn enqueue_global(
-        &mut self,
-        item: Admitted<GlobalItem<O>>,
-    ) -> Result<(), Admitted<GlobalItem<O>>> {
+    fn enqueue_global(&mut self, item: Admitted<GlobalItem<O>>) {
         let item_kind = global_item_observation_item(&item.item);
-        if self.global_queue.len() >= self.global_queue_capacity
-            && !(O::PENDING_LIFECYCLE && (self.has_pending_lanes() || self.lanes.values().any(|lane| lane.running)))
-        {
-            observe_owner_runtime::<O>(
-                &self.observation,
-                self.id,
-                OwnerRuntimeStage::Enqueue,
-                item_kind,
-                OwnerRuntimeRoute::Global,
-                None,
-                Some(self.global_queue.len()),
-                Some(OwnerRuntimeReason::QueueFull),
-            );
-            return Err(item);
-        }
-        self.global_queue.push_back(item);
+        let reason = if self.global_queue.len() >= self.global_queue_capacity || !self.global_waiting.is_empty() {
+            self.global_waiting.push_back(item);
+            OwnerRuntimeReason::QueueFull
+        } else {
+            self.global_queue.push_back(item);
+            OwnerRuntimeReason::Accepted
+        };
         observe_owner_runtime::<O>(
             &self.observation,
             self.id,
@@ -1606,31 +1552,15 @@ where
             item_kind,
             OwnerRuntimeRoute::Global,
             None,
-            Some(self.global_queue.len()),
-            Some(OwnerRuntimeReason::Accepted),
+            Some(self.global_queue.len() + self.global_waiting.len()),
+            Some(reason),
         );
-        Ok(())
     }
 
-    fn enqueue_exclusive(
-        &mut self,
-        item: Admitted<ExclusiveItem<O>>,
-    ) -> Result<(), Admitted<ExclusiveItem<O>>> {
+    fn enqueue_exclusive(&mut self, item: Admitted<ExclusiveItem<O>>) {
         let item_kind = exclusive_item_observation_item(&item.item);
         let route = exclusive_item_observation_route(&item.item);
-        if self.exclusive_queue.len() >= self.global_queue_capacity {
-            observe_owner_runtime::<O>(
-                &self.observation,
-                self.id,
-                OwnerRuntimeStage::Enqueue,
-                item_kind,
-                route,
-                None,
-                Some(self.exclusive_queue.len()),
-                Some(OwnerRuntimeReason::QueueFull),
-            );
-            return Err(item);
-        }
+        // The mailbox barrier admits no further item until this exclusive settles.
         self.exclusive_queue.push_back(item);
         observe_owner_runtime::<O>(
             &self.observation,
@@ -1642,16 +1572,17 @@ where
             Some(self.exclusive_queue.len()),
             Some(OwnerRuntimeReason::Accepted),
         );
-        Ok(())
     }
 
     async fn dispatch_direct_query(&mut self, query: Admitted<O::Query>) {
+        let shared = self.shared.clone();
         let Admitted { item: query, permit } = query;
         let id = self.next_direct_id;
         self.next_direct_id = self.next_direct_id.wrapping_add(1);
         let cancellation = self.owner_cancellation.child_token();
         self.direct_running.insert(id, cancellation.clone());
         self.send_work(
+            shared,
             OwnerRuntimeItem::Query,
             OwnerRuntimeRoute::Direct,
             None,
@@ -1676,7 +1607,7 @@ where
         let keys = self
             .lanes
             .iter()
-            .filter(|(_, lane)| !lane.running && !lane.queue.is_empty() && lane.state.is_some())
+            .filter(|(_, lane)| !lane.running && (!lane.queue.is_empty() || !lane.waiting.is_empty()) && lane.state.is_some())
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         for key in keys {
@@ -1689,7 +1620,14 @@ where
         let Some(lane) = self.lanes.get_mut(&key) else {
             return;
         };
-        if lane.running || lane.queue.is_empty() {
+        if lane.running {
+            return;
+        }
+        while lane.queue.len() < self.lane_queue_capacity {
+            let Some(item) = lane.waiting.pop_front() else { break; };
+            lane.queue.push_back(item);
+        }
+        if lane.queue.is_empty() {
             return;
         }
         let Some(state) = lane.state.as_ref() else {
@@ -1697,15 +1635,23 @@ where
         };
         let index = match lane.queue.front().map(|item| &item.item) {
             Some(LaneItem::Command(command)) if !O::keyed_command_ready(&self.shared, &key, state, command) => {
-                let Some(index) = lane.queue.iter().position(|item| {
+                // The existing control escape must also reach the admission-bounded tail.
+                let Some(index) = lane.queue.iter().chain(&lane.waiting).position(|item| {
                     matches!(&item.item, LaneItem::Command(command) if matches!(O::route_command(command), CommandRoute::KeyedControl(_)))
                 }) else { return; };
                 index
             }
             _ => 0,
         };
+        let shared = self.shared.clone();
+        let key_hash = key_hash_for_observation(&self.observation, &key);
         let state = lane.state.take().expect("ready lane state");
-        let Some(Admitted { item, permit }) = lane.queue.remove(index) else {
+        let item = if index < lane.queue.len() {
+            lane.queue.remove(index)
+        } else {
+            lane.waiting.remove(index - lane.queue.len())
+        };
+        let Some(Admitted { item, permit }) = item else {
             lane.state = Some(state);
             return;
         };
@@ -1713,7 +1659,6 @@ where
         lane.running = true;
         lane.cancellation = Some(cancellation.clone());
         let item_kind = lane_item_observation_item(&item);
-        let key_hash = key_hash_for_observation(&self.observation, &key);
         let work = match item {
             LaneItem::Command(command) => Work::KeyedCommand {
                 key,
@@ -1724,18 +1669,26 @@ where
             LaneItem::Query(query) => Work::KeyedQuery {
                 key,
                 state,
-                query: query.query,
+                query,
                 cancellation,
             },
         };
-        self.send_work(item_kind, OwnerRuntimeRoute::Keyed, key_hash, Admitted { item: work, permit })
+        self.send_work(shared, item_kind, OwnerRuntimeRoute::Keyed, key_hash, Admitted { item: work, permit })
             .await;
     }
 
     async fn dispatch_global_if_ready(&mut self) {
-        if self.global_running || self.global_queue.is_empty() {
+        if self.global_running {
             return;
         }
+        while self.global_queue.len() < self.global_queue_capacity {
+            let Some(item) = self.global_waiting.pop_front() else { break; };
+            self.global_queue.push_back(item);
+        }
+        if self.global_queue.is_empty() {
+            return;
+        }
+        let shared = self.shared.clone();
         let Some(state) = self.global_state.take() else {
             return;
         };
@@ -1756,11 +1709,11 @@ where
             },
             GlobalItem::Query(query) => Work::GlobalQuery {
                 state,
-                query: query.query,
+                query,
                 cancellation,
             },
         };
-        self.send_work(item_kind, OwnerRuntimeRoute::Global, None, Admitted { item: work, permit })
+        self.send_work(shared, item_kind, OwnerRuntimeRoute::Global, None, Admitted { item: work, permit })
             .await;
     }
 
@@ -1771,13 +1724,15 @@ where
             || !self.direct_running.is_empty()
             || self.global_running
             || !self.global_queue.is_empty()
+            || !self.global_waiting.is_empty()
             || self
                 .lanes
                 .values()
-                .any(|lane| lane.running || !lane.queue.is_empty())
+                .any(|lane| lane.running || !lane.queue.is_empty() || !lane.waiting.is_empty())
         {
             return;
         }
+        let shared = self.shared.clone();
         let Some(state) = self.global_state.take() else {
             return;
         };
@@ -1805,15 +1760,16 @@ where
             },
             ExclusiveItem::Query(query) => Work::ExclusiveQuery {
                 state,
-                query: query.query,
+                query,
                 cancellation,
             },
         };
-        self.send_work(item_kind, route, None, Admitted { item: work, permit }).await;
+        self.send_work(shared, item_kind, route, None, Admitted { item: work, permit }).await;
     }
 
     async fn send_work(
         &mut self,
+        shared: O::Shared,
         item: OwnerRuntimeItem,
         route: OwnerRuntimeRoute,
         key_hash: Option<u64>,
@@ -1833,7 +1789,7 @@ where
         let runnable = Runnable {
             work: work.boxed(
                 self.id,
-                self.shared.clone(),
+                shared,
                 self.observation.clone(),
                 item,
                 route,
@@ -1884,7 +1840,7 @@ where
                     lane.state = Some(state);
                     lane.running = false;
                     lane.cancellation = None;
-                    if lane.queue.is_empty() {
+                    if lane.queue.is_empty() && lane.waiting.is_empty() {
                         lane.idle_since = Some(Instant::now());
                     }
                 }
@@ -1933,7 +1889,7 @@ where
     fn evict_idle_lanes(&mut self) {
         if self.idle_timeout.is_zero() {
             self.lanes
-                .retain(|key, lane| lane.running || !lane.queue.is_empty()
+                .retain(|key, lane| lane.running || !lane.queue.is_empty() || !lane.waiting.is_empty()
                     || lane.state.as_ref().is_some_and(|state| O::lane_has_pending(&self.shared, key, state)));
             return;
         }
@@ -1942,6 +1898,7 @@ where
         self.lanes.retain(|key, lane| {
             lane.running
                 || !lane.queue.is_empty()
+                || !lane.waiting.is_empty()
                 || lane.state.as_ref().is_some_and(|state| O::lane_has_pending(&self.shared, key, state))
                 || lane
                     .idle_since
@@ -1964,12 +1921,14 @@ where
             cancellation.cancel();
         }
         self.global_queue.clear();
+        self.global_waiting.clear();
         self.exclusive_queue.clear();
         for lane in self.lanes.values_mut() {
             if let Some(cancellation) = &lane.cancellation {
                 cancellation.cancel();
             }
             lane.queue.clear();
+            lane.waiting.clear();
         }
     }
 
@@ -1979,39 +1938,12 @@ where
             && !self.global_running
             && !self.exclusive_running
             && self.global_queue.is_empty()
+            && self.global_waiting.is_empty()
             && self.exclusive_queue.is_empty()
             && self
                 .lanes
                 .values()
-                .all(|lane| !lane.running && lane.queue.is_empty())
-    }
-}
-
-fn lane_item_to_mailbox<O: OwnerSpec>(item: LaneItem<O>) -> Mailbox<O::Command, O::Query> {
-    match item {
-        LaneItem::Command(command) => {
-            let control = O::PENDING_LIFECYCLE && matches!(O::route_command(&command), CommandRoute::KeyedControl(_));
-            Mailbox::Command { command, control }
-        },
-        LaneItem::Query(query) => query.into_mailbox(),
-    }
-}
-
-fn global_item_to_mailbox<O: OwnerSpec>(item: GlobalItem<O>) -> Mailbox<O::Command, O::Query> {
-    match item {
-        GlobalItem::Command(command) => Mailbox::Command { command, control: false },
-        GlobalItem::Query(query) => query.into_mailbox(),
-    }
-}
-
-fn exclusive_item_to_mailbox<O: OwnerSpec>(
-    item: ExclusiveItem<O>,
-) -> Mailbox<O::Command, O::Query> {
-    match item {
-        ExclusiveItem::Command(command) | ExclusiveItem::Shutdown(command) => {
-            Mailbox::Command { command, control: false }
-        }
-        ExclusiveItem::Query(query) => query.into_mailbox(),
+                .all(|lane| !lane.running && lane.queue.is_empty() && lane.waiting.is_empty())
     }
 }
 

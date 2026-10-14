@@ -66,6 +66,10 @@ pub(in crate::surfaces::workspace) struct OpenedDirectory {
 }
 
 impl OpenedDirectory {
+    pub(in crate::surfaces::workspace) fn resource_key(&self) -> Result<String, DirectoryError> {
+        Ok(format!("{:x}:{:x}", self.identity.device, self.identity.inode))
+    }
+
     pub(in crate::surfaces::workspace) fn canonical(&self) -> &CanonicalDirectory {
         &self.canonical
     }

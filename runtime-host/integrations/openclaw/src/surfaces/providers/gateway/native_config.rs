@@ -204,6 +204,7 @@ impl ProviderNativeConfigurationOperation {
                 );
             }
         };
+        let _transaction = self.gateway.config_transaction().await;
         let snapshot = match self
             .read_snapshot("config-get", "config-snapshot-unavailable")
             .await
@@ -441,6 +442,7 @@ impl ProviderNativeConfigurationOperation {
                 ObservedStatus::Unavailable
             }
         };
+        drop(_transaction);
         if auth_state_refresh_required {
             self.refresh_auth_status().await;
         }

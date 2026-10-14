@@ -24,10 +24,13 @@ import type {
   WikiReindexState,
 } from '@/types/wiki-capabilities';
 import { trackUiEvent } from './telemetry';
+import { isTraceEnabled, startupTrace } from './trace-logger';
 import { mapBackendErrorCode, normalizeAppError } from './error-model';
 import {
   decodeHostApiProxyEnvelope,
+  HOST_API_STARTUP_PATHS,
   type HostApiProxyEnvelope,
+  resolveHostApiProxyErrorCode,
   unwrapHostApiProxyEnvelope,
 } from './host-api-transport-contract';
 import {
@@ -335,7 +338,21 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
   }
   const requestId = crypto.randomUUID();
   const tracing = !!init?.traceId && isSessionTraceEnabled();
-  const requestIdHash = tracing ? summarizeIdentifier(requestId).hash : null;
+  const startupPath = isTraceEnabled() ? path.split(/[?#]/, 1)[0] : '';
+  const startupTracing = isTraceEnabled() && method.toUpperCase() === 'GET' && HOST_API_STARTUP_PATHS.has(startupPath);
+  const startupStartedAt = startupTracing ? performance.now() : 0;
+  const requestIdHash = tracing || startupTracing ? summarizeIdentifier(requestId).hash : null;
+  const traceStartup = (phase: string, detail?: () => Record<string, unknown>): void => {
+    if (!startupTracing) return;
+    startupTrace('renderer.hostapi', phase, () => ({
+      path: startupPath, method: 'GET', requestIdHash,
+      elapsedMs: Math.round(performance.now() - startupStartedAt), ...detail?.(),
+    }));
+  };
+  let startupStage: 'invoke' | 'decode' | 'parse' = 'invoke';
+  let startupFailureCode = 'IPC_FAILED';
+  let startupStatus: number | null = null;
+  traceStartup('start');
   let abortListener: (() => void) | null = null;
   if (signal) {
     abortListener = () => {
@@ -349,6 +366,7 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
     if (tracing) logSessionTrace('hostapi.ipc.invoke', init?.traceId, () => ({
       requestIdHash, method, elapsedMs: Date.now() - startedAt,
     }));
+    traceStartup('invoke.start');
     const responsePromise = invokeIpc<unknown>('hostapi:fetch', {
       requestId,
       path,
@@ -370,14 +388,30 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
     if (tracing) logSessionTrace('hostapi.ipc.response', init?.traceId, () => ({
       requestIdHash, elapsedMs: Date.now() - startedAt,
     }));
+    traceStartup('invoke.end', () => ({ outcome: 'received' }));
+    startupStage = 'decode';
+    startupFailureCode = 'INVALID_RESPONSE';
+    traceStartup('decode.start');
     const decodeStartedAt = tracing ? performance.now() : 0;
     const envelope = decodeHostApiProxyEnvelope(response);
     if (tracing) logSessionTrace('hostapi.ipc.decoded', init?.traceId, () => ({
       requestIdHash, decodeElapsedMs: performance.now() - decodeStartedAt,
       status: envelope.ok ? envelope.data.status : null, outcome: envelope.ok ? 'received' : 'proxy-failed',
     }));
-    return parseUnifiedProxyResponse<T>(envelope, path, method, startedAt);
+    startupStatus = envelope.ok ? envelope.data.status : null;
+    traceStartup('decode.end', () => ({ status: startupStatus, outcome: envelope.ok ? 'received' : 'proxy-failed' }));
+    startupStage = 'parse';
+    if (startupTracing) startupFailureCode = envelope.ok ? 'HTTP_ERROR' : resolveHostApiProxyErrorCode(envelope.error) ?? 'UNAVAILABLE';
+    traceStartup('parse.start');
+    const result = parseUnifiedProxyResponse<T>(envelope, path, method, startedAt);
+    traceStartup('parse.end', () => ({ outcome: 'parsed', status: startupStatus }));
+    traceStartup('end', () => ({ outcome: 'success', status: startupStatus }));
+    return result;
   } catch (error) {
+    traceStartup(`${startupStage}.end`, () => ({ outcome: 'failed' }));
+    traceStartup('error', () => ({
+      code: signal?.aborted ? 'ABORTED' : startupFailureCode, status: startupStatus,
+    }));
     if (tracing) logSessionTrace('hostapi.ipc.error', init?.traceId, () => ({
       requestIdHash, elapsedMs: Date.now() - startedAt, ...summarizeError(error),
     }));

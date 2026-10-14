@@ -3,6 +3,7 @@ import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isBoundedText, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from '../client';
 import { isSkillsCallReceipt, type SkillsCallReceipt } from './management';
 import { isCallId } from '../../../../../src/types/call-log/decode';
+import type { SealedSkillCatalogIssue } from '../../../../../src/types/skill';
 
 export const SEALED_SKILLS_ENDPOINTS = Object.freeze({
   status: '/api/sealed-skills/status',
@@ -35,6 +36,7 @@ export type SealedSkillPackageEntry = Readonly<{
 
 export type SealedSkillsStatusResult = Readonly<{
   skills: SealedSkillPackageEntry[];
+  issues?: SealedSkillCatalogIssue[];
   ready?: boolean;
   updatedAt?: number | null;
   error?: string | null;
@@ -75,6 +77,7 @@ export type SealedSkillCloudExportResult = Readonly<{
     fileName: string;
     packageSha256: string;
     packageBase64: string;
+    reason?: 'cleanup-failed';
   }>;
 }>;
 
@@ -226,13 +229,25 @@ function outcomeFromResponse(body: unknown): string {
 }
 
 function isSealedSkillsStatusResult(value: unknown): value is SealedSkillsStatusResult {
-  return hasOnlyKeys(value, ['skills', 'ready', 'updatedAt', 'error'])
+  return hasOnlyKeys(value, ['skills', 'issues', 'ready', 'updatedAt', 'error'])
     && hasRequiredKeys(value, ['skills'])
     && Array.isArray(value.skills)
     && value.skills.every(isSealedSkillPackageEntry)
+    && (value.issues === undefined || (Array.isArray(value.issues) && value.issues.every(isSealedSkillCatalogIssue)))
     && (value.ready === undefined || typeof value.ready === 'boolean')
     && (value.updatedAt === undefined || value.updatedAt === null || isTimestamp(value.updatedAt))
     && (value.error === undefined || value.error === null || isBoundedText(value.error, 1_024));
+}
+
+function isSealedSkillCatalogIssue(value: unknown): value is SealedSkillCatalogIssue {
+  return hasOnlyKeys(value, ['fileName', 'skillKey', 'reason'])
+    && hasRequiredKeys(value, ['fileName', 'reason'])
+    && typeof value.fileName === 'string' && value.fileName.length > 0
+    && Buffer.byteLength(value.fileName, 'utf8') <= 1_024
+    && !/[\\/\0]/.test(value.fileName) && value.fileName !== '.' && value.fileName !== '..'
+    && (value.skillKey === undefined || (typeof value.skillKey === 'string' && value.skillKey.trim().length > 0
+      && Buffer.byteLength(value.skillKey, 'utf8') <= 4_096 && !value.skillKey.includes('\0')))
+    && ['duplicate-package', 'invalid-package', 'missing-authorization-key', 'unavailable-package'].includes(value.reason as string);
 }
 
 function isSealedSkillPackageEntry(value: unknown): value is SealedSkillPackageEntry {
@@ -298,7 +313,8 @@ function isSealedSkillCloudExportResult(value: unknown): value is SealedSkillClo
   if (!isRecord(value) || !hasExactKeys(value, ['callId', 'command', 'result'])
     || !isCallId(value.callId) || value.command !== 'sealedSkills.exportCloud' || !isRecord(value.result)) return false;
   const result = value.result;
-  return hasExactKeys(result, ['kind', 'skillKey', 'fileName', 'packageSha256', 'packageBase64'])
+  return hasAllowedKeys(result, ['kind', 'skillKey', 'fileName', 'packageSha256', 'packageBase64', 'reason'], ['kind', 'skillKey', 'fileName', 'packageSha256', 'packageBase64'])
+    && (!Object.hasOwn(result, 'reason') || result.reason === 'cleanup-failed')
     && result.kind === 'sealedCloudExport' && isOpenClawSkillKey(result.skillKey)
     && isText(result.fileName, 512) && !/[\\/\\\\\0]/.test(result.fileName) && result.fileName.endsWith('.matcha-skillpkg')
     && isPackageSha256(result.packageSha256)

@@ -93,6 +93,7 @@ impl ChannelConfigOperation {
                     Err(_) => ChannelConfigMutationOutcome::Unknown,
                 };
             }
+            let _transaction = self.gateway.config_transaction().await;
             for attempt in 0..3 {
                 channel_trace(
                     "config.get.begin",

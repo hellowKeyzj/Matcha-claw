@@ -18,7 +18,8 @@ serde.workspace = true
 rsa = { version = "0.10.0-rc.18", default-features = false, features = ["std", "encoding", "sha2"] }
 tokio = { workspace = true, features = ["sync"] }
 serde_json.workspace = true
-serde_yaml.workspace = true
+saphyr-parser = "=0.1.2"
+ryu-js = "1.0"
 sha2.workspace = true
 skills-module = { package = "skills", version = "0.1.0", path = "../skills" }
 subagents = { version = "0.1.0", path = "../subagents" }

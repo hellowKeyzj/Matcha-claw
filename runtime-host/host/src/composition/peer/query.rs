@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-use super::PeerKey;
+use super::{PeerKey, PeerLaneKey};
 
 pub(crate) enum PeerQuery {
     State {
@@ -122,25 +122,40 @@ pub(crate) enum PeerQuery {
 }
 
 impl PeerQuery {
-    pub(crate) fn route_query(&self) -> QueryRoute<PeerKey> {
+    pub(crate) fn route_query(&self) -> QueryRoute<PeerLaneKey> {
         match self {
-            Self::State { .. } | Self::OpenClawStatus { .. } | Self::OpenClawRepairStatus { .. } => QueryRoute::Direct,
-            Self::RuntimeLogs { endpoint, .. }
-            | Self::RuntimeControlReadiness { endpoint, .. }
-            | Self::RuntimeGatewayHealth { endpoint, .. }
-            | Self::RuntimeGatewayStatus { endpoint, .. }
-            | Self::RuntimeControlUiUrl { endpoint, .. } => QueryRoute::Keyed(endpoint.clone()),
-            Self::OpenClawLogs { .. }
+            Self::State { .. }
+            | Self::OpenClawStatus { .. }
+            | Self::OpenClawRepairStatus { .. }
+            | Self::RuntimeLogs { .. }
+            | Self::RuntimeControlReadiness { .. }
+            | Self::RuntimeGatewayHealth { .. }
+            | Self::RuntimeGatewayStatus { .. }
+            | Self::RuntimeControlUiUrl { .. }
+            | Self::OpenClawLogs { .. }
             | Self::OpenClawGatewayHealth { .. }
             | Self::OpenClawGatewayStatus { .. }
             | Self::OpenClawControlUiUrl { .. }
             | Self::OpenClawGatewaySnapshot { .. }
             | Self::OpenClawControlSnapshot { .. }
-            | Self::OpenClawBrowserRequest { .. }
-            | Self::OpenClawMcpAppRequest { .. }
-            | Self::OpenClawQuestionList { .. }
-            | Self::OpenClawQuestionResolve { .. } => {
-                QueryRoute::Keyed(RuntimeDriverIdentity::open_claw().endpoint())
+            | Self::OpenClawQuestionList { .. } => QueryRoute::Direct,
+            // Generic browser paths can include profile/config transactions; keep their lane.
+            Self::OpenClawBrowserRequest { .. } => {
+                QueryRoute::Keyed(PeerLaneKey::Lifecycle(RuntimeDriverIdentity::open_claw().endpoint()))
+            }
+            // Model-context writes are shared by every view in the native session.
+            Self::OpenClawMcpAppRequest { request, .. } => {
+                QueryRoute::Keyed(PeerLaneKey::McpApp {
+                    session_key: request.session_key
+                        .trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+                        .to_owned(),
+                })
+            }
+            Self::OpenClawQuestionResolve { request, .. } => {
+                QueryRoute::Keyed(PeerLaneKey::Question {
+                    identity: sessions_module::command::session_identity_lane_key(&request.session_identity),
+                    id: request.id.clone(),
+                })
             }
         }
     }

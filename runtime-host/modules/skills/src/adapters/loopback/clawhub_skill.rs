@@ -162,8 +162,9 @@ pub(super) async fn handle(
         let worker = handle.clone();
         let terminal_slug = slug.clone();
         let terminal_version = version.clone();
+        let effect = crate::operation::Effect::install(slug.clone());
         let receipt = handle
-            .submit_cancellable_operation(call, move |cancellation| async move {
+            .submit_cancellable_operation(call, effect, move |cancellation| async move {
                 let delivery = match worker
                     .install_clawhub_skill_cancellable(command, cancellation)
                     .await

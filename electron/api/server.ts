@@ -1,9 +1,12 @@
 import { randomBytes } from 'node:crypto';
+import { errorMonitor } from 'node:events';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { getPort } from '../utils/config';
 import { logger } from '../utils/logger';
+import { isTraceEnabled, startupTrace } from '../utils/trace-logger';
+import { HOST_API_STARTUP_PATHS, HOST_API_STARTUP_TRACE_HEADER } from '../../src/lib/host-api-transport-contract';
 import type { HostApiContext } from './context';
 import { handleAccountRoutes } from './routes/account';
 import { handleBillingRoutes } from './routes/billing';
@@ -236,6 +239,33 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
     const traceId = isSessionTraceEnabled() ? readTraceHeader(req.headers) : null;
     const traceActive = traceId !== null && req.url?.split(/[?#]/, 1)[0] === '/api/capabilities/execute';
     const traceStartedAt = traceActive ? Date.now() : 0;
+    const startupPath = isTraceEnabled() ? req.url?.split(/[?#]/, 1)[0] ?? '' : '';
+    const startupTracing = isTraceEnabled() && req.method === 'GET' && HOST_API_STARTUP_PATHS.has(startupPath);
+    const startupStartedAt = startupTracing ? performance.now() : 0;
+    const startupHeader = startupTracing ? req.headers[HOST_API_STARTUP_TRACE_HEADER.toLowerCase()] : null;
+    const requestIdHash = typeof startupHeader === 'string' && /^[a-f0-9]{8}$/.test(startupHeader) ? startupHeader : null;
+    const traceStartup = (phase: string, detail?: () => Record<string, unknown>): void => {
+      if (!startupTracing) return;
+      startupTrace('electron.hostapi.server', phase, () => ({
+        path: startupPath, method: 'GET', requestIdHash,
+        elapsedMs: Math.round(performance.now() - startupStartedAt), ...detail?.(),
+      }));
+    };
+    let startupStage: 'auth' | 'dispatch' | null = null;
+    if (startupTracing) {
+      const terminal = (phase: string, outcome: 'finished' | 'aborted' | 'failed'): void => {
+        res.removeListener('finish', finished);
+        res.removeListener('close', closed);
+        res.removeListener(errorMonitor, failed);
+        traceStartup(phase, () => ({ outcome, status: res.statusCode }));
+      };
+      const finished = () => terminal('res.finish', 'finished');
+      const closed = () => terminal('res.close', res.writableFinished ? 'finished' : 'aborted');
+      const failed = () => terminal('res.error', 'failed');
+      res.once('finish', finished);
+      res.once('close', closed);
+      res.once(errorMonitor, failed);
+    }
     const trace = (stage: string, payload?: () => Record<string, unknown>): void => {
       if (!traceActive) return;
       logSessionTrace(`electron.hostapi.server.${stage}`, traceId, {
@@ -243,6 +273,7 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
       });
     };
     trace('received');
+    traceStartup('received');
     try {
       const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${port}`);
       const origin = typeof req.headers?.origin === 'string' ? req.headers.origin : undefined;
@@ -264,6 +295,8 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
       }
 
       trace('auth.start');
+      startupStage = 'auth';
+      traceStartup('auth.start');
       if (hostApiToken) {
         const authHeader = typeof req.headers?.authorization === 'string'
           ? req.headers.authorization
@@ -277,12 +310,16 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
         const presentedToken = bearerToken || queryToken;
         if (!presentedToken || presentedToken !== hostApiToken) {
           trace('auth.end', () => ({ outcome: 'rejected', status: 401 }));
+          traceStartup('auth.end', () => ({ outcome: 'rejected', status: 401 }));
+          startupStage = null;
           sendJson(res, 401, { success: false, error: 'Unauthorized' });
           return;
         }
       }
 
       trace('auth.end', () => ({ outcome: hostApiToken ? 'accepted' : 'not-required' }));
+      traceStartup('auth.end', () => ({ outcome: hostApiToken ? 'accepted' : 'not-required' }));
+      startupStage = null;
 
       if (!requireJsonContentType(req)) {
         sendJson(res, 415, { success: false, error: 'Content-Type must be application/json' });
@@ -301,14 +338,21 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
         return;
       }
 
+      traceStartup('boundary.pass');
       trace('dispatch.start');
+      startupStage = 'dispatch';
+      traceStartup('dispatch.start');
       for (const handler of routeHandlers) {
         if (await handler(req, res, requestUrl, deps)) {
           trace('dispatch.end', () => ({ outcome: 'handled', status: res.statusCode }));
+          traceStartup('dispatch.end', () => ({ outcome: 'handled', status: res.statusCode }));
+          startupStage = null;
           return;
         }
       }
       trace('dispatch.end', () => ({ outcome: 'unhandled' }));
+      traceStartup('dispatch.end', () => ({ outcome: 'unhandled' }));
+      startupStage = null;
       if (isMainOwnedRoute(requestUrl.pathname)) {
         sendJson(res, 500, {
           success: false,
@@ -319,6 +363,8 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
       sendJson(res, 404, { success: false, error: `No route for ${req.method} ${requestUrl.pathname}` });
     } catch {
       trace('failure', () => ({ outcome: 'failed', status: 500 }));
+      if (startupStage) traceStartup(`${startupStage}.end`, () => ({ outcome: 'failed', status: 500 }));
+      traceStartup('error', () => ({ code: 'REQUEST_FAILED', status: 500 }));
       logger.error('Host API request failed.');
       sendJson(res, 500, { success: false, error: 'Host API request failed.' });
     }
@@ -348,7 +394,12 @@ export function startHostApiServer(
     proxyFleetTerminalStreamUpgrade(Number(runtimeHostTransportPort), req, socket, head);
   });
 
+  const bindStartedAt = isTraceEnabled() ? performance.now() : 0;
   server.on('error', (error: NodeJS.ErrnoException) => {
+    startupTrace('electron.hostapi.bind', 'error', () => ({
+      code: error.code === 'EADDRINUSE' || error.code === 'EACCES' ? error.code : 'SERVER_ERROR',
+      elapsedMs: Math.round(performance.now() - bindStartedAt),
+    }));
     if (!server.listening && readyGeneration === hostApiServerGeneration) {
       rejectHostApiReady?.(error);
     }
@@ -362,7 +413,9 @@ export function startHostApiServer(
     logger.error('Host API server error:', error);
   });
 
+  startupTrace('electron.hostapi.bind', 'start');
   server.listen(resolvedPort, '127.0.0.1', () => {
+    startupTrace('electron.hostapi.bind', 'listening', () => ({ elapsedMs: Math.round(performance.now() - bindStartedAt) }));
     const address = server.address() as AddressInfo | null;
     const listeningPort = address?.port ?? resolvedPort;
     const listeningBaseUrl = `http://127.0.0.1:${listeningPort}`;

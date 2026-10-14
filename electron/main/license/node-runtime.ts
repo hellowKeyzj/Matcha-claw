@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { app } from 'electron';
+import { isTraceEnabled, startupTrace } from '../../utils/trace-logger';
 import {
   normalizeLicenseKey,
   sanitizeLicenseGateSnapshot,
@@ -108,6 +109,7 @@ interface LicenseSecretFileV1 {
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const HARDWARE_ID_CONTEXT = 'matchaclaw-hardware-id-v1';
 const SECRET_CONTEXT = 'matchaclaw-license-secret-v1';
+let licenseTraceSeq = 0;
 
 function computeRetryDelaySec(revalidateFailureCount: number): number {
   const exponent = Math.min(revalidateFailureCount, 4);
@@ -228,11 +230,18 @@ async function readEncryptedLicenseKey(
   filePath: string,
   material: string,
 ): Promise<string | null> {
+  const traceEnabled = isTraceEnabled();
+  const seq = traceEnabled ? ++licenseTraceSeq : 0;
+  const startedAt = traceEnabled ? performance.now() : 0;
+  startupTrace('license.runtime', 'secret.read.start', () => ({ seq }));
   try {
     const raw = await readFile(filePath, 'utf8');
     const parsed = JSON.parse(raw) as unknown;
-    return decryptLicenseKeyFromFile(parsed as LicenseSecretFileV1, material);
+    const stored = decryptLicenseKeyFromFile(parsed as LicenseSecretFileV1, material);
+    startupTrace('license.runtime', 'secret.read.end', () => ({ seq, outcome: 'available', elapsedMs: performance.now() - startedAt }));
+    return stored;
   } catch {
+    startupTrace('license.runtime', 'secret.read.error', () => ({ seq, outcome: 'unavailable', elapsedMs: performance.now() - startedAt }));
     return null;
   }
 }
@@ -420,13 +429,26 @@ function normalizeAndHashHardwareId(raw: string): string {
 }
 
 async function resolveHardwareId(platformName: NodeJS.Platform = process.platform): Promise<string | null> {
-  const override = process.env.MATCHACLAW_LICENSE_HARDWARE_ID_OVERRIDE?.trim();
-  if (override) {
-    return normalizeAndHashHardwareId(override) || null;
-  }
+  const traceEnabled = isTraceEnabled();
+  const seq = traceEnabled ? ++licenseTraceSeq : 0;
+  const startedAt = traceEnabled ? performance.now() : 0;
+  startupTrace('license.runtime', 'hardware.start', () => ({ seq }));
+  try {
+    const override = process.env.MATCHACLAW_LICENSE_HARDWARE_ID_OVERRIDE?.trim();
+    if (override) {
+      const resolved = normalizeAndHashHardwareId(override) || null;
+      startupTrace('license.runtime', 'hardware.end', () => ({ seq, outcome: resolved ? 'available' : 'unavailable', elapsedMs: performance.now() - startedAt }));
+      return resolved;
+    }
 
-  const raw = await resolveHardwareIdRaw(platformName);
-  return raw ? normalizeAndHashHardwareId(raw) || null : null;
+    const raw = await resolveHardwareIdRaw(platformName);
+    const resolved = raw ? normalizeAndHashHardwareId(raw) || null : null;
+    startupTrace('license.runtime', 'hardware.end', () => ({ seq, outcome: resolved ? 'available' : 'unavailable', elapsedMs: performance.now() - startedAt }));
+    return resolved;
+  } catch (error) {
+    startupTrace('license.runtime', 'hardware.error', () => ({ seq, elapsedMs: performance.now() - startedAt }));
+    throw error;
+  }
 }
 
 function normalizeDeviceId(rawDeviceId: string): string {
@@ -488,19 +510,30 @@ function hashLicenseKey(normalizedKey: string): string {
 }
 
 async function getAppRuntimeInfo(): Promise<RuntimeInfo> {
-  let userDataDir: string | null;
+  const traceEnabled = isTraceEnabled();
+  const seq = traceEnabled ? ++licenseTraceSeq : 0;
+  const startedAt = traceEnabled ? performance.now() : 0;
+  startupTrace('license.runtime', 'runtime-info.start', () => ({ seq }));
   try {
-    userDataDir = app.getPath('userData');
-  } catch {
-    userDataDir = process.env.MATCHACLAW_APP_USER_DATA_DIR || null;
-  }
+    let userDataDir: string | null;
+    try {
+      userDataDir = app.getPath('userData');
+    } catch {
+      userDataDir = process.env.MATCHACLAW_APP_USER_DATA_DIR || null;
+    }
 
-  return {
-    packaged: app.isPackaged,
-    version: app.getVersion(),
-    machineName: process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? 'unknown-host',
-    userDataDir,
-  };
+    const runtime = {
+      packaged: app.isPackaged,
+      version: app.getVersion(),
+      machineName: process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? 'unknown-host',
+      userDataDir,
+    };
+    startupTrace('license.runtime', 'runtime-info.end', () => ({ seq, elapsedMs: performance.now() - startedAt }));
+    return runtime;
+  } catch (error) {
+    startupTrace('license.runtime', 'runtime-info.error', () => ({ seq, elapsedMs: performance.now() - startedAt }));
+    throw error;
+  }
 }
 
 async function getLicenseCacheFilePath(): Promise<string | null> {
@@ -510,23 +543,33 @@ async function getLicenseCacheFilePath(): Promise<string | null> {
 
 async function loadCachedState(): Promise<CachedLicenseState | null> {
   const cacheFilePath = await getLicenseCacheFilePath();
+  const traceEnabled = isTraceEnabled();
+  const seq = traceEnabled ? ++licenseTraceSeq : 0;
+  const startedAt = traceEnabled ? performance.now() : 0;
+  startupTrace('license.runtime', 'cache.read.start', () => ({ seq }));
   if (!cacheFilePath) {
+    startupTrace('license.runtime', 'cache.read.end', () => ({ seq, outcome: 'unavailable', elapsedMs: performance.now() - startedAt }));
     return null;
   }
   try {
     const state = JSON.parse(await readFile(cacheFilePath, 'utf8')) as unknown;
     if (!state || typeof state !== 'object') {
+      startupTrace('license.runtime', 'cache.read.end', () => ({ seq, outcome: 'unusable', elapsedMs: performance.now() - startedAt }));
       return null;
     }
     const typed = state as CachedLicenseState;
     if (typed.version !== LICENSE_CACHE_VERSION) {
+      startupTrace('license.runtime', 'cache.read.end', () => ({ seq, outcome: 'unusable', elapsedMs: performance.now() - startedAt }));
       return null;
     }
     if (!typed.deviceId || !typed.keyHash) {
+      startupTrace('license.runtime', 'cache.read.end', () => ({ seq, outcome: 'unusable', elapsedMs: performance.now() - startedAt }));
       return null;
     }
+    startupTrace('license.runtime', 'cache.read.end', () => ({ seq, outcome: 'available', elapsedMs: performance.now() - startedAt }));
     return typed;
   } catch {
+    startupTrace('license.runtime', 'cache.read.error', () => ({ seq, outcome: 'unavailable', elapsedMs: performance.now() - startedAt }));
     return null;
   }
 }
@@ -536,11 +579,21 @@ async function saveCachedState(state: CachedLicenseState): Promise<void> {
   if (!cacheFilePath) {
     return;
   }
-  await mkdir(path.dirname(cacheFilePath), { recursive: true });
-  await writeFile(cacheFilePath, `${JSON.stringify(state, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600,
-  });
+  const traceEnabled = isTraceEnabled();
+  const seq = traceEnabled ? ++licenseTraceSeq : 0;
+  const startedAt = traceEnabled ? performance.now() : 0;
+  startupTrace('license.runtime', 'cache.write.start', () => ({ seq }));
+  try {
+    await mkdir(path.dirname(cacheFilePath), { recursive: true });
+    await writeFile(cacheFilePath, `${JSON.stringify(state, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    startupTrace('license.runtime', 'cache.write.end', () => ({ seq, elapsedMs: performance.now() - startedAt }));
+  } catch (error) {
+    startupTrace('license.runtime', 'cache.write.error', () => ({ seq, elapsedMs: performance.now() - startedAt }));
+    throw error;
+  }
 }
 
 async function clearCachedState(): Promise<void> {
@@ -636,9 +689,18 @@ async function callLicenseServer(
   payload: LicenseServerPayload,
   timeoutMs: number,
 ): Promise<LicenseServerResponse> {
+  const traceEnabled = isTraceEnabled();
+  const seq = traceEnabled ? ++licenseTraceSeq : 0;
+  const startedAt = traceEnabled ? performance.now() : 0;
+  let phase = 'headers';
+  startupTrace('license.runtime', 'server.start', () => ({ seq }));
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => {
+    controller.abort();
+    startupTrace('license.runtime', 'server.timeout', () => ({ seq, stage: phase, elapsedMs: performance.now() - startedAt }));
+  }, timeoutMs);
   try {
+    startupTrace('license.runtime', 'server.headers.start', () => ({ seq }));
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -647,22 +709,35 @@ async function callLicenseServer(
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
+    startupTrace('license.runtime', 'server.headers.end', () => ({ seq, status: response.status, elapsedMs: performance.now() - startedAt }));
 
+    phase = 'body';
+    const bodyStartedAt = traceEnabled ? performance.now() : 0;
+    startupTrace('license.runtime', 'server.body.start', () => ({ seq }));
     const rawText = await response.text();
+    startupTrace('license.runtime', 'server.body.end', () => ({ seq, elapsedMs: performance.now() - bodyStartedAt }));
+    phase = 'parse';
+    const parseStartedAt = traceEnabled ? performance.now() : 0;
+    startupTrace('license.runtime', 'server.parse.start', () => ({ seq }));
     let body: LicenseServerResponse = {};
     if (rawText.trim()) {
       try {
         body = JSON.parse(rawText) as LicenseServerResponse;
+        startupTrace('license.runtime', 'server.parse.end', () => ({ seq, outcome: 'parsed', elapsedMs: performance.now() - parseStartedAt }));
       } catch {
+        startupTrace('license.runtime', 'server.parse.error', () => ({ seq, outcome: 'invalid_json', elapsedMs: performance.now() - parseStartedAt }));
         body = {
           valid: false,
           code: 'invalid_response',
           message: rawText.trim(),
         };
       }
+    } else {
+      startupTrace('license.runtime', 'server.parse.end', () => ({ seq, outcome: 'empty', elapsedMs: performance.now() - parseStartedAt }));
     }
 
     if (!response.ok) {
+      startupTrace('license.runtime', 'server.finish', () => ({ seq, outcome: 'http_rejected', status: response.status, elapsedMs: performance.now() - startedAt }));
       return {
         valid: false,
         code: body.code || `http_${response.status}`,
@@ -671,6 +746,7 @@ async function callLicenseServer(
     }
 
     if (typeof body.valid !== 'boolean') {
+      startupTrace('license.runtime', 'server.finish', () => ({ seq, outcome: 'invalid_response', status: response.status, elapsedMs: performance.now() - startedAt }));
       return {
         valid: false,
         code: 'invalid_response',
@@ -678,7 +754,11 @@ async function callLicenseServer(
       };
     }
 
+    startupTrace('license.runtime', 'server.finish', () => ({ seq, outcome: body.valid ? 'accepted' : 'rejected', status: response.status, elapsedMs: performance.now() - startedAt }));
     return body;
+  } catch (error) {
+    startupTrace('license.runtime', 'server.error', () => ({ seq, stage: phase, outcome: controller.signal.aborted ? 'timeout' : 'failed', elapsedMs: performance.now() - startedAt }));
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -695,10 +775,16 @@ async function persistLicenseSecret(
   }
   const filePath = getLicenseSecretFilePath(runtime.userDataDir);
   const material = buildSecretMaterial(identity, config.product);
+  const traceEnabled = isTraceEnabled();
+  const seq = traceEnabled ? ++licenseTraceSeq : 0;
+  const startedAt = traceEnabled ? performance.now() : 0;
+  startupTrace('license.runtime', 'secret.write.start', () => ({ seq }));
   try {
     await writeEncryptedLicenseKey(filePath, normalizedKey, material);
+    startupTrace('license.runtime', 'secret.write.end', () => ({ seq, elapsedMs: performance.now() - startedAt }));
     return true;
   } catch {
+    startupTrace('license.runtime', 'secret.write.error', () => ({ seq, elapsedMs: performance.now() - startedAt }));
     return false;
   }
 }
@@ -814,8 +900,23 @@ export class NodeLicenseRuntime implements LicenseRuntime {
 
   private runLicenseOperation<T>(operation: () => Promise<T>): Promise<T> {
     if (this.closing) return Promise.reject(new Error('License runtime is closed'));
-    const result = this.pendingLicenseOperation.then(operation);
+    const traceEnabled = isTraceEnabled();
+    const seq = traceEnabled ? ++licenseTraceSeq : 0;
+    const queuedAt = traceEnabled ? performance.now() : 0;
+    let startedAt = 0;
+    startupTrace('license.runtime', 'operation.queued', () => ({ seq }));
+    const result = this.pendingLicenseOperation.then(traceEnabled ? () => {
+      startedAt = performance.now();
+      startupTrace('license.runtime', 'operation.start', () => ({ seq, waitMs: startedAt - queuedAt }));
+      return operation();
+    } : operation);
     this.pendingLicenseOperation = result.catch(() => undefined);
+    if (traceEnabled) {
+      void result.then(
+        () => startupTrace('license.runtime', 'operation.finish', () => ({ seq, elapsedMs: performance.now() - startedAt })),
+        () => startupTrace('license.runtime', 'operation.error', () => ({ seq, elapsedMs: performance.now() - startedAt })),
+      );
+    }
     return result;
   }
 
@@ -874,18 +975,31 @@ export class NodeLicenseRuntime implements LicenseRuntime {
   }
 
   private async readClientIdentity(userDataDir: string | null): Promise<ClientIdentity> {
-    if (!userDataDir) {
-      return {
-        installId: 'unknown-device',
+    const traceEnabled = isTraceEnabled();
+    const seq = traceEnabled ? ++licenseTraceSeq : 0;
+    const startedAt = traceEnabled ? performance.now() : 0;
+    startupTrace('license.runtime', 'identity.start', () => ({ seq }));
+    try {
+      if (!userDataDir) {
+        const identity = {
+          installId: 'unknown-device',
+          hardwareId: await this.getHardwareIdCached(),
+        };
+        startupTrace('license.runtime', 'identity.end', () => ({ seq, outcome: 'unavailable', elapsedMs: performance.now() - startedAt }));
+        return identity;
+      }
+      const identityFilePath = path.join(userDataDir, 'matchaclaw-license-device-identity.json');
+      const identity = await loadOrCreateDeviceIdentity(identityFilePath);
+      const clientIdentity = {
+        installId: normalizeDeviceId(identity.deviceId),
         hardwareId: await this.getHardwareIdCached(),
       };
+      startupTrace('license.runtime', 'identity.end', () => ({ seq, outcome: 'available', elapsedMs: performance.now() - startedAt }));
+      return clientIdentity;
+    } catch (error) {
+      startupTrace('license.runtime', 'identity.error', () => ({ seq, elapsedMs: performance.now() - startedAt }));
+      throw error;
     }
-    const identityFilePath = path.join(userDataDir, 'matchaclaw-license-device-identity.json');
-    const identity = await loadOrCreateDeviceIdentity(identityFilePath);
-    return {
-      installId: normalizeDeviceId(identity.deviceId),
-      hardwareId: await this.getHardwareIdCached(),
-    };
   }
 
   private getRecentValidatedLicenseKeyFromSnapshot(): string | null {
@@ -915,11 +1029,17 @@ export class NodeLicenseRuntime implements LicenseRuntime {
 
     const fallback = this.getRecentValidatedLicenseKeyFromSnapshot();
     if (!fallback) {
+      startupTrace('license.runtime', 'secret.recovery.skipped', () => ({ outcome: 'unavailable' }));
       return null;
     }
 
     // 本地密文损坏/不可读时，用最近一次成功授权的 key 自愈重建密文文件
-    await persistLicenseSecret(runtime, config, identity, fallback);
+    const traceEnabled = isTraceEnabled();
+    const seq = traceEnabled ? ++licenseTraceSeq : 0;
+    const startedAt = traceEnabled ? performance.now() : 0;
+    startupTrace('license.runtime', 'secret.recovery.start', () => ({ seq }));
+    const persisted = await persistLicenseSecret(runtime, config, identity, fallback);
+    startupTrace('license.runtime', 'secret.recovery.end', () => ({ seq, outcome: persisted ? 'persisted' : 'unavailable', elapsedMs: performance.now() - startedAt }));
     return fallback;
   }
 
@@ -1155,6 +1275,7 @@ export class NodeLicenseRuntime implements LicenseRuntime {
         nowMs,
       })
       : null;
+    startupTrace('license.runtime', 'bootstrap.cache-decision', () => ({ outcome: usableCache?.valid ? 'usable' : 'unusable' }));
 
     const storedKey = await this.readStoredLicenseKeyWithRecovery(runtime, config, identity);
     const hasStoredKey = Boolean(storedKey);
@@ -1192,15 +1313,31 @@ export class NodeLicenseRuntime implements LicenseRuntime {
       hasStoredKey: true,
       hasUsableCache: false,
     });
-    await this.validateLicenseKey(storedKey, undefined, false);
+    const traceEnabled = isTraceEnabled();
+    const seq = traceEnabled ? ++licenseTraceSeq : 0;
+    const startedAt = traceEnabled ? performance.now() : 0;
+    startupTrace('license.runtime', 'bootstrap.validate.start', () => ({ seq }));
+    try {
+      await this.validateLicenseKey(storedKey, undefined, false);
+      startupTrace('license.runtime', 'bootstrap.validate.end', () => ({ seq, state: this.licenseGateSnapshot.state, elapsedMs: performance.now() - startedAt }));
+    } catch (error) {
+      startupTrace('license.runtime', 'bootstrap.validate.error', () => ({ seq, elapsedMs: performance.now() - startedAt }));
+      throw error;
+    }
   }
 
   private async ensureLicenseGateBootstrapped(): Promise<void> {
     if (this.gateBootstrapStarted) return;
     this.gateBootstrapStarted = true;
+    const traceEnabled = isTraceEnabled();
+    const seq = traceEnabled ? ++licenseTraceSeq : 0;
+    const startedAt = traceEnabled ? performance.now() : 0;
+    startupTrace('license.runtime', 'bootstrap.begin', () => ({ seq }));
     try {
       await this.bootstrapLicenseGateInternal();
+      startupTrace('license.runtime', 'bootstrap.finish', () => ({ seq, state: this.licenseGateSnapshot.state, elapsedMs: performance.now() - startedAt }));
     } catch (error) {
+      startupTrace('license.runtime', 'bootstrap.error', () => ({ seq, elapsedMs: performance.now() - startedAt }));
       this.markGateFromValidation({
         valid: false,
         code: 'network_error',

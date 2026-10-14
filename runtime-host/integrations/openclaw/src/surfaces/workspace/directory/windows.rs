@@ -36,6 +36,27 @@ pub(in crate::surfaces::workspace) struct OpenedDirectory {
 }
 
 impl OpenedDirectory {
+    pub(in crate::surfaces::workspace) fn resource_key(&self) -> Result<String, DirectoryError> {
+        let mut identity = FS::FILE_ID_INFO::default();
+        // SAFETY: self owns a verified directory handle; identity is a correctly sized output.
+        if unsafe {
+            FS::GetFileInformationByHandleEx(
+                self.handle.as_raw_handle(),
+                FS::FileIdInfo,
+                (&mut identity as *mut FS::FILE_ID_INFO).cast(),
+                size_of::<FS::FILE_ID_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(DirectoryError);
+        }
+        Ok(format!(
+            "{:016x}:{:032x}",
+            identity.VolumeSerialNumber,
+            u128::from_le_bytes(identity.FileId.Identifier),
+        ))
+    }
+
     pub(in crate::surfaces::workspace) fn into_handle(self) -> DirectoryHandle {
         self.handle
     }

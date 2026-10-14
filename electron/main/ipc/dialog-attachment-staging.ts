@@ -157,7 +157,7 @@ async function generateImagePreview(stagedPath: string, mimeType: string, fileSi
 }
 
 function isFileNotFoundError(error: unknown): boolean {
-  return Boolean(error)
+  return error !== null
     && typeof error === 'object'
     && 'code' in error
     && error.code === 'ENOENT';

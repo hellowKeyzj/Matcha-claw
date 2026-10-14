@@ -9,39 +9,21 @@ use zeroize::{Zeroize, Zeroizing};
 use super::{Family, MAX_BYTES, discovery, now_millis, revision};
 
 pub(super) struct Client {
-    runtime: tokio::runtime::Runtime,
     client: reqwest::Client,
     state_dir: PathBuf,
 }
 
 impl Client {
     pub(super) fn new(state_dir: PathBuf) -> Result<Self, ()> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| ())?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| ())?;
-        Ok(Self {
-            runtime,
-            client,
-            state_dir,
-        })
+        Ok(Self { client, state_dir })
     }
 
-    pub(super) fn call(
-        &self,
-        family: Family,
-        name: &str,
-        arguments: &Map<String, Value>,
-    ) -> ToolCallOutcome {
-        self.runtime.block_on(self.request(family, name, arguments))
-    }
-
-    async fn request(
+    pub(super) async fn call(
         &self,
         family: Family,
         name: &str,

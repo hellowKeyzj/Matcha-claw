@@ -36,6 +36,8 @@ pub struct Detail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result_ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<crate::management::ConfigOutcome>,
@@ -168,6 +170,16 @@ pub(crate) fn terminal(mut detail: Detail, response: &Response) -> (CallStatus, 
     detail.expires_at = body.get("expiresAt").and_then(Value::as_u64);
     detail.sha256 = digest(body).or(detail.sha256);
     detail.result_ready = body.get("resultReady").and_then(Value::as_bool);
+    detail.reason = match body.get("reason").and_then(Value::as_str) {
+        Some(
+            reason @ ("invalid-path" | "file-too-large" | "empty" | "too-many-files"
+            | "duplicate-path" | "total-overflow" | "total-too-large"
+            | "missing-skill-md" | "invalid-skill-md" | "filename-conflict"
+            | "duplicate-package" | "already-exists" | "not-found" | "package-changed"
+            | "rejected" | "unavailable" | "cleanup-failed"),
+        ) => Some(reason.to_owned()),
+        _ => None,
+    };
     detail.result = match body.get("result").and_then(Value::as_str) {
         Some("accepted") => Some(crate::management::ConfigOutcome::Accepted),
         Some("partial") => Some(crate::management::ConfigOutcome::Partial),

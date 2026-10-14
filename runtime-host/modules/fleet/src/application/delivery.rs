@@ -186,6 +186,13 @@ impl FleetDeliveryOwner {
         self.store.facts()
     }
 
+    pub(crate) fn read_current<T>(
+        &mut self,
+        read: impl FnOnce(&FleetFacts) -> T,
+    ) -> Result<T, FleetDeliveryError> {
+        self.store.read_current(read).map_err(FleetDeliveryError::Store)
+    }
+
     pub fn environment(&self, id: &EnvironmentId) -> Option<&EnvironmentRecord> {
         self.store
             .facts()

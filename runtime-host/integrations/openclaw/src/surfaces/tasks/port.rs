@@ -8,13 +8,13 @@ use crate::{
 
 impl OpenClawGateway {
     /// Lists the task-manager snapshot through the Gateway control exchange.
-    pub async fn list_tasks(&mut self, scope: TaskScope) -> Result<TaskSnapshot, TaskReadFailure> {
+    pub async fn list_tasks(&self, scope: TaskScope) -> Result<TaskSnapshot, TaskReadFailure> {
         self.task_manager(scope)?.list().await
     }
 
     /// Reads one task through the Gateway control exchange.
     pub async fn get_task(
-        &mut self,
+        &self,
         scope: TaskScope,
         task_id: String,
     ) -> Result<Task, TaskReadFailure> {
@@ -23,7 +23,7 @@ impl OpenClawGateway {
 
     /// Creates one task without retrying an ambiguous native mutation.
     pub async fn create_task(
-        &mut self,
+        &self,
         scope: TaskScope,
         input: TaskCreate,
     ) -> TaskMutationOutcome<TaskCreateReceipt> {
@@ -35,7 +35,7 @@ impl OpenClawGateway {
 
     /// Updates one task without retrying an ambiguous native mutation.
     pub async fn update_task(
-        &mut self,
+        &self,
         scope: TaskScope,
         input: TaskUpdate,
     ) -> TaskMutationOutcome<TaskSnapshot> {
@@ -47,7 +47,7 @@ impl OpenClawGateway {
 
     /// Replaces the native todo projection without retrying ambiguous delivery.
     pub async fn write_todos(
-        &mut self,
+        &self,
         scope: TaskScope,
         old_todos: Vec<Todo>,
         new_todos: Vec<Todo>,
@@ -59,11 +59,11 @@ impl OpenClawGateway {
     }
 
     /// Reads the native todo projection through the Gateway control exchange.
-    pub async fn get_todos(&mut self, scope: TaskScope) -> Result<TodoSnapshot, TaskReadFailure> {
+    pub async fn get_todos(&self, scope: TaskScope) -> Result<TodoSnapshot, TaskReadFailure> {
         self.task_manager(scope)?.todo_get().await
     }
 
-    fn task_manager(&mut self, scope: TaskScope) -> Result<TaskManagerOperation, TaskReadFailure> {
+    fn task_manager(&self, scope: TaskScope) -> Result<TaskManagerOperation, TaskReadFailure> {
         Ok(TaskManagerOperation::new(self.client(), scope))
     }
 }

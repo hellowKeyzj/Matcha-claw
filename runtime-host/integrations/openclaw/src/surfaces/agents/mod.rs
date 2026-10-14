@@ -178,7 +178,11 @@ impl OpenClawAgents {
         method: &str,
         decode: impl FnOnce(GatewayResponse) -> Result<T, wire::WireError>,
     ) -> AgentsMutationOutcome<T> {
-        let _ = method;
+        let _transaction = if matches!(method, wire::agents::AGENTS_CREATE_METHOD | wire::agents::AGENTS_UPDATE_METHOD | wire::agents::AGENTS_DELETE_METHOD) {
+            Some(self.gateway.config_transaction().await)
+        } else {
+            None
+        };
         match self.gateway.rpc_mutation(request).await {
             MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
                 AgentsMutationOutcome::Rejected

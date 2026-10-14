@@ -139,7 +139,13 @@ impl SessionQuery {
             Self::Content { command, .. } => {
                 QueryRoute::Keyed(session_identity_lane_key(command.identity()))
             }
-            Self::Catalog { .. } | Self::History { .. } => QueryRoute::Global,
+            // Catalog refreshes commit shared bindings; keep them ordered per endpoint.
+            Self::Catalog { command, .. } => QueryRoute::Keyed(command.endpoint().canonical_key()),
+            // Native history carries an endpoint and key, not a full owner identity.
+            Self::History { command, .. } => QueryRoute::Keyed(
+                serde_json::to_string(&(command.endpoint(), command.session_key()))
+                    .expect("session history address serialization"),
+            ),
         }
     }
 }

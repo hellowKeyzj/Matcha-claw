@@ -70,9 +70,12 @@ async fn execute(
             &plan.project_root,
             &plan.project_id,
             &plan.task.id,
-            |task| {
-                task.references = references.clone();
-                task.status = WikiQuestionStatus::Answering;
+            {
+                let references = references.clone();
+                move |task| {
+                    task.references = references;
+                    task.status = WikiQuestionStatus::Answering;
+                }
             },
         )
         .await?;

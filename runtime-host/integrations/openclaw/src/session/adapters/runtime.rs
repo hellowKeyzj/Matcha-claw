@@ -253,8 +253,6 @@ impl OpenClawDriver {
 
     async fn configured_agent_model(&self, agent_id: &str) -> Option<String> {
         self.gateway
-            .lock()
-            .await
             .list_agents()
             .await
             .ok()?

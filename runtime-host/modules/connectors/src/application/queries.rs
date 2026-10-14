@@ -46,10 +46,8 @@ pub(crate) enum ConnectorQuery {
 impl ConnectorQuery {
     pub(crate) fn route(&self) -> QueryRoute<ConnectorOwnerKey> {
         match self {
-            Self::List { .. }
-            | Self::Catalog { .. }
-            | Self::Status { .. }
-            | Self::Get { .. }
+            Self::List { .. } | Self::Catalog { .. } | Self::Get { .. } => QueryRoute::Direct,
+            Self::Status { .. }
             | Self::Probe { .. }
             | Self::SessionStatus { .. }
             | Self::OpenClawMcpServers { .. } => QueryRoute::Global,

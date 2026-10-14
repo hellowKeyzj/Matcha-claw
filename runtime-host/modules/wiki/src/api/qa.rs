@@ -57,12 +57,25 @@ impl WikiHandle {
         &self,
         input: WikiQuestionTaskSelector,
     ) -> Result<WikiQuestionTaskReceipt, WikiFailure> {
-        self.request_command(Some("qa.cancel"), |reply| WikiCommand::CancelQuestion {
-            input,
-            reply,
-        })
-        .await
-        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+        let call = call::begin(self.recorder(), "qa.cancel").await?;
+        let result = async {
+            call::running(call.as_ref(), None).await?;
+            if self.owner.is_closed()
+                || self.workflows.cancellation.is_cancelled()
+                || self.shutdown.get().is_some_and(TaskHandle::is_cancelled)
+            {
+                return Err(WikiFailure::OwnerUnavailable);
+            }
+            crate::owner::qa::cancel_question(
+                &self.shared,
+                &self.shared.snapshot().await,
+                input,
+            )
+            .await
+        }
+        .await;
+        call::finish(call.as_ref(), result.as_ref().err()).await;
+        result
     }
 
     pub(crate) async fn admit_save_question(

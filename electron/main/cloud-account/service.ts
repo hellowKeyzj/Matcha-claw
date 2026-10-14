@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isTraceEnabled, startupTrace } from '../../utils/trace-logger';
 import { executePackageOperation, PackageOperationError, type PackageOperationTransports } from './package-operations';
 import type { CloudPackageOperationKind, CloudPackageOperationRequests, CloudPackageOperationReceipt, CloudPackageOperationResult, CloudPackageOperationError } from '../../../src/types/cloud-package-operation';
 import { clearCloudAccountSession, readCloudAccountSession, writeCloudAccountSession, type CloudAccountSession } from './session-store';
@@ -68,6 +69,10 @@ export function createCloudAccountService(
   let publicSettingsTask: Promise<PublicCloudSettings> | undefined;
   let sessionTask: Promise<AccountSessionProjection> | undefined;
   let refreshTask: Promise<CloudAccountSession | null> | undefined;
+  const traceEnabled = isTraceEnabled();
+  let traceSeq = 0;
+  let publicSettingsSeq = 0;
+  let refreshSeq = 0;
   let epoch = 0;
   let closed = false;
   let sessionTail = Promise.resolve();
@@ -81,7 +86,7 @@ export function createCloudAccountService(
   let skillExportObservationDisconnected = false;
   const skillExportReservations = new Set<Readonly<{ epoch: number }>>();
   const packageTasks = new Set<Promise<void>>();
-  let packageTail = Promise.resolve();
+  let packageUploadTail = Promise.resolve();
   const prunePackageOperations = () => {
     const now = Date.now();
     for (const [id, entry] of packageOperations) {
@@ -190,8 +195,12 @@ export function createCloudAccountService(
     return task;
   };
   const notifySession = (session: CloudAccountSession | null) => {
+    const seq = traceEnabled ? ++traceSeq : 0;
+    const startedAt = traceEnabled ? performance.now() : 0;
+    startupTrace('cloud-account-service', 'session.notify.start', () => ({ seq }));
     void providerSync?.reconcile(session);
     void packages.setSession(session?.user.id).catch(() => undefined);
+    startupTrace('cloud-account-service', 'session.notify.end', () => ({ seq, outcome: 'dispatched', elapsedMs: Math.round(performance.now() - startedAt) }));
   };
   const clearSession = async (expected: number) => {
     assertCurrent(expected);
@@ -200,34 +209,106 @@ export function createCloudAccountService(
     await clearing;
   };
   const refreshStoredSession = (session: CloudAccountSession, expected: number): Promise<CloudAccountSession | null> => {
-    if (refreshTask) return refreshTask;
+    if (refreshTask) {
+      startupTrace('cloud-account-service', 'refresh.cache-join', () => ({ seq: refreshSeq }));
+      return refreshTask;
+    }
+    const seq = refreshSeq = traceEnabled ? ++traceSeq : 0;
+    const startedAt = traceEnabled ? performance.now() : 0;
+    let stage = 'clear';
+    let stageStartedAt = startedAt;
+    let outcome = 'error';
+    startupTrace('cloud-account-service', 'refresh.begin', () => ({ seq }));
     const task = (async () => {
-      if (!session.refreshToken) { await clearSession(expected); return null; }
+      if (!session.refreshToken) {
+        startupTrace('cloud-account-service', 'refresh.clear.start', () => ({ seq }));
+        await clearSession(expected);
+        startupTrace('cloud-account-service', 'refresh.clear.end', () => ({ seq, outcome: 'success', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+        stage = '';
+        outcome = 'anonymous';
+        return null;
+      }
       try {
+        stage = 'network';
+        stageStartedAt = traceEnabled ? performance.now() : 0;
+        startupTrace('cloud-account-service', 'refresh.network.start', () => ({ seq }));
         const refreshed = await client.refresh(session.refreshToken);
+        startupTrace('cloud-account-service', 'refresh.network.end', () => ({ seq, outcome: 'success', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+        stage = '';
         assertCurrent(expected);
         const nextSession = { ...session, accessToken: refreshed.accessToken, refreshToken: refreshed.refreshToken, expiresAt: refreshed.expiresAt, tokenType: refreshed.tokenType };
-        await sessionOperation(async () => { assertCurrent(expected); await writeCloudAccountSession(nextSession); });
+        stage = 'tail.wait';
+        stageStartedAt = traceEnabled ? performance.now() : 0;
+        startupTrace('cloud-account-service', 'refresh.tail.wait.start', () => ({ seq }));
+        await sessionOperation(async () => {
+          startupTrace('cloud-account-service', 'refresh.tail.wait.end', () => ({ seq, outcome: 'success', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+          stage = '';
+          assertCurrent(expected);
+          stage = 'write';
+          stageStartedAt = traceEnabled ? performance.now() : 0;
+          startupTrace('cloud-account-service', 'refresh.write.start', () => ({ seq }));
+          await writeCloudAccountSession(nextSession);
+          startupTrace('cloud-account-service', 'refresh.write.end', () => ({ seq, outcome: 'success', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+          stage = '';
+        });
         assertCurrent(expected);
         notifySession(nextSession);
+        outcome = 'success';
         return nextSession;
       } catch (error) {
-        if (isUnauthorized(error) && expected === epoch) { await clearSession(expected); return null; }
+        if (stage) startupTrace('cloud-account-service', `refresh.${stage}.end`, () => ({ seq, outcome: 'error', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+        stage = '';
+        startupTrace('cloud-account-service', 'refresh.error', () => ({ seq, outcome: isUnauthorized(error) ? 'unauthorized' : 'error', elapsedMs: Math.round(performance.now() - startedAt) }));
+        if (isUnauthorized(error) && expected === epoch) {
+          stage = 'clear';
+          stageStartedAt = traceEnabled ? performance.now() : 0;
+          startupTrace('cloud-account-service', 'refresh.clear.start', () => ({ seq }));
+          await clearSession(expected);
+          startupTrace('cloud-account-service', 'refresh.clear.end', () => ({ seq, outcome: 'success', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+          stage = '';
+          outcome = 'anonymous';
+          return null;
+        }
         throw error;
       }
-    })().finally(() => { if (refreshTask === task) refreshTask = undefined; });
+    })().finally(() => {
+      if (refreshTask === task) refreshTask = undefined;
+      if (stage) startupTrace('cloud-account-service', `refresh.${stage}.end`, () => ({ seq, outcome: 'error', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+      startupTrace('cloud-account-service', 'refresh.end', () => ({ seq, outcome, elapsedMs: Math.round(performance.now() - startedAt) }));
+    });
     refreshTask = task;
     return task;
   };
   const validSession = async (expected: number) => {
-    await sessionChangeTask;
-    await sessionTail;
-    assertCurrent(expected);
-    const session = await readCloudAccountSession();
-    assertCurrent(expected);
-    if (!session) return null;
-    return session.expiresAt !== null && session.expiresAt <= Date.now() + 120_000
-      ? refreshStoredSession(session, expected) : session;
+    const seq = traceEnabled ? ++traceSeq : 0;
+    let stage = 'change.wait';
+    let startedAt = traceEnabled ? performance.now() : 0;
+    startupTrace('cloud-account-service', 'session.change.wait.start', () => ({ seq }));
+    try {
+      await sessionChangeTask;
+      startupTrace('cloud-account-service', 'session.change.wait.end', () => ({ seq, outcome: 'success', elapsedMs: Math.round(performance.now() - startedAt) }));
+      stage = 'tail.wait';
+      startedAt = traceEnabled ? performance.now() : 0;
+      startupTrace('cloud-account-service', 'session.tail.wait.start', () => ({ seq }));
+      await sessionTail;
+      startupTrace('cloud-account-service', 'session.tail.wait.end', () => ({ seq, outcome: 'success', elapsedMs: Math.round(performance.now() - startedAt) }));
+      stage = '';
+      assertCurrent(expected);
+      stage = 'read';
+      startedAt = traceEnabled ? performance.now() : 0;
+      startupTrace('cloud-account-service', 'session.read.start', () => ({ seq }));
+      const session = await readCloudAccountSession();
+      startupTrace('cloud-account-service', 'session.read.end', () => ({ seq, outcome: session ? 'stored' : 'empty', elapsedMs: Math.round(performance.now() - startedAt) }));
+      stage = '';
+      assertCurrent(expected);
+      if (!session) return null;
+      const needsRefresh = session.expiresAt !== null && session.expiresAt <= Date.now() + 120_000;
+      startupTrace('cloud-account-service', 'session.local', () => ({ seq, outcome: needsRefresh ? 'near-expiry-refresh' : 'cache' }));
+      return needsRefresh ? refreshStoredSession(session, expected) : session;
+    } catch (error) {
+      if (stage) startupTrace('cloud-account-service', `session.${stage}.end`, () => ({ seq, outcome: 'error', elapsedMs: Math.round(performance.now() - startedAt) }));
+      throw error;
+    }
   };
   const withSession = async <T>(run: (session: CloudAccountSession) => Promise<T>): Promise<T> => {
     const expected = epoch;
@@ -264,46 +345,104 @@ export function createCloudAccountService(
   const packages = createPackageAuthorizationLifecycle(packageTransport, authorizePackage, downloadPackage);
   const getPublicSettings = () => {
     if (!publicSettingsTask) {
+      const seq = publicSettingsSeq = traceEnabled ? ++traceSeq : 0;
+      const startedAt = traceEnabled ? performance.now() : 0;
+      startupTrace('cloud-account-service', 'public-settings.create', () => ({ seq }));
       const task = client.fetchPublicSettings().catch((error) => {
-        if (publicSettingsTask === task) publicSettingsTask = undefined;
+        startupTrace('cloud-account-service', 'public-settings.settle', () => ({ seq, outcome: 'error', elapsedMs: Math.round(performance.now() - startedAt) }));
+        if (publicSettingsTask === task) {
+          publicSettingsTask = undefined;
+          startupTrace('cloud-account-service', 'public-settings.reset', () => ({ seq }));
+        }
         throw error;
       });
       publicSettingsTask = task;
+      if (traceEnabled) void task.then(() => {
+        startupTrace('cloud-account-service', 'public-settings.settle', () => ({ seq, outcome: 'success', elapsedMs: Math.round(performance.now() - startedAt) }));
+      }, () => undefined);
+    } else {
+      startupTrace('cloud-account-service', 'public-settings.cache-join', () => ({ seq: publicSettingsSeq }));
     }
     return publicSettingsTask;
   };
   const getSession = () => {
+    const seq = traceEnabled ? ++traceSeq : 0;
+    const startedAt = traceEnabled ? performance.now() : 0;
+    startupTrace('cloud-account-service', 'session.get.begin', () => ({ seq }));
     if (!sessionTask) {
+      startupTrace('cloud-account-service', 'session.get.create', () => ({ seq }));
       const expected = epoch;
       const task = (async (): Promise<AccountSessionProjection> => {
         const session = await validSession(expected);
         notifySession(session);
         if (!session) return { state: 'anonymous' };
         void (async () => {
+          const profileSeq = traceEnabled ? ++traceSeq : 0;
+          const profileStartedAt = traceEnabled ? performance.now() : 0;
+          let stage = '';
+          let stageStartedAt = profileStartedAt;
+          let outcome = 'error';
+          startupTrace('cloud-account-service', 'profile.background.start', () => ({ seq: profileSeq }));
           try {
             const user = await client.fetchProfile(session.accessToken);
+            stage = 'tail.wait';
+            stageStartedAt = traceEnabled ? performance.now() : 0;
+            startupTrace('cloud-account-service', 'profile.tail.wait.start', () => ({ seq: profileSeq }));
             await sessionOperation(async () => {
+              startupTrace('cloud-account-service', 'profile.tail.wait.end', () => ({ seq: profileSeq, outcome: 'success', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+              stage = '';
               assertCurrent(expected);
+              stage = 'read';
+              stageStartedAt = traceEnabled ? performance.now() : 0;
+              startupTrace('cloud-account-service', 'profile.read.start', () => ({ seq: profileSeq }));
               const current = await readCloudAccountSession();
-              if (current?.accessToken !== session.accessToken) return;
+              startupTrace('cloud-account-service', 'profile.read.end', () => ({ seq: profileSeq, outcome: 'success', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+              stage = '';
+              if (current?.accessToken !== session.accessToken) { outcome = 'skipped'; return; }
               assertCurrent(expected);
               const next = { ...session, user };
+              stage = 'write';
+              stageStartedAt = traceEnabled ? performance.now() : 0;
+              startupTrace('cloud-account-service', 'profile.write.start', () => ({ seq: profileSeq }));
               await writeCloudAccountSession(next);
+              startupTrace('cloud-account-service', 'profile.write.end', () => ({ seq: profileSeq, outcome: 'success', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+              stage = '';
               assertCurrent(expected);
               notifySession(next);
               if (sessionTask === task) sessionTask = Promise.resolve(toSessionProjection(next));
+              outcome = 'success';
             });
           } catch (error) {
-            if (isUnauthorized(error) && expected === epoch) await clearSession(expected).catch(() => undefined);
+            if (stage) startupTrace('cloud-account-service', `profile.${stage}.end`, () => ({ seq: profileSeq, outcome: 'error', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+            startupTrace('cloud-account-service', 'profile.background.error', () => ({ seq: profileSeq, outcome: isUnauthorized(error) ? 'unauthorized' : 'error' }));
+            if (isUnauthorized(error) && expected === epoch) {
+              stageStartedAt = traceEnabled ? performance.now() : 0;
+              startupTrace('cloud-account-service', 'profile.clear.start', () => ({ seq: profileSeq }));
+              let clearOutcome = 'success';
+              await clearSession(expected).catch(() => { clearOutcome = 'error'; });
+              startupTrace('cloud-account-service', 'profile.clear.end', () => ({ seq: profileSeq, outcome: clearOutcome, elapsedMs: Math.round(performance.now() - stageStartedAt) }));
+            }
+          } finally {
+            startupTrace('cloud-account-service', 'profile.background.end', () => ({ seq: profileSeq, outcome, elapsedMs: Math.round(performance.now() - profileStartedAt) }));
           }
         })();
         return toSessionProjection(session);
       })().catch((error) => {
-        if (sessionTask === task) sessionTask = undefined;
+        if (sessionTask === task) {
+          sessionTask = undefined;
+          startupTrace('cloud-account-service', 'session.get.reset', () => ({ seq }));
+        }
         throw error;
       });
       sessionTask = task;
+    } else {
+      startupTrace('cloud-account-service', 'session.get.cache-join', () => ({ seq }));
     }
+    if (traceEnabled) void sessionTask.then(() => {
+      startupTrace('cloud-account-service', 'session.get.end', () => ({ seq, outcome: 'success', elapsedMs: Math.round(performance.now() - startedAt) }));
+    }, () => {
+      startupTrace('cloud-account-service', 'session.get.end', () => ({ seq, outcome: 'error', elapsedMs: Math.round(performance.now() - startedAt) }));
+    });
     return sessionTask;
   };
   const beginSessionChange = () => {
@@ -360,8 +499,8 @@ export function createCloudAccountService(
     }
     const entry = { epoch: expected, result: { operationId, kind, state: 'pending' } as CloudPackageOperationResult, expiresAt: undefined as number | undefined };
     packageOperations.set(operationId, entry);
-    // Package uploads share cloud account effects; one in-flight workflow, at most 16 retained operations.
-    const task = packageTail.then(async () => {
+    // The retained operation slots bound workflows; only multipart uploads share a serial effect.
+    const task = Promise.resolve().then(async () => {
       try {
         assertCurrent(expected);
         operationShutdown.signal.throwIfAborted();
@@ -378,7 +517,22 @@ export function createCloudAccountService(
             catch (error) { await removePackageDownload(input, value); throw error; }
           },
           fetchKey: async () => { assertCurrent(expected); const value = await client.fetchSealedCloudKey(session.accessToken); assertCurrent(expected); return value; },
-          upload: async (upload) => { assertCurrent(expected); const value = await client.uploadPackage(session.accessToken, upload); assertCurrent(expected); return value; },
+          upload: (upload) => {
+            const uploading = packageUploadTail.then(async () => {
+              assertCurrent(expected);
+              operationShutdown.signal.throwIfAborted();
+              try {
+                const value = await client.uploadPackage(session.accessToken, upload);
+                assertCurrent(expected);
+                return value;
+              } catch (error) {
+                if (isUnauthorized(error) && expected === epoch) await clearSession(expected).catch(() => undefined);
+                throw error;
+              }
+            });
+            packageUploadTail = uploading.then(() => undefined, () => undefined);
+            return uploading;
+          },
           prepare: async (input) => { assertCurrent(expected); await getSession(); assertCurrent(expected); return packages.preparePackageInstall(input); },
           bind: (callId, prepared) => packages.bindPackageInstall(callId, prepared),
           release: (prepared) => packages.releasePackageInstall(prepared),
@@ -396,13 +550,35 @@ export function createCloudAccountService(
         notifyPackageChanged(operationId);
       }
     }).finally(() => { packageTasks.delete(task); });
-    packageTail = task;
     packageTasks.add(task);
     return { operationId, accepted: true };
   };
 
   return {
-    prewarm: () => { void getPublicSettings().catch(() => undefined); void getSession().catch(() => undefined); },
+    prewarm: () => {
+      if (!traceEnabled) {
+        void getPublicSettings().catch(() => undefined);
+        void getSession().catch(() => undefined);
+        return;
+      }
+      const seq = ++traceSeq;
+      const startedAt = traceEnabled ? performance.now() : 0;
+      let remaining = 2;
+      let outcome = 'success';
+      startupTrace('cloud-account-service', 'prewarm.begin', () => ({ seq }));
+      void getPublicSettings().catch(() => {
+        outcome = 'error';
+        startupTrace('cloud-account-service', 'prewarm.error', () => ({ seq, operation: 'public-settings', outcome: 'error' }));
+      }).finally(() => {
+        if (--remaining === 0) startupTrace('cloud-account-service', 'prewarm.end', () => ({ seq, outcome, elapsedMs: Math.round(performance.now() - startedAt) }));
+      });
+      void getSession().catch(() => {
+        outcome = 'error';
+        startupTrace('cloud-account-service', 'prewarm.error', () => ({ seq, operation: 'session', outcome: 'error' }));
+      }).finally(() => {
+        if (--remaining === 0) startupTrace('cloud-account-service', 'prewarm.end', () => ({ seq, outcome, elapsedMs: Math.round(performance.now() - startedAt) }));
+      });
+    },
     getPublicSettings,
     getSession,
     login: async (request) => {

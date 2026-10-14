@@ -55,7 +55,6 @@ async function applyLinuxLaunchAtStartup(enabled: boolean): Promise<void> {
 function applyWindowsOrMacLaunchAtStartup(enabled: boolean): void {
   app.setLoginItemSettings({
     openAtLogin: enabled,
-    openAsHidden: false,
   });
   logger.info(`Launch-at-startup ${enabled ? 'enabled' : 'disabled'} via login items`);
 }

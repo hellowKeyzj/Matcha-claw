@@ -18,7 +18,7 @@ pub(crate) enum FleetCommand {
         reply: oneshot::Sender<
             Result<
                 crate::owner::actor::FleetTerminalOpenResult,
-                fleet::terminal::TerminalSessionError,
+                crate::owner::actor::FleetTerminalOpenError,
             >,
         >,
     },
@@ -552,7 +552,7 @@ impl FleetCommand {
     pub(crate) fn route_command(&self) -> CommandRoute<FleetLaneKey> {
         match self {
             Self::Recorded { command, .. } => command.route_command(),
-            Self::TerminalOpenAllocated { .. } => CommandRoute::Exclusive,
+            Self::TerminalOpenAllocated { .. } => CommandRoute::Global,
             Self::TerminalProviderOpen { target_id, .. } => {
                 CommandRoute::Keyed(FleetLaneKey::Target(target_id.clone()))
             }
@@ -641,9 +641,7 @@ impl FleetQuery {
         match self {
             Self::Recorded { query, .. } => query.route_query(),
             Self::Live { .. } => QueryRoute::Direct,
-            Self::TerminalContext { .. }
-            | Self::TerminalResolveContext { .. }
-            | Self::QuerySnapshot { .. }
+            Self::QuerySnapshot { .. }
             | Self::Snapshot { .. }
             | Self::SelectorPreview { .. }
             | Self::TargetSummaries { .. }
@@ -654,7 +652,9 @@ impl FleetQuery {
             | Self::ConnectionTarget { .. }
             | Self::EnvironmentTarget { .. }
             | Self::ResourceTarget { .. } => QueryRoute::Exclusive,
-            Self::TerminalList { .. } => QueryRoute::Global,
+            Self::TerminalList { .. }
+            | Self::TerminalContext { .. }
+            | Self::TerminalResolveContext { .. } => QueryRoute::Global,
         }
     }
 }

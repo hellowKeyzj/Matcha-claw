@@ -99,6 +99,7 @@ impl WikiOwnerInput {
 pub(crate) struct WikiShared {
     pub(crate) vector_index: Arc<dyn WikiVectorIndex>,
     pub(crate) question_tasks: Arc<crate::qa::QuestionTasks>,
+    pub(crate) blocking: Arc<super::blocking::BlockingTasks>,
     pub(crate) lint_runs: Arc<crate::lint::LintRuns>,
     pub(crate) dedup: Arc<crate::dedup::DedupRuns>,
     pub(crate) missing_pages: Arc<crate::page_links::MissingPageRuns>,
@@ -145,13 +146,16 @@ impl WikiOwner {
         for project in registry.projects() {
             source_lifecycle::recover_source_tasks(project_root(project))?;
         }
-        let question_tasks =
-            crate::qa::QuestionTasks::recover(registry.projects().iter().map(|project| {
+        let blocking = Arc::new(super::blocking::BlockingTasks::default());
+        let question_tasks = crate::qa::QuestionTasks::recover(
+            registry.projects().iter().map(|project| {
                 (
                     project.project_id().to_owned(),
                     project_root(project).to_path_buf(),
                 )
-            }))?;
+            }),
+            blocking.clone(),
+        )?;
         let vector_index = match input.vector_index {
             Some(index) => index,
             None => Arc::new(LanceWikiVectorIndex::new().map_err(WikiFailure::from)?),
@@ -162,6 +166,7 @@ impl WikiOwner {
                 vector_index,
                 ingest_llm: input.ingest_llm,
                 question_tasks: Arc::new(question_tasks),
+                blocking,
                 lint_runs: Arc::new(crate::lint::LintRuns::default()),
                 dedup: Arc::new(crate::dedup::DedupRuns::default()),
                 missing_pages: Arc::new(crate::page_links::MissingPageRuns::default()),
@@ -354,46 +359,46 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
                 .await;
         }
         WikiCommand::RestoreHistory { input, reply } => {
-            let result =
+            let result = shared.blocking.run(move || {
                 selected_project(&state, input.project_id.as_deref()).and_then(|project| {
                     let root = project_root(project);
                     let receipt = crate::history::restore(root, &input.path, &input.version_id)?;
                     refresh_file_snapshot(root, &[input.path.as_str()])?;
                     Ok(receipt)
-                });
+                })
+            }).await;
             let _ = reply.send(result).await;
         }
         WikiCommand::UpdateHistoryConfig { input, reply } => {
-            let result =
+            let result = shared.blocking.run(move || {
                 selected_project(&state, input.project_id.as_deref()).and_then(|project| {
                     crate::history::update_settings(project_root(project), input.settings)
-                });
+                })
+            }).await;
             let _ = reply.send(result).await;
         }
         WikiCommand::ClearHistory { input, reply } => {
-            let result = selected_project(&state, input.project_id.as_deref())
-                .and_then(|project| crate::history::clear(project_root(project)));
+            let result = shared.blocking.run(move || {
+                selected_project(&state, input.project_id.as_deref())
+                    .and_then(|project| crate::history::clear(project_root(project)))
+            }).await;
             let _ = reply.send(result).await;
         }
         WikiCommand::ExportArchive { input, reply } => {
-            let result = tokio::task::spawn_blocking(move || {
+            let result = shared.blocking.run(move || {
                 super::maintenance::export_archive(&state, input)
-            })
-            .await
-            .unwrap_or_else(|_| Err(WikiFailure::state("Wiki project export task failed")));
+            }).await;
             let _ = reply.send(result).await;
         }
-        WikiCommand::ImportArchive { input, reply } => {
-            reply
-                .send_project_imported(super::maintenance::import_archive(&shared, input).await)
-                .await;
+        WikiCommand::ImportArchive { root, reply } => {
+            let _ = reply.send(register_project(&shared, root, None).await.map_err(|_| {
+                WikiFailure::state("Imported Wiki project could not be registered")
+            })).await;
         }
         WikiCommand::RebuildIndex { input, reply } => {
-            let result = tokio::task::spawn_blocking(move || {
+            let result = shared.blocking.run(move || {
                 super::maintenance::rebuild_index(&state, input)
-            })
-            .await
-            .unwrap_or_else(|_| Err(WikiFailure::state("Wiki index rebuild task failed")));
+            }).await;
             reply.send_index_rebuilt(result).await;
         }
         WikiCommand::StageQuestion {
@@ -403,11 +408,6 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
         } => {
             let _ = reply
                 .send(super::qa::stage_question(&shared, &state, input, cancellation).await)
-                .await;
-        }
-        WikiCommand::CancelQuestion { input, reply } => {
-            let _ = reply
-                .send(super::qa::cancel_question(&shared, &state, input).await)
                 .await;
         }
         WikiCommand::SaveQuestion { input, reply } => {
@@ -524,7 +524,8 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             let _ = reply.send(result).await;
         }
         WikiCommand::WriteFile { input, reply } => {
-            let _ = reply.send(write_file(&state, input)).await;
+            let result = shared.blocking.run(move || write_file(&state, input)).await;
+            let _ = reply.send(result).await;
         }
         WikiCommand::StageImportSource { input, reply } => {
             let _ = reply.send(stage_import_source(&state, input)).await;
@@ -714,24 +715,29 @@ async fn handle_query(shared: WikiShared, query: WikiQuery) {
                 .await;
         }
         WikiQuery::HistoryList { input, reply } => {
-            let result =
+            let result = shared.blocking.run(move || {
                 selected_project(&state, input.project_id.as_deref()).and_then(|project| {
                     Ok(crate::history::WikiFileHistoryReceipt {
                         project_id: project.project_id().to_owned(),
                         path: input.path.clone(),
                         entries: crate::history::list(project_root(project), &input.path)?,
                     })
-                });
+                })
+            }).await;
             let _ = reply.send(result).await;
         }
         WikiQuery::HistoryConfig { input, reply } => {
-            let result = selected_project(&state, input.project_id.as_deref())
-                .and_then(|project| crate::history::settings(project_root(project)));
+            let result = shared.blocking.run(move || {
+                selected_project(&state, input.project_id.as_deref())
+                    .and_then(|project| crate::history::settings(project_root(project)))
+            }).await;
             let _ = reply.send(result).await;
         }
         WikiQuery::HistoryStats { input, reply } => {
-            let result = selected_project(&state, input.project_id.as_deref())
-                .and_then(|project| crate::history::stats(project_root(project)));
+            let result = shared.blocking.run(move || {
+                selected_project(&state, input.project_id.as_deref())
+                    .and_then(|project| crate::history::stats(project_root(project)))
+            }).await;
             let _ = reply.send(result).await;
         }
         WikiQuery::QuestionTask { input, reply } => {
@@ -866,27 +872,46 @@ async fn create_project(
     Ok(receipt)
 }
 
-pub(super) async fn open_project(
-    shared: &WikiShared,
-    input: WikiOpenProjectInput,
-) -> Result<WikiProjectsReceipt, WikiFailure> {
+pub(super) fn prepare_open_project(input: WikiOpenProjectInput) -> Result<PathBuf, WikiFailure> {
     let root = normalize_root(&input.root_path)?;
     if !root.is_dir() {
         return Err(WikiFailure::not_found(path_text(&root)));
     }
     ensure_project_layout(&root).map_err(|error| WikiFailure::io(path_text(&root), error))?;
     source_lifecycle::recover_source_tasks(&root)?;
+    Ok(root)
+}
 
-    let mut state = shared.state.write().await;
+pub(super) async fn open_project(
+    shared: &WikiShared,
+    input: WikiOpenProjectInput,
+) -> Result<WikiProjectsReceipt, WikiFailure> {
+    let title = input.title.clone();
+    let root = shared.blocking.run(move || prepare_open_project(input)).await?;
+    register_project(shared, root, title).await
+}
+
+async fn register_project(
+    shared: &WikiShared,
+    root: PathBuf,
+    title: Option<String>,
+) -> Result<WikiProjectsReceipt, WikiFailure> {
+    let mut state = shared.snapshot().await;
     if state.current_project_id.as_deref() != Some(&project_id_for_root(&root)) {
         if let Some(previous) = state.current_project_id.as_deref() {
             shared.dedup.pause(previous).await?;
         }
         shared.review_sweeps.invalidate_all();
     }
-    let receipt = upsert_project(&mut state, &root, input.title)?;
-    sync_source_watch(shared, &state);
-    Ok(receipt)
+    let registration = shared.clone();
+    shared.blocking.run(move || {
+        let result = upsert_project(&mut state, &root, title);
+        *registration.state.blocking_write() = state.clone();
+        if result.is_ok() {
+            sync_source_watch(&registration, &state);
+        }
+        result
+    }).await
 }
 
 async fn set_current_project(

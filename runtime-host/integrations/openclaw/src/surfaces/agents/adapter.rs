@@ -24,8 +24,6 @@ impl OpenClawDriver {
             Command::List { .. } => {
                 let result = self
                     .gateway
-                    .lock()
-                    .await
                     .list_agents()
                     .await
                     .map(|mut list| {
@@ -52,7 +50,7 @@ impl OpenClawDriver {
                 let Ok(input) = native_create(input) else {
                     return Outcome::Rejected;
                 };
-                let result = self.gateway.lock().await.create_agent(input).await;
+                let result = self.gateway.create_agent(input).await;
                 match result {
                     super::AgentsMutationOutcome::Applied(agent) => {
                         if workspace_initialization == WorkspaceInitialization::MainAgentTemplate
@@ -80,7 +78,7 @@ impl OpenClawDriver {
                     return Outcome::Rejected;
                 };
                 agents_mutation(
-                    self.gateway.lock().await.update_agent(input).await,
+                    self.gateway.update_agent(input).await,
                     |agent| Outcome::Updated(agent_updated(agent)),
                 )
             }
@@ -94,19 +92,17 @@ impl OpenClawDriver {
                     return Outcome::Rejected;
                 };
                 agents_mutation(
-                    self.gateway.lock().await.delete_agent(input).await,
+                    self.gateway.delete_agent(input).await,
                     |agent| Outcome::Deleted(agent_deleted(agent)),
                 )
             }
             Command::ListFiles { agent_id, .. } => {
-                agents_files(self.gateway.lock().await.list_agent_files(agent_id).await)
+                agents_files(self.gateway.list_agent_files(agent_id).await)
             }
             Command::GetFile { agent_id, name, .. } => {
                 let name = native_file_name(name);
                 agents_file(
                     self.gateway
-                        .lock()
-                        .await
                         .get_agent_file(agent_id, name)
                         .await,
                 )
@@ -120,8 +116,6 @@ impl OpenClawDriver {
                 let name = native_file_name(name);
                 agents_mutation(
                     self.gateway
-                        .lock()
-                        .await
                         .set_agent_file(agent_id, name, content)
                         .await,
                     |file| Outcome::File(agent_file(file)),
@@ -129,8 +123,6 @@ impl OpenClawDriver {
             }
             Command::DisplayConfiguration { .. } => agents::configuration(
                 self.gateway
-                    .lock()
-                    .await
                     .agent_configuration_display()
                     .await
                     .map(configuration_display)
@@ -142,8 +134,6 @@ impl OpenClawDriver {
                 ..
             } => agents::configuration_mutation(configuration_mutation(
                 self.gateway
-                    .lock()
-                    .await
                     .set_agent_description(agent_id, description)
                     .await,
             )),
@@ -156,15 +146,13 @@ impl OpenClawDriver {
                 };
                 agents::configuration_mutation(configuration_mutation(
                     self.gateway
-                        .lock()
-                        .await
                         .set_agent_configuration_model(agent_id, model)
                         .await,
                 ))
             }
             Command::SetSkills {
                 agent_id, skills, ..
-            } => match self.gateway.lock().await.set_agent_skills(agent_id, skills).await {
+            } => match self.gateway.set_agent_skills(agent_id, skills).await {
                 Ok(outcome) => agents::configuration_mutation(configuration_mutation(outcome)),
                 Err((unknown_skill_keys, non_canonical_skill_keys)) => Outcome::SkillConfiguration(
                     agents::SkillConfigurationOutcome::InvalidSkillKeys { unknown_skill_keys, non_canonical_skill_keys },
@@ -174,8 +162,6 @@ impl OpenClawDriver {
                 agent_id, trace_id, ..
             } => Outcome::SkillConfiguration(skill_configuration_outcome(
                 self.gateway
-                    .lock()
-                    .await
                     .agent_skill_configuration(agent_id, trace_id)
                     .await,
             )),
@@ -187,8 +173,6 @@ impl OpenClawDriver {
                 ..
             } => Outcome::SkillConfiguration(skill_configuration_outcome(
                 self.gateway
-                    .lock()
-                    .await
                     .set_agent_skill_configuration(
                         agent_id,
                         revision,
@@ -201,8 +185,6 @@ impl OpenClawDriver {
                 agent_id, trace_id, ..
             } => Outcome::ToolConfiguration(tool_configuration_outcome(
                 self.gateway
-                    .lock()
-                    .await
                     .agent_tool_configuration(agent_id, trace_id)
                     .await,
             )),
@@ -214,8 +196,6 @@ impl OpenClawDriver {
                 ..
             } => Outcome::ToolConfiguration(tool_configuration_outcome(
                 self.gateway
-                    .lock()
-                    .await
                     .set_agent_tool_configuration(
                         agent_id,
                         revision,

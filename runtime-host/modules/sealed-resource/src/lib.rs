@@ -12,8 +12,8 @@ pub use api::{
     SealedAgentStore, SealedAgentTarget, SealedCloudPackageEntry, SealedCloudPackageMetadata,
     SealedCloudPackageType, SealedPackageAuthorizationKey, SealedPackageAuthorizationKeyring,
     SealedResourceError, SealedResourceMeteringBinding, SealedResourceRead, SealedSkillCatalog,
-    SealedSkillCatalogEntry, SealedSkillDescriptor, SealedSkillPackageExport, SealedSkillStore,
-    SealedSkillTarget,
+    SealedSkillCatalogEntry, SealedSkillCatalogIssue, SealedSkillDescriptor,
+    SealedSkillPackageExport, SealedSkillStore, SealedSkillTarget,
 };
 pub use domain::{AgentKey, PackageRelativePath, SkillKey};
 pub use ports::{SealedResourceModule, SealedResourceProvisionError};

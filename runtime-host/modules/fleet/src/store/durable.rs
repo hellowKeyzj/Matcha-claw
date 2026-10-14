@@ -171,6 +171,16 @@ impl FleetStore {
         })
     }
 
+    pub(crate) fn read_current<T>(
+        &mut self,
+        read: impl FnOnce(&FleetFacts) -> T,
+    ) -> Result<T, StoreFault> {
+        self.ensure_writable()?;
+        let _lock = WriterLock::acquire(&self.lock_path)?;
+        self.refresh_locked()?;
+        Ok(read(&self.facts))
+    }
+
     pub(crate) fn transact<T>(
         &mut self,
         mutation: impl FnOnce(&mut FleetFacts) -> Result<T, StoreFault>,

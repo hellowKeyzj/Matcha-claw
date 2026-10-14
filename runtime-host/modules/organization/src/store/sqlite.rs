@@ -1,6 +1,6 @@
 use std::{fs, io, path::Path, time::Duration};
 
-use rusqlite::{Connection, Error, ErrorCode, Row, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, Error, ErrorCode, OpenFlags, Row, Transaction, TransactionBehavior, params};
 
 use super::{
     StoreFault,
@@ -72,6 +72,37 @@ impl Database {
             transaction.commit().map_err(commit_error)?;
         }
         Ok(Self { connection })
+    }
+
+    pub(crate) fn read_record(path: &Path, key: &RecordKey) -> Result<Option<StoredRecord>, StoreFault> {
+        let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(read_error)?;
+        connection.busy_timeout(Duration::from_millis(500)).map_err(read_error)?;
+        let transaction = connection.transaction().map_err(read_error)?;
+        let version: u8 = transaction
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(read_error)?;
+        if version != schema::VERSION {
+            return Err(StoreFault::UnsupportedSchemaVersion(version));
+        }
+        if !metadata(&transaction)?.1 {
+            return Err(StoreFault::MigrationRequired);
+        }
+        let record = {
+            let mut statement = transaction.prepare_cached(
+                "SELECT kind,scope,id,team_id,run_id,payload FROM records
+                 WHERE kind=?1 AND scope=?2 AND id=?3 AND payload IS NOT NULL",
+            ).map_err(read_error)?;
+            let mut rows = statement.query(params![key.kind.as_str(), key.scope, key.id])
+                .map_err(read_error)?;
+            rows.next().map_err(read_error)?.map(read_change).transpose()?
+        };
+        transaction.commit().map_err(read_error)?;
+        match record {
+            Some(RecordChange::Put(record)) => Ok(Some(record)),
+            None => Ok(None),
+            Some(RecordChange::Delete(_)) => Err(StoreFault::CorruptRecord),
+        }
     }
 
     pub(crate) fn initialized(&self) -> Result<bool, StoreFault> {

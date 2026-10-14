@@ -74,20 +74,26 @@ async function subagentManagementCapabilityExecute<TResult>(
   target: CapabilityTarget,
   timeoutMs?: number,
 ): Promise<TResult> {
-  const result = await hostApiFetch<unknown>('/api/subagents/agents', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: SUBAGENT_MANAGEMENT_CAPABILITY_ID,
-      operationId,
-      scope,
-      target,
-      input,
-    }),
-    timeoutMs,
-  });
-  return isSubagentMutation(operationId)
-    ? await waitForSubagentMutation<TResult>(result, operationId, scope.endpoint, typeof input.agentId === 'string' ? input.agentId : undefined)
-    : result as TResult;
+  try {
+    const result = await hostApiFetch<unknown>('/api/subagents/agents', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: SUBAGENT_MANAGEMENT_CAPABILITY_ID,
+        operationId,
+        scope,
+        target,
+        input,
+      }),
+      timeoutMs,
+    });
+    return isSubagentMutation(operationId)
+      ? await waitForSubagentMutation<TResult>(result, operationId, scope.endpoint, typeof input.agentId === 'string' ? input.agentId : undefined)
+      : result as TResult;
+  } finally {
+    if (isSubagentMutation(operationId) && operationId !== 'subagents.package.export') {
+      invalidateAgentsSnapshot();
+    }
+  }
 }
 
 interface AgentFileGetResult {
@@ -597,11 +603,25 @@ function isConfigDisplayCacheFresh(nowMs: number): boolean {
   return (nowMs - configDisplayCache.cachedAt) <= CONFIG_DISPLAY_CACHE_TTL_MS;
 }
 
-function invalidateConfigDisplayCache(): void {
+function invalidateAgentsSnapshot(): void {
+  latestLoadAgentsRequestId += 1;
   configDisplayGeneration += 1;
   configDisplayCache = null;
   configDisplayReadTask = null;
   configDisplayReadTaskSeq = 0;
+  if (agentsSnapshotRetryTimer) {
+    clearTimeout(agentsSnapshotRetryTimer);
+    agentsSnapshotRetryTimer = null;
+  }
+  const current = useSubagentsStore.getState().agentsResource;
+  if (current.status === 'loading') {
+    useSubagentsStore.setState({
+      agentsResource: {
+        ...current,
+        status: current.hasLoadedOnce ? 'ready' : 'idle',
+      },
+    });
+  }
 }
 
 async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Promise<ConfigDisplaySnapshot> {
@@ -620,6 +640,9 @@ async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Prom
   const task = (async () => {
     try {
       const configGetResult = await rpc<SubagentDisplayConfigResult>('displayConfig.get', {});
+      if (generation !== configDisplayGeneration) {
+        return createEmptyConfigDisplaySnapshot();
+      }
       if (!isSnapshotReady(configGetResult)) {
         scheduleAgentsSnapshotRetry(() => useSubagentsStore.getState().loadAgents({ silent: true }));
         if (configDisplayCache) {
@@ -628,7 +651,7 @@ async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Prom
         return createEmptyConfigDisplaySnapshot();
       }
       const snapshot = buildConfigDisplaySnapshot(configGetResult);
-      if (generation === configDisplayGeneration && (!configDisplayCache || requestSeq >= configDisplayCache.requestSeq)) {
+      if (!configDisplayCache || requestSeq >= configDisplayCache.requestSeq) {
         configDisplayCache = {
           snapshot,
           cachedAt: Date.now(),
@@ -745,7 +768,11 @@ function persistAvatarPresentation(
   } else {
     nextPresentations[normalizedAgentId] = presentation;
   }
-  writeStoredAvatarPresentations(nextPresentations);
+  try {
+    writeStoredAvatarPresentations(nextPresentations);
+  } finally {
+    invalidateAgentsSnapshot();
+  }
 }
 
 function pruneStoredAvatarPresentations(validAgentIds: Iterable<string>): void {
@@ -943,6 +970,7 @@ async function fetchPersistedFilesForAgent(agentId: string): Promise<Partial<Rec
 const persistedFilesLoadTasks = new Map<string, Promise<Partial<Record<SubagentTargetFile, string>>>>();
 let latestLoadAgentsRequestId = 0;
 let agentMutationChain: Promise<void> = Promise.resolve();
+const agentMutationTails = new Map<string, Promise<void>>();
 let activeMutatingOperationCount = 0;
 const pendingDeletedAgentIds = new Set<string>();
 const unconfirmedDeletedAgentIds = new Set<string>();
@@ -959,6 +987,7 @@ export function __resetSubagentsStoreInternalCachesForTest(): void {
   unconfirmedDeletedAgentIds.clear();
   latestLoadAgentsRequestId = 0;
   agentMutationChain = Promise.resolve();
+  agentMutationTails.clear();
   activeMutatingOperationCount = 0;
   inflightLoadAgentsTask = null;
   availableModelsLoaded = false;
@@ -1002,9 +1031,37 @@ function filterOutPendingDeletedAgents(agents: SubagentSummary[]): SubagentSumma
   return agents.filter((agent) => !isAgentPendingDeletion(agent.id));
 }
 
-function runSerializedAgentMutation<T>(task: () => Promise<T>): Promise<T> {
-  const run = agentMutationChain.then(task, task);
-  agentMutationChain = run.then(() => undefined, () => undefined);
+function trackAgentMutation(agentId: string, task: Promise<unknown>): void {
+  const key = normalizeAgentIdForComparison(agentId);
+  const previous = agentMutationTails.get(key) ?? Promise.resolve();
+  const tail = Promise.all([previous, task.then(() => undefined, () => undefined)]).then(() => {
+    if (agentMutationTails.get(key) === tail) {
+      agentMutationTails.delete(key);
+    }
+  });
+  agentMutationTails.set(key, tail);
+}
+
+function runSerializedAgentMutation<T>(
+  task: () => Promise<T>,
+  agentId?: string,
+  canRunLocally?: () => boolean,
+): Promise<T> {
+  const previousGlobal = agentMutationChain;
+  const previousAgent = agentId === undefined
+    ? undefined
+    : agentMutationTails.get(normalizeAgentIdForComparison(agentId));
+  const run = (previousAgent ?? Promise.resolve()).then(async () => {
+    if (!canRunLocally?.()) {
+      await previousGlobal;
+    }
+    return task();
+  });
+  const settled = run.then(() => undefined, () => undefined);
+  agentMutationChain = Promise.all([previousGlobal, settled]).then(() => undefined);
+  if (agentId !== undefined) {
+    trackAgentMutation(agentId, settled);
+  }
   return run;
 }
 
@@ -1160,28 +1217,16 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
 
     const requestId = ++latestLoadAgentsRequestId;
-    const stateBeforeLoad = get();
-    const previousResource = stateBeforeLoad.agentsResource;
-    set({
-      agentsResource: silent && previousResource.hasLoadedOnce
-        ? previousResource
-        : createLoadingResourceState({
-          ...previousResource,
-          hasLoadedOnce: previousResource.hasLoadedOnce || previousResource.data.length > 0,
-        }),
-      error: null,
-    });
-
-    const task = (async () => {
+    const task = Promise.resolve().then(async () => {
       try {
         const [result, configSnapshot] = await Promise.all([
           rpc<AgentsListResult>('agents.list', {}),
           readConfigForDisplay(),
         ]);
+        if (requestId !== latestLoadAgentsRequestId) {
+          return;
+        }
         if (!isSnapshotReady(result)) {
-          if (requestId !== latestLoadAgentsRequestId) {
-            return;
-          }
           const current = get().agentsResource;
           const hasUsableSnapshot = current.hasLoadedOnce || current.data.length > 0;
           const message = getOptionalString(result.error);
@@ -1233,9 +1278,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           configSnapshot,
           readStoredAvatarPresentations(),
         ));
-        if (requestId !== latestLoadAgentsRequestId) {
-          return;
-        }
         const stateSnapshot = get();
         const currentAgents = readAgentsFromState(stateSnapshot);
         const selectedAgentId = stateSnapshot.selectedAgentId;
@@ -1286,11 +1328,23 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           error: message,
         });
       } finally {
-        inflightLoadAgentsTask = null;
+        if (inflightLoadAgentsTask === task) {
+          inflightLoadAgentsTask = null;
+        }
       }
-    })();
+    });
 
     inflightLoadAgentsTask = task;
+    const previousResource = get().agentsResource;
+    set({
+      agentsResource: silent && previousResource.hasLoadedOnce
+        ? previousResource
+        : createLoadingResourceState({
+          ...previousResource,
+          hasLoadedOnce: previousResource.hasLoadedOnce || previousResource.data.length > 0,
+        }),
+      error: null,
+    });
     await task;
   },
 
@@ -1374,86 +1428,89 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     model,
     avatarSeed,
     avatarStyle,
-  }, options) => runSerializedAgentMutation(async () => {
-    beginGlobalMutating(set);
-    try {
-      const managementScope = await resolveSubagentManagementScope();
-      const trimmedName = name.trim();
-      if (!trimmedName) {
-        throw new Error('Subagent name is required');
-      }
-      const modelId = (model ?? '').trim();
-      const avatarPresentation = normalizeAvatarPresentation({
-        avatarSeed,
-        avatarStyle: avatarStyle === undefined ? undefined : resolveAgentAvatarStyle(avatarStyle),
-      });
-      const predictedAgentId = normalizeAgentIdForComparison(trimmedName);
-      if (predictedAgentId) {
-        pendingDeletedAgentIds.delete(predictedAgentId);
-      }
-      const agents = readAgentsFromState(get());
-      if (hasSubagentNameConflict(trimmedName, agents)) {
-        throw new Error('Invalid subagent name: duplicate');
-      }
-      const resolvedWorkspace = workspace.trim() || buildSubagentWorkspacePath({
-        name: trimmedName,
-        agents,
-      });
-      if (!resolvedWorkspace) {
-        throw new Error('Subagent workspace is required');
-      }
-      const createResult = await rpc<AgentsCreateResult>('agents.create', {
-        name: trimmedName,
-        workspace: resolvedWorkspace,
-        model: modelId || null,
-        ...(options?.workspaceInitialization ? { workspaceInitialization: options.workspaceInitialization } : {}),
-      }, {
-        scope: managementScope,
-        target: { kind: 'subagent' },
-      });
-      const createdAgentId = getOptionalString(createResult.agent?.id);
-      if (!createdAgentId) {
-        throw new Error('Subagent creation returned an invalid receipt');
-      }
-      unconfirmedDeletedAgentIds.delete(createdAgentId);
-      const normalizedCreatedAgentId = normalizeAgentIdForComparison(createdAgentId);
-      if (normalizedCreatedAgentId) {
-        pendingDeletedAgentIds.delete(normalizedCreatedAgentId);
-      }
-      const warnings: string[] = createResult.success ? [] : [buildCreateWarning(createdAgentId, createResult.error || 'Subagent workspace initialization failed')];
-      const nextDescription = getOptionalString(description);
-      if (nextDescription !== undefined) {
-        try {
-          await updateAgentDescriptionConfig(managementScope, createdAgentId, nextDescription);
-        } catch (error) {
-          warnings.push(buildCreateDescriptionWarning(createdAgentId, error));
+  }, options) => {
+    const creation: Promise<SubagentCreateResult> = runSerializedAgentMutation(async () => {
+      beginGlobalMutating(set);
+      try {
+        const managementScope = await resolveSubagentManagementScope();
+        const trimmedName = name.trim();
+        if (!trimmedName) {
+          throw new Error('Subagent name is required');
         }
-      }
-      try {
-        persistAvatarPresentation(createdAgentId, avatarPresentation);
+        const modelId = (model ?? '').trim();
+        const avatarPresentation = normalizeAvatarPresentation({
+          avatarSeed,
+          avatarStyle: avatarStyle === undefined ? undefined : resolveAgentAvatarStyle(avatarStyle),
+        });
+        const predictedAgentId = normalizeAgentIdForComparison(trimmedName);
+        if (predictedAgentId) {
+          pendingDeletedAgentIds.delete(predictedAgentId);
+        }
+        const agents = readAgentsFromState(get());
+        if (hasSubagentNameConflict(trimmedName, agents)) {
+          throw new Error('Invalid subagent name: duplicate');
+        }
+        const resolvedWorkspace = workspace.trim() || buildSubagentWorkspacePath({
+          name: trimmedName,
+          agents,
+        });
+        if (!resolvedWorkspace) {
+          throw new Error('Subagent workspace is required');
+        }
+        const createResult = await rpc<AgentsCreateResult>('agents.create', {
+          name: trimmedName,
+          workspace: resolvedWorkspace,
+          model: modelId || null,
+          ...(options?.workspaceInitialization ? { workspaceInitialization: options.workspaceInitialization } : {}),
+        }, {
+          scope: managementScope,
+          target: { kind: 'subagent' },
+        });
+        const createdAgentId = getOptionalString(createResult.agent?.id);
+        if (!createdAgentId) {
+          throw new Error('Subagent creation returned an invalid receipt');
+        }
+        trackAgentMutation(createdAgentId, creation);
+        unconfirmedDeletedAgentIds.delete(createdAgentId);
+        const normalizedCreatedAgentId = normalizeAgentIdForComparison(createdAgentId);
+        if (normalizedCreatedAgentId) {
+          pendingDeletedAgentIds.delete(normalizedCreatedAgentId);
+        }
+        const warnings: string[] = createResult.success ? [] : [buildCreateWarning(createdAgentId, createResult.error || 'Subagent workspace initialization failed')];
+        const nextDescription = getOptionalString(description);
+        if (nextDescription !== undefined) {
+          try {
+            await updateAgentDescriptionConfig(managementScope, createdAgentId, nextDescription);
+          } catch (error) {
+            warnings.push(buildCreateDescriptionWarning(createdAgentId, error));
+          }
+        }
+        try {
+          persistAvatarPresentation(createdAgentId, avatarPresentation);
+        } catch (error) {
+          warnings.push(buildCreateAvatarWarning(createdAgentId, error));
+        }
+        try {
+          await get().loadAgents({ silent: true });
+        } catch (error) {
+          warnings.push(buildCreateRefreshWarning(createdAgentId, error));
+        }
+        return toSubagentCreateResult(createdAgentId, warnings);
       } catch (error) {
-        warnings.push(buildCreateAvatarWarning(createdAgentId, error));
+        const message = getErrorMessage(error) || 'Failed to create subagent';
+        set({
+          error: message,
+        });
+        if (error instanceof Error) {
+          throw error;
+        }
+        throw new Error(message, { cause: error });
+      } finally {
+        finishGlobalMutating(set);
       }
-      invalidateConfigDisplayCache();
-      try {
-        await get().loadAgents({ silent: true });
-      } catch (error) {
-        warnings.push(buildCreateRefreshWarning(createdAgentId, error));
-      }
-      return toSubagentCreateResult(createdAgentId, warnings);
-    } catch (error) {
-      const message = getErrorMessage(error) || 'Failed to create subagent';
-      set({
-        error: message,
-      });
-      if (error instanceof Error) {
-        throw error;
-      }
-      throw new Error(message, { cause: error });
-    } finally {
-      finishGlobalMutating(set);
-    }
-  }),
+    });
+    return creation;
+  },
 
   createAgentFromTemplate: async ({ template, model, localizedName }) => {
     const managementScope = await resolveSubagentManagementScope();
@@ -1607,7 +1664,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         const receipt = decodeCallReceipt(admitted.install);
         const terminal = await waitForSubagentResult(receipt, 'subagents.package.install', {
           kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
-        });
+        }).finally(invalidateAgentsSnapshot);
         const confirmed = await hostApiFetch<typeof result>('/api/packages/install/confirm', {
           method: 'POST', body: JSON.stringify({ callId: receipt.callId }),
         });
@@ -1694,7 +1751,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }
     }
 
-    invalidateConfigDisplayCache();
     try {
       await get().loadAgents({ silent: true });
     } catch (error) {
@@ -1704,7 +1760,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
 
   updateAgent: async ({ agentId, name, description, workspace, model, skills, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
-    const managementScope = await resolveSubagentManagementScope();
     const current = readAgentsFromState(get()).find((agent) => agent.id === agentId);
     const explicitSkillAllowlistRequested = skills !== undefined;
     const nextExplicitSkillAllowlist = skills === null
@@ -1746,27 +1801,30 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
     beginGlobalMutating(set);
     try {
-      if (identityChanged || modelChanged) {
-        const updatePayload: Record<string, unknown> = {
-          agentId,
-        };
-        if (identityChanged) {
-          updatePayload.name = nextName;
-          updatePayload.workspace = nextWorkspace;
+      if (identityChanged || modelChanged || descriptionChanged || explicitSkillAllowlistRequested) {
+        const managementScope = await resolveSubagentManagementScope();
+        if (identityChanged || modelChanged) {
+          const updatePayload: Record<string, unknown> = {
+            agentId,
+          };
+          if (identityChanged) {
+            updatePayload.name = nextName;
+            updatePayload.workspace = nextWorkspace;
+          }
+          if (modelChanged) {
+            updatePayload.model = nextModel ?? null;
+          }
+          await rpc('agents.update', updatePayload, {
+            scope: managementScope,
+            target: buildSubagentTarget(managementScope, agentId),
+          });
         }
-        if (modelChanged) {
-          updatePayload.model = nextModel ?? null;
+        if (descriptionChanged) {
+          await updateAgentDescriptionConfig(managementScope, agentId, nextDescription);
         }
-        await rpc('agents.update', updatePayload, {
-          scope: managementScope,
-          target: buildSubagentTarget(managementScope, agentId),
-        });
-      }
-      if (descriptionChanged) {
-        await updateAgentDescriptionConfig(managementScope, agentId, nextDescription);
-      }
-      if (explicitSkillAllowlistRequested) {
-        await updateAgentSkillsConfig(managementScope, agentId, nextExplicitSkillAllowlist);
+        if (explicitSkillAllowlistRequested) {
+          await updateAgentSkillsConfig(managementScope, agentId, nextExplicitSkillAllowlist);
+        }
       }
       if (avatarSeedChanged || avatarStyleChanged) {
         persistAvatarPresentation(agentId, normalizeAvatarPresentation({
@@ -1774,7 +1832,6 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           avatarStyle: avatarStyleChanged ? nextAvatarStyle : current?.avatarStyle,
         }));
       }
-      invalidateConfigDisplayCache();
       await get().loadAgents({ silent: true });
     } catch (error) {
       const message = getErrorMessage(error) || 'Failed to update subagent';
@@ -1786,6 +1843,15 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     } finally {
       finishGlobalMutating(set);
     }
+  }, agentId, () => {
+    const current = readAgentsFromState(get()).find((agent) => agent.id === agentId);
+    // Native updates share one configuration document; local presentation does not.
+    return Boolean(current
+      && equalOptionalTrimmedString(current.name, name)
+      && equalOptionalTrimmedString(current.workspace, workspace)
+      && equalOptionalTrimmedString(current.model, model)
+      && (description === undefined || equalOptionalTrimmedString(current.description, description))
+      && skills === undefined);
   }),
 
   deleteAgent: async (agentId) => runSerializedAgentMutation(async () => {
@@ -1841,7 +1907,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     } finally {
       finishGlobalMutating(set);
     }
-  }),
+  }, agentId),
 }));
 
 function normalizeSubagentsStatePatch<T extends Partial<SubagentsState> | SubagentsState>(patch: T): T {

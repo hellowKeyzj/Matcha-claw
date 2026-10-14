@@ -508,15 +508,16 @@ function decodeEnvironmentStatus(result: unknown): EnvironmentStatus | null {
     || !hasExpectedKeys(result, ['packageExists', 'isBuilt', 'dir'], ['version'])
     || typeof result.packageExists !== 'boolean'
     || typeof result.isBuilt !== 'boolean'
-    || !isDirectory(result.dir)
-    || (hasOwn(result, 'version') && !isVersion(result.version))) {
+    || !isDirectory(result.dir)) {
     return null;
   }
+  const version = readOptional(result, 'version', isVersion);
+  if (version === null) return null;
   return {
     packageExists: result.packageExists,
     isBuilt: result.isBuilt,
     dir: result.dir,
-    ...(hasOwn(result, 'version') ? { version: result.version } : {}),
+    ...(version === undefined ? {} : { version }),
   };
 }
 
@@ -566,13 +567,14 @@ function readTemplateDetail(
 function readTemplateCategory(value: unknown): TemplateCategory | null {
   if (!isRecord(value)
     || !hasExpectedKeys(value, ['id'], ['order'])
-    || !isSafeMetadataId(value.id)
-    || (hasOwn(value, 'order') && !isSafeInteger(value.order))) {
+    || !isSafeMetadataId(value.id)) {
     return null;
   }
+  const order = readOptional(value, 'order', isSafeInteger);
+  if (order === null) return null;
   return {
     id: value.id,
-    ...(hasOwn(value, 'order') ? { order: value.order } : {}),
+    ...(order === undefined ? {} : { order }),
   };
 }
 
@@ -584,23 +586,24 @@ function readTemplateSummary(value: unknown): TemplateSummary | null {
       ['summary', 'categoryId', 'subcategoryId', 'order'],
     )
     || !isTemplateId(value.id)
-    || !isBoundedText(value.name)
-    || (hasOwn(value, 'summary') && !isBoundedText(value.summary))
-    || (hasOwn(value, 'categoryId') && !isSafeMetadataId(value.categoryId))
-    || (hasOwn(value, 'subcategoryId') && !isSafeMetadataId(value.subcategoryId))
-    || (hasOwn(value, 'order') && !isSafeInteger(value.order))) {
+    || !isBoundedText(value.name)) {
     return null;
   }
+  const summary = readOptional(value, 'summary', isBoundedText);
+  const categoryId = readOptional(value, 'categoryId', isSafeMetadataId);
+  const subcategoryId = readOptional(value, 'subcategoryId', isSafeMetadataId);
+  const order = readOptional(value, 'order', isSafeInteger);
+  if (summary === null || categoryId === null || subcategoryId === null || order === null) return null;
 
   const files = readTemplateFiles(value.files);
   if (!files) return null;
   return {
     id: value.id,
     name: value.name,
-    ...(hasOwn(value, 'summary') ? { summary: value.summary } : {}),
-    ...(hasOwn(value, 'categoryId') ? { categoryId: value.categoryId } : {}),
-    ...(hasOwn(value, 'subcategoryId') ? { subcategoryId: value.subcategoryId } : {}),
-    ...(hasOwn(value, 'order') ? { order: value.order } : {}),
+    ...(summary === undefined ? {} : { summary }),
+    ...(categoryId === undefined ? {} : { categoryId }),
+    ...(subcategoryId === undefined ? {} : { subcategoryId }),
+    ...(order === undefined ? {} : { order }),
     files,
   };
 }
@@ -615,13 +618,14 @@ function readTemplateWithContents(
       ['summary', 'categoryId', 'subcategoryId', 'order'],
     )
     || !isTemplateId(value.id)
-    || !isBoundedText(value.name)
-    || (hasOwn(value, 'summary') && !isBoundedText(value.summary))
-    || (hasOwn(value, 'categoryId') && !isSafeMetadataId(value.categoryId))
-    || (hasOwn(value, 'subcategoryId') && !isSafeMetadataId(value.subcategoryId))
-    || (hasOwn(value, 'order') && !isSafeInteger(value.order))) {
+    || !isBoundedText(value.name)) {
     return null;
   }
+  const summary = readOptional(value, 'summary', isBoundedText);
+  const categoryId = readOptional(value, 'categoryId', isSafeMetadataId);
+  const subcategoryId = readOptional(value, 'subcategoryId', isSafeMetadataId);
+  const order = readOptional(value, 'order', isSafeInteger);
+  if (summary === null || categoryId === null || subcategoryId === null || order === null) return null;
 
   const files = readTemplateFiles(value.files);
   const fileContents = readTemplateFileContents(value.fileContents);
@@ -629,10 +633,10 @@ function readTemplateWithContents(
   return {
     id: value.id,
     name: value.name,
-    ...(hasOwn(value, 'summary') ? { summary: value.summary } : {}),
-    ...(hasOwn(value, 'categoryId') ? { categoryId: value.categoryId } : {}),
-    ...(hasOwn(value, 'subcategoryId') ? { subcategoryId: value.subcategoryId } : {}),
-    ...(hasOwn(value, 'order') ? { order: value.order } : {}),
+    ...(summary === undefined ? {} : { summary }),
+    ...(categoryId === undefined ? {} : { categoryId }),
+    ...(subcategoryId === undefined ? {} : { subcategoryId }),
+    ...(order === undefined ? {} : { order }),
     files,
     fileContents,
   };
@@ -695,15 +699,16 @@ function readRuntimeStateProjection(value: unknown): RuntimeStateProjection | nu
   if (!isRecord(value)
     || !hasExpectedKeys(value, ['lifecycle'], ['observedAtMs', 'failure', 'startupDiagnostic'])
     || !isRuntimeLifecycle(value.lifecycle)
-    || (hasOwn(value, 'observedAtMs') && !isSafeNonNegativeInteger(value.observedAtMs))
-    || (hasOwn(value, 'failure') && !isRuntimeFailure(value.failure))
-    || (hasOwn(value, 'startupDiagnostic') && !isRuntimeStartupDiagnostic(value.startupDiagnostic))) {
+    || (hasOwn(value, 'observedAtMs') && !isSafeNonNegativeInteger(value.observedAtMs))) {
     return null;
   }
+  const failure = readOptional(value, 'failure', isRuntimeFailure);
+  const startupDiagnostic = readOptional(value, 'startupDiagnostic', isRuntimeStartupDiagnostic);
+  if (failure === null || startupDiagnostic === null) return null;
   return {
     lifecycle: value.lifecycle,
-    ...(hasOwn(value, 'failure') ? { failure: value.failure } : {}),
-    ...(hasOwn(value, 'startupDiagnostic') ? { startupDiagnostic: value.startupDiagnostic } : {}),
+    ...(failure === undefined ? {} : { failure }),
+    ...(startupDiagnostic === undefined ? {} : { startupDiagnostic }),
   };
 }
 
@@ -912,6 +917,16 @@ function isSafeNonNegativeInteger(value: unknown): value is number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readOptional<T>(
+  value: Record<string, unknown>,
+  key: string,
+  validate: (value: unknown) => value is T,
+): T | undefined | null {
+  if (!hasOwn(value, key)) return undefined;
+  const field = value[key];
+  return validate(field) ? field : null;
 }
 
 function hasExpectedKeys(

@@ -33,7 +33,7 @@ export function registerDiagnosticsExportHandler(
       if (saveResult.canceled || !saveResult.filePath) return { status: 'cancelled' };
 
       const download = await dependencies.transport.download(archiveId);
-      if (download.status !== 200) return { status: 'failed' };
+      if (download.status !== 200 || !(download.body instanceof Uint8Array)) return { status: 'failed' };
       await dependencies.writeFile(saveResult.filePath, download.body);
       return { status: 'saved' };
     } catch {

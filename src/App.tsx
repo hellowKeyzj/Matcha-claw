@@ -25,7 +25,7 @@ import { applyResolvedTheme, useResolvedTheme } from './lib/use-resolved-theme';
 import { UpdateNotifier } from './components/update/UpdateNotifier';
 import { ProviderRecoveryDialog } from './components/settings/ProviderRecoveryDialog';
 import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
-import { isTraceEnabled } from '@/lib/trace-logger';
+import { isTraceEnabled, startupTrace } from '@/lib/trace-logger';
 import {
   SkillsRoute,
   SecurityRoute,
@@ -73,6 +73,15 @@ function AccountBootSplash() {
 let toolchainPrepareStarted = false;
 
 function MainLayoutWithLazyToolchainPrepare() {
+  useLayoutEffect(() => {
+    if (!isTraceEnabled()) return;
+    const committedAt = performance.now();
+    startupTrace('renderer.layout', 'commit.setup');
+    return () => startupTrace('renderer.layout', 'commit.cleanup', () => ({
+      durationMs: Math.round(performance.now() - committedAt),
+    }));
+  }, []);
+
   useEffect(() => {
     if (toolchainPrepareStarted) {
       return;
@@ -103,6 +112,7 @@ class ErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
+    startupTrace('renderer.app', 'render.error', () => ({ outcome: 'error' }));
     console.error('React Error Boundary caught error:', error, info);
   }
 
@@ -155,6 +165,22 @@ function isLocalAccountEntryState(state: unknown): boolean {
 }
 
 function App() {
+  if (isTraceEnabled() && performance.getEntriesByName('matchaclaw.app.first-render').length === 0) {
+    performance.mark('matchaclaw.app.first-render');
+    startupTrace('renderer.app', 'render.first');
+  }
+  useLayoutEffect(() => {
+    if (!isTraceEnabled()) return;
+    const committedAt = performance.now();
+    startupTrace('renderer.app', 'commit.setup', () => ({
+      renderToCommitMs: Math.round(committedAt
+        - (performance.getEntriesByName('matchaclaw.app.first-render')[0]?.startTime ?? committedAt)),
+    }));
+    return () => startupTrace('renderer.app', 'commit.cleanup', () => ({
+      durationMs: Math.round(performance.now() - committedAt),
+    }));
+  }, []);
+
   const navigate = useNavigate();
   const location = useLocation();
   const initSettings = useSettingsStore((state) => state.init);
@@ -177,18 +203,50 @@ function App() {
   const subscribeLicense = useLicenseStore((state) => state.subscribe);
 
   useEffect(() => {
-    initSettings();
+    if (!isTraceEnabled()) {
+      initSettings();
+      return;
+    }
+    const startedAt = performance.now();
+    startupTrace('renderer.app', 'settings.init.start');
+    initSettings().finally(() => startupTrace('renderer.app', 'settings.init.end', () => ({
+      durationMs: Math.round(performance.now() - startedAt),
+      initialized: useSettingsStore.getState().initialized,
+    })));
+    return () => startupTrace('renderer.app', 'settings.init.cleanup');
   }, [initSettings]);
 
   useEffect(() => {
     if (!settingsInitialized) {
       return;
     }
-    void initUpdate();
+    if (!isTraceEnabled()) {
+      void initUpdate();
+      return;
+    }
+    const startedAt = performance.now();
+    startupTrace('renderer.app', 'update.init.start');
+    void initUpdate().finally(() => startupTrace('renderer.app', 'update.init.end', () => ({
+      durationMs: Math.round(performance.now() - startedAt),
+      initialized: useUpdateStore.getState().isInitialized,
+      outcome: useUpdateStore.getState().error ? 'error' : 'settled',
+    })));
+    return () => startupTrace('renderer.app', 'update.init.cleanup');
   }, [initUpdate, settingsInitialized]);
 
   useEffect(() => {
-    void initAccount();
+    if (!isTraceEnabled()) {
+      void initAccount();
+      return;
+    }
+    const startedAt = performance.now();
+    startupTrace('renderer.app', 'account.init.start');
+    void initAccount().finally(() => startupTrace('renderer.app', 'account.init.end', () => ({
+      durationMs: Math.round(performance.now() - startedAt),
+      accountStatus: useAccountStore.getState().status,
+      outcome: useAccountStore.getState().errorMessage ? 'error' : 'settled',
+    })));
+    return () => startupTrace('renderer.app', 'account.init.cleanup');
   }, [initAccount]);
 
   // Sync i18n language with persisted settings on mount
@@ -200,13 +258,35 @@ function App() {
 
   // Initialize Gateway connection on mount
   useEffect(() => {
-    initGateway();
+    if (!isTraceEnabled()) {
+      initGateway();
+      return;
+    }
+    const startedAt = performance.now();
+    startupTrace('renderer.app', 'gateway.init.start');
+    initGateway().finally(() => startupTrace('renderer.app', 'gateway.init.end', () => ({
+      durationMs: Math.round(performance.now() - startedAt),
+      initialized: useGatewayStore.getState().isInitialized,
+      outcome: useGatewayStore.getState().lastError ? 'error' : 'settled',
+    })));
+    return () => startupTrace('renderer.app', 'gateway.init.cleanup');
   }, [initGateway]);
 
   // Initialize provider snapshot on mount so provider display state
   // survives app restarts without requiring settings page entry.
   useEffect(() => {
-    void initProviders();
+    if (!isTraceEnabled()) {
+      void initProviders();
+      return;
+    }
+    const startedAt = performance.now();
+    startupTrace('renderer.app', 'providers.init.start');
+    void initProviders().finally(() => startupTrace('renderer.app', 'providers.init.end', () => ({
+      durationMs: Math.round(performance.now() - startedAt),
+      snapshotReady: useProviderStore.getState().snapshotReady,
+      outcome: useProviderStore.getState().error ? 'error' : 'settled',
+    })));
+    return () => startupTrace('renderer.app', 'providers.init.cleanup');
   }, [initProviders]);
 
   useEffect(() => {
@@ -241,6 +321,22 @@ function App() {
   const showAuthGate = shouldApplyAccountGate
     && (accountStatus === 'signedOut' || accountStatus === 'offline' || accountStatus === 'requires2fa')
     && !localAccountEntryRequested;
+
+  const gate = showAccountBoot ? 'account-checking'
+    : showAuthGate ? 'auth'
+    : licenseChecking && !isAuthRoute && !isLicenseRoute ? 'license-checking'
+    : licenseBlocked && !isAuthRoute && !isLicenseRoute ? 'license-blocked'
+    : 'routes';
+  const licenseState = licenseSnapshot?.state ?? 'unobserved';
+  useLayoutEffect(() => {
+    if (!isTraceEnabled()) return;
+    const startedAt = performance.now();
+    const detail = () => ({ gate, accountStatus, licenseState, isAuthRoute, isLicenseRoute });
+    startupTrace('renderer.app', 'gate.setup', detail);
+    return () => startupTrace('renderer.app', 'gate.cleanup', () => ({
+      ...detail(), durationMs: Math.round(performance.now() - startedAt),
+    }));
+  }, [gate, accountStatus, licenseState, isAuthRoute, isLicenseRoute]);
 
   // Listen for navigation events from main process
   useEffect(() => {

@@ -285,16 +285,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dependencies = dependencies(root.path());
         let module = &dependencies.sealed_resource;
+        let manifest = "---\nname: Cloud\ndescription: test\n---\nsecret skill body";
         let receipt = SealedSkillPackage::seal(
             SkillKey::parse("cloud-skill").unwrap(),
             SealedSkillTarget::OpenClaw,
-            vec![
-                SealedSkillFileRequest::try_new(
-                    "SKILL.md",
-                    "---\nname: Cloud\ndescription: test\n---\nsecret skill body",
-                )
-                .unwrap(),
-            ],
+            crate::SealedSkillDescriptor::parse_skill_manifest(manifest, "cloud-skill").unwrap(),
+            vec![SealedSkillFileRequest::try_new("SKILL.md", manifest).unwrap()],
         )
         .unwrap();
         let path = root.path().join(receipt.package_file_name());
@@ -364,7 +360,7 @@ mod tests {
         .unwrap();
         module
             .skills_port()
-            .export_sealed_skill_package("local-skill".into())
+            .export_sealed_skill_package("local-skill".into(), local.clone())
             .unwrap();
         // Orphan metadata must not become an installed package.
         fs::write(

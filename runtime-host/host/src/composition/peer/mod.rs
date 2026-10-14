@@ -16,5 +16,13 @@ pub(crate) use handle::PeerHandle;
 pub(crate) use query::PeerQuery;
 
 pub(crate) type PeerKey = platform::endpoint::runtime_address::RuntimeEndpoint;
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(crate) enum PeerLaneKey {
+    Lifecycle(PeerKey),
+    McpApp { session_key: String },
+    Question { identity: String, id: String },
+}
+
 pub(crate) type PeerGlobalState = ();
 pub(crate) type PeerLaneState = ();

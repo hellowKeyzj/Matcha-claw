@@ -82,6 +82,12 @@ export interface SealedSkillMetadata {
   runtimes?: string[];
 }
 
+export interface SealedSkillCatalogIssue {
+  fileName: string;
+  skillKey?: string;
+  reason: 'duplicate-package' | 'invalid-package' | 'missing-authorization-key' | 'unavailable-package';
+}
+
 export interface SealedSkillCloudPackage {
   packageId?: string;
   packageVersionId?: string;

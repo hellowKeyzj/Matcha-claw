@@ -18,7 +18,6 @@ type OpenClawLogEntry = Readonly<{
   line: string;
 }>;
 
-type RuntimeHostControl = Pick<DiagnosticsApiContext['runtimeHost'], 'command'>;
 type RuntimeControlLogsContext = RuntimeHostTransportContext<'runtimeControlTransport'>;
 
 function readMainProcessMemoryUsage() {
@@ -142,7 +141,7 @@ function decodeArchiveDownloadRequest(value: unknown): string | null {
 
 function readElectronProcessMetrics() {
   const metrics = app.getAppMetrics().map((metric) => {
-    const rawMemory = metric.memory as Record<string, unknown> | undefined;
+    const rawMemory = metric.memory;
     return {
       pid: metric.pid,
       type: metric.type,
@@ -150,7 +149,7 @@ function readElectronProcessMetrics() {
       workingSetSizeKb: toNumberOrNull(rawMemory?.workingSetSize),
       peakWorkingSetSizeKb: toNumberOrNull(rawMemory?.peakWorkingSetSize),
       privateBytesKb: toNumberOrNull(rawMemory?.privateBytes),
-      sharedBytesKb: toNumberOrNull(rawMemory?.sharedBytes),
+      sharedBytesKb: toNumberOrNull(rawMemory && 'sharedBytes' in rawMemory ? rawMemory.sharedBytes : undefined),
     };
   });
 

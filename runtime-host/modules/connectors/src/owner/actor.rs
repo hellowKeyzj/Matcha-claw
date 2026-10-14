@@ -1,4 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 
 use foundation::execution::{LaneRetention, OwnerSpec};
 use platform::call::CallStatus;
@@ -8,7 +11,7 @@ use crate::call::{
 };
 
 use crate::{
-    adapters::store::{self, ConnectorStore, ConnectorStoreError},
+    adapters::store::{self, ConnectorStore, ConnectorStoreError, ConnectorStoreSnapshot},
     application::{
         ConnectorCommand, ConnectorOwnerKey, ConnectorQuery,
         receipts::{
@@ -45,6 +48,7 @@ pub struct ConnectorOwnerInput {
 
 #[derive(Clone)]
 pub(crate) struct ConnectorShared {
+    snapshot: Arc<RwLock<Arc<ConnectorStoreSnapshot>>>,
     observations: Arc<ObservationResults>,
     runtime_directory: Arc<dyn ConnectorRuntimeDirectory>,
     runtime_host_mcp_executable: PathBuf,
@@ -69,6 +73,7 @@ impl ConnectorOwner {
 
         Ok(Self {
             shared: ConnectorShared {
+                snapshot: store.snapshot(),
                 observations: Arc::new(ObservationResults::default()),
                 runtime_directory: input.runtime_directory,
                 runtime_host_mcp_executable: input.runtime_host_mcp_executable,
@@ -190,7 +195,9 @@ impl OwnerSpec for ConnectorOwner {
         }
     }
 
-    async fn handle_direct_query(_shared: Self::Shared, _query: Self::Query) {}
+    async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
+        handle_connector_snapshot_query(shared, query).await;
+    }
 
     async fn handle_keyed_query(
         _shared: Self::Shared,
@@ -217,17 +224,14 @@ impl OwnerSpec for ConnectorOwner {
     }
 }
 
-async fn handle_connector_query(
-    shared: ConnectorShared,
-    global: &ConnectorGlobalState,
-    query: ConnectorQuery,
-) {
+async fn handle_connector_snapshot_query(shared: ConnectorShared, query: ConnectorQuery) {
     match query {
         ConnectorQuery::List { call, reply } => {
             if let Some(call) = &call {
                 call.running().await;
             }
-            let connectors: Vec<_> = domain::connector_list(&catalog(global))
+            let snapshot = Arc::clone(&shared.snapshot.read().expect("connector snapshot lock"));
+            let connectors: Vec<_> = domain::connector_list(snapshot.catalog())
                 .into_iter()
                 .map(ConnectorRecord::from_domain)
                 .collect();
@@ -254,7 +258,8 @@ async fn handle_connector_query(
             if let Some(call) = &call {
                 call.running().await;
             }
-            let programs = catalog_programs(&catalog(global));
+            let snapshot = Arc::clone(&shared.snapshot.read().expect("connector snapshot lock"));
+            let programs = catalog_programs(snapshot.catalog());
             if let Some(mut call) = call {
                 call.detail.count = Some(programs.len());
                 call.detail.result = Some(CallResult::Available);
@@ -262,6 +267,47 @@ async fn handle_connector_query(
             }
             let _ = reply.send(ConnectorCatalogReceipt::Available(programs));
         }
+        ConnectorQuery::Get { id, call, reply } => {
+            if let Some(call) = &call {
+                call.running().await;
+            }
+            let snapshot = Arc::clone(&shared.snapshot.read().expect("connector snapshot lock"));
+            let outcome = domain::connector(snapshot.catalog(), &id)
+                .map(ConnectorRecord::from_domain)
+                .map(|connector| ConnectorGetReceipt::Found(Box::new(connector)))
+                .unwrap_or(ConnectorGetReceipt::Missing);
+            if let Some(mut call) = call {
+                call.detail.revision = snapshot.revision(&id);
+                call.detail.applied_revision = snapshot.applied_revision(&id);
+                call.detail.tombstoned = snapshot.tombstoned(&id);
+                call.detail.result = Some(match &outcome {
+                    ConnectorGetReceipt::Found(connector)
+                        if connector
+                            .mcp_server_program
+                            .as_ref()
+                            .is_some_and(|program| {
+                                matches!(program.source, McpProgramSource::SystemRuntime)
+                            }) =>
+                    {
+                        CallResult::Missing
+                    }
+                    ConnectorGetReceipt::Found(_) => CallResult::Found,
+                    ConnectorGetReceipt::Missing => CallResult::Missing,
+                });
+                call.finish(CallStatus::Succeeded).await;
+            }
+            let _ = reply.send(outcome);
+        }
+        _ => unreachable!("connector snapshot query uses the direct route"),
+    }
+}
+
+async fn handle_connector_query(
+    shared: ConnectorShared,
+    global: &ConnectorGlobalState,
+    query: ConnectorQuery,
+) {
+    match query {
         ConnectorQuery::Status { mut call } => {
             if call.start().await.is_err() {
                 shared.observations.discard(call.context.id());
@@ -286,34 +332,6 @@ async fn handle_connector_query(
                 }
             };
             call.finish(status).await;
-        }
-        ConnectorQuery::Get { id, call, reply } => {
-            if let Some(call) = &call {
-                call.running().await;
-            }
-            let outcome = domain::connector(&catalog(global), &id)
-                .map(ConnectorRecord::from_domain)
-                .map(|connector| ConnectorGetReceipt::Found(Box::new(connector)))
-                .unwrap_or(ConnectorGetReceipt::Missing);
-            if let Some(mut call) = call {
-                revision_detail(global, &id, &mut call.detail);
-                call.detail.result = Some(match &outcome {
-                    ConnectorGetReceipt::Found(connector)
-                        if connector
-                            .mcp_server_program
-                            .as_ref()
-                            .is_some_and(|program| {
-                                matches!(program.source, McpProgramSource::SystemRuntime)
-                            }) =>
-                    {
-                        CallResult::Missing
-                    }
-                    ConnectorGetReceipt::Found(_) => CallResult::Found,
-                    ConnectorGetReceipt::Missing => CallResult::Missing,
-                });
-                call.finish(CallStatus::Succeeded).await;
-            }
-            let _ = reply.send(outcome);
         }
         ConnectorQuery::Probe { id, mut call } => {
             if call.start().await.is_err() {
@@ -398,6 +416,7 @@ async fn handle_connector_query(
             }
             let _ = reply.send(outcome);
         }
+        _ => unreachable!("connector native query uses the global route"),
     }
 }
 

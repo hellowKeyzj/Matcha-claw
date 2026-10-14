@@ -1,4 +1,5 @@
 mod loopback;
+mod reader;
 mod store;
 
 use std::{
@@ -31,6 +32,7 @@ struct Writer {
     wake: thread::Thread,
     state: Arc<Mutex<WriterState>>,
     terminal_capacity: Arc<Semaphore>,
+    reader: reader::Reader,
     changed: broadcast::Sender<CallChanged>,
 }
 
@@ -59,32 +61,42 @@ enum TerminalDelivery {
 }
 
 struct PublishedBegin {
-    unknown: Option<CallAppend>,
+    call_id: Option<CallId>,
     state: Arc<Mutex<WriterState>>,
     wake: thread::Thread,
 }
 
 impl PublishedBegin {
     fn into_call_id(mut self) -> CallId {
-        self.unknown.take().unwrap().call_id
+        self.call_id.take().unwrap()
     }
 }
 
 impl Drop for PublishedBegin {
     fn drop(&mut self) {
-        let Some(change) = self.unknown.take() else {
-            return;
-        };
-        if let Ok(mut state) = self.state.lock() {
-            if let Some(TerminalSlot {
-                delivery: slot @ TerminalDelivery::Reserved,
-                ..
-            }) = state.calls.get_mut(&change.call_id)
-            {
-                *slot = TerminalDelivery::Pending(change, None);
-                state.notified = true;
-                self.wake.unpark();
-            }
+        if let Some(call_id) = self.call_id.take() {
+            abandon(&self.state, &self.wake, &call_id);
+        }
+    }
+}
+
+fn abandon(state: &Mutex<WriterState>, wake: &thread::Thread, call_id: &CallId) {
+    if let Ok(mut state) = state.lock() {
+        if let Some(TerminalSlot {
+            delivery: slot @ TerminalDelivery::Reserved,
+            ..
+        }) = state.calls.get_mut(call_id)
+        {
+            *slot = TerminalDelivery::Pending(
+                CallAppend {
+                    call_id: call_id.clone(),
+                    status: Some(platform::call::CallStatus::Unknown),
+                    detail: None,
+                },
+                None,
+            );
+            state.notified = true;
+            wake.unpark();
         }
     }
 }
@@ -96,14 +108,6 @@ enum Request {
         oneshot::Sender<Result<PublishedBegin, CallLogError>>,
     ),
     Append(CallAppend, oneshot::Sender<Result<(), CallLogError>>),
-    List(CallQuery, oneshot::Sender<Result<CallPage, CallLogError>>),
-    Get(CallId, oneshot::Sender<Result<CallRecord, CallLogError>>),
-    History(
-        CallId,
-        Option<u64>,
-        u32,
-        oneshot::Sender<Result<CallHistory, CallLogError>>,
-    ),
 }
 
 impl Drop for Writer {
@@ -113,6 +117,11 @@ impl Drop for Writer {
             state.stopping = true;
         }
         self.wake.unpark();
+        if let Ok(task) = self.task.get_mut() {
+            if let Some(task) = task.take() {
+                let _ = task.join();
+            }
+        }
     }
 }
 
@@ -125,6 +134,7 @@ impl CallLogModule {
         let state = Arc::new(Mutex::new(WriterState::default()));
         let writer_state = state.clone();
         let terminal_capacity = Arc::new(Semaphore::new(QUEUE_CAPACITY));
+        let reader = reader::Reader::open(state_dir, state.clone())?;
         let task = thread::Builder::new()
             .name("call-log-writer".into())
             .spawn(move || run_writer(store, receiver, events, writer_state))
@@ -137,6 +147,7 @@ impl CallLogModule {
                 wake,
                 state,
                 terminal_capacity,
+                reader,
                 changed,
             }),
         })
@@ -151,11 +162,11 @@ impl CallLogModule {
     }
 
     pub async fn list(&self, query: CallQuery) -> Result<CallPage, CallLogError> {
-        self.request(|reply| Request::List(query, reply)).await
+        self.read(|reply| reader::Request::List(query, reply)).await
     }
 
     pub async fn get(&self, call_id: CallId) -> Result<CallRecord, CallLogError> {
-        self.request(|reply| Request::Get(call_id, reply)).await
+        self.read(|reply| reader::Request::Get(call_id, reply)).await
     }
 
     pub async fn history(
@@ -164,8 +175,22 @@ impl CallLogModule {
         after_revision: Option<u64>,
         limit: u32,
     ) -> Result<CallHistory, CallLogError> {
-        self.request(|reply| Request::History(call_id, after_revision, limit, reply))
+        self.read(|reply| reader::Request::History(call_id, after_revision, limit, reply))
             .await
+    }
+
+    async fn read<T>(
+        &self,
+        request: impl FnOnce(oneshot::Sender<Result<T, CallLogError>>) -> reader::Request,
+    ) -> Result<T, CallLogError> {
+        let response = self.inner.reader.enqueue(request)?;
+        self.inner
+            .state
+            .lock()
+            .map_err(|_| CallLogError::Unavailable)?
+            .notified = true;
+        self.inner.wake.unpark();
+        response.await.map_err(|_| CallLogError::Unavailable)?
     }
 
     pub fn descriptor(
@@ -190,19 +215,26 @@ impl CallLogModule {
             .map_err(|_| CallLogError::Unavailable)?
             .stopping = true;
         self.inner.wake.unpark();
-        let task = self
+        let reader = self.inner.reader.stop()?;
+        let writer = self
             .inner
             .task
             .lock()
             .map_err(|_| CallLogError::Unavailable)?
             .take();
-        match task {
-            Some(task) => tokio::task::spawn_blocking(move || task.join())
-                .await
-                .map_err(|_| CallLogError::Unavailable)?
-                .map_err(|_| CallLogError::Unavailable)?,
-            None => Err(CallLogError::Unavailable),
-        }
+        tokio::task::spawn_blocking(move || {
+            let writer = match writer {
+                Some(task) => task.join().unwrap_or(Err(CallLogError::Unavailable)),
+                None => Err(CallLogError::Unavailable),
+            };
+            let reader = match reader {
+                Some(task) => task.join().unwrap_or(Err(CallLogError::Unavailable)),
+                None => Err(CallLogError::Unavailable),
+            };
+            writer.and(reader)
+        })
+        .await
+        .map_err(|_| CallLogError::Unavailable)?
     }
 
     async fn begin_call(&self, call: CallBegin) -> Result<CallId, CallLogError> {
@@ -337,6 +369,10 @@ impl CallLogModule {
 }
 
 impl CallLog for CallLogModule {
+    fn abandon(&self, call_id: &CallId) {
+        abandon(&self.inner.state, &self.inner.wake, call_id);
+    }
+
     fn begin(&self, call: CallBegin) -> CallFuture<CallId> {
         let module = self.clone();
         Box::pin(async move { module.begin_call(call).await })
@@ -387,7 +423,6 @@ fn run_writer(
             let failed = state.lock().map_err(|_| CallLogError::Unavailable)?.failed;
             match request {
                 Request::Begin(call, permit, reply) => {
-                    let detail = call.detail.clone();
                     let outcome = if failed {
                         Err(CallLogError::PersistFailed)
                     } else {
@@ -406,11 +441,7 @@ fn run_writer(
                                 );
                             let _ = changed.send(event);
                             Ok(PublishedBegin {
-                                unknown: Some(CallAppend {
-                                    call_id,
-                                    status: Some(platform::call::CallStatus::Unknown),
-                                    detail: Some(detail),
-                                }),
+                                call_id: Some(call_id),
                                 state: state.clone(),
                                 wake: thread::current(),
                             })
@@ -430,27 +461,6 @@ fn run_writer(
                     };
                     let _ = reply.send(outcome);
                 }
-                Request::List(query, reply) => {
-                    let _ = reply.send(if failed {
-                        Err(CallLogError::PersistFailed)
-                    } else {
-                        store.list(query)
-                    });
-                }
-                Request::Get(call_id, reply) => {
-                    let _ = reply.send(if failed {
-                        Err(CallLogError::PersistFailed)
-                    } else {
-                        store.get(&call_id)
-                    });
-                }
-                Request::History(call_id, after, limit, reply) => {
-                    let _ = reply.send(if failed {
-                        Err(CallLogError::PersistFailed)
-                    } else {
-                        store.history(&call_id, after, limit)
-                    });
-                }
             }
         }
         stopping = state
@@ -459,6 +469,20 @@ fn run_writer(
             .stopping;
         if stopping {
             failures = 0;
+            let mut state = state.lock().map_err(|_| CallLogError::Unavailable)?;
+            // Business owners have joined; external contexts cannot keep the writer alive.
+            for (call_id, slot) in &mut state.calls {
+                if matches!(slot.delivery, TerminalDelivery::Reserved) {
+                    slot.delivery = TerminalDelivery::Pending(
+                        CallAppend {
+                            call_id: call_id.clone(),
+                            status: Some(platform::call::CallStatus::Unknown),
+                            detail: None,
+                        },
+                        None,
+                    );
+                }
+            }
         }
         deliver_terminals(&mut store, &changed, &state, &mut failures)?;
         if stopping {

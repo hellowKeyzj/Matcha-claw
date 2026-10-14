@@ -42,7 +42,7 @@ pub use domain::model::{
 };
 pub use owner::actor::WorkspaceOwnerInput;
 pub use ports::{
-    WorkspaceOps, WorkspaceRequestAdmission, WorkspaceRequestAdmissionClosed,
+    WorkspaceBinding, WorkspaceOps, WorkspaceRequestAdmission, WorkspaceRequestAdmissionClosed,
     WorkspaceRuntimeDirectory,
 };
 
@@ -93,9 +93,10 @@ pub fn spawn_owner(
     input: WorkspaceOwnerInput,
 ) -> (WorkspaceModule, OwnedTask<()>) {
     let owner = WorkspaceOwner::new(input);
+    let shared = owner.shared();
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(16, WorkspaceOwner::lane_retention()),
     );
-    (WorkspaceModule::new(WorkspaceHandle::new(handle)), task)
+    (WorkspaceModule::new(WorkspaceHandle::new(handle, shared)), task)
 }

@@ -35,6 +35,6 @@ impl DiagnosticsCommand {
 
 impl DiagnosticsQuery {
     pub(crate) fn route(&self) -> foundation::execution::QueryRoute<DiagnosticsOwnerKey> {
-        foundation::execution::QueryRoute::Global
+        foundation::execution::QueryRoute::Direct
     }
 }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use platform::endpoint::runtime_address::RuntimeEndpoint;
 
 use crate::domain::model::{
@@ -26,36 +28,62 @@ pub trait WorkspaceOps: Send + Sync {
         session_key: &str,
     ) -> Result<WorkspaceDirectoryRoot, WorkspaceDirectoryFailure>;
 
-    fn read_text(
+    fn bind_workspace(
         &self,
         session_key: &str,
+    ) -> Result<Arc<dyn WorkspaceBinding>, WorkspaceDirectoryFailure>;
+
+    fn resolve_media(
+        &self,
+        session_key: &str,
+        reference: &str,
+    ) -> Result<ResolvedWorkspaceMedia, WorkspaceMediaFailure>;
+
+    fn thumbnail_media_gateway(
+        &self,
+        session_key: &str,
+        gateway_url: &str,
+        mime_type: &str,
+        agent_id: &str,
+    ) -> Result<WorkspaceMediaThumbnail, WorkspaceMediaFailure>;
+
+    fn stage_buffer_media(
+        &self,
+        session_key: &str,
+        base64: &str,
+        file_name: &str,
+        mime_type: &str,
+    ) -> Result<WorkspaceMediaReceipt, WorkspaceMediaFailure>;
+
+    fn workspace_runtime_ready(&self) -> bool;
+}
+
+/// Native-selected resource identity and effects share one bound directory.
+pub trait WorkspaceBinding: Send + Sync {
+    fn resource_key(&self) -> Option<&str>;
+
+    fn read_text(
+        &self,
         relative_path: &str,
         limit: usize,
     ) -> Result<WorkspaceTextReceipt, WorkspaceReadFailure>;
 
     fn read_binary(
         &self,
-        session_key: &str,
         relative_path: &str,
         limit: usize,
     ) -> Result<WorkspaceBinaryReceipt, WorkspaceBinaryFailure>;
 
-    fn stat_file(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-    ) -> Result<WorkspaceStatReceipt, WorkspaceStatFailure>;
+    fn stat_file(&self, relative_path: &str) -> Result<WorkspaceStatReceipt, WorkspaceStatFailure>;
 
     fn list_directory(
         &self,
-        session_key: &str,
         relative_path: &str,
         include_hidden: bool,
     ) -> Result<WorkspaceDirectoryReceipt, WorkspaceListFailure>;
 
     fn write_text(
         &self,
-        session_key: &str,
         relative_path: &str,
         content: &str,
     ) -> Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>;
@@ -67,25 +95,10 @@ pub trait WorkspaceOps: Send + Sync {
         mime_type: &str,
     ) -> Result<WorkspaceMediaReceipt, WorkspaceMediaFailure>;
 
-    fn resolve_media(
-        &self,
-        session_key: &str,
-        reference: &str,
-    ) -> Result<ResolvedWorkspaceMedia, WorkspaceMediaFailure>;
-
     fn thumbnail_media(
         &self,
-        session_key: &str,
         relative_path: &str,
         mime_type: &str,
-    ) -> Result<WorkspaceMediaThumbnail, WorkspaceMediaFailure>;
-
-    fn thumbnail_media_gateway(
-        &self,
-        session_key: &str,
-        gateway_url: &str,
-        mime_type: &str,
-        agent_id: &str,
     ) -> Result<WorkspaceMediaThumbnail, WorkspaceMediaFailure>;
 
     fn thumbnails_media(
@@ -99,14 +112,4 @@ pub trait WorkspaceOps: Send + Sync {
         session_key: &str,
         paths: &[WorkspaceMediaPath],
     ) -> Result<Vec<WorkspaceMediaReceipt>, WorkspaceMediaFailure>;
-
-    fn stage_buffer_media(
-        &self,
-        session_key: &str,
-        base64: &str,
-        file_name: &str,
-        mime_type: &str,
-    ) -> Result<WorkspaceMediaReceipt, WorkspaceMediaFailure>;
-
-    fn workspace_runtime_ready(&self) -> bool;
 }

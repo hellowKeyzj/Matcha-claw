@@ -39,7 +39,7 @@ pub fn read_mcp_servers(
 }
 
 pub async fn observe_mcp_server_status(
-    gateway: &mut crate::port::OpenClawGateway,
+    gateway: &crate::port::OpenClawGateway,
     session_key: String,
 ) -> Result<ports::McpServerStatusList, ports::ConnectorOperationFailure> {
     gateway
@@ -50,7 +50,7 @@ pub async fn observe_mcp_server_status(
 }
 
 pub async fn set_mcp_session_server_enabled(
-    gateway: &mut crate::port::OpenClawGateway,
+    gateway: &crate::port::OpenClawGateway,
     session_key: String,
     server_name: String,
     enabled: bool,

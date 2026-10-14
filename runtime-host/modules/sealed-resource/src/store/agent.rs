@@ -5,7 +5,7 @@ use std::{
     io,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -220,7 +220,47 @@ pub struct SealedAgentStore {
     root: SealedAgentRoot,
     private_directory: PathBuf,
     authorization_keyring: Arc<SealedPackageAuthorizationKeyring>,
+    workspace_operations: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>,
+    // Lock order: workspace, then publication. Catalog takes only publication.
     operation_lock: Mutex<()>,
+}
+
+struct WorkspaceOperation<'a> {
+    operations: &'a Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>,
+    source: PathBuf,
+    workspace: PathBuf,
+    operation: Option<Arc<Mutex<()>>>,
+}
+
+impl WorkspaceOperation<'_> {
+    fn lock(&self) -> Result<MutexGuard<'_, ()>, SealedResourceError> {
+        let guard = self
+            .operation
+            .as_ref()
+            .expect("workspace operation is retained until drop")
+            .lock()
+            .map_err(|_| SealedResourceError::Unknown)?;
+        if workspace_operation_path(&self.source)? != self.workspace {
+            return Err(SealedResourceError::Rejected);
+        }
+        Ok(guard)
+    }
+}
+
+impl Drop for WorkspaceOperation<'_> {
+    fn drop(&mut self) {
+        let Ok(mut operations) = self.operations.lock() else {
+            return;
+        };
+        // Release this user under the registry lock, including when the last users drop together.
+        drop(self.operation.take());
+        if operations
+            .get(&self.workspace)
+            .is_some_and(|operation| Arc::strong_count(operation) == 1)
+        {
+            operations.remove(&self.workspace);
+        }
+    }
 }
 
 impl SealedAgentStore {
@@ -238,6 +278,7 @@ impl SealedAgentStore {
             private_directory,
             root,
             authorization_keyring,
+            workspace_operations: Mutex::new(BTreeMap::new()),
             operation_lock: Mutex::new(()),
         })
     }
@@ -263,6 +304,35 @@ impl SealedAgentStore {
             private_root,
             authorization_keyring,
         )
+    }
+
+    fn workspace_operation(
+        &self,
+        workspace: &Path,
+    ) -> Result<WorkspaceOperation<'_>, SealedResourceError> {
+        let source = workspace.to_owned();
+        let workspace = workspace_operation_path(workspace)?;
+        let mut operations = self
+            .workspace_operations
+            .lock()
+            .map_err(|_| SealedResourceError::Unknown)?;
+        let operation = Arc::clone(
+            operations
+                .entry(workspace.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        );
+        Ok(WorkspaceOperation {
+            operations: &self.workspace_operations,
+            source,
+            workspace,
+            operation: Some(operation),
+        })
+    }
+
+    fn install_workspace(&self, bytes: &[u8]) -> Result<PathBuf, SealedResourceError> {
+        // Manifest identity selects the lock, never authorizes the payload.
+        let manifest = SealedAgentPackage::open_manifest(bytes)?;
+        self.root.workspace_directory(manifest.agent_key())
     }
 
     pub fn catalog(&self) -> Result<SealedAgentCatalog, SealedResourceError> {
@@ -345,18 +415,20 @@ impl SealedAgentStore {
     }
 
     pub fn is_using_sealed_source(&self, agent_key: &AgentKey) -> Result<bool, SealedResourceError> {
+        let workspace = self.root.workspace_directory(agent_key)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let workspace = self.root.workspace_directory(agent_key)?;
-        let Some(workspace) = existing_workspace_directory(&workspace)? else {
+        let Some(workspace) = existing_workspace_directory(&operation.workspace)? else {
             return Ok(false);
         };
         if has_plain_agent_source(&workspace)? {
             return Ok(false);
         }
-        self.find_sealed_package_locked(agent_key)
+        self.find_sealed_package_in_workspace_locked(agent_key, &workspace)
             .map(|entry| entry.is_some())
     }
 
@@ -396,17 +468,19 @@ impl SealedAgentStore {
         if !AGENT_BOOTSTRAP_FILES.contains(&path.as_str()) {
             return Err(SealedResourceError::Rejected);
         }
+        let workspace = self.root.workspace_directory(&agent_key)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let workspace = self.root.workspace_directory(&agent_key)?;
         let workspace =
-            existing_workspace_directory(&workspace)?.ok_or(SealedResourceError::NotFound)?;
+            existing_workspace_directory(&operation.workspace)?.ok_or(SealedResourceError::NotFound)?;
         if has_plain_agent_source(&workspace)? {
             return Err(SealedResourceError::NotFound);
         }
-        let package = self.open_sealed_agent_locked(&agent_key)?;
+        let package = self.open_sealed_agent_locked(&agent_key, &workspace)?;
         let file = package.file(&path).ok_or(SealedResourceError::NotFound)?;
         Ok(SealedResourceRead::new(
             file.content().to_vec(),
@@ -450,13 +524,11 @@ impl SealedAgentStore {
         cloud_public_key: Option<&str>,
         cloud_key_id: Option<&str>,
     ) -> Result<SealedAgentPackageExport, SealedResourceError> {
-        let _guard = self
-            .operation_lock
-            .lock()
-            .map_err(|_| SealedResourceError::Unknown)?;
         let workspace = self.root.workspace_directory(&agent_key)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let workspace =
-            existing_workspace_directory(&workspace)?.ok_or(SealedResourceError::NotFound)?;
+            existing_workspace_directory(&operation.workspace)?.ok_or(SealedResourceError::NotFound)?;
         let files = collect_agent_files(&workspace)?;
         let receipt = SealedAgentPackage::seal_with_cloud_key(
             agent_key.clone(),
@@ -470,6 +542,10 @@ impl SealedAgentStore {
         }
         let package =
             SealedAgentPackage::open(receipt.package_bytes(), receipt.authorization_key())?;
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| SealedResourceError::Unknown)?;
         let file_name = super::export::package_file_name(
             &workspace,
             agent_name,
@@ -490,14 +566,17 @@ impl SealedAgentStore {
         &self,
         package_path: PathBuf,
     ) -> Result<SealedAgentInstallPlan, SealedResourceError> {
+        let bytes = read_install_package(&package_path)?;
+        let workspace = self.install_workspace(&bytes)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let bytes = read_install_package(&package_path)?;
         let authorization_key = self.read_authorization_key_for_package_bytes(&bytes)?;
         let package = self.open_install_package_bytes_locked(&bytes, &authorization_key)?;
-        self.prepare_install_package_locked(&package)
+        self.prepare_install_package_locked(&package, workspace)
     }
 
     pub fn prepare_install_with_authorization_key(
@@ -505,13 +584,16 @@ impl SealedAgentStore {
         package_path: PathBuf,
         authorization_key: SealedPackageAuthorizationKey,
     ) -> Result<SealedAgentInstallPlan, SealedResourceError> {
+        let bytes = read_install_package(&package_path)?;
+        let workspace = self.install_workspace(&bytes)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let bytes = read_install_package(&package_path)?;
         let package = self.open_install_package_bytes_locked(&bytes, &authorization_key)?;
-        self.prepare_install_package_locked(&package)
+        self.prepare_install_package_locked(&package, workspace)
     }
 
     pub fn prepare_install_with_cloud_metadata(
@@ -519,16 +601,19 @@ impl SealedAgentStore {
         package_path: PathBuf,
         metadata: SealedCloudPackageMetadata,
     ) -> Result<SealedAgentInstallPlan, SealedResourceError> {
+        let bytes = read_install_package(&package_path)?;
+        let workspace = self.install_workspace(&bytes)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let bytes = read_install_package(&package_path)?;
         let package_sha256 = hex_digest(&bytes);
         metadata.ensure_matches(SealedCloudPackageType::Agent, &package_sha256)?;
         let authorization_key = self.cloud_authorization_key(&package_sha256)?;
         let package = self.open_install_package_bytes_locked(&bytes, &authorization_key)?;
-        self.prepare_install_package_locked(&package)
+        self.prepare_install_package_locked(&package, workspace)
     }
 
     pub fn install_package_path(
@@ -543,13 +628,16 @@ impl SealedAgentStore {
         &self,
         package_path: PathBuf,
     ) -> Result<SealedAgentCatalogEntry, SealedAgentInstallError> {
+        let bytes = read_install_package(&package_path)?;
+        let workspace = self.install_workspace(&bytes)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let bytes = read_install_package(&package_path)?;
         let authorization_key = self.read_authorization_key_for_package_bytes(&bytes)?;
-        self.install_package_bytes_locked(bytes, authorization_key)
+        self.install_package_bytes_locked(bytes, authorization_key, &operation.workspace)
     }
 
     pub fn install_package_path_with_authorization_key(
@@ -557,12 +645,15 @@ impl SealedAgentStore {
         package_path: PathBuf,
         authorization_key: SealedPackageAuthorizationKey,
     ) -> Result<SealedAgentCatalogEntry, SealedResourceError> {
+        let bytes = read_install_package(&package_path)?;
+        let workspace = self.install_workspace(&bytes)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let bytes = read_install_package(&package_path)?;
-        self.install_package_bytes_locked(bytes, authorization_key)
+        self.install_package_bytes_locked(bytes, authorization_key, &operation.workspace)
             .map_err(SealedAgentInstallError::into_resource_error)
     }
 
@@ -580,23 +671,34 @@ impl SealedAgentStore {
         package_path: PathBuf,
         metadata: SealedCloudPackageMetadata,
     ) -> Result<SealedAgentCatalogEntry, SealedAgentInstallError> {
+        let bytes = read_install_package(&package_path)?;
+        let workspace = self.install_workspace(&bytes)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let bytes = read_install_package(&package_path)?;
         let package_sha256 = hex_digest(&bytes);
         metadata.ensure_matches(SealedCloudPackageType::Agent, &package_sha256)?;
         let authorization_key = self.cloud_authorization_key(&package_sha256)?;
-        self.install_cloud_package_bytes_locked(bytes, authorization_key, metadata)
+        self.install_cloud_package_bytes_locked(
+            bytes,
+            authorization_key,
+            metadata,
+            &operation.workspace,
+        )
     }
 
     pub fn remove_package(&self, agent_key: AgentKey) -> Result<bool, SealedResourceError> {
+        let workspace = self.root.workspace_directory(&agent_key)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        let removal = self.prepare_remove_package_locked(agent_key)?;
+        let removal = self.prepare_remove_package_locked(agent_key, &operation.workspace)?;
         self.remove_prepared_package_locked(removal)
     }
 
@@ -604,17 +706,25 @@ impl SealedAgentStore {
         &self,
         agent_key: AgentKey,
     ) -> Result<SealedAgentRemoval, SealedResourceError> {
+        let workspace = self.root.workspace_directory(&agent_key)?;
+        let operation = self.workspace_operation(&workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
-        self.prepare_remove_package_locked(agent_key)
+        self.prepare_remove_package_locked(agent_key, &operation.workspace)
     }
 
     pub(crate) fn remove_prepared_package(
         &self,
         removal: SealedAgentRemoval,
     ) -> Result<bool, SealedResourceError> {
+        let Some(workspace) = removal.workspace.as_ref() else {
+            return Ok(false);
+        };
+        let operation = self.workspace_operation(workspace)?;
+        let _workspace_guard = operation.lock()?;
         let _guard = self
             .operation_lock
             .lock()
@@ -625,9 +735,9 @@ impl SealedAgentStore {
     fn prepare_remove_package_locked(
         &self,
         agent_key: AgentKey,
+        workspace: &Path,
     ) -> Result<SealedAgentRemoval, SealedResourceError> {
-        let workspace = self.root.workspace_directory(&agent_key)?;
-        let workspace = existing_workspace_directory(&workspace)?;
+        let workspace = existing_workspace_directory(workspace)?;
         let package = match workspace.as_ref() {
             Some(workspace) => self.find_sealed_package_in_workspace_locked(&agent_key, workspace)?,
             None => None,
@@ -677,8 +787,8 @@ impl SealedAgentStore {
     fn prepare_install_package_locked(
         &self,
         package: &SealedAgentPackage,
+        workspace: PathBuf,
     ) -> Result<SealedAgentInstallPlan, SealedResourceError> {
-        let workspace = self.root.workspace_directory(package.agent_key())?;
         let workspace_preexisted = existing_workspace_directory(&workspace)?.is_some();
         Ok(SealedAgentInstallPlan {
             agent_key: package.agent_key().clone(),
@@ -691,9 +801,10 @@ impl SealedAgentStore {
         &self,
         bytes: Vec<u8>,
         authorization_key: SealedPackageAuthorizationKey,
+        workspace: &Path,
     ) -> Result<SealedAgentCatalogEntry, SealedAgentInstallError> {
         let receipt = SealAgentPackageReceipt::from_package_bytes(bytes, authorization_key);
-        self.install_package_receipt_locked(receipt, None)
+        self.install_package_receipt_locked(receipt, None, workspace)
     }
 
     fn install_cloud_package_bytes_locked(
@@ -701,15 +812,17 @@ impl SealedAgentStore {
         bytes: Vec<u8>,
         authorization_key: SealedPackageAuthorizationKey,
         metadata: SealedCloudPackageMetadata,
+        workspace: &Path,
     ) -> Result<SealedAgentCatalogEntry, SealedAgentInstallError> {
         let receipt = SealAgentPackageReceipt::from_package_bytes(bytes, authorization_key);
-        self.install_package_receipt_locked(receipt, Some(metadata))
+        self.install_package_receipt_locked(receipt, Some(metadata), workspace)
     }
 
     fn install_package_receipt_locked(
         &self,
         receipt: SealAgentPackageReceipt,
         metadata: Option<SealedCloudPackageMetadata>,
+        workspace: &Path,
     ) -> Result<SealedAgentCatalogEntry, SealedAgentInstallError> {
         let package = self.open_install_package_bytes_locked(
             receipt.package_bytes(),
@@ -721,9 +834,8 @@ impl SealedAgentStore {
             }
             None => {}
         }
-        let workspace = self.root.workspace_directory(package.agent_key())?;
-        let workspace_preexisted = existing_workspace_directory(&workspace)?.is_some();
-        let workspace = ensure_workspace_directory(&workspace)?;
+        let workspace_preexisted = existing_workspace_directory(workspace)?.is_some();
+        let workspace = ensure_workspace_directory(workspace)?;
         let mut files = AgentInstallFiles::default();
         let result = (|| {
             for name in AGENT_BOOTSTRAP_FILES {
@@ -744,7 +856,9 @@ impl SealedAgentStore {
                 Ok(_) => {}
                 Err(SealedResourceError::AlreadyExists) => {
                     let expected_path = workspace.join(receipt.package_file_name());
-                    match self.find_sealed_package_locked(package.agent_key())? {
+                    match self
+                        .find_sealed_package_in_workspace_locked(package.agent_key(), &workspace)?
+                    {
                         Some((path, _)) if path == expected_path => {}
                         _ => return Err(SealedResourceError::AlreadyExists),
                     }
@@ -833,22 +947,12 @@ impl SealedAgentStore {
     fn open_sealed_agent_locked(
         &self,
         agent_key: &AgentKey,
+        workspace: &Path,
     ) -> Result<SealedAgentPackage, SealedResourceError> {
         let (path, _) = self
-            .find_sealed_package_locked(agent_key)?
+            .find_sealed_package_in_workspace_locked(agent_key, workspace)?
             .ok_or(SealedResourceError::NotFound)?;
         self.open_package_path_locked(&path)
-    }
-
-    fn find_sealed_package_locked(
-        &self,
-        agent_key: &AgentKey,
-    ) -> Result<Option<(PathBuf, String)>, SealedResourceError> {
-        let workspace = self.root.workspace_directory(agent_key)?;
-        let Some(workspace) = existing_workspace_directory(&workspace)? else {
-            return Ok(None);
-        };
-        self.find_sealed_package_in_workspace_locked(agent_key, &workspace)
     }
 
     fn find_sealed_package_in_workspace_locked(
@@ -1313,6 +1417,21 @@ fn remove_install_write(write: &AgentInstallWrite) -> Result<(), SealedResourceE
         return Err(SealedResourceError::Unknown);
     }
     fs::remove_file(&write.path).map_err(|_| SealedResourceError::Unknown)
+}
+
+fn workspace_operation_path(path: &Path) -> Result<PathBuf, SealedResourceError> {
+    if let Some(workspace) = existing_workspace_directory(path)? {
+        return Ok(workspace);
+    }
+    // Prepare/install may target an absent workspace; canonicalize its nearest existing parent.
+    let parent = path.parent().ok_or(SealedResourceError::Rejected)?;
+    let name = path.file_name().ok_or(SealedResourceError::Rejected)?;
+    let parent = match fs::canonicalize(parent) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => workspace_operation_path(parent)?,
+        Err(_) => return Err(SealedResourceError::Unknown),
+    };
+    Ok(parent.join(name))
 }
 
 fn existing_workspace_directory(path: &Path) -> Result<Option<PathBuf>, SealedResourceError> {

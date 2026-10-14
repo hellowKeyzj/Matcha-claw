@@ -184,12 +184,36 @@ impl ClawHubSearchResult {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedSkillExport {
+    entry: SealedSkillCatalogEntry,
+    cleanup_failed: bool,
+}
+
+impl SealedSkillExport {
+    pub fn new(entry: SealedSkillCatalogEntry, cleanup_failed: bool) -> Self {
+        Self {
+            entry,
+            cleanup_failed,
+        }
+    }
+
+    pub fn entry(&self) -> &SealedSkillCatalogEntry {
+        &self.entry
+    }
+
+    pub fn cleanup_failed(&self) -> bool {
+        self.cleanup_failed
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct SealedSkillPackageExport {
     skill_key: String,
     file_name: String,
     package_sha256: String,
     package_bytes: Vec<u8>,
+    cleanup_failed: bool,
 }
 
 impl SealedSkillPackageExport {
@@ -198,12 +222,14 @@ impl SealedSkillPackageExport {
         file_name: String,
         package_sha256: String,
         package_bytes: Vec<u8>,
+        cleanup_failed: bool,
     ) -> Self {
         Self {
             skill_key,
             file_name,
             package_sha256,
             package_bytes,
+            cleanup_failed,
         }
     }
 
@@ -215,6 +241,9 @@ impl SealedSkillPackageExport {
     }
     pub fn package_sha256(&self) -> &str {
         &self.package_sha256
+    }
+    pub fn cleanup_failed(&self) -> bool {
+        self.cleanup_failed
     }
     pub fn into_package_bytes(self) -> Vec<u8> {
         self.package_bytes
@@ -237,11 +266,13 @@ pub trait SealedSkillStorePort: Send + Sync {
     fn export_sealed_skill_package(
         &self,
         skill_key: String,
-    ) -> Result<SealedSkillCatalogEntry, SealedSkillError>;
+        directory: PathBuf,
+    ) -> Result<SealedSkillExport, SealedSkillError>;
 
     fn export_cloud_sealed_skill_package(
         &self,
         skill_key: String,
+        directory: PathBuf,
         cloud_public_key: String,
         cloud_key_id: String,
     ) -> Result<SealedSkillPackageExport, SealedSkillError>;
@@ -266,15 +297,52 @@ pub trait SealedSkillStorePort: Send + Sync {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SealedSkillCatalog {
     entries: Vec<SealedSkillCatalogEntry>,
+    issues: Vec<SealedSkillCatalogIssue>,
 }
 
 impl SealedSkillCatalog {
-    pub fn new(entries: Vec<SealedSkillCatalogEntry>) -> Self {
-        Self { entries }
+    pub fn new(
+        entries: Vec<SealedSkillCatalogEntry>,
+        issues: Vec<SealedSkillCatalogIssue>,
+    ) -> Self {
+        Self { entries, issues }
     }
 
     pub fn entries(&self) -> &[SealedSkillCatalogEntry] {
         &self.entries
+    }
+
+    pub fn issues(&self) -> &[SealedSkillCatalogIssue] {
+        &self.issues
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedSkillCatalogIssue {
+    file_name: String,
+    skill_key: Option<String>,
+    reason: &'static str,
+}
+
+impl SealedSkillCatalogIssue {
+    pub fn new(file_name: String, skill_key: Option<String>, reason: &'static str) -> Self {
+        Self {
+            file_name,
+            skill_key,
+            reason,
+        }
+    }
+
+    pub fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
+    pub fn skill_key(&self) -> Option<&str> {
+        self.skill_key.as_deref()
+    }
+
+    pub fn reason(&self) -> &'static str {
+        self.reason
     }
 }
 

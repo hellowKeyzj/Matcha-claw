@@ -1,6 +1,10 @@
-use std::io::{self, BufRead, Write};
+use std::{future::Future, io, pin::Pin, sync::Arc};
 
 use serde_json::{Map, Value, json};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    task::{AbortHandle, Id, JoinError, JoinSet},
+};
 
 use super::{
     DecodeError, Framing, RequestId, decode_request, detect_framing, encode_error, encode_result,
@@ -13,13 +17,19 @@ const PARSE_ERROR: &str = "Parse error";
 const METHOD_NOT_FOUND: &str = "Method not found";
 const INVALID_PARAMS: &str = "Invalid params";
 const INTERNAL_ERROR: &str = "Internal error";
+const MAX_IN_FLIGHT: usize = 32;
 
-pub trait ToolProvider {
+pub trait ToolProvider: Send + Sync {
     fn tools(&self) -> Vec<Value>;
-    fn call(&mut self, name: &str, arguments: &Map<String, Value>) -> Option<ToolCallOutcome>;
+    fn call<'a>(
+        &'a self,
+        name: &'a str,
+        arguments: &'a Map<String, Value>,
+    ) -> Option<ToolCallFuture<'a>>;
 }
 
 pub type ToolCallOutcome = Result<Value, ToolCallError>;
+pub type ToolCallFuture<'a> = Pin<Box<dyn Future<Output = ToolCallOutcome> + Send + 'a>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolCallError {
@@ -44,67 +54,101 @@ impl ToolCatalog {
             .collect()
     }
 
-    fn call(&mut self, name: &str, arguments: &Map<String, Value>) -> ToolCallOutcome {
-        for provider in &mut self.providers {
+    async fn call(&self, name: &str, arguments: &Map<String, Value>) -> ToolCallOutcome {
+        for provider in &self.providers {
             if let Some(result) = provider.call(name, arguments) {
-                return result;
+                return result.await;
             }
         }
         Err(ToolCallError::InvalidParams)
     }
 }
 
-pub fn run_stdio<R: BufRead, W: Write>(
+pub async fn run_stdio<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     catalog: ToolCatalog,
     input: R,
-    output: W,
+    mut output: W,
 ) -> io::Result<()> {
-    Server { catalog }.run(input, output)
+    let mut calls = JoinSet::new();
+    let result = Server {
+        catalog: Arc::new(catalog),
+    }
+    .run(input, &mut output, &mut calls)
+    .await;
+    // Transport failure ends MCP waits, not effects already admitted by the Host owner.
+    calls.abort_all();
+    while calls.join_next().await.is_some() {}
+    result
 }
 
 struct Server {
-    catalog: ToolCatalog,
+    catalog: Arc<ToolCatalog>,
+}
+
+struct PendingCall {
+    request_id: Option<RequestId>,
+    framing: Framing,
+    task: AbortHandle,
 }
 
 impl Server {
-    fn run<R: BufRead, W: Write>(&mut self, mut input: R, mut output: W) -> io::Result<()> {
+    async fn run<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+        &self,
+        mut input: R,
+        output: &mut W,
+        calls: &mut JoinSet<Option<Vec<u8>>>,
+    ) -> io::Result<()> {
         let mut buffer = Vec::new();
+        let mut pending = Vec::new();
+        let mut eof = false;
         loop {
-            let mut chunk = [0_u8; 8192];
-            let read = input.read(&mut chunk)?;
-            if read == 0 {
-                self.drain(&mut buffer, &mut output, true)?;
+            while let Some(completed) = calls.try_join_next_with_id() {
+                complete_call(completed, &mut pending, output).await?;
+            }
+            if let Some((framing, payload, consumed)) = next_message(&buffer, eof) {
+                buffer.drain(..consumed);
+                let response = match payload {
+                    Ok(payload) => {
+                        self.handle_payload(payload, framing.clone(), calls, &mut pending)
+                    }
+                    Err(error) => encode_error(
+                        Some(&RequestId::Null),
+                        error.json_rpc_error_code(),
+                        decode_message(error),
+                    ),
+                };
+                if let Some(response) = response {
+                    write_response(output, framing, &response).await?;
+                }
+                continue;
+            }
+            if eof {
+                while let Some(completed) = calls.join_next_with_id().await {
+                    complete_call(completed, &mut pending, output).await?;
+                }
                 return Ok(());
             }
-            buffer.extend_from_slice(&chunk[..read]);
-            self.drain(&mut buffer, &mut output, false)?;
-        }
-    }
-
-    fn drain<W: Write>(
-        &mut self,
-        buffer: &mut Vec<u8>,
-        output: &mut W,
-        eof: bool,
-    ) -> io::Result<()> {
-        while let Some((framing, payload, consumed)) = next_message(buffer, eof) {
-            buffer.drain(..consumed);
-            let response = match payload {
-                Ok(payload) => self.handle_payload(payload),
-                Err(error) => encode_error(
-                    Some(&RequestId::Null),
-                    error.json_rpc_error_code(),
-                    decode_message(error),
-                ),
-            };
-            if let Some(response) = response {
-                write_response(output, framing, &response)?;
+            let mut chunk = [0_u8; 8192];
+            tokio::select! {
+                read = input.read(&mut chunk) => {
+                    let read = read?;
+                    eof = read == 0;
+                    buffer.extend_from_slice(&chunk[..read]);
+                }
+                Some(completed) = calls.join_next_with_id(), if !calls.is_empty() => {
+                    complete_call(completed, &mut pending, output).await?;
+                }
             }
         }
-        Ok(())
     }
 
-    fn handle_payload(&mut self, payload: Vec<u8>) -> Option<Vec<u8>> {
+    fn handle_payload(
+        &self,
+        payload: Vec<u8>,
+        framing: Framing,
+        calls: &mut JoinSet<Option<Vec<u8>>>,
+        pending: &mut Vec<PendingCall>,
+    ) -> Option<Vec<u8>> {
         let request = match decode_request(&payload) {
             Ok(request) => request,
             Err(error) => {
@@ -116,11 +160,47 @@ impl Server {
                 );
             }
         };
+        if request.method() == "notifications/cancelled" && request.id().is_none() {
+            if let Some(request_id) = cancellation_id(request.params()) {
+                if let Some(index) = pending
+                    .iter()
+                    .position(|call| call.request_id.as_ref() == Some(&request_id))
+                {
+                    pending.swap_remove(index).task.abort();
+                }
+            }
+            return None;
+        }
+        if request.id().is_some_and(|id| {
+            pending
+                .iter()
+                .any(|call| call.request_id.as_ref() == Some(id))
+        }) {
+            return encode_error(request.id(), -32600, INVALID_REQUEST);
+        }
         let result = match request.method() {
             "initialize" => Ok(initialize_result()),
             "notifications/initialized" => Ok(Value::Null),
             "tools/list" => Ok(json!({ "tools": self.catalog.tools() })),
-            "tools/call" => self.call_tool(request.params()),
+            "tools/call" => {
+                if calls.len() == MAX_IN_FLIGHT {
+                    return encode_error(request.id(), -32000, "Server busy");
+                }
+                let catalog = Arc::clone(&self.catalog);
+                let request_id = request.id().cloned();
+                let task = calls.spawn(async move {
+                    match call_tool(&catalog, request.params()).await {
+                        Ok(value) => encode_result(request.id(), value),
+                        Err((code, message)) => encode_error(request.id(), code, message),
+                    }
+                });
+                pending.push(PendingCall {
+                    request_id,
+                    framing,
+                    task,
+                });
+                return None;
+            }
             _ => Err((-32601, METHOD_NOT_FOUND)),
         };
         match result {
@@ -128,26 +208,68 @@ impl Server {
             Err((code, message)) => encode_error(request.id(), code, message),
         }
     }
+}
 
-    fn call_tool(&mut self, params: Option<&Value>) -> Result<Value, (i32, &'static str)> {
-        let params = strict_object(params).map_err(|_| invalid_params())?;
-        require_exact_keys(params, &["name", "arguments"]).map_err(|_| invalid_params())?;
-        let name = required_string(params, "name").map_err(|_| invalid_params())?;
-        let arguments = strict_object(params.get("arguments")).map_err(|_| invalid_params())?;
-        let (result, is_error) = match self.catalog.call(name, arguments) {
-            Ok(result) => (result, false),
-            Err(ToolCallError::Execution(result)) => (result, true),
-            Err(ToolCallError::InvalidParams) => return Err(invalid_params()),
-            Err(ToolCallError::Internal) => return Err(internal_error()),
-        };
-        let mut response = json!({
-            "content": [{ "type": "text", "text": serde_json::to_string(&result).expect("closed MCP result is serializable") }]
-        });
-        if is_error {
-            response["isError"] = Value::Bool(true);
-        }
-        Ok(response)
+async fn complete_call<W: AsyncWrite + Unpin>(
+    completed: Result<(Id, Option<Vec<u8>>), JoinError>,
+    pending: &mut Vec<PendingCall>,
+    output: &mut W,
+) -> io::Result<()> {
+    let task_id = match &completed {
+        Ok((id, _)) => *id,
+        Err(error) => error.id(),
+    };
+    let Some(index) = pending.iter().position(|call| call.task.id() == task_id) else {
+        return Ok(());
+    };
+    let call = pending.swap_remove(index);
+    let response = match completed {
+        Ok((_, response)) => response,
+        Err(error) if error.is_cancelled() => None,
+        Err(_) => encode_error(call.request_id.as_ref(), -32603, INTERNAL_ERROR),
+    };
+    if let Some(response) = response {
+        write_response(output, call.framing, &response).await?;
     }
+    Ok(())
+}
+
+fn cancellation_id(params: Option<&Value>) -> Option<RequestId> {
+    let params = params?.as_object()?;
+    if params
+        .get("reason")
+        .is_some_and(|reason| !reason.is_string())
+    {
+        return None;
+    }
+    match params.get("requestId")? {
+        Value::String(value) => Some(RequestId::String(value.clone())),
+        Value::Number(value) => Some(RequestId::Number(value.clone())),
+        _ => None,
+    }
+}
+
+async fn call_tool(
+    catalog: &ToolCatalog,
+    params: Option<&Value>,
+) -> Result<Value, (i32, &'static str)> {
+    let params = strict_object(params).map_err(|_| invalid_params())?;
+    require_exact_keys(params, &["name", "arguments"]).map_err(|_| invalid_params())?;
+    let name = required_string(params, "name").map_err(|_| invalid_params())?;
+    let arguments = strict_object(params.get("arguments")).map_err(|_| invalid_params())?;
+    let (result, is_error) = match catalog.call(name, arguments).await {
+        Ok(result) => (result, false),
+        Err(ToolCallError::Execution(result)) => (result, true),
+        Err(ToolCallError::InvalidParams) => return Err(invalid_params()),
+        Err(ToolCallError::Internal) => return Err(internal_error()),
+    };
+    let mut response = json!({
+        "content": [{ "type": "text", "text": serde_json::to_string(&result).expect("closed MCP result is serializable") }]
+    });
+    if is_error {
+        response["isError"] = Value::Bool(true);
+    }
+    Ok(response)
 }
 
 fn next_message(
@@ -206,18 +328,23 @@ fn extract_request_id(payload: &[u8]) -> Option<RequestId> {
     }
 }
 
-fn write_response<W: Write>(output: &mut W, framing: Framing, response: &[u8]) -> io::Result<()> {
+async fn write_response<W: AsyncWrite + Unpin>(
+    output: &mut W,
+    framing: Framing,
+    response: &[u8],
+) -> io::Result<()> {
     match framing {
         Framing::JsonLines => {
-            output.write_all(response)?;
-            output.write_all(b"\n")?;
+            output.write_all(response).await?;
+            output.write_all(b"\n").await?;
         }
         Framing::ContentLength { .. } => {
-            write!(output, "Content-Length: {}\r\n\r\n", response.len())?;
-            output.write_all(response)?;
+            let header = format!("Content-Length: {}\r\n\r\n", response.len());
+            output.write_all(header.as_bytes()).await?;
+            output.write_all(response).await?;
         }
     }
-    output.flush()
+    output.flush().await
 }
 
 fn initialize_result() -> Value {

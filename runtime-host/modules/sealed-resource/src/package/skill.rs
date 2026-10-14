@@ -130,20 +130,21 @@ impl SealedSkillPackage {
     pub(crate) fn seal(
         skill_key: SkillKey,
         target: SealedSkillTarget,
+        descriptor: SealedSkillDescriptor,
         files: Vec<SealedSkillFileRequest>,
     ) -> Result<SealSkillPackageReceipt, SealedResourceError> {
-        Self::seal_with_cloud_key(skill_key, target, files, None, None)
+        Self::seal_with_cloud_key(skill_key, target, descriptor, files, None, None)
     }
 
     pub(crate) fn seal_with_cloud_key(
         skill_key: SkillKey,
         target: SealedSkillTarget,
+        descriptor: SealedSkillDescriptor,
         files: Vec<SealedSkillFileRequest>,
         cloud_public_key: Option<&str>,
         cloud_key_id: Option<&str>,
     ) -> Result<SealSkillPackageReceipt, SealedResourceError> {
         let files = normalize_files(files)?;
-        let descriptor = descriptor_from_files(&files)?;
         let manifest = PackageManifest::from_files(&skill_key, target, &descriptor, &files)
             .map_err(|error| {
                 trace_skill_package_error("manifest", files.len(), total_file_bytes(&files), error);
@@ -479,10 +480,10 @@ fn normalize_files(
         });
     }
     normalized.sort_by(|left, right| left.path.cmp(&right.path));
-    if !normalized
+    let Some(manifest) = normalized
         .iter()
-        .any(|file| file.path == PackageRelativePath::skill_manifest())
-    {
+        .find(|file| file.path == PackageRelativePath::skill_manifest())
+    else {
         let error = rejected("missing-skill-md");
         trace_skill_package_error(
             "normalize-missing-skill-md",
@@ -490,6 +491,11 @@ fn normalize_files(
             total_bytes,
             error,
         );
+        return Err(error);
+    };
+    if std::str::from_utf8(&manifest.content).is_err() {
+        let error = rejected("invalid-skill-md");
+        trace_skill_package_error("normalize-non-utf8", normalized.len(), total_bytes, error);
         return Err(error);
     }
     Ok(normalized)
@@ -511,48 +517,6 @@ fn open_wire(
         return Err(SealedResourceError::Rejected);
     }
     Ok((wire, skill_key))
-}
-
-fn descriptor_from_files(
-    files: &[SealedSkillFile],
-) -> Result<SealedSkillDescriptor, SealedResourceError> {
-    let manifest_path = PackageRelativePath::skill_manifest();
-    let manifest = match files.iter().find(|file| file.path == manifest_path) {
-        Some(manifest) => manifest,
-        None => {
-            let error = rejected("missing-skill-md");
-            trace_skill_package_error(
-                "descriptor-missing-skill-md",
-                files.len(),
-                total_file_bytes(files),
-                error,
-            );
-            return Err(error);
-        }
-    };
-    let content = match std::str::from_utf8(&manifest.content) {
-        Ok(content) => content,
-        Err(_) => {
-            let error = rejected("invalid-skill-md");
-            trace_skill_package_error(
-                "descriptor-non-utf8",
-                files.len(),
-                total_file_bytes(files),
-                error,
-            );
-            return Err(error);
-        }
-    };
-    SealedSkillDescriptor::parse_skill_manifest(content).map_err(|_| {
-        let error = rejected("invalid-skill-md");
-        trace_skill_package_error(
-            "descriptor-frontmatter",
-            files.len(),
-            total_file_bytes(files),
-            error,
-        );
-        error
-    })
 }
 
 fn payload_entries(
@@ -673,16 +637,13 @@ mod tests {
     #[test]
     fn sealed_skill_package_encrypts_payload_and_requires_authorization() {
         let secret = "hidden skill payload";
+        let manifest =
+            format!("---\nname: Encrypted Skill\ndescription: public descriptor\n---\n{secret}\n");
         let receipt = SealedSkillPackage::seal(
             SkillKey::parse("sealed-skill").unwrap(),
             SealedSkillTarget::OpenClaw,
-            vec![SealedSkillFileRequest::try_new(
-                "SKILL.md",
-                format!(
-                    "---\nname: Encrypted Skill\ndescription: public descriptor\n---\n{secret}\n"
-                ),
-            )
-            .unwrap()],
+            SealedSkillDescriptor::parse_skill_manifest(&manifest, "sealed-skill").unwrap(),
+            vec![SealedSkillFileRequest::try_new("SKILL.md", manifest).unwrap()],
         )
         .unwrap();
 

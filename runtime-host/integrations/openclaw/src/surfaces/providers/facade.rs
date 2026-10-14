@@ -2,7 +2,6 @@ use platform::state_dir::CanonicalStateDir;
 use std::collections::BTreeSet;
 
 use ::provider as provider_module;
-use tokio::sync::Mutex;
 
 use crate::{
     bootstrap::{ConfigWriteEffect, PrivateProjectionEffect, RestartPreparation},
@@ -20,7 +19,7 @@ pub use crate::native_config::provider_models::{
 
 pub struct NativeProviderConfigurationContext<'a> {
     pub runtime_running: bool,
-    pub gateway: &'a Mutex<OpenClawGateway>,
+    pub gateway: &'a OpenClawGateway,
     pub state_dir: CanonicalStateDir,
     pub plugins: PluginProjection,
 }
@@ -53,15 +52,13 @@ impl<'a> From<provider_module::ProviderNativeConfigurationCommand<'a>>
 
 pub async fn discover_provider_models(
     runtime_running: bool,
-    gateway: &Mutex<OpenClawGateway>,
+    gateway: &OpenClawGateway,
     identity: &provider_module::ProviderRuntimeIdentity,
 ) -> provider_module::ProviderModelDiscoveryPortOutcome {
     if !runtime_running {
         return provider_module::ProviderModelDiscoveryPortOutcome::Unavailable;
     }
     match gateway
-        .lock()
-        .await
         .discover_provider_models(identity.provider_key())
         .await
     {
@@ -130,8 +127,6 @@ pub async fn reconcile_native_configuration_evidence(
         }
         return context
             .gateway
-            .lock()
-            .await
             .reconcile_provider_native_configuration(
                 command.accounts,
                 command.models,

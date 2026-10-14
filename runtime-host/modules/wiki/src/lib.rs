@@ -166,7 +166,8 @@ pub fn spawn_owner(
                 workflow_handle.drain_call_workflows().await;
                 let watcher_failed = call::report_task_exit(source_watch_task.join().await);
                 let owner_failed = call::report_task_exit(owner_task.drain_and_join().await);
-                watcher_failed || owner_failed
+                let blocking_failed = shared.blocking.shutdown().await;
+                watcher_failed || owner_failed || blocking_failed
             }
             result = &mut source_watch_task => {
                 let watcher_failed = call::report_task_exit(result);
@@ -176,7 +177,8 @@ pub fn spawn_owner(
                 shared.dedup.shutdown().await;
                 workflow_handle.drain_call_workflows().await;
                 let owner_failed = call::report_task_exit(owner_task.drain_and_join().await);
-                watcher_failed || owner_failed
+                let blocking_failed = shared.blocking.shutdown().await;
+                watcher_failed || owner_failed || blocking_failed
             }
             result = &mut owner_task => {
                 let owner_failed = call::report_task_exit(result);
@@ -187,7 +189,8 @@ pub fn spawn_owner(
                 shared.dedup.shutdown().await;
                 workflow_handle.drain_call_workflows().await;
                 let watcher_failed = call::report_task_exit(source_watch_task.join().await);
-                watcher_failed || owner_failed
+                let blocking_failed = shared.blocking.shutdown().await;
+                watcher_failed || owner_failed || blocking_failed
             }
         };
         assert!(!failed, "Wiki managed owner shutdown failed");

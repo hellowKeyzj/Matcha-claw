@@ -246,6 +246,7 @@ function isCronSessionHistoryRequest(value: unknown): value is CronSessionHistor
   return isRecord(value)
     && hasExactKeys(value, ['sessionKey', 'limit'])
     && isNonEmptyString(value.sessionKey)
+    && typeof value.limit === 'number'
     && Number.isSafeInteger(value.limit)
     && value.limit >= 1
     && value.limit <= 200;

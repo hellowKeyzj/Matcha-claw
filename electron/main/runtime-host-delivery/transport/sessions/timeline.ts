@@ -1,26 +1,20 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
-import { decodeSessionView } from './session-contract';
+import { decodeSessionView, sameSessionIdentity, type SessionIdentity } from './session-contract';
+import { isBoundedId, isTimelineIdentity, isTimelineScope } from './timeline-contract';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 const UNAVAILABLE = { success: false, error: 'Session timeline is unavailable' } as const;
 
-type Endpoint = Readonly<{
-  kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw' | 'matcha-agent';
-  runtimeInstanceId: 'local';
-}>;
-
-type Identity = Readonly<{ endpoint: Endpoint; agentId: string; sessionKey: string }>;
 type Direction = 'latest' | 'older' | 'newer';
 
 type TimelineRequest = Readonly<{
   id: 'session.management';
   operationId: 'sessions.load' | 'sessions.window';
-  scope: Readonly<{ kind: 'session'; identity: Identity }>;
-  target: Readonly<{ kind: 'session'; identity: Identity }>;
+  scope: Readonly<{ kind: 'session'; identity: SessionIdentity }>;
+  target: Readonly<{ kind: 'session'; identity: SessionIdentity }>;
   input: Readonly<{
     sessionKey: string;
-    sessionIdentity: Identity;
+    sessionIdentity: SessionIdentity;
     endpointSessionId?: string;
     mode?: Direction;
     limit?: number;
@@ -104,24 +98,14 @@ export function createSessionTimelineTransport(
 function isRequest(value: unknown, operation: TimelineRequest['operationId']): value is TimelineRequest {
   if (!isRecord(value) || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     || value.id !== 'session.management' || value.operationId !== operation
-    || !isScope(value.scope) || !isTarget(value.target) || !isInput(value.input, operation)) return false;
-  return sameIdentity(value.scope.identity, value.target.identity)
-    && sameIdentity(value.scope.identity, value.input.sessionIdentity)
+    || !isTimelineScope(value.scope) || !isTimelineScope(value.target) || !isInput(value.input, operation)) return false;
+  return sameSessionIdentity(value.scope.identity, value.target.identity)
+    && sameSessionIdentity(value.scope.identity, value.input.sessionIdentity)
     && value.input.sessionKey === value.scope.identity.sessionKey;
 }
 
-function isScope(value: unknown): value is { kind: 'session'; identity: Identity } {
-  return isRecord(value) && hasExactKeys(value, ['kind', 'identity'])
-    && value.kind === 'session' && isIdentity(value.identity);
-}
-
-function isTarget(value: unknown): value is { kind: 'session'; identity: Identity } {
-  return isRecord(value) && hasExactKeys(value, ['kind', 'identity'])
-    && value.kind === 'session' && isIdentity(value.identity);
-}
-
 function isInput(value: unknown, operation: TimelineRequest['operationId']): value is TimelineRequest['input'] {
-  if (!isRecord(value) || !isIdentity(value.sessionIdentity) || typeof value.sessionKey !== 'string' || !value.sessionKey) return false;
+  if (!isRecord(value) || !isTimelineIdentity(value.sessionIdentity) || typeof value.sessionKey !== 'string' || !value.sessionKey) return false;
   const allowed = operation === 'sessions.load'
     ? ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'limit']
     : ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'mode', 'limit', 'offset', 'includeCanonical'];
@@ -137,33 +121,6 @@ function isInput(value: unknown, operation: TimelineRequest['operationId']): val
       ? value.offset === undefined
       : value.offset === undefined
         || isSafeNonNegativeInteger(value.offset));
-}
-
-function isIdentity(value: unknown): value is Identity {
-  return isRecord(value) && hasExactKeys(value, ['endpoint', 'agentId', 'sessionKey'])
-    && isEndpoint(value.endpoint)
-    && isBoundedId(value.agentId)
-    && isBoundedId(value.sessionKey);
-}
-
-function isEndpoint(value: unknown): value is Endpoint {
-  return isRecord(value) && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime' && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
-    && value.runtimeInstanceId === 'local';
-}
-
-function sameIdentity(left: Identity, right: Identity): boolean {
-  return left.agentId === right.agentId && left.sessionKey === right.sessionKey
-    && left.endpoint.runtimeAdapterId === right.endpoint.runtimeAdapterId
-    && left.endpoint.runtimeInstanceId === right.endpoint.runtimeInstanceId;
-}
-
-function isBoundedId(value: unknown): value is string {
-  return typeof value === 'string'
-    && value.length > 0
-    && Buffer.byteLength(value, 'utf8') <= 4096
-    && value.trim() === value
-    && !value.includes('\0');
 }
 
 function isUnavailable(value: unknown): boolean {

@@ -1,6 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from '../transport/sessions/trace';
-import { sendLoopbackJson } from '../transport/client';
+import { hasExactKeys, isNonEmptyBoundedText, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../transport/client';
 import { decodeCallReceipt } from '../../../../src/types/call-log/receipt';
 import { isCallId } from '../../../../src/types/call-log/decode';
 
@@ -260,7 +260,7 @@ function isResultRequest(value: unknown): value is ResultRequest {
     && value.endpoint.runtimeAdapterId !== 'openclaw') return false;
   const root = value.operationId === 'subagents.create' || value.operationId === 'subagents.package.install';
   return hasExactKeys(value, root ? ['callId', 'operationId', 'endpoint'] : ['callId', 'operationId', 'endpoint', 'agentId'])
-    && (root || isText(value.agentId, 4096));
+    && (root || isNonEmptyBoundedText(value.agentId, 4096));
 }
 
 function isResultResponse(value: unknown, request: ResultRequest): boolean {
@@ -288,7 +288,7 @@ function isResultResponse(value: unknown, request: ResultRequest): boolean {
     && body.error === 'Subagent workspace initialization failed' && isMutationAgent(body.agent)) return true;
   if (request.operationId === 'subagents.package.install' && hasExactKeys(body, ['success', 'error', 'agentId', 'compensation'])) {
     return body.success === false && body.error === 'Subagent package installation failed'
-      && isText(body.agentId, 4096) && isCompensation(body.compensation);
+      && isNonEmptyBoundedText(body.agentId, 4096) && isCompensation(body.compensation);
   }
   return isFailure(body) && (body.error === 'Subagent request was rejected'
     || body.error === 'Subagent mutation outcome is unknown'
@@ -321,8 +321,8 @@ function isDeleteResult(value: Record<string, unknown>): value is Record<string,
   if (!hasExactKeys(value, ['success', 'kind', 'agent', 'nativeOk', 'removedBindings', 'failedCount', 'purgeFailedCount', 'sealedPurge'])
     || typeof value.success !== 'boolean' || value.kind !== 'deleted' || !isMutationAgent(value.agent)
     || !isRecord(value.agent) || value.agent.name !== null || value.agent.model !== null
-    || typeof value.nativeOk !== 'boolean' || !isTimestamp(value.removedBindings)
-    || !isTimestamp(value.failedCount) || !isTimestamp(value.purgeFailedCount)
+    || typeof value.nativeOk !== 'boolean' || !isSafeNonNegativeInteger(value.removedBindings)
+    || !isSafeNonNegativeInteger(value.failedCount) || !isSafeNonNegativeInteger(value.purgeFailedCount)
     || (value.sealedPurge !== 'completed' && value.sealedPurge !== 'failed' && value.sealedPurge !== 'notAttempted')) return false;
   return value.success === (value.nativeOk && value.failedCount === 0 && value.purgeFailedCount === 0 && value.sealedPurge === 'completed');
 }
@@ -330,7 +330,7 @@ function isDeleteResult(value: Record<string, unknown>): value is Record<string,
 function isCompensation(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['outcome', 'failedCount', 'purgeFailedCount'])
     && typeof value.outcome === 'string' && ['deleted', 'rejected', 'outcomeUnknown', 'unsupported', 'unavailable'].includes(value.outcome)
-    && isTimestamp(value.failedCount) && isTimestamp(value.purgeFailedCount)
+    && isSafeNonNegativeInteger(value.failedCount) && isSafeNonNegativeInteger(value.purgeFailedCount)
     && (value.outcome !== 'deleted' || (value.failedCount === 0 && value.purgeFailedCount === 0));
 }
 
@@ -339,17 +339,17 @@ function isScope(value: unknown): value is Readonly<{ kind: 'agent'; endpoint: E
     && hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
     && value.kind === 'agent'
     && isEndpoint(value.endpoint)
-    && isText(value.agentId, 4096);
+    && isNonEmptyBoundedText(value.agentId, 4096);
 }
 
 function isTarget(value: unknown, operation: Operation): value is AgentTarget | SubagentTarget {
   if (!isRecord(value)) return false;
   if (operation === 'subagents.list' || operation === 'subagents.displayConfig.get') {
-    return hasExactKeys(value, ['kind', 'agentId']) && value.kind === 'agent' && isText(value.agentId, 4096);
+    return hasExactKeys(value, ['kind', 'agentId']) && value.kind === 'agent' && isNonEmptyBoundedText(value.agentId, 4096);
   }
   if (value.kind !== 'subagent') return false;
   if (operation === 'subagents.create' || operation === 'subagents.package.install') return hasExactKeys(value, ['kind']);
-  return hasExactKeys(value, ['kind', 'subagentId']) && isText(value.subagentId, 4096);
+  return hasExactKeys(value, ['kind', 'subagentId']) && isNonEmptyBoundedText(value.subagentId, 4096);
 }
 
 function isInput(
@@ -362,22 +362,22 @@ function isInput(
   if (operation === 'subagentSkills.get' || operation === 'subagentTools.get') {
     return hasExactKeys(value, ['agentId'])
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
+      && isNonEmptyBoundedText(value.agentId, 4096)
       && endpoint.runtimeAdapterId === 'openclaw';
   }
   if (operation === 'subagentSkills.set') {
     return hasExactKeys(value, ['agentId', 'revision', 'selection'])
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
-      && isText(value.revision, 4096)
+      && isNonEmptyBoundedText(value.agentId, 4096)
+      && isNonEmptyBoundedText(value.revision, 4096)
       && isSkillSelection(value.selection)
       && endpoint.runtimeAdapterId === 'openclaw';
   }
   if (operation === 'subagentTools.set') {
     return hasExactKeys(value, ['agentId', 'revision', 'selection'])
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
-      && isText(value.revision, 4096)
+      && isNonEmptyBoundedText(value.agentId, 4096)
+      && isNonEmptyBoundedText(value.revision, 4096)
       && isToolSelection(value.selection)
       && endpoint.runtimeAdapterId === 'openclaw';
   }
@@ -390,33 +390,33 @@ function isInput(
   if (operation === 'subagents.create') {
     return hasAllowedKeys(value, ['kind', 'endpoint', 'name', 'workspace', 'model', 'workspaceInitialization'], ['kind', 'endpoint', 'name', 'workspace', 'model'])
       && value.kind === 'create'
-      && isText(value.name, 4096)
-      && isText(value.workspace, 4096)
-      && (value.model === null || isText(value.model, 4096))
+      && isNonEmptyBoundedText(value.name, 4096)
+      && isNonEmptyBoundedText(value.workspace, 4096)
+      && (value.model === null || isNonEmptyBoundedText(value.model, 4096))
       && (!Object.hasOwn(value, 'workspaceInitialization') || isWorkspaceInitialization(value.workspaceInitialization));
   }
   if (operation === 'subagents.update') {
     return hasAllowedKeys(value, ['kind', 'endpoint', 'agentId', 'name', 'workspace', 'model'], ['kind', 'endpoint', 'agentId'])
       && value.kind === 'update'
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
+      && isNonEmptyBoundedText(value.agentId, 4096)
       && (Object.hasOwn(value, 'name') || Object.hasOwn(value, 'workspace') || Object.hasOwn(value, 'model'))
-      && (!Object.hasOwn(value, 'name') || isText(value.name, 4096))
-      && (!Object.hasOwn(value, 'workspace') || isText(value.workspace, 4096))
-      && (!Object.hasOwn(value, 'model') || value.model === null || isText(value.model, 4096));
+      && (!Object.hasOwn(value, 'name') || isNonEmptyBoundedText(value.name, 4096))
+      && (!Object.hasOwn(value, 'workspace') || isNonEmptyBoundedText(value.workspace, 4096))
+      && (!Object.hasOwn(value, 'model') || value.model === null || isNonEmptyBoundedText(value.model, 4096));
   }
   if (operation === 'subagents.delete') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'deleteFiles'])
       && value.kind === 'delete'
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
+      && isNonEmptyBoundedText(value.agentId, 4096)
       && typeof value.deleteFiles === 'boolean';
   }
   if (operation === 'subagents.files.list') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
       && value.kind === 'filesList'
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096);
+      && isNonEmptyBoundedText(value.agentId, 4096);
   }
   if (operation === 'subagents.displayConfig.get') {
     return hasExactKeys(value, ['kind', 'endpoint'])
@@ -428,15 +428,15 @@ function isInput(
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'description'])
       && value.kind === 'setDescription'
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
-      && (value.description === null || isText(value.description, 4096))
+      && isNonEmptyBoundedText(value.agentId, 4096)
+      && (value.description === null || isNonEmptyBoundedText(value.description, 4096))
       && endpoint.runtimeAdapterId === 'openclaw';
   }
   if (operation === 'subagents.model.set') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'model'])
       && value.kind === 'setConfigurationModel'
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
+      && isNonEmptyBoundedText(value.agentId, 4096)
       && (value.model === null || isModelInput(value.model))
       && endpoint.runtimeAdapterId === 'openclaw';
   }
@@ -444,32 +444,32 @@ function isInput(
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'skills'])
       && value.kind === 'setSkills'
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
+      && isNonEmptyBoundedText(value.agentId, 4096)
       && Array.isArray(value.skills)
-      && value.skills.every((skill) => isText(skill, 4096))
+      && value.skills.every((skill) => isNonEmptyBoundedText(skill, 4096))
       && endpoint.runtimeAdapterId === 'openclaw';
   }
   if (operation === 'subagents.package.export') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
       && value.kind === 'packageExport'
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
+      && isNonEmptyBoundedText(value.agentId, 4096)
       && endpoint.runtimeAdapterId === 'openclaw';
   }
   if (operation === 'subagents.package.exportCloud') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'cloudPublicKey', 'cloudKeyId'])
       && value.kind === 'packageExportCloud'
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
-      && isText(value.cloudPublicKey, 8192)
-      && isText(value.cloudKeyId, 512)
+      && isNonEmptyBoundedText(value.agentId, 4096)
+      && isNonEmptyBoundedText(value.cloudPublicKey, 8192)
+      && isNonEmptyBoundedText(value.cloudKeyId, 512)
       && endpoint.runtimeAdapterId === 'openclaw';
   }
   if (operation === 'subagents.package.install') {
     return hasAllowedKeys(value, ['kind', 'endpoint', 'packagePath', 'cloudMetadata'], ['kind', 'endpoint', 'packagePath'])
       && value.kind === 'packageInstall'
       && target.kind === 'subagent' && target.subagentId === undefined
-      && isText(value.packagePath, 4096)
+      && isNonEmptyBoundedText(value.packagePath, 4096)
       && (value.cloudMetadata === undefined || isCloudPackageInstallMetadata(value.cloudMetadata))
       && endpoint.runtimeAdapterId === 'openclaw';
   }
@@ -477,13 +477,13 @@ function isInput(
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'name'])
       && value.kind === 'filesGet'
       && targetMatches(value.agentId)
-      && isText(value.agentId, 4096)
+      && isNonEmptyBoundedText(value.agentId, 4096)
       && isRootedFileName(value.name);
   }
   return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'name', 'content'])
     && value.kind === 'filesSet'
     && targetMatches(value.agentId)
-    && isText(value.agentId, 4096)
+    && isNonEmptyBoundedText(value.agentId, 4096)
     && isRootedFileName(value.name)
     && typeof value.content === 'string'
     && Buffer.byteLength(value.content, 'utf8') <= 1024 * 1024;
@@ -519,7 +519,7 @@ function isSuccess(value: unknown, operation: Operation): boolean {
   if (operation === 'subagentTools.get') return isConfigurationView(value, false);
   if (!isRecord(value) || value.success !== true) return false;
   if (operation === 'subagents.list') return hasExactKeys(value, ['success', 'defaultId', 'selectionRequired', 'agents'])
-    && isText(value.defaultId, 4096)
+    && isNonEmptyBoundedText(value.defaultId, 4096)
     && typeof value.selectionRequired === 'boolean'
     && Array.isArray(value.agents)
     && value.agents.every(isAgent);
@@ -538,10 +538,10 @@ function isSuccess(value: unknown, operation: Operation): boolean {
 function isAgent(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['id', 'name', 'workspace', 'model', 'kind', 'sealed'])
-    && isText(value.id, 4096)
-    && (value.name === null || isText(value.name, 4096))
-    && (value.workspace === null || isText(value.workspace, 4096))
-    && (value.model === null || isText(value.model, 4096))
+    && isNonEmptyBoundedText(value.id, 4096)
+    && (value.name === null || isNonEmptyBoundedText(value.name, 4096))
+    && (value.workspace === null || isNonEmptyBoundedText(value.workspace, 4096))
+    && (value.model === null || isNonEmptyBoundedText(value.model, 4096))
     && (value.kind === 'agent' || value.kind === 'system')
     && typeof value.sealed === 'boolean';
 }
@@ -549,9 +549,9 @@ function isAgent(value: unknown): boolean {
 function isMutationAgent(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['id', 'name', 'model'])
-    && isText(value.id, 4096)
-    && (value.name === null || isText(value.name, 4096))
-    && (value.model === null || isText(value.model, 4096));
+    && isNonEmptyBoundedText(value.id, 4096)
+    && (value.name === null || isNonEmptyBoundedText(value.name, 4096))
+    && (value.model === null || isNonEmptyBoundedText(value.model, 4096));
 }
 
 function isFile(value: unknown): boolean {
@@ -559,18 +559,18 @@ function isFile(value: unknown): boolean {
     && hasExactKeys(value, ['name', 'missing', 'size', 'updatedAtMs', 'content'])
     && isRootedFileName(value.name)
     && typeof value.missing === 'boolean'
-    && (value.size === null || isTimestamp(value.size))
-    && (value.updatedAtMs === null || isTimestamp(value.updatedAtMs))
+    && (value.size === null || isSafeNonNegativeInteger(value.size))
+    && (value.updatedAtMs === null || isSafeNonNegativeInteger(value.updatedAtMs))
     && (value.content === null || typeof value.content === 'string');
 }
 
 function isPackageExport(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['agentId', 'fileName', 'size', 'exportedAtMs'])
-    && isText(value.agentId, 4096)
-    && isText(value.fileName, 4096)
-    && isTimestamp(value.size)
-    && isTimestamp(value.exportedAtMs);
+    && isNonEmptyBoundedText(value.agentId, 4096)
+    && isNonEmptyBoundedText(value.fileName, 4096)
+    && isSafeNonNegativeInteger(value.size)
+    && isSafeNonNegativeInteger(value.exportedAtMs);
 }
 
 function isPackageArtifact(value: unknown, request: SubagentCloudArtifactRequest): boolean {
@@ -588,16 +588,16 @@ function isPackageArtifact(value: unknown, request: SubagentCloudArtifactRequest
 function isPackageInstall(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['agentId'])
-    && isText(value.agentId, 4096);
+    && isNonEmptyBoundedText(value.agentId, 4096);
 }
 
 function isCloudPackageInstallMetadata(value: unknown): boolean {
   return isRecord(value)
     && hasAllowedKeys(value, ['packageVersionId', 'packageType', 'packageSha256', 'fileName'], ['packageVersionId', 'packageType', 'packageSha256', 'fileName'])
-    && isText(value.packageVersionId, 512)
-    && isText(value.packageType, 128)
+    && isNonEmptyBoundedText(value.packageVersionId, 512)
+    && isNonEmptyBoundedText(value.packageType, 128)
     && isPackageSha256(value.packageSha256)
-    && isText(value.fileName, 512);
+    && isNonEmptyBoundedText(value.fileName, 512);
 }
 
 function isPackageSha256(value: unknown): boolean {
@@ -610,7 +610,7 @@ function isSkillSelection(value: unknown): boolean {
       || (hasExactKeys(value, ['selectionType', 'skillKeys'])
         && value.selectionType === 'setExplicitSkillAllowlist'
         && Array.isArray(value.skillKeys)
-        && value.skillKeys.every((key) => isText(key, 4096))));
+        && value.skillKeys.every((key) => isNonEmptyBoundedText(key, 4096))));
 }
 
 function isToolSelection(value: unknown): boolean {
@@ -618,9 +618,9 @@ function isToolSelection(value: unknown): boolean {
     && ((hasExactKeys(value, ['selectionType']) && value.selectionType === 'inheritDefaultTools')
       || (hasExactKeys(value, ['selectionType', 'profile', 'allow', 'deny'])
         && value.selectionType === 'setAgentToolPolicy'
-        && isText(value.profile, 4096)
-        && Array.isArray(value.allow) && value.allow.every((key) => isText(key, 4096))
-        && Array.isArray(value.deny) && value.deny.every((key) => isText(key, 4096))));
+        && isNonEmptyBoundedText(value.profile, 4096)
+        && Array.isArray(value.allow) && value.allow.every((key) => isNonEmptyBoundedText(key, 4096))
+        && Array.isArray(value.deny) && value.deny.every((key) => isNonEmptyBoundedText(key, 4096))));
 }
 
 function isConfigurationMutationResult(value: Record<string, unknown>, skill: boolean): boolean {
@@ -636,21 +636,21 @@ function isConfigurationMutationResult(value: Record<string, unknown>, skill: bo
   if (!skill) return hasExactKeys(value, ['success', 'resultType', 'unknownToolKeys'])
     && value.resultType === 'invalidToolKeys'
     && Array.isArray(value.unknownToolKeys)
-    && value.unknownToolKeys.every((key) => isText(key, 4096));
+    && value.unknownToolKeys.every((key) => isNonEmptyBoundedText(key, 4096));
   return hasExactKeys(value, ['success', 'resultType', 'unknownSkillKeys', 'nonCanonicalSkillKeys'])
     && value.resultType === 'invalidSkillKeys'
     && Array.isArray(value.unknownSkillKeys)
-    && value.unknownSkillKeys.every((key) => isText(key, 4096))
+    && value.unknownSkillKeys.every((key) => isNonEmptyBoundedText(key, 4096))
     && Array.isArray(value.nonCanonicalSkillKeys)
-    && value.nonCanonicalSkillKeys.every((key) => isText(key, 4096));
+    && value.nonCanonicalSkillKeys.every((key) => isNonEmptyBoundedText(key, 4096));
 }
 
 function isConfigurationView(value: unknown, skill: boolean): boolean {
   if (!isRecord(value)) return false;
-  const common = isText(value.agentId, 4096)
+  const common = isNonEmptyBoundedText(value.agentId, 4096)
     && isSupport(value.support)
-    && isText(value.revision, 4096)
-    && (value.updatedAt === null || isTimestamp(value.updatedAt));
+    && isNonEmptyBoundedText(value.revision, 4096)
+    && (value.updatedAt === null || isSafeNonNegativeInteger(value.updatedAt));
   if (!common) return false;
   return skill ? isSkillConfigurationView(value) : isToolConfigurationView(value);
 }
@@ -670,13 +670,13 @@ function isUnsupportedReason(value: unknown): boolean {
 function isSkillConfigurationView(value: Record<string, unknown>): boolean {
   return hasExactKeys(value, ['agentId', 'support', 'selectionMode', 'explicitSkillKeys', 'inheritedDefaultSkillKeys', 'effectiveSkillKeys', 'options', 'revision', 'updatedAt'])
     && (value.selectionMode === 'inheritsDefaultSkills' || value.selectionMode === 'usesExplicitSkillAllowlist')
-    && [value.explicitSkillKeys, value.inheritedDefaultSkillKeys, value.effectiveSkillKeys].every((items) => Array.isArray(items) && items.every((key) => isText(key, 4096)))
+    && [value.explicitSkillKeys, value.inheritedDefaultSkillKeys, value.effectiveSkillKeys].every((items) => Array.isArray(items) && items.every((key) => isNonEmptyBoundedText(key, 4096)))
     && Array.isArray(value.options) && value.options.every(isSkillOption);
 }
 
 function isSkillOption(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['skillKey', 'displayName', 'description', 'selectable', 'unavailableReason', 'missingRequirements'])
-    && isText(value.skillKey, 4096) && isText(value.displayName, 4096)
+    && isNonEmptyBoundedText(value.skillKey, 4096) && isNonEmptyBoundedText(value.displayName, 4096)
     && typeof value.description === 'string' && typeof value.selectable === 'boolean'
     && (value.unavailableReason === null || value.unavailableReason === 'globalSkillDisabled' || value.unavailableReason === 'blockedByRuntimeAllowlist' || value.unavailableReason === 'missingRequirements')
     && (value.missingRequirements === null || isMissingSkillRequirements(value.missingRequirements));
@@ -684,7 +684,7 @@ function isSkillOption(value: unknown): boolean {
 
 function isMissingSkillRequirements(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['bins', 'anyBins', 'env', 'config', 'os'])
-    && [value.bins, value.anyBins, value.env, value.config, value.os].every((items) => Array.isArray(items) && items.every((item) => isText(item, 4096)));
+    && [value.bins, value.anyBins, value.env, value.config, value.os].every((items) => Array.isArray(items) && items.every((item) => isNonEmptyBoundedText(item, 4096)));
 }
 
 function isToolConfigurationView(value: Record<string, unknown>): boolean {
@@ -696,35 +696,35 @@ function isToolConfigurationView(value: Record<string, unknown>): boolean {
     && Array.isArray(value.toolOptions) && value.toolOptions.every(isToolOption);
 }
 
-function isToolPolicy(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['profile', 'allow', 'deny']) && isText(value.profile, 4096) && Array.isArray(value.allow) && value.allow.every((key) => isText(key, 4096)) && Array.isArray(value.deny) && value.deny.every((key) => isText(key, 4096)); }
-function isToolProfile(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['profileKey', 'displayName']) && isText(value.profileKey, 4096) && isText(value.displayName, 4096); }
-function isToolGroup(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['groupKey', 'displayName', 'source', 'pluginId', 'toolOptions']) && isText(value.groupKey, 4096) && isText(value.displayName, 4096) && (value.source === 'core' || value.source === 'plugin') && (value.pluginId === null || isText(value.pluginId, 4096)) && Array.isArray(value.toolOptions) && value.toolOptions.every(isToolOption); }
+function isToolPolicy(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['profile', 'allow', 'deny']) && isNonEmptyBoundedText(value.profile, 4096) && Array.isArray(value.allow) && value.allow.every((key) => isNonEmptyBoundedText(key, 4096)) && Array.isArray(value.deny) && value.deny.every((key) => isNonEmptyBoundedText(key, 4096)); }
+function isToolProfile(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['profileKey', 'displayName']) && isNonEmptyBoundedText(value.profileKey, 4096) && isNonEmptyBoundedText(value.displayName, 4096); }
+function isToolGroup(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['groupKey', 'displayName', 'source', 'pluginId', 'toolOptions']) && isNonEmptyBoundedText(value.groupKey, 4096) && isNonEmptyBoundedText(value.displayName, 4096) && (value.source === 'core' || value.source === 'plugin') && (value.pluginId === null || isNonEmptyBoundedText(value.pluginId, 4096)) && Array.isArray(value.toolOptions) && value.toolOptions.every(isToolOption); }
 function isToolOption(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['toolKey', 'displayName', 'optionType', 'description', 'source', 'pluginId', 'optional', 'risk', 'tags', 'defaultProfiles', 'deniedByGlobalPolicy', 'groupKey', 'groupDisplayName'])
-    && isText(value.toolKey, 4096)
-    && isText(value.displayName, 4096)
+    && isNonEmptyBoundedText(value.toolKey, 4096)
+    && isNonEmptyBoundedText(value.displayName, 4096)
     && (value.optionType === 'tool' || value.optionType === 'group')
     && (value.description === null || typeof value.description === 'string')
     && (value.source === 'core' || value.source === 'plugin')
-    && (value.pluginId === null || isText(value.pluginId, 4096))
+    && (value.pluginId === null || isNonEmptyBoundedText(value.pluginId, 4096))
     && (value.optional === null || typeof value.optional === 'boolean')
     && (value.risk === null || value.risk === 'low' || value.risk === 'medium' || value.risk === 'high')
     && Array.isArray(value.tags)
-    && value.tags.every((tag) => isText(tag, 4096))
+    && value.tags.every((tag) => isNonEmptyBoundedText(tag, 4096))
     && Array.isArray(value.defaultProfiles)
-    && value.defaultProfiles.every((profile) => isText(profile, 4096))
+    && value.defaultProfiles.every((profile) => isNonEmptyBoundedText(profile, 4096))
     && typeof value.deniedByGlobalPolicy === 'boolean'
-    && (value.groupKey === null || isText(value.groupKey, 4096))
-    && (value.groupDisplayName === null || isText(value.groupDisplayName, 4096));
+    && (value.groupKey === null || isNonEmptyBoundedText(value.groupKey, 4096))
+    && (value.groupDisplayName === null || isNonEmptyBoundedText(value.groupDisplayName, 4096));
 }
 
 function isModelInput(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['primary', 'fallbacks'])
-    && (value.primary === null || isText(value.primary, 4096))
+    && (value.primary === null || isNonEmptyBoundedText(value.primary, 4096))
     && Array.isArray(value.fallbacks)
-    && value.fallbacks.every((fallback) => isText(fallback, 4096));
+    && value.fallbacks.every((fallback) => isNonEmptyBoundedText(fallback, 4096));
 }
 
 function isConfigurationModel(value: unknown): boolean {
@@ -736,38 +736,21 @@ function isConfigurationDefaults(value: unknown): boolean {
     && hasExactKeys(value, ['model', 'skills'])
     && isConfigurationModel(value.model)
     && Array.isArray(value.skills)
-    && value.skills.every((skill) => isText(skill, 4096));
+    && value.skills.every((skill) => isNonEmptyBoundedText(skill, 4096));
 }
 
 function isConfigurationAgent(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['id', 'description', 'model', 'skills'])
-    && isText(value.id, 4096)
-    && (value.description === null || isText(value.description, 4096))
+    && isNonEmptyBoundedText(value.id, 4096)
+    && (value.description === null || isNonEmptyBoundedText(value.description, 4096))
     && isConfigurationModel(value.model)
     && Array.isArray(value.skills)
-    && value.skills.every((skill) => isText(skill, 4096));
+    && value.skills.every((skill) => isNonEmptyBoundedText(skill, 4096));
 }
 
 function isFailure(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['success', 'error']) && value.success === false && typeof value.error === 'string';
-}
-
-function isTimestamp(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isText(value: unknown, max: number): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= max && !value.includes('\0');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function hasAllowedKeys(value: Record<string, unknown>, allowed: readonly string[], required: readonly string[]): boolean {

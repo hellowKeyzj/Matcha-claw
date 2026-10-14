@@ -43,10 +43,6 @@ pub struct OpenClawGatewayControl {
 }
 
 impl OpenClawGatewayControl {
-    pub fn start_supervision(&self) {
-        self.client.start_control_supervision();
-    }
-
     pub fn take_supervisor(&self) -> Option<crate::gateway::client::GatewayControlSupervisor> {
         self.client.take_control_supervisor()
     }

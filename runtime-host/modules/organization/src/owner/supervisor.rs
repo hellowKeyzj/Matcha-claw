@@ -10,7 +10,7 @@ use crate::run::event::TeamRunWake;
 use super::{
     coordinator::{TeamRunCoordinatorInput, TeamRunCoordinatorRequest},
     receipt_router::TeamRunReceiptRouter,
-    run_actor::{CompletedActivity, TeamRunActors},
+    run_actor::{RunActorEvent, TeamRunActors},
     team_run::{CronReconciliation, TeamTriggerCron},
 };
 
@@ -19,7 +19,7 @@ enum Next {
     Tick,
     AdmissionChanged,
     ScheduleChanged(TeamRunWake),
-    ActivityCompleted(CompletedActivity),
+    ActivityCompleted(RunActorEvent),
     Request(Option<TeamRunCoordinatorRequest>),
 }
 
@@ -67,7 +67,7 @@ impl TeamRunSupervisor {
     }
 
     pub(super) async fn retry_settlements(&mut self, input: &TeamRunCoordinatorInput) {
-        self.run_actors.retry_settlements(input, &mut self.receipt_router).await;
+        self.run_actors.join_settlements(input, &mut self.receipt_router).await;
     }
 
     pub(super) fn has_pending_settlements(&self) -> bool {
@@ -137,7 +137,7 @@ pub(super) async fn run<T: Send + Sync + 'static>(
                     "runHash": wake.run_id().map(|id| identifier_hash(id.as_str())),
                     "admitted": input.admission.is_admitted(),
                 }));
-                supervisor.retry_settlements(&input).await;
+                supervisor.run_actors.retry_settlements(&input, &mut supervisor.receipt_router).await;
                 if input.admission.is_admitted() {
                     supervisor
                         .wake_active_runs(&input, now_millis(), false)
@@ -145,11 +145,13 @@ pub(super) async fn run<T: Send + Sync + 'static>(
                 }
             }
             Next::ActivityCompleted(completion) => {
-                supervisor
-                    .run_actors
-                    .route_completion(&input, &mut supervisor.receipt_router, completion)
-                    .await;
-                if input.admission.is_admitted() {
+                let ready = matches!(&completion, RunActorEvent::Ready(_));
+                match completion {
+                    RunActorEvent::Ready(completion) => supervisor.run_actors.route_ready_nodes(&input, completion, now_millis()).await,
+                    RunActorEvent::Activity(completion) => supervisor.run_actors.route_completion(&input, &mut supervisor.receipt_router, completion).await,
+                    RunActorEvent::Settled { run_id, activity_id, status, router } => supervisor.run_actors.settlement_completed(&mut supervisor.receipt_router, run_id, activity_id, status, router),
+                }
+                if !ready && input.admission.is_admitted() {
                     supervisor
                         .wake_active_runs(&input, now_millis(), false)
                         .await;
@@ -190,7 +192,7 @@ async fn next<T>(
             },
         },
         _ = maintenance.tick() => Next::Tick,
-        completion = run_actors.next_completion() => Next::ActivityCompleted(completion),
+        completion = run_actors.next_event() => Next::ActivityCompleted(completion),
         changed = schedule_changes.changed() => match changed {
             Ok(()) => Next::ScheduleChanged(schedule_changes.borrow().clone()),
             Err(_) => {

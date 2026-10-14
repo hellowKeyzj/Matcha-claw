@@ -198,7 +198,7 @@ fn nonempty_field(line: &str, field: &str) -> bool {
         .is_some_and(|value| !value.trim().trim_matches(['\'', '"']).is_empty())
 }
 
-fn normalize_skill_key_value(value: &str) -> Option<String> {
+pub(crate) fn normalize_skill_key_value(value: &str) -> Option<String> {
     let value = value.trim().to_ascii_lowercase();
     if value.is_empty()
         || value.len() > MAX_SKILL_KEY_BYTES

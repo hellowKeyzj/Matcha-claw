@@ -562,6 +562,11 @@ impl OpenClawSkillOperations {
             .await
     }
     pub async fn update(&self, request: SkillUpdateRequest) -> SkillMutationOutcome {
+        let _transaction = if matches!(&request, SkillUpdateRequest::Config { .. }) {
+            Some(self.gateway.config_transaction().await)
+        } else {
+            None
+        };
         let needs_agent = matches!(&request, SkillUpdateRequest::ClawHub { .. });
         let params = request.params();
         let params = if needs_agent {
@@ -598,6 +603,7 @@ impl OpenClawSkillOperations {
         else {
             return (SkillMutationOutcome::Rejected, invalid_keys);
         };
+        let _transaction = self.gateway.config_transaction().await;
         match self.gateway.rpc_mutation(request).await {
             MutationDelivery::Response(GatewayResponse::Success {
                 payload: Some(Value::Object(payload)),
@@ -639,6 +645,7 @@ impl OpenClawSkillOperations {
         let Some(skill_key) = clean_openclaw_skill_key(skill_key) else {
             return SkillConfigRemoveOutcome::Rejected;
         };
+        let _transaction = self.gateway.config_transaction().await;
         for _ in 0..3 {
             match self.remove_config_once(&skill_key).await {
                 ConfigRemoveAttempt::Conflict => {}

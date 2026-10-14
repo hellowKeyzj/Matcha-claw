@@ -159,23 +159,29 @@ pub(super) async fn handle(
         return Err(RequestError::Unauthorized);
     }
     if matches!(route, Route::Export | Route::Uninstall) {
-        decode_skill_key(body)?;
+        let request = decode_skill_key(body)?;
+        let effect = if route == Route::Export {
+            crate::operation::Effect::Export(vec![request.skill_key])
+        } else {
+            crate::operation::Effect::Independent
+        };
         let call = call.ok_or(RequestError::Admission(
             platform::call::CallLogError::Unavailable,
         ))?;
         let body = body.to_vec();
         let worker = skills.clone();
         let receipt = skills
-            .submit_operation(call, async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    if route == Route::Export {
-                        export(&body, worker)
-                    } else {
-                        uninstall(&body, worker)
-                    }
-                })
-                .await;
-                blocking_response(result)
+            .submit_operation(call, effect, async move {
+                if route == Route::Export {
+                    let (status, body) = export(&body, worker).await.unwrap_or_else(|_| {
+                        (400, json!({ "outcome": "rejected", "reason": "rejected" }))
+                    });
+                    platform::loopback::Response::json(status, body)
+                } else {
+                    blocking_response(
+                        tokio::task::spawn_blocking(move || uninstall(&body, worker)).await,
+                    )
+                }
             })
             .await
             .map_err(RequestError::Admission)?;
@@ -183,7 +189,7 @@ pub(super) async fn handle(
     }
     match route {
         Route::Status => status(body, skills).await,
-        Route::Export => export(body, skills),
+        Route::Export => export(body, skills).await,
         Route::ExportCloud => export_cloud(body, skills, call, principal.unwrap()).await,
         Route::Install => install(body, skills, call).await,
         Route::Uninstall => uninstall(body, skills),
@@ -200,12 +206,13 @@ async fn status(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), Reque
         200,
         json!({
             "skills": catalog.entries().iter().map(project_entry).collect::<Vec<_>>(),
+            "issues": catalog.issues().iter().map(project_issue).collect::<Vec<_>>(),
             "ready": true,
         }),
     ))
 }
 
-fn export(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestError> {
+async fn export(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestError> {
     let request = match decode_skill_key(body) {
         Ok(request) => request,
         Err(error) => {
@@ -222,25 +229,33 @@ fn export(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestErro
             skill_key
         );
     }
-    match handle.export_sealed_skill_package(skill_key.clone()) {
-        Ok(entry) => {
+    match handle.export_sealed_skill_package(skill_key.clone()).await {
+        Ok(export) => {
+            let entry = export.entry();
+            let outcome = if export.cleanup_failed() {
+                "partial"
+            } else {
+                "accepted"
+            };
             if platform::trace::enabled() {
                 eprintln!(
-                    "[startup-trace] source=sealed-skills-export phase=runtime detail=accepted skillKey={}",
+                    "[startup-trace] source=sealed-skills-export phase=runtime detail={} skillKey={}",
+                    outcome,
                     entry.skill_key()
                 );
             }
-            Ok((
-                200,
-                json!({ "outcome": "accepted", "skillKey": entry.skill_key() }),
-            ))
+            let mut body = json!({ "outcome": outcome, "skillKey": entry.skill_key() });
+            if export.cleanup_failed() {
+                body["reason"] = json!("cleanup-failed");
+            }
+            Ok((200, body))
         }
         Err(SealedSkillError::NotFound) => {
             eprintln!(
                 "[startup-trace] source=sealed-skills-export phase=runtime detail=not-found skillKey={}",
                 skill_key
             );
-            Ok((404, json!({ "outcome": "notFound" })))
+            Ok((404, json!({ "outcome": "notFound", "reason": "not-found" })))
         }
         Err(SealedSkillError::RejectedWith(detail)) => rejected_export_response(&skill_key, detail),
         Err(error) => {
@@ -249,7 +264,7 @@ fn export(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestErro
                 sealed_skill_error_detail(&error),
                 skill_key
             );
-            Err(map_error(error))
+            Ok(mutation_error(error))
         }
     }
 }
@@ -286,27 +301,28 @@ async fn export_cloud(
     let receipt = handle
         .submit_result(
             call,
+            crate::operation::Effect::Export(vec![request.skill_key.trim().to_owned()]),
             access,
             crate::result::SEALED_RESULT_BUDGET,
             async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    worker.export_cloud_sealed_skill_package(
+                match worker
+                    .export_cloud_sealed_skill_package(
                         request.skill_key,
                         request.cloud_public_key,
                         cloud_key_id,
                     )
-                })
-                .await;
-                match result {
-                    Ok(Ok(export)) => {
+                    .await
+                {
+                    Ok(export) => {
                         let skill_key = export.skill_key().to_owned();
                         let file_name = export.file_name().to_owned();
                         let package_sha256 = export.package_sha256().to_owned();
+                        let cleanup_failed = export.cleanup_failed();
                         let bytes = export.into_package_bytes();
                         if bytes.len() > 10 * 1024 * 1024 {
                             return Err(platform::loopback::Response::json(
                                 400,
-                                json!({ "outcome": "rejected" }),
+                                json!({ "outcome": "rejected", "reason": "total-too-large" }),
                             ));
                         }
                         Ok(crate::result::SkillResult::SealedCloudExport {
@@ -317,19 +333,17 @@ async fn export_cloud(
                                 &base64::engine::general_purpose::STANDARD,
                                 bytes,
                             ),
+                            cleanup_failed,
                         })
                     }
-                    Ok(Err(SealedSkillError::NotFound)) => Err(platform::loopback::Response::json(
+                    Err(SealedSkillError::NotFound) => Err(platform::loopback::Response::json(
                         404,
-                        json!({ "outcome": "notFound" }),
+                        json!({ "outcome": "notFound", "reason": "not-found" }),
                     )),
-                    Ok(Err(SealedSkillError::Unknown)) | Err(_) => Err(
-                        platform::loopback::Response::json(503, json!({ "outcome": "unknown" })),
-                    ),
-                    Ok(Err(_)) => Err(platform::loopback::Response::json(
-                        400,
-                        json!({ "outcome": "rejected" }),
-                    )),
+                    Err(error) => {
+                        let (status, body) = mutation_error(error);
+                        Err(platform::loopback::Response::json(status, body))
+                    }
                 }
             },
         )
@@ -347,10 +361,24 @@ fn rejected_export_response(
         detail.reason(),
         skill_key
     );
-    Ok((
-        400,
-        json!({ "outcome": "rejected", "reason": detail.reason(), "error": detail.message() }),
-    ))
+    Ok(mutation_error(SealedSkillError::RejectedWith(detail)))
+}
+
+fn mutation_error(error: SealedSkillError) -> (u16, Value) {
+    match error {
+        SealedSkillError::RejectedWith(detail) => (
+            400,
+            json!({ "outcome": "rejected", "reason": detail.reason(), "error": detail.message() }),
+        ),
+        SealedSkillError::Unknown => (
+            503,
+            json!({ "outcome": "unknown", "reason": "unavailable" }),
+        ),
+        error => (
+            400,
+            json!({ "outcome": "rejected", "reason": sealed_skill_error_detail(&error) }),
+        ),
+    }
 }
 
 async fn install(
@@ -371,19 +399,12 @@ async fn install(
     {
         let worker = handle.clone();
         let receipt = handle
-            .submit_operation(call, async move {
+            .submit_operation(call, crate::operation::Effect::Independent, async move {
                 let result = tokio::task::spawn_blocking(move || {
                     install_package(worker, package_path, cloud_metadata)
                 })
                 .await;
-                let (status, body) = match result {
-                    Ok(Ok(response)) => response,
-                    Ok(Err(RequestError::Unavailable)) | Err(_) => {
-                        (503, json!({ "outcome": "unknown" }))
-                    }
-                    Ok(Err(_)) => (400, json!({ "outcome": "rejected" })),
-                };
-                platform::loopback::Response::json(status, body)
+                blocking_response(result)
             })
             .await
             .map_err(RequestError::Admission)?;
@@ -396,8 +417,11 @@ fn blocking_response(
 ) -> platform::loopback::Response {
     let (status, body) = match result {
         Ok(Ok(response)) => response,
-        Ok(Err(RequestError::Unavailable)) | Err(_) => (503, json!({ "outcome": "unknown" })),
-        Ok(Err(_)) => (400, json!({ "outcome": "rejected" })),
+        Ok(Err(RequestError::Unavailable)) | Err(_) => (
+            503,
+            json!({ "outcome": "unknown", "reason": "unavailable" }),
+        ),
+        Ok(Err(_)) => (400, json!({ "outcome": "rejected", "reason": "rejected" })),
     };
     platform::loopback::Response::json(status, body)
 }
@@ -412,9 +436,14 @@ fn install_package(
             200,
             json!({ "outcome": "accepted", "skillKey": entry.skill_key() }),
         )),
-        Err(SealedSkillError::AlreadyExists) => Ok((409, json!({ "outcome": "rejected" }))),
-        Err(SealedSkillError::NotFound) => Ok((404, json!({ "outcome": "notFound" }))),
-        Err(error) => Err(map_error(error)),
+        Err(SealedSkillError::AlreadyExists) => Ok((
+            409,
+            json!({ "outcome": "rejected", "reason": "already-exists" }),
+        )),
+        Err(SealedSkillError::NotFound) => {
+            Ok((404, json!({ "outcome": "notFound", "reason": "not-found" })))
+        }
+        Err(error) => Ok(mutation_error(error)),
     }
 }
 
@@ -423,8 +452,11 @@ fn uninstall(body: &[u8], handle: SkillsModule) -> Result<(u16, Value), RequestE
     let skill_key = request.skill_key;
     match handle.remove_sealed_skill(skill_key.clone()) {
         Ok(true) => Ok((200, json!({ "outcome": "removed", "skillKey": skill_key }))),
-        Ok(false) => Ok((404, json!({ "outcome": "notFound", "skillKey": skill_key }))),
-        Err(error) => Err(map_error(error)),
+        Ok(false) => Ok((
+            404,
+            json!({ "outcome": "notFound", "skillKey": skill_key, "reason": "not-found" }),
+        )),
+        Err(error) => Ok(mutation_error(error)),
     }
 }
 
@@ -543,6 +575,14 @@ fn project_entry(entry: &crate::ports::SealedSkillCatalogEntry) -> Value {
         "runtimes": [entry.runtime_target()],
         "source": MATCHA_SEALED_SOURCE,
     })
+}
+
+fn project_issue(issue: &crate::ports::SealedSkillCatalogIssue) -> Value {
+    let mut value = json!({ "fileName": issue.file_name(), "reason": issue.reason() });
+    if let Some(skill_key) = issue.skill_key() {
+        value["skillKey"] = json!(skill_key);
+    }
+    value
 }
 
 fn project_read(read: crate::ports::SealedResourceRead) -> Value {

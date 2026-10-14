@@ -63,6 +63,8 @@ pub(crate) enum SkillResult {
         package_sha256: String,
         #[serde(rename = "packageBase64")]
         package_base64: String,
+        #[serde(skip)]
+        cleanup_failed: bool,
     },
 }
 
@@ -88,7 +90,13 @@ impl SkillResult {
             | Self::BatchState { outcome, .. }
             | Self::UploadCommit { outcome, .. }
             | Self::BundleExport { outcome, .. } => *outcome,
-            Self::SealedCloudExport { .. } => ConfigOutcome::Accepted,
+            Self::SealedCloudExport { cleanup_failed, .. } => {
+                if *cleanup_failed {
+                    ConfigOutcome::Partial
+                } else {
+                    ConfigOutcome::Accepted
+                }
+            }
         };
         let status = match outcome {
             ConfigOutcome::Rejected => 400,
@@ -108,6 +116,12 @@ impl SkillResult {
                 body["updatedCount"] = json!(updated.len());
                 body["invalidCount"] = json!(invalid_keys.len());
                 body["failedCount"] = json!(failed.len());
+            }
+            Self::SealedCloudExport {
+                cleanup_failed: true,
+                ..
+            } => {
+                body["reason"] = json!("cleanup-failed");
             }
             Self::Config { invalid_keys, .. } => body["invalidCount"] = json!(invalid_keys.len()),
             Self::UploadCommit {
@@ -244,7 +258,17 @@ impl Results {
             })?;
             (entry.command, Arc::clone(entry.result.as_ref()?))
         };
-        Some(json!({ "callId": call_id, "command": command, "result": result.as_ref() }))
+        let mut body = json!({ "callId": call_id, "command": command, "result": result.as_ref() });
+        if matches!(
+            result.as_ref(),
+            SkillResult::SealedCloudExport {
+                cleanup_failed: true,
+                ..
+            }
+        ) {
+            body["result"]["reason"] = json!("cleanup-failed");
+        }
+        Some(body)
     }
 
     pub async fn clear(&self) {

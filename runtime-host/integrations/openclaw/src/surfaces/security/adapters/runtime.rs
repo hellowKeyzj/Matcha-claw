@@ -19,7 +19,7 @@ impl SecurityOps for OpenClawDriver {
         policy: Value,
     ) -> ::security::ports::SecurityFuture<'a, ::security::delivery::Outcome> {
         Box::pin(async move {
-            let gateway = self.gateway.lock().await;
+            let gateway = self.gateway.as_ref();
             crate::surfaces::security::sync_policy(&gateway, policy).await
         })
     }
@@ -29,7 +29,7 @@ impl SecurityOps for OpenClawDriver {
     ) -> ::security::ports::SecurityFuture<'a, ::security::emergency::SecurityEmergencyOutcome>
     {
         Box::pin(async move {
-            let gateway = self.gateway.lock().await;
+            let gateway = self.gateway.as_ref();
             crate::surfaces::security::run_emergency(&gateway).await
         })
     }
@@ -39,7 +39,7 @@ impl SecurityOps for OpenClawDriver {
         query: ::security::audit::Query,
     ) -> ::security::ports::SecurityFuture<'a, ::security::audit::Outcome> {
         Box::pin(async move {
-            let gateway = self.gateway.lock().await;
+            let gateway = self.gateway.as_ref();
             crate::surfaces::security::query_audit(&gateway, query).await
         })
     }
@@ -50,7 +50,7 @@ impl SecurityOps for OpenClawDriver {
         input: Value,
     ) -> ::security::ports::SecurityFuture<'a, ::security::operation::Outcome> {
         Box::pin(async move {
-            let gateway = self.gateway.lock().await;
+            let gateway = self.gateway.as_ref();
             crate::surfaces::security::run_operation(&gateway, operation_id, input).await
         })
     }

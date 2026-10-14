@@ -5,7 +5,7 @@ use std::{
     task::Poll,
 };
 
-use foundation::execution::{OperationHandle, TraceContext};
+use foundation::execution::{OperationHandle, OwnedTask, TraceContext};
 use organization::{ActivityId, DeliveryId, GraphRunId};
 use platform::trace::{identifier_hash, runtime_trace};
 use serde_json::json;
@@ -25,8 +25,9 @@ use super::{
 
 const READY_NODES_OPERATION: &str = "teamRun.readyNodes";
 const ACTIVITY_EXECUTION_OPERATION: &str = "teamRun.activityExecution";
-const ACTIVITY_OBSERVATION_OPERATION: &str = "teamRun.activityObservation";
 const ACTIVITY_EXECUTION_CONCURRENCY: usize = 8;
+
+type ReadyNodesResult = Result<Result<Vec<ActivityId>, organization::StoreFault>, crate::RequestAdmissionClosed>;
 
 static NEXT_TEAM_RUN_ACTOR_TRACE: AtomicU64 = AtomicU64::new(1);
 
@@ -45,7 +46,7 @@ impl TeamRunActors {
     ) {
         let active_runs = active_run_ids.iter().cloned().collect::<BTreeSet<_>>();
         self.actors.retain(|run_id, actor| {
-            active_runs.contains(run_id) || actor.activity_execution.processing_len() != 0
+            active_runs.contains(run_id) || actor.ready_nodes.is_some() || actor.activity_execution.processing_len() != 0
         });
         for run_id in &active_run_ids {
             let actor = self
@@ -61,53 +62,73 @@ impl TeamRunActors {
             let Some(actor) = self.actors.get_mut(&run_id) else {
                 continue;
             };
-            if actor.wake_ready_nodes(input, now).await {
-                actor
-                    .start_dirty_activities(input, now, &mut capacity)
-                    .await;
-            }
+            actor.wake_ready_nodes(input, now);
+            actor.start_dirty_activities(input, now, &mut capacity).await;
         }
     }
 
-    pub(super) async fn next_completion(&mut self) -> CompletedActivity {
-        let completion = {
-            let mut joins = self
-                .actors
-                .iter_mut()
-                .flat_map(|(run_id, actor)| {
-                    actor.activity_execution.processing.iter_mut().filter_map(
-                        move |(activity_id, work)| match work {
-                            ActivityExecutionWork::Running(operation) => Some((
-                                run_id.clone(),
-                                activity_id.clone(),
-                                Box::pin(operation.join()),
-                            )),
-                            ActivityExecutionWork::Settling(_) => None,
-                        },
-                    )
-                })
-                .collect::<Vec<_>>();
-            poll_fn(|context| {
-                for (run_id, activity_id, join) in &mut joins {
-                    if let Poll::Ready(result) = join.as_mut().poll(context) {
-                        return Poll::Ready(CompletedActivity {
-                            run_id: run_id.clone(),
-                            completion: result.unwrap_or_else(|_| {
-                                ActivityExecutionCompletion::Observation(
-                                    ActivityExecutionObservation {
-                                        activity_id: activity_id.clone(),
-                                        status: ActivityReceiptStatus::ResponseUnavailable,
-                                    },
-                                )
-                            }),
-                            activity_id: activity_id.clone(),
-                        });
+    pub(super) async fn next_event(&mut self) -> RunActorEvent {
+        let event = {
+            let mut joins: Vec<std::pin::Pin<Box<dyn Future<Output = RunActorEvent> + Send + '_>>> = Vec::new();
+            for (run_id, actor) in &mut self.actors {
+                if let Some(operation) = &mut actor.ready_nodes {
+                    let run_id = run_id.clone();
+                    joins.push(Box::pin(async move {
+                        RunActorEvent::Ready(CompletedReadyNodes { run_id, result: operation.join().await.map_err(|_| ()) })
+                    }));
+                }
+                for (activity_id, work) in &mut actor.activity_execution.processing {
+                    let run_id = run_id.clone();
+                    let activity_id = activity_id.clone();
+                    match work {
+                        ActivityExecutionWork::Running(operation) => joins.push(Box::pin(async move {
+                            RunActorEvent::Activity(CompletedActivity {
+                                run_id, activity_id: activity_id.clone(),
+                                completion: operation.join().await.unwrap_or_else(|_| ActivityExecutionCompletion::Observation(ActivityExecutionObservation {
+                                    activity_id, status: ActivityReceiptStatus::ResponseUnavailable,
+                                })),
+                            })
+                        })),
+                        ActivityExecutionWork::Settling { operation: Some(operation), .. } => joins.push(Box::pin(async move {
+                            let (status, router) = operation.join().await.unwrap_or_else(|_| (ActivityReceiptStatus::ActivityError, TeamRunReceiptRouter::new()));
+                            RunActorEvent::Settled { run_id, activity_id, status, router }
+                        })),
+                        ActivityExecutionWork::Settling { operation: None, .. } => {}
                     }
                 }
+            }
+            poll_fn(|context| {
+                for join in &mut joins {
+                    if let Poll::Ready(event) = join.as_mut().poll(context) { return Poll::Ready(event); }
+                }
                 Poll::Pending
-            })
-            .await
+            }).await
         };
+        match &event {
+            RunActorEvent::Ready(completion) => {
+                self.actors.get_mut(&completion.run_id).expect("completed wake belongs to a run actor").ready_nodes = None;
+            }
+            RunActorEvent::Activity(completion) => self.record_completion(completion),
+            RunActorEvent::Settled { run_id, activity_id, .. } => {
+                if let Some(ActivityExecutionWork::Settling { operation, .. }) = self.actors.get_mut(run_id).and_then(|actor| actor.activity_execution.processing.get_mut(activity_id)) {
+                    *operation = None;
+                }
+            }
+        }
+        event
+    }
+
+    pub(super) async fn route_ready_nodes(&mut self, input: &TeamRunCoordinatorInput, completion: CompletedReadyNodes, now: u64) {
+        let mut capacity = self.capacity();
+        let actor = self.actors.get_mut(&completion.run_id).expect("completed wake belongs to a run actor");
+        actor.ready_nodes_completed(completion.result);
+        if input.admission.is_admitted() {
+            actor.start_dirty_activities(input, now, &mut capacity).await;
+            if std::mem::take(&mut actor.wake_pending) { actor.wake_ready_nodes(input, now); }
+        }
+    }
+
+    fn record_completion(&mut self, completion: &CompletedActivity) {
         let processing = &mut self.actors
             .get_mut(&completion.run_id)
             .expect("completed activity belongs to a run actor")
@@ -115,14 +136,20 @@ impl TeamRunActors {
             .processing;
         match &completion.completion {
             ActivityExecutionCompletion::Executed { run_id, activity_id, delivery_id, claim, outcome } => {
-                processing.insert(activity_id.clone(), ActivityExecutionWork::Settling(ActivityReceipt {
+                processing.insert(activity_id.clone(), ActivityExecutionWork::Settling { receipt: ActivityReceipt {
                     run_id: run_id.clone(), activity_id: activity_id.clone(), delivery_id: delivery_id.clone(),
                     claim: claim.clone(), outcome: outcome.clone(),
-                }));
+                }, operation: None });
             }
             ActivityExecutionCompletion::Observation(_) => { processing.remove(&completion.activity_id); }
         }
-        completion
+    }
+
+    async fn next_completion(&mut self) -> CompletedActivity {
+        match self.next_event().await {
+            RunActorEvent::Activity(completion) => completion,
+            _ => unreachable!("activity-only fixture"),
+        }
     }
 
     pub(super) async fn route_completion(
@@ -144,38 +171,53 @@ impl TeamRunActors {
         receipt_router: &mut TeamRunReceiptRouter,
     ) {
         for actor in self.actors.values() {
+            if let Some(operation) = &actor.ready_nodes { operation.cancel(); }
             for work in actor.activity_execution.processing.values() {
-                if let ActivityExecutionWork::Running(operation) = work {
-                    operation.cancel();
-                }
+                if let ActivityExecutionWork::Running(operation) = work { operation.cancel(); }
             }
         }
         self.retry_settlements(input, receipt_router).await;
-        while self
-            .actors
-            .values()
-            .any(|actor| actor.activity_execution.processing.values().any(|work| matches!(work, ActivityExecutionWork::Running(_))))
-        {
-            let completion = self.next_completion().await;
-            self.route_completion(input, receipt_router, completion)
-                .await;
-        }
+        self.join_pending(input, receipt_router).await;
         self.actors.retain(|_, actor| actor.activity_execution.processing_len() != 0);
     }
 
-    pub(super) fn has_pending_settlements(&self) -> bool {
-        self.actors.values().any(|actor| actor.activity_execution.processing_len() != 0)
+    async fn join_pending(&mut self, input: &TeamRunCoordinatorInput, receipt_router: &mut TeamRunReceiptRouter) {
+        while self.actors.values().any(|actor| actor.ready_nodes.is_some() || actor.activity_execution.processing.values().any(|work| {
+            matches!(work, ActivityExecutionWork::Running(_) | ActivityExecutionWork::Settling { operation: Some(_), .. })
+        })) {
+            match self.next_event().await {
+                RunActorEvent::Ready(completion) => self.actors.get_mut(&completion.run_id).expect("completed wake belongs to a run actor").ready_nodes_completed(completion.result),
+                RunActorEvent::Activity(completion) => self.route_completion(input, receipt_router, completion).await,
+                RunActorEvent::Settled { run_id, activity_id, status, router } => self.settlement_completed(receipt_router, run_id, activity_id, status, router),
+            }
+        }
     }
 
-    pub(super) async fn retry_settlements(&mut self, input: &TeamRunCoordinatorInput, receipt_router: &mut TeamRunReceiptRouter) {
+    pub(super) async fn join_settlements(&mut self, input: &TeamRunCoordinatorInput, receipt_router: &mut TeamRunReceiptRouter) {
+        self.retry_settlements(input, receipt_router).await;
+        self.join_pending(input, receipt_router).await;
+    }
+
+    pub(super) fn has_pending_settlements(&self) -> bool {
+        self.actors.values().any(|actor| actor.ready_nodes.is_some() || actor.activity_execution.processing_len() != 0)
+    }
+
+    pub(super) async fn retry_settlements(&mut self, input: &TeamRunCoordinatorInput, _receipt_router: &mut TeamRunReceiptRouter) {
         for actor in self.actors.values_mut() {
             let receipts = actor.activity_execution.processing.values().filter_map(|work| match work {
-                ActivityExecutionWork::Settling(receipt) => Some(receipt.clone()),
-                ActivityExecutionWork::Running(_) => None,
+                ActivityExecutionWork::Settling { receipt, operation: None } => Some(receipt.clone()),
+                _ => None,
             }).collect::<Vec<_>>();
-            for receipt in receipts {
-                actor.settle_receipt(input, receipt_router, receipt).await;
-            }
+            for receipt in receipts { actor.settle_receipt(input, receipt); }
+        }
+    }
+
+    pub(super) fn settlement_completed(&mut self, receipt_router: &mut TeamRunReceiptRouter, run_id: GraphRunId, activity_id: ActivityId, status: ActivityReceiptStatus, router: TeamRunReceiptRouter) {
+        receipt_router.absorb(router);
+        let actor = self.actors.get_mut(&run_id).expect("settlement belongs to a run actor");
+        if !matches!(status, ActivityReceiptStatus::StoreFault | ActivityReceiptStatus::ActivityError) {
+            actor.activity_execution.processing.remove(&activity_id);
+            if status.should_retry_on_wakeup() { actor.activity_execution.defer(activity_id); }
         }
     }
 
@@ -191,6 +233,8 @@ impl TeamRunActors {
 
 struct TeamRunActor {
     run_id: GraphRunId,
+    ready_nodes: Option<OperationHandle<ReadyNodesResult>>,
+    wake_pending: bool,
     activity_execution: ActivityExecutionState,
 }
 
@@ -198,6 +242,8 @@ impl TeamRunActor {
     fn new(run_id: GraphRunId) -> Self {
         Self {
             run_id,
+            ready_nodes: None,
+            wake_pending: false,
             activity_execution: ActivityExecutionState::default(),
         }
     }
@@ -225,10 +271,10 @@ impl TeamRunActor {
                 claim,
                 outcome,
             } => {
-                let status = self.settle_receipt(input, receipt_router, ActivityReceipt {
+                self.settle_receipt(input, ActivityReceipt {
                     run_id, activity_id: activity_id.clone(), delivery_id, claim, outcome,
-                }).await;
-                (activity_id, status)
+                });
+                return;
             }
         };
         if status.should_retry_on_wakeup() {
@@ -236,25 +282,30 @@ impl TeamRunActor {
         }
     }
 
-    async fn settle_receipt(&mut self, input: &TeamRunCoordinatorInput, receipt_router: &mut TeamRunReceiptRouter, receipt: ActivityReceipt) -> ActivityReceiptStatus {
-        let mut status = ActivityReceiptStatus::ActivityError;
-        for _ in 0..3 {
-            status = receipt_router.route_activity_receipt(input, &receipt).await;
-            if !matches!(status, ActivityReceiptStatus::StoreFault | ActivityReceiptStatus::ActivityError) {
-                self.activity_execution.processing.remove(&receipt.activity_id);
-                if status.should_retry_on_wakeup() {
-                    self.activity_execution.defer(receipt.activity_id.clone());
-                }
-                break;
+    fn settle_receipt(&mut self, input: &TeamRunCoordinatorInput, receipt: ActivityReceipt) {
+        let Some(ActivityExecutionWork::Settling { operation, .. }) = self.activity_execution.processing.get_mut(&receipt.activity_id) else { return; };
+        if operation.is_some() { return; }
+        let input = input.clone();
+        let (task, _) = OwnedTask::spawn(move |_| async move {
+            let mut router = TeamRunReceiptRouter::new();
+            let mut status = ActivityReceiptStatus::ActivityError;
+            for _ in 0..3 {
+                status = router.route_activity_receipt(&input, &receipt).await;
+                if !matches!(status, ActivityReceiptStatus::StoreFault | ActivityReceiptStatus::ActivityError) { break; }
             }
-        }
-        status
+            (status, router)
+        });
+        *operation = Some(task);
     }
 
-    async fn wake_ready_nodes(&mut self, input: &TeamRunCoordinatorInput, now: u64) -> bool {
+    fn wake_ready_nodes(&mut self, input: &TeamRunCoordinatorInput, now: u64) {
+        if self.ready_nodes.is_some() {
+            self.wake_pending = true;
+            return;
+        }
         let run_id = self.run_id.clone();
         let organization = input.organization.clone();
-        let mut operation = spawn_ready_nodes_operation(input, move |_| async move {
+        let operation = spawn_ready_nodes_operation(input, move |_| async move {
             runtime_trace("runtime.team_run.schedule.begin", || json!({
                 "runHash": identifier_hash(run_id.as_str()),
                 "schedulerNow": now,
@@ -282,27 +333,28 @@ impl TeamRunActor {
             }));
             Ok(scheduled?.map(|scheduled| activity_ids.into_iter().chain(scheduled).collect()))
         });
-        match operation.join().await {
+        self.ready_nodes = Some(operation);
+    }
+
+    fn ready_nodes_completed(&mut self, result: Result<ReadyNodesResult, ()>) {
+        match result {
             Ok(Ok(Ok(activity_ids))) => {
                 for activity_id in activity_ids {
                     self.activity_execution.dirty(activity_id);
                 }
-                true
             }
-            Ok(Ok(Err(_))) => false,
+            Ok(Ok(Err(_))) => {},
             Ok(Err(_)) => {
                 runtime_trace("runtime.team_run.schedule.join", || json!({
                     "runHash": identifier_hash(self.run_id.as_str()),
                     "outcome": "owner_unavailable",
                 }));
-                false
             }
             Err(_) => {
                 runtime_trace("runtime.team_run.schedule.join", || json!({
                     "runHash": identifier_hash(self.run_id.as_str()),
                     "outcome": "task_failed",
                 }));
-                false
             }
         }
     }
@@ -341,12 +393,22 @@ impl TeamRunActor {
                 activity_id.clone(),
                 delivery_id.clone(),
                 now,
-            )
-            .await;
+            );
             self.activity_execution.start(activity_id, operation);
             *capacity = (*capacity).saturating_sub(1);
         }
     }
+}
+
+pub(super) enum RunActorEvent {
+    Ready(CompletedReadyNodes),
+    Activity(CompletedActivity),
+    Settled { run_id: GraphRunId, activity_id: ActivityId, status: ActivityReceiptStatus, router: TeamRunReceiptRouter },
+}
+
+pub(super) struct CompletedReadyNodes {
+    run_id: GraphRunId,
+    result: Result<ReadyNodesResult, ()>,
 }
 
 pub(super) struct CompletedActivity {
@@ -373,7 +435,10 @@ enum ActivityExecutionCompletion {
 
 enum ActivityExecutionWork {
     Running(OperationHandle<ActivityExecutionCompletion>),
-    Settling(ActivityReceipt),
+    Settling {
+        receipt: ActivityReceipt,
+        operation: Option<OwnedTask<(ActivityReceiptStatus, TeamRunReceiptRouter)>>,
+    },
 }
 
 #[derive(Default)]
@@ -418,13 +483,16 @@ impl ActivityExecutionState {
     }
 }
 
-async fn start_activity_execution(
+fn start_activity_execution(
     input: &TeamRunCoordinatorInput,
     run_id: GraphRunId,
     activity_id: ActivityId,
     delivery_id: DeliveryId,
     claimed_at: u64,
 ) -> OperationHandle<ActivityExecutionCompletion> {
+    let owned = input.clone();
+    spawn_activity_operation(input, ACTIVITY_EXECUTION_OPERATION, move |cancellation| async move {
+        let input = &owned;
     runtime_trace("runtime.team_run.activity.begin", || json!({
         "runHash": identifier_hash(run_id.as_str()),
         "activityHash": identifier_hash(activity_id.as_str()),
@@ -437,13 +505,10 @@ async fn start_activity_execution(
     {
         Ok(Some(target)) => target,
         Ok(None) | Err(_) => {
-            return observed_activity_execution(
-                input,
-                run_id,
+            return ActivityExecutionCompletion::Observation(ActivityExecutionObservation {
                 activity_id,
-                delivery_id,
-                ActivityReceiptStatus::TargetUnavailable,
-            );
+                status: ActivityReceiptStatus::TargetUnavailable,
+            });
         }
     };
     runtime_trace("runtime.team_run.activity.target", || json!({
@@ -460,24 +525,18 @@ async fn start_activity_execution(
         }
     };
     if target_run_id != &run_id {
-        return observed_activity_execution(
-            input,
-            run_id,
+        return ActivityExecutionCompletion::Observation(ActivityExecutionObservation {
             activity_id,
-            delivery_id,
-            ActivityReceiptStatus::TargetUnavailable,
-        );
+            status: ActivityReceiptStatus::TargetUnavailable,
+        });
     }
     if matches!(target, TeamRunActivityTarget::OpenClaw { .. })
         && open_claw_activity_unavailable(input)
     {
-        return observed_activity_execution(
-            input,
-            run_id,
+        return ActivityExecutionCompletion::Observation(ActivityExecutionObservation {
             activity_id,
-            delivery_id,
-            ActivityReceiptStatus::RuntimeUnavailable,
-        );
+            status: ActivityReceiptStatus::RuntimeUnavailable,
+        });
     }
     let start = match input
         .organization
@@ -486,22 +545,16 @@ async fn start_activity_execution(
     {
         Ok(Ok(start)) => start,
         Ok(Err(TeamRunActivityError::Store(_))) => {
-            return observed_activity_execution(
-                input,
-                run_id,
+            return ActivityExecutionCompletion::Observation(ActivityExecutionObservation {
                 activity_id,
-                delivery_id,
-                ActivityReceiptStatus::StoreFault,
-            );
+                status: ActivityReceiptStatus::StoreFault,
+            });
         }
         Ok(Err(_)) | Err(_) => {
-            return observed_activity_execution(
-                input,
-                run_id,
+            return ActivityExecutionCompletion::Observation(ActivityExecutionObservation {
                 activity_id,
-                delivery_id,
-                ActivityReceiptStatus::ActivityError,
-            );
+                status: ActivityReceiptStatus::ActivityError,
+            });
         }
     };
     match start {
@@ -510,44 +563,14 @@ async fn start_activity_execution(
                 "runHash": identifier_hash(run_id.as_str()),
                 "activityHash": identifier_hash(activity_id.as_str()),
             }));
-            let executor = std::sync::Arc::clone(&input.activity_executor);
-            spawn_activity_operation(
-                input,
-                ACTIVITY_EXECUTION_OPERATION,
-                move |cancellation| async move {
-                    let outcome = executor.execute_cancellable(request, cancellation).await;
-                    ActivityExecutionCompletion::Executed {
-                        run_id,
-                        activity_id,
-                        delivery_id,
-                        claim,
-                        outcome,
-                    }
-                },
-            )
+            let outcome = input.activity_executor.execute_cancellable(request, cancellation).await;
+            ActivityExecutionCompletion::Executed { run_id, activity_id, delivery_id, claim, outcome }
         }
-        TeamRunActivityStart::Immediate(outcome) => observed_activity_execution(
-            input,
-            run_id,
+        TeamRunActivityStart::Immediate(outcome) => ActivityExecutionCompletion::Observation(ActivityExecutionObservation {
             activity_id,
-            delivery_id,
-            ActivityReceiptStatus::from_activity_outcome(&outcome),
-        ),
+            status: ActivityReceiptStatus::from_activity_outcome(&outcome),
+        }),
     }
-}
-
-fn observed_activity_execution(
-    input: &TeamRunCoordinatorInput,
-    _run_id: GraphRunId,
-    activity_id: ActivityId,
-    _delivery_id: DeliveryId,
-    status: ActivityReceiptStatus,
-) -> OperationHandle<ActivityExecutionCompletion> {
-    spawn_activity_operation(input, ACTIVITY_OBSERVATION_OPERATION, move |_| async move {
-        ActivityExecutionCompletion::Observation(ActivityExecutionObservation {
-            activity_id,
-            status,
-        })
     })
 }
 

@@ -18,8 +18,6 @@ impl OpenClawDriver {
         account: String,
     ) -> crate::surfaces::channels::gateway::control::ChannelControlEffect {
         self.gateway
-            .lock()
-            .await
             .connect_channel_account(channel, account)
             .await
     }
@@ -30,8 +28,6 @@ impl OpenClawDriver {
         account: String,
     ) -> crate::surfaces::channels::gateway::control::ChannelControlEffect {
         self.gateway
-            .lock()
-            .await
             .disconnect_channel_account(channel, account)
             .await
     }
@@ -42,8 +38,6 @@ impl OpenClawDriver {
         account: Option<String>,
     ) -> crate::port::ChannelRuntimeEffect {
         self.gateway
-            .lock()
-            .await
             .channel_runtime(crate::port::ChannelRuntimeAction::Stop, channel, account)
             .await
     }
@@ -54,8 +48,6 @@ impl OpenClawDriver {
         input: crate::port::WebLoginStart,
     ) -> crate::port::WebLoginStartEffect {
         self.gateway
-            .lock()
-            .await
             .web_login_start(channel, input)
             .await
     }
@@ -87,8 +79,6 @@ impl OpenClawDriver {
         account: Option<String>,
     ) -> crate::port::ChannelRuntimeEffect {
         self.gateway
-            .lock()
-            .await
             .channel_runtime(crate::port::ChannelRuntimeAction::Logout, channel, account)
             .await
     }
@@ -100,8 +90,6 @@ impl OpenClawDriver {
     ) -> crate::surfaces::channels::gateway::pairing::ChannelPairingEffect {
         let effect = self
             .gateway
-            .lock()
-            .await
             .list_channel_pairing(channel.clone(), account.clone())
             .await;
         if !matches!(
@@ -114,8 +102,6 @@ impl OpenClawDriver {
             return crate::surfaces::channels::gateway::pairing::ChannelPairingEffect::OutcomeUnknown;
         }
         self.gateway
-            .lock()
-            .await
             .list_channel_pairing(channel, account)
             .await
     }
@@ -127,8 +113,6 @@ impl OpenClawDriver {
         code: Zeroizing<Vec<u8>>,
     ) -> crate::surfaces::channels::gateway::pairing::ChannelPairingApprovalEffect {
         self.gateway
-            .lock()
-            .await
             .approve_channel_pairing(channel, account, code)
             .await
     }
@@ -139,8 +123,6 @@ impl OpenClawDriver {
         let runtime_running =
             self.supervisor_handle().snapshot().phase() == SupervisorPhase::Running;
         self.gateway
-            .lock()
-            .await
             .observe_channel_accounts(runtime_running)
             .await
     }
@@ -151,8 +133,6 @@ impl OpenClawDriver {
         let runtime_running =
             self.supervisor_handle().snapshot().phase() == SupervisorPhase::Running;
         self.gateway
-            .lock()
-            .await
             .observe_channel_snapshot(runtime_running)
             .await
     }
@@ -161,8 +141,6 @@ impl OpenClawDriver {
         let runtime_running =
             self.supervisor_handle().snapshot().phase() == SupervisorPhase::Running;
         self.gateway
-            .lock()
-            .await
             .channel_catalog(runtime_running)
             .await
     }
@@ -174,8 +152,6 @@ impl OpenClawDriver {
         let runtime_running =
             self.supervisor_handle().snapshot().phase() == SupervisorPhase::Running;
         self.gateway
-            .lock()
-            .await
             .channel_configure_form(channel, runtime_running)
             .await
     }
@@ -188,8 +164,6 @@ impl OpenClawDriver {
         let runtime_running =
             self.supervisor_handle().snapshot().phase() == SupervisorPhase::Running;
         self.gateway
-            .lock()
-            .await
             .read_channel_config(channel, account_id, runtime_running)
             .await
     }
@@ -201,8 +175,6 @@ impl OpenClawDriver {
         config: Zeroizing<Vec<u8>>,
     ) -> crate::surfaces::channels::gateway::credentials::ChannelCredentialsEffect {
         self.gateway
-            .lock()
-            .await
             .validate_channel_credentials(channel, account, config)
             .await
     }
@@ -230,7 +202,7 @@ impl OpenClawDriver {
 
     async fn refresh_plugin_inventory(&self) -> Result<(), ()> {
         let mut span = ChannelTraceSpan::begin("host.composition.plugins_refresh");
-        let outcome = self.gateway.lock().await.refresh_plugins().await;
+        let outcome = self.gateway.refresh_plugins().await;
         span.finish(match outcome {
             crate::port::PluginRefreshOutcome::RestartRequired => "restart_required",
             crate::port::PluginRefreshOutcome::Rejected => "rejected",
@@ -329,8 +301,6 @@ impl OpenClawDriver {
         let mut save_span = ChannelTraceSpan::begin("host.composition.config_save");
         let outcome = self
             .gateway
-            .lock()
-            .await
             .configure_channel(
                 channel,
                 account_id,
@@ -403,8 +373,6 @@ impl OpenClawDriver {
             self.supervisor_handle().snapshot().phase() == SupervisorPhase::Running;
         let outcome = self
             .gateway
-            .lock()
-            .await
             .delete_channel_config(channel, account_id, runtime_running)
             .await;
         if matches!(outcome, crate::port::DeleteConfigOutcome::RestartRequired) {
@@ -498,8 +466,6 @@ impl ChannelOps for OpenClawDriver {
                 weixin_login.wait(input, cancellation.clone()).await
             } else {
                 gateway
-                    .lock()
-                    .await
                     .web_login_wait_with_cancellation(channel.clone(), input, cancellation.clone())
                     .await
             };

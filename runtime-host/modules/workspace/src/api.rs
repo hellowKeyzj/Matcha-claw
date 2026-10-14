@@ -6,7 +6,8 @@ use platform::{
 use tokio::sync::oneshot;
 
 use crate::{
-    application::commands::{WorkspaceCommand, WorkspaceQuery},
+    application::commands::{WorkspaceCommand, WorkspaceOperation, WorkspaceOwnerKey, WorkspaceQuery},
+    owner::actor::WorkspaceShared,
     call::{self, Detail, Operation, Outcome, RecordedCall},
     domain::model::{
         ResolvedWorkspaceMedia, WorkspaceBinaryFailure, WorkspaceBinaryReceipt,
@@ -20,13 +21,18 @@ use crate::{
 #[derive(Clone)]
 pub struct WorkspaceHandle {
     owner: OwnerRuntimeHandle<WorkspaceCommand, WorkspaceQuery>,
+    shared: WorkspaceShared,
     recorder: Option<CallRecorder>,
 }
 
 impl WorkspaceHandle {
-    pub(crate) fn new(owner: OwnerRuntimeHandle<WorkspaceCommand, WorkspaceQuery>) -> Self {
+    pub(crate) fn new(
+        owner: OwnerRuntimeHandle<WorkspaceCommand, WorkspaceQuery>,
+        shared: WorkspaceShared,
+    ) -> Self {
         Self {
             owner,
+            shared,
             recorder: None,
         }
     }
@@ -43,9 +49,8 @@ impl WorkspaceHandle {
         relative_path: String,
         limit: usize,
     ) -> Result<Result<WorkspaceTextReceipt, WorkspaceReadFailure>, ()> {
-        self.request_command(Operation::ReadText, 1, |call, reply| {
-            WorkspaceCommand::ReadText {
-                call,
+        self.request_command(Operation::ReadText, 1, |reply| {
+            WorkspaceOperation::ReadText {
                 endpoint,
                 session_key,
                 relative_path,
@@ -63,9 +68,8 @@ impl WorkspaceHandle {
         relative_path: String,
         limit: usize,
     ) -> Result<Result<WorkspaceBinaryReceipt, WorkspaceBinaryFailure>, ()> {
-        self.request_command(Operation::ReadBinary, 1, |call, reply| {
-            WorkspaceCommand::ReadBinary {
-                call,
+        self.request_command(Operation::ReadBinary, 1, |reply| {
+            WorkspaceOperation::ReadBinary {
                 endpoint,
                 session_key,
                 relative_path,
@@ -82,9 +86,8 @@ impl WorkspaceHandle {
         session_key: String,
         relative_path: String,
     ) -> Result<Result<WorkspaceStatReceipt, WorkspaceStatFailure>, ()> {
-        self.request_command(Operation::StatFile, 1, |call, reply| {
-            WorkspaceCommand::StatFile {
-                call,
+        self.request_command(Operation::StatFile, 1, |reply| {
+            WorkspaceOperation::StatFile {
                 endpoint,
                 session_key,
                 relative_path,
@@ -101,9 +104,8 @@ impl WorkspaceHandle {
         relative_path: String,
         include_hidden: bool,
     ) -> Result<Result<WorkspaceDirectoryReceipt, WorkspaceListFailure>, ()> {
-        self.request_command(Operation::ListDirectory, 1, |call, reply| {
-            WorkspaceCommand::ListDirectory {
-                call,
+        self.request_command(Operation::ListDirectory, 1, |reply| {
+            WorkspaceOperation::ListDirectory {
                 endpoint,
                 session_key,
                 relative_path,
@@ -121,9 +123,8 @@ impl WorkspaceHandle {
         relative_path: String,
         content: String,
     ) -> Result<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>, ()> {
-        self.request_command(Operation::WriteText, 1, |call, reply| {
-            WorkspaceCommand::WriteText {
-                call,
+        self.request_command(Operation::WriteText, 1, |reply| {
+            WorkspaceOperation::WriteText {
                 endpoint,
                 session_key,
                 relative_path,
@@ -141,9 +142,8 @@ impl WorkspaceHandle {
         relative_path: String,
         mime_type: String,
     ) -> Result<Result<WorkspaceMediaReceipt, WorkspaceMediaFailure>, ()> {
-        self.request_command(Operation::PrepareMedia, 1, |call, reply| {
-            WorkspaceCommand::PrepareMedia {
-                call,
+        self.request_command(Operation::PrepareMedia, 1, |reply| {
+            WorkspaceOperation::PrepareMedia {
                 endpoint,
                 session_key,
                 relative_path,
@@ -160,9 +160,8 @@ impl WorkspaceHandle {
         session_key: String,
         reference: String,
     ) -> Result<Result<ResolvedWorkspaceMedia, WorkspaceMediaFailure>, ()> {
-        self.request_command(Operation::ResolveMedia, 1, |call, reply| {
-            WorkspaceCommand::ResolveMedia {
-                call,
+        self.request_command(Operation::ResolveMedia, 1, |reply| {
+            WorkspaceOperation::ResolveMedia {
                 endpoint,
                 session_key,
                 reference,
@@ -179,9 +178,8 @@ impl WorkspaceHandle {
         relative_path: String,
         mime_type: String,
     ) -> Result<Result<WorkspaceMediaThumbnail, WorkspaceMediaFailure>, ()> {
-        self.request_command(Operation::ThumbnailMedia, 1, |call, reply| {
-            WorkspaceCommand::ThumbnailMedia {
-                call,
+        self.request_command(Operation::ThumbnailMedia, 1, |reply| {
+            WorkspaceOperation::ThumbnailMedia {
                 endpoint,
                 session_key,
                 relative_path,
@@ -200,9 +198,8 @@ impl WorkspaceHandle {
         mime_type: String,
         agent_id: String,
     ) -> Result<Result<WorkspaceMediaThumbnail, WorkspaceMediaFailure>, ()> {
-        self.request_command(Operation::ThumbnailMedia, 1, |call, reply| {
-            WorkspaceCommand::ThumbnailMediaGateway {
-                call,
+        self.request_command(Operation::ThumbnailMedia, 1, |reply| {
+            WorkspaceOperation::ThumbnailMediaGateway {
                 endpoint,
                 session_key,
                 gateway_url,
@@ -220,9 +217,8 @@ impl WorkspaceHandle {
         session_key: String,
         paths: Vec<WorkspaceMediaPath>,
     ) -> Result<Result<Vec<WorkspaceMediaThumbnailEntry>, WorkspaceMediaFailure>, ()> {
-        self.request_command(Operation::ThumbnailsMedia, paths.len(), |call, reply| {
-            WorkspaceCommand::ThumbnailsMedia {
-                call,
+        self.request_command(Operation::ThumbnailsMedia, paths.len(), |reply| {
+            WorkspaceOperation::ThumbnailsMedia {
                 endpoint,
                 session_key,
                 paths,
@@ -238,9 +234,8 @@ impl WorkspaceHandle {
         session_key: String,
         paths: Vec<WorkspaceMediaPath>,
     ) -> Result<Result<Vec<WorkspaceMediaReceipt>, WorkspaceMediaFailure>, ()> {
-        self.request_command(Operation::StagePathsMedia, paths.len(), |call, reply| {
-            WorkspaceCommand::StagePathsMedia {
-                call,
+        self.request_command(Operation::StagePathsMedia, paths.len(), |reply| {
+            WorkspaceOperation::StagePathsMedia {
                 endpoint,
                 session_key,
                 paths,
@@ -258,9 +253,8 @@ impl WorkspaceHandle {
         file_name: String,
         mime_type: String,
     ) -> Result<Result<WorkspaceMediaReceipt, WorkspaceMediaFailure>, ()> {
-        self.request_command(Operation::StageBufferMedia, 1, |call, reply| {
-            WorkspaceCommand::StageBufferMedia {
-                call,
+        self.request_command(Operation::StageBufferMedia, 1, |reply| {
+            WorkspaceOperation::StageBufferMedia {
                 endpoint,
                 session_key,
                 base64,
@@ -276,7 +270,7 @@ impl WorkspaceHandle {
         &self,
         operation: Operation,
         item_count: usize,
-        command: impl FnOnce(RecordedCall, oneshot::Sender<T>) -> WorkspaceCommand,
+        command: impl FnOnce(oneshot::Sender<T>) -> WorkspaceOperation,
     ) -> Result<T, ()> {
         let detail = Detail {
             operation,
@@ -295,14 +289,44 @@ impl WorkspaceHandle {
             detail: detail.clone(),
         };
         let (reply, response) = oneshot::channel();
-        if self
-            .owner
-            .send_command(command(RecordedCall { context, detail }, reply))
-            .await
-            .is_err()
-        {
-            call.finish(CallStatus::Rejected, Outcome::Unavailable)
-                .await;
+        let permit = match self.owner.reserve().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                call.finish(CallStatus::Rejected, Outcome::Unavailable).await;
+                return Err(());
+            }
+        };
+        // Only native config selection and enqueue share this FIFO, never file/media effects.
+        let ingress = self.shared.ingress.clone().lock_owned().await;
+        let operation = command(reply);
+        let (endpoint, session_key) = operation.scope();
+        let endpoint = endpoint.clone();
+        let session_key = session_key.to_owned();
+        let recorded = RecordedCall { context, detail };
+        let sent = if operation.needs_workspace() {
+            let shared = self.shared.clone();
+            self.shared.blocking(move || {
+                let binding = shared.bind(&endpoint, &session_key);
+                let key = match binding.as_ref().and_then(|binding| binding.resource_key()) {
+                    Some(resource_key) => WorkspaceOwnerKey::Directory(endpoint, resource_key.to_owned()),
+                    None => WorkspaceOwnerKey::Session(endpoint, session_key),
+                };
+                let sent = permit.send(WorkspaceCommand { key, binding, operation, call: recorded });
+                drop(ingress);
+                sent.map_err(|_| ())
+            }).await.and_then(|sent| sent)
+        } else {
+            let sent = permit.send(WorkspaceCommand {
+                key: WorkspaceOwnerKey::Session(endpoint, session_key),
+                binding: None,
+                operation,
+                call: recorded,
+            });
+            drop(ingress);
+            sent.map_err(|_| ())
+        };
+        if sent.is_err() {
+            call.finish(CallStatus::Rejected, Outcome::Unavailable).await;
             return Err(());
         }
         response.await.map_err(|_| ())

@@ -1,3 +1,6 @@
+import { isRecord } from './client';
+import type { FleetAgent, FleetConnection, FleetEnvironment, FleetNode, FleetRuntime } from './fleet';
+
 export type FleetRegistrationRoute =
   | 'register-connection'
   | 'register-environment'
@@ -168,50 +171,23 @@ export type FleetRegistrationReceipt = Readonly<{
   rejection?: FleetRegistrationRejection;
 }>;
 
-export type FleetCanonicalConnection = Readonly<{
-  id: string;
-  kind: FleetConnectionKind;
-  displayName: string;
-  endpoint: string | null;
-  labels: readonly string[];
-  enabled: boolean;
-}>;
+export type FleetCanonicalConnection = Pick<
+  FleetConnection, 'id' | 'kind' | 'displayName' | 'endpoint' | 'labels' | 'enabled'
+>;
 
-export type FleetCanonicalEnvironment = Readonly<{
-  id: string;
-  connectionId: string;
-  kind: FleetEnvironmentKind;
-  displayName: string;
-  labels: readonly string[];
-  enabled: boolean;
-}>;
+export type FleetCanonicalEnvironment = Pick<
+  FleetEnvironment, 'id' | 'connectionId' | 'kind' | 'displayName' | 'labels' | 'enabled'
+>;
 
-export type FleetCanonicalNode = Readonly<{
-  id: string;
-  connectionId: string | null;
-  environmentId: string | null;
-  managedResourceId: string | null;
-  health: 'unknown' | 'online' | 'offline' | 'disabled' | 'error';
-}>;
-
-export type FleetCanonicalAgent = Readonly<{
-  id: string;
-  nodeId: string;
-  connectionId: string | null;
-  environmentId: string | null;
-  managedResourceId: string | null;
-}>;
-
-export type FleetCanonicalRuntime = Readonly<{
-  id: string;
-  nodeId: string;
-  agentId: string;
-  connectionId: string | null;
-  environmentId: string | null;
-  managedResourceId: string | null;
-  kind: 'openClaw' | 'matchaAgent' | 'plugin';
-  state: 'discovered' | 'running' | 'stopped' | 'degraded' | 'retired';
-}>;
+export type FleetCanonicalNode = Pick<
+  FleetNode, 'id' | 'connectionId' | 'environmentId' | 'managedResourceId' | 'health'
+>;
+export type FleetCanonicalAgent = Pick<
+  FleetAgent, 'id' | 'nodeId' | 'connectionId' | 'environmentId' | 'managedResourceId'
+>;
+export type FleetCanonicalRuntime = Pick<
+  FleetRuntime, 'id' | 'nodeId' | 'agentId' | 'connectionId' | 'environmentId' | 'managedResourceId' | 'kind' | 'state'
+>;
 
 export type FleetCanonicalReadFacts = Readonly<{
   connections: readonly FleetCanonicalConnection[];
@@ -828,8 +804,4 @@ function isLegacyTargetKind(value: unknown): value is FleetLegacyTargetKind {
 
 function isLegacyEnvironmentKind(value: unknown): value is FleetLegacyEnvironmentKind {
   return value === 'ssh-workdir' || value === 'docker-container' || value === 'k8s-workload' || value === 'vm-workdir' || value === 'custom';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

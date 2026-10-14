@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, normalizePath } from 'vite';
 import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
@@ -6,15 +6,8 @@ import { resolve } from 'path';
 
 const nativeAddonExternal = ['node-llama-cpp', /^@node-llama-cpp\//, '@lydell/node-pty'];
 const qrTerminalExternal = ['qrcode-terminal', /^qrcode-terminal\//];
-const ignoredWorkspaceDirs = [
-  '**/.claude/**',
-  '**/.planning/**',
-  '**/.tmp/**',
-  '**/.tmp_openclaw_repo/**',
-  '**/build/.tmp-*/**',
-  '**/release/**',
-  '**/third_party/**',
-];
+const rendererRoot = normalizePath(__dirname);
+const rendererSourceRoots = ['src', 'public'].map((dir) => `${rendererRoot}/${dir}`);
 
 function clearElectronRunAsNodeForDev(): void {
   if (process.env.ELECTRON_RUN_AS_NODE === '1') {
@@ -123,7 +116,7 @@ export default defineConfig(({ command, mode }) => ({
           },
           build: {
             outDir: 'dist-electron/main',
-            watch: command === 'serve' ? { ignored: ignoredWorkspaceDirs } : undefined,
+            watch: command === 'serve' ? {} : undefined,
             rollupOptions: {
               external: [
                 'electron-store',
@@ -145,7 +138,7 @@ export default defineConfig(({ command, mode }) => ({
         vite: {
           build: {
             outDir: 'dist-electron/preload',
-            watch: command === 'serve' ? { ignored: ignoredWorkspaceDirs } : undefined,
+            watch: command === 'serve' ? {} : undefined,
             rollupOptions: {
               external: ['electron'],
             },
@@ -164,7 +157,12 @@ export default defineConfig(({ command, mode }) => ({
   server: {
     port: 5173,
     watch: {
-      ignored: ignoredWorkspaceDirs,
+      ignored: (file, stats?: { isDirectory(): boolean }) => {
+        if (!stats?.isDirectory()) return false;
+        const directory = normalizePath(file);
+        return directory.startsWith(`${rendererRoot}/`)
+          && !rendererSourceRoots.some((root) => directory === root || directory.startsWith(`${root}/`));
+      },
     },
   },
   build: {

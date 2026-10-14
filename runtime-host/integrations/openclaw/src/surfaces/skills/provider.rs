@@ -11,7 +11,6 @@ use skills_module::{
     install::{Command as SkillInstallCommand, Outcome as SkillInstallOutcome},
     management::{Command as SkillManagementCommand, Outcome as SkillManagementOutcome},
 };
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -23,7 +22,7 @@ use super::{
 use crate::{port::OpenClawGateway, workspace::OpenClawWorkspaceAccess};
 
 pub struct OpenClawSkillProvider {
-    gateway: Arc<Mutex<OpenClawGateway>>,
+    gateway: Arc<OpenClawGateway>,
     electron_image: PathBuf,
     working_directory: PathBuf,
     state_dir: CanonicalStateDir,
@@ -32,7 +31,7 @@ pub struct OpenClawSkillProvider {
 
 impl OpenClawSkillProvider {
     pub fn new(
-        gateway: Arc<Mutex<OpenClawGateway>>,
+        gateway: Arc<OpenClawGateway>,
         electron_image: PathBuf,
         working_directory: PathBuf,
         state_dir: CanonicalStateDir,
@@ -55,7 +54,7 @@ impl OpenClawSkillProvider {
     }
 
     pub async fn installed_skill_catalog(&self) -> Option<super::InstalledSkillCatalog> {
-        self.gateway.lock().await.installed_skill_catalog().await
+        self.gateway.installed_skill_catalog().await
     }
 
     pub async fn install_clawhub(&self, command: SkillInstallCommand) -> SkillInstallOutcome {
@@ -162,7 +161,7 @@ impl OpenClawSkillProvider {
                         Err(_) => return SkillManagementOutcome::Rejected,
                     };
                 let (outcome, invalid_keys) =
-                    self.gateway.lock().await.configure_skill(request).await;
+                    self.gateway.configure_skill(request).await;
                 let outcome = match outcome {
                     SkillMutationOutcome::Accepted if invalid_keys.is_empty() => {
                         skills_module::management::ConfigOutcome::Accepted
@@ -500,38 +499,36 @@ impl OpenClawSkillProvider {
     }
 
     async fn skill_status_catalog(&self) -> Result<SkillStatusCatalog, SkillStatusCatalogError> {
-        self.gateway.lock().await.skill_status_catalog().await
+        self.gateway.skill_status_catalog().await
     }
 
     async fn detail_skill(
         &self,
         request: SkillDetailRequest,
     ) -> Result<SkillDetail, SkillReadError> {
-        self.gateway.lock().await.detail_skill(request).await
+        self.gateway.detail_skill(request).await
     }
 
     async fn update_skill(&self, request: super::SkillUpdateRequest) -> SkillMutationOutcome {
-        self.gateway.lock().await.update_skill(request).await
+        self.gateway.update_skill(request).await
     }
 
     async fn remove_skill_config(&self, skill_key: String) -> SkillConfigRemoveOutcome {
         self.gateway
-            .lock()
-            .await
             .remove_skill_config(skill_key)
             .await
     }
 
     async fn begin_skill_upload(&self, request: SkillUploadBegin) -> SkillUploadOutcome {
-        self.gateway.lock().await.begin_skill_upload(request).await
+        self.gateway.begin_skill_upload(request).await
     }
 
     async fn chunk_skill_upload(&self, request: SkillUploadChunk) -> SkillUploadOutcome {
-        self.gateway.lock().await.chunk_skill_upload(request).await
+        self.gateway.chunk_skill_upload(request).await
     }
 
     async fn commit_skill_upload(&self, request: SkillUploadCommit) -> SkillUploadOutcome {
-        self.gateway.lock().await.commit_skill_upload(request).await
+        self.gateway.commit_skill_upload(request).await
     }
 
     async fn install_clawhub_skill(
@@ -700,8 +697,6 @@ impl OpenClawSkillProvider {
         for skill_key in skill_keys {
             let _ = self
                 .gateway
-                .lock()
-                .await
                 .remove_skill_config(skill_key)
                 .await;
         }

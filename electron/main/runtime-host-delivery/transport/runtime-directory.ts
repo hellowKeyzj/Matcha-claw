@@ -21,10 +21,9 @@ const PLATFORM_TOOLS_UNAVAILABLE = {
 const RUNTIME_ENDPOINT_DIRECTORY_PATH = '/api/runtime-endpoints/list';
 const PLATFORM_TOOLS_PATH = '/api/platform/tools';
 
-export type RuntimeEndpointDirectoryResponse = Readonly<{
-  status: 200 | 503;
-  body: Readonly<{ endpoints: readonly RuntimeEndpointSummary[] }> | typeof UNAVAILABLE;
-}>;
+export type RuntimeEndpointDirectoryResponse =
+  | Readonly<{ status: 200; body: Readonly<{ endpoints: readonly RuntimeEndpointSummary[] }> }>
+  | Readonly<{ status: 503; body: typeof UNAVAILABLE }>;
 
 export type RuntimeTopologyProjectionResponse = Readonly<{
   status: 200 | 503;

@@ -338,15 +338,14 @@ fn open_claw_process_scope(
     state: Arc<Mutex<SlotState>>,
 ) -> ModuleScope {
     let mut scope = ModuleScope::new("openclaw");
-    open_claw.start_control_supervision();
     let control_supervisor_owner = Arc::clone(&open_claw);
-    scope.register_process("process", move || async move {
-        shutdown_open_claw(open_claw, observation, state).await;
-    });
     scope.register_event_subscription("gateway-control", move || async move {
         if let Some(supervisor) = control_supervisor_owner.take_control_supervisor() {
             supervisor.dispose().await;
         }
+    });
+    scope.register_process("process", move || async move {
+        shutdown_open_claw(open_claw, observation, state).await;
     });
     scope
 }

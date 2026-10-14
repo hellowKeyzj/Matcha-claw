@@ -1,4 +1,4 @@
-use platform::mcp::{ToolCallOutcome, ToolProvider};
+use platform::mcp::{ToolCallFuture, ToolProvider};
 use serde_json::{Map, Value, json};
 
 use super::team_run::TeamRunMcpFacade;
@@ -15,8 +15,15 @@ impl ToolProvider for TeamRunMcpFacade {
         ]
     }
 
-    fn call(&mut self, name: &str, arguments: &Map<String, Value>) -> Option<ToolCallOutcome> {
-        is_team_tool(name).then(|| self.call_host(name, arguments))
+    fn call<'a>(
+        &'a self,
+        name: &'a str,
+        arguments: &'a Map<String, Value>,
+    ) -> Option<ToolCallFuture<'a>> {
+        if !is_team_tool(name) {
+            return None;
+        }
+        Some(Box::pin(self.call_host(name, arguments)))
     }
 }
 

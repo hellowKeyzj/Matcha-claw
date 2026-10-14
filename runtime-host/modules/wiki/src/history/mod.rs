@@ -3,7 +3,12 @@ mod store;
 
 pub(crate) use store::{replace_store, version_id, write_private_store, write_store};
 
-use std::{fs, path::Path, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex, Weak},
+};
 
 use crate::domain::{
     WikiFailure, WikiReadReceipt, WikiRevision, resolve_project_path, system_time_ms,
@@ -14,14 +19,28 @@ pub use model::{
     WikiFileHistorySettingsInput, WikiFileHistoryStats, WikiRestoreFileHistoryInput,
 };
 
-// ponytail: serialize the bounded history store; use per-project locks if contention is measured.
-static HISTORY_LOCK: Mutex<()> = Mutex::new(());
+static HISTORY_LOCKS: LazyLock<Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+fn project_lock(root: &Path) -> Result<Arc<Mutex<()>>, WikiFailure> {
+    let mut locks = HISTORY_LOCKS
+        .lock()
+        .map_err(|_| WikiFailure::state("File history registry unavailable"))?;
+    if let Some(lock) = locks.get(root).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(root.to_path_buf(), Arc::downgrade(&lock));
+    Ok(lock)
+}
 
 pub(crate) fn list(root: &Path, path: &str) -> Result<Vec<WikiFileHistoryEntry>, WikiFailure> {
-    let _guard = HISTORY_LOCK
+    let root = store::checked_root(root)?;
+    let lock = project_lock(&root)?;
+    let _guard = lock
         .lock()
         .map_err(|_| WikiFailure::state("File history lock unavailable"))?;
-    let root = store::checked_root(root)?;
     let file = store::checked_file(&root, path)?;
     store::directory(&root, false)?;
     let mut entries = store::read_entries(&store::history_path(&root, &file)?)?;
@@ -30,10 +49,11 @@ pub(crate) fn list(root: &Path, path: &str) -> Result<Vec<WikiFileHistoryEntry>,
 }
 
 pub(crate) fn settings(root: &Path) -> Result<WikiFileHistorySettings, WikiFailure> {
-    let _guard = HISTORY_LOCK
+    let root = store::checked_root(root)?;
+    let lock = project_lock(&root)?;
+    let _guard = lock
         .lock()
         .map_err(|_| WikiFailure::state("File history lock unavailable"))?;
-    let root = store::checked_root(root)?;
     Ok(store::read_settings(&root)?.unwrap_or_default())
 }
 
@@ -41,10 +61,11 @@ pub(crate) fn update_settings(
     root: &Path,
     settings: WikiFileHistorySettings,
 ) -> Result<WikiFileHistorySettings, WikiFailure> {
-    let _guard = HISTORY_LOCK
+    let root = store::checked_root(root)?;
+    let lock = project_lock(&root)?;
+    let _guard = lock
         .lock()
         .map_err(|_| WikiFailure::state("File history lock unavailable"))?;
-    let root = store::checked_root(root)?;
     let mut settings = settings.normalized();
     if settings.enabled && settings.max_versions_per_file == 0 {
         settings.max_versions_per_file = WikiFileHistorySettings::default().max_versions_per_file;
@@ -60,10 +81,11 @@ pub(crate) fn update_settings(
 }
 
 pub(crate) fn stats(root: &Path) -> Result<WikiFileHistoryStats, WikiFailure> {
-    let _guard = HISTORY_LOCK
+    let root = store::checked_root(root)?;
+    let lock = project_lock(&root)?;
+    let _guard = lock
         .lock()
         .map_err(|_| WikiFailure::state("File history lock unavailable"))?;
-    let root = store::checked_root(root)?;
     let files = store::files(&root)?;
     let mut stats = WikiFileHistoryStats {
         bytes: files.iter().map(|(_, bytes, _)| *bytes).sum(),
@@ -77,10 +99,12 @@ pub(crate) fn stats(root: &Path) -> Result<WikiFileHistoryStats, WikiFailure> {
 }
 
 pub(crate) fn clear(root: &Path) -> Result<(), WikiFailure> {
-    let _guard = HISTORY_LOCK
+    let root = store::checked_root(root)?;
+    let lock = project_lock(&root)?;
+    let _guard = lock
         .lock()
         .map_err(|_| WikiFailure::state("File history lock unavailable"))?;
-    store::clear(&store::checked_root(root)?)
+    store::clear(&root)
 }
 
 pub(crate) fn record(root: &Path, path: &str, author: &str, tool: &str) -> Result<(), WikiFailure> {
@@ -94,10 +118,11 @@ pub(crate) fn record(root: &Path, path: &str, author: &str, tool: &str) -> Resul
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(store::io(root, error)),
     }
-    let _guard = HISTORY_LOCK
+    let root = store::checked_root(root)?;
+    let lock = project_lock(&root)?;
+    let _guard = lock
         .lock()
         .map_err(|_| WikiFailure::state("File history lock unavailable"))?;
-    let root = store::checked_root(root)?;
     let settings = store::read_settings(&root)?.unwrap_or_default();
     if !settings.enabled || settings.max_versions_per_file == 0 {
         return Ok(());
@@ -144,10 +169,11 @@ pub(crate) fn restore(
     path: &str,
     version_id: &str,
 ) -> Result<WikiReadReceipt, WikiFailure> {
-    let _guard = HISTORY_LOCK
+    let root = store::checked_root(root)?;
+    let lock = project_lock(&root)?;
+    let _guard = lock
         .lock()
         .map_err(|_| WikiFailure::state("File history lock unavailable"))?;
-    let root = store::checked_root(root)?;
     let file = store::checked_file(&root, path)?;
     store::directory(&root, false)?;
     let history_path = store::history_path(&root, &file)?;

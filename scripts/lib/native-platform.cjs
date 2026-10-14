@@ -10,7 +10,7 @@ const PLATFORM_ALIASES = {
 
 // Capture platform and base architecture; libc/GPU suffixes remain valid variants.
 const PLATFORM_NATIVE_SCOPES = {
-  '@napi-rs': /^canvas-(darwin|linux|win32)-(x64|arm64)/,
+  '@napi-rs': /^canvas-(darwin|linux|win32|android)-(x64|arm64|arm|riscv64)/,
   '@img': /^sharp(?:-libvips)?-(darwin|linux(?:musl)?|win32)-(x64|arm64|arm|ppc64|riscv64|s390x)/,
   '@mariozechner': /^clipboard-(darwin|linux|win32)-(x64|arm64|universal)/,
   '@snazzah': /^davey-(darwin|linux|android|freebsd|win32)-(x64|arm64|arm|ia32)/,
@@ -22,6 +22,8 @@ const PLATFORM_NATIVE_SCOPES = {
   '@trycua': /^cua-driver-(darwin|linux|win32)-(x64|arm64)(?:-.+)?$/,
   '@koromix': /^koffi-(darwin|linux|win32|freebsd|openbsd)-(x64|arm64|ia32|riscv64|loong64)$/,
   '@ubjs': /^node-(darwin|linux|win32)-(x64|arm64)(?:-.+)?$/,
+  '@wecom': /^cli-(darwin|linux|win32)-(x64|arm64)$/,
+  '@openclaw': /^fs-safe-(darwin|linux|win32)-(x64|arm64)(?:-.+)?$/,
 };
 const UNSCOPED_NATIVE_PACKAGES = [
   { pattern: /^sqlite-vec-(darwin|linux|windows)-(x64|arm64)$/ },
@@ -45,22 +47,29 @@ function matchesTarget(platform, arch, pkgPlatform, pkgArch) {
     matchesTargetArch(baseArch(pkgArch), arch);
 }
 
+function isNonTargetNativePackage(name, platform, arch) {
+  if (name === 'fsevents') return !matchesTarget(platform, arch, 'darwin', 'universal');
+  const [scope, entry] = name.split('/');
+  const pattern = PLATFORM_NATIVE_SCOPES[scope];
+  const match = entry ? pattern && entry.match(pattern) :
+    UNSCOPED_NATIVE_PACKAGES.map(({ pattern }) => name.match(pattern)).find(Boolean);
+  return Boolean(match && !matchesTarget(platform, arch, match[1], match[2]));
+}
+
 function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
   let removed = 0;
-  for (const [scope, pattern] of Object.entries(PLATFORM_NATIVE_SCOPES)) {
+  for (const scope of Object.keys(PLATFORM_NATIVE_SCOPES)) {
     const scopeDir = join(nodeModulesDir, scope);
     if (!existsSync(scopeDir)) continue;
     for (const entry of readdirSync(scopeDir)) {
-      const match = entry.match(pattern);
-      if (match && !matchesTarget(platform, arch, match[1], match[2])) {
+      if (isNonTargetNativePackage(`${scope}/${entry}`, platform, arch)) {
         if (safeRmSync(join(scopeDir, entry), { root: scopeDir })) removed++;
       }
     }
   }
   if (!existsSync(nodeModulesDir)) return removed;
   for (const entry of readdirSync(nodeModulesDir)) {
-    const match = UNSCOPED_NATIVE_PACKAGES.map(({ pattern }) => entry.match(pattern)).find(Boolean);
-    if (match && !matchesTarget(platform, arch, match[1], match[2])) {
+    if (isNonTargetNativePackage(entry, platform, arch)) {
       if (safeRmSync(join(nodeModulesDir, entry), { root: nodeModulesDir })) removed++;
     }
   }
@@ -148,6 +157,6 @@ function cleanupNativeDependencyTree(nodeModulesDir, platform, arch) {
 }
 
 module.exports = {
-  PLATFORM_NATIVE_SCOPES, targetArchitectures, matchesTarget, cleanupNativePlatformPackages,
+  PLATFORM_NATIVE_SCOPES, targetArchitectures, matchesTarget, isNonTargetNativePackage, cleanupNativePlatformPackages,
   cleanupOnnxRuntimeBinaries, cleanupNativeDependencyTree,
 };

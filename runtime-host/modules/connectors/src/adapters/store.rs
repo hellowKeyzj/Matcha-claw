@@ -3,6 +3,7 @@ use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
 };
 
 use crate::domain::{Connector, ConnectorCatalog, ConnectorError};
@@ -27,8 +28,34 @@ pub struct ConnectorStore {
     lock_path: PathBuf,
     catalog: ConnectorCatalog,
     revisions: BTreeMap<String, ConnectorRevision>,
+    snapshot: Arc<RwLock<Arc<ConnectorStoreSnapshot>>>,
     requires_reopen: bool,
     persistence: Box<dyn ConnectorStorePersistence>,
+}
+
+pub(crate) struct ConnectorStoreSnapshot {
+    catalog: ConnectorCatalog,
+    revisions: BTreeMap<String, ConnectorRevision>,
+}
+
+impl ConnectorStoreSnapshot {
+    pub(crate) fn catalog(&self) -> &ConnectorCatalog {
+        &self.catalog
+    }
+
+    pub(crate) fn revision(&self, id: &str) -> Option<u64> {
+        self.revisions.get(id).map(|record| record.revision)
+    }
+
+    pub(crate) fn applied_revision(&self, id: &str) -> Option<u64> {
+        self.revisions
+            .get(id)
+            .and_then(|record| record.applied_revision)
+    }
+
+    pub(crate) fn tombstoned(&self, id: &str) -> Option<bool> {
+        self.revisions.get(id).map(|record| record.tombstoned)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,9 +87,14 @@ impl ConnectorStore {
         let _lock = WriterLock::acquire(&lock_path)?;
         remove_stale_temporary(&path)?;
         let (catalog, revisions) = recover(&path)?;
+        let snapshot = Arc::new(RwLock::new(Arc::new(ConnectorStoreSnapshot {
+            catalog: catalog.clone(),
+            revisions: revisions.clone(),
+        })));
         Ok(Self {
             catalog,
             revisions,
+            snapshot,
             path,
             lock_path,
             requires_reopen: false,
@@ -72,6 +104,10 @@ impl ConnectorStore {
 
     pub fn catalog(&self) -> &ConnectorCatalog {
         &self.catalog
+    }
+
+    pub(crate) fn snapshot(&self) -> Arc<RwLock<Arc<ConnectorStoreSnapshot>>> {
+        Arc::clone(&self.snapshot)
     }
 
     pub(crate) fn revision(&self, id: &str) -> Option<u64> {
@@ -165,6 +201,11 @@ impl ConnectorStore {
         let (catalog, revisions) = recover(&self.path)?;
         self.catalog = catalog;
         self.revisions = revisions;
+        let snapshot = Arc::new(ConnectorStoreSnapshot {
+            catalog: self.catalog.clone(),
+            revisions: self.revisions.clone(),
+        });
+        *self.snapshot.write().expect("connector snapshot lock") = snapshot;
         Ok(())
     }
 
@@ -202,6 +243,11 @@ impl ConnectorStore {
             let _ = fs::remove_file(&temporary);
             return Err(ConnectorStoreError::CommitOutcomeUnknown(error.kind()));
         }
+        let snapshot = Arc::new(ConnectorStoreSnapshot {
+            catalog: catalog.clone(),
+            revisions: revisions.clone(),
+        });
+        *self.snapshot.write().expect("connector snapshot lock") = snapshot;
         Ok(())
     }
 }

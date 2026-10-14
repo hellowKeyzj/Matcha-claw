@@ -69,14 +69,16 @@ impl ProviderModelOwner {
     pub(super) fn text_generation_model_limits(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
+        accounts: &[ProviderAccount],
+        catalog: &ProviderModelCatalog,
+        routing: Option<&ProviderRouting>,
         request: ProviderTextGenerationModelLimitsRequest,
     ) -> ProviderTextGenerationModelLimitsOutcome {
         let candidates = match self.resolve_text_generation_candidates(
             runtime,
-            cascade.accounts(),
-            cascade.catalog(),
-            cascade.routing(),
+            accounts,
+            catalog,
+            routing,
             ProviderRoutingCapability::Chat,
             request.model_ref.as_deref(),
         ) {

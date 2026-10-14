@@ -13,7 +13,7 @@ use organization::{OrganizationHandle, TeamRunCoordinatorHandle};
 use provider_module::ProviderHandle;
 
 use super::{
-    AutostartOpenClawError, PeerCommand, PeerGlobalState, PeerKey, PeerLaneState, PeerQuery,
+    AutostartOpenClawError, PeerCommand, PeerGlobalState, PeerKey, PeerLaneKey, PeerLaneState, PeerQuery,
     RuntimeRestartCommandError, RuntimeStartCommandError, RuntimeStopCommandError,
     command::RuntimeLifecycleCall,
 };
@@ -196,7 +196,7 @@ impl PeerOwner {
 impl OwnerSpec for PeerOwner {
     type Command = PeerCommand;
     type Query = PeerQuery;
-    type Key = PeerKey;
+    type Key = PeerLaneKey;
     type Shared = PeerShared;
     type GlobalState = PeerGlobalState;
     type LaneState = PeerLaneState;
@@ -221,7 +221,10 @@ impl OwnerSpec for PeerOwner {
         _lane: &mut Self::LaneState,
         command: Self::Command,
     ) {
-        handle_command(&shared, &key, command).await;
+        let PeerLaneKey::Lifecycle(endpoint) = key else {
+            unreachable!("peer commands only use lifecycle lanes");
+        };
+        handle_command(&shared, &endpoint, command).await;
     }
 
     async fn handle_global_command(

@@ -8,5 +8,6 @@ pub use agent::{
     SealedAgentRuntimeProjection, SealedAgentStore,
 };
 pub use skill::{
-    SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillPackageExport, SealedSkillStore,
+    SealedSkillCatalog, SealedSkillCatalogEntry, SealedSkillCatalogIssue, SealedSkillPackageExport,
+    SealedSkillStore,
 };

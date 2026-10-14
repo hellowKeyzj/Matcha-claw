@@ -1,9 +1,4 @@
-use std::{
-    io::{self, BufReader},
-    path::PathBuf,
-    process::ExitCode,
-    rc::Rc,
-};
+use std::{path::PathBuf, process::ExitCode, sync::Arc};
 
 use organization::TeamRunMcpFacade;
 use platform::mcp::{ToolCatalog, run_stdio};
@@ -11,7 +6,8 @@ use wiki::WikiMcpFacade;
 
 use super::{Family, client::Client};
 
-pub fn run() -> ExitCode {
+#[tokio::main(flavor = "current_thread")]
+pub async fn run() -> ExitCode {
     let Ok(config) = McpInvocation::parse() else {
         eprintln!("runtime-host mcp: artifact configuration is invalid");
         return ExitCode::FAILURE;
@@ -20,22 +16,25 @@ pub fn run() -> ExitCode {
     let Ok(client) = Client::new(config.state_dir) else {
         return ExitCode::FAILURE;
     };
-    let client = Rc::new(client);
-    let team_client = Rc::clone(&client);
-    let team_run = TeamRunMcpFacade::new(move |name, arguments| {
-        team_client.call(Family::Team, name, arguments)
+    let client = Arc::new(client);
+    let team_client = Arc::clone(&client);
+    let team_run = TeamRunMcpFacade::new(Box::new(move |name, arguments| {
+        let client = Arc::clone(&team_client);
+        Box::pin(async move { client.call(Family::Team, name, arguments).await })
+    }));
+    let wiki = WikiMcpFacade::new(move |name, arguments| {
+        let client = Arc::clone(&client);
+        Box::pin(async move { client.call(Family::Wiki, name, arguments).await })
     });
-    let wiki =
-        WikiMcpFacade::new(move |name, arguments| client.call(Family::Wiki, name, arguments));
     let catalog = ToolCatalog::new(vec![Box::new(team_run), Box::new(wiki)]);
-
-    match run_stdio(
-        catalog,
-        BufReader::new(io::stdin().lock()),
-        io::stdout().lock(),
-    ) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+    let Ok(mut input) = foundation::process::StdinReader::open() else {
+        return ExitCode::FAILURE;
+    };
+    let result = run_stdio(catalog, &mut input, tokio::io::stdout()).await;
+    let closed = input.close();
+    match (result, closed) {
+        (Ok(()), Ok(())) => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
     }
 }
 

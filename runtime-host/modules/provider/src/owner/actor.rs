@@ -457,15 +457,10 @@ impl ProviderOwner {
                 )
                 .await;
             }
-            ProviderQuery::TextGenerationModelLimits { request, reply, .. } => {
-                let outcome = self.models.text_generation_model_limits(
-                    self.runtime_directory.as_ref(),
-                    &self.cascade,
-                    request,
-                );
-                send_reply(call, reply, outcome).await;
+            ProviderQuery::TextGenerationModelLimits { .. }
+            | ProviderQuery::GenerateText { .. } => {
+                unreachable!("text generation queries use the direct route")
             }
-            ProviderQuery::GenerateText { .. } => unreachable!("generation uses the direct route"),
             ProviderQuery::SelectSessionModel {
                 endpoint,
                 session_key,
@@ -840,13 +835,16 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
             )
             .await;
         }
-        ProviderQuery::TextGenerationModelLimits { reply, .. } => {
-            send_reply(
-                call,
-                reply,
-                crate::ProviderTextGenerationModelLimitsOutcome::Rejected,
-            )
-            .await;
+        ProviderQuery::TextGenerationModelLimits { request, reply, .. } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = snapshot.models.text_generation_model_limits(
+                shared.runtime_directory.as_ref(),
+                &snapshot.accounts,
+                &snapshot.catalog,
+                snapshot.routing.as_ref(),
+                request,
+            );
+            send_reply(call, reply, outcome).await;
         }
         ProviderQuery::GenerateText {
             request,

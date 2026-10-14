@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use foundation::process::supervision::SupervisorPhase;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 
 use crate::{
     driver::OpenClawDriver,
@@ -79,28 +79,28 @@ impl OpenClawDriver {
         &self,
         request: crate::gateway::request::OpenClawBrowserGatewayRequest,
     ) -> crate::port::OpenClawGatewayRequestOutcome {
-        self.gateway.lock().await.browser_request(request).await
+        self.gateway.browser_request(request).await
     }
 
     pub async fn mcp_app_request(
         &self,
         request: crate::gateway::request::OpenClawMcpAppGatewayRequest,
     ) -> crate::port::OpenClawGatewayRequestOutcome {
-        self.gateway.lock().await.mcp_app_request(request).await
+        self.gateway.mcp_app_request(request).await
     }
 
     pub async fn question_list(
         &self,
         request: crate::gateway::request::OpenClawQuestionListGatewayRequest,
     ) -> crate::port::OpenClawGatewayRequestOutcome {
-        self.gateway.lock().await.question_list(request).await
+        self.gateway.question_list(request).await
     }
 
     pub async fn question_resolve(
         &self,
         request: crate::gateway::request::OpenClawQuestionResolveGatewayRequest,
     ) -> crate::port::OpenClawGatewayRequestOutcome {
-        self.gateway.lock().await.question_resolve(request).await
+        self.gateway.question_resolve(request).await
     }
 
     pub fn control_lease(&self) -> ControlLease {
@@ -189,7 +189,7 @@ impl OpenClawGatewaySnapshotObservation {
 }
 
 pub struct OpenClawGatewayHealthObservation {
-    gateway: Arc<Mutex<OpenClawGateway>>,
+    gateway: Arc<OpenClawGateway>,
     probe: bool,
 }
 
@@ -200,12 +200,12 @@ impl OpenClawGatewayHealthObservation {
         crate::gateway::wire::GatewayHealthSnapshot,
         crate::gateway::client::GatewayClientError,
     > {
-        self.gateway.lock().await.observe_health(self.probe).await
+        self.gateway.observe_health(self.probe).await
     }
 }
 
 pub struct OpenClawGatewayStatusObservation {
-    gateway: Arc<Mutex<OpenClawGateway>>,
+    gateway: Arc<OpenClawGateway>,
     include_channel_summary: bool,
 }
 
@@ -217,8 +217,6 @@ impl OpenClawGatewayStatusObservation {
         crate::gateway::client::GatewayClientError,
     > {
         self.gateway
-            .lock()
-            .await
             .observe_status(self.include_channel_summary)
             .await
     }
@@ -229,7 +227,7 @@ pub struct ControlLease(ControlLeaseInner);
 enum ControlLeaseInner {
     Unavailable,
     Probe {
-        gateway: Arc<Mutex<OpenClawGateway>>,
+        gateway: Arc<OpenClawGateway>,
         lease: foundation::process::supervision::SupervisorLease,
     },
 }
@@ -240,7 +238,7 @@ impl ControlLease {
     }
 
     pub fn probe(
-        gateway: Arc<Mutex<OpenClawGateway>>,
+        gateway: Arc<OpenClawGateway>,
         lease: foundation::process::supervision::SupervisorLease,
     ) -> Self {
         Self(ControlLeaseInner::Probe { gateway, lease })
@@ -272,7 +270,7 @@ impl ControlLease {
                 OpenClawControlReadiness::Unavailable
             }
             ControlLeaseInner::Probe { gateway, lease } => {
-                let readiness = gateway.lock().await.control_readiness_snapshot().await;
+                let readiness = gateway.control_readiness_snapshot().await;
                 if lease.is_cancelled() {
                     OpenClawControlReadiness::Unavailable
                 } else {

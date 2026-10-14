@@ -23,8 +23,8 @@ const { cpSync, existsSync, readdirSync, rmSync, mkdirSync, realpathSync, readFi
 const { join, dirname, basename } = require('path');
 const { safeRmSync } = require('./lib/safe-delete.mjs');
 const {
-  PLATFORM_NATIVE_SCOPES, targetArchitectures, matchesTarget,
-  cleanupOnnxRuntimeBinaries, cleanupNativeDependencyTree,
+  targetArchitectures, matchesTarget,
+  cleanupOnnxRuntimeBinaries, cleanupNativeDependencyTree, isNonTargetNativePackage,
 } = require('./lib/native-platform.cjs');
 const STRIP_LINKER_ARTIFACTS = process.env.MATCHACLAW_STRIP_LINKER_ARTIFACTS === '1';
 
@@ -391,28 +391,37 @@ function cleanupMatchaAgentVendor(vendorDir, platform, arch) {
 
 // FileMatcher exclusions run before AsarPackager, including asarUnpack selection.
 // Keep the same hook owner; do not prune shared source node_modules for one target.
+const nativePackageExclusions = new WeakMap();
 exports.beforePack = async function beforePack(context) {
   const platform = context.electronPlatformName;
   const arch = resolveArch(context.arch);
-  const pty = join(context.packager.info.appDir, 'node_modules', '@lydell', 'node-pty', 'package.json');
-  const pkg = JSON.parse(readFileSync(pty, 'utf8'));
+  const info = context.packager.info;
+  const pty = join(info.appDir, 'node_modules', '@lydell', 'node-pty', 'package.json');
   const ptyRequire = require('module').createRequire(pty);
   for (const targetArch of targetArchitectures(arch)) {
     const target = ptyRequire.resolve(`@lydell/node-pty-${platform}-${targetArch}`);
     if (!existsSync(target)) throw new Error(`Missing target node-pty asset: ${target}`);
   }
-  const exclusions = [];
-  for (const name of Object.keys(pkg.optionalDependencies)) {
-    const match = name.slice('@lydell/'.length).match(PLATFORM_NATIVE_SCOPES['@lydell']);
-    if (match && !matchesTarget(platform, arch, match[1], match[2])) {
-      exclusions.push(`!**/node_modules/${name}{,/**/*}`);
+  const builderRequire = require('module').createRequire(require.resolve('electron-builder/package.json'));
+  const { getCollectorByPackageManager } = builderRequire('app-builder-lib/out/node-module-collector');
+  const { nodeModules } = await getCollectorByPackageManager(
+    await info.getPackageManager(), info.appDir, info.tempDirManager,
+  ).getNodeModules({ packageName: info.metadata.name });
+  const exclusions = new Set();
+  const pending = [...nodeModules];
+  while (pending.length > 0) {
+    const dependency = pending.pop();
+    if (isNonTargetNativePackage(dependency.name, platform, arch)) {
+      exclusions.add(`!**/node_modules/${dependency.name}{,/**/*}`);
     }
+    if (dependency.dependencies) pending.push(...dependency.dependencies);
   }
   // Extend the existing root whitelist; a separate exclusion-only set includes **/*.
   const files = context.packager.config.files.find(fileSet => fileSet.from == null && fileSet.to == null);
   // A packager can run x64 then arm64 with this same file set.
-  files.filter = files.filter.filter(pattern =>
-    !pattern.startsWith('!**/node_modules/@lydell/node-pty-')).concat(exclusions);
+  const previousExclusions = nativePackageExclusions.get(files) || new Set();
+  files.filter = files.filter.filter(pattern => !previousExclusions.has(pattern)).concat([...exclusions]);
+  nativePackageExclusions.set(files, exclusions);
 };
 
 // ── Main hook ────────────────────────────────────────────────────────────────

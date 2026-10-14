@@ -65,7 +65,7 @@ pub struct OpenClawDriver {
     pub(crate) runtime_host_mcp_executable: PathBuf,
     pub(crate) runtime_host_mcp_state_dir: PathBuf,
     pub diagnostic_reporter: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
-    pub gateway: Arc<Mutex<OpenClawGateway>>,
+    pub gateway: Arc<OpenClawGateway>,
     pub gateway_control: OpenClawGatewayControl,
     pub session_gateway: OpenClawSessionGateway,
     pub control_readiness: watch::Receiver<u64>,
@@ -175,10 +175,6 @@ impl OpenClawDriver {
 
     pub fn state_dir(&self) -> &CanonicalStateDir {
         &self.state_dir
-    }
-
-    pub fn start_control_supervision(&self) {
-        self.gateway_control.start_supervision();
     }
 
     pub fn take_control_supervisor(
@@ -377,7 +373,7 @@ impl PreparedOpenClaw {
         let graceful_stop = gateway.graceful_stop_policy();
         let session_gateway = gateway.session_gateway();
         let usage = gateway.usage_projection();
-        let gateway = Arc::new(Mutex::new(gateway));
+        let gateway = Arc::new(gateway);
         let lifecycle_logs = LifecycleLogBuffer::new();
         let diagnostic_state = LifecycleDiagnosticState::new();
         let report_diagnostic = self.report_diagnostic;

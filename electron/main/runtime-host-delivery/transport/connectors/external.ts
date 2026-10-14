@@ -140,7 +140,7 @@ function isRequest(value: unknown): value is Request {
     case 'externalConnectors.upsert':
       return hasExactKeys(value.input, ['kind', 'connector'])
         && value.input.kind === 'upsert'
-        && isConnectorDraft(value.input.connector);
+        && isConnector(value.input.connector);
     default:
       return false;
   }
@@ -154,7 +154,7 @@ function isSuccessResponse(request: Request, value: unknown): boolean {
   const operation = request.operationId;
   if (operation === 'externalConnectors.list') {
     return isRecord(value) && hasExactKeys(value, ['connectors'])
-      && Array.isArray(value.connectors) && value.connectors.every(isPublicConnector);
+      && Array.isArray(value.connectors) && value.connectors.every(isConnector);
   }
   if (operation === 'externalConnectors.catalog') {
     return isRecord(value) && hasExactKeys(value, ['programs'])
@@ -167,41 +167,12 @@ function isSuccessResponse(request: Request, value: unknown): boolean {
         : request.input.sessionIdentity === undefined);
   }
   if (operation === 'externalConnectors.get') {
-    return isRecord(value) && hasExactKeys(value, ['connector']) && isPublicConnector(value.connector);
+    return isRecord(value) && hasExactKeys(value, ['connector']) && isConnector(value.connector);
   }
   return false;
 }
 
-function isConnectorDraft(value: unknown): boolean {
-  if (!isRecord(value) || !hasOnlyKeys(value, [
-    'id', 'kind', 'displayName', 'description', 'enabled', 'workspaceId', 'sourceId',
-    'mcpServerProgram', 'tags', 'command', 'args', 'cwd', 'env', 'url', 'transport',
-    'headers', 'connectionTimeoutMs', 'baseUrl', 'provider', 'packageName', 'config',
-    'secretEnv', 'secretHeaders', 'secretConfigRefs',
-  ]) || !isConnectorId(value.id) || !isConnectorKind(value.kind)) return false;
-  return optionalText(value.displayName)
-    && optionalText(value.description)
-    && optionalBoolean(value.enabled)
-    && optionalText(value.workspaceId)
-    && optionalText(value.sourceId)
-    && optionalMcpProgram(value.mcpServerProgram)
-    && optionalStringArray(value.tags)
-    && optionalSecretReferences(value, value.kind)
-    && optionalText(value.command)
-    && optionalStringArray(value.args)
-    && optionalText(value.cwd)
-    && optionalStringMap(value.env)
-    && optionalText(value.url)
-    && (value.transport === undefined || value.transport === 'streamable-http' || value.transport === 'sse')
-    && optionalStringMap(value.headers)
-    && optionalPositive(value.connectionTimeoutMs)
-    && optionalText(value.baseUrl)
-    && optionalText(value.provider)
-    && optionalText(value.packageName)
-    && optionalRecord(value.config);
-}
-
-function isPublicConnector(value: unknown): boolean {
+function isConnector(value: unknown): boolean {
   if (!isRecord(value) || !hasOnlyKeys(value, [
     'id', 'kind', 'displayName', 'description', 'enabled', 'workspaceId', 'sourceId',
     'mcpServerProgram', 'tags', 'command', 'args', 'cwd', 'env', 'url', 'transport',

@@ -97,32 +97,14 @@ type SkillMissingProjection = Readonly<Partial<{
   os: string[];
 }>>;
 
-export type SkillStatusEntry = Readonly<{
+export type SkillStatusEntry = Omit<NativeSkillStatusEntry, 'key' | 'enabled'> & Readonly<{
   skillKey: string;
-  slug?: string;
-  name: string;
-  description: string;
   disabled: boolean;
-  selectable: boolean;
-  unavailableReason: SkillUnavailableReason | null;
-  eligible: boolean;
-  missingCategories: SkillMissingCategory[];
   missing?: SkillMissingProjection;
-  uninstallable?: boolean;
-  bundled?: boolean;
-  always?: boolean;
-  emoji?: string;
-  source?: SkillsSafeSource;
-  baseDir?: string;
-  filePath?: string;
 }>;
 
-export type SkillsStatusResult = Readonly<{
+export type SkillsStatusResult = Omit<NativeSkillsStatusResult, 'skills'> & Readonly<{
   skills: SkillStatusEntry[];
-  ready?: boolean;
-  refreshing?: boolean;
-  updatedAt?: number | null;
-  error?: string | null;
 }>;
 export type SkillsDetailRequest = Readonly<{ slug: string }>;
 export type SkillsDetailResult = Readonly<{
@@ -544,24 +526,7 @@ function normalizeSkillStatusEntry(value: unknown): NativeSkillStatusEntry | nul
 }
 
 
-type ProjectedSkillStatusEntry = Readonly<{
-  key: string;
-  slug?: string;
-  name: string;
-  description: string;
-  enabled: boolean;
-  selectable: boolean;
-  unavailableReason: SkillUnavailableReason | null;
-  missingCategories: SkillMissingCategory[];
-  eligible: boolean;
-  uninstallable?: boolean;
-  bundled?: boolean;
-  always?: boolean;
-  emoji?: string;
-  source?: SkillsSafeSource;
-  baseDir?: string;
-  filePath?: string;
-}>;
+type ProjectedSkillStatusEntry = NativeSkillStatusEntry;
 
 function normalizeProjectedSkillStatusEntry(entry: ProjectedSkillStatusEntry): NativeSkillStatusEntry {
   return {
