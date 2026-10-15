@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
-  handleAppRoutesMock: vi.fn(),
+  handleMainAppRoutesMock: vi.fn(),
   sendJsonMock: vi.fn(),
   setCorsHeadersMock: vi.fn(),
   loggerErrorMock: vi.fn(),
@@ -11,7 +11,8 @@ const hoisted = vi.hoisted(() => ({
 }));
 
 vi.mock('../../electron/api/routes/app', () => ({
-  handleAppRoutes: (...args: unknown[]) => hoisted.handleAppRoutesMock(...args),
+  handleMainAppRoutes: (...args: unknown[]) => hoisted.handleMainAppRoutesMock(...args),
+  handleAppRoutes: vi.fn(),
 }));
 vi.mock('../../electron/api/routes/files', () => ({ handleFileRoutes: vi.fn() }));
 vi.mock('../../electron/api/routes/diagnostics', () => ({ handleDiagnosticsRoutes: vi.fn() }));
@@ -58,11 +59,14 @@ describe('Host API server public error boundary', () => {
   });
 
   it('does not project a route failure detail or credential through the public API', async () => {
-    hoisted.handleAppRoutesMock.mockRejectedValue(
+    hoisted.handleMainAppRoutesMock.mockRejectedValue(
       new Error('failed with Authorization: Bearer private-token at /private/native/path'),
     );
     const { createHostApiRequestHandler } = await import('../../electron/api/server');
-    const handler = createHostApiRequestHandler({} as never, 13210);
+    const handler = createHostApiRequestHandler({
+      runtime: Promise.resolve({}),
+      signal: new AbortController().signal,
+    } as never, 13210);
 
     await handler(
       { url: '/api/app/browser-relay-info', method: 'GET', headers: {} } as never,
@@ -112,7 +116,10 @@ describe('Host API server Fleet runtime-agent ingress proxy', () => {
     });
     const upstreamPort = await listen(upstream);
     const { getHostApiToken, startHostApiServer, waitForHostApiServerListening } = await import('../../electron/api/server');
-    const hostApiServer = startHostApiServer({} as never, 0, upstreamPort);
+    const hostApiServer = startHostApiServer({
+      runtime: Promise.resolve({ runtimeHostTransportPort: upstreamPort }),
+      signal: new AbortController().signal,
+    } as never, 0);
 
     try {
       await waitForHostApiServerListening(hostApiServer);

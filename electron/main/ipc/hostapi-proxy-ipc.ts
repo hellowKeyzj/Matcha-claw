@@ -3,7 +3,7 @@ import { Readable, addAbortSignal } from 'node:stream';
 import { HOST_API_STARTUP_PATHS, HOST_API_STARTUP_TRACE_HEADER, type HostApiProxyFailureCode } from '../../../src/lib/host-api-transport-contract';
 import { isTraceEnabled, startupTrace, traceDebug } from '../../utils/trace-logger';
 import { ipcMain } from 'electron';
-import { isHostApiRequestAllowed } from '../../api/route-boundary';
+import { getHostApiRequestDependency } from '../../api/route-boundary';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import { getHostApiBaseUrl, getHostApiToken, waitForHostApiReady } from '../../api/server';
 import { handleE2EHostApiFetch } from '@electron/e2e-fixture-loader';
@@ -15,6 +15,7 @@ import {
   summarizeIdentifier,
 } from '../runtime-host-delivery/transport/sessions/trace';
 import { SESSION_PAGE_HEADER, type RendererSessionObservationRegistry } from '../renderer-event-routes';
+import { releaseStagedAttachments } from './dialog-attachment-staging';
 
 type HostApiFetchRequest = {
   requestId?: string;
@@ -98,6 +99,22 @@ function outcomeFromHostApiBody(body: unknown): string {
   return typeof value === 'string' ? value : 'unknown';
 }
 
+function sessionSendStagedAttachmentIds(request: HostApiFetchRequest, path: string, method: string): string[] {
+  if (method !== 'POST' || path.split(/[?#]/, 1)[0] !== '/api/capabilities/execute') return [];
+  const body = typeof request?.body === 'string' ? parseHostApiJson(request.body) : request?.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return [];
+  const { id, operationId, input } = body as Record<string, unknown>;
+  if (id !== 'session.prompt' || (operationId !== 'sessions.prompt' && operationId !== 'sessions.sendWithMedia')
+    || !input || typeof input !== 'object' || Array.isArray(input)) return [];
+  const { attachments } = input as Record<string, unknown>;
+  if (!Array.isArray(attachments)) return [];
+  return attachments.flatMap((attachment) => {
+    if (!attachment || typeof attachment !== 'object' || Array.isArray(attachment)) return [];
+    const { stagedAttachmentId } = attachment as Record<string, unknown>;
+    return typeof stagedAttachmentId === 'string' && stagedAttachmentId.length > 0 ? [stagedAttachmentId] : [];
+  });
+}
+
 function parseHostApiJson(value: string): unknown {
   try {
     return JSON.parse(value);
@@ -106,7 +123,7 @@ function parseHostApiJson(value: string): unknown {
   }
 }
 
-async function waitForHostApiReadyOrAbort(signal: AbortSignal): Promise<void> {
+async function waitForHostApiReadyOrAbort(signal: AbortSignal, runtimeReady?: Promise<unknown>): Promise<void> {
   if (signal.aborted) {
     throw new Error('Host API request aborted.');
   }
@@ -118,7 +135,7 @@ async function waitForHostApiReadyOrAbort(signal: AbortSignal): Promise<void> {
   });
 
   try {
-    await Promise.race([waitForHostApiReady(), abortPromise]);
+    await Promise.race([Promise.all([waitForHostApiReady(), runtimeReady]), abortPromise]);
   } finally {
     if (abortListener) {
       signal.removeEventListener('abort', abortListener);
@@ -165,7 +182,11 @@ function fetchAdmission(
   });
 }
 
-export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionObservationRegistry): void {
+export function registerHostApiProxyHandlers(
+  runtimeReady: Promise<unknown>,
+  sessionObservers?: RendererSessionObservationRegistry,
+): void {
+  void runtimeReady.catch(() => undefined);
   // requestId → AbortController 注册表，让 renderer 通过 hostapi:abort 真正取消正在进行的 upstream fetch，
   // 避免页面切换后还白白等几秒再丢弃响应。
   const inflightRequests = new Map<string, InflightHostApiRequest>();
@@ -194,6 +215,7 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
     const requestId = typeof request?.requestId === 'string' ? request.requestId : '';
     const normalizedPath = normalizeHostApiProxyPath(request?.path);
     const method = (request?.method || 'GET').toUpperCase();
+    const stagedAttachmentIds = sessionSendStagedAttachmentIds(request, normalizedPath, method);
     const traceActive = traceStartedAt !== 0 && sessionTraceId !== null
       && normalizedPath.split(/[?#]/, 1)[0] === '/api/capabilities/execute';
     const startupPath = isTraceEnabled() ? normalizedPath.split(/[?#]/, 1)[0] : '';
@@ -221,7 +243,8 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
     try {
       traceStartup('boundary.start');
       const routeUrl = new URL(normalizedPath, 'http://127.0.0.1');
-      if (!isHostApiRequestAllowed(method, routeUrl.pathname)) {
+      const dependency = getHostApiRequestDependency(method, routeUrl.pathname);
+      if (dependency === null) {
         throw new Error(`hostapi route is not available: ${method} ${routeUrl.pathname}`);
       }
       traceStartup('boundary.end', () => ({ outcome: 'passed' }));
@@ -265,7 +288,7 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
         trace('ready.start');
         startupStage = 'ready';
         traceStartup('ready.start');
-        await waitForHostApiReadyOrAbort(controller.signal);
+        await waitForHostApiReadyOrAbort(controller.signal, dependency === 'runtime' ? runtimeReady : undefined);
         trace('ready.end', () => ({ outcome: 'ready' }));
         traceStartup('ready.end', () => ({ outcome: 'ready' }));
         startupStage = null;
@@ -406,6 +429,9 @@ export function registerHostApiProxyHandlers(sessionObservers?: RendererSessionO
           code: inflightRequest?.failureCode ?? 'UNAVAILABLE',
         },
       };
+    } finally {
+      // A materializing send has already taken its entire batch out of this registry.
+      if (stagedAttachmentIds.length > 0) await releaseStagedAttachments(stagedAttachmentIds);
     }
   });
 }

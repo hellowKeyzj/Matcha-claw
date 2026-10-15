@@ -6,8 +6,6 @@ use channels::{ports::ChannelOps, trace::ChannelTraceSpan};
 use connectors::ports::ConnectorOps;
 use foundation::process::supervision::{CommandReceipt, SupervisorHandle, SupervisorPhase};
 use platform::exchange::InvocationOutcome;
-use provider as provider_module;
-use provider::ProviderHandle;
 use runtime_directory::{OwnedRuntimeFuture, RuntimeDriverIdentity};
 use serde_json::Value;
 use zeroize::Zeroizing;
@@ -24,7 +22,7 @@ use sessions_module::{
     delete::{SessionDeleteCommand, SessionDeleteOutcome},
     model_selection::{
         OpenClawPatchRejection, ResolvedSessionModelSelection, SessionModelSelectionBinding,
-        SessionModelSelectionOutcome, SessionModelSelectionRejection, SessionRuntimeModelFacts,
+        SessionModelSelectionOutcome, SessionModelSelectionRejection,
     },
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{Attachment, SessionSendCommand, SessionSendOutcome},

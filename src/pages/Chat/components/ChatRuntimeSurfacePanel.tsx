@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type WheelEvent } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type WheelEvent } from 'react';
 import { AlertCircle, Keyboard, Loader2, MousePointerClick, PanelTopOpen, RefreshCw, SquareActivity } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -165,6 +165,21 @@ function BrowserRuntimePanel({ surface }: { surface: BrowserSurface }) {
   const [error, setError] = useState<string | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
   const wheelBusyRef = useRef(false);
+  const presentationRef = useRef<{ surface: BrowserSurface; revision: number } | null>(null);
+  useLayoutEffect(() => {
+    presentationRef.current = { surface, revision: 0 };
+    return () => {
+      presentationRef.current = null;
+    };
+  }, [surface]);
+  const beginBrowserUpdate = useCallback(() => {
+    const presentation = presentationRef.current;
+    if (!presentation || presentation.surface !== surface) {
+      return null;
+    }
+    const revision = ++presentation.revision;
+    return () => presentationRef.current === presentation && presentation.revision === revision;
+  }, [surface]);
   const title = surface.title ?? '浏览器标签页';
   const currentTargetId = resolveTargetId(surface, selectedTargetId, tabs);
 
@@ -178,11 +193,14 @@ function BrowserRuntimePanel({ surface }: { surface: BrowserSurface }) {
     { timeoutMs: Math.max(timeoutMs + 5_000, BROWSER_REFRESH_TIMEOUT_MS) },
   ), [surface]);
 
-  const captureScreenshot = useCallback(async (targetId: string) => {
-    if (!targetId) {
+  const captureScreenshot = useCallback(async (targetId: string, isCurrent: () => boolean) => {
+    if (!targetId || !isCurrent()) {
       return;
     }
     const result = await requestBrowser<unknown>('POST', '/screenshot', { targetId, type: 'png' }, BROWSER_REQUEST_TIMEOUT_MS);
+    if (!isCurrent()) {
+      return;
+    }
     const nextScreenshot = readBrowserScreenshot(result);
     if (!nextScreenshot) {
       throw new Error('截图结果不可显示。');
@@ -196,26 +214,40 @@ function BrowserRuntimePanel({ surface }: { surface: BrowserSurface }) {
     }
   }, [requestBrowser]);
 
-  const refreshBrowser = useCallback(async (preferredTargetId?: string) => {
+  const refreshBrowser = useCallback(async (preferredTargetId?: string, isCurrent = beginBrowserUpdate()) => {
+    if (!isCurrent || !isCurrent()) {
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const tabsResult = await requestBrowser<unknown>('GET', '/tabs', undefined, 10_000);
+      if (!isCurrent()) {
+        return;
+      }
       const nextTabs = readBrowserTabs(tabsResult);
       setTabs(nextTabs);
       const targetId = resolveAvailableTargetId(nextTabs, preferredTargetId, selectedTargetId, surface.targetId);
       setSelectedTargetId(targetId || null);
       if (targetId) {
-        await captureScreenshot(targetId);
+        await captureScreenshot(targetId, isCurrent);
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      if (isCurrent()) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
     } finally {
-      setBusy(false);
+      if (isCurrent()) {
+        setBusy(false);
+      }
     }
-  }, [captureScreenshot, requestBrowser, selectedTargetId, surface.targetId]);
+  }, [beginBrowserUpdate, captureScreenshot, requestBrowser, selectedTargetId, surface.targetId]);
 
   useEffect(() => {
+    const isCurrent = beginBrowserUpdate();
+    if (!isCurrent) {
+      return;
+    }
     setSelectedTargetId(surface.targetId);
     setUrlInput(surface.url ?? '');
     setScreenshot(null);
@@ -224,33 +256,50 @@ function BrowserRuntimePanel({ surface }: { surface: BrowserSurface }) {
     void (async () => {
       try {
         const tabsResult = await requestBrowser<unknown>('GET', '/tabs', undefined, 10_000);
+        if (!isCurrent()) {
+          return;
+        }
         const nextTabs = readBrowserTabs(tabsResult);
         setTabs(nextTabs);
         const targetId = resolveAvailableTargetId(nextTabs, surface.targetId, null, surface.targetId);
         setSelectedTargetId(targetId || null);
         if (targetId) {
-          await captureScreenshot(targetId);
+          await captureScreenshot(targetId, isCurrent);
         }
       } catch (caught) {
-        setError(caught instanceof Error ? caught.message : String(caught));
+        if (isCurrent()) {
+          setError(caught instanceof Error ? caught.message : String(caught));
+        }
       } finally {
-        setBusy(false);
+        if (isCurrent()) {
+          setBusy(false);
+        }
       }
     })();
-  }, [captureScreenshot, requestBrowser, surface.targetId, surface.url]);
+  }, [beginBrowserUpdate, captureScreenshot, requestBrowser, surface.targetId, surface.url]);
 
   const runAndRefresh = useCallback(async (operation: () => Promise<string | void>) => {
+    const isCurrent = beginBrowserUpdate();
+    if (!isCurrent) {
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const targetId = await operation();
-      await refreshBrowser(targetId || currentTargetId);
+      if (isCurrent()) {
+        await refreshBrowser(targetId || currentTargetId, isCurrent);
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      if (isCurrent()) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
     } finally {
-      setBusy(false);
+      if (isCurrent()) {
+        setBusy(false);
+      }
     }
-  }, [currentTargetId, refreshBrowser]);
+  }, [beginBrowserUpdate, currentTargetId, refreshBrowser]);
 
   const handleStart = () => {
     void runAndRefresh(async () => {

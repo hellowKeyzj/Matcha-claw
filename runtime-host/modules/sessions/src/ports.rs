@@ -332,12 +332,7 @@ pub trait SessionOpenOps: Send + Sync {
         &'a self,
         command: &'a timeline::Command,
         view: SessionView,
-        provider_handle: provider_module::ProviderHandle,
     ) -> SessionFuture<'a, SessionView>;
-
-    fn agent_default_model<'a>(&'a self, _agent_id: String) -> SessionFuture<'a, Option<String>> {
-        Box::pin(async { None })
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -2,7 +2,10 @@ use std::{
     fs::{File, OpenOptions, TryLockError},
     future::Future,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use tokio_util::sync::CancellationToken;
@@ -13,7 +16,8 @@ use super::source_lifecycle;
 
 #[derive(Debug)]
 pub(crate) struct SourceExecution {
-    _lock: File,
+    lock: Option<File>,
+    notify_on_release: AtomicBool,
     root: PathBuf,
     task_id: String,
     cancellation: CancellationToken,
@@ -22,11 +26,16 @@ pub(crate) struct SourceExecution {
 impl SourceExecution {
     pub(super) fn new(lock: File, root: &Path, task_id: String) -> Arc<Self> {
         Arc::new(Self {
-            _lock: lock,
+            lock: Some(lock),
+            notify_on_release: AtomicBool::new(false),
             root: root.to_path_buf(),
             task_id,
             cancellation: CancellationToken::new(),
         })
+    }
+
+    pub(super) fn published(&self) {
+        self.notify_on_release.store(true, Ordering::Relaxed);
     }
 
     pub(crate) fn task_id(&self) -> &str {
@@ -51,6 +60,7 @@ impl SourceExecution {
     where
         F: Future<Output = Result<T, WikiFailure>>,
     {
+        self.published();
         tokio::pin!(future);
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
@@ -69,6 +79,21 @@ impl SourceExecution {
 
     pub(crate) fn finish<T>(&self, result: &Result<T, WikiFailure>) -> Result<(), WikiFailure> {
         source_lifecycle::finish_source_execution(&self.root, &self.task_id, result.as_ref().err())
+    }
+}
+
+pub(super) fn execution_releases() -> &'static tokio::sync::watch::Sender<u64> {
+    static RELEASES: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+    RELEASES.get_or_init(|| tokio::sync::watch::channel(0).0)
+}
+
+impl Drop for SourceExecution {
+    fn drop(&mut self) {
+        drop(self.lock.take());
+        // Failed staging never published work and must not wake itself indefinitely.
+        if self.notify_on_release.load(Ordering::Relaxed) {
+            execution_releases().send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
     }
 }
 

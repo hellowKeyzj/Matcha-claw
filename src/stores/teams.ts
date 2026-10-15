@@ -349,7 +349,14 @@ async function invalidateRunGraph(target: TeamDesignTarget): Promise<void> {
   }
 }
 
+interface TeamRunListRead {
+  promise: Promise<void>;
+  deletedRunIds: Set<string>;
+  next?: TeamRunListRead;
+}
+
 const snapshotInFlightByTeamId = new Map<string, { runId: string | undefined; dirty: boolean; promise: Promise<void> }>();
+const runListReads = new Map<string, TeamRunListRead>();
 const actionInFlightByKey = new Map<string, { requestId: string; promise: Promise<void>; operation?: string; removed?: boolean }>();
 
 export function planTeamSkillCreation(teams: TeamMeta[], candidate: TeamSkillCandidate): TeamSkillCreationPlan {
@@ -1576,39 +1583,81 @@ export const useTeamsStore = create<TeamsState>()(
       },
       syncRunList: async (teamId) => {
         resolveTeamMeta(get().teams, teamId);
-        const result = await listTeamRuns({ teamId });
-        set((state) => {
-          const runtimeRunIds = result.runs.map((run) => run.runId);
-          const activeRunId = state.teams.find((team) => team.id === teamId)?.activeRunId;
-          const nextActiveRunId = activeRunId && runtimeRunIds.includes(activeRunId)
-            ? activeRunId
-            : selectMostRecentRunId(runtimeRunIds, Object.fromEntries(result.runs.map((run) => [run.runId, run])));
-          const nextActiveRun = nextActiveRunId ? result.runs.find((run) => run.runId === nextActiveRunId) : undefined;
-          const currentProjectedRunId = state.runByTeamId[teamId]?.runId;
-          const shouldClearTeamRunProjection = activeRunId !== nextActiveRunId || (currentProjectedRunId !== undefined && currentProjectedRunId !== nextActiveRunId);
-          const shouldUpdateActiveRunId = activeRunId !== nextActiveRunId;
-          const shouldUpdateRunIds = !equalStringArray(state.runIdsByTeamId[teamId], runtimeRunIds);
-          return {
-            teams: shouldUpdateActiveRunId
-              ? state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: nextActiveRunId, updatedAt: Date.now() } : team)
-              : state.teams,
-            runIdsByTeamId: shouldUpdateRunIds ? { ...state.runIdsByTeamId, [teamId]: runtimeRunIds } : state.runIdsByTeamId,
-            runListByTeamId: { ...state.runListByTeamId, [teamId]: result.runs },
-            runsById: {
-              ...removeRunIdsFromRecord(state.runsById, state.runIdsByTeamId[teamId] ?? []),
-              ...Object.fromEntries(result.runs.map((run) => [run.runId, run])),
-            },
-            ...(shouldClearTeamRunProjection ? emptyTeamRunProjection(teamId, state) : {}),
-            runByTeamId: {
-              ...state.runByTeamId,
-              [teamId]: nextActiveRun,
-            },
-            rolesByTeamId: {
-              ...state.rolesByTeamId,
-              [teamId]: nextActiveRun?.sessions ?? [],
-            },
-          };
+        const previous = runListReads.get(teamId);
+        if (previous?.next) return previous.next.promise;
+        const entry: TeamRunListRead = { promise: Promise.resolve(), deletedRunIds: new Set() };
+        if (previous) previous.next = entry;
+        else runListReads.set(teamId, entry);
+        // Coalesce only the next requested list; snapshots and other teams stay independent.
+        entry.promise = (previous ? previous.promise.catch(() => {}) : Promise.resolve()).then(async () => {
+          const baseline = get();
+          const team = baseline.teams.find((team) => team.id === teamId);
+          if (!team) return;
+          const result = await listTeamRuns({ teamId });
+          set((state) => {
+            const currentTeam = state.teams.find((team) => team.id === teamId);
+            if (!currentTeam) return state;
+            const baselineRunIds = new Set(baseline.runIdsByTeamId[teamId] ?? []);
+            const currentRunIds = state.runIdsByTeamId[teamId] ?? [];
+            const currentRunIdSet = new Set(currentRunIds);
+            const baselineRuns = new Map((baseline.runListByTeamId[teamId] ?? []).map((run) => [run.runId, run]));
+            const currentRuns = new Map((state.runListByTeamId[teamId] ?? []).map((run) => [run.runId, run]));
+            const selectionChanged = currentTeam !== team;
+            const activeRunId = currentTeam.activeRunId;
+            const currentProjectedRunId = state.runByTeamId[teamId]?.runId;
+            const runtimeRuns = result.runs.filter((run) => !entry.deletedRunIds.has(run.runId) && (!baselineRunIds.has(run.runId) || currentRunIdSet.has(run.runId)));
+            const runtimeRunIds = new Set(runtimeRuns.map((run) => run.runId));
+            const retainedRunIds = currentRunIds.filter((runId) => !runtimeRunIds.has(runId) && (
+              !baselineRunIds.has(runId)
+              || state.runsById[runId] !== baseline.runsById[runId]
+              || currentRuns.get(runId) !== baselineRuns.get(runId)
+              || (selectionChanged && activeRunId === runId)
+            ));
+            const nextRunIds = [...runtimeRunIds, ...retainedRunIds];
+            const nextRunIdSet = new Set(nextRunIds);
+            const runsById = { ...removeRunIdsFromRecord(state.runsById, currentRunIds.filter((runId) => !nextRunIdSet.has(runId))) };
+            const nextRunList = runtimeRuns.map((run) => {
+              const currentRun = state.runsById[run.runId];
+              const record = currentRun && currentRun !== baseline.runsById[run.runId] ? currentRun : run;
+              const current = currentRuns.get(run.runId);
+              const sessions = current && current.sessions !== baselineRuns.get(run.runId)?.sessions ? current.sessions : run.sessions;
+              runsById[run.runId] = record;
+              return record === run && sessions === run.sessions ? run : { ...record, sessions };
+            });
+            for (const runId of retainedRunIds) {
+              const current = currentRuns.get(runId);
+              if (current) nextRunList.push(current);
+            }
+            const nextActiveRunId = selectionChanged ? activeRunId
+              : activeRunId && nextRunIdSet.has(activeRunId) ? activeRunId : selectMostRecentRunId(nextRunIds, runsById);
+            const nextActiveRun = nextActiveRunId ? runsById[nextActiveRunId] : undefined;
+            const nextActiveSessions = nextRunList.find((run) => run.runId === nextActiveRunId)?.sessions ?? [];
+            const shouldClearTeamRunProjection = activeRunId !== nextActiveRunId || (currentProjectedRunId !== undefined && currentProjectedRunId !== nextActiveRunId);
+            const shouldUpdateActiveRunId = activeRunId !== nextActiveRunId;
+            const shouldUpdateRunIds = !equalStringArray(currentRunIds, nextRunIds);
+            return {
+              teams: shouldUpdateActiveRunId
+                ? state.teams.map((team) => team.id === teamId ? { ...team, activeRunId: nextActiveRunId, updatedAt: Date.now() } : team)
+                : state.teams,
+              runIdsByTeamId: shouldUpdateRunIds ? { ...state.runIdsByTeamId, [teamId]: nextRunIds } : state.runIdsByTeamId,
+              runListByTeamId: { ...state.runListByTeamId, [teamId]: nextRunList },
+              runsById,
+              ...(shouldClearTeamRunProjection ? emptyTeamRunProjection(teamId, state) : {}),
+              ...(shouldClearTeamRunProjection || state.runByTeamId[teamId] === baseline.runByTeamId[teamId] ? {
+                runByTeamId: { ...state.runByTeamId, [teamId]: nextActiveRun },
+              } : {}),
+              ...(shouldClearTeamRunProjection || state.rolesByTeamId[teamId] === baseline.rolesByTeamId[teamId] ? {
+                rolesByTeamId: { ...state.rolesByTeamId, [teamId]: nextActiveSessions },
+              } : {}),
+            };
+          });
+        }).finally(() => {
+          if (runListReads.get(teamId) === entry) {
+            if (entry.next) runListReads.set(teamId, entry.next);
+            else runListReads.delete(teamId);
+          }
         });
+        return entry.promise;
       },
       deleteRun: async (teamId, requestedRunId) => {
         const state = get();
@@ -1627,6 +1676,7 @@ export const useTeamsStore = create<TeamsState>()(
               ? 'Team run deletion outcome is unknown'
               : 'Team run deletion was not confirmed');
           }
+          runListReads.get(teamId)?.deletedRunIds.add(runId);
           removeDesignReads(teamId, runId);
           removeTeamRunRoleSessions(collectTeamRunRoleSessionBindings(get(), teamId, [runId]));
           set((state) => {

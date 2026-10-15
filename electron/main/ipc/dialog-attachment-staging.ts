@@ -75,31 +75,37 @@ export async function releaseStagedAttachments(stagedAttachmentIds: readonly str
 }
 
 export async function consumeStagedAttachment(stagedAttachmentId: string): Promise<Buffer> {
-  const stagedPath = stagedAttachmentPaths.get(stagedAttachmentId);
-  if (!stagedPath) {
-    throw new Error('unavailable');
-  }
-  stagedAttachmentPaths.delete(stagedAttachmentId);
+  return (await consumeStagedAttachments([stagedAttachmentId]))[0];
+}
 
+export async function consumeStagedAttachments(stagedAttachmentIds: readonly string[]): Promise<Buffer[]> {
+  // Take the whole batch before the first await; release can only reclaim unclaimed IDs.
+  const stagedPaths = stagedAttachmentIds.map((id) => {
+    const stagedPath = stagedAttachmentPaths.get(id);
+    stagedAttachmentPaths.delete(id);
+    return stagedPath;
+  });
   try {
+    const ownedPaths = stagedPaths.filter((path): path is string => Boolean(path));
+    if (ownedPaths.length !== stagedPaths.length) throw new Error('unavailable');
     const root = await realpath(getAttachmentStagingDir());
-    const ownedPath = await realpath(stagedPath);
-    if (!isStagingPath(root, ownedPath)) {
-      throw new Error('unavailable');
+    const contents: Buffer[] = [];
+    for (const stagedPath of ownedPaths) {
+      const ownedPath = await realpath(stagedPath);
+      if (!isStagingPath(root, ownedPath)) throw new Error('unavailable');
+      const metadata = await stat(ownedPath);
+      if (!metadata.isFile() || metadata.size > INLINE_ATTACHMENT_MAX_BYTES) throw new Error('unavailable');
+      const content = await readFile(ownedPath);
+      if (content.length !== metadata.size) throw new Error('unavailable');
+      contents.push(content);
     }
-    const metadata = await stat(ownedPath);
-    if (!metadata.isFile() || metadata.size > INLINE_ATTACHMENT_MAX_BYTES) {
-      throw new Error('unavailable');
-    }
-    const content = await readFile(ownedPath);
-    if (content.length !== metadata.size) {
-      throw new Error('unavailable');
-    }
-    return content;
+    return contents;
   } catch {
     throw new Error('unavailable');
   } finally {
-    await unlink(stagedPath).catch(() => undefined);
+    await Promise.all(stagedPaths.map(async (path) => {
+      if (path) await unlink(path).catch(() => undefined);
+    }));
   }
 }
 

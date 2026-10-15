@@ -15,6 +15,10 @@ const NON_ACTIVITY_TITLE_TEXT = new Set([
   'completed',
   'missing result',
 ]);
+const INPUT_PREVIEW_KEYS = [
+  'message', 'prompt', 'task', 'query', 'text', 'description',
+  'action', 'command', 'path', 'url', 'targetUrl', 'targetId', 'target', 'ref', 'name', 'pattern',
+] as const;
 const BLOCK_TEXT_LIMIT = 4000;
 const DETAILS_TEXT_LIMIT = 2000;
 const STRING_PREVIEW_LIMIT = 96;
@@ -237,19 +241,31 @@ function isMeaningfulToolName(name: string): boolean {
   return normalized.length > 0 && normalized !== 'tool' && !NON_ACTIVITY_TITLE_TEXT.has(normalized);
 }
 
-function resolveActivityTitle(input: {
-  primaryTitle: string;
-  detailTitle: string;
-  summary?: string;
-}, t: TFunction<'chat'>): string {
-  const detailTitle = input.detailTitle.trim();
-  if (detailTitle !== input.primaryTitle && isMeaningfulActivityText(detailTitle)) return detailTitle;
+function readInputPreview(value: unknown): string | null {
+  const input = typeof value === 'string' ? parseStructuredText(value) ?? value : value;
+  if (typeof input === 'string') {
+    return stringPreview(input.match(/\S[^\r\n]*/)?.[0] ?? '');
+  }
+  if (!isRecord(input)) return null;
+  for (const key of INPUT_PREVIEW_KEYS) {
+    const text = input[key];
+    if (typeof text !== 'string') continue;
+    const preview = stringPreview(text.match(/\S[^\r\n]*/)?.[0] ?? '');
+    if (preview) return preview;
+  }
+  return null;
+}
 
-  const summary = input.summary?.trim() ?? '';
-  if (summary.length <= 96 && isMeaningfulActivityText(summary)) return summary;
-
-  if (isMeaningfulToolName(input.primaryTitle)) return t('toolActivity.generic.call', { name: input.primaryTitle.trim() });
-  return t('toolActivity.generic.toolCall');
+function resolveActivityTitle(tool: SessionRenderToolCard, t: TFunction<'chat'>): string {
+  const primaryTitle = tool.displayTitle?.trim() || tool.name?.trim() || '';
+  const title = isMeaningfulToolName(primaryTitle)
+    ? t('toolActivity.generic.call', { name: primaryTitle })
+    : t('toolActivity.generic.toolCall');
+  const detailTitle = tool.displayDetail?.trim() ?? '';
+  const preview = detailTitle !== primaryTitle && isMeaningfulActivityText(detailTitle)
+    ? detailTitle
+    : readInputPreview(tool.input) ?? readInputPreview(tool.inputText);
+  return preview && preview !== primaryTitle ? `${title} · ${preview}` : title;
 }
 
 function buildTrailingLabels(tool: SessionRenderToolCard): ToolActivityTrailingLabel[] {
@@ -316,12 +332,7 @@ function buildTextBlocks(tool: SessionRenderToolCard, hasAssistantCanvas: boolea
 }
 
 export function genericToolActivityRenderer(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {
-  const primaryTitle = tool.displayTitle?.trim() || tool.name?.trim() || '';
-  const title = resolveActivityTitle({
-    primaryTitle,
-    detailTitle: tool.displayDetail?.trim() ?? '',
-    summary: tool.summary,
-  }, t);
+  const title = resolveActivityTitle(tool, t);
   const result = tool.result;
   const hasAssistantCanvas = result.kind === 'canvas' && result.preview.kind === 'canvas' && !!result.preview.url;
   const canvasPreview = hasAssistantCanvas

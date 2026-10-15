@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     InvalidProviderModel, ProviderAccount, ProviderAccountAuthMode, ProviderAccountId,
     ProviderApiProtocol, ProviderCascade, ProviderCascadeFault, ProviderEndpoint, ProviderModel,
-    ProviderModelCapability, ProviderModelCatalog, ProviderModelReference, ProviderModelStoreFault,
+    ProviderModelCapability, ProviderModelCatalog, ProviderModelStoreFault,
     ProviderRouting, ProviderRoutingCapability, ProviderTextGenerationModelLimits,
     ProviderTextGenerationModelLimitsOutcome, ProviderTextGenerationModelLimitsRequest,
     ProviderTextGenerationOutcome, ProviderTextGenerationRequest, ProviderTextGenerationUnavailableReason, Resolver,
@@ -366,73 +366,6 @@ impl ProviderModelOwner {
         }
     }
 
-    pub(super) fn accept_runtime_model_refs(
-        &self,
-        runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
-        endpoint: ProviderSessionEndpoint,
-        runtime_model_refs: &[String],
-    ) -> ProviderSessionRuntimeModelsOutcome {
-        if endpoint != ProviderSessionEndpoint::OpenClawLocal {
-            return ProviderSessionRuntimeModelsOutcome::Unsupported;
-        }
-        let Some(capability) = session_model_capability(endpoint) else {
-            return ProviderSessionRuntimeModelsOutcome::Unsupported;
-        };
-        match self.accept_runtime_models(runtime, cascade, capability, runtime_model_refs) {
-            Ok(accepted) => ProviderSessionRuntimeModelsOutcome::Accepted(accepted),
-            Err(()) => ProviderSessionRuntimeModelsOutcome::Unavailable,
-        }
-    }
-
-    pub(super) fn select_session_model_rebound(
-        &self,
-        runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
-        endpoint: ProviderSessionEndpoint,
-        session_key: String,
-        endpoint_session_id: Option<String>,
-        current_model: Option<String>,
-        default_model: Option<String>,
-        trace_id: Option<String>,
-    ) -> ProviderSessionModelSelectionOutcome {
-        if endpoint != ProviderSessionEndpoint::OpenClawLocal {
-            return ProviderSessionModelSelectionOutcome::Unsupported;
-        }
-        let Some(capability) = session_model_capability(endpoint) else {
-            return ProviderSessionModelSelectionOutcome::Unsupported;
-        };
-        let default = match default_model
-            .as_deref()
-            .map(|default_model| {
-                self.resolve_runtime_model_ref(runtime, cascade, capability, default_model)
-            })
-            .transpose()
-        {
-            Ok(default) => default.flatten(),
-            Err(()) => return ProviderSessionModelSelectionOutcome::Unavailable,
-        };
-        let selection = match default {
-            Some(selection) => selection,
-            None => match self.resolve_routing_default(
-                cascade,
-                ProviderRoutingCapability::Chat,
-                runtime,
-            ) {
-                Ok(Some(selection)) => selection,
-                Ok(None) => return ProviderSessionModelSelectionOutcome::Rejected,
-                Err(()) => return ProviderSessionModelSelectionOutcome::Unavailable,
-            },
-        };
-        let _ = current_model;
-        ProviderSessionModelSelectionOutcome::Selected(selection.into_receipt(
-            endpoint,
-            session_key,
-            endpoint_session_id,
-            trace_id,
-        ))
-    }
-
     fn resolve_text_generation_candidates<'a>(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
@@ -498,89 +431,6 @@ impl ProviderModelOwner {
                 && provider_fingerprint
                     .is_none_or(|fingerprint| matcha_provider_fingerprint(account) == fingerprint)
         })
-    }
-
-    fn resolve_runtime_model_ref(
-        &self,
-        runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
-        capability: ProviderModelCapability,
-        runtime_model_ref: &str,
-    ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
-        let identity_ops = runtime.provider_runtime_identity_ops().ok_or(())?;
-        let identities = provider_runtime_identities(identity_ops, cascade.accounts())?;
-        self.resolve_matching(runtime, cascade, capability, |model, account| {
-            runtime_model_ref_for(identity_ops, &identities, account, model).as_deref()
-                == Some(runtime_model_ref)
-        })
-    }
-
-    fn accept_runtime_models(
-        &self,
-        runtime: &dyn ProviderRuntimeDirectory,
-        cascade: &ProviderCascade,
-        capability: ProviderModelCapability,
-        runtime_model_refs: &[String],
-    ) -> Result<Vec<bool>, ()> {
-        let identity_ops = runtime.provider_runtime_identity_ops().ok_or(())?;
-        let identities = provider_runtime_identities(identity_ops, cascade.accounts())?;
-        let accepted = cascade
-            .catalog()
-            .selectable_for(capability)
-            .into_iter()
-            .filter_map(|model| {
-                runtime_model_ref_for(
-                    identity_ops,
-                    &identities,
-                    cascade.account(model.account_id())?,
-                    model,
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        Ok(runtime_model_refs
-            .iter()
-            .map(|runtime_model_ref| accepted.contains(runtime_model_ref))
-            .collect())
-    }
-
-    fn resolve_routing_default(
-        &self,
-        cascade: &ProviderCascade,
-        capability: ProviderRoutingCapability,
-        runtime: &dyn ProviderRuntimeDirectory,
-    ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
-        let Some(route) = cascade
-            .routing()
-            .and_then(|routing| routing.route(capability))
-        else {
-            return Ok(None);
-        };
-        for reference in std::iter::once(route.primary()).chain(route.fallbacks()) {
-            let Some(selection) =
-                self.resolve_routing_reference(cascade, capability, reference, runtime)?
-            else {
-                continue;
-            };
-            return Ok(Some(selection));
-        }
-        Ok(None)
-    }
-
-    fn resolve_routing_reference(
-        &self,
-        cascade: &ProviderCascade,
-        capability: ProviderRoutingCapability,
-        reference: &ProviderModelReference,
-        runtime: &dyn ProviderRuntimeDirectory,
-    ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
-        self.resolve_matching(
-            runtime,
-            cascade,
-            provider_routing_model_capability(capability),
-            |model, _account| {
-                provider_model_matches_routing_reference(model, capability, reference)
-            },
-        )
     }
 
     fn resolve_matching(

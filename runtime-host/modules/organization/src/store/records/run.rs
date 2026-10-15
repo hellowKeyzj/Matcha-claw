@@ -139,12 +139,24 @@ pub(crate) fn restore_runs(records: &[StoredRecord], contents: &ContentStore) ->
         ready.sort_by(|left, right| left.enqueued_at().cmp(&right.enqueued_at()).then_with(|| left.node_id().cmp(right.node_id())));
         let graph = GraphState::from_durable(definition, metadata, GraphLayout::from_durable(positions), executions, ready);
         let graph = GraphState::restore_durable(graph.durable_snapshot()).map_err(|_| StoreFault::InvalidFacts)?;
-        GraphRunFacts::with_lifecycle_and_start_gate(header.team, header.revision, graph, header.runtime, header.lifecycle, header.gate).map_err(|_| StoreFault::InvalidFacts)
+        let mut run = GraphRunFacts::with_lifecycle_and_start_gate(
+            header.team,
+            header.revision,
+            graph,
+            header.runtime,
+            header.lifecycle,
+            header.gate,
+        )
+        .map_err(|_| StoreFault::InvalidFacts)?;
+        run.restore_retired_executions(header.retired_executions)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+        Ok(run)
     }).collect()
 }
 
 pub(crate) fn apply_changes(run: &mut GraphRunFacts, changes: &[RecordChange], contents: &ContentStore) -> Result<(), StoreFault> {
     let mut attempts = Vec::new();
+    let mut retired_executions = None;
     for change in changes {
         let record_key = match change { RecordChange::Put(row) => &row.key, RecordChange::Delete(key) => key };
         if !graph_kind(record_key.kind) || record_key.scope != run.run_id().as_str() { return Err(StoreFault::InvalidFacts); }
@@ -154,6 +166,7 @@ pub(crate) fn apply_changes(run: &mut GraphRunFacts, changes: &[RecordChange], c
                 match row.key.kind {
                     RecordKind::RunHeader => {
                         let header = decode_header(row)?;
+                        retired_executions = Some(header.retired_executions);
                         run.replace_header(header.team, header.revision, header.runtime, header.lifecycle, header.gate);
                     }
                     RecordKind::GraphDefinition => {
@@ -180,5 +193,9 @@ pub(crate) fn apply_changes(run: &mut GraphRunFacts, changes: &[RecordChange], c
     }
     attempts.sort_by(|left, right| left.node_id().cmp(right.node_id()).then_with(|| left.number().cmp(&right.number())));
     for attempt in attempts { run.graph_mut().import_attempt(attempt).map_err(|_| StoreFault::InvalidFacts)?; }
+    if let Some(retired) = retired_executions {
+        run.restore_retired_executions(retired)
+            .map_err(|_| StoreFault::InvalidFacts)?;
+    }
     Ok(())
 }

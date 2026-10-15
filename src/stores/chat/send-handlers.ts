@@ -501,7 +501,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     && get().loadedSessions[currentSessionKey]?.meta.sessionIdentity === recordIdentity;
   const reconcileUnknown = async (error: string): Promise<ChatSendResult> => {
     await get().syncPendingApprovals(currentSessionKey);
-    if (!isCurrent()) return { accepted: false, reason: 'error', error: 'Send result superseded' };
+    if (!isCurrent()) return { accepted: false, reason: 'error', error: 'Send result superseded', outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments) };
     finalizeStoreSendFailure({ set, error });
     return { accepted: false, reason: 'error', error, outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments) };
   };
@@ -528,7 +528,15 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         sessionKey: currentSessionKey,
         clientId: clientMessageId,
       });
-      return { accepted: false, reason: 'error', error: 'Send result superseded' };
+      return {
+        accepted: false,
+        reason: 'error',
+        error: 'Send result superseded',
+        ...(!sendResult.ok && (sendResult.outcome === 'unknown'
+          || !sendResult.outcome && isRecoverableChatSendTimeout(sendResult.error))
+          ? { outcome: 'unknown' as const, attachmentReselectionRequired: attachmentReselectionRequired(attachments) }
+          : {}),
+      };
     }
 
     if (!sendResult.ok) {
@@ -598,7 +606,14 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         sessionKey: currentSessionKey,
         clientId: clientMessageId,
       });
-      return { accepted: false, reason: 'error', error: 'Send result superseded' };
+      return {
+        accepted: false,
+        reason: 'error',
+        error: 'Send result superseded',
+        ...(params.intent || isRecoverableChatSendTimeout(String(error)) || hasTimeoutSignal(error)
+          ? { outcome: 'unknown' as const, attachmentReselectionRequired: attachmentReselectionRequired(attachments) }
+          : {}),
+      };
     }
     const errorMsg = String(error);
     logSessionTrace('send.exception', traceId, () => ({

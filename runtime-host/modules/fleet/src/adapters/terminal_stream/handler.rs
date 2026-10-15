@@ -95,6 +95,10 @@ pub trait TicketPort: Send + Sync + 'static {
     fn close(&self, session: SessionId, generation: Generation) -> TicketFuture<()>;
 
     fn fail(&self, session: SessionId, generation: Generation) -> TicketFuture<()>;
+
+    fn cancellation(&self, _context: &TerminalContext) -> Option<CancellationToken> {
+        Some(CancellationToken::new())
+    }
 }
 
 pub type TicketSummaryFuture = Pin<
@@ -117,6 +121,7 @@ pub type TerminalContextFuture = Pin<
 pub trait FleetTerminalTicketPort: Send + Sync + 'static {
     fn consume_terminal_ticket(&self, ticket: Vec<u8>) -> TicketSummaryFuture;
     fn terminal_context(&self, summary: crate::terminal::SessionSummary) -> TerminalContextFuture;
+    fn terminal_cancellation(&self, context: &TerminalContext) -> Option<CancellationToken>;
     fn close_terminal_fenced(
         &self,
         session: SessionId,
@@ -130,6 +135,10 @@ pub trait FleetTerminalTicketPort: Send + Sync + 'static {
 }
 
 impl FleetTerminalTicketPort for crate::owner::handle::FleetHandle {
+    fn terminal_cancellation(&self, context: &TerminalContext) -> Option<CancellationToken> {
+        crate::owner::handle::FleetHandle::terminal_cancellation(self, context)
+    }
+
     fn consume_terminal_ticket(&self, ticket: Vec<u8>) -> TicketSummaryFuture {
         let owner = self.clone();
         Box::pin(async move { owner.terminal_consume_ticket(ticket).await.map_err(|_| ()) })
@@ -189,6 +198,10 @@ impl<P> TicketPort for OwnerTicketPort<P>
 where
     P: FleetTerminalTicketPort,
 {
+    fn cancellation(&self, context: &TerminalContext) -> Option<CancellationToken> {
+        self.port.terminal_cancellation(context)
+    }
+
     fn consume(&self, ticket: Vec<u8>) -> TicketFuture<TerminalContext> {
         let port = Arc::clone(&self.port);
         Box::pin(async move {
@@ -344,6 +357,11 @@ async fn serve_upgrade_inner(
             return Ok(());
         }
     };
+    let Some(cancellation) = tickets.cancellation(&context) else {
+        let _ = tickets.close(context.session.clone(), context.generation).await;
+        let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
+        return Ok(());
+    };
     let cancellation = {
         let mut active = generations.lock().await;
         if active
@@ -352,7 +370,6 @@ async fn serve_upgrade_inner(
         {
             None
         } else {
-            let cancellation = CancellationToken::new();
             if let Some(previous) = active.insert(
                 context.session.clone(),
                 ActiveGeneration {
@@ -379,6 +396,12 @@ async fn serve_upgrade_inner(
         context.generation,
     );
     let opened = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            finalizer.close(None).await;
+            let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
+            return Ok(());
+        },
         result = provider.open(context.clone()) => match result {
             Ok(opened) => opened,
             Err(_) => {
@@ -391,11 +414,6 @@ async fn serve_upgrade_inner(
                 let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
                 return Ok(());
             }
-        },
-        _ = cancellation.cancelled() => {
-            finalizer.close(None).await;
-            let _ = timeout(OUTPUT_QUEUE_WAIT, write_frame(&mut stream, 8, &[])).await;
-            return Ok(());
         },
         _ = shutdown.cancelled() => {
             finalizer.close(None).await;
@@ -518,6 +536,7 @@ async fn run_session(
         }
     };
     tokio::select! {
+        biased;
         _ = cancellation.cancelled() => Ok(SessionEnd::Closed),
         _ = shutdown.cancelled() => Ok(SessionEnd::Closed),
         result = input => result,

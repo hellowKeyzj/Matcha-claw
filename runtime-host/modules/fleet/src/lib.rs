@@ -91,12 +91,16 @@ pub fn spawn_owner(
         input.ssh_host_keys,
     )?;
     let startup_dispatches = owner.pending_dispatches();
+    let terminal_executions = owner.terminal_executions.clone();
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(input.mailbox_capacity, input.lane_retention),
     );
     Ok((
-        FleetModule::new(FleetHandle::new(handle), startup_dispatches),
+        FleetModule::new(
+            FleetHandle::new(handle, terminal_executions),
+            startup_dispatches,
+        ),
         task,
     ))
 }

@@ -5,7 +5,7 @@
  * File writes use an async buffered writer so that high-frequency logging
  * (e.g. during gateway startup) never blocks the Electron main thread.
  * Only the final `process.on('exit')` handler uses synchronous I/O to
- * guarantee the last few messages are flushed before the process exits.
+ * best-effort flush the remaining queued messages before the process exits.
  */
 import { app } from 'electron';
 import { join } from 'path';
@@ -58,18 +58,22 @@ const FLUSH_SIZE_THRESHOLD = 20;
 async function flushBuffer(): Promise<void> {
   if (flushing || writeBuffer.length === 0 || !logFilePath) return;
   flushing = true;
-  const batch = writeBuffer.join('');
-  writeBuffer = [];
   try {
-    await appendFile(logFilePath, batch);
-  } catch {
-    // Silently fail if we can't write to file
+    while (writeBuffer.length > 0) {
+      const batch = writeBuffer.join('');
+      writeBuffer = [];
+      try {
+        await appendFile(logFilePath, batch);
+      } catch {
+        // Silently drop the failed batch; keep draining later log lines.
+      }
+    }
   } finally {
     flushing = false;
   }
 }
 
-/** Synchronous flush for the `exit` handler — guaranteed to write. */
+/** Best-effort synchronous flush of queued lines for the `exit` handler. */
 function flushBufferSync(): void {
   if (writeBuffer.length === 0 || !logFilePath) return;
   try {
@@ -80,7 +84,7 @@ function flushBufferSync(): void {
   writeBuffer = [];
 }
 
-// Ensure all buffered data reaches disk before the process exits.
+// Attempt to flush queued lines before the process exits.
 process.on('exit', flushBufferSync);
 
 // ── Initialisation ───────────────────────────────────────────────

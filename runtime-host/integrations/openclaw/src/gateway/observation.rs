@@ -29,7 +29,7 @@ pub(crate) struct Observation {
 
 pub(crate) enum OrderedContext {
     Subscribe { identity: SessionIdentity, generation: u64, reply: oneshot::Sender<Result<(), RuntimeOperationFailure>> },
-    Describe { identity: SessionIdentity, generation: u64, supported: bool, reply: oneshot::Sender<Result<(), RuntimeOperationFailure>> },
+    Describe { identity: SessionIdentity, generation: u64, supported: bool, reply: oneshot::Sender<Result<Option<sessions_module::state::SessionModelState>, RuntimeOperationFailure>> },
     History { identity: SessionIdentity, generation: u64, page: PageRequest, host_epoch: u64,
         reply: oneshot::Sender<Result<HistoryRead, RuntimeOperationFailure>> },
 }

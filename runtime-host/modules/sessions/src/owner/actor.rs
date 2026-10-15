@@ -38,13 +38,13 @@ use crate::{
         MatchaProviderRuntimeConfig, MatchaProviderSecret, MatchaSessionModelRuntimeCommand,
         NativeEndpoint, ResolvedSessionModelSelection, SessionModelSelectionBinding,
         SessionModelSelectionDiagnostic, SessionModelSelectionOutcome,
-        SessionModelSelectionRejection, SessionRuntimeModelCommand,
+        SessionModelSelectionRejection,
     },
     query::SessionQuery,
     rename::SessionRenameOutcome,
     send::{SessionDeliveryContext, SessionSendCommand, SessionSendOutcome, SessionSendStatus},
     session_catalog::{
-        self, SessionCatalog, SessionCatalogCommand, SessionCatalogEntry, SessionCatalogOutcome,
+        SessionCatalog, SessionCatalogCommand, SessionCatalogEntry, SessionCatalogOutcome,
     },
     session_history::{SessionHistoryCommand, SessionHistoryFailure, SessionHistoryOutcome},
     session_permission::SessionPermissionOutcome,
@@ -58,7 +58,7 @@ use crate::{
 };
 use provider_module::{
     ProviderHandle, ProviderSessionEndpoint, ProviderSessionModelSelection,
-    ProviderSessionModelSelectionOutcome, ProviderSessionRuntimeModelsOutcome,
+    ProviderSessionModelSelectionOutcome,
 };
 
 pub struct SessionSnapshot {
@@ -380,12 +380,12 @@ impl SessionShared {
             timeline::Outcome::Unavailable(failure) => timeline::Outcome::Unavailable(failure),
             timeline::Outcome::Complete(view) => timeline::Outcome::Complete(
                 open_ops
-                    .on_load_session_timeline(&command, view, self.provider_handle.clone())
+                    .on_load_session_timeline(&command, view)
                     .await,
             ),
             timeline::Outcome::Incomplete(view) => timeline::Outcome::Incomplete(
                 open_ops
-                    .on_load_session_timeline(&command, view, self.provider_handle.clone())
+                    .on_load_session_timeline(&command, view)
                     .await,
             ),
         }
@@ -420,102 +420,11 @@ impl SessionShared {
             SessionCatalogOutcome::Listed(catalog) => catalog,
             SessionCatalogOutcome::Unavailable => return SessionCatalogOutcome::Unavailable,
         };
-        if endpoint == RuntimeDriverIdentity::open_claw().endpoint() {
-            catalog = self
-                .reconcile_session_catalog_models(endpoint, catalog)
-                .await;
-        } else if endpoint == RuntimeDriverIdentity::matcha_agent().endpoint() {
+        if endpoint == RuntimeDriverIdentity::matcha_agent().endpoint() {
             self.store_catalog_bindings(&catalog).await;
         }
         session_ownership::enrich_catalog(self.ownership_reader.as_ref(), &mut catalog).await;
         SessionCatalogOutcome::Listed(catalog)
-    }
-
-    /// Read-only list projection: corrects catalog model refs that our own provider catalog no
-    /// longer accepts. Never writes back to the runtime.
-    ///
-    /// Runs at most one provider judgement for the whole catalog, and at most one
-    /// `agents.list`-backed default lookup per distinct stale agent.
-    async fn reconcile_session_catalog_models(
-        &self,
-        endpoint: RuntimeEndpoint,
-        catalog: SessionCatalog,
-    ) -> SessionCatalog {
-        let runtime_endpoint = NativeEndpoint::from_runtime_endpoint(endpoint.clone());
-        let session_count = catalog.sessions.len();
-        let driver = self.running_session_driver(Some(endpoint)).ok();
-        let defaults_driver = driver.clone();
-        let judge_handle = self.provider_handle.clone();
-        let rebound_handle = self.provider_handle.clone();
-        let (catalog, corrected) = session_catalog::reconcile_catalog_models(
-            catalog,
-            async move |model_refs| match judge_handle
-                .accept_session_runtime_models(
-                    provider_session_endpoint(runtime_endpoint),
-                    model_refs,
-                )
-                .await
-            {
-                Ok(ProviderSessionRuntimeModelsOutcome::Accepted(accepted)) => {
-                    session_catalog::CatalogModelJudgement::Accepted(accepted)
-                }
-                _ => session_catalog::CatalogModelJudgement::Unavailable,
-            },
-            move |agent_id| {
-                let driver = defaults_driver.clone();
-                Box::pin(async move {
-                    match driver
-                        .as_ref()
-                        .and_then(|driver| driver.session_ops())
-                        .and_then(|ops| ops.open_session_ops())
-                    {
-                        Some(ops) => ops.agent_default_model(agent_id).await,
-                        None => None,
-                    }
-                })
-            },
-            move |entry, default_model| {
-                let endpoint = NativeEndpoint::from_runtime_endpoint(entry.endpoint.clone());
-                let Ok(command) = SessionRuntimeModelCommand::try_new(
-                    endpoint,
-                    entry.key.clone(),
-                    Some(entry.endpoint_session_id.clone()),
-                    entry
-                        .model_state
-                        .as_ref()
-                        .and_then(|model_state| model_state.selected_ref())
-                        .map(str::to_owned),
-                    default_model,
-                ) else {
-                    return Box::pin(async { None });
-                };
-                let handle = rebound_handle.clone();
-                Box::pin(async move {
-                    let outcome = handle
-                        .select_session_model_rebound(
-                            provider_session_endpoint(command.endpoint),
-                            command.session_key,
-                            command.endpoint_session_id,
-                            command.current_model,
-                            command.default_model,
-                            command.trace_id,
-                        )
-                        .await
-                        .ok()?;
-                    match outcome {
-                        ProviderSessionModelSelectionOutcome::Selected(selection) => {
-                            Some(selection.runtime_model_ref)
-                        }
-                        _ => None,
-                    }
-                })
-            },
-        )
-        .await;
-        if corrected > 0 {
-            log_session_catalog_model_reconciled(session_count, corrected);
-        }
-        catalog
     }
 
     async fn store_catalog_bindings(&self, catalog: &SessionCatalog) {
@@ -2045,13 +1954,6 @@ impl OwnerSpec for SessionOwner {
             }
         }
     }
-}
-
-fn log_session_catalog_model_reconciled(session_count: usize, corrected_count: usize) {
-    crate::trace::log_unscoped("runtime.session-catalog.model-reconciled", || serde_json::json!({
-        "sessionCount": session_count,
-        "correctedCount": corrected_count,
-    }));
 }
 
 fn send_driver_failure(failure: RuntimeOperationFailure) -> SessionSendOutcome {

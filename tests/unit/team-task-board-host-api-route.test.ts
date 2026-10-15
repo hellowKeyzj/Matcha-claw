@@ -160,7 +160,11 @@ describe('Team task board Host API route', () => {
     const result = response();
     const { createHostApiRequestHandler } = await import('../../electron/api/server');
     const handler = createHostApiRequestHandler({
-      teamTaskBoardTransport: { read, mutate: vi.fn() },
+      signal: new AbortController().signal,
+      runtime: Promise.resolve({
+        runtimeHostTransportPort: 13211,
+        runtimeHostTransports: { teamTaskBoardTransport: { read, mutate: vi.fn() } },
+      }),
     } as never, 13210);
 
     await handler(

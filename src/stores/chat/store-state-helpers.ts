@@ -1262,6 +1262,11 @@ type SessionProjectionStore = Map<string, SessionProjectionState>;
 const sessionProjectionByStore = new WeakMap<() => ChatStoreState, SessionProjectionStore>();
 const sessionProjectionStores = new Set<SessionProjectionStore>();
 
+export function getSessionProjectionWatermark(get: () => ChatStoreState, identity: SessionIdentity): string | null {
+  const projection = sessionProjectionByStore.get(get)?.get(buildSessionIdentityKey(identity));
+  return projection ? `${projection.epoch}:${projection.seq}:${projection.cursor}` : null;
+}
+
 function projectionStore(get: () => ChatStoreState): SessionProjectionStore {
   const existing = sessionProjectionByStore.get(get);
   if (existing) {

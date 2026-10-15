@@ -58,6 +58,7 @@ const settingsState = vi.hoisted(() => ({
 }));
 
 const gatewayState = vi.hoisted(() => ({
+  runtimeHost: { lifecycle: 'running', hostLifecycle: 'ready' },
   init: vi.fn(),
 }));
 
@@ -230,7 +231,7 @@ describe('auth route gate', () => {
     gatewayState.init.mockReset();
     providerState.init.mockReset().mockResolvedValue(undefined);
     updateState.init.mockReset().mockResolvedValue(undefined);
-    hostApiFetchMock.mockReset();
+    hostApiFetchMock.mockReset().mockResolvedValue({ recovery: null });
   });
 
   it('root shows account boot while account status is checking', async () => {

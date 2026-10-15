@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     fmt::Write as _,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
     time::{Duration, Instant},
 };
 
@@ -43,6 +43,26 @@ const WEIXIN_STATE_DIR: &str = "openclaw-weixin";
 const WEIXIN_ACCOUNTS_DIR: &str = "accounts";
 const WEIXIN_ACCOUNT_INDEX_FILE: &str = "accounts.json";
 const FALLBACK_ACCOUNT_ID: &str = "default";
+
+static ACCOUNT_INDEX_WRITERS: OnceLock<StdMutex<Vec<(CanonicalStateDir, Weak<StdMutex<()>>)>>> =
+    OnceLock::new();
+
+fn account_index_writer(state_dir: &CanonicalStateDir) -> Arc<StdMutex<()>> {
+    let mut writers = ACCOUNT_INDEX_WRITERS
+        .get_or_init(|| StdMutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    writers.retain(|(_, writer)| writer.strong_count() != 0);
+    if let Some(writer) = writers
+        .iter()
+        .find_map(|(directory, writer)| (directory == state_dir).then(|| writer.upgrade()).flatten())
+    {
+        return writer;
+    }
+    let writer = Arc::new(StdMutex::new(()));
+    writers.push((state_dir.clone(), Arc::downgrade(&writer)));
+    writer
+}
 
 #[derive(Clone)]
 pub struct WeixinLogin {
@@ -558,6 +578,9 @@ impl WeixinLogin {
     ) -> Result<String, ()> {
         let account_id =
             normalize_account_id(raw_account_id).unwrap_or_else(|| FALLBACK_ACCOUNT_ID.to_owned());
+        // Every account shares accounts.json, regardless of its ChannelKey lane.
+        let writer = account_index_writer(&self.state_dir);
+        let _writer = writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let state_dir = self.state_dir.as_path().join(WEIXIN_STATE_DIR);
         let accounts_dir = state_dir.join(WEIXIN_ACCOUNTS_DIR);
         let index_path = state_dir.join(WEIXIN_ACCOUNT_INDEX_FILE);
@@ -825,6 +848,8 @@ pub(super) fn clear_account_state(
         "weixin.account-clear",
         || format!("event=begin accountPresent={}", account_id.is_some()),
     );
+    let writer = account_index_writer(state_dir);
+    let _writer = writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let state_dir = state_dir.as_path().join(WEIXIN_STATE_DIR);
     let Some(account_id) = account_id else {
         return match std::fs::remove_dir_all(state_dir) {

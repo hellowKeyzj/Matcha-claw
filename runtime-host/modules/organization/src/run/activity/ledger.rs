@@ -102,19 +102,7 @@ impl ActivityLedger {
                     facts.activity_id.clone(),
                 ));
             }
-            let key = activity_key(facts);
-            if ledger
-                .activity_ids_by_run_and_idempotency_key
-                .contains_key(&key)
-            {
-                return Err(RestoreActivityLedgerError::DuplicateIdempotencyKey);
-            }
-            ledger
-                .activity_ids_by_run_and_idempotency_key
-                .insert(key, facts.activity_id.clone());
-            ledger
-                .activities
-                .insert(facts.activity_id.clone(), activity);
+            ledger.restore_record(activity)?;
         }
         Ok(ledger)
     }
@@ -123,36 +111,33 @@ impl ActivityLedger {
         &mut self,
         request: ActivityRequest,
     ) -> Result<ActivityRegistrationOutcome, ActivityRequestError> {
-        request.validate()?;
-        let key = activity_key(&request);
+        let activity = Activity::request(request)?;
+        let facts = activity.facts();
+        let key = activity_key(facts);
         if let Some(activity_id) = self.activity_ids_by_run_and_idempotency_key.get(&key) {
             let existing = self
                 .activities
                 .get(activity_id)
                 .expect("idempotency key index always references an activity");
-            return Ok(if existing.facts() == &request {
+            return Ok(if existing.facts() == facts {
                 ActivityRegistrationOutcome::Replayed(existing.clone())
             } else {
                 ActivityRegistrationOutcome::ConflictingIdempotencyKey
             });
         }
-        if self.activities.contains_key(&request.activity_id) {
+        if self.activities.contains_key(&facts.activity_id) {
             return Ok(ActivityRegistrationOutcome::ConflictingActivityId {
-                activity_id: request.activity_id,
+                activity_id: facts.activity_id.clone(),
             });
         }
 
-        let activity = Activity::request(request)?;
         if let Some(undo) = &mut self.undo {
-            undo.entry(activity.facts().activity_id.clone())
-                .or_insert(None);
+            undo.entry(facts.activity_id.clone()).or_insert(None);
         }
-        self.activity_ids_by_run_and_idempotency_key.insert(
-            activity_key(activity.facts()),
-            activity.facts().activity_id.clone(),
-        );
+        self.activity_ids_by_run_and_idempotency_key
+            .insert(key, facts.activity_id.clone());
         self.activities
-            .insert(activity.facts().activity_id.clone(), activity.clone());
+            .insert(facts.activity_id.clone(), activity.clone());
         Ok(ActivityRegistrationOutcome::Recorded(activity))
     }
 

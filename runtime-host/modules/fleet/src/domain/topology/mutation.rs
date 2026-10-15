@@ -472,6 +472,9 @@ impl FleetTopologyFacts {
         if at < runtime.metadata().observed_at() {
             return Err(TopologyMutationError::Backdated);
         }
+        if matches!(runtime.state(), RuntimeState::Retired { .. }) {
+            return Err(TopologyMutationError::AlreadyRetired);
+        }
         runtime.set_state(
             RuntimeState::Running { started_at: at },
             ObservationMetadata::new(
@@ -527,6 +530,9 @@ impl FleetTopologyFacts {
         if at < runtime.metadata().observed_at() {
             return Err(TopologyMutationError::Backdated);
         }
+        if matches!(runtime.state(), RuntimeState::Retired { .. }) {
+            return Err(TopologyMutationError::AlreadyRetired);
+        }
         runtime.set_state(
             RuntimeState::Stopped {
                 stopped_at: Some(at),
@@ -553,6 +559,7 @@ impl FleetTopologyFacts {
             .ok_or(TopologyMutationError::UnknownRuntime)?;
         if let RuntimeState::Retired { retired_at } = runtime.state() {
             if retired_at <= at {
+                self.runtime_commands.remove(id);
                 return Ok(TopologyMutation::Unchanged);
             }
         }
@@ -567,6 +574,7 @@ impl FleetTopologyFacts {
                 super::ObservationFreshness::Pruned,
             ),
         );
+        self.runtime_commands.remove(id);
         Ok(TopologyMutation::Retired)
     }
 

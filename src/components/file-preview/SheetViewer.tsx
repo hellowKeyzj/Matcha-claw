@@ -117,6 +117,9 @@ export function SheetViewer({
           return;
         }
         const xlsx = await import('xlsx') as unknown as XlsxModuleLike;
+        if (cancelled) {
+          return;
+        }
         const workbook = xlsx.read(decodeBase64ToArrayBuffer(result.data), {
           type: 'array',
           cellDates: true,

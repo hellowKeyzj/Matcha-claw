@@ -114,16 +114,6 @@ fn apply_checked(state: &mut GraphState, patch: &GraphPatch, applied_at: u64) ->
     }
     validate_operations(state, &patch.operations)?;
 
-    let mut expected_metadata = state.metadata().clone();
-    let mut expected_layout = state.layout().clone();
-    for operation in patch.operations() {
-        match operation {
-            GraphPatchOperation::RemoveNode(node) => expected_layout.remove_node(node),
-            GraphPatchOperation::SetNodePosition { node_id, position } => expected_layout.set_node_position(node_id.clone(), *position),
-            GraphPatchOperation::SetMetadata { key, value } => { expected_metadata.insert(key.clone(), value.clone()); }
-            _ => {}
-        }
-    }
     state.apply_event(
         GraphEvent::GraphPatched {
             expected_graph_id: patch.expected_graph_id.clone(),
@@ -153,9 +143,6 @@ fn apply_checked(state: &mut GraphState, patch: &GraphPatch, applied_at: u64) ->
                 }
             }
         }
-    }
-    if state.metadata() != &expected_metadata || state.layout() != &expected_layout {
-        return Err(GraphPatchError::InvalidDefinition);
     }
     state.definition().validate_references(Some(&definition))
         .map_err(GraphPatchError::Definition)?;

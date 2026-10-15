@@ -55,6 +55,7 @@ interface SettingsState {
   setUpdateChannel: (channel: UpdateChannel) => Promise<void>;
   setAutoCheckUpdate: (value: boolean) => Promise<void>;
   setDevModeUnlocked: (value: boolean) => Promise<void>;
+  saveRuntimeSettings: (patch: Partial<RuntimeSettings>) => Promise<void>;
   resetSettings: () => Promise<void>;
 }
 
@@ -78,28 +79,33 @@ const defaultSettings = {
 };
 
 type SettingsSnapshot = typeof defaultSettings;
+type RuntimeSettings = Pick<SettingsSnapshot,
+  'browserMode' | 'launchAtStartup' | 'gatewayAutoStart' | 'proxyEnabled' | 'proxyServer' | 'proxyBypassRules'
+>;
+const runtimeSettingRevisions: Record<keyof RuntimeSettings, number> = {
+  browserMode: 0,
+  launchAtStartup: 0,
+  gatewayAutoStart: 0,
+  proxyEnabled: 0,
+  proxyServer: 0,
+  proxyBypassRules: 0,
+};
 
 export const useSettingsStore = create<SettingsState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       ...defaultSettings,
 
       init: async () => {
+        const requestRevisions = { ...runtimeSettingRevisions };
         try {
-          const runtimeSettings = await hostSettingsFetchAll<Pick<
-            SettingsSnapshot,
-            'browserMode' | 'launchAtStartup' | 'gatewayAutoStart' | 'proxyEnabled' | 'proxyServer' | 'proxyBypassRules'
-          >>();
-          set((state) => ({
-            ...state,
-            browserMode: runtimeSettings.browserMode,
-            launchAtStartup: runtimeSettings.launchAtStartup,
-            gatewayAutoStart: runtimeSettings.gatewayAutoStart,
-            proxyEnabled: runtimeSettings.proxyEnabled,
-            proxyServer: runtimeSettings.proxyServer,
-            proxyBypassRules: runtimeSettings.proxyBypassRules,
+          const runtimeSettings = await hostSettingsFetchAll<RuntimeSettings>();
+          set({
+            ...Object.fromEntries((Object.keys(requestRevisions) as Array<keyof RuntimeSettings>)
+              .filter((key) => requestRevisions[key] === runtimeSettingRevisions[key])
+              .map((key) => [key, runtimeSettings[key]])),
             initialized: true,
-          }));
+          });
         } catch {
           // Keep renderer-persisted settings as a fallback when the main
           // process store is not reachable.
@@ -125,15 +131,13 @@ export const useSettingsStore = create<SettingsState>()(
         set({ startMinimized });
       },
       setLaunchAtStartup: async (launchAtStartup) => {
-        await hostSettingsPutPatch({ launchAtStartup });
-        set({ launchAtStartup });
+        await get().saveRuntimeSettings({ launchAtStartup });
       },
       setTelemetryEnabled: async (telemetryEnabled) => {
         set({ telemetryEnabled });
       },
       setGatewayAutoStart: async (gatewayAutoStart) => {
-        await hostSettingsPutPatch({ gatewayAutoStart });
-        set({ gatewayAutoStart });
+        await get().saveRuntimeSettings({ gatewayAutoStart });
       },
       setGatewayPort: async (gatewayPort) => {
         set({ gatewayPort });
@@ -147,8 +151,15 @@ export const useSettingsStore = create<SettingsState>()(
       setDevModeUnlocked: async (devModeUnlocked) => {
         set({ devModeUnlocked });
       },
+      saveRuntimeSettings: async (patch) => {
+        await hostSettingsPutPatch(patch);
+        for (const key of Object.keys(patch) as Array<keyof RuntimeSettings>) {
+          runtimeSettingRevisions[key] += 1;
+        }
+        set(patch);
+      },
       resetSettings: async () => {
-        await hostSettingsPutPatch({
+        await get().saveRuntimeSettings({
           browserMode: defaultSettings.browserMode,
           launchAtStartup: defaultSettings.launchAtStartup,
           gatewayAutoStart: defaultSettings.gatewayAutoStart,

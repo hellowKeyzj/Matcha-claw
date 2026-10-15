@@ -1,10 +1,6 @@
 use super::*;
 use tokio_util::sync::CancellationToken;
 use sessions_module::{
-    model_selection::{
-        NativeEndpoint, SessionModelSelectionDiagnostic, SessionRuntimeModelCommand,
-        SessionRuntimeModelSource,
-    },
     state::{SessionProvider, SessionView},
     timeline,
 };
@@ -205,50 +201,6 @@ impl OpenClawDriver {
                 SessionPermissionOutcome::Unavailable
             }
         }
-    }
-
-    pub(crate) async fn session_runtime_model_facts(
-        &self,
-        session_key: String,
-    ) -> Result<
-        SessionRuntimeModelFacts,
-        sessions_module::RuntimeSessionError<crate::port::OpenClawSessionError>,
-    > {
-        let session_key =
-            crate::session::protocol::SessionKey::try_new(session_key).map_err(|_| {
-                sessions_module::RuntimeSessionError::Client(
-                    crate::port::OpenClawSessionError::TargetRejected,
-                )
-            })?;
-        let row = self
-            .session_gateway
-            .describe_session(crate::session::protocol::SessionDescribeParams::new(
-                session_key,
-                None,
-            ))
-            .await
-            .map_err(sessions_module::RuntimeSessionError::Client)?;
-        Ok(match row {
-            Some(row) => SessionRuntimeModelFacts {
-                current_model: row.model_ref(),
-                model_state: row.model_state(),
-                agent_id: row.agent_id.map(|agent_id| agent_id.as_str().to_owned()),
-                model_override_source: row.model_override_source.map(|source| match source {
-                    crate::session::protocol::SessionModelOverrideSource::User => {
-                        SessionRuntimeModelSource::User
-                    }
-                    crate::session::protocol::SessionModelOverrideSource::Auto => {
-                        SessionRuntimeModelSource::Auto
-                    }
-                }),
-            },
-            None => SessionRuntimeModelFacts {
-                current_model: None,
-                model_state: None,
-                agent_id: None,
-                model_override_source: None,
-            },
-        })
     }
 
     async fn configured_agent_model(&self, agent_id: &str) -> Option<String> {
@@ -754,213 +706,53 @@ impl SessionOpenOps for OpenClawDriver {
         &'a self,
         command: &'a timeline::Command,
         view: SessionView,
-        provider_handle: ProviderHandle,
     ) -> sessions_module::SessionFuture<'a, SessionView> {
         Box::pin(async move {
-            log_session_model_reconcile_entered(command.session_key());
-            let Ok(facts) = self
-                .session_runtime_model_facts(command.session_key().to_owned())
-                .await
-            else {
-                log_session_model_reconcile_skipped("describe", command, None, None);
+            use crate::session::protocol::{SessionDescribeParams, SessionKey};
+
+            let Ok(session_key) = SessionKey::try_new(command.session_key().to_owned()) else {
                 return view;
             };
-            let endpoint = NativeEndpoint::OpenClawLocal;
-            if matches!(
-                facts.model_override_source,
-                Some(SessionRuntimeModelSource::User | SessionRuntimeModelSource::Auto)
-            ) {
-                if let Some(model) = facts.current_model.as_deref() {
-                    let accepted = provider_handle
-                        .accept_session_runtime_models(
-                            provider_module::ProviderSessionEndpoint::OpenClawLocal,
-                            vec![model.to_owned()],
-                        )
-                        .await;
-                    match accepted {
-                        Ok(provider_module::ProviderSessionRuntimeModelsOutcome::Accepted(
-                            accepted,
-                        )) if accepted.first() == Some(&true) => {
-                            log_session_model_reconcile_kept(command.session_key(), model);
-                            return SessionView {
-                                model_state: facts.model_state,
-                                ..view
-                            };
-                        }
-                        Ok(provider_module::ProviderSessionRuntimeModelsOutcome::Accepted(_)) => {}
-                        Ok(
-                            provider_module::ProviderSessionRuntimeModelsOutcome::Unavailable
-                            | provider_module::ProviderSessionRuntimeModelsOutcome::Unsupported,
-                        )
-                        | Err(_) => {
-                            log_session_model_reconcile_skipped(
-                                "judge_unavailable",
-                                command,
-                                facts.current_model.as_deref(),
-                                None,
-                            );
-                            return view;
-                        }
-                    }
-                }
-            }
-            let default_model = match facts.agent_id.as_deref() {
-                Some(agent_id) => self.configured_agent_model(agent_id).await,
-                None => None,
-            };
-            let Ok(rebound) = SessionRuntimeModelCommand::try_new(
-                endpoint,
-                command.session_key().to_owned(),
-                command.endpoint_session_id().map(str::to_owned),
-                facts.current_model.clone(),
-                default_model.clone(),
-            ) else {
-                log_session_model_reconcile_skipped(
-                    "command_invalid",
-                    command,
-                    facts.current_model.as_deref(),
-                    default_model.as_deref(),
-                );
-                return view;
-            };
-            let Ok(provider_module::ProviderSessionModelSelectionOutcome::Selected(selection)) =
-                provider_handle
-                    .select_session_model_rebound(
-                        provider_module::ProviderSessionEndpoint::OpenClawLocal,
-                        rebound.session_key,
-                        rebound.endpoint_session_id,
-                        rebound.current_model,
-                        rebound.default_model,
-                        rebound.trace_id,
-                    )
-                    .await
-            else {
-                log_session_model_reconcile_skipped(
-                    "rebound_unresolved",
-                    command,
-                    facts.current_model.as_deref(),
-                    default_model.as_deref(),
-                );
-                return view;
-            };
-            let resolved_model = platform::trace::enabled().then(|| selection.runtime_model_ref.clone());
-            let resolved_model_state =
-                sessions_module::state::SessionModelState::selected_from_ref(
-                    selection.runtime_model_ref,
-                )
-                .ok();
-            let diagnostic = Some(SessionModelSelectionDiagnostic::new(
-                selection.account_id,
-                selection.model_id,
-                selection.protocol,
-                selection.auth_mode,
-            ));
-            log_session_model_reconciled(
-                command.session_key(),
-                facts.current_model.as_deref(),
-                resolved_model.as_deref(),
-                diagnostic.as_ref(),
-            );
-            SessionView {
-                model_state: resolved_model_state,
-                ..view
+            let result = self
+                .session_gateway
+                .describe_session(SessionDescribeParams::new(session_key, None))
+                .await;
+            platform::trace::runtime_trace("runtime.session-model.read", || {
+                serde_json::json!({
+                    "sessionKey": sessions_module::trace::id_shape(Some(command.session_key())),
+                    "endpointSessionId": sessions_module::trace::id_shape(command.endpoint_session_id()),
+                    "outcome": match &result {
+                        Ok(Some(_)) => "succeeded",
+                        Ok(None) => "not_found",
+                        Err(_) => "unavailable",
+                    },
+                    "modelState": session_model_trace_state(
+                        result.as_ref().ok().and_then(|row| row.as_ref())
+                            .and_then(|row| row.model_state()).as_ref(),
+                    ),
+                })
+            });
+            match result {
+                Ok(row) => SessionView {
+                    model_state: row.and_then(|row| row.model_state()),
+                    ..view
+                },
+                Err(_) => view,
             }
         })
     }
-
-    fn agent_default_model<'a>(
-        &'a self,
-        agent_id: String,
-    ) -> sessions_module::SessionFuture<'a, Option<String>> {
-        Box::pin(async move { self.configured_agent_model(&agent_id).await })
-    }
 }
 
-fn log_session_model_reconciled(
-    session_key: &str,
-    previous_model: Option<&str>,
-    resolved_model: Option<&str>,
-    diagnostic: Option<&SessionModelSelectionDiagnostic>,
-) {
+fn session_model_trace_state(state: Option<&sessions_module::state::SessionModelState>) -> Value {
     use sessions_module::trace as session_trace;
 
-    if !platform::trace::enabled() {
-        return;
-    }
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "prefix": "session-trace",
-            "source": "runtime-host",
-            "stage": "runtime.session-model.reconciled",
-            "sessionKey": session_trace::id_shape(Some(session_key)),
-            "previousModel": session_trace::id_shape(previous_model),
-            "resolvedModel": session_trace::id_shape(resolved_model),
-            "accountId": diagnostic.map(SessionModelSelectionDiagnostic::account_id),
-            "modelId": diagnostic.map(SessionModelSelectionDiagnostic::model_id),
-        })
-    );
-}
-
-fn log_session_model_reconcile_entered(session_key: &str) {
-    use sessions_module::trace as session_trace;
-
-    if !platform::trace::enabled() {
-        return;
-    }
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "prefix": "session-trace",
-            "source": "runtime-host",
-            "stage": "runtime.session-model.reconcile-entered",
-            "sessionKey": session_trace::id_shape(Some(session_key)),
-        })
-    );
-}
-
-fn log_session_model_reconcile_kept(session_key: &str, model: &str) {
-    use sessions_module::trace as session_trace;
-
-    if !platform::trace::enabled() {
-        return;
-    }
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "prefix": "session-trace",
-            "source": "runtime-host",
-            "stage": "runtime.session-model.reconcile-kept",
-            "sessionKey": session_trace::id_shape(Some(session_key)),
-            "model": session_trace::id_shape(Some(model)),
-        })
-    );
-}
-
-fn log_session_model_reconcile_skipped(
-    reason: &'static str,
-    command: &timeline::Command,
-    current_model: Option<&str>,
-    candidate_model: Option<&str>,
-) {
-    use sessions_module::trace as session_trace;
-
-    if !platform::trace::enabled() {
-        return;
-    }
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "prefix": "session-trace",
-            "source": "runtime-host",
-            "stage": "runtime.session-model.reconcile-skipped",
-            "reason": reason,
-            "sessionKey": session_trace::id_shape(Some(command.session_key())),
-            "endpointSessionId": session_trace::id_shape(command.endpoint_session_id()),
-            "currentModel": session_trace::id_shape(current_model),
-            "candidateModel": session_trace::id_shape(candidate_model),
-        })
-    );
+    serde_json::json!({
+        "present": state.is_some(),
+        "selectedRefHash": state.and_then(|state| state.selected_ref()).map(session_trace::fingerprint),
+        "activeRefHash": state.and_then(|state| state.active.as_ref()).map(|model| session_trace::fingerprint(&model.model_ref)),
+        "overrideSource": state.and_then(|state| state.override_source.as_ref()),
+        "selectionHash": state.and_then(|state| state.selection_id.as_deref()).map(session_trace::fingerprint),
+    })
 }
 
 fn valid_command_identity(identity: &sessions_module::state::SessionIdentity) -> bool {
@@ -1045,6 +837,12 @@ impl SessionOps for OpenClawDriver {
                 Some(model) => model,
                 None => return SessionCreateOutcome::Unavailable,
             };
+            platform::trace::runtime_trace("runtime.openclaw.sessions.create.request", || serde_json::json!({
+                "sessionHash": sessions_module::trace::fingerprint(command.session_key()),
+                "agentHash": sessions_module::trace::fingerprint(command.agent_id()),
+                "endpointSessionHash": sessions_module::trace::fingerprint(command.endpoint_session_id()),
+                "configuredDefaultModel": sessions_module::trace::id_shape(Some(&default_model)),
+            }));
             let model = match crate::session::protocol::ModelRef::try_new(default_model) {
                 Ok(model) => model,
                 Err(_) => return SessionCreateOutcome::TargetRejected,
@@ -1053,7 +851,23 @@ impl SessionOps for OpenClawDriver {
                 Ok(params) => params,
                 Err(_) => return SessionCreateOutcome::TargetRejected,
             };
-            match self.session_gateway.create_session(params).await {
+            let result = self.session_gateway.create_session(params).await;
+            platform::trace::runtime_trace("runtime.openclaw.sessions.create.result", || {
+                let (outcome, native_session_id, model_state) = match &result {
+                    Ok(InvocationOutcome::Succeeded(result)) => ("succeeded", Some(result.native_session_id().as_str()), result.model_state()),
+                    Ok(InvocationOutcome::TargetRejected(_)) => ("target_rejected", None, None),
+                    Ok(InvocationOutcome::Cancelled) => ("cancelled", None, None),
+                    Ok(InvocationOutcome::Unknown) => ("unknown", None, None),
+                    Err(_) => ("error", None, None),
+                };
+                serde_json::json!({
+                    "sessionHash": sessions_module::trace::fingerprint(command.session_key()),
+                    "agentHash": sessions_module::trace::fingerprint(command.agent_id()),
+                    "outcome": outcome, "nativeSessionId": sessions_module::trace::id_shape(native_session_id),
+                    "modelState": session_model_trace_state(model_state.as_ref()),
+                })
+            });
+            match result {
                 Ok(outcome) => project_openclaw_create(&command, outcome, epoch),
                 Err(error) => project_openclaw_create_error(error),
             }

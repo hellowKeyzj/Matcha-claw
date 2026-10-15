@@ -54,25 +54,38 @@ describe('IPC handler registration', () => {
     const runtimeHost = {
       command: vi.fn(),
       onSafeEvent: vi.fn(),
+      onDisconnect: vi.fn(),
       onExit: vi.fn(),
+      readE2ECronProviderTrace: vi.fn(() => []),
       stop: vi.fn(),
       forceKill: vi.fn(),
     };
     const getMainWindow = vi.fn(() => null);
     const { registerIpcHandlers } = await import('../../electron/main/ipc-handlers');
 
+    const providerAuth = Promise.resolve({ transport: { execute: vi.fn() }, awaitProviderCall: vi.fn() });
+    const { signal } = new AbortController();
     const fleetCredentialsTransport = { write: vi.fn() };
-    registerIpcHandlers(runtimeHost, getMainWindow, { execute: vi.fn() }, vi.fn(), fleetCredentialsTransport, {
+    const diagnostics = {
       transport: { download: vi.fn() },
       showSaveDialog: vi.fn(),
       writeFile: vi.fn(),
       getE2ESavePath: vi.fn(),
-    });
+    };
+    registerIpcHandlers(runtimeHost, getMainWindow, providerAuth, signal, fleetCredentialsTransport, diagnostics);
 
     expect(mocks.registerHostApiProxyHandlers).toHaveBeenCalledOnce();
     expect(mocks.registerGatewayHandlers).toHaveBeenCalledOnce();
     expect(mocks.registerGatewayHandlers).toHaveBeenCalledWith(runtimeHost);
     expect(mocks.registerFleetPrivateHandlers).toHaveBeenCalledWith(fleetCredentialsTransport);
     expect(mocks.registerWindowHandlers).toHaveBeenCalledWith(getMainWindow);
+    expect(mocks.registerProviderPrivateAuthHandlers).toHaveBeenCalledWith(getMainWindow, providerAuth, signal);
+    expect(mocks.registerDiagnosticsExportHandler).toHaveBeenCalledWith(diagnostics);
+    expect(mocks.registerWindowHandlers.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.registerProviderPrivateAuthHandlers.mock.invocationCallOrder[0],
+    );
+    expect(mocks.registerProviderPrivateAuthHandlers.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.registerFleetPrivateHandlers.mock.invocationCallOrder[0],
+    );
   });
 });

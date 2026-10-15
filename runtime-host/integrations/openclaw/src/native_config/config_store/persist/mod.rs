@@ -1,5 +1,8 @@
 use ::platform::state_dir::StateDirHandle;
 
+mod writer;
+pub(super) use writer::Writer;
+
 #[cfg(unix)]
 mod posix;
 #[cfg(windows)]

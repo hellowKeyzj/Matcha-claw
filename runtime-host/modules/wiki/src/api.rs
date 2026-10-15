@@ -67,6 +67,7 @@ impl WikiHandle {
         owner: OwnerRuntimeHandle<WikiCommand, WikiQuery>,
         shared: crate::owner::actor::WikiShared,
     ) -> Self {
+        let _ = shared.owner.set(owner.clone());
         Self {
             owner,
             shared,
@@ -997,7 +998,7 @@ impl WikiHandle {
         reply.acceptance = Some(acceptance.clone());
         if retain_result {
             match self.results.reserve(call.id()) {
-                Ok(reservation) => reply.result = Some(reservation),
+                Ok(reservation) => reply.result = Some(Arc::new(reservation)),
                 Err(error) => {
                     call::reject_admission(
                         &call,

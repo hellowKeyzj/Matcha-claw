@@ -404,13 +404,6 @@ pub enum ProviderSessionModelSelectionOutcome {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProviderSessionRuntimeModelsOutcome {
-    Accepted(Vec<bool>),
-    Unsupported,
-    Unavailable,
-}
-
 pub fn model_replace_fault(fault: ProviderCascadeFault) -> ProviderModelReplaceOutcome {
     let ProviderCascadeFault::Models(fault) = fault else {
         return ProviderModelReplaceOutcome::Unavailable;

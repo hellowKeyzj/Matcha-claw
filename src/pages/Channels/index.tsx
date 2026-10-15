@@ -383,10 +383,10 @@ export function Channels() {
         <AddChannelDialog
           target={dialogTarget}
           onTargetChange={setDialogTarget}
-          onClose={() => setDialogTarget(null)}
+          onClose={() => setDialogTarget((current) => current === dialogTarget ? null : current)}
           onChannelAdded={() => {
             void fetchChannels();
-            setDialogTarget(null);
+            setDialogTarget((current) => current === dialogTarget ? null : current);
           }}
         />
       )}
@@ -675,7 +675,6 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
   const qrTraceIdRef = useRef<string | undefined>(undefined);
   const qrWaitAbortControllerRef = useRef<AbortController | null>(null);
   const firstInputRef = useRef<HTMLInputElement>(null);
-  const onChannelAddedRef = useRef(onChannelAdded);
   const [validationResult, setValidationResult] = useState<{
     valid: boolean;
     errors: string[];
@@ -719,10 +718,6 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
     }
     return options;
   }, [agents, loadedAgentId, selectedAgentId, t]);
-
-  useEffect(() => {
-    onChannelAddedRef.current = onChannelAdded;
-  }, [onChannelAdded]);
 
   useEffect(() => {
     void loadAgents({ silent: true }).catch(() => undefined);
@@ -931,7 +926,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
           setConnecting(false);
           outcome = 'confirmed';
           logChannelTrace('login.confirmed', traceId);
-          onChannelAddedRef.current();
+          onChannelAdded();
           return;
         }
         const waitController = new AbortController();
@@ -973,7 +968,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
             setConnecting(false);
             outcome = 'confirmed';
             logChannelTrace('login.confirmed', traceId);
-            onChannelAddedRef.current();
+            onChannelAdded();
             return;
           }
           if (waitResult.outcome !== 'progress') {
@@ -1020,7 +1015,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
           setConnecting(false);
           outcome = 'confirmed';
           logChannelTrace('login.confirmed', traceId);
-          onChannelAddedRef.current();
+          onChannelAdded();
           return;
         }
         if (startResult.outcome !== 'progress' || !startResult.sessionKey) {
@@ -1066,7 +1061,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
             setConnecting(false);
             outcome = 'confirmed';
             logChannelTrace('login.confirmed', traceId);
-            onChannelAddedRef.current();
+            onChannelAdded();
             return;
           }
           if (waitResult.outcome === 'cancelled') {

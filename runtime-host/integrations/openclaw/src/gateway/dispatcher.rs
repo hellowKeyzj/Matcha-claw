@@ -91,7 +91,7 @@ impl Dispatcher {
         self.mutate_with_deadline_cancellable(request, deadline, &CancellationToken::new()).await
     }
 
-    async fn mutate_with_deadline_cancellable(
+    pub(crate) async fn mutate_with_deadline_cancellable(
         &self,
         request: RpcRequest,
         deadline: Duration,

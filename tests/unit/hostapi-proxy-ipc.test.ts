@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const mainFrame = {};
   return {
     handlers,
+    ipcEvent: { sender: { mainFrame }, senderFrame: mainFrame },
     ipcMainHandleMock: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
       handlers.set(channel, handler);
     }),
@@ -65,10 +67,10 @@ describe('host API IPC boundary', () => {
       json: vi.fn(async () => ({ success: true })),
     });
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
+    registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
-    await handler?.({}, { path, method });
+    await handler?.(hoisted.ipcEvent, { path, method });
 
     expect(hoisted.proxyAwareFetchMock).toHaveBeenCalledWith(
       `http://127.0.0.1:13210${path}`,
@@ -84,10 +86,10 @@ describe('host API IPC boundary', () => {
     ['POST', '/internal/runtime-host/shell-actions'],
   ])('rejects unsupported public method or internal path %s %s before any loopback request', async (method, path) => {
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
+    registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
-    const result = await handler?.({}, { path, method });
+    const result = await handler?.(hoisted.ipcEvent, { path, method });
 
     expect(result).toEqual({
       ok: false,
@@ -104,10 +106,10 @@ describe('host API IPC boundary', () => {
       json: vi.fn(async () => ({ sampledAt: 'now' })),
     });
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
+    registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
-    const result = await handler?.({}, {
+    const result = await handler?.(hoisted.ipcEvent, {
       path: '/api/diagnostics/memory',
       method: 'GET',
       headers: {
@@ -143,10 +145,10 @@ describe('host API IPC boundary', () => {
       json: vi.fn(async () => ({ ready: true })),
     });
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
+    registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
-    const resultPromise = handler?.({}, {
+    const resultPromise = handler?.(hoisted.ipcEvent, {
       path: '/api/diagnostics/memory',
       method: 'GET',
     });
@@ -173,18 +175,18 @@ describe('host API IPC boundary', () => {
   it('classifies renderer abort while waiting for Host API readiness', async () => {
     hoisted.waitForHostApiReadyMock.mockReturnValue(new Promise<void>(() => undefined));
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
+    registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const fetchHandler = hoisted.handlers.get('hostapi:fetch');
     const abortHandler = hoisted.handlers.get('hostapi:abort');
-    const resultPromise = fetchHandler?.({}, {
+    const resultPromise = fetchHandler?.(hoisted.ipcEvent, {
       requestId: 'request-before-ready',
       path: '/api/diagnostics/memory',
       method: 'GET',
     });
     await Promise.resolve();
 
-    const abortResult = await abortHandler?.({}, { requestId: 'request-before-ready' });
+    const abortResult = await abortHandler?.(hoisted.ipcEvent, { requestId: 'request-before-ready' });
     const result = await resultPromise;
 
     expect(abortResult).toEqual({ ok: true });
@@ -199,10 +201,10 @@ describe('host API IPC boundary', () => {
     vi.useFakeTimers();
     hoisted.waitForHostApiReadyMock.mockReturnValue(new Promise<void>(() => undefined));
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
+    registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
-    const resultPromise = handler?.({}, {
+    const resultPromise = handler?.(hoisted.ipcEvent, {
       path: '/api/diagnostics/memory',
       method: 'GET',
       timeoutMs: 10,
@@ -219,10 +221,10 @@ describe('host API IPC boundary', () => {
 
   it('rejects unimplemented methods before the proxy request', async () => {
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
+    registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
-    const result = await handler?.({}, {
+    const result = await handler?.(hoisted.ipcEvent, {
       path: '/api/diagnostics/memory',
       method: 'POST',
     });
@@ -239,10 +241,10 @@ describe('host API IPC boundary', () => {
       new Error('upstream rejected Authorization: Bearer private-token at /private/native/path'),
     );
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
+    registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
-    const result = await handler?.({}, {
+    const result = await handler?.(hoisted.ipcEvent, {
       path: '/api/diagnostics/memory',
       method: 'GET',
     });
@@ -261,10 +263,10 @@ describe('host API IPC boundary', () => {
       (init as { signal: AbortSignal }).signal.addEventListener('abort', () => reject(new Error('raw timeout /private/native/path')));
     }));
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
+    registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
-    const resultPromise = handler?.({}, {
+    const resultPromise = handler?.(hoisted.ipcEvent, {
       path: '/api/diagnostics/memory',
       method: 'GET',
       timeoutMs: 10,
@@ -284,17 +286,17 @@ describe('host API IPC boundary', () => {
       (init as { signal: AbortSignal }).signal.addEventListener('abort', () => reject(new Error('raw abort /private/native/path')));
     }));
     const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
-    registerHostApiProxyHandlers();
+    registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const fetchHandler = hoisted.handlers.get('hostapi:fetch');
     const abortHandler = hoisted.handlers.get('hostapi:abort');
-    const resultPromise = fetchHandler?.({}, {
+    const resultPromise = fetchHandler?.(hoisted.ipcEvent, {
       requestId: 'request-1',
       path: '/api/diagnostics/memory',
       method: 'GET',
     });
     await Promise.resolve();
-    const abortResult = await abortHandler?.({}, { requestId: 'request-1' });
+    const abortResult = await abortHandler?.(hoisted.ipcEvent, { requestId: 'request-1' });
     const result = await resultPromise;
 
     expect(abortResult).toEqual({ ok: true });

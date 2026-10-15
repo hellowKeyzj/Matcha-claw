@@ -143,7 +143,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   },
 
   checkForUpdates: async () => {
-    set({ status: 'checking', error: null });
+    if (get().status !== 'downloaded') set({ status: 'checking', error: null });
     
     try {
       const result = await Promise.race([

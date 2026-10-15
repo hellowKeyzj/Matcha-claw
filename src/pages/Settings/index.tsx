@@ -75,9 +75,6 @@ import {
   exportDiagnosticsArchive,
 } from '@/lib/diagnostics-archive';
 import {
-  hostSettingsPutPatch,
-} from '@/lib/settings-runtime';
-import {
   DEFAULT_SETTINGS_SECTION,
   parseSettingsSectionFromSearch,
   type SettingsSectionKey,
@@ -427,6 +424,7 @@ export function Settings() {
   const gatewayAutoStart = useSettingsStore((state) => state.gatewayAutoStart);
   const setGatewayAutoStart = useSettingsStore((state) => state.setGatewayAutoStart);
   const browserMode = useSettingsStore((state) => state.browserMode);
+  const saveRuntimeSettings = useSettingsStore((state) => state.saveRuntimeSettings);
   const proxyEnabled = useSettingsStore((state) => state.proxyEnabled);
   const proxyServer = useSettingsStore((state) => state.proxyServer);
   const proxyBypassRules = useSettingsStore((state) => state.proxyBypassRules);
@@ -459,9 +457,13 @@ export function Settings() {
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
   const [openclawCliError, setOpenclawCliError] = useState<string | null>(null);
-  const [proxyServerDraft, setProxyServerDraft] = useState('');
-  const [proxyBypassRulesDraft, setProxyBypassRulesDraft] = useState('');
-  const [proxyEnabledDraft, setProxyEnabledDraft] = useState(false);
+  const [proxyDraft, setProxyDraft] = useState({ proxyEnabled, proxyServer, proxyBypassRules });
+  const {
+    proxyEnabled: proxyEnabledDraft,
+    proxyServer: proxyServerDraft,
+    proxyBypassRules: proxyBypassRulesDraft,
+  } = proxyDraft;
+  const proxySyncedDraftRef = useRef(proxyDraft);
   const [proxySettingsExpanded, setProxySettingsExpanded] = useState(false);
   const [savingProxy, setSavingProxy] = useState(false);
   const [savingBrowserMode, setSavingBrowserMode] = useState(false);
@@ -479,6 +481,7 @@ export function Settings() {
   const showCliTools = true;
   const [showOpenClawLogs, setShowOpenClawLogs] = useState(false);
   const [openClawLogContent, setOpenClawLogContent] = useState('');
+  const openClawLogsReadRef = useRef(0);
   const [collectingDiagnostics, setCollectingDiagnostics] = useState(false);
   const [lastDiagnosticsArchiveId, setLastDiagnosticsArchiveId] = useState('');
   const [lastDiagnosticsEntries, setLastDiagnosticsEntries] = useState(0);
@@ -549,14 +552,16 @@ export function Settings() {
     };
   }, [licenseLocked]);
 
+  useEffect(() => () => { openClawLogsReadRef.current += 1; }, []);
+
   const handleShowOpenClawLogs = async () => {
+    const request = ++openClawLogsReadRef.current;
+    setShowOpenClawLogs(true);
     try {
       const logs = await hostApiFetch<{ content: string }>('/api/openclaw/logs?tailLines=100');
-      setOpenClawLogContent(logs.content);
-      setShowOpenClawLogs(true);
+      if (request === openClawLogsReadRef.current) setOpenClawLogContent(logs.content);
     } catch {
-      setOpenClawLogContent('(Failed to load logs)');
-      setShowOpenClawLogs(true);
+      if (request === openClawLogsReadRef.current) setOpenClawLogContent('(Failed to load logs)');
     }
   };
 
@@ -775,16 +780,20 @@ export function Settings() {
   }, [devModeUnlocked]);
 
   useEffect(() => {
-    setProxyEnabledDraft(proxyEnabled);
-  }, [proxyEnabled]);
-
-  useEffect(() => {
-    setProxyServerDraft(proxyServer);
-  }, [proxyServer]);
-
-  useEffect(() => {
-    setProxyBypassRulesDraft(proxyBypassRules);
-  }, [proxyBypassRules]);
+    const previous = proxySyncedDraftRef.current;
+    const next = { proxyEnabled, proxyServer, proxyBypassRules };
+    proxySyncedDraftRef.current = next;
+    if (savingProxy || (
+      previous.proxyEnabled === proxyEnabled
+      && previous.proxyServer === proxyServer
+      && previous.proxyBypassRules === proxyBypassRules
+    )) return;
+    setProxyDraft((current) => (
+      current.proxyEnabled === previous.proxyEnabled
+      && current.proxyServer.trim() === previous.proxyServer
+      && current.proxyBypassRules.trim() === previous.proxyBypassRules
+    ) ? next : current);
+  }, [proxyEnabled, proxyServer, proxyBypassRules, savingProxy]);
 
   const proxySettingsDirty = useMemo(() => (
     proxyEnabledDraft !== proxyEnabled
@@ -829,21 +838,21 @@ export function Settings() {
   }, [licenseLocked]);
 
   const handleSaveProxySettings = async () => {
+    const submittedDraft = proxyDraft;
+    const savedProxy = {
+      proxyEnabled: submittedDraft.proxyEnabled,
+      proxyServer: submittedDraft.proxyServer.trim(),
+      proxyBypassRules: submittedDraft.proxyBypassRules.trim(),
+    };
     setSavingProxy(true);
     try {
-      const normalizedProxyServer = proxyServerDraft.trim();
-      const normalizedBypassRules = proxyBypassRulesDraft.trim();
-      await hostSettingsPutPatch({
-        proxyEnabled: proxyEnabledDraft,
-        proxyServer: normalizedProxyServer,
-        proxyBypassRules: normalizedBypassRules,
-      });
-
-      useSettingsStore.setState({
-        proxyEnabled: proxyEnabledDraft,
-        proxyServer: normalizedProxyServer,
-        proxyBypassRules: normalizedBypassRules,
-      });
+      await saveRuntimeSettings(savedProxy);
+      proxySyncedDraftRef.current = savedProxy;
+      setProxyDraft((current) => (
+        current.proxyEnabled === submittedDraft.proxyEnabled
+        && current.proxyServer === submittedDraft.proxyServer
+        && current.proxyBypassRules === submittedDraft.proxyBypassRules
+      ) ? savedProxy : current);
 
       toast.success(t('gateway.proxySaved'));
       trackUiEvent('settings.proxy_saved', { enabled: proxyEnabledDraft });
@@ -860,17 +869,14 @@ export function Settings() {
     }
     setSavingBrowserMode(true);
     try {
-      await hostSettingsPutPatch({
-        browserMode: nextMode,
-      });
-      useSettingsStore.setState({ browserMode: nextMode });
+      await saveRuntimeSettings({ browserMode: nextMode });
       toast.success(t('gateway.browser.modeSaved'));
     } catch (error) {
       toast.error(`${t('gateway.browser.modeSaveFailed')}: ${toUserMessage(error)}`);
     } finally {
       setSavingBrowserMode(false);
     }
-  }, [browserMode, savingBrowserMode, t]);
+  }, [browserMode, saveRuntimeSettings, savingBrowserMode, t]);
 
   const filteredTelemetryEntries = useMemo(() => {
     let entries = telemetryEntries;
@@ -1323,7 +1329,10 @@ export function Settings() {
                 <ExternalLink className="h-3 w-3" />
                 {t('gateway.openFolder')}
               </Button>
-              <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowOpenClawLogs(false)}>
+              <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => {
+                openClawLogsReadRef.current += 1;
+                setShowOpenClawLogs(false);
+              }}>
                 {t('common:actions.close')}
               </Button>
             </div>
@@ -1789,7 +1798,7 @@ export function Settings() {
                   <Label>{t('gateway.proxyTitle')}</Label>
                   <Switch
                     checked={proxyEnabledDraft}
-                    onCheckedChange={setProxyEnabledDraft}
+                    onCheckedChange={(proxyEnabled) => setProxyDraft((current) => ({ ...current, proxyEnabled }))}
                     data-testid="settings-proxy-toggle"
                   />
                 </div>
@@ -1799,7 +1808,7 @@ export function Settings() {
                   <Input
                     id="proxy-server"
                     value={proxyServerDraft}
-                    onChange={(event) => setProxyServerDraft(event.target.value)}
+                    onChange={({ target: { value } }) => setProxyDraft((current) => ({ ...current, proxyServer: value }))}
                     placeholder="http://127.0.0.1:7890"
                   />
                   <p className="text-xs text-muted-foreground">
@@ -1812,7 +1821,7 @@ export function Settings() {
                   <Input
                     id="proxy-bypass"
                     value={proxyBypassRulesDraft}
-                    onChange={(event) => setProxyBypassRulesDraft(event.target.value)}
+                    onChange={({ target: { value } }) => setProxyDraft((current) => ({ ...current, proxyBypassRules: value }))}
                     placeholder="<local>;localhost;127.0.0.1;::1"
                   />
                   <p className="text-xs text-muted-foreground">

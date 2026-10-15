@@ -21,6 +21,7 @@ pub use resolution::{
     ControlAuthority, ControlNodeResolution, ControlNodeResolutionError,
     ControlNodeResolutionOutcome, HumanDecision, ScriptReviewRule,
 };
+pub(crate) use executor::graph_event_for_step;
 pub(crate) use resolution::{
     ControlNodeResolutionInput, require_join_ready, require_resolvable_control_node,
     script_review_output_port_with_evidence,

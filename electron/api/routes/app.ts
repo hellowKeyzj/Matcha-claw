@@ -262,11 +262,10 @@ async function readHostHealthProjection(
   return pendingHostHealthSnapshot;
 }
 
-export async function handleAppRoutes(
+export async function handleMainAppRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: AppApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/app/browser-relay-info' && req.method === 'GET') {
     const relativeDir = 'resources/tools/data/extension/chrome-extension/browser-relay';
@@ -287,6 +286,17 @@ export async function handleAppRoutes(
     });
     return true;
   }
+
+  return false;
+}
+
+export async function handleAppRoutes(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  ctx: AppApiContext,
+): Promise<boolean> {
+  if (await handleMainAppRoutes(req, res, url)) return true;
 
   if (url.pathname === '/api/events' && req.method === 'GET') {
     res.writeHead(200, {

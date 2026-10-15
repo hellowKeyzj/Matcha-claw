@@ -18,42 +18,78 @@ type SessionConnectorStatusState = {
   clearSessionStatus: (sessionIdentity: SessionIdentity) => void;
 };
 
-export const useSessionConnectorStatusStore = create<SessionConnectorStatusState>((set) => ({
+export const useSessionConnectorStatusStore = create<SessionConnectorStatusState>((set) => {
+  const observations = new Map<string, symbol>();
+  const mutations = new Map<string, {
+    pending: Set<symbol>;
+    latestByServer: Map<string, symbol>;
+  }>();
+
+  function invalidateObservation(key: string): void {
+    observations.delete(key);
+    set((state) => ({ loadingBySessionKey: { ...state.loadingBySessionKey, [key]: false } }));
+  }
+
+  return ({
   statusesBySessionKey: {},
   loadingBySessionKey: {},
   errorBySessionKey: {},
 
   refreshSessionStatus: async (sessionIdentity) => {
     const key = buildSessionIdentityKey(sessionIdentity);
+    const observation = Symbol();
+    observations.set(key, observation);
     set((state) => ({
       loadingBySessionKey: { ...state.loadingBySessionKey, [key]: true },
       errorBySessionKey: { ...state.errorBySessionKey, [key]: null },
     }));
     try {
       const statuses = await readSessionConnectorStatuses(sessionIdentity);
-      set((state) => ({
+      if (observations.get(key) === observation) set((state) => ({
         statusesBySessionKey: { ...state.statusesBySessionKey, [key]: statuses },
         loadingBySessionKey: { ...state.loadingBySessionKey, [key]: false },
       }));
       return statuses;
     } catch (error) {
       const message = error instanceof Error ? error.message : '加载会话连接器状态失败';
-      set((state) => ({
+      if (observations.get(key) === observation) set((state) => ({
         loadingBySessionKey: { ...state.loadingBySessionKey, [key]: false },
         errorBySessionKey: { ...state.errorBySessionKey, [key]: message },
       }));
       throw error;
+    } finally {
+      if (observations.get(key) === observation) observations.delete(key);
     }
   },
 
   setSessionMcpServerEnabled: async (sessionIdentity, serverId, enabled) => {
     const key = buildSessionIdentityKey(sessionIdentity);
+    const sessionMutations = mutations.get(key) ?? {
+      pending: new Set<symbol>(),
+      latestByServer: new Map<string, symbol>(),
+    };
+    const mutation = Symbol();
+    sessionMutations.pending.add(mutation);
+    sessionMutations.latestByServer.set(serverId, mutation);
+    mutations.set(key, sessionMutations);
     set((state) => ({
       errorBySessionKey: { ...state.errorBySessionKey, [key]: null },
     }));
     try {
-      await setSessionMcpServerEnabled(sessionIdentity, serverId, enabled);
-      set((state) => ({
+      try {
+        await setSessionMcpServerEnabled(sessionIdentity, serverId, enabled);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '更新会话 MCP 状态失败';
+        if (mutations.get(key) === sessionMutations) {
+          set((state) => ({
+            errorBySessionKey: { ...state.errorBySessionKey, [key]: message },
+          }));
+        }
+        throw error;
+      }
+      if (mutations.get(key) !== sessionMutations) return;
+      invalidateObservation(key);
+      if (sessionMutations.latestByServer.get(serverId) === mutation) set((state) => ({
         statusesBySessionKey: {
           ...state.statusesBySessionKey,
           [key]: (state.statusesBySessionKey[key] ?? []).map((status) => (
@@ -68,17 +104,16 @@ export const useSessionConnectorStatusStore = create<SessionConnectorStatusState
         },
       }));
       await useSessionConnectorStatusStore.getState().refreshSessionStatus(sessionIdentity);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '更新会话 MCP 状态失败';
-      set((state) => ({
-        errorBySessionKey: { ...state.errorBySessionKey, [key]: message },
-      }));
-      throw error;
+    } finally {
+      sessionMutations.pending.delete(mutation);
+      if (mutations.get(key) === sessionMutations && sessionMutations.pending.size === 0) mutations.delete(key);
     }
   },
 
   clearSessionStatus: (sessionIdentity) => {
     const key = buildSessionIdentityKey(sessionIdentity);
+    observations.delete(key);
+    mutations.delete(key);
     set((state) => {
       const { [key]: _removedStatuses, ...statusesBySessionKey } = state.statusesBySessionKey;
       const { [key]: _removedLoading, ...loadingBySessionKey } = state.loadingBySessionKey;
@@ -86,4 +121,5 @@ export const useSessionConnectorStatusStore = create<SessionConnectorStatusState
       return { statusesBySessionKey, loadingBySessionKey, errorBySessionKey };
     });
   },
-}));
+  });
+});

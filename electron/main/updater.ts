@@ -12,6 +12,7 @@ import { logger } from '../utils/logger';
 import { EventEmitter } from 'events';
 import { setQuitting } from './app-state';
 import { isUpdateVersionNewer } from '../../src/types/desktop/update-version';
+import { UPDATE_SOURCE_AUTHORIZATION, UPDATE_SOURCE_URL } from './update-source';
 
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
@@ -57,6 +58,7 @@ export class AppUpdater extends EventEmitter {
     
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = false;
+    autoUpdater.disableDifferentialDownload = true;
     
     autoUpdater.logger = {
       info: (msg: string) => logger.info('[Updater]', msg),
@@ -142,6 +144,14 @@ export class AppUpdater extends EventEmitter {
    * Update status and notify renderer
    */
   private updateStatus(newStatus: Partial<UpdateStatus>): void {
+    const downloadedVersion = this.status.status === 'downloaded' ? this.status.info?.version : undefined;
+    if (downloadedVersion && (
+      newStatus.status === 'checking'
+      || newStatus.status === 'not-available'
+      || (newStatus.status === 'available'
+        && (!newStatus.info || !isUpdateVersionNewer(newStatus.info.version, downloadedVersion)))
+    )) return;
+
     this.status = {
       status: newStatus.status ?? this.status.status,
       info: newStatus.info,
@@ -175,7 +185,6 @@ export class AppUpdater extends EventEmitter {
 
   /**
    * Check for updates.
-   * electron-updater automatically tries providers defined in electron-builder.yml in order.
    *
    * In dev mode (not packed), autoUpdater.checkForUpdates() silently returns
    * null without emitting any events, so we must detect this and force a
@@ -282,6 +291,19 @@ export function registerUpdateHandlers(
   updater: AppUpdater,
   mainWindow: BrowserWindow
 ): void {
+  // Keep credentials out of provider headers so redirects and absolute file URLs cannot inherit them.
+  const source = new URL(UPDATE_SOURCE_URL);
+  autoUpdater.netSession.webRequest.onBeforeSendHeaders(
+    { urls: [`${UPDATE_SOURCE_URL}*`] },
+    (details, callback) => {
+      const url = new URL(details.url);
+      const requestHeaders = { ...details.requestHeaders };
+      if (url.origin === source.origin && url.pathname.startsWith(source.pathname)) {
+        requestHeaders.authorization = UPDATE_SOURCE_AUTHORIZATION;
+      }
+      callback({ requestHeaders });
+    },
+  );
   updater.setMainWindow(mainWindow);
 
   // Get current update status

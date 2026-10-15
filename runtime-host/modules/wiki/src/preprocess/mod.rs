@@ -54,8 +54,12 @@ pub fn set_resource_dir_hint(dir: PathBuf) {
     let _ = RESOURCE_DIR_HINT.set(dir);
 }
 
-pub(crate) fn write_source_text_cache(path: &Path, text: &str) -> Result<(), String> {
-    write_cache(path, text)
+pub(crate) fn write_source_text_cache(
+    path: &Path,
+    text: &str,
+    source_revision: &str,
+) -> Result<(), String> {
+    write_cache(path, text, source_revision)
 }
 
 fn read_source_text_blocking(path: &Path, include_images: bool) -> Result<String, String> {
@@ -109,6 +113,13 @@ fn read_source_text_blocking(path: &Path, include_images: bool) -> Result<String
 
 fn preprocess_source_blocking(path: &Path) -> Result<String, String> {
     let ext = extension(path);
+    if !matches!(ext.as_str(), "pdf" | "org")
+        && !OFFICE_EXTS.contains(&ext.as_str())
+        && !EBOOK_EXTS.contains(&ext.as_str())
+    {
+        return Ok("no preprocessing needed".to_string());
+    }
+    let source_revision = source_revision(path)?;
     let text = match ext.as_str() {
         "pdf" => extract_pdf_text(path, false)?,
         "org" => extract_org_text(path)?,
@@ -117,7 +128,7 @@ fn preprocess_source_blocking(path: &Path) -> Result<String, String> {
         _ => return Ok("no preprocessing needed".to_string()),
     };
 
-    write_cache(path, &text)?;
+    write_cache(path, &text, &source_revision)?;
     Ok(text)
 }
 
@@ -154,16 +165,26 @@ fn read_cache(original: &Path) -> Option<String> {
     {
         return None;
     }
-    let original_modified = fs::metadata(original).ok()?.modified().ok()?;
-    let cache_modified = fs::metadata(&cache_path).ok()?.modified().ok()?;
-    if cache_modified >= original_modified {
-        fs::read_to_string(&cache_path).ok()
-    } else {
-        None
-    }
+    let cached = fs::read_to_string(&cache_path).ok()?;
+    let (header, text) = cached.split_once('\n')?;
+    let revision = header
+        .strip_prefix("<!-- wiki-source-revision:")?
+        .strip_suffix(" -->")?;
+    (source_revision(original).ok()? == revision).then(|| text.to_owned())
 }
 
-fn write_cache(original: &Path, text: &str) -> Result<(), String> {
+fn source_revision(path: &Path) -> Result<String, String> {
+    fs::read(path)
+        .map(|bytes| crate::domain::stable_content_hash(&bytes))
+        .map_err(|error| format!("Failed to read preprocessing source: {error}"))
+}
+
+fn write_cache(original: &Path, text: &str, revision: &str) -> Result<(), String> {
+    if source_revision(original)? != revision {
+        return Err(
+            "Source changed during preprocessing; cached result was not published".to_owned(),
+        );
+    }
     let cache_path = cache_path_for(original);
     if let Some(parent) = cache_path.parent() {
         fs::create_dir_all(parent)
@@ -174,7 +195,9 @@ fn write_cache(original: &Path, text: &str) -> Result<(), String> {
     if uses_anydoc_cache(original) {
         let _ = fs::remove_file(&format_path);
     }
-    fs::write(&cache_path, text).map_err(|error| format!("Failed to write cache: {error}"))?;
+    let cached = format!("<!-- wiki-source-revision:{revision} -->\n{text}");
+    crate::history::write_store(&cache_path, cached.as_bytes())
+        .map_err(|_| "Failed to write preprocessing cache".to_owned())?;
     if uses_anydoc_cache(original) {
         mark_app_write_path(&format_path);
         fs::write(&format_path, OFFICE_CACHE_FORMAT).map_err(|error| {

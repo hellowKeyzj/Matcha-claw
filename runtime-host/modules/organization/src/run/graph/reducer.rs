@@ -336,6 +336,7 @@ fn apply_graph_patch(
         }
     }
     let root_ids = definition.execution_root_ids();
+    let namespace = state.replacement_namespace().map(str::to_owned);
     let mut executions = BTreeMap::new();
     for node in definition.nodes() {
         let initial_status = if root_ids.contains(node.id()) && !node.is_armed_start() {
@@ -363,7 +364,8 @@ fn apply_graph_patch(
             NodeExecutionHistory::initial(NodeAttempt::create(
                 node.id().clone(), node.kind(), NonZeroU32::MIN, initial_status,
                 AttemptReason::Initial, Vec::new(), patched_at,
-            ))
+            )
+            .in_namespace(namespace.as_deref()))
         });
         executions.insert(node.id().clone(), history);
     }
@@ -521,7 +523,8 @@ fn fire_trigger(state: &mut GraphState, node_id: &NodeId, now: u64) -> Result<()
         AttemptReason::Trigger,
         Vec::new(),
         now,
-    );
+    )
+    .in_namespace(state.replacement_namespace());
     if current.status() == AttemptStatus::Pending {
         let current_mut = state
             .current_attempt_mut(node_id)
@@ -553,7 +556,8 @@ fn fire_trigger(state: &mut GraphState, node_id: &NodeId, now: u64) -> Result<()
             AttemptReason::Trigger,
             Vec::new(),
             now,
-        );
+        )
+        .in_namespace(state.replacement_namespace());
         state.append_attempt(&reset_id, pending);
     }
     Ok(())

@@ -57,6 +57,13 @@ pub(crate) enum OrganizationCommand {
         run: organization::GraphRunFacts,
         run_idempotency_key: String,
         reply: crate::call::CallReply<ManualTeamCreateOutcome>,
+        continue_run: tokio::sync::oneshot::Sender<(TeamId, organization::GraphRunFacts, String, crate::call::CallReply<ManualTeamCreateOutcome>)>,
+    },
+    ManualTeamRunCreate {
+        team_id: TeamId,
+        run: organization::GraphRunFacts,
+        run_idempotency_key: String,
+        reply: crate::call::CallReply<ManualTeamCreateOutcome>,
     },
     TeamDelete {
         team_id: TeamId,
@@ -202,6 +209,12 @@ pub(crate) enum OrganizationCommand {
         claimed_at: u64,
         reply: tokio::sync::oneshot::Sender<Result<TeamRunActivityStart, TeamRunActivityError>>,
     },
+    AdmitActivityDispatch {
+        run_id: GraphRunId,
+        claim: ActivityClaim,
+        request: crate::ActivityExecutionRequest,
+        reply: tokio::sync::oneshot::Sender<Result<bool, StoreFault>>,
+    },
     SettleActivity {
         run_id: GraphRunId,
         claim: ActivityClaim,
@@ -213,7 +226,9 @@ pub(crate) enum OrganizationCommand {
         delivery_id: DeliveryId,
         settled: NativeRunSettled,
         settled_at: u64,
-        reply: tokio::sync::oneshot::Sender<Result<TeamNodeTerminalResult, StoreFault>>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::store::NativeTerminalSettlement, StoreFault>,
+        >,
     },
     TeamMessageTerminalObserved {
         native_run_id: String,

@@ -40,7 +40,7 @@ use super::{
 };
 
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(15);
-const RPC_DEADLINE: Duration = Duration::from_secs(30);
+pub(crate) const RPC_DEADLINE: Duration = Duration::from_secs(30);
 const CLOSE_DEADLINE: Duration = Duration::from_secs(1);
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -559,7 +559,7 @@ impl GatewayClient {
         result?
     }
 
-    async fn describe_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64) -> Result<(), sessions_module::ports::RuntimeOperationFailure> {
+    async fn describe_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64) -> Result<Option<sessions_module::state::SessionModelState>, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         if control.supports_goal {
             let mut subscribed = control.metadata_subscribed.lock().await;
@@ -764,11 +764,13 @@ impl GatewayClient {
             let subscribed = self.subscribe_observation(&control, identity, generation).await;
             subscribe_elapsed_ms = started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
             subscribed?;
-            self.describe_observation(&control, identity, generation).await?;
+            let model_state = self.describe_observation(&control, identity, generation).await?;
             let started = trace::enabled().then(std::time::Instant::now);
             let history = self.history_observation(&control, identity, generation, page, host_epoch).await;
             history_elapsed_ms = started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
-            history
+            let mut history = history?;
+            history.view.model_state = model_state;
+            Ok(history)
         }.await;
         if trace::enabled() {
             trace::log_unscoped("runtime.openclaw.observation.sync.result", || serde_json::json!({
@@ -1538,11 +1540,28 @@ impl GatewayClient {
         request: wire::RpcRequest,
         cancellation: &CancellationToken,
     ) -> MutationDelivery {
+        self.rpc_mutation_with_deadline_cancellable(request, RPC_DEADLINE, cancellation).await
+    }
+
+    pub(crate) async fn rpc_mutation_with_deadline(
+        &self,
+        request: wire::RpcRequest,
+        deadline: Duration,
+    ) -> MutationDelivery {
+        self.rpc_mutation_with_deadline_cancellable(request, deadline, &CancellationToken::new()).await
+    }
+
+    async fn rpc_mutation_with_deadline_cancellable(
+        &self,
+        request: wire::RpcRequest,
+        deadline: Duration,
+        cancellation: &CancellationToken,
+    ) -> MutationDelivery {
         let control = match self.control_dispatcher_cancellable(cancellation).await {
             Ok(control) => control,
             Err(error) => return MutationDelivery::NotWritten(client_error_to_dispatcher_error(error)),
         };
-        let delivery = control.dispatcher.mutate_cancellable(request.clone(), cancellation).await;
+        let delivery = control.dispatcher.mutate_with_deadline_cancellable(request.clone(), deadline, cancellation).await;
         if let MutationDelivery::NotWritten(error) = delivery {
             if !cancellation.is_cancelled() && is_retryable_control_connection_error(dispatcher_error(error)) {
                 self.mark_control_reconnecting_if_current(&control).await;
@@ -1550,7 +1569,7 @@ impl GatewayClient {
                     Ok(control) => control,
                     Err(error) => return MutationDelivery::NotWritten(client_error_to_dispatcher_error(error)),
                 };
-                return control.dispatcher.mutate_cancellable(request, cancellation).await;
+                return control.dispatcher.mutate_with_deadline_cancellable(request, deadline, cancellation).await;
             }
         }
         delivery

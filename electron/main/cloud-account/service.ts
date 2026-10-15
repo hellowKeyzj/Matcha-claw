@@ -3,7 +3,7 @@ import { isTraceEnabled, startupTrace } from '../../utils/trace-logger';
 import { executePackageOperation, PackageOperationError, type PackageOperationTransports } from './package-operations';
 import type { CloudPackageOperationKind, CloudPackageOperationRequests, CloudPackageOperationReceipt, CloudPackageOperationResult, CloudPackageOperationError } from '../../../src/types/cloud-package-operation';
 import { clearCloudAccountSession, readCloudAccountSession, writeCloudAccountSession, type CloudAccountSession } from './session-store';
-import { CloudAccountClientError, createCloudAccountClient, removePackageDownload, type CloudAccountClient, type CloudPackageUpload } from './client';
+import { CloudAccountClientError, removePackageDownload, type CloudAccountClient, type CloudPackageUpload } from './client';
 import type { CloudProviderSync } from './provider-sync';
 import { getCloudPackageDevicePublicKey } from './device-key-store';
 import { createPackageAuthorizationLifecycle, MAX_PENDING_INSTALLS, type PreparedPackageInstall } from './package-authorization';
@@ -60,11 +60,15 @@ export type CloudAccountService = Readonly<{
   close(): Promise<void>;
 }>;
 
+export type CloudAccountRuntime = Readonly<{
+  providerSync: CloudProviderSync;
+  packageTransport: SealedResourceAuthorizationTransport;
+  operationTransports: PackageOperationTransports;
+}>;
+
 export function createCloudAccountService(
-  client: CloudAccountClient = createCloudAccountClient(),
-  providerSync: CloudProviderSync | undefined,
-  packageTransport: SealedResourceAuthorizationTransport,
-  operationTransports?: PackageOperationTransports,
+  client: CloudAccountClient,
+  runtime: Promise<CloudAccountRuntime>,
 ): CloudAccountService {
   let publicSettingsTask: Promise<PublicCloudSettings> | undefined;
   let sessionTask: Promise<AccountSessionProjection> | undefined;
@@ -86,6 +90,7 @@ export function createCloudAccountService(
   let skillExportObservationDisconnected = false;
   const skillExportReservations = new Set<Readonly<{ epoch: number }>>();
   const packageTasks = new Set<Promise<void>>();
+  const providerTasks = new Set<Promise<void>>();
   let packageUploadTail = Promise.resolve();
   const prunePackageOperations = () => {
     const now = Date.now();
@@ -99,7 +104,7 @@ export function createCloudAccountService(
     for (const [callId, exported] of skillExports) {
       if (exported.expiresAt === undefined || exported.expiresAt > now || exported.observing) continue;
       // A disconnected observation lease is not the native artifact's completion TTL.
-      if (operationTransports && !exported.terminal && !exported.operationId) observeSkillExport(callId, true);
+      if (!exported.terminal && !exported.operationId) observeSkillExport(callId, true);
       else skillExports.delete(callId);
     }
   };
@@ -112,7 +117,7 @@ export function createCloudAccountService(
   };
   const observeSkillExport = (callId: string, recoverExpiredLease = false) => {
     const exported = skillExports.get(callId);
-    if (!operationTransports || closing || !exported || exported.epoch !== epoch || exported.terminal || exported.operationId) return;
+    if (closing || !exported || exported.epoch !== epoch || exported.terminal || exported.operationId) return;
     if (skillExportObservationDisconnected && !recoverExpiredLease) {
       if (exported.expiresAt === undefined) exported.expiresAt = Date.now() + 10 * 60_000;
       return;
@@ -122,6 +127,10 @@ export function createCloudAccountService(
     exported.readRequested = false;
     const task = (async () => {
       try {
+        const { operationTransports } = await runtime;
+        if (closing || skillExports.get(callId) !== exported || exported.epoch !== epoch || exported.operationId) return;
+        subscribeSkillExports(operationTransports);
+        if (skillExportObservationDisconnected && !recoverExpiredLease) return;
         const response = await operationTransports.callLogTransport.get({ callId });
         if (closing || skillExports.get(callId) !== exported || exported.epoch !== epoch || exported.operationId || (skillExportObservationDisconnected && !recoverExpiredLease)) return;
         if (response.status !== 200 || !('module' in response.body) || response.body.callId !== callId
@@ -148,8 +157,8 @@ export function createCloudAccountService(
     })().finally(() => { packageTasks.delete(task); });
     packageTasks.add(task);
   };
-  const subscribeSkillExports = () => {
-    if (unsubscribeSkillExports || !operationTransports) return;
+  const subscribeSkillExports = (operationTransports: PackageOperationTransports) => {
+    if (unsubscribeSkillExports) return;
     try {
       unsubscribeSkillExports = operationTransports.subscribeCalls((event) => {
         if (event === 'disconnected') {
@@ -176,7 +185,10 @@ export function createCloudAccountService(
   };
 
   const notifyPackageChanged = (operationId: string) => {
-    try { operationTransports?.packageChanged(operationId); } catch { /* Hints must not interrupt owner completion. */ }
+    const task = runtime.then(({ operationTransports }) => {
+      operationTransports.packageChanged(operationId);
+    }).catch(() => { /* Hints must not interrupt owner completion. */ }).finally(() => { packageTasks.delete(task); });
+    packageTasks.add(task);
   };
   const invalidatePackageObservation = () => {
     for (const [operationId, entry] of packageOperations) {
@@ -187,18 +199,23 @@ export function createCloudAccountService(
   };
 
   const assertCurrent = (expected: number) => {
-    if (closed || epoch !== expected) throw new CloudAccountClientError(409, 409, 'Cloud account session changed');
+    if (closing || closed || epoch !== expected) throw new CloudAccountClientError(409, 409, 'Cloud account session changed');
   };
   const sessionOperation = <T>(operation: () => Promise<T>): Promise<T> => {
     const task = sessionTail.then(operation);
     sessionTail = task.then(() => undefined, () => undefined);
     return task;
   };
-  const notifySession = (session: CloudAccountSession | null) => {
+  const notifySession = (session: CloudAccountSession | null, expected: number) => {
+    assertCurrent(expected);
     const seq = traceEnabled ? ++traceSeq : 0;
     const startedAt = traceEnabled ? performance.now() : 0;
     startupTrace('cloud-account-service', 'session.notify.start', () => ({ seq }));
-    void providerSync?.reconcile(session);
+    const signals = { bootstrap: AbortSignal.any([operationShutdown.signal, packageObservation.signal]), observation: operationShutdown.signal };
+    const task = runtime.then(({ providerSync }) => {
+      if (!closing && !closed && epoch === expected) return providerSync.reconcile(session, () => assertCurrent(expected), signals);
+    }).catch(() => undefined).finally(() => { providerTasks.delete(task); });
+    providerTasks.add(task);
     void packages.setSession(session?.user.id).catch(() => undefined);
     startupTrace('cloud-account-service', 'session.notify.end', () => ({ seq, outcome: 'dispatched', elapsedMs: Math.round(performance.now() - startedAt) }));
   };
@@ -252,7 +269,7 @@ export function createCloudAccountService(
           stage = '';
         });
         assertCurrent(expected);
-        notifySession(nextSession);
+        notifySession(nextSession, expected);
         outcome = 'success';
         return nextSession;
       } catch (error) {
@@ -314,7 +331,7 @@ export function createCloudAccountService(
     const expected = epoch;
     const session = await validSession(expected);
     if (!session) {
-      notifySession(null);
+      notifySession(null, expected);
       throw new CloudAccountClientError(401, 401, 'Cloud account session is not authenticated');
     }
     void packages.setSession(session.user.id).catch(() => undefined);
@@ -342,7 +359,7 @@ export function createCloudAccountService(
       throw error;
     }
   };
-  const packages = createPackageAuthorizationLifecycle(packageTransport, authorizePackage, downloadPackage);
+  const packages = createPackageAuthorizationLifecycle(async () => (await runtime).packageTransport, authorizePackage, downloadPackage);
   const getPublicSettings = () => {
     if (!publicSettingsTask) {
       const seq = publicSettingsSeq = traceEnabled ? ++traceSeq : 0;
@@ -374,7 +391,7 @@ export function createCloudAccountService(
       const expected = epoch;
       const task = (async (): Promise<AccountSessionProjection> => {
         const session = await validSession(expected);
-        notifySession(session);
+        notifySession(session, expected);
         if (!session) return { state: 'anonymous' };
         void (async () => {
           const profileSeq = traceEnabled ? ++traceSeq : 0;
@@ -408,7 +425,7 @@ export function createCloudAccountService(
               startupTrace('cloud-account-service', 'profile.write.end', () => ({ seq: profileSeq, outcome: 'success', elapsedMs: Math.round(performance.now() - stageStartedAt) }));
               stage = '';
               assertCurrent(expected);
-              notifySession(next);
+              notifySession(next, expected);
               if (sessionTask === task) sessionTask = Promise.resolve(toSessionProjection(next));
               outcome = 'success';
             });
@@ -458,7 +475,7 @@ export function createCloudAccountService(
       assertCurrent(expected);
       await clearCloudAccountSession();
       assertCurrent(expected);
-      notifySession(null);
+      notifySession(null, expected);
       return previous;
     });
     sessionChangeTask = previousSession.then(() => undefined);
@@ -472,14 +489,14 @@ export function createCloudAccountService(
     const session: CloudAccountSession = { accessToken: result.accessToken, refreshToken: result.refreshToken, expiresAt: result.expiresAt, tokenType: result.tokenType, user: result.user };
     await sessionOperation(async () => { assertCurrent(expected); await writeCloudAccountSession(session); });
     assertCurrent(expected);
-    notifySession(session);
+    notifySession(session, expected);
     const projection = toSessionProjection(session);
     sessionTask = Promise.resolve(projection);
     return projection;
   };
 
   const admitPackageOperation = <K extends CloudPackageOperationKind>(kind: K, request: CloudPackageOperationRequests[K]): CloudPackageOperationReceipt => {
-    if (closing || closed || !operationTransports) throw new PackageOperationError('unavailable', 503, 'Cloud package operations are unavailable');
+    if (closing || closed) throw new PackageOperationError('unavailable', 503, 'Cloud package operations are unavailable');
     prunePackageOperations();
     const expected = epoch;
     const observationSignal = AbortSignal.any([operationShutdown.signal, packageObservation.signal]);
@@ -507,6 +524,9 @@ export function createCloudAccountService(
         const session = await validSession(expected);
         if (!session) throw new CloudAccountClientError(401, 401, 'Cloud account session is not authenticated');
         void packages.setSession(session.user.id).catch(() => undefined);
+        const { operationTransports } = await runtime;
+        assertCurrent(expected);
+        operationShutdown.signal.throwIfAborted();
         const result = await executePackageOperation(kind, request, {
           assertCurrent: () => { assertCurrent(expected); operationShutdown.signal.throwIfAborted(); },
           signal: observationSignal,
@@ -534,7 +554,7 @@ export function createCloudAccountService(
             return uploading;
           },
           prepare: async (input) => { assertCurrent(expected); await getSession(); assertCurrent(expected); return packages.preparePackageInstall(input); },
-          bind: (callId, prepared) => packages.bindPackageInstall(callId, prepared),
+          bind: (callId, prepared) => packages.bindPackageInstall(callId, prepared, Promise.resolve(operationTransports)),
           release: (prepared) => packages.releasePackageInstall(prepared),
         }, operationTransports);
         entry.result = { operationId, kind, state: 'succeeded', result } as CloudPackageOperationResult;
@@ -613,7 +633,7 @@ export function createCloudAccountService(
       const refreshed = session ? await refreshStoredSession(session, expected) : null;
       if (!refreshed && epoch !== expected) return getSession();
       assertCurrent(expected);
-      notifySession(refreshed);
+      notifySession(refreshed, expected);
       const projection: AccountSessionProjection = refreshed ? toSessionProjection(refreshed) : { state: 'anonymous' };
       sessionTask = Promise.resolve(projection);
       return projection;
@@ -646,7 +666,7 @@ export function createCloudAccountService(
     },
     packageInstalled: (prepared) => packages.packageInstalled(prepared),
     reservePackageInstall: (prepared) => packages.reservePackageInstall(prepared),
-    bindPackageInstall: (callId, prepared) => packages.bindPackageInstall(callId, prepared),
+    bindPackageInstall: (callId, prepared) => packages.bindPackageInstall(callId, prepared, runtime.then(({ operationTransports }) => operationTransports)),
     releasePackageInstall: (prepared) => packages.releasePackageInstall(prepared),
     acknowledgePackageInstall: (callId, confirmed) => packages.acknowledgePackageInstall(callId, confirmed),
     runtimeExited: () => packages.runtimeExited(),
@@ -668,7 +688,6 @@ export function createCloudAccountService(
       assertCurrent(reservation.epoch);
       if (!skillExportReservations.delete(reservation)) throw new PackageOperationError('sessionChanged', 409, 'Cloud account session changed; sign in and check package status');
       skillExports.set(callId, { epoch: reservation.epoch });
-      subscribeSkillExports();
       observeSkillExport(callId);
     },
     releaseSkillExport: (reservation) => { skillExportReservations.delete(reservation); },
@@ -682,14 +701,16 @@ export function createCloudAccountService(
       unsubscribeSkillExports?.();
       unsubscribeSkillExports = undefined;
       operationShutdown.abort();
-      await Promise.all(packageTasks);
+      await sessionTail;
+      while (packageTasks.size || providerTasks.size) await Promise.all([...packageTasks, ...providerTasks]);
       closed = true;
       epoch += 1;
       invalidatePackageObservation();
       packageOperations.clear();
       skillExports.clear();
       skillExportReservations.clear();
-      await packages.close();
+      try { await packages.close(); }
+      finally { while (packageTasks.size) await Promise.all(packageTasks); }
     },
   };
 }

@@ -50,30 +50,6 @@ pub struct MatchaSessionModelRuntimeCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionRuntimeModelFacts {
-    pub current_model: Option<String>,
-    pub model_state: Option<SessionModelState>,
-    pub agent_id: Option<String>,
-    pub model_override_source: Option<SessionRuntimeModelSource>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SessionRuntimeModelSource {
-    User,
-    Auto,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionRuntimeModelCommand {
-    pub endpoint: NativeEndpoint,
-    pub session_key: String,
-    pub endpoint_session_id: Option<String>,
-    pub current_model: Option<String>,
-    pub default_model: Option<String>,
-    pub trace_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionModelSelectionDiagnostic {
     account_id: String,
     model_id: String,
@@ -206,45 +182,6 @@ impl MatchaSessionModelRuntimeCommand {
 
     pub fn trace_id(&self) -> Option<&str> {
         self.trace_id.as_deref()
-    }
-}
-
-impl SessionRuntimeModelCommand {
-    pub fn try_new(
-        endpoint: NativeEndpoint,
-        session_key: String,
-        endpoint_session_id: Option<String>,
-        current_model: Option<String>,
-        default_model: Option<String>,
-    ) -> Result<Self, InvalidCommand> {
-        if session_key.is_empty()
-            || session_key.len() > MAX_SESSION_KEY_BYTES
-            || session_key.as_bytes().contains(&0)
-            || endpoint_session_id
-                .as_deref()
-                .is_some_and(|endpoint_session_id| !valid_endpoint_session_id(endpoint_session_id))
-            || current_model
-                .as_deref()
-                .is_some_and(|value| !valid_model_value(value, MAX_MATCHA_MODEL_BYTES))
-            || default_model
-                .as_deref()
-                .is_some_and(|value| !valid_model_value(value, MAX_MATCHA_MODEL_BYTES))
-        {
-            return Err(InvalidCommand);
-        }
-        Ok(Self {
-            endpoint,
-            session_key,
-            endpoint_session_id,
-            current_model,
-            default_model,
-            trace_id: None,
-        })
-    }
-
-    pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
-        self.trace_id = trace_id;
-        self
     }
 }
 

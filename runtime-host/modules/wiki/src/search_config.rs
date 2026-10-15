@@ -122,7 +122,7 @@ macro_rules! redacted_debug {
 }
 redacted_debug!(EmbeddingConfigUpdate, SearchConfigUpdate);
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct EmbeddingCredentials {
     pub(crate) api_key: String,
     pub(crate) extra_headers: BTreeMap<String, String>,
@@ -131,6 +131,7 @@ pub struct EmbeddingCredentials {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct PrivateConfig {
+    public_config: Option<SearchConfig>,
     embedding_api_key: String,
     embedding_headers: BTreeMap<String, String>,
 }
@@ -150,8 +151,10 @@ pub fn update_config(
     project_id: &str,
     input: SearchConfigUpdate,
 ) -> Result<SearchConfig, WikiFailure> {
-    let (mut config, mut private) = read_owned_config(root, state_root, project_id)?;
+    let _lock = lock_config(root, "search-config")?;
+    let (mut config, mut private) = read_owned_config_unlocked(root, state_root, project_id)?;
     apply_update(&mut config, &mut private, input)?;
+    private.public_config = Some(config.clone());
     write_private_config(&private_path(state_root, project_id)?, &private)?;
     write_config(&root.join(".llm-wiki/search-config.json"), &config)?;
     Ok(config)
@@ -179,8 +182,26 @@ fn read_owned_config(
     state_root: &Path,
     project_id: &str,
 ) -> Result<(SearchConfig, PrivateConfig), WikiFailure> {
-    let mut config: SearchConfig = read_json(&root.join(".llm-wiki/search-config.json"))?;
+    let _lock = lock_config(root, "search-config")?;
+    read_owned_config_unlocked(root, state_root, project_id)
+}
+
+fn read_owned_config_unlocked(
+    root: &Path,
+    state_root: &Path,
+    project_id: &str,
+) -> Result<(SearchConfig, PrivateConfig), WikiFailure> {
+    let path = root.join(".llm-wiki/search-config.json");
+    let mut config: SearchConfig = read_json(&path)?;
     let private: PrivateConfig = read_json(&private_path(state_root, project_id)?)?;
+    if let Some(bound) = &private.public_config {
+        validate_config(bound)?;
+        if config_hash(&config)? != config_hash(bound)? {
+            // The private atomic write binds credentials and public fields; finish its interrupted projection.
+            write_config(&path, bound)?;
+        }
+        config = bound.clone();
+    }
     validate_config(&config)?;
     config
         .embedding
@@ -350,6 +371,30 @@ fn serialize_public_headers<S: serde::Serializer>(
         .serialize(serializer)
 }
 
+pub(crate) fn lock_config(root: &Path, name: &str) -> Result<fs::File, WikiFailure> {
+    let directory = root.join(".llm-wiki");
+    fs::create_dir_all(&directory)
+        .map_err(|_| WikiFailure::state("Wiki configuration directory could not be created"))?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join(format!("{name}.lock")))
+        .map_err(|_| WikiFailure::state("Wiki configuration lock could not be opened"))?;
+    file.lock()
+        .map_err(|_| WikiFailure::state("Wiki configuration could not be locked"))?;
+    Ok(file)
+}
+
+fn config_hash(config: &SearchConfig) -> Result<String, WikiFailure> {
+    let mut config = config.clone();
+    config.embedding.api_key_configured = false;
+    serde_json::to_vec(&config)
+        .map(|bytes| crate::domain::stable_content_hash(&bytes))
+        .map_err(|_| WikiFailure::state("Wiki search configuration could not be encoded"))
+}
+
 fn private_path(state_root: &Path, project_id: &str) -> Result<PathBuf, WikiFailure> {
     let mut components = Path::new(project_id).components();
     if !matches!(components.next(), Some(Component::Normal(_)))
@@ -402,8 +447,9 @@ fn write_private_config(path: &Path, config: &PrivateConfig) -> Result<(), WikiF
             WikiFailure::state("Wiki private search storage permission setup failed")
         })?;
     }
-    let bytes = serde_json::to_vec_pretty(config)
-        .map_err(|_| WikiFailure::state("Wiki private search configuration could not be encoded"))?;
+    let bytes = serde_json::to_vec_pretty(config).map_err(|_| {
+        WikiFailure::state("Wiki private search configuration could not be encoded")
+    })?;
     crate::history::write_private_store(path, &bytes)
         .map_err(|_| WikiFailure::state("Wiki private search configuration could not be written"))
 }

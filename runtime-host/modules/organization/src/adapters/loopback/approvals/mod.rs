@@ -75,30 +75,13 @@ impl Delivery {
 
     pub(crate) fn body(&self) -> Value {
         match self {
-            Self::Available(approvals) => pending_approvals_body(approvals),
+            Self::Available(approvals) => json!(approvals),
             Self::Unavailable => json!({
                 "success": false,
                 "error": "Team pending approvals are unavailable",
             }),
         }
     }
-}
-
-fn pending_approvals_body(approvals: &organization::run::TeamPendingApprovals) -> Value {
-    json!({
-        "teamId": approvals.team_id(),
-        "runId": approvals.run_id(),
-        "approvals": approvals.approvals().iter().map(|approval| json!({
-            "approvalId": approval.approval_id(),
-            "stageId": approval.stage_id(),
-            "subject": approval.subject(),
-            "nodeId": approval.node_id(),
-            "roleId": approval.role_id(),
-            "reason": approval.reason(),
-            "requestedAction": approval.requested_action(),
-            "createdAt": approval.created_at(),
-        })).collect::<Vec<_>>(),
-    })
 }
 
 pub(crate) async fn read(owner: &OrganizationHandle, request: Request) -> Delivery {

@@ -239,7 +239,7 @@ fn graph_event_at(event: &GraphEvent) -> u64 {
     }
 }
 
-fn graph_event_for_step(step: &ControlExecutionStep) -> GraphEvent {
+pub(crate) fn graph_event_for_step(step: &ControlExecutionStep) -> GraphEvent {
     match step {
         ControlExecutionStep::GraphEvent(event) => event.clone(),
         ControlExecutionStep::HumanDecisionApproval { node_id, fence, requested_at } => {

@@ -130,6 +130,7 @@ impl ProviderHandle {
             id,
             reference: format!("credential:v1:{}", account_id.as_str()),
             revision: draft.revision_value(),
+            account_id: account_id.clone(),
         });
         let (reply, _) = oneshot::channel();
         self.admit_account_command(ProviderCommand::ReplaceAccount {
@@ -160,6 +161,7 @@ impl ProviderHandle {
             id: transaction_id,
             reference: format!("credential:v1:{}", id.as_str()),
             revision: revision.get(),
+            account_id: id.clone(),
         });
         let (reply, _) = oneshot::channel();
         self.admit_account_command(ProviderCommand::DeleteAccount {
@@ -620,60 +622,6 @@ impl ProviderHandle {
         .map_err(|_| ())?;
         rx.await.map_err(|_| ())
     }
-
-    pub async fn accept_session_runtime_models(
-        &self,
-        endpoint: ProviderSessionEndpoint,
-        model_refs: Vec<String>,
-    ) -> Result<ProviderSessionRuntimeModelsOutcome, ()> {
-        let call = ProviderCall::begin(
-            self.recorder.as_ref(),
-            ProviderCallKind::AcceptSessionRuntimeModels,
-            "providerSession.acceptRuntimeModels",
-        )
-        .await?;
-        let (reply, rx) = oneshot::channel();
-        self.send_query(ProviderQuery::AcceptSessionRuntimeModels {
-            call,
-            endpoint,
-            model_refs,
-            reply,
-        })
-        .await
-        .map_err(|_| ())?;
-        rx.await.map_err(|_| ())
-    }
-
-    pub async fn select_session_model_rebound(
-        &self,
-        endpoint: ProviderSessionEndpoint,
-        session_key: String,
-        endpoint_session_id: Option<String>,
-        current_model: Option<String>,
-        default_model: Option<String>,
-        trace_id: Option<String>,
-    ) -> Result<ProviderSessionModelSelectionOutcome, ()> {
-        let call = ProviderCall::begin(
-            self.recorder.as_ref(),
-            ProviderCallKind::SelectSessionModelRebound,
-            "providerSession.selectModelRebound",
-        )
-        .await?;
-        let (reply, rx) = oneshot::channel();
-        self.send_query(ProviderQuery::SelectSessionModelRebound {
-            call,
-            endpoint,
-            session_key,
-            endpoint_session_id,
-            current_model,
-            default_model,
-            trace_id,
-            reply,
-        })
-        .await
-        .map_err(|_| ())?;
-        rx.await.map_err(|_| ())
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -686,6 +634,7 @@ pub(crate) struct ProviderAccountPrivateTransaction {
     pub(crate) id: String,
     pub(crate) reference: String,
     pub(crate) revision: u64,
+    pub(crate) account_id: ProviderAccountId,
 }
 
 pub(crate) enum ProviderCommand {
@@ -795,22 +744,6 @@ pub(crate) enum ProviderQuery {
         trace_id: Option<String>,
         reply: oneshot::Sender<ProviderSessionModelSelectionOutcome>,
     },
-    AcceptSessionRuntimeModels {
-        call: Option<ProviderCall>,
-        endpoint: ProviderSessionEndpoint,
-        model_refs: Vec<String>,
-        reply: oneshot::Sender<ProviderSessionRuntimeModelsOutcome>,
-    },
-    SelectSessionModelRebound {
-        call: Option<ProviderCall>,
-        endpoint: ProviderSessionEndpoint,
-        session_key: String,
-        endpoint_session_id: Option<String>,
-        current_model: Option<String>,
-        default_model: Option<String>,
-        trace_id: Option<String>,
-        reply: oneshot::Sender<ProviderSessionModelSelectionOutcome>,
-    },
     TextGenerationModelLimits {
         call: Option<ProviderCall>,
         request: ProviderTextGenerationModelLimitsRequest,
@@ -865,9 +798,7 @@ impl ProviderQuery {
             | Self::TextGenerationModelLimits { call, .. }
             | Self::GenerateText { call, .. }
             | Self::SelectSessionModel { call, .. }
-            | Self::SelectMatchaSessionModelRuntime { call, .. }
-            | Self::AcceptSessionRuntimeModels { call, .. }
-            | Self::SelectSessionModelRebound { call, .. } => call.clone(),
+            | Self::SelectMatchaSessionModelRuntime { call, .. } => call.clone(),
         }
     }
 
@@ -881,9 +812,7 @@ impl ProviderQuery {
             | Self::TextGenerationModelLimits { call, .. }
             | Self::GenerateText { call, .. }
             | Self::SelectSessionModel { call, .. }
-            | Self::SelectMatchaSessionModelRuntime { call, .. }
-            | Self::AcceptSessionRuntimeModels { call, .. }
-            | Self::SelectSessionModelRebound { call, .. } => call.take(),
+            | Self::SelectMatchaSessionModelRuntime { call, .. } => call.take(),
         }
     }
 
@@ -897,9 +826,7 @@ impl ProviderQuery {
             | Self::TextGenerationModelLimits { .. }
             | Self::GenerateText { .. } => QueryRoute::Direct,
             Self::SelectSessionModel { .. }
-            | Self::SelectMatchaSessionModelRuntime { .. }
-            | Self::AcceptSessionRuntimeModels { .. }
-            | Self::SelectSessionModelRebound { .. } => QueryRoute::Global,
+            | Self::SelectMatchaSessionModelRuntime { .. } => QueryRoute::Global,
         }
     }
 }

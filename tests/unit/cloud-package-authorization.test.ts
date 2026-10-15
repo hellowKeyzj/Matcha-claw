@@ -15,7 +15,7 @@ function fixture() {
   };
   const authorize = vi.fn().mockImplementation(async (request) => ({ packageVersionId: request.packageVersionId, packageType: request.packageType || 'skill', deviceEnvelope: {}, leaseExpiresAt: new Date(Date.now() + 300_000).toISOString() }));
   const download = vi.fn().mockResolvedValue({ packagePath: 'C:/sealed/calendar.matcha-skillpkg', packageVersionId: 'v1', filename: metadata.fileName, bytes: 10, packageSha256: metadata.packageSha256 });
-  return { transport, authorize, download, owner: createPackageAuthorizationLifecycle(transport, authorize, download) };
+  return { transport, authorize, download, owner: createPackageAuthorizationLifecycle(async () => transport, authorize, download) };
 }
 
 describe('cloud package authorization lifecycle', () => {

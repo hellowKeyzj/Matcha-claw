@@ -1,7 +1,7 @@
 use std::{
     cell::Cell,
     fmt,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use serde::Deserialize;
@@ -38,7 +38,24 @@ const SENSITIVE_CONFIG_KEYS: &[&str] = &[
     "x-api-key",
 ];
 
-static PROCESS_WRITER: OnceLock<Mutex<()>> = OnceLock::new();
+static WRITERS: OnceLock<Mutex<Vec<(CanonicalStateDir, Weak<Mutex<()>>)>>> = OnceLock::new();
+
+fn writer_for(state_dir: &CanonicalStateDir) -> Arc<Mutex<()>> {
+    let mut writers = WRITERS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    writers.retain(|(_, writer)| writer.strong_count() != 0);
+    if let Some(writer) = writers
+        .iter()
+        .find_map(|(directory, writer)| (directory == state_dir).then(|| writer.upgrade()).flatten())
+    {
+        return writer;
+    }
+    let writer = Arc::new(Mutex::new(()));
+    writers.push((state_dir.clone(), Arc::downgrade(&writer)));
+    writer
+}
 
 thread_local! {
     static WRITER_ACTIVE: Cell<bool> = const { Cell::new(false) };
@@ -137,7 +154,7 @@ impl OpenClawConfigStore {
         if WRITER_ACTIVE.with(Cell::get) {
             return Err(OpenClawConfigStoreError::ReentrantUpdate);
         }
-        let writer = PROCESS_WRITER.get_or_init(|| Mutex::new(()));
+        let writer = writer_for(&self.state_dir);
         let _writer = writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -146,15 +163,20 @@ impl OpenClawConfigStore {
             .state_dir
             .open()
             .map_err(|_| OpenClawConfigStoreError::StateDirectoryRejected)?;
-        let mut document = read(&state_dir)?;
-        let mutation = mutate(&mut document)?;
-        if mutation.changed {
-            let bytes = serialize(&document)?;
-            persist::replace(&state_dir, &bytes).map_err(OpenClawConfigStoreError::from)?;
-        }
-        Ok(OpenClawConfigUpdate {
-            changed: mutation.changed,
-        })
+        let native_writer = persist::Writer::acquire(&state_dir)?;
+        let result = (|| {
+            let mut document = read(&state_dir)?;
+            let mutation = mutate(&mut document)?;
+            if mutation.changed {
+                let bytes = serialize(&document)?;
+                persist::replace(&state_dir, &bytes).map_err(OpenClawConfigStoreError::from)?;
+            }
+            Ok(OpenClawConfigUpdate {
+                changed: mutation.changed,
+            })
+        })();
+        native_writer.release();
+        result
     }
 }
 

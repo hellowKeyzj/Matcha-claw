@@ -625,6 +625,7 @@ export function RemoteFleetRegistrationSheet({
   const [formError, setFormError] = useState<string | null>(null);
   const [registeredEnvironmentId, setRegisteredEnvironmentId] = useState<string | null>(null);
   const [deploymentError, setDeploymentError] = useState<string | null>(null);
+  const formIncarnationRef = useRef(0);
   const submitInFlightRef = useRef(false);
   const deployInFlightRef = useRef(false);
   const credentialOperationIdsRef = useRef(new Map<WritableCredentialName, string>());
@@ -685,6 +686,7 @@ export function RemoteFleetRegistrationSheet({
   };
 
   const resetRegistrationDraft = useCallback(() => {
+    formIncarnationRef.current += 1;
     credentialOperationIdsRef.current.clear();
     setForm(EMPTY_NODE_FORM);
     setAdvancedOpen(false);
@@ -694,6 +696,7 @@ export function RemoteFleetRegistrationSheet({
   }, []);
 
   useEffect(() => {
+    formIncarnationRef.current += 1;
     if (!open) return;
     credentialOperationIdsRef.current.clear();
     setForm(editingConnection ? formFromEditingConnection(editingConnection) : EMPTY_NODE_FORM);
@@ -701,6 +704,7 @@ export function RemoteFleetRegistrationSheet({
     setFormError(null);
     setRegisteredEnvironmentId(null);
     setDeploymentError(null);
+    return () => { formIncarnationRef.current += 1; };
   }, [editingConnection, open]);
 
   const closeRegistrationSheet = useCallback(() => {
@@ -710,6 +714,7 @@ export function RemoteFleetRegistrationSheet({
 
   const updateOpen = (nextOpen: boolean) => {
     if (!nextOpen) {
+      formIncarnationRef.current += 1;
       if (registeredEnvironmentId) {
         closeRegistrationSheet();
       } else {
@@ -727,6 +732,7 @@ export function RemoteFleetRegistrationSheet({
   const submit = useCallback(async () => {
     if (submitInFlightRef.current) return;
     submitInFlightRef.current = true;
+    const formIncarnation = formIncarnationRef.current;
 
     try {
       setFormError(null);
@@ -768,6 +774,7 @@ export function RemoteFleetRegistrationSheet({
       setRegisteredEnvironmentId(environmentId);
       toast.success(t('remoteFleet.registration.toast.submitted'));
     } catch (error) {
+      if (formIncarnation !== formIncarnationRef.current) return;
       const message = resolveRegistrationErrorMessage(error, t);
       setFormError(message);
       toast.error(message);

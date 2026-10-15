@@ -24,6 +24,19 @@ export interface HostApiContext {
   credentialWriteAdapter?: RemoteFleetCredentialWriteAdapter;
 }
 
+export type MainHostApiContext = Pick<HostApiContext,
+  'licenseService' | 'cloudAccountService' | 'eventBus' | 'sessionObservers'
+>;
+
+export type RuntimeHostApiDependencies = Omit<HostApiContext, keyof MainHostApiContext> & Readonly<{
+  runtimeHostTransportPort: number;
+}>;
+
+export type HostApiServerContext = MainHostApiContext & Readonly<{
+  runtime: Promise<RuntimeHostApiDependencies>;
+  signal: AbortSignal;
+}>;
+
 export type RuntimeHostApiContext = Pick<HostApiContext, 'runtimeHost'>;
 
 export type AppApiContext = Pick<HostApiContext, 'eventBus' | 'runtimeHost'>;

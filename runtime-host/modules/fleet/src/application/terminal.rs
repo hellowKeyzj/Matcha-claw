@@ -39,7 +39,7 @@ pub struct TerminalProviderOpen {
     pub events: TerminalStream,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerminalContext {
     pub session: fleet::terminal::SessionId,
     pub target: fleet::terminal::TargetId,

@@ -27,6 +27,7 @@ pub struct PreparedPageEmbedding {
     pub(crate) fingerprint: String,
     pub(crate) space_key: String,
     pub(crate) rows: Vec<ChunkEmbedding>,
+    pub(crate) commit_guard: Option<std::sync::Arc<vector::IndexCommitGuard>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -286,18 +287,30 @@ impl WikiVectorIndex for LanceWikiVectorIndex {
             {
                 return Ok(());
             }
-            // Provider cancellation precedes the atomic page replacement; old vectors remain on failure.
-            let rows = tokio::time::timeout(
-                Duration::from_secs(300),
-                self.prepare_rows(title, chunks, config, credentials, None),
-            )
-            .await
-            .map_err(|_| {
-                WikiIndexFailure::embedding("wiki embedding provider timed out after 300 seconds")
-            })??;
-            vector::upsert_page_chunks(project_root, &page_id, rows, &fingerprint, &space_key)
+            let index_revision = vector::page_index_revision(project_root, &page_id)
                 .await
-                .map_err(WikiIndexFailure::lancedb)
+                .map_err(WikiIndexFailure::lancedb)?;
+            let slots = tokio::sync::Semaphore::new(config.concurrency.clamp(1, 32));
+            let mut page = self
+                .prepare_page(
+                    relative_path,
+                    title,
+                    revision,
+                    chunks,
+                    config,
+                    credentials,
+                    &slots,
+                )
+                .await?;
+            page.commit_guard = Some(std::sync::Arc::new(vector::IndexCommitGuard::Page {
+                path: relative_path.to_owned(),
+                revision: revision.id().to_owned(),
+                index_revision,
+            }));
+            self.update_pages(project_root, vec![page], &|_| {})
+                .await
+                .1
+                .map_or(Ok(()), Err)
         })
     }
 
@@ -336,6 +349,7 @@ impl WikiVectorIndex for LanceWikiVectorIndex {
                 fingerprint: embedding_fingerprint(revision, title, config, &space_key),
                 space_key,
                 rows,
+                commit_guard: None,
             })
         })
     }
@@ -508,11 +522,11 @@ fn enrich_chunk(title: &str, chunk: &WikiChunk) -> String {
     .join("\n\n")
 }
 
-fn page_id(relative_path: &str) -> String {
+pub(crate) fn page_id(relative_path: &str) -> String {
     stable_content_hash(relative_path.as_bytes())
 }
 
-fn embedding_space_key(config: &EmbeddingConfig) -> String {
+pub(crate) fn embedding_space_key(config: &EmbeddingConfig) -> String {
     let signature = match config.source {
         EmbeddingSource::LocalMiniLm => serde_json::json!({
             "source": config.source,
@@ -531,7 +545,7 @@ fn embedding_space_key(config: &EmbeddingConfig) -> String {
     stable_content_hash(signature.to_string().as_bytes())
 }
 
-fn embedding_fingerprint(
+pub(crate) fn embedding_fingerprint(
     revision: &WikiRevision,
     title: &str,
     config: &EmbeddingConfig,

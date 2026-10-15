@@ -171,46 +171,106 @@ pub(crate) struct ReindexPlan {
     pub index: Arc<dyn WikiVectorIndex>,
     pub config: EmbeddingConfig,
     pub credentials: EmbeddingCredentials,
+    pub index_revision: Option<crate::vector::IndexRevision>,
     pub progress: ReindexRun,
+}
+
+pub(crate) struct ReindexCommit {
+    plan: ReindexPlan,
+    tree: BTreeMap<String, Option<String>>,
+    pages: Vec<PreparedPageEmbedding>,
+    failed: usize,
+    cancellation: CancellationToken,
+}
+
+impl ReindexCommit {
+    pub(crate) fn project_id(&self) -> &str {
+        &self.plan.progress.project_id
+    }
 }
 
 pub(crate) async fn run(
     mut plan: ReindexPlan,
     cancellation: CancellationToken,
+    owner: crate::WikiHandle,
 ) -> Result<WikiReindexReceipt, WikiFailure> {
-    let result = execute(&plan, &cancellation).await;
-    plan.progress.finish(result.as_ref().err());
-    result
+    let prepared = prepare(&plan, &cancellation).await;
+    let (tree, pages, failed) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            plan.progress.finish(Some(&error));
+            return Err(error);
+        }
+    };
+    owner
+        .request_command(None, |reply| {
+            crate::application::commands::WikiCommand::CommitReindex {
+                commit: ReindexCommit {
+                    plan,
+                    tree,
+                    pages,
+                    failed,
+                    cancellation,
+                },
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(WikiFailure::OwnerUnavailable))
 }
 
-async fn execute(
+async fn prepare(
     plan: &ReindexPlan,
     cancellation: &CancellationToken,
-) -> Result<WikiReindexReceipt, WikiFailure> {
+) -> Result<
+    (
+        BTreeMap<String, Option<String>>,
+        Vec<PreparedPageEmbedding>,
+        usize,
+    ),
+    WikiFailure,
+> {
     if cancellation.is_cancelled() {
         return Err(WikiFailure::cancelled());
     }
     let root = plan.project_root.clone();
-    let paths = tokio::task::spawn_blocking(move || content_paths(&root))
+    let mut tree = tokio::task::spawn_blocking(move || content_snapshot(&root))
         .await
         .map_err(|_| {
             WikiFailure::state("Could not read the Wiki tree; existing index was left unchanged")
         })??;
-    plan.progress.update(|state| state.total = paths.len());
+    plan.progress.update(|state| state.total = tree.len());
     let http_slots = tokio::sync::Semaphore::new(plan.config.concurrency.clamp(1, 32));
-    let mut pending = stream::iter(paths)
-        .map(|path| {
+    let inputs = tree
+        .iter()
+        .map(|(path, revision)| (path.clone(), revision.clone()))
+        .collect::<Vec<_>>();
+    let mut pending = stream::iter(inputs)
+        .map(|(path, revision)| {
             let slots = &http_slots;
-            async move { prepare_page(plan, &path, slots, cancellation).await }
+            async move {
+                let result = match revision.as_deref() {
+                    Some(revision) => {
+                        prepare_page(plan, &path, revision, slots, cancellation).await
+                    }
+                    None => Err(WikiFailure::state("Wiki content could not be read")),
+                };
+                (path, result)
+            }
         })
         .buffer_unordered(plan.config.concurrency.clamp(1, 32));
     let mut pages = Vec::new();
     let mut failed = 0;
-    while let Some(result) = pending.next().await {
+    while let Some((path, result)) = pending.next().await {
         match result {
             Ok(Some(page)) => pages.push(page),
             Ok(None) => {}
             Err(error) if error.is_cancelled() => return Err(error),
+            Err(WikiFailure::Io { .. }) => {
+                failed += 1;
+                // An unreadable page is not written; keep its path and previous vectors.
+                tree.insert(path, None);
+            }
             Err(_) => failed += 1,
         }
         plan.progress.update(|state| state.done += 1);
@@ -218,6 +278,59 @@ async fn execute(
     if cancellation.is_cancelled() {
         return Err(WikiFailure::cancelled());
     }
+    drop(pending);
+    Ok((tree, pages, failed))
+}
+
+pub(crate) async fn commit(
+    state: &crate::owner::actor::WikiState,
+    mut commit: ReindexCommit,
+) -> Result<WikiReindexReceipt, WikiFailure> {
+    let result = commit_inner(state, &mut commit).await;
+    commit.plan.progress.finish(result.as_ref().err());
+    result
+}
+
+async fn commit_inner(
+    state: &crate::owner::actor::WikiState,
+    commit: &mut ReindexCommit,
+) -> Result<WikiReindexReceipt, WikiFailure> {
+    let plan = &commit.plan;
+    if commit.cancellation.is_cancelled() {
+        return Err(WikiFailure::cancelled());
+    }
+    let project = crate::owner::actor::selected_project(state, Some(&plan.progress.project_id))?;
+    let root = crate::owner::actor::project_root(project);
+    let (config, credentials) = crate::search_config::embedding_execution_config(
+        root,
+        &state.state_root,
+        project.project_id(),
+    )?;
+    if root != plan.project_root
+        || config != plan.config
+        || credentials != plan.credentials
+        || !content_snapshot_matches(root, &commit.tree)?
+        || crate::vector::index_revision(root)
+            .await
+            .map_err(|reason| WikiFailure::IndexUnavailable {
+                backend: "lancedb".to_owned(),
+                reason,
+            })?
+            != plan.index_revision
+    {
+        return Err(WikiFailure::state(
+            "Wiki content or index changed during rebuild; existing index was left unchanged. Retry explicitly.",
+        ));
+    }
+    let mut pages = std::mem::take(&mut commit.pages);
+    let guard = Arc::new(crate::vector::IndexCommitGuard::Tree {
+        files: commit.tree.clone(),
+        revision: plan.index_revision.clone(),
+    });
+    for page in &mut pages {
+        page.commit_guard = Some(guard.clone());
+    }
+    let failed = commit.failed;
     plan.progress
         .update(|state| state.phase = Some(WikiReindexPhase::Writing));
     // Cancellation stops preparation, never abandons a Lance commit. OwnedTask shutdown joins this section.
@@ -263,13 +376,19 @@ async fn execute(
 async fn prepare_page(
     plan: &ReindexPlan,
     relative_path: &str,
+    expected_revision: &str,
     http_slots: &tokio::sync::Semaphore,
     cancellation: &CancellationToken,
 ) -> Result<Option<PreparedPageEmbedding>, WikiFailure> {
     let content = tokio::select! {
         _ = cancellation.cancelled() => return Err(WikiFailure::cancelled()),
-        content = tokio::fs::read_to_string(plan.project_root.join(relative_path)) => content.map_err(|_| WikiFailure::state("Wiki content could not be read"))?,
+        content = tokio::fs::read_to_string(plan.project_root.join(relative_path)) => content.map_err(|error| WikiFailure::io(relative_path, error))?,
     };
+    if crate::domain::stable_content_hash(content.as_bytes()) != expected_revision {
+        return Err(WikiFailure::state(
+            "Wiki page changed during rebuild preparation",
+        ));
+    }
     let title = extract_search_title(
         &content,
         Path::new(relative_path)
@@ -303,6 +422,31 @@ async fn prepare_page(
         }
     }
     Err(WikiFailure::state("Wiki page could not be fully embedded"))
+}
+
+pub(crate) fn content_snapshot(
+    root: &Path,
+) -> Result<BTreeMap<String, Option<String>>, WikiFailure> {
+    Ok(content_paths(root)?
+        .into_iter()
+        .map(|path| {
+            let revision = std::fs::read(root.join(&path))
+                .ok()
+                .map(|bytes| crate::domain::stable_content_hash(&bytes));
+            (path, revision)
+        })
+        .collect())
+}
+
+pub(crate) fn content_snapshot_matches(
+    root: &Path,
+    expected: &BTreeMap<String, Option<String>>,
+) -> Result<bool, WikiFailure> {
+    let current = content_snapshot(root)?;
+    Ok(current.keys().eq(expected.keys())
+        && expected
+            .iter()
+            .all(|(path, revision)| revision.is_none() || current.get(path) == Some(revision)))
 }
 
 fn content_paths(root: &Path) -> Result<Vec<String>, WikiFailure> {

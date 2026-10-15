@@ -699,6 +699,50 @@ impl OrganizationStore {
         })
     }
 
+    /// The successful locked read is dispatch admission, ordered against cancellation.
+    pub(crate) fn admit_agent_activity_dispatch(
+        &mut self,
+        claim: &ActivityClaim,
+        request: &crate::ActivityExecutionRequest,
+    ) -> Result<bool, StoreFault> {
+        self.read_locked(|facts| {
+            let Some(activity) = facts.activities().activity(claim.activity_id()) else {
+                return Ok(false);
+            };
+            let Ok(run) = facts.require_started_run(&activity.facts().run_id) else {
+                return Ok(false);
+            };
+            let binding = request.binding();
+            let crate::ActivityKind::AgentTask { role_id, session_ref, .. } = &activity.facts().activity_kind else {
+                return Ok(false);
+            };
+            if binding.role().as_str() != role_id
+                || binding.session_ref().as_str() != session_ref
+                || binding.session_ref().as_str() != activity.facts().target.as_str()
+                || activity.active_claim() != Some(claim)
+                || !matches!(activity.phase(), crate::ActivityPhase::Dispatched(_))
+                || run.graph().current_attempt(&activity.facts().node_id)
+                    .is_none_or(|attempt| attempt.fence() != &activity.facts().fence || !attempt.status().accepts_outcome())
+                || run.runtime().is_none_or(|runtime| !runtime.bindings().contains(binding))
+            {
+                return Ok(false);
+            }
+            let expected = crate::ActivityExecutionRequest::agent_task(run.team(), activity.facts(), binding.clone())
+                .map_err(|_| StoreFault::InvalidFacts)?;
+            Ok(&expected == request)
+        })
+    }
+
+    pub(crate) fn activity_was_purged(
+        &mut self,
+        run_id: &GraphRunId,
+        activity_id: &ActivityId,
+    ) -> Result<bool, StoreFault> {
+        self.read_locked(|facts| Ok(facts.purged_run_marker(run_id).is_some()
+            && facts.run(run_id).is_none()
+            && facts.activities().activity(activity_id).is_none()))
+    }
+
     pub(crate) fn settle_agent_activity_dispatch(
         &mut self,
         claim: &ActivityClaim,
@@ -1059,6 +1103,15 @@ impl OrganizationStore {
         self.facts.native_terminal_target(delivery_id)
     }
 
+    pub(crate) fn native_terminal_is_retired(
+        &self,
+        target: &NativeTerminalReceiptTarget,
+    ) -> Result<bool, StoreFault> {
+        self.facts
+            .native_terminal_is_retired(target)
+            .map_err(|_| StoreFault::InvalidFacts)
+    }
+
     pub(crate) fn observe_native_terminal(
         &mut self,
         target: NativeTerminalReceiptTarget,
@@ -1093,7 +1146,7 @@ impl OrganizationStore {
             crate::application::team_message::TeamMessageFailure,
         >,
         settled_at: u64,
-    ) -> Result<AuthorizedGraphResolutionOutcome, StoreFault> {
+    ) -> Result<super::NativeTerminalSettlement, StoreFault> {
         runtime_trace("runtime.team_run.terminal.store.settle", || {
             json!({
                 "deliveryHash": identifier_hash(target.delivery_id().as_str()),
@@ -1111,10 +1164,23 @@ impl OrganizationStore {
                 ));
             }
 
+            if facts
+                .native_terminal_is_retired(&target)
+                .map_err(|_| StoreFault::InvalidFacts)?
+            {
+                return Ok(super::NativeTerminalSettlement::Retired);
+            }
             phase = "settle_facts";
             let outcome = facts.settle_native_terminal(&target, status, output, settled_at)?;
             phase = "commit";
-            Ok(outcome)
+            Ok(match outcome {
+                AuthorizedGraphResolutionOutcome::Recorded => {
+                    super::NativeTerminalSettlement::Recorded
+                }
+                AuthorizedGraphResolutionOutcome::Replayed => {
+                    super::NativeTerminalSettlement::Replayed
+                }
+            })
         });
         runtime_trace("runtime.team_run.terminal.store.settle", || {
             json!({
@@ -1123,8 +1189,9 @@ impl OrganizationStore {
                 "nativeRunHash": identifier_hash(target.correlation().native_run_receipt().as_str()),
                 "phase": phase,
                 "outcome": match &result {
-                    Ok(AuthorizedGraphResolutionOutcome::Recorded) => "recorded",
-                    Ok(AuthorizedGraphResolutionOutcome::Replayed) => "replayed",
+                    Ok(super::NativeTerminalSettlement::Recorded) => "recorded",
+                    Ok(super::NativeTerminalSettlement::Replayed) => "replayed",
+                    Ok(super::NativeTerminalSettlement::Retired) => "retired",
                     Err(StoreFault::CommitOutcomeUnknown(_)) => "commit_outcome_unknown",
                     Err(_) => "error",
                 },
@@ -1407,20 +1474,9 @@ impl OrganizationStore {
         resolution: ControlNodeResolution,
     ) -> Result<ControlNodeResolutionOutcome, StoreFault> {
         self.transact(|facts| {
-            if facts
-                .control_node_resolution(resolution.idempotency_key())
-                .is_some()
-            {
-                return facts
-                    .apply_control_node_resolution(resolution)
-                    .map_err(StoreFault::ControlNodeResolution);
-            }
-
-            let outcome = facts
+            facts
                 .apply_control_node_resolution(resolution)
-                .map_err(StoreFault::ControlNodeResolution)?;
-
-            Ok(outcome)
+                .map_err(StoreFault::ControlNodeResolution)
         })
     }
 

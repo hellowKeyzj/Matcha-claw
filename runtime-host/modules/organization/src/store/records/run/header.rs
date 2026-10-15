@@ -17,6 +17,8 @@ struct Header {
     creation_key: String,
     lifecycle: Lifecycle,
     gate: Gate,
+    #[serde(default)]
+    retired_executions: Vec<(String, String, String)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -54,6 +56,8 @@ pub(crate) struct RunHeader {
     pub(crate) runtime: Option<RunRuntimeReceipt>,
     pub(crate) lifecycle: GraphRunLifecycle,
     pub(crate) gate: RunStartGate,
+    pub(crate) retired_executions:
+        std::collections::BTreeSet<(crate::NodeId, crate::ExecutionFence)>,
 }
 
 pub(crate) fn encode_header(run: &GraphRunFacts) -> Result<StoredRecord, StoreFault> {
@@ -81,6 +85,17 @@ pub(crate) fn encode_header(run: &GraphRunFacts) -> Result<StoredRecord, StoreFa
     record(run.team(), run.run_id(), RecordKind::RunHeader, "", &Header {
         revision: run.frozen_team_revision().get(), runtime,
         creation_key: run.lifecycle().creation_idempotency_key().to_owned(), lifecycle, gate,
+        retired_executions: run
+            .retired_executions()
+            .iter()
+            .map(|(node, fence)| {
+                (
+                    node.as_str().to_owned(),
+                    fence.attempt_id().as_str().to_owned(),
+                    fence.node_execution_id().as_str().to_owned(),
+                )
+            })
+            .collect(),
     })
 }
 
@@ -118,5 +133,22 @@ pub(crate) fn decode_header(row: &StoredRecord) -> Result<RunHeader, StoreFault>
     if let RunStartGate::Designing { design_epoch, prompt_generation } = &gate {
         if design_epoch.trim().is_empty() || prompt_generation.as_ref().is_some_and(|value| value.trim().is_empty()) { return Err(StoreFault::InvalidFacts); }
     }
-    Ok(RunHeader { team, run, revision, runtime, lifecycle, gate })
+    let mut retired_executions = std::collections::BTreeSet::new();
+    for (node, attempt, execution) in header.retired_executions {
+        if !retired_executions.insert((
+            crate::NodeId::new(node),
+            crate::ExecutionFence::from_durable(attempt, execution),
+        )) {
+            return Err(StoreFault::InvalidFacts);
+        }
+    }
+    Ok(RunHeader {
+        team,
+        run,
+        revision,
+        runtime,
+        lifecycle,
+        gate,
+        retired_executions,
+    })
 }

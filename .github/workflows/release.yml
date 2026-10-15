@@ -1,5 +1,5 @@
 # MatchaClaw Release Workflow
-# Builds and publishes releases for macOS, Windows, and Linux
+# Builds Windows x64/arm64 and macOS arm64; WebDAV updates and GitHub download mirrors.
 
 name: Release
 run-name: Release (${{ github.event_name }})
@@ -21,7 +21,6 @@ on:
         options:
           - win
           - mac
-          - linux
           - all
       skip_matcha_agent:
         description: 'Skip building and packaging matcha-agent'
@@ -31,7 +30,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -51,13 +50,11 @@ jobs:
           platform="${{ github.event.inputs.platform }}"
 
           if [ "$event" = "push" ] || [ -z "$platform" ] || [ "$platform" = "all" ]; then
-            include='[{"os":"macos-14","platform":"mac"},{"os":"windows-latest","platform":"win"},{"os":"ubuntu-latest","platform":"linux"}]'
+            include='[{"os":"macos-14","platform":"mac"},{"os":"windows-latest","platform":"win"}]'
           elif [ "$platform" = "win" ]; then
             include='[{"os":"windows-latest","platform":"win"}]'
           elif [ "$platform" = "mac" ]; then
             include='[{"os":"macos-14","platform":"mac"}]'
-          elif [ "$platform" = "linux" ]; then
-            include='[{"os":"ubuntu-latest","platform":"linux"}]'
           else
             echo "Unsupported platform input: $platform"
             exit 1
@@ -104,7 +101,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
-          targets: aarch64-apple-darwin, x86_64-apple-darwin, aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu, aarch64-pc-windows-msvc, x86_64-pc-windows-msvc
+          targets: ${{ matrix.platform == 'mac' && 'aarch64-apple-darwin' || 'aarch64-pc-windows-msvc, x86_64-pc-windows-msvc' }}
 
       - name: Prefer HTTPS for public GitHub git dependencies
         run: |
@@ -128,28 +125,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pnpm run download:wiki-assets -- --arch x64
           pnpm run download:wiki-assets -- --arch arm64
+          if [ "${{ matrix.platform }}" = "win" ]; then
+            pnpm run download:wiki-assets -- --arch x64
+          fi
 
       - name: Download uv binaries for macOS
         if: matrix.platform == 'mac'
-        run: pnpm run uv:download:mac
+        run: pnpm exec zx scripts/download-bundled-uv.mjs --target=darwin-arm64
 
       - name: Download Bun binaries for macOS
         if: matrix.platform == 'mac'
-        run: pnpm run bun:download:mac
+        run: node scripts/download-bundled-bun.mjs --target=darwin-arm64
 
       - name: Download uv binaries for Windows
         if: matrix.platform == 'win'
         run: pnpm run uv:download:win
-
-      - name: Download uv binaries for Linux
-        if: matrix.platform == 'linux'
-        run: pnpm run uv:download:linux
-
-      - name: Download Bun binaries for Linux
-        if: matrix.platform == 'linux'
-        run: pnpm run bun:download:linux
 
       # macOS specific steps
       - name: Free disk space (macOS)
@@ -168,7 +159,7 @@ jobs:
           df -h /
 
       # --publish never: prevent electron-builder from auto-publishing to GitHub.
-      # All artifacts are collected and published atomically in the publish job.
+      # The publish job verifies all packages before replacing channel metadata.
       - name: Verify Apple notarization credentials
         if: matrix.platform == 'mac'
         env:
@@ -204,8 +195,6 @@ jobs:
           ulimit -n 65536
           echo "File descriptor limit: $(ulimit -n)"
 
-          # Intel Mac builds are temporarily paused due to the Lance native-link failure.
-          # node scripts/build-runtime-host-native.mjs --platform darwin --arch x64
           node scripts/build-runtime-host-native.mjs --platform darwin --arch arm64
           pnpm run build:vite
           pnpm run build:matcha-agent
@@ -387,17 +376,12 @@ jobs:
             done
           }
 
-          # Restore --x64 alongside --arm64 when Intel Mac builds resume.
-          # pnpm exec electron-builder --mac dir --x64 --arm64 --publish never -c.mac.notarize=false
           pnpm exec electron-builder --mac dir --arm64 --publish never -c.mac.notarize=false
 
-          # submit_notary x64 "release/mac/MatchaClaw.app"
           submit_notary arm64 "release/mac-arm64/MatchaClaw.app"
 
-          # wait_notary x64 "release/mac/MatchaClaw.app"
           wait_notary arm64 "release/mac-arm64/MatchaClaw.app"
 
-          # pnpm exec electron-builder --mac dmg zip --x64 --prepackaged "release/mac/MatchaClaw.app" --publish never -c.mac.notarize=false
           pnpm exec electron-builder --mac dmg zip --arm64 --prepackaged "release/mac-arm64/MatchaClaw.app" --publish never -c.mac.notarize=false
 
       - name: Prove macOS arm64 mounted package runtime host
@@ -536,7 +520,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pnpm run build:vite && pnpm run build:matcha-agent && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs
-          pnpm exec electron-builder --win --publish never
+          pnpm exec electron-builder --win --x64 --arm64 --publish never
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -605,142 +589,6 @@ jobs:
         with:
           subject-path: ${{ env.WINDOWS_NSIS_EVIDENCE_RECEIPT }}
 
-      # Linux specific steps
-      - name: Install Linux ARM64 Rust linker
-        if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-      - name: Build Linux
-        if: matrix.platform == 'linux'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-        run: node scripts/build-runtime-host-native.mjs --platform linux --arch x64 && node scripts/build-runtime-host-native.mjs --platform linux --arch arm64 && pnpm run build:vite && pnpm run build:matcha-agent && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs && pnpm exec electron-builder --linux --publish never
-
-      - name: Prove Linux x64 extracted package runtime host
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "$RUNNER_OS" != "Linux" ] || [ "$RUNNER_ARCH" != "X64" ]; then
-            echo "Linux x64 package proof requires a Linux/X64 runner; got $RUNNER_OS/$RUNNER_ARCH."
-            exit 1
-          fi
-
-          release_directory="$GITHUB_WORKSPACE/release"
-          unpacked_root="$release_directory/linux-unpacked"
-          shopt -s nullglob
-          appimage_packages=("$release_directory"/*-linux-x86_64.AppImage)
-          deb_packages=("$release_directory"/*-linux-amd64.deb)
-          rpm_packages=("$release_directory"/*-linux-x86_64.rpm)
-          if [ "${#appimage_packages[@]}" -ne 1 ] || [ "${#deb_packages[@]}" -ne 1 ] || [ "${#rpm_packages[@]}" -ne 1 ]; then
-            echo "Expected exactly one Linux x64 AppImage, deb, and rpm created by this build; found AppImage=${#appimage_packages[@]} deb=${#deb_packages[@]} rpm=${#rpm_packages[@]}."
-            exit 1
-          fi
-          if [ ! -d "$unpacked_root" ]; then
-            echo "Linux x64 unpacked application required by package smoke is missing: $unpacked_root"
-            exit 1
-          fi
-          if ! command -v rpm2cpio >/dev/null || ! command -v cpio >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install --yes rpm2cpio cpio
-          fi
-
-          appimage_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-appimage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
-          deb_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-deb-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
-          rpm_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-rpm-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
-          cleanup_package_roots() {
-            rm -rf "$appimage_root" "$deb_root" "$rpm_root"
-          }
-          trap cleanup_package_roots EXIT
-
-          appimage_extract_directory="$appimage_root/extract-workdir"
-          mkdir -p "$appimage_extract_directory"
-          (
-            cd "$appimage_extract_directory"
-            chmod +x "${appimage_packages[0]}"
-            "${appimage_packages[0]}" --appimage-extract
-          )
-          appimage_installed_root="$appimage_extract_directory/squashfs-root"
-          if [ ! -d "$appimage_installed_root" ]; then
-            echo "AppImage extraction did not create the expected application root: $appimage_installed_root"
-            exit 1
-          fi
-
-          dpkg-deb --extract "${deb_packages[0]}" "$deb_root/root"
-          (
-            cd "$rpm_root"
-            rpm2cpio "${rpm_packages[0]}" | cpio -idm --quiet
-          )
-
-          deb_installed_root="$deb_root/root/opt/MatchaClaw"
-          rpm_installed_root="$rpm_root/opt/MatchaClaw"
-          for installed_root in "$deb_installed_root" "$rpm_installed_root"; do
-            if [ ! -d "$installed_root" ]; then
-              echo "Extracted package did not contain the expected application root: $installed_root"
-              exit 1
-            fi
-          done
-
-          prove_package() {
-            local target="$1"
-            local package_path="$2"
-            local installed_root="$3"
-            local receipt_path="$4"
-            local smoke_report
-            local smoke_status
-            set +e
-            smoke_report="$(node scripts/package-smoke-runtime-host.mjs --platform linux --arch x64 --target "$target" --unpacked "$unpacked_root" --package "$package_path" --installed "$installed_root" --receipt "$receipt_path" --repository "$GITHUB_REPOSITORY" --workflow-ref "$GITHUB_WORKFLOW_REF" --source-revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --run 2>&1)"
-            smoke_status=$?
-            set -e
-            printf '%s\n' "$smoke_report"
-            if [ "$smoke_status" -ne 0 ]; then
-              echo "Extracted Linux x64 ${target} package smoke failed with exit code $smoke_status."
-              exit "$smoke_status"
-            fi
-            if ! printf '%s\n' "$smoke_report" | grep -Fx 'package-execution=installed-native-run (bootstrap-rejection-passed)' >/dev/null; then
-              echo "Extracted Linux x64 ${target} package smoke did not record installed-native-run."
-              exit 1
-            fi
-            if [ ! -f "$receipt_path" ]; then
-              echo "Extracted Linux x64 ${target} package smoke did not produce its evidence receipt."
-              exit 1
-            fi
-          }
-
-          appimage_receipt_path="$release_directory/runtime-host-package-evidence-linux-x64-appimage.json"
-          deb_receipt_path="$release_directory/runtime-host-package-evidence-linux-x64-deb.json"
-          rpm_receipt_path="$release_directory/runtime-host-package-evidence-linux-x64-rpm.json"
-          prove_package AppImage "${appimage_packages[0]}" "$appimage_installed_root" "$appimage_receipt_path"
-          prove_package deb "${deb_packages[0]}" "$deb_installed_root" "$deb_receipt_path"
-          prove_package rpm "${rpm_packages[0]}" "$rpm_installed_root" "$rpm_receipt_path"
-          echo "LINUX_X64_APPIMAGE_EVIDENCE_RECEIPT=$appimage_receipt_path" >> "$GITHUB_ENV"
-          echo "LINUX_X64_DEB_EVIDENCE_RECEIPT=$deb_receipt_path" >> "$GITHUB_ENV"
-          echo "LINUX_X64_RPM_EVIDENCE_RECEIPT=$rpm_receipt_path" >> "$GITHUB_ENV"
-
-      - name: Attest Linux x64 extracted AppImage package execution evidence
-        if: matrix.platform == 'linux' && env.LINUX_X64_APPIMAGE_EVIDENCE_RECEIPT != ''
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: ${{ env.LINUX_X64_APPIMAGE_EVIDENCE_RECEIPT }}
-
-      - name: Attest Linux x64 extracted deb package execution evidence
-        if: matrix.platform == 'linux' && env.LINUX_X64_DEB_EVIDENCE_RECEIPT != ''
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: ${{ env.LINUX_X64_DEB_EVIDENCE_RECEIPT }}
-
-      - name: Attest Linux x64 extracted rpm package execution evidence
-        if: matrix.platform == 'linux' && env.LINUX_X64_RPM_EVIDENCE_RECEIPT != ''
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: ${{ env.LINUX_X64_RPM_EVIDENCE_RECEIPT }}
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -748,146 +596,11 @@ jobs:
           path: |
             release/*.dmg
             release/*.zip
-            release/*.blockmap
             release/*.exe
-            release/*.AppImage
-            release/*.deb
-            release/*.rpm
-            release/mac/MatchaClaw.app/**
             release/win-arm64-unpacked/**
-            release/linux-arm64-unpacked/**
             release/runtime-host-package-evidence-*.json
             release/*.yml
-            !release/builder-debug.yml
-          retention-days: 7
-
-  prove-macos-x64-packages:
-    needs: release
-    # Temporarily paused with Intel Mac builds; keep the job for restoration.
-    # if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'mac'
-    if: ${{ false }}
-    runs-on: macos-13
-    steps:
-      - name: Require macOS x64 native package-proof runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "$RUNNER_OS" != "macOS" ] || [ "$RUNNER_ARCH" != "X64" ]; then
-            echo "macOS x64 package proof requires a macOS/X64 runner; got $RUNNER_OS/$RUNNER_ARCH."
-            exit 1
-          fi
-
-      - name: Checkout package smoke runner
-        uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-
-      - name: Download macOS release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: release-mac
-          path: release
-
-      - name: Prove macOS x64 mounted and extracted package runtime host
-        shell: bash
-        run: |
-          set -euo pipefail
-          release_directory="$GITHUB_WORKSPACE/release"
-          unpacked_root="$release_directory/mac/MatchaClaw.app"
-          shopt -s nullglob
-          dmg_packages=("$release_directory"/*-mac-x64.dmg)
-          zip_packages=("$release_directory"/*-mac-x64.zip)
-          if [ "${#dmg_packages[@]}" -ne 1 ] || [ "${#zip_packages[@]}" -ne 1 ]; then
-            echo "Expected exactly one macOS x64 DMG and ZIP from the release build; found DMG=${#dmg_packages[@]} ZIP=${#zip_packages[@]}."
-            exit 1
-          fi
-          if [ ! -d "$unpacked_root" ]; then
-            echo "macOS x64 unpacked application required by package smoke is missing: $unpacked_root"
-            exit 1
-          fi
-          chmod +x "$unpacked_root/Contents/Resources/bin/darwin-x64/runtime-host" "$unpacked_root/Contents/Resources/bin/darwin-x64/runtime-host-guardian"
-
-          mount_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-mounted-x64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
-          zip_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-unzipped-x64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
-          mounted=false
-          cleanup_package_roots() {
-            if [ "$mounted" = true ]; then
-              hdiutil detach "$mount_root" -quiet || true
-            fi
-            rmdir "$mount_root" 2>/dev/null || true
-            rm -rf "$zip_root"
-          }
-          trap cleanup_package_roots EXIT
-
-          hdiutil attach -nobrowse -readonly -mountpoint "$mount_root" "${dmg_packages[0]}"
-          mounted=true
-          dmg_installed_root="$mount_root/MatchaClaw.app"
-          if [ ! -d "$dmg_installed_root" ]; then
-            echo "Mounted DMG did not contain the expected application root: $dmg_installed_root"
-            exit 1
-          fi
-
-          prove_package() {
-            local target="$1"
-            local package_path="$2"
-            local installed_root="$3"
-            local receipt_path="$4"
-            local smoke_report
-            local smoke_status
-            set +e
-            smoke_report="$(node scripts/package-smoke-runtime-host.mjs --platform darwin --arch x64 --target "$target" --unpacked "$unpacked_root" --package "$package_path" --installed "$installed_root" --receipt "$receipt_path" --repository "$GITHUB_REPOSITORY" --workflow-ref "$GITHUB_WORKFLOW_REF" --source-revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --run 2>&1)"
-            smoke_status=$?
-            set -e
-            printf '%s\n' "$smoke_report"
-            if [ "$smoke_status" -ne 0 ]; then
-              echo "Mounted or extracted macOS x64 ${target} package smoke failed with exit code $smoke_status."
-              exit "$smoke_status"
-            fi
-            if ! printf '%s\n' "$smoke_report" | grep -Fx 'package-execution=installed-native-run (bootstrap-rejection-passed)' >/dev/null; then
-              echo "Mounted or extracted macOS x64 ${target} package smoke did not record installed-native-run."
-              exit 1
-            fi
-            if [ ! -f "$receipt_path" ]; then
-              echo "Mounted or extracted macOS x64 ${target} package smoke did not produce its evidence receipt."
-              exit 1
-            fi
-          }
-
-          dmg_receipt_path="$release_directory/runtime-host-package-evidence-darwin-x64-dmg.json"
-          prove_package dmg "${dmg_packages[0]}" "$dmg_installed_root" "$dmg_receipt_path"
-
-          unzip -q "${zip_packages[0]}" -d "$zip_root"
-          zip_installed_root="$zip_root/MatchaClaw.app"
-          if [ ! -d "$zip_installed_root" ]; then
-            echo "Extracted ZIP did not contain the expected application root: $zip_installed_root"
-            exit 1
-          fi
-          zip_receipt_path="$release_directory/runtime-host-package-evidence-darwin-x64-zip.json"
-          prove_package zip "${zip_packages[0]}" "$zip_installed_root" "$zip_receipt_path"
-          echo "MACOS_X64_DMG_EVIDENCE_RECEIPT=$dmg_receipt_path" >> "$GITHUB_ENV"
-          echo "MACOS_X64_ZIP_EVIDENCE_RECEIPT=$zip_receipt_path" >> "$GITHUB_ENV"
-
-      - name: Attest macOS x64 mounted DMG package execution evidence
-        if: env.MACOS_X64_DMG_EVIDENCE_RECEIPT != ''
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: ${{ env.MACOS_X64_DMG_EVIDENCE_RECEIPT }}
-
-      - name: Attest macOS x64 extracted ZIP package execution evidence
-        if: env.MACOS_X64_ZIP_EVIDENCE_RECEIPT != ''
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: ${{ env.MACOS_X64_ZIP_EVIDENCE_RECEIPT }}
-
-      - name: Upload macOS x64 package evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-package-evidence-macos-x64
-          path: release/runtime-host-package-evidence-darwin-x64-*.json
-          if-no-files-found: error
+            !release/builder-*.yml
           retention-days: 7
 
   prove-windows-arm64-package:
@@ -984,198 +697,78 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  prove-linux-arm64-packages:
-    needs: release
-    if: github.event_name == 'push' || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'linux'
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - name: Require Linux ARM64 native package-proof runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "$RUNNER_OS" != "Linux" ] || [ "$RUNNER_ARCH" != "ARM64" ]; then
-            echo "Linux ARM64 package proof requires a Linux/ARM64 runner; got $RUNNER_OS/$RUNNER_ARCH."
-            exit 1
-          fi
-
-      - name: Checkout package smoke runner
-        uses: actions/checkout@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-
-      - name: Download Linux release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: release-linux
-          path: release
-
-      - name: Prove Linux ARM64 extracted package runtime host
-        shell: bash
-        run: |
-          set -euo pipefail
-          release_directory="$GITHUB_WORKSPACE/release"
-          unpacked_root="$release_directory/linux-arm64-unpacked"
-          shopt -s nullglob
-          appimage_packages=("$release_directory"/*-linux-arm64.AppImage)
-          deb_packages=("$release_directory"/*-linux-arm64.deb)
-          rpm_packages=("$release_directory"/*-linux-arm64.rpm)
-          if [ "${#appimage_packages[@]}" -ne 1 ] || [ "${#deb_packages[@]}" -ne 1 ] || [ "${#rpm_packages[@]}" -ne 0 ]; then
-            echo "Expected exactly one Linux ARM64 AppImage and deb, and no undeclared ARM64 rpm, from the release build; found AppImage=${#appimage_packages[@]} deb=${#deb_packages[@]} rpm=${#rpm_packages[@]}."
-            exit 1
-          fi
-          if [ ! -d "$unpacked_root" ]; then
-            echo "Linux ARM64 unpacked application required by package smoke is missing: $unpacked_root"
-            exit 1
-          fi
-          chmod +x "$unpacked_root/resources/bin/linux-arm64/runtime-host" "$unpacked_root/resources/bin/linux-arm64/runtime-host-guardian"
-
-          appimage_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-appimage-arm64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
-          deb_root="$(mktemp -d "$RUNNER_TEMP/matchaclaw-deb-arm64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-XXXXXX")"
-          cleanup_package_roots() {
-            rm -rf "$appimage_root" "$deb_root"
-          }
-          trap cleanup_package_roots EXIT
-
-          appimage_extract_directory="$appimage_root/extract-workdir"
-          mkdir -p "$appimage_extract_directory"
-          (
-            cd "$appimage_extract_directory"
-            chmod +x "${appimage_packages[0]}"
-            "${appimage_packages[0]}" --appimage-extract
-          )
-          appimage_installed_root="$appimage_extract_directory/squashfs-root"
-          if [ ! -d "$appimage_installed_root" ]; then
-            echo "AppImage extraction did not create the expected application root: $appimage_installed_root"
-            exit 1
-          fi
-
-          dpkg-deb --extract "${deb_packages[0]}" "$deb_root/root"
-          deb_installed_root="$deb_root/root/opt/MatchaClaw"
-          if [ ! -d "$deb_installed_root" ]; then
-            echo "Extracted deb package did not contain the expected application root: $deb_installed_root"
-            exit 1
-          fi
-
-          prove_package() {
-            local target="$1"
-            local package_path="$2"
-            local installed_root="$3"
-            local receipt_path="$4"
-            local smoke_report
-            local smoke_status
-            set +e
-            smoke_report="$(node scripts/package-smoke-runtime-host.mjs --platform linux --arch arm64 --target "$target" --unpacked "$unpacked_root" --package "$package_path" --installed "$installed_root" --receipt "$receipt_path" --repository "$GITHUB_REPOSITORY" --workflow-ref "$GITHUB_WORKFLOW_REF" --source-revision "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --run 2>&1)"
-            smoke_status=$?
-            set -e
-            printf '%s\n' "$smoke_report"
-            if [ "$smoke_status" -ne 0 ]; then
-              echo "Extracted Linux ARM64 ${target} package smoke failed with exit code $smoke_status."
-              exit "$smoke_status"
-            fi
-            if ! printf '%s\n' "$smoke_report" | grep -Fx 'package-execution=installed-native-run (bootstrap-rejection-passed)' >/dev/null; then
-              echo "Extracted Linux ARM64 ${target} package smoke did not record installed-native-run."
-              exit 1
-            fi
-            if [ ! -f "$receipt_path" ]; then
-              echo "Extracted Linux ARM64 ${target} package smoke did not produce its evidence receipt."
-              exit 1
-            fi
-          }
-
-          appimage_receipt_path="$release_directory/runtime-host-package-evidence-linux-arm64-appimage.json"
-          deb_receipt_path="$release_directory/runtime-host-package-evidence-linux-arm64-deb.json"
-          prove_package AppImage "${appimage_packages[0]}" "$appimage_installed_root" "$appimage_receipt_path"
-          prove_package deb "${deb_packages[0]}" "$deb_installed_root" "$deb_receipt_path"
-          echo "LINUX_ARM64_APPIMAGE_EVIDENCE_RECEIPT=$appimage_receipt_path" >> "$GITHUB_ENV"
-          echo "LINUX_ARM64_DEB_EVIDENCE_RECEIPT=$deb_receipt_path" >> "$GITHUB_ENV"
-
-      - name: Attest Linux ARM64 extracted AppImage package execution evidence
-        if: env.LINUX_ARM64_APPIMAGE_EVIDENCE_RECEIPT != ''
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: ${{ env.LINUX_ARM64_APPIMAGE_EVIDENCE_RECEIPT }}
-
-      - name: Attest Linux ARM64 extracted deb package execution evidence
-        if: env.LINUX_ARM64_DEB_EVIDENCE_RECEIPT != ''
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: ${{ env.LINUX_ARM64_DEB_EVIDENCE_RECEIPT }}
-
-      - name: Upload Linux ARM64 package evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-package-evidence-linux-arm64
-          path: release/runtime-host-package-evidence-linux-arm64-*.json
-          if-no-files-found: error
-          retention-days: 7
-
-  # ──────────────────────────────────────────────────────────────
-  # Job: Publish to GitHub Releases
-  # ──────────────────────────────────────────────────────────────
+  # Packages precede channel metadata; GitHub is a manual download mirror.
   publish:
-    needs: [release, prove-macos-x64-packages, prove-windows-arm64-package, prove-linux-arm64-packages]
+    needs: [release, prove-windows-arm64-package]
     if: >-
       ${{
         always() &&
+        github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') &&
         needs.release.result == 'success' &&
-        (needs.prove-macos-x64-packages.result == 'success' || needs.prove-macos-x64-packages.result == 'skipped') &&
-        (needs.prove-windows-arm64-package.result == 'success' || needs.prove-windows-arm64-package.result == 'skipped') &&
-        (needs.prove-linux-arm64-packages.result == 'success' || needs.prove-linux-arm64-packages.result == 'skipped')
+        needs.prove-windows-arm64-package.result == 'success'
       }}
     runs-on: ubuntu-latest
+    concurrency:
+      group: matchaclaw-update-publication
+      cancel-in-progress: false
     env:
       UPDATE_SERVER_HOST: ${{ secrets.UPDATE_SERVER_HOST }}
       UPDATE_SERVER_PORT: ${{ secrets.UPDATE_SERVER_PORT }}
       UPDATE_SERVER_USER: ${{ secrets.UPDATE_SERVER_USER }}
       UPDATE_SERVER_PATH: ${{ secrets.UPDATE_SERVER_PATH }}
       UPDATE_SERVER_SSH_KEY: ${{ secrets.UPDATE_SERVER_SSH_KEY }}
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install publisher dependencies
+        run: pnpm install --prod --frozen-lockfile --ignore-scripts
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
 
-      - name: List all downloaded artifacts
-        run: |
-          echo "=== All artifacts downloaded ==="
-          find release-artifacts/ -type f -exec ls -lh {} \;
-          echo ""
-          echo "=== File tree ==="
-          tree release-artifacts/ || find release-artifacts/ -print
-
-      - name: Remove duplicate builder-debug files
-        run: |
-          echo "Removing builder-debug.yml files to avoid duplicate asset upload conflicts..."
-          find release-artifacts/ -name "builder-debug.yml" -delete -print || true
-
       - name: Prepare deploy bundle
-        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
         run: |
-          rm -rf deploy-bundle
+          set -euo pipefail
           mkdir -p deploy-bundle
-          find release-artifacts -type f \( \
-            -name "*.dmg" -o \
-            -name "*.zip" -o \
-            -name "*.exe" -o \
-            -name "*.AppImage" -o \
-            -name "*.deb" -o \
-            -name "*.rpm" -o \
-            -name "runtime-host-package-evidence-*.json" -o \
-            -name "*.yml" -o \
-            -name "*.blockmap" \
-          \) -exec cp -f {} deploy-bundle/ \;
-          echo "Prepared deploy bundle:"
+          # Artifact roots hold release files; unpacked app binaries are proof inputs only.
+          while IFS= read -r -d '' file; do
+            destination="deploy-bundle/$(basename "$file")"
+            if [ -f "$destination" ] && ! cmp -s "$file" "$destination"; then
+              echo "Conflicting release artifact: $(basename "$file")"
+              exit 1
+            fi
+            cp "$file" "$destination"
+          done < <(find release-artifacts -mindepth 2 -maxdepth 2 -type f \
+            \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' -o \
+               -name '*.yml' -o -name 'runtime-host-package-evidence-*.json' \) \
+            ! -name 'builder-*.yml' -print0)
           ls -lh deploy-bundle
 
-      - name: Deploy update files to update server
-        if: startsWith(github.ref, 'refs/tags/') && env.UPDATE_SERVER_HOST != '' && env.UPDATE_SERVER_USER != '' && env.UPDATE_SERVER_PATH != '' && env.UPDATE_SERVER_SSH_KEY != ''
+      - name: Publish full-package updates to WebDAV
+        env:
+          UPDATE_WEBDAV_USERNAME: ${{ secrets.UPDATE_WEBDAV_USERNAME }}
+          UPDATE_WEBDAV_PASSWORD: ${{ secrets.UPDATE_WEBDAV_PASSWORD }}
+        run: node scripts/publish-update-webdav.mjs deploy-bundle
+
+      - name: Deploy migration update files to legacy update server
+        if: env.UPDATE_SERVER_HOST != '' && env.UPDATE_SERVER_USER != '' && env.UPDATE_SERVER_PATH != '' && env.UPDATE_SERVER_SSH_KEY != ''
+        shell: bash
         run: |
           set -euo pipefail
           port="${UPDATE_SERVER_PORT:-22}"
@@ -1186,68 +779,56 @@ jobs:
           ssh-keyscan -p "$port" -H "$UPDATE_SERVER_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
           ssh -p "$port" "$UPDATE_SERVER_USER@$UPDATE_SERVER_HOST" "mkdir -p '$UPDATE_SERVER_PATH'"
-          rsync -avz --delete -e "ssh -p $port" deploy-bundle/ "$UPDATE_SERVER_USER@$UPDATE_SERVER_HOST:$UPDATE_SERVER_PATH/"
+          # Old clients still need historical installers; sync packages before channel files.
+          rsync -avz -e "ssh -p $port" \
+            --include='*.exe' --include='*.zip' --include='*.dmg' --exclude='*' \
+            deploy-bundle/ "$UPDATE_SERVER_USER@$UPDATE_SERVER_HOST:$UPDATE_SERVER_PATH/"
+          rsync -avz -e "ssh -p $port" \
+            --include='*.yml' --exclude='*' \
+            deploy-bundle/ "$UPDATE_SERVER_USER@$UPDATE_SERVER_HOST:$UPDATE_SERVER_PATH/"
 
-      - name: Skip server deploy (missing secrets)
-        if: startsWith(github.ref, 'refs/tags/') && (env.UPDATE_SERVER_HOST == '' || env.UPDATE_SERVER_USER == '' || env.UPDATE_SERVER_PATH == '' || env.UPDATE_SERVER_SSH_KEY == '')
+      - name: Skip legacy migration deploy (missing secrets)
+        if: env.UPDATE_SERVER_HOST == '' || env.UPDATE_SERVER_USER == '' || env.UPDATE_SERVER_PATH == '' || env.UPDATE_SERVER_SSH_KEY == ''
         run: |
-          echo "Server deploy skipped: missing one or more required secrets."
-          echo "Required: UPDATE_SERVER_HOST, UPDATE_SERVER_USER, UPDATE_SERVER_PATH, UPDATE_SERVER_SSH_KEY"
+          echo "Legacy migration deploy skipped: missing optional UPDATE_SERVER_* secrets."
+          echo "Required for migration: UPDATE_SERVER_HOST, UPDATE_SERVER_USER, UPDATE_SERVER_PATH, UPDATE_SERVER_SSH_KEY"
 
-      - name: Create GitHub Release
+      - name: Create GitHub download mirror
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            release-artifacts/**/*.dmg
-            release-artifacts/**/*.zip
-            release-artifacts/**/*.exe
-            release-artifacts/**/*.AppImage
-            release-artifacts/**/*.deb
-            release-artifacts/**/*.rpm
-            release-artifacts/**/runtime-host-package-evidence-*.json
-            release-artifacts/**/*.yml
+            deploy-bundle/*.dmg
+            deploy-bundle/*.zip
+            deploy-bundle/*.exe
+            deploy-bundle/runtime-host-package-evidence-*.json
+            deploy-bundle/*.yml
           draft: false
-          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
-          make_latest: ${{ !(contains(github.ref, 'alpha') || contains(github.ref, 'beta')) }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
           generate_release_notes: true
           body: |
-            ## 🚀 MatchaClaw ${{ github.ref_name }}
-             
+            ## MatchaClaw ${{ github.ref_name }}
+
             MatchaClaw - Graphical AI Assistant based on OpenClaw
-            
-            ### 📦 Downloads
-            
-            Please select the appropriate installer for your operating system and architecture:
-            
-            #### macOS
-            - **Apple Silicon (M1/M2/M3/M4)**: `MatchaClaw-*-mac-arm64.dmg`
-            - **Intel (x64)**: Builds temporarily paused.
-            
-            #### Windows
-            - **Installer (x64)**: `MatchaClaw-*-win-x64.exe`
-            - **Installer (ARM64)**: `MatchaClaw-*-win-arm64.exe`
-            
-            #### Linux
-            - **AppImage (x64)**: `MatchaClaw-*-linux-x86_64.AppImage` (Universal format, recommended)
-            - **AppImage (ARM64)**: `MatchaClaw-*-linux-arm64.AppImage`
-            - **Debian/Ubuntu (x64)**: `MatchaClaw-*-linux-amd64.deb`
-            - **Debian/Ubuntu (ARM64)**: `MatchaClaw-*-linux-arm64.deb`
-            - **RPM (x64)**: `MatchaClaw-*-linux-x86_64.rpm`
-            
-            ### 📝 Release Notes
-            
+
+            ### Manual downloads
+
+            This release supports Windows x64/ARM64 and macOS Apple Silicon (ARM64) only.
+            GitHub Release assets are a manual download mirror, not an automatic-update fallback.
+
+            - **Windows x64**: `MatchaClaw-*-win-x64.exe`
+            - **Windows ARM64**: `MatchaClaw-*-win-arm64.exe`
+            - **macOS Apple Silicon**: `MatchaClaw-*-mac-arm64.dmg` / `MatchaClaw-*-mac-arm64.zip`
+
+            ### Release notes
+
             See the auto-generated release notes below for detailed changes.
-            
-            ### ⚠️ Installation Notes
-            
-            - **macOS**: On first launch, you may see "cannot verify developer". Go to System Preferences → Security & Privacy to allow the app to run
-            - **Windows**: SmartScreen may block the app. Click "More info" → "Run anyway" to proceed
-            - **Linux AppImage**: First run `chmod +x MatchaClaw-*.AppImage` to add execute permission. On Ubuntu 22.04 you may also need `sudo apt install libfuse2`; on Ubuntu 24.04 use `sudo apt install libfuse2t64`
-            - **Linux .deb (Ubuntu 24.04)**: If installation fails due to missing dependencies, use `sudo apt install libgtk-3-0t64 libnotify4t64 libxss1t64` before installing
-            
-            ---
-            
-            💬 Found an issue? Please submit an [Issue](https://github.com/${{ github.repository }}/issues)
+
+            ### Installation notes
+
+            - **macOS**: If macOS blocks first launch, allow the app in System Settings → Privacy & Security.
+            - **Windows**: If SmartScreen blocks the app, click "More info" → "Run anyway" to proceed.
+
+            Found an issue? Please submit an [Issue](https://github.com/${{ github.repository }}/issues).
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

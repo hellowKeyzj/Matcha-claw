@@ -69,6 +69,18 @@ function sendRendererHostEvent(
   mainWindow?.webContents.send('host:event', { eventName, payload });
 }
 
+export function registerMainEventBridge(deps: {
+  hostEventBus: HostEventBus;
+  getMainWindow: () => BrowserWindow | null;
+}): () => void {
+  const unsubscribers = (['package:changed', 'license:gate-changed'] as const).map((eventName) =>
+    deps.hostEventBus.on(eventName, (payload) => {
+      sendRendererHostEvent(deps.getMainWindow(), eventName, payload);
+    }),
+  );
+  return () => { for (const unsubscribe of unsubscribers) unsubscribe(); };
+}
+
 export function registerHostEventBridge(deps: {
   runtimeHost: RuntimeHostBridge;
   hostEventBus: HostEventBus;
@@ -76,9 +88,11 @@ export function registerHostEventBridge(deps: {
   sessionObservers: RendererSessionObservationRegistry;
   sessionEvents?: SessionEventsTransport;
   resyncSessions: () => Promise<void>;
-}): void {
+}): () => void {
+  let disposed = false;
+  const unsubscribers: Array<() => void> = [];
   const emit: EmitHostEvent = (eventName, payload) => {
-    emitHostEvent(deps.hostEventBus, deps.getMainWindow(), eventName, payload);
+    if (!disposed) emitHostEvent(deps.hostEventBus, deps.getMainWindow(), eventName, payload);
   };
 
   const publishRuntimeHostStatus = async (): Promise<void> => {
@@ -98,14 +112,18 @@ export function registerHostEventBridge(deps: {
     emit('gateway:status', status);
   };
 
-  deps.sessionEvents?.onDelta((delta) => {
-    publishSessionDelta(decodeSessionDelta(delta), deps.sessionObservers);
-  });
-  deps.sessionEvents?.onResync((payload) => {
-    const event = decodeSessionResync(payload);
-    if (event) deps.sessionObservers.publish(event.identity, 'session.resync', event);
-  });
-  deps.sessionEvents?.onReconnect(() => { void deps.resyncSessions(); });
+  if (deps.sessionEvents) {
+    unsubscribers.push(
+      deps.sessionEvents.onConnected(() => { void deps.resyncSessions(); }),
+      deps.sessionEvents.onResync((payload) => {
+        const event = decodeSessionResync(payload);
+        if (event) deps.sessionObservers.publish(event.identity, 'session.resync', event);
+      }),
+      deps.sessionEvents.onDelta((delta) => {
+        publishSessionDelta(decodeSessionDelta(delta), deps.sessionObservers);
+      }),
+    );
+  }
 
   for (const eventName of [
     'gateway:error',
@@ -114,19 +132,17 @@ export function registerHostEventBridge(deps: {
     'gateway:channel-status',
     'gateway:exit',
     'team:event',
-    'package:changed',
-    'license:gate-changed',
   ] as const) {
-    deps.hostEventBus.on(eventName, (payload) => {
+    unsubscribers.push(deps.hostEventBus.on(eventName, (payload) => {
       sendRendererHostEvent(deps.getMainWindow(), eventName, payload);
-    });
+    }));
   }
 
-  deps.hostEventBus.on('gateway:lifecycle', () => {
+  unsubscribers.push(deps.hostEventBus.on('gateway:lifecycle', () => {
     void publishGatewayStatus();
-  });
+  }));
 
-  deps.runtimeHost.onSafeEvent((event) => {
+  unsubscribers.push(deps.runtimeHost.onSafeEvent((event) => {
     switch (event.type) {
       case 'call.changed':
         emit('call:changed', { callId: event.callId, revision: event.revision });
@@ -169,21 +185,25 @@ export function registerHostEventBridge(deps: {
         });
         return;
     }
-  });
-  deps.runtimeHost.onDisconnect(() => {
+  }));
+  unsubscribers.push(deps.runtimeHost.onDisconnect(() => {
     emit('runtime-host:disconnected', {});
-  });
-  deps.runtimeHost.onExit((exit) => {
+  }));
+  unsubscribers.push(deps.runtimeHost.onExit((exit) => {
     emitHostExit(emit, exit);
-  });
-  deps.runtimeHost.onRestart((restart) => {
+  }));
+  unsubscribers.push(deps.runtimeHost.onRestart((restart) => {
     emit('runtime-host:restart', restart);
     void deps.resyncSessions();
     void publishRuntimeHostStatus();
     void publishGatewayStatus();
-  });
+  }));
   void publishRuntimeHostStatus();
   void publishGatewayStatus();
+  return () => {
+    disposed = true;
+    for (const unsubscribe of unsubscribers) unsubscribe();
+  };
 }
 
 

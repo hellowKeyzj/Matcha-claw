@@ -15,7 +15,7 @@ export type SessionEventsTransportOptions = Readonly<{
 export interface SessionEventsTransport {
   onDelta(handler: SessionDeltaEventHandler): () => void;
   onResync(handler: (event: SessionResync) => void): () => void;
-  onReconnect(handler: () => void): () => void;
+  onConnected(handler: () => void): () => void;
   close(): void;
 }
 
@@ -35,8 +35,7 @@ export function createSessionEventsTransport(
   const reconnectDelayMs = options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
   const handlers = new Set<SessionDeltaEventHandler>();
   const resyncHandlers = new Set<(event: SessionResync) => void>();
-  const reconnectHandlers = new Set<() => void>();
-  let connected = false;
+  const connectedHandlers = new Set<() => void>();
   let closed = false;
   let started = false;
   let controller: AbortController | null = null;
@@ -62,8 +61,7 @@ export function createSessionEventsTransport(
         scheduleReconnect();
         return;
       }
-      if (connected) reconnectHandlers.forEach((handler) => handler());
-      connected = true;
+      connectedHandlers.forEach((handler) => handler());
       await readEventStream(response.body, (frame) => {
         const value = parseEventData(frame.data);
         const tracing = isSessionTraceEnabled();
@@ -129,15 +127,15 @@ export function createSessionEventsTransport(
       resyncHandlers.add(handler);
       return () => { resyncHandlers.delete(handler); };
     },
-    onReconnect(handler): () => void {
-      reconnectHandlers.add(handler);
-      return () => { reconnectHandlers.delete(handler); };
+    onConnected(handler): () => void {
+      connectedHandlers.add(handler);
+      return () => { connectedHandlers.delete(handler); };
     },
     close(): void {
       closed = true;
       handlers.clear();
       resyncHandlers.clear();
-      reconnectHandlers.clear();
+      connectedHandlers.clear();
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;

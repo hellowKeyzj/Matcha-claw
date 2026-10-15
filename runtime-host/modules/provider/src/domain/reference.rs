@@ -44,6 +44,13 @@ impl CredentialReference {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn for_transaction(account_id: &str, transaction_id: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let account_hash = format!("{:x}", Sha256::digest(account_id.as_bytes()));
+        Self::try_new(format!("credential:v1:provider:{account_hash}:{transaction_id}"))
+            .expect("validated account transaction credential reference")
+    }
 }
 
 impl fmt::Debug for CredentialReference {

@@ -46,7 +46,7 @@ pub use application::receipts::{
     ProviderPersistedOutcome, ProviderRouteView, ProviderRoutingListOutcome,
     ProviderRoutingReplaceOutcome, ProviderRoutingView, ProviderSessionEndpoint,
     ProviderSessionModelSelection, ProviderSessionModelSelectionOutcome,
-    ProviderSessionRuntimeModelsOutcome, SelectableProviderModelView,
+    SelectableProviderModelView,
 };
 pub use application::{
     InvalidProviderAccountDraft, ProviderAccountDraft, ProviderTextGenerationModelLimits,

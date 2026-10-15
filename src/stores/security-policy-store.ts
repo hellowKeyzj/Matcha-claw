@@ -421,18 +421,16 @@ export const useSecurityPolicyStore = create<SecurityPolicyState>((set, get) => 
   savePolicy: async () => {
     set({ mutating: true });
     try {
-      const payload: SecurityPolicy = get().policy;
+      const payload = cloneSecurityPolicy(get().policy);
       const receipt = await hostSecurityWritePolicy(payload);
       if (receipt.desired.outcome !== 'confirmed') {
         set({ error: SECURITY_POLICY_OUTCOME_UNKNOWN_ERROR });
         return;
       }
-      const nextPolicy = cloneSecurityPolicy(payload);
-      const savedSnapshot = cloneSecurityPolicy(nextPolicy);
-      securityPolicyCache = nextPolicy;
+      const savedSnapshot = cloneSecurityPolicy(payload);
+      securityPolicyCache = cloneSecurityPolicy(get().policy);
       securitySavedPolicySnapshotCache = savedSnapshot;
       set({
-        policy: nextPolicy,
         savedPolicySnapshot: savedSnapshot,
         policyReady: true,
         error: null,

@@ -28,8 +28,6 @@ pub enum ProviderCallKind {
     GenerateText,
     SelectSessionModel,
     SelectMatchaSessionModelRuntime,
-    AcceptSessionRuntimeModels,
-    SelectSessionModelRebound,
 }
 
 #[derive(Clone, Serialize)]
@@ -517,27 +515,6 @@ impl ProviderCallOutcome for ProviderSessionModelSelectionOutcome {
             }
             Self::Rejected => {
                 detail.outcome = Some(ProviderCallResult::Rejected);
-                CallStatus::Rejected
-            }
-            Self::Unavailable => {
-                detail.outcome = Some(ProviderCallResult::Unavailable);
-                CallStatus::Failed
-            }
-        }
-    }
-}
-
-impl ProviderCallOutcome for ProviderSessionRuntimeModelsOutcome {
-    fn summarize(&self, detail: &mut ProviderCallDetail) -> CallStatus {
-        match self {
-            Self::Accepted(items) => {
-                detail.outcome = Some(ProviderCallResult::Accepted);
-                detail.count = Some(items.len());
-                detail.accepted_count = Some(items.iter().filter(|accepted| **accepted).count());
-                CallStatus::Succeeded
-            }
-            Self::Unsupported => {
-                detail.outcome = Some(ProviderCallResult::Unsupported);
                 CallStatus::Rejected
             }
             Self::Unavailable => {

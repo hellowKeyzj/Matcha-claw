@@ -3,7 +3,7 @@ import { traceLog } from '@/lib/trace-logger';
  * Chat Page
  * Native React implementation using runtime-host session APIs.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type SetStateAction } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AlertCircle } from 'lucide-react';
@@ -654,6 +654,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const [visibleRuntimeError, setVisibleRuntimeError] = useState<string | null>(null);
   const [exportingMarkdown, setExportingMarkdown] = useState(false);
   const [sessionPermission, setSessionPermission] = useState<ChatSessionPermissionProjection>(() => createSessionPermissionProjection({ loading: true }));
+  const sessionPermissionOperationRef = useRef<{ identityKey: string; sequence: number } | null>(null);
   const skillPreviewRequestSeqRef = useRef(0);
   const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
   const chatLayoutRef = useRef<HTMLDivElement>(null);
@@ -941,11 +942,23 @@ export function Chat({ isActive = true }: ChatProps) {
     ? JSON.stringify(currentSessionPermissionIdentity)
     : '';
 
+  useLayoutEffect(() => {
+    sessionPermissionOperationRef.current = isGatewayRunning && currentSessionPermissionIdentityKey
+      ? { identityKey: currentSessionPermissionIdentityKey, sequence: 0 }
+      : null;
+    return () => {
+      sessionPermissionOperationRef.current = null;
+    };
+  }, [currentSessionPermissionIdentityKey, isGatewayRunning]);
+
   useEffect(() => {
-    if (!isGatewayRunning || !currentSessionPermissionIdentity) {
+    const owner = sessionPermissionOperationRef.current;
+    if (!isGatewayRunning || !currentSessionPermissionIdentity || !owner) {
       setSessionPermission(createSessionPermissionProjection());
       return;
     }
+    const sequence = ++owner.sequence;
+    const isCurrent = () => sessionPermissionOperationRef.current === owner && owner.sequence === sequence;
     let cancelled = false;
     setSessionPermission((current) => createSessionPermissionProjection({
       ...current,
@@ -955,12 +968,12 @@ export function Chat({ isActive = true }: ChatProps) {
     }));
     void hostSessionPermissionGet({ identity: currentSessionPermissionIdentity })
       .then((result) => {
-        if (!cancelled) {
+        if (!cancelled && isCurrent()) {
           setSessionPermission(sessionPermissionProjectionFromResult(result));
         }
       })
       .catch((error) => {
-        if (!cancelled) {
+        if (!cancelled && isCurrent()) {
           setSessionPermission(createSessionPermissionProjection());
           toast.error(t('input.permissionLoadFailed', { error: error instanceof Error ? error.message : String(error) }));
         }
@@ -1358,6 +1371,31 @@ export function Chat({ isActive = true }: ChatProps) {
       disabled: activeRun || !currentSessionRecordKey,
     };
   }, [activeRun, availableModels, currentSessionModelId, currentSessionRecordKey, modelsLoading, t]);
+  const composerContextTraceRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isSessionTraceEnabled()) return;
+    const modelState = currentSession.meta.modelState;
+    const context = {
+      identity: summarizeSessionIdentity(connectorSessionIdentity), recordKey: summarizeIdentifier(currentSessionRecordKey),
+      endpointSessionId: summarizeIdentifier(connectorEndpointSessionId),
+      conversationKind: currentConversation?.kind ?? null, runtimeState: currentConversationRuntime.state,
+      directoryStatus: runtimeEndpointDirectory.status, gatewayRunning: isGatewayRunning,
+      workspaceUnavailable: currentWorkspaceUnavailable, composerDisabled: !currentChatRuntimeAvailable || currentWorkspaceUnavailable,
+      historyStatus: currentSession.meta.historyStatus, runPhase: currentSession.runtime.runPhase,
+      activeRun: summarizeIdentifier(currentSession.runtime.activeRunId), modelBlockedByRun: activeRun,
+      modelState: {
+        present: !!modelState, selectionId: summarizeIdentifier(modelState?.selectionId),
+        selectedRef: summarizeIdentifier(modelState?.selected?.ref), activeRef: summarizeIdentifier(modelState?.active?.ref),
+        overrideSource: modelState?.overrideSource ?? null,
+      },
+      displayedModel: summarizeIdentifier(currentSessionModelId), catalogMatch: !!currentSessionModelEntry,
+      availableModelCount: availableModels.length, modelsLoading,
+    };
+    const signature = JSON.stringify(context);
+    if (composerContextTraceRef.current === signature) return;
+    composerContextTraceRef.current = signature;
+    logSessionTrace('session.composer.context', 'session-composer-boundary', () => context);
+  });
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
@@ -1485,7 +1523,10 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [activeRun, currentSessionConversation, currentSessionModelId, currentSessionRecordKey, loadSessions, t]);
 
   const handleSelectSessionPermission = useCallback(async (selection: SessionPermissionSelection) => {
+    const owner = sessionPermissionOperationRef.current;
     if (!currentSessionPermissionIdentity
+      || !owner
+      || owner.identityKey !== currentSessionPermissionIdentityKey
       || selection === sessionPermission.mode
       || sessionPermission.loading
       || sessionPermission.switching
@@ -1495,6 +1536,8 @@ export function Chat({ isActive = true }: ChatProps) {
       || (selection === 'full' && !sessionPermission.canSelectFull)) {
       return;
     }
+    const sequence = ++owner.sequence;
+    const isCurrent = () => sessionPermissionOperationRef.current === owner && owner.sequence === sequence;
     const previousPermission = sessionPermission;
     setSessionPermission(createSessionPermissionProjection({
       ...sessionPermission,
@@ -1507,16 +1550,20 @@ export function Chat({ isActive = true }: ChatProps) {
         identity: currentSessionPermissionIdentity,
         selection,
       });
-      setSessionPermission(sessionPermissionProjectionFromResult(result));
+      if (isCurrent()) {
+        setSessionPermission(sessionPermissionProjectionFromResult(result));
+      }
     } catch (error) {
-      setSessionPermission(createSessionPermissionProjection({
-        ...previousPermission,
-        switching: false,
-        pending: false,
-      }));
+      if (isCurrent()) {
+        setSessionPermission(createSessionPermissionProjection({
+          ...previousPermission,
+          switching: false,
+          pending: false,
+        }));
+      }
       toast.error(t('input.permissionSwitchFailed', { error: error instanceof Error ? error.message : String(error) }));
     }
-  }, [activeRun, currentSessionPermissionIdentity, sessionPermission, t]);
+  }, [activeRun, currentSessionPermissionIdentity, currentSessionPermissionIdentityKey, sessionPermission, t]);
 
   const handlePreviewSkill = useCallback(async (skill: {
     id: string;

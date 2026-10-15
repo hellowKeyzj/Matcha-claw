@@ -112,6 +112,27 @@ export async function executePackageOperation<K extends CloudPackageOperationKin
   throw new Error('Invalid cloud package operation kind');
 }
 
+export async function readPackageInstallOutcome(
+  transports: PackageOperationTransports, callId: string, packageType: string,
+): Promise<boolean | undefined> {
+  const observed = await transports.callLogTransport.get({ callId });
+  if (observed.status !== 200 || !('module' in observed.body) || observed.body.callId !== callId) {
+    throw new Error('Cloud package installation observation is unavailable');
+  }
+  const call = observed.body;
+  if (packageType === 'agent') {
+    if (call.module !== 'subagents' || call.command !== 'subagents.package.install' || call.detail.endpoint !== 'openclaw:local') {
+      throw new Error('Cloud agent installation call identity is invalid');
+    }
+    if (!['succeeded', 'failed', 'rejected', 'unknown'].includes(call.status)) return undefined;
+    return call.status === 'succeeded' && call.detail.outcome === 'packageInstalled' && typeof call.detail.agentId === 'string';
+  }
+  if (call.module !== 'skills' || call.command !== 'sealedSkills.install') throw new Error('Cloud skill installation call identity is invalid');
+  if (!['succeeded', 'failed', 'rejected', 'unknown'].includes(call.status)) return undefined;
+  return call.status === 'succeeded' && call.detail.access === 'write' && call.detail.outcome === 'accepted'
+    && typeof call.detail.skillKey === 'string';
+}
+
 function checkedUpload(fileName: string, sha256: string, base64: string, limit: number, size?: number): CloudPackageUpload {
   if (base64.length === 0 || base64.length > Math.ceil(limit / 3) * 4 || base64.length % 4 !== 0
     || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64) || !/^[a-f0-9]{64}$/i.test(sha256)

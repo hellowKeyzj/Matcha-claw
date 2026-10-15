@@ -283,9 +283,13 @@ export default function WikiPage() {
   const selectedPathRef = useRef(selectedPath);
   const editorTextRef = useRef(editorText);
   editorTextRef.current = editorText;
+  const previewRef = useRef(preview);
+  previewRef.current = preview;
+  const editorRevisionRef = useRef(0);
   const fileRequestRef = useRef(0);
   const snapshotRequestRef = useRef(0);
-  const snapshotReadingRef = useRef(false);
+  const sourceWatchRevisionRef = useRef(new Map<string, number>());
+  const reviewsRevisionRef = useRef(new Map<string, number>());
   const treeRequestRef = useRef({ projectId, files: [] as readonly WikiFileItem[], loaded: new Set<string>(), loading: new Set<string>() });
   const projectGenerationRef = useRef(0);
   const navigationRequestRef = useRef(0);
@@ -294,6 +298,11 @@ export default function WikiPage() {
   const cancellingSourcePaths = useMemo(() => new Set(sourceTasks.filter((task) => cancellingSourceTasks.has(JSON.stringify([projectId, task.sourcePath]))).map((task) => task.sourcePath)), [cancellingSourceTasks, projectId, sourceTasks]);
   useEffect(() => { projectIdRef.current = projectId; }, [projectId]);
   useEffect(() => { selectedPathRef.current = selectedPath; }, [selectedPath]);
+  const changeEditorText = useCallback((content: string) => {
+    editorRevisionRef.current++;
+    editorTextRef.current = content;
+    setEditorText(content);
+  }, []);
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; fileRequestRef.current++; snapshotRequestRef.current++; navigationRequestRef.current++; projectGenerationRef.current++; };
@@ -434,7 +443,7 @@ export default function WikiPage() {
   const loadWikiSnapshot = useCallback(async (expectedProjectId?: string) => {
     if (expectedProjectId && projectIdRef.current !== expectedProjectId) return;
     const request = ++snapshotRequestRef.current;
-    snapshotReadingRef.current = true;
+    const generation = projectGenerationRef.current;
     navigationRequestRef.current++;
     const previousTree = treeRequestRef.current;
     treeRequestRef.current = { ...previousTree, loaded: new Set(previousTree.loaded), loading: new Set() };
@@ -450,8 +459,7 @@ export default function WikiPage() {
       hostWikiProjectTemplates(),
     ]);
 
-    if (request !== snapshotRequestRef.current) return;
-    snapshotReadingRef.current = false;
+    if (request !== snapshotRequestRef.current || generation !== projectGenerationRef.current) return;
     if (statusResult.status === 'rejected' || projectsResult.status === 'rejected') {
       setNavigationLoading(false);
       setNavigationError(t('sidebar.loadFailed'));
@@ -500,17 +508,24 @@ export default function WikiPage() {
     }
     setStatus(nextStatus);
     setProjectTemplates(nextTemplates);
+    const sourceWatchRevision = nextProjectId ? sourceWatchRevisionRef.current.get(nextProjectId) : undefined;
+    const reviewsRevision = nextProjectId ? reviewsRevisionRef.current.get(nextProjectId) : undefined;
     const [sourceWatchResult, , reviewsResult] = await Promise.allSettled([
-      nextProjectId ? hostWikiSourceWatchConfig({ projectId: nextProjectId }) : Promise.resolve({ config: DEFAULT_SOURCE_WATCH_CONFIG }),
+      nextProjectId ? hostWikiSourceWatchConfig({ projectId: nextProjectId }) : Promise.resolve({ projectId: nextProjectId, config: DEFAULT_SOURCE_WATCH_CONFIG }),
       nextProjectId ? readSourceTasks(nextProjectId) : Promise.resolve(),
       nextProjectId ? hostWikiReviews({ projectId: nextProjectId }) : Promise.resolve([]),
       nextProjectId ? loadDirectory('', tree) : Promise.resolve(),
       nextProjectId ? loadNavigation(nextProjectId) : Promise.resolve(),
     ]);
-    if (request !== snapshotRequestRef.current || projectIdRef.current !== nextProjectId || (expectedProjectId && projectIdRef.current !== expectedProjectId)) return;
-    setSourceWatchConfig(sourceWatchResult.status === 'fulfilled' ? normalizeSourceWatchConfig(sourceWatchResult.value.config) : DEFAULT_SOURCE_WATCH_CONFIG);
+    if (request !== snapshotRequestRef.current || projectIdRef.current !== nextProjectId
+      || useWikiProjectsStore.getState().currentProject?.projectId !== nextProjectId
+      || (expectedProjectId && projectIdRef.current !== expectedProjectId)) return;
+    if (!nextProjectId || sourceWatchRevision === sourceWatchRevisionRef.current.get(nextProjectId)) {
+      setSourceWatchConfig(sourceWatchResult.status === 'fulfilled' && sourceWatchResult.value.projectId === nextProjectId
+        ? normalizeSourceWatchConfig(sourceWatchResult.value.config) : DEFAULT_SOURCE_WATCH_CONFIG);
+    }
     if (!nextProjectId) setSourceTaskProjection(null);
-    setReviewItems(reviewsResult.status === 'fulfilled' ? normalizeReviews(reviewsResult.value) : []);
+    if (!nextProjectId || reviewsRevision === reviewsRevisionRef.current.get(nextProjectId)) setReviewItems(reviewsResult.status === 'fulfilled' ? normalizeReviews(reviewsResult.value) : []);
 
     if (!nextCurrentProject) {
       setPageMode('home');
@@ -535,7 +550,7 @@ export default function WikiPage() {
   }, [refresh]);
 
   useEffect(() => {
-    if (!snapshotReadingRef.current && treeRequestRef.current.projectId !== projectId) void refresh();
+    if (treeRequestRef.current.projectId !== projectId) void refresh();
   }, [projectId, refresh]);
 
   const chooseLibraryDirectory = useCallback(async () => {
@@ -556,14 +571,9 @@ export default function WikiPage() {
       navigationRequestRef.current++;
       projectGenerationRef.current++;
       treeRequestRef.current = { ...treeRequestRef.current, loading: new Set() };
-      snapshotReadingRef.current = true;
-      try {
-        await createProject({ path, name: projectName.trim() || undefined, templateId: selectedTemplateId });
-        await loadWikiSnapshot();
-        setPageMode('workspace');
-      } finally {
-        snapshotReadingRef.current = false;
-      }
+      await createProject({ path, name: projectName.trim() || undefined, templateId: selectedTemplateId });
+      await loadWikiSnapshot();
+      setPageMode('workspace');
     }, t('actions.createdLibrary'));
   }, [createProject, loadWikiSnapshot, openPath, projectName, run, selectedTemplateId, t]);
 
@@ -574,21 +584,22 @@ export default function WikiPage() {
       navigationRequestRef.current++;
       projectGenerationRef.current++;
       treeRequestRef.current = { ...treeRequestRef.current, loading: new Set() };
-      snapshotReadingRef.current = true;
-      try {
-        await openProject(project);
-        await loadWikiSnapshot();
-        setPageMode('workspace');
-      } finally {
-        snapshotReadingRef.current = false;
-      }
+      await openProject(project);
+      await loadWikiSnapshot();
+      setPageMode('workspace');
     }, t('actions.switchedLibrary'));
   }, [loadWikiSnapshot, openProject, run, t]);
 
   const readProjectFile = useCallback(async (selectedProjectId: string, path: string, open = true) => {
-    if (projectIdRef.current !== selectedProjectId || (!open && selectedPathRef.current !== path)) return;
+    if (projectIdRef.current !== selectedProjectId || useWikiProjectsStore.getState().currentProject?.projectId !== selectedProjectId
+      || (!open && selectedPathRef.current !== path)) return;
     const request = ++fileRequestRef.current;
-    const isCurrent = () => request === fileRequestRef.current && projectIdRef.current === selectedProjectId && selectedPathRef.current === path;
+    const editorRevision = editorRevisionRef.current;
+    const generation = projectGenerationRef.current;
+    const isCurrent = () => mountedRef.current && request === fileRequestRef.current
+      && generation === projectGenerationRef.current && editorRevision === editorRevisionRef.current
+      && projectIdRef.current === selectedProjectId && selectedPathRef.current === path
+      && useWikiProjectsStore.getState().currentProject?.projectId === selectedProjectId;
     const meta = classifyWikiPath(path);
     selectedPathRef.current = path;
     setBusy('read');
@@ -645,14 +656,19 @@ export default function WikiPage() {
 
   const onHistoryRestored = useCallback(async (restoredProjectId: string, path: string) => {
     if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== restoredProjectId) return;
+    const request = fileRequestRef.current;
+    const editorRevision = editorRevisionRef.current;
     await loadWikiSnapshot(restoredProjectId);
-    if (projectGeneration === projectGenerationRef.current) await readProjectFile(restoredProjectId, path, false);
+    if (projectGeneration === projectGenerationRef.current && request === fileRequestRef.current
+      && editorRevision === editorRevisionRef.current) await readProjectFile(restoredProjectId, path, false);
   }, [loadWikiSnapshot, projectGeneration, readProjectFile]);
 
   const onFilesChanged = useCallback(async (changedProjectId: string, writtenPages: string[], deletedPages: string[]) => {
     if (projectIdRef.current !== changedProjectId || projectGeneration !== projectGenerationRef.current) return;
     const path = selectedPathRef.current;
     const request = fileRequestRef.current;
+    const editorRevision = editorRevisionRef.current;
+    const clean = previewRef.current.kind !== 'text' || editorTextRef.current === previewRef.current.content;
     if (deletedPages.includes(path)) {
       fileRequestRef.current++;
       selectedPathRef.current = '';
@@ -674,42 +690,54 @@ export default function WikiPage() {
     setLoadedDirectories(new Set(refreshedTree.loaded));
     await Promise.all(reload.map((directory) => loadDirectory(directory, refreshedTree)));
     if (projectIdRef.current !== changedProjectId || projectGeneration !== projectGenerationRef.current || request !== fileRequestRef.current || path !== selectedPathRef.current) return;
-    if (writtenPages.includes(path)) await readProjectFile(changedProjectId, path, false);
+    if (clean && editorRevision === editorRevisionRef.current && writtenPages.includes(path)) await readProjectFile(changedProjectId, path, false);
   }, [loadDirectory, loadWikiSnapshot, projectGeneration, readProjectFile]);
 
   const onMaintenanceChanged = useCallback(async () => {
     if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     const request = fileRequestRef.current;
     const path = selectedPathRef.current;
+    const editorRevision = editorRevisionRef.current;
+    const clean = previewRef.current.kind !== 'text' || editorTextRef.current === previewRef.current.content;
     const reload = [...treeRequestRef.current.loaded].filter(Boolean);
-    await loadWikiSnapshot();
+    await loadWikiSnapshot(projectId);
     if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     const tree = treeRequestRef.current;
     for (const directory of reload) tree.loaded.delete(directory);
     await Promise.all(reload.map((directory) => loadDirectory(directory, tree)));
     if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     setGraph(null);
-    if (path && path === selectedPathRef.current && request === fileRequestRef.current && (preview.kind !== 'text' || editorText === preview.content)) await readProjectFile(projectId, path, false);
-  }, [editorText, loadDirectory, loadWikiSnapshot, preview, projectGeneration, projectId, readProjectFile]);
+    if (path && path === selectedPathRef.current && request === fileRequestRef.current
+      && clean && editorRevision === editorRevisionRef.current) await readProjectFile(projectId, path, false);
+  }, [loadDirectory, loadWikiSnapshot, projectGeneration, projectId, readProjectFile]);
 
   const onMissingPageCreated = useCallback(async (createdProjectId: string, path: string) => {
     if (createdProjectId !== projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     const request = fileRequestRef.current;
+    const editorRevision = editorRevisionRef.current;
+    const clean = previewRef.current.kind !== 'text' || editorTextRef.current === previewRef.current.content;
     await loadWikiSnapshot(createdProjectId);
     if (projectIdRef.current !== createdProjectId || projectGeneration !== projectGenerationRef.current) return;
     const directory = path.slice(0, path.lastIndexOf('/') + 1).replace(/\/$/, '');
     const tree = treeRequestRef.current;
     tree.loaded.delete(directory);
     await loadDirectory(directory, tree);
-    if (projectIdRef.current === createdProjectId && projectGeneration === projectGenerationRef.current && request === fileRequestRef.current) await readProjectFile(createdProjectId, path);
+    if (projectIdRef.current === createdProjectId && projectGeneration === projectGenerationRef.current
+      && request === fileRequestRef.current && clean && editorRevision === editorRevisionRef.current) await readProjectFile(createdProjectId, path);
   }, [loadDirectory, loadWikiSnapshot, projectGeneration, projectId, readProjectFile]);
 
-  const onQuestionSaved = useCallback(async (path: string) => {
-    if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
+  const onQuestionSaveStarted = useCallback(() => {
+    const generation = projectGenerationRef.current;
     const request = fileRequestRef.current;
-    await loadWikiSnapshot(projectId);
-    if (projectIdRef.current === projectId && projectGeneration === projectGenerationRef.current && request === fileRequestRef.current) await readProjectFile(projectId, path);
-  }, [loadWikiSnapshot, projectGeneration, projectId, readProjectFile]);
+    const editorRevision = editorRevisionRef.current;
+    const clean = previewRef.current.kind !== 'text' || editorTextRef.current === previewRef.current.content;
+    return async (path: string) => {
+      if (!projectId || !mountedRef.current || projectIdRef.current !== projectId || generation !== projectGenerationRef.current) return;
+      await loadWikiSnapshot(projectId);
+      if (projectIdRef.current === projectId && generation === projectGenerationRef.current
+        && request === fileRequestRef.current && clean && editorRevision === editorRevisionRef.current) await readProjectFile(projectId, path);
+    };
+  }, [loadWikiSnapshot, projectId, readProjectFile]);
 
   const openImageSource = useCallback(async (pagePath: string, imageSrc: string) => {
     if (!projectId) throw new Error(t('search.sourceOpenFailed', { defaultValue: '请先打开知识库，再定位原始来源。' }));
@@ -791,16 +819,22 @@ export default function WikiPage() {
   }, [onFilesChanged, projectGeneration, projectId, t]);
 
   const saveFile = useCallback(async () => {
-    if (!selectedPath || preview.kind !== 'text') return;
-    const currentPreview = preview;
-    if (!projectId) return;
+    if (!projectId || !selectedPath || preview.kind !== 'text' || preview.path !== selectedPath
+      || selectedPathRef.current !== selectedPath || projectIdRef.current !== projectId
+      || projectGeneration !== projectGenerationRef.current
+      || useWikiProjectsStore.getState().currentProject?.projectId !== projectId) return;
+    const request = fileRequestRef.current;
+    const content = editorTextRef.current;
     await run('write', async () => {
-      await hostWikiWriteFile({ projectId, path: selectedPath, content: editorText });
-      if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== projectId) return;
-      setPreview({ ...currentPreview, content: editorText });
+      await hostWikiWriteFile({ projectId, path: selectedPath, content });
+      if (projectGeneration !== projectGenerationRef.current || projectIdRef.current !== projectId
+        || useWikiProjectsStore.getState().currentProject?.projectId !== projectId) return;
+      if (request === fileRequestRef.current && selectedPathRef.current === selectedPath) {
+        setPreview((current) => current.kind === 'text' && current.path === selectedPath ? { ...current, content } : current);
+      }
       await loadWikiSnapshot(projectId);
     }, t('actions.savedPage'));
-  }, [editorText, loadWikiSnapshot, preview, projectGeneration, projectId, run, selectedPath, t]);
+  }, [loadWikiSnapshot, preview, projectGeneration, projectId, run, selectedPath, t]);
 
   const onSelectionPrepare = useCallback(async (selection: WikiSelectionSnapshot) => {
     if (!projectId || preview.kind !== 'text' || selectedPathRef.current !== selectedPath
@@ -814,17 +848,17 @@ export default function WikiPage() {
       await hostWikiWriteFile({ projectId, path: selectedPath, content });
       if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current || selectedPathRef.current !== selectedPath) throw new Error(t('actions.projectChanged'));
       if (editorTextRef.current !== draft) throw new Error(t('selection.sourceChanged'));
-      setEditorText(content);
+      changeEditorText(content);
       setPreview({ ...preview, content });
     } finally {
       if (projectIdRef.current === projectId && projectGeneration === projectGenerationRef.current) setBusy(null);
     }
-  }, [preview, projectGeneration, projectId, selectedPath, t]);
+  }, [changeEditorText, preview, projectGeneration, projectId, selectedPath, t]);
 
   const onSelectionApplied = useCallback(async (receipt: WikiSelectionApplyReceipt) => {
     if (receipt.projectId !== projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     if (selectedPathRef.current === receipt.relativePath && preview.kind === 'text' && editorTextRef.current === preview.content) {
-      setEditorText(receipt.content);
+      changeEditorText(receipt.content);
       setPreview((current) => current.kind === 'text' && current.path === receipt.relativePath ? { ...current, content: receipt.content } : current);
     }
     setGraph(null);
@@ -834,7 +868,7 @@ export default function WikiPage() {
     const tree = treeRequestRef.current;
     tree.loaded.delete(directory);
     await loadDirectory(directory, tree);
-  }, [loadDirectory, loadWikiSnapshot, preview, projectGeneration, projectId]);
+  }, [changeEditorText, loadDirectory, loadWikiSnapshot, preview, projectGeneration, projectId]);
 
   const rescan = useCallback(async () => {
     await run('rescan', async () => {
@@ -978,37 +1012,61 @@ export default function WikiPage() {
   }, [projectId, t]);
 
   const updateSourceWatchConfig = useCallback(async (payload: WikiSourceWatchConfigUpdate) => {
+    if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     await run('source-watch-config', async () => {
-      const receipt = await hostWikiUpdateSourceWatchConfig(payload);
-      setSourceWatchConfig(normalizeSourceWatchConfig(receipt.config));
+      const receipt = await hostWikiUpdateSourceWatchConfig({ ...payload, projectId });
+      if (receipt.projectId !== projectId) throw new Error(t('actions.resultUnconfirmed'));
+      sourceWatchRevisionRef.current.set(projectId, (sourceWatchRevisionRef.current.get(projectId) ?? 0) + 1);
+      if (projectIdRef.current === projectId && projectGeneration === projectGenerationRef.current
+        && useWikiProjectsStore.getState().currentProject?.projectId === projectId) setSourceWatchConfig(normalizeSourceWatchConfig(receipt.config));
     }, t('actions.updatedSourceWatch'));
-  }, [run, t]);
+  }, [projectGeneration, projectId, run, t]);
 
   const loadReviews = useCallback(async () => {
+    if (!projectId) return;
+    const revision = reviewsRevisionRef.current.get(projectId);
     await run('reviews', async () => {
-      setReviewItems(normalizeReviews(await hostWikiReviews()));
+      const items = normalizeReviews(await hostWikiReviews({ projectId }));
+      if (revision === reviewsRevisionRef.current.get(projectId) && projectGeneration === projectGenerationRef.current
+        && projectIdRef.current === projectId && useWikiProjectsStore.getState().currentProject?.projectId === projectId) setReviewItems(items);
     });
-  }, [run]);
+  }, [projectGeneration, projectId, run]);
 
   const resolveReview = useCallback(async (id: string, action: string) => {
+    if (!projectId) return;
     await run('review-resolve', async () => {
-      setReviewItems(normalizeReviews(await hostWikiResolveReview({ id, action })));
+      const items = normalizeReviews(await hostWikiResolveReview({ projectId, id, action }));
+      reviewsRevisionRef.current.set(projectId, (reviewsRevisionRef.current.get(projectId) ?? 0) + 1);
+      if (projectGeneration === projectGenerationRef.current && projectIdRef.current === projectId
+        && useWikiProjectsStore.getState().currentProject?.projectId === projectId) setReviewItems(items);
     }, t('actions.resolvedReview'));
-  }, [run, t]);
+  }, [projectGeneration, projectId, run, t]);
 
   const dismissReview = useCallback(async (id: string) => {
+    if (!projectId) return;
     await run('review-dismiss', async () => {
-      setReviewItems(normalizeReviews(await hostWikiDismissReview({ id })));
+      const items = normalizeReviews(await hostWikiDismissReview({ projectId, id }));
+      reviewsRevisionRef.current.set(projectId, (reviewsRevisionRef.current.get(projectId) ?? 0) + 1);
+      if (projectGeneration === projectGenerationRef.current && projectIdRef.current === projectId
+        && useWikiProjectsStore.getState().currentProject?.projectId === projectId) setReviewItems(items);
     }, t('actions.dismissedReview'));
-  }, [run, t]);
+  }, [projectGeneration, projectId, run, t]);
 
   const clearResolvedReviews = useCallback(async () => {
+    if (!projectId) return;
     await run('review-clear', async () => {
-      setReviewItems(normalizeReviews(await hostWikiClearResolvedReviews()));
+      const items = normalizeReviews(await hostWikiClearResolvedReviews({ projectId }));
+      reviewsRevisionRef.current.set(projectId, (reviewsRevisionRef.current.get(projectId) ?? 0) + 1);
+      if (projectGeneration === projectGenerationRef.current && projectIdRef.current === projectId
+        && useWikiProjectsStore.getState().currentProject?.projectId === projectId) setReviewItems(items);
     }, t('actions.clearedReviews'));
-  }, [run, t]);
+  }, [projectGeneration, projectId, run, t]);
 
   const createReviewPage = useCallback(async (item: WikiReviewItem) => {
+    if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
+    const request = fileRequestRef.current;
+    const editorRevision = editorRevisionRef.current;
+    const clean = previewRef.current.kind !== 'text' || editorTextRef.current === previewRef.current.content;
     await run('review-create-page', async () => {
       const drafts = createReviewPageDrafts(item, 'Create Page');
       const created = drafts.map((draft) => {
@@ -1018,12 +1076,12 @@ export default function WikiPage() {
         return { path, content, title: draft.title, dir: draft.dir, fileName };
       });
       for (const page of created) {
-        await hostWikiWriteFile({ path: page.path, content: page.content });
+        await hostWikiWriteFile({ projectId, path: page.path, content: page.content });
       }
       if (created.length > 0) {
         let indexContent = '# Wiki Index\n';
         try {
-          indexContent = normalizeRead(await hostWikiReadFile({ path: 'wiki/index.md' }), 'wiki/index.md').content;
+          indexContent = normalizeRead(await hostWikiReadFile({ projectId, path: 'wiki/index.md' }), 'wiki/index.md').content;
         } catch {
           // keep default
         }
@@ -1035,28 +1093,35 @@ export default function WikiPage() {
             ? indexContent.replace(new RegExp(`(${sectionHeader}\\n)`), (match) => `${match}${entry}\n`)
             : `${indexContent.trimEnd()}\n\n${sectionHeader}\n${entry}\n`;
         }
-        await hostWikiWriteFile({ path: 'wiki/index.md', content: indexContent });
+        await hostWikiWriteFile({ projectId, path: 'wiki/index.md', content: indexContent });
 
         let logContent = '# Wiki Log\n';
         try {
-          logContent = normalizeRead(await hostWikiReadFile({ path: 'wiki/log.md' }), 'wiki/log.md').content;
+          logContent = normalizeRead(await hostWikiReadFile({ projectId, path: 'wiki/log.md' }), 'wiki/log.md').content;
         } catch {
           // keep default
         }
         const createdNames = created.map((page) => `\`${page.fileName}\``).join(', ');
-        await hostWikiWriteFile({ path: 'wiki/log.md', content: `${logContent.trimEnd()}\n- ${makeQueryFileName('review').date}: Created ${created.length} page${created.length === 1 ? '' : 's'} from review: ${createdNames}\n` });
+        await hostWikiWriteFile({ projectId, path: 'wiki/log.md', content: `${logContent.trimEnd()}\n- ${makeQueryFileName('review').date}: Created ${created.length} page${created.length === 1 ? '' : 's'} from review: ${createdNames}\n` });
       }
       const first = created[0];
-      if (first) {
+      if (first && projectIdRef.current === projectId && projectGeneration === projectGenerationRef.current
+        && request === fileRequestRef.current && clean && editorRevision === editorRevisionRef.current) {
+        fileRequestRef.current++;
+        selectedPathRef.current = first.path;
         setSelectedPath(first.path);
         setEditorText(first.content);
         setPreview({ kind: 'text', path: first.path, content: first.content, ...classifyWikiPath(first.path) });
         setActiveTab('wiki');
       }
-      setReviewItems(normalizeReviews(await hostWikiResolveReview({ id: item.id, action: first ? `Created: ${first.path}` : 'Created page' })));
-      await loadWikiSnapshot();
+      const items = normalizeReviews(await hostWikiResolveReview({ projectId, id: item.id, action: first ? `Created: ${first.path}` : 'Created page' }));
+      reviewsRevisionRef.current.set(projectId, (reviewsRevisionRef.current.get(projectId) ?? 0) + 1);
+      if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current
+        || useWikiProjectsStore.getState().currentProject?.projectId !== projectId) return;
+      setReviewItems(items);
+      await loadWikiSnapshot(projectId);
     }, t('actions.createdReviewPage'));
-  }, [loadWikiSnapshot, run, t]);
+  }, [loadWikiSnapshot, projectGeneration, projectId, run, t]);
 
   const searchPages = useCallback(async () => {
     const trimmedQuery = query.trim();
@@ -1207,7 +1272,7 @@ export default function WikiPage() {
             editorText={editorText}
             busy={busy}
             resolveImageSrc={resolveWikiMarkdownImage}
-            onEditorTextChange={setEditorText}
+            onEditorTextChange={changeEditorText}
             onSave={saveFile}
             onEmbedPage={embedPage}
             onRestored={onHistoryRestored}
@@ -1226,6 +1291,7 @@ export default function WikiPage() {
     currentProject?.title,
     deleteSourceAtPath,
     editorText,
+    changeEditorText,
     embedPage,
     graph,
     highlightedNodeIds,
@@ -1308,7 +1374,7 @@ export default function WikiPage() {
       activeTab={activeTab}
       sourceView={sourceView}
       busy={busy}
-      questionPanel={questionProjectId === projectId ? <QuestionPanel key={projectId} projectId={currentProject.projectId} initialModelRef={sourceWatchConfig.generationModelRef} busy={busy} onOpenFile={(path) => readProjectFile(currentProject.projectId, path)} onSaved={onQuestionSaved} /> : undefined}
+      questionPanel={questionProjectId === projectId ? <QuestionPanel key={projectId} projectId={currentProject.projectId} initialModelRef={sourceWatchConfig.generationModelRef} busy={busy} onOpenFile={(path) => readProjectFile(currentProject.projectId, path)} onSaveStarted={onQuestionSaveStarted} /> : undefined}
       activity={<ActivityBar status={status} sourceTasks={sourceTasks} busy={busy} sourceTasksError={sourceTasksError} cancellingSourcePaths={cancellingSourcePaths} onLoadSourceTasks={loadSourceTasks} onCancelSourceTask={cancelSourceTask} />}
       onTabChange={changeWorkspaceTab}
       onSourceViewChange={setSourceView}

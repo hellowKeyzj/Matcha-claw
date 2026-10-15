@@ -56,7 +56,7 @@ function enableMainAppRoutes() {
     loadSessions: vi.fn().mockResolvedValue(undefined),
   } as never);
   useRuntimeHostStore.setState({
-    runtimeHost: { lifecycle: 'running' },
+    runtimeHost: { lifecycle: 'running', hostLifecycle: 'ready' },
     init: vi.fn().mockResolvedValue(undefined),
   } as never);
   useAccountStore.setState({

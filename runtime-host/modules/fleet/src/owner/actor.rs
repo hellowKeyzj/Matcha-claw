@@ -96,17 +96,20 @@ pub(crate) struct FleetShared {
     docker_ownership: BTreeMap<String, String>,
     ssh_host_keys: BTreeMap<TargetId, russh::keys::PublicKey>,
     pending_calls: crate::call::PendingCalls,
+    terminal_executions: super::terminal::TerminalExecutions,
 }
 
 impl FleetShared {
     fn open_operation_owner(&self) -> Result<FleetOwner, FleetDeliveryError> {
-        FleetOwner::open_live(
+        let mut owner = FleetOwner::open_live(
             &self.facts_path,
             &self.private_root,
             self.docker_ownership.clone(),
             self.ssh_host_keys.clone(),
         )
-        .map_err(|_| FleetDeliveryError::InvalidTransition)
+        .map_err(|_| FleetDeliveryError::InvalidTransition)?;
+        owner.terminal_executions = self.terminal_executions.clone();
+        Ok(owner)
     }
 }
 
@@ -115,6 +118,7 @@ pub(crate) struct FleetOwner {
     private_root: PathBuf,
     pub(crate) delivery: FleetDeliveryOwner,
     terminal: TerminalSessionOwner,
+    pub(crate) terminal_executions: super::terminal::TerminalExecutions,
     executor: crate::application::executor::FleetCommandExecutor,
     pub(crate) credentials: crate::application::credentials::FleetCredentialVault,
     pub(crate) ssh_host_keys: BTreeMap<TargetId, russh::keys::PublicKey>,
@@ -238,6 +242,7 @@ impl FleetOwner {
             private_root,
             delivery,
             terminal: TerminalSessionOwner::default(),
+            terminal_executions: Default::default(),
             executor,
             credentials,
             ssh_host_keys,
@@ -267,11 +272,25 @@ impl FleetOwner {
         now: SystemTime,
     ) -> Result<FleetTerminalOpenResult, FleetTerminalOpenError> {
         let terminal = &mut self.terminal;
+        let executions = &self.terminal_executions;
         // Keep target/endpoint validation and local allocation atomic with facts writers.
         self.delivery
             .read_current(|facts| {
                 let (target, endpoint) = Self::resolve_terminal_target_endpoint(facts, selector)
                     .ok_or(TerminalSessionError::InvalidState)?;
+                let frozen = super::terminal::TerminalTarget {
+                    snapshot: facts
+                        .target_snapshot(&target)
+                        .ok_or(TerminalSessionError::InvalidState)?,
+                    config: facts
+                        .target_configuration(&target)
+                        .cloned()
+                        .ok_or(TerminalSessionError::InvalidState)?,
+                    binding: facts
+                        .target_binding(&target)
+                        .cloned()
+                        .ok_or(TerminalSessionError::InvalidState)?,
+                };
                 let provider = match facts.target_configuration(&target) {
                     Some(FleetTargetConfig::Docker(_)) => "docker",
                     Some(FleetTargetConfig::Ssh(_)) => "ssh",
@@ -297,6 +316,7 @@ impl FleetOwner {
                     rows: opened.session.dimensions().rows(),
                     cols: opened.session.dimensions().cols(),
                 };
+                executions.insert(context.clone(), frozen);
                 Ok(FleetTerminalOpenResult { opened, context })
             })
             .map_err(FleetTerminalOpenError::Delivery)?
@@ -308,7 +328,9 @@ impl FleetOwner {
         session: TerminalSessionId,
         now: SystemTime,
     ) -> Result<OpenedSession, TerminalSessionError> {
-        self.terminal.reconnect(session, now)
+        let opened = self.terminal.reconnect(session, now)?;
+        self.terminal_executions.reconnect(&opened.session);
+        Ok(opened)
     }
 
     pub(crate) fn terminal_begin_close(
@@ -317,7 +339,9 @@ impl FleetOwner {
         generation: Generation,
         now: SystemTime,
     ) -> Result<SessionSummary, TerminalSessionError> {
-        self.terminal.begin_close(session, generation, now)
+        let summary = self.terminal.begin_close(session, generation, now)?;
+        self.terminal_executions.revoke(session, generation);
+        Ok(summary)
     }
 
     pub(crate) fn terminal_finish_close(
@@ -326,7 +350,9 @@ impl FleetOwner {
         generation: Generation,
         now: SystemTime,
     ) -> Result<SessionSummary, TerminalSessionError> {
-        self.terminal.finish_close(session, generation, now)
+        let summary = self.terminal.finish_close(session, generation, now)?;
+        self.terminal_executions.revoke(session, generation);
+        Ok(summary)
     }
 
     pub(crate) fn terminal_list(&self) -> Vec<SessionSummary> {
@@ -338,7 +364,9 @@ impl FleetOwner {
         ticket: &[u8],
         now: SystemTime,
     ) -> Result<SessionSummary, TerminalSessionError> {
-        self.terminal.consume_ticket_any(ticket, now)
+        let summary = self.terminal.consume_ticket_any(ticket, now)?;
+        self.terminal_executions.redeem(&summary);
+        Ok(summary)
     }
 
     pub(crate) fn terminal_close(
@@ -347,7 +375,9 @@ impl FleetOwner {
         generation: Generation,
         now: SystemTime,
     ) -> Result<SessionSummary, TerminalSessionError> {
-        self.terminal.close(session, generation, now)
+        let summary = self.terminal.close(session, generation, now)?;
+        self.terminal_executions.revoke(session, generation);
+        Ok(summary)
     }
 
     pub(crate) fn terminal_fail(
@@ -356,7 +386,9 @@ impl FleetOwner {
         generation: Generation,
         now: SystemTime,
     ) -> Result<SessionSummary, TerminalSessionError> {
-        self.terminal.fail(session, generation, now)
+        let summary = self.terminal.fail(session, generation, now)?;
+        self.terminal_executions.revoke(session, generation);
+        Ok(summary)
     }
 
     pub(crate) fn write_credential(
@@ -517,47 +549,80 @@ impl FleetOwner {
         context: crate::application::terminal::TerminalContext,
     ) -> Result<crate::application::terminal::TerminalProviderOpen, ()> {
         let target = TargetId::try_from(context.target.as_str()).map_err(|_| ())?;
-        let provider = context.provider.as_str();
-        let config = self.target_config(&target).ok_or(())?;
-        match (provider, config) {
-            ("ssh", FleetTargetConfig::Ssh(config)) => {
-                let key = self.ssh_host_keys.get(&target).ok_or(())?;
-                let (commands, events) = crate::application::ssh::open_terminal(
-                    &config,
-                    &mut self.credentials,
-                    key,
-                    context.rows,
-                    context.cols,
-                )
-                .await
-                .map_err(|_| ())?;
-                Ok(crate::application::terminal::TerminalProviderOpen { commands, events })
-            }
-            ("docker", FleetTargetConfig::Docker(config)) => {
-                crate::application::docker::open_terminal(
-                    &config,
-                    &mut self.credentials,
-                    context.rows,
-                    context.cols,
-                )
-                .await
-                .map_err(|_| ())
-            }
-            ("custom", FleetTargetConfig::Custom(config)) => {
-                let Some(terminal) = config.terminal() else {
-                    return Err(());
-                };
-                if !crate::application::custom::supports_terminal_protocol(terminal)
-                    || !self.custom_terminal_capability_ready(&context.endpoint)
-                {
-                    return Err(());
+        let mut opening = self.terminal_executions.begin_open(&context).ok_or(())?;
+        // The target lane orders replacement against open; capture only the validated revision.
+        let config = self
+            .delivery
+            .read_current(|facts| {
+                if !opening.target.matches(facts) || opening.cancellation.is_cancelled() {
+                    return None;
                 }
-                crate::application::custom::open_terminal(&config, &mut self.credentials, &context)
+                let (_, endpoint) = Self::resolve_terminal_target_endpoint(
+                    facts,
+                    &FleetTerminalTargetSelector::Target(context.target.clone()),
+                )?;
+                if endpoint.id() != &context.endpoint || endpoint.node_id() != &context.node {
+                    return None;
+                }
+                Some(opening.target.config.clone())
+            })
+            .map_err(|_| ())?
+            .ok_or(())?;
+        let cancellation = opening.cancellation.clone();
+        let operation = async {
+            match (context.provider.as_str(), config) {
+                ("ssh", FleetTargetConfig::Ssh(config)) => {
+                    let key = self.ssh_host_keys.get(&target).ok_or(())?;
+                    crate::application::ssh::open_terminal(
+                        &config,
+                        &mut self.credentials,
+                        key,
+                        context.rows,
+                        context.cols,
+                        cancellation.clone(),
+                    )
                     .await
                     .map_err(|_| ())
+                }
+                ("docker", FleetTargetConfig::Docker(config)) => {
+                    crate::application::docker::open_terminal(
+                        &config,
+                        &mut self.credentials,
+                        context.rows,
+                        context.cols,
+                        cancellation.clone(),
+                    )
+                    .await
+                    .map_err(|_| ())
+                }
+                ("custom", FleetTargetConfig::Custom(config)) => {
+                    let terminal = config.terminal().ok_or(())?;
+                    if !crate::application::custom::supports_terminal_protocol(terminal)
+                        || !self.custom_terminal_capability_ready(&context.endpoint)
+                    {
+                        return Err(());
+                    }
+                    crate::application::custom::open_terminal(
+                        &config,
+                        &mut self.credentials,
+                        &context,
+                        cancellation.clone(),
+                    )
+                    .await
+                    .map_err(|_| ())
+                }
+                _ => Err(()),
             }
-            _ => Err(()),
+        };
+        if cancellation.is_cancelled() {
+            return Err(());
         }
+        let (opened, task) = operation.await?;
+        opening.attach(task);
+        if cancellation.is_cancelled() {
+            return Err(());
+        }
+        Ok(opened)
     }
 
     fn custom_terminal_capability_ready(
@@ -832,11 +897,17 @@ impl FleetOwner {
         id: TargetId,
         config: FleetTargetConfig,
     ) -> Result<TargetSnapshot, FleetDeliveryError> {
-        self.delivery.put_target(id, config)
+        let snapshot = self.delivery.put_target(id.clone(), config)?;
+        self.terminal_executions.invalidate_target(&id, Some(&snapshot));
+        Ok(snapshot)
     }
 
     pub(crate) fn remove_target(&mut self, id: &TargetId) -> Result<bool, FleetDeliveryError> {
-        self.delivery.remove_target(id)
+        let removed = self.delivery.remove_target(id)?;
+        if removed {
+            self.terminal_executions.invalidate_target(id, None);
+        }
+        Ok(removed)
     }
 
     pub(crate) fn bind_target_endpoint(
@@ -1809,6 +1880,7 @@ impl OwnerSpec for FleetOwner {
             docker_ownership: self.docker_ownership.clone(),
             ssh_host_keys: self.ssh_host_keys.clone(),
             pending_calls: Default::default(),
+            terminal_executions: self.terminal_executions.clone(),
         };
         (shared, self)
     }
@@ -3147,11 +3219,13 @@ impl OwnerSpec for FleetOwner {
             FleetQuery::Live { .. } => unreachable!("live queries are direct"),
             FleetQuery::TerminalContext { summary, reply } => {
                 let result = global.delivery.read_current(|facts| {
-                    Self::resolve_terminal_context_from_facts(
+                    let context = Self::resolve_terminal_context_from_facts(
                         facts,
                         &FleetTerminalTargetSelector::Target(summary.target().clone()),
                         &summary,
-                    )
+                    )?;
+                    global.terminal_executions.context(summary.id(), summary.generation())
+                        .filter(|frozen| frozen == &context)
                 });
                 if let Some(call) = &call {
                     call.finish(&result).await;
@@ -3164,7 +3238,9 @@ impl OwnerSpec for FleetOwner {
                 reply,
             } => {
                 let result = global.delivery.read_current(|facts| {
-                    Self::resolve_terminal_context_from_facts(facts, &selector, &summary)
+                    let context = Self::resolve_terminal_context_from_facts(facts, &selector, &summary)?;
+                    global.terminal_executions.context(summary.id(), summary.generation())
+                        .filter(|frozen| frozen == &context)
                 });
                 if let Some(call) = &call {
                     call.finish(&result).await;
@@ -3278,6 +3354,14 @@ impl OwnerSpec for FleetOwner {
             return;
         }
         Self::handle_global_query(shared, global, query).await;
+    }
+
+    async fn shutdown(
+        _shared: Self::Shared,
+        global: &mut Self::GlobalState,
+        _lanes: Vec<(Self::Key, Self::LaneState)>,
+    ) {
+        global.terminal_executions.shutdown().await;
     }
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Loader2,
@@ -197,6 +197,11 @@ export function TasksPage() {
   const [taskListScrollTop, setTaskListScrollTop] = useState(0);
   const [taskListViewportHeight, setTaskListViewportHeight] = useState(0);
   const scopedTasksRequestSeqRef = useRef(0);
+  const activeScopeRef = useRef<TaskCenterScopeFilter | null>(null);
+  useLayoutEffect(() => {
+    activeScopeRef.current = scopeFilter;
+    return () => { activeScopeRef.current = null; };
+  }, [scopeFilter]);
   const taskListScrollRef = useRef<HTMLDivElement | null>(null);
   const getTaskListScrollElement = useCallback(() => {
     if (taskListScrollRef.current?.isConnected) return taskListScrollRef.current;
@@ -235,10 +240,13 @@ export function TasksPage() {
   }, [currentSessionKey, init, initialized, refreshTasks, sessions]);
 
   const loadScopedTasks = useCallback(async () => {
+    if (activeScopeRef.current !== scopeFilter) return;
     const requestSeq = scopedTasksRequestSeqRef.current + 1;
     scopedTasksRequestSeqRef.current = requestSeq;
+    const isCurrentRequest = () => activeScopeRef.current === scopeFilter
+      && scopedTasksRequestSeqRef.current === requestSeq;
     const clearScopedTasksIfCurrent = () => {
-      if (scopedTasksRequestSeqRef.current === requestSeq) {
+      if (isCurrentRequest()) {
         setScopedTasks([]);
       }
     };
@@ -258,7 +266,7 @@ export function TasksPage() {
       }
       if (scopeFilter.type === 'team') {
         const snapshot = await listTaskSnapshot({ sessionKey: activeSession.sessionIdentity.sessionKey, sessionIdentity: activeSession.sessionIdentity, teamKey: scopeFilter.teamId });
-        if (scopedTasksRequestSeqRef.current !== requestSeq) {
+        if (!isCurrentRequest()) {
           return;
         }
         setScopedTasks(snapshot.tasks.map((task) => ({
@@ -280,7 +288,7 @@ export function TasksPage() {
           snapshot: await listTaskSnapshot({ sessionKey: session.sessionIdentity.sessionKey, sessionIdentity: session.sessionIdentity }),
         };
       }));
-      if (scopedTasksRequestSeqRef.current !== requestSeq) {
+      if (!isCurrentRequest()) {
         return;
       }
       setScopedTasks(snapshots.flatMap(({ sessionKey, snapshot }) => snapshot.tasks.map((task) => ({

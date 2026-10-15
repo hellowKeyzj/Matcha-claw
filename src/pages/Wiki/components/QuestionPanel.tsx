@@ -16,7 +16,7 @@ export type QuestionPanelProps = Readonly<{
   initialModelRef?: string;
   busy?: string | null;
   onOpenFile(path: string): void | Promise<void>;
-  onSaved(path: string): void | Promise<void>;
+  onSaveStarted(): (path: string) => void | Promise<void>;
 }>;
 
 type QuestionTask = WikiQuestionTask;
@@ -27,7 +27,7 @@ function isTerminal(task: QuestionTask | null): boolean {
   return task !== null && ['done', 'cancelled', 'error'].includes(task.status);
 }
 
-export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, onSaved }: QuestionPanelProps): JSX.Element {
+export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, onSaveStarted }: QuestionPanelProps): JSX.Element {
   const { t } = useTranslation('wiki');
   const [conversations, setConversations] = useState<readonly Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -50,8 +50,9 @@ export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, on
   const lifecycleRef = useRef(0);
   const waitControllerRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const callbacksRef = useRef({ onOpenFile, onSaved });
-  callbacksRef.current = { onOpenFile, onSaved };
+  const callbacksRef = useRef({ onOpenFile, onSaveStarted });
+  callbacksRef.current = { onOpenFile, onSaveStarted };
+  const saveCallbacksRef = useRef(new Map<string, ReturnType<QuestionPanelProps['onSaveStarted']>>());
 
   useEffect(() => {
     const lifecycle = ++lifecycleRef.current;
@@ -225,6 +226,8 @@ export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, on
 
   function save(turn: QuestionTurn): void {
     if (disabled || actionRef.current || pendingTurn || turn.task?.status !== 'done' || turn.savedPath || turn.task.savedPath) return;
+    const onSaved = callbacksRef.current.onSaveStarted();
+    saveCallbacksRef.current.set(turn.id, onSaved);
     void run('save', async (isCurrent) => {
       setSavingTaskId(turn.id);
       const receipt = await hostWikiSaveQuestion({ projectId, taskId: turn.id });
@@ -241,7 +244,8 @@ export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, on
         if (result.callId !== receipt.callId || result.operation !== 'qa.save' || result.result.projectId !== projectId) throw projectFailure();
         const path = result.result.savedPath;
         updateConversations((current) => current.map((conversation) => ({ ...conversation, turns: conversation.turns.map((item) => item.id === turn.id ? { ...item, savedPath: path } : item) })));
-        await callbacksRef.current.onSaved(path);
+        saveCallbacksRef.current.delete(turn.id);
+        await onSaved(path);
       } finally {
         if (waitControllerRef.current === controller) waitControllerRef.current = null;
       }
@@ -249,7 +253,8 @@ export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, on
   }
 
   function refresh(): void {
-    if (disabled) return;
+    if (disabled || actionRef.current) return;
+    const onRefreshedSave = callbacksRef.current.onSaveStarted();
     void run('refresh', async (isCurrent) => {
       const turn = pendingTurn ?? lastTurn;
       if (turn) {
@@ -261,7 +266,9 @@ export function QuestionPanel({ projectId, initialModelRef, busy, onOpenFile, on
         if (task?.savedPath && !turn.savedPath) {
           const path = task.savedPath;
           updateConversations((current) => current.map((conversation) => ({ ...conversation, turns: conversation.turns.map((item) => item.id === turn.id ? { ...item, savedPath: path } : item) })));
-          await callbacksRef.current.onSaved(path);
+          const onSaved = saveCallbacksRef.current.get(turn.id) ?? onRefreshedSave;
+          saveCallbacksRef.current.delete(turn.id);
+          await onSaved(path);
         }
       }
       if (isCurrent()) setModelVersion((version) => version + 1);

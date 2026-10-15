@@ -36,14 +36,18 @@ function hostApiContext(overrides: {
   mutate?: ReturnType<typeof vi.fn>;
 } = {}) {
   return {
-    runtimeHostTransports: {
-      clawHubSkillInstallTransport: { install: vi.fn() },
-      clawHubSkillSearchTransport: { search: overrides.search ?? vi.fn() },
-      fleetTransport: {
-        read: overrides.read ?? vi.fn(),
-        mutate: overrides.mutate ?? vi.fn(),
+    signal: new AbortController().signal,
+    runtime: Promise.resolve({
+      runtimeHostTransportPort: 13211,
+      runtimeHostTransports: {
+        clawHubSkillInstallTransport: { install: vi.fn() },
+        clawHubSkillSearchTransport: { search: overrides.search ?? vi.fn() },
+        fleetTransport: {
+          read: overrides.read ?? vi.fn(),
+          mutate: overrides.mutate ?? vi.fn(),
+        },
       },
-    },
+    }),
   } as never;
 }
 

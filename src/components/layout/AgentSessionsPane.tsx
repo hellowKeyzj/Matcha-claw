@@ -4,6 +4,7 @@ import { Check, ChevronDown, ChevronRight, Pencil, Plus, Trash2, X } from 'lucid
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import { cn } from '@/lib/utils';
+import { createSessionTraceId, isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
 import { useTeamRunLabels } from '@/hooks/use-team-run-labels';
 import { useSubagentsStore } from '@/stores/subagents';
 import {
@@ -41,6 +42,7 @@ const SESSION_BUCKET_COLLAPSE_STORAGE_KEY = 'layout:session-time-bucket-collapse
 
 type SessionPaneTab = 'agent' | 'team' | 'session';
 type SessionBucketScope = 'session' | 'automation';
+type SessionRenameDraft = { key: string; title: string };
 
 const SESSION_BUCKET_SCOPES: readonly SessionBucketScope[] = ['session', 'automation'];
 
@@ -566,8 +568,8 @@ interface SessionListSectionProps {
   automationBuckets: AgentSessionSwitchboardSessionBucket[];
   currentSessionKey: string;
   deletingSessionKeys: Record<string, true>;
-  renamingSessionKey: string | null;
-  editingSession: { key: string; title: string } | null;
+  renamingSessionKeys: Record<string, SessionRenameDraft>;
+  editingSession: SessionRenameDraft | null;
   collapsedSessionBuckets: Record<string, boolean>;
   state: 'loading' | 'error' | 'ready';
   errorMessage: string | null;
@@ -594,7 +596,7 @@ const SessionListSection = memo(function SessionListSection({
   automationBuckets,
   currentSessionKey,
   deletingSessionKeys,
-  renamingSessionKey,
+  renamingSessionKeys,
   editingSession,
   collapsedSessionBuckets,
   state,
@@ -700,7 +702,7 @@ const SessionListSection = memo(function SessionListSection({
                   avatarStyle={result.source.kind === 'agent' ? result.source.avatarStyle : undefined}
                   isCurrent={currentSessionKey === session.key}
                   deleting={deleting}
-                  renaming={renamingSessionKey === session.key}
+                  renaming={Boolean(renamingSessionKeys[session.key])}
                   editing={editing}
                   editingTitle={editing ? editingSession.title : ''}
                   deleteLabel={viewModel?.deleteLabel ?? fallbackDeleteLabel(session.key)}
@@ -950,8 +952,8 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
     () => loadCollapsedSessionBucketMap(),
   );
   const [deletingSessionKeys, setDeletingSessionKeys] = useState<Record<string, true>>({});
-  const [renamingSessionKey, setRenamingSessionKey] = useState<string | null>(null);
-  const [editingSession, setEditingSession] = useState<{ key: string; title: string } | null>(null);
+  const [renamingSessionKeys, setRenamingSessionKeys] = useState<Record<string, SessionRenameDraft>>({});
+  const [editingSession, setEditingSession] = useState<SessionRenameDraft | null>(null);
   const [pendingDeleteSession, setPendingDeleteSession] = useState<{
     key: string;
     title: string;
@@ -959,6 +961,21 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
   const [switchboardOpen, setSwitchboardOpen] = useState(false);
   const [hoverPeekOpen, setHoverPeekOpen] = useState(false);
   const hoverCloseTimerRef = useRef<number | null>(null);
+  const switchboardTraceStateRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isSessionTraceEnabled()) return;
+    const detail = {
+      state: switchboardOpen ? 'open' : 'closed', activeTab, hoverPeekOpen,
+      conversationKind: currentConversation?.kind ?? 'none',
+      recordKey: summarizeIdentifier(currentSessionKey),
+      identity: summarizeSessionIdentity(currentConversation?.kind === 'session' ? currentConversation.sessionIdentity : null),
+    };
+    const stateKey = JSON.stringify(detail);
+    if (switchboardTraceStateRef.current === stateKey) return;
+    switchboardTraceStateRef.current = stateKey;
+    logSessionTrace('switchboard.state', createSessionTraceId('switchboard'), () => detail);
+  }, [activeTab, currentConversation, currentSessionKey, hoverPeekOpen, switchboardOpen]);
 
   const runtimeEndpoints = useMemo(
     () => sessionRuntimeGraph.endpoints.filter((endpoint) => endpoint.target != null),
@@ -1222,21 +1239,29 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
       setEditingSession(null);
       return;
     }
-    setRenamingSessionKey(editingSession.key);
+    const submittedDraft = editingSession;
+    setRenamingSessionKeys((current) => ({ ...current, [submittedDraft.key]: submittedDraft }));
     try {
-      await renameSession(editingSession.key, normalizedTitle);
-      setEditingSession(null);
+      await renameSession(submittedDraft.key, normalizedTitle);
+      setEditingSession((current) => current === submittedDraft ? null : current);
     } finally {
-      setRenamingSessionKey(null);
+      setRenamingSessionKeys((current) => {
+        if (current[submittedDraft.key] !== submittedDraft) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[submittedDraft.key];
+        return next;
+      });
     }
   }, [editingSession, renameSession]);
 
   const cancelRenameSession = useCallback(() => {
-    if (renamingSessionKey) {
+    if (editingSession && renamingSessionKeys[editingSession.key]) {
       return;
     }
     setEditingSession(null);
-  }, [renamingSessionKey]);
+  }, [editingSession, renamingSessionKeys]);
 
   const closeDeleteDialog = useCallback(() => {
     if (!pendingDeleteSession) {
@@ -1316,8 +1341,18 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
 
       {switchboardOpen ? (
         <div
+          data-testid="chat-switchboard-backdrop"
           className="fixed inset-0 z-20 bg-transparent"
-          onMouseDown={closeSwitchboard}
+          onMouseDown={(event) => {
+            closeSwitchboard();
+            logSessionTrace('switchboard.backdrop.intercept', createSessionTraceId('switchboard-backdrop'), () => ({
+              intercept: true, button: event.button,
+              overComposer: document.elementsFromPoint(event.clientX, event.clientY)
+                .some((element) => element.closest('[data-testid="chat-composer"]') !== null),
+              recordKey: summarizeIdentifier(currentSessionKey),
+              identity: summarizeSessionIdentity(currentConversation?.kind === 'session' ? currentConversation.sessionIdentity : null),
+            }));
+          }}
         />
       ) : null}
 
@@ -1407,7 +1442,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
                 automationBuckets={switchboard.automationSessionResults}
                 currentSessionKey={currentSessionKey}
                 deletingSessionKeys={deletingSessionKeys}
-                renamingSessionKey={renamingSessionKey}
+                renamingSessionKeys={renamingSessionKeys}
                 editingSession={editingSession}
                 collapsedSessionBuckets={collapsedSessionBuckets}
                 state={paneViewModel.sessionListState}

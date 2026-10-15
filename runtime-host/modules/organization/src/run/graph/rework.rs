@@ -26,7 +26,8 @@ pub(super) fn request(
         AttemptReason::Rework,
         Vec::new(),
         now,
-    );
+    )
+    .in_namespace(state.replacement_namespace());
     state.remove_ready_item(node_id);
     state.append_attempt(node_id, attempt.clone());
     state.enqueue(&attempt, now);
@@ -77,7 +78,8 @@ pub(super) fn reopen(
                 AttemptReason::Rework,
                 inputs.unwrap_or_default(),
                 now,
-            ))
+            )
+            .in_namespace(state.replacement_namespace()))
         })
         .collect::<Result<Vec<_>, ReduceError>>()?;
     for attempt in attempts {

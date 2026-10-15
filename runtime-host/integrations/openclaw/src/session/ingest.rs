@@ -496,12 +496,15 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                                 crate::gateway::wire::GatewayResponse::Failure { .. } => unreachable!("native failure handled above"),
                             }).map_err(|_| RuntimeOperationFailure::Unknown)?.ok_or(RuntimeOperationFailure::Unknown)?;
                             if row.agent_id.as_ref().map(|agent| agent.as_str()) != Some(identity.agent_id.as_str()) || row.key.as_deref() != Some(identity.session_key.as_str()) { return Err(RuntimeOperationFailure::Unknown); }
+                            let model_state = row.model_state();
                             let session_id = row.session_id.ok_or(RuntimeOperationFailure::Unknown)?;
                             let goal = if supported { row.goal } else { sessions_module::goal::SessionGoalView::Unsupported };
-                            router.goal(&identity, generation, &session_id, goal, epoch, None, &observations).await
+                            router.goal(&identity, generation, &session_id, goal, epoch, None, &observations).await?;
+                            Ok(model_state)
                         }.await;
+                        let status = result.as_ref().map(|_| ()).map_err(|failure| *failure);
                         let _ = describe_reply.send(result);
-                        result
+                        status
                     }
                     Some(OrderedContext::History { identity, generation, page, host_epoch, reply: history_reply }) => {
                         let request_hash = super::trace::enabled().then(|| sessions_module::trace::fingerprint(response.request_id()));

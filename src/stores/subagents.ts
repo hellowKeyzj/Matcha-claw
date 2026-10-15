@@ -24,6 +24,7 @@ import { decodeCallReceipt } from '@/types/call-log/receipt';
 import { runCloudPackageOperation } from '@/lib/cloud-package-call';
 import i18n from '@/i18n';
 import { fetchSelectableProviderModels } from '@/lib/provider-models';
+import { createSessionTraceId, logSessionTrace, summarizeError, summarizeIdentifier } from '@/lib/session-trace';
 import { useChatStore } from '@/stores/chat';
 import {
   buildSubagentWorkspacePath,
@@ -1350,10 +1351,22 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
   loadAvailableModels: async (options) => {
     const force = options?.force === true;
+    const traceId = createSessionTraceId('available-models');
+    const startedAt = traceId ? performance.now() : 0;
     if (!force && availableModelsLoaded) {
+      logSessionTrace('models.available.cache-hit', traceId, () => ({
+        requestId: latestAvailableModelsRequestId, force, outcome: 'cached',
+        count: get().availableModels.length, loading: get().modelsLoading,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      }));
       return;
     }
     if (!force && inflightAvailableModelsTask) {
+      logSessionTrace('models.available.inflight-join', traceId, () => ({
+        requestId: latestAvailableModelsRequestId, force, outcome: 'joined',
+        count: get().availableModels.length, loading: get().modelsLoading,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      }));
       await inflightAvailableModelsTask;
       return;
     }
@@ -1362,15 +1375,26 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       availableModelsLoaded = false;
     }
     const requestId = ++latestAvailableModelsRequestId;
+    const previousCount = traceId ? get().availableModels.length : 0;
     set({
       ...(force ? { availableModels: [] } : {}),
       modelsLoading: true,
     });
+    logSessionTrace('models.available.start', traceId, () => ({
+      requestId, force, outcome: 'loading', cleared: force, previousCount,
+      count: get().availableModels.length, loading: get().modelsLoading,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    }));
     let currentTask: Promise<void> | null = null;
     const task = (async () => {
       try {
         const normalizedModels = await fetchSelectableProviderModels();
         if (requestId !== latestAvailableModelsRequestId) {
+          logSessionTrace('models.available.result', traceId, () => ({
+            requestId, latestRequestId: latestAvailableModelsRequestId, force, outcome: 'stale-discarded', response: 'success',
+            resultCount: normalizedModels.length, count: get().availableModels.length, loading: get().modelsLoading,
+            elapsedMs: Math.round(performance.now() - startedAt),
+          }));
           return;
         }
         availableModelsLoaded = true;
@@ -1379,14 +1403,33 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           modelsLoading: false,
           error: null,
         });
+        logSessionTrace('models.available.result', traceId, () => ({
+          requestId, force, outcome: 'success', count: get().availableModels.length, loading: get().modelsLoading,
+          models: normalizedModels.slice(0, 32).map((model) => ({
+            idHash: summarizeIdentifier(model.id).hash,
+            referenceHashes: (model.modelReferences ?? []).slice(0, 4).map((reference) => summarizeIdentifier(reference).hash),
+            referenceCount: model.modelReferences?.length ?? 0, truncated: (model.modelReferences?.length ?? 0) > 4,
+          })),
+          truncated: normalizedModels.length > 32,
+          elapsedMs: Math.round(performance.now() - startedAt),
+        }));
       } catch (error) {
         if (requestId !== latestAvailableModelsRequestId) {
+          logSessionTrace('models.available.result', traceId, () => ({
+            requestId, latestRequestId: latestAvailableModelsRequestId, force, outcome: 'stale-discarded', response: 'error',
+            count: get().availableModels.length, loading: get().modelsLoading, error: summarizeError(error),
+            elapsedMs: Math.round(performance.now() - startedAt),
+          }));
           return;
         }
         set({
           modelsLoading: false,
           error: getErrorMessage(error) || 'Failed to load models',
         });
+        logSessionTrace('models.available.result', traceId, () => ({
+          requestId, force, outcome: 'error', count: get().availableModels.length, loading: get().modelsLoading,
+          error: summarizeError(error), elapsedMs: Math.round(performance.now() - startedAt),
+        }));
       } finally {
         if (inflightAvailableModelsTask === currentTask) {
           inflightAvailableModelsTask = null;

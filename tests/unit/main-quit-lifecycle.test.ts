@@ -31,9 +31,6 @@ const hoisted = vi.hoisted(() => {
     isVisible: vi.fn(() => true),
     once: vi.fn(),
   };
-  const hostApiServerMock = {
-    close: vi.fn(),
-  };
   const electronAppMock = {
     commandLine: { appendSwitch: vi.fn() },
     disableHardwareAcceleration: vi.fn(),
@@ -55,14 +52,11 @@ const hoisted = vi.hoisted(() => {
     getName: vi.fn(() => 'MatchaClaw'),
   };
   const hostEventBusInstances: Array<{ closeAll: ReturnType<typeof vi.fn> }> = [];
-  const directRuntimeHostMock = {
-    stop: vi.fn(async () => undefined),
-    forceKill: vi.fn(async () => undefined),
-  };
-  const bootstrapMainApplicationMock = vi.fn(async () => ({
+  const closeApplicationMock = vi.fn(async () => undefined);
+  const bootstrapMainApplicationMock = vi.fn(() => ({
     mainWindow: mainWindowMock,
-    hostApiServer: hostApiServerMock,
-    directRuntimeHost: directRuntimeHostMock,
+    ready: Promise.resolve(),
+    close: closeApplicationMock,
   }));
   const loggerMock = {
     debug: vi.fn(),
@@ -74,9 +68,9 @@ const hoisted = vi.hoisted(() => {
   return {
     appHandlers,
     electronAppMock,
-    hostApiServerMock,
+    mainWindowMock,
     hostEventBusInstances,
-    directRuntimeHostMock,
+    closeApplicationMock,
     bootstrapMainApplicationMock,
     loggerMock,
   };
@@ -167,8 +161,7 @@ describe('main quit lifecycle coordination', () => {
     hoisted.hostEventBusInstances.length = 0;
     hoisted.electronAppMock.isPackaged = false;
     hoisted.electronAppMock.whenReady.mockReturnValue(Promise.resolve());
-    hoisted.directRuntimeHostMock.stop.mockResolvedValue(undefined);
-    hoisted.directRuntimeHostMock.forceKill.mockResolvedValue(undefined);
+    hoisted.closeApplicationMock.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -224,7 +217,11 @@ describe('main quit lifecycle coordination', () => {
   it('E2E bootstrap failure keeps the process available and logs no raw error', async () => {
     process.env.MATCHACLAW_E2E = '1';
     const failure = new Error('C:\\private\\runtime-host.exe token');
-    hoisted.bootstrapMainApplicationMock.mockRejectedValueOnce(failure);
+    hoisted.bootstrapMainApplicationMock.mockImplementationOnce(() => ({
+      mainWindow: hoisted.mainWindowMock,
+      ready: Promise.reject(failure),
+      close: hoisted.closeApplicationMock,
+    }));
 
     processListeners = await importMainIndex();
 
@@ -233,49 +230,40 @@ describe('main quit lifecycle coordination', () => {
     expect(hoisted.loggerMock.error).not.toHaveBeenCalledWith(expect.anything(), failure);
   });
 
-  it('closes shell resources and gracefully stops only DirectRuntimeHost', async () => {
-    vi.useFakeTimers();
+  it('closes shell resources and awaits application cleanup before quitting', async () => {
+    let resolveClose!: () => void;
+    hoisted.closeApplicationMock.mockReturnValue(new Promise<void>((resolve) => { resolveClose = resolve; }));
     processListeners = await importMainIndex();
 
     const event = dispatchBeforeQuit();
 
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
     expect(hoisted.hostEventBusInstances[0]?.closeAll).toHaveBeenCalledTimes(1);
-    expect(hoisted.directRuntimeHostMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.directRuntimeHostMock.forceKill).not.toHaveBeenCalled();
+    expect(hoisted.closeApplicationMock).toHaveBeenCalledTimes(1);
+    expect(hoisted.electronAppMock.quit).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(hoisted.directRuntimeHostMock.forceKill).not.toHaveBeenCalled();
-    expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(5000);
-
-    expect(hoisted.directRuntimeHostMock.forceKill).not.toHaveBeenCalled();
-    expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1);
+    resolveClose();
+    await vi.waitFor(() => expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1));
   });
 
-  it('force-kills only DirectRuntimeHost when graceful stop fails', async () => {
-    vi.useFakeTimers();
-    hoisted.directRuntimeHostMock.stop.mockRejectedValue(new Error('graceful stop failed'));
+  it('logs settled application cleanup failure and still permits quitting', async () => {
+    const failure = new Error('application cleanup failed');
+    hoisted.closeApplicationMock.mockRejectedValue(failure);
     processListeners = await importMainIndex();
 
     dispatchBeforeQuit();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1));
+    expect(hoisted.loggerMock.warn).toHaveBeenCalledWith('Failed to close main application during quit:', failure);
+    const secondEvent = dispatchBeforeQuit();
 
-    expect(hoisted.directRuntimeHostMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.directRuntimeHostMock.forceKill).toHaveBeenCalledTimes(1);
+    expect(secondEvent.preventDefault).not.toHaveBeenCalled();
+    expect(hoisted.closeApplicationMock).toHaveBeenCalledTimes(1);
     expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1);
   });
 
-  it('force-kills DirectRuntimeHost once after the five-second stop deadline and waits for it', async () => {
-    vi.useFakeTimers();
-    let resolveForceKill!: () => void;
-    const forceKillPromise = new Promise<void>((resolve) => {
-      resolveForceKill = resolve;
-    });
-    hoisted.directRuntimeHostMock.stop.mockReturnValue(new Promise(() => undefined));
-    hoisted.directRuntimeHostMock.forceKill.mockReturnValue(forceKillPromise);
+  it('joins repeated quit requests until the single application cleanup completes', async () => {
+    let resolveClose!: () => void;
+    hoisted.closeApplicationMock.mockReturnValue(new Promise<void>((resolve) => { resolveClose = resolve; }));
     processListeners = await importMainIndex();
 
     const firstEvent = dispatchBeforeQuit();
@@ -283,31 +271,16 @@ describe('main quit lifecycle coordination', () => {
 
     expect(firstEvent.preventDefault).toHaveBeenCalledTimes(1);
     expect(secondEvent.preventDefault).toHaveBeenCalledTimes(1);
-    expect(hoisted.directRuntimeHostMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.directRuntimeHostMock.forceKill).not.toHaveBeenCalled();
+    expect(hoisted.closeApplicationMock).toHaveBeenCalledTimes(1);
     expect(hoisted.electronAppMock.quit).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(4999);
-
-    expect(hoisted.directRuntimeHostMock.forceKill).not.toHaveBeenCalled();
-    expect(hoisted.electronAppMock.quit).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(1);
-
-    expect(hoisted.directRuntimeHostMock.forceKill).toHaveBeenCalledTimes(1);
-    expect(hoisted.electronAppMock.quit).not.toHaveBeenCalled();
-
-    resolveForceKill();
-    await vi.waitFor(() => {
-      expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1);
-    });
-
+    resolveClose();
+    await vi.waitFor(() => expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1));
     const thirdEvent = dispatchBeforeQuit();
 
     expect(thirdEvent.preventDefault).not.toHaveBeenCalled();
     expect(hoisted.hostEventBusInstances[0]?.closeAll).toHaveBeenCalledTimes(1);
-    expect(hoisted.directRuntimeHostMock.stop).toHaveBeenCalledTimes(1);
-    expect(hoisted.directRuntimeHostMock.forceKill).toHaveBeenCalledTimes(1);
+    expect(hoisted.closeApplicationMock).toHaveBeenCalledTimes(1);
     expect(hoisted.electronAppMock.quit).toHaveBeenCalledTimes(1);
   });
 });

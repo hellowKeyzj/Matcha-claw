@@ -34,6 +34,7 @@ import { useTranslation } from 'react-i18next';
 import { ManualTeamCreationProgress } from './ManualTeamCreationProgress';
 
 type TeamSkillReview = {
+  revision: number;
   candidate: TeamSkillCandidate;
   creationPlan: TeamSkillCreationPlan;
   dependencyPlan: TeamDependencyPreparationPlan;
@@ -164,6 +165,9 @@ export function TeamsPage() {
   const [replacementConfirmed, setReplacementConfirmed] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const createTitleRef = useRef<HTMLHeadingElement>(null);
+  const packageReviewRevisionRef = useRef(0);
+
+  useEffect(() => () => { packageReviewRevisionRef.current += 1; }, []);
 
   const packagePath = teamSkillPackagePath.trim();
   const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
@@ -186,12 +190,13 @@ export function TeamsPage() {
     && !showingManualCreation
     && manualMembers.length > 0
     && manualLeaderCount === 1;
-  const review = createDialogPhase.type === 'review_ready'
+  const phaseReview = createDialogPhase.type === 'review_ready'
     || createDialogPhase.type === 'installing_dependency'
     || createDialogPhase.type === 'importing_dependency'
     || createDialogPhase.type === 'creating_run'
     ? createDialogPhase.review
     : null;
+  const review = phaseReview?.revision === packageReviewRevisionRef.current ? phaseReview : null;
   const checkingPackage = createDialogPhase.type === 'validating_package';
   const creatingRun = createDialogPhase.type === 'creating_run';
   const installingDependency = createDialogPhase.type === 'installing_dependency' ? createDialogPhase.dependencyName : null;
@@ -201,8 +206,15 @@ export function TeamsPage() {
   const provisionedRoleCount = teams.reduce((count, team) => count + (rolesByTeamId[team.id]?.length ?? 0), 0);
 
   const resetPackageReview = () => {
+    packageReviewRevisionRef.current += 1;
     setCreateDialogPhase({ type: 'editing_source' });
     setReplacementConfirmed(false);
+  };
+
+  const restorePackageReview = (currentReview: TeamSkillReview, error: string | null = null) => {
+    if (currentReview.revision !== packageReviewRevisionRef.current) return;
+    setCreateDialogPhase({ type: 'review_ready', review: currentReview });
+    setCreateError(error);
   };
 
   useEffect(() => {
@@ -301,7 +313,7 @@ export function TeamsPage() {
     };
   };
 
-  const buildReview = async (): Promise<TeamSkillReview> => {
+  const buildReview = async (revision: number): Promise<TeamSkillReview> => {
     const validation = readSealedTeamSkillPackageValidationResult(await validateTeamSkillPackage({ packagePath }));
     if (validation.status !== 'valid') {
       throw new Error(t('create.invalidPackage'));
@@ -316,6 +328,7 @@ export function TeamsPage() {
       throw new Error(t(dependencyResult.status === 'invalid' ? 'create.invalidPackage' : 'create.dependencyPlanUnavailable'));
     }
     return {
+      revision,
       candidate,
       creationPlan: planTeamSkillCreation(candidate),
       dependencyPlan: dependencyResult.plan,
@@ -326,12 +339,14 @@ export function TeamsPage() {
     if (!canCheckPackage) {
       return;
     }
+    const revision = ++packageReviewRevisionRef.current;
     setCreateDialogPhase({ type: 'validating_package' });
     setReplacementConfirmed(false);
     setCreateError(null);
     try {
-      setCreateDialogPhase({ type: 'review_ready', review: await buildReview() });
+      restorePackageReview(await buildReview(revision));
     } catch (error) {
+      if (revision !== packageReviewRevisionRef.current) return;
       setCreateDialogPhase({ type: 'editing_source' });
       setCreateError(error instanceof Error ? error.message : String(error));
     }
@@ -351,7 +366,8 @@ export function TeamsPage() {
 
   const refreshDependencyPlanAfterSkillChange = async (currentReview: TeamSkillReview) => {
     await fetchSkills({ force: true, fresh: true });
-    setCreateDialogPhase({ type: 'review_ready', review: await refreshDependencyPlan(currentReview) });
+    if (currentReview.revision !== packageReviewRevisionRef.current) return;
+    restorePackageReview(await refreshDependencyPlan(currentReview));
   };
 
   const handleInstallDependency = async (item: TeamDependencyPlanItem) => {
@@ -364,8 +380,7 @@ export function TeamsPage() {
       await installSkill(readClawHubSkillSlug(item.name, item.source));
       await refreshDependencyPlanAfterSkillChange(review);
     } catch (error) {
-      setCreateDialogPhase({ type: 'review_ready', review });
-      setCreateError(error instanceof Error ? error.message : String(error));
+      restorePackageReview(review, error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -384,8 +399,7 @@ export function TeamsPage() {
       await enableSkill(importedSkill.skillKey);
       await refreshDependencyPlanAfterSkillChange(review);
     } catch (error) {
-      setCreateDialogPhase({ type: 'review_ready', review });
-      setCreateError(error instanceof Error ? error.message : String(error));
+      restorePackageReview(review, error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -401,20 +415,19 @@ export function TeamsPage() {
         buttonLabel: t('create.importLocalSkillButton'),
       });
       if (!selectedPath) {
-        setCreateDialogPhase({ type: 'review_ready', review });
+        restorePackageReview(review);
         return;
       }
       const importedSkill = await readLocalSkillImport(selectedPath);
       if (!importedSkill) {
-        setCreateDialogPhase({ type: 'review_ready', review });
+        restorePackageReview(review);
         return;
       }
       await importLocalSkill(importedSkill);
       await enableSkill(importedSkill.skillKey);
       await refreshDependencyPlanAfterSkillChange(review);
     } catch (error) {
-      setCreateDialogPhase({ type: 'review_ready', review });
-      setCreateError(error instanceof Error ? error.message : String(error));
+      restorePackageReview(review, error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -434,7 +447,7 @@ export function TeamsPage() {
   };
 
   const handleCreateOrReplace = async () => {
-    if (createSourceType !== 'teamskill' || !review || creatingRun || mutatingDependency || !review.dependencyPlan.canProceed) {
+    if (createSourceType !== 'teamskill' || !review || review.revision !== packageReviewRevisionRef.current || creatingRun || mutatingDependency || !review.dependencyPlan.canProceed) {
       return;
     }
     if (review.creationPlan.action === 'open_existing') {
@@ -462,8 +475,7 @@ export function TeamsPage() {
         } catch {
           // Store-level delete failure keeps the team and records its own per-team error.
         }
-        setCreateDialogPhase({ type: 'review_ready', review });
-        setCreateError(provisioningErrorMessage);
+        restorePackageReview(review, provisioningErrorMessage);
       }
       return;
     }
@@ -480,8 +492,7 @@ export function TeamsPage() {
       setCreateDialogOpen(false);
       navigate(`/teams/${teamId}`);
     } catch (error) {
-      setCreateDialogPhase({ type: 'review_ready', review });
-      setCreateError(error instanceof Error ? error.message : String(error));
+      restorePackageReview(review, error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -968,7 +979,7 @@ export function TeamsPage() {
                       resetManualTeamCreation();
                       setCreateSourceType('manual');
                       setCreateError(null);
-                      setCreateDialogPhase({ type: 'editing_source' });
+                      resetPackageReview();
                     }}>
                       {t('create.manualProgress.editButton')}
                     </Button>

@@ -264,6 +264,14 @@ pub(crate) enum WikiCommand {
         input: WikiPathSelector,
         reply: CallReply<()>,
     },
+    CommitEmbedding {
+        plan: crate::owner::project_commit::PageEmbeddingPlan,
+        reply: CallReply<()>,
+    },
+    CommitReindex {
+        commit: crate::reindex::ReindexCommit,
+        reply: CallReply<crate::reindex::WikiReindexReceipt>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -623,7 +631,13 @@ impl WikiCommand {
             Self::UpdateSearchConfig { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
-            Self::EmbedPage { reply, .. } => {
+            Self::EmbedPage { input, reply } => {
+                reply.send_embedded(Err(error), input.project_id.expect("embed project resolved before dispatch")).await;
+            }
+            Self::CommitEmbedding { plan, reply } => {
+                reply.send_embedded(Err(error), plan.project_id).await;
+            }
+            Self::CommitReindex { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
         }
@@ -642,7 +656,7 @@ impl WikiCommand {
             Self::SaveQuestion { reply, .. } => reply.acceptance.as_ref(),
             Self::LintAction { reply, .. } => reply.acceptance.as_ref(),
             Self::Rescan { reply, .. } => reply.acceptance.as_ref(),
-            Self::EmbedPage { reply, .. } => reply.acceptance.as_ref(),
+            Self::EmbedPage { reply, .. } | Self::CommitEmbedding { reply, .. } => reply.acceptance.as_ref(),
             Self::ApplyGeneratedPages { reply, .. } => reply.acceptance.as_ref(),
             Self::DeletePage { reply, .. } => reply.acceptance.as_ref(),
             Self::DeleteSource { reply, .. } => reply.acceptance.as_ref(),
@@ -707,7 +721,8 @@ impl WikiCommand {
             Self::ReorderSourceTask { reply, .. } => reply.call.as_ref(),
             Self::Rescan { reply, .. } => reply.call.as_ref(),
             Self::UpdateSearchConfig { reply, .. } => reply.call.as_ref(),
-            Self::EmbedPage { reply, .. } => reply.call.as_ref(),
+            Self::EmbedPage { reply, .. } | Self::CommitEmbedding { reply, .. } => reply.call.as_ref(),
+            Self::CommitReindex { reply, .. } => reply.call.as_ref(),
         }
     }
 
@@ -766,7 +781,8 @@ impl WikiCommand {
             Self::ReorderSourceTask { reply, .. } => reply.call = call,
             Self::Rescan { reply, .. } => reply.call = call,
             Self::UpdateSearchConfig { reply, .. } => reply.call = call,
-            Self::EmbedPage { reply, .. } => reply.call = call,
+            Self::EmbedPage { reply, .. } | Self::CommitEmbedding { reply, .. } => reply.call = call,
+            Self::CommitReindex { reply, .. } => reply.call = call,
         }
     }
 
@@ -859,7 +875,13 @@ impl WikiCommand {
                 None => CommandRoute::Global,
             },
             Self::CreateMissingPage { plan, .. } => CommandRoute::Keyed(WikiOwnerKey::Commit(plan.project_id.clone())),
-            Self::ImportArchive { .. } | Self::StageReindex { .. } => CommandRoute::Global,
+            Self::ImportArchive { .. } => CommandRoute::Global,
+            Self::StageReindex { input, .. } => match input.project_id.as_deref() {
+                Some(id) => CommandRoute::Keyed(WikiOwnerKey::Commit(id.to_owned())),
+                None => CommandRoute::Global,
+            },
+            Self::CommitEmbedding { plan, .. } => CommandRoute::Keyed(WikiOwnerKey::Commit(plan.project_id.clone())),
+            Self::CommitReindex { commit, .. } => CommandRoute::Keyed(WikiOwnerKey::Commit(commit.project_id().to_owned())),
             Self::BeginLint { plan, .. } | Self::CompleteLint { plan, .. } => {
                 CommandRoute::Keyed(WikiOwnerKey::Commit(plan.project_id.clone()))
             }

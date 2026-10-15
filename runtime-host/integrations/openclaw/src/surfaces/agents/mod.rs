@@ -3,15 +3,17 @@ pub(crate) mod port;
 pub(crate) mod projection;
 pub mod templates;
 
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
 use crate::gateway::{
-    client::{GatewayClient, GatewayClientError},
+    client::{GatewayClient, GatewayClientError, RPC_DEADLINE},
     delivery::MutationDelivery,
     wire::{self, GatewayResponse},
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
+const DELETE_RPC_DEADLINE: Duration = Duration::from_secs(60);
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -105,6 +107,7 @@ impl OpenClawAgents {
         self.mutate(
             request,
             wire::agents::AGENTS_CREATE_METHOD,
+            RPC_DEADLINE,
             wire::agents::decode_create,
         )
         .await
@@ -118,6 +121,7 @@ impl OpenClawAgents {
         self.mutate(
             request,
             wire::agents::AGENTS_UPDATE_METHOD,
+            RPC_DEADLINE,
             wire::agents::decode_update,
         )
         .await
@@ -131,6 +135,7 @@ impl OpenClawAgents {
         self.mutate(
             request,
             wire::agents::AGENTS_DELETE_METHOD,
+            DELETE_RPC_DEADLINE,
             wire::agents::decode_delete,
         )
         .await
@@ -154,6 +159,7 @@ impl OpenClawAgents {
         self.mutate(
             request,
             wire::agents::AGENTS_FILES_SET_METHOD,
+            RPC_DEADLINE,
             move |response| wire::agents::decode_files_set(response, &agent_id, name),
         )
         .await
@@ -176,6 +182,7 @@ impl OpenClawAgents {
         &self,
         request: wire::RpcRequest,
         method: &str,
+        deadline: Duration,
         decode: impl FnOnce(GatewayResponse) -> Result<T, wire::WireError>,
     ) -> AgentsMutationOutcome<T> {
         let _transaction = if matches!(method, wire::agents::AGENTS_CREATE_METHOD | wire::agents::AGENTS_UPDATE_METHOD | wire::agents::AGENTS_DELETE_METHOD) {
@@ -183,7 +190,7 @@ impl OpenClawAgents {
         } else {
             None
         };
-        match self.gateway.rpc_mutation(request).await {
+        match self.gateway.rpc_mutation_with_deadline(request, deadline).await {
             MutationDelivery::Response(GatewayResponse::Failure { .. }) => {
                 AgentsMutationOutcome::Rejected
             }

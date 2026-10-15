@@ -435,6 +435,7 @@ pub(crate) struct GraphRunFacts {
     runtime: Option<RunRuntimeReceipt>,
     lifecycle: GraphRunLifecycle,
     pub(super) start_gate: RunStartGate,
+    pub(super) retired_executions: BTreeSet<(NodeId, ExecutionFence)>,
 }
 
 impl GraphRunFacts {
@@ -498,6 +499,61 @@ impl GraphRunFacts {
             runtime,
             lifecycle,
             start_gate,
+            retired_executions: BTreeSet::new(),
+        })
+    }
+
+    pub(crate) fn retired_executions(&self) -> &BTreeSet<(NodeId, ExecutionFence)> {
+        &self.retired_executions
+    }
+
+    pub(crate) fn restore_retired_executions(
+        &mut self,
+        retired: BTreeSet<(NodeId, ExecutionFence)>,
+    ) -> Result<(), OrganizationFactsError> {
+        self.validate_retired_executions(&retired)?;
+        self.retired_executions = retired;
+        Ok(())
+    }
+
+    fn validate_retired_executions(
+        &self,
+        retired: &BTreeSet<(NodeId, ExecutionFence)>,
+    ) -> Result<(), OrganizationFactsError> {
+        for (node, fence) in retired {
+            let number = fence
+                .attempt_id()
+                .as_str()
+                .strip_prefix(&format!("{}:attempt:", node.as_str()))
+                .and_then(|number| number.parse::<std::num::NonZeroU32>().ok())
+                .ok_or(OrganizationFactsError::InvalidGraphRun)?;
+            if node.as_str().trim().is_empty()
+                || fence.attempt_id() != &crate::AttemptId::for_node(node, number)
+                || !fence.node_execution_id().matches_attempt(node, number)
+                || self
+                    .graph
+                    .executions()
+                    .values()
+                    .flat_map(|history| history.attempts())
+                    .any(|attempt| attempt.fence() == fence)
+            {
+                return Err(OrganizationFactsError::InvalidGraphRun);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn execution_is_retired(&self, node: &NodeId, fence: &ExecutionFence) -> bool {
+        self.retired_executions
+            .contains(&(node.clone(), fence.clone()))
+    }
+
+    fn retired_execution_has_attempt(&self, node: &NodeId, fence: &ExecutionFence) -> bool {
+        self.graph.executions().get(node).is_some_and(|history| {
+            history
+                .attempts()
+                .iter()
+                .any(|attempt| attempt.fence().attempt_id() == fence.attempt_id())
         })
     }
 
@@ -752,6 +808,7 @@ impl OrganizationFacts {
 
         let mut run_facts = BTreeMap::new();
         for run in runs {
+            run.validate_retired_executions(&run.retired_executions)?;
             let team = team_facts
                 .get(run.team().as_str())
                 .ok_or(OrganizationFactsError::UnknownRunTeam)?;
@@ -2030,6 +2087,16 @@ impl OrganizationFacts {
                             == delivery.facts().node_execution_id
                     })
                     .map(|attempt| attempt.fence().clone())
+                    .or_else(|| {
+                        run.retired_executions
+                            .iter()
+                            .find(|(node, fence)| {
+                                node == &node_id
+                                    && fence.node_execution_id().as_str()
+                                        == delivery.facts().node_execution_id
+                            })
+                            .map(|(_, fence)| fence.clone())
+                    })
             },
             |observation| Some(observation.fence().clone()),
         )?;
@@ -2054,6 +2121,68 @@ impl OrganizationFacts {
             endpoint,
             correlation,
         ))
+    }
+
+    pub(super) fn native_terminal_is_retired(
+        &self,
+        target: &super::NativeTerminalReceiptTarget,
+    ) -> Result<bool, OrganizationFactsError> {
+        if self.native_terminal_target(target.delivery_id()).as_ref() != Some(target) {
+            return Err(OrganizationFactsError::InvalidTerminalObservation);
+        }
+        let run = self
+            .runs
+            .get(target.graph_run_id().as_str())
+            .ok_or(OrganizationFactsError::UnknownRun)?;
+        if !run.execution_is_retired(target.node_id(), target.fence()) {
+            return Ok(false);
+        }
+        let activity_id = ActivityId::new(target.delivery_id().as_str())
+            .map_err(|_| OrganizationFactsError::InvalidActivity)?;
+        let activity = self
+            .activities
+            .activity(&activity_id)
+            .ok_or(OrganizationFactsError::InvalidActivity)?;
+        validate_activity(&self.runs, activity)?;
+        if activity.facts().run_id != *target.graph_run_id()
+            || activity.facts().node_id != *target.node_id()
+            || activity.facts().fence != *target.fence()
+        {
+            return Err(OrganizationFactsError::InvalidActivity);
+        }
+        if let Some(proof) = activity.settlement_proof() {
+            validate_agent_activity_settlement(&self.deliveries, activity, proof)?;
+        }
+        if let Some(claim) = activity
+            .active_claim()
+            .or_else(|| activity.native_terminal_claim())
+        {
+            validate_native_confirmed_activity_claim(
+                &self.runs,
+                &self.deliveries,
+                activity,
+                claim,
+            )?;
+        } else if activity.settlement_proof().is_none() {
+            return Err(OrganizationFactsError::InvalidActivityTransition);
+        }
+        let delivery = self
+            .deliveries
+            .delivery(target.delivery_id())
+            .ok_or(OrganizationFactsError::InvalidTerminalObservation)?;
+        let binding = run
+            .runtime()
+            .and_then(|runtime| {
+                runtime.bindings().iter().find(|binding| {
+                    binding.role().as_str() == delivery.facts().role_id
+                        && binding.session_ref().as_str() == delivery.facts().session_ref
+                })
+            })
+            .ok_or(OrganizationFactsError::InvalidActivityTarget)?;
+        if target.correlation().endpoint_session_id() != binding.endpoint_session_id() {
+            return Err(OrganizationFactsError::InvalidTerminalObservation);
+        }
+        Ok(true)
     }
 
     pub fn validate(&self) -> Result<(), OrganizationFactsError> {
@@ -2172,6 +2301,12 @@ impl OrganizationFacts {
                 || current.frozen_team_revision() != previous_run.frozen_team_revision()
             {
                 return Err(OrganizationFactsError::RunOwnershipChanged);
+            }
+            if !previous_run
+                .retired_executions
+                .is_subset(&current.retired_executions)
+            {
+                return Err(OrganizationFactsError::InvalidGraphRun);
             }
             if !current
                 .lifecycle()
@@ -2336,9 +2471,22 @@ impl OrganizationFacts {
             .get_mut(run_id.as_str())
             .ok_or(OrganizationFactsError::UnknownRun)?;
         let plan = crate::run::lifecycle::cancellation_plan(run);
-        Ok(run
-            .lifecycle
-            .begin_cancellation(plan, idempotency_key, requested_at))
+        let outcome = run.lifecycle.begin_cancellation(plan, idempotency_key, requested_at);
+        let pending = self.activities.activities()
+            .filter(|activity| activity.facts().run_id == *run_id)
+            .filter(|activity| matches!(activity.phase(), ActivityPhase::Pending | ActivityPhase::RetryScheduled { .. }))
+            .map(|activity| activity.facts().activity_id.clone())
+            .collect::<Vec<_>>();
+        for activity_id in pending {
+            self.activities.activity_mut(&activity_id).expect("selected activity exists").cancel(requested_at);
+            if let Ok(delivery_id) = crate::DeliveryId::new(activity_id.as_str())
+                && let Some(delivery) = self.deliveries.delivery_mut(&delivery_id)
+                && matches!(delivery.phase(), DeliveryPhase::Pending | DeliveryPhase::RetryScheduled { .. })
+            {
+                delivery.cancel(requested_at);
+            }
+        }
+        Ok(outcome)
     }
 
     pub(crate) fn settle_graph_run_cancellation(
@@ -2528,6 +2676,9 @@ impl OrganizationFacts {
             .expect("run restore preserves its team");
         if team.tombstoned() {
             return Err(OrganizationFactsError::RuntimeTeamTombstoned);
+        }
+        if !matches!(run.lifecycle().state(), GraphRunLifecycleState::Active) {
+            return Err(OrganizationFactsError::InvalidGraphRunLifecycle);
         }
         let materialization = self
             .materializations
@@ -2846,7 +2997,8 @@ impl OrganizationFacts {
             .ok_or(crate::StoreFault::GraphPatch(crate::GraphPatchError::UnknownRun))?;
         definition.validate().and_then(|_| definition.validate_references(Some(current.graph().definition())))
             .map_err(|error| crate::StoreFault::GraphPatch(crate::GraphPatchError::Definition(error)))?;
-        let graph = GraphState::initialize(definition, command.created_at());
+        let graph = GraphState::initialize(definition, command.created_at())
+            .with_current_identity(current.graph());
         let changed = graph.definition() != current.graph().definition();
         if changed && matches!(current.start_gate(), RunStartGate::Started) {
             graph.definition().validate_join_inputs().map_err(|error| {
@@ -2864,13 +3016,53 @@ impl OrganizationFacts {
         } else {
             crate::application::design::validate_assignments(self, &current, graph.definition(), None)?;
         }
-        let receipt = self.events.try_accept(command).map_err(crate::StoreFault::EventLedger)?;
+        self.events
+            .replay(&command)
+            .map_err(crate::StoreFault::EventLedger)?;
         self.touch_run(run_id.as_str());
+        let previous = std::mem::replace(
+            &mut self
+                .runs
+                .get_mut(run_id.as_str())
+                .expect("validated run")
+                .graph,
+            graph,
+        );
+        let admissible = self.validate_replaced_graph_dependents(run_id.as_str());
+        let graph = std::mem::replace(
+            &mut self
+                .runs
+                .get_mut(run_id.as_str())
+                .expect("validated run")
+                .graph,
+            previous,
+        );
+        admissible.map_err(|_| crate::StoreFault::InvalidFacts)?;
+        let graph = graph.with_replacement_identity(command.command_id());
+        let receipt = self
+            .events
+            .try_accept(command)
+            .map_err(crate::StoreFault::EventLedger)?;
         let updated = self.runs.get_mut(run_id.as_str()).expect("validated run");
+        updated
+            .retired_executions
+            .extend(
+                updated
+                    .graph
+                    .executions()
+                    .iter()
+                    .flat_map(|(node, history)| {
+                        history
+                            .attempts()
+                            .iter()
+                            .map(|attempt| (node.clone(), attempt.fence().clone()))
+                    }),
+            );
         updated.graph.replace_with(graph);
         if changed {
             super::design::invalidate_graph_design(updated);
         }
+        self.cancel_superseded_pending_activities(&run_id);
         Ok(receipt)
     }
 
@@ -3639,21 +3831,17 @@ impl OrganizationFacts {
         activity_id: &ActivityId,
         claimed_at: u64,
     ) -> Result<ActivityClaimOutcome, OrganizationFactsError> {
-        let activity = self
-            .activities
-            .activity_mut(activity_id)
+        let activity = self.activities.activity(activity_id)
             .ok_or(OrganizationFactsError::UnknownActivity)?;
-        if matches!(
-            activity.phase(),
-            ActivityPhase::Pending | ActivityPhase::RetryScheduled { .. }
-        ) && self
-            .runs
-            .get(activity.facts().run_id.as_str())
-            .and_then(|run| run.graph().current_attempt(&activity.facts().node_id))
-            .is_none_or(|attempt| attempt.fence() != &activity.facts().fence)
-        {
-            return Err(OrganizationFactsError::InvalidActivityTransition);
+        if matches!(activity.phase(), ActivityPhase::Pending | ActivityPhase::RetryScheduled { .. }) {
+            let run = self.require_started_run(&activity.facts().run_id)?;
+            if run.graph().current_attempt(&activity.facts().node_id)
+                .is_none_or(|attempt| attempt.fence() != &activity.facts().fence)
+            {
+                return Err(OrganizationFactsError::InvalidActivityTransition);
+            }
         }
+        let activity = self.activities.activity_mut(activity_id).expect("validated activity");
         Ok(crate::claim_activity(activity, claimed_at))
     }
 
@@ -3865,6 +4053,14 @@ fn validate_artifact_provenance(
         .flat_map(|history| history.attempts())
         .any(|attempt| attempt.fence() == record.fence())
         .then_some(())
+        .or_else(|| {
+            run.retired_executions
+                .iter()
+                .any(|(node, fence)| {
+                    fence == record.fence() && run.retired_execution_has_attempt(node, fence)
+                })
+                .then_some(())
+        })
         .ok_or(OrganizationFactsError::StaleEvidenceNodeExecution)
 }
 
@@ -3896,6 +4092,15 @@ fn validate_evidence_provenance(
         .flat_map(|history| history.attempts())
         .any(|attempt| attempt.fence().node_execution_id().as_str() == record.node_execution_id())
         .then_some(())
+        .or_else(|| {
+            run.retired_executions
+                .iter()
+                .any(|(node, fence)| {
+                    fence.node_execution_id().as_str() == record.node_execution_id()
+                        && run.retired_execution_has_attempt(node, fence)
+                })
+                .then_some(())
+        })
         .ok_or(OrganizationFactsError::StaleEvidenceNodeExecution)
 }
 
@@ -4020,6 +4225,11 @@ fn validate_human_decision_approvals<'a>(
                     .attempts()
                     .iter()
                     .any(|attempt| attempt.fence().node_execution_id().as_str() == fence)
+            })
+            && !run.retired_executions.iter().any(|(node, retired)| {
+                node == &node_id
+                    && retired.node_execution_id().as_str() == fence
+                    && run.retired_execution_has_attempt(node, retired)
             })
         {
             return Err(OrganizationFactsError::InvalidApprovalLedger);
@@ -4463,10 +4673,12 @@ fn validate_activity_request(
         .executions()
         .get(&request.node_id)
         .ok_or(OrganizationFactsError::InvalidActivity)?;
-    if history
+    if (history
         .attempts()
         .iter()
         .all(|attempt| attempt.fence() != &request.fence)
+        && !(run.execution_is_retired(&request.node_id, &request.fence)
+            && run.retired_execution_has_attempt(&request.node_id, &request.fence)))
         || request.fence.node_execution_id() != &request.node_execution_id
     {
         return Err(OrganizationFactsError::InvalidActivity);

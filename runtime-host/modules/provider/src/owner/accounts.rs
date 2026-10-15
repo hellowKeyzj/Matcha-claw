@@ -81,14 +81,33 @@ impl ProviderAccountsOwner {
         self.private_resolver = private_resolver;
     }
 
+    pub(super) async fn begin_transaction(
+        &self,
+        account_id: ProviderAccountId,
+        revision: u64,
+        kind: &str,
+        credential_required: bool,
+    ) -> Result<Option<crate::api::ProviderAccountPrivateTransaction>, crate::ResolverFailure> {
+        Ok(self.private_resolver.begin_account_transaction(
+            account_id.as_str(), revision, kind, credential_required,
+        ).await?.map(|id| crate::api::ProviderAccountPrivateTransaction {
+            id,
+            reference: format!("credential:v1:{}", account_id.as_str()),
+            revision,
+            account_id,
+        }))
+    }
+
     pub(super) async fn claim_transaction(
         &self,
         transaction: &crate::api::ProviderAccountPrivateTransaction,
+        previous_reference: Option<&str>,
     ) -> Result<(), crate::ResolverFailure> {
         self.private_resolver.claim_account_transaction(
             &transaction.id,
             &transaction.reference,
             transaction.revision,
+            previous_reference,
         ).await
     }
 
@@ -96,12 +115,14 @@ impl ProviderAccountsOwner {
         &self,
         transaction: &crate::api::ProviderAccountPrivateTransaction,
         settlement: &str,
+        committed: bool,
     ) -> Result<(), crate::ResolverFailure> {
         self.private_resolver.settle_account_transaction(
             &transaction.id,
             &transaction.reference,
             transaction.revision,
             settlement,
+            committed,
         ).await
     }
 
@@ -110,6 +131,7 @@ impl ProviderAccountsOwner {
         cascade: &mut ProviderCascade,
         identity_ops: &dyn ProviderRuntimeIdentityOps,
         draft: ProviderAccountDraft,
+        transaction: Option<&crate::api::ProviderAccountPrivateTransaction>,
     ) -> ProviderAccountsMutation {
         if cascade.reload().is_err() {
             return ProviderAccountsMutation::completed(
@@ -129,7 +151,10 @@ impl ProviderAccountsOwner {
         }) {
             return ProviderAccountsMutation::completed(ProviderAccountsDesiredOutcome::Rejected);
         }
-        let Ok(account) = draft.materialize(existing.as_ref(), current_timestamp()) else {
+        let credential = transaction.map(|transaction| crate::CredentialReference::for_transaction(
+            transaction.account_id.as_str(), &transaction.id,
+        ));
+        let Ok(account) = draft.materialize_with_credential(existing.as_ref(), current_timestamp(), credential) else {
             return ProviderAccountsMutation::completed(ProviderAccountsDesiredOutcome::Rejected);
         };
         let previous_provider_key = existing
@@ -167,7 +192,7 @@ impl ProviderAccountsOwner {
                     Some((previous, reference)) => {
                         let private = match private_profile_provider_key_for_account(identity_ops, previous) {
                             Ok(profile_provider) => self.private_resolver
-                                .discard(reference.as_str(), &profile_provider, account.revision().get())
+                                .discard(reference.as_str(), &profile_provider, account.revision().get(), account.id().as_str(), transaction.map(|transaction| transaction.id.as_str()))
                                 .await
                                 .map_err(PrivateProfileProjectionError::resolver),
                             Err(_) => Err(PrivateProfileProjectionError::InvalidProviderKey),
@@ -185,7 +210,7 @@ impl ProviderAccountsOwner {
                     let identities = provider_runtime_identities(identity_ops, cascade.accounts())
                         .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey);
                     let private = match identities {
-                        Ok(identities) => self.apply_private_profile(identity_ops, &identities, &account).await,
+                        Ok(identities) => self.apply_private_profile(identity_ops, &identities, &account, transaction.map(|transaction| transaction.id.as_str())).await,
                         Err(error) => Err(error),
                     };
                     (private, true)
@@ -194,7 +219,7 @@ impl ProviderAccountsOwner {
                         Some(reference) => {
                             let private = match private_profile_provider_key_for_account(identity_ops, &account) {
                                 Ok(profile_provider) => self.private_resolver
-                                    .discard(reference.as_str(), &profile_provider, account.revision().get())
+                                    .discard(reference.as_str(), &profile_provider, account.revision().get(), account.id().as_str(), transaction.map(|transaction| transaction.id.as_str()))
                                     .await
                                     .map_err(PrivateProfileProjectionError::resolver),
                                 Err(_) => Err(PrivateProfileProjectionError::InvalidProviderKey),
@@ -231,6 +256,7 @@ impl ProviderAccountsOwner {
         identity_ops: &dyn ProviderRuntimeIdentityOps,
         id: ProviderAccountId,
         revision: ProviderAccountRevision,
+        transaction: Option<&crate::api::ProviderAccountPrivateTransaction>,
     ) -> ProviderAccountsMutation {
         if cascade.reload().is_err() {
             return ProviderAccountsMutation::completed(
@@ -249,7 +275,7 @@ impl ProviderAccountsOwner {
         let private = match account.configuration().credential() {
             Some(credential) => match private_profile_provider_key_for_account(identity_ops, &account) {
                 Ok(profile_provider) => self.private_resolver
-                    .delete(credential.as_str(), &profile_provider, revision.get())
+                    .delete(credential.as_str(), &profile_provider, revision.get(), account.id().as_str(), transaction.map(|transaction| transaction.id.as_str()))
                     .await
                     .map_err(PrivateProfileProjectionError::resolver),
                 Err(_) => Err(PrivateProfileProjectionError::InvalidProviderKey),
@@ -299,7 +325,7 @@ impl ProviderAccountsOwner {
         {
             tokio::time::timeout_at(
                 deadline,
-                self.apply_private_profile(identity_ops, &identities, account),
+                self.apply_private_profile(identity_ops, &identities, account, None),
             )
             .await
             .map_err(|_| PrivateProfileProjectionError::Deadline)??;
@@ -313,6 +339,7 @@ impl ProviderAccountsOwner {
         _identity_ops: &dyn ProviderRuntimeIdentityOps,
         identities: &BTreeMap<String, String>,
         account: &ProviderAccount,
+        transaction_id: Option<&str>,
     ) -> Result<(), PrivateProfileProjectionError> {
         match account.configuration().auth_mode() {
             ProviderAccountAuthMode::Local | ProviderAccountAuthMode::CliReuse => Ok(()),
@@ -335,6 +362,8 @@ impl ProviderAccountsOwner {
                         credential_provider,
                         account.configuration().auth_mode(),
                         account.revision().get(),
+                        account.id().as_str(),
+                        transaction_id,
                     )
                     .await
                     .map_err(PrivateProfileProjectionError::resolver)

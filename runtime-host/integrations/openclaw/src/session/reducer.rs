@@ -615,7 +615,7 @@ impl SessionReducerActor {
                 "projectionState": "committed", "actualFinalItems": sessions_module::trace::items_shape(&self.body.items),
                 "retiredItemCount": self.body.retired.len(), "retiredItemsTruncated": self.body.retired.len() > 200,
                 "retiredItemHashes": self.body.retired.iter().take(200).map(|id| sessions_module::trace::fingerprint(id)).collect::<Vec<_>>(),
-                "runtimePhase": self.cache.runtime.phase,
+                "runtimePhase": self.cache.runtime.phase, "errorPresent": self.cache.runtime.error_detail.is_some(),
                 "activeRunHash": self.cache.runtime.active_run_id.as_deref().map(sessions_module::trace::fingerprint),
                 "commitElapsedMs": commit_elapsed_ms, "timingScope": "cache_merge_validate_and_assign_excluding_commit_success_trace" }));
             let trace_elapsed_ms = trace_started.elapsed().as_secs_f64() * 1000.0;
@@ -626,10 +626,20 @@ impl SessionReducerActor {
         Some(())
     }
 
+    fn history_trace_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "nativeSessionId": sessions_module::trace::id_shape(self.native_session_id.as_deref()),
+            "leafScopeKnown": self.active_leaf.is_some(),
+            "leafHash": self.active_leaf.as_ref().and_then(|leaf| leaf.as_deref()).map(sessions_module::trace::fingerprint),
+            "runtime": runtime_trace_state(&self.cache.runtime),
+        })
+    }
+
     pub(crate) fn sync_history(&mut self, window: &super::window::SessionWindow, page: super::window::PageRequest, epoch: GatewayEpoch)
         -> Result<Option<CanonicalIngressResult>, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure as Failure;
         let history_started = super::trace::enabled().then(std::time::Instant::now);
+        let history_before = history_started.map(|_| self.history_trace_state());
         if super::trace::enabled() {
             super::trace::log_unscoped("runtime.openclaw.reducer.history_input", || serde_json::json!({
                 "sessionHash": sessions_module::trace::fingerprint(self.session_key.as_str()), "sourceEpoch": epoch.as_u64(),
@@ -639,7 +649,10 @@ impl SessionReducerActor {
                 "summarizedMessageCount": window.messages().len().min(super::window::PageRequest::MAX_LIMIT),
                 "messagesTruncated": window.messages().len() > super::window::PageRequest::MAX_LIMIT,
                 "cursorPresent": window.state().delta_cursor().is_some(), "cursorHash": window.state().delta_cursor().map(sessions_module::trace::fingerprint),
-                "completeSnapshot": window.state().complete_snapshot(),
+                "completeSnapshot": window.state().complete_snapshot(), "before": history_before,
+                "incomingNativeSessionId": sessions_module::trace::id_shape(window.native_session_id()),
+                "incomingLeafScopeKnown": window.state().active_leaf_scope().is_some(),
+                "incomingLeafHash": window.state().active_leaf_scope().flatten().map(sessions_module::trace::fingerprint),
                 "messages": window.messages().iter().take(super::window::PageRequest::MAX_LIMIT).enumerate().map(|(index, message)| serde_json::json!({
                     "index": index, "role": format!("{:?}", message.role()), "sequence": message.sequence(),
                     "runHash": message.run_id().map(sessions_module::trace::fingerprint), "messageHash": message.message_id().map(sessions_module::trace::fingerprint),
@@ -663,7 +676,15 @@ impl SessionReducerActor {
             .is_some_and(|(current, incoming)| current != incoming);
         let leaf_changed = self.active_leaf.as_ref().map(|leaf| leaf.as_deref()).zip(window.state().active_leaf_scope())
             .is_some_and(|(current, incoming)| current != incoming);
-        if session_changed && !full { return Err(Failure::Unknown); }
+        if session_changed && !full {
+            super::trace::log_unscoped("runtime.openclaw.reducer.history_rejected", || serde_json::json!({
+                "reason": "delta_session_changed", "sessionChanged": session_changed, "leafChanged": leaf_changed,
+                "resetScope": false, "before": history_before,
+                "incomingNativeSessionId": sessions_module::trace::id_shape(window.native_session_id()),
+                "incomingLeafScopeKnown": window.state().active_leaf_scope().is_some(),
+                "incomingLeafHash": window.state().active_leaf_scope().flatten().map(sessions_module::trace::fingerprint) }));
+            return Err(Failure::Unknown);
+        }
         let reset_scope = full && (session_changed || leaf_changed);
         let full_latest = full && matches!(page.direction(), super::window::Direction::Latest);
         let prefix = (!reset_scope && full_latest && self.native_session_id.is_some()
@@ -681,6 +702,7 @@ impl SessionReducerActor {
         if full { body.rebuild_history(prefix, reset_scope); }
         let mut cache = if reset_scope { super::adapters::timeline::OpenClawReplayProjection::empty() } else { self.cache.clone() };
         if reset_scope && !session_changed { cache.approvals = self.cache.approvals.clone(); }
+        let runtime_after_scope = history_started.map(|_| runtime_trace_state(&cache.runtime));
         let in_flight_run = window.state().in_flight_run().filter(|run|
             matches!(page.direction(), super::window::Direction::Latest)
                 && window.state().is_active()
@@ -785,6 +807,9 @@ impl SessionReducerActor {
             super::trace::log_unscoped("runtime.openclaw.reducer.history_accepted", || serde_json::json!({
                 "sourceEpoch": epoch.as_u64(), "historyKind": format!("{:?}", window.state().kind()),
                 "fullLatest": full_latest, "terminalHistoryPending": self.body.needs_terminal_history(), "projectionState": "committed",
+                "sessionHash": sessions_module::trace::fingerprint(self.session_key.as_str()),
+                "sessionChanged": session_changed, "leafChanged": leaf_changed, "resetScope": reset_scope,
+                "before": history_before, "runtimeAfterScope": runtime_after_scope, "after": self.history_trace_state(),
                 "actualFinalItems": sessions_module::trace::items_shape(&self.body.items),
                 "runtimePhase": self.cache.runtime.phase, "activeRunHash": self.cache.runtime.active_run_id.as_deref().map(sessions_module::trace::fingerprint),
                 "inputTraceElapsedMs": input_trace_elapsed_ms, "bodyWithTraceElapsedMs": body_with_trace_elapsed_ms,
@@ -1354,6 +1379,13 @@ fn push_replacement(changes: &mut Vec<CanonicalSessionChange>, replacement: Cano
         return;
     }
     changes.push(replacement);
+}
+
+fn runtime_trace_state(runtime: &sessions_module::state::RuntimeView) -> serde_json::Value {
+    serde_json::json!({
+        "phase": runtime.phase, "errorPresent": runtime.error_detail.is_some(),
+        "activeRunHash": runtime.active_run_id.as_deref().map(sessions_module::trace::fingerprint),
+    })
 }
 
 fn produce(

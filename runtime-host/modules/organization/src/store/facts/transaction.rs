@@ -91,6 +91,7 @@ pub(super) struct RunHeader {
     pub(super) runtime: Option<RunRuntimeReceipt>,
     pub(super) lifecycle: GraphRunLifecycle,
     pub(super) start_gate: RunStartGate,
+    pub(super) retired_executions: BTreeSet<(NodeId, ExecutionFence)>,
 }
 
 impl RunHeader {
@@ -99,6 +100,7 @@ impl RunHeader {
             team: run.team.clone(), revision: run.frozen_team_revision,
             runtime: run.runtime.clone(), lifecycle: run.lifecycle.clone(),
             start_gate: run.start_gate.clone(),
+            retired_executions: run.retired_executions.clone(),
         }
     }
 
@@ -108,6 +110,7 @@ impl RunHeader {
         run.runtime = self.runtime;
         run.lifecycle = self.lifecycle;
         run.start_gate = self.start_gate;
+        run.retired_executions = self.retired_executions;
     }
 }
 
@@ -201,7 +204,11 @@ impl OrganizationFacts {
                 if run.team != old.team || run.frozen_team_revision != old.revision { return Err(OrganizationFactsError::RunOwnershipChanged); }
                 if !run.lifecycle.can_transition_from(&old.lifecycle) { return Err(OrganizationFactsError::InvalidGraphRunLifecycle); }
                 if !run.start_gate.can_transition_from(&old.start_gate) { return Err(OrganizationFactsError::InvalidRunStartGate); }
+                if !old.retired_executions.is_subset(&run.retired_executions) {
+                    return Err(OrganizationFactsError::InvalidGraphRun);
+                }
             }
+            run.validate_retired_executions(&run.retired_executions)?;
             if matches!(old, RunUndo::Inserted) {
                 GraphState::restore_durable(run.graph.durable_snapshot()).map_err(|_| OrganizationFactsError::InvalidGraphRun)?;
             } else {
@@ -314,7 +321,10 @@ impl OrganizationFacts {
         Ok(())
     }
 
-    fn validate_replaced_graph_dependents(&self, run_id: &str) -> Result<(), OrganizationFactsError> {
+    pub(super) fn validate_replaced_graph_dependents(
+        &self,
+        run_id: &str,
+    ) -> Result<(), OrganizationFactsError> {
         let run = &self.runs[run_id];
         for delivery in self.deliveries.deliveries().filter(|value| value.facts().run_id == run_id) {
             if let DeliveryPhase::TerminalObserved { observation } = delivery.phase() {

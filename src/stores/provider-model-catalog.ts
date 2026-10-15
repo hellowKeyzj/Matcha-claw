@@ -8,6 +8,8 @@ import {
 import { refreshProviderPostMutationProjections } from '@/stores/provider-post-mutation-refresh';
 
 let inflightRefreshTask: Promise<void> | null = null;
+let latestCatalogRequestId = 0;
+let pendingSaves = 0;
 
 interface ProviderModelCatalogState {
   models: ProviderModel[];
@@ -36,37 +38,52 @@ export const useProviderModelCatalogStore = create<ProviderModelCatalogState>((s
       await inflightRefreshTask;
       return;
     }
+    const requestId = ++latestCatalogRequestId;
     inflightRefreshTask = (async () => {
       set({ loading: true, error: null });
       try {
         const models = await fetchProviderModels();
-        set({ models, ready: true, loading: false, warning: null });
+        if (requestId === latestCatalogRequestId) {
+          set({ models, ready: true, loading: false, warning: null });
+        }
       } catch (error) {
-        set({ loading: false, error: String(error) });
+        if (requestId === latestCatalogRequestId) {
+          set({ loading: false, error: String(error) });
+        }
       } finally {
-        inflightRefreshTask = null;
+        if (requestId === latestCatalogRequestId) inflightRefreshTask = null;
       }
     })();
     await inflightRefreshTask;
   },
 
   replaceAccountModels: async (accountId, next) => {
+    ++pendingSaves;
     set({ saving: true, error: null, warning: null });
     try {
       const result = await persistProviderModels(accountId, next);
+      const requestId = ++latestCatalogRequestId;
+      inflightRefreshTask = null;
+      set({ loading: false, warning: result.warning ?? null });
       try {
         const models = await fetchProviderModels();
-        set({ models, saving: false, ready: true, error: null, warning: result.warning ?? null });
+        if (requestId === latestCatalogRequestId) {
+          set({ models, ready: true });
+        }
       } catch (refreshError) {
-        set({ saving: false, ready: true, error: String(refreshError), warning: result.warning ?? null });
+        if (requestId === latestCatalogRequestId) {
+          set({ ready: true, error: String(refreshError) });
+        }
       }
       await refreshProviderPostMutationProjections({
         refreshProviderModelCatalog: false,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      set({ saving: false, error: message });
+      set({ error: message });
       throw error;
+    } finally {
+      set({ saving: --pendingSaves > 0 });
     }
   },
 }));

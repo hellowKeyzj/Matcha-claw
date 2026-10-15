@@ -1,4 +1,6 @@
 import { app, session, type BrowserWindow } from 'electron';
+import type { Server } from 'node:http';
+import type { RuntimeHostApiDependencies } from '../api/context';
 import {
   registerRuntimeIpcHandlers,
   registerStaticIpcHandlers,
@@ -10,7 +12,7 @@ import { logger } from '../utils/logger';
 import { warmupNetworkOptimization } from '../utils/uv-env';
 import type { HostEventBus } from '../api/event-bus';
 import { startHostApiServer, waitForHostApiServerListening } from '../api/server';
-import { registerHostEventBridge } from './host-event-bridge';
+import { registerHostEventBridge, registerMainEventBridge } from './host-event-bridge';
 import { RendererSessionObservationRegistry } from './renderer-event-routes';
 import { observationRequest } from './runtime-host-delivery/transport/sessions/observation';
 import { createMainWindow, loadMainWindowContent } from './main-window';
@@ -24,7 +26,7 @@ import {
 import { createRuntimeHostDelivery, type RuntimeHostDelivery } from './runtime-host-delivery/delivery';
 import { RuntimeHostLifecycleOwner, stopOrForceKillRuntimeHost } from './runtime-host-delivery/lifecycle-owner';
 import { createCloudAccountClient } from './cloud-account/client';
-import { createCloudAccountService } from './cloud-account/service';
+import { createCloudAccountService, type CloudAccountRuntime } from './cloud-account/service';
 import { createCloudProviderSync } from './cloud-account/provider-sync';
 import { createProviderCallObserver } from './ipc/provider-call-observation';
 import { createCallSubscriber } from './call-observation';
@@ -35,7 +37,8 @@ import {
 } from './runtime-host-delivery/transport/bundle';
 import {
   createProviderCredentialStatusTransport,
-  type ProviderCredentialStatusTransport,
+  registerProviderPrivateAuthHandlers,
+  type ProviderPrivateAccountDependencies,
 } from './ipc/provider-private-auth';
 import { createFleetCredentialWriteAdapter } from './ipc/fleet-private';
 import { composeLicenseService } from './license/composition';
@@ -144,16 +147,17 @@ function registerMainWindowLifecycle(deps: {
   });
 }
 
-export async function bootstrapMainApplication(deps: {
+export type MainApplication = Readonly<{
+  mainWindow: BrowserWindow;
+  ready: Promise<void>;
+  close: () => Promise<void>;
+}>;
+
+export function bootstrapMainApplication(deps: {
   hostEventBus: HostEventBus;
   setMainWindow: (window: BrowserWindow | null) => void;
   getMainWindow: () => BrowserWindow | null;
-}): Promise<{
-  mainWindow: BrowserWindow;
-  directRuntimeHost: RuntimeHostLifecycleOwner;
-  closeRuntimeHostDelivery: () => Promise<void>;
-  closeSessionObservations: () => Promise<void>;
-}> {
+}): MainApplication {
   logger.init();
   logger.info('=== MatchaClaw Application Starting ===');
   logger.debug(() =>
@@ -185,167 +189,203 @@ export async function bootstrapMainApplication(deps: {
   registerGatewayControlUiSecurityHeaders();
   const sessionObservers = new RendererSessionObservationRegistry();
   sessionObservers.attach(mainWindow.webContents);
-  registerStaticIpcHandlers(deps.getMainWindow, sessionObservers);
   if (isE2EMode) {
     registerE2EUpdateHandlers();
   } else {
     registerUpdateHandlers(appUpdater, mainWindow);
   }
-  loadMainWindowContent(mainWindow);
-  let directRuntimeHost: RuntimeHostLifecycleOwner;
+  const stopMainEvents = registerMainEventBridge({
+    hostEventBus: deps.hostEventBus,
+    getMainWindow: deps.getMainWindow,
+  });
+  const licenseService = composeLicenseService({
+    onGateChanged: (snapshot) => deps.hostEventBus.emit('license:gate-changed', snapshot),
+  });
+  const shutdown = new AbortController();
+  let closeTask: Promise<void> | undefined;
+  let delivery: RuntimeHostDelivery | undefined;
   let startedRuntimeHost: DirectRuntimeHost | undefined;
-  let closeRuntimeHostDelivery: (() => Promise<void>) | undefined;
-  let transportBundle: RuntimeHostTransportBundle;
-  let providerCredentialStatusTransport: ProviderCredentialStatusTransport;
-  let awaitProviderCall: ReturnType<typeof createProviderCallObserver>;
-  let cloudAccountService: ReturnType<typeof createCloudAccountService>;
-  let licenseService: ReturnType<typeof composeLicenseService>;
-  let delivery: RuntimeHostDelivery;
-  try {
-    delivery = await createRuntimeHostDelivery(deps.hostEventBus);
-    closeRuntimeHostDelivery = delivery.close;
-    const initialRuntimeHost = await delivery.launchRuntimeHost();
-    startedRuntimeHost = initialRuntimeHost;
-    directRuntimeHost = new RuntimeHostLifecycleOwner(
-      initialRuntimeHost,
-      delivery.launchRuntimeHost,
-    );
-    transportBundle = createRuntimeHostTransportBundle({
-      issuer: delivery.issuer,
-      runtimeHostTransportPort: delivery.runtimeHostTransportPort,
-      reportE2ECronTrace: isE2EMode
-        ? async (stage) => {
-            await new Promise<void>((resolve) => setTimeout(resolve, 0));
-            publishE2ECronProviderTrace([...directRuntimeHost.readE2ECronProviderTrace(), stage]);
-          }
-        : undefined,
-    });
-    sessionObservers.setNativeRelease(async (identity, leaseId) => {
-      const response = await transportBundle.hostApiTransports.sessionObservationTransport.release(observationRequest(identity, leaseId, 'sessions.release'));
-      if (response.status !== 200) throw new Error('Session observation release is unavailable');
-    });
-    closeRuntimeHostDelivery = async () => {
-      await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during delivery close'));
-      await cloudAccountService?.close();
-      transportBundle.close();
-      await delivery.close();
-    };
-    providerCredentialStatusTransport = createProviderCredentialStatusTransport();
-    const subscribeCalls = createCallSubscriber(deps.hostEventBus, directRuntimeHost);
-    awaitProviderCall = createProviderCallObserver(transportBundle.hostApiTransports.callLogTransport, subscribeCalls);
-    const cloudProviderSync = createCloudProviderSync({
-      fetchClientBootstrap: (token) => cloudAccountClient.fetchClientBootstrap(token),
-      providerAccountsTransport: transportBundle.hostApiTransports.providerAccountsTransport,
-      providerModelsTransport: transportBundle.hostApiTransports.providerModelsTransport,
-      awaitProviderCall,
-    });
-    cloudAccountService = createCloudAccountService(cloudAccountClient, cloudProviderSync, transportBundle.hostApiTransports.sealedResourceAuthorizationTransport, {
-      agentsTransport: transportBundle.hostApiTransports.agentsTransport,
-      sealedSkillsTransport: transportBundle.hostApiTransports.sealedSkillsTransport,
-      callLogTransport: transportBundle.hostApiTransports.callLogTransport,
-      subscribeCalls,
-      packageChanged: (operationId) => deps.hostEventBus.emit('package:changed', { operationId }),
-    });
-    const stopPackageExit = directRuntimeHost.onExit(() => cloudAccountService.runtimeExited());
-    const stopPackageRestart = directRuntimeHost.onRestart(() => {
-      void cloudAccountService.runtimeRestarted().catch(() => logger.warn('Cloud package authorization restore failed'));
-    });
-    closeRuntimeHostDelivery = async () => {
-      try {
-        await licenseService?.dispose();
-      } finally {
-        await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during delivery close'));
-        stopPackageExit();
-        stopPackageRestart();
-        try { await cloudAccountService.close(); } finally {
-          transportBundle.close();
-          await delivery.close();
-        }
-      }
-    };
-    licenseService = composeLicenseService({
-      onGateChanged: (snapshot) => deps.hostEventBus.emit('license:gate-changed', snapshot),
-    });
-  } catch (error) {
-    await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during bootstrap cleanup'));
-    if (startedRuntimeHost) {
-      await stopOrForceKillRuntimeHost(startedRuntimeHost).catch(() => undefined);
-    }
-    await closeRuntimeHostDelivery?.().catch(() => undefined);
-    publishE2ELaunchDiagnostic(error);
-    if (isDirectRuntimeHostDeliveryError(error) && error.diagnostic?.stderr) {
-      logger.error(`[RuntimeHost] launch diagnostic: ${error.diagnostic.stderr}`);
-    }
-    publishE2EStartupOutcome(classifyBootstrapStartupFailure(error));
-    throw error;
-  }
+  let directRuntimeHost: RuntimeHostLifecycleOwner | undefined;
+  let transportBundle: RuntimeHostTransportBundle | undefined;
+  let runtimeReady = false;
+  const subscriptions: (() => void)[] = [stopMainEvents];
+  const assertStarting = () => {
+    if (shutdown.signal.aborted || isQuitting()) throw new Error('Application is shutting down');
+  };
 
-  try {
-    await waitForHostApiServerListening(
-      startHostApiServer({
-        licenseService,
-        cloudAccountService,
-        eventBus: deps.hostEventBus,
-        runtimeHost: directRuntimeHost,
+  const runtimeSetup = (async (): Promise<{
+    api: RuntimeHostApiDependencies;
+    account: CloudAccountRuntime;
+    providerAuth: ProviderPrivateAccountDependencies;
+  }> => {
+    try {
+      assertStarting();
+      delivery = await createRuntimeHostDelivery(deps.hostEventBus);
+      assertStarting();
+      startedRuntimeHost = await delivery.launchRuntimeHost();
+      assertStarting();
+      const runtimeHost = new RuntimeHostLifecycleOwner(startedRuntimeHost, delivery.launchRuntimeHost);
+      directRuntimeHost = runtimeHost;
+      const bundle = createRuntimeHostTransportBundle({
+        issuer: delivery.issuer,
+        runtimeHostTransportPort: delivery.runtimeHostTransportPort,
+        reportE2ECronTrace: isE2EMode
+          ? async (stage) => {
+              await new Promise<void>((resolve) => setTimeout(resolve, 0));
+              publishE2ECronProviderTrace([...runtimeHost.readE2ECronProviderTrace(), stage]);
+            }
+          : undefined,
+      });
+      transportBundle = bundle;
+      const transports = bundle.hostApiTransports;
+      sessionObservers.setNativeRelease(async (identity, leaseId) => {
+        const response = await transports.sessionObservationTransport.release(observationRequest(identity, leaseId, 'sessions.release'));
+        if (response.status !== 200) throw new Error('Session observation release is unavailable');
+      });
+      const subscribeCalls = createCallSubscriber(deps.hostEventBus, runtimeHost);
+      const awaitProviderCall = createProviderCallObserver(transports.callLogTransport, subscribeCalls);
+      const providerSync = createCloudProviderSync({
+        fetchClientBootstrap: (token) => cloudAccountClient.fetchClientBootstrap(token),
+        providerAccountsTransport: transports.providerAccountsTransport,
+        providerModelsTransport: transports.providerModelsTransport,
+        awaitProviderCall,
+      });
+      subscriptions.push(
+        runtimeHost.onExit(() => cloudAccountService.runtimeExited()),
+        runtimeHost.onRestart(() => {
+          void cloudAccountService.runtimeRestarted().catch(() => logger.warn('Cloud package authorization restore failed'));
+        }),
+      );
+      registerRuntimeIpcHandlers(
+        runtimeHost,
+        transports.fleetCredentialsTransport,
+        createDiagnosticsExportDependencies(transports.diagnosticsArchiveTransport),
+      );
+      subscriptions.push(registerHostEventBridge({
+        runtimeHost,
+        hostEventBus: deps.hostEventBus,
+        getMainWindow: deps.getMainWindow,
         sessionObservers,
-        runtimeHostTransports: transportBundle.hostApiTransports,
-        providerCredentialStatusTransport,
-        credentialWriteAdapter: createFleetCredentialWriteAdapter(
-          transportBundle.hostApiTransports.fleetCredentialsTransport,
-        ),
-      }, undefined, delivery.runtimeHostTransportPort)
-    );
-
-    registerRuntimeIpcHandlers(
-      directRuntimeHost,
-      deps.getMainWindow,
-      transportBundle.hostApiTransports.providerAccountsTransport,
-      awaitProviderCall,
-      transportBundle.hostApiTransports.fleetCredentialsTransport,
-      createDiagnosticsExportDependencies(transportBundle.hostApiTransports.diagnosticsArchiveTransport),
-    );
-    registerHostEventBridge({
-      runtimeHost: directRuntimeHost,
-      hostEventBus: deps.hostEventBus,
-      getMainWindow: deps.getMainWindow,
+        sessionEvents: bundle.sessionEventsTransport,
+        resyncSessions: () => sessionObservers.resync(async (identity, leaseId) => {
+          const response = await transports.sessionObservationTransport.observe(
+            observationRequest(identity, leaseId, 'sessions.observe'));
+          return response.status === 200 && 'leaseId' in response.body ? response.body : null;
+        }),
+      }));
+      const result = {
+        api: {
+          runtimeHost,
+          runtimeHostTransports: transports,
+          providerCredentialStatusTransport: createProviderCredentialStatusTransport(),
+          credentialWriteAdapter: createFleetCredentialWriteAdapter(transports.fleetCredentialsTransport),
+          runtimeHostTransportPort: delivery.runtimeHostTransportPort,
+        },
+        account: {
+          providerSync,
+          packageTransport: transports.sealedResourceAuthorizationTransport,
+          operationTransports: {
+            agentsTransport: transports.agentsTransport,
+            sealedSkillsTransport: transports.sealedSkillsTransport,
+            callLogTransport: transports.callLogTransport,
+            subscribeCalls,
+            packageChanged: (operationId) => deps.hostEventBus.emit('package:changed', { operationId }),
+          },
+        },
+        providerAuth: { transport: transports.providerAccountsTransport, awaitProviderCall },
+      } satisfies {
+        api: RuntimeHostApiDependencies;
+        account: CloudAccountRuntime;
+        providerAuth: ProviderPrivateAccountDependencies;
+      };
+      runtimeReady = true;
+      return result;
+    } catch (error) {
+      publishE2ELaunchDiagnostic(error);
+      if (isDirectRuntimeHostDeliveryError(error) && error.diagnostic?.stderr) {
+        logger.error(`[RuntimeHost] launch diagnostic: ${error.diagnostic.stderr}`);
+      }
+      publishE2EStartupOutcome(classifyBootstrapStartupFailure(error));
+      throw error;
+    }
+  })();
+  const accountRuntime = runtimeSetup.then(({ account }) => account);
+  void accountRuntime.catch(() => undefined);
+  const cloudAccountService = createCloudAccountService(cloudAccountClient, accountRuntime);
+  const apiRuntime = runtimeSetup.then(({ api }) => api);
+  void apiRuntime.catch(() => undefined);
+  registerStaticIpcHandlers(deps.getMainWindow, apiRuntime, sessionObservers);
+  const providerAuth = runtimeSetup.then((runtime) => runtime.providerAuth);
+  void providerAuth.catch(() => undefined);
+  const drainProviderAuth = registerProviderPrivateAuthHandlers(deps.getMainWindow, providerAuth, shutdown.signal);
+  let server: Server | undefined;
+  const startup = (async () => {
+    server = startHostApiServer({
+      licenseService,
+      cloudAccountService,
+      eventBus: deps.hostEventBus,
       sessionObservers,
-      sessionEvents: transportBundle.sessionEventsTransport,
-      resyncSessions: () => sessionObservers.resync(async (identity, leaseId) => {
-        const response = await transportBundle.hostApiTransports.sessionObservationTransport.observe(
-          observationRequest(identity, leaseId, 'sessions.observe'));
-        return response.status === 200 && 'leaseId' in response.body ? response.body : null;
-      }),
+      runtime: apiRuntime,
+      signal: shutdown.signal,
     });
-    cloudAccountService.prewarm();
-
+    const listening = waitForHostApiServerListening(server);
+    const [{ api }] = await Promise.all([runtimeSetup, listening]);
+    assertStarting();
     if (!isE2EMode) {
-      const settings = await transportBundle.hostApiTransports.settingsDesiredTransport.read().catch(() => null);
+      const settings = await api.runtimeHostTransports.settingsDesiredTransport.read().catch(() => null);
+      assertStarting();
       if (!settings || !(await applyLaunchAtStartupSetting(settings.launchAtStartup))) {
         logger.warn('Launch-at-startup setting could not be applied during startup');
       }
     }
-
+    assertStarting();
     if (isE2EMode) {
-      revealMainWindowAfterGatewayLeavesStopped({
-        hostEventBus: deps.hostEventBus,
-        mainWindow,
-      });
+      revealMainWindowAfterGatewayLeavesStopped({ hostEventBus: deps.hostEventBus, mainWindow });
     }
-
     publishE2EStartupOutcome({ stage: 'ready', outcome: 'started' });
-    return {
-      mainWindow,
-      directRuntimeHost,
-      closeRuntimeHostDelivery: closeRuntimeHostDelivery ?? (async () => undefined),
-      closeSessionObservations: () => sessionObservers.close(),
-    };
-  } catch (error) {
+  })();
+  const close = (): Promise<void> => {
+    if (closeTask) return closeTask;
+    shutdown.abort();
+    closeTask = (async () => {
+      const hostApiServer = server;
+      const serverClosed = hostApiServer && new Promise<void>((resolve, reject) => {
+        hostApiServer.close((error?: NodeJS.ErrnoException) => error && error.code !== 'ERR_SERVER_NOT_RUNNING' ? reject(error) : resolve());
+        hostApiServer.closeAllConnections();
+      });
+      void serverClosed?.catch(() => undefined);
+      await Promise.allSettled([runtimeSetup, startup]);
+      if (!runtimeReady) cloudAccountService.runtimeExited();
+      try {
+        try {
+          await licenseService.dispose();
+        } finally {
+          await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during application close'));
+          await cloudAccountService.close();
+        }
+      } finally {
+        await drainProviderAuth();
+        for (const unsubscribe of subscriptions) unsubscribe();
+        try {
+          const runtimeHost = directRuntimeHost ?? startedRuntimeHost;
+          if (runtimeHost) await stopOrForceKillRuntimeHost(runtimeHost);
+        } finally {
+          transportBundle?.close();
+          await delivery?.close();
+          await serverClosed;
+        }
+      }
+    })();
+    return closeTask;
+  };
+  const ready = startup.catch(async (error) => {
     publishE2EStartupOutcome({ stage: 'host-api', outcome: 'HOST_API_FAILED' });
-    await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during bootstrap cleanup'));
-    await stopOrForceKillRuntimeHost(directRuntimeHost).catch(() => undefined);
-    await closeRuntimeHostDelivery?.().catch(() => undefined);
+    await close().catch(() => logger.warn('Failed to clean up application startup'));
     throw error;
-  }
+  });
+  cloudAccountService.prewarm();
+  loadMainWindowContent(mainWindow);
+  return { mainWindow, ready, close };
 }
 
 function publishE2ELaunchDiagnostic(error: unknown): void {

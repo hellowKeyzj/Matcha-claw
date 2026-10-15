@@ -9,6 +9,7 @@ pub(crate) mod insights;
 pub(crate) mod lint;
 pub(crate) mod maintenance;
 pub(crate) mod pages;
+pub(crate) mod project_commit;
 pub(crate) mod qa;
 pub(crate) mod reindex;
 pub(crate) mod review_lifecycle;

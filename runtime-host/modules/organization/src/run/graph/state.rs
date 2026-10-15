@@ -1,6 +1,7 @@
 use std::{collections::{BTreeMap, BTreeSet}, num::NonZeroU32};
 
 use crate::run::event::{MetadataValue, OpaqueId};
+use sha2::{Digest, Sha256};
 
 use super::definition::{EdgeAction, EdgeId, GraphDefinition, NodeId, NodeKind};
 
@@ -27,6 +28,41 @@ impl NodeExecutionId {
 
     pub(crate) fn from_durable(value: String) -> Self {
         Self(value)
+    }
+
+    pub(crate) fn replacement_namespace(&self) -> Option<&str> {
+        let mut parts = self.0.strip_prefix("replace:")?.split(':');
+        let namespace = parts.next()?;
+        let node = parts.next()?;
+        let number = parts.next()?.parse::<NonZeroU32>().ok()?;
+        (parts.next().is_none()
+            && number.get() > 0
+            && namespace.len() == 64
+            && node.len() == 32
+            && namespace
+                .bytes()
+                .chain(node.bytes())
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        .then_some(namespace)
+    }
+
+    fn for_replacement(namespace: &str, node: &NodeId, number: NonZeroU32) -> Self {
+        let node = Sha256::digest(node.as_str().as_bytes());
+        Self(format!(
+            "replace:{namespace}:{}:{number}",
+            node[..16]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ))
+    }
+
+    pub(crate) fn matches_attempt(&self, node: &NodeId, number: NonZeroU32) -> bool {
+        let expected = match self.replacement_namespace() {
+            Some(namespace) => Self::for_replacement(namespace, node, number),
+            None => Self::for_attempt(&AttemptId::for_node(node, number)),
+        };
+        self == &expected
     }
 
     pub fn as_str(&self) -> &str {
@@ -224,6 +260,14 @@ impl NodeAttempt {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    pub(super) fn in_namespace(mut self, namespace: Option<&str>) -> Self {
+        if let Some(namespace) = namespace {
+            self.fence.node_execution_id =
+                NodeExecutionId::for_replacement(namespace, &self.node_id, self.number);
+        }
+        self
     }
 
     pub(crate) fn from_durable(input: NodeAttemptDurableInput) -> Self {
@@ -524,6 +568,43 @@ impl GraphState {
         }
     }
 
+    pub(crate) fn with_replacement_identity(self, command_id: &OpaqueId) -> Self {
+        self.with_namespace(&format!(
+            "{:x}",
+            Sha256::digest(command_id.as_str().as_bytes())
+        ))
+    }
+
+    pub(crate) fn with_current_identity(self, current: &Self) -> Self {
+        match current.replacement_namespace() {
+            Some(namespace) => self.with_namespace(namespace),
+            None => self,
+        }
+    }
+
+    fn with_namespace(mut self, namespace: &str) -> Self {
+        for history in self.executions.values_mut() {
+            for attempt in &mut history.attempts {
+                attempt.fence.node_execution_id =
+                    NodeExecutionId::for_replacement(&namespace, &attempt.node_id, attempt.number);
+            }
+        }
+        for item in &mut self.ready_queue {
+            item.fence = self.executions[&item.node_id].current().fence().clone();
+        }
+        self
+    }
+
+    pub(super) fn replacement_namespace(&self) -> Option<&str> {
+        self.executions
+            .values()
+            .next()?
+            .current()
+            .fence()
+            .node_execution_id()
+            .replacement_namespace()
+    }
+
     pub(crate) fn from_durable(
         definition: GraphDefinition,
         metadata: BTreeMap<OpaqueId, MetadataValue>,
@@ -741,7 +822,12 @@ impl GraphState {
             if attempt.number().get() != *number || attempt.node_id() != node
                 || attempt.node_kind() != definition.kind() || attempt.number() > definition.max_attempts()
                 || attempt.fence().attempt_id() != &fence
-                || attempt.fence().node_execution_id() != &NodeExecutionId::for_attempt(&fence)
+                || !attempt
+                    .fence()
+                    .node_execution_id()
+                    .matches_attempt(node, attempt.number())
+                || attempt.fence().node_execution_id().replacement_namespace()
+                    != self.replacement_namespace()
                 || attempt.updated_at() < attempt.created_at()
                 || (matches!(attempt.status(), AttemptStatus::Completed | AttemptStatus::Failed) != attempt.output_port().is_some())
             { return Err(()); }
@@ -801,13 +887,12 @@ impl GraphState {
     }
 
     pub(crate) fn remove_attempt_record(&mut self, execution_id: &str) {
-        let Some((node, number)) = execution_id.rsplit_once(":attempt:") else { return };
-        let Ok(number) = number.parse::<u32>() else { return };
-        let node = NodeId::new(node);
-        if let Some(history) = self.executions.get_mut(&node) {
-            history.attempts.retain(|attempt| attempt.number().get() != number);
-            if history.attempts.is_empty() { self.executions.remove(&node); }
-        }
+        self.executions.retain(|_, history| {
+            history
+                .attempts
+                .retain(|attempt| attempt.fence().node_execution_id().as_str() != execution_id);
+            !history.attempts.is_empty()
+        });
     }
 
     pub(crate) fn import_ready(&mut self, node: &NodeId, value: Option<ReadyQueueItem>) {

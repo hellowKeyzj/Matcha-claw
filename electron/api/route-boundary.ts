@@ -345,23 +345,23 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/remote-fleet/revoke-agent',
 ]);
 
-type HostApiAllowedRequest = readonly [method: string, pathname: string];
+type HostApiAllowedRequest = readonly [method: string, pathname: string, dependency?: 'main'];
 
 const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freeze([
   ['GET', '/api/events'],
-  ['GET', '/api/account/public-settings'],
-  ['GET', '/api/account/session'],
-  ['POST', '/api/account/login'],
-  ['POST', '/api/account/login/2fa'],
-  ['POST', '/api/account/register'],
-  ['POST', '/api/account/send-verify-code'],
-  ['POST', '/api/account/refresh'],
-  ['POST', '/api/account/logout'],
-  ['GET', '/api/app/browser-relay-info'],
-  ['GET', '/api/billing/checkout-info'],
-  ['GET', '/api/billing/plans'],
-  ['POST', '/api/billing/orders'],
-  ['POST', '/api/billing/orders/verify'],
+  ['GET', '/api/account/public-settings', 'main'],
+  ['GET', '/api/account/session', 'main'],
+  ['POST', '/api/account/login', 'main'],
+  ['POST', '/api/account/login/2fa', 'main'],
+  ['POST', '/api/account/register', 'main'],
+  ['POST', '/api/account/send-verify-code', 'main'],
+  ['POST', '/api/account/refresh', 'main'],
+  ['POST', '/api/account/logout', 'main'],
+  ['GET', '/api/app/browser-relay-info', 'main'],
+  ['GET', '/api/billing/checkout-info', 'main'],
+  ['GET', '/api/billing/plans', 'main'],
+  ['POST', '/api/billing/orders', 'main'],
+  ['POST', '/api/billing/orders/verify', 'main'],
   ['POST', '/api/subagents/agents'],
   ['POST', '/api/subagents/results'],
   ['GET', '/api/capabilities/list'],
@@ -413,14 +413,14 @@ const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freez
   ['POST', '/api/files/read-text'],
   ['POST', '/api/files/list-dir'],
   ['POST', '/api/files/write-text'],
-  ['GET', '/api/license/gate'],
-  ['GET', '/api/license/stored-key'],
-  ['POST', '/api/license/validate'],
-  ['POST', '/api/license/revalidate'],
-  ['POST', '/api/license/clear'],
-  ['GET', '/api/logs'],
-  ['GET', '/api/logs/dir'],
-  ['GET', '/api/logs/files'],
+  ['GET', '/api/license/gate', 'main'],
+  ['GET', '/api/license/stored-key', 'main'],
+  ['POST', '/api/license/validate', 'main'],
+  ['POST', '/api/license/revalidate', 'main'],
+  ['POST', '/api/license/clear', 'main'],
+  ['GET', '/api/logs', 'main'],
+  ['GET', '/api/logs/dir', 'main'],
+  ['GET', '/api/logs/files', 'main'],
   ['GET', '/api/openclaw/logs/dir'],
   ['GET', '/api/gateway/status'],
   ['GET', '/api/gateway/health'],
@@ -502,10 +502,10 @@ const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freez
   ['POST', '/api/sealed-skills/uninstall'],
   ['POST', '/api/subagents/skill-bundles/export'],
   ['POST', '/api/subagents/skill-bundles/import'],
-  ['GET', '/api/subscription/summary'],
-  ['GET', '/api/subscription/active'],
-  ['GET', '/api/subscription/progress'],
-  ['GET', '/api/subscription/platform-quotas'],
+  ['GET', '/api/subscription/summary', 'main'],
+  ['GET', '/api/subscription/active', 'main'],
+  ['GET', '/api/subscription/progress', 'main'],
+  ['GET', '/api/subscription/platform-quotas', 'main'],
   ['GET', '/api/matcha-agent/app-server/status'],
   ['POST', '/api/matcha-agent/app-server/restart'],
   ['GET', '/api/runtime-host/usage/recent'],
@@ -635,14 +635,14 @@ const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freez
   ['POST', '/api/remote-fleet/revoke-agent'],
 ] as const);
 
-const HOST_API_ALLOWED_DYNAMIC_REQUESTS = Object.freeze([
-  ['GET', '/api/billing/orders/:orderId'],
+const HOST_API_ALLOWED_DYNAMIC_REQUESTS: readonly HostApiAllowedRequest[] = Object.freeze([
+  ['GET', '/api/billing/orders/:orderId', 'main'],
   ['GET', '/api/channels/pairing/:channelType'],
   ['GET', '/api/openclaw/subagent-templates/:templateId'],
   ['POST', '/api/packages/:packageVersionId/publish'],
   ['GET', '/api/settings/:key'],
   ['GET', '/api/provider-accounts/:accountId/has-api-key'],
-] as const satisfies readonly HostApiAllowedRequest[]);
+] as const);
 
 export function getMainApiBoundarySnapshot() {
   return {
@@ -667,18 +667,20 @@ export function isHostApiProxyWebSocketRoute(pathname: string): boolean {
   return HOSTAPI_PROXY_WEBSOCKET_EXACT_ROUTES.includes(pathname);
 }
 
-export function isHostApiRequestAllowed(method: string, pathname: string): boolean {
+export function getHostApiRequestDependency(method: string, pathname: string): 'main' | 'runtime' | null {
   const normalizedMethod = method.toUpperCase();
-  if (HOST_API_ALLOWED_REQUESTS.some(
+  const request = HOST_API_ALLOWED_REQUESTS.find(
     ([allowedMethod, allowedPathname]) =>
       allowedMethod === normalizedMethod && allowedPathname === pathname,
-  )) {
-    return true;
-  }
-  return HOST_API_ALLOWED_DYNAMIC_REQUESTS.some(
+  ) ?? HOST_API_ALLOWED_DYNAMIC_REQUESTS.find(
     ([allowedMethod, template]) =>
       allowedMethod === normalizedMethod && isSafeDynamicRoute(pathname, template),
   );
+  return request ? request[2] ?? 'runtime' : null;
+}
+
+export function isHostApiRequestAllowed(method: string, pathname: string): boolean {
+  return getHostApiRequestDependency(method, pathname) !== null;
 }
 
 function isSafeDynamicRoute(pathname: string, template: string): boolean {
