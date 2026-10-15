@@ -90,7 +90,7 @@ pub enum DeliveryPhaseSnapshot {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct TerminalObservationSnapshot {
-    payload: Box<TerminalObservationSnapshotPayload>,
+    payload: Box<TerminalObservationSnapshotInput>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -106,21 +106,6 @@ pub struct TerminalObservationSnapshotInput {
     pub observed_at: u64,
     pub output: Option<TeamNodeOutput>,
     pub resolution: TerminalObservationResolution,
-}
-
-#[derive(Clone, Eq, PartialEq)]
-struct TerminalObservationSnapshotPayload {
-    delivery_id: DeliveryId,
-    graph_run_id: String,
-    node_id: String,
-    fence: ExecutionFence,
-    role_id: String,
-    correlation: NativeDeliveryCorrelation,
-    delivered_receipt: DeliveryReceiptReference,
-    native_terminal: NativeTerminalStatus,
-    observed_at: u64,
-    output: Option<TeamNodeOutput>,
-    resolution: TerminalObservationResolution,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,33 +154,8 @@ impl fmt::Debug for DeliveryPhaseSnapshot {
 
 impl TerminalObservationSnapshot {
     pub(crate) fn new(input: TerminalObservationSnapshotInput) -> Self {
-        let TerminalObservationSnapshotInput {
-            delivery_id,
-            graph_run_id,
-            node_id,
-            fence,
-            role_id,
-            correlation,
-            delivered_receipt,
-            native_terminal,
-            observed_at,
-            output,
-            resolution,
-        } = input;
         Self {
-            payload: Box::new(TerminalObservationSnapshotPayload {
-                delivery_id,
-                graph_run_id,
-                node_id,
-                fence,
-                role_id,
-                correlation,
-                delivered_receipt,
-                native_terminal,
-                observed_at,
-                output,
-                resolution,
-            }),
+            payload: Box::new(input),
         }
     }
 
@@ -450,7 +410,7 @@ impl TerminalObservationSnapshot {
 
     fn into_observation(self) -> TerminalObservation {
         let TerminalObservationSnapshot { payload } = self;
-        let TerminalObservationSnapshotPayload {
+        let TerminalObservationSnapshotInput {
             delivery_id,
             graph_run_id,
             node_id,

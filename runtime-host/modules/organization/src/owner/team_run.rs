@@ -78,6 +78,7 @@ pub(crate) enum TeamRunActivityError {
     InvalidPrompt,
     InvalidBinding,
     SessionMismatch,
+    Retired,
     Store(StoreFault),
 }
 
@@ -850,7 +851,6 @@ impl TeamRunOwner {
             .activity(&activity_id)
             .cloned()
             .ok_or(TeamRunActivityError::SessionMismatch)?;
-        let request = agent_task_execution_request(store, activity.facts())?;
         match activity.phase() {
             ActivityPhase::Claimed(_) | ActivityPhase::Dispatched(_) => {
                 return Ok(TeamRunActivityStart::Immediate(
@@ -878,6 +878,12 @@ impl TeamRunOwner {
             }
             _ => {}
         }
+        if !super::run_scheduler::run_allows_activity_execution(store, &activity.facts().run_id) {
+            return Ok(TeamRunActivityStart::Immediate(TeamRunActivityOutcome::Terminal(
+                self.recover_activity_run(store, &activity_id),
+            )));
+        }
+        let request = agent_task_execution_request(store, activity.facts())?;
         let claim = store
             .claim_agent_activity(&activity_id, request.delivery_request().clone(), claimed_at)
             .map_err(TeamRunActivityError::Store)?;
@@ -943,6 +949,19 @@ impl TeamRunOwner {
         let (_delivery, activity) = store
             .settle_agent_activity_dispatch(&claim, delivery_receipt, activity_settlement)
             .map_err(TeamRunActivityError::Store)?;
+        let request = store
+            .facts()
+            .activities()
+            .activity(&activity_id)
+            .ok_or(TeamRunActivityError::Store(StoreFault::InvalidFacts))?
+            .facts();
+        if store
+            .facts()
+            .run(&request.run_id)
+            .is_some_and(|run| run.execution_is_retired(&request.node_id, &request.fence))
+        {
+            return Err(TeamRunActivityError::Retired);
+        }
         Ok(match activity {
             None => {
                 TeamRunActivityOutcome::Dispatched(self.recover_activity_run(store, &activity_id))
@@ -1212,11 +1231,14 @@ pub(crate) fn resolve_native_settled_output(
     delivery_id: &DeliveryId,
     settled: NativeRunSettled,
     resolved_at: u64,
-) -> Result<TeamNodeTerminalResult, StoreFault> {
+) -> Result<crate::store::NativeTerminalSettlement, StoreFault> {
     let target = store
         .native_terminal_target(delivery_id)
         .filter(|target| target.graph_run_id() == run_id)
         .ok_or(StoreFault::InvalidFacts)?;
+    if store.native_terminal_is_retired(&target)? {
+        return store.settle_native_terminal(target, settled.status, Ok(None), resolved_at);
+    }
     let output = if settled.status == NativeTerminalStatus::Completed {
         let graph = store.facts().run(run_id).ok_or(StoreFault::InvalidFacts)?.graph();
         let delivery = store.facts().deliveries().delivery(delivery_id).ok_or(StoreFault::InvalidFacts)?;
@@ -1231,15 +1253,7 @@ pub(crate) fn resolve_native_settled_output(
     } else {
         Ok(None)
     };
-    let outcome = store.settle_native_terminal(target, settled.status, output, resolved_at)?;
-    Ok(match outcome {
-        organization::AuthorizedGraphResolutionOutcome::Recorded => {
-            TeamNodeTerminalResult::Recorded
-        }
-        organization::AuthorizedGraphResolutionOutcome::Replayed => {
-            TeamNodeTerminalResult::Replayed
-        }
-    })
+    store.settle_native_terminal(target, settled.status, output, resolved_at)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

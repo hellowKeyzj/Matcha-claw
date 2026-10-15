@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { HostApiServerContext } from '../../electron/api/context';
 
 const originalE2EMode = process.env.MATCHACLAW_E2E;
 const e2eStartupOutcomeKey = '__matchaclawE2EStartupOutcome';
@@ -36,6 +37,7 @@ const hoisted = vi.hoisted(() => ({
   loggerWarnMock: vi.fn(),
   applyLaunchAtStartupSettingMock: vi.fn(),
   warmupNetworkOptimizationMock: vi.fn(),
+  registerMainEventBridgeMock: vi.fn(),
   registerHostEventBridgeMock: vi.fn(),
   createMainWindowMock: vi.fn(),
   loadMainWindowContentMock: vi.fn(),
@@ -51,6 +53,7 @@ const hoisted = vi.hoisted(() => ({
   startHostApiServerMock: vi.fn(),
   waitForHostApiServerListeningMock: vi.fn(),
   createProviderCredentialStatusTransportMock: vi.fn(),
+  registerProviderPrivateAuthHandlersMock: vi.fn(),
   waitForGatewayControlReadyMock: vi.fn(),
 }));
 
@@ -97,6 +100,7 @@ vi.mock('../../electron/utils/uv-env', () => ({
   warmupNetworkOptimization: (...args: unknown[]) => hoisted.warmupNetworkOptimizationMock(...args),
 }));
 vi.mock('../../electron/main/host-event-bridge', () => ({
+  registerMainEventBridge: (...args: unknown[]) => hoisted.registerMainEventBridgeMock(...args),
   registerHostEventBridge: (...args: unknown[]) => hoisted.registerHostEventBridgeMock(...args),
 }));
 vi.mock('../../electron/api/server', () => ({
@@ -141,6 +145,8 @@ vi.mock('../../electron/main/launch-at-startup', () => ({
 vi.mock('../../electron/main/ipc/provider-private-auth', () => ({
   createProviderCredentialStatusTransport: (...args: unknown[]) =>
     hoisted.createProviderCredentialStatusTransportMock(...args),
+  registerProviderPrivateAuthHandlers: (...args: unknown[]) =>
+    hoisted.registerProviderPrivateAuthHandlersMock(...args),
 }));
 vi.mock('../../electron/main/gateway-control-ready-probe', () => ({
   GatewayControlReadinessBudgetError: class GatewayControlReadinessBudgetError extends Error {},
@@ -183,6 +189,7 @@ function createRuntimeHostTransportBundleFixture() {
     fleetCredentialsTransport: { write: vi.fn() },
     sessionContentTransport: { load: vi.fn() },
     sessionTimelineTransport: { list: vi.fn() },
+    sessionObservationTransport: { observe: vi.fn(), release: vi.fn() },
     diagnosticsArchiveTransport: { archive: vi.fn(), download: vi.fn() },
     workspaceTextTransport: { read: vi.fn() },
     workspaceBinaryTransport: { read: vi.fn() },
@@ -247,6 +254,7 @@ function createRuntimeHostTransportBundleFixture() {
     teamHumanDecisionTransport: { resolve: vi.fn() },
     providerAccountsTransport: { execute: vi.fn() },
     providerModelsTransport: { execute: vi.fn() },
+    callLogTransport: { get: vi.fn() },
     externalConnectorsTransport: { execute: vi.fn() },
     openClawMcpServersTransport: { execute: vi.fn() },
     providerRoutingTransport: { execute: vi.fn() },
@@ -346,9 +354,15 @@ beforeEach(() => {
     getE2ESavePath: vi.fn(),
   });
   hoisted.createProviderCredentialStatusTransportMock.mockReturnValue({ hasApiKey: vi.fn() });
+  hoisted.registerProviderPrivateAuthHandlersMock.mockReturnValue(vi.fn().mockResolvedValue(undefined));
   hoisted.waitForGatewayControlReadyMock.mockResolvedValue(undefined);
-  hoisted.startHostApiServerMock.mockReturnValue({});
-  hoisted.waitForHostApiServerListeningMock.mockResolvedValue({});
+  hoisted.registerMainEventBridgeMock.mockReturnValue(vi.fn());
+  hoisted.registerHostEventBridgeMock.mockReturnValue(vi.fn());
+  hoisted.startHostApiServerMock.mockReturnValue({
+    close: vi.fn((callback: () => void) => callback()),
+    closeAllConnections: vi.fn(),
+  });
+  hoisted.waitForHostApiServerListeningMock.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -368,13 +382,16 @@ describe('bootstrapMainApplication', () => {
     context.directRuntimeHost.onExit.mockImplementation((handler: never) => { exited = handler; return () => {}; });
     const replacement = createDirectRuntimeHostFixture();
     context.launchRuntimeHost.mockResolvedValueOnce(context.directRuntimeHost).mockResolvedValueOnce(replacement);
-    const result = await bootstrapMainApplication(context.deps as never);
+    const app = bootstrapMainApplication(context.deps as never);
+    await app.ready;
+    const hostApiContext = hoisted.startHostApiServerMock.mock.calls[0][0] as HostApiServerContext;
+    const { runtimeHost } = await hostApiContext.runtime;
     const service = hoisted.createCloudAccountServiceMock.mock.results[0].value;
     exited({ code: 1, signal: null });
     expect(service.runtimeExited).toHaveBeenCalledOnce();
-    await result.directRuntimeHost.restart();
+    await runtimeHost.restart();
     expect(service.runtimeRestarted).toHaveBeenCalledOnce();
-    await result.closeRuntimeHostDelivery();
+    await app.close();
     expect(service.close).toHaveBeenCalledOnce();
     expect(service.close.mock.invocationCallOrder[0]).toBeLessThan(context.closeRuntimeHostDelivery.mock.invocationCallOrder[0]);
   });
@@ -385,7 +402,8 @@ describe('bootstrapMainApplication', () => {
     hoisted.createMainWindowMock.mockReturnValue(context.mainWindow);
     context.launchRuntimeHost.mockResolvedValue(context.directRuntimeHost);
 
-    const result = await bootstrapMainApplication(context.deps as never);
+    const app = bootstrapMainApplication(context.deps as never);
+    await app.ready;
     const bundle = readCreatedTransportBundle();
 
     expect(hoisted.createRuntimeHostDeliveryMock).toHaveBeenCalledWith(context.deps.hostEventBus);
@@ -404,38 +422,52 @@ describe('bootstrapMainApplication', () => {
     });
     expect(hoisted.createCloudAccountServiceMock).toHaveBeenCalledWith(
       hoisted.createCloudAccountClientMock.mock.results[0]?.value,
-      hoisted.createCloudProviderSyncMock.mock.results[0]?.value,
-      bundle.hostApiTransports.sealedResourceAuthorizationTransport,
-      {
+      expect.any(Promise),
+    );
+    await expect(hoisted.createCloudAccountServiceMock.mock.calls[0][1]).resolves.toEqual({
+      providerSync: hoisted.createCloudProviderSyncMock.mock.results[0]?.value,
+      packageTransport: bundle.hostApiTransports.sealedResourceAuthorizationTransport,
+      operationTransports: {
         agentsTransport: bundle.hostApiTransports.agentsTransport,
         sealedSkillsTransport: bundle.hostApiTransports.sealedSkillsTransport,
         callLogTransport: bundle.hostApiTransports.callLogTransport,
         subscribeCalls: expect.any(Function),
         packageChanged: expect.any(Function),
       },
-    );
+    });
     expect(hoisted.cloudAccountServicePrewarmMock).toHaveBeenCalledOnce();
 
-    const hostApiContext = hoisted.startHostApiServerMock.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(hostApiContext.runtimeHostTransports).toBe(bundle.hostApiTransports);
+    const hostApiContext = hoisted.startHostApiServerMock.mock.calls[0][0] as HostApiServerContext;
+    const runtime = await hostApiContext.runtime;
+    expect(runtime.runtimeHostTransports).toBe(bundle.hostApiTransports);
     for (const key of Object.keys(bundle.hostApiTransports)) {
       expect(hostApiContext).not.toHaveProperty(key);
+      expect(runtime).not.toHaveProperty(key);
     }
     expect(hostApiContext).toEqual(expect.objectContaining({
       cloudAccountService: expect.objectContaining({ prewarm: expect.any(Function) }),
       eventBus: context.deps.hostEventBus,
+      sessionObservers: expect.anything(),
+      runtime: expect.any(Promise),
+      signal: expect.any(AbortSignal),
+    }));
+    expect(runtime).toEqual(expect.objectContaining({
       runtimeHost: expect.objectContaining({
         command: expect.any(Function),
         restart: expect.any(Function),
       }),
-      sessionObservers: expect.anything(),
       providerCredentialStatusTransport:
         hoisted.createProviderCredentialStatusTransportMock.mock.results[0]?.value,
       credentialWriteAdapter: expect.any(Function),
+      runtimeHostTransportPort: 34_101,
     }));
-    expect(hostApiContext).not.toHaveProperty('hostApiTransports');
-    expect(hostApiContext).not.toHaveProperty('sessionEventsTransport');
-    expect(hostApiContext).not.toHaveProperty('close');
+    for (const projection of [hostApiContext, runtime]) {
+      expect(projection).not.toHaveProperty('hostApiTransports');
+      expect(projection).not.toHaveProperty('sessionEventsTransport');
+      expect(projection).not.toHaveProperty('close');
+    }
+    expect(hostApiContext).not.toHaveProperty('runtimeHost');
+    expect(hostApiContext).not.toHaveProperty('runtimeHostTransports');
     expect(hoisted.composeLicenseServiceMock).toHaveBeenCalledWith({ onGateChanged: expect.any(Function) });
     expect(hostApiContext.licenseService).toBe(hoisted.composeLicenseServiceMock.mock.results[0].value);
     expect(hoisted.composeLicenseServiceMock.mock.results[0].value.gate).not.toHaveBeenCalled();
@@ -447,20 +479,28 @@ describe('bootstrapMainApplication', () => {
     };
     hoisted.composeLicenseServiceMock.mock.calls[0][0].onGateChanged(licenseGate);
     expect(context.deps.hostEventBus.emit).toHaveBeenCalledWith('license:gate-changed', licenseGate);
-    expect(hoisted.startHostApiServerMock).toHaveBeenCalledWith(
-      hostApiContext,
-      undefined,
-      34_101,
+    expect(hoisted.startHostApiServerMock).toHaveBeenCalledWith(hostApiContext);
+    expect(hoisted.waitForHostApiServerListeningMock).toHaveBeenCalledWith(
+      hoisted.startHostApiServerMock.mock.results[0].value,
     );
-    expect(hoisted.waitForHostApiServerListeningMock).toHaveBeenCalledWith({});
+    expect(hoisted.registerMainEventBridgeMock).toHaveBeenCalledWith({
+      hostEventBus: context.deps.hostEventBus,
+      getMainWindow: context.deps.getMainWindow,
+    });
     expect(hoisted.registerRuntimeIpcHandlersMock).toHaveBeenCalledWith(
-      expect.objectContaining({ command: expect.any(Function) }),
-      context.deps.getMainWindow,
-      bundle.hostApiTransports.providerAccountsTransport,
-      expect.any(Function),
+      runtime.runtimeHost,
       bundle.hostApiTransports.fleetCredentialsTransport,
       expect.objectContaining({ transport: expect.objectContaining({ download: expect.any(Function) }) }),
     );
+    expect(hoisted.registerProviderPrivateAuthHandlersMock).toHaveBeenCalledWith(
+      context.deps.getMainWindow,
+      expect.any(Promise),
+      hostApiContext.signal,
+    );
+    await expect(hoisted.registerProviderPrivateAuthHandlersMock.mock.calls[0][1]).resolves.toEqual({
+      transport: bundle.hostApiTransports.providerAccountsTransport,
+      awaitProviderCall: hoisted.createCloudProviderSyncMock.mock.calls[0][0].awaitProviderCall,
+    });
     expect(hoisted.createDiagnosticsExportDependenciesMock).toHaveBeenCalledWith(
       bundle.hostApiTransports.diagnosticsArchiveTransport,
     );
@@ -475,33 +515,64 @@ describe('bootstrapMainApplication', () => {
       sessionEvents: bundle.sessionEventsTransport,
       resyncSessions: expect.any(Function),
     });
-    expect(result).toEqual(expect.objectContaining({
+    expect(app).toEqual({
       mainWindow: context.mainWindow,
-      directRuntimeHost: expect.objectContaining({
-        command: expect.any(Function),
-        restart: expect.any(Function),
-      }),
-    }));
+      ready: expect.any(Promise),
+      close: expect.any(Function),
+    });
     expect(hoisted.loadMainWindowContentMock).toHaveBeenCalledWith(context.mainWindow);
     expect(readE2EStartupOutcome()).toBeUndefined();
 
     const licenseService = hoisted.composeLicenseServiceMock.mock.results[0].value;
+    const accountService = hoisted.createCloudAccountServiceMock.mock.results[0].value;
+    const drainProviderAuth = hoisted.registerProviderPrivateAuthHandlersMock.mock.results[0].value;
+    const server = hoisted.startHostApiServerMock.mock.results[0].value;
+    const closeObservers = vi.spyOn(hostApiContext.sessionObservers, 'close');
     let resolveLicenseDisposal!: () => void;
     licenseService.dispose.mockReturnValue(new Promise<void>((resolve) => {
       resolveLicenseDisposal = resolve;
     }));
-    const closing = result.closeRuntimeHostDelivery();
+    let resolveProviderDrain!: () => void;
+    drainProviderAuth.mockReturnValue(new Promise<void>((resolve) => {
+      resolveProviderDrain = resolve;
+    }));
+    const closing = app.close();
+    expect(app.close()).toBe(closing);
+    expect(server.close).toHaveBeenCalledWith(expect.any(Function));
+    expect(server.closeAllConnections).toHaveBeenCalledOnce();
+    expect(hostApiContext.signal.aborted).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(context.directRuntimeHost.stop).not.toHaveBeenCalled();
     expect(context.closeRuntimeHostDelivery).not.toHaveBeenCalled();
     resolveLicenseDisposal();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(drainProviderAuth).toHaveBeenCalledOnce();
+    expect(context.directRuntimeHost.stop).not.toHaveBeenCalled();
+    expect(context.closeRuntimeHostDelivery).not.toHaveBeenCalled();
+    resolveProviderDrain();
     await closing;
     expect(licenseService.dispose).toHaveBeenCalledOnce();
+    expect(closeObservers).toHaveBeenCalledOnce();
+    expect(accountService.close).toHaveBeenCalledOnce();
+    expect(drainProviderAuth).toHaveBeenCalledOnce();
+    expect(accountService.close.mock.invocationCallOrder[0]).toBeLessThan(drainProviderAuth.mock.invocationCallOrder[0]);
+    expect(drainProviderAuth.mock.invocationCallOrder[0]).toBeLessThan(
+      hoisted.registerMainEventBridgeMock.mock.results[0].value.mock.invocationCallOrder[0],
+    );
+    expect(drainProviderAuth.mock.invocationCallOrder[0]).toBeLessThan(context.directRuntimeHost.stop.mock.invocationCallOrder[0]);
+    expect(hoisted.registerMainEventBridgeMock.mock.results[0].value).toHaveBeenCalledOnce();
+    expect(hoisted.registerHostEventBridgeMock.mock.results[0].value).toHaveBeenCalledOnce();
+    expect(licenseService.dispose.mock.invocationCallOrder[0]).toBeLessThan(closeObservers.mock.invocationCallOrder[0]);
+    expect(closeObservers.mock.invocationCallOrder[0]).toBeLessThan(accountService.close.mock.invocationCallOrder[0]);
+    expect(accountService.close.mock.invocationCallOrder[0]).toBeLessThan(context.directRuntimeHost.stop.mock.invocationCallOrder[0]);
     expect(licenseService.dispose.mock.invocationCallOrder[0]).toBeLessThan(
       context.closeRuntimeHostDelivery.mock.invocationCallOrder[0],
     );
     expect(bundle.close).toHaveBeenCalledOnce();
     expect(bundle.sessionEventsTransport.close).toHaveBeenCalledOnce();
     expect(context.closeRuntimeHostDelivery).toHaveBeenCalledOnce();
+    expect(context.directRuntimeHost.stop).toHaveBeenCalledOnce();
+    expect(context.directRuntimeHost.stop.mock.invocationCallOrder[0]).toBeLessThan(bundle.close.mock.invocationCallOrder[0]);
     expect(bundle.close.mock.invocationCallOrder[0]).toBeLessThan(
       context.closeRuntimeHostDelivery.mock.invocationCallOrder[0],
     );
@@ -517,33 +588,67 @@ describe('bootstrapMainApplication', () => {
       resolveRuntimeHost = resolve;
     }));
 
-    const bootstrapping = bootstrapMainApplication(context.deps as never);
+    const app = bootstrapMainApplication(context.deps as never);
+    const hostApiContext = hoisted.startHostApiServerMock.mock.calls[0][0] as HostApiServerContext;
+    let ready = false;
+    let runtimeReady = false;
+    void app.ready.then(() => { ready = true; });
+    const wiredRuntime = hostApiContext.runtime.then((runtime) => {
+      runtimeReady = true;
+      expect(hoisted.registerRuntimeIpcHandlersMock).toHaveBeenCalledOnce();
+      expect(hoisted.registerHostEventBridgeMock).toHaveBeenCalledOnce();
+      return runtime;
+    });
     await Promise.resolve();
 
+    expect(app.mainWindow).toBe(context.mainWindow);
+    expect(ready).toBe(false);
+    expect(runtimeReady).toBe(false);
     expect(hoisted.registerStaticIpcHandlersMock).toHaveBeenCalledWith(
       context.deps.getMainWindow,
+      hostApiContext.runtime,
       expect.objectContaining({ attach: expect.any(Function), close: expect.any(Function) }),
+    );
+    expect(hoisted.registerStaticIpcHandlersMock.mock.invocationCallOrder[0]).toBeLessThan(
+      hoisted.loadMainWindowContentMock.mock.invocationCallOrder[0],
     );
     expect(hoisted.registerE2EUpdateHandlersMock).toHaveBeenCalledOnce();
     expect(hoisted.loadMainWindowContentMock).toHaveBeenCalledWith(context.mainWindow);
     expect(hoisted.createRuntimeHostTransportBundleMock).not.toHaveBeenCalled();
-    expect(hoisted.startHostApiServerMock).not.toHaveBeenCalled();
+    expect(hoisted.startHostApiServerMock).toHaveBeenCalledOnce();
+    expect(hoisted.composeLicenseServiceMock).toHaveBeenCalledOnce();
+    expect(hoisted.composeLicenseServiceMock.mock.results[0].value.gate).not.toHaveBeenCalled();
+    expect(hoisted.composeLicenseServiceMock.mock.results[0].value.storedKey).not.toHaveBeenCalled();
+    expect(hoisted.registerMainEventBridgeMock).toHaveBeenCalledOnce();
+    expect(hoisted.registerMainEventBridgeMock.mock.invocationCallOrder[0]).toBeLessThan(
+      hoisted.loadMainWindowContentMock.mock.invocationCallOrder[0],
+    );
+    expect(hoisted.registerProviderPrivateAuthHandlersMock).toHaveBeenCalledOnce();
+    expect(hoisted.registerProviderPrivateAuthHandlersMock.mock.invocationCallOrder[0]).toBeLessThan(
+      hoisted.loadMainWindowContentMock.mock.invocationCallOrder[0],
+    );
+    expect(hoisted.cloudAccountServicePrewarmMock).toHaveBeenCalledOnce();
+    expect(hoisted.cloudAccountServicePrewarmMock.mock.invocationCallOrder[0]).toBeLessThan(
+      hoisted.loadMainWindowContentMock.mock.invocationCallOrder[0],
+    );
+    expect(hoisted.createCloudProviderSyncMock).not.toHaveBeenCalled();
     expect(hoisted.registerRuntimeIpcHandlersMock).not.toHaveBeenCalled();
+    expect(hoisted.registerHostEventBridgeMock).not.toHaveBeenCalled();
     expect(context.mainWindow.show).not.toHaveBeenCalled();
 
     resolveRuntimeHost(context.directRuntimeHost);
-    await expect(bootstrapping).resolves.toMatchObject({
-      directRuntimeHost: expect.objectContaining({
-        command: expect.any(Function),
-        restart: expect.any(Function),
-      }),
-    });
+    await app.ready;
+    expect((await wiredRuntime).runtimeHost).toEqual(expect.objectContaining({
+      command: expect.any(Function),
+      restart: expect.any(Function),
+    }));
     expect(context.deps.hostEventBus.on).toHaveBeenCalledWith('gateway:status', expect.any(Function));
     const reveal = (context.deps.hostEventBus.on as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as (payload: unknown) => void;
     reveal({ processState: 'stopped' });
     expect(context.mainWindow.show).not.toHaveBeenCalled();
     reveal({ processState: 'starting' });
     expect(context.mainWindow.show).toHaveBeenCalledOnce();
+    await app.close();
   });
 
   it('does not block Host admission on OpenClaw peer readiness', async () => {
@@ -552,16 +657,18 @@ describe('bootstrapMainApplication', () => {
     hoisted.createMainWindowMock.mockReturnValue(context.mainWindow);
     context.launchRuntimeHost.mockResolvedValue(context.directRuntimeHost);
 
-    await expect(bootstrapMainApplication(context.deps as never)).resolves.toMatchObject({
-      directRuntimeHost: expect.objectContaining({
-        command: expect.any(Function),
-        restart: expect.any(Function),
-      }),
-    });
+    const app = bootstrapMainApplication(context.deps as never);
+    await app.ready;
+    const hostApiContext = hoisted.startHostApiServerMock.mock.calls[0][0] as HostApiServerContext;
+    expect((await hostApiContext.runtime).runtimeHost).toEqual(expect.objectContaining({
+      command: expect.any(Function),
+      restart: expect.any(Function),
+    }));
 
     expect(hoisted.waitForGatewayControlReadyMock).not.toHaveBeenCalled();
     expect(context.directRuntimeHost.stop).not.toHaveBeenCalled();
     expect(hoisted.createRuntimeHostTransportBundleMock).toHaveBeenCalledOnce();
+    await app.close();
   });
 
   it('后续 bootstrap 失败时停止已启动的 Rust Host 并先关闭 SSE bundle', async () => {
@@ -570,9 +677,16 @@ describe('bootstrapMainApplication', () => {
     const failure = new Error('Host API listen failed');
     hoisted.createMainWindowMock.mockReturnValue(context.mainWindow);
     context.launchRuntimeHost.mockResolvedValue(context.directRuntimeHost);
-    hoisted.waitForHostApiServerListeningMock.mockRejectedValue(failure);
+    let rejectListening!: (error: Error) => void;
+    hoisted.waitForHostApiServerListeningMock.mockReturnValue(new Promise<void>((_resolve, reject) => {
+      rejectListening = reject;
+    }));
 
-    await expect(bootstrapMainApplication(context.deps as never)).rejects.toBe(failure);
+    const app = bootstrapMainApplication(context.deps as never);
+    const hostApiContext = hoisted.startHostApiServerMock.mock.calls[0][0] as HostApiServerContext;
+    await hostApiContext.runtime;
+    rejectListening(failure);
+    await expect(app.ready).rejects.toBe(failure);
     const bundle = readCreatedTransportBundle();
 
     expect(context.directRuntimeHost.stop).toHaveBeenCalledOnce();
@@ -589,19 +703,43 @@ describe('bootstrapMainApplication', () => {
   it('停止失败时强制终止已启动的 Rust Host', async () => {
     const bootstrapMainApplication = await importBootstrapMainApplication();
     const context = createBootstrapContext();
+    const failure = new Error('Host API listen failed');
+    let resolveRuntimeHost!: (runtimeHost: ReturnType<typeof createDirectRuntimeHostFixture>) => void;
+    let rejectListening!: (error: Error) => void;
     hoisted.createMainWindowMock.mockReturnValue(context.mainWindow);
-    context.launchRuntimeHost.mockResolvedValue(context.directRuntimeHost);
-    hoisted.waitForHostApiServerListeningMock.mockRejectedValue(
-      new Error('Host API listen failed')
-    );
+    context.launchRuntimeHost.mockReturnValue(new Promise((resolve) => {
+      resolveRuntimeHost = resolve;
+    }));
+    hoisted.waitForHostApiServerListeningMock.mockReturnValue(new Promise<void>((_resolve, reject) => {
+      rejectListening = reject;
+    }));
     context.directRuntimeHost.stop.mockRejectedValue(new Error('graceful stop failed'));
 
-    await expect(bootstrapMainApplication(context.deps as never)).rejects.toThrow(
-      'Host API listen failed'
-    );
+    const app = bootstrapMainApplication(context.deps as never);
+    const outcome = app.ready.catch((error) => error);
+    await Promise.resolve();
+    expect(context.launchRuntimeHost).toHaveBeenCalledOnce();
+    rejectListening(failure);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const closing = app.close();
+    const closed = vi.fn();
+    void closing.then(closed);
+    expect(hoisted.startHostApiServerMock.mock.results[0].value.close).toHaveBeenCalledOnce();
+    expect(context.directRuntimeHost.stop).not.toHaveBeenCalled();
+    expect(context.closeRuntimeHostDelivery).not.toHaveBeenCalled();
+    expect(closed).not.toHaveBeenCalled();
+
+    resolveRuntimeHost(context.directRuntimeHost);
+    expect(await outcome).toBe(failure);
+    await closing;
 
     expect(context.directRuntimeHost.stop).toHaveBeenCalledOnce();
     expect(context.directRuntimeHost.forceKill).toHaveBeenCalledOnce();
+    expect(context.closeRuntimeHostDelivery).toHaveBeenCalledOnce();
+    expect(hoisted.createRuntimeHostTransportBundleMock).not.toHaveBeenCalled();
+    expect(hoisted.registerRuntimeIpcHandlersMock).not.toHaveBeenCalled();
+    expect(hoisted.registerHostEventBridgeMock).not.toHaveBeenCalled();
+    expect(hoisted.createCloudAccountServiceMock.mock.results[0].value.runtimeExited).toHaveBeenCalledOnce();
   });
 
   it('停止超时后强制终止已启动的 Rust Host', async () => {
@@ -611,21 +749,30 @@ describe('bootstrapMainApplication', () => {
       const context = createBootstrapContext();
       hoisted.createMainWindowMock.mockReturnValue(context.mainWindow);
       context.launchRuntimeHost.mockResolvedValue(context.directRuntimeHost);
-      hoisted.waitForHostApiServerListeningMock.mockRejectedValue(
-        new Error('Host API listen failed')
-      );
+      let rejectListening!: (error: Error) => void;
+      hoisted.waitForHostApiServerListeningMock.mockReturnValue(new Promise<void>((_resolve, reject) => {
+        rejectListening = reject;
+      }));
       context.directRuntimeHost.stop.mockReturnValue(new Promise(() => undefined));
 
-      const outcome = bootstrapMainApplication(context.deps as never).then(
+      const app = bootstrapMainApplication(context.deps as never);
+      const outcome = app.ready.then(
         () => undefined,
         (error) => error
       );
-      await vi.advanceTimersByTimeAsync(5000);
+      const hostApiContext = hoisted.startHostApiServerMock.mock.calls[0][0] as HostApiServerContext;
+      await hostApiContext.runtime;
+      rejectListening(new Error('Host API listen failed'));
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(context.directRuntimeHost.stop).toHaveBeenCalledOnce();
+      expect(context.directRuntimeHost.forceKill).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
 
       const error = await outcome;
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toBe('Host API listen failed');
       expect(context.directRuntimeHost.forceKill).toHaveBeenCalledOnce();
+      await app.close();
     } finally {
       vi.useRealTimers();
     }
@@ -637,10 +784,12 @@ describe('bootstrapMainApplication', () => {
     hoisted.createMainWindowMock.mockReturnValue(context.mainWindow);
     context.launchRuntimeHost.mockResolvedValue(context.directRuntimeHost);
 
-    await bootstrapMainApplication(context.deps as never);
+    const app = bootstrapMainApplication(context.deps as never);
+    await app.ready;
 
     expect(context.launchRuntimeHost).toHaveBeenCalledTimes(1);
-    expect(hoisted.registerRuntimeIpcHandlersMock.mock.calls[0]).toHaveLength(6);
+    expect(hoisted.registerRuntimeIpcHandlersMock.mock.calls[0]).toHaveLength(3);
+    await app.close();
   });
 
   it('E2E 模式仍通过同一 Rust Host 路径启动，并只在 bundle 注入 Cron trace callback', async () => {
@@ -650,7 +799,8 @@ describe('bootstrapMainApplication', () => {
     hoisted.createMainWindowMock.mockReturnValue(context.mainWindow);
     context.launchRuntimeHost.mockResolvedValue(context.directRuntimeHost);
 
-    await bootstrapMainApplication(context.deps as never);
+    const app = bootstrapMainApplication(context.deps as never);
+    await app.ready;
 
     expect(context.launchRuntimeHost).toHaveBeenCalledTimes(1);
     expect(hoisted.createTrayMock).not.toHaveBeenCalled();
@@ -664,6 +814,7 @@ describe('bootstrapMainApplication', () => {
     expect(bundleInput.reportE2ECronTrace).toEqual(expect.any(Function));
     await bundleInput.reportE2ECronTrace?.('cron-ready');
     expect(readE2ECronProviderTrace()).toEqual(['cron-before', 'cron-ready']);
+    await app.close();
   });
 
   it('E2E 保留 delivery bootstrap 已发布的安全失败分类', async () => {
@@ -681,7 +832,9 @@ describe('bootstrapMainApplication', () => {
       throw failure;
     });
 
-    await expect(bootstrapMainApplication(context.deps as never)).rejects.toBe(failure);
+    const app = bootstrapMainApplication(context.deps as never);
+    await expect(app.ready).rejects.toBe(failure);
+    await app.close();
 
     expect(hoisted.createRuntimeHostTransportBundleMock).not.toHaveBeenCalled();
     expect(readE2EStartupOutcome()).toEqual({
@@ -702,7 +855,9 @@ describe('bootstrapMainApplication', () => {
     });
     context.launchRuntimeHost.mockRejectedValue(failure);
 
-    await expect(bootstrapMainApplication(context.deps as never)).rejects.toBe(failure);
+    const app = bootstrapMainApplication(context.deps as never);
+    await expect(app.ready).rejects.toBe(failure);
+    await app.close();
 
     expect(hoisted.createRuntimeHostTransportBundleMock).not.toHaveBeenCalled();
     expect(readE2EStartupOutcome()).toEqual({

@@ -29,9 +29,12 @@ impl WikiHandle {
         };
         let cancellation = self.workflows.cancellation.child_token();
         self.workflows
-            .admit(call, operation, reindex::run(plan, cancellation), |_| {
-                WikiWorkflowSummary::Reindex
-            })
+            .admit(
+                call,
+                operation,
+                reindex::run(plan, cancellation, self.unrecorded()),
+                |_| WikiWorkflowSummary::Reindex,
+            )
             .await
     }
 
@@ -66,7 +69,7 @@ impl WikiHandle {
                 call,
                 Some(operation),
                 None,
-                reindex::run(plan, cancellation),
+                reindex::run(plan, cancellation, self.unrecorded()),
                 |_| Some(WikiWorkflowSummary::Reindex),
             )
             .await?

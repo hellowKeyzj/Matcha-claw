@@ -43,11 +43,10 @@ function getOpenClawLogDir(): string {
   return join(getOpenClawConfigDir(), 'logs');
 }
 
-export async function handleLogRoutes(
+export async function handleMainLogRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  ctx: RuntimeHostTransportContext<'runtimeControlTransport'>,
 ): Promise<boolean> {
   if (url.pathname === '/api/logs' && req.method === 'GET') {
     sendJson(res, 200, { content: await logger.readLogFile(parseTailLines(url)) });
@@ -63,6 +62,17 @@ export async function handleLogRoutes(
     sendJson(res, 200, { files: await logger.listLogFiles() });
     return true;
   }
+
+  return false;
+}
+
+export async function handleLogRoutes(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  ctx: RuntimeHostTransportContext<'runtimeControlTransport'>,
+): Promise<boolean> {
+  if (await handleMainLogRoutes(req, res, url)) return true;
 
   if (url.pathname === '/api/openclaw/logs' && req.method === 'GET') {
     await handleOpenClawLogs(res, url, ctx);

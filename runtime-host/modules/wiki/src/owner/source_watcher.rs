@@ -231,21 +231,26 @@ fn run_project_watcher(
         }
     }
 
-    refresh_project_paths(
+    let mut releases = super::source_execution::execution_releases().subscribe();
+    let mut pending = BTreeSet::<PathBuf>::new();
+    let roots = watch_roots(&root);
+    if !refresh_project_paths(
         &handle,
         &wiki,
         &control,
         &project.project_id,
         generation,
         project.auto_ingest,
-        watch_roots(&root),
-    );
-
-    let mut pending = BTreeSet::<PathBuf>::new();
+        roots.clone(),
+    ) {
+        pending.extend(roots);
+    }
+    let mut refresh_requested = false;
     let mut last_linux_rescan = crate::domain::now_ms();
     while !cancellation.is_cancelled() && control.generation() == generation {
         match rx.recv_timeout(Duration::from_millis(CHANGE_DEBOUNCE_MS)) {
             Ok(path) => {
+                refresh_requested = true;
                 pending.insert(path);
                 while let Ok(path) = rx.try_recv() {
                     pending.insert(path);
@@ -265,17 +270,25 @@ fn run_project_watcher(
                     );
                     continue;
                 }
-                let paths = pending.iter().cloned().collect::<Vec<_>>();
-                pending.clear();
-                refresh_project_paths(
-                    &handle,
-                    &wiki,
-                    &control,
-                    &project.project_id,
-                    generation,
-                    project.auto_ingest,
-                    paths,
-                );
+                let released = releases.has_changed().unwrap_or(false);
+                if released {
+                    releases.borrow_and_update();
+                }
+                if refresh_requested || released {
+                    refresh_requested = false;
+                    let paths = pending.iter().cloned().collect::<Vec<_>>();
+                    if refresh_project_paths(
+                        &handle,
+                        &wiki,
+                        &control,
+                        &project.project_id,
+                        generation,
+                        project.auto_ingest,
+                        paths,
+                    ) {
+                        pending.clear();
+                    }
+                }
                 maybe_linux_rescan(
                     &handle,
                     &wiki,
@@ -347,13 +360,19 @@ fn refresh_project_paths(
     generation: u64,
     auto_ingest: bool,
     paths: Vec<PathBuf>,
-) {
+) -> bool {
     if paths.is_empty() || control.generation() != generation {
-        return;
+        return true;
     }
     let result =
         handle.block_on(wiki.refresh_source_paths(project_id.to_owned(), paths, auto_ingest));
-    if let Err(error) = result {
-        eprintln!("[wiki] source watcher refresh failed: {error:?}");
+    match result {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!(
+                "[wiki] source watcher refresh failed; paths retained until a filesystem change or source execution release: {error:?}"
+            );
+            false
+        }
     }
 }

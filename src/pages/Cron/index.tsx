@@ -1261,8 +1261,8 @@ export function Cron({ embedded = false }: CronProps) {
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const requestedAgentsLoadRef = useRef(false);
-  const [showDialog, setShowDialog] = useState(false);
-  const [editingJob, setEditingJob] = useState<CronJob | undefined>();
+  const [dialog, setDialog] = useState<{ job?: CronJob } | null>(null);
+  const editingJob = dialog?.job;
   const [jobToDelete, setJobToDelete] = useState<{ id: string } | null>(null);
   const [statusFilter, setStatusFilter] = useState<CronStatusFilter>('all');
 
@@ -1401,8 +1401,7 @@ export function Cron({ embedded = false }: CronProps) {
             <Button
               size="sm"
               onClick={() => {
-                setEditingJob(undefined);
-                setShowDialog(true);
+                setDialog({});
               }}
               disabled={!isGatewayRunning || mutating}
             >
@@ -1477,8 +1476,7 @@ export function Cron({ embedded = false }: CronProps) {
           >
             <Button
               onClick={() => {
-                setEditingJob(undefined);
-                setShowDialog(true);
+                setDialog({});
               }}
               disabled={!isGatewayRunning}
             >
@@ -1504,8 +1502,7 @@ export function Cron({ embedded = false }: CronProps) {
                     isMutating={Boolean(mutatingByJobId[job.id])}
                     onToggle={(enabled) => handleToggle(job.id, enabled)}
                     onEdit={() => {
-                      setEditingJob(job);
-                      setShowDialog(true);
+                      setDialog({ job });
                     }}
                     onDelete={() => setJobToDelete({ id: job.id })}
                     onTrigger={async () => {
@@ -1523,14 +1520,13 @@ export function Cron({ embedded = false }: CronProps) {
       )}
 
       {/* Create/Edit Dialog */}
-      {showDialog && (
+      {dialog && (
         <TaskDialog
           job={editingJob}
           agents={availableAgents}
           defaultAgentId={defaultAgentId}
           onClose={() => {
-            setShowDialog(false);
-            setEditingJob(undefined);
+            setDialog((current) => current === dialog ? null : current);
           }}
           onSave={handleSave}
         />

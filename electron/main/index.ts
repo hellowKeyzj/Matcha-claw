@@ -3,10 +3,9 @@
  */
 import { app, BrowserWindow, dialog } from 'electron';
 import { logger } from '../utils/logger';
-import { setQuitting } from './app-state';
+import { isQuitting, setQuitting } from './app-state';
 import { HostEventBus } from '../api/event-bus';
-import type { RuntimeHostLifecycleOwner } from './runtime-host-delivery/lifecycle-owner';
-import { bootstrapMainApplication } from './app-bootstrap';
+import { bootstrapMainApplication, type MainApplication } from './app-bootstrap';
 import { DirectRuntimeHostDeliveryError } from './runtime-host-delivery/direct-host';
 import { createMainWindow, loadMainWindowContent } from './main-window';
 import {
@@ -100,11 +99,34 @@ const gotTheLock = gotElectronLock && gotFileLock;
 // Global references
 let mainWindow: BrowserWindow | null = null;
 let hostEventBus!: HostEventBus;
-let directRuntimeHost: RuntimeHostLifecycleOwner | null = null;
-let closeRuntimeHostDelivery: (() => Promise<void>) | null = null;
-let closeSessionObservations: (() => Promise<void>) | null = null;
+let application: MainApplication | null = null;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
+
+async function handleBootstrapFailure(error: unknown): Promise<void> {
+  if (isQuitting()) return;
+  if (isE2EMode) {
+    logger.error('Failed to bootstrap main application');
+    return;
+  }
+  if (error instanceof DirectRuntimeHostDeliveryError && error.startupFailure === 'provider-migration-failed') {
+    logger.error('Provider configuration migration failed during startup.');
+    try {
+      await dialog.showMessageBox({
+        type: 'error',
+        title: 'MatchaClaw',
+        message: '模型配置恢复未完成，应用无法启动。',
+        detail: '请检查磁盘空间和配置目录的读写权限后重启；仍无法启动请联系支持。请勿删除配置或备份。',
+        buttons: ['退出'],
+      });
+    } finally {
+      app.quit();
+    }
+    return;
+  }
+  logger.error('Failed to bootstrap main application:', error);
+  app.quit();
+}
 
 function focusWindow(window: BrowserWindow): void {
   if (window.isDestroyed()) {
@@ -179,7 +201,8 @@ if (gotTheLock) {
 
   // Application lifecycle
   app.whenReady().then(() => {
-    void bootstrapMainApplication({
+    if (isQuitting()) return;
+    application = bootstrapMainApplication({
       hostEventBus,
       setMainWindow: (window) => {
         mainWindow = window;
@@ -188,39 +211,15 @@ if (gotTheLock) {
         }
       },
       getMainWindow: () => mainWindow,
-    }).then((result) => {
-      mainWindow = result.mainWindow;
-      bindPendingSecondInstanceFocus(result.mainWindow);
-      directRuntimeHost = result.directRuntimeHost;
-      closeRuntimeHostDelivery = result.closeRuntimeHostDelivery;
-      closeSessionObservations = result.closeSessionObservations;
-    }).catch(async (error: unknown) => {
-      if (isE2EMode) {
-        logger.error('Failed to bootstrap main application');
-        return;
-      }
-      if (error instanceof DirectRuntimeHostDeliveryError && error.startupFailure === 'provider-migration-failed') {
-        logger.error('Provider configuration migration failed during startup.');
-        try {
-          await dialog.showMessageBox({
-            type: 'error',
-            title: 'MatchaClaw',
-            message: '模型配置恢复未完成，应用无法启动。',
-            detail: '请检查磁盘空间和配置目录的读写权限后重启；仍无法启动请联系支持。请勿删除配置或备份。',
-            buttons: ['退出'],
-          });
-        } finally {
-          app.quit();
-        }
-        return;
-      }
-      logger.error('Failed to bootstrap main application:', error);
-      app.quit();
     });
+    mainWindow = application.mainWindow;
+    bindPendingSecondInstanceFocus(application.mainWindow);
+    void application.ready.catch(handleBootstrapFailure);
 
     // Register activate handler AFTER app is ready to prevent
     // "Cannot create BrowserWindow before app is ready" on macOS.
     app.on('activate', () => {
+      if (isQuitting()) return;
       if (BrowserWindow.getAllWindows().length === 0) {
         mainWindow = createMainWindow();
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -232,7 +231,7 @@ if (gotTheLock) {
         focusMainWindow();
       }
     });
-  });
+  }).catch(handleBootstrapFailure);
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
@@ -256,52 +255,13 @@ if (gotTheLock) {
 
     hostEventBus.closeAll();
 
-    const runtimeHost = directRuntimeHost;
-    if (!runtimeHost) {
-      markQuitCleanupCompleted(quitLifecycleState);
-      app.quit();
-      return;
+    try {
+      await application?.close();
+    } catch (error) {
+      logger.warn('Failed to close main application during quit:', error);
     }
-    await closeSessionObservations?.().catch((error) => {
-      logger.warn('Failed to release session observations during quit:', error);
-    });
-    closeSessionObservations = null;
-    const stopPromise = runtimeHost.stop()
-      .then(() => 'stopped' as const)
-      .catch((error) => {
-        logger.warn('Failed to stop Direct Runtime Host during quit:', error);
-        return 'stop-failed' as const;
-      });
-
-    let quitCleanupTimeout: ReturnType<typeof setTimeout> | undefined;
-    const timeoutPromise = new Promise<'timeout'>((resolve) => {
-      quitCleanupTimeout = setTimeout(() => resolve('timeout'), 5000);
-      quitCleanupTimeout.unref?.();
-    });
-
-    void Promise.race([stopPromise, timeoutPromise]).then(async (result) => {
-      if (quitCleanupTimeout) {
-        clearTimeout(quitCleanupTimeout);
-      }
-      if (result !== 'stopped') {
-        logger.warn(
-          result === 'timeout'
-            ? 'Direct Runtime Host stop timed out; force-killing it'
-            : 'Direct Runtime Host stop failed; force-killing it',
-        );
-        try {
-          await runtimeHost.forceKill();
-        } catch (error) {
-          logger.warn('Failed to force-kill Direct Runtime Host during quit:', error);
-        }
-      }
-      await closeRuntimeHostDelivery?.().catch((error) => {
-        logger.warn('Failed to close Runtime Host delivery during quit:', error);
-      });
-      closeRuntimeHostDelivery = null;
-      markQuitCleanupCompleted(quitLifecycleState);
-      app.quit();
-    });
+    markQuitCleanupCompleted(quitLifecycleState);
+    app.quit();
   });
 }
 

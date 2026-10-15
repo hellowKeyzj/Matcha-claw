@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { errorMonitor } from 'node:events';
+import { addAbortListener, errorMonitor } from 'node:events';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
@@ -7,13 +7,13 @@ import { getPort } from '../utils/config';
 import { logger } from '../utils/logger';
 import { isTraceEnabled, startupTrace } from '../utils/trace-logger';
 import { HOST_API_STARTUP_PATHS, HOST_API_STARTUP_TRACE_HEADER } from '../../src/lib/host-api-transport-contract';
-import type { HostApiContext } from './context';
+import type { HostApiContext, HostApiServerContext, MainHostApiContext } from './context';
 import { handleAccountRoutes } from './routes/account';
 import { handleBillingRoutes } from './routes/billing';
 import { handleCapabilityRoutes } from './routes/capabilities';
 import { handleCallRoutes } from './routes/calls';
 import { handleAgentsRoutes } from './routes/agents';
-import { handleAppRoutes } from './routes/app';
+import { handleAppRoutes, handleMainAppRoutes } from './routes/app';
 import { handleChannelAuthorizationRoutes } from './routes/channel-authorization';
 import { handleChannelCatalogRoutes } from './routes/channel-catalog';
 import { handleChannelConfigureRoutes } from './routes/channel-configure';
@@ -33,7 +33,7 @@ import { handleFileRoutes } from './routes/files';
 import { handleFleetRoutes } from './routes/fleet';
 import { handleGatewayRoutes } from './routes/gateway';
 import { handleLicenseRoutes } from './routes/license';
-import { handleLogRoutes } from './routes/logs';
+import { handleLogRoutes, handleMainLogRoutes } from './routes/logs';
 import { handleManualTeamRoutes } from './routes/manual-team';
 import { handleMatchaAgentAppServerRoutes } from './routes/matcha-agent-app-server';
 import { handleOpenClawRoutes } from './routes/openclaw';
@@ -73,24 +73,31 @@ import { proxyFleetRuntimeAgentIngress, proxyFleetTerminalStreamUpgrade } from '
 import {
   isHostApiProxyWebSocketRoute,
   isHostApiQueryTokenAllowedRoute,
-  isHostApiRequestAllowed,
+  getHostApiRequestDependency,
   isMainOwnedRoute,
 } from './route-boundary';
 import { requireJsonContentType, sendJson, setCorsHeaders } from './route-utils';
 import { isSessionTraceEnabled, logSessionTrace, readTraceHeader } from '../main/runtime-host-delivery/transport/sessions/trace';
 
-type RouteHandler = (
+type RouteHandler<Context> = (
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  deps: HostApiContext,
+  deps: Context,
 ) => Promise<boolean>;
 
-const routeHandlers: readonly RouteHandler[] = [
+const mainRouteHandlers: readonly RouteHandler<MainHostApiContext>[] = [
+  handleMainAppRoutes,
+  handleAccountRoutes,
+  handleBillingRoutes,
+  handleLicenseRoutes,
+  handleMainLogRoutes,
+  handleSubscriptionRoutes,
+];
+
+const runtimeRouteHandlers: readonly RouteHandler<HostApiContext>[] = [
   handleAppRoutes,
-  (req, res, url, deps) => handleAccountRoutes(req, res, url, deps),
   (req, res, url, deps) => handleAgentsRoutes(req, res, url, deps.runtimeHostTransports.agentsTransport),
-  (req, res, url, deps) => handleBillingRoutes(req, res, url, deps),
   (req, res, url, deps) => handleCapabilityRoutes(req, res, url, deps),
   (req, res, url, deps) => handleCallRoutes(req, res, url, deps.runtimeHostTransports.callLogTransport),
   (req, res, url, deps) => handleChannelAuthorizationRoutes(req, res, url, deps.runtimeHostTransports.channelAuthorizationTransport),
@@ -123,7 +130,6 @@ const routeHandlers: readonly RouteHandler[] = [
     deps.credentialWriteAdapter,
   ),
   (req, res, url, deps) => handleGatewayRoutes(req, res, url, deps),
-  (req, res, url, deps) => handleLicenseRoutes(req, res, url, deps),
   (req, res, url, deps) => handleLogRoutes(req, res, url, deps),
   (req, res, url, deps) => handleManualTeamRoutes(req, res, url, deps.runtimeHostTransports.manualTeamTransport),
   (req, res, url, deps) => handleMatchaAgentAppServerRoutes(req, res, url, deps),
@@ -158,7 +164,6 @@ const routeHandlers: readonly RouteHandler[] = [
   (req, res, url, deps) => handleSkillBundleRoutes(req, res, url, deps.runtimeHostTransports.skillBundleTransport),
   (req, res, url, deps) => handleSkillsRoutes(req, res, url, deps.runtimeHostTransports.skillsManagementTransport),
   (req, res, url, deps) => handleSealedSkillsRoutes(req, res, url, deps.runtimeHostTransports.sealedSkillsTransport, deps.runtimeHostTransports.skillsManagementTransport),
-  (req, res, url, deps) => handleSubscriptionRoutes(req, res, url, deps),
   (req, res, url, deps) => handleTeamApprovalsRoutes(req, res, url, deps.runtimeHostTransports.teamApprovalsTransport),
   (req, res, url, deps) => handleTeamDecisionRoutes(req, res, url, deps.runtimeHostTransports.teamHumanDecisionTransport),
   (req, res, url, deps) => handleTeamGraphRoutes(req, res, url, deps.runtimeHostTransports.teamGraphTransport),
@@ -234,7 +239,15 @@ export async function readHostApiConnection(): Promise<HostApiConnection> {
   return { baseUrl: hostApiBaseUrl, token: hostApiToken };
 }
 
-export function createHostApiRequestHandler(deps: HostApiContext, port: number, runtimeHostTransportPort?: number) {
+function isRequestClosed(req: IncomingMessage, res: ServerResponse, signal: AbortSignal): boolean {
+  return signal.aborted || req.aborted || req.socket?.destroyed || res.destroyed || res.writableEnded;
+}
+
+export function createHostApiRequestHandler(ctx: HostApiServerContext, port: number) {
+  const { runtime, signal, ...main } = ctx;
+  const runtimeContext = runtime.then((deps): HostApiContext => ({ ...main, ...deps }));
+  void runtimeContext.catch(() => undefined);
+
   return async (req: IncomingMessage, res: ServerResponse) => {
     const traceId = isSessionTraceEnabled() ? readTraceHeader(req.headers) : null;
     const traceActive = traceId !== null && req.url?.split(/[?#]/, 1)[0] === '/api/capabilities/execute';
@@ -286,11 +299,9 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
       }
 
       if (requestUrl.pathname === '/api/remote-fleet/runtime-agent/ingress') {
-        if (Number.isFinite(runtimeHostTransportPort)) {
-          proxyFleetRuntimeAgentIngress(Number(runtimeHostTransportPort), req, res);
-        } else {
-          sendJson(res, 503, { success: false, error: 'Fleet data is unavailable' });
-        }
+        const { runtimeHostTransportPort } = await runtime;
+        if (isRequestClosed(req, res, signal)) return;
+        proxyFleetRuntimeAgentIngress(runtimeHostTransportPort, req, res);
         return;
       }
 
@@ -326,7 +337,8 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
         return;
       }
 
-      if (!isHostApiRequestAllowed(req.method ?? '', requestUrl.pathname)) {
+      const dependency = getHostApiRequestDependency(req.method ?? '', requestUrl.pathname);
+      if (dependency === null) {
         if (isMainOwnedRoute(requestUrl.pathname)) {
           sendJson(res, 500, {
             success: false,
@@ -342,17 +354,31 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
       trace('dispatch.start');
       startupStage = 'dispatch';
       traceStartup('dispatch.start');
-      for (const handler of routeHandlers) {
-        if (await handler(req, res, requestUrl, deps)) {
-          trace('dispatch.end', () => ({ outcome: 'handled', status: res.statusCode }));
-          traceStartup('dispatch.end', () => ({ outcome: 'handled', status: res.statusCode }));
-          startupStage = null;
-          return;
+      let handled = false;
+      if (dependency === 'main') {
+        for (const handler of mainRouteHandlers) {
+          if (isRequestClosed(req, res, signal)) return;
+          if (await handler(req, res, requestUrl, main)) {
+            handled = true;
+            break;
+          }
+        }
+      } else {
+        if (isRequestClosed(req, res, signal)) return;
+        const deps = await runtimeContext;
+        for (const handler of runtimeRouteHandlers) {
+          if (isRequestClosed(req, res, signal)) return;
+          if (await handler(req, res, requestUrl, deps)) {
+            handled = true;
+            break;
+          }
         }
       }
-      trace('dispatch.end', () => ({ outcome: 'unhandled' }));
-      traceStartup('dispatch.end', () => ({ outcome: 'unhandled' }));
+      const outcome = handled ? { outcome: 'handled', status: res.statusCode } : { outcome: 'unhandled' };
+      trace('dispatch.end', () => outcome);
+      traceStartup('dispatch.end', () => outcome);
       startupStage = null;
+      if (handled) return;
       if (isMainOwnedRoute(requestUrl.pathname)) {
         sendJson(res, 500, {
           success: false,
@@ -362,6 +388,7 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
       }
       sendJson(res, 404, { success: false, error: `No route for ${req.method} ${requestUrl.pathname}` });
     } catch {
+      if (isRequestClosed(req, res, signal)) return;
       trace('failure', () => ({ outcome: 'failed', status: 500 }));
       if (startupStage) traceStartup(`${startupStage}.end`, () => ({ outcome: 'failed', status: 500 }));
       traceStartup('error', () => ({ code: 'REQUEST_FAILED', status: 500 }));
@@ -372,9 +399,8 @@ export function createHostApiRequestHandler(deps: HostApiContext, port: number, 
 }
 
 export function startHostApiServer(
-  ctx: HostApiContext,
+  ctx: HostApiServerContext,
   port?: number,
-  runtimeHostTransportPort?: number,
 ): Server {
   const resolvedPort = Number.isFinite(port) && (port ?? 0) > 0
     ? Number(port)
@@ -383,15 +409,27 @@ export function startHostApiServer(
   hostApiToken = randomBytes(32).toString('hex');
   hostApiBaseUrl = '';
 
-  const server = createServer(createHostApiRequestHandler(ctx, resolvedPort, runtimeHostTransportPort));
+  const server = createServer(createHostApiRequestHandler(ctx, resolvedPort));
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const requestUrl = new URL(req.url || '/', `http://127.0.0.1:${resolvedPort}`);
-    if (!isHostApiProxyWebSocketRoute(requestUrl.pathname) || !Number.isFinite(runtimeHostTransportPort)) {
+    if (ctx.signal.aborted || !isHostApiProxyWebSocketRoute(requestUrl.pathname)) {
       socket.destroy();
       return;
     }
-    proxyFleetTerminalStreamUpgrade(Number(runtimeHostTransportPort), req, socket, head);
+    const abortListener = addAbortListener(ctx.signal, () => socket.destroy());
+    const cleanup = () => {
+      abortListener[Symbol.dispose]();
+      socket.off('close', cleanup);
+    };
+    socket.once('close', cleanup);
+    void ctx.runtime.then(({ runtimeHostTransportPort }) => {
+      if (ctx.signal.aborted || req.aborted || socket.destroyed || !server.listening) {
+        socket.destroy();
+        return;
+      }
+      proxyFleetTerminalStreamUpgrade(runtimeHostTransportPort, req, socket, head);
+    }).catch(() => socket.destroy()).finally(cleanup);
   });
 
   const bindStartedAt = isTraceEnabled() ? performance.now() : 0;
@@ -443,13 +481,16 @@ export async function waitForHostApiServerListening(server: Server): Promise<Ser
       cleanup();
       reject(error);
     };
+    const handleClose = () => handleError(new Error('Host API server closed before listening.'));
     const cleanup = () => {
       server.off('listening', handleListening);
       server.off('error', handleError);
+      server.off('close', handleClose);
     };
 
     server.once('listening', handleListening);
     server.once('error', handleError);
+    server.once('close', handleClose);
   });
 
   return server;

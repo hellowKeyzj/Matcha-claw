@@ -374,7 +374,10 @@ impl EventLedger {
             _ => return Err(RecordCommandError::RejectionConflict),
         };
         let events = if record.is_accepted() {
-            let event = next_event(&run_id, records, self.events.get(&run_id), record.command())?;
+            let event_sequence = next_sequence(self.events.get(&run_id).map_or(0, Vec::len))
+                .expect("event sequence cannot overflow");
+            let event = TeamEvent::from_command(record.command(), event_sequence)
+                .map_err(|_| RecordCommandError::InvalidEventId)?;
             if !self.event_ids.insert(event.event_id().to_owned()) { return Err(RecordCommandError::InvalidEventId); }
             self.events.entry(run_id).or_default().push(event.clone());
             vec![event]
@@ -492,27 +495,6 @@ fn next_sequence(existing_count: usize) -> Option<NonZeroU64> {
         .ok()?
         .checked_add(1)
         .and_then(NonZeroU64::new)
-}
-
-fn next_event(
-    run_id: &OpaqueId,
-    records: &[CommandRecord],
-    events: Option<&Vec<TeamEvent>>,
-    command: &RunCommand,
-) -> Result<TeamEvent, RecordCommandError> {
-    let event_sequence =
-        next_sequence(events.map_or(0, Vec::len)).expect("event sequence cannot overflow");
-    let event = TeamEvent::from_command(command, event_sequence)
-        .map_err(|_| RecordCommandError::InvalidEventId)?;
-    if records.iter().any(|record| {
-        record.is_accepted()
-            && record.command_id() == command.command_id()
-            && record.command() != command
-    }) {
-        return Err(RecordCommandError::CommandIdConflict);
-    }
-    let _ = run_id;
-    Ok(event)
 }
 
 fn approval_resolution_event_is_canonical(event: &TeamEvent) -> bool {

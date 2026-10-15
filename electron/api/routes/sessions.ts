@@ -1,5 +1,5 @@
 import {
-  consumeStagedAttachment,
+  consumeStagedAttachments,
   releaseStagedAttachments,
   stageWorkspaceMediaAttachment,
 } from '../../main/ipc/dialog-attachment-staging';
@@ -1707,83 +1707,95 @@ function summarizeString(value: unknown): { present: boolean; length: number } {
 async function adaptSessionSendRequest(
   body: Record<string, unknown>,
 ): Promise<SessionSendRequest> {
-  if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
-    || body.id !== 'session.prompt'
-    || (body.operationId !== 'sessions.prompt' && body.operationId !== 'sessions.sendWithMedia')
-    || !isRecord(body.scope)
-    || !hasExactKeys(body.scope, ['kind', 'identity'])
-    || body.scope.kind !== 'session'
-    || !isSessionIdentity(body.scope.identity)
-    || !isRecord(body.target)
-    || !hasExactKeys(body.target, ['kind', 'identity'])
-    || body.target.kind !== 'session'
-    || !isSessionIdentity(body.target.identity)
-    || !sameIdentity(body.scope.identity, body.target.identity)
-    || !isRecord(body.input)
-    || !hasAllowedKeys(body.input, ['sessionKey', 'sessionIdentity', 'message'], [
-      'runId',
-      'endpointSessionId',
-      'idempotencyKey',
-      'deliver',
-      'attachments',
-      'media',
-      'intent',
-    ])
-    || !isSessionIdentity(body.input.sessionIdentity)
-    || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
-    || body.input.sessionKey !== body.scope.identity.sessionKey
-    || typeof body.input.message !== 'string'
-    || (body.input.runId !== undefined && !isIdentifier(body.input.runId))
-    || body.input.media !== undefined
-    || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))
-    || (body.input.idempotencyKey !== undefined && !isIdentifier(body.input.idempotencyKey))
-    || (body.input.deliver !== undefined && typeof body.input.deliver !== 'boolean')
-    || (Object.hasOwn(body.input, 'intent') && (!isSessionSendIntent(body.input.intent)
-      || body.input.runId !== undefined || !isGoalIdentifier(body.input.idempotencyKey, 128)
-      || !isGoalObjective(body.input.message)))
-    || (body.input.attachments !== undefined && !Array.isArray(body.input.attachments))
-    || (body.operationId === 'sessions.sendWithMedia'
-      && (!Array.isArray(body.input.attachments) || body.input.attachments.length === 0))
-    || (Array.isArray(body.input.attachments) && body.input.attachments.length > MAX_ATTACHMENTS)) {
-    throw new Error('Session send request is invalid');
-  }
-
-  const attachments = body.input.attachments ?? [];
-  let totalBytes = 0;
-  const projected = [];
-  for (const attachment of attachments) {
-    if (!isStagedAttachmentMetadata(attachment)) throw new Error('Session send request is invalid');
-    totalBytes += attachment.fileSize;
-    if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) throw new Error('Session send request is invalid');
-    const content = await consumeStagedAttachment(attachment.stagedAttachmentId);
-    if (content.length !== attachment.fileSize || content.length > MAX_ATTACHMENT_BYTES) {
-      throw new Error('Session send attachment is unavailable');
+  const stagedAttachmentIds = isRecord(body.input) && Array.isArray(body.input.attachments)
+    ? body.input.attachments.flatMap((attachment) => (
+        isRecord(attachment) && isIdentifier(attachment.stagedAttachmentId) ? [attachment.stagedAttachmentId] : []
+      ))
+    : [];
+  try {
+    if (!hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
+      || body.id !== 'session.prompt'
+      || (body.operationId !== 'sessions.prompt' && body.operationId !== 'sessions.sendWithMedia')
+      || !isRecord(body.scope)
+      || !hasExactKeys(body.scope, ['kind', 'identity'])
+      || body.scope.kind !== 'session'
+      || !isSessionIdentity(body.scope.identity)
+      || !isRecord(body.target)
+      || !hasExactKeys(body.target, ['kind', 'identity'])
+      || body.target.kind !== 'session'
+      || !isSessionIdentity(body.target.identity)
+      || !sameIdentity(body.scope.identity, body.target.identity)
+      || !isRecord(body.input)
+      || !hasAllowedKeys(body.input, ['sessionKey', 'sessionIdentity', 'message'], [
+        'runId',
+        'endpointSessionId',
+        'idempotencyKey',
+        'deliver',
+        'attachments',
+        'media',
+        'intent',
+      ])
+      || !isSessionIdentity(body.input.sessionIdentity)
+      || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
+      || body.input.sessionKey !== body.scope.identity.sessionKey
+      || typeof body.input.message !== 'string'
+      || (body.input.runId !== undefined && !isIdentifier(body.input.runId))
+      || body.input.media !== undefined
+      || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))
+      || (body.input.idempotencyKey !== undefined && !isIdentifier(body.input.idempotencyKey))
+      || (body.input.deliver !== undefined && typeof body.input.deliver !== 'boolean')
+      || (Object.hasOwn(body.input, 'intent') && (!isSessionSendIntent(body.input.intent)
+        || body.input.runId !== undefined || !isGoalIdentifier(body.input.idempotencyKey, 128)
+        || !isGoalObjective(body.input.message)))
+      || (body.input.attachments !== undefined && !Array.isArray(body.input.attachments))
+      || (body.operationId === 'sessions.sendWithMedia'
+        && (!Array.isArray(body.input.attachments) || body.input.attachments.length === 0))
+      || (Array.isArray(body.input.attachments) && body.input.attachments.length > MAX_ATTACHMENTS)) {
+      throw new Error('Session send request is invalid');
     }
-    projected.push({
-      mimeType: attachment.mimeType,
-      fileName: attachment.fileName,
-      content: content.toString('base64'),
-    });
-  }
 
-  const identity = body.scope.identity;
-  return {
-    id: 'session.prompt',
-    operationId: 'sessions.send',
-    scope: { kind: 'session', identity },
-    target: { kind: 'session', identity },
-    input: {
-      identity,
-      ...(body.input.endpointSessionId === undefined ? {} : { endpointSessionId: body.input.endpointSessionId as string }),
-      message: body.input.message as string,
-      ...(body.input.runId === undefined
-        ? body.input.idempotencyKey === undefined ? {} : { idempotencyKey: body.input.idempotencyKey as string }
-        : { runId: body.input.runId as string }),
-      ...(body.input.deliver === undefined ? {} : { deliver: body.input.deliver as boolean }),
-      ...(isSessionSendIntent(body.input.intent) ? { intent: body.input.intent } : {}),
-      attachments: projected,
-    },
-  };
+    const attachments = body.input.attachments ?? [];
+    let totalBytes = 0;
+    for (const attachment of attachments) {
+      if (!isStagedAttachmentMetadata(attachment)) throw new Error('Session send request is invalid');
+      totalBytes += attachment.fileSize;
+      if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) throw new Error('Session send request is invalid');
+    }
+    const contents = attachments.length > 0 ? await consumeStagedAttachments(stagedAttachmentIds) : [];
+    const projected = attachments.map((attachment, index) => {
+      const content = contents[index];
+      if (content.length !== attachment.fileSize || content.length > MAX_ATTACHMENT_BYTES) {
+        throw new Error('Session send attachment is unavailable');
+      }
+      return {
+        mimeType: attachment.mimeType,
+        fileName: attachment.fileName,
+        content: content.toString('base64'),
+      };
+    });
+
+    const identity = body.scope.identity;
+    return {
+      id: 'session.prompt',
+      operationId: 'sessions.send',
+      scope: { kind: 'session', identity },
+      target: { kind: 'session', identity },
+      input: {
+        identity,
+        ...(body.input.endpointSessionId === undefined ? {} : { endpointSessionId: body.input.endpointSessionId as string }),
+        message: body.input.message as string,
+        ...(body.input.runId === undefined
+          ? body.input.idempotencyKey === undefined ? {} : { idempotencyKey: body.input.idempotencyKey as string }
+          : { runId: body.input.runId as string }),
+        ...(body.input.deliver === undefined ? {} : { deliver: body.input.deliver as boolean }),
+        ...(isSessionSendIntent(body.input.intent) ? { intent: body.input.intent } : {}),
+        attachments: projected,
+      },
+    };
+  } finally {
+    // Renderer timeouts do not end this materialization task's custody of the batch.
+    await releaseStagedAttachments(stagedAttachmentIds);
+  }
 }
 
 function isPublicTransportResponse(value: unknown): value is PublicTransportResponse {

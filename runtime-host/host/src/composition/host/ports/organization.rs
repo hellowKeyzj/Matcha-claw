@@ -301,6 +301,34 @@ impl TeamSessionExecutor {
             runtime_directory,
         }
     }
+
+    fn activity_session_identity(&self, request: &ActivityExecutionRequest) -> Option<(SessionIdentity, String)> {
+        let binding = request.binding();
+        let failed = |kind| {
+            runtime_trace("runtime.team_run.activity.resolve", || json!({
+                "runHash": identifier_hash(&request.delivery_request().run_id),
+                "activityHash": identifier_hash(request.delivery_request().delivery_id.as_str()),
+                "outcome": "error", "kind": kind,
+            }));
+            None
+        };
+        let Some(identity) = RuntimeDriverIdentity::from_reference(binding.endpoint().as_str()) else {
+            return failed("invalid_runtime_reference");
+        };
+        let Some(driver) = self.runtime_directory.lookup(&identity.endpoint()) else {
+            return failed("driver_not_found");
+        };
+        let Some(session_ops) = driver.session_ops() else {
+            return failed("session_unsupported");
+        };
+        let Some(session_key) = session_ops.agent_scoped_session_key(binding.agent().as_str(), binding.endpoint_session_id().as_str()) else {
+            return failed("session_key_unresolved");
+        };
+        let Some(session_identity) = SessionIdentity::new(session_key.clone(), session_provider_from_identity(identity), binding.agent().as_str().to_owned()) else {
+            return failed("invalid_session_identity");
+        };
+        Some((session_identity, session_key))
+    }
 }
 
 impl organization::TeamRunAdmission for HostAdmission {
@@ -374,6 +402,44 @@ fn session_provider_from_identity(identity: RuntimeDriverIdentity) -> SessionPro
 }
 
 impl organization::TeamActivityExecutor for TeamSessionExecutor {
+    fn prepare_cancellable(
+        &self,
+        request: ActivityExecutionRequest,
+        cancellation: CancellationToken,
+    ) -> runtime_directory::OwnedRuntimeFuture<Result<(), ActivityExecutionOutcome>> {
+        let executor = self.clone();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(ActivityExecutionOutcome::Rejected { rejection: organization::DeliveryRejection::Retryable });
+            }
+            let Some((identity, _)) = executor.activity_session_identity(&request) else {
+                return Err(ActivityExecutionOutcome::Unknown);
+            };
+            runtime_trace("runtime.team_run.activity.ensure", || json!({
+                "runHash": identifier_hash(&request.delivery_request().run_id),
+                "activityHash": identifier_hash(request.delivery_request().delivery_id.as_str()),
+                "outcome": "begin",
+            }));
+            let result = executor.session.ensure_bound_session(identity, SessionSourceBinding::team_from_receipt(request.binding())).await;
+            runtime_trace("runtime.team_run.activity.ensure", || json!({
+                "runHash": identifier_hash(&request.delivery_request().run_id),
+                "activityHash": identifier_hash(request.delivery_request().delivery_id.as_str()),
+                "outcome": match &result {
+                    Ok(SessionEnsureOutcome::Created(_) | SessionEnsureOutcome::Existing(_)) => "success",
+                    Ok(SessionEnsureOutcome::RuntimeNotFound | SessionEnsureOutcome::RuntimeNoSessionSupport) => "error",
+                    Ok(SessionEnsureOutcome::Failed) | Err(_) => "unknown",
+                },
+            }));
+            match result {
+                Ok(SessionEnsureOutcome::Created(_)) | Ok(SessionEnsureOutcome::Existing(_)) => Ok(()),
+                Ok(SessionEnsureOutcome::RuntimeNotFound | SessionEnsureOutcome::RuntimeNoSessionSupport) => Err(ActivityExecutionOutcome::Rejected {
+                    rejection: organization::DeliveryRejection::Permanent,
+                }),
+                Ok(SessionEnsureOutcome::Failed) | Err(_) => Err(ActivityExecutionOutcome::Unknown),
+            }
+        })
+    }
+
     fn execute(
         &self,
         request: ActivityExecutionRequest,
@@ -387,7 +453,7 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
         cancellation: CancellationToken,
     ) -> runtime_directory::OwnedRuntimeFuture<ActivityExecutionOutcome> {
         let session = self.session.clone();
-        let runtime_directory = Arc::clone(&self.runtime_directory);
+        let executor = self.clone();
         Box::pin(async move {
             if cancellation.is_cancelled() {
                 return ActivityExecutionOutcome::Rejected {
@@ -406,32 +472,7 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
             };
             let delivery = request.delivery_request().clone();
             let binding = request.binding().clone();
-            let Some(identity) = RuntimeDriverIdentity::from_reference(binding.endpoint().as_str())
-            else {
-                trace("runtime.team_run.activity.resolve", "error", "invalid_runtime_reference");
-                return ActivityExecutionOutcome::Unknown;
-            };
-            let Some(driver) = runtime_directory.lookup(&identity.endpoint()) else {
-                trace("runtime.team_run.activity.resolve", "error", "driver_not_found");
-                return ActivityExecutionOutcome::Unknown;
-            };
-            let Some(session_ops) = driver.session_ops() else {
-                trace("runtime.team_run.activity.resolve", "error", "session_unsupported");
-                return ActivityExecutionOutcome::Unknown;
-            };
-            let Some(session_key) = session_ops.agent_scoped_session_key(
-                binding.agent().as_str(),
-                binding.endpoint_session_id().as_str(),
-            ) else {
-                trace("runtime.team_run.activity.resolve", "error", "session_key_unresolved");
-                return ActivityExecutionOutcome::Unknown;
-            };
-            let Some(session_identity) = SessionIdentity::new(
-                session_key.clone(),
-                session_provider_from_identity(identity),
-                binding.agent().as_str().to_owned(),
-            ) else {
-                trace("runtime.team_run.activity.resolve", "error", "invalid_session_identity");
+            let Some((session_identity, session_key)) = executor.activity_session_identity(&request) else {
                 return ActivityExecutionOutcome::Unknown;
             };
             runtime_trace("runtime.team_run.activity.resolve", || json!({
@@ -443,31 +484,6 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
                 "outcome": "success",
             }));
             let source_binding = SessionSourceBinding::team_from_receipt(&binding);
-            trace("runtime.team_run.activity.ensure", "begin", "ensure");
-            match session
-                .ensure_bound_session(session_identity.clone(), source_binding.clone())
-                .await
-            {
-                Ok(SessionEnsureOutcome::Created(_)) | Ok(SessionEnsureOutcome::Existing(_)) => {
-                    trace("runtime.team_run.activity.ensure", "success", "bound");
-                }
-                Ok(SessionEnsureOutcome::RuntimeNotFound)
-                | Ok(SessionEnsureOutcome::RuntimeNoSessionSupport) => {
-                    trace("runtime.team_run.activity.ensure", "error", "runtime_unavailable_or_unsupported");
-                    return ActivityExecutionOutcome::Rejected {
-                        rejection: organization::DeliveryRejection::Permanent,
-                    };
-                }
-                Ok(SessionEnsureOutcome::Failed) | Err(_) => {
-                    trace("runtime.team_run.activity.ensure", "unknown", "ensure_failed");
-                    return ActivityExecutionOutcome::Unknown;
-                }
-            }
-            if cancellation.is_cancelled() {
-                return ActivityExecutionOutcome::Rejected {
-                    rejection: organization::DeliveryRejection::Retryable,
-                };
-            }
             let command = match SessionSendCommand::try_new(
                 session_identity,
                 Some(binding.endpoint_session_id().as_str().to_owned()),

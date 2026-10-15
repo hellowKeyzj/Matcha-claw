@@ -2,6 +2,7 @@ import { traceDebug, isTraceEnabled } from '../../utils/trace-logger';
 import { summarizeIdentifier } from '../runtime-host-delivery/transport/sessions/trace';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { addAbortListener } from 'node:events';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { platform } from 'node:process';
@@ -15,7 +16,8 @@ import { probeAnthropicCliAuth } from './provider-private-auth/anthropic-cli-pro
 import { AuthProfileSqliteError, AuthProfileSqliteWriter } from './provider-private-auth/auth-profile-sqlite';
 import {
   beginPrivateAccountTransaction, claimPrivateAccountTransaction, closePrivateAccountTransactions,
-  privateAccountTransactionForRequest, settlePrivateAccountTransaction,
+  isPrivateAccountRecoveryActive, isVersionedProviderCredentialReference, ownsCredentialReference, privateAccountTransactionForRequest, recoverPrivateAccountTransactions,
+  runPrivateAccountEffect, settlePrivateAccountTransaction,
   type PrivateAccountTransaction,
 } from './provider-private-auth/account-transactions';
 import { loginOpenAICodexOAuth } from '../../services/providers/oauth/openai-codex-oauth';
@@ -78,7 +80,7 @@ type AccountIntent = ProviderAccountIntent;
 type Flow = Readonly<{ flowId: string; account: AccountIntent; provider: Provider; controller: AbortController }>;
 
 export type AwaitProviderCall = (receipt: CallReceipt, command: 'providerAccounts.replace' | 'providerAccounts.delete') => Promise<CallRecord<'provider'>>;
-export type ProviderPrivateAccountDependencies = Readonly<{ transport: ProviderAccountsTransport; awaitProviderCall: AwaitProviderCall }>;
+export type ProviderPrivateAccountDependencies = Readonly<{ transport: ProviderAccountsTransport; awaitProviderCall: AwaitProviderCall; assertCurrent?: () => void }>;
 
 const activeFlows = new Map<string, Flow>();
 const manualCodes = new Map<string, { resolve: (value: string) => void; reject: () => void }>();
@@ -106,12 +108,14 @@ export async function migrateLegacyProviderPrivateAuth(legacyProviderStoreFilePa
       const authMode = storedAccountAuthMode(account);
       if (!isId(accountId) || !provider || !authMode || authMode === 'local' || authMode === 'cliReuse') continue;
       const reference = credentialReference(accountId);
-      const existing = await credentialSnapshot(reference);
+      const store = await readStore();
+      if (Object.keys(store).some((key) => isVersionedProviderCredentialReference(key) && ownsCredentialReference(accountId, key))) continue;
+      const existing = store[reference];
       const key = legacy.apiKeys[accountId];
       if (!existing && (authMode !== 'apiKey' || !isSecret(key))) continue;
       try {
-        if (!existing) await storeSecret(accountId, { kind: 'apiKey', provider, key });
-        await applyPrivateProfile(reference, openClawProviderKey(provider, accountId, authMode), provider, authMode, authProfiles);
+        if (!existing) await storeSecret(reference, { kind: 'apiKey', provider, key });
+        await applyPrivateProfile(reference, accountId, openClawProviderKey(provider, accountId, authMode), provider, authMode, authProfiles);
       } catch {
         if (!existing) await removeCredentialReference(reference).catch(() => undefined);
       }
@@ -130,16 +134,24 @@ export function createProviderCredentialStatusTransport(): ProviderCredentialSta
     async hasApiKey(accountId: string): Promise<ProviderCredentialStatusResponse> {
       if (!isId(accountId)) throw new Error('Provider account request is invalid');
       const store = await readStore();
-      return { hasKey: Object.hasOwn(store, credentialReference(accountId)) };
+      return { hasKey: Object.keys(store).some((reference) => ownsCredentialReference(accountId, reference)) };
     },
   };
 }
 
 export function registerProviderPrivateAuthHandlers(
   getMainWindow: () => BrowserWindow | null,
-  transport: ProviderAccountsTransport,
-  awaitProviderCall: AwaitProviderCall,
-): void {
+  runtime: Promise<ProviderPrivateAccountDependencies>,
+  signal: AbortSignal,
+): () => Promise<void> {
+  const mutations = new Set<Promise<unknown>>();
+  const trackMutation = <T>(mutate: () => Promise<T>): Promise<T> => {
+    signal.throwIfAborted();
+    const task = Promise.resolve().then(mutate);
+    mutations.add(task);
+    return task.finally(() => { mutations.delete(task); });
+  };
+  void runtime.catch(() => undefined);
   ipcMain.handle('providers:storeAccount', async (_, input: unknown) => {
     const value = input as { account?: unknown; apiKey?: unknown; token?: unknown };
     providerPrivateAuthTrace('ipc.store.received', () => ({
@@ -156,7 +168,11 @@ export function registerProviderPrivateAuthHandlers(
     }
     providerPrivateAuthTrace('ipc.store.decoded', () => (accountTrace(account)));
     try {
-      return await admitPrivateAccount(transport, await preparePrivateAccount(account, value.apiKey, value.token), account);
+      const { transport } = await runtime;
+      return await trackMutation(async () => {
+        const transaction = await preparePrivateAccount(account, value.apiKey, value.token);
+        return await admitPrivateAccount(transport, transaction, account);
+      });
     } catch {
       return { status: 'unknown', reason: 'outcome-unknown' } satisfies PrivateAccountAdmissionFailure;
     }
@@ -172,8 +188,10 @@ export function registerProviderPrivateAuthHandlers(
       providerPrivateAuthTrace('ipc.delete.rejected', () => ({ detail: 'invalid-request' }));
       return { status: 'rejected', reason: 'invalid-request' } satisfies PrivateAccountAdmissionFailure;
     }
+    const { accountId, revision } = value;
     try {
-      return await admitPrivateDelete(transport, value.accountId, value.revision);
+      const { transport } = await runtime;
+      return await trackMutation(() => admitPrivateDelete(transport, accountId, revision));
     } catch {
       return { status: 'unknown', reason: 'outcome-unknown' } satisfies PrivateAccountAdmissionFailure;
     }
@@ -186,9 +204,18 @@ export function registerProviderPrivateAuthHandlers(
     }
     if (activeFlows.has(flow.flowId)) throw new Error('Provider OAuth flow is already active');
     activeFlows.set(flow.flowId, flow);
-    publish(getMainWindow, { flowId: flow.flowId, status: 'started' });
-    void runOAuth(flow, getMainWindow, { transport, awaitProviderCall });
-    return { flowId: flow.flowId, status: 'started' as const };
+    try {
+      const deps = await runtime;
+      if (signal.aborted || flow.controller.signal.aborted || activeFlows.get(flow.flowId) !== flow) {
+        throw new Error(OAUTH_ERROR_MESSAGE);
+      }
+      publish(getMainWindow, { flowId: flow.flowId, status: 'started' });
+      void runOAuth(flow, getMainWindow, deps, signal, trackMutation);
+      return { flowId: flow.flowId, status: 'started' as const };
+    } catch {
+      if (activeFlows.get(flow.flowId) === flow) activeFlows.delete(flow.flowId);
+      throw new Error(OAUTH_ERROR_MESSAGE);
+    }
   });
 
   ipcMain.handle('providers:submitOAuthCode', async (_, input: unknown) => {
@@ -198,6 +225,7 @@ export function registerProviderPrivateAuthHandlers(
     if (!flow || flow.provider !== 'openai' || flow.account.authMode !== 'oauthBrowser') {
       throw new Error('Provider OAuth flow is unavailable');
     }
+    if (signal.aborted) throw new Error(OAUTH_ERROR_MESSAGE);
     resolveManualCode(flow.flowId, value.code);
     return { flowId: flow.flowId, status: 'submitted' as const };
   });
@@ -205,12 +233,14 @@ export function registerProviderPrivateAuthHandlers(
   ipcMain.handle('providers:cancelOAuth', async (_, input: unknown) => {
     const flowId = (input as { flowId?: unknown })?.flowId;
     if (!isId(flowId)) throw new Error('Provider OAuth request is invalid');
+    if (signal.aborted) throw new Error(OAUTH_ERROR_MESSAGE);
     activeFlows.get(flowId)?.controller.abort();
     activeFlows.delete(flowId);
     rejectManualCode(flowId);
     publish(getMainWindow, { flowId, status: 'cancelled' });
     return { flowId, status: 'cancelled' as const };
   });
+  return async () => { await Promise.allSettled(mutations); };
 }
 
 function sendPrivateResolverFailure(response: ServerResponse, code: PrivateResolverFailureCode, status = 503): void {
@@ -237,6 +267,45 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
       return;
     }
     const body = await readBoundedBody(request);
+    if (request.method === 'POST' && body?.operation === 'recover') {
+      if (Object.keys(body).sort().join(',') !== 'accounts,operation' || !Array.isArray(body.accounts)
+        || !body.accounts.every((account: unknown) => isRecord(account) && Object.keys(account).sort().join(',') === 'accountId,reference'
+          && isId(account.accountId) && isCredentialReference(account.reference) && ownsCredentialReference(account.accountId, account.reference))) {
+        sendPrivateResolverFailure(response, 'invalid-request', 400);
+        return;
+      }
+      const retained = new Set(body.accounts.map((account: { reference: string }) => account.reference));
+      try {
+        await recoverPrivateAccountTransactions(() => updatePrivateStore((store) => {
+          for (const reference of Object.keys(store)) {
+            if (isVersionedProviderCredentialReference(reference) && !retained.has(reference)) delete store[reference];
+          }
+        }));
+        response.writeHead(204).end();
+      } catch { sendPrivateResolverFailure(response, 'credential-store-unavailable'); }
+      return;
+    }
+    if (isPrivateAccountRecoveryActive()) {
+      sendPrivateResolverFailure(response, 'credential-store-unavailable');
+      return;
+    }
+    if (request.method === 'POST' && body?.operation === 'begin') {
+      if (Object.keys(body).sort().join(',') !== 'accountId,credentialRequired,kind,operation,revision'
+        || !isId(body.accountId) || !isRevision(body.revision)
+        || (body.kind !== 'replace' && body.kind !== 'delete') || typeof body.credentialRequired !== 'boolean'
+        || body.kind === 'delete' && body.credentialRequired) {
+        sendPrivateResolverFailure(response, 'invalid-request', 400);
+        return;
+      }
+      try {
+        const transaction = await beginPrivateAccountTransaction(body.accountId, body.revision, body.kind, settleCredential);
+        transaction.credentialRequired = body.credentialRequired;
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ transactionId: transaction.id }));
+      } catch {
+        sendPrivateResolverFailure(response, 'credential-store-unavailable');
+      }
+      return;
+    }
     const reference = body && isCredentialReference(body.reference) ? body.reference : undefined;
     const revision = body && isRevision(body.revision) ? body.revision : undefined;
     const profileProvider = body && isProfileProviderName(body.provider) ? body.provider : undefined;
@@ -267,9 +336,9 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
         const transaction = privateAccountTransactionForRequest(body.transactionId as string, reference, revision!);
         if (!transaction) throw new ProviderPrivateResolverError('invalid-request');
         if (body.operation === 'claim') {
-          if (!claimPrivateAccountTransaction(transaction)) throw new ProviderPrivateResolverError('invalid-request');
+          await claimPrivateCredential(transaction, body.previousReference as string | undefined);
         } else {
-          await settlePrivateAccountTransaction(transaction, body.settlement as 'retained' | 'rejected' | 'unknown', restoreCredential);
+          await settlePrivateAccountTransaction(transaction, body.settlement as 'retained' | 'rejected' | 'unknown', body.committed === true, settleCredential);
         }
         response.writeHead(204).end();
       } else if (request.method === 'DELETE') {
@@ -277,15 +346,19 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
           sendPrivateResolverFailure(response, 'invalid-request', 400);
           return;
         }
-        await deletePrivateAccount(reference, profileProvider, authProfiles);
+        const accountId = body!.accountId as string;
+        const transactionId = body!.transactionId as string;
+        await runPrivateAccountEffect(accountId, reference, revision, transactionId, () => deletePrivateAccount(reference, accountId, profileProvider, authProfiles));
         response.writeHead(204).end();
       } else if (request.method === 'PUT') {
         if (!revision || !profileProvider) {
           sendPrivateResolverFailure(response, 'invalid-request', 400);
           return;
         }
-        await removePrivateProfile(reference, profileProvider, authProfiles);
-        await removeCredentialReference(reference);
+        await runPrivateAccountEffect(body!.accountId as string, reference, revision, body!.transactionId as string, async () => {
+          await removePrivateProfile(reference, body!.accountId as string, profileProvider, authProfiles);
+          await removeCredentialReference(reference);
+        });
         response.writeHead(204).end();
       } else if (!revision) {
         traceResolve('electron.private-credential.resolve.branch', () => ({ outcome: 'lookup' }));
@@ -309,7 +382,8 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
           sendPrivateResolverFailure(response, 'invalid-request', 400);
           return;
         }
-        await applyPrivateProfile(reference, provider, credentialProvider, authMode, authProfiles);
+        await runPrivateAccountEffect(body.accountId as string, reference, revision, body.transactionId as string | undefined,
+          () => applyPrivateProfile(reference, body.accountId as string, provider, credentialProvider, authMode, authProfiles));
         response.writeHead(204).end();
       }
     } catch (error) {
@@ -328,7 +402,7 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
     }
   };
   const server = createServer((request, response) => {
-    if (closing || requests.size >= MAX_PRIVATE_RESOLVER_REQUESTS) {
+    if (closing || isPrivateAccountRecoveryActive() || requests.size >= MAX_PRIVATE_RESOLVER_REQUESTS) {
       sendPrivateResolverFailure(response, 'auth-profile-write-failed');
       request.resume();
       return;
@@ -366,7 +440,7 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
           await closeServer(server);
           await Promise.all(requests);
           await privateStoreWrite;
-          await closePrivateAccountTransactions(restoreCredential);
+          await closePrivateAccountTransactions(settleCredential);
         } finally {
           await authProfiles.close();
         }
@@ -380,7 +454,10 @@ async function runOAuth(
   flow: Flow,
   getMainWindow: () => BrowserWindow | null,
   deps: ProviderPrivateAccountDependencies,
+  signal: AbortSignal,
+  trackMutation: (mutate: () => Promise<PrivateAccountAdmissionResult>) => Promise<PrivateAccountAdmissionResult>,
 ): Promise<void> {
+  const shutdownListener = addAbortListener(signal, () => flow.controller.abort());
   let flowClaimed = false;
   try {
     const secret = await loginFlow(flow, getMainWindow);
@@ -392,7 +469,8 @@ async function runOAuth(
       authMode: secret.kind === 'apiKey' ? 'apiKey' as const
         : secret.kind === 'token' ? 'token' as const : flow.account.authMode,
     };
-    const replacement = await commitPrivateAccount(deps, account, secret);
+    const replacement = await commitPrivateAccount(deps, account, secret, trackMutation);
+    if (signal.aborted) return;
     publish(getMainWindow, { flowId: flow.flowId, status: oauthOutcome(replacement.outcome) });
     if (replacement.outcome === 'stored') {
       publishLegacy(getMainWindow, 'oauth:success', {
@@ -406,12 +484,14 @@ async function runOAuth(
       });
     }
   } catch {
-    if (flowClaimed || activeFlows.get(flow.flowId) === flow) {
+    if (!signal.aborted && (flowClaimed || activeFlows.get(flow.flowId) === flow)) {
       if (activeFlows.get(flow.flowId) === flow) activeFlows.delete(flow.flowId);
       publish(getMainWindow, { flowId: flow.flowId, status: 'unknown' });
       publishLegacy(getMainWindow, 'oauth:error', { message: OAUTH_ERROR_MESSAGE });
     }
   } finally {
+    shutdownListener[Symbol.dispose]();
+    if (signal.aborted && activeFlows.get(flow.flowId) === flow) activeFlows.delete(flow.flowId);
     if (!activeFlows.has(flow.flowId)) rejectManualCode(flow.flowId);
   }
 }
@@ -479,6 +559,7 @@ async function openAiSecret(flow: Flow, getMainWindow: () => BrowserWindow | nul
 
 async function deviceSecret(flow: Flow, getMainWindow: () => BrowserWindow | null): Promise<PrivateCredential> {
   const note = async (message: string) => {
+    if (flow.controller.signal.aborted) return;
     const verificationUri = message.match(/Open\s+(https?:\/\/\S+?)\s+to/i)?.[1];
     const userCode = verificationUri ? new URL(verificationUri).searchParams.get('user_code') : undefined;
     if (verificationUri && userCode) {
@@ -491,7 +572,7 @@ async function deviceSecret(flow: Flow, getMainWindow: () => BrowserWindow | nul
       });
     }
   };
-  const openUrl = async (url: string) => { await shell.openExternal(url); };
+  const openUrl = async (url: string) => { flow.controller.signal.throwIfAborted(); await shell.openExternal(url); };
   const token = flow.provider === 'qwen-portal'
     ? await loginQwenPortalOAuth({ openUrl, note, progress: { update: () => {}, stop: () => {} } })
     : await loginMiniMaxPortalOAuth({
@@ -564,14 +645,14 @@ export async function storeProviderPrivateAccount(
   apiKey?: unknown,
   token?: unknown,
 ): Promise<ProviderPrivateAccountMutationResult> {
-  const transaction = await preparePrivateAccount(account, apiKey, token);
-  const receipt = await admitPrivateAccount(deps.transport, transaction, account);
+  const transaction = await preparePrivateAccount(account, apiKey, token, deps.assertCurrent);
+  const receipt = await admitPrivateAccount(deps.transport, transaction, account, deps.assertCurrent);
   return 'status' in receipt ? receipt
     : await accountCallResult(deps, receipt, 'providerAccounts.replace', account.id, account.revision);
 }
 
 async function preparePrivateAccount(
-  account: AccountIntent, apiKey?: unknown, token?: unknown,
+  account: AccountIntent, apiKey?: unknown, token?: unknown, assertCurrent?: () => void,
 ): Promise<PrivateAccountTransaction> {
   if (!parseAccount(account)
     || apiKey !== undefined && (account.authMode !== 'apiKey' || !isSecret(apiKey))
@@ -591,22 +672,24 @@ async function preparePrivateAccount(
     : token !== undefined
       ? { kind: 'token', provider: account.provider, token: normalizeProviderToken(account.provider, token as string) }
       : undefined;
-  return preparePrivateAccountSecret(account, secret);
+  return preparePrivateAccountSecret(account, secret, assertCurrent);
 }
 
 async function preparePrivateAccountSecret(
-  account: AccountIntent, secret?: PrivateCredential,
+  account: AccountIntent, secret?: PrivateCredential, assertCurrent?: () => void,
 ): Promise<PrivateAccountTransaction> {
-  const reference = credentialReference(account.id);
-  const transaction = await beginPrivateAccountTransaction(reference, account.revision, () => credentialSnapshot(reference), restoreCredential);
+  assertCurrent?.();
+  const transaction = await beginPrivateAccountTransaction(account.id, account.revision, 'replace', settleCredential);
   try {
-    if (account.authMode !== 'local' && account.authMode !== 'cliReuse') {
-      if (secret) await storeSecret(account.id, secret);
-      else if (!transaction.previous) throw new Error('A provider credential is required');
+    assertCurrent?.();
+    transaction.credentialRequired = account.authMode !== 'local' && account.authMode !== 'cliReuse';
+    if (transaction.credentialRequired && secret) {
+      assertCurrent?.();
+      transaction.encryptedCredential = encryptSecret(secret);
     }
     return transaction;
   } catch (error) {
-    await settlePrivateAccountTransaction(transaction, 'rejected', restoreCredential);
+    await settlePrivateAccountTransaction(transaction, 'rejected', false, settleCredential);
     throw error;
   }
 }
@@ -614,10 +697,13 @@ async function preparePrivateAccountSecret(
 async function commitPrivateAccount(
   deps: ProviderPrivateAccountDependencies,
   account: AccountIntent,
-  secret?: PrivateCredential,
+  secret: PrivateCredential,
+  trackMutation: (mutate: () => Promise<PrivateAccountAdmissionResult>) => Promise<PrivateAccountAdmissionResult>,
 ): Promise<PublicReplaceResult> {
-  const transaction = await preparePrivateAccountSecret(account, secret);
-  const receipt = await admitPrivateAccount(deps.transport, transaction, account);
+  const receipt = await trackMutation(async () => {
+    const transaction = await preparePrivateAccountSecret(account, secret);
+    return await admitPrivateAccount(deps.transport, transaction, account);
+  });
   if ('status' in receipt) return { outcome: receipt.status };
   const result = await accountCallResult(deps, receipt, 'providerAccounts.replace', account.id, account.revision);
   return { outcome: result.status as PublicMutationOutcome, accountId: account.id, detail: result.detail };
@@ -637,28 +723,28 @@ export async function deleteProviderPrivateAccount(
   accountId: string,
   revision: number,
 ): Promise<ProviderPrivateAccountMutationResult> {
-  const receipt = await admitPrivateDelete(deps.transport, accountId, revision);
+  const receipt = await admitPrivateDelete(deps.transport, accountId, revision, deps.assertCurrent);
   return 'status' in receipt ? receipt
     : await accountCallResult(deps, receipt, 'providerAccounts.delete', accountId, revision);
 }
 
 async function admitPrivateAccount(
-  transport: ProviderAccountsTransport, transaction: PrivateAccountTransaction, account: AccountIntent,
+  transport: ProviderAccountsTransport, transaction: PrivateAccountTransaction, account: AccountIntent, assertCurrent?: () => void,
 ): Promise<PrivateAccountAdmissionResult> {
   return admitPrivateMutation(transport, transaction, 'providerAccounts.replace', {
     kind: 'replace', account, privateTransactionId: transaction.id,
-  });
+  }, assertCurrent);
 }
 
 async function admitPrivateDelete(
-  transport: ProviderAccountsTransport, accountId: string, revision: number,
+  transport: ProviderAccountsTransport, accountId: string, revision: number, assertCurrent?: () => void,
 ): Promise<PrivateAccountAdmissionResult> {
   if (!isId(accountId) || !isRevision(revision)) throw new Error('Provider account request is invalid');
-  const reference = credentialReference(accountId);
-  const transaction = await beginPrivateAccountTransaction(reference, revision, () => credentialSnapshot(reference), restoreCredential);
+  assertCurrent?.();
+  const transaction = await beginPrivateAccountTransaction(accountId, revision, 'delete', settleCredential);
   return admitPrivateMutation(transport, transaction, 'providerAccounts.delete', {
     kind: 'delete', accountId, revision, privateTransactionId: transaction.id,
-  });
+  }, assertCurrent);
 }
 
 async function admitPrivateMutation(
@@ -666,7 +752,13 @@ async function admitPrivateMutation(
   transaction: PrivateAccountTransaction,
   command: 'providerAccounts.replace' | 'providerAccounts.delete',
   input: unknown,
+  assertCurrent?: () => void,
 ): Promise<PrivateAccountAdmissionResult> {
+  try { assertCurrent?.(); }
+  catch (error) {
+    if (!transaction.claimed) await settlePrivateAccountTransaction(transaction, 'rejected', false, settleCredential);
+    throw error;
+  }
   let response: ProviderMutationTransportResponse;
   try { response = await transport.execute(accountRequest(command, input)); }
   catch { return { status: 'unknown', reason: 'outcome-unknown' }; }
@@ -677,7 +769,7 @@ async function admitPrivateMutation(
   const notAdmitted = response.status === 400 || response.status === 422
     || response.status === 503 && 'code' in response.body && response.body.code === 'not-admitted';
   if (notAdmitted && !transaction.claimed) {
-    try { await settlePrivateAccountTransaction(transaction, 'rejected', restoreCredential); }
+    try { await settlePrivateAccountTransaction(transaction, 'rejected', false, settleCredential); }
     catch { return { status: 'unknown', reason: 'outcome-unknown' }; }
     return {
       status: 'rejected',
@@ -767,31 +859,61 @@ function rejectManualCode(flowId: string): void {
   manualCodes.get(flowId)?.reject();
 }
 
-async function credentialSnapshot(reference: string): Promise<string | undefined> {
-  return (await readStore())[reference];
-}
-
-async function restoreCredential(reference: string, encrypted: string | undefined): Promise<void> {
+async function settleCredential(
+  transaction: PrivateAccountTransaction, outcome: 'retained' | 'rejected' | 'unknown', committed: boolean,
+): Promise<void> {
   await updatePrivateStore((store) => {
-    if (encrypted) store[reference] = encrypted;
-    else delete store[reference];
+    if (outcome === 'rejected') delete store[transaction.credentialReference];
+    else if (committed) {
+      const retained = transaction.kind === 'replace' && transaction.credentialRequired
+        ? transaction.credentialReference : undefined;
+      for (const reference of Object.keys(store)) {
+        if (ownsCredentialReference(transaction.accountId, reference) && reference !== retained) delete store[reference];
+      }
+    }
   });
 }
 
-async function storeSecret(accountId: string, secret: unknown): Promise<string> {
+async function claimPrivateCredential(transaction: PrivateAccountTransaction, previousReference: string | undefined): Promise<void> {
+  if (previousReference !== undefined && !ownsCredentialReference(transaction.accountId, previousReference)) {
+    throw new ProviderPrivateResolverError('invalid-request');
+  }
+  if (transaction.claimed && transaction.previousReference !== previousReference) throw new ProviderPrivateResolverError('invalid-request');
+  if (!claimPrivateAccountTransaction(transaction)) throw new ProviderPrivateResolverError('invalid-request');
+  transaction.previousReference = previousReference;
+  await runPrivateAccountEffect(transaction.accountId, transaction.credentialReference, transaction.revision, transaction.id, async () => {
+    await updatePrivateStore((store) => {
+      if (transaction.kind === 'replace' && transaction.credentialRequired && !store[transaction.credentialReference]) {
+        const credential = transaction.encryptedCredential ?? (previousReference && store[previousReference]);
+        if (!credential) throw new ProviderPrivateResolverError('credential-missing');
+        store[transaction.credentialReference] = credential;
+      }
+      for (const reference of Object.keys(store)) {
+        if (ownsCredentialReference(transaction.accountId, reference)
+          && reference !== previousReference && reference !== transaction.credentialReference) delete store[reference];
+      }
+    });
+  });
+}
+
+function encryptSecret(secret: unknown): string {
   if (!safeStorage.isEncryptionAvailable()) throw new Error('Provider credential storage is unavailable');
   const serialized = JSON.stringify(secret);
   if (Buffer.byteLength(serialized) > MAX_SECRET_BYTES) throw new Error('Provider credential request is invalid');
-  const reference = credentialReference(accountId);
-  const encrypted = safeStorage.encryptString(serialized).toString('base64');
+  return safeStorage.encryptString(serialized).toString('base64');
+}
+
+async function storeSecret(reference: string, secret: unknown): Promise<string> {
+  const encrypted = encryptSecret(secret);
   await updatePrivateStore((store) => {
+    if (store[reference] !== undefined) throw new ProviderPrivateResolverError('invalid-request');
     store[reference] = encrypted;
   });
   return reference;
 }
 
-async function deletePrivateAccount(reference: string, profileProvider: string, authProfiles: AuthProfileSqliteWriter): Promise<void> {
-  await removePrivateProfile(reference, profileProvider, authProfiles);
+async function deletePrivateAccount(reference: string, accountId: string, profileProvider: string, authProfiles: AuthProfileSqliteWriter): Promise<void> {
+  await removePrivateProfile(reference, accountId, profileProvider, authProfiles);
   await removeCredentialReference(reference);
 }
 
@@ -858,6 +980,7 @@ async function resolvePrivateCredential(reference: string): Promise<string | und
 
 async function applyPrivateProfile(
   reference: string,
+  accountId: string,
   profileProvider: string,
   credentialProvider: string,
   authMode: CredentialAuthMode,
@@ -872,7 +995,7 @@ async function applyPrivateProfile(
   const encrypted = await readPrivateCredential(reference);
   const credential = decryptPrivateCredential(encrypted);
   const profileId = privateProfileId(profileProvider);
-  const legacyProfileId = legacyPrivateProfileId(reference);
+  const legacyProfileId = accountId;
   const profile = authMode === 'apiKey'
     ? credential.kind === 'apiKey' && credential.provider === credentialProvider
       ? { type: 'api_key', provider: profileProvider, key: credential.key }
@@ -909,9 +1032,9 @@ function oauthProfile(
   return { ...profile, type: 'oauth', provider };
 }
 
-async function removePrivateProfile(reference: string, profileProvider: string, authProfiles: AuthProfileSqliteWriter): Promise<void> {
+async function removePrivateProfile(reference: string, accountId: string, profileProvider: string, authProfiles: AuthProfileSqliteWriter): Promise<void> {
   const profileId = privateProfileId(profileProvider);
-  const legacyProfileId = legacyPrivateProfileId(reference);
+  const legacyProfileId = accountId;
   providerPrivateAuthTrace('delete.private-profile-before', () => ({
     provider: profileProvider,
     reference: idShape(reference),
@@ -967,10 +1090,6 @@ function normalizeProviderKeyPart(value: string): string {
 
 function privateProfileId(provider: string): string {
   return `${provider}:default`;
-}
-
-function legacyPrivateProfileId(reference: string): string {
-  return reference.slice('credential:v1:'.length);
 }
 
 function parsePrivateCredential(value: string):
@@ -1152,25 +1271,32 @@ function isCredentialReference(value: unknown): value is string {
   return typeof value === 'string' && /^credential:v1:[A-Za-z0-9_.:-]{1,128}$/.test(value);
 }
 
+function isTransactionId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
+}
+
 function isPrivateResolverRequest(
   method: string,
   body: Record<string, unknown> | undefined,
 ): boolean {
   if (!body) return false;
   const keys = Object.keys(body).sort();
-  if (method === 'POST') {
-    if (body.operation === 'claim' || body.operation === 'settle') {
-      return keys.join(',') === (body.operation === 'claim'
-        ? 'operation,reference,revision,transactionId' : 'operation,reference,revision,settlement,transactionId')
-        && typeof body.transactionId === 'string'
-        && /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.transactionId)
-        && isRevision(body.revision)
-        && (body.operation === 'claim' || body.settlement === 'retained' || body.settlement === 'rejected' || body.settlement === 'unknown');
-    }
-    return keys.join(',') === 'reference'
-      || keys.join(',') === 'authMode,credentialProvider,provider,reference,revision';
+  if (method === 'POST' && (body.operation === 'claim' || body.operation === 'settle')) {
+    return keys.join(',') === (body.operation === 'claim'
+      ? (body.previousReference === undefined ? 'operation,reference,revision,transactionId' : 'operation,previousReference,reference,revision,transactionId')
+      : 'committed,operation,reference,revision,settlement,transactionId')
+      && isTransactionId(body.transactionId) && isRevision(body.revision)
+      && (body.operation === 'claim'
+        ? body.previousReference === undefined || isCredentialReference(body.previousReference)
+        : typeof body.committed === 'boolean' && (body.settlement === 'retained' || body.settlement === 'rejected' || body.settlement === 'unknown'));
   }
-  return keys.join(',') === 'provider,reference,revision';
+  if (method === 'POST' && keys.join(',') === 'reference') return true;
+  const effectKeys = method === 'POST'
+    ? 'accountId,authMode,credentialProvider,provider,reference,revision'
+    : 'accountId,provider,reference,revision';
+  return keys.join(',') === (body.transactionId === undefined ? effectKeys : `${effectKeys},transactionId`)
+    && isId(body.accountId) && isRevision(body.revision)
+    && (method === 'POST' && body.transactionId === undefined || isTransactionId(body.transactionId));
 }
 
 function authorized(value: string | undefined, expected: string): boolean {
@@ -1186,11 +1312,12 @@ async function readBoundedBody(request: NodeJS.ReadableStream): Promise<Record<s
   for await (const chunk of request) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     length += bytes.length;
-    if (length > MAX_PRIVATE_REQUEST_BYTES) return undefined;
+    if (length > MAX_AUTH_PROFILES_BYTES) return undefined;
     chunks.push(bytes);
   }
   try {
     const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (length > MAX_PRIVATE_REQUEST_BYTES && (!isRecord(value) || value.operation !== 'recover')) return undefined;
     return value && typeof value === 'object' && !Array.isArray(value)
       ? value as Record<string, unknown>
       : undefined;

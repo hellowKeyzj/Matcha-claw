@@ -382,6 +382,7 @@ impl OrganizationHandle {
     ) -> Result<ManualTeamCreateOutcome, RequestAdmissionClosed> {
         if let Some(call) = &self.call { call.references(Some(team_id.as_str()), Some(run.run_id().as_str()), None).await; }
         let (reply, reply_rx) = self.reply_channel();
+        let (continue_run, continuation) = tokio::sync::oneshot::channel();
         platform::trace::session_trace("runtime.team.owner.enqueue.start", || serde_json::json!({}));
         self.inner
             .send_command(OrganizationCommand::ManualTeamCreate {
@@ -393,6 +394,7 @@ impl OrganizationHandle {
                 run,
                 run_idempotency_key,
                 reply,
+                continue_run,
             })
             .await
             .map_err(|error| {
@@ -407,6 +409,11 @@ impl OrganizationHandle {
             || serde_json::json!({"reason": "queued"}),
         );
         self.call_admitted().await;
+        if let Ok((team_id, run, run_idempotency_key, reply)) = continuation.await {
+            self.inner.send_command(OrganizationCommand::ManualTeamRunCreate {
+                team_id, run, run_idempotency_key, reply,
+            }).await.map_err(closed)?;
+        }
         reply_rx.await.map_err(|_| {
             platform::trace::session_trace(
                 "runtime.team.owner.reply",
@@ -1220,6 +1227,19 @@ impl OrganizationHandle {
         reply_rx.await.map_err(|_| closed_error())
     }
 
+    pub(crate) async fn admit_activity_dispatch(
+        &self,
+        run_id: GraphRunId,
+        claim: ActivityClaim,
+        request: crate::ActivityExecutionRequest,
+    ) -> Result<Result<bool, StoreFault>, RequestAdmissionClosed> {
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        self.inner.send_command(OrganizationCommand::AdmitActivityDispatch {
+            run_id, claim, request, reply,
+        }).await.map_err(closed)?;
+        reply_rx.await.map_err(|_| closed_error())
+    }
+
     pub(crate) async fn settle_activity(
         &self,
         run_id: GraphRunId,
@@ -1339,7 +1359,8 @@ impl OrganizationHandle {
         delivery_id: DeliveryId,
         settled: NativeRunSettled,
         settled_at: u64,
-    ) -> Result<Result<TeamNodeTerminalResult, StoreFault>, RequestAdmissionClosed> {
+    ) -> Result<Result<crate::store::NativeTerminalSettlement, StoreFault>, RequestAdmissionClosed>
+    {
         let wake_run_id = run_id.clone();
         let wake_reason = if settled.status == organization::NativeTerminalStatus::Cancelled {
             TeamRunWakeReason::RunCancelled

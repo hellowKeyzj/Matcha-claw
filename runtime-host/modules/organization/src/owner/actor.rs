@@ -1047,6 +1047,9 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::ManualTeamCreate { team_id, .. } => {
                 CommandRoute::Keyed(OrganizationLaneKey::Team(team_id.clone()))
             }
+            OrganizationCommand::ManualTeamRunCreate { run, .. } => {
+                CommandRoute::Keyed(OrganizationLaneKey::Run(run.run_id().clone()))
+            }
             OrganizationCommand::RunDeleteAndPurge { run_id, .. }
             | OrganizationCommand::RunCreate { run_id, .. }
             | OrganizationCommand::RunCreateFromTeamTemplate { run_id, .. }
@@ -1057,6 +1060,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::TaskBoardMutate { run_id, .. }
             | OrganizationCommand::ScheduleReadyNodes { run_id, .. }
             | OrganizationCommand::ClaimActivity { run_id, .. }
+            | OrganizationCommand::AdmitActivityDispatch { run_id, .. }
             | OrganizationCommand::SettleActivity { run_id, .. }
             | OrganizationCommand::NativeRunSettled { run_id, .. } => {
                 CommandRoute::Keyed(OrganizationLaneKey::Run(run_id.clone()))
@@ -1222,6 +1226,7 @@ impl OwnerSpec for OrganizationOwner {
                 run,
                 run_idempotency_key,
                 reply,
+                continue_run,
             } => {
                 with_session_trace(reply.trace_id(), async {
                     let started = platform::trace::enabled().then(Instant::now);
@@ -1235,9 +1240,8 @@ impl OwnerSpec for OrganizationOwner {
                     }
                     let owner_started = platform::trace::enabled().then(Instant::now);
                     session_trace("runtime.team.owner.start", || json!({}));
-                    let outcome = super::manual_team::manual_team_create(
+                    let prepared = super::manual_team::prepare_manual_team_run(
                             refreshed.expect("manual team store was opened"),
-                            &state.team_run,
                             &shared,
                             ManualTeamMaterializationInput {
                                 team_id,
@@ -1251,18 +1255,44 @@ impl OwnerSpec for OrganizationOwner {
                             &reply,
                         )
                         .await;
-                    session_trace(
-                        "runtime.team.owner.end",
-                        || json!({"reason": match &outcome {
-                    ManualTeamCreateOutcome::Created(_) => "succeeded",
-                    ManualTeamCreateOutcome::Rejected => "rejected",
-                    ManualTeamCreateOutcome::Unavailable => "unavailable",
-                    ManualTeamCreateOutcome::OutcomeUnknown => "outcome_unknown",
-                }, "elapsedMs": owner_started.map(|started| started.elapsed().as_millis())}),
-                    );
-                    let _ = reply.send(outcome).await;
+                    match prepared {
+                        Ok((team_id, run, run_idempotency_key)) => {
+                            // The caller hands off outside the owner mailbox, so bounded admission cannot hold this lane.
+                            if let Err((_, _, _, reply)) = continue_run.send((team_id, run, run_idempotency_key, reply)) {
+                                let _ = reply.send(ManualTeamCreateOutcome::Unavailable).await;
+                            }
+                        }
+                        Err(outcome) => {
+                            session_trace("runtime.team.owner.end", || json!({
+                                "reason": "materialization_not_confirmed",
+                                "elapsedMs": owner_started.map(|started| started.elapsed().as_millis()),
+                            }));
+                            let _ = reply.send(outcome).await;
+                        }
+                    }
                 })
                 .await;
+            }
+            OrganizationCommand::ManualTeamRunCreate { team_id, run, run_idempotency_key, reply } => {
+                with_session_trace(reply.trace_id(), async {
+                    let outcome = match OrganizationRunLane::open_store(&mut state.store, &state.store_path) {
+                        Ok(store) => super::manual_team::create_manual_team_run(
+                            store, &state.team_run, &shared, team_id, run, run_idempotency_key, &reply,
+                        ).await,
+                        Err(error) => {
+                            reply.creation_failure(creation_store_failure(TeamCreationStage::InitializingSessions, &error)).await;
+                            reply.creation(None, Err(&error)).await;
+                            ManualTeamCreateOutcome::Unavailable
+                        }
+                    };
+                    session_trace("runtime.team.owner.end", || json!({"reason": match &outcome {
+                        ManualTeamCreateOutcome::Created(_) => "succeeded",
+                        ManualTeamCreateOutcome::Rejected => "rejected",
+                        ManualTeamCreateOutcome::Unavailable => "unavailable",
+                        ManualTeamCreateOutcome::OutcomeUnknown => "outcome_unknown",
+                    }}));
+                    let _ = reply.send(outcome).await;
+                }).await;
             }
             OrganizationCommand::RunDeleteAndPurge {
                 run_id,
@@ -1573,6 +1603,16 @@ impl OwnerSpec for OrganizationOwner {
                     });
                 let _ = reply.send(outcome);
             }
+            OrganizationCommand::AdmitActivityDispatch { run_id, claim, request, reply } => {
+                let outcome = OrganizationRunLane::open_store(&mut state.store, &state.store_path)
+                    .and_then(|store| {
+                        if request.delivery_request().run_id != run_id.as_str() {
+                            return Ok(false);
+                        }
+                        store.admit_agent_activity_dispatch(&claim, &request)
+                    });
+                let _ = reply.send(outcome);
+            }
             OrganizationCommand::SettleActivity {
                 run_id,
                 claim,
@@ -1582,6 +1622,11 @@ impl OwnerSpec for OrganizationOwner {
                 let outcome = OrganizationRunLane::open_store(&mut state.store, &state.store_path)
                     .map_err(TeamRunActivityError::Store)
                     .and_then(|mut store| {
+                        if store.activity_was_purged(&run_id, claim.activity_id())
+                            .map_err(TeamRunActivityError::Store)?
+                        {
+                            return Err(TeamRunActivityError::Retired);
+                        }
                         if !crate::owner::run_scheduler::activity_belongs_to(
                             &store,
                             &run_id,
@@ -1869,6 +1914,7 @@ impl OwnerSpec for OrganizationOwner {
             }
             OrganizationCommand::ManualTeamMaterialize { .. }
             | OrganizationCommand::ManualTeamCreate { .. }
+            | OrganizationCommand::ManualTeamRunCreate { .. }
             | OrganizationCommand::RunDeleteAndPurge { .. }
             | OrganizationCommand::RunCreate { .. }
             | OrganizationCommand::RunCreateFromTeamTemplate { .. }
@@ -1887,6 +1933,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::TaskBoardMutate { .. }
             | OrganizationCommand::ScheduleReadyNodes { .. }
             | OrganizationCommand::ClaimActivity { .. }
+            | OrganizationCommand::AdmitActivityDispatch { .. }
             | OrganizationCommand::SettleActivity { .. }
             | OrganizationCommand::NativeRunSettled { .. } => {
                 unreachable!("organization command routed to global lane")

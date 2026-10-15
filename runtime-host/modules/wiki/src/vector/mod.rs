@@ -26,7 +26,8 @@ const MODEL_CHANGED: &str = "wiki embedding model changed; rebuild the full vect
 const MAX_PAGE_ID_CHARS: usize = 256;
 const REVISION_DIR: &str = ".llm-wiki/embedding-revisions";
 
-static DB_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>> = OnceLock::new();
+// The lock value advances only after a successful full replacement or clear, never a page merge.
+static DB_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::RwLock<u64>>>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct ChunkEmbedding {
@@ -44,6 +45,146 @@ pub struct ChunkSearchResult {
     pub chunk_text: String,
     pub heading_path: String,
     pub score: f32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct IndexRevision {
+    version: u64,
+    timestamp_ns: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PageIndexRevision {
+    generation: u64,
+    rows_signature: String,
+}
+
+pub(crate) enum IndexCommitGuard {
+    Page {
+        path: String,
+        revision: String,
+        index_revision: PageIndexRevision,
+    },
+    Tree {
+        files: std::collections::BTreeMap<String, Option<String>>,
+        revision: Option<IndexRevision>,
+    },
+}
+
+impl IndexCommitGuard {
+    async fn validate(
+        &self,
+        project_path: &Path,
+        db: &lancedb::Connection,
+        generation: u64,
+    ) -> Result<(), String> {
+        let unchanged = match self {
+            Self::Page {
+                path,
+                revision,
+                index_revision,
+            } => {
+                crate::domain::resolve_project_path(project_path, path)
+                    .ok()
+                    .and_then(|path| fs::read(path).ok())
+                    .is_some_and(|bytes| crate::domain::stable_content_hash(&bytes) == *revision)
+                    && generation == index_revision.generation
+                    && page_rows_signature_unlocked(db, &crate::index::page_id(path)).await?
+                        == index_revision.rows_signature
+            }
+            Self::Tree { files, revision } => {
+                crate::reindex::content_snapshot_matches(project_path, files).unwrap_or(false)
+                    && index_revision_unlocked(db).await? == *revision
+            }
+        };
+        if !unchanged {
+            return Err(
+                "Wiki content or index changed during embedding; retry explicitly".to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn commit_guard(pages: &[crate::index::PreparedPageEmbedding]) -> Option<Arc<IndexCommitGuard>> {
+    pages.first().and_then(|page| page.commit_guard.clone())
+}
+
+pub(crate) async fn index_revision(project_path: &Path) -> Result<Option<IndexRevision>, String> {
+    let lock = db_lock(project_path);
+    let _guard = lock.read().await;
+    let db = connect(&db_uri(project_path))
+        .execute()
+        .await
+        .map_err(|err| format!("DB connect error: {err}"))?;
+    index_revision_unlocked(&db).await
+}
+
+async fn index_revision_unlocked(db: &lancedb::Connection) -> Result<Option<IndexRevision>, String> {
+    let tables = db
+        .table_names()
+        .execute()
+        .await
+        .map_err(|err| format!("List tables error: {err}"))?;
+    if !has_table(&tables, TABLE_CHUNKS_V2) {
+        return Ok(None);
+    }
+    let table = db
+        .open_table(TABLE_CHUNKS_V2)
+        .execute()
+        .await
+        .map_err(|err| format!("Open table error: {err}"))?;
+    let dataset = table
+        .dataset()
+        .ok_or_else(|| "Wiki index is not a native dataset".to_owned())?
+        .get()
+        .await
+        .map_err(|err| format!("Read index version error: {err}"))?;
+    let version = dataset.version();
+    Ok(Some(IndexRevision {
+        version: version.version,
+        timestamp_ns: version
+            .timestamp
+            .timestamp_nanos_opt()
+            .ok_or_else(|| "Wiki index version timestamp is out of range".to_owned())?,
+    }))
+}
+
+pub(crate) async fn page_index_revision(
+    project_path: &Path,
+    page_id: &str,
+) -> Result<PageIndexRevision, String> {
+    validate_page_id(page_id)?;
+    let lock = db_lock(project_path);
+    let guard = lock.read().await;
+    let db = connect(&db_uri(project_path))
+        .execute()
+        .await
+        .map_err(|err| format!("DB connect error: {err}"))?;
+    Ok(PageIndexRevision {
+        generation: *guard,
+        rows_signature: page_rows_signature_unlocked(&db, page_id).await?,
+    })
+}
+
+async fn page_rows_signature_unlocked(
+    db: &lancedb::Connection,
+    page_id: &str,
+) -> Result<String, String> {
+    let tables = db
+        .table_names()
+        .execute()
+        .await
+        .map_err(|err| format!("List tables error: {err}"))?;
+    if !has_table(&tables, TABLE_CHUNKS_V2) {
+        return rows_signature(&[]);
+    }
+    let table = db
+        .open_table(TABLE_CHUNKS_V2)
+        .execute()
+        .await
+        .map_err(|err| format!("Open table error: {err}"))?;
+    rows_signature(&page_batches(&table, page_id).await?)
 }
 
 pub(crate) struct PageSearchResult {
@@ -236,13 +377,17 @@ pub(crate) async fn replace_pages(
     project_path: &Path,
     pages: Vec<crate::index::PreparedPageEmbedding>,
 ) -> Result<usize, String> {
+    let commit_guard = commit_guard(&pages);
     let (schema, prepared) = prepare_batches(pages)?;
     let lock = db_lock(project_path);
-    let _guard = lock.write().await;
+    let mut generation = lock.write().await;
     let db = connect(&db_uri(project_path))
         .execute()
         .await
         .map_err(|err| format!("DB connect error: {err}"))?;
+    if let Some(guard) = &commit_guard {
+        guard.validate(project_path, &db, *generation).await?;
+    }
     if prepared.is_empty() {
         let tables = db
             .table_names()
@@ -282,6 +427,7 @@ pub(crate) async fn replace_pages(
         .execute()
         .await
         .map_err(|err| format!("Atomic index replacement failed: {err}"))?;
+    *generation += 1;
     for (page_id, revision, _) in prepared {
         let _ = save_revision_unlocked(project_path, &page_id, &revision);
     }
@@ -293,6 +439,7 @@ pub(crate) async fn update_pages(
     pages: Vec<crate::index::PreparedPageEmbedding>,
     on_written: &(dyn Fn(usize) + Send + Sync),
 ) -> (usize, Option<String>) {
+    let commit_guard = commit_guard(&pages);
     let (schema, prepared) = match prepare_batches(pages) {
         Ok(prepared) => prepared,
         Err(error) => return (0, Some(error)),
@@ -301,12 +448,15 @@ pub(crate) async fn update_pages(
         return (0, None);
     }
     let lock = db_lock(project_path);
-    let _guard = lock.write().await;
+    let generation = lock.write().await;
     let db = match connect(&db_uri(project_path)).execute().await {
         Ok(db) => db,
         Err(error) => return (0, Some(format!("DB connect error: {error}"))),
     };
     let compatible = async {
+        if let Some(guard) = &commit_guard {
+            guard.validate(project_path, &db, *generation).await?;
+        }
         let tables = db
             .table_names()
             .execute()
@@ -493,7 +643,7 @@ pub async fn count_chunks(project_path: impl AsRef<Path>) -> Result<usize, Strin
 pub async fn clear(project_path: impl AsRef<Path>) -> Result<(), String> {
     let project_path = project_path.as_ref();
     let lock = db_lock(project_path);
-    let _guard = lock.write().await;
+    let mut generation = lock.write().await;
 
     let db = connect(&db_uri(project_path))
         .execute()
@@ -510,6 +660,7 @@ pub async fn clear(project_path: impl AsRef<Path>) -> Result<(), String> {
             .await
             .map_err(|err| format!("Drop chunk table error: {err}"))?;
     }
+    *generation += 1;
     Ok(())
 }
 
@@ -667,13 +818,13 @@ fn db_uri(project_path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn db_lock(project_path: &Path) -> Arc<tokio::sync::RwLock<()>> {
+fn db_lock(project_path: &Path) -> Arc<tokio::sync::RwLock<u64>> {
     let key = db_uri(project_path);
     let locks = DB_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut locks = locks.lock().expect("wiki vector lock map poisoned");
     locks
         .entry(key)
-        .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+        .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(0)))
         .clone()
 }
 

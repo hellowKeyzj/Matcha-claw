@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
@@ -10,16 +10,19 @@ interface ProviderRecovery {
   backupDirectory: string;
 }
 
-export function ProviderRecoveryDialog({ ready }: { ready: boolean }) {
+export function ProviderRecoveryDialog({ queryEnabled, visible }: { queryEnabled: boolean; visible: boolean }) {
   const { t } = useTranslation('settings');
   const navigate = useNavigate();
   const [recovery, setRecovery] = useState<ProviderRecovery | null>(null);
   const [pending, setPending] = useState<'acknowledge' | 'open-backup' | null>(null);
   const [error, setError] = useState<'acknowledgeFailed' | 'openBackupFailed' | null>(null);
   const loaded = useRef(false);
+  const notifyLoadFailed = useEffectEvent(() => {
+    toast.error(t('providerRecovery.loadFailed'));
+  });
 
   useEffect(() => {
-    if (!ready || loaded.current) return;
+    if (!queryEnabled || loaded.current) return;
     const controller = new AbortController();
     void hostApiFetch<unknown>('/api/providers/recovery', {
       signal: controller.signal,
@@ -43,10 +46,10 @@ export function ProviderRecoveryDialog({ ready }: { ready: boolean }) {
       loaded.current = true;
       setRecovery({ backupDirectory: nextRecovery.backupDirectory });
     }).catch(() => {
-      if (!controller.signal.aborted) toast.error(t('providerRecovery.loadFailed'));
+      if (!controller.signal.aborted) notifyLoadFailed();
     });
     return () => controller.abort();
-  }, [ready, t]);
+  }, [queryEnabled]);
 
   async function acknowledge(addModel: boolean) {
     if (pending) return;
@@ -79,7 +82,7 @@ export function ProviderRecoveryDialog({ ready }: { ready: boolean }) {
   }
 
   return (
-    <DialogPrimitive.Root open={ready && recovery !== null}>
+    <DialogPrimitive.Root open={visible && recovery !== null}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/55 data-[state=closed]:animate-out data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content

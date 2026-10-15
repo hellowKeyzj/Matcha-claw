@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { Check, Copy, ExternalLink, Loader2, RefreshCw, X } from 'lucide-react';
 import { Badge, type BadgeProps } from '@/components/ui/badge';
@@ -50,6 +50,32 @@ type ActiveBillingOrder = Readonly<{
   clientSecret?: string;
   expiresAt: string;
 }>;
+
+type BillingOrderState = Readonly<{
+  incarnation: number;
+  currentOrder: ActiveBillingOrder | null;
+  creatingOrder: boolean;
+  orderErrorMessage: string | null;
+  verifyingOrder: boolean;
+  checkingOrder: boolean;
+  copiedText: string | null;
+}>;
+
+type BillingOrderScope = Readonly<{
+  incarnation: number;
+  orderId: number | null;
+  outTradeNo?: string;
+}>;
+
+const INITIAL_ORDER_STATE: BillingOrderState = {
+  incarnation: 0,
+  currentOrder: null,
+  creatingOrder: false,
+  orderErrorMessage: null,
+  verifyingOrder: false,
+  checkingOrder: false,
+  copiedText: null,
+};
 
 type PlanTab = Readonly<{
   key: string;
@@ -367,20 +393,23 @@ function activeOrderFromResult(result: PaymentOrderResult, fallbackPaymentType: 
   };
 }
 
-function mergePaymentOrder(order: PaymentOrder, previous?: ActiveBillingOrder | null): ActiveBillingOrder {
+function mergePaymentOrder(order: PaymentOrder, previous: ActiveBillingOrder | null): ActiveBillingOrder | null {
+  if (!previous || order.id !== previous.id || (previous.outTradeNo && order.outTradeNo !== previous.outTradeNo)) return previous;
+  // A read frozen before verification cannot undo the same order's confirmed payment.
+  if (isPaidOrderStatus(previous.status) && shouldPollOrderStatus(order.status)) return previous;
   return {
     id: order.id,
     status: order.status,
     amount: order.amount,
     payAmount: order.payAmount,
-    currency: order.currency ?? previous?.currency,
+    currency: order.currency ?? previous.currency,
     feeRate: order.feeRate,
-    paymentType: order.paymentType || previous?.paymentType,
-    outTradeNo: order.outTradeNo || previous?.outTradeNo,
-    qrCode: previous?.qrCode,
-    payUrl: previous?.payUrl ?? undefined,
-    clientSecret: previous?.clientSecret,
-    expiresAt: order.expiresAt || previous?.expiresAt || '',
+    paymentType: order.paymentType || previous.paymentType,
+    outTradeNo: order.outTradeNo || previous.outTradeNo,
+    qrCode: previous.qrCode,
+    payUrl: previous.payUrl,
+    clientSecret: previous.clientSecret,
+    expiresAt: order.expiresAt || previous.expiresAt,
   };
 }
 
@@ -402,17 +431,14 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
   const [selectedPlanId, setSelectedPlanId] = useState<number | null>(null);
   const [selectedMethodId, setSelectedMethodId] = useState('');
   const [acceptedAgreement, setAcceptedAgreement] = useState(false);
-  const [creatingOrder, setCreatingOrder] = useState(false);
-  const [currentOrder, setCurrentOrder] = useState<ActiveBillingOrder | null>(null);
-  const [orderErrorMessage, setOrderErrorMessage] = useState<string | null>(null);
-  const [verifyingOrder, setVerifyingOrder] = useState(false);
-  const [checkingOrder, setCheckingOrder] = useState(false);
-  const [copiedText, setCopiedText] = useState<string | null>(null);
+  const [orderState, setOrderState] = useState(INITIAL_ORDER_STATE);
+  const { creatingOrder, currentOrder, orderErrorMessage, verifyingOrder, checkingOrder, copiedText } = orderState;
 
   const openRef = useRef(open);
+  const incarnationRef = useRef(0);
   const loadRequestIdRef = useRef(0);
   const pollTimerRef = useRef<number | null>(null);
-  const pollInFlightRef = useRef(false);
+  const pollInFlightRef = useRef<BillingOrderScope | null>(null);
   const refreshedOrderIdRef = useRef<number | null>(null);
 
   const stopPolling = useCallback(() => {
@@ -421,6 +447,28 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
       pollTimerRef.current = null;
     }
   }, []);
+
+  const commitOrderState = useCallback((scope: BillingOrderScope, update: (previous: BillingOrderState) => BillingOrderState) => {
+    setOrderState((previous) => {
+      if (!openRef.current || scope.incarnation !== incarnationRef.current || scope.incarnation !== previous.incarnation
+        || scope.orderId !== (previous.currentOrder?.id ?? null) || (scope.outTradeNo && scope.outTradeNo !== previous.currentOrder?.outTradeNo)) return previous;
+      return update(previous);
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    openRef.current = open;
+    const incarnation = ++incarnationRef.current;
+    refreshedOrderIdRef.current = null;
+    setOrderState({ ...INITIAL_ORDER_STATE, incarnation });
+    return () => {
+      openRef.current = false;
+      incarnationRef.current += 1;
+      pollInFlightRef.current = null;
+      loadRequestIdRef.current += 1;
+      stopPolling();
+    };
+  }, [open, stopPolling]);
 
   const availableMethods = useMemo<BillingMethodOption[]>(() => (
     Object.entries(checkoutInfo?.methods ?? {})
@@ -472,8 +520,7 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
     const requestId = ++loadRequestIdRef.current;
     setLoadStatus('loading');
     setLoadErrorMessage(null);
-    setCurrentOrder(null);
-    setOrderErrorMessage(null);
+    setOrderState((previous) => ({ ...previous, currentOrder: null, orderErrorMessage: null }));
     setAcceptedAgreement(false);
     stopPolling();
 
@@ -498,37 +545,27 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
     }
   }, [stopPolling]);
 
-  const verifyCurrentOrder = useCallback(async (outTradeNo: string, manual: boolean) => {
-    if (pollInFlightRef.current) return;
-    pollInFlightRef.current = true;
-    if (manual) {
-      setCheckingOrder(true);
-    } else {
-      setVerifyingOrder(true);
-    }
+  const verifyCurrentOrder = useCallback(async (order: ActiveBillingOrder, manual: boolean) => {
+    if (!order.outTradeNo) return;
+    const scope: BillingOrderScope = { incarnation: orderState.incarnation, orderId: order.id, outTradeNo: order.outTradeNo };
+    const inFlight = pollInFlightRef.current;
+    if (inFlight?.incarnation === scope.incarnation && inFlight.orderId === scope.orderId && inFlight.outTradeNo === scope.outTradeNo) return;
+    pollInFlightRef.current = scope;
+    commitOrderState(scope, (previous) => ({ ...previous, checkingOrder: manual || previous.checkingOrder, verifyingOrder: !manual }));
 
     try {
-      const nextOrder = await verifyBillingOrder({ outTradeNo });
-      if (!openRef.current) return;
-      setCurrentOrder((previous) => mergePaymentOrder(nextOrder, previous));
-      setOrderErrorMessage(null);
+      const nextOrder = await verifyBillingOrder({ outTradeNo: order.outTradeNo });
+      commitOrderState(scope, (previous) => ({ ...previous, currentOrder: mergePaymentOrder(nextOrder, previous.currentOrder), orderErrorMessage: null }));
     } catch (error) {
-      if (!openRef.current) return;
-      setOrderErrorMessage(t('subscriptionDialog.errors.verifyOrderFailed', { message: messageFromError(error) }));
+      commitOrderState(scope, (previous) => ({ ...previous, orderErrorMessage: t('subscriptionDialog.errors.verifyOrderFailed', { message: messageFromError(error) }) }));
     } finally {
-      pollInFlightRef.current = false;
-      if (openRef.current) {
-        setCheckingOrder(false);
-        setVerifyingOrder(false);
-      }
+      if (pollInFlightRef.current === scope) pollInFlightRef.current = null;
+      commitOrderState(scope, (previous) => ({ ...previous, checkingOrder: false, verifyingOrder: false }));
     }
-  }, [t]);
+  }, [commitOrderState, orderState.incarnation, t]);
 
   useEffect(() => {
-    openRef.current = open;
     if (!open) {
-      stopPolling();
-      loadRequestIdRef.current += 1;
       setActiveDialogTab('current');
       setLoadStatus('idle');
       setLoadErrorMessage(null);
@@ -536,26 +573,18 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
       setPlans([]);
       setSelectedMethodId('');
       setSelectedPlanId(null);
-      setCurrentOrder(null);
-      setOrderErrorMessage(null);
       setAcceptedAgreement(false);
-      setCreatingOrder(false);
-      setVerifyingOrder(false);
-      setCheckingOrder(false);
-      setCopiedText(null);
       return;
     }
 
     setActiveDialogTab('current');
     void refreshSubscriptions();
-  }, [open, refreshSubscriptions, stopPolling]);
+  }, [open, refreshSubscriptions]);
 
   useEffect(() => {
     if (!open || activeDialogTab !== 'checkout' || loadStatus !== 'idle') return;
     void loadBillingData();
   }, [activeDialogTab, loadBillingData, loadStatus, open]);
-
-  useEffect(() => () => stopPolling(), [stopPolling]);
 
   useEffect(() => {
     if (!open || !currentOrder || !shouldPollOrderStatus(currentOrder.status) || !currentOrder.outTradeNo) {
@@ -563,9 +592,8 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
       return;
     }
 
-    const outTradeNo = currentOrder.outTradeNo;
     const timer = window.setInterval(() => {
-      void verifyCurrentOrder(outTradeNo, false);
+      void verifyCurrentOrder(currentOrder, false);
     }, POLL_INTERVAL_MS);
     pollTimerRef.current = timer;
 
@@ -598,8 +626,8 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
 
   async function createOrder(): Promise<void> {
     if (!selectedPlan || !selectedMethodId || creatingOrder || hasPendingOrder) return;
-    setCreatingOrder(true);
-    setOrderErrorMessage(null);
+    const scope: BillingOrderScope = { incarnation: orderState.incarnation, orderId: currentOrder?.id ?? null, outTradeNo: currentOrder?.outTradeNo };
+    commitOrderState(scope, (previous) => ({ ...previous, creatingOrder: true, orderErrorMessage: null }));
     stopPolling();
 
     try {
@@ -612,48 +640,43 @@ export function SubscriptionPlanDialog({ open, onOpenChange }: SubscriptionPlanD
         paymentSource: 'matcha',
         isMobile: false,
       });
-      if (!openRef.current) return;
-      setCurrentOrder(activeOrderFromResult(result, selectedMethodId));
-      refreshedOrderIdRef.current = null;
+      commitOrderState(scope, (previous) => ({ ...INITIAL_ORDER_STATE, incarnation: previous.incarnation, currentOrder: activeOrderFromResult(result, selectedMethodId) }));
     } catch (error) {
-      if (!openRef.current) return;
-      setOrderErrorMessage(t('subscriptionDialog.errors.createOrderFailed', { message: messageFromError(error) }));
-    } finally {
-      if (openRef.current) setCreatingOrder(false);
+      commitOrderState(scope, (previous) => ({ ...previous, creatingOrder: false, orderErrorMessage: t('subscriptionDialog.errors.createOrderFailed', { message: messageFromError(error) }) }));
     }
   }
 
   async function reloadOrder(): Promise<void> {
     if (!currentOrder || checkingOrder) return;
-    setCheckingOrder(true);
-    setOrderErrorMessage(null);
+    const scope: BillingOrderScope = { incarnation: orderState.incarnation, orderId: currentOrder.id, outTradeNo: currentOrder.outTradeNo };
+    commitOrderState(scope, (previous) => ({ ...previous, checkingOrder: true, orderErrorMessage: null }));
 
     try {
       const nextOrder = await fetchBillingOrder(currentOrder.id);
-      if (!openRef.current) return;
-      setCurrentOrder((previous) => mergePaymentOrder(nextOrder, previous));
+      commitOrderState(scope, (previous) => ({ ...previous, currentOrder: mergePaymentOrder(nextOrder, previous.currentOrder) }));
     } catch (error) {
-      if (!openRef.current) return;
-      setOrderErrorMessage(t('subscriptionDialog.errors.reloadOrderFailed', { message: messageFromError(error) }));
+      commitOrderState(scope, (previous) => ({ ...previous, orderErrorMessage: t('subscriptionDialog.errors.reloadOrderFailed', { message: messageFromError(error) }) }));
     } finally {
-      if (openRef.current) setCheckingOrder(false);
+      commitOrderState(scope, (previous) => ({ ...previous, checkingOrder: false }));
     }
   }
 
   async function openPayUrl(payUrl: string): Promise<void> {
+    const scope: BillingOrderScope = { incarnation: orderState.incarnation, orderId: currentOrder?.id ?? null, outTradeNo: currentOrder?.outTradeNo };
     try {
       await window.electron.openExternal(payUrl);
     } catch (error) {
-      setOrderErrorMessage(t('subscriptionDialog.errors.openPayUrlFailed', { message: messageFromError(error) }));
+      commitOrderState(scope, (previous) => ({ ...previous, orderErrorMessage: t('subscriptionDialog.errors.openPayUrlFailed', { message: messageFromError(error) }) }));
     }
   }
 
   async function copyText(text: string): Promise<void> {
+    const scope: BillingOrderScope = { incarnation: orderState.incarnation, orderId: currentOrder?.id ?? null, outTradeNo: currentOrder?.outTradeNo };
     try {
       await navigator.clipboard.writeText(text);
-      setCopiedText(text);
+      commitOrderState(scope, (previous) => ({ ...previous, copiedText: text }));
     } catch (error) {
-      setOrderErrorMessage(t('subscriptionDialog.errors.copyFailed', { message: messageFromError(error) }));
+      commitOrderState(scope, (previous) => ({ ...previous, orderErrorMessage: t('subscriptionDialog.errors.copyFailed', { message: messageFromError(error) }) }));
     }
   }
 
@@ -989,7 +1012,7 @@ function PaymentSummaryPanel({
   onMethodChange: (methodId: string) => void;
   onOpenPayUrl: (value: string) => Promise<void>;
   onReloadOrder: () => Promise<void>;
-  onVerifyOrder: (outTradeNo: string, manual: boolean) => Promise<void>;
+  onVerifyOrder: (order: ActiveBillingOrder, manual: boolean) => Promise<void>;
 }) {
   return (
     <aside className="rounded-[1.35rem] border border-border/70 bg-card p-4 lg:sticky lg:top-0">
@@ -1209,7 +1232,7 @@ function OrderPaymentPanel({
   onCopy: (value: string) => Promise<void>;
   onOpenPayUrl: (value: string) => Promise<void>;
   onReloadOrder: () => Promise<void>;
-  onVerifyOrder: (outTradeNo: string, manual: boolean) => Promise<void>;
+  onVerifyOrder: (order: ActiveBillingOrder, manual: boolean) => Promise<void>;
 }) {
   if (!currentOrder) {
     return null;
@@ -1282,7 +1305,7 @@ function OrderPaymentPanel({
           variant="outline"
           size="sm"
           disabled={checkingOrder || verifyingOrder || !currentOrder.outTradeNo}
-          onClick={() => { if (currentOrder.outTradeNo) void onVerifyOrder(currentOrder.outTradeNo, true); }}
+          onClick={() => { if (currentOrder.outTradeNo) void onVerifyOrder(currentOrder, true); }}
         >
           {verifyingOrder ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
           {t('subscriptionDialog.order.verify')}

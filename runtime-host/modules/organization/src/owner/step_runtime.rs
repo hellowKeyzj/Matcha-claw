@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use organization::{
-    ActivityKind, ActivityPhase, ActivityRequest, ActivityTarget, AuthorizedGraphOutcome,
-    ControlExecutionStep, DeliveryPhase, GraphEvent, GraphRunFacts, GraphRunId,
-    GraphRunLifecycleState, GraphState, NodeId, NodeKind, OrganizationStore, RoleId,
-    RoleSessionReceipt, RunStartGate, StoreFault,
+    ActivityKind, ActivityPhase, ActivityRequest, ActivityTarget, ControlExecutionStep,
+    DeliveryPhase, GraphRunFacts, GraphRunId, GraphRunLifecycleState, GraphState, NodeId,
+    NodeKind, OrganizationStore, RoleId, RoleSessionReceipt, RunStartGate, StoreFault,
 };
 
 use platform::trace::{identifier_hash, runtime_trace};
@@ -226,37 +225,13 @@ fn graph_after_control_steps(
 ) -> Result<GraphState, StoreFault> {
     let mut planned_graph = graph.clone();
     for step in control_steps {
-        planned_graph = organization::reduce(planned_graph, graph_event_for_control_step(step))
-            .map_err(StoreFault::GraphReduce)?;
+        planned_graph = organization::reduce(
+            planned_graph,
+            crate::run::control::graph_event_for_step(step),
+        )
+        .map_err(StoreFault::GraphReduce)?;
     }
     Ok(planned_graph)
-}
-
-fn graph_event_for_control_step(step: &ControlExecutionStep) -> GraphEvent {
-    match step {
-        ControlExecutionStep::GraphEvent(event) => event.clone(),
-        ControlExecutionStep::HumanDecisionApproval { node_id, fence, requested_at } => {
-            GraphEvent::NodeWaiting {
-                node_id: node_id.clone(),
-                fence: fence.clone(),
-                waiting_at: *requested_at,
-            }
-        }
-        ControlExecutionStep::ControlResolution(resolution) => match resolution.outcome() {
-            AuthorizedGraphOutcome::Completed => GraphEvent::NodeCompleted {
-                node_id: resolution.node_id().clone(),
-                fence: resolution.fence().clone(),
-                output_port: resolution.output_port().to_owned(),
-                completed_at: resolution.resolved_at(),
-            },
-            AuthorizedGraphOutcome::Failed => GraphEvent::NodeFailed {
-                node_id: resolution.node_id().clone(),
-                fence: resolution.fence().clone(),
-                output_port: resolution.output_port().to_owned(),
-                failed_at: resolution.resolved_at(),
-            },
-        },
-    }
 }
 
 fn compose_activity_prompt(

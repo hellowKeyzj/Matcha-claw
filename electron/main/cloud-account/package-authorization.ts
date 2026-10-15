@@ -1,6 +1,7 @@
 import { isTraceEnabled, traceDebug } from '../../utils/trace-logger';
 import { CloudAccountClientError, removePackageDownload } from './client';
 import { unwrapCloudPackageDeviceEnvelope } from './device-key-store';
+import { readPackageInstallOutcome, type PackageOperationTransports } from './package-operations';
 import type { CloudPackageAuthorization, CloudPackageDownloadRequest, CloudPackageLocalDownload } from './types';
 import type { SealedResourceAuthorizationTransport, SealedResourceCloudPackage } from '../runtime-host-delivery/transport/sealed-resource';
 
@@ -21,7 +22,7 @@ const isTransient = (error: unknown) => !(error instanceof CloudAccountClientErr
   || (error.status >= 500 && error.code !== 'INVALID_PACKAGE_AUTHORIZATION' && error.code !== 'PACKAGE_AUTHORIZATION_REJECTED');
 
 export function createPackageAuthorizationLifecycle(
-  transport: SealedResourceAuthorizationTransport,
+  getTransport: () => Promise<SealedResourceAuthorizationTransport>,
   authorize: (request: CloudPackageDownloadRequest) => Promise<CloudPackageAuthorization>,
   download: (request: CloudPackageDownloadRequest) => Promise<CloudPackageLocalDownload>,
 ) {
@@ -32,13 +33,21 @@ export function createPackageAuthorizationLifecycle(
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let runtimeTail = Promise.resolve();
+  let transportReady = false;
   let restoreTask: Promise<void> | undefined;
   let restoreRetryAt = Infinity;
   let restoreRetryDelay = 0;
   const packages = new Map<string, TrackedPackage>();
   const renewals = new Map<string, Promise<void>>();
   const installReservations = new Set<Readonly<{ epoch: number }>>();
-  const pendingInstalls = new Map<string, PreparedPackageInstall>();
+  const pendingInstalls = new Map<string, {
+    prepared: PreparedPackageInstall;
+    transports: Promise<PackageOperationTransports>;
+    observing?: Promise<void>;
+    readRequested?: boolean;
+  }>();
+  const installTasks = new Set<Promise<void>>();
+  let unsubscribeInstalls: (() => void) | undefined;
 
   const current = (expected: number) => !closed && running && userId !== undefined && epoch === expected;
   const assertCurrent = (expected: number) => {
@@ -58,6 +67,8 @@ export function createPackageAuthorizationLifecycle(
     renewals.clear();
     installReservations.clear();
     pendingInstalls.clear();
+    unsubscribeInstalls?.();
+    unsubscribeInstalls = undefined;
     restoreTask = undefined;
     restoreRetryAt = Infinity;
     restoreRetryDelay = 0;
@@ -72,6 +83,9 @@ export function createPackageAuthorizationLifecycle(
     const authorizationKey = key ?? await unwrap(authorization);
     assertCurrent(expected);
     await runtimeOperation(async () => {
+      assertCurrent(expected);
+      const transport = await getTransport();
+      transportReady = true;
       assertCurrent(expected);
       assertAuthorization(metadata.packageVersionId, metadata.packageType, authorization);
       const response = await transport.authorizePackage({
@@ -148,6 +162,8 @@ export function createPackageAuthorizationLifecycle(
     if (current(expected)) schedule();
   };
   const clear = () => runtimeOperation(async () => {
+    const transport = await getTransport();
+    transportReady = true;
     const response = await transport.clearAuthorizations();
     if (response.status !== 200 || response.body.outcome !== 'accepted') {
       throw new CloudAccountClientError(503, 503, 'Package authorization clearing is unavailable');
@@ -173,6 +189,9 @@ export function createPackageAuthorizationLifecycle(
       stage = 'list';
       stageStartedAt = isTraceEnabled() ? performance.now() : 0;
       traceDebug(() => '[startup-trace] source=cloud-package-authorization phase=restore stage=list-start');
+      const transport = await getTransport();
+      transportReady = true;
+      if (!current(expected)) return;
       const response = await transport.listCloudPackages();
       if (response.status !== 200) throw new CloudAccountClientError(503, 503, 'Installed cloud packages are unavailable');
       packageCount = response.body.packages.length;
@@ -194,7 +213,7 @@ export function createPackageAuthorizationLifecycle(
     })().catch((error) => {
       outcome = 'failed';
       if (stage) traceDebug(() => `[startup-trace] source=cloud-package-authorization phase=restore stage=${stage}-end duration_ms=${(performance.now() - stageStartedAt).toFixed(1)} outcome=failed`);
-      if (current(expected) && isTransient(error)) {
+      if (transportReady && current(expected) && isTransient(error)) {
         restoreRetryDelay = nextRetryDelay(restoreRetryDelay);
         restoreRetryAt = Date.now() + restoreRetryDelay;
         schedule();
@@ -212,6 +231,50 @@ export function createPackageAuthorizationLifecycle(
     if (!current(prepared.epoch)) return;
     track(prepared.cloudMetadata, prepared.leaseExpiresAt);
     schedule();
+  };
+  const acknowledgePackageInstall = (callId: string, confirmed: boolean) => {
+    const pending = pendingInstalls.get(callId);
+    if (!pending) return;
+    pendingInstalls.delete(callId);
+    if (confirmed) packageInstalled(pending.prepared);
+    if (!pendingInstalls.size) {
+      unsubscribeInstalls?.();
+      unsubscribeInstalls = undefined;
+    }
+  };
+  const observeInstall = (callId: string): Promise<void> | undefined => {
+    const pending = pendingInstalls.get(callId);
+    if (!pending || !current(pending.prepared.epoch)) return;
+    if (pending.observing) { pending.readRequested = true; return pending.observing; }
+    const task = (async () => {
+      try {
+        do {
+          pending.readRequested = false;
+          try {
+            const transports = await pending.transports;
+            if (pendingInstalls.get(callId) !== pending || !current(pending.prepared.epoch)) return;
+            if (!unsubscribeInstalls) {
+              unsubscribeInstalls = transports.subscribeCalls((event) => {
+                if (event === 'resync') {
+                  for (const id of pendingInstalls.keys()) observeInstall(id);
+                } else if (event !== 'disconnected') observeInstall(event.callId);
+              });
+            }
+            const confirmed = await readPackageInstallOutcome(transports, callId, pending.prepared.cloudMetadata.packageType);
+            if (pendingInstalls.get(callId) === pending && current(pending.prepared.epoch) && confirmed !== undefined) {
+              acknowledgePackageInstall(callId, confirmed);
+            }
+          } catch {
+            // Observation failure is not native completion; a Call event/resync reads it again.
+          }
+        } while (pending.readRequested && pendingInstalls.get(callId) === pending && current(pending.prepared.epoch));
+      } finally {
+        pending.observing = undefined;
+      }
+    })().finally(() => { installTasks.delete(task); });
+    pending.observing = task;
+    installTasks.add(task);
+    return task;
   };
 
   return {
@@ -240,13 +303,19 @@ export function createPackageAuthorizationLifecycle(
     async close() {
       invalidate();
       closed = true;
+      while (installTasks.size) await Promise.all(installTasks);
       if (running) await clear();
+      else await runtimeTail;
     },
     async preparePackageInstall(request: CloudPackageDownloadRequest): Promise<PreparedPackageInstall> {
       // Wait for the session-transition clear, not unrelated background renewals.
       await runtimeTail;
       const expected = epoch;
       assertCurrent(expected);
+      if (installReservations.size + pendingInstalls.size >= MAX_PENDING_INSTALLS) {
+        await Promise.all([...pendingInstalls.keys()].map(observeInstall));
+        assertCurrent(expected);
+      }
       const reservation = { epoch: expected };
       if (installReservations.size + pendingInstalls.size >= MAX_PENDING_INSTALLS) {
         throw new CloudAccountClientError(409, 'PACKAGE_INSTALL_QUEUE_FULL', 'Confirm pending package installs before installing another package');
@@ -287,20 +356,16 @@ export function createPackageAuthorizationLifecycle(
       assertCurrent(prepared.epoch);
       if (!installReservations.has(prepared)) throw new CloudAccountClientError(409, 409, 'Cloud package install reservation is unavailable');
     },
-    bindPackageInstall(callId: string, prepared: PreparedPackageInstall) {
+    bindPackageInstall(callId: string, prepared: PreparedPackageInstall, transports: Promise<PackageOperationTransports>) {
       // An admitted native install keeps its receipt even if the cloud session changed.
       if (!installReservations.delete(prepared) || !current(prepared.epoch)) return;
-      pendingInstalls.set(callId, prepared);
+      pendingInstalls.set(callId, { prepared, transports });
+      observeInstall(callId);
     },
     releasePackageInstall(prepared: PreparedPackageInstall) {
       installReservations.delete(prepared);
     },
-    acknowledgePackageInstall(callId: string, confirmed: boolean) {
-      const prepared = pendingInstalls.get(callId);
-      if (!prepared) return;
-      pendingInstalls.delete(callId);
-      if (confirmed) packageInstalled(prepared);
-    },
+    acknowledgePackageInstall,
   };
 }
 

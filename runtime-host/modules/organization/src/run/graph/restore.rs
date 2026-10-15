@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, num::NonZeroU32};
 use super::{
     definition::{DefinitionError, NodeId, NodeKind},
     reducer::state_has_only_current_ready_items,
-    state::{AttemptId, GraphState, NodeExecutionId},
+    state::{AttemptId, GraphState},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -112,9 +112,13 @@ pub fn restore_oracle(state: GraphState) -> Result<GraphState, RestoreError> {
                 });
             }
             let attempt_id = AttemptId::for_node(node_id, expected_number);
-            let execution_id = NodeExecutionId::for_attempt(&attempt_id);
             if attempt.fence().attempt_id() != &attempt_id
-                || attempt.fence().node_execution_id() != &execution_id
+                || !attempt
+                    .fence()
+                    .node_execution_id()
+                    .matches_attempt(node_id, expected_number)
+                || attempt.fence().node_execution_id().replacement_namespace()
+                    != state.replacement_namespace()
             {
                 return Err(RestoreError::InvalidAttemptFence {
                     node_id: node_id.clone(),

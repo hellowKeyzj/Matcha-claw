@@ -14,15 +14,27 @@ pub struct FleetHandle {
     owner: OwnerRuntimeHandle<FleetCommand, FleetQuery>,
     recorder: Option<platform::call::CallRecorder>,
     recording: Option<crate::call::FleetCall>,
+    terminal_executions: super::terminal::TerminalExecutions,
 }
 
 impl FleetHandle {
-    pub(crate) fn new(owner: OwnerRuntimeHandle<FleetCommand, FleetQuery>) -> Self {
+    pub(crate) fn new(
+        owner: OwnerRuntimeHandle<FleetCommand, FleetQuery>,
+        terminal_executions: super::terminal::TerminalExecutions,
+    ) -> Self {
         Self {
             owner,
             recorder: None,
             recording: None,
+            terminal_executions,
         }
+    }
+
+    pub(crate) fn terminal_cancellation(
+        &self,
+        context: &crate::terminal_stream::TerminalContext,
+    ) -> Option<tokio_util::sync::CancellationToken> {
+        self.terminal_executions.cancellation(context)
     }
 
     pub(crate) fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
@@ -315,13 +327,17 @@ impl FleetHandle {
     > {
         let (reply, reply_rx) = oneshot::channel();
         self.admit(FleetCommand::TerminalClose {
-            session,
+            session: session.clone(),
             generation,
             reply,
         })
         .await
         .map_err(|_| RequestAdmissionClosed)?;
-        reply_rx.await.map_err(|_| RequestAdmissionClosed)
+        let result = reply_rx.await.map_err(|_| RequestAdmissionClosed)?;
+        if result.is_ok() {
+            self.terminal_executions.stop(&session, generation).await;
+        }
+        Ok(result)
     }
 
     pub async fn terminal_fail_fenced(
@@ -334,13 +350,17 @@ impl FleetHandle {
     > {
         let (reply, reply_rx) = oneshot::channel();
         self.admit(FleetCommand::TerminalFail {
-            session,
+            session: session.clone(),
             generation,
             reply,
         })
         .await
         .map_err(|_| RequestAdmissionClosed)?;
-        reply_rx.await.map_err(|_| RequestAdmissionClosed)
+        let result = reply_rx.await.map_err(|_| RequestAdmissionClosed)?;
+        if result.is_ok() {
+            self.terminal_executions.stop(&session, generation).await;
+        }
+        Ok(result)
     }
 
     pub async fn terminal_close(
@@ -354,7 +374,13 @@ impl FleetHandle {
         self.admit(FleetCommand::TerminalCloseCurrent { session, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
-        reply_rx.await.map_err(|_| RequestAdmissionClosed)
+        let result = reply_rx.await.map_err(|_| RequestAdmissionClosed)?;
+        if let Ok(summary) = &result {
+            self.terminal_executions
+                .stop(summary.id(), summary.generation())
+                .await;
+        }
+        Ok(result)
     }
 
     pub async fn terminal_begin_close(
@@ -368,7 +394,13 @@ impl FleetHandle {
         self.admit(FleetCommand::TerminalBeginCloseCurrent { session, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
-        reply_rx.await.map_err(|_| RequestAdmissionClosed)
+        let result = reply_rx.await.map_err(|_| RequestAdmissionClosed)?;
+        if let Ok(summary) = &result {
+            self.terminal_executions
+                .stop(summary.id(), summary.generation())
+                .await;
+        }
+        Ok(result)
     }
 
     pub async fn terminal_finish_close(
@@ -382,7 +414,13 @@ impl FleetHandle {
         self.admit(FleetCommand::TerminalFinishCloseCurrent { session, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
-        reply_rx.await.map_err(|_| RequestAdmissionClosed)
+        let result = reply_rx.await.map_err(|_| RequestAdmissionClosed)?;
+        if let Ok(summary) = &result {
+            self.terminal_executions
+                .stop(summary.id(), summary.generation())
+                .await;
+        }
+        Ok(result)
     }
 
     pub async fn terminal_reconnect(
@@ -396,7 +434,13 @@ impl FleetHandle {
         self.admit(FleetCommand::TerminalReconnect { session, reply })
             .await
             .map_err(|_| RequestAdmissionClosed)?;
-        reply_rx.await.map_err(|_| RequestAdmissionClosed)
+        let result = reply_rx.await.map_err(|_| RequestAdmissionClosed)?;
+        if let Ok(opened) = &result {
+            self.terminal_executions
+                .stop_previous(opened.session.id(), opened.session.generation())
+                .await;
+        }
+        Ok(result)
     }
 
     pub async fn terminal_begin_close_fenced(
@@ -409,13 +453,17 @@ impl FleetHandle {
     > {
         let (reply, reply_rx) = oneshot::channel();
         self.admit(FleetCommand::TerminalBeginClose {
-            session,
+            session: session.clone(),
             generation,
             reply,
         })
         .await
         .map_err(|_| RequestAdmissionClosed)?;
-        reply_rx.await.map_err(|_| RequestAdmissionClosed)
+        let result = reply_rx.await.map_err(|_| RequestAdmissionClosed)?;
+        if result.is_ok() {
+            self.terminal_executions.stop(&session, generation).await;
+        }
+        Ok(result)
     }
 
     pub async fn terminal_finish_close_fenced(
@@ -428,13 +476,17 @@ impl FleetHandle {
     > {
         let (reply, reply_rx) = oneshot::channel();
         self.admit(FleetCommand::TerminalFinishClose {
-            session,
+            session: session.clone(),
             generation,
             reply,
         })
         .await
         .map_err(|_| RequestAdmissionClosed)?;
-        reply_rx.await.map_err(|_| RequestAdmissionClosed)
+        let result = reply_rx.await.map_err(|_| RequestAdmissionClosed)?;
+        if result.is_ok() {
+            self.terminal_executions.stop(&session, generation).await;
+        }
+        Ok(result)
     }
 
     pub async fn terminal_list(

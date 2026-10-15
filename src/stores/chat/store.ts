@@ -52,7 +52,7 @@ import {
   type ChatSessionRuntimeEndpointTarget,
   type ChatStoreState,
 } from './types';
-import { applySessionView, getSessionMeta, getSessionRuntime, patchSessionMeta } from './store-state-helpers';
+import { applySessionView, getSessionMeta, getSessionProjectionWatermark, getSessionRuntime, patchSessionMeta } from './store-state-helpers';
 import { observeChatSession, releaseChatSession } from '@/services/runtime/session-runtime';
 import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, findSessionRecordKey, resolveSessionOperationTarget, sameRuntimeEndpointScope } from './session-identity';
 import {
@@ -218,6 +218,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
   const runtimeKernel = createChatStoreKernel(set);
   const { beginMutating, finishMutating, historyRuntime, sessionRunCache } = runtimeKernel;
   let sessionRuntimeBootstrapSequence = 0;
+  const approvalSyncRequests = new Map<string, symbol>();
   const observations = new Map<string, {
     identity: SessionIdentity;
     leaseId: string;
@@ -351,6 +352,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       status: 'idle',
       error: null,
       endpoints: [],
+      directoryRevision: 0,
+      directoryRevisionByRuntimeScopeKey: {},
       defaultSessionPromptScope: null,
     },
     sessionCatalogLoadedAtByRuntimeScopeKey: {},
@@ -425,7 +428,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       try {
         useRuntimeEndpointsStore.getState().init();
         await useRuntimeEndpointsStore.getState().refresh();
-        const { status, error, endpoints } = useRuntimeEndpointsStore.getState();
+        const { status, error, endpoints, revision, revisionByRuntimeScopeKey } = useRuntimeEndpointsStore.getState();
         if (sessionRuntimeBootstrapSequence !== requestSequence) {
           return;
         }
@@ -446,6 +449,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
               status: starting ? 'loading' : 'error',
               error: starting ? null : message,
               endpoints: targets,
+              directoryRevision: revision,
+              directoryRevisionByRuntimeScopeKey: revisionByRuntimeScopeKey,
               defaultSessionPromptScope: null,
             };
             return {
@@ -466,12 +471,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
             status: 'ready' as const,
             error: null,
             endpoints: targets,
+            directoryRevision: revision,
+            directoryRevisionByRuntimeScopeKey: revisionByRuntimeScopeKey,
             defaultSessionPromptScope,
           };
           const sessionRuntimeGraph = buildSessionRuntimeGraph(sessionRuntimeCatalog, state.loadedSessions);
           const currentConversation = state.currentSessionKey && state.loadedSessions[state.currentSessionKey]
             ? buildCurrentConversationFromSessionRecord(state.loadedSessions[state.currentSessionKey]!)
-            : createDraftCurrentConversation(defaultSessionPromptScope.endpoint, defaultSessionPromptScope.agentId);
+            : state.currentConversation ?? createDraftCurrentConversation(defaultSessionPromptScope.endpoint, defaultSessionPromptScope.agentId);
           return {
             currentConversation,
             sessionRuntimeGraph,
@@ -621,38 +628,51 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       });
     },
     syncPendingApprovals: async (sessionKeyHint) => {
+      let identityKey: string | null = null;
+      const request = Symbol();
       try {
-        const targetSessionKey = normalizeTaskSessionKey(sessionKeyHint, get().currentSessionKey);
-        const target = resolveSessionOperationTarget(get(), targetSessionKey);
+        const stateBeforeFetch = get();
+        const targetSessionKey = normalizeTaskSessionKey(sessionKeyHint, stateBeforeFetch.currentSessionKey);
+        const target = resolveSessionOperationTarget(stateBeforeFetch, targetSessionKey);
         if (!target.endpointSessionId) {
           return;
         }
+        const targetIdentityKey = buildSessionIdentityKey(target.sessionIdentity);
+        identityKey = targetIdentityKey;
+        approvalSyncRequests.set(targetIdentityKey, request);
+        const recordIdentity = stateBeforeFetch.loadedSessions[targetSessionKey]?.meta.sessionIdentity;
+        const approvalsBeforeFetch = stateBeforeFetch.pendingApprovalsBySession[targetSessionKey];
+        const watermark = getSessionProjectionWatermark(get, target.sessionIdentity);
         const payload = await hostSessionApprovals({
           sessionIdentity: target.sessionIdentity,
           endpointSessionId: target.endpointSessionId,
         });
-        const stateAfterFetch = get();
-        const targetRecordKey = findSessionRecordKey(stateAfterFetch, target.sessionIdentity) ?? targetSessionKey;
-        const grouped = groupApprovalsBySession(payload.approvals.flatMap((approval) => {
-          const recordKey = findSessionRecordKey(stateAfterFetch, approval.sessionIdentity);
-          if (!recordKey) {
-            return [];
+        set((state) => {
+          const targetRecordKey = findSessionRecordKey(state, target.sessionIdentity);
+          if (!targetRecordKey
+            || approvalSyncRequests.get(targetIdentityKey) !== request
+            || state.loadedSessions[targetRecordKey]?.meta.sessionIdentity !== recordIdentity
+            || getSessionMeta(state, targetRecordKey).endpointSessionId !== target.endpointSessionId
+            || state.pendingApprovalsBySession[targetRecordKey] !== approvalsBeforeFetch
+            || getSessionProjectionWatermark(get, target.sessionIdentity) !== watermark) {
+            return state;
           }
-          const meta = getSessionMeta(stateAfterFetch, recordKey);
-          return [{
-            ...approval,
-            sessionKey: recordKey,
-            endpointSessionId: meta.endpointSessionId ?? undefined,
-            allowedDecisions: [...approval.allowedDecisions],
-          }];
-        }));
-        set((state) => buildSyncPendingApprovalsPatch({
-          state,
-          grouped,
-          sessionKeys: [targetRecordKey],
-        }));
+          const grouped = groupApprovalsBySession(payload.approvals.flatMap((approval) => (
+            buildSessionIdentityKey(approval.sessionIdentity) === targetIdentityKey ? [{
+              ...approval,
+              sessionKey: targetRecordKey,
+              endpointSessionId: target.endpointSessionId,
+              allowedDecisions: [...approval.allowedDecisions],
+            }] : []
+          )));
+          return buildSyncPendingApprovalsPatch({ state, grouped, sessionKeys: [targetRecordKey] });
+        });
       } catch {
         // ignore
+      } finally {
+        if (identityKey && approvalSyncRequests.get(identityKey) === request) {
+          approvalSyncRequests.delete(identityKey);
+        }
       }
     },
     resolveApproval: async (approval, decision) => {

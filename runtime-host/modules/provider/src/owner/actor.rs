@@ -190,6 +190,10 @@ impl ProviderOwner {
         }
         match command {
             ProviderCommand::ConfigurePrivateResolver { resolver, reply } => {
+                // Before routes/ready: reconcile only this freshly reloaded canonical inventory.
+                if self.cascade.reload().is_ok() {
+                    let _ = resolver.recover_account_credentials(self.cascade.accounts()).await;
+                }
                 self.accounts.set_private_resolver(resolver.clone());
                 self.models.set_private_resolver(resolver);
                 self.update_snapshot();
@@ -201,8 +205,31 @@ impl ProviderOwner {
                 reply,
                 ..
             } => {
+                let transaction = match transaction {
+                    Some(transaction) => Some(transaction),
+                    None => {
+                        let Ok(account_id) = draft.account_id() else {
+                            send_reply(call, reply, ProviderAccountsDelivery::Rejected).await;
+                            return;
+                        };
+                        match self.accounts.begin_transaction(
+                            account_id, draft.revision_value(), "replace",
+                            !matches!(draft.auth_mode(), "local" | "cliReuse"),
+                        ).await {
+                            Ok(transaction) => transaction,
+                            Err(error) => {
+                                if let Some(call) = &mut call {
+                                    call.diagnostic(ProviderCallDiagnosticReason::PrivateTransactionSettleFailed, Some(error.safe_code()));
+                                }
+                                send_reply(call, reply, ProviderAccountsDelivery::Unavailable).await;
+                                return;
+                            }
+                        }
+                    }
+                };
                 if !self.claim_account_transaction(&mut call, transaction.as_ref()).await {
-                    send_reply(call, reply, ProviderAccountsDelivery::Unavailable).await;
+                    let outcome = self.settle_account_transaction(&mut call, transaction.as_ref(), ProviderAccountsDelivery::Unavailable).await;
+                    send_reply(call, reply, outcome).await;
                     return;
                 }
                 let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops()
@@ -217,7 +244,7 @@ impl ProviderOwner {
                 };
                 let outcome = self
                     .accounts
-                    .replace(&mut self.cascade, identity_ops, draft).await;
+                    .replace(&mut self.cascade, identity_ops, draft, transaction.as_ref()).await;
                 self.update_snapshot();
                 if matches!(
                     outcome.desired,
@@ -240,8 +267,22 @@ impl ProviderOwner {
                 reply,
                 ..
             } => {
+                let transaction = match transaction {
+                    Some(transaction) => Some(transaction),
+                    None => match self.accounts.begin_transaction(id.clone(), revision.get(), "delete", false).await {
+                        Ok(transaction) => transaction,
+                        Err(error) => {
+                            if let Some(call) = &mut call {
+                                call.diagnostic(ProviderCallDiagnosticReason::PrivateTransactionSettleFailed, Some(error.safe_code()));
+                            }
+                            send_reply(call, reply, ProviderAccountsDelivery::Unavailable).await;
+                            return;
+                        }
+                    }
+                };
                 if !self.claim_account_transaction(&mut call, transaction.as_ref()).await {
-                    send_reply(call, reply, ProviderAccountsDelivery::Unavailable).await;
+                    let outcome = self.settle_account_transaction(&mut call, transaction.as_ref(), ProviderAccountsDelivery::Unavailable).await;
+                    send_reply(call, reply, outcome).await;
                     return;
                 }
                 let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops()
@@ -256,7 +297,7 @@ impl ProviderOwner {
                 };
                 let outcome = self
                     .accounts
-                    .delete(&mut self.cascade, identity_ops, id, revision).await;
+                    .delete(&mut self.cascade, identity_ops, id, revision, transaction.as_ref()).await;
                 self.update_snapshot();
                 if matches!(
                     outcome.desired,
@@ -345,14 +386,18 @@ impl ProviderOwner {
     }
 
     async fn claim_account_transaction(
-        &self,
+        &mut self,
         call: &mut Option<ProviderCall>,
         transaction: Option<&ProviderAccountPrivateTransaction>,
     ) -> bool {
         let Some(transaction) = transaction else {
             return true;
         };
-        let Err(error) = self.accounts.claim_transaction(transaction).await else {
+        if self.cascade.reload().is_err() { return false; }
+        let previous_reference = self.cascade.account(&transaction.account_id)
+            .and_then(|account| account.configuration().credential())
+            .map(crate::CredentialReference::as_str);
+        let Err(error) = self.accounts.claim_transaction(transaction, previous_reference).await else {
             return true;
         };
         if let Some(call) = call {
@@ -380,7 +425,12 @@ impl ProviderOwner {
             ProviderAccountsDelivery::Unknown { .. } => "unknown",
             _ => "rejected",
         };
-        let Err(error) = self.accounts.settle_transaction(transaction, settlement).await else {
+        let committed = matches!(&outcome,
+            ProviderAccountsDelivery::Stored { commit: ProviderCommitOutcome::Committed, .. }
+            | ProviderAccountsDelivery::Deleted { commit: ProviderCommitOutcome::Committed, .. }
+            | ProviderAccountsDelivery::Unknown { commit: ProviderCommitOutcome::Committed, .. }
+        );
+        let Err(error) = self.accounts.settle_transaction(transaction, settlement, committed).await else {
             return outcome;
         };
         if let Some(call) = call {

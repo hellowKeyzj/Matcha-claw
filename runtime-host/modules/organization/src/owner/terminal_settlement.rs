@@ -7,7 +7,7 @@ use serde_json::json;
 use crate::{EndpointSessionId, NativeRunSettled};
 use crate::application::team_message::TeamMessageFailure;
 
-use super::team_run::{TeamNodeTerminalResult, TeamRunOwner};
+use super::team_run::TeamRunOwner;
 
 pub(crate) struct TeamRunTerminalSettlement {
     repairs: BTreeMap<String, PendingTeamMessageRepair>,
@@ -181,6 +181,13 @@ impl TeamRunTerminalSettlement {
                 "boundary": "refresh", "error": crate::trace::terminal_error(error),
             }));
         })?;
+        let target = store
+            .native_terminal_target(pending.context.delivery_id())
+            .filter(|target| target.graph_run_id() == pending.context.run_id())
+            .ok_or(StoreFault::InvalidFacts)?;
+        if store.native_terminal_is_retired(&target)? {
+            return Ok(TeamMessageTerminalObservation::Ignored);
+        }
         let delivery = store.facts().deliveries().delivery(pending.context.delivery_id()).ok_or(StoreFault::InvalidFacts)
             .inspect_err(|error| {
                 runtime_trace("runtime.team_run.terminal.error", || json!({
@@ -253,8 +260,9 @@ fn settle_native_run(
         "runHash": identifier_hash(pending.context.run_id().as_str()),
         "attempt": pending.attempt,
         "outcome": match &result {
-            Ok(crate::AuthorizedGraphResolutionOutcome::Recorded) => "recorded",
-            Ok(crate::AuthorizedGraphResolutionOutcome::Replayed) => "replayed",
+            Ok(crate::store::NativeTerminalSettlement::Recorded) => "recorded",
+            Ok(crate::store::NativeTerminalSettlement::Replayed) => "replayed",
+            Ok(crate::store::NativeTerminalSettlement::Retired) => "retired",
             Err(_) => "error",
         },
         "error": result.as_ref().err().map(crate::trace::terminal_error),
@@ -270,7 +278,7 @@ pub(crate) fn settle_native_run_for_delivery(
     delivery_id: &DeliveryId,
     settled: NativeRunSettled,
     settled_at: u64,
-) -> Result<TeamNodeTerminalResult, StoreFault> {
+) -> Result<crate::store::NativeTerminalSettlement, StoreFault> {
     super::team_run::resolve_native_settled_output(store, run_id, delivery_id, settled, settled_at)
 }
 
@@ -298,6 +306,11 @@ fn team_message_terminal_context(
         return Ok(None);
     };
     let target = team_run.native_terminal_target(store, &delivery_id);
+    if let Some(target) = &target
+        && store.native_terminal_is_retired(target)?
+    {
+        return Ok(None);
+    }
     runtime_trace("runtime.team_run.terminal.locate", || json!({
         "nativeRunHash": identifier_hash(native_run_id),
         "deliveryHash": identifier_hash(delivery_id.as_str()),

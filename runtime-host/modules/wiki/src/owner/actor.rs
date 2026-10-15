@@ -3,7 +3,7 @@ use std::{
     future::Future,
     io::{Cursor, Read as _},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -33,7 +33,7 @@ use crate::{
         WikiSourceSkip, WikiSourceTaskActionInput, WikiSourceTaskKind, WikiSourceTasksReceipt,
         WikiSourceWatchConfig, WikiSourceWatchConfigInput, WikiSourceWatchConfigReceipt,
         WikiStatusReceipt, WikiWriteInput, WikiWriteReceipt, absolute_clean_path, build_graph,
-        chunk_markdown_with_overlap, ensure_project_layout, ensure_project_layout_for_template,
+        ensure_project_layout, ensure_project_layout_for_template,
         layout_status, normalize_relative_path, now_ms, project_id_for_root,
         project_template_or_default, project_template_views, resolve_project_path,
         stable_content_hash, system_time_ms, title_for_root,
@@ -108,6 +108,7 @@ pub(crate) struct WikiShared {
     pub(crate) reindex_progress: Arc<crate::reindex::ReindexProgress>,
     pub(crate) ingest_llm: Option<Arc<dyn WikiIngestLlm>>,
     state: Arc<RwLock<WikiState>>,
+    pub(crate) owner: Arc<OnceLock<foundation::execution::OwnerRuntimeHandle<WikiCommand, WikiQuery>>>,
     source_watch_control: SourceWatchControl,
 }
 
@@ -164,6 +165,7 @@ impl WikiOwner {
         Ok(Self {
             shared: WikiShared {
                 vector_index,
+                owner: Arc::new(OnceLock::new()),
                 ingest_llm: input.ingest_llm,
                 question_tasks: Arc::new(question_tasks),
                 blocking,
@@ -266,17 +268,7 @@ impl OwnerSpec for WikiOwner {
 
 async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
     if let Err(error) = crate::call::running(command.call(), command.acceptance()).await {
-        match command {
-            WikiCommand::EmbedPage { input, reply } => {
-                reply
-                    .send_embedded(
-                        Err(error),
-                        input.project_id.expect("embed project resolved before dispatch"),
-                    )
-                    .await;
-            }
-            command => command.reject(error).await,
-        }
+        command.reject(error).await;
         return;
     }
     let state = shared.snapshot().await;
@@ -421,7 +413,7 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             reply,
         } => {
             let _ = reply
-                .send(super::reindex::stage(&shared, &state, input, task_id))
+                .send(super::reindex::stage(&shared, &state, input, task_id).await)
                 .await;
         }
         WikiCommand::StageLint {
@@ -528,7 +520,11 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             let _ = reply.send(result).await;
         }
         WikiCommand::StageImportSource { input, reply } => {
-            let _ = reply.send(stage_import_source(&state, input)).await;
+            let result = stage_import_source(&state, input);
+            if let Ok(staged) = &result {
+                publish_source_executions(std::slice::from_ref(staged));
+            }
+            let _ = reply.send(result).await;
         }
         WikiCommand::ParseImportSource {
             input,
@@ -549,10 +545,18 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
                 .await;
         }
         WikiCommand::StageImportFolder { input, reply } => {
-            let _ = reply.send(stage_import_folder(&state, input)).await;
+            let result = stage_import_folder(&state, input);
+            if let Ok(plan) = &result {
+                publish_source_executions(&plan.imports);
+            }
+            let _ = reply.send(result).await;
         }
         WikiCommand::StageRefreshSources { input, reply } => {
-            let _ = reply.send(stage_refresh_sources(&state, input)).await;
+            let result = stage_refresh_sources(&state, input);
+            if let Ok(plan) = &result {
+                publish_source_executions(&plan.imports);
+            }
+            let _ = reply.send(result).await;
         }
         WikiCommand::StageRefreshSourcePaths {
             project_id,
@@ -560,9 +564,11 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             auto_ingest,
             reply,
         } => {
-            let _ = reply
-                .send(stage_refresh_source_paths(&state, &project_id, paths, auto_ingest))
-                .await;
+            let result = stage_refresh_source_paths(&state, &project_id, paths, auto_ingest);
+            if let Ok(plan) = &result {
+                publish_source_executions(&plan.imports);
+            }
+            let _ = reply.send(result).await;
         }
         WikiCommand::CleanupDeletedWikiPages {
             project_id,
@@ -624,7 +630,11 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
             let _ = reply.send(clear_resolved_reviews(&state, input)).await;
         }
         WikiCommand::RetrySourceTask { input, reply } => {
-            let _ = reply.send(retry_source_task(&state, input)).await;
+            let result = retry_source_task(&state, input);
+            if let Ok(plan) = &result {
+                publish_source_executions(plan.staged.as_slice());
+            }
+            let _ = reply.send(result).await;
         }
         WikiCommand::PauseSourceTask { input, reply } => {
             if let Ok(project) = selected_project(&state, input.project_id.as_deref()) {
@@ -635,7 +645,11 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
                 .await;
         }
         WikiCommand::ResumeSourceTask { input, reply } => {
-            let _ = reply.send(resume_source_task(&state, input)).await;
+            let result = resume_source_task(&state, input);
+            if let Ok(plan) = &result {
+                publish_source_executions(plan.staged.as_slice());
+            }
+            let _ = reply.send(result).await;
         }
         WikiCommand::ReorderSourceTask { input, reply } => {
             let _ = reply.send(reorder_source_task(&state, input)).await;
@@ -645,9 +659,35 @@ async fn handle_project_command(shared: WikiShared, command: WikiCommand) {
         }
         WikiCommand::EmbedPage { input, reply } => {
             let project_id = input.project_id.clone().expect("embed project resolved before dispatch");
-            reply
-                .send_embedded(embed_page(&shared, &state, input).await, project_id)
-                .await;
+            match super::project_commit::prepare_page(&shared, &state, input).await {
+                Ok(plan) => match shared.owner.get().and_then(|owner| owner.try_reserve().ok()) {
+                    Some(permit) => {
+                        let call = reply.call.clone();
+                        let operation = reply.operation;
+                        let result = reply.result.clone();
+                        if permit.send(WikiCommand::CommitEmbedding { plan, reply }).is_err() {
+                            if let Some(result) = &result {
+                                result.complete(crate::call_result::WikiCallResult::EmbedPage(
+                                    crate::call_result::WikiEmbedResult::Failed {
+                                        project_id,
+                                        code: crate::call_result::WikiEmbedFailureCode::from_failure(&WikiFailure::OwnerUnavailable),
+                                    },
+                                ));
+                            }
+                            crate::call::finish_detail(call.as_ref(), Some(&WikiFailure::OwnerUnavailable), operation).await;
+                        }
+                    }
+                    None => reply.send_embedded(Err(WikiFailure::OwnerUnavailable), project_id).await,
+                },
+                Err(error) => reply.send_embedded(Err(error), project_id).await,
+            }
+        }
+        WikiCommand::CommitEmbedding { plan, reply } => {
+            let project_id = plan.project_id.clone();
+            reply.send_embedded(super::project_commit::commit_page(&shared, &state, plan).await, project_id).await;
+        }
+        WikiCommand::CommitReindex { commit, reply } => {
+            let _ = reply.send(crate::reindex::commit(&state, commit).await).await;
         }
         WikiCommand::CreateProject { input, reply } => {
             let _ = reply.send(create_project(&shared, input).await).await;
@@ -981,11 +1021,8 @@ fn source_watch_config(
 ) -> Result<WikiSourceWatchConfigReceipt, WikiFailure> {
     let project = selected_project(global, input.project_id.as_deref())?;
     let project_id = project.project_id().to_owned();
-    let config = source_watch_config_with_private_flags(
-        global,
-        &project_id,
-        read_source_watch_config(project_root(project))?,
-    )?;
+    let (config, private) = read_mineru_execution_config(global, project)?;
+    let config = config.with_mineru_private_flags(private.token.is_some(), private.local_token.is_some());
     Ok(WikiSourceWatchConfigReceipt::new(project_id, config))
 }
 
@@ -996,7 +1033,8 @@ async fn update_source_watch_config(
     let state = shared.snapshot().await;
     let project = selected_project(&state, input.project_id.as_deref())?;
     let project_id = project.project_id().to_owned();
-    let current = read_source_watch_config(project_root(project))?;
+    let config_lock = crate::search_config::lock_config(project_root(project), "source-watch-config")?;
+    let (current, mut private) = read_mineru_execution_config_unlocked(&state, project)?;
     let config = WikiSourceWatchConfig::new(
         input.enabled.unwrap_or(current.enabled()),
         input.auto_ingest.unwrap_or(current.auto_ingest()),
@@ -1049,13 +1087,16 @@ async fn update_source_watch_config(
             .unwrap_or_else(|| current.mineru_local_server_url().to_owned()),
     );
     validate_source_watch_config(&config)?;
-    let mut private = read_mineru_private_config(&state, &project_id)?;
     apply_private_token_input(&mut private.token, input.mineru_token);
     apply_private_token_input(&mut private.local_token, input.mineru_local_token);
+    private.public_config = Some(config.clone());
     write_mineru_private_config(&state, &project_id, &private)?;
     write_source_watch_config(project_root(project), &config)?;
-    if state.current_project_id.as_deref() == Some(project_id.as_str()) {
-        sync_source_watch(shared, &state);
+    drop(config_lock);
+    // Publish under the live state guard: an old Commit(A) cannot reinstall A after Global opened B.
+    let current = shared.state.read().await;
+    if current.current_project_id.as_deref() == Some(project_id.as_str()) {
+        sync_source_watch(shared, &current);
     }
     Ok(WikiSourceWatchConfigReceipt::new(
         project_id,
@@ -1144,7 +1185,7 @@ fn source_files(
     Ok(WikiSourceFilesReceipt::new(entries))
 }
 
-fn read_file(global: &WikiState, input: WikiReadInput) -> Result<WikiReadReceipt, WikiFailure> {
+pub(super) fn read_file(global: &WikiState, input: WikiReadInput) -> Result<WikiReadReceipt, WikiFailure> {
     let project = selected_project(global, input.project_id.as_deref())?;
     let root = project_root(project);
     let path = resolve_project_path(root, &input.relative_path)?;
@@ -1814,16 +1855,6 @@ fn stage_refresh_source_paths(
     })
 }
 
-fn retain_pending_cleanup_snapshot(snapshot: &mut FileSnapshot) {
-    for (path, cleanup) in &snapshot.pending_cleanup_paths {
-        if let Some(entry) = cleanup.before.get(path).and_then(Option::as_ref) {
-            snapshot.entries.insert(path.clone(), entry.clone());
-        } else {
-            snapshot.entries.remove(path);
-        }
-    }
-}
-
 fn collect_changed_snapshot_paths(
     root: &Path,
     path: &Path,
@@ -1834,7 +1865,7 @@ fn collect_changed_snapshot_paths(
         let mut entries = BTreeMap::new();
         collect_snapshot_entries(root, path, &mut entries)?;
         out.extend(entries.into_keys());
-        out.extend(previous.pending_cleanup_paths.keys()
+        out.extend(previous.entries.keys().chain(previous.pending_cleanup_paths.keys())
             .filter(|known| root.join(known).starts_with(path)).cloned());
         return Ok(());
     }
@@ -1880,6 +1911,14 @@ pub(super) fn read_snapshot_entry(
     }))
 }
 
+fn publish_source_executions(imports: &[WikiStagedImportSource]) {
+    for import in imports {
+        if let Some(execution) = &import.execution {
+            execution.published();
+        }
+    }
+}
+
 async fn parse_import_source(
     shared: &WikiShared,
     input: WikiStagedImportSource,
@@ -1914,8 +1953,22 @@ async fn parse_import_source_inner(
         None,
     )?;
     let state = shared.snapshot().await;
-    let private = read_mineru_private_config(&state, &input.project_id)?;
-    let config = read_source_watch_config(&input.project_root).unwrap_or_default();
+    let project = selected_project(&state, Some(&input.project_id))?;
+    let (config, private) = match ingest {
+        IngestMode::Configured => read_mineru_execution_config(&state, project)?,
+        IngestMode::SourceOnly => {
+            let root = project_root(project);
+            let _lock = crate::search_config::lock_config(root, "source-watch-config")?;
+            let private = read_mineru_private_config(&state, project.project_id())?;
+            let config = if let Some(bound) = &private.public_config {
+                validate_source_watch_config(bound)?;
+                bound.clone()
+            } else {
+                read_source_watch_config(root).unwrap_or_default()
+            };
+            (config, private)
+        }
+    };
     let llm = match ingest {
         IngestMode::Configured => shared.ingest_llm.clone(),
         IngestMode::SourceOnly => None,
@@ -1979,11 +2032,12 @@ async fn read_import_source_text(
 ) -> Result<MineruParseResult, WikiFailure> {
     if config.mineru_enabled() && is_pdf_source(&input.source_path) {
         match parse_pdf_with_mineru(input, config, private, cancellation.clone()).await {
-            Ok(result) if !result.markdown.trim().is_empty() => {
-                let _ = crate::preprocess::write_source_text_cache(
-                    &input.source_path,
-                    &result.markdown,
-                );
+            Ok((result, revision)) if !result.markdown.trim().is_empty() => {
+                if let Some(revision) = revision {
+                    let _ = crate::preprocess::write_source_text_cache(
+                        &input.source_path, &result.markdown, &revision,
+                    );
+                }
                 return Ok(result);
             }
             Ok(_) => {}
@@ -2018,7 +2072,7 @@ async fn parse_pdf_with_mineru(
     config: &WikiSourceWatchConfig,
     private: &MineruPrivateConfig,
     cancellation: CancellationToken,
-) -> Result<MineruParseResult, WikiFailure> {
+) -> Result<(MineruParseResult, Option<String>), WikiFailure> {
     let metadata = tokio::fs::metadata(&input.source_path)
         .await
         .map_err(|error| WikiFailure::io(path_text(&input.source_path), error))?;
@@ -2027,19 +2081,20 @@ async fn parse_pdf_with_mineru(
             "MinerU accurate parsing supports files up to 200 MB",
         ));
     }
-    if config.mineru_backend() == "local" {
-        parse_pdf_with_local_mineru(input, config, private.local_token.as_deref(), cancellation)
-            .await
+    let source_url = (config.mineru_backend() != "local")
+        .then(|| mineru_source_url(input, private)).flatten();
+    // A URL parse has no proven relationship to the local file and must not populate its cache.
+    let bytes = if source_url.is_none() {
+        cancel_on_token(&cancellation, tokio::fs::read(&input.source_path)).await?
+            .map_err(|error| WikiFailure::io(path_text(&input.source_path), error))?
+    } else { Vec::new() };
+    let revision = source_url.is_none().then(|| stable_content_hash(&bytes));
+    let result = if config.mineru_backend() == "local" {
+        parse_pdf_with_local_mineru(input, config, private.local_token.as_deref(), bytes, cancellation).await
     } else {
-        parse_pdf_with_cloud_mineru(
-            input,
-            config,
-            private.token.as_deref(),
-            mineru_source_url(input, private),
-            cancellation,
-        )
-        .await
-    }
+        parse_pdf_with_cloud_mineru(input, config, private.token.as_deref(), source_url, bytes, cancellation).await
+    }?;
+    Ok((result, revision))
 }
 
 async fn parse_pdf_with_cloud_mineru(
@@ -2047,6 +2102,7 @@ async fn parse_pdf_with_cloud_mineru(
     config: &WikiSourceWatchConfig,
     token: Option<&str>,
     source_url: Option<&str>,
+    bytes: Vec<u8>,
     cancellation: CancellationToken,
 ) -> Result<MineruParseResult, WikiFailure> {
     let token = token
@@ -2067,9 +2123,6 @@ async fn parse_pdf_with_cloud_mineru(
         )
         .await;
     }
-    let bytes = cancel_on_token(&cancellation, tokio::fs::read(&input.source_path))
-        .await?
-        .map_err(|error| WikiFailure::io(path_text(&input.source_path), error))?;
     let file_name = input
         .source_path
         .file_name()
@@ -2236,6 +2289,7 @@ async fn parse_pdf_with_local_mineru(
     input: &WikiStagedImportSource,
     config: &WikiSourceWatchConfig,
     token: Option<&str>,
+    bytes: Vec<u8>,
     cancellation: CancellationToken,
 ) -> Result<MineruParseResult, WikiFailure> {
     let endpoint = local_mineru_api_base(config.mineru_local_endpoint())?;
@@ -2256,9 +2310,6 @@ async fn parse_pdf_with_local_mineru(
         configured_backend,
         local_mineru_health_version(&client, &endpoint, token, &cancellation).await?,
     );
-    let bytes = cancel_on_token(&cancellation, tokio::fs::read(&input.source_path))
-        .await?
-        .map_err(|error| WikiFailure::io(path_text(&input.source_path), error))?;
     let file_name = input
         .source_path
         .file_name()
@@ -3672,57 +3723,8 @@ pub(super) async fn embed_page(
     global: &WikiState,
     input: WikiPathSelector,
 ) -> Result<(), WikiFailure> {
-    let project = selected_project(global, input.project_id.as_deref())?;
-    let read = read_file(
-        global,
-        WikiReadInput {
-            project_id: Some(project.project_id().to_owned()),
-            relative_path: input.relative_path.clone(),
-            limit: 0,
-        },
-    )?;
-    let (config, credentials) = crate::search_config::embedding_execution_config(
-        project_root(project),
-        &global.state_root,
-        project.project_id(),
-    )?;
-    if !config.enabled || !config.is_ready() {
-        return Err(WikiFailure::IndexUnavailable {
-            backend: "embedding".to_owned(),
-            reason: if !config.enabled {
-                "wiki embedding is disabled"
-            } else {
-                "wiki embedding is not configured"
-            }
-            .to_owned(),
-        });
-    }
-    let title = crate::domain::extract_search_title(
-        read.content(),
-        Path::new(&input.relative_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&input.relative_path),
-    );
-    let chunks = chunk_markdown_with_overlap(
-        &input.relative_path,
-        read.content(),
-        config.max_chunk_chars,
-        config.overlap_chunk_chars,
-    );
-    shared
-        .vector_index
-        .embed_page(
-            project_root(project),
-            &input.relative_path,
-            &title,
-            read.revision(),
-            &chunks,
-            &config,
-            &credentials,
-        )
-        .await
-        .map_err(WikiFailure::from)
+    let plan = super::project_commit::prepare_page(shared, global, input).await?;
+    super::project_commit::commit_page(shared, global, plan).await
 }
 
 async fn retrieve_context(
@@ -4650,7 +4652,7 @@ fn upsert_project(
     projects(global)
 }
 
-pub(super) fn selected_project<'a>(
+pub(crate) fn selected_project<'a>(
     global: &'a WikiState,
     project_id: Option<&str>,
 ) -> Result<&'a WikiProjectRecord, WikiFailure> {
@@ -4671,7 +4673,7 @@ fn current_project(global: &WikiState) -> Result<&WikiProjectRecord, WikiFailure
     selected_project(global, None)
 }
 
-pub(super) fn project_root(project: &WikiProjectRecord) -> &Path {
+pub(crate) fn project_root(project: &WikiProjectRecord) -> &Path {
     Path::new(project.root_path())
 }
 
@@ -4744,8 +4746,7 @@ pub(super) fn write_file_snapshot(root: &Path) -> Result<(), WikiFailure> {
             changes.push(FileChange::new("deleted", path.clone(), String::new()));
         }
     }
-    retain_pending_cleanup_snapshot(&mut current);
-    write_json(root.join(FILE_SNAPSHOT), &current)?;
+    // Discovery is not acknowledgement: watcher/refresh owns applying the diff and advancing its baseline.
     write_json(root.join(FILE_CHANGE_QUEUE), &changes)
 }
 
@@ -4824,18 +4825,42 @@ fn path_text(path: &Path) -> String {
 #[derive(Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MineruPrivateConfig {
+    #[serde(default)]
+    public_config: Option<WikiSourceWatchConfig>,
     token: Option<String>,
     local_token: Option<String>,
     source_urls: BTreeMap<String, String>,
 }
 
-fn source_watch_config_with_private_flags(
-    global: &WikiState,
-    project_id: &str,
-    config: WikiSourceWatchConfig,
-) -> Result<WikiSourceWatchConfig, WikiFailure> {
-    let private = read_mineru_private_config(global, project_id)?;
-    Ok(config.with_mineru_private_flags(private.token.is_some(), private.local_token.is_some()))
+fn source_watch_config_hash(config: &WikiSourceWatchConfig) -> Result<String, WikiFailure> {
+    let config = config.clone().with_mineru_private_flags(false, false);
+    serde_json::to_vec(&config).map(|bytes| stable_content_hash(&bytes))
+        .map_err(|_| WikiFailure::state("Wiki source configuration could not be encoded"))
+}
+
+fn read_mineru_execution_config(
+    state: &WikiState,
+    project: &WikiProjectRecord,
+) -> Result<(WikiSourceWatchConfig, MineruPrivateConfig), WikiFailure> {
+    let _lock = crate::search_config::lock_config(project_root(project), "source-watch-config")?;
+    read_mineru_execution_config_unlocked(state, project)
+}
+
+fn read_mineru_execution_config_unlocked(
+    state: &WikiState,
+    project: &WikiProjectRecord,
+) -> Result<(WikiSourceWatchConfig, MineruPrivateConfig), WikiFailure> {
+    let root = project_root(project);
+    let mut config = read_source_watch_config(root)?;
+    let private = read_mineru_private_config(state, project.project_id())?;
+    if let Some(bound) = &private.public_config {
+        validate_source_watch_config(bound)?;
+        if source_watch_config_hash(&config)? != source_watch_config_hash(bound)? {
+            write_source_watch_config(root, bound)?;
+        }
+        config = bound.clone();
+    }
+    Ok((config, private))
 }
 
 fn read_mineru_private_config(

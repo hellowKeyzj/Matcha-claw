@@ -45,6 +45,7 @@ impl OrganizationFacts {
                 (Some(value), RunUndo::Updated(old)) => {
                     if value.team != old.team || value.frozen_team_revision != old.revision
                         || value.runtime != old.runtime || value.lifecycle != old.lifecycle || value.start_gate != old.start_gate
+                        || value.retired_executions != old.retired_executions
                     { changes.push(RecordChange::Put(run::encode_header(value)?)); }
                     changes.extend(run::encode_graph_changes(value, contents)?);
                 }

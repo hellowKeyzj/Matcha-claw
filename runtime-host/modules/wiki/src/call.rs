@@ -255,7 +255,7 @@ pub(crate) struct CallReply<T> {
     pub(crate) call: Option<CallContext<WikiCallDetail>>,
     pub(crate) operation: Option<WikiCallOperation>,
     pub(crate) acceptance: Option<WikiCallAcceptance>,
-    pub(crate) result: Option<crate::call_result::WikiResultReservation>,
+    pub(crate) result: Option<Arc<crate::call_result::WikiResultReservation>>,
 }
 
 impl<T> CallReply<T> {

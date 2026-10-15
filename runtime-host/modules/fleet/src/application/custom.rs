@@ -125,7 +125,8 @@ pub(crate) async fn open_terminal<R: FleetSecretResolverPort>(
     config: &CustomTargetConfig,
     resolver: &mut R,
     context: &TerminalContext,
-) -> Result<TerminalProviderOpen, ProviderError>
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<(TerminalProviderOpen, foundation::execution::OwnedTask<()>), ProviderError>
 where
     R::Secret: AsRef<str>,
 {
@@ -206,18 +207,25 @@ where
             header_value(&format!("Bearer {token}"))?,
         );
     }
-    let socket = timeout(CUSTOM_OPEN_TIMEOUT, connect_async(request))
-        .await
-        .map_err(|_| ProviderError::message("custom terminal websocket open timed out"))?
-        .map_err(|_| ProviderError::message("custom terminal websocket failed to open"))?
-        .0;
+    let socket = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(ProviderError::message("custom terminal open cancelled")),
+        result = timeout(CUSTOM_OPEN_TIMEOUT, connect_async(request)) => result
+            .map_err(|_| ProviderError::message("custom terminal websocket open timed out"))?
+            .map_err(|_| ProviderError::message("custom terminal websocket failed to open"))?.0,
+    };
     let (commands, command_rx) = mpsc::channel(32);
     let (events, events_rx) = mpsc::channel(32);
-    tokio::spawn(run_socket(socket, command_rx, events));
-    Ok(TerminalProviderOpen {
-        commands,
-        events: events_rx,
-    })
+    let (task, _) = foundation::execution::OwnedTask::spawn(move |stop| async move {
+        run_socket(socket, command_rx, events, cancellation, stop).await;
+    });
+    Ok((
+        TerminalProviderOpen {
+            commands,
+            events: events_rx,
+        },
+        task,
+    ))
 }
 
 fn terminal_credential_reference<'a>(
@@ -273,6 +281,8 @@ async fn run_socket(
     socket: CustomSocket,
     mut commands: mpsc::Receiver<ProviderCommand>,
     events: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
+    cancellation: tokio_util::sync::CancellationToken,
+    stop: tokio_util::sync::CancellationToken,
 ) {
     let result = {
         let (writer, mut reader) = socket.split();
@@ -281,9 +291,20 @@ async fn run_socket(
         let send = async {
             loop {
                 match commands.recv().await {
-                    Some(ProviderCommand::Input(data)) if data.len() <= MAX_FRAME_BYTES => { write_socket(&writer, Message::Binary(data.into()), false).await?; }
-                    Some(ProviderCommand::Resize { rows, cols }) => { write_socket(&writer, TerminalControlFrame::resize(rows, cols).into_message(), false).await?; }
-                    Some(ProviderCommand::Input(_)) => return Err(ProviderError::message("custom terminal input is too large")),
+                    Some(ProviderCommand::Input(data)) if data.len() <= MAX_FRAME_BYTES => {
+                        write_socket(&writer, Message::Binary(data.into()), false).await?;
+                    }
+                    Some(ProviderCommand::Resize { rows, cols }) => {
+                        write_socket(
+                            &writer,
+                            TerminalControlFrame::resize(rows, cols).into_message(),
+                            false,
+                        )
+                        .await?;
+                    }
+                    Some(ProviderCommand::Input(_)) => {
+                        return Err(ProviderError::message("custom terminal input is too large"));
+                    }
                     None => return Ok(()),
                 }
             }
@@ -291,25 +312,57 @@ async fn run_socket(
         let receive = async {
             loop {
                 match reader.next().await {
-                    Some(Ok(Message::Binary(data))) if data.len() <= MAX_FRAME_BYTES => { if events.send(Ok(ProviderEvent::Output(data.to_vec()))).await.is_err() { return Ok(()); } }
-                    Some(Ok(Message::Text(text))) => match parse_control(text.as_ref(), &writer, &events).await? { ControlResult::Continue => {}, ControlResult::Exit => return Ok(()) },
-                    Some(Ok(Message::Ping(payload))) => { write_socket(&writer, Message::Pong(payload), false).await?; }
-                    Some(Ok(Message::Close(frame))) => { let _ = events.send(Ok(ProviderEvent::Exit { code: frame.and_then(|f| i32::try_from(u16::from(f.code)).ok()) })).await; return Ok(()); }
+                    Some(Ok(Message::Binary(data))) if data.len() <= MAX_FRAME_BYTES => {
+                        if events
+                            .send(Ok(ProviderEvent::Output(data.to_vec())))
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        match parse_control(text.as_ref(), &writer, &events).await? {
+                            ControlResult::Continue => {}
+                            ControlResult::Exit => return Ok(()),
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        write_socket(&writer, Message::Pong(payload), false).await?;
+                    }
+                    Some(Ok(Message::Close(frame))) => {
+                        let _ = events
+                            .send(Ok(ProviderEvent::Exit {
+                                code: frame.and_then(|f| i32::try_from(u16::from(f.code)).ok()),
+                            }))
+                            .await;
+                        return Ok(());
+                    }
                     Some(Ok(_)) => {}
-                    Some(Err(_)) | None => return Err(ProviderError::message("custom terminal websocket failed")),
+                    Some(Err(_)) | None => {
+                        return Err(ProviderError::message("custom terminal websocket failed"));
+                    }
                 }
             }
         };
         let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Ok(()),
+            _ = stop.cancelled() => Ok(()),
             _ = events.closed() => Ok(()),
             result = send => result,
             result = receive => result,
         };
         // A dropped command sender owns both close frames, whichever future ended first.
-        if commands.is_closed() {
-            result.and(write_socket(&writer, TerminalControlFrame::close().into_message(), true).await)
+        if commands.is_closed() || cancellation.is_cancelled() || stop.is_cancelled() {
+            commands.close();
+            result.and(
+                write_socket(&writer, TerminalControlFrame::close().into_message(), true).await,
+            )
         } else if events.is_closed() {
-            result.and(Err(ProviderError::message("custom terminal event channel is closed")))
+            result.and(Err(ProviderError::message(
+                "custom terminal event channel is closed",
+            )))
         } else {
             result
         }

@@ -657,9 +657,22 @@ function summarizeSwitchSessionRecord(record: ReturnType<typeof resolveSessionRe
 }
 
 export async function executeLoadSessions(input: CreateStoreSessionActionsInput): Promise<void> {
-  const requestSequence = sessionCatalogLoadSequence + 1;
-  sessionCatalogLoadSequence = requestSequence;
-  await executeLoadSessionsNow(input, requestSequence);
+  const requestSequence = ++sessionCatalogLoadSequence;
+  while (sessionCatalogLoadSequence === requestSequence) {
+    const sourceRevision = input.get().sessionRuntimeCatalog.directoryRevision;
+    await executeLoadSessionsNow(input, requestSequence);
+    if (sessionCatalogLoadSequence !== requestSequence
+      || useRuntimeEndpointsStore.getState().revision <= sourceRevision) {
+      return;
+    }
+    await input.get().bootstrapSessionRuntime();
+    const catalog = input.get().sessionRuntimeCatalog;
+    if (sessionCatalogLoadSequence !== requestSequence
+      || catalog.status !== 'ready'
+      || catalog.directoryRevision <= sourceRevision) {
+      return;
+    }
+  }
 }
 
 async function executeLoadSessionsNow(
@@ -678,6 +691,7 @@ async function executeLoadSessionsNow(
     sessionCatalogStatus: createLoadingResourceStatusState(previousResource),
   });
   const targets = readSessionRuntimeTargets(stateBeforeLoad);
+  const endpointRevisionByRuntimeScopeKey = stateBeforeLoad.sessionRuntimeCatalog.directoryRevisionByRuntimeScopeKey;
   const traceId = createSessionTraceId('session.catalog.load');
   if (traceId) logSessionTrace('session.catalog.request', traceId, () => ({
     requestSequence, endpointCount: targets.length, status: 'started',
@@ -761,7 +775,6 @@ async function executeLoadSessionsNow(
     ? sessions.filter((session) => sameRuntimeEndpointScope(session.sessionIdentity.endpoint, contextTarget.endpoint))
     : sessions;
   const loadedAt = Date.now();
-  const endpointRevisionByRuntimeScopeKey = useRuntimeEndpointsStore.getState().revisionByRuntimeScopeKey;
   const successfulRuntimeScopes = new Set(
     readyResults.map((result) => buildRuntimeScopeKey(result.target.defaultSessionPromptScope.endpoint)),
   );

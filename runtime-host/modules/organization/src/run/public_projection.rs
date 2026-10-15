@@ -1086,34 +1086,20 @@ impl TeamRunPublicSnapshotRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct TeamRunPublicSnapshotProducer;
-
-impl TeamRunPublicSnapshotProducer {
-    pub fn produce(
-        facts: &OrganizationFacts,
-        request: &TeamRunPublicSnapshotRequest,
-    ) -> TeamRunPublicSnapshotQueryOutcome {
-        let Ok(run) = validated_public_run(facts, request.team_id(), request.run_id()) else {
-            return TeamRunPublicSnapshotQueryOutcome::Unavailable(
-                validated_public_run(facts, request.team_id(), request.run_id()).unwrap_err(),
-            );
-        };
-        TeamRunPublicSnapshotQueryOutcome::Available(build_public_snapshot(
+pub(crate) fn produce_team_run_public_snapshot(
+    facts: &OrganizationFacts,
+    request: &TeamRunPublicSnapshotRequest,
+) -> TeamRunPublicSnapshotQueryOutcome {
+    match validated_public_run(facts, request.team_id(), request.run_id()) {
+        Ok(run) => TeamRunPublicSnapshotQueryOutcome::Available(build_public_snapshot(
             facts,
             request.team_id(),
             request.run_id(),
             run,
             request,
-        ))
+        )),
+        Err(reason) => TeamRunPublicSnapshotQueryOutcome::Unavailable(reason),
     }
-}
-
-pub(crate) fn produce_team_run_public_snapshot(
-    facts: &OrganizationFacts,
-    request: &TeamRunPublicSnapshotRequest,
-) -> TeamRunPublicSnapshotQueryOutcome {
-    TeamRunPublicSnapshotProducer::produce(facts, request)
 }
 
 /// Queries a complete safe snapshot when the caller has only a run identity. The team association
@@ -1150,16 +1136,44 @@ pub(crate) fn query_team_run_public_diagnostics(
     team_id: &TeamId,
     run_id: &GraphRunId,
 ) -> TeamRunPublicDiagnosticsQueryOutcome {
-    let Ok(run) = validated_public_run(facts, team_id, run_id) else {
-        return TeamRunPublicDiagnosticsQueryOutcome::Unavailable(
-            validated_public_run(facts, team_id, run_id).unwrap_err(),
-        );
+    let run = match validated_public_run(facts, team_id, run_id) {
+        Ok(run) => run,
+        Err(reason) => return TeamRunPublicDiagnosticsQueryOutcome::Unavailable(reason),
+    };
+    let counts = TeamRunPublicCounts {
+        attempts: run
+            .graph()
+            .executions()
+            .values()
+            .map(|history| history.attempts().len())
+            .sum(),
+        deliveries: facts
+            .deliveries()
+            .deliveries()
+            .filter(|delivery| delivery.facts().run_id == run_id.as_str())
+            .count(),
+        approvals: facts
+            .approvals()
+            .filter(|approval| approval.facts().run_id == run_id.as_str())
+            .count(),
+        decisions: facts
+            .decisions()
+            .filter(|decision| decision.run_id() == run_id.as_str())
+            .count(),
+        evidence: facts
+            .evidence_records()
+            .filter(|record| record.run_id() == run_id.as_str())
+            .count(),
+        artifacts: facts
+            .artifacts()
+            .filter(|record| record.run_id() == run_id.as_str())
+            .count(),
+        events: facts.events_for_run(run_id.as_str()).len(),
     };
     TeamRunPublicDiagnosticsQueryOutcome::Available(diagnostics_projection(
-        facts,
         run_id,
-        run,
         runtime_state(facts, run_id, run.runtime().is_some()),
+        counts,
     ))
 }
 
@@ -1230,8 +1244,17 @@ fn build_public_snapshot(
         .filter(|record| record.run_id() == run_id.as_str())
         .map(public_artifact)
         .collect::<Vec<_>>();
-    let events = facts
-        .events_for_run(run_id.as_str())
+    let events = facts.events_for_run(run_id.as_str());
+    let counts = TeamRunPublicCounts {
+        attempts: attempts.len(),
+        deliveries: deliveries.len(),
+        approvals: approvals.len(),
+        decisions: decisions.len(),
+        evidence: evidence.len(),
+        artifacts: artifacts.len(),
+        events: events.len(),
+    };
+    let events = events
         .into_iter()
         .filter(|event| event.sequence() >= request.event_cursor())
         .take(request.event_limit().unwrap_or(usize::MAX))
@@ -1243,7 +1266,7 @@ fn build_public_snapshot(
         .into_iter()
         .map(project_team_run_public_event)
         .collect::<Vec<_>>();
-    let diagnostics = diagnostics_projection(facts, run_id, run, runtime);
+    let diagnostics = diagnostics_projection(run_id, runtime, counts);
     TeamRunPublicSnapshot {
         run: TeamRunPublicRun {
             team_id: team_id.as_str().to_owned(),
@@ -1280,41 +1303,10 @@ fn build_public_snapshot(
 }
 
 fn diagnostics_projection(
-    facts: &OrganizationFacts,
     run_id: &GraphRunId,
-    run: &crate::GraphRunFacts,
     runtime: TeamRuntimeState,
+    counts: TeamRunPublicCounts,
 ) -> TeamRunPublicDiagnostics {
-    let counts = TeamRunPublicCounts {
-        attempts: run
-            .graph()
-            .executions()
-            .values()
-            .map(|history| history.attempts().len())
-            .sum(),
-        deliveries: facts
-            .deliveries()
-            .deliveries()
-            .filter(|delivery| delivery.facts().run_id == run_id.as_str())
-            .count(),
-        approvals: facts
-            .approvals()
-            .filter(|approval| approval.facts().run_id == run_id.as_str())
-            .count(),
-        decisions: facts
-            .decisions()
-            .filter(|decision| decision.run_id() == run_id.as_str())
-            .count(),
-        evidence: facts
-            .evidence_records()
-            .filter(|record| record.run_id() == run_id.as_str())
-            .count(),
-        artifacts: facts
-            .artifacts()
-            .filter(|record| record.run_id() == run_id.as_str())
-            .count(),
-        events: facts.events_for_run(run_id.as_str()).len(),
-    };
     TeamRunPublicDiagnostics {
         run_id: run_id.as_str().to_owned(),
         runtime,

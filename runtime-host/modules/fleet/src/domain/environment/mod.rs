@@ -779,6 +779,12 @@ impl EnvironmentStore {
         if environment.connection_id() != resource.connection_id() {
             return Err(EnvironmentMutationError::ResourceConnectionMismatch);
         }
+        if matches!(
+            environment.state(),
+            EnvironmentState::Deleting { .. } | EnvironmentState::Deleted { .. }
+        ) {
+            return Err(EnvironmentMutationError::InvalidTransition);
+        }
         if !environment.managed_resource_ids.contains(resource.id()) {
             environment.managed_resource_ids.push(resource.id().clone());
             environment.managed_resource_ids.sort();
@@ -811,6 +817,15 @@ impl EnvironmentStore {
             .ok_or(EnvironmentMutationError::NotFound)?;
         if environment.connection_id() != connection_id {
             return Err(EnvironmentMutationError::ResourceConnectionMismatch);
+        }
+        if !resource.is_tombstone()
+            && !matches!(resource.state(), ManagedResourceState::Deleted { .. })
+            && matches!(
+                environment.state(),
+                EnvironmentState::Deleting { .. } | EnvironmentState::Deleted { .. }
+            )
+        {
+            return Err(EnvironmentMutationError::InvalidTransition);
         }
         self.resource_mut(id)?
             .refresh_metadata(metadata, observed_at)

@@ -5,6 +5,13 @@ use crate::{
     RuntimeEndpointReference,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeTerminalSettlement {
+    Recorded,
+    Replayed,
+    Retired,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct NativeTerminalReceiptTarget {
     delivery_id: DeliveryId,
@@ -58,6 +65,14 @@ impl NativeTerminalReceiptTarget {
 
     pub fn graph_run_id(&self) -> &GraphRunId {
         &self.proof.graph_run_id
+    }
+
+    pub(super) fn node_id(&self) -> &NodeId {
+        &self.proof.node_id
+    }
+
+    pub(super) fn fence(&self) -> &ExecutionFence {
+        &self.proof.fence
     }
 }
 

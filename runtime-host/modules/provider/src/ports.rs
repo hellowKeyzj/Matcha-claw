@@ -348,7 +348,7 @@ pub enum ProviderRestartPreparation {
     Unknown,
 }
 
-const MAX_REQUEST_BYTES: usize = 512;
+const MAX_REQUEST_BYTES: usize = 1024;
 const MAX_RESOLVE_BYTES: usize = 256 * 1024;
 const MAX_RESOLVER_ERROR_BYTES: usize = 4096;
 
@@ -455,15 +455,66 @@ impl Resolver {
         })
     }
 
+    pub(crate) async fn recover_account_credentials(&self, accounts: &[ProviderAccount]) -> Result<(), ResolverFailure> {
+        let Some(client) = &self.client else { return Ok(()); };
+        let accounts = accounts.iter().filter_map(|account| {
+            Some(serde_json::json!({
+                "accountId": account.id().as_str(),
+                "reference": account.configuration().credential()?.as_str(),
+            }))
+        }).collect::<Vec<_>>();
+        let body = serde_json::to_vec(&serde_json::json!({ "operation": "recover", "accounts": accounts }))
+            .map_err(|_| ResolverFailure::new("private-resolver-request-encode-failed", None))?;
+        if body.len() > 1024 * 1024 { return Err(ResolverFailure::new("private-resolver-request-too-large", None)); }
+        let response = client.post(&self.endpoint).bearer_auth(&self.authorization)
+            .timeout(Duration::from_secs(30)).header("content-type", "application/json").body(body)
+            .send().await.map_err(|_| ResolverFailure::new("private-resolver-request-failed", None))?;
+        let status = response.status().as_u16();
+        if status == 204 { Ok(()) } else { Err(resolver_response_failure(response, status).await) }
+    }
+
+    pub(crate) async fn begin_account_transaction(
+        &self,
+        account_id: &str,
+        revision: u64,
+        kind: &str,
+        credential_required: bool,
+    ) -> Result<Option<String>, ResolverFailure> {
+        if self.client.is_none() { return Ok(None); }
+        let response = self.request(reqwest::Method::POST, serde_json::json!({
+            "operation": "begin", "accountId": account_id, "revision": revision,
+            "kind": kind, "credentialRequired": credential_required,
+        })).await?;
+        let status = response.status().as_u16();
+        if status != 200 { return Err(resolver_response_failure(response, status).await); }
+        let bytes = resolver_response_bytes(response, MAX_REQUEST_BYTES).await?;
+        let value = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|_| ResolverFailure::new("private-resolver-response-invalid", Some(status)))?;
+        let id = value.as_object().filter(|value| value.len() == 1)
+            .and_then(|value| value.get("transactionId"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| id.len() == 36 && id.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) { byte == b'-' }
+                else { byte.is_ascii_digit() || matches!(byte, b'a'..=b'f') }
+            }))
+            .ok_or_else(|| ResolverFailure::new("private-resolver-response-invalid", Some(status)))?;
+        Ok(Some(id.to_owned()))
+    }
+
     pub async fn claim_account_transaction(
         &self,
         transaction_id: &str,
         reference: &str,
         revision: u64,
+        previous_reference: Option<&str>,
     ) -> Result<(), ResolverFailure> {
-        self.request_no_content(reqwest::Method::POST, serde_json::json!({
+        let mut body = serde_json::json!({
             "operation": "claim", "transactionId": transaction_id, "reference": reference, "revision": revision,
-        })).await
+        });
+        if let Some(reference) = previous_reference {
+            body["previousReference"] = serde_json::json!(reference);
+        }
+        self.request_no_content(reqwest::Method::POST, body).await
     }
 
     pub async fn settle_account_transaction(
@@ -472,9 +523,10 @@ impl Resolver {
         reference: &str,
         revision: u64,
         settlement: &str,
+        committed: bool,
     ) -> Result<(), ResolverFailure> {
         self.request_no_content(reqwest::Method::POST, serde_json::json!({
-            "operation": "settle", "transactionId": transaction_id, "reference": reference, "revision": revision, "settlement": settlement,
+            "operation": "settle", "transactionId": transaction_id, "reference": reference, "revision": revision, "settlement": settlement, "committed": committed,
         })).await
     }
 
@@ -485,17 +537,19 @@ impl Resolver {
         credential_provider: &str,
         mode: ProviderAccountAuthMode,
         revision: u64,
+        account_id: &str,
+        transaction_id: Option<&str>,
     ) -> Result<(), ResolverFailure> {
-        self.request_no_content(
-            reqwest::Method::POST,
-            serde_json::json!({
-                "reference": reference,
-                "provider": profile_provider,
-                "credentialProvider": credential_provider,
-                "authMode": auth_mode_name(mode),
-                "revision": revision,
-            }),
-        ).await
+        let mut body = serde_json::json!({
+            "reference": reference,
+            "provider": profile_provider,
+            "credentialProvider": credential_provider,
+            "authMode": auth_mode_name(mode),
+            "revision": revision,
+            "accountId": account_id,
+        });
+        if let Some(id) = transaction_id { body["transactionId"] = serde_json::json!(id); }
+        self.request_no_content(reqwest::Method::POST, body).await
     }
 
     pub async fn delete(
@@ -503,15 +557,14 @@ impl Resolver {
         reference: &str,
         profile_provider: &str,
         revision: u64,
+        account_id: &str,
+        transaction_id: Option<&str>,
     ) -> Result<(), ResolverFailure> {
-        self.request_no_content(
-            reqwest::Method::DELETE,
-            serde_json::json!({
-                "reference": reference,
-                "provider": profile_provider,
-                "revision": revision,
-            }),
-        ).await
+        let mut body = serde_json::json!({
+            "reference": reference, "provider": profile_provider, "revision": revision, "accountId": account_id,
+        });
+        if let Some(id) = transaction_id { body["transactionId"] = serde_json::json!(id); }
+        self.request_no_content(reqwest::Method::DELETE, body).await
     }
 
     pub async fn discard(
@@ -519,15 +572,14 @@ impl Resolver {
         reference: &str,
         profile_provider: &str,
         revision: u64,
+        account_id: &str,
+        transaction_id: Option<&str>,
     ) -> Result<(), ResolverFailure> {
-        self.request_no_content(
-            reqwest::Method::PUT,
-            serde_json::json!({
-                "reference": reference,
-                "provider": profile_provider,
-                "revision": revision,
-            }),
-        ).await
+        let mut body = serde_json::json!({
+            "reference": reference, "provider": profile_provider, "revision": revision, "accountId": account_id,
+        });
+        if let Some(id) = transaction_id { body["transactionId"] = serde_json::json!(id); }
+        self.request_no_content(reqwest::Method::PUT, body).await
     }
 
     async fn request_no_content(

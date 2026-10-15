@@ -25,7 +25,7 @@ pub(crate) use facts::{
     WorkflowTemplateFacts,
 };
 pub use fault::{DesignError, RuntimeGraphError, StoreFault};
-pub(crate) use terminal_observation::NativeTerminalReceiptTarget;
+pub(crate) use terminal_observation::{NativeTerminalReceiptTarget, NativeTerminalSettlement};
 
 #[cfg(test)]
 mod tests;

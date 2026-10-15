@@ -7,7 +7,7 @@ import type { SessionGoalView, SessionGoalUpdate, SessionGoalOutcome } from '@/t
 
 type GoalAction = SessionGoalUpdate | { action: 'clear' };
 type GoalTarget = { identity: SessionIdentity; recordKey: string; endpointSessionId: string };
-type PendingOperation = { operationId: string; issuedAtMs: number; action: GoalAction['action'] | 'start'; draftId?: string; target?: GoalTarget; goalId?: string };
+type PendingOperation = { operationId: string; issuedAtMs: number; action: GoalAction['action'] | 'start'; draftId?: string; draftRevision?: number; target?: GoalTarget; goalId?: string };
 type GoalError = Exclude<SessionGoalOutcome['outcome'], 'succeeded'> | 'empty' | 'active' | 'missing-session' | 'goal-attachments' | 'error';
 type ActionState = { busy: boolean; error: GoalError | null; unknown: boolean; canDiscard?: boolean; pending?: PendingOperation };
 const IDLE: ActionState = { busy: false, error: null, unknown: false };
@@ -107,7 +107,8 @@ export function useChatGoals(identity: SessionIdentity | null, recordKey: string
     const drafts = useComposerDraftStore.getState();
     const mode = drafts.modes[draftKey];
     if (!enabled || !mode || currentState().busy || currentState().unknown) return { accepted: false, reason: 'error' };
-    const pending: PendingOperation = { operationId: crypto.randomUUID(), issuedAtMs: Date.now(), action: mode.goalId ? 'edit' : 'start', draftId: mode.id };
+    const draftRevision = drafts.revisions[draftKey];
+    const pending: PendingOperation = { operationId: crypto.randomUUID(), issuedAtMs: Date.now(), action: mode.goalId ? 'edit' : 'start', draftId: mode.id, draftRevision };
     let result: ChatSendResult;
     if (mode.goalId) {
       const outcome = await mutate(mode.goalId, { action: 'edit', objective: text }, pending, mode.id);
@@ -128,7 +129,7 @@ export function useChatGoals(identity: SessionIdentity | null, recordKey: string
     const key = result.sessionRecordKey ?? draftKey;
     const operationState = statesRef.current[mode.id];
     if (result.accepted && operationState?.pending?.operationId === pending.operationId) {
-      if (useComposerDraftStore.getState().modes[key]?.id === mode.id) useComposerDraftStore.getState().clearDraft(key);
+      useComposerDraftStore.getState().settleDraft(key, draftRevision, mode.id);
       publish(result.sessionRecordKey ?? recordKey, operationState, mode.id);
     }
     return result;
@@ -148,7 +149,7 @@ export function useChatGoals(identity: SessionIdentity | null, recordKey: string
     const drafts = useComposerDraftStore.getState();
     if (state.unknown && state.pending?.action === 'start') {
       if (view.goal && drafts.modes[draftKey]?.id === state.pending.draftId) {
-        drafts.clearDraft(draftKey);
+        drafts.settleDraft(draftKey, state.pending.draftRevision, state.pending.draftId);
         publish(recordKey, IDLE, scope);
       } else publish(scope, { ...state, busy: false, canDiscard: true });
     } else {

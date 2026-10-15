@@ -26,6 +26,7 @@ type Observation = {
   lease: ObservationLease;
   nativeLeaseId: string;
   settled: boolean;
+  settle: () => void;
 };
 type SendDemand = {
   page: SessionPage;
@@ -42,6 +43,7 @@ export class RendererSessionObservationRegistry {
   private readonly sends = new Set<SendDemand>();
   private releaseNative?: (identity: SessionIdentity, leaseId: string) => Promise<unknown>;
   private readonly operations = new Set<Promise<unknown>>();
+  private readonly acquisitions = new Set<Promise<void>>();
   private readonly releases = new Set<Promise<void>>();
   private closed = false;
   private closing?: Promise<void>;
@@ -90,7 +92,11 @@ export class RendererSessionObservationRegistry {
       this.observations.add(lease);
     }
     lease.pending += 1;
-    return { lease, nativeLeaseId: lease.nativeLeaseId, settled: false };
+    let settle!: () => void;
+    const pending = new Promise<void>((resolve) => { settle = resolve; });
+    this.acquisitions.add(pending);
+    return { lease, nativeLeaseId: lease.nativeLeaseId, settled: false,
+      settle: () => { this.acquisitions.delete(pending); settle(); } };
   }
 
   completeObservation(entry: Observation, nativeLeaseId: string): boolean {
@@ -99,6 +105,7 @@ export class RendererSessionObservationRegistry {
     entry.settled = true;
     lease.pending -= 1;
     lease.acquired = true;
+    entry.settle();
     for (const demand of this.sends) {
       if (demand.goalOutcomeUnknown && demand.page === lease.page
         && sameSessionIdentity(demand.identity, lease.identity)) this.sends.delete(demand);
@@ -108,7 +115,7 @@ export class RendererSessionObservationRegistry {
 
   async rollbackObservation(entry: Observation): Promise<void> {
     const { lease } = entry;
-    if (!entry.settled) { entry.settled = true; lease.pending -= 1; }
+    if (!entry.settled) { entry.settled = true; lease.pending -= 1; entry.settle(); }
     if (this.observations.has(lease) && !lease.revoked && (lease.acquired || lease.pending > 0)) return;
     if (lease.releasing) await lease.releasing.catch(() => undefined);
     await this.releaseObservationLease(lease);
@@ -207,6 +214,9 @@ export class RendererSessionObservationRegistry {
   }
 
   async resync(observe: (identity: SessionIdentity, leaseId: string) => Promise<SessionObservationResult<{ epoch: number; seq: number; runtime: unknown }> | null>): Promise<void> {
+    if (this.closed) return;
+    // Snapshot only already-started acquires, never resync operations or future requests.
+    await Promise.allSettled([...this.acquisitions]);
     if (this.closed) return;
     for (const lease of this.observations) {
       if (lease.revoked) void this.releaseObservationLease(lease).catch(() => undefined);

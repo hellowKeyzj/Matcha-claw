@@ -5,7 +5,8 @@ import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { invokeIpc } from '@/lib/api-client';
 import { waitForCall } from '@/lib/call-log-await';
-import { hostWikiCallResult, hostWikiExportArchive, hostWikiImportArchive, hostWikiRebuildIndex } from '@/lib/host-api';
+import { hostWikiCallResult, hostWikiExportArchive, hostWikiRebuildIndex } from '@/lib/host-api';
+import { useWikiProjectsStore } from '@/stores/wiki-projects';
 import { pickLocalDirectory } from '@/services/local-path-picker';
 import { HistorySettingsPanel } from './HistorySettingsPanel';
 import { DedupPanel } from './DedupPanel';
@@ -95,11 +96,17 @@ function MaintenanceBody({ projectId, projectName, modelRef, busy, onChanged }: 
         destination = selected.filePath;
       }
 
+      if (request.operation === 'project.import-archive') {
+        const refreshed = await useWikiProjectsStore.getState().importArchive({ archivePath: request.archivePath, destination: request.destination });
+        if (!signal.aborted) {
+          setNotice(text('imported', '新知识库已导入。'));
+          if (!refreshed) setError(text('refreshFailed', '操作已完成，但页面刷新失败，请手动刷新。'));
+        }
+        return;
+      }
       const receipt = operation === 'project.export-archive'
         ? await hostWikiExportArchive({ projectId, destination: destination! })
-        : request.operation === 'project.import-archive'
-          ? await hostWikiImportArchive({ archivePath: request.archivePath, destination: request.destination })
-          : await hostWikiRebuildIndex({ projectId });
+        : await hostWikiRebuildIndex({ projectId });
       if (signal.aborted) return;
       const call = await waitForCall(receipt, 'wiki', { signal, timeoutMs: null }).catch(() => {
         throw new Error(text('unconfirmed', '无法确认操作结果，请刷新查看；不要重复提交。'));
@@ -122,12 +129,8 @@ function MaintenanceBody({ projectId, projectName, modelRef, busy, onChanged }: 
       if (result.callId !== call.callId || result.operation !== operation) {
         throw new Error(text('unconfirmed', '无法确认操作结果，请刷新查看；不要重复提交。'));
       }
-      let completed = text('imported', '新知识库已导入。');
-      if (result.operation === 'rebuild-index') {
-        if (result.result.projectId !== projectId) throw new Error(text('unconfirmed', '无法确认操作结果，请刷新查看；不要重复提交。'));
-        completed = t('maintenance.rebuilt', { defaultValue: '分类索引已重建：{{pages}} 个页面，{{groups}} 个分类。', pages: result.result.pages, groups: result.result.groups });
-      }
-      setNotice(completed);
+      if (result.operation !== 'rebuild-index' || result.result.projectId !== projectId) throw new Error(text('unconfirmed', '无法确认操作结果，请刷新查看；不要重复提交。'));
+      setNotice(t('maintenance.rebuilt', { defaultValue: '分类索引已重建：{{pages}} 个页面，{{groups}} 个分类。', pages: result.result.pages, groups: result.result.groups }));
       try {
         await onChanged();
       } catch {

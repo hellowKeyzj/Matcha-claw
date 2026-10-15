@@ -6,6 +6,7 @@ export function createProviderCallObserver(transport: CallLogTransport, subscrib
   return async (
     receipt: CallReceipt,
     command: 'providerAccounts.replace' | 'providerAccounts.delete' | 'providerModels.replace',
+    signal?: AbortSignal,
   ): Promise<CallRecord<'provider'>> => {
     const call = await waitForCallRecord(receipt, 'provider', async (callId) => {
       const response = await transport.get({ callId });
@@ -13,7 +14,7 @@ export function createProviderCallObserver(transport: CallLogTransport, subscrib
         throw new Error('Provider operation result could not be confirmed');
       }
       return response.body;
-    }, undefined, subscribeCalls);
+    }, { signal }, subscribeCalls);
     if (call.command !== command) throw new Error('Provider operation call identity is invalid');
     return call;
   };

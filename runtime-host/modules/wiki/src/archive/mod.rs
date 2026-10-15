@@ -479,6 +479,33 @@ fn extract_archive<R: Read + std::io::Seek>(
 }
 
 fn publish_import(staging: &Path, root: &Path) -> Result<(), ArchiveError> {
+    let parent = root.parent().ok_or(ArchiveError::InvalidPath(
+        "import destination must have a parent directory",
+    ))?;
+    // Keep the lock beside the target, not inside the directory whose emptiness we validate.
+    let name = root.file_name().unwrap().to_string_lossy();
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let name = name.to_lowercase();
+    let lock_path = parent.join(format!(
+        ".wiki-import-{}.lock",
+        crate::domain::stable_content_hash(name.as_bytes()),
+    ));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| ArchiveError::Io {
+            action: "open import publication lock",
+            path: root.to_path_buf(),
+            source,
+        })?;
+    lock.lock().map_err(|source| ArchiveError::Io {
+        action: "lock import destination",
+        path: root.to_path_buf(),
+        source,
+    })?;
     ensure_empty_destination(root)?;
     if !root.exists() {
         return fs::rename(staging, root).map_err(|source| ArchiveError::Io {

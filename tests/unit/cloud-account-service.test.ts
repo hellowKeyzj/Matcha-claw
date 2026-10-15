@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CloudAccountRuntime } from '../../electron/main/cloud-account/service';
 
 vi.mock('../../electron/main/cloud-account/device-key-store', () => ({
   getCloudPackageDevicePublicKey: vi.fn().mockResolvedValue('device-public-key'),
@@ -11,6 +12,20 @@ function packageTransport() {
     listCloudPackages: vi.fn().mockResolvedValue({ status: 200, body: { packages: [] } }),
     clearAuthorizations: vi.fn().mockResolvedValue({ status: 200, body: { outcome: 'accepted' } }),
   };
+}
+
+function runtimeFixture(transport = packageTransport()): Promise<CloudAccountRuntime> {
+  return Promise.resolve({
+    providerSync: { reconcile: vi.fn().mockResolvedValue(undefined) },
+    packageTransport: transport,
+    operationTransports: {
+      agentsTransport: { execute: vi.fn(), result: vi.fn(), exportCloudArtifact: vi.fn() },
+      sealedSkillsTransport: { readStatus: vi.fn(), export: vi.fn(), exportCloud: vi.fn(), exportCloudResult: vi.fn(), install: vi.fn(), uninstall: vi.fn() },
+      callLogTransport: { list: vi.fn(), get: vi.fn(), history: vi.fn() },
+      subscribeCalls: vi.fn(() => vi.fn()),
+      packageChanged: vi.fn(),
+    },
+  });
 }
 
 const hoisted = vi.hoisted(() => ({
@@ -100,7 +115,10 @@ describe('cloud account service', () => {
     let resolveProfile!: (value: typeof freshUser) => void;
     const fetchProfileMock = vi.fn((): Promise<typeof freshUser> => new Promise((resolve) => { resolveProfile = resolve; }));
     const { createCloudAccountService } = await import('../../electron/main/cloud-account/service');
-    const service = createCloudAccountService({ fetchProfile: fetchProfileMock } as never, undefined, packageTransport());
+    const transport = packageTransport();
+    let resolveRuntime!: (value: CloudAccountRuntime) => void;
+    const runtime = new Promise<CloudAccountRuntime>((resolve) => { resolveRuntime = resolve; });
+    const service = createCloudAccountService({ fetchProfile: fetchProfileMock } as never, runtime);
 
     const projection = await service.getSession();
 
@@ -112,6 +130,8 @@ describe('cloud account service', () => {
     });
     expect(fetchProfileMock).toHaveBeenCalledTimes(1);
     expect(hoisted.writeCloudAccountSessionMock).not.toHaveBeenCalled();
+    expect(transport.clearAuthorizations).not.toHaveBeenCalled();
+    expect(transport.listCloudPackages).not.toHaveBeenCalled();
 
     resolveProfile(freshUser);
     await vi.waitFor(() => expect(hoisted.writeCloudAccountSessionMock).toHaveBeenCalledTimes(1));
@@ -123,6 +143,11 @@ describe('cloud account service', () => {
       tokenType: 'Bearer',
     });
     expect(fetchProfileMock).toHaveBeenCalledTimes(1);
+    const dependencies = await runtimeFixture(transport);
+    resolveRuntime(dependencies);
+    await vi.waitFor(() => expect(dependencies.providerSync.reconcile).toHaveBeenCalledWith({ ...localSession, user: freshUser }));
+    await vi.waitFor(() => expect(transport.listCloudPackages).toHaveBeenCalledTimes(1));
+    await service.close();
   });
 
   it('invalidates in-flight authorization synchronously on logout and does not refill after a new login', async () => {
@@ -139,7 +164,7 @@ describe('cloud account service', () => {
     };
     const transport = packageTransport();
     const { createCloudAccountService } = await import('../../electron/main/cloud-account/service');
-    const service = createCloudAccountService(client as never, undefined, transport);
+    const service = createCloudAccountService(client as never, runtimeFixture(transport));
     await service.getSession();
     const installing = service.preparePackageInstall({ packageVersionId: 'v1' });
     const rejection = expect(installing).rejects.toMatchObject({ status: 409 });
@@ -158,7 +183,7 @@ describe('cloud account service', () => {
     const { createCloudAccountService } = await import('../../electron/main/cloud-account/service');
     const { CloudAccountClientError } = await import('../../electron/main/cloud-account/client');
     const client = { publishPackage: vi.fn().mockRejectedValue(new CloudAccountClientError(403, 'MATCHA_PACKAGE_VERSION_NOT_PUBLISHABLE', 'not publishable')) };
-    const service = createCloudAccountService(client as never, undefined, packageTransport());
+    const service = createCloudAccountService(client as never, runtimeFixture());
     await expect(service.publishPackage('v1')).rejects.toMatchObject({ status: 403 });
     expect(hoisted.clearCloudAccountSessionMock).not.toHaveBeenCalled();
     await service.close();
@@ -173,7 +198,7 @@ describe('cloud account service', () => {
     let resolveRefresh!: (value: unknown) => void;
     const client = { refresh: vi.fn(() => new Promise((resolve) => { resolveRefresh = resolve; })), logout: vi.fn().mockResolvedValue(undefined) };
     const { createCloudAccountService } = await import('../../electron/main/cloud-account/service');
-    const service = createCloudAccountService(client as never, undefined, packageTransport());
+    const service = createCloudAccountService(client as never, runtimeFixture());
     const session = service.getSession();
     const rejected = expect(session).rejects.toMatchObject({ status: 409 });
     await vi.waitFor(() => expect(client.refresh).toHaveBeenCalledTimes(1));
@@ -195,7 +220,7 @@ describe('cloud account service', () => {
     const service = createCloudAccountService({
       fetchPublicSettings: fetchPublicSettingsMock,
       fetchProfile: fetchProfileMock,
-    } as never, undefined, packageTransport());
+    } as never, runtimeFixture());
 
     service.prewarm();
     const settingsPromise = service.getPublicSettings();

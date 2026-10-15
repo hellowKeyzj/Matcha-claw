@@ -1,0 +1,140 @@
+name: Test Update WebDAV
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-update-webdav
+  cancel-in-progress: false
+
+jobs:
+  upload-download-cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify WebDAV upload, download, and cleanup
+        shell: bash
+        env:
+          UPDATE_WEBDAV_USERNAME: ${{ secrets.UPDATE_WEBDAV_USERNAME }}
+          UPDATE_WEBDAV_PASSWORD: ${{ secrets.UPDATE_WEBDAV_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$UPDATE_WEBDAV_USERNAME" ] || [ -z "$UPDATE_WEBDAV_PASSWORD" ]; then
+            printf '%s\n' 'Configure UPDATE_WEBDAV_USERNAME and UPDATE_WEBDAV_PASSWORD in repository Secrets.'
+            exit 1
+          fi
+
+          workdir="$(mktemp -d)"
+          mkdir "$workdir/download"
+          uuid="$(openssl rand -hex 16)"
+          name="matcha-update-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${uuid}.bin"
+          url="https://www.senluopan.com/dav/$name"
+          printf 'Temporary file: %s\n' "$name"
+          cleanup_required=0
+
+          dav() {
+            curl --silent --show-error --connect-timeout 20 --max-time 60 \
+              --proto '=https' --proto-redir '=https' \
+              --user "$UPDATE_WEBDAV_USERNAME:$UPDATE_WEBDAV_PASSWORD" "$@"
+          }
+
+          cleanup() {
+            result=$?
+            trap - EXIT
+            if [ "$cleanup_required" -eq 1 ]; then
+              code="$(dav --request DELETE --output /dev/null --write-out '%{http_code}' "$url")" || exit 1
+              if [ "$code" != 204 ] && [ "$code" != 404 ]; then
+                printf 'Cleanup failed: HTTP %s; remove only %s from the update folder.\n' "$code" "$name"
+                exit 1
+              fi
+              code="$(dav --head --output /dev/null --write-out '%{http_code}' "$url")" || exit 1
+              if [ "$code" != 404 ]; then
+                printf 'Cleanup verification failed: HTTP %s for %s.\n' "$code" "$name"
+                exit 1
+              fi
+              printf '%s\n' 'Temporary remote file removed (confirmed HTTP 404).'
+            fi
+            if [ "$result" -eq 0 ]; then
+              printf '%s\n' 'PASS: GitHub runner uploaded, downloaded, verified, and removed a 64 KiB file. No release metadata was changed.'
+            fi
+            exit "$result"
+          }
+          trap cleanup EXIT
+
+          code="$(dav --head --output /dev/null --write-out '%{http_code}' "$url")"
+          if [ "$code" != 404 ]; then
+            printf 'Preflight expected HTTP 404, got %s; nothing will be written.\n' "$code"
+            exit 1
+          fi
+
+          dd if=/dev/urandom of="$workdir/payload.bin" bs=65536 count=1 status=none
+          cleanup_required=1
+          code="$(dav --request PUT --header 'If-None-Match: *' \
+            --upload-file "$workdir/payload.bin" --output /dev/null --write-out '%{http_code}' "$url")"
+          if [ "$code" = 412 ]; then
+            cleanup_required=0
+          fi
+          if [ "$code" != 201 ]; then
+            printf 'Upload expected HTTP 201, got %s.\n' "$code"
+            exit 1
+          fi
+          printf '%s\n' 'Upload succeeded (HTTP 201).'
+
+          # Follow redirects explicitly so diagnostics never expose signed URLs or credentials.
+          python3 -I - "$url" "$workdir/download/payload.bin" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+          from urllib.parse import urljoin, urlsplit
+
+          url, destination = sys.argv[1:]
+          headers_path = destination + '.headers'
+          authorization_allowed = True
+          deadline = time.monotonic() + 60
+          for hop in range(1, 7):
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  sys.exit('Download exceeded its 60-second total timeout.')
+              target = urlsplit(url)
+              if target.scheme != 'https' or not target.hostname or target.username or target.password:
+                  sys.exit('Download rejected a non-HTTPS or credential-bearing redirect.')
+              origin = (target.scheme, target.hostname, target.port or 443)
+              authorization_allowed = authorization_allowed and origin == ('https', 'www.senluopan.com', 443)
+              print(f'Download hop {hop}: host={target.hostname} port={target.port or 443}', flush=True)
+              command = [
+                  'curl', '--silent', '--show-error', '--connect-timeout', '20', '--max-time', str(remaining),
+                  '--proto', '=https', '--max-filesize', '65536',
+                  '--dump-header', headers_path, '--output', destination, '--write-out', '%{json}',
+              ]
+              if authorization_allowed:
+                  command += ['--user', os.environ['UPDATE_WEBDAV_USERNAME'] + ':' + os.environ['UPDATE_WEBDAV_PASSWORD']]
+              result = subprocess.run(command + [url], capture_output=True, text=True)
+              metrics = json.loads(result.stdout or '{}')
+              report = {'hop': hop, 'host': target.hostname, 'curl_exit': result.returncode}
+              for key in ('http_code', 'remote_ip', 'time_namelookup', 'time_connect', 'time_appconnect', 'time_starttransfer', 'time_total'):
+                  report[key] = metrics.get(key)
+              print(json.dumps(report), flush=True)
+              # Do not print curl stderr, response headers, or its full JSON (they can contain signed URLs).
+              if result.returncode:
+                  sys.exit(result.returncode)
+              status = metrics['http_code']
+              if status == 200:
+                  break
+              if status not in (301, 302, 303, 307, 308):
+                  sys.exit(f'Download failed: HTTP {status}.')
+              headers = Path(headers_path).read_text(encoding='iso-8859-1').splitlines()
+              location = next((line.split(':', 1)[1].strip() for line in reversed(headers) if line.lower().startswith('location:')), None)
+              if not location:
+                  sys.exit('Download redirect has no Location header.')
+              url = urljoin(url, location)
+          else:
+              sys.exit('Download exceeded five redirects.')
+          PY
+          cmp "$workdir/payload.bin" "$workdir/download/payload.bin"
+          printf '%s\n' 'Download succeeded; every byte matches the uploaded file.'

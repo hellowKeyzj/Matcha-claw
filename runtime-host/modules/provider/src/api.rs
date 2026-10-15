@@ -130,6 +130,7 @@ impl ProviderHandle {
             id,
             reference: format!("credential:v1:{}", account_id.as_str()),
             revision: draft.revision_value(),
+            account_id: account_id.clone(),
         });
         let (reply, _) = oneshot::channel();
         self.admit_account_command(ProviderCommand::ReplaceAccount {
@@ -160,6 +161,7 @@ impl ProviderHandle {
             id: transaction_id,
             reference: format!("credential:v1:{}", id.as_str()),
             revision: revision.get(),
+            account_id: id.clone(),
         });
         let (reply, _) = oneshot::channel();
         self.admit_account_command(ProviderCommand::DeleteAccount {
@@ -686,6 +688,7 @@ pub(crate) struct ProviderAccountPrivateTransaction {
     pub(crate) id: String,
     pub(crate) reference: String,
     pub(crate) revision: u64,
+    pub(crate) account_id: ProviderAccountId,
 }
 
 pub(crate) enum ProviderCommand {

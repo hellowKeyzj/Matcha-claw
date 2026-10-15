@@ -361,15 +361,11 @@ pub(crate) async fn open_terminal<R>(
     pinned_host_key: &PublicKey,
     rows: u16,
     cols: u16,
+    cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<
     (
-        mpsc::Sender<crate::application::terminal::ProviderCommand>,
-        mpsc::Receiver<
-            Result<
-                crate::application::terminal::ProviderEvent,
-                crate::application::terminal::ProviderError,
-            >,
-        >,
+        crate::application::terminal::TerminalProviderOpen,
+        foundation::execution::OwnedTask<()>,
     ),
     SshEffectError,
 >
@@ -377,53 +373,91 @@ where
     R: FleetSecretResolverPort,
     R::Secret: AsRef<str>,
 {
-    let connection = SshEffect::default()
-        .connect(target, resolver, pinned_host_key)
-        .await?;
-    let mut channel = connection
-        .session
-        .channel_open_session()
-        .await
-        .map_err(|_| SshEffectError::Protocol)?;
-    channel
-        .request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
-        .await
-        .map_err(|_| SshEffectError::Protocol)?;
-    channel
-        .request_shell(true)
-        .await
-        .map_err(|_| SshEffectError::Protocol)?;
+    let effect = SshEffect::default();
+    let connection = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(SshEffectError::Network),
+        result = effect.connect(target, resolver, pinned_host_key) => result?,
+    };
+    let setup = async {
+        let channel = connection
+            .session
+            .channel_open_session()
+            .await
+            .map_err(|_| SshEffectError::Protocol)?;
+        channel
+            .request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
+            .await
+            .map_err(|_| SshEffectError::Protocol)?;
+        if cancellation.is_cancelled() {
+            return Err(SshEffectError::Network);
+        }
+        channel
+            .request_shell(true)
+            .await
+            .map_err(|_| SshEffectError::Protocol)?;
+        Ok::<_, SshEffectError>(channel)
+    };
+    let result = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(SshEffectError::Network),
+        result = setup => result,
+    };
+    let mut channel = match result {
+        Ok(channel) => channel,
+        Err(error) => {
+            let _ = connection.close().await;
+            return Err(error);
+        }
+    };
     let (commands_tx, mut commands_rx) = mpsc::channel(32);
     let (events_tx, events_rx) = mpsc::channel(32);
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                command = commands_rx.recv() => match command {
-                    Some(crate::application::terminal::ProviderCommand::Input(data)) => {
-                        if channel.data_bytes(data).await.is_err() { break; }
+    let (task, _) = foundation::execution::OwnedTask::spawn(move |stop| async move {
+        let run = async {
+            loop {
+                tokio::select! {
+                    command = commands_rx.recv() => match command {
+                        Some(crate::application::terminal::ProviderCommand::Input(data)) => {
+                            if channel.data_bytes(data).await.is_err() { break; }
+                        }
+                        Some(crate::application::terminal::ProviderCommand::Resize { rows, cols }) => {
+                            if channel.window_change(cols as u32, rows as u32, 0, 0).await.is_err() { break; }
+                        }
+                        None => { let _ = channel.eof().await; break; }
+                    },
+                    message = channel.wait() => match message {
+                        Some(russh::ChannelMsg::Data { data }) => {
+                            if events_tx.send(Ok(crate::application::terminal::ProviderEvent::Output(data.to_vec()))).await.is_err() { break; }
+                        }
+                        Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
+                            if events_tx.send(Ok(crate::application::terminal::ProviderEvent::Output(data.to_vec()))).await.is_err() { break; }
+                        }
+                        Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
+                            let _ = events_tx.send(Ok(crate::application::terminal::ProviderEvent::Exit { code: i32::try_from(exit_status).ok() })).await;
+                        }
+                        Some(russh::ChannelMsg::Close) | None => break,
+                        _ => {}
                     }
-                    Some(crate::application::terminal::ProviderCommand::Resize { rows, cols }) => {
-                        if channel.window_change(cols as u32, rows as u32, 0, 0).await.is_err() { break; }
-                    }
-                    None => { let _ = channel.eof().await; break; }
-                },
-                message = channel.wait() => match message {
-                    Some(russh::ChannelMsg::Data { data }) => {
-                        if events_tx.send(Ok(crate::application::terminal::ProviderEvent::Output(data.to_vec()))).await.is_err() { break; }
-                    }
-                    Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
-                        if events_tx.send(Ok(crate::application::terminal::ProviderEvent::Output(data.to_vec()))).await.is_err() { break; }
-                    }
-                    Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
-                        let _ = events_tx.send(Ok(crate::application::terminal::ProviderEvent::Exit { code: i32::try_from(exit_status).ok() })).await;
-                    }
-                    Some(russh::ChannelMsg::Close) | None => break,
-                    _ => {}
                 }
             }
+        };
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {},
+            _ = stop.cancelled() => {},
+            _ = run => {},
         }
+        commands_rx.close();
+        let _ = timeout(connection.timeouts.connect, channel.close()).await;
+        let _ = connection.close().await;
     });
-    Ok((commands_tx, events_rx))
+    Ok((
+        crate::application::terminal::TerminalProviderOpen {
+            commands: commands_tx,
+            events: events_rx,
+        },
+        task,
+    ))
 }
 impl SshConnection {
     async fn exec(

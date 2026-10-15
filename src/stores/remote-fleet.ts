@@ -985,7 +985,133 @@ function upsertById<T extends { readonly id: string }>(items: readonly T[], item
     .sort((first, second) => first.id.localeCompare(second.id));
 }
 
-export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
+function mergeProjectionItems<T extends { readonly id: string }>(
+  base: readonly T[],
+  current: readonly T[],
+  response: readonly T[],
+  mutations: ReadonlyMap<string, number>,
+  sequence: number,
+): readonly T[] {
+  if (base === current) return response;
+  const currentById = new Map(current.map((item) => [item.id, item]));
+  const changes = new Map<string, T | undefined>();
+  for (const [id, mutationSequence] of mutations) {
+    if (mutationSequence > sequence) changes.set(id, currentById.get(id));
+  }
+  if (changes.size === 0) return response;
+  const merged = response.flatMap((item) => {
+    if (!changes.has(item.id)) return [item];
+    const updated = changes.get(item.id);
+    changes.delete(item.id);
+    return updated ? [updated] : [];
+  });
+  return [...merged, ...[...changes.values()].filter((item): item is T => item !== undefined)];
+}
+
+export const useRemoteFleetStore = create<RemoteFleetState>((set, get) => {
+  let inventoryRevision = 0;
+  let activeInventoryMutations = 0;
+  let refreshInFlight: Promise<void> | null = null;
+  let projectionReadbackPending = false;
+  let listProjectionSequence = 0;
+  const committedListSequences = new Map<keyof RemoteFleetProjectionState, number>();
+  const mutationSequences = new Map<keyof RemoteFleetProjectionState, Map<string, number>>();
+
+  function projectionPatchForCommit(
+    state: RemoteFleetProjectionState,
+    patch: RemoteFleetProjectionPatch,
+    base: RemoteFleetProjectionState = state,
+    sequence = ++listProjectionSequence,
+    source: RemoteFleetProjectionPatch | RemoteFleetActionPayload = patch,
+    mutation = false,
+  ): RemoteFleetProjectionPatch {
+    const mutationSequence = mutation ? ++listProjectionSequence : 0;
+    return Object.fromEntries((Object.keys(patch) as (keyof RemoteFleetProjectionState)[]).flatMap((field) => {
+      const items = patch[field];
+      if (!items) return [];
+      const complete = field in source;
+      if (complete && sequence <= (committedListSequences.get(field) ?? 0)) return [];
+      const mutations = mutationSequences.get(field) ?? new Map<string, number>();
+      const merged = complete ? mergeProjectionItems<{ readonly id: string }>(base[field], state[field], items, mutations, sequence) : items;
+      if (complete) {
+        committedListSequences.set(field, sequence);
+        for (const [id, committed] of mutations) {
+          if (committed <= sequence) mutations.delete(id);
+        }
+      }
+      if (mutation) {
+        const previous = new Map(state[field].map((item) => [item.id, item]));
+        const next = new Map(merged.map((item) => [item.id, item]));
+        for (const id of new Set([...previous.keys(), ...next.keys()])) {
+          const before = previous.get(id);
+          const after = next.get(id);
+          // Partial upserts remain real writes even when an entity returns to its old value.
+          if (complete ? JSON.stringify(before) !== JSON.stringify(after) : before !== after) {
+            mutations.set(id, mutationSequence);
+          }
+        }
+      }
+      if (mutations.size > 0) mutationSequences.set(field, mutations);
+      else mutationSequences.delete(field);
+      return [[field, merged]];
+    })) as RemoteFleetProjectionPatch;
+  }
+
+  function commitListRead(
+    patch: RemoteFleetProjectionPatch,
+    base: RemoteFleetProjectionState,
+    revision: number,
+    sequence: number,
+  ) {
+    set((state) => projectionPatchForCommit(state, patch, base, sequence));
+    projectionReadbackPending ||= revision !== inventoryRevision || activeInventoryMutations > 0;
+    flushProjectionReadback();
+  }
+
+  function beginInventoryMutation() {
+    inventoryRevision += 1;
+    activeInventoryMutations += 1;
+  }
+
+  function finishInventoryMutation() {
+    inventoryRevision += 1;
+    activeInventoryMutations -= 1;
+    if (activeInventoryMutations === 0) flushProjectionReadback();
+  }
+
+  function flushProjectionReadback() {
+    if (projectionReadbackPending && !refreshInFlight && activeInventoryMutations === 0) {
+      void refreshProjection(false).catch(() => undefined);
+    }
+  }
+
+  function refreshProjection(showLoading = true): Promise<void> {
+    if (showLoading) set({ loading: true, error: null });
+    if (refreshInFlight) return refreshInFlight;
+    refreshInFlight = (async () => {
+      try {
+        const base = get();
+        const revision = inventoryRevision;
+        const sequence = ++listProjectionSequence;
+        projectionReadbackPending = false;
+        const snapshot = normalizeSnapshot(await hostApiFetch<unknown>('/api/remote-fleet/snapshot'));
+        set((state) => ({
+          ...projectionPatchForCommit(state, projectionFromSnapshot(snapshot), base, sequence),
+          ready: true,
+        }));
+        projectionReadbackPending ||= revision !== inventoryRevision || activeInventoryMutations > 0;
+      } catch (error) {
+        set({ error: actionErrorMessage(error, '加载 Remote Fleet 失败') });
+        throw error;
+      } finally {
+        refreshInFlight = null;
+        set({ loading: false });
+        flushProjectionReadback();
+      }
+    })();
+    return refreshInFlight;
+  }
+
   async function runMutation(
     actionKey: string,
     path: string,
@@ -993,6 +1119,11 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
     fallbackErrorMessage: string,
     options: { readonly timeoutMs?: number } = {},
   ): Promise<RemoteFleetActionPayload> {
+    beginInventoryMutation();
+    let base = get();
+    let snapshotRevision = inventoryRevision;
+    let sequence = ++listProjectionSequence;
+    let refreshRequired = false;
     set({ mutatingAction: actionKey, error: null });
     try {
       const response = readRecord(await remoteFleetPost<unknown>(path, body, options));
@@ -1001,6 +1132,9 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
         && (path === '/api/remote-fleet/probe-connection' || path === '/api/remote-fleet/delete-environment')) {
         if (!isCallId(response.callId) || response.accepted !== true) throw new Error('Fleet admission is missing its call receipt');
         const call = await waitForCall({ callId: response.callId, accepted: true }, 'fleet', { timeoutMs: path === '/api/remote-fleet/delete-environment' ? null : undefined });
+        base = get();
+        snapshotRevision = inventoryRevision;
+        sequence = ++listProjectionSequence;
         const snapshot = normalizeSnapshot(await hostApiFetch<unknown>('/api/remote-fleet/snapshot'));
         const deleting = path === '/api/remote-fleet/delete-environment';
         const entityId = deleting ? body.environmentId : body.connectionId;
@@ -1017,8 +1151,9 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
             ? { ...snapshot, environments: snapshot.environments.filter((item) => item.id !== body.environmentId || item.status !== 'deleted') }
             : snapshot };
       }
+      refreshRequired = Boolean(payload.snapshot) && snapshotRevision !== inventoryRevision;
       set((state) => ({
-        ...projectionPatchFromActionPayload(state, payload),
+        ...projectionPatchForCommit(state, projectionPatchFromActionPayload(state, payload), base, sequence, payload.snapshot ?? payload, true),
         ready: payload.snapshot ? true : state.ready,
       }));
       return payload;
@@ -1026,6 +1161,8 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
       set({ error: actionErrorMessage(error, fallbackErrorMessage) });
       throw error;
     } finally {
+      projectionReadbackPending ||= refreshRequired;
+      finishInventoryMutation();
       set((state) => ({ mutatingAction: state.mutatingAction === actionKey ? null : state.mutatingAction }));
     }
   }
@@ -1038,20 +1175,7 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
     mutatingAction: null,
     error: null,
 
-    refresh: async () => {
-      set({ loading: true, error: null });
-      try {
-        const snapshot = normalizeSnapshot(await hostApiFetch<unknown>('/api/remote-fleet/snapshot'));
-        set({
-          ...projectionFromSnapshot(snapshot),
-          ready: true,
-          loading: false,
-        });
-      } catch (error) {
-        set({ loading: false, error: actionErrorMessage(error, '加载 Remote Fleet 失败') });
-        throw error;
-      }
-    },
+    refresh: refreshProjection,
 
     loadMetrics: async () => {
       const actionKey = 'load-metrics';
@@ -1137,30 +1261,34 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
     openTerminal: async (target) => {
       const targetKey = target.endpointId ?? target.runtimeId ?? target.nodeId ?? 'unknown';
       const actionKey = `terminal-open:${targetKey}`;
+      beginInventoryMutation();
       set({ mutatingAction: actionKey, error: null });
       try {
         const result = normalizeTerminalOpenResult(await remoteFleetPost<unknown>('/api/remote-fleet/terminal/open', compactTerminalOpenTarget(target)));
-        set((state) => ({ sessions: upsertById(state.sessions, result.session) }));
+        set((state) => projectionPatchForCommit(state, { sessions: upsertById(state.sessions, result.session) }, state, undefined, {}, true));
         return result;
       } catch (error) {
         set({ error: '打开 Remote Fleet 终端失败' });
         throw error;
       } finally {
+        finishInventoryMutation();
         set((state) => ({ mutatingAction: state.mutatingAction === actionKey ? null : state.mutatingAction }));
       }
     },
 
     reconnectTerminal: async (sessionId) => {
       const actionKey = `terminal-reconnect:${sessionId}`;
+      beginInventoryMutation();
       set({ mutatingAction: actionKey, error: null });
       try {
         const result = normalizeTerminalOpenResult(await remoteFleetPost<unknown>('/api/remote-fleet/terminal/reconnect', { sessionId }));
-        set((state) => ({ sessions: upsertById(state.sessions, result.session) }));
+        set((state) => projectionPatchForCommit(state, { sessions: upsertById(state.sessions, result.session) }, state, undefined, {}, true));
         return result;
       } catch (error) {
         set({ error: '重新连接 Remote Fleet 终端失败' });
         throw error;
       } finally {
+        finishInventoryMutation();
         set((state) => ({ mutatingAction: state.mutatingAction === actionKey ? null : state.mutatingAction }));
       }
     },
@@ -1178,9 +1306,12 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
       const actionKey = 'terminal-sessions';
       set({ mutatingAction: actionKey, error: null });
       try {
+        const base = get();
+        const revision = inventoryRevision;
+        const sequence = ++listProjectionSequence;
         const payload = readRecord(await hostApiFetch<unknown>('/api/remote-fleet/terminal/sessions'));
         const sessions = normalizeProjectionArray(payload.sessions, normalizeTerminalSessionSummary);
-        set({ sessions });
+        commitListRead({ sessions }, base, revision, sequence);
         return sessions;
       } catch (error) {
         set({ error: actionErrorMessage(error, '加载 Remote Fleet 终端会话失败') });
@@ -1233,9 +1364,12 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
       const actionKey = 'list-commands';
       set({ mutatingAction: actionKey, error: null });
       try {
+        const base = get();
+        const revision = inventoryRevision;
+        const sequence = ++listProjectionSequence;
         const payload = readRecord(await hostApiFetch<unknown>('/api/remote-fleet/list-commands'));
         const commands = normalizeProjectionArray(payload.commands, normalizeCommandSummary);
-        set({ commands });
+        commitListRead({ commands }, base, revision, sequence);
         return commands;
       } catch (error) {
         set({ error: actionErrorMessage(error, '加载远端命令失败') });
@@ -1249,9 +1383,12 @@ export const useRemoteFleetStore = create<RemoteFleetState>((set) => {
       const actionKey = 'list-audit-events';
       set({ mutatingAction: actionKey, error: null });
       try {
+        const base = get();
+        const revision = inventoryRevision;
+        const sequence = ++listProjectionSequence;
         const payload = readRecord(await hostApiFetch<unknown>('/api/remote-fleet/list-audit-events'));
         const auditEvents = normalizeProjectionArray(payload.auditEvents, normalizeAuditEventSummary);
-        set({ auditEvents });
+        commitListRead({ auditEvents }, base, revision, sequence);
         return auditEvents;
       } catch (error) {
         set({ error: actionErrorMessage(error, '加载远端审计事件失败') });

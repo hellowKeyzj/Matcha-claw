@@ -12,8 +12,9 @@ import * as SelectPrimitive from '@radix-ui/react-select';
 import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck, Settings2, GitBranch, ArrowUpRight, Play, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import type {
-  SessionIdentity,
+import {
+  buildSessionIdentityKey,
+  type SessionIdentity,
 } from '../../types/desktop/runtime-address';
 import { invokeIpc } from '@/lib/api-client';
 import { useSkillsStore } from '@/stores/skills';
@@ -31,7 +32,7 @@ import type { ChatSendAttachment, ChatSendResult } from '@/stores/chat';
 import { CHAT_INLINE_ATTACHMENT_MAX_BYTES } from '@/stores/chat/types';
 import { resolveChatSendGateForPayload, type ChatSendGate } from '@/stores/chat/send-gate';
 import type { ChatContextUsageViewModel } from './context-usage';
-import type { ComposerMode, ComposerDraftSelection } from '@/stores/composer-drafts';
+import { useComposerDraftStore, type ComposerMode, type ComposerDraftSelection } from '@/stores/composer-drafts';
 import type { SessionRunPhase } from '@/types/session/runtime-state';
 import type { TeamStartGateStatus } from '@/types/team-design';
 import { createSessionTraceId, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
@@ -460,14 +461,26 @@ export const ChatInput = memo(function ChatInput({
   const { t } = useTranslation('chat');
   const [uncontrolledInput, setUncontrolledInput] = useState('');
   const input = onDraftChange ? (draft ?? '') : uncontrolledInput;
+  const inputRevisionRef = useRef(0);
   const setInput = useCallback((update: SetStateAction<string>) => {
+    inputRevisionRef.current += 1;
     if (onDraftChange) onDraftChange(update);
     else setUncontrolledInput(update);
   }, [onDraftChange]);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const committedAttachmentsRef = useRef(attachments);
   const ownedStagedAttachmentIdsRef = useRef(new Set<string>());
   const canceledStagingKeysRef = useRef(new Set<string>());
   const mountedRef = useRef(true);
+  const sessionIdentityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
+  const composerScope = useMemo(() => ({ draftKey, sessionIdentityKey }), [draftKey, sessionIdentityKey]);
+  const currentScopeRef = useRef<typeof composerScope | null>(null);
+  type SendOperation = { scope: typeof composerScope; attachmentIds: ReadonlySet<string> };
+  const sendOperationRef = useRef<SendOperation | null>(null);
+  const [pendingSend, setPendingSend] = useState<SendOperation | null>(null);
+  const isCurrentScope = useCallback(() => (
+    mountedRef.current && currentScopeRef.current === composerScope
+  ), [composerScope]);
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionStart, setMentionStart] = useState(-1);
   const [mentionEnd, setMentionEnd] = useState(-1);
@@ -745,10 +758,11 @@ export const ChatInput = memo(function ChatInput({
     setInputAndSelection(nextValue, { start: caret, end: caret, direction: 'none' });
     closeMention();
     requestAnimationFrame(() => {
+      if (!isCurrentScope()) return;
       textareaRef.current?.focus();
       textareaRef.current?.setSelectionRange(caret, caret);
     });
-  }, [closeMention, input, mentionEnd, mentionStart, setInputAndSelection]);
+  }, [closeMention, input, isCurrentScope, mentionEnd, mentionStart, setInputAndSelection]);
 
   const refreshSlashCandidates = useCallback((nextInput: string, cursor: number) => {
     const range = detectSlashRange(nextInput, cursor);
@@ -781,10 +795,11 @@ export const ChatInput = memo(function ChatInput({
     else setSelectedSkills((prev) => (prev.some((item) => item.id === candidate.id) ? prev : [...prev, candidate]));
     closeSlash();
     requestAnimationFrame(() => {
+      if (!isCurrentScope()) return;
       textareaRef.current?.focus();
       textareaRef.current?.setSelectionRange(caret, caret);
     });
-  }, [closeSlash, goal, input, setInputAndSelection, slashEnd, slashStart]);
+  }, [closeSlash, goal, input, isCurrentScope, setInputAndSelection, slashEnd, slashStart]);
 
   const toggleQuickPhrase = useCallback(() => {
     setQuickPhraseOpen((open) => !open);
@@ -821,10 +836,11 @@ export const ChatInput = memo(function ChatInput({
     setInputAndSelection(nextValue, { start: caret, end: caret, direction: 'none' });
     closeQuickPhrase();
     requestAnimationFrame(() => {
+      if (!isCurrentScope()) return;
       textareaRef.current?.focus();
       textareaRef.current?.setSelectionRange(caret, caret);
     });
-  }, [closeQuickPhrase, input, setInputAndSelection]);
+  }, [closeQuickPhrase, input, isCurrentScope, setInputAndSelection]);
 
   const commitQuickPhraseList = useCallback((nextPhrases: QuickPhrase[]) => {
     setQuickPhrases(nextPhrases);
@@ -870,16 +886,35 @@ export const ChatInput = memo(function ChatInput({
   }, []);
 
   const registerStagedAttachment = useCallback((stagedAttachmentId: string, stagingKey: string): boolean => {
-    if (!mountedRef.current || canceledStagingKeysRef.current.has(stagingKey)) {
+    if (!isCurrentScope() || canceledStagingKeysRef.current.has(stagingKey)) {
       releaseStagedAttachmentIds([stagedAttachmentId]);
       return false;
     }
     canceledStagingKeysRef.current.delete(stagingKey);
     ownedStagedAttachmentIdsRef.current.add(stagedAttachmentId);
     return true;
-  }, [releaseStagedAttachmentIds]);
+  }, [isCurrentScope, releaseStagedAttachmentIds]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    currentScopeRef.current = composerScope;
+    const retainedIds = new Set(committedAttachmentsRef.current
+      .filter((attachment) => attachment.status !== 'staging')
+      .map((attachment) => attachment.stagedAttachmentId));
+    releaseStagedAttachmentIds([...ownedStagedAttachmentIdsRef.current].filter((id) => !retainedIds.has(id)));
+    setAttachments((current) => {
+      const retained = current.filter((attachment) => attachment.status !== 'staging' && retainedIds.has(attachment.stagedAttachmentId));
+      return retained.length === current.length ? current : retained;
+    });
+    return () => {
+      currentScopeRef.current = null;
+    };
+  }, [composerScope, releaseStagedAttachmentIds]);
+
+  useLayoutEffect(() => {
+    committedAttachmentsRef.current = attachments;
+  }, [attachments]);
+
+  useLayoutEffect(() => {
     mountedRef.current = true;
     const ownedStagedAttachmentIds = ownedStagedAttachmentIdsRef.current;
     const canceledStagingKeys = canceledStagingKeysRef.current;
@@ -897,6 +932,7 @@ export const ChatInput = memo(function ChatInput({
   // ── File staging via native dialog ─────────────────────────────
 
   const stageSelectedDialogAttachments = useCallback(async () => {
+    if (!isCurrentScope()) return;
     const tempIds: string[] = [];
     let stagingAttachments: FileAttachment[] = [];
     let stagedAttachmentIdsFromResult: string[] = [];
@@ -911,6 +947,10 @@ export const ChatInput = memo(function ChatInput({
       stagedAttachmentIdsFromResult = result.attachments
         .map((attachment) => attachment.stagedAttachmentId)
         .filter((id): id is string => typeof id === 'string' && id.length > 0);
+      if (!isCurrentScope()) {
+        releaseStagedAttachmentIds(stagedAttachmentIdsFromResult);
+        return;
+      }
 
       stagingAttachments = result.attachments.map((attachment) => {
         const tempId = crypto.randomUUID();
@@ -922,8 +962,12 @@ export const ChatInput = memo(function ChatInput({
           attachment.fileSize,
         );
       });
-      setAttachments((prev) => [...prev, ...stagingAttachments]);
+      setAttachments((prev) => isCurrentScope() ? [...prev, ...stagingAttachments] : prev);
       await waitForAttachmentPlaceholderFrame();
+      if (!isCurrentScope()) {
+        releaseStagedAttachmentIds(stagedAttachmentIdsFromResult);
+        return;
+      }
 
       const updatesByTempId = new Map<string, FileAttachment>();
       for (let i = 0; i < tempIds.length; i++) {
@@ -936,10 +980,10 @@ export const ChatInput = memo(function ChatInput({
           ? { ...attachment, stagedAttachmentId: attachment.stagedAttachmentId ?? tempId, status: 'ready' }
           : { ...stagingAttachments[i], status: 'error', error: 'Attachment removed' });
       }
-      if (mountedRef.current) {
-        setAttachments((prev) => prev.map((attachment) => (
+      if (isCurrentScope()) {
+        setAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
           updatesByTempId.get(attachment.stagedAttachmentId) ?? attachment
-        )));
+        )) : prev);
       }
     } catch (err) {
       if (stagedAttachmentIdsFromResult.length > 0) {
@@ -950,18 +994,18 @@ export const ChatInput = memo(function ChatInput({
         return;
       }
       const failedIds = new Set(tempIds);
-      if (mountedRef.current) {
-        setAttachments((prev) => prev.map((attachment) => (
+      if (isCurrentScope()) {
+        setAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
           failedIds.has(attachment.stagedAttachmentId)
             ? { ...attachment, status: 'error', error: String(err) }
             : attachment
-        )));
+        )) : prev);
       }
     }
-  }, [registerStagedAttachment, releaseStagedAttachmentIds]);
+  }, [isCurrentScope, registerStagedAttachment, releaseStagedAttachmentIds]);
 
   const stageDroppedPathFiles = useCallback(async (filePaths: string[]) => {
-    if (filePaths.length === 0) {
+    if (!isCurrentScope() || filePaths.length === 0) {
       return;
     }
     const tempIds: string[] = filePaths.map(() => crypto.randomUUID());
@@ -970,7 +1014,7 @@ export const ChatInput = memo(function ChatInput({
       const fileName = filePath.split(/[\\/]/).pop() || 'file';
       return buildStagingAttachment(tempIds[index], fileName, 'application/octet-stream', 0);
     });
-    setAttachments((prev) => [...prev, ...stagingAttachments]);
+    setAttachments((prev) => isCurrentScope() ? [...prev, ...stagingAttachments] : prev);
 
     try {
       const result = await invokeIpc<{ attachments?: DialogStagedAttachmentPayload[] }>(
@@ -981,6 +1025,10 @@ export const ChatInput = memo(function ChatInput({
       stagedAttachmentIdsFromResult = stagedAttachments
         .map((attachment) => attachment.stagedAttachmentId)
         .filter((id): id is string => typeof id === 'string' && id.length > 0);
+      if (!isCurrentScope()) {
+        releaseStagedAttachmentIds(stagedAttachmentIdsFromResult);
+        return;
+      }
       const updatesByTempId = new Map<string, FileAttachment>();
       for (let i = 0; i < tempIds.length; i++) {
         const tempId = tempIds[i];
@@ -996,30 +1044,30 @@ export const ChatInput = memo(function ChatInput({
           ? { ...data, stagedAttachmentId: data.stagedAttachmentId ?? tempId, status: 'ready' }
           : { ...stagingAttachments[i], status: 'error', error: 'Attachment removed' });
       }
-      if (mountedRef.current) {
-        setAttachments((prev) => prev.map((attachment) => (
+      if (isCurrentScope()) {
+        setAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
           updatesByTempId.get(attachment.stagedAttachmentId) ?? attachment
-        )));
+        )) : prev);
       }
     } catch (err) {
       if (stagedAttachmentIdsFromResult.length > 0) {
         releaseStagedAttachmentIds(stagedAttachmentIdsFromResult);
       }
       const failedIds = new Set(tempIds);
-      if (mountedRef.current) {
-        setAttachments((prev) => prev.map((attachment) => (
+      if (isCurrentScope()) {
+        setAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
           failedIds.has(attachment.stagedAttachmentId)
             ? { ...attachment, status: 'error', error: String(err) }
             : attachment
-        )));
+        )) : prev);
       }
     }
-  }, [registerStagedAttachment, releaseStagedAttachmentIds]);
+  }, [isCurrentScope, registerStagedAttachment, releaseStagedAttachmentIds]);
 
   // ── Stage browser File objects (paste / drag-drop) ─────────────
 
   const stageBufferFiles = useCallback(async (files: globalThis.File[]) => {
-    if (files.length === 0) {
+    if (!isCurrentScope() || files.length === 0) {
       return;
     }
 
@@ -1041,17 +1089,19 @@ export const ChatInput = memo(function ChatInput({
         file.size,
       )
     ));
-    setAttachments((prev) => [...prev, ...placeholders]);
+    setAttachments((prev) => isCurrentScope() ? [...prev, ...placeholders] : prev);
 
     const results = await mapWithConcurrency(
       queue,
       STAGE_BUFFER_CONCURRENCY,
       async ({ file, tempId, fallback }) => {
         try {
+          if (!isCurrentScope()) throw new Error('Attachment removed');
           if (file.size > STAGE_BUFFER_MAX_BYTES) {
             throw new Error('tooLarge');
           }
           const base64 = await readFileAsBase64(file);
+          if (!isCurrentScope()) throw new Error('Attachment removed');
           const staged = await invokeIpc<DialogStagedAttachmentPayload>('dialog:stageRendererBufferAttachment', {
             base64,
             fileName: file.name,
@@ -1087,16 +1137,16 @@ export const ChatInput = memo(function ChatInput({
       },
     );
 
-    if (!mountedRef.current) {
+    if (!isCurrentScope()) {
       return;
     }
     const updatesByTempId = new Map<string, FileAttachment>(
       results.map((result) => [result.tempId, result.attachment] as const),
     );
-    setAttachments((prev) => prev.map((attachment) => (
+    setAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
       updatesByTempId.get(attachment.stagedAttachmentId) ?? attachment
-    )));
-  }, [registerStagedAttachment]);
+    )) : prev);
+  }, [isCurrentScope, registerStagedAttachment]);
 
   // ── Attachment management ──────────────────────────────────────
 
@@ -1130,9 +1180,12 @@ export const ChatInput = memo(function ChatInput({
   const invalidGoalAttachments = Boolean(goal?.mode) && attachments.some((attachment) => isDirectoryAttachment(attachment) || attachment.fileSize > CHAT_INLINE_ATTACHMENT_MAX_BYTES || Boolean(goal?.mode?.goalId));
   const editingGoal = Boolean(goal?.mode?.goalId);
   const effectiveSending = sending && !editingGoal;
+  const sendPending = pendingSend?.scope === composerScope
+    || attachments.some((attachment) => pendingSend?.attachmentIds.has(attachment.stagedAttachmentId));
   const canSend = (payloadGate.canSend || editingGoal && !payloadGate.canSend && (payloadGate.reason === 'active' || payloadGate.reason === 'stopping'))
     && (!goal?.mode || Boolean(input.trim()) && goal.supported && !goal.busy && !goal.unknown && !invalidGoalAttachments)
     && allReady
+    && !sendPending
     && !disabled
     && (editingGoal || !approvalWaiting)
     && (editingGoal || !imageGenerationActive);
@@ -1162,7 +1215,9 @@ export const ChatInput = memo(function ChatInput({
     : '';
 
   const handleSend = useCallback(async () => {
-    if (!canSend) return;
+    const pendingOperation = sendOperationRef.current;
+    if (!canSend || !isCurrentScope() || pendingOperation && (pendingOperation.scope === composerScope
+      || attachments.some((attachment) => pendingOperation.attachmentIds.has(attachment.stagedAttachmentId)))) return;
     const readyAttachments = attachments.filter((attachment) => attachment.status === 'ready');
     const rawText = input.trim();
     const textToSend = goal?.mode ? input : buildSkillPrefixedMessage(rawText, selectedSkills);
@@ -1180,32 +1235,51 @@ export const ChatInput = memo(function ChatInput({
     const stagedIdsToSend = readyAttachments
       .map((attachment) => attachment.stagedAttachmentId)
       .filter((id) => ownedStagedAttachmentIdsRef.current.has(id));
+    const sentAttachmentIds = new Set(readyAttachments.map((attachment) => attachment.stagedAttachmentId));
+    const inputRevision = inputRevisionRef.current;
+    const drafts = useComposerDraftStore.getState();
+    const draftRevision = draftKey ? drafts.revisions[draftKey] : undefined;
+    const ownsDraftSnapshot = draftKey && onDraftChange && (drafts.drafts[draftKey] ?? '') === input;
+    const operation = { scope: composerScope, attachmentIds: sentAttachmentIds };
+    sendOperationRef.current = operation;
+    setPendingSend(operation);
+    const ownsSend = () => isCurrentScope() && sendOperationRef.current === operation;
+    // The send invocation owns this batch before optimistic rendering can unmount the draft.
+    stagedIdsToSend.forEach((id) => ownedStagedAttachmentIdsRef.current.delete(id));
     let result: ChatSendResult;
     try {
-      result = goal?.mode ? await goal.onSubmit(textToSend, attachmentsToSend) : await onSend(textToSend, attachmentsToSend);
-    } catch {
-      releaseStagedAttachmentIds(stagedIdsToSend, true);
-      setAttachments([]);
-      return;
+      try {
+        result = goal?.mode ? await goal.onSubmit(textToSend, attachmentsToSend) : await onSend(textToSend, attachmentsToSend);
+      } catch {
+        releaseStagedAttachmentIds(stagedIdsToSend);
+        return;
+      }
+      if (!result.accepted) {
+        // An unknown receipt can precede Main's materialization completion.
+        if (result.outcome !== 'unknown') releaseStagedAttachmentIds(stagedIdsToSend);
+        return;
+      }
+      const inputUnchanged = inputRevisionRef.current === inputRevision;
+      if (!goal?.mode) {
+        if (ownsDraftSnapshot) useComposerDraftStore.getState().settleDraft(draftKey, draftRevision);
+        else if (ownsSend() && inputUnchanged) {
+          setInput((current) => isCurrentScope() && current === input ? '' : current);
+        }
+      }
+      if (!ownsSend()) return;
+      setSelectedSkills((current) => isCurrentScope() ? current.filter((skill) => !selectedSkills.includes(skill)) : current);
+      if (!inputUnchanged) return;
+      closeMention();
+      closeSlash();
+      closeQuickPhrase();
+    } finally {
+      if (mountedRef.current) {
+        setAttachments((current) => current.filter((attachment) => !sentAttachmentIds.has(attachment.stagedAttachmentId)));
+        setPendingSend((current) => current === operation ? null : current);
+      }
+      if (sendOperationRef.current === operation) sendOperationRef.current = null;
     }
-    if (!result.accepted) {
-      releaseStagedAttachmentIds(stagedIdsToSend, true);
-      setAttachments([]);
-      return;
-    }
-    stagedIdsToSend.forEach((stagedAttachmentId) => {
-      ownedStagedAttachmentIdsRef.current.delete(stagedAttachmentId);
-    });
-    if (!goal?.mode) setInputAndSelection('', { start: 0, end: 0, direction: 'none' });
-    closeMention();
-    closeSlash();
-    closeQuickPhrase();
-    setSelectedSkills([]);
-    setAttachments([]);
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
-  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, goal, input, onSend, releaseStagedAttachmentIds, selectedSkills, setInputAndSelection]);
+  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, composerScope, draftKey, goal, input, isCurrentScope, onDraftChange, onSend, releaseStagedAttachmentIds, selectedSkills, setInput]);
 
   const handleStop = useCallback(() => {
     logSessionTrace('stop.intent', createSessionTraceId('stop-intent'), () => ({

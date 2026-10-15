@@ -17,6 +17,7 @@ pub(super) enum ActivityReceiptStatus {
     TargetUnavailable,
     StoreFault,
     ActivityError,
+    Retired,
     RuntimeUnavailable,
     ResponseUnavailable,
 }
@@ -100,6 +101,7 @@ impl TeamRunReceiptRouter {
             .await
         {
             Ok(Ok(outcome)) => ActivityReceiptStatus::from_activity_outcome(&outcome),
+            Ok(Err(TeamRunActivityError::Retired)) => ActivityReceiptStatus::Retired,
             Ok(Err(TeamRunActivityError::Store(_))) => ActivityReceiptStatus::StoreFault,
             Ok(Err(_)) | Err(_) => ActivityReceiptStatus::ActivityError,
         };
@@ -125,6 +127,7 @@ impl TeamRunReceiptRouter {
                 | ActivityReceiptStatus::AlreadyClaimed
                 | ActivityReceiptStatus::AwaitingRetry
                 | ActivityReceiptStatus::Terminal
+                | ActivityReceiptStatus::Retired
         ) {
             self.last_failure = Some(observation.clone());
         }

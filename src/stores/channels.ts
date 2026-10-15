@@ -48,6 +48,7 @@ interface ChannelsState {
 const CHANNELS_SILENT_REFRESH_MIN_GAP_MS = 1200;
 const CHANNELS_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
 let inflightChannelsFetchPromise: Promise<void> | null = null;
+let channelsSnapshotRevision = 0;
 let channelsLastFetchAtMs = 0;
 let channelsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -150,9 +151,11 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
       set({ refreshing: true, initialLoading: false, error: null });
     }
 
+    const requestRevision = channelsSnapshotRevision;
     const runFetch = (async () => {
       try {
         const result = await hostChannelsFetchSnapshot();
+        if (requestRevision !== channelsSnapshotRevision) return;
         const data = result.snapshot as {
             channelOrder?: string[];
             channels?: Record<string, unknown>;
@@ -260,6 +263,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
           }));
         }
       } catch (error) {
+        if (requestRevision !== channelsSnapshotRevision) return;
         // Gateway not connected, keep stale channels and surface refresh error.
         const shouldSurfaceError = !silent || !hasSnapshot;
         set((state) => ({
@@ -338,6 +342,10 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
         }));
         return false;
       }
+      channelsSnapshotRevision += 1;
+      inflightChannelsFetchPromise = null;
+      channelsLastFetchAtMs = 0;
+      clearChannelsSnapshotRetry();
       set((state) => ({
         channels: state.channels.filter((item) => item.id !== channelId),
       }));

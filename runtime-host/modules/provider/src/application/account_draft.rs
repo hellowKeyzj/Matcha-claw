@@ -103,7 +103,19 @@ impl ProviderAccountDraft {
         existing: Option<&ProviderAccount>,
         updated_at: impl Into<String>,
     ) -> Result<ProviderAccount, InvalidProviderAccountDraft> {
-        let updated_at = updated_at.into();
+        self.materialize_with_credential(existing, updated_at, None)
+    }
+
+    pub(crate) fn materialize_with_credential(
+        &self,
+        existing: Option<&ProviderAccount>,
+        updated_at: impl Into<String>,
+        credential: Option<CredentialReference>,
+    ) -> Result<ProviderAccount, InvalidProviderAccountDraft> {
+        let updated_at = existing
+            .filter(|account| account.revision().get() == self.revision)
+            .map(|account| account.configuration().updated_at().to_owned())
+            .unwrap_or_else(|| updated_at.into());
         let created_at = existing
             .map(|account| account.configuration().created_at().to_owned())
             .unwrap_or_else(|| updated_at.clone());
@@ -121,7 +133,12 @@ impl ProviderAccountDraft {
                 protocol: self.api_protocol()?,
                 media_protocol: self.media_api_protocol()?,
                 auth_mode: self.account_auth_mode()?,
-                credential: self.credential()?,
+                credential: if matches!(self.auth_mode.as_str(), "local" | "cliReuse") {
+                    None
+                } else {
+                    credential.or_else(|| existing.and_then(|account| account.configuration().credential().cloned()))
+                        .or(self.credential()?)
+                },
                 created_at,
                 updated_at,
             })
@@ -148,13 +165,6 @@ impl ProviderAccountDraft {
                 .map(provider_media_api_protocol_name)
                 == self.media_protocol.as_deref()
             && provider_account_auth_mode_name(configuration.auth_mode()) == self.auth_mode
-            && configuration.credential().map(CredentialReference::as_str)
-                == self
-                    .credential()
-                    .ok()
-                    .flatten()
-                    .as_ref()
-                    .map(CredentialReference::as_str)
     }
 
     pub fn account_id(&self) -> Result<ProviderAccountId, InvalidProviderAccountDraft> {

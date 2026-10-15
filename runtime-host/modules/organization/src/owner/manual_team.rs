@@ -187,13 +187,12 @@ pub(super) async fn manual_team_materialize(
         .await
 }
 
-pub(super) async fn manual_team_create(
+pub(super) async fn prepare_manual_team_run(
     store: &mut OrganizationStore,
-    team_run: &TeamRunOwner,
     shared: &OrganizationShared,
     input: ManualTeamMaterializationInput,
     call: &crate::call::CallReply<ManualTeamCreateOutcome>,
-) -> ManualTeamCreateOutcome {
+) -> Result<(TeamId, organization::GraphRunFacts, String), ManualTeamCreateOutcome> {
     let ManualTeamMaterializationInput {
         team_id,
         team_name,
@@ -227,7 +226,7 @@ pub(super) async fn manual_team_create(
             call.creation_failure(TeamCreationFailure::new(
                 TeamCreationStage::Submitting, TeamCreationFailureReason::InvalidInput,
             )).await;
-            return ManualTeamCreateOutcome::Rejected;
+            return Err(ManualTeamCreateOutcome::Rejected);
         }
     };
     let observer = call.provision_observer();
@@ -244,11 +243,11 @@ pub(super) async fn manual_team_create(
         Ok(materialization) => materialization,
         Err(super::member_introduction::PreparationError::Rejected(failure)) => {
             call.creation_failure(failure).await;
-            return ManualTeamCreateOutcome::Rejected;
+            return Err(ManualTeamCreateOutcome::Rejected);
         }
         Err(super::member_introduction::PreparationError::Unavailable(failure)) => {
             call.creation_failure(failure).await;
-            return ManualTeamCreateOutcome::Unavailable;
+            return Err(ManualTeamCreateOutcome::Unavailable);
         }
     };
     let team_id = materialization.definition().team_id().clone();
@@ -257,16 +256,16 @@ pub(super) async fn manual_team_create(
     {
         Ok((_, request)) => request,
         Err(TeamMaterializationCommandOutcome::Rejected) => {
-            return ManualTeamCreateOutcome::Rejected;
+            return Err(ManualTeamCreateOutcome::Rejected);
         }
         Err(TeamMaterializationCommandOutcome::OutcomeUnknown) => {
-            return ManualTeamCreateOutcome::OutcomeUnknown;
+            return Err(ManualTeamCreateOutcome::OutcomeUnknown);
         }
         Err(TeamMaterializationCommandOutcome::Unavailable) => {
-            return ManualTeamCreateOutcome::Unavailable;
+            return Err(ManualTeamCreateOutcome::Unavailable);
         }
         Err(TeamMaterializationCommandOutcome::Materialized { .. }) => {
-            return ManualTeamCreateOutcome::OutcomeUnknown;
+            return Err(ManualTeamCreateOutcome::OutcomeUnknown);
         }
     };
     let outcome = shared
@@ -292,14 +291,26 @@ pub(super) async fn manual_team_create(
         .await;
     if let Err(error) = &committed {
         call.creation_failure(creation_store_failure(TeamCreationStage::SavingTeam, error)).await;
-        return ManualTeamCreateOutcome::Unavailable;
+        return Err(ManualTeamCreateOutcome::Unavailable);
     }
     if !matches!(
         outcome,
         organization::MaterializationOperationOutcome::Confirmed { .. }
     ) {
-        return manual_materialization_outcome(outcome);
+        return Err(manual_materialization_outcome(outcome));
     }
+    Ok((team_id, run, run_idempotency_key))
+}
+
+pub(super) async fn create_manual_team_run(
+    store: &mut OrganizationStore,
+    team_run: &TeamRunOwner,
+    shared: &OrganizationShared,
+    team_id: TeamId,
+    run: organization::GraphRunFacts,
+    run_idempotency_key: String,
+    call: &crate::call::CallReply<ManualTeamCreateOutcome>,
+) -> ManualTeamCreateOutcome {
     let run_id = run.run_id().clone();
     let started = platform::trace::enabled().then(Instant::now);
     session_trace("runtime.team.run_create.start", || json!({}));

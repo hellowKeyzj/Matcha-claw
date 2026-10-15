@@ -123,7 +123,14 @@ pub(crate) async fn open_terminal<R: FleetSecretResolverPort>(
     resolver: &mut R,
     rows: u16,
     cols: u16,
-) -> Result<crate::application::terminal::TerminalProviderOpen, DockerEffectError>
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<
+    (
+        crate::application::terminal::TerminalProviderOpen,
+        foundation::execution::OwnedTask<()>,
+    ),
+    DockerEffectError,
+>
 where
     R::Secret: AsRef<str>,
 {
@@ -132,24 +139,32 @@ where
     }
     let client = DockerEffectClient::new(config.clone(), BTreeMap::new())?;
     let token = client.token(resolver)?;
-    let response = client
-        .req(
-            &format!("/containers/{}/exec", config.container_name()),
-            reqwest::Method::POST,
-            token.as_deref(),
-            Some(json!({
-                "AttachStdin": true,
-                "AttachStdout": true,
-                "AttachStderr": true,
-                "Tty": true,
-                "Cmd": ["/bin/sh", "-l"]
-            })),
-            API_TIMEOUT,
-        )
-        .await?;
-    ok(&response)?;
-    let exec_id = id(response).await?;
-    resize_exec(&client, &exec_id, token.as_deref(), rows, cols).await?;
+    let setup = async {
+        let response = client
+            .req(
+                &format!("/containers/{}/exec", config.container_name()),
+                reqwest::Method::POST,
+                token.as_deref(),
+                Some(json!({
+                    "AttachStdin": true,
+                    "AttachStdout": true,
+                    "AttachStderr": true,
+                    "Tty": true,
+                    "Cmd": ["/bin/sh", "-l"]
+                })),
+                API_TIMEOUT,
+            )
+            .await?;
+        ok(&response)?;
+        let exec_id = id(response).await?;
+        resize_exec(&client, &exec_id, token.as_deref(), rows, cols).await?;
+        Ok::<_, DockerEffectError>(exec_id)
+    };
+    let exec_id = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(DockerEffectError::Network),
+        result = setup => result?,
+    };
 
     let (commands, command_rx) = tokio::sync::mpsc::channel(32);
     let (events, events_rx) = tokio::sync::mpsc::channel(32);
@@ -161,104 +176,125 @@ where
     let resize_client = std::sync::Arc::new(client.clone());
     let resize_exec_id = std::sync::Arc::new(exec_id.clone());
     let resize_token = std::sync::Arc::new(token.clone());
-    tokio::spawn(async move {
-        let body_stream = futures_util::stream::unfold(
-            (Some(start_payload), command_rx),
-            move |(payload, mut rx)| {
-                let resize_client = std::sync::Arc::clone(&resize_client);
-                let resize_exec_id = std::sync::Arc::clone(&resize_exec_id);
-                let resize_token = std::sync::Arc::clone(&resize_token);
-                async move {
-                    if let Some(payload) = payload {
-                        return Some((Ok::<_, std::convert::Infallible>(payload), (None, rx)));
-                    }
-                    loop {
-                        match rx.recv().await {
-                            Some(crate::application::terminal::ProviderCommand::Input(data))
-                                if !data.is_empty() =>
-                            {
-                                return Some((Ok(data), (None, rx)));
-                            }
-                            Some(crate::application::terminal::ProviderCommand::Resize {
-                                rows,
-                                cols,
-                            }) => {
-                                let _ = resize_exec(
-                                    resize_client.as_ref(),
-                                    resize_exec_id.as_str(),
-                                    resize_token.as_deref(),
+    let (task, _) = foundation::execution::OwnedTask::spawn(move |stop| async move {
+        let run = async {
+            let stream_cancellation = cancellation.clone();
+            let body_stream = futures_util::stream::unfold(
+                (Some(start_payload), command_rx),
+                move |(payload, mut rx)| {
+                    let resize_client = std::sync::Arc::clone(&resize_client);
+                    let resize_exec_id = std::sync::Arc::clone(&resize_exec_id);
+                    let resize_token = std::sync::Arc::clone(&resize_token);
+                    let cancellation = stream_cancellation.clone();
+                    async move {
+                        if cancellation.is_cancelled() {
+                            return None;
+                        }
+                        if let Some(payload) = payload {
+                            return Some((Ok::<_, std::convert::Infallible>(payload), (None, rx)));
+                        }
+                        loop {
+                            let command = tokio::select! {
+                                biased;
+                                _ = cancellation.cancelled() => return None,
+                                command = rx.recv() => command,
+                            };
+                            match command {
+                                Some(crate::application::terminal::ProviderCommand::Input(
+                                    data,
+                                )) if !data.is_empty() => {
+                                    return Some((Ok(data), (None, rx)));
+                                }
+                                Some(crate::application::terminal::ProviderCommand::Resize {
                                     rows,
                                     cols,
-                                )
-                                .await;
+                                }) => {
+                                    let _ = resize_exec(
+                                        resize_client.as_ref(),
+                                        resize_exec_id.as_str(),
+                                        resize_token.as_deref(),
+                                        rows,
+                                        cols,
+                                    )
+                                    .await;
+                                }
+                                Some(crate::application::terminal::ProviderCommand::Input(_)) => {}
+                                None => return None,
                             }
-                            Some(crate::application::terminal::ProviderCommand::Input(_)) => {}
-                            None => return None,
                         }
                     }
-                }
-            },
-        );
-        let mut request = http
-            .post(url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("Connection", "Upgrade")
-            .header("Upgrade", "tcp")
-            .body(reqwest::Body::wrap_stream(body_stream));
-        if let Some(token) = token_owned.as_deref() {
-            request = request.bearer_auth(token);
-        }
-        let Ok(response) = request.send().await else {
-            let _ = events
-                .send(Err(crate::application::terminal::ProviderError::message(
-                    "Docker stream failed",
-                )))
-                .await;
-            return;
-        };
-        if !response.status().is_success() {
-            let _ = events
-                .send(Err(crate::application::terminal::ProviderError::message(
-                    "Docker stream rejected",
-                )))
-                .await;
-            return;
-        }
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(chunk) if !chunk.is_empty() => {
-                    if events
-                        .send(Ok(crate::application::terminal::ProviderEvent::Output(
-                            chunk.to_vec(),
-                        )))
-                        .await
-                        .is_err()
-                    {
+                },
+            );
+            let mut request = http
+                .post(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "tcp")
+                .body(reqwest::Body::wrap_stream(body_stream));
+            if let Some(token) = token_owned.as_deref() {
+                request = request.bearer_auth(token);
+            }
+            let Ok(response) = request.send().await else {
+                let _ = events
+                    .send(Err(crate::application::terminal::ProviderError::message(
+                        "Docker stream failed",
+                    )))
+                    .await;
+                return;
+            };
+            if !response.status().is_success() {
+                let _ = events
+                    .send(Err(crate::application::terminal::ProviderError::message(
+                        "Docker stream rejected",
+                    )))
+                    .await;
+                return;
+            }
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(chunk) if !chunk.is_empty() => {
+                        if events
+                            .send(Ok(crate::application::terminal::ProviderEvent::Output(
+                                chunk.to_vec(),
+                            )))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        let _ = events
+                            .send(Err(crate::application::terminal::ProviderError::message(
+                                "Docker stream failed",
+                            )))
+                            .await;
                         return;
                     }
                 }
-                Ok(_) => {}
-                Err(_) => {
-                    let _ = events
-                        .send(Err(crate::application::terminal::ProviderError::message(
-                            "Docker stream failed",
-                        )))
-                        .await;
-                    return;
-                }
             }
+            let _ = events
+                .send(Ok(crate::application::terminal::ProviderEvent::Exit {
+                    code: None,
+                }))
+                .await;
+        };
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {},
+            _ = stop.cancelled() => {},
+            _ = run => {},
         }
-        let _ = events
-            .send(Ok(crate::application::terminal::ProviderEvent::Exit {
-                code: None,
-            }))
-            .await;
     });
-    Ok(crate::application::terminal::TerminalProviderOpen {
-        commands,
-        events: events_rx,
-    })
+    Ok((
+        crate::application::terminal::TerminalProviderOpen {
+            commands,
+            events: events_rx,
+        },
+        task,
+    ))
 }
 
 async fn resize_exec(

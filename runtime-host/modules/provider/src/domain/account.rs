@@ -315,6 +315,12 @@ impl ProviderAccount {
     pub fn configuration(&self) -> &ProviderAccountConfiguration {
         &self.configuration
     }
+
+    pub(crate) fn matches_except_credential(&self, other: &Self) -> bool {
+        let mut account = self.clone();
+        account.configuration.credential = other.configuration.credential.clone();
+        account == *other
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

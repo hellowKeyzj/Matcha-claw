@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { hostWikiCreateProject, hostWikiOpenProject, hostWikiProjects, type HostWikiRequest } from '@/lib/host-api';
+import { hostWikiCallResult, hostWikiCreateProject, hostWikiImportArchive, hostWikiOpenProject, hostWikiProjects, type HostWikiRequest } from '@/lib/host-api';
+import { waitForCall } from '@/lib/call-log-await';
 import { isRecord, normalizeProjects, type WikiProject } from '@/pages/Wiki/wiki-model';
 
 type WikiProjectProjection = {
@@ -14,10 +15,12 @@ type WikiProjectsState = WikiProjectProjection & {
   refresh: () => Promise<WikiProjectProjection>;
   openProject: (project: WikiProject) => Promise<void>;
   createProject: (input: HostWikiRequest) => Promise<void>;
+  importArchive: (input: { archivePath: string; destination: string }) => Promise<boolean>;
 };
 
 let generation = 0;
 let refreshPromise: Promise<WikiProjectProjection> | null = null;
+let switchingPromise: Promise<void> | null = null;
 
 function projectReceipt(payload: unknown): WikiProjectProjection {
   if (!isRecord(payload) || !Array.isArray(payload.projects)
@@ -32,22 +35,25 @@ function projectReceipt(payload: unknown): WikiProjectProjection {
 }
 
 export const useWikiProjectsStore = create<WikiProjectsState>((set, get) => {
-  const mutateProject = async (task: () => Promise<unknown>, expectedProjectId?: string): Promise<void> => {
-    if (get().switching) throw new Error('Wiki project switch is in progress');
+  const mutateProject = (task: () => Promise<unknown>, expectedProjectId?: string): Promise<void> => {
+    if (get().switching) return Promise.reject(new Error('Wiki project switch is in progress'));
     generation++;
     refreshPromise = null;
     set({ switching: true, loading: false });
-    try {
-      const projection = projectReceipt(await task());
+    const mutation = Promise.resolve().then(task).then((payload) => {
+      const projection = projectReceipt(payload);
       if (expectedProjectId && projection.currentProject?.projectId !== expectedProjectId) {
         throw new Error('Wiki project switch was not confirmed');
       }
       set({ ...projection, ready: true });
-    } finally {
+    }).finally(() => {
       generation++;
       refreshPromise = null;
+      switchingPromise = null;
       set({ switching: false, loading: false });
-    }
+    });
+    switchingPromise = mutation;
+    return mutation;
   };
 
   return {
@@ -80,5 +86,27 @@ export const useWikiProjectsStore = create<WikiProjectsState>((set, get) => {
       project.projectId,
     ),
     createProject: (input) => mutateProject(() => hostWikiCreateProject(input)),
+    importArchive: async (input) => {
+      let refreshed: boolean;
+      try {
+        const receipt = await hostWikiImportArchive(input);
+        const call = await waitForCall(receipt, 'wiki', { timeoutMs: null });
+        if (call.callId !== receipt.callId || call.command !== 'project.import-archive'
+          || call.detail.operation !== 'project.import-archive' || call.status === 'unknown') {
+          throw new Error('Wiki archive import result is unconfirmed');
+        }
+        if (call.status !== 'succeeded' || call.detail.outcome !== 'completed') throw new Error('Wiki archive import failed');
+        const result = await hostWikiCallResult({ callId: receipt.callId });
+        if (result.callId !== receipt.callId || result.operation !== 'project.import-archive'
+          || !projectReceipt(result.result).currentProject) throw new Error('Wiki archive import result is unconfirmed');
+      } finally {
+        // Import changes native current even after its panel stops observing.
+        while (switchingPromise) await switchingPromise.catch(() => {});
+        generation++;
+        refreshPromise = null;
+        refreshed = await get().refresh().then(() => true, () => false);
+      }
+      return refreshed;
+    },
   };
 });

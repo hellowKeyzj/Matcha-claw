@@ -563,7 +563,22 @@ fn start_activity_execution(
                 "runHash": identifier_hash(run_id.as_str()),
                 "activityHash": identifier_hash(activity_id.as_str()),
             }));
-            let outcome = input.activity_executor.execute_cancellable(request, cancellation).await;
+            let outcome = match input.activity_executor.prepare_cancellable(request.clone(), cancellation.clone()).await {
+                Err(outcome) => outcome,
+                Ok(()) => match input.organization.admit_activity_dispatch(run_id.clone(), claim.clone(), request.clone()).await {
+                    Ok(Ok(true)) => input.activity_executor.execute_cancellable(request, cancellation).await,
+                    Ok(Ok(false)) => ActivityExecutionOutcome::Rejected { rejection: organization::DeliveryRejection::Permanent },
+                    result => {
+                        runtime_trace("runtime.team_run.activity.admit", || json!({
+                            "runHash": identifier_hash(run_id.as_str()),
+                            "activityHash": identifier_hash(activity_id.as_str()),
+                            "outcome": "not_admitted",
+                            "reason": if matches!(result, Ok(Err(_))) { "store_fault" } else { "admission_or_reply_closed" },
+                        }));
+                        ActivityExecutionOutcome::Rejected { rejection: organization::DeliveryRejection::Retryable }
+                    }
+                },
+            };
             ActivityExecutionCompletion::Executed { run_id, activity_id, delivery_id, claim, outcome }
         }
         TeamRunActivityStart::Immediate(outcome) => ActivityExecutionCompletion::Observation(ActivityExecutionObservation {

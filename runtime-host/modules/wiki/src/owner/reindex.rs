@@ -5,7 +5,7 @@ use crate::{
 
 use super::actor::{WikiShared, WikiState, project_root, selected_project};
 
-pub(crate) fn stage(
+pub(crate) async fn stage(
     shared: &WikiShared,
     state: &WikiState,
     input: WikiReindexInput,
@@ -23,6 +23,12 @@ pub(crate) fn stage(
             "Wiki embedding is disabled or not configured",
         ));
     }
+    let index_revision = crate::vector::index_revision(project_root(project))
+        .await
+        .map_err(|reason| WikiFailure::IndexUnavailable {
+            backend: "lancedb".to_owned(),
+            reason,
+        })?;
     let progress = shared
         .reindex_progress
         .reserve(project.project_id(), task_id)?;
@@ -31,6 +37,7 @@ pub(crate) fn stage(
         index: shared.vector_index.clone(),
         config,
         credentials,
+        index_revision,
         progress,
     })
 }

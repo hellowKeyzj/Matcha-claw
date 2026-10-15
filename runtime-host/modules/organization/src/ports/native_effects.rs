@@ -173,6 +173,16 @@ pub trait OrganizationRuntimeDirectory: Send + Sync {
 }
 
 pub trait TeamActivityExecutor: Send + Sync {
+    /// Prepares the session without sending. Organization admits dispatch after this completes.
+    fn prepare_cancellable(
+        &self,
+        _request: ActivityExecutionRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<Result<(), ActivityExecutionOutcome>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Sends a prepared activity after Organization dispatch admission.
     fn execute(
         &self,
         request: ActivityExecutionRequest,

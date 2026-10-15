@@ -6,6 +6,7 @@ import { expandPath, getLogsDir, getResourcesDir } from '../../utils/paths';
 import { logger } from '../../utils/logger';
 
 const CHROME_EXTENSIONS_URL = 'chrome://extensions/';
+let windowsChromeClipboardQueue: Promise<void> = Promise.resolve();
 
 function isAllowedExternalUrl(url: string): boolean {
   try {
@@ -169,7 +170,9 @@ async function openChromeExtensionsPage(): Promise<void> {
 
     try {
       if (process.platform === 'win32') {
-        await openChromeInternalPageOnWindows(command, CHROME_EXTENSIONS_URL);
+        const operation = windowsChromeClipboardQueue.then(() => openChromeInternalPageOnWindows(command, CHROME_EXTENSIONS_URL));
+        windowsChromeClipboardQueue = operation.then(() => undefined, () => undefined);
+        await operation;
         return;
       }
 

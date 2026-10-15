@@ -260,6 +260,8 @@ export interface ChatSessionRuntimeCatalogState {
   status: 'idle' | 'loading' | 'ready' | 'error';
   error: string | null;
   endpoints: ChatSessionRuntimeEndpointTarget[];
+  directoryRevision: number;
+  directoryRevisionByRuntimeScopeKey: Record<string, number>;
   defaultSessionPromptScope: AgentScope | null;
 }
 

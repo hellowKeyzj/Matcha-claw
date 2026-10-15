@@ -36,7 +36,11 @@ type ModelDraft = Readonly<{
 }>;
 
 export type CloudProviderSync = Readonly<{
-  reconcile(session: CloudAccountSession | null): Promise<void>;
+  reconcile(
+    session: CloudAccountSession | null,
+    assertCurrent?: () => void,
+    signals?: Readonly<{ bootstrap: AbortSignal; observation: AbortSignal }>,
+  ): Promise<void>;
 }>;
 
 type SyncState = string | null;
@@ -45,48 +49,81 @@ export function createCloudProviderSync(deps: SyncDependencies): CloudProviderSy
   let active: SyncState = null;
   let queue = Promise.resolve();
 
-  const enqueue = (session: CloudAccountSession | null) => {
-    queue = queue.catch(() => undefined).then(async () => {
+  const reconcile: CloudProviderSync['reconcile'] = (session, assertOwner, signals) => {
+    const assertCurrent = () => { assertOwner?.(); };
+    const currentDeps: SyncDependencies = signals ? {
+      ...deps,
+      awaitProviderCall: (receipt, command) => deps.awaitProviderCall(receipt, command, signals.observation),
+    } : deps;
+    const task = queue.then(async () => {
       try {
-        active = await reconcileNow(deps, session, active);
+        assertCurrent();
+        const bootstrap = session ? await fetchBootstrap(deps, session.accessToken, signals?.bootstrap) : null;
+        assertCurrent();
+        active = await reconcileNow(currentDeps, session, bootstrap, active, assertCurrent);
       } catch {
+        try { assertCurrent(); } catch { return; }
         logger.warn('Cloud provider sync failed');
       }
     });
-    return queue;
+    queue = task.catch(() => undefined);
+    return task;
   };
 
-  return { reconcile: enqueue };
+  return { reconcile };
+}
+
+async function fetchBootstrap(deps: SyncDependencies, token: string, signal?: AbortSignal): Promise<CloudClientBootstrap> {
+  if (!signal) return deps.fetchClientBootstrap(token);
+  signal.throwIfAborted();
+  let onAbort: () => void = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    // Only bootstrap waiting is revocable; admitted private writes keep their original drain.
+    return await Promise.race([deps.fetchClientBootstrap(token), aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 async function reconcileNow(
   deps: SyncDependencies,
   session: CloudAccountSession | null,
+  bootstrap: CloudClientBootstrap | null,
   active: SyncState,
+  assertCurrent: () => void,
 ): Promise<SyncState> {
-  if (!session) {
-    await removeCloudProvider(deps, active);
+  if (!session || !bootstrap) {
+    await removeCloudProvider(deps, active, assertCurrent);
     return null;
   }
   const owner = session.user.id.toString();
-  if (active && active !== owner) await removeCloudProvider(deps, active);
-  const bootstrap = await deps.fetchClientBootstrap(session.accessToken);
+  if (active && active !== owner) {
+    await removeCloudProvider(deps, active, assertCurrent);
+    assertCurrent();
+  }
   if (!isUsableBootstrap(bootstrap)) {
-    await removeCloudProvider(deps, owner);
+    await removeCloudProvider(deps, owner, assertCurrent);
     return null;
   }
   const account = await accountFromBootstrap(deps.providerAccountsTransport, bootstrap, owner);
+  assertCurrent();
   if (!account) return active;
   const stored = await storeProviderPrivateAccount(
-    { transport: deps.providerAccountsTransport, awaitProviderCall: deps.awaitProviderCall },
+    { transport: deps.providerAccountsTransport, awaitProviderCall: deps.awaitProviderCall, assertCurrent },
     account,
     apiKeyFromBootstrap(bootstrap),
   );
+  // An admitted private transaction keeps its own settlement even after admission is revoked.
+  assertCurrent();
   if (stored.status !== 'stored') {
     logger.warn(`Cloud provider account sync failed: ${stored.status}`);
     return active;
   }
-  await replaceDiscoveredModels(deps);
+  await replaceDiscoveredModels(deps, assertCurrent);
   return owner;
 }
 
@@ -132,9 +169,11 @@ async function accountFromBootstrap(
   };
 }
 
-async function replaceDiscoveredModels(deps: SyncDependencies): Promise<void> {
+async function replaceDiscoveredModels(deps: SyncDependencies, assertCurrent: () => void): Promise<void> {
   const transport = deps.providerModelsTransport;
+  assertCurrent();
   const discovery = await transport.discover(ACCOUNT_ID);
+  assertCurrent();
   if (discovery.status !== 200 || !isModelDiscovery(discovery.body)) {
     logger.warn(`Cloud provider model discovery failed: ${discovery.status}`);
     return;
@@ -170,15 +209,17 @@ async function getAccount(transport: ProviderAccountsTransport): ReturnType<Prov
   });
 }
 
-async function removeCloudProvider(deps: SyncDependencies, active: SyncState): Promise<void> {
+async function removeCloudProvider(deps: SyncDependencies, active: SyncState, assertCurrent: () => void): Promise<void> {
+  assertCurrent();
   const listed = await getAccount(deps.providerAccountsTransport);
+  assertCurrent();
   if (listed.status === 404) return;
   if (listed.status !== 200 || !isCloudProviderAccount(listed.body)) {
     if (active) logger.warn(`Cloud provider cleanup lookup failed: ${listed.status}`);
     return;
   }
   const deleted = await deleteProviderPrivateAccount(
-    { transport: deps.providerAccountsTransport, awaitProviderCall: deps.awaitProviderCall },
+    { transport: deps.providerAccountsTransport, awaitProviderCall: deps.awaitProviderCall, assertCurrent },
     ACCOUNT_ID,
     listed.body.account.revision,
   );

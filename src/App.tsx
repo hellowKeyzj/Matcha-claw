@@ -193,6 +193,8 @@ function App() {
     isLocalAccountEntryState(location.state)
   );
   const initGateway = useGatewayStore((state) => state.init);
+  const runtimeHostReady = useGatewayStore((state) => state.runtimeHost.hostLifecycle === 'ready');
+  const [hasObservedHostReady, setHasObservedHostReady] = useState(runtimeHostReady);
   const initProviders = useProviderStore((state) => state.init);
   const initUpdate = useUpdateStore((state) => state.init);
   const initAccount = useAccountStore((state) => state.init);
@@ -202,7 +204,13 @@ function App() {
   const licenseError = useLicenseStore((state) => state.error);
   const subscribeLicense = useLicenseStore((state) => state.subscribe);
 
+  // Latch the first Host ready observation, not peer readiness or lifetime liveness.
+  if (runtimeHostReady && !hasObservedHostReady) {
+    setHasObservedHostReady(true);
+  }
+
   useEffect(() => {
+    if (!hasObservedHostReady) return;
     if (!isTraceEnabled()) {
       initSettings();
       return;
@@ -214,12 +222,9 @@ function App() {
       initialized: useSettingsStore.getState().initialized,
     })));
     return () => startupTrace('renderer.app', 'settings.init.cleanup');
-  }, [initSettings]);
+  }, [hasObservedHostReady, initSettings]);
 
   useEffect(() => {
-    if (!settingsInitialized) {
-      return;
-    }
     if (!isTraceEnabled()) {
       void initUpdate();
       return;
@@ -232,7 +237,7 @@ function App() {
       outcome: useUpdateStore.getState().error ? 'error' : 'settled',
     })));
     return () => startupTrace('renderer.app', 'update.init.cleanup');
-  }, [initUpdate, settingsInitialized]);
+  }, [initUpdate]);
 
   useEffect(() => {
     if (!isTraceEnabled()) {
@@ -272,9 +277,10 @@ function App() {
     return () => startupTrace('renderer.app', 'gateway.init.cleanup');
   }, [initGateway]);
 
-  // Initialize provider snapshot on mount so provider display state
-  // survives app restarts without requiring settings page entry.
+  // Initialize provider snapshot after the first Host ready so provider display
+  // state survives app restarts without requiring settings page entry.
   useEffect(() => {
+    if (!hasObservedHostReady) return;
     if (!isTraceEnabled()) {
       void initProviders();
       return;
@@ -287,7 +293,7 @@ function App() {
       outcome: useProviderStore.getState().error ? 'error' : 'settled',
     })));
     return () => startupTrace('renderer.app', 'providers.init.cleanup');
-  }, [initProviders]);
+  }, [hasObservedHostReady, initProviders]);
 
   useEffect(() => {
     if (accountStatus === 'signedIn' && isAuthRoute) {
@@ -525,8 +531,11 @@ function App() {
           </Routes>
         )}
 
-        <ProviderRecoveryDialog ready={settingsInitialized && !isAuthRoute
-          && !showAccountBoot && !showAuthGate && !licenseChecking && !licenseBlocked} />
+        <ProviderRecoveryDialog
+          queryEnabled={hasObservedHostReady}
+          visible={settingsInitialized && !isAuthRoute
+            && !showAccountBoot && !showAuthGate && !licenseChecking && !licenseBlocked}
+        />
         <UpdateNotifier />
 
         {/* Global toast notifications */}

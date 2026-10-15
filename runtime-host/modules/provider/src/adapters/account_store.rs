@@ -81,14 +81,15 @@ impl ProviderAccountStore {
                     return Err(ProviderAccountStoreFault::StaleRevision);
                 }
                 if account.revision() == current.revision() {
-                    if &account != current {
+                    if &account == current {
+                        return Ok(self
+                            .account(&account_id)
+                            .expect("existing account remains addressable"));
+                    }
+                    if !account.matches_except_credential(current) {
                         return Err(ProviderAccountStoreFault::RevisionConflict);
                     }
-                    return Ok(self
-                        .account(&account_id)
-                        .expect("existing account remains addressable"));
-                }
-                if current.revision().get().checked_add(1) != Some(account.revision().get()) {
+                } else if current.revision().get().checked_add(1) != Some(account.revision().get()) {
                     return Err(ProviderAccountStoreFault::RevisionMustFollowCurrent);
                 }
                 accounts[index] = account;

@@ -905,7 +905,7 @@ describe('chat tool activity renderers', () => {
     expect(preview.approvalReviewOutcome).toBeUndefined();
   });
 
-  it('uses generic fallback for unknown tools with raw JSON only in expanded content', () => {
+  it('uses generic fallback for unknown tools with safe input summaries in expanded content', () => {
     const rawInput = {
       arbitrary: 'raw-json-marker',
       nested: { enabled: true },
@@ -923,7 +923,9 @@ describe('chat tool activity renderers', () => {
     expect(visibleText(activity)).not.toContain('"arbitrary"');
     expect(activity.canExpand).toBe(true);
     expect(expandedText(activity)).toContain('"arbitrary"');
-    expect(expandedText(activity)).toContain('raw-json-marker');
+    expect(expandedText(activity)).toContain(t('toolActivity.generic.string', { count: rawInput.arbitrary.length }));
+    expect(expandedText(activity)).toContain('"enabled"');
+    expect(expandedText(activity)).not.toContain('raw-json-marker');
   });
 
   it('renders generic details only in expanded content without private fields', () => {

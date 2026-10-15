@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fmt,
 };
 
@@ -211,8 +211,8 @@ pub fn compile_workflow_plan(
 ) -> Result<WorkflowPlanCompilation, WorkflowPlanCompileError> {
     validate_plan_scalars(plan)?;
 
-    let tasks_by_id = build_tasks_by_id(&plan.tasks)?;
-    validate_dependencies(&plan.tasks, &tasks_by_id)?;
+    let task_ids = build_task_ids(&plan.tasks)?;
+    validate_dependencies(&plan.tasks, &task_ids)?;
 
     let nodes = plan
         .tasks
@@ -298,10 +298,10 @@ fn validate_plan_scalars(plan: &WorkflowPlan) -> Result<(), WorkflowPlanCompileE
     Ok(())
 }
 
-fn build_tasks_by_id(
+fn build_task_ids(
     tasks: &[WorkflowTask],
-) -> Result<BTreeMap<String, &WorkflowTask>, WorkflowPlanCompileError> {
-    let mut tasks_by_id = BTreeMap::new();
+) -> Result<BTreeSet<&str>, WorkflowPlanCompileError> {
+    let mut task_ids = BTreeSet::new();
     for task in tasks {
         if task.task_id.trim().is_empty() {
             return Err(WorkflowPlanCompileError::EmptyTaskId);
@@ -322,18 +322,18 @@ fn build_tasks_by_id(
         {
             return Err(WorkflowPlanCompileError::EmptyOutputArtifactKind);
         }
-        if tasks_by_id.insert(task.task_id.clone(), task).is_some() {
+        if !task_ids.insert(task.task_id()) {
             return Err(WorkflowPlanCompileError::DuplicateTaskId(
                 task.task_id.clone(),
             ));
         }
     }
-    Ok(tasks_by_id)
+    Ok(task_ids)
 }
 
 fn validate_dependencies(
     tasks: &[WorkflowTask],
-    tasks_by_id: &BTreeMap<String, &WorkflowTask>,
+    task_ids: &BTreeSet<&str>,
 ) -> Result<(), WorkflowPlanCompileError> {
     for task in tasks {
         let mut dependency_ids = BTreeSet::new();
@@ -344,7 +344,7 @@ fn validate_dependencies(
                     dependency_task_id: dependency_task_id.clone(),
                 });
             }
-            if !tasks_by_id.contains_key(dependency_task_id) {
+            if !task_ids.contains(dependency_task_id.as_str()) {
                 return Err(WorkflowPlanCompileError::UnknownDependency {
                     task_id: task.task_id.clone(),
                     dependency_task_id: dependency_task_id.clone(),
