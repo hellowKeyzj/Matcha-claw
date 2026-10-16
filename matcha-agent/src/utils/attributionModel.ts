@@ -9,6 +9,7 @@ import { getAPIProvider } from './model/providers.js'
 function resolveProviderModel(anthropicModel: string): string {
   switch (getAPIProvider()) {
     case 'openai':
+    case 'openaiResponses':
       return resolveOpenAIModel(anthropicModel)
     case 'gemini':
       return resolveGeminiModel(anthropicModel)

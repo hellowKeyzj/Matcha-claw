@@ -114,7 +114,7 @@ export async function readCronTasks(dir?: string): Promise<CronTask[]> {
       typeof t.createdAt !== 'number'
     ) {
       logForDebugging(
-        () => `[ScheduledTasks] skipping malformed task: ${jsonStringify(t)}`,
+        `[ScheduledTasks] skipping malformed task: ${jsonStringify(t)}`,
       )
       continue
     }

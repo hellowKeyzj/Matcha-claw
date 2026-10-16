@@ -80,7 +80,7 @@ export const fetchMcpSkillsForClient = memoizeWithLRU(
           if (!textContent) {
             logMCPDebug(
               client.name,
-              `Skill resource ${resource.uri} returned no text content, skipping`,
+              'Skill resource returned no text content, skipping',
             )
             continue
           }

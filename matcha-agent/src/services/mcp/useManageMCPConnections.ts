@@ -509,7 +509,8 @@ export function useManageMCPConnections(
                   const { content, meta } = notification.params
                   logMCPDebug(
                     client.name,
-                    `notifications/claude/channel: ${content.slice(0, 80)}`,
+                    () =>
+                      `notifications/claude/channel (content length: ${content.length}, meta key count: ${Object.keys(meta ?? {}).length})`,
                   )
                   logEvent('tengu_mcp_channel_message', {
                     content_length: content.length,
@@ -550,7 +551,7 @@ export function useManageMCPConnections(
                       ) ?? false
                     logMCPDebug(
                       client.name,
-                      `notifications/claude/channel/permission: ${request_id} → ${behavior} (${resolved ? 'matched pending' : 'no pending entry — stale or unknown ID'})`,
+                      `notifications/claude/channel/permission: ${behavior} (matched: ${resolved})`,
                     )
                   },
                 )
@@ -568,7 +569,7 @@ export function useManageMCPConnections(
               client.client.removeNotificationHandler(CHANNEL_PERMISSION_METHOD)
               logMCPDebug(
                 client.name,
-                `Channel notifications skipped: ${gate.reason}`,
+                `Channel notifications skipped: ${gate.kind}`,
               )
               // Surface a once-per-kind toast when a channel server is
               // blocked. This is the only

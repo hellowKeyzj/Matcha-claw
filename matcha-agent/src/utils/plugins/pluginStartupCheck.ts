@@ -152,12 +152,11 @@ export function getPluginEditableScopes(): Map<string, ExtendedPluginScope> {
   }
 
   logForDebugging(
-    () =>
-      `Found ${result.size} enabled plugins with scopes: ${Array.from(
-        result.entries(),
-      )
-        .map(([id, scope]) => `${id}(${scope})`)
-        .join(', ')}`,
+    `Found ${result.size} enabled plugins with scopes: ${Array.from(
+      result.entries(),
+    )
+      .map(([id, scope]) => `${id}(${scope})`)
+      .join(', ')}`,
   )
 
   return result

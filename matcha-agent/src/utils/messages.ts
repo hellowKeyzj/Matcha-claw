@@ -22,6 +22,7 @@ import {
 import { sanitizeToolNameForAnalytics } from 'src/services/analytics/metadata.js'
 import type { AgentId } from 'src/types/ids.js'
 import { companionIntroText } from '../buddy/prompt.js'
+import { hasSealedSkillReferences, markSealedMetaContent, parseSealedSkillReference } from '../skills/sealed/reference.js'
 import { NO_CONTENT_MESSAGE } from '../constants/messages.js'
 import { OUTPUT_STYLE_CONFIG } from '../constants/outputStyles.js'
 import { isAutoMemoryEnabled } from '../memdir/paths.js'
@@ -1276,8 +1277,11 @@ export function buildMessageLookups(
       }
 
       // Count in-progress hooks
-      const progressData = msg.data as { type: string; hookEvent: HookEvent }
-      if (progressData.type === 'hook_progress') {
+      const progressData = msg.data as
+        | { type: string; hookEvent: HookEvent }
+        | null
+        | undefined
+      if (progressData && progressData.type === 'hook_progress') {
         const hookEvent = progressData.hookEvent
         let byHookEvent = inProgressHookCounts.get(toolUseID)
         if (!byHookEvent) {
@@ -1927,7 +1931,9 @@ function appendMessageTagToUserMessage(message: UserMessage): UserMessage {
       ...message,
       message: {
         ...message.message,
-        content: content + tag,
+        content: parseSealedSkillReference(content)
+          ? [{ type: 'text', text: content }, { type: 'text', text: tag }]
+          : content + tag,
       },
     }
   }
@@ -1950,9 +1956,13 @@ function appendMessageTagToUserMessage(message: UserMessage): UserMessage {
 
   const newContent = [...content]
   const textBlock = newContent[lastTextIdx] as TextBlockParam
-  newContent[lastTextIdx] = {
-    ...textBlock,
-    text: textBlock.text + tag,
+  if (parseSealedSkillReference(textBlock.text)) {
+    newContent.push({ type: 'text', text: tag })
+  } else {
+    newContent[lastTextIdx] = {
+      ...textBlock,
+      text: textBlock.text + tag,
+    }
   }
 
   return {
@@ -2100,7 +2110,7 @@ function ensureSystemReminderWrap(msg: UserMessage): UserMessage {
   const content = msg.message.content
   if (!content) return msg
   if (typeof content === 'string') {
-    if (content.startsWith('<system-reminder>')) return msg
+    if (content.startsWith('<system-reminder>') || parseSealedSkillReference(content)) return msg
     return {
       ...msg,
       message: { ...msg.message, content: wrapInSystemReminder(content) },
@@ -2108,7 +2118,7 @@ function ensureSystemReminderWrap(msg: UserMessage): UserMessage {
   }
   let changed = false
   const newContent = content.map(b => {
-    if (b.type === 'text' && !b.text.startsWith('<system-reminder>')) {
+    if (b.type === 'text' && !b.text.startsWith('<system-reminder>') && !parseSealedSkillReference(b.text)) {
       changed = true
       return { ...b, text: wrapInSystemReminder(b.text) }
     }
@@ -2641,10 +2651,14 @@ export function normalizeMessagesForAPI(
     filterTrailingThinkingFromLastAssistant(withFilteredOrphans)
   const withFilteredWhitespace =
     filterWhitespaceOnlyAssistantMessages(withFilteredThinking)
-  const withNonEmpty = ensureNonEmptyAssistantContent(withFilteredWhitespace)
+  const withMergedWhitespace =
+    withFilteredWhitespace === withFilteredThinking
+      ? withFilteredWhitespace
+      : mergeAdjacentUserMessages(withFilteredWhitespace)
+  const withNonEmpty = ensureNonEmptyAssistantContent(withMergedWhitespace)
 
-  // filterOrphanedThinkingOnlyMessages doesn't merge adjacent users (whitespace
-  // filter does, but only when IT fires). Merge here so smoosh can fold the
+  // filterOrphanedThinkingOnlyMessages doesn't merge adjacent users (the API
+  // whitespace pass above does, but only when IT fires). Merge here so smoosh can fold the
   // SR-text sibling that hoistToolResults produces. The smoosh itself folds
   // <system-reminder>-prefixed text siblings into the adjacent tool_result.
   // Gated together: the merge exists solely to feed the smoosh; running it
@@ -2698,6 +2712,8 @@ export function mergeUserMessagesAndToolResults(
   const currentContent = normalizeUserTextContent(
     b.message.content as string | ContentBlockParam[],
   )
+  markSealedMetaContent(a, lastContent)
+  markSealedMetaContent(b, currentContent)
   return {
     ...a,
     message: {
@@ -2743,6 +2759,8 @@ export function mergeUserMessages(a: UserMessage, b: UserMessage): UserMessage {
   const currentContent = normalizeUserTextContent(
     b.message.content as string | ContentBlockParam[],
   )
+  markSealedMetaContent(a, lastContent)
+  markSealedMetaContent(b, currentContent)
   if (feature('HISTORY_SNIP')) {
     // A merged message is only meta if ALL merged messages are meta. If any
     // operand is real user content, the result must not be flagged isMeta
@@ -2840,7 +2858,7 @@ function joinTextAtSeam(
 ): ContentBlockParam[] {
   const lastA = a.at(-1)
   const firstB = b[0]
-  if (lastA?.type === 'text' && firstB?.type === 'text') {
+  if (lastA?.type === 'text' && firstB?.type === 'text' && !parseSealedSkillReference(lastA.text)) {
     return [...a.slice(0, -1), { ...lastA, text: lastA.text + '\n' }, ...b]
   }
   return [...a, ...b]
@@ -2868,6 +2886,7 @@ function smooshIntoToolResult(
   blocks: ContentBlockParam[],
 ): ToolResultBlockParam | null {
   if (blocks.length === 0) return tr
+  if (hasSealedSkillReferences(tr.content) || hasSealedSkillReferences(blocks)) return null
 
   const existing = tr.content
   if (Array.isArray(existing) && existing.some(isToolReferenceBlock)) {
@@ -2954,7 +2973,9 @@ export function mergeUserContentBlocks(
       b.every(x => x.type === 'text')
     ) {
       const copy = a.slice()
-      copy[copy.length - 1] = smooshIntoToolResult(lastBlock, b)!
+      const merged = smooshIntoToolResult(lastBlock, b)
+      if (merged === null) return [...a, ...b]
+      copy[copy.length - 1] = merged
       return copy
     }
     return [...a, ...b]
@@ -3491,6 +3512,7 @@ export function wrapMessagesInSystemReminder(
 ): UserMessage[] {
   return messages.map(msg => {
     if (typeof msg.message.content === 'string') {
+      if (parseSealedSkillReference(msg.message.content)) return msg
       return {
         ...msg,
         message: {
@@ -3501,7 +3523,7 @@ export function wrapMessagesInSystemReminder(
     } else if (Array.isArray(msg.message.content)) {
       // For array content, wrap text blocks in system-reminder
       const wrappedContent = msg.message.content.map(block => {
-        if (block.type === 'text') {
+        if (block.type === 'text' && !parseSealedSkillReference(block.text)) {
           return {
             ...block,
             text: wrapInSystemReminder(block.text),
@@ -4075,7 +4097,11 @@ Read the team config to discover your teammates' names. Check the task list peri
         return []
       }
 
-      const skillsContent = attachment.skills
+      const sealed = attachment.skills.filter(skill => parseSealedSkillReference(skill.content))
+      const ordinary = attachment.skills.filter(skill => !parseSealedSkillReference(skill.content))
+      const sealedMessages = sealed.map(skill => createUserMessage({ content: [{ type: 'text', text: skill.content }], isMeta: true }))
+      if (ordinary.length === 0) return sealedMessages
+      const skillsContent = ordinary
         .map(
           skill =>
             `### Skill: ${skill.name}\nPath: ${skill.path}\n\n${skill.content}`,
@@ -4087,7 +4113,7 @@ Read the team config to discover your teammates' names. Check the task list peri
           content: `The following skills were invoked in this session. Continue to follow these guidelines:\n\n${skillsContent}`,
           isMeta: true,
         }),
-      ])
+      ]).concat(sealedMessages)
     }
     case 'todo_reminder': {
       const todoItems = attachment.content
@@ -4360,7 +4386,7 @@ You have exited auto mode. The user may now want to interact more directly. You 
       } else {
         logMCPDebug(
           attachment.server,
-          `No displayable content found in MCP resource ${attachment.uri}.`,
+          'No displayable content found in MCP resource.',
         )
         // Fallback if no content could be transformed
         return wrapMessagesInSystemReminder([
@@ -5359,21 +5385,9 @@ export function filterWhitespaceOnlyAssistantMessages(
     return messages
   }
 
-  // Removing assistant messages may leave adjacent user messages that need
-  // merging (the API requires alternating user/assistant roles).
-  const merged: Message[] = []
-  for (const message of filtered) {
-    const prev = merged.at(-1)
-    if (message.type === 'user' && prev?.type === 'user') {
-      merged[merged.length - 1] = mergeUserMessages(
-        prev as UserMessage,
-        message as UserMessage,
-      ) // lvalue
-    } else {
-      merged.push(message)
-    }
-  }
-  return merged
+  // Canonical recovery preserves producer boundaries. Role folding belongs
+  // only to normalizeMessagesForAPI's temporary copy.
+  return filtered
 }
 
 /**

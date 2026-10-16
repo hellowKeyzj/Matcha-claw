@@ -166,8 +166,7 @@ export async function enrollTrustedDevice(): Promise<void> {
 
     if (response.status !== 200 && response.status !== 201) {
       logForDebugging(
-        () =>
-          `[trusted-device] Enrollment failed ${response.status}: ${jsonStringify(response.data).slice(0, 200)}`,
+        `[trusted-device] Enrollment failed ${response.status}: ${jsonStringify(response.data).slice(0, 200)}`,
       )
       return
     }

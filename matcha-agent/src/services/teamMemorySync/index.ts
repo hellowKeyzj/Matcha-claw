@@ -505,8 +505,7 @@ async function uploadTeamMemory(
     }
 
     logForDebugging(
-      () =>
-        `team-memory-sync: uploaded ${Object.keys(entries).length} entries (checksum: ${responseChecksum ?? 'none'})`,
+      `team-memory-sync: uploaded ${Object.keys(entries).length} entries (checksum: ${responseChecksum ?? 'none'})`,
       { level: 'debug' },
     )
     return {

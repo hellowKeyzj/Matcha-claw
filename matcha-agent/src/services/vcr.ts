@@ -9,6 +9,8 @@ import mapValues from 'lodash-es/mapValues.js'
 import { dirname, join } from 'path'
 import { addToTotalSessionCost } from 'src/cost-tracker.js'
 import { calculateUSDCost } from 'src/utils/modelCost.js'
+import { hasSealedSkillReferences } from '../skills/sealed/reference.js'
+import { sealedModelContext } from '../skills/sealed/privacy.js'
 import type {
   AssistantMessage,
   Message,
@@ -44,7 +46,7 @@ async function withFixture<T>(
   fixtureName: string,
   f: () => Promise<T>,
 ): Promise<T> {
-  if (!shouldUseVCR()) {
+  if (sealedModelContext() || !shouldUseVCR()) {
     return await f()
   }
 
@@ -92,7 +94,7 @@ export async function withVCR(
   messages: Message[],
   f: () => Promise<(AssistantMessage | StreamEvent | SystemAPIErrorMessage)[]>,
 ): Promise<(AssistantMessage | StreamEvent | SystemAPIErrorMessage)[]> {
-  if (!shouldUseVCR()) {
+  if (sealedModelContext() || hasSealedSkillReferences(messages) || !shouldUseVCR()) {
     return await f()
   }
 
@@ -359,7 +361,7 @@ export async function* withStreamingVCR(
   StreamEvent | AssistantMessage | SystemAPIErrorMessage,
   void
 > {
-  if (!shouldUseVCR()) {
+  if (sealedModelContext() || hasSealedSkillReferences(messages) || !shouldUseVCR()) {
     return yield* f()
   }
 

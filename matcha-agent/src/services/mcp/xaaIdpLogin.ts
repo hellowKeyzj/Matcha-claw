@@ -405,11 +405,11 @@ export async function acquireIdpIdToken(
 
   const cached = getCachedIdpIdToken(idpIssuer)
   if (cached) {
-    logMCPDebug('xaa', `Using cached id_token for ${idpIssuer}`)
+    logMCPDebug('xaa', 'Using cached id_token')
     return cached
   }
 
-  logMCPDebug('xaa', `No cached id_token for ${idpIssuer}; starting OIDC login`)
+  logMCPDebug('xaa', 'No cached id_token; starting OIDC login')
 
   const metadata = await discoverOidc(idpIssuer)
   const port = opts.callbackPort ?? (await findAvailablePort())
@@ -478,10 +478,7 @@ export async function acquireIdpIdToken(
     : Date.now() + (tokens.expires_in ?? 3600) * 1000
 
   saveIdpIdToken(idpIssuer, tokens.id_token, expiresAt)
-  logMCPDebug(
-    'xaa',
-    `Cached id_token for ${idpIssuer} (expires ${new Date(expiresAt).toISOString()})`,
-  )
+  logMCPDebug('xaa', 'Cached id_token')
 
   return tokens.id_token
 }

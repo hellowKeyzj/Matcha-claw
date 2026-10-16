@@ -3,6 +3,7 @@ import { createHash } from 'crypto'
 import { promises as fs } from 'fs'
 import { dirname, join } from 'path'
 import { getSessionId } from 'src/bootstrap/state.js'
+import { sealedModelContext } from '../../skills/sealed/privacy.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { jsonParse, jsonStringify } from '../../utils/slowOperations.js'
 
@@ -149,6 +150,7 @@ export function createDumpPromptsFetch(
   const filePath = getDumpPromptsPath(agentIdOrSessionId)
 
   return async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (sealedModelContext()) return globalThis.fetch(input, init)
     const state = dumpState.get(agentIdOrSessionId) ?? {
       initialized: false,
       messageCountSeen: 0,

@@ -4,7 +4,7 @@
  *
  * Two modes:
  * 1. Sampled logging: 100% of ant users, 0.1% of external users - logs phases to Statsig
- * 2. Detailed profiling: MATCHACLAW_TRACE=1 - full report with memory snapshots
+ * 2. Detailed profiling: CLAUDE_CODE_PROFILE_STARTUP=1 - full report with memory snapshots
  *
  * Uses Node.js built-in performance hooks API for standard timing measurement.
  */
@@ -16,15 +16,14 @@ import {
   logEvent,
 } from '../services/analytics/index.js'
 import { logForDebugging } from './debug.js'
-import { getClaudeConfigHomeDir } from './envUtils.js'
-import { isTraceEnabled } from './trace.js'
+import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
 import { getFsImplementation } from './fsOperations.js'
 import { formatMs, formatTimelineLine, getPerformance } from './profilerBase.js'
 import { writeFileSync_DEPRECATED } from './slowOperations.js'
 
 // Module-level state - decided once at module load
 // eslint-disable-next-line custom-rules/no-process-env-top-level
-const DETAILED_PROFILING = isTraceEnabled()
+const DETAILED_PROFILING = isEnvTruthy(process.env.CLAUDE_CODE_PROFILE_STARTUP)
 
 // Sampling for Statsig logging: 100% ant, 0.5% external
 // Decision made once at startup - non-sampled users pay no profiling cost
@@ -36,16 +35,9 @@ const STATSIG_LOGGING_SAMPLED =
 // Enable profiling if either detailed mode OR sampled for Statsig
 const SHOULD_PROFILE = DETAILED_PROFILING || STATSIG_LOGGING_SAMPLED
 
-// Track memory snapshots separately (perf_hooks doesn't track memory).
-// Only used when DETAILED_PROFILING is enabled.
-// Stored as an array that appends in the same order as perf.mark() calls, so
-// memorySnapshots[i] corresponds to getEntriesByType('mark')[i]. Using a Map
-// keyed by checkpoint name is wrong because some checkpoints fire more than
-// once (e.g. loadSettingsFromDisk_start fires during init and again after
-// plugins reset the settings cache), and the second call would overwrite the
-// first's memory snapshot.
-const memorySnapshots: NodeJS.MemoryUsage[] = []
-const startupMarks = new Set<string>()
+// Track owned marks and optional memory snapshots by name, matching
+// LightweightPerf so repeated checkpoints keep their latest time and memory.
+const memorySnapshots = new Map<string, NodeJS.MemoryUsage | undefined>()
 
 // Phase definitions for Statsig logging: [startCheckpoint, endCheckpoint]
 const PHASE_DEFINITIONS = {
@@ -69,12 +61,12 @@ export function profileCheckpoint(name: string): void {
 
   const perf = getPerformance()
   perf.mark(name)
-  startupMarks.add(name)
 
   // Only capture memory when detailed profiling enabled (env var)
-  if (DETAILED_PROFILING) {
-    memorySnapshots.push(process.memoryUsage())
-  }
+  memorySnapshots.set(
+    name,
+    DETAILED_PROFILING ? process.memoryUsage() : undefined,
+  )
 }
 
 /**
@@ -89,7 +81,7 @@ function getReport(): string {
   const perf = getPerformance()
   const marks = perf
     .getEntriesByType('mark')
-    .filter(mark => startupMarks.has(mark.name))
+    .filter(mark => memorySnapshots.has(mark.name))
   if (marks.length === 0) {
     return 'No profiling checkpoints recorded'
   }
@@ -101,13 +93,13 @@ function getReport(): string {
   lines.push('')
 
   let prevTime = 0
-  for (const [i, mark] of marks.entries()) {
+  for (const mark of marks) {
     lines.push(
       formatTimelineLine(
         mark.startTime,
         mark.startTime - prevTime,
         mark.name,
-        memorySnapshots[i],
+        memorySnapshots.get(mark.name),
         8,
         7,
       ),
@@ -132,7 +124,7 @@ export function profileReport(): void {
   // Log to Statsig (sampled: 100% ant, 0.1% external)
   logStartupPerf()
 
-  // Output detailed report if MATCHACLAW_TRACE=1
+  // Output detailed report if CLAUDE_CODE_PROFILE_STARTUP=1
   if (DETAILED_PROFILING) {
     // Write to file
     const path = getStartupPerfLogPath()
@@ -152,9 +144,8 @@ export function profileReport(): void {
   // processes (daemon, cron). After this point startup marks are no longer needed
   // — the report has been written and the Statsig event has been logged.
   const perf = getPerformance()
-  for (const name of startupMarks) perf.clearMarks(name)
-  startupMarks.clear()
-  memorySnapshots.length = 0
+  for (const name of memorySnapshots.keys()) perf.clearMarks(name)
+  memorySnapshots.clear()
 }
 
 export function isDetailedProfilingEnabled(): boolean {
@@ -176,7 +167,7 @@ function logStartupPerf(): void {
   const perf = getPerformance()
   const marks = perf
     .getEntriesByType('mark')
-    .filter(mark => startupMarks.has(mark.name))
+    .filter(mark => memorySnapshots.has(mark.name))
   if (marks.length === 0) return
 
   // Build checkpoint lookup

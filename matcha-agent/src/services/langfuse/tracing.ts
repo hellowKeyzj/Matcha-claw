@@ -8,6 +8,7 @@ import { isLangfuseEnabled } from './client.js'
 import { sanitizeToolInput, sanitizeToolOutput } from './sanitize.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { getCoreUserData } from 'src/utils/user.js'
+import { markSealedTelemetry, sealedModelContext, sealedTelemetryValue } from '../../skills/sealed/privacy.js'
 
 export type { LangfuseSpan }
 
@@ -41,7 +42,7 @@ export function createTrace(params: {
     const rootSpan = startObservation(
       traceName,
       {
-        input: params.input,
+        input: sealedTelemetryValue(params.input),
         metadata: {
           provider: params.provider,
           model: params.model,
@@ -51,6 +52,7 @@ export function createTrace(params: {
       },
       { asType: 'agent' },
     ) as RootTrace
+    if (sealedModelContext()) markSealedTelemetry(rootSpan)
     rootSpan.otelSpan.setAttribute(
       LangfuseOtelSpanAttributes.TRACE_SESSION_ID,
       params.sessionId,
@@ -112,6 +114,7 @@ export function recordLLMObservation(
   },
 ): void {
   if (!rootSpan || !isLangfuseEnabled()) return
+  if (sealedModelContext()) markSealedTelemetry(rootSpan)
   try {
     const genName =
       PROVIDER_GENERATION_NAMES[params.provider] ?? `Chat${params.provider}`
@@ -123,9 +126,9 @@ export function recordLLMObservation(
       genName,
       {
         model: params.model,
-        input: params.tools
+        input: sealedTelemetryValue(params.tools
           ? { messages: params.input, tools: params.tools }
-          : params.input,
+          : params.input, rootSpan),
         metadata: {
           provider: params.provider,
           model: params.model,
@@ -163,7 +166,7 @@ export function recordLLMObservation(
     const cacheRead = params.usage.cache_read_input_tokens ?? 0
     const cacheCreation = params.usage.cache_creation_input_tokens ?? 0
     gen.update({
-      output: params.output,
+      output: sealedTelemetryValue(params.output, rootSpan),
       usageDetails: {
         input: params.usage.input_tokens + cacheCreation + cacheRead,
         output: params.usage.output_tokens,
@@ -202,7 +205,7 @@ export function recordToolObservation(
     const toolObs = startObservation(
       params.toolName,
       {
-        input: sanitizeToolInput(params.toolName, params.input),
+        input: sealedTelemetryValue(sanitizeToolInput(params.toolName, params.input), rootSpan),
         metadata: {
           toolUseId: params.toolUseId,
           isError: String(params.isError ?? false),
@@ -232,7 +235,7 @@ export function recordToolObservation(
     }
 
     toolObs.update({
-      output: sanitizeToolOutput(params.toolName, params.output),
+      output: sealedTelemetryValue(sanitizeToolOutput(params.toolName, params.output), rootSpan),
       ...(params.isError && { level: 'ERROR' as const }),
     })
 
@@ -289,8 +292,7 @@ export function createToolBatchSpan(
     }
 
     logForDebugging(
-      () =>
-        `[langfuse] Tool batch span created: ${batchSpan.id} (tools=${params.toolNames.join(',')})`,
+      `[langfuse] Tool batch span created: ${batchSpan.id} (tools=${params.toolNames.join(',')})`,
     )
     return batchSpan
   } catch (e) {
@@ -327,7 +329,7 @@ export function createSubagentTrace(params: {
     const rootSpan = startObservation(
       `agent:${params.agentType}`,
       {
-        input: params.input,
+        input: sealedTelemetryValue(params.input),
         metadata: {
           provider: params.provider,
           model: params.model,
@@ -337,6 +339,7 @@ export function createSubagentTrace(params: {
       },
       { asType: 'agent' },
     ) as RootTrace
+    if (sealedModelContext()) markSealedTelemetry(rootSpan)
     rootSpan.otelSpan.setAttribute(
       LangfuseOtelSpanAttributes.TRACE_SESSION_ID,
       params.sessionId,
@@ -383,7 +386,7 @@ export function createChildSpan(
     const span = startObservation(
       params.name,
       {
-        input: params.input,
+        input: sealedTelemetryValue(params.input, parentSpan),
         metadata: {
           provider: params.provider,
           model: params.model,
@@ -395,6 +398,7 @@ export function createChildSpan(
         parentSpanContext: parentSpan.otelSpan.spanContext(),
       },
     ) as LangfuseSpan
+    if (sealedTelemetryValue(undefined, parentSpan) !== undefined) markSealedTelemetry(span)
 
     // Propagate session ID and user ID from parent
     const parent = parentSpan as unknown as RootTrace
@@ -434,7 +438,7 @@ export function endTrace(
   if (!rootSpan) return
   try {
     const updatePayload: Record<string, unknown> = {}
-    if (output !== undefined) updatePayload.output = output
+    if (output !== undefined) updatePayload.output = sealedTelemetryValue(output, rootSpan)
     if (status === 'interrupted') updatePayload.level = 'WARNING'
     else if (status === 'error') updatePayload.level = 'ERROR'
     if (Object.keys(updatePayload).length > 0) rootSpan.update(updatePayload)

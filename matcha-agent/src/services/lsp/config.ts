@@ -62,7 +62,7 @@ export async function getAllLspServers(): Promise<{
     }
 
     logForDebugging(
-      () => `Total LSP servers loaded: ${Object.keys(allServers).length}`,
+      `Total LSP servers loaded: ${Object.keys(allServers).length}`,
     )
   } catch (error) {
     // Log error for monitoring production issues.

@@ -23,6 +23,8 @@ import {
 } from '../../bootstrap/state.js'
 import { getOauthConfig } from '../../constants/oauth.js'
 import { isDebugToStdErr, logForDebugging } from '../../utils/debug.js'
+import { sealedModelContext } from '../../skills/sealed/privacy.js'
+import { SEALED_REDACTION } from '../../skills/sealed/reference.js'
 import {
   getAWSRegion,
   getVertexRegionForModel,
@@ -71,13 +73,15 @@ import {
  */
 
 function createStderrLogger(): ClientOptions['logger'] {
+  const log = (level: string, msg: unknown, args: unknown[]) => {
+    if (sealedModelContext()) console.error(`[Anthropic SDK ${level}]`, SEALED_REDACTION)
+    else console.error(`[Anthropic SDK ${level}]`, msg, ...args)
+  }
   return {
-    error: (msg, ...args) =>
-      console.error('[Anthropic SDK ERROR]', msg, ...args),
-    warn: (msg, ...args) => console.error('[Anthropic SDK WARN]', msg, ...args),
-    info: (msg, ...args) => console.error('[Anthropic SDK INFO]', msg, ...args),
-    debug: (msg, ...args) =>
-      console.error('[Anthropic SDK DEBUG]', msg, ...args),
+    error: (msg, ...args) => log('ERROR', msg, args),
+    warn: (msg, ...args) => log('WARN', msg, args),
+    info: (msg, ...args) => log('INFO', msg, args),
+    debug: (msg, ...args) => log('DEBUG', msg, args),
   }
 }
 

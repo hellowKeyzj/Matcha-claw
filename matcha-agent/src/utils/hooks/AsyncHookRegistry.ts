@@ -198,8 +198,7 @@ export async function checkForAsyncHookResponses(): Promise<
             const parsed = jsonParse(line.trim())
             if (!('async' in parsed)) {
               logForDebugging(
-                () =>
-                  `Hooks: Found sync response from ${hook.processId}: ${jsonStringify(parsed)}`,
+                `Hooks: Found sync response from ${hook.processId}: ${jsonStringify(parsed)}`,
               )
               response = parsed
               break

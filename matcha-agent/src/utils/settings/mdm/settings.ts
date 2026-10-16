@@ -82,7 +82,7 @@ export function startMdmSettingsLoad(): void {
     logForDebugging(`MDM settings load completed in ${duration}ms`)
     if (Object.keys(mdm.settings).length > 0) {
       logForDebugging(
-        () => `MDM settings found: ${Object.keys(mdm.settings).join(', ')}`,
+        `MDM settings found: ${Object.keys(mdm.settings).join(', ')}`,
       )
       try {
         logForDiagnosticsNoPII('info', 'mdm_settings_loaded', {

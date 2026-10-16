@@ -1,4 +1,3 @@
-import { isTraceEnabled } from '../../../../src/utils/trace.js'
 import { log, error as logError } from '../logger'
 
 export interface SessionEvent {
@@ -42,13 +41,10 @@ export class EventBus {
     if (this.events.length > MAX_EVENTS_PER_BUS) {
       this.events = this.events.slice(-Math.floor(MAX_EVENTS_PER_BUS / 2))
     }
-    if (isTraceEnabled())
-      log(
-        `[RC-DEBUG] bus publish: sessionId=${event.sessionId} type=${event.type} dir=${event.direction} seq=${full.seqNum} subscribers=${this.subscribers.size}`,
-        event.type === 'error'
-          ? `payload=${JSON.stringify(event.payload)}`
-          : '',
-      )
+    log(
+      `[RC-DEBUG] bus publish: sessionId=${event.sessionId} type=${event.type} dir=${event.direction} seq=${full.seqNum} subscribers=${this.subscribers.size}`,
+      event.type === 'error' ? `payload=${JSON.stringify(event.payload)}` : '',
+    )
     for (const cb of this.subscribers) {
       try {
         cb(full)

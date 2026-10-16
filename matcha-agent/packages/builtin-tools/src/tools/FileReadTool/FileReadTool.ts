@@ -25,6 +25,10 @@ import {
   addSkillDirectories,
   discoverSkillDirsForPaths,
 } from 'src/skills/loadSkillsDir.js'
+import { collectSealedMessageReferences, isSealedSkillPath, parseSealedSkillPath } from 'src/skills/sealed/reference.js'
+import { readSealedReference, SealedSkillError } from 'src/skills/sealed/catalog.js'
+import { sealedReadPermission } from 'src/skills/sealed/permissions.js'
+import { sealedReadTokenBudget } from 'src/skills/sealed/budget.js'
 import type { ToolUseContext } from 'src/Tool.js'
 import { buildTool, type ToolDef } from 'src/Tool.js'
 import { getCwd } from 'src/utils/cwd.js'
@@ -388,7 +392,7 @@ export const FileReadTool = buildTool({
   backfillObservableInput(input) {
     // hooks.mdx documents file_path as absolute; expand so hook allowlists
     // can't be bypassed via ~ or relative paths.
-    if (typeof input.file_path === 'string') {
+    if (typeof input.file_path === 'string' && !isSealedSkillPath(input.file_path)) {
       input.file_path = expandPath(input.file_path)
     }
   },
@@ -397,6 +401,9 @@ export const FileReadTool = buildTool({
   },
   async checkPermissions(input, context): Promise<PermissionDecision> {
     const appState = context.getAppState()
+    if (isSealedSkillPath(input.file_path)) {
+      return sealedReadPermission(input.file_path, appState.toolPermissionContext)
+    }
     return checkReadPermissionForTool(
       FileReadTool,
       input,
@@ -413,7 +420,15 @@ export const FileReadTool = buildTool({
     return ''
   },
   renderToolUseErrorMessage,
-  async validateInput({ file_path, pages }, toolUseContext: ToolUseContext) {
+  async validateInput({ file_path, pages, offset, limit }, toolUseContext: ToolUseContext) {
+    if (isSealedSkillPath(file_path)) {
+      const permission = sealedReadPermission(file_path, toolUseContext.getAppState().toolPermissionContext)
+      if (permission.behavior === 'deny') return { result: false, message: permission.message, errorCode: 1 }
+      if (offset !== undefined || limit !== undefined || pages !== undefined) {
+        return { result: false, message: 'Sealed skill instructions require a complete document read; offset, limit and pages are not supported.', errorCode: 11 }
+      }
+      return { result: true }
+    }
     // Validate pages parameter (pure string parsing, no I/O)
     if (pages !== undefined) {
       const parsed = parsePDFPageRange(pages)
@@ -464,6 +479,23 @@ export const FileReadTool = buildTool({
       return { result: true }
     }
 
+    // 预检：如果路径已是一个存在的目录，及时拒绝并给出指引
+    // 避免 AI 模型用 Read 工具读取目录路径时抛出原始 EISDIR 错误，
+    // 模型拿到错误后不知该用 ls 列目录，可能做出错误恢复决策。
+    try {
+      const fileStat = await getFsImplementation().stat(fullFilePath)
+      if (fileStat.isDirectory()) {
+        return {
+          result: false,
+          message: `Cannot read '${file_path}': the specified path is an existing directory. Use Bash ls to list files in this directory, or specify a filename path to read a specific file.`,
+          errorCode: 10,
+        }
+      }
+    } catch (e) {
+      if (!isENOENT(e)) throw e
+      // ENOENT = 文件还不存在，放行，call() 会通过 findSimilarFile 给出友好建议
+    }
+
     // Binary extension check (string check on extension only, no I/O).
     // PDF, images, and SVG are excluded - this tool renders them natively.
     const ext = path.extname(fullFilePath).toLowerCase()
@@ -511,6 +543,24 @@ export const FileReadTool = buildTool({
         hasMaxTokens: fileReadingLimits.maxTokens !== undefined,
         hasMaxSizeBytes: fileReadingLimits.maxSizeBytes !== undefined,
       })
+    }
+
+    if (isSealedSkillPath(file_path)) {
+      if (offset !== 1 || limit !== undefined || pages !== undefined) {
+        throw new Error('Sealed skill instructions require a complete document read.')
+      }
+      if (sealedReadPermission(file_path, context.getAppState().toolPermissionContext).behavior === 'deny') {
+        throw new Error('Sealed skill Read is denied by native permission settings.')
+      }
+      const { skillKey } = parseSealedSkillPath(file_path)
+      const priorPackages = new Set(collectSealedMessageReferences(context.messages)
+        .filter(ref => ref.skillKey === skillKey).map(ref => ref.packageSha256))
+      if (priorPackages.size > 1) throw new SealedSkillError('sealed_package_changed')
+      const ref = await readSealedReference(file_path, context.abortController.signal, {
+        maxSizeBytes,
+        maxTokens: Math.min(maxTokens, await sealedReadTokenBudget(context)),
+      }, priorPackages.values().next().value)
+      return { data: { type: 'text' as const, file: { filePath: file_path, content: JSON.stringify(ref), numLines: 1, startLine: 1, totalLines: 1 } } }
     }
 
     const ext = path.extname(file_path).toLowerCase().slice(1)
@@ -688,6 +738,9 @@ export const FileReadTool = buildTool({
           content: FILE_UNCHANGED_STUB,
         }
       case 'text': {
+        if (isSealedSkillPath(data.file.filePath)) {
+          return { tool_use_id: toolUseID, type: 'tool_result', content: data.file.content }
+        }
         let content: string
 
         if (data.file.content) {

@@ -3567,8 +3567,7 @@ async function getAsyncHookResponseAttachments(): Promise<Attachment[]> {
       exitCode,
     }) => {
       logForDebugging(
-        () =>
-          `Hooks: Creating attachment for ${processId} (${hookName}): ${jsonStringify(response)}`,
+        `Hooks: Creating attachment for ${processId} (${hookName}): ${jsonStringify(response)}`,
       )
       return {
         type: 'async_hook_response' as const,

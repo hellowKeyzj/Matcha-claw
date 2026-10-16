@@ -72,8 +72,7 @@ export async function createCodeSession(
     !data.session.id.startsWith('cse_')
   ) {
     logForDebugging(
-      () =>
-        `[code-session] No session.id (cse_*) in response: ${jsonStringify(data).slice(0, 200)}`,
+      `[code-session] No session.id (cse_*) in response: ${jsonStringify(data).slice(0, 200)}`,
     )
     return null
   }
@@ -142,8 +141,7 @@ export async function fetchRemoteCredentials(
     !('worker_epoch' in data)
   ) {
     logForDebugging(
-      () =>
-        `[code-session] /bridge response malformed (need worker_jwt, expires_in, api_base_url, worker_epoch): ${jsonStringify(data).slice(0, 200)}`,
+      `[code-session] /bridge response malformed (need worker_jwt, expires_in, api_base_url, worker_epoch): ${jsonStringify(data).slice(0, 200)}`,
     )
     return null
   }
@@ -157,8 +155,7 @@ export async function fetchRemoteCredentials(
     !Number.isSafeInteger(epoch)
   ) {
     logForDebugging(
-      () =>
-        `[code-session] /bridge worker_epoch invalid: ${jsonStringify(rawEpoch)}`,
+      `[code-session] /bridge worker_epoch invalid: ${jsonStringify(rawEpoch)}`,
     )
     return null
   }

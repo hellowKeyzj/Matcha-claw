@@ -1,5 +1,6 @@
 import chalk from 'chalk'
 import { writeSync } from 'fs'
+import { constants } from 'node:os'
 import memoize from 'lodash-es/memoize.js'
 import { onExit } from 'signal-exit'
 import type { ExitReason } from 'src/entrypoints/agentSdkTypes.js'
@@ -36,6 +37,7 @@ import { runCleanupFunctions } from './cleanupRegistry.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
 import { isEnvTruthy } from './envUtils.js'
+import { getErrnoCode } from './errors.js'
 import { getCurrentSessionTitle, sessionIdExists } from './sessionStorage.js'
 import { sleep } from './sleep.js'
 import { closeSentry } from './sentry.js'
@@ -169,9 +171,7 @@ function printResumeHint(): void {
 
       writeSync(
         1,
-        chalk.dim(
-          `\nResume this session with:\nclaude --resume ${resumeArg}\n`,
-        ),
+        chalk.dim(`\nResume this session with:\nccb --resume ${resumeArg}\n`),
       )
       resumeHintPrinted = true
     } catch {
@@ -226,6 +226,51 @@ function forceExit(exitCode: number): never {
   // TypeScript trick: cast to never since we know this only happens in tests
   // where the mock returns instead of exiting
   return undefined as never
+}
+
+function exitOnFatalError(
+  event: 'uncaught_exception' | 'unhandled_rejection',
+  error: unknown,
+): never {
+  process.exitCode = 1
+  try {
+    const errorName =
+      error instanceof Error
+        ? [
+            'TypeError',
+            'RangeError',
+            'ReferenceError',
+            'SyntaxError',
+            'URIError',
+            'EvalError',
+            'AggregateError',
+          ].includes(error.name)
+          ? error.name
+          : 'Error'
+        : typeof error
+    const code = getErrnoCode(error)
+    logForDiagnosticsNoPII('error', event, {
+      error_name: errorName,
+      error_code:
+        code && Object.hasOwn(constants.errno, code) ? code : undefined,
+    })
+    logEvent(`tengu_${event}`, {
+      error_name:
+        errorName as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+    })
+  } finally {
+    try {
+      writeSync(2, `Fatal CLI error (${event}).\n`)
+    } catch {
+      // stderr may already be closed.
+    }
+    // Fatal state cannot safely run asynchronous cleanup or user hooks.
+    try {
+      cleanupTerminalModes()
+    } finally {
+      forceExit(1)
+    }
+  }
 }
 
 /**
@@ -293,40 +338,12 @@ export const setupGracefulShutdown = memoize(() => {
     }
   }
 
-  // Log uncaught exceptions for container observability and analytics
-  // Error names (e.g., "TypeError") are not sensitive - safe to log
   process.on('uncaughtException', error => {
-    logForDiagnosticsNoPII('error', 'uncaught_exception', {
-      error_name: error.name,
-      error_message: error.message.slice(0, 2000),
-    })
-    logEvent('tengu_uncaught_exception', {
-      error_name:
-        error.name as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-    })
+    exitOnFatalError('uncaught_exception', error)
   })
 
-  // Log unhandled promise rejections for container observability and analytics
   process.on('unhandledRejection', reason => {
-    const errorName =
-      reason instanceof Error
-        ? reason.name
-        : typeof reason === 'string'
-          ? 'string'
-          : 'unknown'
-    const errorInfo =
-      reason instanceof Error
-        ? {
-            error_name: reason.name,
-            error_message: reason.message.slice(0, 2000),
-            error_stack: reason.stack?.slice(0, 4000),
-          }
-        : { error_message: String(reason).slice(0, 2000) }
-    logForDiagnosticsNoPII('error', 'unhandled_rejection', errorInfo)
-    logEvent('tengu_unhandled_rejection', {
-      error_name:
-        errorName as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-    })
+    exitOnFatalError('unhandled_rejection', reason)
   })
 })
 

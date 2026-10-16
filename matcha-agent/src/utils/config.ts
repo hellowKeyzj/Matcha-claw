@@ -816,59 +816,26 @@ export function saveGlobalConfig(
   }
 
   let written: GlobalConfig | null = null
-  try {
-    const didWrite = saveConfigWithLock(
-      getGlobalClaudeFile(),
-      createDefaultGlobalConfig,
-      current => {
-        const config = updater(current)
-        // Skip if no changes (same reference returned)
-        if (config === current) {
-          return current
-        }
-        written = {
-          ...config,
-          projects: removeProjectHistory(current.projects),
-        }
-        return written
-      },
-    )
-    // Only write-through if we actually wrote. If the auth-loss guard
-    // tripped (or the updater made no changes), the file is untouched and
-    // the cache is still valid -- touching it would corrupt the guard.
-    if (didWrite && written) {
-      writeThroughGlobalConfigCache(written)
-    }
-  } catch (error) {
-    logForDebugging(`Failed to save config with lock: ${error}`, {
-      level: 'error',
-    })
-    // Fall back to non-locked version on error. This fallback is a race
-    // window: if another process is mid-write (or the file got truncated),
-    // getConfig returns defaults. Refuse to write those over a good cached
-    // config to avoid wiping auth. See GH #3117.
-    const currentConfig = getConfig(
-      getGlobalClaudeFile(),
-      createDefaultGlobalConfig,
-    )
-    if (wouldLoseAuthState(currentConfig)) {
-      logForDebugging(
-        'saveGlobalConfig fallback: re-read config is missing auth that cache has; refusing to write. See GH #3117.',
-        { level: 'error' },
-      )
-      logEvent('tengu_config_auth_loss_prevented', {})
-      return
-    }
-    const config = updater(currentConfig)
-    // Skip if no changes (same reference returned)
-    if (config === currentConfig) {
-      return
-    }
-    written = {
-      ...config,
-      projects: removeProjectHistory(currentConfig.projects),
-    }
-    saveConfig(getGlobalClaudeFile(), written, DEFAULT_GLOBAL_CONFIG)
+  const didWrite = saveConfigWithLock(
+    getGlobalClaudeFile(),
+    createDefaultGlobalConfig,
+    current => {
+      const config = updater(current)
+      // Skip if no changes (same reference returned)
+      if (config === current) {
+        return current
+      }
+      written = {
+        ...config,
+        projects: removeProjectHistory(current.projects),
+      }
+      return written
+    },
+  )
+  // Only write-through if we actually wrote. If the auth-loss guard
+  // tripped (or the updater made no changes), the file is untouched and
+  // the cache is still valid -- touching it would corrupt the guard.
+  if (didWrite && written) {
     writeThroughGlobalConfigCache(written)
   }
 }
@@ -1121,36 +1088,7 @@ export function getCustomApiKeyStatus(
   return 'new'
 }
 
-function saveConfig<A extends object>(
-  file: string,
-  config: A,
-  defaultConfig: A,
-): void {
-  // Ensure the directory exists before writing the config file
-  const dir = dirname(file)
-  const fs = getFsImplementation()
-  // mkdirSync is already recursive in FsOperations implementation
-  fs.mkdirSync(dir)
-
-  // Filter out any values that match the defaults
-  const filteredConfig = pickBy(
-    config,
-    (value, key) =>
-      jsonStringify(value) !== jsonStringify(defaultConfig[key as keyof A]),
-  )
-  // Write config file with secure permissions - mode only applies to new files
-  writeFileSyncAndFlush_DEPRECATED(
-    file,
-    jsonStringify(filteredConfig, null, 2),
-    {
-      encoding: 'utf-8',
-      mode: 0o600,
-    },
-  )
-  if (file === getGlobalClaudeFile()) {
-    globalConfigWriteCount++
-  }
-}
+const configLockWait = new Int32Array(new SharedArrayBuffer(4))
 
 /**
  * Returns true if a write was performed; false if the write was skipped
@@ -1174,15 +1112,25 @@ function saveConfigWithLock<A extends object>(
   try {
     const lockFilePath = `${file}.lock`
     const startTime = Date.now()
-    release = lockfile.lockSync(file, {
-      lockfilePath: lockFilePath,
-      onCompromised: err => {
-        // Default onCompromised throws from a setTimeout callback, which
-        // becomes an unhandled exception. Log instead -- the lock being
-        // stolen (e.g. after a 10s event-loop stall) is recoverable.
-        logForDebugging(`Config lock compromised: ${err}`, { level: 'error' })
-      },
-    })
+    for (;;) {
+      try {
+        release = lockfile.lockSync(file, {
+          realpath: false,
+          lockfilePath: lockFilePath,
+          onCompromised: err => {
+            // Default onCompromised throws from a setTimeout callback, which
+            // becomes an unhandled exception. Log instead -- the lock being
+            // stolen (e.g. after a 10s event-loop stall) is recoverable.
+            logForDebugging(`Config lock compromised: ${err}`, { level: 'error' })
+          },
+        })
+        break
+      } catch (error) {
+        if (getErrnoCode(error) !== 'ELOCKED') throw error
+        // Only wait for another process; the synchronous updater runs once.
+        Atomics.wait(configLockWait, 0, 0, 5)
+      }
+    }
     const lockTime = Date.now() - startTime
     if (lockTime > 100) {
       logForDebugging(
@@ -1645,62 +1593,28 @@ export function saveCurrentProjectConfig(
   const absolutePath = getProjectPathForConfig()
 
   let written: GlobalConfig | null = null
-  try {
-    const didWrite = saveConfigWithLock(
-      getGlobalClaudeFile(),
-      createDefaultGlobalConfig,
-      current => {
-        const currentProjectConfig =
-          current.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
-        const newProjectConfig = updater(currentProjectConfig)
-        // Skip if no changes (same reference returned)
-        if (newProjectConfig === currentProjectConfig) {
-          return current
-        }
-        written = {
-          ...current,
-          projects: {
-            ...current.projects,
-            [absolutePath]: newProjectConfig,
-          },
-        }
-        return written
-      },
-    )
-    if (didWrite && written) {
-      writeThroughGlobalConfigCache(written)
-    }
-  } catch (error) {
-    logForDebugging(`Failed to save config with lock: ${error}`, {
-      level: 'error',
-    })
-
-    // Same race window as saveGlobalConfig's fallback -- refuse to write
-    // defaults over good cached config. See GH #3117.
-    const config = getConfig(getGlobalClaudeFile(), createDefaultGlobalConfig)
-    if (wouldLoseAuthState(config)) {
-      logForDebugging(
-        'saveCurrentProjectConfig fallback: re-read config is missing auth that cache has; refusing to write. See GH #3117.',
-        { level: 'error' },
-      )
-      logEvent('tengu_config_auth_loss_prevented', {})
-      return
-    }
-    const currentProjectConfig =
-      config.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
-    const newProjectConfig = updater(currentProjectConfig)
-    // Skip if no changes (same reference returned)
-    if (newProjectConfig === currentProjectConfig) {
-      return
-    }
-    written = {
-      ...config,
-      projects: {
-        ...config.projects,
-        [absolutePath]: newProjectConfig,
-      },
-    }
-    saveConfig(getGlobalClaudeFile(), written, DEFAULT_GLOBAL_CONFIG)
+  const didWrite = saveConfigWithLock(
+    getGlobalClaudeFile(),
+    createDefaultGlobalConfig,
+    current => {
+      const currentProjectConfig =
+        current.projects?.[absolutePath] ?? DEFAULT_PROJECT_CONFIG
+      const newProjectConfig = updater(currentProjectConfig)
+      // Skip if no changes (same reference returned)
+      if (newProjectConfig === currentProjectConfig) {
+        return current
+      }
+      written = {
+        ...current,
+        projects: {
+          ...current.projects,
+          [absolutePath]: newProjectConfig,
+        },
+      }
+      return written
+    },
+  )
+  if (didWrite && written) {
     writeThroughGlobalConfigCache(written)
   }
 }

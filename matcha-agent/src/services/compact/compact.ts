@@ -10,6 +10,7 @@ const sessionTranscriptModule = feature('KAIROS')
 import { APIUserAbortError } from '@anthropic-ai/sdk'
 import { markPostCompaction } from 'src/bootstrap/state.js'
 import { getInvokedSkillsForAgent } from '../../bootstrap/state.js'
+import { collectSealedMessageReferences, parseSealedSkillReference, sealedReferenceKey, sealedSkillPath } from '../../skills/sealed/reference.js'
 import type { QuerySource } from '../../constants/querySource.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import type { Tool, ToolUseContext } from '../../Tool.js'
@@ -582,7 +583,7 @@ export async function compactConversation(
     }
 
     // Add skill attachment if skills were invoked in this session
-    const skillAttachment = createSkillAttachmentIfNeeded(context.agentId)
+    const skillAttachment = createSkillAttachmentIfNeeded(context.agentId, messages)
     if (skillAttachment) {
       postCompactFileAttachments.push(skillAttachment)
     }
@@ -979,7 +980,7 @@ export async function partialCompactConversation(
       postCompactFileAttachments.push(planModeAttachment)
     }
 
-    const skillAttachment = createSkillAttachmentIfNeeded(context.agentId)
+    const skillAttachment = createSkillAttachmentIfNeeded(context.agentId, allMessages)
     if (skillAttachment) {
       postCompactFileAttachments.push(skillAttachment)
     }
@@ -1230,7 +1231,13 @@ async function streamCompactSummary({
           // Pass the compact context's abortController so user Esc aborts the
           // fork — same signal the streaming fallback uses at
           // `signal: context.abortController.signal` below.
-          overrides: { abortController: context.abortController },
+          // Share setResponseLength so streamed summary tokens drive the
+          // compaction progress bar (the fork path is the default; without
+          // this the bar sits at 0% until compact_end).
+          overrides: {
+            abortController: context.abortController,
+            shareSetResponseLength: true,
+          },
         })
         const assistantMsg = getLastAssistantMessage(result.messages)
         const assistantText = assistantMsg
@@ -1539,10 +1546,16 @@ export function createPlanAttachmentIfNeeded(
  */
 export function createSkillAttachmentIfNeeded(
   agentId?: string,
+  messages: Message[] = [],
 ): AttachmentMessage | null {
   const invokedSkills = getInvokedSkillsForAgent(agentId)
+  const references = new Map(collectSealedMessageReferences(messages).map(ref => [sealedReferenceKey(ref), ref]))
+  for (const skill of invokedSkills.values()) {
+    const ref = parseSealedSkillReference(skill.content)
+    if (ref) references.set(sealedReferenceKey(ref), ref)
+  }
 
-  if (invokedSkills.size === 0) {
+  if (invokedSkills.size === 0 && references.size === 0) {
     return null
   }
 
@@ -1551,6 +1564,7 @@ export function createSkillAttachmentIfNeeded(
   // instructions typically live) rather than dropping whole skills.
   let usedTokens = 0
   const skills = Array.from(invokedSkills.values())
+    .filter(skill => !parseSealedSkillReference(skill.content))
     .sort((a, b) => b.invokedAt - a.invokedAt)
     .map(skill => ({
       name: skill.skillName,
@@ -1569,6 +1583,11 @@ export function createSkillAttachmentIfNeeded(
       return true
     })
 
+  // Reference facts are durable, tiny and indivisible. Their contentTokens
+  // are charged only when hydrated, not dropped by ordinary carry truncation.
+  for (const ref of references.values()) {
+    skills.push({ name: ref.skillKey, path: sealedSkillPath(ref.skillKey, ref.path), content: JSON.stringify(ref) })
+  }
   if (skills.length === 0) {
     return null
   }

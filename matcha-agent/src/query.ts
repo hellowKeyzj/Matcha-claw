@@ -113,7 +113,6 @@ import { recordContentReplacement } from './utils/sessionStorage.js'
 import { handleStopHooks } from './query/stopHooks.js'
 import { buildQueryConfig } from './query/config.js'
 import { productionDeps, type QueryDeps } from './query/deps.js'
-import type { RunTraceSink } from './query/runTrace.js'
 import type { Terminal, Continue } from './query/transitions.js'
 import { feature } from 'bun:bundle'
 import {
@@ -253,7 +252,6 @@ export type QueryParams = {
   // budget for the whole agentic turn; `remaining` is computed per iteration
   // from cumulative API usage. See configureTaskBudgetParams in claude.ts.
   taskBudget?: { total: number }
-  runTrace?: RunTraceSink
   deps?: QueryDeps
 }
 
@@ -416,7 +414,6 @@ async function* queryLoop(
     skipCacheWrite,
   } = params
   const deps = params.deps ?? productionDeps()
-  const runTrace = params.runTrace
 
   // Mutable cross-iteration state. The loop body destructures this at the top
   // of each iteration so reads stay bare-name (`messages`, `toolUseContext`).
@@ -893,21 +890,12 @@ async function* queryLoop(
     let attemptWithFallback = true
 
     queryCheckpoint('query_api_loop_start')
-    runTrace?.('query.api.loop.start', {
-      queryDepth: queryTracking.depth,
-      mainLoopModel: toolUseContext.options.mainLoopModel,
-      currentModel,
-    })
     try {
       while (attemptWithFallback) {
         attemptWithFallback = false
         try {
           let streamingFallbackOccured = false
           queryCheckpoint('query_api_streaming_start')
-          runTrace?.('query.api.streaming.start', {
-            queryDepth: queryTracking.depth,
-            currentModel,
-          })
           for await (const message of deps.callModel({
             messages: prependUserContext(messagesForQuery, userContext),
             systemPrompt: fullSystemPrompt,
@@ -929,9 +917,6 @@ async function* queryLoop(
               fallbackModel,
               onStreamingFallback: () => {
                 streamingFallbackOccured = true
-                runTrace?.('api.nonstreaming_fallback.started', {
-                  queryDepth: queryTracking.depth,
-                })
               },
               querySource,
               agents: toolUseContext.options.agentDefinitions.activeAgents,
@@ -960,7 +945,6 @@ async function* queryLoop(
                 },
               }),
               langfuseTrace: toolUseContext.langfuseTrace,
-              runTrace,
             },
           })) {
             // We won't use the tool_calls from the first attempt
@@ -1136,9 +1120,6 @@ async function* queryLoop(
             }
           }
           queryCheckpoint('query_api_streaming_end')
-          runTrace?.('query.api.streaming.end', {
-            queryDepth: queryTracking.depth,
-          })
 
           // Yield deferred microcompact boundary message using actual API-reported
           // token deletion count instead of client-side estimates.

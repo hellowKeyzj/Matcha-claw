@@ -9,6 +9,7 @@
 
 import { z } from 'zod/v4'
 import { lazySchema } from '../../utils/lazySchema.js'
+import { TodoListSchema } from '../../utils/todo/types.js'
 import {
   AccountInfoSchema,
   AgentDefinitionSchema,
@@ -450,6 +451,40 @@ export const SDKControlMcpToggleRequestSchema = lazySchema(() =>
     .describe('Enables or disables an MCP server.'),
 )
 
+const NativeTaskCreateSchema = lazySchema(() => z.strictObject({
+  subject: z.string().min(1),
+  description: z.string().min(1),
+  activeForm: z.string().min(1).optional(),
+  owner: z.string().min(1).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+}))
+
+const NativeTaskUpdateSchema = lazySchema(() => NativeTaskCreateSchema().partial().extend({
+  taskId: z.string().regex(/^[a-zA-Z0-9_-]+$/),
+  status: z.enum(['pending', 'in_progress', 'completed', 'deleted']).optional(),
+  addBlocks: z.array(z.string().regex(/^[a-zA-Z0-9_-]+$/)).optional(),
+  addBlockedBy: z.array(z.string().regex(/^[a-zA-Z0-9_-]+$/)).optional(),
+}))
+
+export const SDKControlTaskRequestSchema = lazySchema(() => z.discriminatedUnion('subtype', [
+  z.strictObject({ subtype: z.literal('task_list'), list_id: z.string().min(1).optional() }),
+  z.strictObject({ subtype: z.literal('task_get'), list_id: z.string().min(1).optional(), task_id: z.string().regex(/^[a-zA-Z0-9_-]+$/) }),
+  z.strictObject({ subtype: z.literal('task_create'), list_id: z.string().min(1).optional(), input: NativeTaskCreateSchema() }),
+  z.strictObject({ subtype: z.literal('task_update'), list_id: z.string().min(1).optional(), input: NativeTaskUpdateSchema() }),
+]))
+
+export const SDKControlGetTodosRequestSchema = lazySchema(() =>
+  z.strictObject({ subtype: z.literal('get_todos') }),
+)
+
+export const SDKControlWriteTodosRequestSchema = lazySchema(() =>
+  z.strictObject({
+    subtype: z.literal('write_todos'),
+    old_todos: TodoListSchema(),
+    new_todos: TodoListSchema(),
+  }),
+)
+
 export const SDKControlStopTaskRequestSchema = lazySchema(() =>
   z
     .object({
@@ -566,6 +601,9 @@ export const SDKControlRequestInnerSchema = lazySchema(() =>
     SDKControlMcpReconnectRequestSchema(),
     SDKControlMcpToggleRequestSchema(),
     SDKControlStopTaskRequestSchema(),
+    SDKControlTaskRequestSchema(),
+    SDKControlGetTodosRequestSchema(),
+    SDKControlWriteTodosRequestSchema(),
     SDKControlApplyFlagSettingsRequestSchema(),
     SDKControlGetSettingsRequestSchema(),
     SDKControlElicitationRequestSchema(),

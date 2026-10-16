@@ -397,10 +397,10 @@ export function buildAPIProviderProperties(): Property[] {
       label: 'Grok base URL',
       value: grokBaseUrl,
     });
-  } else if (apiProvider === 'openai' || apiProvider === 'openaiResponses') {
+  } else if (apiProvider === 'openai') {
     const openaiBaseUrl = process.env.OPENAI_BASE_URL;
     properties.push({
-      label: apiProvider === 'openaiResponses' ? 'OpenAI Responses base URL' : 'OpenAI base URL',
+      label: 'OpenAI base URL',
       value: openaiBaseUrl,
     });
   }

@@ -94,37 +94,6 @@ type MCPOAuthFlowErrorReason =
 const MAX_LOCK_RETRIES = 5
 
 /**
- * OAuth query parameters that should be redacted from logs.
- * These contain sensitive values that could enable CSRF or session fixation attacks.
- */
-const SENSITIVE_OAUTH_PARAMS = [
-  'state',
-  'nonce',
-  'code_challenge',
-  'code_verifier',
-  'code',
-]
-
-/**
- * Redacts sensitive OAuth query parameters from a URL for safe logging.
- * Prevents exposure of state, nonce, code_challenge, code_verifier, and authorization codes.
- */
-function redactSensitiveUrlParams(url: string): string {
-  try {
-    const parsedUrl = new URL(url)
-    for (const param of SENSITIVE_OAUTH_PARAMS) {
-      if (parsedUrl.searchParams.has(param)) {
-        parsedUrl.searchParams.set(param, '[REDACTED]')
-      }
-    }
-    return parsedUrl.toString()
-  } catch {
-    // Return as-is if not a valid URL
-    return url
-  }
-}
-
-/**
  * Some OAuth servers (notably Slack) return HTTP 200 for all responses,
  * signaling errors via the JSON body instead. The SDK's executeTokenRequest
  * only calls parseErrorResponse when !response.ok, so a 200 with
@@ -295,7 +264,7 @@ async function fetchAuthServerMetadata(
     // to the legacy path-aware retry.
     logMCPDebug(
       serverName,
-      `RFC 9728 discovery failed, falling back: ${errorMessage(err)}`,
+      `RFC 9728 discovery failed, falling back (${err instanceof Error ? err.constructor.name : 'unknown'})`,
     )
   }
 
@@ -515,10 +484,7 @@ export async function revokeServerTokens(
             authMethods.includes('client_secret_post')
               ? 'client_secret_post'
               : 'client_secret_basic'
-          logMCPDebug(
-            serverName,
-            `Revoking tokens via ${revocationEndpointStr} (${authMethod})`,
-          )
+          logMCPDebug(serverName, `Revoking tokens (${authMethod})`)
 
           // Revoke refresh token first (more important - prevents future access token generation)
           if (tokenData.refreshToken) {
@@ -537,7 +503,7 @@ export async function revokeServerTokens(
               // Log but continue
               logMCPDebug(
                 serverName,
-                `Failed to revoke refresh token: ${errorMessage(error)}`,
+                `Failed to revoke refresh token (${error instanceof Error ? error.constructor.name : 'unknown'})`,
               )
             }
           }
@@ -558,7 +524,7 @@ export async function revokeServerTokens(
             } catch (error: unknown) {
               logMCPDebug(
                 serverName,
-                `Failed to revoke access token: ${errorMessage(error)}`,
+                `Failed to revoke access token (${error instanceof Error ? error.constructor.name : 'unknown'})`,
               )
             }
           }
@@ -566,7 +532,10 @@ export async function revokeServerTokens(
       }
     } catch (error: unknown) {
       // Log error but don't throw - revocation is best-effort
-      logMCPDebug(serverName, `Failed to revoke tokens: ${errorMessage(error)}`)
+      logMCPDebug(
+        serverName,
+        `Failed to revoke tokens (${error instanceof Error ? error.constructor.name : 'unknown'})`,
+      )
     }
   } else {
     logMCPDebug(serverName, 'No tokens to revoke')
@@ -690,18 +659,7 @@ async function performMCPXaaAuth(
   const clientConfig = getMcpClientConfig(serverName, serverConfig)
   const clientSecret = clientConfig?.clientSecret
   if (!clientSecret) {
-    logMCPDebug(serverName, () => {
-      const wantedKey = getServerKey(serverName, serverConfig)
-      const haveKeys = Object.keys(
-        getSecureStorage().read()?.mcpOAuthClientConfig ?? {},
-      )
-      const headersForLogging = Object.fromEntries(
-        Object.entries(serverConfig.headers ?? {}).map(([k, v]) =>
-          k.toLowerCase() === 'authorization' ? [k, '[REDACTED]'] : [k, v],
-        ),
-      )
-      return `XAA: secret lookup miss. wanted=${wantedKey} have=[${haveKeys.join(', ')}] configHeaders=${jsonStringify(headersForLogging)}`
-    })
+    logMCPDebug(serverName, 'XAA: AS client secret lookup miss')
     throw new Error(
       `XAA: AS client secret not found for '${serverName}'. Re-add with --client-secret.`,
     )
@@ -920,10 +878,7 @@ export async function performMCPOAuthFlow(
     try {
       resourceMetadataUrl = new URL(cachedResourceMetadataUrl)
     } catch {
-      logMCPDebug(
-        serverName,
-        `Invalid cached resourceMetadataUrl: ${cachedResourceMetadataUrl}`,
-      )
+      logMCPDebug(serverName, 'Invalid cached resourceMetadataUrl')
     }
   }
   const wwwAuthParams: WWWAuthenticateParams = {
@@ -983,15 +938,12 @@ export async function performMCPOAuthFlow(
       if (metadata) {
         // Store metadata in provider for scope information
         provider.setMetadata(metadata)
-        logMCPDebug(
-          serverName,
-          `Fetched OAuth metadata with scope: ${getScopeFromMetadata(metadata) || 'NONE'}`,
-        )
+        logMCPDebug(serverName, 'Fetched OAuth metadata')
       }
     } catch (error) {
       logMCPDebug(
         serverName,
-        `Failed to fetch OAuth metadata: ${errorMessage(error)}`,
+        `Failed to fetch OAuth metadata (${error instanceof Error ? error.constructor.name : 'unknown'})`,
       )
     }
 
@@ -1168,7 +1120,6 @@ export async function performMCPOAuthFlow(
       server.listen(port, '127.0.0.1', async () => {
         try {
           logMCPDebug(serverName, `Starting SDK auth`)
-          logMCPDebug(serverName, `Server URL: ${serverConfig.url}`)
 
           // First call to start the auth flow - should redirect
           // Pass the scope and resource_metadata from WWW-Authenticate header if available
@@ -1186,7 +1137,10 @@ export async function performMCPOAuthFlow(
             )
           }
         } catch (error) {
-          logMCPDebug(serverName, `SDK auth error: ${error}`)
+          logMCPDebug(
+            serverName,
+            `SDK auth error (${error instanceof Error ? error.constructor.name : 'unknown'})`,
+          )
           cleanup()
           rejectOnce(new Error(`SDK auth failed: ${errorMessage(error)}`))
         }
@@ -1223,20 +1177,6 @@ export async function performMCPOAuthFlow(
     logMCPDebug(serverName, `Auth result: ${result}`)
 
     if (result === 'AUTHORIZED') {
-      // Debug: Check if tokens were properly saved
-      const savedTokens = await provider.tokens()
-      logMCPDebug(
-        serverName,
-        `Tokens after auth: ${savedTokens ? 'Present' : 'Missing'}`,
-      )
-      if (savedTokens) {
-        logMCPDebug(
-          serverName,
-          `Token access_token length: ${savedTokens.access_token?.length}`,
-        )
-        logMCPDebug(serverName, `Token expires_in: ${savedTokens.expires_in}`)
-      }
-
       logEvent('tengu_mcp_oauth_flow_success', {
         flowAttemptId:
           flowAttemptId as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -1254,7 +1194,10 @@ export async function performMCPOAuthFlow(
       throw new Error('Unexpected auth result: ' + result)
     }
   } catch (error) {
-    logMCPDebug(serverName, `Error during auth completion: ${error}`)
+    logMCPDebug(
+      serverName,
+      `Error during auth completion (${error instanceof Error ? error.constructor.name : 'unknown'})`,
+    )
 
     // Determine failure reason for attribution telemetry. The try block covers
     // port acquisition, the callback server, the redirect flow, and token
@@ -1424,10 +1367,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     const metadataScope = getScopeFromMetadata(this._metadata)
     if (metadataScope) {
       metadata.scope = metadataScope
-      logMCPDebug(
-        this.serverName,
-        `Using scope from metadata: ${metadata.scope}`,
-      )
+      logMCPDebug(this.serverName, 'Using scope from metadata')
     }
 
     return metadata
@@ -1442,7 +1382,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
   get clientMetadataUrl(): string | undefined {
     const override = process.env.MCP_OAUTH_CLIENT_METADATA_URL
     if (override) {
-      logMCPDebug(this.serverName, `Using CIMD URL from env: ${override}`)
+      logMCPDebug(this.serverName, 'Using CIMD URL from env')
       return override
     }
     return MCP_CLIENT_METADATA_URL
@@ -1464,7 +1404,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
    */
   markStepUpPending(scope: string): void {
     this._pendingStepUpScope = scope
-    logMCPDebug(this.serverName, `Marked step-up pending: ${scope}`)
+    logMCPDebug(this.serverName, 'Marked step-up pending')
   }
 
   async state(): Promise<string> {
@@ -1603,7 +1543,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
       } catch (e) {
         logMCPDebug(
           this.serverName,
-          `XAA silent exchange failed: ${errorMessage(e)}`,
+          `XAA silent exchange failed (${e instanceof Error ? e.constructor.name : 'unknown'})`,
         )
       }
       // Fall through. Either id_token isn't cached (xaaRefresh returned
@@ -1627,10 +1567,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
       this._pendingStepUpScope !== undefined &&
       this._pendingStepUpScope.split(' ').some(s => !currentScopes.includes(s))
     if (needsStepUp) {
-      logMCPDebug(
-        this.serverName,
-        `Step-up pending (${this._pendingStepUpScope}), omitting refresh_token`,
-      )
+      logMCPDebug(this.serverName, 'Step-up pending, omitting refresh_token')
     }
 
     // If token is expired and we don't have a refresh token, return undefined
@@ -1676,7 +1613,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
       } catch (error) {
         logMCPDebug(
           this.serverName,
-          `Token refresh error: ${errorMessage(error)}`,
+          `Token refresh error (${error instanceof Error ? error.constructor.name : 'unknown'})`,
         )
       }
     }
@@ -1780,7 +1717,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     } catch (e) {
       logMCPDebug(
         this.serverName,
-        `XAA: OIDC discovery failed in silent refresh: ${errorMessage(e)}`,
+        `XAA: OIDC discovery failed in silent refresh (${e instanceof Error ? e.constructor.name : 'unknown'})`,
       )
       return undefined
     }
@@ -1852,27 +1789,18 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
 
     // Extract and store scopes from the authorization URL for later use in token exchange
     const scopes = authorizationUrl.searchParams.get('scope')
-    logMCPDebug(
-      this.serverName,
-      `Authorization URL: ${redactSensitiveUrlParams(authorizationUrl.toString())}`,
-    )
-    logMCPDebug(this.serverName, `Scopes in URL: ${scopes || 'NOT FOUND'}`)
+    logMCPDebug(this.serverName, 'Authorization URL received')
+    logMCPDebug(this.serverName, `Authorization URL has scopes: ${!!scopes}`)
 
     if (scopes) {
       this._scopes = scopes
-      logMCPDebug(
-        this.serverName,
-        `Captured scopes from authorization URL: ${scopes}`,
-      )
+      logMCPDebug(this.serverName, 'Captured scopes from authorization URL')
     } else {
       // If no scope in URL, try to get it from metadata
       const metadataScope = getScopeFromMetadata(this._metadata)
       if (metadataScope) {
         this._scopes = metadataScope
-        logMCPDebug(
-          this.serverName,
-          `Using scopes from metadata: ${metadataScope}`,
-        )
+        logMCPDebug(this.serverName, 'Using scopes from metadata')
       } else {
         logMCPDebug(this.serverName, `No scopes available from URL or metadata`)
       }
@@ -1892,7 +1820,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
       if (existing) {
         existing.stepUpScope = this._scopes
         storage.update(existingData)
-        logMCPDebug(this.serverName, `Persisted step-up scope: ${this._scopes}`)
+        logMCPDebug(this.serverName, 'Persisted step-up scope')
       }
     }
 
@@ -1913,8 +1841,6 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     }
 
     logMCPDebug(this.serverName, `Redirecting to authorization URL`)
-    const redactedUrl = redactSensitiveUrlParams(urlString)
-    logMCPDebug(this.serverName, `Authorization URL: ${redactedUrl}`)
 
     // Notify the UI about the authorization URL BEFORE opening the browser,
     // so users can see the URL as a fallback if the browser fails to open
@@ -1923,7 +1849,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     }
 
     if (!this.skipBrowserOpen) {
-      logMCPDebug(this.serverName, `Opening authorization URL: ${redactedUrl}`)
+      logMCPDebug(this.serverName, 'Opening authorization URL')
 
       const success = await openBrowser(urlString)
       if (!success) {
@@ -1935,7 +1861,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     } else {
       logMCPDebug(
         this.serverName,
-        `Skipping browser open (skipBrowserOpen=true). URL: ${redactedUrl}`,
+        'Skipping browser open (skipBrowserOpen=true)',
       )
     }
   }
@@ -1996,10 +1922,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     const existingData = storage.read() || {}
     const serverKey = getServerKey(this.serverName, this.serverConfig)
 
-    logMCPDebug(
-      this.serverName,
-      `Saving discovery state (authServer: ${state.authorizationServerUrl})`,
-    )
+    logMCPDebug(this.serverName, 'Saving discovery state')
 
     // Persist only the URLs, NOT the full metadata blobs.
     // authorizationServerMetadata alone is ~1.5-2KB per MCP server (every
@@ -2038,10 +1961,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
 
     const cached = data?.mcpOAuth?.[serverKey]?.discoveryState
     if (cached?.authorizationServerUrl) {
-      logMCPDebug(
-        this.serverName,
-        `Returning cached discovery state (authServer: ${cached.authorizationServerUrl})`,
-      )
+      logMCPDebug(this.serverName, 'Returning cached discovery state')
 
       return {
         authorizationServerUrl: cached.authorizationServerUrl,
@@ -2056,10 +1976,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
     // Check config hint for direct metadata URL
     const metadataUrl = this.serverConfig.oauth?.authServerMetadataUrl
     if (metadataUrl) {
-      logMCPDebug(
-        this.serverName,
-        `Fetching metadata from configured URL: ${metadataUrl}`,
-      )
+      logMCPDebug(this.serverName, 'Fetching metadata from configured URL')
       try {
         const metadata = await fetchAuthServerMetadata(
           this.serverName,
@@ -2076,7 +1993,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
       } catch (error) {
         logMCPDebug(
           this.serverName,
-          `Failed to fetch from configured metadata URL: ${errorMessage(error)}`,
+          `Failed to fetch from configured metadata URL (${error instanceof Error ? error.constructor.name : 'unknown'})`,
         )
       }
     }
@@ -2228,7 +2145,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
           } else if (cached?.authorizationServerUrl) {
             logMCPDebug(
               this.serverName,
-              `Re-discovering metadata from persisted auth server URL: ${cached.authorizationServerUrl}`,
+              'Re-discovering metadata from persisted auth server URL',
             )
             metadata = await discoverAuthorizationServerMetadata(
               cached.authorizationServerUrl,
@@ -2286,7 +2203,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
         if (error instanceof InvalidGrantError) {
           logMCPDebug(
             this.serverName,
-            `Token refresh failed with invalid_grant: ${error.message}`,
+            'Token refresh failed with invalid_grant',
           )
           clearKeychainCache()
           const storage = getSecureStorage()
@@ -2334,7 +2251,7 @@ export class ClaudeAuthProvider implements OAuthClientProvider {
         if (!isRetryable || attempt >= MAX_ATTEMPTS) {
           logMCPDebug(
             this.serverName,
-            `Token refresh failed: ${errorMessage(error)}`,
+            `Token refresh failed (${error instanceof Error ? error.constructor.name : 'unknown'})`,
           )
           emitRefreshEvent(
             'failure',

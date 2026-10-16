@@ -53,6 +53,6 @@ export function usePluginAutoupdateNotification(): void {
       timeoutMs: 10000,
     });
 
-    logForDebugging(() => `Showing plugin autoupdate notification for: ${pluginNames.join(', ')}`);
+    logForDebugging(`Showing plugin autoupdate notification for: ${pluginNames.join(', ')}`);
   }, [updatedPlugins, addNotification]);
 }

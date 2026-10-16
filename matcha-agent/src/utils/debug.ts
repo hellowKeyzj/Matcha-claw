@@ -1,7 +1,9 @@
 import { appendFile, mkdir, symlink, unlink } from 'fs/promises'
 import memoize from 'lodash-es/memoize.js'
-import { dirname, join } from 'path'
+import { dirname, join, resolve } from 'path'
 import { getSessionId } from 'src/bootstrap/state.js'
+import { sealedModelContext } from '../skills/sealed/privacy.js'
+import { SEALED_REDACTION } from '../skills/sealed/reference.js'
 
 import { type BufferedWriter, createBufferedWriter } from './bufferedWriter.js'
 import { registerCleanup } from './cleanupRegistry.js'
@@ -10,16 +12,62 @@ import {
   parseDebugFilter,
   shouldShowDebugMessage,
 } from './debugFilter.js'
-import { getClaudeConfigHomeDir } from './envUtils.js'
-import { isTraceEnabled } from './trace.js'
+import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
 import { getFsImplementation } from './fsOperations.js'
 import { writeToStderr } from './process.js'
 import { jsonStringify } from './slowOperations.js'
 
 export type DebugLogLevel = 'verbose' | 'debug' | 'info' | 'warn' | 'error'
 
-export function isDebugMode(): boolean {
-  return isTraceEnabled()
+const LEVEL_ORDER: Record<DebugLogLevel, number> = {
+  verbose: 0,
+  debug: 1,
+  info: 2,
+  warn: 3,
+  error: 4,
+}
+
+/**
+ * Minimum log level to include in debug output. Defaults to 'debug', which
+ * filters out 'verbose' messages. Set CLAUDE_CODE_DEBUG_LOG_LEVEL=verbose to
+ * include high-volume diagnostics (e.g. full statusLine command, shell, cwd,
+ * stdout/stderr) that would otherwise drown out useful debug output.
+ */
+export const getMinDebugLogLevel = memoize((): DebugLogLevel => {
+  const raw = process.env.CLAUDE_CODE_DEBUG_LOG_LEVEL?.toLowerCase().trim()
+  if (raw && Object.hasOwn(LEVEL_ORDER, raw)) {
+    return raw as DebugLogLevel
+  }
+  return 'debug'
+})
+
+let runtimeDebugEnabled = false
+
+export const isDebugMode = memoize((): boolean => {
+  return (
+    runtimeDebugEnabled ||
+    isEnvTruthy(process.env.DEBUG) ||
+    isEnvTruthy(process.env.DEBUG_SDK) ||
+    process.argv.includes('--debug') ||
+    process.argv.includes('-d') ||
+    isDebugToStdErr() ||
+    // Also check for --debug=pattern syntax
+    process.argv.some(arg => arg.startsWith('--debug=')) ||
+    // --debug-file implicitly enables debug mode
+    getDebugFilePath() !== null
+  )
+})
+
+/**
+ * Enables debug logging mid-session (e.g. via /debug). Non-ants don't write
+ * debug logs by default, so this lets them start capturing without restarting
+ * with --debug. Returns true if logging was already active.
+ */
+export function enableDebugLogging(): boolean {
+  const wasActive = isDebugMode() || process.env.USER_TYPE === 'ant'
+  runtimeDebugEnabled = true
+  isDebugMode.cache.clear?.()
+  return wasActive
 }
 
 // Extract and parse debug filter from command line arguments
@@ -36,18 +84,18 @@ export const getDebugFilter = memoize((): DebugFilter | null => {
   return parseDebugFilter(filterPattern)
 })
 
-export function isDebugToStdErr(): boolean {
-  return isTraceEnabled() && process.argv.includes('--debug-to-stderr')
-}
+export const isDebugToStdErr = memoize((): boolean => {
+  return process.argv.includes('--debug-to-stderr')
+})
 
 export const getDebugFilePath = memoize((): string | null => {
   for (let i = 0; i < process.argv.length; i++) {
     const arg = process.argv[i]!
     if (arg.startsWith('--debug-file=')) {
-      return arg.substring('--debug-file='.length)
+      return resolve(arg.substring('--debug-file='.length))
     }
     if (arg === '--debug-file' && i + 1 < process.argv.length) {
-      return process.argv[i + 1]!
+      return resolve(process.argv[i + 1]!)
     }
   }
   return null
@@ -55,6 +103,12 @@ export const getDebugFilePath = memoize((): string | null => {
 
 function shouldLogDebugMessage(message: string): boolean {
   if (process.env.NODE_ENV === 'test' && !isDebugToStdErr()) {
+    return false
+  }
+
+  // Non-ants only write debug logs when debug mode is active (via --debug at
+  // startup or /debug mid-session). Ants always log for /share, bug reports.
+  if (process.env.USER_TYPE !== 'ant' && !isDebugMode()) {
     return false
   }
 
@@ -118,11 +172,24 @@ function getDebugWriter(): BufferedWriter {
               // Directory already exists
             }
           }
-          getFsImplementation().appendFileSync(path, content)
+          try {
+            getFsImplementation().appendFileSync(path, content)
+          } catch (e) {
+            // If the directory was removed between mkdirSync and
+            // appendFileSync (or the path was relative and CWD changed),
+            // retry once with a fresh mkdirSync. Swallow on second failure
+            // to avoid crashing the React render tree via the error boundary.
+            try {
+              getFsImplementation().mkdirSync(dir)
+              getFsImplementation().appendFileSync(path, content)
+            } catch {
+              // Best-effort: debug log write failed, don't crash the UI
+            }
+          }
           void updateLatestDebugLogSymlink()
           return
         }
-        // Buffered warning/error path (trace disabled): flushes ~1/sec so chain
+        // Buffered path (ants without --debug): flushes ~1/sec so chain
         // depth stays ~1. .bind over a closure so only the bound args are
         // retained, not this scope.
         pendingWrite = pendingWrite
@@ -147,16 +214,18 @@ export async function flushDebugLogs(): Promise<void> {
 }
 
 export function logForDebugging(
-  message: string | (() => string),
+  message: string,
   { level }: { level: DebugLogLevel } = {
     level: 'debug',
   },
 ): void {
-  if (!isTraceEnabled() && level !== 'warn' && level !== 'error') return
-  message = typeof message === 'function' ? message() : message
+  if (LEVEL_ORDER[level] < LEVEL_ORDER[getMinDebugLogLevel()]) {
+    return
+  }
   if (!shouldLogDebugMessage(message)) {
     return
   }
+  if (sealedModelContext()) message = SEALED_REDACTION
 
   // Multiline messages break the jsonl output format, so make any multiline messages JSON.
   if (hasFormattedOutput && message.includes('\n')) {
@@ -175,7 +244,9 @@ export function logForDebugging(
 export function getDebugLogPath(): string {
   return (
     getDebugFilePath() ??
-    process.env.CLAUDE_CODE_DEBUG_LOGS_DIR ??
+    (process.env.CLAUDE_CODE_DEBUG_LOGS_DIR
+      ? resolve(process.env.CLAUDE_CODE_DEBUG_LOGS_DIR)
+      : null) ??
     join(getClaudeConfigHomeDir(), 'debug', `${getSessionId()}.txt`)
   )
 }

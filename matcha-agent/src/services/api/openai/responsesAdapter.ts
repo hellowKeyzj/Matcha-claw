@@ -1,14 +1,21 @@
 import { randomUUID } from 'crypto'
-import type { BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
-import { openaiAdapter } from 'src/services/providerUsage/adapters/openai.js'
-import { updateProviderBuckets } from 'src/services/providerUsage/store.js'
-import { getProxyFetchOptions } from 'src/utils/proxy.js'
-import type { RunTraceSink } from '../../../query/runTrace.js'
+import type {
+  BetaJSONOutputFormat,
+  BetaRawMessageStreamEvent,
+} from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+import type { ResponseCreateParamsStreaming } from 'openai/resources/responses/responses.mjs'
+import { getOpenAIClient } from './client.js'
+import { normalizeOpenAIUsage, type AnthropicUsage } from '@ant/model-provider'
 import { getValidChatGPTAuth } from './chatgptAuth.js'
 
 type ResponsesInputItem = Record<string, unknown>
 type ResponsesTool = Record<string, unknown>
-export type ResponsesReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
+export type ResponsesReasoningEffort =
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
 
 type ResponsesRequest = {
   model: string
@@ -20,31 +27,18 @@ type ResponsesRequest = {
   tool_choice?: unknown
   reasoning?: { effort: ResponsesReasoningEffort }
   parallel_tool_calls?: boolean
-}
-
-type AnthropicUsage = {
-  input_tokens: number
-  output_tokens: number
-  cache_creation_input_tokens: number
-  cache_read_input_tokens: number
-}
-
-type ResponsesTraceContext = {
-  trace: RunTraceSink | undefined
-  startedAt: number
-  provider: 'openai'
-  wireProtocol: 'chatCompletions' | 'responses'
-  transport:
-    | 'openai-chat-completions'
-    | 'openai-responses'
-    | 'chatgpt-responses'
-  model: string
-}
-
-const DEFAULT_OPENAI_RESPONSES_BASE_URL = 'https://api.openai.com/v1'
-
-function openAIResponsesUrl(baseUrl: string | undefined): string {
-  return `${(baseUrl || DEFAULT_OPENAI_RESPONSES_BASE_URL).replace(/\/+$/, '')}/responses`
+  /** Sticky cache routing key — stable for the CCB session. */
+  prompt_cache_key?: string
+  max_output_tokens?: number
+  temperature?: number
+  text?: {
+    format: {
+      type: 'json_schema'
+      name: string
+      schema: BetaJSONOutputFormat['schema']
+      strict: true
+    }
+  }
 }
 
 function textFromContent(content: unknown): string {
@@ -190,6 +184,11 @@ export function buildResponsesRequest(params: {
   tools: unknown[]
   toolChoice: unknown
   reasoningEffort?: ResponsesReasoningEffort
+  /** Session-scoped key supplied only by official OpenAI routes. */
+  promptCacheKey?: string
+  maxOutputTokens?: number
+  temperature?: number
+  outputFormat?: BetaJSONOutputFormat
 }): ResponsesRequest {
   const { input, instructions } = convertMessagesToResponsesInput(
     params.messages,
@@ -209,36 +208,40 @@ export function buildResponsesRequest(params: {
       ? { reasoning: { effort: params.reasoningEffort } }
       : {}),
     parallel_tool_calls: true,
+    ...(params.promptCacheKey
+      ? { prompt_cache_key: params.promptCacheKey }
+      : {}),
+    ...(params.maxOutputTokens !== undefined
+      ? { max_output_tokens: params.maxOutputTokens }
+      : {}),
+    ...(params.temperature !== undefined
+      ? { temperature: params.temperature }
+      : {}),
+    ...(params.outputFormat
+      ? {
+          text: {
+            format: {
+              type: 'json_schema' as const,
+              name: 'response',
+              schema: params.outputFormat.schema,
+              strict: true as const,
+            },
+          },
+        }
+      : {}),
   }
 }
 
 async function* parseSSE(
   response: Response,
-  traceContext?: ResponsesTraceContext,
 ): AsyncGenerator<Record<string, unknown>, void> {
-  if (!response.body)
-    throw new Error('OpenAI Responses API response did not include a body')
+  if (!response.body) throw new Error('ChatGPT response did not include a body')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-  let bodyChunkCount = 0
-  let rawFrameCount = 0
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
-    bodyChunkCount++
-    if (bodyChunkCount === 1) {
-      traceContext?.trace?.('api.stream.first_chunk', {
-        provider: traceContext.provider,
-        wireProtocol: traceContext.wireProtocol,
-        transport: traceContext.transport,
-        phase: 'raw-body',
-        model: traceContext.model,
-        elapsedMs: Date.now() - traceContext.startedAt,
-        rawChunkBytes: value.byteLength,
-        bodyChunkCount,
-      })
-    }
     buffer += decoder.decode(value, { stream: true })
     let splitAt = buffer.indexOf('\n\n')
     while (splitAt >= 0) {
@@ -252,59 +255,52 @@ async function* parseSSE(
       if (data && data !== '[DONE]') {
         const parsed = JSON.parse(data) as unknown
         if (parsed && typeof parsed === 'object') {
-          rawFrameCount++
-          const event = parsed as Record<string, unknown>
-          if (rawFrameCount === 1) {
-            traceContext?.trace?.('api.stream.first_chunk', {
-              provider: traceContext.provider,
-              wireProtocol: traceContext.wireProtocol,
-              transport: traceContext.transport,
-              phase: 'raw-frame',
-              model: traceContext.model,
-              elapsedMs: Date.now() - traceContext.startedAt,
-              rawEventType:
-                typeof event.type === 'string' ? event.type : 'unknown',
-              rawFrameCount,
-              bodyChunkCount,
-            })
-          }
-          yield event
+          yield parsed as Record<string, unknown>
         }
       }
       splitAt = buffer.indexOf('\n\n')
     }
   }
-  traceContext?.trace?.('api.stream.loop.end', {
-    provider: traceContext.provider,
-    wireProtocol: traceContext.wireProtocol,
-    transport: traceContext.transport,
-    phase: 'raw-body',
-    model: traceContext.model,
-    elapsedMs: Date.now() - traceContext.startedAt,
-    rawFrameCount,
-    bodyChunkCount,
-    rawDone: true,
-  })
 }
 
-function extractUsage(
+/**
+ * Map OpenAI Responses usage → Anthropic-style mutually exclusive fields.
+ *
+ * OpenAI:  input_tokens is TOTAL input; cached_tokens ⊆ input_tokens;
+ *          cache_write_tokens (GPT-5.6+) reports tokens written this turn.
+ * Anthropic: input + cache_creation + cache_read are disjoint and sum to total.
+ *
+ * Without subtracting cached from input, cacheWarning hit-rate becomes
+ * cached/(total+cached) with a hard ceiling of 50%.
+ */
+export function extractUsage(
   response: Record<string, unknown> | undefined,
 ): AnthropicUsage {
   const usage = response?.usage as Record<string, unknown> | undefined
   const inputDetails = usage?.input_tokens_details as
     | Record<string, unknown>
     | undefined
-  return {
-    input_tokens:
-      typeof usage?.input_tokens === 'number' ? usage.input_tokens : 0,
-    output_tokens:
-      typeof usage?.output_tokens === 'number' ? usage.output_tokens : 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens:
-      typeof inputDetails?.cached_tokens === 'number'
-        ? inputDetails.cached_tokens
-        : 0,
-  }
+
+  const totalInput =
+    typeof usage?.input_tokens === 'number' ? usage.input_tokens : 0
+  const outputTokens =
+    typeof usage?.output_tokens === 'number' ? usage.output_tokens : 0
+
+  const cachedRaw =
+    typeof inputDetails?.cached_tokens === 'number'
+      ? inputDetails.cached_tokens
+      : 0
+  const writeRaw =
+    typeof inputDetails?.cache_write_tokens === 'number'
+      ? inputDetails.cache_write_tokens
+      : 0
+
+  return normalizeOpenAIUsage({
+    totalInputTokens: totalInput,
+    outputTokens,
+    cacheReadTokens: cachedRaw,
+    cacheWriteTokens: writeRaw,
+  })
 }
 
 function mapStopReason(response: Record<string, unknown> | undefined): string {
@@ -473,13 +469,13 @@ export async function* adaptResponsesStreamToAnthropic(
 
     if (type === 'response.error') {
       const error = event.error as Record<string, unknown> | undefined
-      throw new Error(String(error?.message ?? 'OpenAI Responses API error'))
+      throw new Error(String(error?.message ?? 'ChatGPT Responses API error'))
     }
 
     if (type === 'response.failed') {
       const response = event.response as Record<string, unknown> | undefined
       const error = response?.error as Record<string, unknown> | undefined
-      throw new Error(String(error?.message ?? 'OpenAI Responses API failed'))
+      throw new Error(String(error?.message ?? 'ChatGPT Responses API failed'))
     }
 
     if (type === 'response.completed' || type === 'response.incomplete') {
@@ -512,45 +508,23 @@ export async function createOpenAIResponsesStream(params: {
   request: ResponsesRequest
   signal: AbortSignal
   fetchOverride?: typeof fetch
-  traceContext?: ResponsesTraceContext
+  maxRetries?: number
+  source?: string
 }): Promise<AsyncIterable<Record<string, unknown>>> {
-  const fetchFn = params.fetchOverride ?? (globalThis.fetch as typeof fetch)
-  const response = await fetchFn(
-    openAIResponsesUrl(process.env.OPENAI_BASE_URL),
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY || ''}`,
-        'Content-Type': 'application/json',
-        Accept: 'text/event-stream',
-      },
-      body: JSON.stringify(params.request),
-      signal: params.signal,
-      ...getProxyFetchOptions({ forAnthropicAPI: false }),
-    },
-  )
-  try {
-    updateProviderBuckets(
-      'openai',
-      openaiAdapter.parseHeaders(response.headers),
-    )
-  } catch {
-    // Usage tracking must not affect the request path.
-  }
-  if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    throw new Error(
-      `OpenAI Responses API request failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ''}`,
-    )
-  }
-  return parseSSE(response, params.traceContext)
+  return (await getOpenAIClient({
+    maxRetries: params.maxRetries ?? 0,
+    fetchOverride: params.fetchOverride,
+    source: params.source,
+  }).responses.create(
+    params.request as unknown as ResponseCreateParamsStreaming,
+    { signal: params.signal },
+  )) as unknown as AsyncIterable<Record<string, unknown>>
 }
 
 export async function createChatGPTResponsesStream(params: {
   request: ResponsesRequest
   signal: AbortSignal
   fetchOverride?: typeof fetch
-  traceContext?: ResponsesTraceContext
 }): Promise<AsyncIterable<Record<string, unknown>>> {
   const auth = await getValidChatGPTAuth()
   const fetchFn = params.fetchOverride ?? (globalThis.fetch as typeof fetch)
@@ -581,5 +555,5 @@ export async function createChatGPTResponsesStream(params: {
       `ChatGPT Responses API request failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ''}`,
     )
   }
-  return parseSSE(response, params.traceContext)
+  return parseSSE(response)
 }

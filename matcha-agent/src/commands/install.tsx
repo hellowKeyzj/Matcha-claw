@@ -120,14 +120,14 @@ function Install({ onDone, force, target }: InstallProps): React.ReactNode {
         }
 
         if (errors.length > 0) {
-          logForDebugging(() => `Cleanup errors: ${errors.join(', ')}`);
+          logForDebugging(`Cleanup errors: ${errors.join(', ')}`);
           // Continue despite cleanup errors - native install already succeeded
         }
 
         // Clean up old shell aliases
         const aliasMessages = await cleanupShellAliases();
         if (aliasMessages.length > 0) {
-          logForDebugging(() => `Shell alias cleanup: ${aliasMessages.map(m => m.message).join('; ')}`);
+          logForDebugging(`Shell alias cleanup: ${aliasMessages.map(m => m.message).join('; ')}`);
         }
 
         // Log success event

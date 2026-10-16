@@ -161,8 +161,7 @@ export function migrateToSinglePluginFile(): void {
         flush: true,
       })
       logForDebugging(
-        () =>
-          `Converted installed_plugins.json from V1 to V2 format (${Object.keys(v1Data.plugins).length} plugins)`,
+        `Converted installed_plugins.json from V1 to V2 format (${Object.keys(v1Data.plugins).length} plugins)`,
       )
 
       // Clean up legacy cache directories
@@ -330,8 +329,7 @@ export function loadInstalledPluginsV2(): InstalledPluginsFileV2 {
         const validated = InstalledPluginsFileSchemaV2().parse(rawData.data)
         installedPluginsCacheV2 = validated
         logForDebugging(
-          () =>
-            `Loaded ${Object.keys(validated.plugins).length} installed plugins from ${filePath}`,
+          `Loaded ${Object.keys(validated.plugins).length} installed plugins from ${filePath}`,
         )
         return validated
       }
@@ -341,8 +339,7 @@ export function loadInstalledPluginsV2(): InstalledPluginsFileV2 {
       const v2Data = migrateV1ToV2(v1Validated)
       installedPluginsCacheV2 = v2Data
       logForDebugging(
-        () =>
-          `Loaded and converted ${Object.keys(v1Validated.plugins).length} plugins from V1 format`,
+        `Loaded and converted ${Object.keys(v1Validated.plugins).length} plugins from V1 format`,
       )
       return v2Data
     }
@@ -387,8 +384,7 @@ function saveInstalledPluginsV2(data: InstalledPluginsFileV2): void {
     installedPluginsCacheV2 = data
 
     logForDebugging(
-      () =>
-        `Saved ${Object.keys(data.plugins).length} installed plugins to ${filePath}`,
+      `Saved ${Object.keys(data.plugins).length} installed plugins to ${filePath}`,
     )
   } catch (error) {
     const _errorMsg = errorMessage(error)
@@ -733,8 +729,7 @@ export async function initializeVersionedPlugins(): Promise<void> {
   // 2. Caching in inMemoryInstalledPlugins for session state
   const data = getInMemoryInstalledPlugins()
   logForDebugging(
-    () =>
-      `Initialized versioned plugins system with ${Object.keys(data.plugins).length} plugins`,
+    `Initialized versioned plugins system with ${Object.keys(data.plugins).length} plugins`,
   )
 }
 

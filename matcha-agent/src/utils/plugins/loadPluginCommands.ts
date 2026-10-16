@@ -424,8 +424,7 @@ export const getPluginCommands = memoize(async (): Promise<Command[]> => {
 
   if (errors.length > 0) {
     logForDebugging(
-      () =>
-        `Plugin loading errors: ${errors.map(e => getPluginErrorMessage(e)).join(', ')}`,
+      `Plugin loading errors: ${errors.map(e => getPluginErrorMessage(e)).join(', ')}`,
     )
   }
 
@@ -465,10 +464,8 @@ export const getPluginCommands = memoize(async (): Promise<Command[]> => {
 
       // Load commands from additional paths specified in manifest
       if (plugin.commandsPaths) {
-        const commandsPaths = plugin.commandsPaths
         logForDebugging(
-          () =>
-            `Plugin ${plugin.name} has commandsPaths: ${commandsPaths.join(', ')}`,
+          `Plugin ${plugin.name} has commandsPaths: ${plugin.commandsPaths.join(', ')}`,
         )
         // Process all commandsPaths in parallel. isDuplicatePath is synchronous
         // (check-and-add), so concurrent access to loadedPaths is safe.
@@ -851,8 +848,7 @@ export const getPluginSkills = memoize(async (): Promise<Command[]> => {
 
   if (errors.length > 0) {
     logForDebugging(
-      () =>
-        `Plugin loading errors: ${errors.map(e => getPluginErrorMessage(e)).join(', ')}`,
+      `Plugin loading errors: ${errors.map(e => getPluginErrorMessage(e)).join(', ')}`,
     )
   }
 
@@ -899,10 +895,8 @@ export const getPluginSkills = memoize(async (): Promise<Command[]> => {
 
       // Load skills from additional paths specified in manifest
       if (plugin.skillsPaths) {
-        const skillsPaths = plugin.skillsPaths
         logForDebugging(
-          () =>
-            `Attempting to load skills from plugin ${plugin.name} skillsPaths: ${skillsPaths.join(', ')}`,
+          `Attempting to load skills from plugin ${plugin.name} skillsPaths: ${plugin.skillsPaths.join(', ')}`,
         )
         // Process all skillsPaths in parallel. isDuplicatePath is synchronous
         // (check-and-add), so concurrent access to loadedPaths is safe.

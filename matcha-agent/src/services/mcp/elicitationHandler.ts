@@ -12,7 +12,6 @@ import {
   executeNotificationHooks,
 } from '../../utils/hooks.js'
 import { logMCPDebug, logMCPError } from '../../utils/log.js'
-import { jsonStringify } from '../../utils/slowOperations.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -75,12 +74,8 @@ export function registerElicitationHandler(
   // created with elicitation capability declared.
   try {
     client.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
-      logMCPDebug(
-        serverName,
-        () => `Received elicitation request: ${jsonStringify(request)}`,
-      )
-
       const mode = getElicitationMode(request.params)
+      logMCPDebug(serverName, `Received elicitation request (mode: ${mode})`)
 
       logEvent('tengu_mcp_elicitation_shown', {
         mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -96,8 +91,7 @@ export function registerElicitationHandler(
         if (hookResponse) {
           logMCPDebug(
             serverName,
-            () =>
-              `Elicitation resolved by hook: ${jsonStringify(hookResponse)}`,
+            `Elicitation resolved by hook (action: ${hookResponse.action})`,
           )
           logEvent('tengu_mcp_elicitation_response', {
             mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -155,7 +149,7 @@ export function registerElicitationHandler(
         const rawResult = await response
         logMCPDebug(
           serverName,
-          () => `Elicitation response: ${jsonStringify(rawResult)}`,
+          `Elicitation response (action: ${rawResult.action})`,
         )
         const result = await runElicitationResultHooks(
           serverName,
@@ -177,10 +171,7 @@ export function registerElicitationHandler(
       ElicitationCompleteNotificationSchema,
       notification => {
         const { elicitationId } = notification.params
-        logMCPDebug(
-          serverName,
-          `Received elicitation completion notification: ${elicitationId}`,
-        )
+        logMCPDebug(serverName, 'Received elicitation completion notification')
         void executeNotificationHooks({
           message: `MCP server "${serverName}" confirmed elicitation ${elicitationId} complete`,
           notificationType: 'elicitation_complete',
@@ -201,7 +192,7 @@ export function registerElicitationHandler(
         if (!found) {
           logMCPDebug(
             serverName,
-            `Ignoring completion notification for unknown elicitation: ${elicitationId}`,
+            'Ignoring completion notification for unknown elicitation',
           )
         }
       },

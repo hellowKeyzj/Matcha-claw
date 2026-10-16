@@ -9,18 +9,20 @@ import {
   setLastAPIRequestMessages,
 } from '../bootstrap/state.js'
 import { TICK_TAG } from '../constants/xml.js'
+import { sealedModelContext } from '../skills/sealed/privacy.js'
+import { SEALED_REDACTION } from '../skills/sealed/reference.js'
 import {
   type LogOption,
   type SerializedMessage,
   sortLogs,
 } from '../types/logs.js'
 import { CACHE_PATHS } from './cachePaths.js'
+import { isDebugMode } from './debug.js'
 import { stripDisplayTags, stripDisplayTagsAllowEmpty } from './displayTags.js'
 import { isEnvTruthy } from './envUtils.js'
 import { toError, shortErrorStack } from './errors.js'
 import { isEssentialTrafficOnly } from './privacyLevel.js'
 import { jsonParse } from './slowOperations.js'
-import { isTraceEnabled } from './trace.js'
 
 /**
  * Gets the display title for a log/session with fallback logic.
@@ -157,7 +159,7 @@ const isHardFailMode = memoize((): boolean => {
 })
 
 export function logError(error: unknown): void {
-  const err = toError(error)
+  const err = sealedModelContext() ? new Error(SEALED_REDACTION) : toError(error)
   if (feature('HARD_FAIL') && isHardFailMode()) {
     console.error('[HARD FAIL] logError called with:', err.stack || err.message)
     // eslint-disable-next-line custom-rules/no-process-exit
@@ -315,16 +317,20 @@ export function logMCPDebug(
   serverName: string,
   message: string | (() => string),
 ): void {
-  if (!isTraceEnabled()) return
-  message = typeof message === 'function' ? message() : message
   try {
+    if (!isDebugMode()) return
+    const resolvedMessage = typeof message === 'function' ? message() : message
     // If sink not attached, queue the event
     if (errorLogSink === null) {
-      errorQueue.push({ type: 'mcpDebug', serverName, message })
+      errorQueue.push({
+        type: 'mcpDebug',
+        serverName,
+        message: resolvedMessage,
+      })
       return
     }
 
-    errorLogSink.logMCPDebug(serverName, message)
+    errorLogSink.logMCPDebug(serverName, resolvedMessage)
   } catch {
     // Silently fail
   }
@@ -337,6 +343,7 @@ export function captureAPIRequest(
   params: BetaMessageStreamParams,
   querySource?: QuerySource,
 ): void {
+  if (sealedModelContext()) return
   // startsWith, not exact match — users with non-default output styles get
   // variants like 'repl_main_thread:outputStyle:Explanatory' (querySource.ts).
   if (!querySource || !querySource.startsWith('repl_main_thread')) {

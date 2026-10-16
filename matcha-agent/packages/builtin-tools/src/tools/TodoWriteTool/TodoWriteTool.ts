@@ -6,6 +6,7 @@ import { buildTool, type ToolDef } from 'src/Tool.js'
 import { lazySchema } from 'src/utils/lazySchema.js'
 import { isTodoV2Enabled } from 'src/utils/tasks.js'
 import { TodoListSchema } from 'src/utils/todo/types.js'
+import { writeTodos } from 'src/utils/todo/state.js'
 import { VERIFICATION_AGENT_TYPE } from '../AgentTool/constants.js'
 import { TODO_WRITE_TOOL_NAME } from './constants.js'
 import { DESCRIPTION, PROMPT } from './prompt.js'
@@ -63,11 +64,9 @@ export const TodoWriteTool = buildTool({
     return null
   },
   async call({ todos }, context) {
-    const appState = context.getAppState()
     const todoKey = context.agentId ?? getSessionId()
-    const oldTodos = appState.todos[todoKey] ?? []
+    const oldTodos = writeTodos(context, todoKey, todos)
     const allDone = todos.every(_ => _.status === 'completed')
-    const newTodos = allDone ? [] : todos
 
     // Structural nudge: if the main-thread agent is closing out a 3+ item
     // list and none of those items was a verification step, append a reminder
@@ -84,14 +83,6 @@ export const TodoWriteTool = buildTool({
     ) {
       verificationNudgeNeeded = true
     }
-
-    context.setAppState(prev => ({
-      ...prev,
-      todos: {
-        ...prev.todos,
-        [todoKey]: newTodos,
-      },
-    }))
 
     return {
       data: {

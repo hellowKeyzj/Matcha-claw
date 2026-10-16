@@ -431,12 +431,11 @@ export async function performCrossAppAccess(
 ): Promise<XaaResult> {
   const fetchFn = makeXaaFetch(abortSignal)
 
-  logMCPDebug(serverName, `XAA: discovering PRM for ${serverUrl}`)
+  logMCPDebug(serverName, 'XAA: discovering PRM')
   const prm = await discoverProtectedResource(serverUrl, { fetchFn })
   logMCPDebug(
     serverName,
-    () =>
-      `XAA: discovered resource=${prm.resource} ASes=[${prm.authorization_servers.join(', ')}]`,
+    `XAA: discovered PRM (authorization server count: ${prm.authorization_servers.length})`,
   )
 
   // Try each advertised AS in order. grant_types_supported is OPTIONAL per
@@ -480,10 +479,7 @@ export async function performCrossAppAccess(
     authMethods.includes('client_secret_post')
       ? 'client_secret_post'
       : 'client_secret_basic'
-  logMCPDebug(
-    serverName,
-    `XAA: AS issuer=${asMeta.issuer} token_endpoint=${asMeta.token_endpoint} auth_method=${authMethod}`,
-  )
+  logMCPDebug(serverName, `XAA: discovered AS (auth method: ${authMethod})`)
 
   logMCPDebug(serverName, `XAA: exchanging id_token for ID-JAG at IdP`)
   const jag = await requestJwtAuthorizationGrant({

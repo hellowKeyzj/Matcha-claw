@@ -1,7 +1,7 @@
 import { open, stat } from 'fs/promises'
 import { CLAUDE_CODE_GUIDE_AGENT_TYPE } from '@claude-code-best/builtin-tools/tools/AgentTool/built-in/claudeCodeGuideAgent.js'
 import { getSettingsFilePathForSource } from 'src/utils/settings/settings.js'
-import { getDebugLogPath, isDebugMode } from '../../utils/debug.js'
+import { enableDebugLogging, getDebugLogPath } from '../../utils/debug.js'
 import { errorMessage, isENOENT } from '../../utils/errors.js'
 import { formatFileSize } from '../../utils/format.js'
 import { registerBundledSkill } from '../bundledSkills.js'
@@ -15,7 +15,7 @@ export function registerDebugSkill(): void {
     description:
       process.env.USER_TYPE === 'ant'
         ? 'Debug your current Claude Code session by reading the session debug log. Includes all event logging'
-        : 'Read session debug logs and help diagnose issues',
+        : 'Enable debug logging for this session and help diagnose issues',
     allowedTools: ['Read', 'Grep', 'Glob'],
     argumentHint: '[issue description]',
     // disableModelInvocation so that the user has to explicitly request it in
@@ -23,7 +23,9 @@ export function registerDebugSkill(): void {
     disableModelInvocation: true,
     userInvocable: true,
     async getPromptForCommand(args) {
-      const loggingEnabled = isDebugMode()
+      // Non-ants don't write debug logs by default — turn logging on now so
+      // subsequent activity in this session is captured.
+      const wasAlreadyLogging = enableDebugLogging()
       const debugLogPath = getDebugLogPath()
 
       let logInfo: string
@@ -50,16 +52,18 @@ export function registerDebugSkill(): void {
         }
       } catch (e) {
         logInfo = isENOENT(e)
-          ? 'No debug log exists yet.'
+          ? 'No debug log exists yet — logging was just enabled.'
           : `Failed to read last ${DEFAULT_DEBUG_LINES_READ} lines of debug log: ${errorMessage(e)}`
       }
 
-      const justEnabledSection = loggingEnabled
+      const justEnabledSection = wasAlreadyLogging
         ? ''
         : `
-## Debug Logging Disabled
+## Debug Logging Just Enabled
 
-Debug logging is disabled. To capture new diagnostics, restart with \`MATCHACLAW_TRACE=1\` and reproduce the issue. This command can still inspect existing logs; it does not override the trace switch.
+Debug logging was OFF for this session until now. Nothing prior to this /debug invocation was captured.
+
+Tell the user that debug logging is now active at \`${debugLogPath}\`, ask them to reproduce the issue, then re-read the log. If they can't reproduce, they can also restart with \`claude --debug\` to capture logs from startup.
 `
 
       const prompt = `# Debug Skill

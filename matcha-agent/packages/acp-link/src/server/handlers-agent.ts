@@ -136,7 +136,7 @@ export async function handleConnect(ws: WSContext): Promise<void> {
     sendJsonRpcError(
       ws,
       state,
-      state.pendingJsonRpc?.id ?? null,
+      null,
       JSONRPC_INTERNAL_ERROR,
       `Failed to connect: ${(error as Error).message}`,
     )

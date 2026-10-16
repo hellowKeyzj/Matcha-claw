@@ -16,8 +16,8 @@ import { getSessionId } from '../bootstrap/state.js'
 import { createBufferedWriter } from './bufferedWriter.js'
 import { CACHE_PATHS } from './cachePaths.js'
 import { registerCleanup } from './cleanupRegistry.js'
-import { logForDebugging } from './debug.js'
-import { isTraceEnabled } from './trace.js'
+import { isDebugMode, logForDebugging } from './debug.js'
+import { isENOENT } from './errors.js'
 import { getFsImplementation } from './fsOperations.js'
 import { attachErrorLogSink, dateToFilename } from './log.js'
 import { jsonStringify } from './slowOperations.js'
@@ -89,16 +89,17 @@ function getLogWriter(path: string): JsonlWriter {
   if (!writer) {
     const dir = dirname(path)
     writer = createJsonlWriter({
-      // sync IO: called from sync context
       writeFn: (content: string) => {
         try {
-          // Happy-path: directory already exists
           getFsImplementation().appendFileSync(path, content)
-        } catch {
-          // If any error occurs, assume it was due to missing directory
-          getFsImplementation().mkdirSync(dir)
-          // Retry appending
-          getFsImplementation().appendFileSync(path, content)
+        } catch (error) {
+          if (!isENOENT(error)) return
+          try {
+            getFsImplementation().mkdirSync(dir)
+            getFsImplementation().appendFileSync(path, content)
+          } catch {
+            // Diagnostic I/O must not throw from timer, overflow, or cleanup flushes.
+          }
         }
       },
       flushIntervalMs: 1000,
@@ -203,7 +204,7 @@ function logMCPErrorImpl(serverName: string, error: unknown): void {
  * Implementation for logMCPDebug - writes MCP debug message to log file.
  */
 function logMCPDebugImpl(serverName: string, message: string): void {
-  if (!isTraceEnabled()) return
+  if (!isDebugMode()) return
   logForDebugging(`MCP server "${serverName}": ${message}`)
 
   const logFile = getMCPLogsPath(serverName)

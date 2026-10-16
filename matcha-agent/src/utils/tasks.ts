@@ -1,4 +1,5 @@
-import { mkdir, readdir, readFile, unlink, writeFile } from 'fs/promises'
+import { AsyncLocalStorage } from 'async_hooks'
+import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { z } from 'zod/v4'
 import { getIsNonInteractiveSession, getSessionId } from '../bootstrap/state.js'
@@ -60,7 +61,7 @@ export const onTasksUpdated = tasksUpdated.subscribe
  */
 export function notifyTasksUpdated(): void {
   try {
-    tasksUpdated.emit()
+    heldTaskLists.exit(() => tasksUpdated.emit())
   } catch {
     // Ignore listener errors — task mutations must not fail due to notification issues
   }
@@ -107,6 +108,21 @@ const LOCK_OPTIONS = {
   },
 }
 
+const heldTaskLists = new AsyncLocalStorage<ReadonlySet<string>>()
+
+// All native writers share the existing proper-lockfile list lock, including cascades.
+export async function withTaskListLock<T>(taskListId: string, operation: () => Promise<T>): Promise<T> {
+  const key = getTasksDir(taskListId)
+  const held = heldTaskLists.getStore()
+  if (held?.has(key)) return operation()
+  const release = await lockfile.lock(await ensureTaskListLockFile(taskListId), LOCK_OPTIONS)
+  try {
+    return await heldTaskLists.run(new Set([...(held ?? []), key]), operation)
+  } finally {
+    await release()
+  }
+}
+
 function getHighWaterMarkPath(taskListId: string): string {
   return join(getTasksDir(taskListId), HIGH_WATER_MARK_FILE)
 }
@@ -116,9 +132,11 @@ async function readHighWaterMark(taskListId: string): Promise<number> {
   try {
     const content = (await readFile(path, 'utf-8')).trim()
     const value = parseInt(content, 10)
-    return isNaN(value) ? 0 : value
-  } catch {
-    return 0
+    if (!Number.isSafeInteger(value) || value < 0 || String(value) !== content) throw new Error('task_native_schema')
+    return value
+  } catch (error) {
+    if (getErrnoCode(error) === 'ENOENT') return 0
+    throw error
   }
 }
 
@@ -145,13 +163,8 @@ export function isTodoV2Enabled(): boolean {
  * Uses file locking to prevent race conditions when multiple Claudes run in parallel.
  */
 export async function resetTaskList(taskListId: string): Promise<void> {
-  const dir = getTasksDir(taskListId)
-  const lockPath = await ensureTaskListLockFile(taskListId)
-
-  let release: (() => Promise<void>) | undefined
-  try {
-    // Acquire exclusive lock on the task list
-    release = await lockfile.lock(lockPath, LOCK_OPTIONS)
+  return withTaskListLock(taskListId, async () => {
+    const dir = getTasksDir(taskListId)
 
     // Find the current highest ID and save it to the high water mark file
     const currentHighest = await findHighestTaskIdFromFiles(taskListId)
@@ -180,11 +193,7 @@ export async function resetTaskList(taskListId: string): Promise<void> {
       }
     }
     notifyTasksUpdated()
-  } finally {
-    if (release) {
-      await release()
-    }
-  }
+  })
 }
 
 /**
@@ -248,8 +257,9 @@ async function findHighestTaskIdFromFiles(taskListId: string): Promise<number> {
   let files: string[]
   try {
     files = await readdir(dir)
-  } catch {
-    return 0
+  } catch (error) {
+    if (getErrnoCode(error) === 'ENOENT') return 0
+    throw error
   }
   let highest = 0
   for (const file of files) {
@@ -285,32 +295,34 @@ export async function createTask(
   taskListId: string,
   taskData: Omit<Task, 'id'>,
 ): Promise<string> {
-  const lockPath = await ensureTaskListLockFile(taskListId)
-
-  let release: (() => Promise<void>) | undefined
-  try {
-    // Acquire exclusive lock on the task list
-    release = await lockfile.lock(lockPath, LOCK_OPTIONS)
-
+  return withTaskListLock(taskListId, async () => {
     // Read highest ID from disk while holding the lock
     const highestId = await findHighestTaskId(taskListId)
+    if (!Number.isSafeInteger(highestId + 1)) throw new Error('task_id_exhausted')
     const id = String(highestId + 1)
     const task: Task = { id, ...taskData }
     const path = getTaskPath(taskListId, id)
     await writeFile(path, jsonStringify(task, null, 2))
     notifyTasksUpdated()
     return id
-  } finally {
-    if (release) {
-      await release()
-    }
-  }
+  })
 }
 
 export async function getTask(
   taskListId: string,
   taskId: string,
 ): Promise<Task | null> {
+  try {
+    return await readTask(taskListId, taskId)
+  } catch (error) {
+    logForDebugging(`[Tasks] Failed to read task ${taskId}: ${errorMessage(error)}`)
+    logError(error)
+    return null
+  }
+}
+
+// Structured controls must distinguish missing data from schema/IO failures.
+export async function readTask(taskListId: string, taskId: string): Promise<Task | null> {
   const path = getTaskPath(taskListId, taskId)
   try {
     const content = await readFile(path, 'utf-8')
@@ -331,21 +343,11 @@ export async function getTask(
       }
     }
     const parsed = TaskSchema().safeParse(data)
-    if (!parsed.success) {
-      logForDebugging(
-        `[Tasks] Task ${taskId} failed schema validation: ${parsed.error.message}`,
-      )
-      return null
-    }
+    if (!parsed.success || parsed.data.id !== taskId || [...parsed.data.blocks, ...parsed.data.blockedBy].some(id => !/^[a-zA-Z0-9_-]+$/.test(id))) throw new Error('task_native_schema')
     return parsed.data
-  } catch (e) {
-    const code = getErrnoCode(e)
-    if (code === 'ENOENT') {
-      return null
-    }
-    logForDebugging(`[Tasks] Failed to read task ${taskId}: ${errorMessage(e)}`)
-    logError(e)
-    return null
+  } catch (error) {
+    if (getErrnoCode(error) === 'ENOENT') return null
+    throw error
   }
 }
 
@@ -356,7 +358,7 @@ async function updateTaskUnsafe(
   taskId: string,
   updates: Partial<Omit<Task, 'id'>>,
 ): Promise<Task | null> {
-  const existing = await getTask(taskListId, taskId)
+  const existing = await readTask(taskListId, taskId)
   if (!existing) {
     return null
   }
@@ -368,6 +370,14 @@ async function updateTaskUnsafe(
 }
 
 export async function updateTask(
+  taskListId: string,
+  taskId: string,
+  updates: Partial<Omit<Task, 'id'>>,
+): Promise<Task | null> {
+  return withTaskListLock(taskListId, () => updateTaskLocked(taskListId, taskId, updates))
+}
+
+async function updateTaskLocked(
   taskListId: string,
   taskId: string,
   updates: Partial<Omit<Task, 'id'>>,
@@ -394,6 +404,18 @@ export async function deleteTask(
   taskListId: string,
   taskId: string,
 ): Promise<boolean> {
+  try {
+    return await deleteTaskStrict(taskListId, taskId)
+  } catch {
+    return false
+  }
+}
+
+export async function deleteTaskStrict(taskListId: string, taskId: string): Promise<boolean> {
+  return withTaskListLock(taskListId, () => deleteTaskLocked(taskListId, taskId))
+}
+
+async function deleteTaskLocked(taskListId: string, taskId: string): Promise<boolean> {
   const path = getTaskPath(taskListId, taskId)
 
   try {
@@ -418,7 +440,7 @@ export async function deleteTask(
     }
 
     // Remove references to this task from other tasks
-    const allTasks = await listTasks(taskListId)
+    const allTasks = await readTasks(taskListId)
     for (const task of allTasks) {
       const newBlocks = task.blocks.filter(id => id !== taskId)
       const newBlockedBy = task.blockedBy.filter(id => id !== taskId)
@@ -435,9 +457,33 @@ export async function deleteTask(
 
     notifyTasksUpdated()
     return true
-  } catch {
-    return false
+  } catch (error) {
+    throw error
   }
+}
+
+export async function readTaskView(taskListId: string, task: Task): Promise<Task & { createdAt: number; updatedAt: number }> {
+  const file = await stat(getTaskPath(taskListId, task.id))
+  return { ...task, createdAt: Math.max(0, Math.floor(file.birthtimeMs)), updatedAt: Math.max(0, Math.floor(file.mtimeMs)) }
+}
+
+export async function readTasks(taskListId: string): Promise<Task[]> {
+  let files: string[]
+  try {
+    files = await readdir(getTasksDir(taskListId))
+  } catch (error) {
+    if (getErrnoCode(error) === 'ENOENT') return []
+    throw error
+  }
+  const tasks: Task[] = []
+  for (const file of files.filter(name => name.endsWith('.json') && !name.startsWith('.')).sort()) {
+    const id = file.slice(0, -5)
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('task_native_schema')
+    const task = await readTask(taskListId, id)
+    if (!task) throw new Error('task_concurrent_change')
+    tasks.push(task)
+  }
+  return tasks
 }
 
 export async function listTasks(taskListId: string): Promise<Task[]> {
@@ -460,9 +506,13 @@ export async function blockTask(
   fromTaskId: string,
   toTaskId: string,
 ): Promise<boolean> {
+  return withTaskListLock(taskListId, () => blockTaskLocked(taskListId, fromTaskId, toTaskId))
+}
+
+async function blockTaskLocked(taskListId: string, fromTaskId: string, toTaskId: string): Promise<boolean> {
   const [fromTask, toTask] = await Promise.all([
-    getTask(taskListId, fromTaskId),
-    getTask(taskListId, toTaskId),
+    readTask(taskListId, fromTaskId),
+    readTask(taskListId, toTaskId),
   ])
   if (!fromTask || !toTask) {
     return false
@@ -483,6 +533,36 @@ export async function blockTask(
   }
 
   return true
+}
+
+export type TaskPatch = Partial<Omit<Task, 'id' | 'blocks' | 'blockedBy'>> & {
+  addBlocks?: string[]
+  addBlockedBy?: string[]
+}
+
+export async function patchTask(taskListId: string, taskId: string, patch: TaskPatch): Promise<Task | null> {
+  return withTaskListLock(taskListId, async () => {
+    const current = await readTask(taskListId, taskId)
+    if (!current) return null
+    const { addBlocks = [], addBlockedBy = [], metadata, ...fields } = patch
+    const updates: Partial<Omit<Task, 'id'>> = fields
+    for (const id of [...addBlocks, ...addBlockedBy]) {
+      if (!await readTask(taskListId, id)) throw new Error('task_dependency_missing')
+    }
+    if (metadata !== undefined) {
+      const merged = { ...(current.metadata ?? {}) }
+      for (const [key, value] of Object.entries(metadata)) {
+        if (value === null) delete merged[key]
+        else Object.defineProperty(merged, key, { value, enumerable: true, configurable: true, writable: true })
+      }
+      updates.metadata = merged
+    }
+    const updated = await updateTask(taskListId, taskId, updates)
+    if (!updated) return null
+    for (const id of addBlocks) await blockTask(taskListId, taskId, id)
+    for (const id of addBlockedBy) await blockTask(taskListId, id, taskId)
+    return readTask(taskListId, taskId)
+  })
 }
 
 export type ClaimTaskResult = {
@@ -543,6 +623,15 @@ export async function claimTask(
   taskId: string,
   claimantAgentId: string,
   options: ClaimTaskOptions = {},
+): Promise<ClaimTaskResult> {
+  return withTaskListLock(taskListId, () => claimTaskLocked(taskListId, taskId, claimantAgentId, options))
+}
+
+async function claimTaskLocked(
+  taskListId: string,
+  taskId: string,
+  claimantAgentId: string,
+  options: ClaimTaskOptions,
 ): Promise<ClaimTaskResult> {
   const taskPath = getTaskPath(taskListId, taskId)
 
@@ -620,13 +709,8 @@ async function claimTaskWithBusyCheck(
   taskId: string,
   claimantAgentId: string,
 ): Promise<ClaimTaskResult> {
-  const lockPath = await ensureTaskListLockFile(taskListId)
-
-  let release: (() => Promise<void>) | undefined
   try {
-    // Acquire exclusive lock on the task list
-    release = await lockfile.lock(lockPath, LOCK_OPTIONS)
-
+    // claimTask already holds the native list lock.
     // Read all tasks to check agent status and task state atomically
     const allTasks = await listTasks(taskListId)
 
@@ -684,10 +768,6 @@ async function claimTaskWithBusyCheck(
     )
     logError(error)
     return { success: false, reason: 'task_not_found' }
-  } finally {
-    if (release) {
-      await release()
-    }
   }
 }
 

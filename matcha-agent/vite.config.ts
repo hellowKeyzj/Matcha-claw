@@ -127,7 +127,7 @@ export default defineConfig({
   resolve: {
     alias: {
       // src/* path alias (mirrors tsconfig paths)
-      'src/': resolve(projectRoot, 'src/'),
+      src: resolve(projectRoot, 'src/'),
     },
     // Ensure workspace packages share a single copy of these
     dedupe: ['react', 'react-reconciler', 'react-compiler-runtime'],

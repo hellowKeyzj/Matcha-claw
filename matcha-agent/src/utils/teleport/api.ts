@@ -485,8 +485,7 @@ export async function sendEventToRemoteSession(
     }
 
     logForDebugging(
-      () =>
-        `[sendEventToRemoteSession] Failed with status ${response.status}: ${jsonStringify(response.data)}`,
+      `[sendEventToRemoteSession] Failed with status ${response.status}: ${jsonStringify(response.data)}`,
     )
     return false
   } catch (error) {
@@ -535,8 +534,7 @@ export async function updateSessionTitle(
     }
 
     logForDebugging(
-      () =>
-        `[updateSessionTitle] Failed with status ${response.status}: ${jsonStringify(response.data)}`,
+      `[updateSessionTitle] Failed with status ${response.status}: ${jsonStringify(response.data)}`,
     )
     return false
   } catch (error) {

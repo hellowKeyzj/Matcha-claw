@@ -36,12 +36,10 @@ import {
   type PromptMessage,
   type ResourceLink,
 } from '@modelcontextprotocol/sdk/types.js'
-import mapValues from 'lodash-es/mapValues.js'
 import memoize from 'lodash-es/memoize.js'
 import zipObject from 'lodash-es/zipObject.js'
 import pMap from 'p-map'
 import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js'
-import { getCwd } from '../../utils/cwd.js'
 import type { Command } from '../../commands.js'
 import { getOauthConfig } from '../../constants/oauth.js'
 import { PRODUCT_URL } from '../../constants/product.js'
@@ -67,6 +65,7 @@ import {
 } from '../../utils/auth.js'
 import { registerCleanup } from '../../utils/cleanupRegistry.js'
 import { detectCodeIndexingFromMcpServerName } from '../../utils/codeIndexing.js'
+import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isEnvDefinedFalsy, isEnvTruthy } from '../../utils/envUtils.js'
 import {
@@ -678,7 +677,7 @@ export const connectToServer = memoize(
         )
         logMCPDebug(name, `SSE transport initialized, awaiting connection`)
       } else if (serverRef.type === 'sse-ide') {
-        logMCPDebug(name, `Setting up SSE-IDE transport to ${serverRef.url}`)
+        logMCPDebug(name, 'Setting up SSE-IDE transport')
         // IDE servers don't need authentication
         // TODO: Use the auth token provided in the lockfile
         const proxyOptions = getProxyFetchOptions()
@@ -735,10 +734,7 @@ export const connectToServer = memoize(
         }
         transport = new WebSocketTransport(wsClient)
       } else if (serverRef.type === 'ws') {
-        logMCPDebug(
-          name,
-          `Initializing WebSocket transport to ${serverRef.url}`,
-        )
+        logMCPDebug(name, 'Initializing WebSocket transport')
 
         const combinedHeaders = await getMcpServerHeaders(name, serverRef)
 
@@ -755,10 +751,7 @@ export const connectToServer = memoize(
           name,
           () =>
             `WebSocket transport options: ${jsonStringify({
-              url: serverRef.url,
-              headers: mapValues(wsHeaders, (value, key) =>
-                key.toLowerCase() === 'authorization' ? '[REDACTED]' : value,
-              ),
+              headerCount: Object.keys(wsHeaders).length,
               hasSessionAuth: !!sessionIngressToken,
             })}`,
         )
@@ -782,7 +775,7 @@ export const connectToServer = memoize(
         }
         transport = new WebSocketTransport(wsClient)
       } else if (serverRef.type === 'http') {
-        logMCPDebug(name, `Initializing HTTP transport to ${serverRef.url}`)
+        logMCPDebug(name, 'Initializing HTTP transport')
         logMCPDebug(
           name,
           `Node version: ${process.version}, Platform: ${process.platform}`,
@@ -790,12 +783,12 @@ export const connectToServer = memoize(
         logMCPDebug(
           name,
           () =>
-            `Environment: ${jsonStringify({
-              NODE_OPTIONS: process.env.NODE_OPTIONS || 'not set',
-              UV_THREADPOOL_SIZE: process.env.UV_THREADPOOL_SIZE || 'default',
-              HTTP_PROXY: process.env.HTTP_PROXY || 'not set',
-              HTTPS_PROXY: process.env.HTTPS_PROXY || 'not set',
-              NO_PROXY: process.env.NO_PROXY || 'not set',
+            `Environment configuration: ${jsonStringify({
+              hasNodeOptions: !!process.env.NODE_OPTIONS,
+              hasThreadpoolSize: !!process.env.UV_THREADPOOL_SIZE,
+              hasHttpProxy: !!process.env.HTTP_PROXY,
+              hasHttpsProxy: !!process.env.HTTPS_PROXY,
+              hasNoProxy: !!process.env.NO_PROXY,
             })}`,
         )
 
@@ -844,19 +837,9 @@ export const connectToServer = memoize(
           name,
           () =>
             `HTTP transport options: ${jsonStringify({
-              url: serverRef.url,
-              headers: transportOptions.requestInit?.headers
-                ? mapValues(
-                    transportOptions.requestInit.headers as Record<
-                      string,
-                      string
-                    >,
-                    (value, key) =>
-                      key.toLowerCase() === 'authorization'
-                        ? '[REDACTED]'
-                        : value,
-                  )
-                : undefined,
+              headerCount: Object.keys(
+                transportOptions.requestInit?.headers ?? {},
+              ).length,
               hasAuthProvider: !!authProvider,
               timeoutMs: MCP_REQUEST_TIMEOUT_MS,
             })}`,
@@ -883,7 +866,7 @@ export const connectToServer = memoize(
         const oauthConfig = getOauthConfig()
         const proxyUrl = `${oauthConfig.MCP_PROXY_URL}${oauthConfig.MCP_PROXY_PATH.replace('{server_id}', serverRef.id)}`
 
-        logMCPDebug(name, `Using claude.ai proxy at ${proxyUrl}`)
+        logMCPDebug(name, 'Using claude.ai proxy')
 
         // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
         const fetchWithAuth = createClaudeAiProxyFetch(globalThis.fetch)
@@ -966,8 +949,8 @@ export const connectToServer = memoize(
             ...subprocessEnv(),
             ...stdioRef.env,
           } as Record<string, string>,
-          cwd: getCwd(),
           stderr: 'pipe', // prevents error output from the MCP server from printing to the UI
+          cwd: getCwd(),
         })
       } else {
         throw new Error(
@@ -1040,7 +1023,7 @@ export const connectToServer = memoize(
 
       // For HTTP transport, try a basic connectivity test first
       if (serverRef.type === 'http') {
-        logMCPDebug(name, `Testing basic HTTP connectivity to ${serverRef.url}`)
+        logMCPDebug(name, 'Checking HTTP endpoint metadata')
         try {
           const testUrl = new URL(serverRef.url)
           logMCPDebug(
@@ -1055,8 +1038,8 @@ export const connectToServer = memoize(
           ) {
             logMCPDebug(name, `Using loopback address: ${testUrl.hostname}`)
           }
-        } catch (urlError) {
-          logMCPDebug(name, `Failed to parse URL: ${urlError}`)
+        } catch {
+          logMCPDebug(name, 'Failed to parse HTTP endpoint URL')
         }
       }
 
@@ -1108,13 +1091,7 @@ export const connectToServer = memoize(
         if (serverRef.type === 'sse' && error instanceof Error) {
           logMCPDebug(
             name,
-            () =>
-              `SSE Connection failed after ${elapsed}ms: ${jsonStringify({
-                url: serverRef.url,
-                error: error.message,
-                errorType: error.constructor.name,
-                stack: error.stack,
-              })}`,
+            `SSE connection failed after ${elapsed}ms (${error.constructor.name})`,
           )
           logMCPError(name, error)
 
@@ -1122,15 +1099,9 @@ export const connectToServer = memoize(
             return handleRemoteAuthFailure(name, serverRef, 'sse')
           }
         } else if (serverRef.type === 'http' && error instanceof Error) {
-          const errorObj = error as Error & {
-            cause?: unknown
-            code?: string
-            errno?: string | number
-            syscall?: string
-          }
           logMCPDebug(
             name,
-            `HTTP Connection failed after ${elapsed}ms: ${error.message} (code: ${errorObj.code || 'none'}, errno: ${errorObj.errno || 'none'})`,
+            `HTTP connection failed after ${elapsed}ms (${error.constructor.name})`,
           )
           logMCPError(name, error)
 
@@ -1143,7 +1114,7 @@ export const connectToServer = memoize(
         ) {
           logMCPDebug(
             name,
-            `claude.ai proxy connection failed after ${elapsed}ms: ${error.message}`,
+            `claude.ai proxy connection failed after ${elapsed}ms (${error.constructor.name})`,
           )
           logMCPError(name, error)
 
@@ -1195,7 +1166,7 @@ export const connectToServer = memoize(
             hasPrompts: !!capabilities?.prompts,
             hasResources: !!capabilities?.resources,
             hasResourceSubscribe: !!capabilities?.resources?.subscribe,
-            serverVersion: serverVersion || 'unknown',
+            hasServerVersion: !!serverVersion,
           })}`,
       )
       logForDebugging(
@@ -1208,8 +1179,7 @@ export const connectToServer = memoize(
       client.setRequestHandler(ElicitRequestSchema, async request => {
         logMCPDebug(
           name,
-          () =>
-            `Elicitation request received during initialization: ${jsonStringify(request)}`,
+          `Elicitation request received during initialization (mode: ${request.params.mode === 'url' ? 'url' : 'form'}, action: cancel)`,
         )
         return { action: 'cancel' as const }
       })
@@ -1260,7 +1230,10 @@ export const connectToServer = memoize(
         hasTriggeredClose = true
         logMCPDebug(name, `Closing transport (${reason})`)
         void client.close().catch(e => {
-          logMCPDebug(name, `Error during close: ${errorMessage(e)}`)
+          logMCPDebug(
+            name,
+            `Error during close (${e instanceof Error ? e.constructor.name : 'unknown'})`,
+          )
         })
       }
 
@@ -1324,7 +1297,7 @@ export const connectToServer = memoize(
               `Failed to spawn process - check command and permissions`,
             )
           } else {
-            logMCPDebug(name, `Connection error: ${error.message}`)
+            logMCPDebug(name, `Connection error (${error.constructor.name})`)
           }
         }
 
@@ -1425,12 +1398,18 @@ export const connectToServer = memoize(
           try {
             await inProcessServer.close()
           } catch (error) {
-            logMCPDebug(name, `Error closing in-process server: ${error}`)
+            logMCPDebug(
+              name,
+              `Error closing in-process server (${error instanceof Error ? error.constructor.name : 'unknown'})`,
+            )
           }
           try {
             await client.close()
           } catch (error) {
-            logMCPDebug(name, `Error closing client: ${error}`)
+            logMCPDebug(
+              name,
+              `Error closing client (${error instanceof Error ? error.constructor.name : 'unknown'})`,
+            )
           }
           return
         }
@@ -1456,7 +1435,10 @@ export const connectToServer = memoize(
               try {
                 process.kill(childPid, 'SIGINT')
               } catch (error) {
-                logMCPDebug(name, `Error sending SIGINT: ${error}`)
+                logMCPDebug(
+                  name,
+                  `Error sending SIGINT (${error instanceof Error ? error.constructor.name : 'unknown'})`,
+                )
                 return
               }
 
@@ -1511,7 +1493,10 @@ export const connectToServer = memoize(
                       try {
                         process.kill(childPid, 'SIGTERM')
                       } catch (termError) {
-                        logMCPDebug(name, `Error sending SIGTERM: ${termError}`)
+                        logMCPDebug(
+                          name,
+                          `Error sending SIGTERM (${termError instanceof Error ? termError.constructor.name : 'unknown'})`,
+                        )
                         resolved = true
                         clearInterval(checkInterval)
                         clearTimeout(failsafeTimeout)
@@ -1544,7 +1529,7 @@ export const connectToServer = memoize(
                         } catch (killError) {
                           logMCPDebug(
                             name,
-                            `Error sending SIGKILL: ${killError}`,
+                            `Error sending SIGKILL (${killError instanceof Error ? killError.constructor.name : 'unknown'})`,
                           )
                         }
                       } catch {
@@ -1576,7 +1561,10 @@ export const connectToServer = memoize(
               })
             }
           } catch (processError) {
-            logMCPDebug(name, `Error terminating process: ${processError}`)
+            logMCPDebug(
+              name,
+              `Error terminating process (${processError instanceof Error ? processError.constructor.name : 'unknown'})`,
+            )
           }
         }
 
@@ -1584,7 +1572,10 @@ export const connectToServer = memoize(
         try {
           await client.close()
         } catch (error) {
-          logMCPDebug(name, `Error closing client: ${error}`)
+          logMCPDebug(
+            name,
+            `Error closing client (${error instanceof Error ? error.constructor.name : 'unknown'})`,
+          )
         }
       }
 
@@ -1641,7 +1632,7 @@ export const connectToServer = memoize(
       })
       logMCPDebug(
         name,
-        `Connection failed after ${connectionDurationMs}ms: ${errorMessage(error)}`,
+        `Connection failed after ${connectionDurationMs}ms (${error instanceof Error ? error.constructor.name : 'unknown'})`,
       )
       logMCPError(name, `Connection failed: ${errorMessage(error)}`)
 
@@ -3024,8 +3015,7 @@ export async function callMCPToolWithUrlElicitationRetry({
         if (hookResponse) {
           logMCPDebug(
             serverName,
-            () =>
-              `URL elicitation ${elicitationId} resolved by hook: ${jsonStringify(hookResponse)}`,
+            `URL elicitation resolved by hook (action: ${hookResponse.action})`,
           )
           if (hookResponse.action !== 'accept') {
             return {
@@ -3104,17 +3094,14 @@ export async function callMCPToolWithUrlElicitationRetry({
         if (finalResult.action !== 'accept') {
           logMCPDebug(
             serverName,
-            `User ${finalResult.action === 'decline' ? 'declined' : finalResult.action + 'ed'} URL elicitation ${elicitationId}`,
+            `URL elicitation response (action: ${finalResult.action})`,
           )
           return {
             content: `URL elicitation was ${finalResult.action === 'decline' ? 'declined' : finalResult.action + 'ed'} by the user. The tool "${tool}" could not complete because it requires the user to open a URL.`,
           }
         }
 
-        logMCPDebug(
-          serverName,
-          `Elicitation ${elicitationId} completed, retrying tool call`,
-        )
+        logMCPDebug(serverName, 'URL elicitation completed, retrying tool call')
       }
 
       // Loop back to retry the tool call
@@ -3293,7 +3280,7 @@ async function callMCPTool({
     if (e instanceof Error && e.name !== 'AbortError') {
       logMCPDebug(
         name,
-        `Tool '${tool}' failed after ${Math.floor(elapsed / 1000)}s: ${e.message}`,
+        `Tool '${tool}' failed after ${Math.floor(elapsed / 1000)}s (${e.constructor.name})`,
       )
     }
 

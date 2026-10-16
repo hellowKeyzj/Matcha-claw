@@ -38,6 +38,7 @@ import type { Progress as AgentProgress } from '@claude-code-best/builtin-tools/
 import { runAgent } from '@claude-code-best/builtin-tools/tools/AgentTool/runAgent.js';
 import { renderToolUseProgressMessage } from '@claude-code-best/builtin-tools/tools/AgentTool/UI.js';
 import type { CommandResultDisplay } from '../../types/command.js';
+import { parseSealedSkillReference } from '../../skills/sealed/reference.js';
 import { createAbortController } from '../abortController.js';
 import { getAgentContext } from '../agentContext.js';
 import { createAttachmentMessage, getAttachmentMessages } from '../attachments.js';
@@ -1152,7 +1153,8 @@ async function getMessagesForPromptSlashCommand(
     .filter((b): b is TextBlockParam => b.type === 'text')
     .map(b => b.text)
     .join('\n\n');
-  addInvokedSkill(command.name, skillPath, skillContent, getAgentContext()?.agentId ?? null);
+  const sealedReferences = result.filter((b): b is TextBlockParam => b.type === 'text' && parseSealedSkillReference(b.text) !== undefined);
+  addInvokedSkill(command.name, skillPath, sealedReferences.length ? sealedReferences[0]!.text : skillContent, getAgentContext()?.agentId ?? null);
 
   const metadata = formatCommandLoadingMetadata(command, args);
 
@@ -1172,7 +1174,7 @@ async function getMessagesForPromptSlashCommand(
   const attachmentMessages = await toArray(
     getAttachmentMessages(
       result
-        .filter((block): block is TextBlockParam => block.type === 'text')
+        .filter((block): block is TextBlockParam => block.type === 'text' && !parseSealedSkillReference(block.text))
         .map(block => block.text)
         .join(' '),
       context,

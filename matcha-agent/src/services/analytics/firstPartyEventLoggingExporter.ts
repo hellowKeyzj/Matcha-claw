@@ -623,9 +623,7 @@ export class FirstPartyEventLoggingExporter implements LogRecordExporter {
       logForDebugging(
         `1P event logging: ${eventCount} events exported successfully${withAuth ? ' (with auth)' : ' (without auth)'}`,
       )
-      logForDebugging(
-        () => `API Response: ${jsonStringify(responseData, null, 2)}`,
-      )
+      logForDebugging(`API Response: ${jsonStringify(responseData, null, 2)}`)
     }
   }
 

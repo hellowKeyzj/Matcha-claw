@@ -1,5 +1,6 @@
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { getInitialMainLoopModel } from '../../bootstrap/state.js'
+import { resolveOpenAIModel } from '@ant/model-provider'
 import {
   isClaudeAISubscriber,
   isMaxSubscriber,
@@ -24,6 +25,7 @@ import {
   getDefaultOpusModel,
   getDefaultHaikuModel,
   getDefaultMainLoopModelSetting,
+  getDefaultMainLoopModel,
   getMarketingNameForModel,
   getUserSpecifiedModelSetting,
   isOpus1mMergeEnabled,
@@ -34,7 +36,6 @@ import {
 import { has1mContext } from '../context.js'
 import { getGlobalConfig } from '../config.js'
 import {
-  CHATGPT_CODEX_DEFAULT_MODEL,
   CHATGPT_CODEX_MODEL_OPTIONS,
   isChatGPTAuthMode,
 } from './chatgptModels.js'
@@ -84,7 +85,7 @@ function getCustomSonnetOption(): ModelOption | undefined {
   const provider = getAPIProvider()
   // Use provider-specific DEFAULT_SONNET_MODEL
   const customSonnetModel =
-    provider === 'openai'
+    provider === 'openai' || provider === 'openaiResponses'
       ? process.env.OPENAI_DEFAULT_SONNET_MODEL
       : provider === 'gemini'
         ? process.env.GEMINI_DEFAULT_SONNET_MODEL
@@ -94,13 +95,13 @@ function getCustomSonnetOption(): ModelOption | undefined {
     const is1m = has1mContext(customSonnetModel)
     // Use appropriate NAME/DESCRIPTION env vars based on provider
     const nameEnv =
-      provider === 'openai'
+      provider === 'openai' || provider === 'openaiResponses'
         ? process.env.OPENAI_DEFAULT_SONNET_MODEL_NAME
         : provider === 'gemini'
           ? process.env.GEMINI_DEFAULT_SONNET_MODEL_NAME
           : process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME
     const descEnv =
-      provider === 'openai'
+      provider === 'openai' || provider === 'openaiResponses'
         ? process.env.OPENAI_DEFAULT_SONNET_MODEL_DESCRIPTION
         : provider === 'gemini'
           ? process.env.GEMINI_DEFAULT_SONNET_MODEL_DESCRIPTION
@@ -133,7 +134,7 @@ function getCustomOpusOption(): ModelOption | undefined {
   const provider = getAPIProvider()
   // Use provider-specific DEFAULT_OPUS_MODEL
   const customOpusModel =
-    provider === 'openai'
+    provider === 'openai' || provider === 'openaiResponses'
       ? process.env.OPENAI_DEFAULT_OPUS_MODEL
       : provider === 'gemini'
         ? process.env.GEMINI_DEFAULT_OPUS_MODEL
@@ -143,13 +144,13 @@ function getCustomOpusOption(): ModelOption | undefined {
     const is1m = has1mContext(customOpusModel)
     // Use appropriate NAME/DESCRIPTION env vars based on provider
     const nameEnv =
-      provider === 'openai'
+      provider === 'openai' || provider === 'openaiResponses'
         ? process.env.OPENAI_DEFAULT_OPUS_MODEL_NAME
         : provider === 'gemini'
           ? process.env.GEMINI_DEFAULT_OPUS_MODEL_NAME
           : process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME
     const descEnv =
-      provider === 'openai'
+      provider === 'openai' || provider === 'openaiResponses'
         ? process.env.OPENAI_DEFAULT_OPUS_MODEL_DESCRIPTION
         : provider === 'gemini'
           ? process.env.GEMINI_DEFAULT_OPUS_MODEL_DESCRIPTION
@@ -224,7 +225,7 @@ function getCustomHaikuOption(): ModelOption | undefined {
   const provider = getAPIProvider()
   // Use provider-specific DEFAULT_HAIKU_MODEL
   const customHaikuModel =
-    provider === 'openai'
+    provider === 'openai' || provider === 'openaiResponses'
       ? process.env.OPENAI_DEFAULT_HAIKU_MODEL
       : provider === 'gemini'
         ? process.env.GEMINI_DEFAULT_HAIKU_MODEL
@@ -233,13 +234,13 @@ function getCustomHaikuOption(): ModelOption | undefined {
   if (is3P && customHaikuModel) {
     // Use appropriate NAME/DESCRIPTION env vars based on provider
     const nameEnv =
-      provider === 'openai'
+      provider === 'openai' || provider === 'openaiResponses'
         ? process.env.OPENAI_DEFAULT_HAIKU_MODEL_NAME
         : provider === 'gemini'
           ? process.env.GEMINI_DEFAULT_HAIKU_MODEL_NAME
           : process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME
     const descEnv =
-      provider === 'openai'
+      provider === 'openai' || provider === 'openaiResponses'
         ? process.env.OPENAI_DEFAULT_HAIKU_MODEL_DESCRIPTION
         : provider === 'gemini'
           ? process.env.GEMINI_DEFAULT_HAIKU_MODEL_DESCRIPTION
@@ -342,12 +343,13 @@ function getOpusPlanOption(): ModelOption {
 }
 
 function getChatGPTCodexModelOptions(): ModelOption[] {
+  const defaultModel = resolveOpenAIModel(getDefaultMainLoopModel())
   return [
     {
       value: null,
       label: 'Default (recommended)',
-      description: `Use the default ChatGPT Codex model (currently ${CHATGPT_CODEX_DEFAULT_MODEL})`,
-      descriptionForModel: `Default ChatGPT Codex model (currently ${CHATGPT_CODEX_DEFAULT_MODEL})`,
+      description: `Use the default ChatGPT Codex model (currently ${defaultModel})`,
+      descriptionForModel: `Default ChatGPT Codex model (currently ${defaultModel})`,
     },
     ...CHATGPT_CODEX_MODEL_OPTIONS.map(model => ({
       value: model.value,

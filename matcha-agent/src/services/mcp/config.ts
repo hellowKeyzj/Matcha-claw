@@ -1,5 +1,5 @@
 import { feature } from 'bun:bundle'
-import { chmod, open, readFile, rename, stat, unlink } from 'fs/promises'
+import { chmod, open, rename, stat, unlink } from 'fs/promises'
 import mapValues from 'lodash-es/mapValues.js'
 import memoize from 'lodash-es/memoize.js'
 import { dirname, join, parse } from 'path'
@@ -49,27 +49,12 @@ import {
   McpJsonConfigSchema,
   type McpServerConfig,
   McpServerConfigSchema,
-  McpStdioServerConfigSchema,
   type McpSSEServerConfig,
   type McpStdioServerConfig,
   type McpWebSocketServerConfig,
   type ScopedMcpServerConfig,
 } from './types.js'
 import { getProjectMcpServerStatus } from './utils.js'
-
-async function getHostBuiltinMcpConfig(): Promise<Record<string, ScopedMcpServerConfig>> {
-  const path = process.env.MATCHA_BUILTIN_MCP_CONFIG
-  if (!path) return {}
-  let text: string
-  try {
-    text = await readFile(path, 'utf8')
-  } catch (error: unknown) {
-    if (getErrnoCode(error) === 'ENOENT') return {}
-    throw error
-  }
-  const config = McpStdioServerConfigSchema().strict().parse(JSON.parse(text))
-  return { matcha: { ...config, scope: 'dynamic' } }
-}
 
 /**
  * Get the path to the managed MCP configuration file
@@ -1192,7 +1177,6 @@ export async function getClaudeCodeMcpConfigs(
   // disabled manual server mustn't suppress a plugin server, or neither runs
   // (manual is skipped by name at connection time; plugin was removed here).
   const extraTargets = await extraDedupTargets
-  const builtinServers = mcpLocked ? {} : await getHostBuiltinMcpConfig()
   const enabledManualServers: Record<string, ScopedMcpServerConfig> = {}
   for (const [name, config] of Object.entries({
     ...userServers,
@@ -1200,7 +1184,6 @@ export async function getClaudeCodeMcpConfigs(
     ...localServers,
     ...dynamicServers,
     ...extraTargets,
-    ...builtinServers,
   })) {
     if (
       !isMcpServerDisabled(name) &&
@@ -1245,14 +1228,13 @@ export async function getClaudeCodeMcpConfigs(
     })
   }
 
-  // Merge in order of precedence: plugin < user < project < local < Host built-in.
+  // Merge in order of precedence: plugin < user < project < local
   const configs = Object.assign(
     {},
     dedupedPluginServers,
     userServers,
     approvedProjectServers,
     localServers,
-    builtinServers,
   )
 
   // Apply policy filtering to merged configs

@@ -98,8 +98,7 @@ export async function getMcpHeadersFromHelper(
 
     logMCPDebug(
       serverName,
-      () =>
-        `Successfully retrieved ${Object.keys(headers).length} headers from headersHelper`,
+      `Successfully retrieved ${Object.keys(headers).length} headers from headersHelper`,
     )
     return headers as Record<string, string>
   } catch (error) {

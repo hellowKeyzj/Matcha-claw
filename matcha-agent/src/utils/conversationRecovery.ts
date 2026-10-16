@@ -11,7 +11,6 @@ import type {
   LogOption,
   PersistedWorktreeSession,
   SerializedMessage,
-  TranscriptMessage,
 } from '../types/logs.js'
 import type {
   Message,
@@ -50,7 +49,6 @@ import {
   loadMessageLogs,
   loadTranscriptFile,
   removeExtraFields,
-  type TranscriptDisplayRead,
 } from './sessionStorage.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
 
@@ -434,71 +432,39 @@ export function restoreSkillStateFromMessages(messages: Message[]): void {
 }
 
 /**
- * Loads the newest non-sidechain conversation chain from a transcript JSONL.
- * The result keeps transcript-only fields such as parentUuid for history
- * projections; callers that need persistence messages must strip them at
- * their own boundary.
- */
-export async function loadTranscriptHistoryFromJsonlPath(
-  path: string,
-  displayRead?: TranscriptDisplayRead,
-): Promise<{
-  messages: TranscriptMessage[]
-  sessionId: UUID | undefined
-}> {
-  return loadTranscriptChainFromJsonlPath(path, displayRead)
-}
-
-async function loadTranscriptChainFromJsonlPath(
-  path: string,
-  displayRead?: TranscriptDisplayRead,
-): Promise<{
-  messages: TranscriptMessage[]
-  sessionId: UUID | undefined
-}> {
-  const { messages: byUuid, leafUuids } = await loadTranscriptFile(path, {
-    displayRead,
-  })
-  const tip = findLatestNonSidechainLeaf(byUuid, leafUuids)
-  if (!tip) return { messages: [], sessionId: undefined }
-  return {
-    messages: buildConversationChain(byUuid, tip),
-    // Leaf's sessionId — forked sessions copy chain[0] from the source
-    // transcript, so the root retains the source session's ID. Matches
-    // loadFullLog's mostRecentLeaf.sessionId.
-    sessionId: tip.sessionId as UUID | undefined,
-  }
-}
-
-function findLatestNonSidechainLeaf(
-  messages: Map<UUID, TranscriptMessage>,
-  leafUuids: Set<UUID>,
-): TranscriptMessage | null {
-  let latestLeaf: TranscriptMessage | null = null
-  let latestTimestamp = 0
-  for (const message of messages.values()) {
-    if (message.isSidechain || !leafUuids.has(message.uuid)) continue
-    const timestamp = new Date(message.timestamp).getTime()
-    if (timestamp > latestTimestamp) {
-      latestTimestamp = timestamp
-      latestLeaf = message
-    }
-  }
-  return latestLeaf
-}
-
-/**
- * Chain-walk a transcript JSONL for resume. Transcript-only fields are removed
- * at this persistence boundary to preserve the SerializedMessage[] contract.
+ * Chain-walk a transcript jsonl by path.  Same sequence loadFullLog
+ * runs internally — loadTranscriptFile → find newest non-sidechain
+ * leaf → buildConversationChain → removeExtraFields — just starting
+ * from an arbitrary path instead of the sid-derived one.
+ *
+ * leafUuids is populated by loadTranscriptFile as "uuids that no
+ * other message's parentUuid points at" — the chain tips.  There can
+ * be several (sidechains, orphans); newest non-sidechain is the main
+ * conversation's end.
  */
 export async function loadMessagesFromJsonlPath(path: string): Promise<{
   messages: SerializedMessage[]
   sessionId: UUID | undefined
 }> {
-  const loaded = await loadTranscriptChainFromJsonlPath(path)
+  const { messages: byUuid, leafUuids } = await loadTranscriptFile(path)
+  let tip: (typeof byUuid extends Map<UUID, infer T> ? T : never) | null = null
+  let tipTs = 0
+  for (const m of byUuid.values()) {
+    if (m.isSidechain || !leafUuids.has(m.uuid)) continue
+    const ts = new Date(m.timestamp).getTime()
+    if (ts > tipTs) {
+      tipTs = ts
+      tip = m
+    }
+  }
+  if (!tip) return { messages: [], sessionId: undefined }
+  const chain = buildConversationChain(byUuid, tip)
   return {
-    messages: removeExtraFields(loaded.messages),
-    sessionId: loaded.sessionId,
+    messages: removeExtraFields(chain),
+    // Leaf's sessionId — forked sessions copy chain[0] from the source
+    // transcript, so the root retains the source session's ID. Matches
+    // loadFullLog's mostRecentLeaf.sessionId.
+    sessionId: tip.sessionId as UUID | undefined,
   }
 }
 

@@ -158,19 +158,17 @@ export function useRemoteSession({
 
     const manager = new RemoteSessionManager(config, {
       onMessage: sdkMessage => {
-        logForDebugging(() => {
-          const parts = [`type=${sdkMessage.type}`]
-          if ('subtype' in sdkMessage)
-            parts.push(`subtype=${sdkMessage.subtype as string}`)
-          if (sdkMessage.type === 'user') {
-            const c = (sdkMessage.message as { content?: unknown } | undefined)
-              ?.content
-            parts.push(
-              `content=${Array.isArray(c) ? c.map(b => b.type).join(',') : typeof c}`,
-            )
-          }
-          return `[useRemoteSession] Received ${parts.join(' ')}`
-        })
+        const parts = [`type=${sdkMessage.type}`]
+        if ('subtype' in sdkMessage)
+          parts.push(`subtype=${sdkMessage.subtype as string}`)
+        if (sdkMessage.type === 'user') {
+          const c = (sdkMessage.message as { content?: unknown } | undefined)
+            ?.content
+          parts.push(
+            `content=${Array.isArray(c) ? c.map(b => b.type).join(',') : typeof c}`,
+          )
+        }
+        logForDebugging(`[useRemoteSession] Received ${parts.join(' ')}`)
 
         // Clear response timeout on any message received — including the WS
         // echo of our own POST, which acts as a heartbeat. This must run

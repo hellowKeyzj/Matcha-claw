@@ -104,8 +104,7 @@ export async function initialize(): Promise<void> {
   if (paths.length === 0) return
 
   logForDebugging(
-    () =>
-      `Watching for changes in skill/command directories: ${paths.join(', ')}...`,
+    `Watching for changes in skill/command directories: ${paths.join(', ')}...`,
   )
 
   watcher = chokidar.watch(paths, {

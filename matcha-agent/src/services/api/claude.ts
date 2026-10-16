@@ -72,7 +72,6 @@ import {
 import { resolveAppliedEffort } from '../../utils/effort.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { errorMessage } from '../../utils/errors.js'
-import { computeFingerprintFromMessages } from '../../utils/fingerprint.js'
 import { captureAPIRequest, logError } from '../../utils/log.js'
 import {
   createAssistantAPIErrorMessage,
@@ -167,7 +166,7 @@ import {
 } from 'src/utils/betas.js'
 import { CLAUDE_IN_CHROME_MCP_SERVER_NAME } from 'src/utils/claudeInChrome/common.js'
 import { CHROME_SEARCH_EXTRA_TOOLS_INSTRUCTIONS } from 'src/utils/claudeInChrome/prompt.js'
-import { getMaxThinkingTokensForModel } from 'src/utils/context.js'
+import { getContextWindowForModel, getMaxThinkingTokensForModel } from 'src/utils/context.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { logForDiagnosticsNoPII } from 'src/utils/diagLogs.js'
 import { type EffortValue, modelSupportsEffort } from 'src/utils/effort.js'
@@ -182,7 +181,6 @@ import { headlessProfilerCheckpoint } from 'src/utils/headlessProfiler.js'
 import { isMcpInstructionsDeltaEnabled } from 'src/utils/mcpInstructionsDelta.js'
 import { calculateUSDCost } from 'src/utils/modelCost.js'
 import { endQueryProfile, queryCheckpoint } from 'src/utils/queryProfiler.js'
-import type { RunTraceSink } from 'src/query/runTrace.js'
 import {
   modelSupportsAdaptiveThinking,
   modelSupportsThinking,
@@ -239,6 +237,9 @@ import {
   convertToolsToLangfuse,
 } from '../langfuse/convert.js'
 import { withStreamingVCR, withVCR } from '../vcr.js'
+import { hydrateSealedModelMessages, protectSealedModelStream, sealedExecutionQuery } from '../../skills/sealed/model.js'
+import { collectSealedMessageReferences, hasSealedSkillReferences } from '../../skills/sealed/reference.js'
+import { markSealedTelemetry } from '../../skills/sealed/privacy.js'
 import { CLIENT_REQUEST_ID_HEADER, getAnthropicClient } from './client.js'
 import {
   API_ERROR_MESSAGE_PREFIX,
@@ -728,7 +729,6 @@ export type Options = {
   taskBudget?: { total: number; remaining?: number }
   /** Langfuse root trace span for observability. No-op if null/undefined. */
   langfuseTrace?: LangfuseSpan | null
-  runTrace?: RunTraceSink
 }
 
 export async function queryModelWithoutStreaming({
@@ -1055,6 +1055,17 @@ async function* queryModel(
   tools: Tools,
   signal: AbortSignal,
   options: Options,
+): AsyncGenerator<StreamEvent | AssistantMessage | SystemAPIErrorMessage, void> {
+  yield* protectSealedModelStream(messages, () => queryModelRequest(messages, systemPrompt, thinkingConfig, tools, signal, options))
+}
+
+async function* queryModelRequest(
+  messages: Message[],
+  systemPrompt: SystemPrompt,
+  thinkingConfig: ThinkingConfig,
+  tools: Tools,
+  signal: AbortSignal,
+  options: Options,
 ): AsyncGenerator<
   StreamEvent | AssistantMessage | SystemAPIErrorMessage,
   void
@@ -1234,8 +1245,7 @@ async function* queryModel(
     cachedMCEnabled = featureEnabled && modelSupported && headerAvailable
     const config = getCachedMCConfig()
     logForDebugging(
-      () =>
-        `Cached MC gate: enabled=${featureEnabled} modelSupported=${modelSupported} headerAvailable=${headerAvailable} model=${options.model} supportedModels=${jsonStringify((config as Record<string, unknown>).supportedModels)}`,
+      `Cached MC gate: enabled=${featureEnabled} modelSupported=${modelSupported} headerAvailable=${headerAvailable} model=${options.model} supportedModels=${jsonStringify((config as Record<string, unknown>).supportedModels)}`,
     )
   }
 
@@ -1341,22 +1351,35 @@ async function* queryModel(
     API_MAX_MEDIA_PER_REQUEST,
   )
 
+  // Only the request-local copy is hydrated. Durable helper queries (compact,
+  // hooks, memory) retain reference facts, never protected source text.
+  if (hasSealedSkillReferences(messagesForAPI) && sealedExecutionQuery(options.querySource)) {
+    const trusted = collectSealedMessageReferences(messages)
+    const { roughTokenCountEstimation } = await import('../tokenEstimation.js')
+    const outputTokens = getAPIProvider() === 'openai' || getAPIProvider() === 'openaiResponses'
+      ? (await import('./openai/requestBody.js')).resolveOpenAIMaxTokens(
+          getModelMaxOutputTokens(options.model).upperLimit, options.maxOutputTokensOverride,
+        )
+      : options.maxOutputTokensOverride || getMaxOutputTokensForModel(options.model)
+    const overhead = Math.ceil(roughTokenCountEstimation(jsonStringify({
+      systemPrompt,
+      tools: [...toolSchemas, ...(options.extraToolSchemas ?? [])],
+    })) * 4 / 3)
+    messagesForAPI = await hydrateSealedModelMessages(
+      messagesForAPI,
+      signal,
+      await options.getToolPermissionContext(),
+      getContextWindowForModel(options.model) - overhead
+        - outputTokens,
+      trusted,
+    )
+    if (trusted.length > 0 && options.langfuseTrace) markSealedTelemetry(options.langfuseTrace)
+  }
+
   // OpenAI-compatible provider: delegate to the OpenAI adapter layer
   // after shared preprocessing (message normalization, tool filtering,
   // media stripping) but before Anthropic-specific logic (betas, thinking, caching).
-  if (getAPIProvider() === 'openaiResponses') {
-    const { queryModelOpenAIResponses } = await import('./openai/index.js')
-    yield* queryModelOpenAIResponses(
-      messagesForAPI,
-      systemPrompt,
-      tools,
-      signal,
-      options,
-    )
-    return
-  }
-
-  if (getAPIProvider() === 'openai') {
+  if (getAPIProvider() === 'openai' || getAPIProvider() === 'openaiResponses') {
     const { queryModelOpenAI } = await import('./openai/index.js')
     // OpenAI emulates Anthropic's dynamic tool loading client-side. It needs
     // the full tool pool so SearchExtraToolsTool can search deferred MCP tools that
@@ -1400,11 +1423,6 @@ async function* queryModel(
   logEvent('tengu_api_after_normalize', {
     postNormalizedMessageCount: messagesForAPI.length,
   })
-
-  // Compute fingerprint from first user message for attribution.
-  // Must run BEFORE injecting synthetic messages (e.g. deferred tool names)
-  // so the fingerprint reflects the actual user input.
-  const fingerprint = computeFingerprintFromMessages(messagesForAPI)
 
   // When the delta attachment is enabled, deferred tools are announced
   // via persisted deferred_tools_delta attachments instead of this
@@ -1453,7 +1471,7 @@ async function* queryModel(
   // filter(Boolean) works by converting each element to a boolean - empty strings become false and are filtered out.
   systemPrompt = asSystemPrompt(
     [
-      getAttributionHeader(fingerprint),
+      getAttributionHeader(),
       getCLISyspromptPrefix({
         isNonInteractive: options.isNonInteractiveSession,
         hasAppendSystemPrompt: options.hasAppendSystemPrompt,
@@ -1515,6 +1533,15 @@ async function* queryModel(
     } as unknown as BetaToolUnion)
   }
   const allTools = [...toolSchemas, ...extraToolSchemas]
+  if (hasSealedSkillReferences(messages) && sealedExecutionQuery(options.querySource)) {
+    const { roughTokenCountEstimation, roughTokenCountEstimationForMessages } = await import('../tokenEstimation.js')
+    const pressure = roughTokenCountEstimationForMessages(messagesForAPI.map(({ type, message }) => ({ type, message })))
+      + roughTokenCountEstimation(jsonStringify({ system, tools: allTools }))
+    if (Math.ceil(pressure * 4 / 3) + (options.maxOutputTokensOverride || getMaxOutputTokensForModel(options.model))
+      > getContextWindowForModel(options.model)) {
+      throw new Error('Sealed skill is unavailable (sealed_whole_document_budget)')
+    }
+  }
 
   const isFastMode =
     isFastModeEnabled() &&
@@ -1892,9 +1919,6 @@ async function* queryModel(
 
   try {
     queryCheckpoint('query_client_creation_start')
-    options.runTrace?.('api.client.creation.start', {
-      queryDepth: options.queryTracking?.depth,
-    })
     const generator = withRetry(
       () =>
         getAnthropicClient({
@@ -1913,10 +1937,6 @@ async function* queryModel(
         // only calls getClient() again after auth errors), so the delta from
         // client_creation_start is meaningful on attempt 1.
         queryCheckpoint('query_client_creation_end')
-        options.runTrace?.('api.client.creation.end', {
-          queryDepth: options.queryTracking?.depth,
-          attempt,
-        })
 
         const params = paramsFromContext(context)
         captureAPIRequest(params, options.querySource) // Capture for bug reports
@@ -1927,11 +1947,6 @@ async function* queryModel(
         // awaits until response headers arrive, so this MUST be before the await
         // or the "Network TTFB" phase measurement is wrong.
         queryCheckpoint('query_api_request_sent')
-        options.runTrace?.('api.request.sent', {
-          queryDepth: options.queryTracking?.depth,
-          attempt,
-          model: options.model,
-        })
         if (!options.agentId) {
           headlessProfilerCheckpoint('api_request_sent')
         }
@@ -1961,11 +1976,6 @@ async function* queryModel(
         queryCheckpoint('query_response_headers_received')
         streamRequestId = result.request_id
         streamResponse = result.response
-        options.runTrace?.('api.response.headers', {
-          queryDepth: options.queryTracking?.depth,
-          attempt,
-          requestId: streamRequestId,
-        })
         return result.data
       },
       {
@@ -2011,12 +2021,6 @@ async function* queryModel(
     const STREAM_IDLE_TIMEOUT_MS =
       parseInt(process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS || '', 10) || 90_000
     const STREAM_IDLE_WARNING_MS = STREAM_IDLE_TIMEOUT_MS / 2
-    options.runTrace?.('api.stream.watchdog.configured', {
-      queryDepth: options.queryTracking?.depth,
-      requestId: streamRequestId,
-      enabled: streamWatchdogEnabled,
-      timeoutMs: STREAM_IDLE_TIMEOUT_MS,
-    })
     let streamIdleAborted = false
     // performance.now() snapshot when watchdog fires, for measuring abort propagation delay
     let streamWatchdogFiredAt: number | null = null
@@ -2056,11 +2060,6 @@ async function* queryModel(
           { level: 'error' },
         )
         logForDiagnosticsNoPII('error', 'cli_streaming_idle_timeout')
-        options.runTrace?.('api.stream.watchdog.timeout', {
-          queryDepth: options.queryTracking?.depth,
-          requestId: streamRequestId,
-          timeoutMs: STREAM_IDLE_TIMEOUT_MS,
-        })
         logEvent('tengu_streaming_idle_timeout', {
           model:
             options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -2077,8 +2076,6 @@ async function* queryModel(
     try {
       // stream in and accumulate state
       let isFirstChunk = true
-      let hasContentDelta = false
-      let hasTextDelta = false
       let lastEventTime: number | null = null // Set after first chunk to avoid measuring TTFB as a stall
       const STALL_THRESHOLD_MS = 30_000 // 30 seconds
       let totalStallTime = 0
@@ -2115,11 +2112,6 @@ async function* queryModel(
 
         if (isFirstChunk) {
           logForDebugging('Stream started - received first chunk')
-          options.runTrace?.('api.stream.first_chunk', {
-            queryDepth: options.queryTracking?.depth,
-            requestId: streamRequestId,
-            eventType: part.type,
-          })
           queryCheckpoint('query_first_chunk_received')
           if (!options.agentId) {
             headlessProfilerCheckpoint('first_chunk')
@@ -2132,11 +2124,6 @@ async function* queryModel(
           case 'message_start': {
             partialMessage = part.message
             ttftMs = Date.now() - start
-            options.runTrace?.('api.stream.message_start', {
-              queryDepth: options.queryTracking?.depth,
-              requestId: streamRequestId,
-              messageId: part.message.id,
-            })
             usage = updateUsage(usage, part.message?.usage)
             // Capture research from message_start if available (internal only).
             // Always overwrite with the latest value.
@@ -2150,12 +2137,6 @@ async function* queryModel(
             break
           }
           case 'content_block_start':
-            options.runTrace?.('api.stream.content_block_start', {
-              queryDepth: options.queryTracking?.depth,
-              requestId: streamRequestId,
-              blockIndex: part.index,
-              blockType: part.content_block.type,
-            })
             switch (part.content_block.type) {
               case 'tool_use':
                 contentBlocks[part.index] = {
@@ -2217,15 +2198,6 @@ async function* queryModel(
           case 'content_block_delta': {
             const contentBlock = contentBlocks[part.index]
             const delta = part.delta as typeof part.delta | ConnectorTextDelta
-            if (!hasContentDelta) {
-              hasContentDelta = true
-              options.runTrace?.('api.stream.first_content_delta', {
-                queryDepth: options.queryTracking?.depth,
-                requestId: streamRequestId,
-                blockIndex: part.index,
-                deltaType: delta.type,
-              })
-            }
             if (!contentBlock) {
               logEvent('tengu_streaming_error', {
                 error_type:
@@ -2285,15 +2257,6 @@ async function* queryModel(
                   contentBlock.input += delta.partial_json
                   break
                 case 'text_delta':
-                  if (!hasTextDelta) {
-                    hasTextDelta = true
-                    options.runTrace?.('api.stream.first_text_delta', {
-                      queryDepth: options.queryTracking?.depth,
-                      requestId: streamRequestId,
-                      blockIndex: part.index,
-                      textLength: delta.text?.length ?? 0,
-                    })
-                  }
                   if (contentBlock.type !== 'text') {
                     logEvent('tengu_streaming_error', {
                       error_type:
@@ -2353,11 +2316,6 @@ async function* queryModel(
             break
           }
           case 'content_block_stop': {
-            options.runTrace?.('api.stream.content_block_stop', {
-              queryDepth: options.queryTracking?.depth,
-              requestId: streamRequestId,
-              blockIndex: part.index,
-            })
             const contentBlock = contentBlocks[part.index]
             if (!contentBlock) {
               logEvent('tengu_streaming_error', {
@@ -2436,13 +2394,6 @@ async function* queryModel(
             // the queued reference; direct mutation ensures the transcript
             // captures the final values.
             stopReason = part.delta.stop_reason
-            if (stopReason) {
-              options.runTrace?.('api.stream.message_delta.stop_reason', {
-                queryDepth: options.queryTracking?.depth,
-                requestId: streamRequestId,
-                stopReason,
-              })
-            }
 
             const lastMsg = newMessages.at(-1)
             if (lastMsg) {
@@ -2499,10 +2450,6 @@ async function* queryModel(
             break
           }
           case 'message_stop':
-            options.runTrace?.('api.stream.message_stop', {
-              queryDepth: options.queryTracking?.depth,
-              requestId: streamRequestId,
-            })
             break
         }
 
@@ -2514,13 +2461,6 @@ async function* queryModel(
       }
       // Clear the idle timeout watchdog now that the stream loop has exited
       clearStreamIdleTimers()
-      options.runTrace?.('api.stream.loop.end', {
-        queryDepth: options.queryTracking?.depth,
-        requestId: streamRequestId,
-        stopReason,
-        assistantMessages: newMessages.length,
-        streamIdleAborted,
-      })
 
       // If the stream was aborted by our idle timeout watchdog, fall back to
       // non-streaming retry rather than treating it as a completed stream.
@@ -2544,12 +2484,6 @@ async function* queryModel(
             'clean' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
           model:
             options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        })
-        options.runTrace?.('api.stream.loop.exited_after_watchdog', {
-          queryDepth: options.queryTracking?.depth,
-          requestId: streamRequestId,
-          exitDelayMs,
-          exitPath: 'clean',
         })
         // Prevent double-emit: this throw lands in the catch block below,
         // whose exit_path='error' probe guards on streamWatchdogFiredAt.
@@ -2637,13 +2571,6 @@ async function* queryModel(
     } catch (streamingError) {
       // Clear the idle timeout watchdog on error path too
       clearStreamIdleTimers()
-      options.runTrace?.('api.stream.error', {
-        queryDepth: options.queryTracking?.depth,
-        requestId: streamRequestId,
-        errorName:
-          streamingError instanceof Error ? streamingError.name : 'unknown',
-        streamIdleAborted,
-      })
 
       // Instrumentation: if the watchdog had already fired and the for-await
       // threw (rather than exiting cleanly), record that the loop DID exit and
@@ -2668,14 +2595,6 @@ async function* queryModel(
               : ('unknown' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS),
           model:
             options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        })
-        options.runTrace?.('api.stream.loop.exited_after_watchdog', {
-          queryDepth: options.queryTracking?.depth,
-          requestId: streamRequestId,
-          exitDelayMs,
-          exitPath: 'error',
-          errorName:
-            streamingError instanceof Error ? streamingError.name : 'unknown',
         })
       }
 
@@ -2850,12 +2769,6 @@ async function* queryModel(
       clearStreamIdleTimers()
     }
   } catch (errorFromRetry) {
-    options.runTrace?.('api.stream.error', {
-      queryDepth: options.queryTracking?.depth,
-      requestId: streamRequestId,
-      errorName:
-        errorFromRetry instanceof Error ? errorFromRetry.name : 'unknown',
-    })
     // FallbackTriggeredError must propagate to query.ts, which performs the
     // actual model switch. Swallowing it here would turn the fallback into a
     // no-op — the user would just see "Model fallback triggered: X -> Y" as
@@ -3442,8 +3355,7 @@ export function addCacheBreakpoints(
           pinCacheEdits(i, newCacheEdits as any)
 
           logForDebugging(
-            () =>
-              `Added cache_edits block with ${dedupedNewEdits.edits.length} deletion(s) to message[${i}]: ${dedupedNewEdits.edits.map(e => e.cache_reference).join(', ')}`,
+            `Added cache_edits block with ${dedupedNewEdits.edits.length} deletion(s) to message[${i}]: ${dedupedNewEdits.edits.map(e => e.cache_reference).join(', ')}`,
           )
           break
         }

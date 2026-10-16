@@ -13,6 +13,8 @@
 import { feature } from 'bun:bundle'
 import { context as otelContext, type Span, trace } from '@opentelemetry/api'
 import { AsyncLocalStorage } from 'async_hooks'
+import { sealedModelContext } from '../../skills/sealed/privacy.js'
+import { SEALED_REDACTION } from '../../skills/sealed/reference.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import type { AssistantMessage, UserMessage } from '../../types/message.js'
 import { isEnvDefinedFalsy, isEnvTruthy } from '../envUtils.js'
@@ -174,8 +176,7 @@ function createSpanAttributes(
  * Sets the interaction context for all subsequent operations.
  */
 export function startInteractionSpan(userPrompt: string): Span {
-  if (isAnyTracingEnabled() || isPerfettoTracingEnabled())
-    ensureCleanupInterval()
+  ensureCleanupInterval()
 
   // Start Perfetto span regardless of OTel tracing state
   const perfettoSpanId = isPerfettoTracingEnabled()
@@ -325,7 +326,7 @@ export function startLLMRequestSpan(
   }
 
   // Add experimental attributes (system prompt, new_context)
-  addBetaLLMRequestAttributes(span, newContext, messagesForAPI)
+  if (!sealedModelContext()) addBetaLLMRequestAttributes(span, newContext, messagesForAPI)
 
   const spanId = getSpanId(span)
   const spanContextObj: SpanContext = {
@@ -414,7 +415,7 @@ export function endLLMRequestSpan(
       cacheReadTokens: metadata?.cacheReadTokens,
       cacheCreationTokens: metadata?.cacheCreationTokens,
       success: metadata?.success,
-      error: metadata?.error,
+      error: sealedModelContext() && metadata?.error ? SEALED_REDACTION : metadata?.error,
       requestSetupMs: metadata?.requestSetupMs,
       attemptStartTimes: metadata?.attemptStartTimes,
     })
@@ -444,7 +445,7 @@ export function endLLMRequestSpan(
       endAttributes['success'] = metadata.success
     if (metadata.statusCode !== undefined)
       endAttributes['status_code'] = metadata.statusCode
-    if (metadata.error !== undefined) endAttributes['error'] = metadata.error
+    if (metadata.error !== undefined) endAttributes['error'] = sealedModelContext() ? SEALED_REDACTION : metadata.error
     if (metadata.attempt !== undefined)
       endAttributes['attempt'] = metadata.attempt
     if (metadata.hasToolCall !== undefined)
@@ -453,7 +454,7 @@ export function endLLMRequestSpan(
       endAttributes['ttft_ms'] = metadata.ttftMs
 
     // Add experimental response attributes (model_output, thinking_output)
-    addBetaLLMResponseAttributes(endAttributes, metadata)
+    if (!sealedModelContext()) addBetaLLMResponseAttributes(endAttributes, metadata)
   }
 
   llmSpanContext.span.setAttributes(endAttributes)

@@ -39,7 +39,6 @@ import {
 } from './utils/config.js';
 import { updateDeepLinkTerminalPreference } from './utils/deepLink/terminalPreference.js';
 import { isEnvTruthy, isRunningOnHomespace } from './utils/envUtils.js';
-import { isTraceEnabled } from './utils/trace.js';
 import { type FpsMetrics, FpsTracker } from './utils/fpsTracker.js';
 import { updateGithubRepoPathMapping } from './utils/githubRepoPathMapping.js';
 import { applyConfigEnvironmentVariables } from './utils/managedEnv.js';
@@ -320,7 +319,7 @@ export function getRenderContext(exitOnCtrlC: boolean): {
   // offline analysis by bench/repl-scroll.ts. Captures the full TUI
   // render pipeline (yoga → screen buffer → diff → optimize → stdout)
   // so perf work on any phase can be validated against real user flows.
-  const frameTimingLogPath = isTraceEnabled() ? process.env.CLAUDE_CODE_FRAME_TIMING_LOG : undefined;
+  const frameTimingLogPath = process.env.CLAUDE_CODE_FRAME_TIMING_LOG;
   return {
     getFpsMetrics: () => fpsTracker.getMetrics(),
     stats,

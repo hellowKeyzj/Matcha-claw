@@ -4,6 +4,7 @@ import { existsSync } from 'fs'
 import memoize from 'lodash-es/memoize.js'
 import { homedir } from 'os'
 import * as path from 'path'
+import { fileURLToPath } from 'url'
 import { logEvent } from 'src/services/analytics/index.js'
 import { isInBundledMode } from './bundledMode.js'
 import { logForDebugging } from './debug.js'
@@ -14,6 +15,11 @@ import { findExecutable } from './findExecutable.js'
 import { logError } from './log.js'
 import { getPlatform } from './platform.js'
 import { countCharInString } from './stringUtils.js'
+
+// Source runs use src/utils/vendor; built JS uses dist/vendor.
+const vendorRoot = import.meta.url.endsWith('.ts')
+  ? path.dirname(fileURLToPath(import.meta.url))
+  : distRoot
 
 type RipgrepConfig = {
   mode: 'system' | 'builtin' | 'embedded'
@@ -50,52 +56,27 @@ export const getRipgrepConfig = memoize((): RipgrepConfig => {
     }
   }
 
-  return resolveBuiltinWithFallback(getBuiltinRipgrepCandidates(distRoot))
+  const rgRoot = path.resolve(vendorRoot, 'vendor', 'ripgrep')
+  const command =
+    process.platform === 'win32'
+      ? path.resolve(rgRoot, `${process.arch}-win32`, 'rg.exe')
+      : path.resolve(rgRoot, `${process.arch}-${process.platform}`, 'rg')
+
+  return resolveBuiltinWithFallback(command)
 })
 
-export function getBuiltinRipgrepCandidates(
-  root: string,
-  arch = process.arch,
-  platform = process.platform,
-): string[] {
-  const binaryName = platform === 'win32' ? 'rg.exe' : 'rg'
-  const archPlatform = `${arch}-${platform}`
-  const projectRoot = path.basename(root) === 'dist' ? path.dirname(root) : root
-
-  return [
-    path.resolve(
-      projectRoot,
-      'dist',
-      'vendor',
-      'ripgrep',
-      archPlatform,
-      binaryName,
-    ),
-    path.resolve(
-      projectRoot,
-      'src',
-      'utils',
-      'vendor',
-      'ripgrep',
-      archPlatform,
-      binaryName,
-    ),
-    path.resolve(projectRoot, 'vendor', 'ripgrep', archPlatform, binaryName),
-  ]
-}
-
 /**
- * Pure function: decide what to do when builtin rg binaries may be missing.
+ * Pure function: decide what to do when the builtin rg binary may be missing.
  * Extracted so it can be tested without any module mocking.
  *
- * @param builtinCandidates Candidate paths to vendored rg binaries, in preference order.
- * @param systemRgPath      When omitted, calls `findExecutable('rg')` (production path).
- *                          Pass a string to force a specific system path, or `null` to
- *                          simulate "system rg not found".
- * @param platform          Override for `process.platform` (tests only).
+ * @param builtinPath  Path to the vendored rg binary.
+ * @param systemRgPath  When omitted, calls `findExecutable('rg')` (production path).
+ *                     Pass a string to force a specific system path, or `null` to
+ *                     simulate "system rg not found".
+ * @param platform     Override for `process.platform` (tests only).
  */
 export function resolveBuiltinWithFallback(
-  builtinCandidates: string[],
+  builtinPath: string,
   systemRgPath?: string | null,
   platform?: string,
 ): {
@@ -105,14 +86,15 @@ export function resolveBuiltinWithFallback(
   note?: string
 } {
   const p = platform ?? process.platform
-  const existingBuiltin = builtinCandidates.find(candidate =>
-    existsSync(candidate),
-  )
 
-  if (existingBuiltin) {
-    return { mode: 'builtin', command: existingBuiltin, args: [] }
+  // Builtin exists — use it, no note.
+  if (existsSync(builtinPath)) {
+    return { mode: 'builtin', command: builtinPath, args: [] }
   }
 
+  // Builtin missing — check system rg.
+  // When systemRgPath is explicitly passed (including null), use it directly.
+  // When undefined, call findExecutable (production path).
   const resolvedSystem =
     systemRgPath === undefined
       ? findExecutable('rg', []).cmd
@@ -126,9 +108,10 @@ export function resolveBuiltinWithFallback(
     }
   }
 
+  // Neither available.
   return {
     mode: 'builtin',
-    command: builtinCandidates[0],
+    command: builtinPath,
     args: [],
     note: `no ripgrep available on ${p}; install ripgrep via apt/pkg/brew`,
   }

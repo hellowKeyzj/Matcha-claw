@@ -4,6 +4,7 @@ import type { BetaMessageParam as MessageParam } from '@anthropic-ai/sdk/resourc
 // to defer ~279KB of AWS SDK code until a Bedrock call is actually made
 import type { CountTokensCommandInput } from '@aws-sdk/client-bedrock-runtime'
 import { getAPIProvider } from 'src/utils/model/providers.js'
+import { parseSealedSkillReference } from '../skills/sealed/reference.js'
 import { VERTEX_COUNT_TOKENS_ALLOWED_BETAS } from '../constants/betas.js'
 import type { Attachment } from '../utils/attachments.js'
 import { getModelBetas } from '../utils/betas.js'
@@ -216,7 +217,7 @@ export function roughTokenCountEstimation(
   content: string,
   bytesPerToken: number = 4,
 ): number {
-  return Math.round(content.length / bytesPerToken)
+  return parseSealedSkillReference(content)?.contentTokens ?? Math.round(content.length / bytesPerToken)
 }
 
 /**

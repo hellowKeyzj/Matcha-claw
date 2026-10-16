@@ -191,8 +191,7 @@ export async function checkGithubTokenSynced(): Promise<boolean> {
     const synced =
       response.status === 200 && response.data?.is_authenticated === true
     logForDebugging(
-      () =>
-        `GitHub token synced: ${synced} (status=${response.status}, data=${JSON.stringify(response.data)})`,
+      `GitHub token synced: ${synced} (status=${response.status}, data=${JSON.stringify(response.data)})`,
     )
     return synced
   } catch (error) {

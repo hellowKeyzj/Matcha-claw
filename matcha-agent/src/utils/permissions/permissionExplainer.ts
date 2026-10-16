@@ -197,8 +197,7 @@ Explain this command in context.`
     const toolUseBlock = response.content.find(c => c.type === 'tool_use')
     if (toolUseBlock && toolUseBlock.type === 'tool_use') {
       logForDebugging(
-        () =>
-          `Permission explainer: tool input: ${jsonStringify(toolUseBlock.input).slice(0, 500)}`,
+        `Permission explainer: tool input: ${jsonStringify(toolUseBlock.input).slice(0, 500)}`,
       )
       const result = RiskAssessmentSchema().safeParse(toolUseBlock.input)
 

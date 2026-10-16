@@ -185,7 +185,7 @@ import {
   logSuggestionSuppressed,
   type PromptVariant,
 } from 'src/services/PromptSuggestion/promptSuggestion.js'
-import { getLastCacheSafeParams } from 'src/utils/forkedAgent.js'
+import { getLastCacheSafeParams } from 'src/utils/cacheSafeParamsSlot.js'
 import { getAccountInformation } from 'src/utils/auth.js'
 import { OAuthService } from 'src/services/oauth/index.js'
 import { installOAuthTokens } from 'src/cli/handlers/auth.js'
@@ -212,6 +212,9 @@ import {
   saveMode,
   saveAiGeneratedTitle,
   restoreSessionMetadata,
+  recordTranscript,
+  flushSessionStorage,
+  getTranscriptPathForSession,
 } from 'src/utils/sessionStorage.js'
 import { incrementPromptCount } from 'src/utils/commitAttribution.js'
 import {
@@ -256,7 +259,12 @@ import {
   toInternalMessages,
   toSDKRateLimitInfo,
 } from 'src/utils/messages/mappers.js'
-import { createModelSwitchBreadcrumbs } from 'src/utils/messages.js'
+import { createModelSwitchBreadcrumbs, createAssistantMessage, createUserMessage } from 'src/utils/messages.js'
+import { TodoListSchema } from 'src/utils/todo/types.js'
+import { activeTodos, writeTodos } from 'src/utils/todo/state.js'
+import { createTask, deleteTaskStrict, getTaskListId, isTodoV2Enabled, patchTask, readTask, readTasks, readTaskView, sanitizePathComponent, withTaskListLock } from 'src/utils/tasks.js'
+import { TODO_WRITE_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/TodoWriteTool/constants.js'
+import { SDKControlGetTodosRequestSchema, SDKControlWriteTodosRequestSchema, SDKControlTaskRequestSchema } from 'src/entrypoints/sdk/controlSchemas.js'
 import { collectContextData } from 'src/commands/context/context-noninteractive.js'
 import { LOCAL_COMMAND_STDOUT_TAG } from 'src/constants/xml.js'
 import {
@@ -358,7 +366,7 @@ import { isBackgroundTask } from '../tasks/types.js'
 import { stopTask } from '../tasks/stopTask.js'
 import { drainSdkEvents } from '../utils/sdkEventQueue.js'
 import { initializeGrowthBook } from '../services/analytics/growthbook.js'
-import { errorMessage, toError } from '../utils/errors.js'
+import { errorMessage, getErrnoCode, toError } from '../utils/errors.js'
 import { sleep } from '../utils/sleep.js'
 import { isExtractModeActive } from '../memdir/paths.js'
 
@@ -1310,8 +1318,7 @@ function runHeadlessStreaming(
           async (request, extra) => {
             logMCPDebug(
               serverName,
-              () =>
-                `Elicitation request received in print mode: ${jsonStringify(request)}`,
+              `Elicitation request received in print mode (mode: ${request.params.mode === 'url' ? 'url' : 'form'})`,
             )
 
             const mode = request.params.mode === 'url' ? 'url' : 'form'
@@ -1329,8 +1336,7 @@ function runHeadlessStreaming(
             if (hookResponse) {
               logMCPDebug(
                 serverName,
-                () =>
-                  `Elicitation resolved by hook: ${jsonStringify(hookResponse)}`,
+                `Elicitation resolved by hook (action: ${hookResponse.action})`,
               )
               logEvent('tengu_mcp_elicitation_response', {
                 mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -1389,10 +1395,7 @@ function runHeadlessStreaming(
           ElicitationCompleteNotificationSchema,
           notification => {
             const { elicitationId } = notification.params
-            logMCPDebug(
-              serverName,
-              `Elicitation completion notification: ${elicitationId}`,
-            )
+            logMCPDebug(serverName, 'Elicitation completion notification')
             void executeNotificationHooks({
               message: `MCP server "${serverName}" confirmed elicitation ${elicitationId} complete`,
               notificationType: 'elicitation_complete',
@@ -1914,7 +1917,9 @@ function runHeadlessStreaming(
     }
   })
 
+  let todoControlInFlight: Promise<void> | undefined
   const run = async () => {
+    if (todoControlInFlight) await todoControlInFlight
     if (running) {
       return
     }
@@ -3161,6 +3166,118 @@ function runHeadlessStreaming(
             }
           }
           sendControlResponseSuccess(msg)
+        } else if (typeof req.subtype === 'string' && ['task_list', 'task_get', 'task_create', 'task_update'].includes(req.subtype)) {
+          const parsed = SDKControlTaskRequestSchema().safeParse(req)
+          if (!parsed.success) {
+            sendControlResponseSuccess(msg, { error: { kind: 'invalid_params', outcome: 'rejected' } })
+          } else {
+            const request = parsed.data
+            const listId = request.list_id ?? getTaskListId()
+            if (!listId || listId.length > 256 || listId.includes('\0')) {
+              sendControlResponseSuccess(msg, { error: { kind: 'invalid_params', outcome: 'rejected' } })
+            } else {
+              let mutationStarted = false
+              try {
+                const response = await withTaskListLock(listId, async () => {
+                  const taskViews = async () => Promise.all((await readTasks(listId)).map(task => readTaskView(listId, task)))
+                  if (request.subtype === 'task_list') return { tasks: await taskViews() }
+                  if (request.subtype === 'task_get') {
+                    const task = await readTask(listId, request.task_id)
+                    return task ? { task: await readTaskView(listId, task) } : { error: { kind: 'not_found', outcome: 'rejected' } }
+                  }
+                  // Read the complete list before mutating so malformed/IO failures are not missing items.
+                  await readTasks(listId)
+                  if (request.subtype === 'task_create') {
+                    mutationStarted = true
+                    const id = await createTask(listId, { ...request.input, status: 'pending', blocks: [], blockedBy: [] })
+                    const task = await readTask(listId, id)
+                    if (!task) throw new Error('task_readback_missing')
+                    return { task: await readTaskView(listId, task), tasks: await taskViews(), persisted: true, outcome: 'applied' }
+                  }
+                  const { taskId, status, ...patch } = request.input
+                  if (!await readTask(listId, taskId)) return { error: { kind: 'not_found', outcome: 'rejected' } }
+                  for (const id of [...(patch.addBlocks ?? []), ...(patch.addBlockedBy ?? [])]) {
+                    if (!await readTask(listId, id)) return { error: { kind: 'task_dependency_missing', outcome: 'rejected' } }
+                  }
+                  mutationStarted = true
+                  if (status === 'deleted') {
+                    if (!await deleteTaskStrict(listId, taskId)) throw new Error('task_delete_unconfirmed')
+                    const tasks = await readTasks(listId)
+                    if (tasks.some(task => task.id === taskId || task.blocks.includes(taskId) || task.blockedBy.includes(taskId))) throw new Error('task_delete_unconfirmed')
+                    return { tasks: await taskViews(), deletedId: taskId, persisted: true, outcome: 'applied' }
+                  }
+                  const task = await patchTask(listId, taskId, { ...patch, ...(status ? { status } : {}) })
+                  if (!task) throw new Error('task_readback_missing')
+                  return { task: await readTaskView(listId, task), tasks: await taskViews(), persisted: true, outcome: 'applied' }
+                })
+                sendControlResponseSuccess(msg, {
+                  listId: sanitizePathComponent(listId),
+                  todos: isTodoV2Enabled() ? [] : getAppState().todos[getSessionId()] ?? [],
+                  ...response,
+                })
+              } catch (error) {
+                const code = getErrnoCode(error)
+                const kind = code === 'ELOCKED' || code === 'ECOMPROMISED' ? 'task_lock_conflict' : error instanceof Error && error.message === 'task_native_schema' ? 'task_native_schema' : 'task_io'
+                sendControlResponseSuccess(msg, { error: { kind, outcome: mutationStarted ? 'unknown' : 'rejected' } })
+              }
+            }
+          }
+        } else if (msg.request.subtype === 'get_todos' || msg.request.subtype === 'write_todos') {
+          const write = msg.request.subtype === 'write_todos'
+          const parsed = (write ? SDKControlWriteTodosRequestSchema() : SDKControlGetTodosRequestSchema()).safeParse(req)
+          if (!parsed.success) {
+            sendControlResponseSuccess(msg, { error: { kind: 'invalid_params', outcome: 'rejected' } })
+          } else if (isTodoV2Enabled()) {
+            sendControlResponseSuccess(msg, { error: { kind: 'todo_owner_inactive', outcome: 'rejected' } })
+          } else if (!write) {
+            sendControlResponseSuccess(msg, { todos: getAppState().todos[getSessionId()] ?? [], source: 'appState' })
+          } else if (running || todoControlInFlight) {
+            sendControlResponseSuccess(msg, { error: { kind: 'todo_session_busy', outcome: 'rejected' } })
+          } else if (isSessionPersistenceDisabled()) {
+            sendControlResponseSuccess(msg, { error: { kind: 'todo_persistence_disabled', outcome: 'rejected' } })
+          } else if (parsed.data.subtype === 'write_todos') {
+            const { old_todos, new_todos } = parsed.data
+            const current = getAppState().todos[getSessionId()] ?? []
+            const expected = activeTodos(old_todos)
+            if (current.length !== expected.length || current.some((todo, index) => {
+              const old = expected[index]
+              return !old || todo.content !== old.content || todo.status !== old.status || todo.activeForm !== old.activeForm
+            })) {
+              sendControlResponseSuccess(msg, { error: { kind: 'todo_conflict', outcome: 'rejected' } })
+            } else {
+              const operation = async () => {
+                const toolUseId = `todo-control-${randomUUID()}`
+                const assistant = createAssistantMessage({ content: [{ type: 'tool_use', id: toolUseId, name: TODO_WRITE_TOOL_NAME, input: { todos: new_todos } }] })
+                const result = createUserMessage({
+                  content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'Todos have been modified successfully.' }],
+                  toolUseResult: { oldTodos: current, newTodos: new_todos },
+                  sourceToolAssistantUUID: assistant.uuid,
+                })
+                writeTodos({ getAppState, setAppState }, getSessionId(), new_todos)
+                mutableMessages.push(assistant, result)
+                try {
+                  await recordTranscript(mutableMessages)
+                  await flushSessionStorage()
+                  // Flush is only a drain; observe the native transcript before claiming persistence.
+                  const transcript = await readFile(getTranscriptPathForSession(getSessionId()), 'utf-8')
+                  const entries = transcript.split('\n').filter(Boolean).map(line => JSON.parse(line) as { uuid?: string; timestamp?: unknown; message?: { content?: unknown } })
+                  const saved = entries.find(entry => entry.uuid === assistant.uuid)
+                  const persisted = jsonStringify(saved?.message?.content) === jsonStringify(assistant.message.content) && entries.some(entry => entry.uuid === result.uuid)
+                  const updatedAt = typeof saved?.timestamp === 'string' ? Date.parse(saved.timestamp) : NaN
+                  const todos = TodoListSchema().parse(getAppState().todos[getSessionId()] ?? [])
+                  sendControlResponseSuccess(msg, {
+                    todos, stateApplied: true, transcriptPersisted: persisted,
+                    transcriptMessageId: assistant.uuid,
+                    ...(persisted && Number.isSafeInteger(updatedAt) && updatedAt >= 0 ? { updatedAt } : { error: { kind: 'todo_persistence_unconfirmed', outcome: 'unknown' } }),
+                  })
+                } catch {
+                  sendControlResponseSuccess(msg, { error: { kind: 'todo_io', outcome: 'unknown' }, stateApplied: true, transcriptPersisted: false })
+                }
+              }
+              todoControlInFlight = operation()
+              try { await todoControlInFlight } finally { todoControlInFlight = undefined }
+            }
+          }
         } else if (msg.request.subtype === 'mcp_status') {
           sendControlResponseSuccess(msg, {
             mcpServers: buildMcpServerStatuses(),
@@ -4973,7 +5090,8 @@ function handleChannelEnable(
       const { content, meta } = notification.params
       logMCPDebug(
         serverName,
-        `notifications/claude/channel: ${content.slice(0, 80)}`,
+        () =>
+          `notifications/claude/channel (content length: ${content.length}, meta key count: ${Object.keys(meta ?? {}).length})`,
       )
       logEvent('tengu_mcp_channel_message', {
         content_length: content.length,
@@ -5049,7 +5167,8 @@ function reregisterChannelHandlerAfterReconnect(
       const { content, meta } = notification.params
       logMCPDebug(
         connection.name,
-        `notifications/claude/channel: ${content.slice(0, 80)}`,
+        () =>
+          `notifications/claude/channel (content length: ${content.length}, meta key count: ${Object.keys(meta ?? {}).length})`,
       )
       logEvent('tengu_mcp_channel_message', {
         content_length: content.length,

@@ -2,22 +2,18 @@ import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from 
 import { getInitialSettings } from '../settings/settings.js'
 import type { SettingsJson } from '../settings/types.js'
 import { isEnvTruthy } from '../envUtils.js'
+import type { APIProvider } from './providerClassification.js'
 
-export type APIProvider =
-  | 'firstParty'
-  | 'bedrock'
-  | 'vertex'
-  | 'foundry'
-  | 'openai'
-  | 'openaiResponses'
-  | 'gemini'
-  | 'grok'
+export {
+  type APIProvider,
+  isThirdPartyAPIProvider,
+} from './providerClassification.js'
 
 export function getAPIProvider(
   settings: Pick<SettingsJson, 'modelType'> = getInitialSettings(),
 ): APIProvider {
   if (isEnvTruthy(process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST)) {
-    return getEnvAPIProvider() ?? 'firstParty'
+    return getEnvAPIProvider()
   }
 
   const modelType = settings.modelType
@@ -25,10 +21,10 @@ export function getAPIProvider(
   if (modelType === 'gemini') return 'gemini'
   if (modelType === 'grok') return 'grok'
 
-  return getEnvAPIProvider() ?? 'firstParty'
+  return getEnvAPIProvider()
 }
 
-function getEnvAPIProvider(): APIProvider | undefined {
+function getEnvAPIProvider(): APIProvider {
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_BEDROCK)) return 'bedrock'
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_VERTEX)) return 'vertex'
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_FOUNDRY)) return 'foundry'
@@ -39,7 +35,7 @@ function getEnvAPIProvider(): APIProvider | undefined {
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI)) return 'gemini'
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_GROK)) return 'grok'
 
-  return undefined
+  return 'firstParty'
 }
 
 export function getAPIProviderForStatsig(): AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS {

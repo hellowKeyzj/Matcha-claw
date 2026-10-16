@@ -408,8 +408,7 @@ export async function extractMcpServersFromPlugins(
       plugin.mcpServers = servers
 
       logForDebugging(
-        () =>
-          `Loaded ${Object.keys(servers).length} MCP servers from plugin ${plugin.name}`,
+        `Loaded ${Object.keys(servers).length} MCP servers from plugin ${plugin.name}`,
       )
 
       return addPluginScopeToServers(

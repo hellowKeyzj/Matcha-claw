@@ -277,11 +277,10 @@ export function saveMcpServerUserConfig(
       }
       if (needSecureScrub) {
         logForDebugging(
-          () =>
-            `saveMcpServerUserConfig: scrubbed ${
-              Object.keys(existingInSecureStorage!).length -
-              Object.keys(secureScrubbed!).length
-            } stale non-sensitive key(s) from secureStorage for ${k}`,
+          `saveMcpServerUserConfig: scrubbed ${
+            Object.keys(existingInSecureStorage!).length -
+            Object.keys(secureScrubbed!).length
+          } stale non-sensitive key(s) from secureStorage for ${k}`,
         )
       }
     }
@@ -340,8 +339,7 @@ export function saveMcpServerUserConfig(
     }
 
     logForDebugging(
-      () =>
-        `Saved user config for ${pluginId}/${serverName} (${Object.keys(nonSensitive).length} non-sensitive, ${Object.keys(sensitive).length} sensitive)`,
+      `Saved user config for ${pluginId}/${serverName} (${Object.keys(nonSensitive).length} non-sensitive, ${Object.keys(sensitive).length} sensitive)`,
     )
   } catch (error) {
     const errorObj = toError(error)

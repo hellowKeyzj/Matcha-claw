@@ -1,4 +1,8 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test'
+import {
+  type APIProvider,
+  isThirdPartyAPIProvider,
+} from '../providerClassification.js'
 
 /**
  * Inlined provider logic for hermetic testing.
@@ -11,33 +15,12 @@ import { describe, expect, test, beforeEach, afterEach } from 'bun:test'
  * importing anything that can be polluted.
  */
 
-type APIProvider =
-  | 'firstParty'
-  | 'bedrock'
-  | 'vertex'
-  | 'foundry'
-  | 'openai'
-  | 'openaiResponses'
-  | 'gemini'
-  | 'grok'
-
 function getAPIProviderTest(settings: { modelType?: string }): APIProvider {
-  if (
-    process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST === '1' ||
-    process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST === 'true'
-  ) {
-    return getEnvAPIProviderTest() ?? 'firstParty'
-  }
-
   const modelType = settings.modelType
   if (modelType === 'openai') return 'openai'
   if (modelType === 'gemini') return 'gemini'
   if (modelType === 'grok') return 'grok'
 
-  return getEnvAPIProviderTest() ?? 'firstParty'
-}
-
-function getEnvAPIProviderTest(): APIProvider | undefined {
   if (
     process.env.CLAUDE_CODE_USE_BEDROCK === '1' ||
     process.env.CLAUDE_CODE_USE_BEDROCK === 'true'
@@ -55,11 +38,6 @@ function getEnvAPIProviderTest(): APIProvider | undefined {
     return 'foundry'
 
   if (
-    process.env.CLAUDE_CODE_USE_OPENAI_RESPONSES === '1' ||
-    process.env.CLAUDE_CODE_USE_OPENAI_RESPONSES === 'true'
-  )
-    return 'openaiResponses'
-  if (
     process.env.CLAUDE_CODE_USE_OPENAI === '1' ||
     process.env.CLAUDE_CODE_USE_OPENAI === 'true'
   )
@@ -75,8 +53,35 @@ function getEnvAPIProviderTest(): APIProvider | undefined {
   )
     return 'grok'
 
-  return undefined
+  return 'firstParty'
 }
+
+describe('isThirdPartyAPIProvider', () => {
+  test('returns false only for the first-party Anthropic provider', () => {
+    expect(isThirdPartyAPIProvider('firstParty')).toBe(false)
+  })
+
+  for (const provider of [
+    'bedrock',
+    'vertex',
+    'foundry',
+    'openai',
+    'gemini',
+    'grok',
+  ] as const satisfies readonly APIProvider[]) {
+    test(`returns true for ${provider}`, () => {
+      expect(isThirdPartyAPIProvider(provider)).toBe(true)
+    })
+  }
+
+  for (const modelType of ['openai', 'gemini', 'grok'] as const) {
+    test(`classifies settings modelType=${modelType} as third-party`, () => {
+      expect(isThirdPartyAPIProvider(getAPIProviderTest({ modelType }))).toBe(
+        true,
+      )
+    })
+  }
+})
 
 function isFirstPartyAnthropicBaseUrlTest(): boolean {
   const baseUrl = process.env.ANTHROPIC_BASE_URL
@@ -95,13 +100,11 @@ function isFirstPartyAnthropicBaseUrlTest(): boolean {
 
 describe('getAPIProvider', () => {
   const envKeys = [
-    'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
     'CLAUDE_CODE_USE_GEMINI',
     'CLAUDE_CODE_USE_BEDROCK',
     'CLAUDE_CODE_USE_VERTEX',
     'CLAUDE_CODE_USE_FOUNDRY',
     'CLAUDE_CODE_USE_OPENAI',
-    'CLAUDE_CODE_USE_OPENAI_RESPONSES',
     'CLAUDE_CODE_USE_GROK',
     'OPENAI_BASE_URL',
     'GEMINI_BASE_URL',
@@ -138,12 +141,6 @@ describe('getAPIProvider', () => {
     expect(getAPIProviderTest({ modelType: 'gemini' })).toBe('gemini')
   })
 
-  test('host-managed provider routing ignores settings modelType', () => {
-    process.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1'
-    process.env.CLAUDE_CODE_USE_OPENAI = '1'
-    expect(getAPIProviderTest({ modelType: 'gemini' })).toBe('openai')
-  })
-
   test('returns "gemini" when CLAUDE_CODE_USE_GEMINI is set', () => {
     process.env.CLAUDE_CODE_USE_GEMINI = '1'
     expect(getAPIProviderTest({})).toBe('gemini')
@@ -167,11 +164,6 @@ describe('getAPIProvider', () => {
   test('returns "openai" when CLAUDE_CODE_USE_OPENAI is set', () => {
     process.env.CLAUDE_CODE_USE_OPENAI = '1'
     expect(getAPIProviderTest({})).toBe('openai')
-  })
-
-  test('returns "openaiResponses" when CLAUDE_CODE_USE_OPENAI_RESPONSES is set', () => {
-    process.env.CLAUDE_CODE_USE_OPENAI_RESPONSES = '1'
-    expect(getAPIProviderTest({})).toBe('openaiResponses')
   })
 
   test('returns "grok" when CLAUDE_CODE_USE_GROK is set', () => {

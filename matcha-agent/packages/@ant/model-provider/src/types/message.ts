@@ -2,6 +2,7 @@
 // Moved from src/types/message.ts to decouple the API layer from the main project.
 
 import type { UUID } from 'crypto'
+import type { AnthropicUsage } from '../shared/openaiUsage.js'
 import type {
   ContentBlockParam,
   ContentBlock,
@@ -78,7 +79,12 @@ export type UserMessage = Message & {
 }
 export type NormalizedUserMessage = UserMessage
 export type RequestStartEvent = { type: string; [key: string]: unknown }
-export type StreamEvent = { type: string; [key: string]: unknown }
+export type StreamEvent = {
+  type: string
+  /** Internal complete usage; never forwarded in the public SDK event. */
+  usageSnapshot?: AnthropicUsage
+  [key: string]: unknown
+}
 export type SystemCompactBoundaryMessage = Message & {
   type: 'system'
   compactMetadata: {

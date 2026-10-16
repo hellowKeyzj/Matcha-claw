@@ -969,8 +969,7 @@ export async function teleportToRemote(options: {
         environment_id: options.environmentId,
       };
       logForDebugging(
-        () =>
-          `[teleportToRemote] explicit env ${options.environmentId}, ${Object.keys(envVars).length} env vars, ${seedBundleFileId ? `bundle=${seedBundleFileId}` : `source=${gitSource?.url ?? 'none'}@${options.branchName ?? 'default'}`}`,
+        `[teleportToRemote] explicit env ${options.environmentId}, ${Object.keys(envVars).length} env vars, ${seedBundleFileId ? `bundle=${seedBundleFileId}` : `source=${gitSource?.url ?? 'none'}@${options.branchName ?? 'default'}`}`,
       );
       const response = await axios.post(url, requestBody, { headers, signal });
       if (response.status !== 200 && response.status !== 201) {
@@ -1167,7 +1166,7 @@ export async function teleportToRemote(options: {
     }
 
     logForDebugging(
-      () => `Available environments: ${environments.map(e => `${e.environment_id} (${e.name}, ${e.kind})`).join(', ')}`,
+      `Available environments: ${environments.map(e => `${e.environment_id} (${e.name}, ${e.kind})`).join(', ')}`,
     );
 
     // Select environment based on settings, then anthropic_cloud preference, then first available.
@@ -1282,7 +1281,7 @@ export async function teleportToRemote(options: {
       environment_id: environmentId,
     };
 
-    logForDebugging(() => `Creating session with payload: ${jsonStringify(requestBody, null, 2)}`);
+    logForDebugging(`Creating session with payload: ${jsonStringify(requestBody, null, 2)}`);
 
     // Make API call
     const response = await axios.post(url, requestBody, { headers, signal, validateStatus: status => status < 500 });
@@ -1342,7 +1341,7 @@ export async function archiveRemoteSession(sessionId: string, timeout = 10_000):
     if (resp.status === 200 || resp.status === 409) {
       logForDebugging(`[archiveRemoteSession] archived ${sessionId}`);
     } else {
-      logForDebugging(() => `[archiveRemoteSession] ${sessionId} failed ${resp.status}: ${jsonStringify(resp.data)}`);
+      logForDebugging(`[archiveRemoteSession] ${sessionId} failed ${resp.status}: ${jsonStringify(resp.data)}`);
     }
   } catch (err) {
     logError(err);

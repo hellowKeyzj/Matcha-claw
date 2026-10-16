@@ -370,8 +370,7 @@ export class StructuredIO {
           process.env[key] = value
         }
         logForDebugging(
-          () =>
-            `[structuredIO] applied update_environment_variables: ${keys.join(', ')}`,
+          `[structuredIO] applied update_environment_variables: ${keys.join(', ')}`,
         )
         return undefined
       }

@@ -13,8 +13,12 @@ import type {
 } from '../../../types/message.js'
 import type { AgentId } from '../../../types/ids.js'
 import type { Tools } from '../../../Tool.js'
+import { getSessionId } from '../../../bootstrap/state.js'
 import { getOpenAIClient } from './client.js'
-import { updateOpenAIUsage } from './openaiShared.js'
+import {
+  formatOpenAIPromptCacheKey,
+  getOfficialOpenAIPromptCacheKey,
+} from './openaiShared.js'
 import {
   anthropicMessagesToOpenAI,
   resolveOpenAIModel,
@@ -23,6 +27,7 @@ import {
   anthropicToolChoiceToOpenAI,
 } from '@ant/model-provider'
 import { isChatGPTAuthEnabled } from './chatgptAuth.js'
+import { getAPIProvider } from '../../../utils/model/providers.js'
 import {
   adaptResponsesStreamToAnthropic,
   buildResponsesRequest,
@@ -80,20 +85,22 @@ function convertToResponsesReasoningEffort(
   if (effortValue === 'low') return 'low'
   if (effortValue === 'medium') return 'medium'
   if (effortValue === 'high') return 'high'
-  if (effortValue === 'xhigh' || effortValue === 'max') return 'xhigh'
+  if (effortValue === 'xhigh') return 'xhigh'
+  if (effortValue === 'max') return 'max'
   if (typeof effortValue === 'number') return 'high'
   return undefined
 }
 
-function getChatGPTResponsesReasoningEffort(
+function getResponsesReasoningEffort(
   effortValue: unknown,
+  defaultEffort?: ResponsesReasoningEffort,
 ): ResponsesReasoningEffort | undefined {
   const envOverride = process.env.CLAUDE_CODE_EFFORT_LEVEL?.toLowerCase()
   if (envOverride === 'auto' || envOverride === 'unset') return undefined
   return (
     convertToResponsesReasoningEffort(envOverride) ??
     convertToResponsesReasoningEffort(effortValue) ??
-    'medium'
+    defaultEffort
   )
 }
 
@@ -212,125 +219,19 @@ function assembleFinalAssistantOutputs(params: {
  * SSE stream back to Anthropic BetaRawMessageStreamEvent for consumption
  * by the existing query pipeline.
  */
-type OpenAIWireProtocol = 'chatCompletions' | 'responses'
-type OpenAITransport =
-  | 'openai-chat-completions'
-  | 'openai-responses'
-  | 'chatgpt-responses'
-
-function openAIRawEventType(event: unknown): string {
-  if (!event || typeof event !== 'object') return typeof event
-  const record = event as Record<string, unknown>
-  if (typeof record.type === 'string') return record.type
-  if (typeof record.object === 'string') return record.object
-  return 'object'
-}
-
-function openAIRawDeltaChars(event: unknown): number {
-  if (!event || typeof event !== 'object') return 0
-  const record = event as Record<string, unknown>
-  if (typeof record.delta === 'string') return record.delta.length
-  const choices = record.choices
-  if (!Array.isArray(choices)) return 0
-  const firstChoice = choices[0]
-  if (!firstChoice || typeof firstChoice !== 'object') return 0
-  const delta = (firstChoice as Record<string, unknown>).delta
-  if (!delta || typeof delta !== 'object') return 0
-  const deltaRecord = delta as Record<string, unknown>
-  if (typeof deltaRecord.content === 'string') return deltaRecord.content.length
-  if (typeof deltaRecord.reasoning_content === 'string') {
-    return deltaRecord.reasoning_content.length
-  }
-  const toolCalls = deltaRecord.tool_calls
-  if (!Array.isArray(toolCalls)) return 0
-  return toolCalls.reduce((total, toolCall) => {
-    if (!toolCall || typeof toolCall !== 'object') return total
-    const fn = (toolCall as Record<string, unknown>).function
-    if (!fn || typeof fn !== 'object') return total
-    const argumentsDelta = (fn as Record<string, unknown>).arguments
-    return (
-      total + (typeof argumentsDelta === 'string' ? argumentsDelta.length : 0)
-    )
-  }, 0)
-}
-
-async function* traceOpenAIRawStream<T>(
-  stream: AsyncIterable<T>,
-  params: {
-    trace: Options['runTrace']
-    startedAt: number
-    provider: 'openai'
-    wireProtocol: OpenAIWireProtocol
-    transport: OpenAITransport
-    model: string
-  },
-): AsyncGenerator<T, void> {
-  let rawFrameCount = 0
-  let firstDeltaLogged = false
-  for await (const event of stream) {
-    rawFrameCount++
-    const rawEventType = openAIRawEventType(event)
-    if (rawFrameCount === 1) {
-      params.trace?.('api.stream.first_chunk', {
-        provider: params.provider,
-        wireProtocol: params.wireProtocol,
-        transport: params.transport,
-        phase: 'raw-event',
-        model: params.model,
-        elapsedMs: Date.now() - params.startedAt,
-        rawEventType,
-        rawFrameCount,
-      })
-    }
-    const deltaChars = openAIRawDeltaChars(event)
-    if (!firstDeltaLogged && deltaChars > 0) {
-      firstDeltaLogged = true
-      params.trace?.('api.stream.first_content_delta', {
-        provider: params.provider,
-        wireProtocol: params.wireProtocol,
-        transport: params.transport,
-        phase: 'raw-event',
-        model: params.model,
-        elapsedMs: Date.now() - params.startedAt,
-        rawEventType,
-        rawFrameCount,
-        deltaChars,
-      })
-    }
-    yield event
-  }
-  params.trace?.('api.stream.loop.end', {
-    provider: params.provider,
-    wireProtocol: params.wireProtocol,
-    transport: params.transport,
-    phase: 'raw-event',
-    model: params.model,
-    elapsedMs: Date.now() - params.startedAt,
-    rawFrameCount,
-    rawDone: true,
-  })
-}
-
-async function* queryModelOpenAIWithProtocol(
+export async function* queryModelOpenAI(
   messages: Message[],
   systemPrompt: SystemPrompt,
   tools: Tools,
   signal: AbortSignal,
   options: Options,
-  wireProtocol: OpenAIWireProtocol,
 ): AsyncGenerator<
   StreamEvent | AssistantMessage | SystemAPIErrorMessage,
   void
 > {
-  let traceStartedAt = 0
-  let tracedWireProtocol: OpenAIWireProtocol = wireProtocol
-  let tracedTransport: OpenAITransport | undefined
-  let tracedModel = options.model
-
   try {
     // 1. Resolve model name
     const openaiModel = resolveOpenAIModel(options.model)
-    tracedModel = openaiModel
 
     // 2. Normalize messages using shared preprocessing
     const messagesForAPI = normalizeMessagesForAPI(messages, tools)
@@ -411,9 +312,6 @@ async function* queryModelOpenAIWithProtocol(
     )
     const openaiTools = anthropicToolsToOpenAI(standardTools)
     const openaiToolChoice = anthropicToolChoiceToOpenAI(options.toolChoice)
-    const reasoningEffort = getChatGPTResponsesReasoningEffort(
-      options.effortValue,
-    )
 
     // 9. Log tool filtering details
     if (useSearchExtraTools) {
@@ -452,115 +350,75 @@ async function* queryModelOpenAIWithProtocol(
       options.maxOutputTokensOverride,
     )
 
+    const useAPIKeyResponses = getAPIProvider() === 'openaiResponses'
+    const useChatGPTResponses = !useAPIKeyResponses && isChatGPTAuthEnabled()
+    // OpenAI's official OAuth and API-key routes share the same prompt-cache
+    // contract. Scope the key to the real conversation so resumed turns stay
+    // sticky while unrelated sessions do not share a routing bucket. Generic
+    // compatible endpoints intentionally receive no OpenAI-specific fields.
+    const sessionId = getSessionId()
+    const sessionPromptCacheKey = formatOpenAIPromptCacheKey(sessionId)
+    const promptCacheKey = useChatGPTResponses
+      ? sessionPromptCacheKey
+      : getOfficialOpenAIPromptCacheKey(process.env.OPENAI_BASE_URL, sessionId)
+    const useOfficialOpenAICache = promptCacheKey !== undefined
+
     logForDebugging(
-      `[OpenAI] Calling model=${openaiModel}, messages=${openaiMessages.length}, tools=${openaiTools.length}, thinking=${enableThinking}`,
+      `[OpenAI] Calling model=${openaiModel}, messages=${openaiMessages.length}, tools=${openaiTools.length}, thinking=${enableThinking}${promptCacheKey ? `, prompt_cache_key=${promptCacheKey}` : ''}`,
     )
 
-    // 11. Call OpenAI API with streaming. ChatGPT subscription auth uses the
-    // Codex Responses backend; API-key/OpenAI-compatible auth keeps the
-    // existing Chat Completions adapter.
-    const usesChatGPTResponses =
-      wireProtocol === 'chatCompletions' && isChatGPTAuthEnabled()
-    const requestWireProtocol: OpenAIWireProtocol =
-      wireProtocol === 'responses' || usesChatGPTResponses
-        ? 'responses'
-        : 'chatCompletions'
-    const transport: OpenAITransport =
-      wireProtocol === 'responses'
-        ? 'openai-responses'
-        : usesChatGPTResponses
-          ? 'chatgpt-responses'
-          : 'openai-chat-completions'
-    traceStartedAt = Date.now()
-    tracedWireProtocol = requestWireProtocol
-    tracedTransport = transport
-    options.runTrace?.('api.request.sent', {
-      queryDepth: options.queryTracking?.depth,
-      provider: 'openai',
-      wireProtocol: requestWireProtocol,
-      transport,
-      phase: 'request',
-      model: openaiModel,
-      hasBaseUrl: Boolean(process.env.OPENAI_BASE_URL),
-      hasApiKey: Boolean(process.env.OPENAI_API_KEY),
-    })
-
-    const traceContext = {
-      trace: options.runTrace,
-      startedAt: traceStartedAt,
-      provider: 'openai' as const,
-      wireProtocol: requestWireProtocol,
-      transport,
-      model: openaiModel,
-    }
-
-    const adaptedStream =
-      requestWireProtocol === 'responses'
-        ? adaptResponsesStreamToAnthropic(
-            traceOpenAIRawStream(
-              wireProtocol === 'responses'
-                ? await createOpenAIResponsesStream({
-                    request: buildResponsesRequest({
-                      model: openaiModel,
-                      messages: openaiMessages,
-                      tools: openaiTools,
-                      toolChoice: openaiToolChoice,
-                      reasoningEffort,
-                    }),
-                    signal,
-                    fetchOverride:
-                      options.fetchOverride as unknown as typeof fetch,
-                    traceContext,
-                  })
-                : await createChatGPTResponsesStream({
-                    request: buildResponsesRequest({
-                      model: openaiModel,
-                      messages: openaiMessages,
-                      tools: openaiTools,
-                      toolChoice: openaiToolChoice,
-                      reasoningEffort,
-                    }),
-                    signal,
-                    fetchOverride:
-                      options.fetchOverride as unknown as typeof fetch,
-                    traceContext,
-                  }),
-              traceContext,
+    // 11. Responses shares conversion, not authentication or endpoint ownership.
+    const responsesRequest =
+      useAPIKeyResponses || useChatGPTResponses
+        ? buildResponsesRequest({
+            model: openaiModel,
+            messages: openaiMessages,
+            tools: openaiTools,
+            toolChoice: openaiToolChoice,
+            reasoningEffort: getResponsesReasoningEffort(
+              options.effortValue,
+              useChatGPTResponses ? 'medium' : undefined,
             ),
-            openaiModel,
-          )
-        : adaptOpenAIStreamToAnthropic(
-            traceOpenAIRawStream(
-              await getOpenAIClient({
-                maxRetries: 0,
-                fetchOverride: options.fetchOverride as unknown as typeof fetch,
-                source: options.querySource,
-              }).chat.completions.create(
-                buildOpenAIRequestBody({
-                  model: openaiModel,
-                  messages: openaiMessages,
-                  tools: openaiTools,
-                  toolChoice: openaiToolChoice,
-                  enableThinking,
-                  maxTokens,
-                  temperatureOverride: options.temperatureOverride,
-                }),
-                { signal },
-              ),
-              traceContext,
-            ) as Parameters<typeof adaptOpenAIStreamToAnthropic>[0],
-            openaiModel,
-          )
-
-    options.runTrace?.('api.response.headers', {
-      queryDepth: options.queryTracking?.depth,
-      provider: 'openai',
-      wireProtocol: requestWireProtocol,
-      transport,
-      phase: 'headers',
-      model: openaiModel,
-      elapsedMs: Date.now() - traceStartedAt,
-    })
+            promptCacheKey,
+            ...(!useChatGPTResponses && {
+              maxOutputTokens: maxTokens,
+              temperature: options.temperatureOverride,
+              outputFormat: options.outputFormat,
+            }),
+          })
+        : undefined
+    const adaptedStream = responsesRequest
+      ? adaptResponsesStreamToAnthropic(
+          await (useChatGPTResponses
+            ? createChatGPTResponsesStream
+            : createOpenAIResponsesStream)({
+            request: responsesRequest,
+            signal,
+            fetchOverride: options.fetchOverride as unknown as typeof fetch,
+          }),
+          openaiModel,
+        )
+      : adaptOpenAIStreamToAnthropic(
+          await getOpenAIClient({
+            maxRetries: 0,
+            fetchOverride: options.fetchOverride as unknown as typeof fetch,
+            source: options.querySource,
+          }).chat.completions.create(
+            buildOpenAIRequestBody({
+              model: openaiModel,
+              messages: openaiMessages,
+              tools: openaiTools,
+              toolChoice: openaiToolChoice,
+              enableThinking,
+              maxTokens,
+              temperatureOverride: options.temperatureOverride,
+              promptCacheKey,
+            }),
+            { signal },
+          ),
+          openaiModel,
+          { includeCacheWriteTokens: useOfficialOpenAICache },
+        )
 
     // 12. Convert OpenAI stream to Anthropic events, then process into
     //     AssistantMessage + StreamEvent (matching the Anthropic path behavior)
@@ -577,61 +435,26 @@ async function* queryModelOpenAIWithProtocol(
       cache_read_input_tokens: 0,
     }
     let ttftMs = 0
-    const start = traceStartedAt || Date.now()
-    let adaptedEventCount = 0
-    let hasAdaptedContentDelta = false
-    let hasAdaptedTextDelta = false
+    const start = Date.now()
 
     for await (const event of adaptedStream) {
-      adaptedEventCount++
-      if (adaptedEventCount === 1) {
-        options.runTrace?.('api.stream.first_chunk', {
-          queryDepth: options.queryTracking?.depth,
-          provider: 'openai',
-          wireProtocol: tracedWireProtocol,
-          transport: tracedTransport ?? null,
-          phase: 'adapter-event',
-          model: tracedModel,
-          elapsedMs: Date.now() - start,
-          adapterEventType: event.type,
-          emittedEventCount: adaptedEventCount,
-        })
-      }
       switch (event.type) {
         case 'message_start': {
           partialMessage = event.message
           ttftMs = Date.now() - start
-          options.runTrace?.('api.stream.message_start', {
-            queryDepth: options.queryTracking?.depth,
-            provider: 'openai',
-            wireProtocol: tracedWireProtocol,
-            transport: tracedTransport ?? null,
-            phase: 'adapter-event',
-            model: tracedModel,
-            elapsedMs: ttftMs,
-            emittedEventCount: adaptedEventCount,
-          })
           if (event.message.usage) {
             usage = {
-              ...usage,
-              ...(event.message.usage as unknown as typeof usage),
+              input_tokens: event.message.usage.input_tokens,
+              output_tokens: event.message.usage.output_tokens,
+              cache_creation_input_tokens:
+                event.message.usage.cache_creation_input_tokens ?? 0,
+              cache_read_input_tokens:
+                event.message.usage.cache_read_input_tokens ?? 0,
             }
           }
           break
         }
         case 'content_block_start': {
-          options.runTrace?.('api.stream.content_block_start', {
-            queryDepth: options.queryTracking?.depth,
-            provider: 'openai',
-            wireProtocol: tracedWireProtocol,
-            transport: tracedTransport ?? null,
-            phase: 'adapter-event',
-            model: tracedModel,
-            elapsedMs: Date.now() - start,
-            blockIndex: event.index,
-            blockType: event.content_block.type,
-            emittedEventCount: adaptedEventCount,
-          })
           const idx = event.index
           const cb = event.content_block
           if (cb.type === 'tool_use') {
@@ -650,39 +473,7 @@ async function* queryModelOpenAIWithProtocol(
           const delta = event.delta
           const block = contentBlocks[idx]
           if (!block) break
-          if (!hasAdaptedContentDelta) {
-            hasAdaptedContentDelta = true
-            options.runTrace?.('api.stream.first_content_delta', {
-              queryDepth: options.queryTracking?.depth,
-              provider: 'openai',
-              wireProtocol: tracedWireProtocol,
-              transport: tracedTransport ?? null,
-              phase: 'adapter-event',
-              model: tracedModel,
-              elapsedMs: Date.now() - start,
-              blockIndex: idx,
-              deltaType: delta.type,
-              emittedEventCount: adaptedEventCount,
-            })
-          }
           if (delta.type === 'text_delta') {
-            if (!hasAdaptedTextDelta) {
-              hasAdaptedTextDelta = true
-              const now = Date.now()
-              options.runTrace?.('api.stream.first_text_delta', {
-                queryDepth: options.queryTracking?.depth,
-                provider: 'openai',
-                wireProtocol: tracedWireProtocol,
-                transport: tracedTransport ?? null,
-                phase: 'adapter-event',
-                model: tracedModel,
-                elapsedMs: now - start,
-                blockIndex: idx,
-                deltaType: delta.type,
-                textLength: delta.text.length,
-                emittedEventCount: adaptedEventCount,
-              })
-            }
             block.text = ((block.text as string | undefined) || '') + delta.text
           } else if (delta.type === 'input_json_delta') {
             block.input =
@@ -696,55 +487,29 @@ async function* queryModelOpenAIWithProtocol(
           break
         }
         case 'content_block_stop': {
-          options.runTrace?.('api.stream.content_block_stop', {
-            queryDepth: options.queryTracking?.depth,
-            provider: 'openai',
-            wireProtocol: tracedWireProtocol,
-            transport: tracedTransport ?? null,
-            phase: 'adapter-event',
-            model: tracedModel,
-            elapsedMs: Date.now() - start,
-            blockIndex: event.index,
-            emittedEventCount: adaptedEventCount,
-          })
           // Block accumulation is complete; assembly happens at message_stop.
           break
         }
         case 'message_delta': {
           const deltaUsage = event.usage
           if (deltaUsage) {
-            usage = updateOpenAIUsage(
-              usage,
-              deltaUsage as unknown as Parameters<typeof updateOpenAIUsage>[1],
-            )
+            usage = {
+              input_tokens: deltaUsage.input_tokens ?? usage.input_tokens,
+              output_tokens: deltaUsage.output_tokens ?? usage.output_tokens,
+              cache_creation_input_tokens:
+                deltaUsage.cache_creation_input_tokens ??
+                usage.cache_creation_input_tokens,
+              cache_read_input_tokens:
+                deltaUsage.cache_read_input_tokens ??
+                usage.cache_read_input_tokens,
+            }
           }
           if (event.delta.stop_reason != null) {
             stopReason = event.delta.stop_reason
-            options.runTrace?.('api.stream.message_delta.stop_reason', {
-              queryDepth: options.queryTracking?.depth,
-              provider: 'openai',
-              wireProtocol: tracedWireProtocol,
-              transport: tracedTransport ?? null,
-              phase: 'adapter-event',
-              model: tracedModel,
-              elapsedMs: Date.now() - start,
-              stopReason,
-              emittedEventCount: adaptedEventCount,
-            })
           }
           break
         }
         case 'message_stop': {
-          options.runTrace?.('api.stream.message_stop', {
-            queryDepth: options.queryTracking?.depth,
-            provider: 'openai',
-            wireProtocol: tracedWireProtocol,
-            transport: tracedTransport ?? null,
-            phase: 'adapter-event',
-            model: tracedModel,
-            elapsedMs: Date.now() - start,
-            emittedEventCount: adaptedEventCount,
-          })
           // Assemble ONE AssistantMessage with ALL content blocks, matching the
           // Anthropic SDK path. Real usage (input + output tokens) is available
           // here and injected so tokenCountWithEstimation() can read it.
@@ -768,7 +533,13 @@ async function* queryModelOpenAIWithProtocol(
             partialMessage = null
           }
           // Track cost and token usage
-          if (usage.input_tokens + usage.output_tokens > 0) {
+          if (
+            usage.input_tokens +
+              usage.output_tokens +
+              usage.cache_creation_input_tokens +
+              usage.cache_read_input_tokens >
+            0
+          ) {
             const costUSD = calculateUSDCost(
               openaiModel,
               usage as unknown as BetaUsage,
@@ -788,20 +559,11 @@ async function* queryModelOpenAIWithProtocol(
         type: 'stream_event',
         event,
         ...(event.type === 'message_start' ? { ttftMs } : undefined),
+        ...(event.type === 'message_stop'
+          ? { usageSnapshot: usage }
+          : undefined),
       } as StreamEvent
     }
-
-    options.runTrace?.('api.stream.loop.end', {
-      queryDepth: options.queryTracking?.depth,
-      provider: 'openai',
-      wireProtocol: tracedWireProtocol,
-      transport: tracedTransport ?? null,
-      phase: 'adapter-event',
-      model: tracedModel,
-      elapsedMs: Date.now() - start,
-      stopReason,
-      emittedEventCount: adaptedEventCount,
-    })
 
     // Record LLM observation in Langfuse (no-op if not configured)
     recordLLMObservation(options.langfuseTrace ?? null, {
@@ -838,16 +600,6 @@ async function* queryModelOpenAIWithProtocol(
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error)
-    options.runTrace?.('api.stream.error', {
-      queryDepth: options.queryTracking?.depth,
-      provider: 'openai',
-      wireProtocol: tracedWireProtocol,
-      transport: tracedTransport ?? null,
-      phase: traceStartedAt ? 'openai-compatible' : 'setup',
-      model: tracedModel,
-      elapsedMs: traceStartedAt ? Date.now() - traceStartedAt : 0,
-      errorName: error instanceof Error ? error.name : typeof error,
-    })
     logForDebugging(`[OpenAI] Error: ${errorMessage}`, { level: 'error' })
     yield createAssistantAPIErrorMessage({
       content: `API Error: ${errorMessage}`,
@@ -857,44 +609,4 @@ async function* queryModelOpenAIWithProtocol(
         : new Error(String(error))) as unknown as SDKAssistantMessageError,
     })
   }
-}
-
-export async function* queryModelOpenAI(
-  messages: Message[],
-  systemPrompt: SystemPrompt,
-  tools: Tools,
-  signal: AbortSignal,
-  options: Options,
-): AsyncGenerator<
-  StreamEvent | AssistantMessage | SystemAPIErrorMessage,
-  void
-> {
-  yield* queryModelOpenAIWithProtocol(
-    messages,
-    systemPrompt,
-    tools,
-    signal,
-    options,
-    'chatCompletions',
-  )
-}
-
-export async function* queryModelOpenAIResponses(
-  messages: Message[],
-  systemPrompt: SystemPrompt,
-  tools: Tools,
-  signal: AbortSignal,
-  options: Options,
-): AsyncGenerator<
-  StreamEvent | AssistantMessage | SystemAPIErrorMessage,
-  void
-> {
-  yield* queryModelOpenAIWithProtocol(
-    messages,
-    systemPrompt,
-    tools,
-    signal,
-    options,
-    'responses',
-  )
 }

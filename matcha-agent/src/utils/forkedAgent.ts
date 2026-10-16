@@ -25,6 +25,7 @@ import type {
   BetaRawMessageStreamEvent,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js'
 import type { ToolUseContext } from '../Tool.js'
+import { hasSealedSkillReferences } from '../skills/sealed/reference.js'
 import type { AgentDefinition } from '@claude-code-best/builtin-tools/tools/AgentTool/loadAgentsDir.js'
 import type { AgentId } from '../types/ids.js'
 import type { Message, StreamEvent } from '../types/message.js'
@@ -71,18 +72,9 @@ export type CacheSafeParams = {
   forkContextMessages: Message[]
 }
 
-// Slot written by handleStopHooks after each turn so post-turn forks
-// (promptSuggestion, postTurnSummary, /btw) can share the main loop's
-// prompt cache without each caller threading params through.
-let lastCacheSafeParams: CacheSafeParams | null = null
-
-export function saveCacheSafeParams(params: CacheSafeParams | null): void {
-  lastCacheSafeParams = params
-}
-
-export function getLastCacheSafeParams(): CacheSafeParams | null {
-  return lastCacheSafeParams
-}
+// The post-turn snapshot slot (saveCacheSafeParams/getLastCacheSafeParams)
+// lives in cacheSafeParamsSlot.ts — it is session-scoped and kept separate
+// so it can be unit-tested without this module's query-loop dependencies.
 
 export type ForkedAgentParams = {
   /** Messages to start the forked query loop with */
@@ -225,7 +217,7 @@ export async function prepareForkedCommandContext(
   }
 
   // Prepare prompt messages
-  const promptMessages = [createUserMessage({ content: skillContent })]
+  const promptMessages = [createUserMessage({ content: skillPrompt, isMeta: hasSealedSkillReferences(skillPrompt) ? true : undefined })]
 
   return {
     skillContent,
@@ -587,6 +579,18 @@ export async function runForkedAgent({
         if (isMessageDeltaStreamEvent(message)) {
           const turnUsage = updateUsage({ ...EMPTY_USAGE }, message.event.usage)
           totalUsage = accumulateUsage(totalUsage, turnUsage)
+        } else {
+          // Feed streamed text length into the (optionally shared) response
+          // length callback so callers with shareSetResponseLength can drive
+          // token-based UI (e.g. the compaction progress bar). No-op by default.
+          const event = (message as StreamEventMessage).event
+          if (
+            event.type === 'content_block_delta' &&
+            event.delta.type === 'text_delta'
+          ) {
+            const textLength = event.delta.text.length
+            isolatedToolUseContext.setResponseLength(len => len + textLength)
+          }
         }
         continue
       }
@@ -628,8 +632,7 @@ export async function runForkedAgent({
   }
 
   logForDebugging(
-    () =>
-      `Forked agent [${forkLabel}] finished: ${outputMessages.length} messages, types=[${outputMessages.map(m => m.type).join(', ')}], totalUsage: input=${totalUsage.input_tokens} output=${totalUsage.output_tokens} cacheRead=${totalUsage.cache_read_input_tokens} cacheCreate=${totalUsage.cache_creation_input_tokens}`,
+    `Forked agent [${forkLabel}] finished: ${outputMessages.length} messages, types=[${outputMessages.map(m => m.type).join(', ')}], totalUsage: input=${totalUsage.input_tokens} output=${totalUsage.output_tokens} cacheRead=${totalUsage.cache_read_input_tokens} cacheCreate=${totalUsage.cache_creation_input_tokens}`,
   )
 
   const durationMs = Date.now() - startTime

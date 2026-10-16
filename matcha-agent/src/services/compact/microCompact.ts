@@ -12,6 +12,7 @@ import { WEB_SEARCH_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/WebS
 import type { Message } from '../../types/message.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { getMainLoopModel } from '../../utils/model/model.js'
+import { hasSealedSkillReferences } from '../../skills/sealed/reference.js'
 import { SHELL_TOOL_NAMES } from '../../utils/shell/shellToolUtils.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
 import {
@@ -343,8 +344,7 @@ async function cachedMicrocompactPath(
     }
 
     logForDebugging(
-      () =>
-        `Cached MC deleting ${toolsToDelete.length} tool(s): ${toolsToDelete.join(', ')}`,
+      `Cached MC deleting ${toolsToDelete.length} tool(s): ${toolsToDelete.join(', ')}`,
     )
 
     // Log the event
@@ -483,7 +483,8 @@ function maybeTimeBasedMicrocompact(
       if (
         block.type === 'tool_result' &&
         clearSet.has(block.tool_use_id) &&
-        block.content !== TIME_BASED_MC_CLEARED_MESSAGE
+        block.content !== TIME_BASED_MC_CLEARED_MESSAGE &&
+        !hasSealedSkillReferences(block.content)
       ) {
         tokensSaved += calculateToolResultTokens(block)
         touched = true

@@ -9,7 +9,7 @@ import {
 } from 'src/utils/hooks.js'
 import { lazySchema } from 'src/utils/lazySchema.js'
 import {
-  blockTask,
+  patchTask,
   deleteTask,
   getTask,
   getTaskListId,
@@ -17,7 +17,6 @@ import {
   listTasks,
   type TaskStatus,
   TaskStatusSchema,
-  updateTask,
 } from 'src/utils/tasks.js'
 import {
   getAgentId,
@@ -198,15 +197,7 @@ export const TaskUpdateTool = buildTool({
       }
     }
     if (metadata !== undefined) {
-      const merged = { ...(existingTask.metadata ?? {}) }
-      for (const [key, value] of Object.entries(metadata)) {
-        if (value === null) {
-          delete merged[key]
-        } else {
-          merged[key] = value
-        }
-      }
-      updates.metadata = merged
+      updates.metadata = metadata
       updatedFields.push('metadata')
     }
     if (status !== undefined) {
@@ -269,8 +260,9 @@ export const TaskUpdateTool = buildTool({
       }
     }
 
-    if (Object.keys(updates).length > 0) {
-      await updateTask(taskListId, taskId, updates)
+    if (Object.keys(updates).length > 0 || addBlocks?.length || addBlockedBy?.length) {
+      const updated = await patchTask(taskListId, taskId, { ...updates, addBlocks, addBlockedBy })
+      if (!updated) return { data: { success: false, taskId, updatedFields: [], error: 'Task not found' } }
     }
 
     // Notify new owner via mailbox when ownership changes
@@ -302,9 +294,6 @@ export const TaskUpdateTool = buildTool({
       const newBlocks = addBlocks.filter(
         id => !existingTask.blocks.includes(id),
       )
-      for (const blockId of newBlocks) {
-        await blockTask(taskListId, taskId, blockId)
-      }
       if (newBlocks.length > 0) {
         updatedFields.push('blocks')
       }
@@ -315,9 +304,6 @@ export const TaskUpdateTool = buildTool({
       const newBlockedBy = addBlockedBy.filter(
         id => !existingTask.blockedBy.includes(id),
       )
-      for (const blockerId of newBlockedBy) {
-        await blockTask(taskListId, blockerId, taskId)
-      }
       if (newBlockedBy.length > 0) {
         updatedFields.push('blockedBy')
       }

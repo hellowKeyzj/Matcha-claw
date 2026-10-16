@@ -55,6 +55,7 @@ import {
 import { isTodoV2Enabled } from './tasks.js'
 import type { TodoList } from './todo/types.js'
 import { TodoListSchema } from './todo/types.js'
+import { activeTodos } from './todo/state.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
 import {
   getCurrentWorktreeSession,
@@ -78,7 +79,7 @@ function extractTodosFromTranscript(messages: Message[]): TodoList {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
     if (msg?.type !== 'assistant') continue
-    const toolUse = (msg.message!.content as any[]).find(
+    const toolUse = (msg.message!.content as any[]).findLast(
       block => block.type === 'tool_use' && block.name === TODO_WRITE_TOOL_NAME,
     )
     if (!toolUse || toolUse.type !== 'tool_use') continue
@@ -139,13 +140,11 @@ export function restoreSessionStateFromLog(
   // Interactive mode uses file-backed v2 tasks, so AppState.todos is unused there.
   if (!isTodoV2Enabled() && result.messages && result.messages.length > 0) {
     const todos = extractTodosFromTranscript(result.messages)
-    if (todos.length > 0) {
-      const agentId = getSessionId()
-      setAppState(prev => ({
-        ...prev,
-        todos: { ...prev.todos, [agentId]: todos },
-      }))
-    }
+    // Resume uses the same all-completed → empty transition as TodoWrite.
+    setAppState(prev => ({
+      ...prev,
+      todos: { ...prev.todos, [getSessionId()]: activeTodos(todos) },
+    }))
   }
 }
 

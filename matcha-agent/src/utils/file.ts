@@ -16,7 +16,7 @@ import { logEvent } from 'src/services/analytics/index.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 import { getCwd } from '../utils/cwd.js'
 import { logForDebugging } from './debug.js'
-import { isENOENT, isFsInaccessible } from './errors.js'
+import { getErrnoCode, isENOENT, isFsInaccessible } from './errors.js'
 import {
   detectEncodingForResolvedPath,
   detectLineEndingsForString,
@@ -382,10 +382,10 @@ export function writeFileSyncAndFlush_DEPRECATED(
     // ENOENT (doesn't exist) or EINVAL (not a symlink) — keep targetPath = filePath
   }
 
-  // Try atomic write first
+  // Write a flushed temporary file in the same directory before replacing.
   const tempPath = `${targetPath}.tmp.${process.pid}.${Date.now()}`
 
-  // Check if target file exists and get its permissions (single stat, reused in both atomic and fallback paths)
+  // Check if target file exists and get its permissions
   let targetMode: number | undefined
   let targetExists = false
   try {
@@ -434,7 +434,27 @@ export function writeFileSyncAndFlush_DEPRECATED(
     // Atomic rename (on POSIX systems, this is atomic)
     // On Windows, this will overwrite the destination if it exists
     logForDebugging(`Renaming ${tempPath} to ${targetPath}`)
-    fs.renameSync(tempPath, targetPath)
+    try {
+      fs.renameSync(tempPath, targetPath)
+    } catch (error) {
+      if (process.platform !== 'win32' || getErrnoCode(error) !== 'EPERM') {
+        throw error
+      }
+      // Windows readers may briefly block replacement; bound this resource wait.
+      const deadline = performance.now() + 250
+      const wait = new Int32Array(new SharedArrayBuffer(4))
+      for (;;) {
+        const remaining = deadline - performance.now()
+        if (remaining <= 0) throw error
+        Atomics.wait(wait, 0, 0, Math.min(5, remaining))
+        try {
+          fs.renameSync(tempPath, targetPath)
+          break
+        } catch (retryError) {
+          if (getErrnoCode(retryError) !== 'EPERM') throw retryError
+        }
+      }
+    }
     logForDebugging(`File ${targetPath} written atomically`)
   } catch (atomicError) {
     logForDebugging(`Failed to write file atomically: ${atomicError}`, {
@@ -450,30 +470,7 @@ export function writeFileSyncAndFlush_DEPRECATED(
       logForDebugging(`Failed to clean up temp file: ${cleanupError}`)
     }
 
-    // Fallback to non-atomic write
-    logForDebugging(`Falling back to non-atomic write for ${targetPath}`)
-    try {
-      const fallbackOptions: {
-        encoding: BufferEncoding
-        flush: boolean
-        mode?: number
-      } = {
-        encoding: options.encoding,
-        flush: true,
-      }
-      // Only set mode for new files
-      if (!targetExists && options.mode !== undefined) {
-        fallbackOptions.mode = options.mode
-      }
-
-      fsWriteFileSync(targetPath, content, fallbackOptions)
-      logForDebugging(
-        `File ${targetPath} written successfully with non-atomic fallback`,
-      )
-    } catch (fallbackError) {
-      logForDebugging(`Non-atomic write also failed: ${fallbackError}`)
-      throw fallbackError
-    }
+    throw atomicError
   }
 }
 

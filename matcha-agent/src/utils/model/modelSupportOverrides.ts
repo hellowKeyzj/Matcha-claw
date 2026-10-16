@@ -50,7 +50,11 @@ export const get3PModelCapabilityOverride = memoize(
     }
     const m = model.toLowerCase()
     // Choose the appropriate tier list based on provider
-    const tiers = getAPIProvider() === 'openai' ? OPENAI_TIERS : ANTHROPIC_TIERS
+    const provider = getAPIProvider()
+    const tiers =
+      provider === 'openai' || provider === 'openaiResponses'
+        ? OPENAI_TIERS
+        : ANTHROPIC_TIERS
     for (const tier of tiers) {
       const pinned = process.env[tier.modelEnvVar]
       const capabilities = process.env[tier.capabilitiesEnvVar]

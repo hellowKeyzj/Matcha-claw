@@ -177,8 +177,7 @@ export function registerLSPNotificationHandlers(
               )
               logError(err)
               logForDebugging(
-                () =>
-                  `Invalid diagnostic params from ${serverName}: ${jsonStringify(params)}`,
+                `Invalid diagnostic params from ${serverName}: ${jsonStringify(params)}`,
               )
               return
             }

@@ -9,7 +9,9 @@
  */
 export function debugMock() {
   return {
+    getMinDebugLogLevel: () => 'debug' as const,
     isDebugMode: () => false,
+    enableDebugLogging: () => false,
     getDebugFilter: () => null,
     isDebugToStdErr: () => false,
     getDebugFilePath: () => null as string | null,

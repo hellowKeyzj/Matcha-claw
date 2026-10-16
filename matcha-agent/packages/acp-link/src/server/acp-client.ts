@@ -1,12 +1,9 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type { WSContext } from 'hono/ws'
 import * as acp from '@agentclientprotocol/sdk'
 import { send } from './client-send.js'
 import {
   PERMISSION_TIMEOUT_MS,
   generateRequestId,
-  getAgentConfig,
   logPerm,
   logWs,
 } from './runtime-state.js'
@@ -53,37 +50,18 @@ export function createClient(
     },
 
     async readTextFile(params) {
-      const filePath = resolveWorkspaceFilePath(params.path)
       logWs.debug({ path: params.path }, 'readTextFile')
-      return { content: await readFile(filePath, 'utf8') }
+      return { content: '' }
     },
 
     async writeTextFile(params) {
-      const filePath = resolveWorkspaceFilePath(params.path)
       logWs.debug({ path: params.path }, 'writeTextFile')
-      await mkdir(dirname(filePath), { recursive: true })
-      await writeFile(filePath, params.content, 'utf8')
       return {}
     },
   }
 }
 
 // Handle permission response from client
-function resolveWorkspaceFilePath(path: string): string {
-  const workspaceRoot = resolve(getAgentConfig().cwd)
-  const filePath = isAbsolute(path)
-    ? resolve(path)
-    : resolve(workspaceRoot, path)
-  const relativePath = relative(workspaceRoot, filePath)
-  if (
-    relativePath === '' ||
-    (!relativePath.startsWith('..') && !isAbsolute(relativePath))
-  ) {
-    return filePath
-  }
-  throw new Error(`File path escapes ACP workspace: ${path}`)
-}
-
 export function handlePermissionResponse(
   ws: WSContext,
   payload: {

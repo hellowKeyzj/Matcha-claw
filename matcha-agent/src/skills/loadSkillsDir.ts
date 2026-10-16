@@ -63,6 +63,7 @@ import { isRestrictedToPluginOnly } from '../utils/settings/pluginOnlyPolicy.js'
 import { HooksSchema, type HooksSettings } from '../utils/settings/types.js'
 import { createSignal } from '../utils/signal.js'
 import { registerMCPSkillBuilders } from './mcpSkillBuilders.js'
+import { loadSealedCommands } from './sealed/catalog.js'
 
 export type LoadedFrom =
   | 'commands_DEPRECATED'
@@ -642,8 +643,7 @@ export const getSkillDirCommands = memoize(
     const projectSkillsDirs = getProjectDirsUpToHome('skills', cwd)
 
     logForDebugging(
-      () =>
-        `Loading skills from: managed=${managedSkillsDir}, user=${userSkillsDir}, project=[${projectSkillsDirs.join(', ')}]`,
+      `Loading skills from: managed=${managedSkillsDir}, user=${userSkillsDir}, project=[${projectSkillsDirs.join(', ')}]`,
     )
 
     // Load from additional directories (--add-dir)
@@ -800,7 +800,9 @@ export const getSkillDirCommands = memoize(
       `Loaded ${deduplicatedSkills.length} unique skills (${unconditionalSkills.length} unconditional, ${newConditionalSkills.length} conditional, managed: ${managedSkills.length}, user: ${userSkills.length}, project: ${projectSkillsNested.flat().length}, additional: ${additionalSkillsNested.flat().length}, legacy commands: ${legacyCommands.length})`,
     )
 
-    return unconditionalSkills
+    const sealed = skillsLocked ? [] : await loadSealedCommands()
+    const sealedNames = new Set(sealed.map(skill => skill.name))
+    return [...unconditionalSkills.filter(skill => !sealedNames.has(skill.name)), ...sealed]
   },
 )
 

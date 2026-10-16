@@ -447,8 +447,7 @@ export async function runBridgeLoop(
     return (rawStatus: SessionDoneStatus): void => {
       const workId = sessionWorkIds.get(sessionId)
       rcLog(
-        () =>
-          `session done: sessionId=${sessionId} workId=${workId ?? 'none'} status=${rawStatus}` +
+        `session done: sessionId=${sessionId} workId=${workId ?? 'none'} status=${rawStatus}` +
           ` wasTimedOut=${timedOutSessions.has(sessionId)} duration=${Math.round((Date.now() - startTime) / 1000)}s` +
           ` stderr=${handle.lastStderr.length > 0 ? handle.lastStderr.join('\\n').slice(0, 500) : '(none)'}`,
       )
