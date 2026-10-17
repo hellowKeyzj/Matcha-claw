@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { CronTransport } from '../../main/runtime-host-delivery/transport/cron';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
   success: false,
@@ -36,7 +37,7 @@ export async function handleCronRoutes(
       ? Math.min(Math.max(Math.floor(rawLimit), 1), 200)
       : 200;
     try {
-      const response = await transport.history(sessionKey, limit);
+      const response = await transport.history(sessionKey, limit, readRuntimeScopeQuery(url.searchParams));
       sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, UNAVAILABLE);
@@ -46,7 +47,7 @@ export async function handleCronRoutes(
 
   if (url.pathname === '/api/cron/jobs' && req.method === 'GET') {
     try {
-      const response = await transport.list();
+      const response = await transport.list(readRuntimeScopeQuery(url.searchParams));
       sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, UNAVAILABLE);

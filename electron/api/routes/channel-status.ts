@@ -4,6 +4,7 @@ import {
   type ChannelStatusTransport,
 } from '../../main/runtime-host-delivery/transport/channels/status';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { isProductRuntimeScope, readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
   success: false,
@@ -22,7 +23,7 @@ export async function handleChannelStatusRoutes(
 ): Promise<boolean> {
   if (url.pathname === '/api/channels/snapshot' && req.method === 'GET') {
     try {
-      const response = await transport.readSnapshot();
+      const response = await transport.readSnapshot(readRuntimeScopeQuery(url.searchParams));
       if (response.status === 200 && isChannelSnapshot(response.body)) {
         sendJson(res, 200, {
           success: true,
@@ -50,13 +51,14 @@ export async function handleChannelStatusRoutes(
     sendJson(res, 400, INVALID);
     return true;
   }
-  if (!isEmptyObject(body)) {
+  if (!isEmptyObject(body)
+    && !(isRecord(body) && Object.keys(body).length === 1 && isProductRuntimeScope(body.scope))) {
     sendJson(res, 400, INVALID);
     return true;
   }
 
   try {
-    const response = await transport.read();
+    const response = await transport.read(isRecord(body) ? body.scope : undefined);
     if (response.status === 200 && isRecord(response.body) && 'accounts' in response.body && Array.isArray(response.body.accounts)) {
       sendJson(res, 200, response.body);
     } else {

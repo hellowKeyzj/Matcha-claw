@@ -17,6 +17,7 @@ use crate::{api::ConnectorHandle, delivery};
 
 pub mod external;
 pub mod openclaw_mcp_servers;
+mod scope;
 
 const CONNECTOR_REQUEST_BYTES: usize = 64 * 1024;
 const SHORT_DEADLINE: Duration = Duration::from_secs(5);
@@ -118,24 +119,28 @@ async fn handle_external_connectors(request: Request, dependencies: Dependencies
             .await
             .map(external::Delivery::Catalog)
             .unwrap_or(external::Delivery::Unavailable),
-        external::Command::Status => dependencies
+        external::Command::Status(endpoint, principal) => dependencies
             .connector
-            .admit_status()
+            .admit_status(endpoint, principal)
             .await
             .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
-        external::Command::ObservationResult(call_id, identity, principal) => match dependencies
-            .connector
-            .observation_result(&call_id, &principal, identity.as_ref())
-        {
-            Ok(result) => external::Delivery::ObservationResult(call_id, result),
-            Err(crate::owner::observations::ObservationReadError::Pending) => {
-                external::Delivery::Pending
+        external::Command::ObservationResult(call_id, identity, endpoint, principal) => {
+            match dependencies.connector.observation_result(
+                &call_id,
+                &principal,
+                endpoint.as_ref(),
+                identity.as_ref(),
+            ) {
+                Ok(result) => external::Delivery::ObservationResult(call_id, result),
+                Err(crate::owner::observations::ObservationReadError::Pending) => {
+                    external::Delivery::Pending
+                }
+                Err(crate::owner::observations::ObservationReadError::Missing) => {
+                    external::Delivery::Missing
+                }
             }
-            Err(crate::owner::observations::ObservationReadError::Missing) => {
-                external::Delivery::Missing
-            }
-        },
+        }
         external::Command::SessionStatus(identity, principal) => dependencies
             .connector
             .admit_session_status(identity, principal)
@@ -148,9 +153,9 @@ async fn handle_external_connectors(request: Request, dependencies: Dependencies
             .await
             .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
-        external::Command::Probe(id) => dependencies
+        external::Command::Probe(id, endpoint, principal) => dependencies
             .connector
-            .admit_probe(id)
+            .admit_probe(id, endpoint, principal)
             .await
             .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
@@ -170,6 +175,12 @@ async fn handle_external_connectors(request: Request, dependencies: Dependencies
         external::Command::Upsert(connector) => dependencies
             .connector
             .admit_upsert(*connector)
+            .await
+            .map(external::Delivery::Accepted)
+            .unwrap_or(external::Delivery::Unavailable),
+        external::Command::Update(id, patch) => dependencies
+            .connector
+            .admit_update(id, *patch)
             .await
             .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
@@ -209,9 +220,9 @@ async fn handle_openclaw_mcp_servers(request: Request, dependencies: Dependencie
         }
     };
     let delivery = match command {
-        openclaw_mcp_servers::Command::List => dependencies
+        openclaw_mcp_servers::Command::List(endpoint) => dependencies
             .connector
-            .openclaw_mcp_servers()
+            .openclaw_mcp_servers(endpoint)
             .await
             .map(openclaw_mcp_servers::Delivery::List)
             .unwrap_or(openclaw_mcp_servers::Delivery::Unavailable),

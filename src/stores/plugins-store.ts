@@ -2,20 +2,10 @@ import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { configurePlugin, operatePlugin } from '@/lib/plugins';
 
-export type PluginCatalogItem = {
-  id: string;
-  name: string;
-  version: string;
-  kind: 'builtin' | 'third-party';
-  platform: 'openclaw' | 'matchaclaw';
-  category: string;
-  group: 'channel' | 'model' | 'general';
-  description?: string;
-  enabled: boolean;
-  controlMode?: 'manual';
-  source?: 'workspace' | 'bundled' | 'openclaw-extension' | 'matchaclaw-extension';
-  companionSkillSlugs?: string[];
-};
+import { selectManagementEndpoint, selectManagementAgentScope, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { buildCapabilityScopeKey, runtimeInstanceScope, runtimeScopeQuery } from '@/types/desktop/runtime-address';
+import { isPluginCatalog, isPluginScope, type PluginCatalogItem, type PluginScope } from '@/types/plugins';
+export type { PluginCatalogItem } from '@/types/plugins';
 
 type RuntimeLifecycle = 'starting' | 'running' | 'restarting' | 'stopping' | 'stopped' | 'error';
 
@@ -40,14 +30,6 @@ export type RuntimePayload = {
   };
 };
 
-type CatalogPayload = {
-  success?: boolean;
-  execution?: {
-    enabledPluginIds: string[];
-  };
-  plugins: PluginCatalogItem[];
-};
-
 export type PluginConfigurationOutcome = 'configured' | 'rejected' | 'unknown';
 export type PluginOperation = 'install' | 'update' | 'uninstall';
 
@@ -57,6 +39,7 @@ type PluginFetchOptions = {
   force?: boolean;
   reason?: PluginRefreshReason;
 };
+type CatalogFetchOptions = PluginFetchOptions & { scope?: PluginScope };
 
 type PluginRefreshOptions = PluginFetchOptions & {
   silent?: boolean;
@@ -71,10 +54,21 @@ const EMPTY_CATALOG: PluginCatalogItem[] = [];
 
 let runtimeCache: RuntimePayload | null = null;
 let runtimeCacheUpdatedAt = 0;
-let catalogCache: PluginCatalogItem[] | null = null;
-let catalogCacheUpdatedAt = 0;
+let catalogCache: { key: string; plugins: PluginCatalogItem[]; updatedAt: number } | null = null;
+const OPENCLAW_SCOPE = runtimeInstanceScope({ kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' });
+const OPENCLAW_SCOPE_KEY = buildCapabilityScopeKey(OPENCLAW_SCOPE);
+
+function selectedPluginScope(): PluginScope | null {
+  const state = useRuntimeEndpointsStore.getState();
+  const endpoint = selectManagementEndpoint(state);
+  const scope = endpoint?.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'openclaw'
+    ? runtimeInstanceScope(endpoint) : selectManagementAgentScope(state);
+  return isPluginScope(scope) ? scope : null;
+}
 let runtimeInflightTask: Promise<RuntimePayload> | null = null;
-let catalogInflightTask: Promise<PluginCatalogItem[]> | null = null;
+let runtimeFetchGeneration = 0;
+let catalogInflight: { key: string; task: Promise<PluginCatalogItem[]> } | null = null;
+let catalogFetchGeneration = 0;
 let latestRuntimeRequestId = 0;
 let latestCatalogRequestId = 0;
 let latestSnapshotRefreshRequestId = 0;
@@ -87,8 +81,8 @@ function readRuntimeCache(): RuntimePayload | null {
   return runtimeCache ? cloneValue(runtimeCache) : null;
 }
 
-function readCatalogCache(): PluginCatalogItem[] {
-  return catalogCache ? cloneValue(catalogCache) : cloneValue(EMPTY_CATALOG);
+function readCatalogCache(key: string): PluginCatalogItem[] {
+  return catalogCache?.key === key ? cloneValue(catalogCache.plugins) : cloneValue(EMPTY_CATALOG);
 }
 
 function writeRuntimeCache(payload: RuntimePayload): RuntimePayload {
@@ -97,18 +91,17 @@ function writeRuntimeCache(payload: RuntimePayload): RuntimePayload {
   return readRuntimeCache() as RuntimePayload;
 }
 
-function writeCatalogCache(plugins: PluginCatalogItem[]): PluginCatalogItem[] {
-  catalogCache = cloneValue(Array.isArray(plugins) ? plugins : EMPTY_CATALOG);
-  catalogCacheUpdatedAt = Date.now();
-  return readCatalogCache();
+function writeCatalogCache(key: string, plugins: PluginCatalogItem[]): PluginCatalogItem[] {
+  catalogCache = { key, plugins: cloneValue(plugins), updatedAt: Date.now() };
+  return readCatalogCache(key);
 }
 
 function hasFreshRuntimeCache(): boolean {
   return runtimeCache !== null && (Date.now() - runtimeCacheUpdatedAt) < PLUGIN_CACHE_FRESH_MS;
 }
 
-function hasFreshCatalogCache(): boolean {
-  return catalogCache !== null && (Date.now() - catalogCacheUpdatedAt) < PLUGIN_CACHE_FRESH_MS;
+function hasFreshCatalogCache(key: string): boolean {
+  return catalogCache?.key === key && (Date.now() - catalogCache.updatedAt) < PLUGIN_CACHE_FRESH_MS;
 }
 
 function delay(ms: number): Promise<void> {
@@ -124,14 +117,16 @@ function isRuntimeReady(payload: RuntimePayload): boolean {
     && payload.health.lifecycle === 'running';
 }
 
-async function fetchRuntimeShared(): Promise<RuntimePayload> {
-  if (runtimeInflightTask) {
+async function fetchRuntimeShared(force: boolean): Promise<RuntimePayload> {
+  if (!force && runtimeInflightTask) {
     return await runtimeInflightTask;
   }
 
+  const generation = ++runtimeFetchGeneration;
   const task = (async () => {
     const payload = await hostApiFetch<RuntimePayload>('/api/plugins/runtime');
-    return writeRuntimeCache(payload);
+    if (generation === runtimeFetchGeneration) writeRuntimeCache(payload);
+    return payload;
   })();
 
   runtimeInflightTask = task;
@@ -200,23 +195,20 @@ async function waitForRuntimeHostReady(): Promise<RuntimePayload> {
     : new Error('Runtime Host did not become ready after restart');
 }
 
-async function fetchCatalogShared(): Promise<PluginCatalogItem[]> {
-  if (catalogInflightTask) {
-    return await catalogInflightTask;
-  }
-
+async function fetchCatalogShared(scope: PluginScope, force: boolean): Promise<PluginCatalogItem[]> {
+  const key = buildCapabilityScopeKey(scope);
+  if (!force && catalogInflight?.key === key) return catalogInflight.task;
+  const generation = ++catalogFetchGeneration;
   const task = (async () => {
-    const payload = await hostApiFetch<CatalogPayload>('/api/plugins/catalog');
-    return writeCatalogCache(Array.isArray(payload.plugins) ? payload.plugins : EMPTY_CATALOG);
+    const payload = await hostApiFetch<unknown>(`/api/plugins/catalog?${runtimeScopeQuery(scope)}`);
+    if (!isPluginCatalog(payload, scope)) throw new Error('Invalid plugin catalog');
+    const plugins = [...payload.plugins];
+    if (generation === catalogFetchGeneration) writeCatalogCache(key, plugins);
+    return plugins;
   })();
-
-  catalogInflightTask = task;
-  try {
-    return await task;
-  } finally {
-    if (catalogInflightTask === task) {
-      catalogInflightTask = null;
-    }
+  catalogInflight = { key, task };
+  try { return await task; } finally {
+    if (catalogInflight?.task === task) catalogInflight = null;
   }
 }
 
@@ -227,6 +219,9 @@ function hasMutatingState(action: 'restart' | PluginOperation | null, pluginId: 
 interface PluginsStoreState {
   runtime: RuntimePayload | null;
   catalog: PluginCatalogItem[];
+  catalogScope: PluginScope | null;
+  catalogScopeKey: string | null;
+  setScope: (scope: PluginScope | null) => void;
   runtimeReady: boolean;
   catalogReady: boolean;
   runtimePending: boolean;
@@ -239,19 +234,31 @@ interface PluginsStoreState {
   error: string | null;
   prewarm: () => Promise<void>;
   refreshRuntime: (options?: PluginFetchOptions) => Promise<void>;
-  refreshCatalog: (options?: PluginFetchOptions) => Promise<void>;
+  refreshCatalog: (options?: CatalogFetchOptions) => Promise<void>;
   refreshSnapshot: (options?: PluginRefreshOptions) => Promise<void>;
   restartHost: () => Promise<void>;
-  togglePluginEnabled: (pluginId: string, nextEnabled: boolean) => Promise<PluginConfigurationOutcome>;
-  operatePlugin: (pluginId: string, operation: PluginOperation) => Promise<PluginConfigurationOutcome>;
+  togglePluginEnabled: (pluginId: string, nextEnabled: boolean, scope?: PluginScope) => Promise<PluginConfigurationOutcome>;
+  operatePlugin: (pluginId: string, operation: PluginOperation, scope?: PluginScope) => Promise<PluginConfigurationOutcome>;
   clearError: () => void;
 }
 
 export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
   runtime: readRuntimeCache(),
-  catalog: readCatalogCache(),
+  catalog: [],
+  catalogScope: null,
+  catalogScopeKey: null,
+  setScope: (scope) => {
+    if (scope !== null && !isPluginScope(scope)) throw new Error('Invalid plugin scope');
+    const key = scope ? buildCapabilityScopeKey(scope) : null;
+    if (key === get().catalogScopeKey) return;
+    ++latestCatalogRequestId;
+    ++latestSnapshotRefreshRequestId;
+    set({ catalogScope: scope, catalogScopeKey: key, catalog: key ? readCatalogCache(key) : [],
+      catalogReady: key !== null && catalogCache?.key === key, catalogPending: false,
+      refreshing: false, refreshReason: null, error: null });
+  },
   runtimeReady: runtimeCache !== null,
-  catalogReady: catalogCache !== null,
+  catalogReady: false,
   runtimePending: false,
   catalogPending: false,
   refreshing: false,
@@ -262,9 +269,12 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
   error: null,
 
   prewarm: async () => {
+    const scope = selectedPluginScope();
+    get().setScope(scope);
+    if (!scope) return;
     await Promise.allSettled([
-      get().refreshRuntime({ reason: 'background' }),
-      get().refreshCatalog({ reason: 'background' }),
+      get().refreshCatalog({ scope, reason: 'background' }),
+      ...(scope.kind === 'runtime-instance' ? [get().refreshRuntime({ reason: 'background' })] : []),
     ]);
   },
 
@@ -276,10 +286,11 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     }
 
     const requestId = ++latestRuntimeRequestId;
-    set({ runtimePending: true, error: null });
+    const catalogKey = get().catalogScopeKey;
+    set({ runtimePending: true, ...(catalogKey === OPENCLAW_SCOPE_KEY || catalogKey === null ? { error: null } : {}) });
 
     try {
-      const runtime = await fetchRuntimeShared();
+      const runtime = await fetchRuntimeShared(force);
       if (requestId !== latestRuntimeRequestId) {
         return;
       }
@@ -294,7 +305,8 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
       }
       set({
         runtimePending: false,
-        error: PLUGIN_LOAD_FAILED_KEY,
+        ...(get().catalogScopeKey === catalogKey && (catalogKey === OPENCLAW_SCOPE_KEY || catalogKey === null)
+          ? { error: PLUGIN_LOAD_FAILED_KEY } : {}),
       });
       throw error;
     }
@@ -303,16 +315,20 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
   refreshCatalog: async (options) => {
     const reason = options?.reason ?? 'background';
     const force = options?.force ?? (reason === 'manual' || reason === 'mutation');
-    if (!force && hasFreshCatalogCache()) {
+    const scope = options?.scope ?? get().catalogScope;
+    if (!scope || !isPluginScope(scope)) return;
+    const key = buildCapabilityScopeKey(scope);
+    const active = key === get().catalogScopeKey;
+    if (!force && hasFreshCatalogCache(key)) {
+      if (active) set({ catalog: readCatalogCache(key), catalogReady: true, catalogPending: false });
       return;
     }
-
-    const requestId = ++latestCatalogRequestId;
-    set({ catalogPending: true, error: null });
+    const requestId = active ? ++latestCatalogRequestId : null;
+    if (active) set({ catalogPending: true, error: null });
 
     try {
-      const catalog = await fetchCatalogShared();
-      if (requestId !== latestCatalogRequestId) {
+      const catalog = await fetchCatalogShared(scope, force);
+      if (requestId !== latestCatalogRequestId || key !== get().catalogScopeKey) {
         return;
       }
       set({
@@ -321,7 +337,7 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
         catalogPending: false,
       });
     } catch (error) {
-      if (requestId !== latestCatalogRequestId) {
+      if (requestId !== latestCatalogRequestId || key !== get().catalogScopeKey) {
         return;
       }
       set({
@@ -348,7 +364,7 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
 
     try {
       const refreshTasks = [get().refreshCatalog({ reason, force: options?.force })];
-      if (get().runtimeReady) {
+      if (get().catalogScopeKey === OPENCLAW_SCOPE_KEY) {
         refreshTasks.push(get().refreshRuntime({ reason, force: options?.force }));
       }
       await Promise.all(refreshTasks);
@@ -401,18 +417,22 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     }
   },
 
-  togglePluginEnabled: async (pluginId, nextEnabled) => {
+  togglePluginEnabled: async (pluginId, nextEnabled, requestedScope) => {
+    const scope = cloneValue(requestedScope ?? get().catalogScope);
+    if (!scope || !isPluginScope(scope) || get().mutating) throw new Error('Plugin mutation is unavailable');
+    const key = buildCapabilityScopeKey(scope);
     set({ mutatingPluginId: pluginId, mutating: true, error: null });
     try {
-      const outcome = await configurePlugin(pluginId, nextEnabled);
+      const outcome = await configurePlugin(pluginId, nextEnabled, scope);
       if (outcome !== 'configured') {
-        set({ error: 'plugins:errors.togglePluginFailed' });
+        if (get().catalogScopeKey === key) set({ error: 'plugins:errors.togglePluginFailed' });
       } else {
-        await get().refreshCatalog({ reason: 'mutation', force: true });
+        await get().refreshCatalog({ scope, reason: 'mutation', force: true });
+        if (key === OPENCLAW_SCOPE_KEY) await get().refreshRuntime({ reason: 'mutation', force: true });
       }
       return outcome;
     } catch (error) {
-      set({ error: 'plugins:errors.togglePluginFailed' });
+      if (get().catalogScopeKey === key) set({ error: 'plugins:errors.togglePluginFailed' });
       throw error;
     } finally {
       set((state) => {
@@ -425,18 +445,22 @@ export const usePluginsStore = create<PluginsStoreState>((set, get) => ({
     }
   },
 
-  operatePlugin: async (pluginId, operation) => {
+  operatePlugin: async (pluginId, operation, requestedScope) => {
+    const scope = cloneValue(requestedScope ?? get().catalogScope);
+    if (!scope || !isPluginScope(scope) || get().mutating) throw new Error('Plugin mutation is unavailable');
+    const key = buildCapabilityScopeKey(scope);
     set({ mutatingPluginId: pluginId, mutatingAction: operation, mutating: true, error: null });
     try {
-      const outcome = await operatePlugin(pluginId, operation);
+      const outcome = await operatePlugin(pluginId, operation, scope);
       if (outcome !== 'configured') {
-        set({ error: 'plugins:errors.operationFailed' });
+        if (get().catalogScopeKey === key) set({ error: 'plugins:errors.operationFailed' });
       } else {
-        await get().refreshCatalog({ reason: 'mutation', force: true });
+        await get().refreshCatalog({ scope, reason: 'mutation', force: true });
+        if (key === OPENCLAW_SCOPE_KEY) await get().refreshRuntime({ reason: 'mutation', force: true });
       }
       return outcome;
     } catch (error) {
-      set({ error: 'plugins:errors.operationFailed' });
+      if (get().catalogScopeKey === key) set({ error: 'plugins:errors.operationFailed' });
       throw error;
     } finally {
       set((state) => {

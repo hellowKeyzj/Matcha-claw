@@ -108,6 +108,7 @@ impl Delivery {
         match self {
             Self::Outcome(Outcome::Validated(_)) => 200,
             Self::Outcome(Outcome::TargetRejected) => 400,
+            Self::Outcome(Outcome::Unsupported) => 501,
             Self::Outcome(Outcome::Unknown) | Self::Unavailable => 503,
         }
     }
@@ -122,6 +123,9 @@ impl Delivery {
                     "valid": false,
                     "errors": ["Channel credentials request was rejected"],
                 })
+            }
+            Self::Outcome(Outcome::Unsupported) => {
+                json!({"success": false, "outcome": "unsupported", "error": "Channel credentials validation is not supported by this runtime"})
             }
             Self::Outcome(Outcome::Unknown) => {
                 json!({"success": false, "error": "Channel credentials validation is unavailable"})

@@ -29,9 +29,13 @@ pub(crate) enum Request {
     },
     DependencyPlan {
         selection_id: organization::package::TeamSkillSelectionId,
+        endpoint: organization::RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
     },
     Materialize {
         selection_id: organization::package::TeamSkillSelectionId,
+        endpoint: organization::RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
         team_id: organization::TeamId,
         idempotency_key: organization::IdempotencyKey,
     },
@@ -66,7 +70,9 @@ pub(crate) fn decode(
         }
         VALIDATE_OPERATION | DEPENDENCY_PLAN_OPERATION => {
             verify(authorization, verifier, now, operation)?;
-            if body.len() != 2 {
+            if body.len() != 2 + usize::from(body.contains_key("scope")) + usize::from(body.contains_key("sourceAgentId"))
+                || (operation == VALIDATE_OPERATION && (body.contains_key("scope") || body.contains_key("sourceAgentId")))
+            {
                 return Err(DecodeError::Invalid);
             }
             let Some(Value::String(selection_id)) = body.get("selectionId") else {
@@ -78,12 +84,14 @@ pub(crate) fn decode(
             Ok(if operation == VALIDATE_OPERATION {
                 Request::Validate { selection_id }
             } else {
-                Request::DependencyPlan { selection_id }
+                let endpoint = runtime_endpoint(body.get("scope"))?;
+                let source_agent = source_agent(body.get("sourceAgentId"), &endpoint)?;
+                Request::DependencyPlan { selection_id, endpoint, source_agent }
             })
         }
         MATERIALIZE_OPERATION => {
             verify(authorization, verifier, now, MATERIALIZE_OPERATION)?;
-            if body.len() != 4 {
+            if body.len() != 4 + usize::from(body.contains_key("scope")) + usize::from(body.contains_key("sourceAgentId")) {
                 return Err(DecodeError::Invalid);
             }
             let Some(Value::String(selection_id)) = body.get("selectionId") else {
@@ -95,7 +103,11 @@ pub(crate) fn decode(
             let Some(Value::String(idempotency_key)) = body.get("idempotencyKey") else {
                 return Err(DecodeError::Invalid);
             };
+            let endpoint = runtime_endpoint(body.get("scope"))?;
+            let source_agent = source_agent(body.get("sourceAgentId"), &endpoint)?;
             Ok(Request::Materialize {
+                endpoint,
+                source_agent,
                 selection_id: organization::package::TeamSkillSelectionId::parse(
                     selection_id.clone(),
                 )
@@ -108,6 +120,39 @@ pub(crate) fn decode(
         }
         _ => Err(DecodeError::Invalid),
     }
+}
+
+fn source_agent(value: Option<&Value>, endpoint: &organization::RuntimeEndpointReference) -> Result<Option<organization::ManagedAgentReference>, DecodeError> {
+    match value {
+        Some(Value::String(id)) if !id.trim().is_empty() => organization::ManagedAgentReference::try_new(id.clone()).map(Some).map_err(|_| DecodeError::Invalid),
+        None if endpoint.as_str() == "endpoint:openclaw" => Ok(None),
+        _ => Err(DecodeError::Invalid),
+    }
+}
+
+fn runtime_endpoint(scope: Option<&Value>) -> Result<organization::RuntimeEndpointReference, DecodeError> {
+    use runtime_directory::RuntimeDriverIdentity;
+
+    let identity = match scope {
+        None => RuntimeDriverIdentity::open_claw(),
+        Some(scope) => {
+            let scope = scope.as_object().ok_or(DecodeError::Invalid)?;
+            if scope.len() != 2 || scope.get("kind") != Some(&json!("runtime-instance")) {
+                return Err(DecodeError::Invalid);
+            }
+            let endpoint = scope.get("endpoint").and_then(Value::as_object).ok_or(DecodeError::Invalid)?;
+            if endpoint.len() != 3 || endpoint.get("kind") != Some(&json!("native-runtime")) {
+                return Err(DecodeError::Invalid);
+            }
+            [RuntimeDriverIdentity::open_claw(), RuntimeDriverIdentity::matcha_agent()]
+                .into_iter()
+                .find(|identity| endpoint.get("runtimeAdapterId").and_then(Value::as_str) == Some(identity.runtime_adapter_id())
+                    && endpoint.get("runtimeInstanceId").and_then(Value::as_str) == Some(identity.runtime_instance_id()))
+                .ok_or(DecodeError::Invalid)?
+        }
+    };
+    organization::RuntimeEndpointReference::try_new(identity.runtime_endpoint_reference())
+        .map_err(|_| DecodeError::Invalid)
 }
 
 fn verify(
@@ -268,16 +313,18 @@ pub(crate) async fn dispatch(owner: &OrganizationHandle, request: Request) -> De
             .team_skill_selection_validate(selection_id)
             .await
             .map_or(Delivery::Unavailable, Delivery::Validation),
-        Request::DependencyPlan { selection_id } => owner
-            .team_skill_selection_dependency_plan(selection_id)
+        Request::DependencyPlan { selection_id, endpoint, source_agent } => owner
+            .team_skill_selection_dependency_plan(selection_id, endpoint, source_agent)
             .await
             .map_or(Delivery::Unavailable, Delivery::DependencyPlan),
         Request::Materialize {
             selection_id,
+            endpoint,
+            source_agent,
             team_id,
             idempotency_key,
         } => match owner
-            .team_skill_materialize(selection_id, team_id, idempotency_key)
+            .team_skill_materialize(selection_id, endpoint, source_agent, team_id, idempotency_key)
             .await
         {
             Ok(crate::TeamMaterializationCommandOutcome::Materialized { .. }) => {

@@ -6,7 +6,6 @@ const MATCHA_PROTOCOL_ID: &str = "matcha-agent-app-server";
 const MATCHA_RUNTIME_ADAPTER_ID: &str = "matcha-agent";
 const LOCAL_RUNTIME_INSTANCE_ID: &str = "local";
 const OPENCLAW_AGENT_ID: &str = "main";
-const MATCHA_AGENT_ID: &str = "matcha";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeDriverIdentity {
@@ -36,7 +35,7 @@ impl RuntimeDriverIdentity {
             runtime_adapter_id: MATCHA_RUNTIME_ADAPTER_ID,
             runtime_instance_id: LOCAL_RUNTIME_INSTANCE_ID,
             runtime_endpoint_reference: "endpoint:matcha",
-            default_agent_id: MATCHA_AGENT_ID,
+            default_agent_id: "",
             display_name: "Matcha Agent",
         }
     }

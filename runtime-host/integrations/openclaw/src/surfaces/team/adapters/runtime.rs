@@ -544,7 +544,7 @@ impl organization::OrganizationNativeRuntime for OpenClawDriver {
         })
     }
 
-    fn installed_skill_names(&self) -> OwnedRuntimeFuture<Option<Vec<String>>> {
+    fn installed_skill_names(&self, _source_agent: Option<organization::ManagedAgentReference>) -> OwnedRuntimeFuture<Option<Vec<String>>> {
         let provider = crate::surfaces::skills::OpenClawSkillProvider::new(
             Arc::clone(&self.gateway),
             self.electron_image.clone(),

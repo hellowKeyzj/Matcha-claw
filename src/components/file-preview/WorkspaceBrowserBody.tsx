@@ -7,22 +7,19 @@ import { hostFileListDir, type FilePreviewDirEntry, type WorkspaceFileContext } 
 import { classifyFileContentType, extnameOf, getMimeTypeForPath, supportsInlineDiff } from '@/lib/generated-files';
 import { cn } from '@/lib/utils';
 import { FilePreviewBody, type FilePreviewMode } from './FilePreviewBody';
-import { resolveWorkspaceRelativePath, type ArtifactPreviewTarget } from './types';
-import type {
-  SessionIdentity,
-} from '../../types/desktop/runtime-address';
+import { formatWorkspacePathForDisplay, resolveWorkspaceRelativePath, type ArtifactPreviewTarget } from './types';
 
 interface WorkspaceBrowserBodyProps {
   rootPath: string | null;
   selectedFilePath: string | null;
   selectedFile: ArtifactPreviewTarget | null;
-  sessionIdentity?: SessionIdentity;
   workspaceContext?: WorkspaceFileContext;
   availableWidth?: number;
   previewMode?: FilePreviewMode;
   onSelectFile: (file: ArtifactPreviewTarget) => void;
   onPreviewModeChange?: (mode: FilePreviewMode) => void;
   previewHeaderTrailingAccessory?: ReactNode;
+  recoveryAction?: ReactNode;
   className?: string;
 }
 
@@ -70,6 +67,9 @@ function getWorkspaceNodeName(relativePath: string): string {
 }
 
 function joinWorkspaceDisplayPath(rootPath: string, relativePath: string): string {
+  if (!rootPath) {
+    return relativePath;
+  }
   if (!relativePath) {
     return rootPath;
   }
@@ -93,18 +93,18 @@ function createWorkspaceTreeNode(entry: FilePreviewDirEntry, workspaceRoot: stri
 
 function createWorkspaceRootNode(
   rootPath: string,
-  workspaceRoot: string,
   entries: FilePreviewDirEntry[],
+  rootLabel: string,
 ): WorkspaceTreeNode {
   return {
-    name: getWorkspaceNodeName(rootPath),
+    name: getWorkspaceNodeName(rootPath) || rootLabel,
     displayPath: rootPath,
     relativePath: '',
     isDirectory: true,
     size: 0,
     hasChildren: entries.length > 0,
     childrenLoaded: true,
-    children: entries.map((entry) => createWorkspaceTreeNode(entry, workspaceRoot)),
+    children: entries.map((entry) => createWorkspaceTreeNode(entry, rootPath)),
   };
 }
 
@@ -189,23 +189,10 @@ function mergeDirectoryChildren(
 }
 
 function buildAncestorDirectoryPaths(
-  rootPath: string,
-  targetPath: string,
+  relativePath: string,
   includeTarget: boolean,
 ): string[] {
-  const normalizedRoot = normalizeWorkspacePath(rootPath);
-  const normalizedTarget = normalizeWorkspacePath(targetPath);
-  if (normalizedTarget === normalizedRoot) {
-    return [''];
-  }
-
-  const normalizedRootPrefix = normalizedRoot.endsWith('/') ? normalizedRoot : `${normalizedRoot}/`;
-  if (!normalizedTarget.startsWith(normalizedRootPrefix)) {
-    return [];
-  }
-
-  const relative = normalizedTarget.slice(normalizedRootPrefix.length);
-  const segments = relative.split('/').filter(Boolean);
+  const segments = relativePath.replace(/\\/g, '/').split('/').filter(Boolean);
   if (segments.length === 0) {
     return [''];
   }
@@ -301,13 +288,13 @@ export function WorkspaceBrowserBody({
   rootPath,
   selectedFilePath,
   selectedFile,
-  sessionIdentity,
   workspaceContext,
   availableWidth = Number.POSITIVE_INFINITY,
   previewMode = 'preview',
   onSelectFile,
   onPreviewModeChange,
   previewHeaderTrailingAccessory,
+  recoveryAction,
   className,
 }: WorkspaceBrowserBodyProps) {
   const { t } = useTranslation('chat');
@@ -319,7 +306,9 @@ export function WorkspaceBrowserBody({
   const treeRef = useRef<WorkspaceTreeNode | null>(null);
   const treeVersionRef = useRef(0);
   const loadingPathsRef = useRef<Set<string>>(new Set());
-  const effectiveRootPath = rootPath?.trim() || null;
+  const effectiveRootPath = formatWorkspacePathForDisplay(rootPath?.trim() || '');
+  const workspaceAgentScope = workspaceContext?.agentScope;
+  const workspaceRootLabel = t('artifacts.workspaceTab');
   const workspaceLayout = useMemo(() => {
     if (availableWidth < WORKSPACE_SPLIT_MIN_WIDTH) {
       return {
@@ -362,9 +351,6 @@ export function WorkspaceBrowserBody({
 
   const ensureDirectoryChildrenLoaded = async (relativePath: string, version: number): Promise<void> => {
     const workspaceRoot = effectiveRootPath;
-    if (!workspaceRoot) {
-      return;
-    }
     const currentTree = treeRef.current;
     const currentNode = currentTree ? findTreeNode(currentTree, relativePath) : null;
     if (!currentNode || !currentNode.isDirectory || currentNode.childrenLoaded) {
@@ -381,13 +367,13 @@ export function WorkspaceBrowserBody({
     });
 
     try {
-      if (!sessionIdentity) {
+      if (!workspaceAgentScope) {
         return;
       }
       const result = await hostFileListDir(
         {
-          endpoint: sessionIdentity.endpoint,
-          sessionKey: sessionIdentity.sessionKey,
+          endpoint: workspaceAgentScope.endpoint,
+          agentId: workspaceAgentScope.agentId,
           relativePath,
         },
         {
@@ -418,7 +404,7 @@ export function WorkspaceBrowserBody({
   };
 
   useEffect(() => {
-    if (!effectiveRootPath) {
+    if (!workspaceAgentScope) {
       treeVersionRef.current += 1;
       treeRef.current = null;
       setTreeState({ status: 'idle' });
@@ -437,15 +423,10 @@ export function WorkspaceBrowserBody({
 
     void (async () => {
       try {
-        if (!sessionIdentity) {
-          setTreeState({ status: 'error', message: 'SessionIdentity is required' });
-          replaceLoadingPaths(new Set());
-          return;
-        }
         const result = await hostFileListDir(
           {
-            endpoint: sessionIdentity.endpoint,
-            sessionKey: sessionIdentity.sessionKey,
+            endpoint: workspaceAgentScope.endpoint,
+            agentId: workspaceAgentScope.agentId,
             relativePath: '',
           },
           {
@@ -461,7 +442,7 @@ export function WorkspaceBrowserBody({
           setTreeState({ status: 'error', message: String(result.error ?? 'unknown') });
           return;
         }
-        const nextTree = createWorkspaceRootNode(effectiveRootPath, effectiveRootPath, result.entries);
+        const nextTree = createWorkspaceRootNode(effectiveRootPath, result.entries, workspaceRootLabel);
         treeRef.current = nextTree;
         startTransition(() => {
           replaceLoadingPaths(new Set());
@@ -483,21 +464,22 @@ export function WorkspaceBrowserBody({
 
     return () => {
       cancelled = true;
+      treeVersionRef.current += 1;
     };
-  }, [effectiveRootPath, reloadToken, sessionIdentity]);
+  }, [effectiveRootPath, reloadToken, workspaceAgentScope, workspaceRootLabel]);
 
   useEffect(() => {
     const workspaceRoot = effectiveRootPath;
-    if (treeState.status !== 'ready' || !selectedFilePath || !workspaceRoot) {
+    if (treeState.status !== 'ready' || !selectedFilePath) {
       return;
     }
     const includeTarget = selectedFile?.isDirectory === true;
     const selectedFileRelativePath = selectedFile?.relativePath
-      ?? resolveWorkspaceRelativePath(selectedFilePath, workspaceRoot);
+      ?? resolveWorkspaceRelativePath(selectedFilePath, workspaceRoot || undefined);
     if (selectedFileRelativePath == null) {
       return;
     }
-    const ancestorPaths = buildAncestorDirectoryPaths(workspaceRoot, joinWorkspaceDisplayPath(workspaceRoot, selectedFileRelativePath), includeTarget);
+    const ancestorPaths = buildAncestorDirectoryPaths(selectedFileRelativePath, includeTarget);
     if (ancestorPaths.length === 0) {
       return;
     }
@@ -560,8 +542,8 @@ export function WorkspaceBrowserBody({
       return null;
     }
     const selectedFileRelativePath = selectedFile?.relativePath
-      ?? (selectedFilePath && effectiveRootPath
-        ? resolveWorkspaceRelativePath(selectedFilePath, effectiveRootPath)
+      ?? (selectedFilePath
+        ? resolveWorkspaceRelativePath(selectedFilePath, effectiveRootPath || undefined)
         : null);
     return FileTreeNodeRow({
       node: treeState.tree,
@@ -641,7 +623,7 @@ export function WorkspaceBrowserBody({
                 size="icon"
                 className="h-7 w-7 rounded-md"
                 onClick={() => setReloadToken((current) => current + 1)}
-                disabled={!effectiveRootPath || treeState.status === 'loading'}
+                disabled={!workspaceAgentScope || treeState.status === 'loading'}
                 title={t('common:actions.refresh', { defaultValue: 'Refresh' })}
                 aria-label={t('common:actions.refresh', { defaultValue: 'Refresh' })}
               >
@@ -662,8 +644,9 @@ export function WorkspaceBrowserBody({
               </div>
             ) : null}
             {treeState.status === 'error' ? (
-              <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
-                {t('artifacts.workspaceLoadFailed', { error: treeState.message })}
+              <div role="status" className="space-y-2 px-2 py-3 text-sm text-muted-foreground">
+                <p>{t('artifacts.workspaceLoadError')}</p>
+                {recoveryAction}
               </div>
             ) : null}
             {treeState.status === 'ready' ? treeBody : null}
@@ -674,9 +657,9 @@ export function WorkspaceBrowserBody({
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {selectedFile ? (
           <FilePreviewBody
+            key={selectedFile.filePath}
             file={selectedFile}
             mode={supportsInlineDiff(selectedFile) ? previewMode : 'preview'}
-            sessionIdentity={sessionIdentity}
             workspaceContext={workspaceContext}
             className="h-full"
             headerLeadingAccessory={treeCollapsed ? workspaceTreeToggleButton : null}

@@ -170,36 +170,54 @@ impl OpenClawDriver {
         &self,
         command: SessionPermissionCommand,
     ) -> SessionPermissionOutcome {
+        use sessions_module::session_permission::{NativeEndpoint, SessionPermissionSelection};
+
+        if command.endpoint != NativeEndpoint::OpenClawLocal {
+            return SessionPermissionOutcome::Rejected;
+        }
+        let identity = sessions_module::state::SessionIdentity {
+            endpoint: sessions_module::state::SessionEndpoint::local(SessionProvider::OpenClaw),
+            agent_id: command.agent_id().to_owned(),
+            session_key: command.session_key().to_owned(),
+        };
+        if !valid_command_identity(&identity) {
+            return SessionPermissionOutcome::Rejected;
+        }
         let session_key =
-            match crate::session::protocol::SessionKey::try_new(command.session_key().to_owned()) {
+            match crate::session::protocol::SessionKey::try_new(identity.session_key) {
                 Ok(session_key) => session_key,
-                Err(_) => return SessionPermissionOutcome::unsupported(),
+                Err(_) => return SessionPermissionOutcome::Rejected,
             };
         let outcome = match command.action() {
             SessionPermissionAction::Get => self
                 .session_gateway
-                .get_session_permission(session_key)
+                .get_session_permission(session_key, command.agent_id())
                 .await
                 .map(InvocationOutcome::Succeeded),
-            SessionPermissionAction::Set { permission_mode } => {
+            SessionPermissionAction::Set {
+                selection: SessionPermissionSelection::OpenClaw(permission_mode),
+            } => {
                 self.session_gateway
                     .set_session_permission(
                         crate::session::protocol::SessionPermissionPatchParams::new(
                             session_key,
                             permission_mode.map(openclaw_session_permission_mode),
                         ),
+                        command.agent_id(),
                     )
                     .await
             }
+            SessionPermissionAction::Set { .. } => return SessionPermissionOutcome::Rejected,
         };
         match outcome {
             Ok(InvocationOutcome::Succeeded(projection)) => SessionPermissionOutcome::projection(
                 project_openclaw_session_permission(projection),
             ),
-            Ok(InvocationOutcome::TargetRejected(_)) => SessionPermissionOutcome::unsupported(),
-            Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown) | Err(_) => {
-                SessionPermissionOutcome::Unavailable
-            }
+            Ok(InvocationOutcome::TargetRejected(_))
+            | Err(crate::port::OpenClawSessionError::TargetRejected) => SessionPermissionOutcome::Rejected,
+            Ok(InvocationOutcome::Cancelled | InvocationOutcome::Unknown)
+            | Err(crate::port::OpenClawSessionError::UnknownResponse) => SessionPermissionOutcome::Unknown,
+            Err(_) => SessionPermissionOutcome::Unavailable,
         }
     }
 
@@ -527,10 +545,19 @@ const fn project_openclaw_create_error(
 fn openclaw_rename_params(
     command: &SessionRenameCommand,
 ) -> Result<crate::session::protocol::SessionLabelPatchParams, ()> {
-    let agent_id =
-        crate::session::protocol::AgentId::try_new(command.agent_id.clone()).map_err(|_| ())?;
+    if command.identity.validate().is_err()
+        || command.identity.endpoint
+            != sessions_module::state::SessionEndpoint::local(
+                sessions_module::state::SessionProvider::OpenClaw,
+            )
+    {
+        return Err(());
+    }
+    let agent_id = crate::session::protocol::AgentId::try_new(command.identity.agent_id.clone())
+        .map_err(|_| ())?;
     let prefix = format!("agent:{}:", agent_id.as_str());
     let endpoint_session_id = command
+        .identity
         .session_key
         .strip_prefix(&prefix)
         .and_then(|value| {
@@ -579,9 +606,17 @@ const fn project_openclaw_rename_error(
 fn openclaw_delete_params(
     command: &SessionDeleteCommand,
 ) -> Result<crate::session::protocol::SessionDeleteParams, ()> {
-    let agent_id =
-        crate::session::protocol::AgentId::try_new(command.agent_id.clone()).map_err(|_| ())?;
-    let scoped = command.session_key.strip_prefix("agent:").ok_or(())?;
+    if command.identity.validate().is_err()
+        || command.identity.endpoint
+            != sessions_module::state::SessionEndpoint::local(
+                sessions_module::state::SessionProvider::OpenClaw,
+            )
+    {
+        return Err(());
+    }
+    let agent_id = crate::session::protocol::AgentId::try_new(command.identity.agent_id.clone())
+        .map_err(|_| ())?;
+    let scoped = command.identity.session_key.strip_prefix("agent:").ok_or(())?;
     let (actual_agent_id, endpoint_session_id) = scoped.split_once(':').ok_or(())?;
     if actual_agent_id != agent_id.as_str() {
         return Err(());

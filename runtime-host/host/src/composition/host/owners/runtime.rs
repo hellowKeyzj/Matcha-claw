@@ -21,7 +21,7 @@ use usage::UsageModule;
 use wiki::WikiModule;
 use workspace::WorkspaceModule;
 
-use crate::composition::runtime_ports::{RuntimeDriver, RuntimeDriverIdentity};
+use crate::composition::runtime_ports::RuntimeDriver;
 use provider_module::ProviderModule;
 use sessions_module::{SessionHandle, SessionModule, SessionOwnerInput};
 
@@ -285,7 +285,8 @@ pub(in crate::composition::host) struct RuntimeOwnerInput {
     pub(in crate::composition::host) diagnostics: ::diagnostics::DiagnosticsArchiveProducer,
     pub(in crate::composition::host) toolchain: Arc<toolchain::NativeToolchain>,
     pub(in crate::composition::host) open_claw: Arc<openclaw::driver::OpenClawDriver>,
-    pub(in crate::composition::host) matcha_driver: Arc<dyn RuntimeDriver>,
+    pub(in crate::composition::host) matcha_driver:
+        Arc<matcha_agent::driver::MatchaRuntimeDriver>,
     pub(in crate::composition::host) admission: Arc<crate::composition::admission::HostAdmission>,
     pub(in crate::composition::host) sealed_resource: sealed_resource::SealedResourceModule,
     pub(in crate::composition::host) session_delta: Option<sessions_module::SessionDeltaSource>,
@@ -349,7 +350,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     let runtime_directory = Arc::new(
         crate::composition::runtime_ports::RuntimeDriverDirectory::fixed_peers(
             open_claw_driver,
-            matcha_driver,
+            matcha_driver.clone(),
         ),
     );
     let owner_runtime_system = OwnerRuntimeSystem::spawn_observed(
@@ -372,12 +373,10 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     )
     .map_err(|_| ConstructionError::Security)?;
     let security = security.with_call_recorder(calls.clone());
-    let channel_endpoint = RuntimeDriverIdentity::open_claw().endpoint();
     let (channel, channel_task) = channels::spawn_owner(
         &owner_runtime_system,
         ChannelOwnerInput {
             runtime_directory: runtime_directory.clone(),
-            default_endpoint: channel_endpoint.clone(),
         },
     );
 
@@ -568,9 +567,11 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     let peer_owner = crate::composition::peer::PeerOwner::new(
         Arc::clone(&admission),
         matcha_startup_diagnostics.clone(),
+        matcha_driver,
         Arc::clone(&open_claw),
         openclaw_startup_diagnostics.clone(),
         provider_handle.clone(),
+        connector.clone(),
         settings.clone(),
         security.clone(),
         team_run_coordinator_handle.clone(),

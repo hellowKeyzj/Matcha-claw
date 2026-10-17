@@ -17,6 +17,7 @@ mod clawhub_skill;
 mod management;
 mod result;
 mod sealed_resource;
+pub(crate) mod scope;
 
 const DEFAULT_REQUEST_BYTES: usize = 64 * 1024;
 const SHORT_DEADLINE: Duration = Duration::from_secs(5);
@@ -82,7 +83,7 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     })
 }
 
-fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
+fn route(mut dependencies: Dependencies, mut request: Request) -> RouteFuture {
     let tracing_open_path = platform::trace::enabled()
         && pathname(request.path()) == management::CAPABILITY_EXECUTE_ENDPOINT
         && serde_json::from_slice::<serde_json::Value>(&request.body)
@@ -105,6 +106,10 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
         })
         .flatten();
     let dispatch = async move {
+        dependencies.skills = match scope::bind(&mut request, dependencies.skills) {
+            Ok(skills) => skills,
+            Err(()) => return fixed(400, "Skills runtime scope is invalid"),
+        };
         let path = pathname(request.path()).to_owned();
         let recorded = match (
             &dependencies.skills.recorder,
@@ -594,7 +599,7 @@ async fn handle_sealed_resource(
     call: Option<crate::operation::RecordedCall>,
 ) -> Response {
     match sealed_resource::handle(
-        request.path(),
+        pathname(request.path()),
         request.method(),
         &request.head.headers,
         &request.body,

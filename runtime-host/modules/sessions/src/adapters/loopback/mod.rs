@@ -33,6 +33,7 @@ pub(crate) mod history;
 pub(crate) mod key;
 pub(crate) mod model_selection;
 pub(crate) mod permission;
+mod question;
 pub(crate) mod presenter;
 mod rename;
 pub(crate) mod send;
@@ -75,6 +76,8 @@ const PATHS: &[RoutePath] = &[
     RoutePath::ExactWithQuery(RELEASE_PATH),
     RoutePath::ExactWithQuery(APPROVAL_LIST_PATH),
     RoutePath::ExactWithQuery(APPROVAL_RESPOND_PATH),
+    RoutePath::ExactWithQuery(question::LIST_PATH),
+    RoutePath::ExactWithQuery(question::RESPOND_PATH),
     RoutePath::ExactWithQuery(MODEL_PATH),
     RoutePath::ExactWithQuery(LOAD_PATH),
     RoutePath::ExactWithQuery(WINDOW_PATH),
@@ -153,6 +156,9 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
         if request.method() == "POST" && matches!(request.path(), OBSERVE_PATH | RELEASE_PATH) {
             return observation::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
         }
+        if request.method() == "POST" && matches!(request.path(), question::LIST_PATH | question::RESPOND_PATH) {
+            return question::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
+        }
         if request.method() == "POST" && request.path() == GOAL_PATH {
             return goal::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
         }
@@ -225,6 +231,8 @@ fn is_session_route(path: &str) -> bool {
             | RELEASE_PATH
             | APPROVAL_LIST_PATH
             | APPROVAL_RESPOND_PATH
+            | question::LIST_PATH
+            | question::RESPOND_PATH
             | MODEL_PATH
             | LOAD_PATH
             | WINDOW_PATH

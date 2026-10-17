@@ -2,8 +2,10 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type {
   UsageHistoryEntry,
   UsageTransport,
+  UsageTransportResponse,
 } from '../../main/runtime-host-delivery/transport/usage';
 import { sendJson } from '../route-utils';
+import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const UNAVAILABLE = {
   success: false,
@@ -27,10 +29,11 @@ export async function handleRuntimeHostUsageRoutes(
   const limit = rawLimit === null ? undefined : Number(rawLimit);
   try {
     const response = url.pathname === '/api/runtime-host/usage/recent'
-      ? await transport.read(limit)
+      ? await transport.read(limit, readRuntimeScopeQuery(url.searchParams))
       : await transport.readSessionTimeseries({
         sessionId: url.searchParams.get('sessionId') ?? '',
         agentId: url.searchParams.get('agentId') ?? '',
+        scope: readRuntimeScopeQuery(url.searchParams),
       });
     if (response.status === 200 && isUsageEntries(response.body)) {
       sendJson(res, 200, response.body.entries);
@@ -44,7 +47,7 @@ export async function handleRuntimeHostUsageRoutes(
 }
 
 function isUsageEntries(
-  body: Readonly<{ entries: readonly UsageHistoryEntry[] }> | typeof UNAVAILABLE,
+  body: UsageTransportResponse['body'],
 ): body is Readonly<{ entries: readonly UsageHistoryEntry[] }> {
   return 'entries' in body;
 }

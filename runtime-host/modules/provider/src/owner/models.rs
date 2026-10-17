@@ -168,11 +168,11 @@ impl ProviderModelOwner {
             session_trace("provider-generation.candidate-started", || candidate_trace(json!({
                 "streaming": is_streaming, "timeoutMs": timeout_ms,
             })));
-            let Some(protocol) = provider_generation_protocol(account) else {
+            let Some(protocol) = provider_execution_protocol(account) else {
                 session_trace("provider-generation.candidate-skipped", || candidate_trace(json!({ "reason": "protocol_invalid" })));
                 continue;
             };
-            let Ok(endpoint) = provider_generation_endpoint(account) else {
+            let Ok(endpoint) = provider_execution_endpoint(account) else {
                 session_trace("provider-generation.candidate-skipped", || candidate_trace(json!({ "reason": "endpoint_invalid" })));
                 continue;
             };
@@ -325,7 +325,7 @@ impl ProviderModelOwner {
         let Some(capability) = session_model_capability(endpoint) else {
             return ProviderSessionModelSelectionOutcome::Unsupported;
         };
-        match self.resolve_selection(runtime, cascade, capability, &model_selection_id) {
+        match self.resolve_selection(runtime, cascade, endpoint, capability, &model_selection_id) {
             Ok(Some(selection)) => ProviderSessionModelSelectionOutcome::Selected(
                 selection.into_receipt(endpoint, session_key, endpoint_session_id, trace_id),
             ),
@@ -378,7 +378,7 @@ impl ProviderModelOwner {
         let required_capability = provider_routing_model_capability(capability);
         match model_ref {
             Some(model_ref) => {
-                let identity_ops = runtime.provider_runtime_identity_ops().ok_or(())?;
+                let identity_ops = runtime.provider_runtime_identity_ops(&ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint()).ok_or(())?;
                 let identities = provider_runtime_identities(identity_ops, accounts)?;
                 for model in catalog.selectable_for(required_capability) {
                     let Some(account) = accounts
@@ -408,10 +408,11 @@ impl ProviderModelOwner {
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
         cascade: &ProviderCascade,
+        endpoint: ProviderSessionEndpoint,
         capability: ProviderModelCapability,
         selection_id: &str,
     ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
-        self.resolve_matching(runtime, cascade, capability, |model, _account| {
+        self.resolve_matching(runtime, cascade, endpoint, capability, |model, _account| {
             model.selection_id() == selection_id
         })
     }
@@ -425,7 +426,7 @@ impl ProviderModelOwner {
         model_selection_id: Option<&str>,
         provider_fingerprint: Option<&str>,
     ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
-        self.resolve_matching(runtime, cascade, capability, |model, account| {
+        self.resolve_matching(runtime, cascade, ProviderSessionEndpoint::MatchaAgentLocal, capability, |model, account| {
             model.model_id() == model_id
                 && model_selection_id.is_none_or(|id| model.selection_id() == id)
                 && provider_fingerprint
@@ -437,10 +438,11 @@ impl ProviderModelOwner {
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
         cascade: &ProviderCascade,
+        endpoint: ProviderSessionEndpoint,
         capability: ProviderModelCapability,
         mut matches_selection: impl FnMut(&ProviderModel, &ProviderAccount) -> bool,
     ) -> Result<Option<ResolvedProviderModelSelection>, ()> {
-        let identity_ops = runtime.provider_runtime_identity_ops().ok_or(())?;
+        let identity_ops = runtime.provider_runtime_identity_ops(&endpoint.runtime_endpoint()).ok_or(())?;
         let identities = provider_runtime_identities(identity_ops, cascade.accounts())?;
         for model in cascade.catalog().selectable_for(capability) {
             let Some(account) = cascade.account(model.account_id()) else {
@@ -488,7 +490,7 @@ impl ProviderModelOwner {
             return ProviderModelDiscoverOutcome::Rejected;
         };
         if runtime_discovery_provider(&account) {
-            let Some(identity_ops) = runtime.provider_runtime_identity_ops() else {
+            let Some(identity_ops) = runtime.provider_runtime_identity_ops(&ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint()) else {
                 return ProviderModelDiscoverOutcome::Unavailable;
             };
             let Ok(identity) = identity_ops.runtime_identity(&account) else {
@@ -589,7 +591,7 @@ impl ProviderModelOwner {
             return ProviderModelReplaceOutcome::Rejected;
         };
         let runtime_provider_key = if account.configuration().enabled() {
-            let Some(identity_ops) = runtime.provider_runtime_identity_ops() else {
+            let Some(identity_ops) = runtime.provider_runtime_identity_ops(&ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint()) else {
                 return ProviderModelReplaceOutcome::Rejected;
             };
             match identity_ops.runtime_identities(cascade.accounts()) {
@@ -1237,7 +1239,7 @@ fn resolve_generation_models<'a>(
     (!candidates.is_empty()).then_some(candidates)
 }
 
-fn provider_generation_endpoint(account: &ProviderAccount) -> Result<ProviderEndpoint, ()> {
+pub fn provider_execution_endpoint(account: &ProviderAccount) -> Result<ProviderEndpoint, ()> {
     account
         .configuration()
         .endpoint()
@@ -1249,7 +1251,7 @@ fn provider_generation_endpoint(account: &ProviderAccount) -> Result<ProviderEnd
         .ok_or(())
 }
 
-fn provider_generation_protocol(account: &ProviderAccount) -> Option<ProviderApiProtocol> {
+pub fn provider_execution_protocol(account: &ProviderAccount) -> Option<ProviderApiProtocol> {
     account
         .configuration()
         .protocol()

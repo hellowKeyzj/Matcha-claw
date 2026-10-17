@@ -267,7 +267,7 @@ impl ConnectorSecretReferences {
         )
     }
 
-    fn has_values(&self) -> bool {
+    pub(super) fn has_values(&self) -> bool {
         self.secret_env
             .as_ref()
             .is_some_and(|values| !values.is_empty())
@@ -704,7 +704,7 @@ fn valid_secret_reference_map(
     })
 }
 
-fn connector_config(
+pub(super) fn connector_config(
     config: serde_json::Map<String, serde_json::Value>,
 ) -> Result<ConnectorConfig, ConnectorError> {
     ConnectorConfig::try_new(

@@ -1,7 +1,7 @@
 import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
 import { AppError } from '@/lib/error-model';
 import { decodeTeamCreationFailure, type TeamCreationFailure, type TeamCreationStage } from '@/types/call-log/organization';
-import { runtimeEndpointsEqual, validateRuntimeEndpointRef, validateSessionIdentity } from '@/types/desktop/runtime-address';
+import { runtimeEndpointsEqual, runtimeInstanceScope, validateRuntimeEndpointRef, validateSessionIdentity, type RuntimeScope } from '@/types/desktop/runtime-address';
 import type { TeamCreationObserver } from '@/types/team-creation';
 import {
   createSessionTraceId,
@@ -694,15 +694,20 @@ export async function readTeamWebhookAuth(): Promise<TeamWebhookAuthProjection> 
 
 type TeamRuntimeResponseDecoder<T> = (payload: unknown) => T;
 
+type TeamRuntimeSelection = { scope: RuntimeScope };
+
 async function teamRuntimeApi<T>(payload: {
   operationId: TeamRuntimeOperationId;
   target: CapabilityTarget | null;
   input: Record<string, unknown>;
+  scope: RuntimeScope;
 }, decode?: TeamRuntimeResponseDecoder<T>): Promise<T> {
   const traceId = createSessionTraceId(`team-runtime:${payload.operationId}`);
   let scope: Awaited<ReturnType<typeof resolveSingleCapabilityScope>>;
   try {
-    scope = await resolveSingleCapabilityScope(TEAM_RUNTIME_CAPABILITY_ID);
+    const source = payload.scope;
+    if (!source || (source.kind !== 'agent' && source.kind !== 'runtime-instance')) throw new Error('Select a real runtime Agent for this team.');
+    scope = await resolveSingleCapabilityScope(TEAM_RUNTIME_CAPABILITY_ID, runtimeInstanceScope(source.endpoint));
   } catch (error) {
     logSessionTrace('renderer.team.runtime.scope-error', traceId, () => ({
       ...summarizeTeamRuntimeRequest(payload),
@@ -864,9 +869,11 @@ function readString(record: Record<string, unknown> | null, key: string): string
 }
 
 export async function validateTeamSkillPackage(payload: {
+  scope: RuntimeScope;
   packagePath: string;
 }): Promise<TeamSkillPackageValidationResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.packageValidate',
     target: { kind: 'team', packagePath: payload.packagePath },
     input: { packagePath: payload.packagePath },
@@ -874,16 +881,21 @@ export async function validateTeamSkillPackage(payload: {
 }
 
 export async function planTeamDependencies(payload: {
+  scope: RuntimeScope;
+  sourceAgentId?: string;
   packagePath: string;
 }): Promise<TeamDependencyPreparationPlanResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.dependencyPlan',
     target: { kind: 'team', packagePath: payload.packagePath },
-    input: { packagePath: payload.packagePath },
+    input: { packagePath: payload.packagePath, ...(payload.sourceAgentId ? { sourceAgentId: payload.sourceAgentId } : {}) },
   }, decodeTeamDependencyPreparationPlan);
 }
 
 export async function provisionTeamAgents(payload: {
+  scope: RuntimeScope;
+  sourceAgentId?: string;
   teamId: string;
   packagePath: string;
   idempotencyKey: string;
@@ -891,6 +903,7 @@ export async function provisionTeamAgents(payload: {
   manualTeam?: ManualTeamProvisionRecord;
 }): Promise<CallReceipt> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.provisionAgents',
     target: { kind: 'team', teamId: payload.teamId, packagePath: payload.packagePath },
     input: {
@@ -898,6 +911,7 @@ export async function provisionTeamAgents(payload: {
       packagePath: payload.packagePath,
       idempotencyKey: payload.idempotencyKey,
       ...(payload.sourceType ? { sourceType: payload.sourceType } : {}),
+      ...(payload.sourceAgentId ? { sourceAgentId: payload.sourceAgentId } : {}),
       ...(payload.manualTeam ? { manualTeam: toManualTeamProvisionInput(payload.manualTeam) } : {}),
     },
   }, decodeCallReceipt);
@@ -912,9 +926,11 @@ export type TeamDeleteResult = {
 };
 
 export async function deleteTeamInstance(payload: {
+  scope: RuntimeScope;
   teamId: string;
 }): Promise<CallReceipt> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.delete',
     target: { kind: 'team', teamId: payload.teamId },
     input: { kind: 'team', teamId: payload.teamId },
@@ -945,6 +961,8 @@ export function classifyTeamCreationFailure(
 }
 
 export async function createTeamRun(payload: {
+  scope: RuntimeScope;
+  sourceAgentId?: string;
   teamId?: string;
   packagePath: string;
   runId?: string;
@@ -954,6 +972,7 @@ export async function createTeamRun(payload: {
   let failure: TeamCreationFailure | null = null;
   try {
     return await teamRuntimeApi({
+      scope: payload.scope,
       operationId: 'team.runCreate',
       target: { kind: 'team', packagePath: payload.packagePath, ...(payload.teamId ? { teamId: payload.teamId } : {}) },
       input: {
@@ -962,6 +981,7 @@ export async function createTeamRun(payload: {
         ...(payload.runId ? { runId: payload.runId } : {}),
         idempotencyKey: payload.idempotencyKey,
         ...(payload.sourceType ? { sourceType: payload.sourceType } : {}),
+        ...(payload.sourceAgentId ? { sourceAgentId: payload.sourceAgentId } : {}),
       },
     }, (response) => {
       if (isRecord(response) && response.outcome === 'outcome-unknown'
@@ -990,30 +1010,36 @@ export interface TeamRunListItem extends TeamRunRecord {
 }
 
 export async function listTeamRuns(payload: {
+  scope: RuntimeScope;
   teamId: string;
 }): Promise<{ teamId: string; runs: TeamRunListItem[] }> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.runList',
     target: { kind: 'team', teamId: payload.teamId },
     input: { teamId: payload.teamId },
   }, (response) => decodeTeamRunList(response, payload.teamId));
 }
 
-export async function listTeamRunTriggers(payload?: {
+export async function listTeamRunTriggers(payload: {
+  scope: RuntimeScope;
   teamId?: string;
 }): Promise<TeamTriggerListResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.triggerList',
-    target: payload?.teamId ? { kind: 'team', teamId: payload.teamId } : { kind: 'team' },
+    target: payload.teamId ? { kind: 'team', teamId: payload.teamId } : { kind: 'team' },
     input: {},
   });
 }
 
 export async function fireTeamWebhookTrigger(payload: {
+  scope: RuntimeScope;
   webhookPath: string;
   idempotencyKey: string;
 }): Promise<TeamWebhookTriggerFireResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.webhookTriggerFire',
     target: { kind: 'team' },
     input: {
@@ -1024,10 +1050,12 @@ export async function fireTeamWebhookTrigger(payload: {
 }
 
 export async function resumeTeam(payload: {
+  scope: RuntimeScope;
   teamId: string;
   idempotencyKey: string;
 }): Promise<{ success: true; teamId: string; restoredRunIds: string[]; activeRunIds: string[]; skippedTerminalRunIds: string[]; runs: TeamRunListItem[] }> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.resume',
     target: { kind: 'team', teamId: payload.teamId },
     input: { teamId: payload.teamId, idempotencyKey: payload.idempotencyKey },
@@ -1035,12 +1063,14 @@ export async function resumeTeam(payload: {
 }
 
 export async function submitTeamRunDecision(payload: {
+  scope: RuntimeScope;
   runId: string;
   decision: TeamDecisionType;
   note?: string;
   idempotencyKey: string;
 }): Promise<TeamRunDecisionSubmitResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.runDecisionSubmit',
     target: { kind: 'team-run', runId: payload.runId },
     input: {
@@ -1053,6 +1083,7 @@ export async function submitTeamRunDecision(payload: {
 }
 
 export async function resolveTeamApproval(payload: {
+  scope: RuntimeScope;
   runId: string;
   approvalId: string;
   decision: TeamApprovalResolutionDecision;
@@ -1060,6 +1091,7 @@ export async function resolveTeamApproval(payload: {
   idempotencyKey: string;
 }): Promise<TeamApprovalResolveResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.approvalResolve',
     target: { kind: 'team-approval', runId: payload.runId, approvalId: payload.approvalId },
     input: {
@@ -1072,20 +1104,22 @@ export async function resolveTeamApproval(payload: {
   }, decodeTeamApprovalResolve);
 }
 
-export async function startTeamDesign(payload: TeamDesignTarget & { idempotencyKey: string }): Promise<{ success: true; outcome: 'designing' }> {
+export async function startTeamDesign(payload: TeamDesignTarget & TeamRuntimeSelection & { idempotencyKey: string }): Promise<{ success: true; outcome: 'designing' }> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.designStart',
     target: { kind: 'team', teamId: payload.teamId },
     input: { teamId: payload.teamId, runId: payload.runId, idempotencyKey: payload.idempotencyKey },
   }, (value) => decodeTeamDesignMutation(value, 'designing'));
 }
 
-export async function startTeamRun(payload: TeamDesignTarget & {
+export async function startTeamRun(payload: TeamDesignTarget & TeamRuntimeSelection & {
   designEpoch: string | null;
   expectedGraphVersion: string;
   idempotencyKey: string;
 }): Promise<{ success: true; outcome: 'started' }> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.runStart',
     target: { kind: 'team', teamId: payload.teamId },
     input: {
@@ -1098,23 +1132,25 @@ export async function startTeamRun(payload: TeamDesignTarget & {
   }, (value) => decodeTeamDesignMutation(value, 'started'));
 }
 
-export async function exitTeamDesign(payload: TeamDesignTarget & { designEpoch: string }): Promise<{ success: true; outcome: 'intake' }> {
+export async function exitTeamDesign(payload: TeamDesignTarget & TeamRuntimeSelection & { designEpoch: string }): Promise<{ success: true; outcome: 'intake' }> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.designExit',
     target: { kind: 'team', teamId: payload.teamId },
     input: { teamId: payload.teamId, runId: payload.runId, designEpoch: payload.designEpoch },
   }, (value) => decodeTeamDesignMutation(value, 'intake'));
 }
 
-export async function readTeamDesignSnapshot(target: TeamDesignTarget): Promise<TeamDesignSnapshot> {
+export async function readTeamDesignSnapshot(target: TeamDesignTarget & TeamRuntimeSelection): Promise<TeamDesignSnapshot> {
   return await teamRuntimeApi({
+    scope: target.scope,
     operationId: 'team.designSnapshot',
     target: { kind: 'team', teamId: target.teamId },
     input: { teamId: target.teamId, runId: target.runId },
   }, (value) => decodeTeamDesignSnapshot(value, target));
 }
 
-export async function patchTeamDesignGraph(payload: TeamDesignTarget & {
+export async function patchTeamDesignGraph(payload: TeamDesignTarget & TeamRuntimeSelection & {
   designEpoch: string;
   expectedGraphVersion: string;
   commandId: string;
@@ -1122,6 +1158,7 @@ export async function patchTeamDesignGraph(payload: TeamDesignTarget & {
   operations: TeamGraphPatchOperation[];
 }): Promise<TeamDesignSnapshot> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.designGraphPatch',
     target: { kind: 'team', teamId: payload.teamId },
     input: {
@@ -1137,11 +1174,13 @@ export async function patchTeamDesignGraph(payload: TeamDesignTarget & {
 }
 
 export async function readTeamRunSnapshot(payload: {
+  scope: RuntimeScope;
   runId: string;
   eventCursor?: number;
   eventLimit?: number;
 }): Promise<TeamRunSnapshot> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.runSnapshot',
     target: { kind: 'team-run', runId: payload.runId },
     input: {
@@ -1153,9 +1192,11 @@ export async function readTeamRunSnapshot(payload: {
 }
 
 export async function readTeamRunDiagnostics(payload: {
+  scope: RuntimeScope;
   runId: string;
 }): Promise<TeamRunDiagnostics> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.runDiagnostics',
     target: { kind: 'team-run', runId: payload.runId },
     input: { runId: payload.runId },
@@ -1163,11 +1204,13 @@ export async function readTeamRunDiagnostics(payload: {
 }
 
 export async function saveTeamRunGraphProjection(payload: {
+  scope: RuntimeScope;
   runId: string;
   graph: TeamGraphSnapshotRecord;
   idempotencyKey: string;
 }): Promise<TeamGraphSaveResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.graphSave',
     target: { kind: 'team-run', runId: payload.runId },
     input: {
@@ -1179,6 +1222,7 @@ export async function saveTeamRunGraphProjection(payload: {
 }
 
 export async function submitTeamRunGraphPatch(payload: {
+  scope: RuntimeScope;
   runId: string;
   summary: string;
   patch: TeamGraphPatchInput;
@@ -1186,6 +1230,7 @@ export async function submitTeamRunGraphPatch(payload: {
   metadata?: Record<string, unknown>;
 }): Promise<TeamAgentCommandResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.graphPatch',
     target: { kind: 'team-run', runId: payload.runId },
     input: {
@@ -1199,12 +1244,14 @@ export async function submitTeamRunGraphPatch(payload: {
 }
 
 export async function readTeamRunGraphContext(payload: {
+  scope: RuntimeScope;
   teamId: string;
   runId: string;
   view: 'current_node' | 'currentNode' | 'graph_summary' | 'graphSummary';
   nodeExecutionId?: string;
 }): Promise<TeamGraphContextResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.graphContext',
     target: { kind: 'team-run', teamId: payload.teamId, runId: payload.runId },
     input: {
@@ -1217,9 +1264,11 @@ export async function readTeamRunGraphContext(payload: {
 }
 
 export async function exportTeamRunGraphYaml(payload: {
+  scope: RuntimeScope;
   runId: string;
 }): Promise<TeamGraphYamlExportResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.graphExportYaml',
     target: { kind: 'team-run', runId: payload.runId },
     input: { runId: payload.runId },
@@ -1227,11 +1276,13 @@ export async function exportTeamRunGraphYaml(payload: {
 }
 
 export async function importTeamRunGraphYaml(payload: {
+  scope: RuntimeScope;
   runId: string;
   yaml: string;
   idempotencyKey: string;
 }): Promise<TeamGraphYamlImportResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.graphImportYaml',
     target: { kind: 'team-run', runId: payload.runId },
     input: {
@@ -1243,6 +1294,7 @@ export async function importTeamRunGraphYaml(payload: {
 }
 
 export async function fireTeamRunTrigger(payload: {
+  scope: RuntimeScope;
   runId: string;
   startNodeId: string;
   triggerSource: TeamTriggerSourceKind;
@@ -1250,6 +1302,7 @@ export async function fireTeamRunTrigger(payload: {
   idempotencyKey: string;
 }): Promise<TeamTriggerFireResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.triggerFire',
     target: { kind: 'team-run', runId: payload.runId },
     input: {
@@ -1263,9 +1316,11 @@ export async function fireTeamRunTrigger(payload: {
 }
 
 export async function wakeDueTeamRunNodePromptRetries(payload: {
+  scope: RuntimeScope;
   runId: string;
 }): Promise<TeamNodePromptRetryDueResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.nodePromptRetryDue',
     target: { kind: 'team-run', runId: payload.runId },
     input: { runId: payload.runId },
@@ -1273,6 +1328,7 @@ export async function wakeDueTeamRunNodePromptRetries(payload: {
 }
 
 export async function submitTeamRunNodeEvent(payload: {
+  scope: RuntimeScope;
   runId: string;
   nodeExecutionId: string;
   event: TeamNodeEventKind;
@@ -1291,6 +1347,7 @@ export async function submitTeamRunNodeEvent(payload: {
   attemptNumber?: number;
 }): Promise<TeamAgentCommandResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.nodeEvent',
     target: { kind: 'team-run', runId: payload.runId },
     input: {
@@ -1315,11 +1372,13 @@ export async function submitTeamRunNodeEvent(payload: {
 }
 
 export async function cancelTeamRun(payload: {
+  scope: RuntimeScope;
   runId: string;
   reason?: string;
   idempotencyKey: string;
 }): Promise<TeamRunCancelResult> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.runCancel',
     target: { kind: 'team-run', runId: payload.runId },
     input: {
@@ -1331,9 +1390,11 @@ export async function cancelTeamRun(payload: {
 }
 
 export async function deleteTeamRun(payload: {
+  scope: RuntimeScope;
   runId: string;
 }): Promise<CallReceipt> {
   return await teamRuntimeApi({
+    scope: payload.scope,
     operationId: 'team.runDelete',
     target: { kind: 'team-run', runId: payload.runId },
     input: { runId: payload.runId },

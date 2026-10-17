@@ -14,9 +14,10 @@ import type {
 } from '../../main/runtime-host-delivery/transport/sessions/approvals';
 import type { SessionContentLoadRequest } from '../../main/runtime-host-delivery/transport/sessions/content';
 import type { SessionModelSelectionRequest } from '../../main/runtime-host-delivery/transport/sessions/model-selection';
-import type {
-  SessionPermissionOperationId,
-  SessionPermissionRequest,
+import {
+  decodeSessionPermissionRequest,
+  type SessionPermissionOperationId,
+  type SessionPermissionRequest,
 } from '../../main/runtime-host-delivery/transport/sessions/permission';
 import type { SessionGoalReceipt } from '../../../src/types/session-goal';
 import { decodeSessionGoalOutcome, decodeSessionGoalRequest, isGoalIdentifier, isGoalObjective, isSessionSendIntent } from '../../main/runtime-host-delivery/transport/sessions/goal';
@@ -698,14 +699,16 @@ function decodeWorkspaceMediaRequest(body: Record<string, unknown>): WorkspaceMe
     || !isRecord(body.scope)
     || !hasExactKeys(body.scope, ['kind', 'endpoint', 'sessionKey'])
     || body.scope.kind !== 'session'
-    || !isOpenClawEndpoint(body.scope.endpoint)
+    || !isRuntimeEndpoint(body.scope.endpoint)
     || !isIdentifier(body.scope.sessionKey)
     || !isRecord(body.target)
     || !hasExactKeys(body.target, ['kind'])
     || body.target.kind !== 'workspace-media'
     || !isRecord(body.input)
-    || !isOpenClawEndpoint(body.input.endpoint)
-    || body.input.sessionKey !== body.scope.sessionKey) {
+    || !isRuntimeEndpoint(body.input.endpoint)
+    || body.input.sessionKey !== body.scope.sessionKey
+    || body.input.endpoint.runtimeAdapterId !== body.scope.endpoint.runtimeAdapterId
+    || body.input.endpoint.runtimeInstanceId !== body.scope.endpoint.runtimeInstanceId) {
     return null;
   }
 
@@ -718,6 +721,9 @@ function decodeWorkspaceMediaRequest(body: Record<string, unknown>): WorkspaceMe
   const input = body.input;
   const endpoint = input.endpoint as RuntimeEndpoint;
   const sessionKey = input.sessionKey as string;
+  if (endpoint.runtimeAdapterId === 'matcha-agent'
+    && (Object.hasOwn(input, 'gatewayUrl')
+      || (Array.isArray(input.paths) && input.paths.some((path) => isRecord(path) && Object.hasOwn(path, 'gatewayUrl'))))) return null;
   if (body.operationId === 'media.resolve') {
     if (!hasExactKeys(input, ['endpoint', 'sessionKey', 'reference'])
       || !isMediaReference(input.reference)) return null;
@@ -1157,7 +1163,6 @@ function adaptSessionDeleteRequest(body: Record<string, unknown>): Record<string
     || !hasExactKeys(body.scope, ['kind', 'identity'])
     || body.scope.kind !== 'session'
     || !isSessionIdentity(body.scope.identity)
-    || !isOpenClawEndpoint(body.scope.identity.endpoint)
     || !isRecord(body.target)
     || !hasExactKeys(body.target, ['kind', 'identity'])
     || body.target.kind !== 'session'
@@ -1187,7 +1192,6 @@ function adaptSessionRenameRequest(body: Record<string, unknown>): Record<string
     || !hasExactKeys(body.scope, ['kind', 'identity'])
     || body.scope.kind !== 'session'
     || !isSessionIdentity(body.scope.identity)
-    || !isOpenClawEndpoint(body.scope.identity.endpoint)
     || !isRecord(body.target)
     || !hasExactKeys(body.target, ['kind', 'identity'])
     || body.target.kind !== 'session'
@@ -1211,87 +1215,24 @@ function adaptSessionRenameRequest(body: Record<string, unknown>): Record<string
   };
 }
 
-function isSessionPermissionRequest(
-  body: Record<string, unknown>,
-  operationId: SessionPermissionOperationId,
-): body is SessionPermissionRequest {
-  return hasExactKeys(body, ['id', 'operationId', 'scope', 'target', 'input'])
-    && body.id === 'session.management'
-    && body.operationId === operationId
-    && isRecord(body.scope)
-    && hasExactKeys(body.scope, ['kind', 'identity'])
-    && body.scope.kind === 'session'
-    && isSessionIdentity(body.scope.identity)
-    && isRecord(body.target)
-    && hasExactKeys(body.target, ['kind', 'identity'])
-    && body.target.kind === 'session'
-    && isSessionIdentity(body.target.identity)
-    && sameIdentity(body.scope.identity, body.target.identity)
-    && isRecord(body.input)
-    && hasExactKeys(body.input, operationId === 'sessions.permission.get'
-      ? ['sessionKey', 'sessionIdentity']
-      : ['sessionKey', 'sessionIdentity', 'permissionMode'])
-    && isSessionIdentity(body.input.sessionIdentity)
-    && sameIdentity(body.scope.identity, body.input.sessionIdentity)
-    && body.input.sessionKey === body.scope.identity.sessionKey
-    && (operationId === 'sessions.permission.get' || isSessionPermissionMode(body.input.permissionMode));
-}
-
 function adaptSessionPermissionRequest(
   body: Record<string, unknown>,
   operationId: SessionPermissionOperationId,
   traceId?: string | null,
 ): SessionPermissionRequest {
-  if (!isSessionPermissionRequest(body, operationId)) {
-    logSessionTrace('electron.permission.route.invalid', traceId, () => ({
-      operationId,
-      envelope: summarizePermissionBody(body),
-    }));
+  const request = decodeSessionPermissionRequest(body);
+  if (!request || request.operationId !== operationId) {
+    logSessionTrace('electron.permission.route.invalid', traceId, () => ({ operationId }));
     throw new Error('Session permission request is invalid');
   }
-  const request = {
-    id: 'session.management',
-    scope: { kind: 'session', identity: body.scope.identity },
-    target: { kind: 'session', identity: body.target.identity },
-    ...(body.operationId === 'sessions.permission.get'
-      ? {
-          operationId: body.operationId,
-          input: {
-            sessionKey: body.input.sessionKey,
-            sessionIdentity: body.input.sessionIdentity,
-          },
-        }
-      : {
-          operationId: body.operationId,
-          input: {
-            sessionKey: body.input.sessionKey,
-            sessionIdentity: body.input.sessionIdentity,
-            permissionMode: body.input.permissionMode,
-          },
-        }),
-  } satisfies SessionPermissionRequest;
   if (isSessionTraceEnabled()) logSessionTrace('electron.permission.route.adapted', traceId, {
     operationId,
-    adapter: body.scope.identity.endpoint.runtimeAdapterId,
-    instance: body.scope.identity.endpoint.runtimeInstanceId,
-    sessionKey: summarizeIdentifier(body.input.sessionKey),
-    permissionMode: body.operationId === 'sessions.permission.set' ? body.input.permissionMode : null,
+    adapter: request.scope.identity.endpoint.runtimeAdapterId,
+    instance: request.scope.identity.endpoint.runtimeInstanceId,
+    sessionKey: summarizeIdentifier(request.input.sessionKey),
+    permissionMode: request.operationId === 'sessions.permission.set' ? request.input.permissionMode : null,
   });
   return request;
-}
-
-function summarizePermissionBody(body: Record<string, unknown>) {
-  const scope = isRecord(body.scope) ? body.scope : null;
-  const target = isRecord(body.target) ? body.target : null;
-  const input = isRecord(body.input) ? body.input : null;
-  return {
-    bodyKeys: Object.keys(body).sort(),
-    scopeIdentity: summarizeIdentityShape(scope?.identity),
-    targetIdentity: summarizeIdentityShape(target?.identity),
-    inputIdentity: summarizeIdentityShape(input?.sessionIdentity),
-    inputSessionKey: summarizeString(input?.sessionKey),
-    permissionMode: input?.permissionMode === undefined ? null : input.permissionMode,
-  };
 }
 
 function adaptSessionListRequest(body: Record<string, unknown>): Record<string, unknown> {
@@ -1567,14 +1508,6 @@ function isMatchaAgentIdentity(
 
 function isApprovalDecision(value: unknown): value is 'allow-once' | 'allow-always' | 'deny' {
   return value === 'allow-once' || value === 'allow-always' || value === 'deny';
-}
-
-function isSessionPermissionMode(value: unknown): value is null | 'read-only' | 'guarded' | 'workspace' | 'full' {
-  return value === null
-    || value === 'read-only'
-    || value === 'guarded'
-    || value === 'workspace'
-    || value === 'full';
 }
 
 function adaptSessionModelSelectionRequest(body: Record<string, unknown>, traceId?: string | null): SessionModelSelectionRequest {
@@ -1857,10 +1790,6 @@ function isRuntimeEndpoint(value: unknown): value is RuntimeEndpoint {
     && value.kind === 'native-runtime'
     && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
     && value.runtimeInstanceId === 'local';
-}
-
-function isOpenClawEndpoint(value: unknown): value is RuntimeEndpoint {
-  return isRuntimeEndpoint(value) && value.runtimeAdapterId === 'openclaw';
 }
 
 function isRelativePath(value: unknown): value is string {

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { AlertCircle, Cable, Loader2, Pencil, Plus, RefreshCw, Save, Search, Trash2, X } from 'lucide-react';
 import { AgentViewToggle } from '@/components/common/AgentViewToggle';
+import { LoadingState } from '@/components/common/LoadingSpinner';
 import { AgentPage, AgentPageSection, AgentPageToolbar, AgentResourceCard, AgentResourceFooter, AgentResourceGrid, AgentResourceIcon, AgentResourcePill } from '@/components/common/AgentPage';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -12,12 +13,22 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
-import { useExternalConnectorsStore, type ExternalConnectorConnectionStatus, type ExternalConnectorKind, type ExternalConnectorSecretRef, type ExternalConnectorSpec, type ExternalMcpServerProgramDescriptor, type OpenClawMcpServerSummary } from '@/stores/external-connectors';
+import { useExternalConnectorsStore, type ExternalConnectorConnectionStatus, type ExternalConnectorKind, type ExternalConnectorSecretRef, type ExternalConnectorSpec, type ExternalConnectorSummary, type ExternalConnectorPatch, type ExternalMcpServerProgramDescriptor, type OpenClawMcpServerSummary } from '@/stores/external-connectors';
 import { cn } from '@/lib/utils';
+import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
+import { selectManagementEndpoint, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { buildCapabilityScopeKey, runtimeInstanceScope, runtimeEndpointsEqual, type RuntimeInstanceScope } from '@/types/desktop/runtime-address';
+
+const EMPTY_CONNECTORS: ExternalConnectorSummary[] = [];
+const EMPTY_STATUSES: Record<string, ExternalConnectorConnectionStatus> = {};
+const EMPTY_SERVERS: OpenClawMcpServerSummary[] = [];
+const EMPTY_PROGRAMS: ExternalMcpServerProgramDescriptor[] = [];
 
 const CONNECTOR_KINDS: ExternalConnectorKind[] = ['mcp-stdio', 'mcp-http', 'cli', 'sdk', 'http'];
 const PROCESS_KINDS = new Set<ExternalConnectorKind>(['mcp-stdio', 'cli']);
 const HTTP_KINDS = new Set<ExternalConnectorKind>(['mcp-http', 'http']);
+
+type PrivateField = 'command' | 'args' | 'cwd' | 'env' | 'headers' | 'config';
 
 type ConnectorFormState = {
   id: string;
@@ -41,6 +52,7 @@ type ConnectorFormState = {
   config: string;
   secretConfigRefs: string;
   mcpServerProgramId: string;
+  replaceFields: PrivateField[];
 };
 
 const EMPTY_FORM: ConnectorFormState = {
@@ -65,6 +77,7 @@ const EMPTY_FORM: ConnectorFormState = {
   config: '',
   secretConfigRefs: '',
   mcpServerProgramId: '',
+  replaceFields: [],
 };
 
 function parseStringMap(value: string, fieldName: string): Record<string, string> | undefined {
@@ -113,15 +126,11 @@ function splitArgs(value: string): string[] | undefined {
   return args.length > 0 ? args : undefined;
 }
 
-function serializeStringMap(value?: Record<string, string>): string {
-  return value ? Object.entries(value).map(([key, itemValue]) => `${key}=${itemValue}`).join('\n') : '';
-}
-
 function serializeSecretRefMap(value?: Record<string, ExternalConnectorSecretRef>): string {
   return value ? Object.entries(value).map(([key, itemValue]) => `${key}=${itemValue.ref}`).join('\n') : '';
 }
 
-function formFromConnector(connector: ExternalConnectorSpec): ConnectorFormState {
+function formFromConnector(connector: ExternalConnectorSummary): ConnectorFormState {
   const base = {
     ...EMPTY_FORM,
     id: connector.id,
@@ -134,10 +143,6 @@ function formFromConnector(connector: ExternalConnectorSpec): ConnectorFormState
   if (connector.kind === 'mcp-stdio' || connector.kind === 'cli') {
     return {
       ...base,
-      command: connector.command,
-      args: connector.args?.join('\n') ?? '',
-      cwd: connector.cwd ?? '',
-      env: serializeStringMap(connector.env),
       secretEnv: serializeSecretRefMap(connector.secretEnv),
     };
   }
@@ -146,7 +151,6 @@ function formFromConnector(connector: ExternalConnectorSpec): ConnectorFormState
       ...base,
       url: connector.url,
       transport: connector.transport ?? 'streamable-http',
-      headers: serializeStringMap(connector.headers),
       secretHeaders: serializeSecretRefMap(connector.secretHeaders),
       connectionTimeoutMs: connector.connectionTimeoutMs ? String(connector.connectionTimeoutMs) : '',
     };
@@ -155,7 +159,6 @@ function formFromConnector(connector: ExternalConnectorSpec): ConnectorFormState
     return {
       ...base,
       baseUrl: connector.baseUrl,
-      headers: serializeStringMap(connector.headers),
       secretHeaders: serializeSecretRefMap(connector.secretHeaders),
     };
   }
@@ -164,7 +167,6 @@ function formFromConnector(connector: ExternalConnectorSpec): ConnectorFormState
       ...base,
       provider: connector.provider,
       packageName: connector.packageName ?? '',
-      config: connector.config ? JSON.stringify(connector.config, null, 2) : '',
       secretConfigRefs: serializeSecretRefMap(connector.secretConfigRefs),
     };
   }
@@ -225,9 +227,68 @@ function buildConnector(form: ConnectorFormState, mcpServerPrograms: readonly Ex
   }) as ExternalConnectorSpec;
 }
 
+function buildPatch(form: ConnectorFormState, connector: ExternalConnectorSummary): ExternalConnectorPatch {
+  const original = formFromConnector(connector);
+  const changed = (field: keyof ConnectorFormState) => form[field] !== original[field];
+  const common = {
+    ...(changed('displayName') ? { displayName: form.displayName.trim() || null } : {}),
+    ...(changed('description') ? { description: form.description.trim() || null } : {}),
+    ...(changed('enabled') ? { enabled: form.enabled } : {}),
+  };
+  const replace = (field: PrivateField) => form.replaceFields.includes(field);
+  if (form.kind === 'mcp-stdio' || form.kind === 'cli') {
+    return {
+      ...common,
+      ...(replace('command') ? { command: form.command.trim() } : {}),
+      ...(replace('args') ? { args: splitArgs(form.args) ?? null } : {}),
+      ...(replace('cwd') ? { cwd: form.cwd.trim() || null } : {}),
+      ...(replace('env') ? { env: parseStringMap(form.env, 'env') ?? null } : {}),
+      ...(changed('secretEnv') ? { secretEnv: parseSecretRefMap(form.secretEnv, 'secretEnv') ?? null } : {}),
+    };
+  }
+  if (form.kind === 'mcp-http') {
+    return {
+      ...common,
+      ...(changed('url') ? { url: form.url.trim() } : {}),
+      ...(changed('transport') ? { transport: form.transport } : {}),
+      ...(changed('connectionTimeoutMs') ? { connectionTimeoutMs: form.connectionTimeoutMs.trim() ? Number(form.connectionTimeoutMs) : null } : {}),
+      ...(replace('headers') ? { headers: parseStringMap(form.headers, 'headers') ?? null } : {}),
+      ...(changed('secretHeaders') ? { secretHeaders: parseSecretRefMap(form.secretHeaders, 'secretHeaders') ?? null } : {}),
+    };
+  }
+  if (form.kind === 'http') {
+    return {
+      ...common,
+      ...(changed('baseUrl') ? { baseUrl: form.baseUrl.trim() } : {}),
+      ...(replace('headers') ? { headers: parseStringMap(form.headers, 'headers') ?? null } : {}),
+      ...(changed('secretHeaders') ? { secretHeaders: parseSecretRefMap(form.secretHeaders, 'secretHeaders') ?? null } : {}),
+    };
+  }
+  return {
+    ...common,
+    ...(changed('provider') ? { provider: form.provider.trim() } : {}),
+    ...(changed('packageName') ? { packageName: form.packageName.trim() || null } : {}),
+    ...(replace('config') ? { config: parseJsonObject(form.config) ?? null } : {}),
+    ...(changed('secretConfigRefs') ? { secretConfigRefs: parseSecretRefMap(form.secretConfigRefs, 'secretConfigRefs') ?? null } : {}),
+  };
+}
+
 function withoutUndefined<T extends Record<string, unknown>>(input: T): T {
   return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)) as T;
 }
+
+type ConnectorListEntry = {
+  key: string;
+  id: string;
+  displayName: string;
+  description?: string;
+  kind: ExternalConnectorKind | 'unknown';
+  source: OpenClawMcpServerSummary['source'];
+  enabled: boolean;
+  editable: boolean;
+  removable: boolean;
+  connector?: ExternalConnectorSummary;
+};
 
 function ConnectorKindBadge({ kind }: { kind: ExternalConnectorKind | OpenClawMcpServerSummary['kind'] }) {
   return <AgentResourcePill>{kind}</AgentResourcePill>;
@@ -252,29 +313,29 @@ function ConnectorProbeBadge({ status }: { status?: ExternalConnectorConnectionS
   return <AgentResourcePill>未检测</AgentResourcePill>;
 }
 
-function mcpServerSourceLabel(source: OpenClawMcpServerSummary['source']): string {
+function mcpServerSourceLabel(source: OpenClawMcpServerSummary['source'], scope: RuntimeInstanceScope): string {
   if (source === 'preset') return '预置';
-  if (source === 'openclaw') return 'OpenClaw';
+  if (source === 'openclaw') return scope.endpoint.kind === 'native-runtime' && scope.endpoint.runtimeAdapterId === 'matcha-agent' ? 'Matcha 原生' : 'OpenClaw';
   return '我的';
 }
 
-function ConnectorFields({ form, mcpServerPrograms, setForm }: {
+function ConnectorFields({ form, editing, mcpServerPrograms, setForm }: {
   form: ConnectorFormState;
+  editing: boolean;
   mcpServerPrograms: readonly ExternalMcpServerProgramDescriptor[];
   setForm: (updater: (current: ConnectorFormState) => ConnectorFormState) => void;
 }) {
   const update = <K extends keyof ConnectorFormState>(key: K, value: ConnectorFormState[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
   };
-  const matchingMcpPrograms = mcpServerPrograms.filter((program) => program.connectorKinds.includes(form.kind as 'mcp-stdio' | 'mcp-http'));
+  const privateFields: PrivateField[] = PROCESS_KINDS.has(form.kind) ? ['command', 'args', 'cwd', 'env']
+    : HTTP_KINDS.has(form.kind) ? ['headers'] : ['config'];
+  const matchingMcpPrograms = mcpServerPrograms.filter((program) => program.source !== 'system-runtime' && program.connectorKinds.includes(form.kind as 'mcp-stdio' | 'mcp-http'));
   const selectMcpServerProgram = (programId: string) => {
     const program = matchingMcpPrograms.find((item) => item.id === programId);
     setForm((current) => ({
       ...current,
       mcpServerProgramId: programId,
-      command: program?.command ?? current.command,
-      args: program?.args?.join('\n') ?? current.args,
-      url: program?.url ?? current.url,
       transport: program?.transport ?? current.transport,
     }));
   };
@@ -284,11 +345,11 @@ function ConnectorFields({ form, mcpServerPrograms, setForm }: {
       <div className="grid gap-4 md:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="connector-id">连接器 ID</Label>
-          <Input id="connector-id" value={form.id} onChange={(event) => update('id', event.target.value)} placeholder="github-mcp" />
+          <Input id="connector-id" disabled={editing} value={form.id} onChange={(event) => update('id', event.target.value)} placeholder="github-mcp" />
         </div>
         <div className="space-y-2">
           <Label htmlFor="connector-kind">协议类型</Label>
-          <Select id="connector-kind" value={form.kind} onChange={(event) => update('kind', event.target.value as ExternalConnectorKind)}>
+          <Select id="connector-kind" disabled={editing} value={form.kind} onChange={(event) => update('kind', event.target.value as ExternalConnectorKind)}>
             {CONNECTOR_KINDS.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
           </Select>
         </div>
@@ -314,7 +375,7 @@ function ConnectorFields({ form, mcpServerPrograms, setForm }: {
       {(form.kind === 'mcp-stdio' || form.kind === 'mcp-http') && (
         <div className="space-y-2 rounded-md border border-border p-3">
           <Label htmlFor="connector-mcp-program">MCP server 程序</Label>
-          <Select id="connector-mcp-program" value={form.mcpServerProgramId} onChange={(event) => selectMcpServerProgram(event.target.value)}>
+          <Select id="connector-mcp-program" disabled={editing} value={form.mcpServerProgramId} onChange={(event) => selectMcpServerProgram(event.target.value)}>
             <option value="">外部自行管理</option>
             {matchingMcpPrograms.map((program) => (
               <option key={program.id} value={program.id}>{program.displayName} · {program.source}</option>
@@ -323,23 +384,37 @@ function ConnectorFields({ form, mcpServerPrograms, setForm }: {
         </div>
       )}
 
+      {editing && (
+        <div className="space-y-3 rounded-md border border-border p-3">
+          <p className="text-xs text-muted-foreground">私有执行配置不回读，默认保留；仅开启的字段会替换。可选字段留空表示清除，Command 不可清空。</p>
+          <div className="flex flex-wrap gap-4">
+            {privateFields.map((field) => (
+              <label key={field} className="flex items-center gap-2 text-sm">
+                <Switch checked={form.replaceFields.includes(field)} onCheckedChange={(checked) => update('replaceFields', checked ? [...form.replaceFields, field] : form.replaceFields.filter((item) => item !== field))} />
+                替换 {field}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
       {PROCESS_KINDS.has(form.kind) && (
         <>
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="connector-command">Command</Label>
-              <Input id="connector-command" value={form.command} onChange={(event) => update('command', event.target.value)} placeholder="npx" />
+              <Input id="connector-command" disabled={editing && !form.replaceFields.includes('command')} value={form.command} onChange={(event) => update('command', event.target.value)} placeholder="npx" />
             </div>
             <div className="space-y-2">
               <Label htmlFor="connector-cwd">cwd</Label>
-              <Input id="connector-cwd" value={form.cwd} onChange={(event) => update('cwd', event.target.value)} placeholder="可选" />
+              <Input id="connector-cwd" disabled={editing && !form.replaceFields.includes('cwd')} value={form.cwd} onChange={(event) => update('cwd', event.target.value)} placeholder="可选" />
             </div>
           </div>
           <div className="space-y-2">
             <Label htmlFor="connector-args">Args</Label>
-            <Textarea id="connector-args" value={form.args} onChange={(event) => update('args', event.target.value)} placeholder={'每行一个参数\n-y\n@modelcontextprotocol/server-filesystem'} />
+            <Textarea id="connector-args" disabled={editing && !form.replaceFields.includes('args')} value={form.args} onChange={(event) => update('args', event.target.value)} placeholder={'每行一个参数\n-y\n@modelcontextprotocol/server-filesystem'} />
           </div>
-          <MapFields form={form} update={update} publicKey="env" secretKey="secretEnv" publicLabel="公开 env" secretLabel="Secret env refs" />
+          <MapFields form={form} editing={editing} update={update} publicKey="env" secretKey="secretEnv" publicLabel="env" secretLabel="Secret env refs" />
         </>
       )}
 
@@ -362,7 +437,7 @@ function ConnectorFields({ form, mcpServerPrograms, setForm }: {
             <Label htmlFor="connector-timeout">连接超时 ms</Label>
             <Input id="connector-timeout" value={form.connectionTimeoutMs} onChange={(event) => update('connectionTimeoutMs', event.target.value)} placeholder="可选，例如 10000" />
           </div>
-          <MapFields form={form} update={update} publicKey="headers" secretKey="secretHeaders" publicLabel="公开 headers" secretLabel="Secret header refs" />
+          <MapFields form={form} editing={editing} update={update} publicKey="headers" secretKey="secretHeaders" publicLabel="headers" secretLabel="Secret header refs" />
         </>
       )}
 
@@ -372,7 +447,7 @@ function ConnectorFields({ form, mcpServerPrograms, setForm }: {
             <Label htmlFor="connector-base-url">Base URL</Label>
             <Input id="connector-base-url" value={form.baseUrl} onChange={(event) => update('baseUrl', event.target.value)} placeholder="https://api.example.com" />
           </div>
-          <MapFields form={form} update={update} publicKey="headers" secretKey="secretHeaders" publicLabel="公开 headers" secretLabel="Secret header refs" />
+          <MapFields form={form} editing={editing} update={update} publicKey="headers" secretKey="secretHeaders" publicLabel="headers" secretLabel="Secret header refs" />
         </>
       )}
 
@@ -389,8 +464,8 @@ function ConnectorFields({ form, mcpServerPrograms, setForm }: {
             </div>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="connector-config">公开 config JSON</Label>
-            <Textarea id="connector-config" value={form.config} onChange={(event) => update('config', event.target.value)} placeholder={'{\n  "apiVersion": "2025-01-01"\n}'} />
+            <Label htmlFor="connector-config">config JSON</Label>
+            <Textarea id="connector-config" disabled={editing && !form.replaceFields.includes('config')} value={form.config} onChange={(event) => update('config', event.target.value)} placeholder={'{\n  "apiVersion": "2025-01-01"\n}'} />
           </div>
           <div className="space-y-2">
             <Label htmlFor="connector-secret-config">Secret config refs</Label>
@@ -401,15 +476,16 @@ function ConnectorFields({ form, mcpServerPrograms, setForm }: {
 
       {HTTP_KINDS.has(form.kind) && (
         <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700">
-          不要在公开 headers 里填写 Authorization、token、apiKey 等密钥；请放到 Secret refs。
+          不要在headers 里填写 Authorization、token、apiKey 等密钥；请放到 Secret refs。
         </p>
       )}
     </div>
   );
 }
 
-function MapFields({ form, update, publicKey, secretKey, publicLabel, secretLabel }: {
+function MapFields({ form, editing, update, publicKey, secretKey, publicLabel, secretLabel }: {
   form: ConnectorFormState;
+  editing: boolean;
   update: <K extends keyof ConnectorFormState>(key: K, value: ConnectorFormState[K]) => void;
   publicKey: 'env' | 'headers';
   secretKey: 'secretEnv' | 'secretHeaders';
@@ -420,7 +496,7 @@ function MapFields({ form, update, publicKey, secretKey, publicLabel, secretLabe
     <div className="grid gap-4 md:grid-cols-2">
       <div className="space-y-2">
         <Label htmlFor={`connector-${publicKey}`}>{publicLabel}</Label>
-        <Textarea id={`connector-${publicKey}`} value={form[publicKey]} onChange={(event) => update(publicKey, event.target.value)} placeholder="KEY=value" />
+        <Textarea id={`connector-${publicKey}`} disabled={editing && !form.replaceFields.includes(publicKey)} value={form[publicKey]} onChange={(event) => update(publicKey, event.target.value)} placeholder="KEY=value" />
       </div>
       <div className="space-y-2">
         <Label htmlFor={`connector-${secretKey}`}>{secretLabel}</Label>
@@ -479,7 +555,7 @@ function ConnectorFormDialog({
             </p>
           ) : null}
 
-          <ConnectorFields form={form} mcpServerPrograms={mcpServerPrograms} setForm={setForm} />
+          <ConnectorFields form={form} editing={editingId !== null} mcpServerPrograms={mcpServerPrograms} setForm={setForm} />
 
           <div className="border-t border-border" />
 
@@ -498,20 +574,39 @@ function ConnectorFormDialog({
 }
 
 export function ExternalConnectorsPage() {
-  const connectors = useExternalConnectorsStore((state) => state.connectors);
-  const connectorStatuses = useExternalConnectorsStore((state) => state.connectorStatuses);
-  const mcpServers = useExternalConnectorsStore((state) => state.mcpServers);
-  const mcpServerPrograms = useExternalConnectorsStore((state) => state.mcpServerPrograms);
-  const ready = useExternalConnectorsStore((state) => state.ready);
-  const loading = useExternalConnectorsStore((state) => state.loading);
+  const endpoint = useRuntimeEndpointsStore(selectManagementEndpoint);
+  const scope = useMemo(() => endpoint?.kind === 'native-runtime' && ['openclaw', 'matcha-agent'].includes(endpoint.runtimeAdapterId) ? runtimeInstanceScope(endpoint) : null, [endpoint]);
+  useEffect(() => { useExternalConnectorsStore.getState().selectScope(scope); }, [scope]);
+  if (!scope) return <AgentPage><RuntimeScopeSelector /><p className="text-sm text-muted-foreground">请选择运行时。</p></AgentPage>;
+  return <ExternalConnectorsForRuntime key={buildCapabilityScopeKey(scope)} scope={scope} />;
+}
+
+function ExternalConnectorsForRuntime({ scope }: { scope: RuntimeInstanceScope }) {
+  const active = useRef(true);
+  const sequence = useRef(0);
+  const current = useCallback((request: number) => {
+    const endpoint = selectManagementEndpoint(useRuntimeEndpointsStore.getState());
+    return active.current && request === sequence.current && endpoint !== null && runtimeEndpointsEqual(endpoint, scope.endpoint);
+  }, [scope]);
+  useEffect(() => { active.current = true; return () => { active.current = false; sequence.current += 1; }; }, []);
+  const storeScope = useExternalConnectorsStore((state) => state.scope);
+  const scopeMatches = storeScope && buildCapabilityScopeKey(storeScope) === buildCapabilityScopeKey(scope);
+  const connectors = useExternalConnectorsStore((state) => scopeMatches ? state.connectors : EMPTY_CONNECTORS);
+  const connectorStatuses = useExternalConnectorsStore((state) => scopeMatches ? state.connectorStatuses : EMPTY_STATUSES);
+  const mcpServers = useExternalConnectorsStore((state) => scopeMatches ? state.mcpServers : EMPTY_SERVERS);
+  const mcpServerPrograms = useExternalConnectorsStore((state) => scopeMatches ? state.mcpServerPrograms : EMPTY_PROGRAMS);
+  const ready = useExternalConnectorsStore((state) => Boolean(scopeMatches && state.ready));
+  const loading = useExternalConnectorsStore((state) => Boolean(scopeMatches && state.loading));
   const mutatingId = useExternalConnectorsStore((state) => state.mutatingId);
-  const error = useExternalConnectorsStore((state) => state.error);
+  const error = useExternalConnectorsStore((state) => scopeMatches ? state.error : null);
   const refresh = useExternalConnectorsStore((state) => state.refresh);
   const probe = useExternalConnectorsStore((state) => state.probe);
   const upsert = useExternalConnectorsStore((state) => state.upsert);
+  const updateConnector = useExternalConnectorsStore((state) => state.update);
   const remove = useExternalConnectorsStore((state) => state.remove);
   const [form, setForm] = useState<ConnectorFormState>(EMPTY_FORM);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingConnector, setEditingConnector] = useState<ExternalConnectorSummary | null>(null);
+  const editingId = editingConnector?.id ?? null;
   const [formDialogOpen, setFormDialogOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -529,92 +624,140 @@ export function ExternalConnectorsPage() {
   };
 
   useEffect(() => {
+    useExternalConnectorsStore.getState().selectScope(scope);
+    const request = sequence.current;
     void refresh().catch(() => {
+      if (!current(request)) return;
       toast.error('加载连接器失败');
     });
-  }, [refresh]);
+  }, [refresh, scope, current]);
 
-  const connectorById = useMemo(() => new Map(connectors.map((connector) => [connector.id, connector])), [connectors]);
-  const visibleMcpServers = useMemo(() => {
+  const entries = useMemo(() => {
+    const connectorById = new Map(connectors.map((connector) => [connector.id, connector]));
+    const nativeConnectorIds = new Set(mcpServers.flatMap((server) => server.connectorId ? [server.connectorId] : []));
+    const native: ConnectorListEntry[] = mcpServers.map((server) => {
+      const connector = server.connectorId ? connectorById.get(server.connectorId) : undefined;
+      return {
+        key: `native:${server.serverId}`,
+        id: server.serverId,
+        displayName: connector?.displayName ?? server.displayName,
+        description: connector?.description ?? server.description,
+        kind: server.kind,
+        source: server.source,
+        enabled: connector ? connector.enabled !== false : server.enabled,
+        editable: server.source === 'external' && server.editable,
+        removable: server.source === 'external' && server.removable,
+        connector,
+      };
+    });
+    return [...native, ...connectors.filter((connector) => !nativeConnectorIds.has(connector.id)).map((connector): ConnectorListEntry => ({
+      key: `connector:${connector.id}`,
+      id: connector.id,
+      displayName: connector.displayName ?? connector.id,
+      description: connector.description,
+      kind: connector.kind,
+      source: 'external',
+      enabled: connector.enabled !== false,
+      editable: true,
+      removable: true,
+      connector,
+    }))];
+  }, [connectors, mcpServers]);
+  const visibleEntries = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    return mcpServers.filter((server) => (
-      (kindFilter === 'all' || server.kind === kindFilter)
-      && (statusFilter === 'all' || server.enabled === (statusFilter === 'enabled'))
-      && (!query || [server.displayName, server.serverId, server.connectorId, server.description, server.kind]
+    return entries.filter((entry) => (
+      (kindFilter === 'all' || entry.kind === kindFilter)
+      && (statusFilter === 'all' || entry.enabled === (statusFilter === 'enabled'))
+      && (!query || [entry.displayName, entry.id, entry.connector?.id, entry.description, entry.kind]
         .some((value) => value?.toLocaleLowerCase().includes(query)))
-    )).sort((a, b) => a.serverId.localeCompare(b.serverId));
-  }, [kindFilter, mcpServers, search, statusFilter]);
+    )).sort((a, b) => a.id.localeCompare(b.id));
+  }, [entries, kindFilter, search, statusFilter]);
 
   const closeFormDialog = useCallback(() => {
     setFormDialogOpen(false);
     setForm(EMPTY_FORM);
-    setEditingId(null);
+    setEditingConnector(null);
     setFormError(null);
   }, []);
 
   const openCreateDialog = useCallback(() => {
     setForm(EMPTY_FORM);
-    setEditingId(null);
+    setEditingConnector(null);
     setFormError(null);
     setFormDialogOpen(true);
   }, []);
 
   const submit = useCallback(async () => {
+    const request = ++sequence.current;
     try {
       setFormError(null);
-      await upsert(buildConnector(form, mcpServerPrograms));
-      toast.success(editingId ? '连接器已更新' : '连接器已创建');
+      const result = editingConnector
+        ? await updateConnector(editingConnector.id, buildPatch(form, editingConnector))
+        : await upsert(buildConnector(form, mcpServerPrograms));
+      if (!current(request)) return;
+      if (result.applied.status !== 'written') toast.warning('配置已保存，原生投影未确认；不会视为已连接。');
+      else toast.success('配置已保存；新原生会话启动时使用，不代表已连接。');
       closeFormDialog();
     } catch (submitError) {
+      if (!current(request)) return;
       const message = submitError instanceof Error ? submitError.message : '保存连接器失败';
       setFormError(message);
       toast.error(message);
     }
-  }, [closeFormDialog, editingId, form, mcpServerPrograms, upsert]);
+  }, [closeFormDialog, editingConnector, form, mcpServerPrograms, updateConnector, upsert, current]);
 
-  const editConnector = useCallback((connector: ExternalConnectorSpec) => {
+  const editConnector = useCallback((connector: ExternalConnectorSummary) => {
     setForm(formFromConnector(connector));
-    setEditingId(connector.id);
+    setEditingConnector(connector);
     setFormError(null);
     setFormDialogOpen(true);
   }, []);
 
-  const toggleEnabled = useCallback(async (connector: ExternalConnectorSpec, enabled: boolean) => {
+  const toggleEnabled = useCallback(async (connector: ExternalConnectorSummary, enabled: boolean) => {
+    const request = ++sequence.current;
     try {
-      await upsert({ ...connector, enabled });
+      const result = await updateConnector(connector.id, { enabled });
+      if (current(request) && result.applied.status !== 'written') toast.warning('配置已保存，原生投影未确认；不会视为已连接。');
     } catch (toggleError) {
+      if (!current(request)) return;
       toast.error(toggleError instanceof Error ? toggleError.message : '切换连接器失败');
     }
-  }, [upsert]);
+  }, [updateConnector, current]);
 
   const removeConnector = useCallback(async (connectorId: string) => {
+    const request = ++sequence.current;
     try {
       await remove(connectorId);
+      if (!current(request)) return;
       if (editingId === connectorId) {
         closeFormDialog();
       }
       toast.success('连接器已删除');
     } catch (deleteError) {
+      if (!current(request)) return;
       toast.error(deleteError instanceof Error ? deleteError.message : '删除连接器失败');
     }
-  }, [closeFormDialog, editingId, remove]);
+  }, [closeFormDialog, editingId, remove, current]);
 
   const probeConnector = useCallback(async (connectorId: string) => {
+    const request = ++sequence.current;
     try {
       await probe(connectorId);
     } catch (probeError) {
+      if (!current(request)) return;
       toast.error(probeError instanceof Error ? probeError.message : '检测连接器失败');
     }
-  }, [probe]);
+  }, [probe, current]);
 
   const saving = mutatingId === form.id;
-  const showInitialLoading = !ready && loading;
+  const showInitialLoading = !scopeMatches || (!ready && (loading || !error));
 
   return (
     <AgentPage>
       <AgentPageSection actions={(
         <>
-          <Button variant="outline" size="icon" className="size-9 rounded-full" aria-label="刷新连接器" onClick={() => void refresh()} disabled={loading}>
+          <RuntimeScopeSelector />
+          <Button variant="outline" size="icon" className="size-9 rounded-full" aria-label="刷新连接器" onClick={() => void refresh().catch(() => undefined)} disabled={loading}>
             <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
           </Button>
           <Button size="sm" className="h-9 rounded-full" onClick={openCreateDialog}>
@@ -624,7 +767,7 @@ export function ExternalConnectorsPage() {
       )}>
         <h2 className="flex min-h-12 items-center gap-2 border-b-2 border-foreground pb-3 text-sm font-medium">
           我的连接器
-          {ready && <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">{mcpServers.length}</Badge>}
+          {ready && <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">{entries.length}</Badge>}
         </h2>
       </AgentPageSection>
 
@@ -643,7 +786,7 @@ export function ExternalConnectorsPage() {
           <option value="disabled">未启用</option>
         </Select>
         <div className="ml-auto flex items-center gap-3">
-          {ready && <span className="text-xs text-muted-foreground">{visibleMcpServers.length} 个 MCP server</span>}
+          {ready && <span className="text-xs text-muted-foreground">{visibleEntries.length} 个连接器</span>}
           <AgentViewToggle value={view} onChange={(value) => updateFilter('view', value)} gridLabel="网格视图" listLabel="列表视图" />
         </div>
       </AgentPageToolbar>
@@ -656,20 +799,12 @@ export function ExternalConnectorsPage() {
       )}
 
       {showInitialLoading ? (
-        <AgentResourceGrid aria-busy="true" className={cn(view === 'list' && 'md:grid-cols-1 lg:grid-cols-1 xl:grid-cols-1 2xl:grid-cols-1')}>
-          {Array.from({ length: 4 }).map((_, index) => (
-            <AgentResourceCard key={index} className={cn('gap-4', view === 'grid' && 'min-h-60')}>
-              <div className="h-4 w-40 animate-pulse rounded bg-muted" />
-              <div className="h-3 w-3/5 animate-pulse rounded bg-muted" />
-              <div className="h-3 w-2/5 animate-pulse rounded bg-muted" />
-            </AgentResourceCard>
-          ))}
-        </AgentResourceGrid>
-      ) : visibleMcpServers.length === 0 ? (
+        <LoadingState label="正在加载连接器…" />
+      ) : !ready ? null : visibleEntries.length === 0 ? (
         <div className="flex min-h-[430px] flex-col items-center justify-center gap-5 rounded-[1.75rem] border border-border/70 bg-card p-8 text-center shadow-none">
           <AgentResourceIcon className="size-16 rounded-[1.25rem]"><Cable className="size-7" /></AgentResourceIcon>
-          <p className="max-w-md text-sm text-muted-foreground">{mcpServers.length === 0 ? '添加连接器，让 Agent 访问外部服务、数据与工具。' : '没有符合筛选条件的 MCP server。'}</p>
-          {mcpServers.length === 0 && (
+          <p className="max-w-md text-sm text-muted-foreground">{entries.length === 0 ? '添加连接器，让 Agent 访问外部服务、数据与工具。' : '没有符合筛选条件的连接器。'}</p>
+          {entries.length === 0 && (
             <>
               <Button size="sm" className="h-9 rounded-full" onClick={openCreateDialog}><Plus className="mr-2 size-4" />新增连接器</Button>
               <div className="flex flex-wrap justify-center gap-2">
@@ -680,49 +815,49 @@ export function ExternalConnectorsPage() {
         </div>
       ) : (
         <AgentResourceGrid className={cn(view === 'list' && 'md:grid-cols-1 lg:grid-cols-1 xl:grid-cols-1 2xl:grid-cols-1')}>
-          {visibleMcpServers.map((server) => {
-            const connector = server.connectorId ? connectorById.get(server.connectorId) : undefined;
+          {visibleEntries.map((entry) => {
+            const connector = entry.connector;
             const connectorId = connector?.id;
-            const canEdit = server.source === 'external' && server.editable && connector;
-            const canRemove = server.source === 'external' && server.removable && connector;
-            const canProbe = server.source === 'external' && connectorId;
-            const canToggle = server.source === 'external' && server.editable && connector;
-            const name = server.displayName || server.serverId;
+            const canEdit = entry.editable && connector;
+            const canRemove = entry.removable && connector;
+            const canProbe = entry.source === 'external' && connectorId;
+            const canToggle = entry.editable && connector;
+            const name = entry.displayName || entry.id;
             return (
-              <AgentResourceCard key={server.serverId} className={cn('gap-3 p-4', view === 'grid' ? 'min-h-56' : 'md:grid md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] md:items-center')}>
+              <AgentResourceCard key={entry.key} className={cn('gap-3 p-4', view === 'grid' ? 'min-h-56' : 'md:grid md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] md:items-center')}>
                 <div className="flex min-w-0 items-center gap-3">
                   <AgentResourceIcon><Cable className="size-5" /></AgentResourceIcon>
                   {canEdit ? (
                     <button type="button" className="min-w-0 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => editConnector(connector)} aria-label={`编辑 ${name}`}>
                       <h3 className="truncate text-sm font-semibold" title={name}>{name}</h3>
-                      <p className="mt-1 truncate text-xs text-muted-foreground" title={server.serverId}>{server.serverId}</p>
+                      <p className="mt-1 truncate text-xs text-muted-foreground" title={entry.id}>{entry.id}</p>
                     </button>
                   ) : (
                     <div className="min-w-0 text-left">
                       <h3 className="truncate text-sm font-semibold" title={name}>{name}</h3>
-                      <p className="mt-1 truncate text-xs text-muted-foreground" title={server.serverId}>{server.serverId}</p>
+                      <p className="mt-1 truncate text-xs text-muted-foreground" title={entry.id}>{entry.id}</p>
                     </div>
                   )}
                 </div>
                 <div className="flex min-w-0 flex-1 flex-col gap-3">
-                  {server.description && <p className="line-clamp-2 text-sm text-muted-foreground" title={server.description}>{server.description}</p>}
+                  {entry.description && <p className="line-clamp-2 text-sm text-muted-foreground" title={entry.description}>{entry.description}</p>}
                   <div className="mt-auto flex flex-wrap items-center gap-2">
-                    <ConnectorKindBadge kind={server.kind} />
-                    <AgentResourcePill>{mcpServerSourceLabel(server.source)}</AgentResourcePill>
+                    <ConnectorKindBadge kind={entry.kind} />
+                    <AgentResourcePill>{mcpServerSourceLabel(entry.source, scope)}</AgentResourcePill>
                     {connectorId && <ConnectorProbeBadge status={connectorStatuses[connectorId]} />}
                   </div>
                 </div>
                 <AgentResourceFooter className={cn(view === 'list' && 'md:mt-0 md:shrink-0')}>
                   <span className="inline-flex items-center gap-2 whitespace-nowrap">
-                    <span className={cn('size-1.5 rounded-full', server.enabled ? 'bg-emerald-500' : 'bg-muted-foreground')} />
-                    {server.enabled ? '已启用' : '未启用'}
+                    <span className={cn('size-1.5 rounded-full', entry.enabled ? 'bg-emerald-500' : 'bg-muted-foreground')} />
+                    {entry.enabled ? '已启用' : '未启用'}
                   </span>
                   <div className="flex items-center gap-1">
                     {connectorId && mutatingId === connectorId && <Loader2 className="size-3.5 animate-spin" />}
                     <Button variant="ghost" size="icon" className="size-7" disabled={!canEdit} aria-label={`编辑 ${name}`} onClick={() => canEdit && editConnector(connector)}><Pencil className="size-3.5" /></Button>
                     <Button variant="ghost" size="icon" className="size-7" disabled={mutatingId !== null || !canProbe} aria-label={`检测 ${name}`} onClick={() => connectorId && void probeConnector(connectorId)}><RefreshCw className="size-3.5" /></Button>
                     <Button variant="ghost" size="icon" className="size-7" disabled={mutatingId !== null || !canRemove} aria-label={`删除 ${name}`} onClick={() => connectorId && void removeConnector(connectorId)}><Trash2 className="size-3.5" /></Button>
-                    <Switch className="ml-1" aria-label={`启用 ${name}`} checked={server.enabled} disabled={mutatingId !== null || !canToggle} onCheckedChange={(checked) => connector && void toggleEnabled(connector, checked)} />
+                    <Switch className="ml-1" aria-label={`启用 ${name}`} checked={entry.enabled} disabled={mutatingId !== null || !canToggle} onCheckedChange={(checked) => connector && void toggleEnabled(connector, checked)} />
                   </div>
                 </AgentResourceFooter>
               </AgentResourceCard>

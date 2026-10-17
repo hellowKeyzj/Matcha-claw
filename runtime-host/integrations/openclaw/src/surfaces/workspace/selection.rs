@@ -44,9 +44,11 @@ impl OpenClawWorkspaceSelector {
     }
 
     pub(crate) fn select(&self, session_key: &str) -> Option<WorkspaceSelection> {
-        let Some(agent_id) = session_agent_id(session_key) else {
-            return Some(self.main.clone());
-        };
+        self.select_agent(session_agent_id(session_key).unwrap_or("main"))
+    }
+
+    pub(crate) fn select_agent(&self, requested_agent_id: &str) -> Option<WorkspaceSelection> {
+        let agent_id = agent_id(requested_agent_id)?;
         if agent_id == "main" {
             return Some(self.main.clone());
         }

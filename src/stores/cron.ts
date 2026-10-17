@@ -4,16 +4,22 @@
  */
 import { useEffect } from 'react';
 import { create } from 'zustand';
+import { hostApiFetch } from '@/lib/host-api';
 import {
-  hostApiFetch,
-  resolveSingleCapabilityScope,
-} from '@/lib/host-api';
+  buildRuntimeEndpointKey,
+  runtimeInstanceScope,
+  runtimeScopeQuery,
+  validateRuntimeEndpointRef,
+  type RuntimeEndpointRef,
+  type RuntimeInstanceScope,
+} from '@/types/desktop/runtime-address';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { waitForCronMutation } from '@/lib/cron-call';
 import type { CronMutationOperation } from '@/lib/cron-call';
 import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '../types/cron';
 
 interface CronState {
+  endpoint: RuntimeEndpointRef | null;
   jobs: CronJob[];
   snapshotReady: boolean;
   initialLoading: boolean;
@@ -23,6 +29,7 @@ interface CronState {
   error: string | null;
   
   // Actions
+  setEndpoint: (endpoint: RuntimeEndpointRef | null) => void;
   fetchJobs: (options?: { refreshAfterInflight?: boolean; silent?: boolean }) => Promise<void>;
   createJob: (input: CronJobCreateInput) => Promise<CronJob>;
   updateJob: (id: string, input: CronJobUpdateInput) => Promise<void>;
@@ -46,6 +53,7 @@ let cronSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let cronEventCleanup: (() => void) | null = null;
 let cronEventGeneration = 0;
 let cronJobsEpoch = 0;
+let cronScopeGeneration = 0;
 let pendingCronFetchAfterInflight = false;
 let globalCronMutationCount = 0;
 let cronStoreSubscriberCount = 0;
@@ -80,6 +88,7 @@ function scheduleCronSnapshotRetry(fetchJobs: () => Promise<void>): void {
 }
 
 async function cronMutationRequest<TResult>(
+  scope: RuntimeInstanceScope,
   path: string,
   operationId: CronMutationOperation,
   input: Record<string, unknown>,
@@ -90,21 +99,21 @@ async function cronMutationRequest<TResult>(
     body: JSON.stringify({
       id: SCHEDULER_CRON_CAPABILITY_ID,
       operationId,
-      scope: await resolveSingleCapabilityScope(SCHEDULER_CRON_CAPABILITY_ID),
+      scope,
       target,
       input,
     }),
   });
-  return await waitForCronMutation(receipt, operationId, target.jobId) as TResult;
+  return await waitForCronMutation(receipt, operationId, scope, target.jobId) as TResult;
 }
 
-async function cronTriggerRequest(id: string): Promise<CronTriggerResult> {
+async function cronTriggerRequest(scope: RuntimeInstanceScope, id: string): Promise<CronTriggerResult> {
   const result = await hostApiFetch<unknown>('/api/capabilities/execute', {
     method: 'POST',
     body: JSON.stringify({
       id: SCHEDULER_CRON_CAPABILITY_ID,
       operationId: 'cron.trigger',
-      scope: await resolveSingleCapabilityScope(SCHEDULER_CRON_CAPABILITY_ID),
+      scope,
       target: { kind: 'cron-job', jobId: id },
       input: { id },
     }),
@@ -217,7 +226,17 @@ function decrementMutatingJob(mutatingByJobId: Record<string, number>, jobId: st
   };
 }
 
+function requireCronScope(endpoint: RuntimeEndpointRef | null): RuntimeInstanceScope {
+  if (!endpoint) throw new Error('Select a runtime for scheduled tasks');
+  return runtimeInstanceScope(endpoint);
+}
+
+function assertCronScope(generation: number): void {
+  if (generation !== cronScopeGeneration) throw new Error('The scheduled-task runtime changed; the previous operation may still complete');
+}
+
 const useCronStoreBase = create<CronState>((set, get) => ({
+  endpoint: null,
   jobs: [],
   snapshotReady: false,
   initialLoading: false,
@@ -226,7 +245,23 @@ const useCronStoreBase = create<CronState>((set, get) => ({
   mutatingByJobId: {},
   error: null,
   
+  setEndpoint: (endpoint) => {
+    const previous = get().endpoint;
+    if ((previous ? buildRuntimeEndpointKey(previous) : null) === (endpoint ? buildRuntimeEndpointKey(endpoint) : null)) return;
+    cronScopeGeneration += 1;
+    incrementCronJobsEpoch();
+    clearCronSnapshotRetry();
+    inflightCronFetchPromise = null;
+    pendingCronFetchAfterInflight = false;
+    globalCronMutationCount = 0;
+    set({ endpoint, jobs: [], snapshotReady: false, initialLoading: false, refreshing: false, mutating: false, mutatingByJobId: {}, error: null });
+  },
+
   fetchJobs: async (options) => {
+    const endpoint = get().endpoint;
+    if (!endpoint) return;
+    const scope = runtimeInstanceScope(endpoint);
+    const generation = cronScopeGeneration;
     if (!cronEventCleanup) {
       initCronEvents();
     }
@@ -250,7 +285,8 @@ const useCronStoreBase = create<CronState>((set, get) => ({
 
     const task = (async () => {
       try {
-        const snapshot = decodeCronJobsSnapshot(await hostApiFetch<unknown>('/api/cron/jobs'));
+        const snapshot = decodeCronJobsSnapshot(await hostApiFetch<unknown>(`/api/cron/jobs?${runtimeScopeQuery(scope)}`));
+        if (generation !== cronScopeGeneration) return;
         if (requestEpoch !== cronJobsEpoch) {
           set({ initialLoading: false, refreshing: false });
           return;
@@ -273,6 +309,7 @@ const useCronStoreBase = create<CronState>((set, get) => ({
           error: null,
         });
       } catch (error) {
+        if (generation !== cronScopeGeneration) return;
         if (requestEpoch !== cronJobsEpoch) {
           set({ initialLoading: false, refreshing: false });
           return;
@@ -300,15 +337,19 @@ const useCronStoreBase = create<CronState>((set, get) => ({
   },
   
   createJob: async (input) => {
+    const scope = requireCronScope(get().endpoint);
+    const generation = cronScopeGeneration;
+    if (!input.agentId?.trim()) throw new Error('Select an Agent for the scheduled task');
     beginGlobalCronMutation();
     set({ mutating: true });
     try {
       const job = await cronMutationRequest<CronJob>(
+        scope,
         '/api/cron/jobs/create',
         'cron.create',
         {
           name: input.name,
-          agentId: input.agentId ?? 'main',
+          agentId: input.agentId,
           message: input.message,
           model: input.model,
           schedule: input.schedule,
@@ -317,6 +358,7 @@ const useCronStoreBase = create<CronState>((set, get) => ({
         },
         { kind: 'cron-job' },
       );
+      assertCronScope(generation);
       if (!isRecord(job) || typeof job.id !== 'string') {
         throw new Error('Invalid cron create response');
       }
@@ -328,12 +370,16 @@ const useCronStoreBase = create<CronState>((set, get) => ({
       console.error('Failed to create cron job:', error);
       throw error;
     } finally {
-      endGlobalCronMutation();
-      set((state) => ({ mutating: hasMutatingJobs(state.mutatingByJobId) }));
+      if (generation === cronScopeGeneration) {
+        endGlobalCronMutation();
+        set((state) => ({ mutating: hasMutatingJobs(state.mutatingByJobId) }));
+      }
     }
   },
   
   updateJob: async (id, input) => {
+    const scope = requireCronScope(get().endpoint);
+    const generation = cronScopeGeneration;
     set((state) => {
       const next = incrementMutatingJob(state.mutatingByJobId, id);
       return {
@@ -343,11 +389,13 @@ const useCronStoreBase = create<CronState>((set, get) => ({
     });
     try {
       const job = await cronMutationRequest<CronJob>(
+        scope,
         '/api/cron/jobs/update',
         'cron.update',
         { jobId: id, ...input },
         { kind: 'cron-job', jobId: id },
       );
+      assertCronScope(generation);
       if (!job || typeof job.id !== 'string' || job.id !== id) {
         throw new Error('Invalid cron update response');
       }
@@ -360,7 +408,7 @@ const useCronStoreBase = create<CronState>((set, get) => ({
       console.error('Failed to update cron job:', error);
       throw error;
     } finally {
-      set((state) => {
+      if (generation === cronScopeGeneration) set((state) => {
         const next = decrementMutatingJob(state.mutatingByJobId, id);
         return {
           mutatingByJobId: next,
@@ -371,6 +419,8 @@ const useCronStoreBase = create<CronState>((set, get) => ({
   },
   
   deleteJob: async (id) => {
+    const scope = requireCronScope(get().endpoint);
+    const generation = cronScopeGeneration;
     set((state) => {
       const next = incrementMutatingJob(state.mutatingByJobId, id);
       return {
@@ -380,11 +430,13 @@ const useCronStoreBase = create<CronState>((set, get) => ({
     });
     try {
       const result = await cronMutationRequest<{ removed: boolean }>(
+        scope,
         '/api/cron/jobs/delete',
         'cron.delete',
         { jobId: id },
         { kind: 'cron-job', jobId: id },
       );
+      assertCronScope(generation);
       if (!result || typeof result.removed !== 'boolean') {
         throw new Error('Invalid cron delete response');
       }
@@ -399,7 +451,7 @@ const useCronStoreBase = create<CronState>((set, get) => ({
       console.error('Failed to delete cron job:', error);
       throw error;
     } finally {
-      set((state) => {
+      if (generation === cronScopeGeneration) set((state) => {
         const next = decrementMutatingJob(state.mutatingByJobId, id);
         return {
           mutatingByJobId: next,
@@ -410,6 +462,8 @@ const useCronStoreBase = create<CronState>((set, get) => ({
   },
   
   toggleJob: async (id, enabled) => {
+    const scope = requireCronScope(get().endpoint);
+    const generation = cronScopeGeneration;
     set((state) => {
       const next = incrementMutatingJob(state.mutatingByJobId, id);
       return {
@@ -419,11 +473,13 @@ const useCronStoreBase = create<CronState>((set, get) => ({
     });
     try {
       const job = await cronMutationRequest<CronJob>(
+        scope,
         '/api/cron/jobs/toggle',
         'cron.toggle',
         { id, enabled },
         { kind: 'cron-job', jobId: id },
       );
+      assertCronScope(generation);
       if (!job || typeof job.id !== 'string' || job.id !== id) {
         throw new Error('Invalid cron toggle response');
       }
@@ -436,7 +492,7 @@ const useCronStoreBase = create<CronState>((set, get) => ({
       console.error('Failed to toggle cron job:', error);
       throw error;
     } finally {
-      set((state) => {
+      if (generation === cronScopeGeneration) set((state) => {
         const next = decrementMutatingJob(state.mutatingByJobId, id);
         return {
           mutatingByJobId: next,
@@ -447,6 +503,8 @@ const useCronStoreBase = create<CronState>((set, get) => ({
   },
   
   triggerJob: async (id) => {
+    const scope = requireCronScope(get().endpoint);
+    const generation = cronScopeGeneration;
     set((state) => {
       const next = incrementMutatingJob(state.mutatingByJobId, id);
       return {
@@ -455,7 +513,9 @@ const useCronStoreBase = create<CronState>((set, get) => ({
       };
     });
     try {
-      const result = await cronTriggerRequest(id);
+      const result = await cronTriggerRequest(scope, id);
+      assertCronScope(generation);
+      void get().fetchJobs({ refreshAfterInflight: true, silent: true });
       if (result.outcome === 'accepted') {
         return { ran: true };
       }
@@ -469,7 +529,7 @@ const useCronStoreBase = create<CronState>((set, get) => ({
       console.error('Failed to trigger cron job:', error);
       throw error;
     } finally {
-      set((state) => {
+      if (generation === cronScopeGeneration) set((state) => {
         const next = decrementMutatingJob(state.mutatingByJobId, id);
         return {
           mutatingByJobId: next,
@@ -505,13 +565,23 @@ export function initCronEvents(): () => void {
   let active = true;
   const unsubscribe = subscribeHostEvent<unknown>('openclaw:cron', (event) => {
     if (!active || !isCronExecutionEvent(event)) return;
-    if (!useCronStore.getState().jobs.some((job) => job.id === event.jobId)) return;
+    const { endpoint, jobs } = useCronStore.getState();
+    if (endpoint?.kind !== 'native-runtime' || endpoint.runtimeAdapterId !== 'openclaw') return;
+    if (!jobs.some((job) => job.id === event.jobId)) return;
+    void useCronStore.getState().fetchJobs({ refreshAfterInflight: true, silent: true });
+  });
+  const unsubscribeChanged = subscribeHostEvent<unknown>('cron:changed', (event) => {
+    if (!active || !isRecord(event) || Object.keys(event).length !== 1
+      || validateRuntimeEndpointRef(event.endpoint)) return;
+    const endpoint = useCronStore.getState().endpoint;
+    if (!endpoint || buildRuntimeEndpointKey(endpoint) !== buildRuntimeEndpointKey(event.endpoint as RuntimeEndpointRef)) return;
     void useCronStore.getState().fetchJobs({ refreshAfterInflight: true, silent: true });
   });
   const cleanup = () => {
     if (!active) return;
     active = false;
     unsubscribe();
+    unsubscribeChanged();
     if (cronEventGeneration === generation) {
       cronEventCleanup = null;
       clearCronSnapshotRetry();

@@ -14,6 +14,9 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import {
   buildSessionIdentityKey,
+  buildCapabilityScopeKey,
+  type AgentScope,
+  type RuntimeInstanceScope,
   type SessionIdentity,
 } from '../../types/desktop/runtime-address';
 import { invokeIpc } from '@/lib/api-client';
@@ -32,6 +35,7 @@ import type { ChatSendAttachment, ChatSendResult } from '@/stores/chat';
 import { CHAT_INLINE_ATTACHMENT_MAX_BYTES } from '@/stores/chat/types';
 import { resolveChatSendGateForPayload, type ChatSendGate } from '@/stores/chat/send-gate';
 import type { ChatContextUsageViewModel } from './context-usage';
+import type { PermissionPickerState } from './useChatPermissions';
 import { useComposerDraftStore, type ComposerMode, type ComposerDraftSelection } from '@/stores/composer-drafts';
 import type { SessionRunPhase } from '@/types/session/runtime-state';
 import type { TeamStartGateStatus } from '@/types/team-design';
@@ -90,6 +94,7 @@ type SlashItem = (SelectedSkill & { kind: 'skill' }) | { kind: 'goal'; id: 'goal
 interface ModelPickerOption {
   id: string;
   label: string;
+  disabled?: boolean;
 }
 
 interface ModelPickerState {
@@ -102,28 +107,6 @@ interface ModelPickerState {
   onSelect: (modelId: string) => void;
 }
 
-type PermissionMode = 'read-only' | 'guarded' | 'workspace' | 'full';
-type PermissionSelection = PermissionMode | null;
-
-interface PermissionPickerOption {
-  mode: PermissionSelection;
-  labelKey: string;
-  descriptionKey: string;
-  disabled?: boolean;
-}
-
-interface PermissionPickerState {
-  mode: PermissionSelection;
-  defaultMode: PermissionMode | null;
-  loading: boolean;
-  switching: boolean;
-  supported: boolean;
-  pending: boolean;
-  canSelectFull: boolean;
-  options: PermissionPickerOption[];
-  disabled?: boolean;
-  onSelect: (mode: PermissionSelection) => void;
-}
 
 interface SkillManagerState {
   label: string;
@@ -139,13 +122,6 @@ interface SkillManagerState {
   onClose?: () => void;
 }
 
-const PERMISSION_MODE_LABEL_KEYS: Record<PermissionMode, string> = {
-  'read-only': 'input.permissionReadOnly',
-  guarded: 'input.permissionGuarded',
-  workspace: 'input.permissionWorkspace',
-  full: 'input.permissionFull',
-};
-
 const STAGE_BUFFER_CONCURRENCY = 3;
 const STAGE_BUFFER_MAX_BYTES = CHAT_INLINE_ATTACHMENT_MAX_BYTES;
 const QUICK_PHRASE_STORAGE_KEY = 'matchaclaw:chat:quick-phrases';
@@ -156,6 +132,7 @@ interface QuickPhrase {
 }
 
 const DEFAULT_QUICK_PHRASES: QuickPhrase[] = [];
+const EMPTY_SKILLS: ReturnType<typeof useSkillsStore.getState>['skills'] = [];
 
 export interface ChatInputHandle {
   replaceText: (text: string) => void;
@@ -174,9 +151,11 @@ interface ChatInputProps {
   onDraftSelectionChange?: (selection: ComposerDraftSelection) => void;
   draftSelection?: ComposerDraftSelection | null;
   stopping?: boolean;
+  skillsScope: AgentScope | RuntimeInstanceScope | null;
   skillManager?: SkillManagerState | null;
   modelPicker?: ModelPickerState | null;
   permissionPicker?: PermissionPickerState | null;
+  configurationStatus?: string | null;
   contextUsage?: ChatContextUsageViewModel | null;
   onOpenTeamGraph?: () => void;
   teamDesign?: { status: TeamStartGateStatus | null; disabled: boolean; starting: boolean; exiting: boolean; error: string | null; onStart: () => void; onExit: () => void; onRun: () => void } | null;
@@ -206,20 +185,6 @@ function resolveInputPlaceholder(
     return translate('input.approvalWaitingPlaceholder');
   }
   return translate('input.messagePlaceholder');
-}
-
-function resolveComposerNoticeText(
-  disabled: boolean,
-  approvalWaiting: boolean,
-  translate: (key: string, options?: Record<string, unknown>) => string,
-): string | null {
-  if (disabled) {
-    return translate('input.gatewayDisconnectedPlaceholder');
-  }
-  if (approvalWaiting) {
-    return translate('input.approvalWaitingPlaceholder');
-  }
-  return null;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -440,9 +405,11 @@ export const ChatInput = memo(function ChatInput({
   onDraftSelectionChange,
   draftSelection,
   stopping = false,
+  skillsScope,
   skillManager = null,
   modelPicker = null,
   permissionPicker = null,
+  configurationStatus = null,
   contextUsage = null,
   onOpenTeamGraph,
   teamDesign = null,
@@ -475,7 +442,13 @@ export const ChatInput = memo(function ChatInput({
   const sessionIdentityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
   const composerScope = useMemo(() => ({ draftKey, sessionIdentityKey }), [draftKey, sessionIdentityKey]);
   const currentScopeRef = useRef<typeof composerScope | null>(null);
-  type SendOperation = { scope: typeof composerScope; attachmentIds: ReadonlySet<string> };
+  type SendOperation = {
+    scope: typeof composerScope;
+    attachmentIds: ReadonlySet<string>;
+    initializationId: string | null;
+    handoffScope: typeof composerScope | null;
+    retired: boolean;
+  };
   const sendOperationRef = useRef<SendOperation | null>(null);
   const [pendingSend, setPendingSend] = useState<SendOperation | null>(null);
   const isCurrentScope = useCallback(() => (
@@ -512,9 +485,12 @@ export const ChatInput = memo(function ChatInput({
   const draftSelectionRef = useRef<ComposerDraftSelection | null>(null);
   const lastRestoredDraftKeyRef = useRef<string | null>(null);
   draftSelectionRef.current = draftSelection ?? null;
-  const skills = useSkillsStore((state) => state.skills);
-  const skillsSnapshotReady = useSkillsStore((state) => state.snapshotReady);
-  const skillsInitialLoading = useSkillsStore((state) => state.initialLoading);
+  const skillsScopeKey = skillsScope ? buildCapabilityScopeKey(skillsScope) : null;
+  const storedSkills = useSkillsStore((state) => state.skills);
+  const skillsScopeMatches = useSkillsStore((state) => skillsScopeKey !== null && state.scopeKey === skillsScopeKey);
+  const skills = skillsScopeMatches ? storedSkills : EMPTY_SKILLS;
+  const skillsSnapshotReady = useSkillsStore((state) => skillsScopeMatches && state.snapshotReady);
+  const skillsInitialLoading = useSkillsStore((state) => skillsScopeMatches && state.initialLoading);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const allowedSkillIdSet = useMemo(() => {
     if (!Array.isArray(allowedSkillIds)) {
@@ -593,11 +569,11 @@ export const ChatInput = memo(function ChatInput({
   }, [disabled, draftKey]);
 
   useEffect(() => {
-    if (!slashOpen || skillsSnapshotReady || skillsInitialLoading) {
+    if (!slashOpen || !skillsScope || skillsSnapshotReady || skillsInitialLoading) {
       return;
     }
-    void fetchSkills();
-  }, [fetchSkills, skillsInitialLoading, skillsSnapshotReady, slashOpen]);
+    void fetchSkills({ scope: skillsScope });
+  }, [fetchSkills, skillsInitialLoading, skillsScope, skillsSnapshotReady, slashOpen]);
 
   useEffect(() => {
     if (!slashOpen || slashItems.length === 0) {
@@ -629,7 +605,7 @@ export const ChatInput = memo(function ChatInput({
   }, [modelPicker]);
 
   useEffect(() => {
-    if (!permissionPicker || permissionPicker.disabled || permissionPicker.loading || permissionPicker.switching || permissionPicker.pending || !permissionPicker.supported) {
+    if (!permissionPicker || permissionPicker.disabled || permissionPicker.busy || permissionPicker.options.length === 0) {
       setPermissionPickerOpen(false);
     }
   }, [permissionPicker]);
@@ -898,6 +874,14 @@ export const ChatInput = memo(function ChatInput({
 
   useLayoutEffect(() => {
     currentScopeRef.current = composerScope;
+    const operation = sendOperationRef.current;
+    if (operation && operation.scope !== composerScope && operation.handoffScope !== composerScope) {
+      const initialization = draftKey ? useComposerDraftStore.getState().initializations[draftKey] : null;
+      if (!operation.retired && !operation.handoffScope && !operation.scope.sessionIdentityKey && composerScope.sessionIdentityKey
+        && initialization?.kind === 'pending' && initialization.operationId === operation.initializationId) {
+        operation.handoffScope = composerScope;
+      } else operation.retired = true;
+    }
     const retainedIds = new Set(committedAttachmentsRef.current
       .filter((attachment) => attachment.status !== 'staging')
       .map((attachment) => attachment.stagedAttachmentId));
@@ -909,7 +893,7 @@ export const ChatInput = memo(function ChatInput({
     return () => {
       currentScopeRef.current = null;
     };
-  }, [composerScope, releaseStagedAttachmentIds]);
+  }, [composerScope, draftKey, releaseStagedAttachmentIds]);
 
   useLayoutEffect(() => {
     committedAttachmentsRef.current = attachments;
@@ -1198,10 +1182,8 @@ export const ChatInput = memo(function ChatInput({
     || modelPicker.options.length === 0;
   const permissionPickerDisabled = !permissionPicker
     || permissionPicker.disabled
-    || permissionPicker.loading
-    || permissionPicker.switching
-    || permissionPicker.pending
-    || !permissionPicker.supported;
+    || permissionPicker.busy
+    || permissionPicker.options.length === 0;
   const composerTraceRef = useRef<{ signature: string; state: Record<string, unknown> } | null>(null);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
@@ -1223,8 +1205,7 @@ export const ChatInput = memo(function ChatInput({
       },
       permission: {
         present: !!permissionPicker, disabled: permissionPickerDisabled, blockedByParent: permissionPicker?.disabled ?? false,
-        loading: permissionPicker?.loading ?? false, switching: permissionPicker?.switching ?? false,
-        pending: permissionPicker?.pending ?? false, supported: permissionPicker?.supported ?? false, open: permissionPickerOpen,
+        busy: permissionPicker?.busy ?? false, optionCount: permissionPicker?.options.length ?? 0, open: permissionPickerOpen,
       },
       skillManagerOpen, quickPhraseOpen,
     };
@@ -1265,18 +1246,6 @@ export const ChatInput = memo(function ChatInput({
     document.addEventListener('pointerdown', onPointerDown, { capture: true, passive: true });
     return () => document.removeEventListener('pointerdown', onPointerDown, true);
   }, []);
-  const permissionPickerDefaultLabel = permissionPicker?.defaultMode
-    ? t('input.permissionDefaultWithMode', { mode: t(PERMISSION_MODE_LABEL_KEYS[permissionPicker.defaultMode]) })
-    : t('input.permissionDefault');
-  const permissionPickerLabel = permissionPicker
-    ? permissionPicker.loading
-      ? t('input.permissionLoading')
-      : permissionPicker.pending
-        ? t('input.permissionPending')
-        : permissionPicker.mode
-          ? t(PERMISSION_MODE_LABEL_KEYS[permissionPicker.mode])
-          : permissionPickerDefaultLabel
-    : '';
 
   const handleSend = useCallback(async () => {
     const pendingOperation = sendOperationRef.current;
@@ -1304,23 +1273,41 @@ export const ChatInput = memo(function ChatInput({
     const drafts = useComposerDraftStore.getState();
     const draftRevision = draftKey ? drafts.revisions[draftKey] : undefined;
     const ownsDraftSnapshot = draftKey && onDraftChange && (drafts.drafts[draftKey] ?? '') === input;
-    const operation = { scope: composerScope, attachmentIds: sentAttachmentIds };
+    const operation: SendOperation = {
+      scope: composerScope, attachmentIds: sentAttachmentIds, initializationId: null, handoffScope: null, retired: false,
+    };
     sendOperationRef.current = operation;
     setPendingSend(operation);
     const ownsSend = () => isCurrentScope() && sendOperationRef.current === operation;
     // The send invocation owns this batch before optimistic rendering can unmount the draft.
     stagedIdsToSend.forEach((id) => ownedStagedAttachmentIdsRef.current.delete(id));
     let result: ChatSendResult;
+    let retainAttachments = false;
     try {
       try {
-        result = goal?.mode ? await goal.onSubmit(textToSend, attachmentsToSend) : await onSend(textToSend, attachmentsToSend);
+        const send = goal?.mode ? goal.onSubmit(textToSend, attachmentsToSend) : onSend(textToSend, attachmentsToSend);
+        operation.initializationId = draftKey ? useComposerDraftStore.getState().initializations[draftKey]?.operationId ?? null : null;
+        result = await send;
       } catch {
         releaseStagedAttachmentIds(stagedIdsToSend);
         return;
       }
       if (!result.accepted) {
-        // An unknown receipt can precede Main's materialization completion.
-        if (result.outcome !== 'unknown') releaseStagedAttachmentIds(stagedIdsToSend);
+        if (result.dispatch === 'not-dispatched') {
+          const currentScope = currentScopeRef.current;
+          retainAttachments = mountedRef.current && sendOperationRef.current === operation && !operation.retired
+            && (currentScope === operation.scope || currentScope === operation.handoffScope
+              && currentScope?.draftKey === result.sessionRecordKey);
+          if (retainAttachments) {
+            const retainedIds = new Set(stagedIdsToSend.filter((id) => !canceledStagingKeysRef.current.has(id)
+              && committedAttachmentsRef.current.some((attachment) => attachment.stagedAttachmentId === id)));
+            retainedIds.forEach((id) => ownedStagedAttachmentIdsRef.current.add(id));
+            releaseStagedAttachmentIds(stagedIdsToSend.filter((id) => !retainedIds.has(id)));
+          } else releaseStagedAttachmentIds(stagedIdsToSend);
+        } else if (result.outcome !== 'unknown') {
+          // An unknown receipt can precede Main's materialization completion.
+          releaseStagedAttachmentIds(stagedIdsToSend);
+        }
         return;
       }
       const inputUnchanged = inputRevisionRef.current === inputRevision;
@@ -1338,7 +1325,7 @@ export const ChatInput = memo(function ChatInput({
       closeQuickPhrase();
     } finally {
       if (mountedRef.current) {
-        setAttachments((current) => current.filter((attachment) => !sentAttachmentIds.has(attachment.stagedAttachmentId)));
+        if (!retainAttachments) setAttachments((current) => current.filter((attachment) => !sentAttachmentIds.has(attachment.stagedAttachmentId)));
         setPendingSend((current) => current === operation ? null : current);
       }
       if (sendOperationRef.current === operation) sendOperationRef.current = null;
@@ -1499,12 +1486,8 @@ export const ChatInput = memo(function ChatInput({
   );
 
   const canOpenTeamGraph = !teamDesign || teamDesign.status === 'designing' || teamDesign.status === 'started';
-  const placeholderText = goal?.mode && !disabled && !approvalWaiting ? t('goal.placeholder') : resolveInputPlaceholder(disabled, approvalWaiting, t);
-  const composerNoticeText = resolveComposerNoticeText(
-    disabled,
-    approvalWaiting,
-    t,
-  );
+  const placeholderText = reconnecting ? t('input.gatewayRecoveringNotice')
+    : goal?.mode && !disabled && !approvalWaiting ? t('goal.placeholder') : resolveInputPlaceholder(disabled, approvalWaiting, t);
 
   return (
     <div
@@ -1517,16 +1500,6 @@ export const ChatInput = memo(function ChatInput({
     >
       <div className={`${CHAT_LAYOUT_TOKENS.inputRail} chat-scroll-sync-input-inner`}>
         {goalDock}
-        {reconnecting ? (
-          <div className="mb-2 rounded-full border border-border/45 bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-none">
-            {t('input.gatewayRecoveringNotice')}
-          </div>
-        ) : null}
-        {composerNoticeText ? (
-          <div className="mb-2 rounded-full border border-border/45 bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-none">
-            {composerNoticeText}
-          </div>
-        ) : null}
         {onOpenTeamGraph ? (
           <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 px-3 max-md:px-2.5 max-sm:px-2">
             <Button
@@ -1682,7 +1655,7 @@ export const ChatInput = memo(function ChatInput({
                 disabled={disabled || Boolean(goal?.mode && goal.busy)}
                 className={cn(
                   CHAT_LAYOUT_TOKENS.inputTextarea,
-                  'placeholder:text-muted-foreground/70',
+                  'placeholder:text-muted-foreground',
                 )}
                 rows={1}
                 data-testid="chat-composer-input"
@@ -1759,6 +1732,7 @@ export const ChatInput = memo(function ChatInput({
             )}
           </div>
 
+          {configurationStatus ? <p role="status" aria-live="polite" className="px-1 text-[11px] text-muted-foreground">{configurationStatus}</p> : null}
           <div className={cn(CHAT_LAYOUT_TOKENS.inputActionsRow, 'border-t border-border/35 pt-1.5')}>
             <div className={cn(
               'flex w-full min-w-0 items-end gap-1.5',
@@ -1787,22 +1761,20 @@ export const ChatInput = memo(function ChatInput({
                   <Button
                     type="button"
                     variant="ghost"
-                    size={permissionPicker.supported || permissionPicker.loading ? 'icon' : 'sm'}
+                    size={permissionPicker.options.length > 0 || permissionPicker.busy ? 'icon' : 'sm'}
                     aria-label={t('input.pickPermissionMode')}
                     aria-haspopup="listbox"
                     aria-expanded={permissionPickerOpen}
-                    title={permissionPicker.supported || permissionPicker.loading
-                      ? `${t('input.permissionPickerTitle')} · ${permissionPickerLabel}`
-                      : t('input.permissionUnsupported')}
+                    title={[t('input.permissionPickerTitle'), permissionPicker.label, permissionPicker.status].filter(Boolean).join(' · ')}
                     data-testid="chat-permission-picker"
                     data-chat-control="permission"
                     data-state={permissionPickerOpen ? 'open' : 'closed'}
                     disabled={permissionPickerDisabled}
                     className={cn(
-                      permissionPicker.supported || permissionPicker.loading ? CHAT_LAYOUT_TOKENS.inputAttachButton : 'h-9 max-w-[11rem] rounded-full px-3 text-[12px] font-medium',
+                      permissionPicker.options.length > 0 || permissionPicker.busy ? CHAT_LAYOUT_TOKENS.inputAttachButton : 'h-9 max-w-[11rem] rounded-full px-3 text-[12px] font-medium',
                       'border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
-                      permissionPicker.mode === null && permissionPicker.supported && 'text-emerald-700 dark:text-emerald-300',
-                      (permissionPicker.mode ?? permissionPicker.defaultMode) === 'full' && permissionPicker.supported && 'text-amber-700 dark:text-amber-300',
+                      permissionPicker.tone === 'positive' && 'text-emerald-700 dark:text-emerald-300',
+                      permissionPicker.tone === 'warning' && 'text-amber-700 dark:text-amber-300',
                       permissionPickerOpen && 'bg-background/90 text-foreground',
                       permissionPickerDisabled && 'cursor-not-allowed opacity-55',
                     )}
@@ -1815,13 +1787,13 @@ export const ChatInput = memo(function ChatInput({
                       setPermissionPickerOpen((open) => !open);
                     }}
                   >
-                    {permissionPicker.loading || permissionPicker.pending ? (
+                    {permissionPicker.busy ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
                       <ShieldCheck className="h-4 w-4 shrink-0" />
                     )}
-                    {!permissionPicker.supported && !permissionPicker.loading ? (
-                      <span className="truncate">{t('input.permissionUnsupported')}</span>
+                    {permissionPicker.options.length === 0 && !permissionPicker.busy ? (
+                      <span className="truncate">{permissionPicker.status ?? permissionPicker.label}</span>
                     ) : null}
                   </Button>
                   {permissionPickerOpen ? (
@@ -1830,20 +1802,19 @@ export const ChatInput = memo(function ChatInput({
                       aria-label={t('input.pickPermissionMode')}
                       className="absolute bottom-full left-0 z-50 mb-2 w-64 translate-x-0 overflow-hidden rounded-[1rem] border border-border/60 bg-popover/95 p-1.5 text-sm text-popover-foreground shadow-[0_18px_50px_rgba(0,0,0,0.20)] backdrop-blur-xl"
                     >
+                      {permissionPicker.status ? <p role="status" className="px-2 py-1.5 text-[11px] text-muted-foreground">{permissionPicker.status}</p> : null}
                       {permissionPicker.options.map((option) => {
-                        const selected = option.mode === permissionPicker.mode;
-                        const optionDisabled = permissionPicker.pending || option.disabled === true;
-                        const label = option.mode === null
-                          ? permissionPickerDefaultLabel
-                          : t(option.labelKey);
+                        const selected = option.id === permissionPicker.currentId;
+                        const optionDisabled = permissionPickerDisabled || option.disabled === true;
+                        const label = option.label;
                         return (
                           <button
-                            key={option.mode ?? 'default'}
+                            key={option.id}
                             type="button"
                             role="option"
                             aria-selected={selected}
                             disabled={optionDisabled}
-                            title={optionDisabled && option.mode === 'full' ? t('input.permissionFullRequiresAccess') : label}
+                            title={optionDisabled ? option.disabledReason ?? label : label}
                             className={cn(
                               'flex w-full items-center gap-2 rounded-[0.75rem] px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45',
                               selected
@@ -1856,13 +1827,13 @@ export const ChatInput = memo(function ChatInput({
                               }
                               setPermissionPickerOpen(false);
                               if (!selected) {
-                                permissionPicker.onSelect(option.mode);
+                                permissionPicker.onSelect(option.id);
                               }
                             }}
                           >
                             <div className="min-w-0 flex-1">
                               <div className="truncate text-[12px] font-medium leading-5">{label}</div>
-                              <div className="line-clamp-2 text-[11px] leading-4 text-muted-foreground">{t(option.descriptionKey)}</div>
+                              <div className="line-clamp-2 text-[11px] leading-4 text-muted-foreground">{option.description}</div>
                             </div>
                             <span className="flex h-4 w-4 shrink-0 items-center justify-center">
                               {selected ? <Check className="h-3.5 w-3.5" /> : null}
@@ -2000,6 +1971,7 @@ export const ChatInput = memo(function ChatInput({
                               <SelectPrimitive.Item
                                 key={option.id}
                                 value={option.id}
+                                disabled={option.disabled}
                                 className={cn(
                                   'flex w-full cursor-default items-center gap-2.5 rounded-[0.85rem] px-2.5 py-2 text-left outline-none transition-colors data-[highlighted]:bg-muted/70',
                                   selected

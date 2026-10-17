@@ -22,7 +22,7 @@ pub mod login;
 pub mod pairing;
 pub mod status;
 
-const TINY_REQUEST_BYTES: usize = 256;
+const TINY_REQUEST_BYTES: usize = 1024;
 const CONTROL_REQUEST_BYTES: usize = 20 * 1024;
 const CATALOG_REQUEST_BYTES: usize = 64 * 1024;
 const CREDENTIALS_REQUEST_BYTES: usize = 320 * 1024;
@@ -34,19 +34,16 @@ const DEFAULT_REQUEST_BYTES: usize = 64 * 1024;
 pub struct Dependencies {
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     channel: ChannelHandle,
-    endpoint: RuntimeEndpoint,
 }
 
 impl Dependencies {
     pub fn new(
         verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
         channel: ChannelHandle,
-        endpoint: RuntimeEndpoint,
     ) -> Self {
         Self {
             verifier,
             channel,
-            endpoint,
         }
     }
 }
@@ -110,16 +107,48 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
+        if !request_body_within_limit(
+            request.headers(),
+            &request.body,
+            body_limit(pathname(request.path())),
+        ) {
+            return Response::json(
+                400,
+                serde_json::json!({"success":false,"error":"Channel request is invalid"}),
+            ).into();
+        }
+        let mut body = match serde_json::from_slice::<serde_json::Value>(&request.body) {
+            Ok(body) => body,
+            Err(_) => return Response::json(
+                400,
+                serde_json::json!({"success":false,"error":"Channel request is invalid"}),
+            ).into(),
+        };
+        let endpoint = match take_endpoint(&mut body) {
+            Ok(endpoint) => endpoint,
+            Err(()) => return Response::json(
+                400,
+                serde_json::json!({"success":false,"error":"Channel runtime scope is invalid"}),
+            ).into(),
+        };
+        let body = serde_json::to_vec(&body).expect("JSON value serializes");
+        let mut headers = request.headers().to_vec();
+        headers.retain(|(name, _)| name != "content-length");
+        headers.push(("content-length".into(), body.len().to_string()));
+        let dependencies = Dependencies {
+            channel: dependencies.channel.with_endpoint(endpoint.clone()),
+            verifier: dependencies.verifier,
+        };
         let response = match pathname(request.path()) {
             status::AUTHORIZATION_ENDPOINT => {
                 status::handler::handle(
                     request.method(),
                     request.path(),
-                    request.headers(),
-                    &request.body,
+                    &headers,
+                    &body,
                     Arc::clone(&dependencies.verifier),
                     dependencies.channel,
-                    dependencies.endpoint,
+                    endpoint.clone(),
                 )
                 .await
             }
@@ -127,11 +156,11 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
                 pairing::handler::handle(
                     request.method(),
                     request.path(),
-                    request.headers(),
-                    &request.body,
+                    &headers,
+                    &body,
                     Arc::clone(&dependencies.verifier),
                     dependencies.channel,
-                    dependencies.endpoint,
+                    endpoint.clone(),
                 )
                 .await
             }
@@ -142,11 +171,11 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
                 catalog::handler::handle(
                     request.method(),
                     request.path(),
-                    request.headers(),
-                    &request.body,
+                    &headers,
+                    &body,
                     Arc::clone(&dependencies.verifier),
                     dependencies.channel,
-                    dependencies.endpoint,
+                    endpoint.clone(),
                 )
                 .await
             }
@@ -154,11 +183,11 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
                 control::handler::handle(
                     request.method(),
                     request.path(),
-                    request.headers(),
-                    &request.body,
+                    &headers,
+                    &body,
                     Arc::clone(&dependencies.verifier),
                     dependencies.channel,
-                    dependencies.endpoint,
+                    endpoint.clone(),
                 )
                 .await
             }
@@ -166,6 +195,32 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
         };
         response.into()
     })
+}
+
+fn take_endpoint(body: &mut serde_json::Value) -> Result<RuntimeEndpoint, ()> {
+    let body = body.as_object_mut().ok_or(())?;
+    let Some(scope) = body.remove("scope") else {
+        // This unscoped API is the existing OpenClaw route, never implicit peer selection.
+        return RuntimeEndpoint::try_new("openclaw", "local").map_err(|_| ());
+    };
+    let scope = scope.as_object().ok_or(())?;
+    if scope.len() != 2
+        || scope.get("kind").and_then(serde_json::Value::as_str) != Some("runtime-instance")
+    {
+        return Err(());
+    }
+    let endpoint = scope
+        .get("endpoint")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(())?;
+    if endpoint.len() != 3
+        || endpoint.get("kind").and_then(serde_json::Value::as_str) != Some("native-runtime")
+    {
+        return Err(());
+    }
+    let adapter = endpoint.get("runtimeAdapterId").and_then(serde_json::Value::as_str).ok_or(())?;
+    let instance = endpoint.get("runtimeInstanceId").and_then(serde_json::Value::as_str).ok_or(())?;
+    RuntimeEndpoint::try_new(adapter, instance).map_err(|_| ())
 }
 
 fn body_length(headers: &[(String, String)]) -> Option<usize> {

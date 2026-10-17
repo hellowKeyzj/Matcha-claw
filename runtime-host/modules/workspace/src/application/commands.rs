@@ -25,34 +25,34 @@ pub(crate) struct WorkspaceCommand {
 pub(crate) enum WorkspaceOperation {
     ReadText {
         endpoint: RuntimeEndpoint,
-        session_key: String,
+        agent_id: String,
         relative_path: String,
         limit: usize,
         reply: oneshot::Sender<Result<WorkspaceTextReceipt, WorkspaceReadFailure>>,
     },
     ReadBinary {
         endpoint: RuntimeEndpoint,
-        session_key: String,
+        agent_id: String,
         relative_path: String,
         limit: usize,
         reply: oneshot::Sender<Result<WorkspaceBinaryReceipt, WorkspaceBinaryFailure>>,
     },
     StatFile {
         endpoint: RuntimeEndpoint,
-        session_key: String,
+        agent_id: String,
         relative_path: String,
         reply: oneshot::Sender<Result<WorkspaceStatReceipt, WorkspaceStatFailure>>,
     },
     ListDirectory {
         endpoint: RuntimeEndpoint,
-        session_key: String,
+        agent_id: String,
         relative_path: String,
         include_hidden: bool,
         reply: oneshot::Sender<Result<WorkspaceDirectoryReceipt, WorkspaceListFailure>>,
     },
     WriteText {
         endpoint: RuntimeEndpoint,
-        session_key: String,
+        agent_id: String,
         relative_path: String,
         content: String,
         reply: oneshot::Sender<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>>,
@@ -112,24 +112,40 @@ pub(crate) enum WorkspaceQuery {}
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub(crate) enum WorkspaceOwnerKey {
     Directory(RuntimeEndpoint, String),
+    Agent(RuntimeEndpoint, String),
     Session(RuntimeEndpoint, String),
 }
 
-impl WorkspaceOperation {
-    pub(crate) fn scope(&self) -> (&RuntimeEndpoint, &str) {
+#[derive(Clone, Copy)]
+pub(crate) enum WorkspaceSelection<'a> {
+    Agent(&'a str),
+    Session(&'a str),
+}
+
+impl WorkspaceSelection<'_> {
+    pub(crate) fn owner_key(self, endpoint: RuntimeEndpoint) -> WorkspaceOwnerKey {
         match self {
-            Self::ReadText { endpoint, session_key, .. }
-            | Self::ReadBinary { endpoint, session_key, .. }
-            | Self::StatFile { endpoint, session_key, .. }
-            | Self::ListDirectory { endpoint, session_key, .. }
-            | Self::WriteText { endpoint, session_key, .. }
-            | Self::PrepareMedia { endpoint, session_key, .. }
+            Self::Agent(agent_id) => WorkspaceOwnerKey::Agent(endpoint, agent_id.to_owned()),
+            Self::Session(session_key) => WorkspaceOwnerKey::Session(endpoint, session_key.to_owned()),
+        }
+    }
+}
+
+impl WorkspaceOperation {
+    pub(crate) fn scope(&self) -> (&RuntimeEndpoint, WorkspaceSelection<'_>) {
+        match self {
+            Self::ReadText { endpoint, agent_id, .. }
+            | Self::ReadBinary { endpoint, agent_id, .. }
+            | Self::StatFile { endpoint, agent_id, .. }
+            | Self::ListDirectory { endpoint, agent_id, .. }
+            | Self::WriteText { endpoint, agent_id, .. } => (endpoint, WorkspaceSelection::Agent(agent_id)),
+            Self::PrepareMedia { endpoint, session_key, .. }
             | Self::ResolveMedia { endpoint, session_key, .. }
             | Self::ThumbnailMedia { endpoint, session_key, .. }
             | Self::ThumbnailMediaGateway { endpoint, session_key, .. }
             | Self::ThumbnailsMedia { endpoint, session_key, .. }
             | Self::StagePathsMedia { endpoint, session_key, .. }
-            | Self::StageBufferMedia { endpoint, session_key, .. } => (endpoint, session_key),
+            | Self::StageBufferMedia { endpoint, session_key, .. } => (endpoint, WorkspaceSelection::Session(session_key)),
         }
     }
 

@@ -206,7 +206,9 @@ fn effect_outcome(effect: &ChannelMutationEffect) -> ChannelCallOutcome {
         | ChannelMutationEffect::Credentials(Credentials::TargetRejected)
         | ChannelMutationEffect::LoginFinalized(LoginFinalizationOutcome::Rejected)
         | ChannelMutationEffect::Login(Login::Rejected) => ChannelCallOutcome::Rejected,
-        ChannelMutationEffect::Login(Login::Unsupported) => ChannelCallOutcome::Unsupported,
+        ChannelMutationEffect::Login(Login::Unsupported)
+        | ChannelMutationEffect::Control(Control::Unsupported)
+        | ChannelMutationEffect::Credentials(Credentials::Unsupported) => ChannelCallOutcome::Unsupported,
         ChannelMutationEffect::Login(Login::Cancelled) => ChannelCallOutcome::Cancelled,
         ChannelMutationEffect::Credentials(Credentials::Validated(validation)) => if validation.valid { ChannelCallOutcome::Valid } else { ChannelCallOutcome::Invalid },
         ChannelMutationEffect::Login(Login::Progress(progress)) => match progress.status {

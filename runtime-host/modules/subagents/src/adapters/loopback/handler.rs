@@ -71,7 +71,7 @@ async fn handle_request(request: Request, dependencies: super::Dependencies) -> 
                 "operation": &request.operation_id,
                 "adapter": &request.scope.endpoint.runtime_adapter_id,
                 "instance": &request.scope.endpoint.runtime_instance_id,
-                "scopeAgentId": id_shape(Some(&request.scope.agent_id)),
+                "scopeAgentId": id_shape(request.scope.agent_id.as_deref()),
                 "targetSubagentId": id_shape(request.target.subagent_id.as_deref()),
             })
         },

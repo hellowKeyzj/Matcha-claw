@@ -151,6 +151,7 @@ function isCapabilityDescriptor(value: unknown): value is CapabilityDescriptor {
     'supportLevel',
     'availability',
     'operations',
+    'sessionConfiguration',
     'policyScope',
     'ownerModuleId',
     'routeOwnerId',
@@ -183,6 +184,10 @@ function isCapabilityDescriptor(value: unknown): value is CapabilityDescriptor {
     && isCapabilityAvailability(value.availability)
     && Array.isArray(value.operations)
     && value.operations.every(isCapabilityOperation)
+    && (!Object.hasOwn(value, 'sessionConfiguration') || (value.id === 'session.prompt' && value.scopeKind === 'agent'
+      && isRecord(value.sessionConfiguration) && hasExactKeys(value.sessionConfiguration, ['permission', 'modelSelection'])
+      && typeof value.sessionConfiguration.permission === 'boolean' && typeof value.sessionConfiguration.modelSelection === 'boolean'
+      && value.operations.some((operation) => isRecord(operation) && operation.id === 'sessions.create')))
     && isCapabilityText(value.policyScope)
     && isCapabilityText(value.ownerModuleId)
     && isCapabilityText(value.routeOwnerId)

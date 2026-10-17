@@ -11,7 +11,7 @@ use crate::call::{
 };
 
 use crate::{
-    adapters::store::{self, ConnectorStore, ConnectorStoreError, ConnectorStoreSnapshot},
+    adapters::store::{self, ConnectorMutation, ConnectorStore, ConnectorStoreError, ConnectorStoreSnapshot},
     application::{
         ConnectorCommand, ConnectorOwnerKey, ConnectorQuery,
         receipts::{
@@ -148,6 +148,30 @@ impl OwnerSpec for ConnectorOwner {
                 }
                 let _ = reply.send(outcome);
             }
+            ConnectorCommand::Update { id, patch, mut call, reply } => {
+                if let Some(active) = &call {
+                    if active.start().await.is_err() {
+                        if let Some(mut call) = call {
+                            call.detail.result = Some(CallResult::Unavailable);
+                            call.finish(CallStatus::Failed).await;
+                        }
+                        let _ = reply.send(ConnectorMutationReceipt::Unavailable);
+                        return;
+                    }
+                }
+                let outcome = match global.store.update(&id, *patch) {
+                    Ok(Some((mutation, connector))) => {
+                        project_stored(&shared, global, connector, mutation, call.as_mut()).await
+                    }
+                    Ok(None) => ConnectorMutationReceipt::Missing,
+                    Err(error) => mutation_error(error),
+                };
+                if let Some(mut call) = call {
+                    let status = call.detail.mutation(&outcome);
+                    call.finish(status).await;
+                }
+                let _ = reply.send(outcome);
+            }
             ConnectorCommand::Remove {
                 id,
                 mut call,
@@ -167,6 +191,11 @@ impl OwnerSpec for ConnectorOwner {
                 global.private_resolver = resolver;
                 let _ = reconcile_connector_projection(&shared, global).await;
                 let _ = reply.send(());
+            }
+            ConnectorCommand::ReprojectPrivateProjection { endpoint, reply } => {
+                let outcome =
+                    apply_connector_projection_for_endpoint(&shared, global, &endpoint).await;
+                let _ = reply.send(outcome);
             }
             ConnectorCommand::SetSessionMcpServerEnabled {
                 target,
@@ -308,14 +337,19 @@ async fn handle_connector_query(
     query: ConnectorQuery,
 ) {
     match query {
-        ConnectorQuery::Status { mut call } => {
+        ConnectorQuery::Status { endpoint, mut call } => {
             if call.start().await.is_err() {
                 shared.observations.discard(call.context.id());
                 call.detail.result = Some(CallResult::Unavailable);
                 call.finish(CallStatus::Failed).await;
                 return;
             }
-            let outcome = status(&shared, domain::user_connectors(&catalog(global))).await;
+            let outcome = status(
+                &shared,
+                &endpoint,
+                domain::user_connectors(&catalog(global)),
+            )
+            .await;
             let status = match outcome {
                 ConnectorStatusReceipt::Available(statuses) => {
                     call.detail.observations(&statuses);
@@ -333,7 +367,11 @@ async fn handle_connector_query(
             };
             call.finish(status).await;
         }
-        ConnectorQuery::Probe { id, mut call } => {
+        ConnectorQuery::Probe {
+            endpoint,
+            id,
+            mut call,
+        } => {
             if call.start().await.is_err() {
                 shared.observations.discard(call.context.id());
                 call.detail.result = Some(CallResult::Unavailable);
@@ -341,7 +379,7 @@ async fn handle_connector_query(
                 return;
             }
             let connector = domain::connector(&catalog(global), &id);
-            let outcome = probe(&shared, connector).await;
+            let outcome = probe(&shared, &endpoint, connector).await;
             let status = match outcome {
                 ConnectorProbeReceipt::Observed(observation) => {
                     call.detail.observations.push(ObservationSummary {
@@ -395,11 +433,15 @@ async fn handle_connector_query(
             );
             call.finish(CallStatus::Succeeded).await;
         }
-        ConnectorQuery::OpenClawMcpServers { call, reply } => {
+        ConnectorQuery::OpenClawMcpServers {
+            endpoint,
+            call,
+            reply,
+        } => {
             if let Some(call) = &call {
                 call.running().await;
             }
-            let outcome = openclaw_mcp_servers(&shared, global).await;
+            let outcome = openclaw_mcp_servers(&shared, global, &endpoint).await;
             if let Some(mut call) = call {
                 let status = match &outcome {
                     OpenClawMcpServersReceipt::Available(servers) => {
@@ -428,7 +470,7 @@ async fn upsert(
     shared: &ConnectorShared,
     global: &mut ConnectorGlobalState,
     connector: Connector,
-    mut call: Option<&mut ConnectorCall>,
+    call: Option<&mut ConnectorCall>,
 ) -> ConnectorMutationReceipt {
     if domain::is_system_runtime_connector(&connector) {
         return ConnectorMutationReceipt::Rejected;
@@ -439,6 +481,16 @@ async fn upsert(
         Err(error) => return mutation_error(error),
     };
 
+    project_stored(shared, global, connector, mutation, call).await
+}
+
+async fn project_stored(
+    shared: &ConnectorShared,
+    global: &mut ConnectorGlobalState,
+    connector: Connector,
+    mutation: ConnectorMutation,
+    mut call: Option<&mut ConnectorCall>,
+) -> ConnectorMutationReceipt {
     if let Some(call) = call.as_deref_mut() {
         call.detail.created = Some(mutation.created);
     }
@@ -543,7 +595,38 @@ async fn apply_connector_projection(
     shared: &ConnectorShared,
     global: &ConnectorGlobalState,
 ) -> ConnectorProjectionEffect {
-    let Some(ops) = shared.runtime_directory.connector_ops() else {
+    let endpoints = shared.runtime_directory.connector_endpoints();
+    if endpoints.is_empty() {
+        return ConnectorProjectionEffect::Unavailable;
+    }
+    let mut changed = false;
+    let mut unavailable = false;
+    let mut unknown = false;
+    for endpoint in endpoints {
+        match apply_connector_projection_for_endpoint(shared, global, &endpoint).await {
+            ConnectorProjectionEffect::Written { changed: written } => changed |= written,
+            ConnectorProjectionEffect::Unknown => unknown = true,
+            ConnectorProjectionEffect::Unavailable => unavailable = true,
+        }
+    }
+    if unknown {
+        ConnectorProjectionEffect::Unknown
+    } else if unavailable {
+        ConnectorProjectionEffect::Unavailable
+    } else {
+        ConnectorProjectionEffect::Written { changed }
+    }
+}
+
+async fn apply_connector_projection_for_endpoint(
+    shared: &ConnectorShared,
+    global: &ConnectorGlobalState,
+    endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
+) -> ConnectorProjectionEffect {
+    let Some(ops) = shared
+        .runtime_directory
+        .connector_ops_for_endpoint(endpoint)
+    else {
         return ConnectorProjectionEffect::Unavailable;
     };
     ops.apply_runtime_mcp_projection(
@@ -588,6 +671,7 @@ async fn set_session_mcp_server_enabled(
     };
     match ops
         .set_mcp_session_server_enabled(
+            target.session.agent_id,
             target.session.session_key,
             target.server_id,
             target.enabled,
@@ -602,8 +686,12 @@ async fn set_session_mcp_server_enabled(
 async fn openclaw_mcp_servers(
     shared: &ConnectorShared,
     global: &ConnectorGlobalState,
+    endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
 ) -> OpenClawMcpServersReceipt {
-    let Some(ops) = shared.runtime_directory.connector_ops() else {
+    let Some(ops) = shared
+        .runtime_directory
+        .connector_ops_for_endpoint(endpoint)
+    else {
         return OpenClawMcpServersReceipt::Unavailable;
     };
     let Ok(servers) = ops.list_mcp_servers().await else {
@@ -619,8 +707,15 @@ fn runtime_mcp_servers(global: &ConnectorGlobalState) -> Vec<RuntimeMcpServerSum
     projection::runtime_mcp_servers(&catalog(global))
 }
 
-async fn status(shared: &ConnectorShared, connectors: Vec<Connector>) -> ConnectorStatusReceipt {
-    let Some(ops) = shared.runtime_directory.connector_ops() else {
+async fn status(
+    shared: &ConnectorShared,
+    endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
+    connectors: Vec<Connector>,
+) -> ConnectorStatusReceipt {
+    let Some(ops) = shared
+        .runtime_directory
+        .connector_ops_for_endpoint(endpoint)
+    else {
         return ConnectorStatusReceipt::Unavailable;
     };
     let statuses = futures_util::future::join_all(connectors.into_iter().map(|connector| {
@@ -636,14 +731,21 @@ async fn status(shared: &ConnectorShared, connectors: Vec<Connector>) -> Connect
     ConnectorStatusReceipt::Available(statuses)
 }
 
-async fn probe(shared: &ConnectorShared, connector: Option<Connector>) -> ConnectorProbeReceipt {
+async fn probe(
+    shared: &ConnectorShared,
+    endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
+    connector: Option<Connector>,
+) -> ConnectorProbeReceipt {
     let Some(connector) = connector else {
         return ConnectorProbeReceipt::Missing;
     };
     if domain::is_system_runtime_connector(&connector) {
         return ConnectorProbeReceipt::Missing;
     }
-    let Some(ops) = shared.runtime_directory.connector_ops() else {
+    let Some(ops) = shared
+        .runtime_directory
+        .connector_ops_for_endpoint(endpoint)
+    else {
         return ConnectorProbeReceipt::Unavailable;
     };
     ConnectorProbeReceipt::Observed(map_observation(
@@ -681,7 +783,7 @@ async fn session_connector_status(
 
     let servers = runtime_mcp_servers(global);
     let statuses = ops
-        .observe_mcp_server_status(target.session_key.clone())
+        .observe_mcp_server_status(target.agent_id, target.session_key.clone())
         .await;
 
     match statuses {

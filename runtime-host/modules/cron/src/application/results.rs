@@ -37,6 +37,7 @@ impl MutationKind {
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ResultSubject {
     pub(crate) principal: String,
+    pub(crate) endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
     pub(crate) command: MutationKind,
     pub(crate) job_id: Option<String>,
 }
@@ -46,6 +47,7 @@ pub(crate) enum MutationResult {
     Job { id: String, job: Box<JobResponse> },
     Removed(bool),
     Rejected,
+    UnsupportedDelivery,
     Unknown,
     Unavailable,
 }
@@ -64,6 +66,7 @@ impl MutationResult {
                 }
             }
             CronJobMutationOutcome::Rejected => Self::Rejected,
+            CronJobMutationOutcome::UnsupportedDelivery => Self::UnsupportedDelivery,
             CronJobMutationOutcome::OutcomeUnknown => Self::Unknown,
             CronJobMutationOutcome::Unavailable => Self::Unavailable,
         }
@@ -88,7 +91,7 @@ impl MutationResult {
                 detail.removed = Some(*removed);
                 (CallStatus::Succeeded, Outcome::Applied)
             }
-            Self::Rejected => (CallStatus::Rejected, Outcome::Rejected),
+            Self::Rejected | Self::UnsupportedDelivery => (CallStatus::Rejected, Outcome::Rejected),
             Self::Unknown => (CallStatus::Unknown, Outcome::OutcomeUnknown),
             Self::Unavailable => (CallStatus::Failed, Outcome::Unavailable),
         }

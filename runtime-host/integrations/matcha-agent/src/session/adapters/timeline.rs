@@ -1,396 +1,227 @@
-use super::*;
-use sessions_module::state::{
-    ItemStatus, MissingFact, OmissionReason, RunPhase, RuntimeView,
-    SessionCompleteness, SessionContent, SessionFact, SessionIdentity, SessionItem,
-    SessionView, SessionWindow, ToolPhase, ToolView,
+use crate::{
+    client::Client,
+    session::{
+        history, projection,
+        rpc::{self, Failure, FailureKind},
+    },
+};
+use serde_json::Value;
+use sessions_module::{
+    session_history::{
+        SessionHistoryCommand, SessionHistoryFailure, SessionHistoryMessage, SessionHistoryOutcome,
+        SessionHistoryRole, SessionHistoryView,
+    },
+    state::{
+        ItemStatus, MissingFact, SessionCompleteness, SessionFact, SessionItem, SessionView,
+        ToolView,
+    },
+    timeline::{self, UnavailableReason},
 };
 
-pub(super) async fn load_matcha_timeline(
-    session: MatchaPeerSessionHandle,
-    command: session_timeline::Command,
+pub(super) async fn read(
+    client: &Client,
+    command: &timeline::Command,
     epoch: u64,
-) -> session_timeline::Outcome {
-    let Some(session_id) = matcha_native_session_id(command.endpoint_session_id()) else {
-        return session_timeline::Outcome::unavailable(
-            session_timeline::UnavailableReason::MatchaMissingNativeSessionId,
-        );
-    };
-    let mode = match command.direction() {
-        session_timeline::Direction::Latest => HydrationWindowMode::Latest,
-        session_timeline::Direction::Older => HydrationWindowMode::Older,
-        session_timeline::Direction::Newer => HydrationWindowMode::Newer,
-    };
-    let request = HydrationWindowRequest::new(mode, command.limit(), command.offset());
-    let snapshot = match session.load_history(session_id, request).await {
-        HistoryResult::Complete(snapshot) => snapshot,
-        HistoryResult::Incomplete(reason) => {
-            return session_timeline::Outcome::unavailable_with_diagnostic(
-                session_timeline::UnavailableReason::MatchaReadIncomplete,
-                matcha_hydration_diagnostic("matcha.transcript", reason),
-            );
-        }
-        HistoryResult::NotFound => {
-            return session_timeline::Outcome::unavailable(
-                session_timeline::UnavailableReason::MatchaReadNotFound,
-            );
-        }
-        HistoryResult::Unavailable => {
-            return session_timeline::Outcome::unavailable(
-                session_timeline::UnavailableReason::MatchaReadUnavailable,
-            );
-        }
-        HistoryResult::Unknown => {
-            return session_timeline::Outcome::unavailable(
-                session_timeline::UnavailableReason::MatchaReadUnknown,
-            );
-        }
-    };
-    let identity = command.identity().clone();
-    if identity.validate().is_err() {
-        return session_timeline::Outcome::unavailable(
-            session_timeline::UnavailableReason::MatchaIdentityInvalid,
-        );
-    };
-    project_matcha_hydration_view(
-        &identity,
-        command.endpoint_session_id().map(str::to_owned),
-        &snapshot,
-        epoch,
+) -> Result<SessionView, Failure> {
+    let record = rpc::bound(client, command.identity(), command.endpoint_session_id()).await?;
+    let (page, window) = history::window(
+        client,
+        record.session_id.as_str(),
+        &record.agent_id,
+        command.direction(),
+        command.limit(),
+        command.offset(),
     )
-    .map(session_timeline::Outcome::Incomplete)
-    .unwrap_or_else(|| {
-        session_timeline::Outcome::unavailable(
-            session_timeline::UnavailableReason::MatchaProjectionInvalid,
-        )
-    })
-}
-
-pub(super) async fn load_matcha_content(
-    session: MatchaPeerSessionHandle,
-    command: session_timeline::ContentCommand,
-) -> session_timeline::ContentOutcome {
-    let Some(session_id) = matcha_native_session_id(command.endpoint_session_id()) else {
-        return session_timeline::ContentOutcome::unavailable(
-            session_timeline::UnavailableReason::MatchaMissingNativeSessionId,
-        );
-    };
-    match session
-        .load_history_content(
-            session_id,
-            command.content_ref().to_owned(),
-            command.offset(),
-            command.limit(),
-        )
-        .await
-    {
-        HistoryResult::Complete(chunk) => {
-            session_timeline::ContentOutcome::Complete(session_timeline::ContentChunk {
-                content_ref: chunk.content_ref().to_owned(),
-                offset: chunk.offset(),
-                text: chunk.text().to_owned(),
-                next_offset: chunk.next_offset(),
-                total_bytes: chunk.total_bytes(),
-                complete: chunk.complete(),
-            })
-        }
-        HistoryResult::NotFound => session_timeline::ContentOutcome::unavailable(
-            session_timeline::UnavailableReason::MatchaReadNotFound,
-        ),
-        HistoryResult::Unavailable => session_timeline::ContentOutcome::unavailable(
-            session_timeline::UnavailableReason::MatchaReadUnavailable,
-        ),
-        HistoryResult::Unknown | HistoryResult::Incomplete(_) => {
-            session_timeline::ContentOutcome::unavailable(
-                session_timeline::UnavailableReason::MatchaReadUnknown,
-            )
+    .await?;
+    let mut items = Vec::new();
+    let mut tools = Vec::<ToolView>::new();
+    for row in &page.messages {
+        if let Some(message) = projection::message(row, ItemStatus::Final)? {
+            if items
+                .iter()
+                .any(|item: &SessionItem| item.item_id() == message.item.item_id())
+            {
+                return Err(Failure::InvalidReadback);
+            }
+            items.push(message.item);
+            for tool in message.tools {
+                projection::merge_tool(&mut tools, tool)?;
+            }
         }
     }
+    let mut view = sessions_module::state::SessionState::new(command.identity().clone(), epoch)
+        .map_err(|_| Failure::InvalidInput)?
+        .view();
+    view.endpoint_session_id = Some(record.session_id.as_str().to_owned());
+    view.goal = sessions_module::goal::SessionGoalView::Unsupported;
+    view.model_state = record
+        .model
+        .as_deref()
+        .and_then(|model| sessions_module::state::SessionModelState::selected_from_ref(model).ok());
+    if let Some(model) = &mut view.model_state {
+        model.selection_id = record.model_selection_id;
+    }
+    view.items = SessionFact::Incomplete {
+        facts: items,
+        gaps: vec![MissingFact::BoundedHistory],
+    };
+    view.tools = SessionFact::Incomplete {
+        facts: tools,
+        gaps: vec![MissingFact::EventOnly],
+    };
+    view.window = SessionFact::Complete(window);
+    view.completeness = SessionCompleteness::Incomplete {
+        missing: vec![
+            MissingFact::Catalog,
+            MissingFact::Usage,
+            MissingFact::Artifacts,
+            MissingFact::ContextTokens,
+            MissingFact::Tasks,
+            MissingFact::ReplayCursor,
+            MissingFact::PartialRuntime,
+            MissingFact::EventOnly,
+        ],
+    };
+    view.validate().map_err(|_| Failure::InvalidReadback)?;
+    Ok(view)
 }
-
-fn matcha_native_session_id(endpoint_session_id: Option<&str>) -> Option<SessionId> {
-    SessionId::try_new(endpoint_session_id?.to_owned()).ok()
-}
-
-fn matcha_hydration_diagnostic(
-    source: &'static str,
-    reason: crate::session::hydration::HydrationIncomplete,
-) -> session_timeline::UnavailableDiagnostic {
-    let rejection = reason.transcript_rejection();
-    session_timeline::UnavailableDiagnostic::new(
-        source,
-        rejection.and_then(|rejection| rejection.message_index()),
-        rejection.and_then(|rejection| rejection.block_index()),
-        rejection.and_then(|rejection| rejection.block_type()),
-        rejection
-            .map(|rejection| rejection.field())
-            .unwrap_or("hydration"),
-        rejection
-            .map(|rejection| rejection.reason())
-            .unwrap_or_else(|| matcha_hydration_reason(reason)),
-        rejection
-            .map(|rejection| rejection.actual())
-            .unwrap_or("hydration_incomplete"),
-    )
-}
-
-const fn matcha_hydration_reason(
-    reason: crate::session::hydration::HydrationIncomplete,
-) -> &'static str {
-    match reason {
-        crate::session::hydration::HydrationIncomplete::ReplayRecoveryRequired => {
-            "replay_recovery_required"
-        }
-        crate::session::hydration::HydrationIncomplete::ReplayIncomplete => "replay_incomplete",
-        crate::session::hydration::HydrationIncomplete::TranscriptRejected(_) => {
-            "transcript_rejected"
-        }
-        crate::session::hydration::HydrationIncomplete::ConnectionInterrupted => {
-            "connection_interrupted"
-        }
-        crate::session::hydration::HydrationIncomplete::SourceRejected => "source_rejected",
-        crate::session::hydration::HydrationIncomplete::SourceUnavailable => "source_unavailable",
-        crate::session::hydration::HydrationIncomplete::ProtocolRejected => "protocol_rejected",
-        crate::session::hydration::HydrationIncomplete::ConnectionCloseFailed => {
-            "connection_close_failed"
-        }
+pub(super) async fn load(
+    client: &Client,
+    command: timeline::Command,
+    epoch: u64,
+) -> timeline::Outcome {
+    match read(client, &command, epoch).await {
+        Ok(view) => timeline::Outcome::Incomplete(view),
+        Err(error) => timeline::Outcome::unavailable(reason(&error)),
     }
 }
-
-pub(super) fn project_matcha_hydration_view(
-    identity: &SessionIdentity,
-    endpoint_session_id: Option<String>,
-    snapshot: &HydrationSnapshot,
-    epoch: u64,
-) -> Option<SessionView> {
-    let transcript = snapshot.window();
-    let view = SessionView {
-        session_key: identity.session_key.clone(),
-        endpoint_session_id,
-        ownership: None,
-        model_state: None,
-        goal: sessions_module::goal::SessionGoalView::Unsupported,
-        identity: identity.clone(),
-        epoch,
-        seq: 0,
-        cursor: 0,
-        items: SessionFact::Complete(matcha_items(snapshot.messages())),
-        tools: SessionFact::Complete(matcha_tools(snapshot.messages())),
-        approvals: SessionFact::Incomplete {
-            facts: Vec::new(),
-            gaps: vec![MissingFact::EventOnly],
-        },
-        runtime: SessionFact::Incomplete {
-            facts: RuntimeView {
-                phase: RunPhase::Completed,
-                active_run_id: None,
-                issue: None,
-                run_progress: None,
-                runtime_activity: None,
-                error_detail: None,
-            },
-            gaps: vec![MissingFact::PartialRuntime],
-        },
-        window: SessionFact::Complete(SessionWindow {
-            total_item_count: transcript.total_item_count() as u64,
-            window_start_offset: transcript.window_start_offset() as u64,
-            window_end_offset: transcript.window_end_offset() as u64,
-            has_more: transcript.has_more(),
-            has_newer: transcript.has_newer(),
-            is_at_latest: transcript.is_at_latest(),
+fn reason(error: &Failure) -> UnavailableReason {
+    if error.is_not_found() {
+        return UnavailableReason::MatchaReadNotFound;
+    }
+    match error.kind() {
+        FailureKind::Rejected => UnavailableReason::RuntimeTargetRejected,
+        FailureKind::Unknown => UnavailableReason::MatchaReadUnknown,
+        _ => UnavailableReason::MatchaReadUnavailable,
+    }
+}
+pub(super) async fn history(
+    client: &Client,
+    command: SessionHistoryCommand,
+) -> SessionHistoryOutcome {
+    let result = async {
+        let (agent, id) =
+            projection::parse_session_key(command.session_key()).ok_or(Failure::InvalidInput)?;
+        if command.endpoint()
+            != &runtime_directory::RuntimeDriverIdentity::matcha_agent().endpoint()
+            || command
+                .endpoint_session_id()
+                .is_some_and(|native_id| native_id != id)
+        {
+            return Err(Failure::InvalidInput);
+        }
+        rpc::get(client, id, Some(agent)).await?;
+        let limit = command
+            .limit()
+            .and_then(|limit| usize::try_from(limit).ok())
+            .unwrap_or(200)
+            .min(200);
+        let (page, _) =
+            history::window(client, id, agent, timeline::Direction::Latest, limit, None).await?;
+        let mut messages = Vec::new();
+        for row in page.messages {
+            let role = match row.get("type").and_then(Value::as_str) {
+                Some("user") => SessionHistoryRole::User,
+                Some("assistant") => SessionHistoryRole::Assistant,
+                _ => continue,
+            };
+            // Plain history has no preview/completeness field. Never return the
+            // bounded timeline aggregate as if it were the full native text.
+            let text = match row
+                .pointer("/message/content")
+                .or_else(|| row.get("content"))
+            {
+                Some(Value::String(text)) => text.clone(),
+                Some(Value::Array(blocks)) => blocks
+                    .iter()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                    .map(|block| {
+                        block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .ok_or(Failure::InvalidReadback)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .concat(),
+                None | Some(Value::Null) => String::new(),
+                _ => return Err(Failure::InvalidReadback),
+            };
+            messages.push(SessionHistoryMessage { role, text });
+        }
+        Ok(SessionHistoryView { messages })
+    }
+    .await;
+    match result {
+        Ok(view) => SessionHistoryOutcome::Loaded(view),
+        Err(error) => SessionHistoryOutcome::Failed(match error.kind() {
+            FailureKind::Rejected => SessionHistoryFailure::Rejected,
+            FailureKind::Unknown => SessionHistoryFailure::Protocol,
+            _ => SessionHistoryFailure::Unavailable,
         }),
-        completeness: SessionCompleteness::Incomplete {
-            missing: vec![
-                MissingFact::Catalog,
-                MissingFact::Usage,
-                MissingFact::Artifacts,
-                MissingFact::ContextTokens,
-                MissingFact::Tasks,
-                MissingFact::ReplayCursor,
-                MissingFact::PartialRuntime,
-                MissingFact::EventOnly,
-            ],
-        },
-    };
-    view.validate().ok().map(|_| view)
+    }
 }
-
-fn matcha_items(messages: &[crate::session::hydration::HydratedMessage]) -> Vec<SessionItem> {
-    messages
-        .iter()
-        .enumerate()
-        .map(|(index, message)| {
-            let item_id = message
-                .id()
-                .or(message.origin_message_id())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("source:{}", message.source_index().unwrap_or(index)));
-            let text = message.text();
-            let content = matcha_content(message);
-            match message.role() {
-                HydratedMessageRole::User => SessionItem::UserMessage {
-                    item_id,
-                    message_id: message.id().map(str::to_owned),
-                    text,
-                    content,
-                    status: ItemStatus::Final,
-                },
-                HydratedMessageRole::Assistant => SessionItem::AssistantTurn {
-                    item_id,
-                    run_id: None,
-                    message_id: message.id().map(str::to_owned),
-                    status: ItemStatus::Final,
-                    segments: content,
-                    text,
-                },
-                HydratedMessageRole::System => SessionItem::System {
-                    item_id,
-                    text,
-                    status: ItemStatus::Final,
-                },
-            }
+pub(super) async fn content(
+    client: &Client,
+    command: timeline::ContentCommand,
+) -> timeline::ContentOutcome {
+    let result = async {
+        let record = rpc::bound(client, command.identity(), command.endpoint_session_id()).await?;
+        let (uuid, index) = command
+            .content_ref()
+            .strip_prefix("native:")
+            .and_then(|value| value.rsplit_once(':'))
+            .ok_or(Failure::InvalidInput)?;
+        let index = index.parse::<usize>().map_err(|_| Failure::InvalidInput)?;
+        let row =
+            history::message(client, record.session_id.as_str(), &record.agent_id, uuid).await?;
+        let body = row
+            .pointer("/message/content")
+            .or_else(|| row.get("content"))
+            .ok_or(Failure::InvalidReadback)?;
+        let block = if let Some(blocks) = body.as_array() {
+            blocks.get(index).ok_or(Failure::InvalidInput)?
+        } else if index == 0 {
+            body
+        } else {
+            return Err(Failure::InvalidInput);
+        };
+        let text = if let Some(text) = block.as_str() {
+            text
+        } else {
+            block
+                .get("text")
+                .or_else(|| block.get("thinking"))
+                .and_then(Value::as_str)
+                .ok_or(Failure::InvalidInput)?
+        };
+        let start = usize::try_from(command.offset()).map_err(|_| Failure::InvalidInput)?;
+        if start > text.len() || !text.is_char_boundary(start) {
+            return Err(Failure::InvalidInput);
+        }
+        let chunk = projection::prefix(&text[start..], command.limit());
+        let next = start + chunk.len();
+        Ok(timeline::ContentChunk {
+            content_ref: command.content_ref().to_owned(),
+            offset: start as u64,
+            text: chunk.to_owned(),
+            next_offset: next as u64,
+            total_bytes: text.len() as u64,
+            complete: next == text.len(),
         })
-        .collect()
-}
-
-fn matcha_content(message: &crate::session::hydration::HydratedMessage) -> Vec<SessionContent> {
-    message
-        .content()
-        .iter()
-        .map(|block| match block {
-            crate::session::hydration::HydratedContentBlock::Text { text } => {
-                SessionContent::Text { text: text.clone() }
-            }
-            crate::session::hydration::HydratedContentBlock::LargeText(text) => {
-                SessionContent::LargeText {
-                    text: text.text().to_owned(),
-                    content_ref: text.content_ref().to_owned(),
-                    total_bytes: text.total_bytes(),
-                    loaded_bytes: text.loaded_bytes(),
-                }
-            }
-            crate::session::hydration::HydratedContentBlock::Thinking { text } => {
-                SessionContent::Thinking { text: text.clone() }
-            }
-            crate::session::hydration::HydratedContentBlock::ToolUse(tool) => {
-                SessionContent::ToolUse {
-                    name: tool.name().to_owned(),
-                    tool_call_id: tool.tool_call_id().to_owned(),
-                }
-            }
-            crate::session::hydration::HydratedContentBlock::ToolResult(result) => {
-                match result.tool_call_id() {
-                    Some(tool_call_id) => SessionContent::ToolResult {
-                        tool_call_id: tool_call_id.to_owned(),
-                        summary: result.body().map(str::to_owned),
-                        is_error: result.is_error().unwrap_or(false),
-                    },
-                    None => SessionContent::Omitted {
-                        reason: OmissionReason::Unknown,
-                    },
-                }
-            }
-            crate::session::hydration::HydratedContentBlock::Image(image) => {
-                SessionContent::Media {
-                    media_type: Some(image.media_type().to_owned()),
-                    reference: image.reference().to_owned(),
-                }
-            }
-        })
-        .collect()
-}
-
-fn matcha_tools(messages: &[crate::session::hydration::HydratedMessage]) -> Vec<ToolView> {
-    let mut tools = Vec::new();
-    for message in messages {
-        for block in message.content() {
-            match block {
-                crate::session::hydration::HydratedContentBlock::ToolUse(tool) => {
-                    upsert_matcha_tool_use(&mut tools, tool);
-                }
-                crate::session::hydration::HydratedContentBlock::ToolResult(result) => {
-                    if let Some(tool_call_id) = result.tool_call_id() {
-                        upsert_matcha_tool_result(&mut tools, tool_call_id, result);
-                    }
-                }
-                _ => {}
-            }
-        }
     }
-    tools
-}
-
-fn upsert_matcha_tool_use(
-    tools: &mut Vec<ToolView>,
-    tool: &crate::session::hydration::HydratedToolUse,
-) {
-    if let Some(existing) = tools
-        .iter_mut()
-        .find(|existing| existing.tool_call_id == tool.tool_call_id())
-    {
-        if existing.name.is_none() {
-            existing.name = Some(tool.name().to_owned());
-        }
-        if tool.input().is_some() {
-            existing.input = tool.input().cloned();
-        }
-        if tool.input_text().is_some() {
-            existing.input_text = tool.input_text().map(str::to_owned);
-        }
-        return;
-    }
-
-    tools.push(ToolView {
-        tool_call_id: tool.tool_call_id().to_owned(),
-        run_id: None,
-        name: Some(tool.name().to_owned()),
-        phase: ToolPhase::Started,
-        input: tool.input().cloned(),
-        input_text: tool.input_text().map(str::to_owned),
-        summary: None,
-        output: None,
-        details: None,
-        is_error: None,
-    });
-}
-
-fn upsert_matcha_tool_result(
-    tools: &mut Vec<ToolView>,
-    tool_call_id: &str,
-    result: &crate::session::hydration::HydratedToolResult,
-) {
-    let phase = matcha_tool_result_phase(result.is_error());
-    if let Some(existing) = tools
-        .iter_mut()
-        .find(|existing| existing.tool_call_id == tool_call_id)
-    {
-        existing.phase = phase;
-        if result.body().is_some() {
-            existing.summary = result.body().map(str::to_owned);
-        }
-        if result.is_error().is_some() {
-            existing.is_error = result.is_error();
-        }
-        return;
-    }
-
-    tools.push(ToolView {
-        tool_call_id: tool_call_id.to_owned(),
-        run_id: None,
-        name: None,
-        phase,
-        input: None,
-        input_text: None,
-        summary: result.body().map(str::to_owned),
-        output: None,
-        details: None,
-        is_error: result.is_error(),
-    });
-}
-
-const fn matcha_tool_result_phase(is_error: Option<bool>) -> ToolPhase {
-    if matches!(is_error, Some(true)) {
-        ToolPhase::Failed
-    } else {
-        ToolPhase::Completed
+    .await;
+    match result {
+        Ok(chunk) => timeline::ContentOutcome::Complete(chunk),
+        Err(error) => timeline::ContentOutcome::unavailable(reason(&error)),
     }
 }

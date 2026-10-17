@@ -1,22 +1,27 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { Check, Plus, RefreshCw, Search, X } from 'lucide-react';
-import { AgentAvatar } from '@/components/common/AgentAvatar';
+import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { Bot, ChevronDown, Crown, FileArchive, Folder, FolderArchive, Loader2, Package, UserRoundPlus, Users, X } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { invokeIpc } from '@/lib/api-client';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
+import { isRuntimeEndpointReady, selectManagementEndpoint, selectManagementRuntime, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { agentScope, buildCapabilityScopeKey, buildRuntimeEndpointKey, runtimeEndpointsEqual, runtimeInstanceScope } from '@/types/desktop/runtime-address';
 import { pickLocalArchive, pickLocalDirectory, pickLocalSkillSource, readLocalSkillImport } from '@/services/local-path-picker';
 import {
   planTeamDependencies,
   validateTeamSkillPackage,
   type TeamDependencyPlanItem,
   type TeamDependencyPreparationPlan,
+  type TeamRoleBindingRecord,
+  type TeamRunListItem,
 } from '@/services/openclaw/team-runtime-client';
 import {
   isClawHubDependencySource,
@@ -25,13 +30,13 @@ import {
   normalizeDependencySource,
   readClawHubSkillSlug,
 } from './dependency-source';
-import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
-import { useSubagentsStore } from '@/stores/subagents';
-import { useTeamsStore, type ManualTeamCandidate, type ManualTeamMemberProvisionRecord, type TeamSkillCandidate, type TeamSkillCreationPlan } from '@/stores/teams';
+import { getSubagentManagementScope, useSubagentsStore } from '@/stores/subagents';
+import { resolveTeamRuntimeScope, useTeamsStore, type ManualTeamCandidate, type ManualTeamMemberProvisionRecord, type TeamMeta, type TeamSkillCandidate, type TeamSkillCreationPlan } from '@/stores/teams';
 import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
 import { ManualTeamCreationProgress } from './ManualTeamCreationProgress';
+import { TeamMemberPicker, type ManualMemberDraft } from './TeamMemberPicker';
 
 type TeamSkillReview = {
   revision: number;
@@ -41,11 +46,6 @@ type TeamSkillReview = {
 };
 
 type CreateSourceType = 'teamskill' | 'manual';
-
-type ManualMemberDraft = {
-  agentId: string;
-  isLeader: boolean;
-};
 
 type SealedTeamSkillPackage = TeamSkillCandidate['teamSkillPackage'];
 
@@ -84,6 +84,7 @@ function readSealedTeamSkillPackageValidationResult(value: unknown): SealedTeamS
 
 type CreateDialogPhase =
   | { type: 'editing_source' }
+  | { type: 'selecting_package' }
   | { type: 'validating_package' }
   | { type: 'review_ready'; review: TeamSkillReview }
   | { type: 'installing_dependency'; review: TeamSkillReview; dependencyName: string }
@@ -126,15 +127,30 @@ function buildManualRoleId(agent: SubagentSummary, usedRoleIds: ReadonlySet<stri
   return roleId;
 }
 
+function teamRoleCount(team: TeamMeta, roles: TeamRoleBindingRecord[] | undefined, runs: TeamRunListItem[] | undefined): number | undefined {
+  if (roles?.length && (!team.activeRunId || roles.every((role) => role.runId === team.activeRunId))) return roles.length;
+  const run = runs?.find((run) => run.runId === team.activeRunId);
+  if (run) return run.sessions.length;
+  return !team.activeRunId && runs?.length === 0 ? 0 : undefined;
+}
+
 export function TeamsPage() {
   const { t } = useTranslation('teams');
   const subtitle = t('subtitle');
   const navigate = useNavigate();
-  const gatewayStatus = useGatewayStore((state) => state.status);
-  const gatewayOperational = isGatewayOperational(gatewayStatus);
+  const selectedRuntime = useRuntimeEndpointsStore(selectManagementRuntime);
+  const selectedEndpoint = useRuntimeEndpointsStore(selectManagementEndpoint);
+  const endpoints = useRuntimeEndpointsStore((state) => state.endpoints);
+  const creationRuntime = selectedRuntime?.runtimeAdapterId === 'openclaw' ? selectedRuntime : null;
+  const runtimeReady = Boolean(creationRuntime && isRuntimeEndpointReady(creationRuntime) && supportsRuntimeEndpointCapabilityFamily(creationRuntime, 'team'));
+  const requestedManagementScope = getSubagentManagementScope(creationRuntime?.endpointRef ?? null);
+  const managementScopeKey = requestedManagementScope ? buildCapabilityScopeKey(requestedManagementScope) : '';
+  const manualAgentsReady = Boolean(requestedManagementScope && runtimeReady);
 
   const teams = useTeamsStore((state) => state.teams);
   const rolesByTeamId = useTeamsStore((state) => state.rolesByTeamId);
+  const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
+  const syncRunList = useTeamsStore((state) => state.syncRunList);
   const loadingByTeamId = useTeamsStore((state) => state.loadingByTeamId);
   const errorByTeamId = useTeamsStore((state) => state.errorByTeamId);
   const planTeamSkillCreation = useTeamsStore((state) => state.planTeamSkillCreation);
@@ -154,31 +170,46 @@ export function TeamsPage() {
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
+  const setManagementScope = useSubagentsStore((state) => state.setManagementScope);
 
+  const [roleReads, setRoleReads] = useState<Record<string, { loading: boolean; error?: string }>>({});
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [createSourceType, setCreateSourceType] = useState<CreateSourceType>('teamskill');
   const [teamName, setTeamName] = useState('');
   const [teamSkillPackagePath, setTeamSkillPackagePath] = useState('');
-  const [manualSearchQuery, setManualSearchQuery] = useState('');
+  const [createDialogElement, setCreateDialogElement] = useState<HTMLDivElement | null>(null);
   const [manualMembers, setManualMembers] = useState<ManualMemberDraft[]>([]);
   const [createDialogPhase, setCreateDialogPhase] = useState<CreateDialogPhase>({ type: 'editing_source' });
   const [replacementConfirmed, setReplacementConfirmed] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const createTitleRef = useRef<HTMLHeadingElement>(null);
+  const createTriggerRef = useRef<HTMLButtonElement>(null);
   const packageReviewRevisionRef = useRef(0);
+  const createOperationRef = useRef(0);
 
-  useEffect(() => () => { packageReviewRevisionRef.current += 1; }, []);
+  useEffect(() => {
+    const directory = useRuntimeEndpointsStore.getState();
+    directory.init();
+    if (directory.status === 'idle') void directory.refresh();
+    return () => {
+      packageReviewRevisionRef.current += 1;
+      createOperationRef.current += 1;
+    };
+  }, []);
 
   const packagePath = teamSkillPackagePath.trim();
-  const agents = Array.isArray(agentsResource.data) ? agentsResource.data : [];
-  const selectedAgentIds = new Set(manualMembers.map((member) => member.agentId));
-  const manualSearchText = manualSearchQuery.trim().toLocaleLowerCase();
+  const managementScope = useSubagentsStore((state) => state.managementScope);
+  const managementMatches = Boolean(managementScopeKey && managementScope && buildCapabilityScopeKey(managementScope) === managementScopeKey);
+  const agentsLoading = manualAgentsReady && (!managementMatches || agentsResource.status === 'idle' || agentsResource.status === 'loading');
+  const agents = creationRuntime && managementMatches && Array.isArray(agentsResource.data) ? agentsResource.data : [];
+  const refreshManualAgents = useCallback(async () => {
+    if (!requestedManagementScope || !manualAgentsReady) return;
+    setManagementScope(requestedManagementScope);
+    const scope = useSubagentsStore.getState().managementScope;
+    if (scope && buildCapabilityScopeKey(scope) === managementScopeKey) await loadAgents({ silent: true, scope });
+  }, [requestedManagementScope, manualAgentsReady, managementScopeKey, setManagementScope, loadAgents]);
   const teamAssignableAgents = agents.filter((agent) => agent.kind !== 'system');
-  const visibleAgents = manualSearchText
-    ? teamAssignableAgents.filter((agent) => [agent.id, agent.name, agent.identity?.name, agent.workspace, ...(agent.skills ?? [])]
-      .filter((value): value is string => typeof value === 'string' && value.length > 0)
-      .some((value) => value.toLocaleLowerCase().includes(manualSearchText)))
-    : teamAssignableAgents;
+  const creationScope = useMemo(() => creationRuntime ? runtimeInstanceScope(creationRuntime.endpointRef) : null, [creationRuntime]);
   const selectedManualMembers = manualMembers.map((member) => ({
     member,
     agent: agents.find((agent) => agent.id === member.agentId) ?? null,
@@ -186,10 +217,11 @@ export function TeamsPage() {
   const manualLeaderCount = manualMembers.filter((member) => member.isLeader).length;
   const showingManualCreation = manualTeamCreation !== null;
   const creatingManual = manualTeamCreation?.status === 'running' || manualTeamCreation?.status === 'cleaning_up';
-  const canCreateManualTeam = gatewayOperational
+  const canCreateManualTeam = manualAgentsReady
     && !showingManualCreation
     && manualMembers.length > 0
-    && manualLeaderCount === 1;
+    && manualLeaderCount === 1
+    && selectedManualMembers.every(({ agent }) => agent && agent.kind !== 'system');
   const phaseReview = createDialogPhase.type === 'review_ready'
     || createDialogPhase.type === 'installing_dependency'
     || createDialogPhase.type === 'importing_dependency'
@@ -197,18 +229,49 @@ export function TeamsPage() {
     ? createDialogPhase.review
     : null;
   const review = phaseReview?.revision === packageReviewRevisionRef.current ? phaseReview : null;
+  const selectingPackage = createDialogPhase.type === 'selecting_package';
   const checkingPackage = createDialogPhase.type === 'validating_package';
   const creatingRun = createDialogPhase.type === 'creating_run';
   const installingDependency = createDialogPhase.type === 'installing_dependency' ? createDialogPhase.dependencyName : null;
   const importingDependency = createDialogPhase.type === 'importing_dependency' ? createDialogPhase.dependencyName : null;
   const mutatingDependency = installingDependency || importingDependency;
-  const canCheckPackage = createSourceType === 'teamskill' && gatewayOperational && Boolean(packagePath) && !checkingPackage && !creatingRun && !mutatingDependency;
-  const provisionedRoleCount = teams.reduce((count, team) => count + (rolesByTeamId[team.id]?.length ?? 0), 0);
+  const packageBusy = selectingPackage || checkingPackage || creatingRun || Boolean(mutatingDependency);
+  const canSelectPackage = runtimeReady && Boolean(creationScope) && !packageBusy;
+  const roleCounts = teams.map((team) => teamRoleCount(team, rolesByTeamId[team.id], runListByTeamId[team.id]));
+  const provisionedRoleCount = roleCounts.every((count) => count !== undefined)
+    ? roleCounts.reduce((total, count) => total + count, 0)
+    : undefined;
+  const rolesLoading = teams.some((team, index) => roleCounts[index] === undefined && roleReads[team.id]?.loading);
+  useEffect(() => {
+    for (const team of teams) {
+      const teamId = team.id;
+      const state = useTeamsStore.getState();
+      if (teamRoleCount(team, state.rolesByTeamId[teamId], state.runListByTeamId[teamId]) !== undefined) continue;
+      const scope = resolveTeamRuntimeScope(teamId);
+      if (!endpoints.some((entry) => runtimeEndpointsEqual(entry.endpointRef, scope.endpoint)
+        && isRuntimeEndpointReady(entry) && supportsRuntimeEndpointCapabilityFamily(entry, 'team'))) continue;
+      const read = { loading: true };
+      setRoleReads((current) => ({ ...current, [teamId]: read }));
+      void syncRunList(teamId).then(() => {
+        setRoleReads((current) => current[teamId] === read ? { ...current, [teamId]: { loading: false } } : current);
+      }, (error: unknown) => {
+        setRoleReads((current) => current[teamId] === read ? {
+          ...current, [teamId]: { loading: false, error: error instanceof Error ? error.message : String(error) },
+        } : current);
+      });
+    }
+  }, [teams, endpoints, syncRunList]);
 
   const resetPackageReview = () => {
     packageReviewRevisionRef.current += 1;
     setCreateDialogPhase({ type: 'editing_source' });
     setReplacementConfirmed(false);
+  };
+
+  const closeCreateDialog = () => {
+    createOperationRef.current += 1;
+    resetPackageReview();
+    setCreateDialogOpen(false);
   };
 
   const restorePackageReview = (currentReview: TeamSkillReview, error: string | null = null) => {
@@ -217,12 +280,27 @@ export function TeamsPage() {
     setCreateError(error);
   };
 
+  useEffect(() => useRuntimeEndpointsStore.subscribe((state, previous) => {
+    const endpoint = selectManagementEndpoint(state);
+    const previousEndpoint = selectManagementEndpoint(previous);
+    if ((endpoint ? buildRuntimeEndpointKey(endpoint) : '') === (previousEndpoint ? buildRuntimeEndpointKey(previousEndpoint) : '')) return;
+    packageReviewRevisionRef.current += 1;
+    createOperationRef.current += 1;
+    setCreateDialogPhase({ type: 'editing_source' });
+    setReplacementConfirmed(false);
+    setCreateError(null);
+    setTeamName('');
+    setTeamSkillPackagePath('');
+    setManualMembers([]);
+  }), []);
+
   useEffect(() => {
-    if (!createDialogOpen || createSourceType !== 'manual' || !gatewayOperational || agentsResource.status === 'loading' || agentsResource.hasLoadedOnce) {
+    if (!createDialogOpen || createSourceType !== 'manual' || !manualAgentsReady
+      || (managementMatches && (agentsResource.hasLoadedOnce || agentsResource.status !== 'idle'))) {
       return;
     }
-    void loadAgents({ silent: true });
-  }, [agentsResource.hasLoadedOnce, agentsResource.status, createDialogOpen, createSourceType, gatewayOperational, loadAgents]);
+    void refreshManualAgents();
+  }, [agentsResource.hasLoadedOnce, agentsResource.status, createDialogOpen, createSourceType, manualAgentsReady, managementMatches, refreshManualAgents]);
 
   useEffect(() => {
     if (createDialogOpen && showingManualCreation) {
@@ -234,41 +312,6 @@ export function TeamsPage() {
     const nextSourceType = value === 'manual' ? 'manual' : 'teamskill';
     setCreateSourceType(nextSourceType);
     setCreateError(null);
-    resetPackageReview();
-  };
-
-  const toggleManualMember = (agent: SubagentSummary, checked: boolean) => {
-    setCreateError(null);
-    setManualMembers((members) => {
-      if (!checked) {
-        const nextMembers = members.filter((member) => member.agentId !== agent.id);
-        if (members.some((member) => member.agentId === agent.id && member.isLeader) && nextMembers.length > 0) {
-          const first = nextMembers[0];
-          if (!first) return nextMembers;
-          return [{ ...first, isLeader: true }, ...nextMembers.slice(1)];
-        }
-        return nextMembers;
-      }
-      if (members.some((member) => member.agentId === agent.id)) {
-        return members;
-      }
-      const isLeader = members.length === 0;
-      return [
-        ...members,
-        {
-          agentId: agent.id,
-          isLeader,
-        },
-      ];
-    });
-  };
-
-  const selectManualLeader = (agentId: string) => {
-    setCreateError(null);
-    setManualMembers((members) => members.map((member) => ({
-      ...member,
-      isLeader: member.agentId === agentId,
-    })));
   };
 
   const buildManualCandidate = (): ManualTeamCandidate => {
@@ -299,11 +342,14 @@ export function TeamsPage() {
         isLeader: member.isLeader,
       };
     });
-    if (members.filter((member) => member.isLeader).length !== 1) {
+    const leader = members.find((member) => member.isLeader);
+    if (!leader || members.filter((member) => member.isLeader).length !== 1) {
       throw new Error(t('create.manualLeaderRequired'));
     }
+    if (!selectedEndpoint) throw new Error('Select a runtime for this team.');
     return {
       displayName,
+      runtimeScope: agentScope(selectedEndpoint, leader.agentId),
       manualTeam: {
         name: displayName,
         description: t('create.manualDescription', { teamName: displayName }),
@@ -313,17 +359,22 @@ export function TeamsPage() {
     };
   };
 
-  const buildReview = async (revision: number): Promise<TeamSkillReview> => {
-    const validation = readSealedTeamSkillPackageValidationResult(await validateTeamSkillPackage({ packagePath }));
+  const buildReview = async (revision: number, selectedPath: string): Promise<TeamSkillReview | null> => {
+    if (!creationScope) throw new Error('Select a runtime for this team.');
+    const scope = creationScope;
+    const validation = readSealedTeamSkillPackageValidationResult(await validateTeamSkillPackage({ packagePath: selectedPath, scope }));
+    if (revision !== packageReviewRevisionRef.current) return null;
     if (validation.status !== 'valid') {
       throw new Error(t('create.invalidPackage'));
     }
     const candidate: TeamSkillCandidate = {
       displayName: teamName.trim() || validation.package.name,
-      packagePath,
+      packagePath: selectedPath,
       teamSkillPackage: validation.package,
+      runtimeScope: scope,
     };
-    const dependencyResult = await planTeamDependencies({ packagePath });
+    const dependencyResult = await planTeamDependencies({ packagePath: selectedPath, scope });
+    if (revision !== packageReviewRevisionRef.current) return null;
     if (dependencyResult.status !== 'available') {
       throw new Error(t(dependencyResult.status === 'invalid' ? 'create.invalidPackage' : 'create.dependencyPlanUnavailable'));
     }
@@ -335,8 +386,8 @@ export function TeamsPage() {
     };
   };
 
-  const handleCheckPackage = async () => {
-    if (!canCheckPackage) {
+  const handleCheckPackage = async (selectedPath: string) => {
+    if (!canSelectPackage || !selectedPath) {
       return;
     }
     const revision = ++packageReviewRevisionRef.current;
@@ -344,7 +395,8 @@ export function TeamsPage() {
     setReplacementConfirmed(false);
     setCreateError(null);
     try {
-      restorePackageReview(await buildReview(revision));
+      const nextReview = await buildReview(revision, selectedPath);
+      if (nextReview) restorePackageReview(nextReview);
     } catch (error) {
       if (revision !== packageReviewRevisionRef.current) return;
       setCreateDialogPhase({ type: 'editing_source' });
@@ -353,7 +405,8 @@ export function TeamsPage() {
   };
 
   const refreshDependencyPlan = async (currentReview: TeamSkillReview): Promise<TeamSkillReview> => {
-    const dependencyResult = await planTeamDependencies({ packagePath: currentReview.candidate.packagePath });
+    const scope = currentReview.candidate.runtimeScope;
+    const dependencyResult = await planTeamDependencies({ packagePath: currentReview.candidate.packagePath, scope });
     if (dependencyResult.status !== 'available') {
       throw new Error(t(dependencyResult.status === 'invalid' ? 'create.invalidPackage' : 'create.dependencyPlanUnavailable'));
     }
@@ -365,19 +418,20 @@ export function TeamsPage() {
   };
 
   const refreshDependencyPlanAfterSkillChange = async (currentReview: TeamSkillReview) => {
-    await fetchSkills({ force: true, fresh: true });
+    if (currentReview.revision !== packageReviewRevisionRef.current) return;
+    await fetchSkills({ force: true, fresh: true, scope: currentReview.candidate.runtimeScope });
     if (currentReview.revision !== packageReviewRevisionRef.current) return;
     restorePackageReview(await refreshDependencyPlan(currentReview));
   };
 
   const handleInstallDependency = async (item: TeamDependencyPlanItem) => {
-    if (!review || item.kind !== 'skill' || !item.installable || !isClawHubDependencySource(item.source) || mutatingDependency || creatingRun) {
+    if (!runtimeReady || !review || review.revision !== packageReviewRevisionRef.current || item.kind !== 'skill' || !item.installable || !isClawHubDependencySource(item.source) || mutatingDependency || creatingRun) {
       return;
     }
     setCreateDialogPhase({ type: 'installing_dependency', review, dependencyName: item.name });
     setCreateError(null);
     try {
-      await installSkill(readClawHubSkillSlug(item.name, item.source));
+      await installSkill(readClawHubSkillSlug(item.name, item.source), undefined, review.candidate.runtimeScope);
       await refreshDependencyPlanAfterSkillChange(review);
     } catch (error) {
       restorePackageReview(review, error instanceof Error ? error.message : String(error));
@@ -385,18 +439,21 @@ export function TeamsPage() {
   };
 
   const handleImportDependencyFromDeclaredSource = async (item: TeamDependencyPlanItem) => {
-    if (!review || item.kind !== 'skill' || !item.installable || !isLocalDependencySource(item.source) || mutatingDependency || creatingRun) {
+    if (!runtimeReady || !review || review.revision !== packageReviewRevisionRef.current || item.kind !== 'skill' || !item.installable || !isLocalDependencySource(item.source) || mutatingDependency || creatingRun) {
       return;
     }
     setCreateDialogPhase({ type: 'importing_dependency', review, dependencyName: item.name });
     setCreateError(null);
     try {
       const importedSkill = await readLocalSkillImport(normalizeDependencySource(item.source));
+      if (review.revision !== packageReviewRevisionRef.current) return;
       if (!importedSkill) {
         throw new Error('Local skill import was canceled');
       }
-      await importLocalSkill(importedSkill);
-      await enableSkill(importedSkill.skillKey);
+      await importLocalSkill(importedSkill, review.candidate.runtimeScope);
+      if (review.candidate.runtimeScope?.endpoint.kind === 'native-runtime' && review.candidate.runtimeScope.endpoint.runtimeAdapterId === 'openclaw') {
+        await enableSkill(importedSkill.skillKey, review.candidate.runtimeScope);
+      }
       await refreshDependencyPlanAfterSkillChange(review);
     } catch (error) {
       restorePackageReview(review, error instanceof Error ? error.message : String(error));
@@ -404,7 +461,7 @@ export function TeamsPage() {
   };
 
   const handleImportDependencyFromLocalPicker = async (item: TeamDependencyPlanItem) => {
-    if (!review || item.kind !== 'skill' || !item.installable || mutatingDependency || creatingRun) {
+    if (!runtimeReady || !review || review.revision !== packageReviewRevisionRef.current || item.kind !== 'skill' || !item.installable || mutatingDependency || creatingRun) {
       return;
     }
     setCreateDialogPhase({ type: 'importing_dependency', review, dependencyName: item.name });
@@ -414,17 +471,21 @@ export function TeamsPage() {
         title: t('create.importLocalSkillButton'),
         buttonLabel: t('create.importLocalSkillButton'),
       });
+      if (review.revision !== packageReviewRevisionRef.current) return;
       if (!selectedPath) {
         restorePackageReview(review);
         return;
       }
       const importedSkill = await readLocalSkillImport(selectedPath);
+      if (review.revision !== packageReviewRevisionRef.current) return;
       if (!importedSkill) {
         restorePackageReview(review);
         return;
       }
-      await importLocalSkill(importedSkill);
-      await enableSkill(importedSkill.skillKey);
+      await importLocalSkill(importedSkill, review.candidate.runtimeScope);
+      if (review.candidate.runtimeScope?.endpoint.kind === 'native-runtime' && review.candidate.runtimeScope.endpoint.runtimeAdapterId === 'openclaw') {
+        await enableSkill(importedSkill.skillKey, review.candidate.runtimeScope);
+      }
       await refreshDependencyPlanAfterSkillChange(review);
     } catch (error) {
       restorePackageReview(review, error instanceof Error ? error.message : String(error));
@@ -447,7 +508,7 @@ export function TeamsPage() {
   };
 
   const handleCreateOrReplace = async () => {
-    if (createSourceType !== 'teamskill' || !review || review.revision !== packageReviewRevisionRef.current || creatingRun || mutatingDependency || !review.dependencyPlan.canProceed) {
+    if (createSourceType !== 'teamskill' || !runtimeReady || !review || review.revision !== packageReviewRevisionRef.current || creatingRun || mutatingDependency || !review.dependencyPlan.canProceed) {
       return;
     }
     if (review.creationPlan.action === 'open_existing') {
@@ -458,13 +519,15 @@ export function TeamsPage() {
       return;
     }
 
+    const operation = ++createOperationRef.current;
     setCreateDialogPhase({ type: 'creating_run', review });
     setCreateError(null);
     if (review.creationPlan.action === 'create') {
-      const teamId = createTeam(review.candidate);
+      const teamId = createTeam({ ...review.candidate, displayName: teamName.trim() || review.candidate.teamSkillPackage.name });
       try {
         await provisionTeamAgents(teamId);
         await createRun(teamId);
+        if (operation !== createOperationRef.current || review.revision !== packageReviewRevisionRef.current) return;
         setActiveTeam(teamId);
         setCreateDialogOpen(false);
         navigate(`/teams/${teamId}`);
@@ -483,11 +546,12 @@ export function TeamsPage() {
     const teamId = replaceTeamSkillVersion({
       teamId: review.creationPlan.teamId,
       expectedCurrentVersion: review.creationPlan.currentVersion,
-      candidate: review.candidate,
+      candidate: { ...review.candidate, displayName: teamName.trim() || review.candidate.teamSkillPackage.name },
     });
     try {
       await provisionTeamAgents(teamId);
       await createRun(teamId);
+      if (operation !== createOperationRef.current || review.revision !== packageReviewRevisionRef.current) return;
       setActiveTeam(teamId);
       setCreateDialogOpen(false);
       navigate(`/teams/${teamId}`);
@@ -500,16 +564,19 @@ export function TeamsPage() {
     if (!canCreateManualTeam) {
       return;
     }
+    const operation = ++createOperationRef.current;
     setCreateError(null);
     try {
       const candidate = buildManualCandidate();
       setCreateDialogPhase({ type: 'creating_manual' });
       const teamId = await createManualTeamWithProgress(candidate);
+      if (operation !== createOperationRef.current) return;
       setActiveTeam(teamId);
       setCreateDialogOpen(false);
       setCreateDialogPhase({ type: 'editing_source' });
       navigate(`/teams/${teamId}`);
     } catch (error) {
+      if (operation !== createOperationRef.current) return;
       if (useTeamsStore.getState().manualTeamCreation === null) {
         setCreateDialogPhase({ type: 'editing_source' });
         setCreateError(error instanceof Error ? error.message : String(error));
@@ -517,27 +584,26 @@ export function TeamsPage() {
     }
   };
 
-  const handleBrowsePackageDirectory = async () => {
+  const handleSelectPackage = async (kind: 'directory' | 'archive') => {
+    if (!canSelectPackage) return;
+    const revision = ++packageReviewRevisionRef.current;
+    setCreateDialogPhase({ type: 'selecting_package' });
     setCreateError(null);
-    const selectedPath = await pickLocalDirectory({
-      title: t('create.browsePackageDirectory'),
-      buttonLabel: t('create.browsePackageDirectory'),
-    });
-    if (selectedPath) {
-      resetPackageReview();
+    const label = t(kind === 'directory' ? 'create.browsePackageDirectory' : 'create.browsePackageArchive');
+    try {
+      const selectedPath = await (kind === 'directory' ? pickLocalDirectory : pickLocalArchive)({ title: label, buttonLabel: label });
+      if (revision !== packageReviewRevisionRef.current) return;
+      if (!selectedPath) {
+        if (phaseReview) restorePackageReview({ ...phaseReview, revision });
+        else setCreateDialogPhase({ type: 'editing_source' });
+        return;
+      }
       setTeamSkillPackagePath(selectedPath);
-    }
-  };
-
-  const handleBrowsePackageArchive = async () => {
-    setCreateError(null);
-    const selectedPath = await pickLocalArchive({
-      title: t('create.browsePackageArchive'),
-      buttonLabel: t('create.browsePackageArchive'),
-    });
-    if (selectedPath) {
-      resetPackageReview();
-      setTeamSkillPackagePath(selectedPath);
+      await handleCheckPackage(selectedPath);
+    } catch (error) {
+      if (revision !== packageReviewRevisionRef.current) return;
+      setCreateDialogPhase({ type: 'editing_source' });
+      setCreateError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -569,7 +635,8 @@ export function TeamsPage() {
         : creatingRun ? t('create.creatingButton') : t('create.createButton');
   const primaryDisabled = createSourceType === 'manual'
     ? !canCreateManualTeam
-    : !review
+    : !runtimeReady
+      || !review
       || creatingRun
       || Boolean(mutatingDependency)
       || !review.dependencyPlan.canProceed
@@ -583,7 +650,7 @@ export function TeamsPage() {
           {subtitle ? <p className="text-sm text-[hsl(var(--shell-text-muted))]">{subtitle}</p> : null}
         </div>
         {!createDialogOpen ? (
-          <Button onClick={() => setCreateDialogOpen(true)}>
+          <Button ref={createTriggerRef} onClick={() => setCreateDialogOpen(true)}>
             {t('create.openCreateDialog')}
           </Button>
         ) : null}
@@ -604,100 +671,130 @@ export function TeamsPage() {
               <div className="text-[11px] text-[hsl(var(--shell-text-muted))]">{t('create.metricTeams')}</div>
             </div>
             <div className="rounded-xl bg-[hsl(var(--shell-surface-muted))] px-3 py-3">
-              <div className="text-lg font-semibold">{provisionedRoleCount}</div>
+              <div className="text-lg font-semibold" aria-busy={rolesLoading}>{provisionedRoleCount ?? (rolesLoading ? t('common:status.loading') : '—')}</div>
               <div className="text-[11px] text-[hsl(var(--shell-text-muted))]">{t('create.metricRoles')}</div>
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {createDialogOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[hsl(var(--shell-scrim))] p-6" role="presentation">
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="team-create-title"
-            aria-busy={creatingManual}
-            className="relative flex h-[min(760px,calc(100dvh-3rem))] w-full max-w-5xl flex-col overflow-hidden rounded-[1.25rem] border bg-[hsl(var(--shell-surface))] text-card-foreground shadow-[var(--shell-shadow-overlay)] [border-color:hsl(var(--shell-border))]"
+      <DialogPrimitive.Root open={createDialogOpen} onOpenChange={(open) => {
+        if (!open && !creatingManual && !creatingRun && !mutatingDependency) closeCreateDialog();
+      }}>
+        <DialogPrimitive.Portal>
+          <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-[hsl(var(--shell-scrim))]" />
+          <DialogPrimitive.Content
+            ref={setCreateDialogElement}
+            aria-describedby={undefined}
+            aria-busy={creatingManual || creatingRun}
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              createTitleRef.current?.focus();
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              createTriggerRef.current?.focus();
+            }}
+            onInteractOutside={(event) => event.preventDefault()}
+            className="fixed left-1/2 top-1/2 z-50 flex h-[min(680px,calc(100dvh-3rem))] w-[min(1000px,calc(100vw-3rem))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-[22px] border border-border bg-card text-card-foreground shadow-[var(--shell-shadow-overlay)] outline-none max-sm:h-[calc(100dvh-1.5rem)] max-sm:w-[calc(100vw-1.5rem)]"
           >
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label={showingManualCreation ? t('create.manualProgress.closeButton') : t('create.cancelButton')}
-              disabled={creatingManual}
-              onClick={() => setCreateDialogOpen(false)}
-              className="absolute right-4 top-4 z-10 h-8 w-8 rounded-sm opacity-70 transition-opacity hover:bg-transparent hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-            >
-              <X className="h-4 w-4" />
-              <span className="sr-only">{showingManualCreation ? t('create.manualProgress.closeButton') : t('create.cancelButton')}</span>
-            </Button>
-
-            <div className="border-b bg-[hsl(var(--shell-surface-muted))] p-6 pr-14 [border-color:hsl(var(--shell-border))]">
-              <h2 id="team-create-title" ref={createTitleRef} tabIndex={-1} className="text-xl font-semibold tracking-[-0.02em] outline-none">
+            <header className="flex shrink-0 items-center gap-4 px-8 pb-6 pt-6 max-sm:px-5">
+              <div aria-hidden="true" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-border bg-muted/50">
+                <Users className="h-6 w-6" strokeWidth={1.6} />
+              </div>
+              <DialogPrimitive.Title ref={createTitleRef} tabIndex={-1} className="min-w-0 flex-1 text-[22px] font-semibold tracking-[-0.025em] outline-none">
                 {manualTeamCreation ? t(`create.manualProgress.status.${manualTeamCreation.status}`) : t('create.modalTitle')}
-              </h2>
-              <p className="mt-2 text-sm leading-6 text-[hsl(var(--shell-text-muted))]">{showingManualCreation ? t('create.manualProgress.modalDescription') : t('create.modalDescription')}</p>
-            </div>
+              </DialogPrimitive.Title>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label={showingManualCreation ? t('create.manualProgress.closeButton') : t('create.cancelButton')}
+                disabled={creatingManual || creatingRun || Boolean(mutatingDependency)}
+                onClick={closeCreateDialog}
+                className="-mr-2 h-8 w-8 shrink-0 text-muted-foreground"
+              >
+                <X className="h-5 w-5" />
+              </Button>
+            </header>
 
             {manualTeamCreation ? (
               <ManualTeamCreationProgress creation={manualTeamCreation} />
             ) : (
-            <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-hidden p-6">
-              <div className="shrink-0 space-y-2">
-                <Label htmlFor="team-name" className="text-foreground">{t('create.teamName')}</Label>
-                <Input
-                  id="team-name"
-                  value={teamName}
-                  onChange={(event) => {
-                    setTeamName(event.target.value);
-                    resetPackageReview();
-                  }}
-                  placeholder={t('create.teamNamePlaceholder')}
-                  className="bg-background"
-                />
-              </div>
+            <div className="flex min-h-0 flex-1 flex-col px-8 max-sm:px-5">
+              <fieldset disabled={creatingRun || Boolean(mutatingDependency)} className="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(160px,205px)] gap-6 pb-6 max-sm:grid-cols-1 max-sm:gap-3">
+                <div className="min-w-0 space-y-2">
+                  <Label htmlFor="team-name" className="text-xs text-muted-foreground">{t('create.teamName')}</Label>
+                  <Input
+                    id="team-name"
+                    value={teamName}
+                    onChange={(event) => {
+                      setTeamName(event.target.value);
+                    }}
+                    placeholder={t('create.teamNamePlaceholder')}
+                    className="h-11 bg-card text-sm"
+                  />
+                </div>
+                <div className="min-w-0 space-y-2">
+                  <div className="text-xs font-medium text-muted-foreground">{t('create.runtimeLabel')}</div>
+                  <RuntimeScopeSelector
+                    runtimeAdapterId="openclaw"
+                    collisionBoundary={createDialogElement}
+                    className="h-11 rounded-[var(--radius-interactive)] border border-border bg-muted/40 px-3"
+                    triggerClassName="h-full min-w-0 flex-1 border-0 bg-transparent px-0 shadow-none"
+                  />
+                </div>
+              </fieldset>
 
-              <Tabs value={createSourceType} onValueChange={handleCreateSourceTypeChange} className="flex min-h-0 flex-1 flex-col space-y-5">
-                <TabsList className="grid w-full grid-cols-2">
-                  <TabsTrigger value="teamskill" onClick={() => handleCreateSourceTypeChange('teamskill')}>{t('create.sourceTypes.teamskill')}</TabsTrigger>
-                  <TabsTrigger value="manual" onClick={() => handleCreateSourceTypeChange('manual')}>{t('create.sourceTypes.manual')}</TabsTrigger>
-                </TabsList>
+              <Tabs value={createSourceType} onValueChange={handleCreateSourceTypeChange} className="flex min-h-0 flex-1 flex-col">
+                <div className="shrink-0 border-b border-border pb-6">
+                  <TabsList className="grid w-[304px] max-w-full grid-cols-2 border-0 bg-muted/70">
+                    <TabsTrigger value="manual" disabled={packageBusy} className="gap-2 px-3 text-xs data-[state=active]:shadow-sm">
+                      <UserRoundPlus aria-hidden="true" className="h-4 w-4 shrink-0" />{t('create.sourceTypes.manual')}
+                    </TabsTrigger>
+                    <TabsTrigger value="teamskill" disabled={packageBusy} className="gap-2 px-3 text-xs data-[state=active]:shadow-sm">
+                      <Package aria-hidden="true" className="h-4 w-4 shrink-0" />{t('create.sourceTypes.teamskill')}
+                    </TabsTrigger>
+                  </TabsList>
+                </div>
 
-                <TabsContent value="teamskill" className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
-                  <div className="space-y-2">
-                    <Label htmlFor="team-skill-package-path" className="text-foreground">{t('create.packagePath')}</Label>
-                    <Input
-                      id="team-skill-package-path"
-                      value={teamSkillPackagePath}
-                      onChange={(event) => {
-                        setCreateError(null);
-                        resetPackageReview();
-                        setTeamSkillPackagePath(event.target.value);
-                      }}
-                      placeholder={t('create.packagePathPlaceholder')}
-                      className="bg-background"
-                    />
-                    <div className="flex flex-wrap gap-2">
-                      <Button type="button" variant="outline" size="sm" onClick={() => void handleBrowsePackageDirectory()} className="border-border bg-card text-foreground hover:bg-secondary">
-                        {t('create.browsePackageDirectory')}
-                      </Button>
-                      <Button type="button" variant="outline" size="sm" onClick={() => void handleBrowsePackageArchive()} className="border-border bg-card text-foreground hover:bg-secondary">
-                        {t('create.browsePackageArchive')}
-                      </Button>
-                      <Button type="button" size="sm" onClick={() => void handleCheckPackage()} disabled={!canCheckPackage}>
-                        {checkingPackage ? t('create.checkingButton') : t('create.checkPackageButton')}
-                      </Button>
+                <TabsContent value="teamskill" className="mt-0 min-h-0 flex-1 overflow-y-auto py-6">
+                  <div className="grid min-h-full grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)] max-sm:grid-cols-1">
+                    <div className="min-w-0 pr-8 max-sm:pr-0">
+                      <div className="flex min-h-48 flex-col items-center justify-center gap-5 rounded-[var(--radius-interactive)] border border-dashed border-input bg-muted/20 px-6 py-8 text-center">
+                        <FolderArchive aria-hidden="true" className="h-8 w-8 text-muted-foreground" strokeWidth={1.5} />
+                        {packagePath ? <p title={packagePath} className="max-h-24 w-full overflow-y-auto break-all font-mono text-xs leading-5 text-muted-foreground">{packagePath}</p> : null}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button type="button" variant="outline" size="sm" disabled={!canSelectPackage} className="gap-2 bg-card text-xs">
+                              {packagePath ? t('create.changePackage') : t('create.choosePackage')}
+                              <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent collisionBoundary={createDialogElement} align="center" className="min-w-44 max-w-[var(--radix-dropdown-menu-content-available-width)] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
+                            <DropdownMenuItem onSelect={() => void handleSelectPackage('directory')}>
+                              <Folder aria-hidden="true" className="h-4 w-4" />{t('create.browsePackageDirectory')}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => void handleSelectPackage('archive')}>
+                              <FileArchive aria-hidden="true" className="h-4 w-4" />{t('create.browsePackageArchive')}
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                      {checkingPackage ? (
+                        <p role="status" className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+                          <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />{t('create.checkingButton')}
+                        </p>
+                      ) : packagePath && !review && !selectingPackage ? (
+                        <Button type="button" variant="ghost" size="sm" disabled={!canSelectPackage} onClick={() => void handleCheckPackage(packagePath)} className="mt-3 text-xs">
+                          {t('create.retryCheck')}
+                        </Button>
+                      ) : null}
                     </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-border bg-muted/25 p-4">
-                    <div className="text-sm font-medium text-foreground">{t('create.teamSkillDefinition')}</div>
-                    <div className="mt-2 text-sm leading-6 text-muted-foreground">{t('create.teamSkillDefinitionDescription')}</div>
-                  </div>
-
-                  {review ? (
-                    <div className="space-y-4 rounded-2xl border border-border bg-background p-4">
+                    <section aria-labelledby="team-preview-title" className="flex min-w-0 flex-col border-l border-border pl-8 max-sm:mt-6 max-sm:border-l-0 max-sm:border-t max-sm:pl-0 max-sm:pt-5">
+                      <h3 id="team-preview-title" className="mb-5 text-sm font-semibold">{t('create.previewTitle')}</h3>
+                      {review ? (
+                    <div className="space-y-5">
                       <div>
                         <div className="text-sm font-medium text-foreground">{review.candidate.teamSkillPackage.name}@{review.candidate.teamSkillPackage.version}</div>
                         <div className="mt-1 text-sm text-muted-foreground">{review.candidate.teamSkillPackage.description}</div>
@@ -743,9 +840,9 @@ export function TeamsPage() {
                           const canOpenSource = isOpenableDependencySource(item.source);
                           const isMutatingThisDependency = mutatingDependency === item.name;
                           return (
-                            <div key={`${item.kind}:${item.name}`} className="flex items-start justify-between gap-3 rounded border p-3 text-sm">
+                            <div key={`${item.kind}:${item.name}`} className="flex flex-wrap items-start justify-between gap-3 border-t border-border py-3 text-sm">
                               <div className="min-w-0">
-                                <div className="font-medium">
+                                <div className="break-words font-medium">
                                   {item.name} · {t(`create.dependencyKind.${item.kind}`)} · {t(`create.dependencySeverity.${item.severity}`)}
                                 </div>
                                 <div className="mt-1 text-xs leading-5 text-muted-foreground">{item.purpose}</div>
@@ -810,172 +907,59 @@ export function TeamsPage() {
                         ) : null}
                       </div>
                     </div>
-                  ) : null}
+                      ) : (
+                        <div className="flex min-h-48 flex-1 flex-col items-center justify-center gap-6 py-6 text-center text-muted-foreground">
+                          <div aria-hidden="true" className="flex flex-col items-center">
+                            <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-muted/40"><Crown className="h-4 w-4" strokeWidth={1.5} /></div>
+                            <div className="h-3 border-l border-border" />
+                            <div className="flex gap-4 border-t border-border pt-3">
+                              {[0, 1, 2].map((index) => <div key={index} className="flex h-7 w-7 items-center justify-center rounded-lg border border-border bg-muted/20"><Bot className="h-3.5 w-3.5" strokeWidth={1.5} /></div>)}
+                            </div>
+                          </div>
+                          <p className="text-xs">{t('create.previewEmpty')}</p>
+                        </div>
+                      )}
+                    </section>
+                  </div>
                 </TabsContent>
 
-                <TabsContent value="manual" className="min-h-0 flex-1 space-y-4 overflow-hidden">
-                  <div className="grid h-full min-h-0 gap-4 lg:grid-cols-[0.95fr_1.05fr]">
-                    <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-whisper">
-                      <div className="border-b border-border/80 p-3">
-                        <div className="relative">
-                          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                          <Input
-                            aria-label={t('create.manualSearch')}
-                            value={manualSearchQuery}
-                            onChange={(event) => setManualSearchQuery(event.target.value)}
-                            placeholder={t('create.manualSearchPlaceholder')}
-                            className="h-10 bg-card pl-9 text-sm"
-                          />
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-between gap-3 px-4 py-3 text-xs text-muted-foreground">
-                        <span>{t('create.manualAgentsCount', { count: agents.length })}</span>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => void loadAgents({ silent: true })}
-                          disabled={!gatewayOperational || agentsResource.status === 'loading'}
-                          aria-label={agentsResource.status === 'loading' ? t('create.manualLoadingAgents') : t('create.manualRefreshAgents')}
-                          className="h-8 w-8 rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground"
-                        >
-                          <RefreshCw className={agentsResource.status === 'loading' ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
-                        </Button>
-                      </div>
-
-                      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 pb-3">
-                        {agentsResource.status === 'error' && agentsResource.error ? (
-                          <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">{agentsResource.error}</div>
-                        ) : null}
-
-                        {agentsResource.status === 'loading' && agents.length === 0 ? (
-                          <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">{t('create.manualLoadingAgents')}</div>
-                        ) : agents.length === 0 ? (
-                          <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">{t('create.manualNoAgents')}</div>
-                        ) : visibleAgents.length === 0 ? (
-                          <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">{t('create.manualNoMatchingAgents')}</div>
-                        ) : visibleAgents.map((agent) => {
-                          const selected = selectedAgentIds.has(agent.id);
-                          const agentName = displayAgentName(agent);
-                          const description = agent.description?.trim();
-                          return (
-                            <div key={agent.id} className="flex items-center gap-3 rounded-2xl border border-border/80 bg-card p-3 transition-colors hover:bg-secondary/40">
-                              <AgentAvatar
-                                avatarSeed={agent.avatarSeed}
-                                avatarStyle={agent.avatarStyle}
-                                agentId={agent.id}
-                                agentName={agentName}
-                                className="h-10 w-10 border border-border"
-                                alt={`${agentName} avatar`}
-                              />
-                              <div className="min-w-0 flex-1">
-                                <div className="truncate text-sm font-medium text-foreground">{agentName}</div>
-                                {description ? <div className="mt-0.5 truncate text-xs text-muted-foreground">{description}</div> : null}
-                              </div>
-                              <Button
-                                type="button"
-                                size="icon"
-                                variant={selected ? 'outline' : 'secondary'}
-                                aria-label={t('create.manualSelectAgentAriaLabel', { agentName })}
-                                disabled={creatingManual}
-                                onClick={() => toggleManualMember(agent, !selected)}
-                                className={selected ? 'h-9 w-9 rounded-full border-emerald-500/40 text-emerald-600' : 'h-9 w-9 rounded-full bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15'}
-                              >
-                                {selected ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-                              </Button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-whisper">
-                      <div className="border-b border-border/80 p-4">
-                        <div className="text-xs font-medium text-muted-foreground">{t('create.manualSelectedCount', { count: manualMembers.length })}</div>
-                        <div className="mt-3 text-sm font-semibold text-foreground">{t('create.manualDefinition')}</div>
-                        <div className="mt-2 text-sm leading-6 text-muted-foreground">{t('create.manualDefinitionDescription')}</div>
-                      </div>
-
-                      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-                        {selectedManualMembers.length === 0 ? (
-                          <div className="rounded-xl border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">{t('create.manualSelectedEmpty')}</div>
-                        ) : selectedManualMembers.map(({ member, agent }) => {
-                          const agentName = agent ? displayAgentName(agent) : member.agentId;
-                          const description = agent?.description?.trim();
-                          return (
-                            <div key={member.agentId} className="rounded-2xl border border-border/80 bg-card p-4">
-                              <div className="flex items-center justify-between gap-3">
-                                <div className="flex min-w-0 items-center gap-3">
-                                  <AgentAvatar
-                                    avatarSeed={agent?.avatarSeed}
-                                    avatarStyle={agent?.avatarStyle}
-                                    agentId={agent?.id ?? member.agentId}
-                                    agentName={agentName}
-                                    className="h-10 w-10 border border-border"
-                                    alt={`${agentName} avatar`}
-                                  />
-                                  <div className="min-w-0">
-                                    <div className="truncate text-sm font-medium text-foreground">{agentName}</div>
-                                    {description ? <div className="mt-1 truncate text-xs text-muted-foreground">{description}</div> : null}
-                                  </div>
-                                </div>
-                                <div className="flex shrink-0 items-center gap-3">
-                                  <label className="flex items-center gap-2 text-sm text-foreground">
-                                    <input
-                                      type="radio"
-                                      name="manual-team-leader"
-                                      checked={member.isLeader}
-                                      disabled={creatingManual}
-                                      onChange={() => selectManualLeader(member.agentId)}
-                                    />
-                                    <span>{t('create.manualLeader')}</span>
-                                  </label>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    aria-label={t('create.manualRemoveAgentAriaLabel', { agentName })}
-                                    disabled={creatingManual}
-                                    onClick={() => agent ? toggleManualMember(agent, false) : setManualMembers((members) => members.filter((candidate) => candidate.agentId !== member.agentId))}
-                                    className="h-8 w-8 text-muted-foreground"
-                                  >
-                                    <X className="h-4 w-4" />
-                                  </Button>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>
-
-                  {manualMembers.length > 0 && manualLeaderCount !== 1 ? (
-                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
-                      {t('create.manualLeaderRequired')}
-                    </div>
-                  ) : null}
+                <TabsContent value="manual" className="mt-0 min-h-0 flex-1 overflow-y-auto py-6">
+                  <TeamMemberPicker
+                    key={managementScopeKey}
+                    agents={teamAssignableAgents}
+                    loading={agentsLoading}
+                    error={managementMatches && agentsResource.status === 'error' ? agentsResource.error : null}
+                    ready={manualAgentsReady}
+                    members={manualMembers}
+                    onMembersChange={(members) => {
+                      setCreateError(null);
+                      setManualMembers(members);
+                    }}
+                    onRefresh={() => void refreshManualAgents()}
+                  />
                 </TabsContent>
               </Tabs>
             </div>
             )}
 
             {createError && !showingManualCreation ? (
-              <div className="mx-6 rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              <div role="alert" className="mx-8 mb-4 max-h-24 shrink-0 overflow-y-auto rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                 {createError}
               </div>
             ) : null}
 
-            <div className="mt-6 flex items-center justify-between gap-3 border-t border-border p-6 pt-4">
+            <footer className="flex min-h-[76px] shrink-0 items-center justify-end gap-3 border-t border-border px-8 py-4 max-sm:px-5">
               {manualTeamCreation ? (
                 <>
-                  <Button type="button" variant="ghost" disabled={creatingManual} onClick={() => setCreateDialogOpen(false)} className="text-muted-foreground hover:bg-secondary hover:text-foreground">
+                  <Button type="button" variant="ghost" disabled={creatingManual} onClick={closeCreateDialog} className="text-muted-foreground hover:bg-secondary hover:text-foreground">
                     {manualTeamCreation.status === 'unconfirmed' ? t('create.manualProgress.viewTeamsButton') : t('create.manualProgress.closeButton')}
                   </Button>
                   {manualTeamCreation.status === 'failed' && manualTeamCreation.cleanup === 'confirmed' ? (
                     <Button type="button" onClick={() => {
-                      setTeamName(manualTeamCreation.candidate.displayName);
-                      setManualMembers(manualTeamCreation.candidate.manualTeam.members.map((member) => ({ agentId: member.agentId, isLeader: member.isLeader })));
+                      if (selectedEndpoint && manualTeamCreation.candidate.runtimeScope && runtimeEndpointsEqual(selectedEndpoint, manualTeamCreation.candidate.runtimeScope.endpoint)) {
+                        setTeamName(manualTeamCreation.candidate.displayName);
+                        setManualMembers(manualTeamCreation.candidate.manualTeam.members.map((member) => ({ agentId: member.agentId, isLeader: member.isLeader })));
+                      }
                       resetManualTeamCreation();
                       setCreateSourceType('manual');
                       setCreateError(null);
@@ -989,7 +973,7 @@ export function TeamsPage() {
                 </>
               ) : (
                 <>
-                  <Button type="button" variant="ghost" onClick={() => setCreateDialogOpen(false)} className="text-muted-foreground hover:bg-secondary hover:text-foreground">
+                  <Button type="button" variant="ghost" disabled={creatingRun || Boolean(mutatingDependency)} onClick={closeCreateDialog} className="text-muted-foreground hover:bg-secondary hover:text-foreground">
                     {t('create.cancelButton')}
                   </Button>
                   <Button type="button" onClick={() => void (createSourceType === 'manual' ? handleCreateManualTeam() : handleCreateOrReplace())} disabled={primaryDisabled}>
@@ -997,10 +981,10 @@ export function TeamsPage() {
                   </Button>
                 </>
               )}
-            </div>
-          </div>
-        </div>
-      ) : null}
+            </footer>
+          </DialogPrimitive.Content>
+        </DialogPrimitive.Portal>
+      </DialogPrimitive.Root>
 
       <div className="space-y-3">
         <h2 className="text-sm font-medium text-muted-foreground">{t('list.title')}</h2>
@@ -1010,24 +994,25 @@ export function TeamsPage() {
           </Card>
         ) : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            {teams.map((team) => {
-              const roleCount = rolesByTeamId[team.id]?.length ?? 0;
+            {teams.map((team, index) => {
+              const roleCount = roleCounts[index];
+              const roleLoading = roleCount === undefined && roleReads[team.id]?.loading;
               const deletingTeam = loadingByTeamId[team.id] === true;
-              const teamError = errorByTeamId[team.id];
+              const teamError = errorByTeamId[team.id] ?? roleReads[team.id]?.error;
               return (
                 <Card key={team.id}>
                   <CardContent className="py-4">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <div className="truncate text-sm font-medium">{team.name}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {t('list.managedRoles')}: {roleCount}
+                        <div className="text-xs text-muted-foreground" aria-busy={Boolean(roleLoading)}>
+                          {t('list.managedRoles')}: {roleCount ?? (roleLoading ? t('common:status.loading') : '—')}
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
                         <Button
                           size="sm"
-                          disabled={!gatewayOperational}
+                          disabled={!endpoints.some((entry) => runtimeEndpointsEqual(entry.endpointRef, resolveTeamRuntimeScope(team.id).endpoint) && isRuntimeEndpointReady(entry))}
                           onClick={async () => {
                             setActiveTeam(team.id);
                             navigate(`/teams/${team.id}`);
@@ -1039,7 +1024,7 @@ export function TeamsPage() {
                         <Button
                           size="sm"
                           variant="outline"
-                          disabled={!gatewayOperational || deletingTeam}
+                          disabled={!endpoints.some((entry) => runtimeEndpointsEqual(entry.endpointRef, resolveTeamRuntimeScope(team.id).endpoint) && isRuntimeEndpointReady(entry)) || deletingTeam}
                           onClick={() => void handleDeleteTeam(team.id)}
                         >
                           {t('list.delete')}

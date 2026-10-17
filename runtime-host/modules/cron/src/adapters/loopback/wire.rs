@@ -2,6 +2,7 @@ use platform::capability::CapabilityDecisionVerifier;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -240,15 +241,41 @@ impl DeliveryInput {
 }
 
 impl Endpoint {
-    fn is_openclaw_local(&self) -> bool {
+    fn is_supported(&self) -> bool {
         self.kind == "native-runtime"
-            && self.runtime_adapter_id == "openclaw"
+            && matches!(
+                self.runtime_adapter_id.as_str(),
+                "openclaw" | "matcha-agent"
+            )
             && self.runtime_instance_id == "local"
+    }
+}
+
+impl ScopeRequest {
+    fn endpoint(&self) -> Result<RuntimeEndpoint, DecodeError> {
+        if self.kind != "runtime-instance" || !self.endpoint.is_supported() {
+            return Err(DecodeError::Invalid);
+        }
+        RuntimeEndpoint::try_new(
+            &self.endpoint.runtime_adapter_id,
+            &self.endpoint.runtime_instance_id,
+        )
+        .map_err(|_| DecodeError::Invalid)
+    }
+}
+
+fn decode_scope(scope: Option<&Value>) -> Result<RuntimeEndpoint, DecodeError> {
+    match scope {
+        Some(scope) => serde_json::from_value::<ScopeRequest>(scope.clone())
+            .map_err(|_| DecodeError::Invalid)?
+            .endpoint(),
+        None => Ok(runtime_directory::RuntimeDriverIdentity::open_claw().endpoint()),
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CronHistoryQuery {
+    pub endpoint: RuntimeEndpoint,
     pub session_key: String,
     pub limit: u64,
 }
@@ -278,6 +305,7 @@ impl CronHistoryQuery {
         let query = query.ok_or(DecodeError::Invalid)?;
         let mut session_key = None;
         let mut limit = None;
+        let mut scope = None;
         if query.is_empty() {
             return Err(DecodeError::Invalid);
         }
@@ -290,6 +318,11 @@ impl CronHistoryQuery {
             match name.as_str() {
                 "sessionKey" if session_key.is_none() => session_key = Some(value),
                 "limit" if limit.is_none() => limit = Some(value),
+                "scope" if scope.is_none() => {
+                    scope = Some(
+                        serde_json::from_str::<Value>(&value).map_err(|_| DecodeError::Invalid)?,
+                    )
+                }
                 _ => return Err(DecodeError::Invalid),
             }
         }
@@ -310,7 +343,11 @@ impl CronHistoryQuery {
                 .filter(|value| (1..=MAX_HISTORY_LIMIT).contains(value))
                 .ok_or(DecodeError::Invalid)?,
         };
-        Ok(Self { session_key, limit })
+        Ok(Self {
+            endpoint: decode_scope(scope.as_ref())?,
+            session_key,
+            limit,
+        })
     }
 }
 
@@ -355,7 +392,7 @@ impl CronRequest {
         authorization: &str,
         verifier: &mut CapabilityDecisionVerifier,
         now: u64,
-    ) -> Result<(Self, String), DecodeError> {
+    ) -> Result<(Self, String, RuntimeEndpoint), DecodeError> {
         if !matches!(
             path,
             LIST_PATH | CREATE_PATH | UPDATE_PATH | DELETE_PATH | TOGGLE_PATH | TRIGGER_PATH
@@ -365,9 +402,13 @@ impl CronRequest {
         let decision = verifier
             .verify(authorization, now, path, SCOPE, CAPABILITY_ID, SUBJECT)
             .map_err(|_| DecodeError::Unauthorized)?;
+        let endpoint = decode_scope(value.get("scope"))?;
         let request = match path {
             LIST_PATH => {
-                if value != serde_json::json!({}) {
+                if value
+                    .as_object()
+                    .is_none_or(|object| object.keys().any(|key| key != "scope"))
+                {
                     return Err(DecodeError::Invalid);
                 }
                 Ok(Self::List)
@@ -379,7 +420,7 @@ impl CronRequest {
             TRIGGER_PATH => decode_trigger(value),
             _ => Err(DecodeError::Invalid),
         }?;
-        Ok((request, decision.principal().to_owned()))
+        Ok((request, decision.principal().to_owned(), endpoint))
     }
 }
 
@@ -389,6 +430,7 @@ pub(crate) struct ResultRequest {
     pub(crate) call_id: platform::call::CallId,
     pub(crate) command: crate::application::results::MutationKind,
     pub(crate) job_id: Option<String>,
+    scope: Option<ScopeRequest>,
 }
 
 impl ResultRequest {
@@ -420,8 +462,15 @@ impl ResultRequest {
         {
             return Err(DecodeError::Invalid);
         }
+        let endpoint = request
+            .scope
+            .as_ref()
+            .map(ScopeRequest::endpoint)
+            .transpose()?
+            .unwrap_or_else(|| runtime_directory::RuntimeDriverIdentity::open_claw().endpoint());
         let subject = crate::application::results::ResultSubject {
             principal: decision.principal().to_owned(),
+            endpoint,
             command: request.command,
             job_id: request.job_id.clone(),
         };
@@ -438,6 +487,10 @@ pub(crate) fn result_body(result: crate::application::results::ResultRead) -> (u
             MutationResult::Job { job, .. } => (200, project_job_response(*job)),
             MutationResult::Removed(removed) => (200, serde_json::json!({ "removed": removed })),
             MutationResult::Rejected => fixed(422, "Cron operation was rejected"),
+            MutationResult::UnsupportedDelivery => fixed(
+                422,
+                "Cron channel announce is not supported by this runtime",
+            ),
             MutationResult::Unknown => fixed(409, "Cron operation outcome is unknown"),
             MutationResult::Unavailable => unavailable(),
         },
@@ -451,7 +504,7 @@ fn decode_create(value: Value) -> Result<CronRequest, DecodeError> {
     if request.id != CAPABILITY_ID
         || request.operation_id != "cron.create"
         || request.scope.kind != "runtime-instance"
-        || !request.scope.endpoint.is_openclaw_local()
+        || !request.scope.endpoint.is_supported()
         || request.target.kind != "cron-job"
     {
         return Err(DecodeError::Invalid);
@@ -476,7 +529,7 @@ fn decode_update(value: Value) -> Result<CronRequest, DecodeError> {
     if request.id != CAPABILITY_ID
         || request.operation_id != "cron.update"
         || request.scope.kind != "runtime-instance"
-        || !request.scope.endpoint.is_openclaw_local()
+        || !request.scope.endpoint.is_supported()
         || request.target.kind != "cron-job"
         || request.target.job_id != request.input.job_id
     {
@@ -515,7 +568,7 @@ fn decode_delete(value: Value) -> Result<CronRequest, DecodeError> {
     if request.id != CAPABILITY_ID
         || request.operation_id != "cron.delete"
         || request.scope.kind != "runtime-instance"
-        || !request.scope.endpoint.is_openclaw_local()
+        || !request.scope.endpoint.is_supported()
         || request.target.kind != "cron-job"
         || request.target.job_id != request.input.job_id
     {
@@ -532,7 +585,7 @@ fn decode_toggle(value: Value) -> Result<CronRequest, DecodeError> {
     if request.id != CAPABILITY_ID
         || request.operation_id != "cron.toggle"
         || request.scope.kind != "runtime-instance"
-        || !request.scope.endpoint.is_openclaw_local()
+        || !request.scope.endpoint.is_supported()
         || request.target.kind != "cron-job"
         || request.target.job_id != request.input.id
     {
@@ -558,7 +611,7 @@ fn decode_trigger(value: Value) -> Result<CronRequest, DecodeError> {
     if request.id != CAPABILITY_ID
         || request.operation_id != "cron.trigger"
         || request.scope.kind != "runtime-instance"
-        || !request.scope.endpoint.is_openclaw_local()
+        || !request.scope.endpoint.is_supported()
         || request.target.kind != "cron-job"
         || request.target.job_id != request.input.id
         || request.input.id.trim().is_empty()
@@ -625,7 +678,7 @@ fn project_history_message(message: crate::model::CronHistoryMessageView) -> Val
             crate::model::CronHistoryRole::User => "user",
             crate::model::CronHistoryRole::Assistant => "assistant",
         },
-        "text": message.text,
+        "content": message.text,
     })
 }
 
@@ -650,6 +703,8 @@ pub fn trigger_body(
                 serde_json::json!({ "success": true, "result": { "outcome": "skipped", "reason": reason } }),
             )
         }
+        Ok(crate::model::CronTriggerResult::Rejected) => fixed(422, "Cron trigger was rejected"),
+        Ok(crate::model::CronTriggerResult::Unavailable) => unavailable(),
         Ok(crate::model::CronTriggerResult::OutcomeUnknown) => {
             fixed(409, "Cron operation outcome is unknown")
         }

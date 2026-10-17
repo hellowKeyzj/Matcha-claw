@@ -65,6 +65,15 @@ impl ConnectorModule {
         self.handle.configure_private_resolver(resolver).await
     }
 
+    /// Replays desired MCP configuration and private sources only to the selected endpoint.
+    /// Written acknowledges persistence/source projection, not a live MCP connection.
+    pub async fn reproject_private_projection(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> ports::ConnectorProjectionEffect {
+        self.handle.reproject_private_projection(endpoint).await
+    }
+
     pub fn handle(&self) -> &ConnectorHandle {
         &self.handle
     }

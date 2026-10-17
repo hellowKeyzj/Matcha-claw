@@ -1,7 +1,7 @@
 import { traceDebug } from '../../../../utils/trace-logger';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isBoundedText, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from '../client';
-import { isSkillsCallReceipt, type SkillsCallReceipt } from './management';
+import { isSkillsCallReceipt, isSkillsRuntimeScope, type SkillsCallReceipt, type SkillsRuntimeScope } from './management';
 import { isCallId } from '../../../../../src/types/call-log/decode';
 import type { SealedSkillCatalogIssue } from '../../../../../src/types/skill';
 
@@ -42,15 +42,17 @@ export type SealedSkillsStatusResult = Readonly<{
   error?: string | null;
 }>;
 
-export type SealedSkillExportRequest = Readonly<{ skillKey: string }>;
+export type SealedSkillExportRequest = Readonly<{ skillKey: string; scope?: SkillsRuntimeScope }>;
 export type SealedSkillCloudExportRequest = Readonly<{
   skillKey: string;
   cloudPublicKey: string;
   cloudKeyId: string;
+  scope?: SkillsRuntimeScope;
 }>;
 export type SealedSkillInstallRequest = Readonly<{
   packagePath: string;
   cloudMetadata?: CloudPackageInstallMetadata;
+  scope?: SkillsRuntimeScope;
 }>;
 
 export type CloudPackageInstallMetadata = Readonly<{
@@ -59,7 +61,7 @@ export type CloudPackageInstallMetadata = Readonly<{
   packageSha256: string;
   fileName: string;
 }>;
-export type SealedSkillUninstallRequest = Readonly<{ skillKey: string }>;
+export type SealedSkillUninstallRequest = Readonly<{ skillKey: string; scope?: SkillsRuntimeScope }>;
 
 export type SealedSkillPackageMutationResult = Readonly<{
   outcome: 'accepted' | 'rejected' | 'unknown' | 'notFound';
@@ -93,10 +95,10 @@ export type SealedSkillsTransportResponse<T> = Readonly<{
   | Readonly<{ status: 404; body: Readonly<{ outcome: 'notFound' }> }>;
 
 export interface SealedSkillsTransport {
-  readStatus(): Promise<SealedSkillsTransportResponse<SealedSkillsStatusResult>>;
+  readStatus(scope?: unknown): Promise<SealedSkillsTransportResponse<SealedSkillsStatusResult>>;
   export(request: unknown): Promise<SealedSkillsTransportResponse<SealedSkillPackageMutationResult>>;
   exportCloud(request: unknown): Promise<SealedSkillsTransportResponse<SealedSkillPackageMutationResult>>;
-  exportCloudResult(callId: string): Promise<SealedSkillsTransportResponse<SealedSkillCloudExportResult>>;
+  exportCloudResult(callId: string, scope?: SkillsRuntimeScope): Promise<SealedSkillsTransportResponse<SealedSkillCloudExportResult>>;
   install(request: unknown): Promise<SealedSkillsTransportResponse<SealedSkillPackageMutationResult>>;
   uninstall(request: unknown): Promise<SealedSkillsTransportResponse<SealedSkillUninstallResult>>;
 }
@@ -107,14 +109,14 @@ export function createSealedSkillsTransport(
   fetcher: typeof fetch = fetch,
 ): SealedSkillsTransport {
   return {
-    readStatus: () => get(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.status, 'sealed-skills:read', 'sealedSkills.status', 'sealed-skills-status', isSealedSkillsStatusResult),
+    readStatus: (scope) => get(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.status, 'sealed-skills:read', 'sealedSkills.status', 'sealed-skills-status', isSealedSkillsStatusResult, scope),
     export: (request) => post(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.export, request, 'sealed-skills:package', 'sealedSkills.export', 'sealed-skills-export', isSealedSkillExportRequest, isSealedSkillPackageMutationResult),
     exportCloud: (request) => post(issuer, runtimeHostTransportPort, fetcher, SEALED_SKILLS_ENDPOINTS.exportCloud, request, 'sealed-skills:package', 'sealedSkills.exportCloud', 'sealed-skills-export-cloud', isSealedSkillCloudExportRequest, isSealedSkillPackageMutationResult),
-    async exportCloudResult(callId) {
-      if (!isCallId(callId)) return rejectedResponse();
+    async exportCloudResult(callId, scope) {
+      if (!isCallId(callId) || (scope !== undefined && !isSkillsRuntimeScope(scope))) return rejectedResponse();
       const endpoint = '/api/sealed-skills/export-cloud/result';
       const response = await sendLoopbackJson({
-        port: runtimeHostTransportPort, path: endpoint, issuer, method: 'POST', fetcher, body: { callId }, timeoutMs: 30_000,
+        port: runtimeHostTransportPort, path: endpoint, issuer, method: 'POST', fetcher, body: { callId, ...(scope === undefined ? {} : { scope }) }, timeoutMs: 30_000,
         decision: { endpoint, scope: 'sealed-skills:package', capability: 'sealedSkills.exportCloud', subject: 'sealed-skills-export-cloud' },
       });
       if (response?.status === 200 && isSealedSkillCloudExportResult(response.body) && response.body.callId === callId) return { status: 200, body: response.body };
@@ -135,8 +137,11 @@ async function get<T>(
   capability: string,
   subject: string,
   isSuccess: (value: unknown) => value is T,
+  runtimeScope?: unknown,
 ): Promise<SealedSkillsTransportResponse<T>> {
-  return send(issuer, runtimeHostTransportPort, fetcher, endpoint, 'GET', undefined, scope, capability, subject, isSuccess);
+  if (runtimeScope !== undefined && !isSkillsRuntimeScope(runtimeScope)) return rejectedResponse();
+  const query = runtimeScope === undefined ? undefined : new URLSearchParams({ scope: JSON.stringify(runtimeScope) });
+  return send(issuer, runtimeHostTransportPort, fetcher, endpoint, 'GET', undefined, scope, capability, subject, isSuccess, query);
 }
 
 async function post<T>(
@@ -151,7 +156,10 @@ async function post<T>(
   isRequest: (value: unknown) => boolean,
   isSuccess: (value: unknown) => value is T,
 ): Promise<SealedSkillsTransportResponse<T>> {
-  if (!isRequest(request)) {
+  if (!isRecord(request)
+    || (Object.hasOwn(request, 'scope') && !isSkillsRuntimeScope(request.scope))) return rejectedResponse();
+  const { scope: _runtimeScope, ...input } = request;
+  if (!isRequest(input)) {
     if (endpoint === SEALED_SKILLS_ENDPOINTS.export) traceExportTransport('request-invalid', request);
     return rejectedResponse();
   }
@@ -170,6 +178,7 @@ async function send<T>(
   capability: string,
   subject: string,
   isSuccess: (value: unknown) => value is T,
+  query?: URLSearchParams,
 ): Promise<SealedSkillsTransportResponse<T>> {
   const response = await sendLoopbackJson({
     port: runtimeHostTransportPort,
@@ -178,6 +187,7 @@ async function send<T>(
     decision: { endpoint, scope, capability, subject },
     method,
     fetcher,
+    ...(query === undefined ? {} : { query }),
     ...(method === 'POST' ? { body: request } : {}),
     ...(endpoint === SEALED_SKILLS_ENDPOINTS.install ? { timeoutMs: 30_000 } : {}),
   });

@@ -3,6 +3,22 @@ import { waitForCall } from './call-log-await';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
 import type { CallRecord } from '@/types/call-log';
 import type { WaitForCallOptions } from '@/types/call-log/wait';
+import { useRuntimeEndpointsStore, selectManagementEndpoint, selectManagementAgentScope } from '@/stores/runtime-endpoints';
+import { runtimeInstanceScope, type AgentScope, type RuntimeInstanceScope } from '@/types/desktop/runtime-address';
+
+export function selectedSkillsScope(): AgentScope | RuntimeInstanceScope | null {
+  const state = useRuntimeEndpointsStore.getState();
+  const endpoint = selectManagementEndpoint(state);
+  if (endpoint?.kind !== 'native-runtime') return null;
+  if (endpoint.runtimeAdapterId === 'openclaw') return runtimeInstanceScope(endpoint);
+  return endpoint.runtimeAdapterId === 'matcha-agent' ? selectManagementAgentScope(state) : null;
+}
+
+export function requireSkillsScope(): AgentScope | RuntimeInstanceScope {
+  const scope = selectedSkillsScope();
+  if (!scope) throw new Error('Select a runtime and Agent before managing skills');
+  return scope;
+}
 import {
   decodeSkillsOperationResult,
   type SkillBundle,
@@ -31,7 +47,7 @@ async function skillsTerminal(receipt: unknown, command: string, input: Record<s
 async function operationResult(call: CallRecord<'skills'>, input: Record<string, unknown>): Promise<SkillsOperationResult> {
   if (call.detail.resultReady !== true) throw new Error('Skills operation result unavailable');
   const response = await hostApiFetchDecoded('/api/skills/operations/result', decodeSkillsOperationResult, {
-    method: 'POST', body: JSON.stringify({ callId: call.callId }),
+    method: 'POST', body: JSON.stringify({ callId: call.callId, ...(input.scope ? { scope: input.scope } : {}) }),
   });
   const result = response.result;
   if (response.callId !== call.callId || response.command !== call.command || result.outcome !== call.detail.result
@@ -107,6 +123,35 @@ export async function waitForSkillsMutation(
 export async function hostSkillsMutation(path: string, input: Record<string, unknown>, command: string, options?: WaitForCallOptions<'skills'>): Promise<SkillsMutationResult> {
   const receipt = await hostApiFetch<unknown>(path, { method: 'POST', body: JSON.stringify(input) });
   return waitForSkillsMutation(receipt, command, input, options);
+}
+
+export async function hostImportSkillArchive(file: File, slug: string, scope: AgentScope): Promise<void> {
+  if (!file.name.toLowerCase().endsWith('.zip') || file.size === 0 || file.size > 32 * 1024 * 1024) {
+    throw new Error('Select a nonempty ZIP archive no larger than 32 MiB');
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  const progress = await hostApiFetch<{ uploadId: string; receivedBytes: number }>('/api/skills/upload/begin', {
+    method: 'POST', body: JSON.stringify({ kind: 'skill-archive', slug, sizeBytes: bytes.length, sha256, scope }),
+  });
+  if (!progress.uploadId || progress.receivedBytes !== 0) throw new Error('Invalid skill archive upload receipt');
+  // Stay within the existing Host 64 KiB request budget after base64 encoding.
+  for (let offset = 0; offset < bytes.length; offset += 32 * 1024) {
+    const chunk = bytes.subarray(offset, offset + 32 * 1024);
+    const dataBase64 = btoa(String.fromCharCode(...chunk));
+    const received = await hostApiFetch<{ uploadId: string; receivedBytes: number }>('/api/skills/upload/chunk', {
+      method: 'POST', body: JSON.stringify({ uploadId: progress.uploadId, offset, dataBase64, scope }),
+    });
+    if (received.uploadId !== progress.uploadId || received.receivedBytes !== offset + chunk.length) {
+      throw new Error('Invalid skill archive chunk receipt');
+    }
+  }
+  const input = { uploadId: progress.uploadId, sha256, scope };
+  const receipt = await hostApiFetch<unknown>('/api/skills/upload/commit', { method: 'POST', body: JSON.stringify(input) });
+  const result = await waitForSkillsOperation(receipt, 'skills.upload.commit', input);
+  if (result.kind !== 'uploadCommit' || result.outcome !== 'accepted' || result.receipt?.receivedBytes !== bytes.length) {
+    throw new Error('Skill archive installation was not confirmed; refresh the selected Agent before retrying');
+  }
 }
 
 export async function hostExportSkillBundles(skillKeys: string[]): Promise<SkillBundle[]> {

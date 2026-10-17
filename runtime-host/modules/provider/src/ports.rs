@@ -21,8 +21,14 @@ pub type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait ProviderRuntimeDirectory: Send + Sync {
     fn provider_config_ops(&self) -> Vec<&dyn ProviderConfigOps>;
     fn provider_model_discovery_ops(&self) -> Option<&dyn ProviderModelDiscoveryOps>;
-    fn provider_runtime_identity_ops(&self) -> Option<&dyn ProviderRuntimeIdentityOps>;
-    fn provider_private_projection_ops(&self) -> Option<&dyn ProviderPrivateProjectionOps>;
+    fn provider_runtime_identity_ops(
+        &self,
+        endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> Option<&dyn ProviderRuntimeIdentityOps>;
+    fn provider_private_projection_ops(
+        &self,
+        endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> Option<&dyn ProviderPrivateProjectionOps>;
 }
 
 pub trait ProviderConfigOps: Send + Sync {
@@ -57,13 +63,14 @@ pub trait ProviderRuntimeIdentityOps: Send + Sync {
 }
 
 pub trait ProviderPrivateProjectionOps: Send + Sync {
-    fn prepare_private_projection(
-        &self,
-        command: ProviderPrivateProjectionCommand<'_>,
-    ) -> ProviderPrivateProjectionEffect;
+    fn prepare_private_projection<'a>(
+        &'a self,
+        command: ProviderPrivateProjectionCommand<'a>,
+    ) -> ProviderFuture<'a, ProviderPrivateProjectionEffect>;
 }
 
 pub struct ProviderNativeConfigurationCommand<'a> {
+    pub resolver: &'a Resolver,
     pub accounts: &'a [ProviderAccount],
     pub models: &'a ProviderModelCatalog,
     pub routing: Option<&'a ProviderRouting>,
@@ -136,18 +143,39 @@ impl ProviderNativeConfigurationEffect {
     pub fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Evidence(left), Self::Evidence(right)) => Self::Evidence(left.merge(right)),
-            (Self::Unavailable, effect) | (effect, Self::Unavailable) => effect,
+            (Self::Evidence(evidence), Self::Unavailable)
+            | (Self::Unavailable, Self::Evidence(evidence)) => Self::Evidence(evidence.merge(
+                ProviderNativeConfigurationEvidence::new(
+                    false,
+                    ProviderAppliedStatus::Unknown,
+                    ProviderObservedStatus::Unavailable,
+                ),
+            )),
+            (Self::Unavailable, Self::Unavailable) => Self::Unavailable,
         }
     }
 }
 
 impl ProviderNativeConfigurationEvidence {
     fn merge(self, other: Self) -> Self {
+        use ProviderObservedStatus::{Mismatch, Unavailable};
+        let prefer_other_diagnostic = match (self.observed, other.observed) {
+            (Mismatch, _) => false,
+            (_, Mismatch) => true,
+            (Unavailable, _) => false,
+            (_, Unavailable) => true,
+            _ => self.applied == ProviderAppliedStatus::Confirmed
+                && other.applied == ProviderAppliedStatus::Unknown,
+        };
         Self {
             changed: self.changed || other.changed,
             applied: self.applied.merge(other.applied),
             observed: self.observed.merge(other.observed),
-            diagnostic: self.diagnostic.or(other.diagnostic),
+            diagnostic: if prefer_other_diagnostic {
+                other.diagnostic.or(self.diagnostic)
+            } else {
+                self.diagnostic.or(other.diagnostic)
+            },
         }
     }
 }
@@ -177,9 +205,9 @@ pub enum ProviderObservedStatus {
 impl ProviderObservedStatus {
     const fn merge(self, other: Self) -> Self {
         match (self, other) {
-            (Self::Unavailable, value) | (value, Self::Unavailable) => value,
+            (Self::Mismatch, _) | (_, Self::Mismatch) => Self::Mismatch,
+            (Self::Unavailable, _) | (_, Self::Unavailable) => Self::Unavailable,
             (Self::Matches, Self::Matches) => Self::Matches,
-            _ => Self::Mismatch,
         }
     }
 }
@@ -276,6 +304,7 @@ impl ProviderRuntimeIdentity {
 }
 
 pub struct ProviderPrivateProjectionCommand<'a> {
+    pub resolver: &'a Resolver,
     pub accounts: &'a [ProviderAccount],
     pub models: &'a ProviderModelCatalog,
     pub routing: Option<&'a ProviderRouting>,

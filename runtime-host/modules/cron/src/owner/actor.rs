@@ -7,6 +7,7 @@ use foundation::execution::{
     LaneRetention, ObservationSink, OperationHandle, OwnerSpec, TraceContext,
 };
 use platform::call::CallStatus;
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, mpsc};
 
 use crate::{
@@ -140,6 +141,7 @@ impl OwnerSpec for CronOwner {
         query: Self::Query,
     ) {
         let CronQuery::LoadHistory {
+            endpoint,
             command,
             mut call,
             reply,
@@ -149,7 +151,7 @@ impl OwnerSpec for CronOwner {
         };
         let outcome = match &call {
             Some(call) if !call.running().await => CronHistoryOutcome::Unavailable,
-            _ => load_history(&shared, command).await,
+            _ => load_history(&shared, endpoint, command).await,
         };
         if let Some(call) = &mut call {
             let (status, detail_outcome) = match &outcome {
@@ -173,10 +175,14 @@ impl OwnerSpec for CronOwner {
         query: Self::Query,
     ) {
         match query {
-            CronQuery::List { mut call, reply } => {
+            CronQuery::List {
+                endpoint,
+                mut call,
+                reply,
+            } => {
                 let outcome = match &call {
                     Some(call) if !call.running().await => CronListOutcome::Unavailable,
-                    _ => list(&shared).await,
+                    _ => list(&shared, &endpoint).await,
                 };
                 if let Some(call) = &mut call {
                     let (status, detail_outcome) = match &outcome {
@@ -215,19 +221,23 @@ impl OwnerSpec for CronOwner {
 
 async fn execute_command(shared: &CronShared, command: CronCommand) {
     match command {
-        CronCommand::Mutate { command, mut call } => {
+        CronCommand::Mutate {
+            endpoint,
+            command,
+            mut call,
+        } => {
             let result = if !call.running().await {
                 MutationResult::Unavailable
             } else {
                 match command {
                     MutationCommand::Create(command) => {
-                        MutationResult::job(create(shared, command).await)
+                        MutationResult::job(create(shared, &endpoint, command).await)
                     }
                     MutationCommand::Update(command) => {
-                        MutationResult::job(update(shared, command).await)
+                        MutationResult::job(update(shared, &endpoint, command).await)
                     }
                     MutationCommand::Delete(command) => {
-                        MutationResult::deleted(delete(shared, command).await)
+                        MutationResult::deleted(delete(shared, &endpoint, command).await)
                     }
                 }
             };
@@ -236,13 +246,14 @@ async fn execute_command(shared: &CronShared, command: CronCommand) {
             call.finish(status, outcome).await;
         }
         CronCommand::Trigger {
+            endpoint,
             job_id,
             mut call,
             reply,
         } => {
             let outcome = match &call {
                 Some(call) if !call.running().await => Err(CronRequestAdmissionClosed),
-                _ => trigger(shared, job_id, &mut call).await,
+                _ => trigger(shared, &endpoint, job_id, &mut call).await,
             };
             if let Some(call) = &mut call {
                 call.finish_trigger(&outcome).await;
@@ -256,23 +267,36 @@ async fn execute_command(shared: &CronShared, command: CronCommand) {
     }
 }
 
-async fn list(shared: &CronShared) -> CronListOutcome {
+async fn list(shared: &CronShared, endpoint: &RuntimeEndpoint) -> CronListOutcome {
     if shared.admission.admit_cron_request().is_err() {
         return CronListOutcome::Unavailable;
     }
-    match shared.runtime_directory.cron_ops() {
+    match shared.runtime_directory.cron_ops(endpoint) {
         Some(ops) => ops.list_cron_jobs().await,
         None => CronListOutcome::Unavailable,
     }
 }
 
-async fn load_history(shared: &CronShared, command: CronHistoryCommand) -> CronHistoryOutcome {
+async fn load_history(
+    shared: &CronShared,
+    endpoint: RuntimeEndpoint,
+    command: CronHistoryCommand,
+) -> CronHistoryOutcome {
     if shared.admission.admit_cron_request().is_err() {
         return CronHistoryOutcome::Unavailable;
     }
-    let Some(ops) = shared.runtime_directory.cron_ops() else {
+    let Some(ops) = shared.runtime_directory.cron_ops(&endpoint) else {
         return CronHistoryOutcome::Unavailable;
     };
+    if let Some(history) = ops.load_cron_history(&command).await {
+        return match history {
+            Ok(history) => CronHistoryOutcome::Loaded(history),
+            Err(CronRunHistoryFailure::Rejected) => CronHistoryOutcome::Rejected,
+            Err(CronRunHistoryFailure::Protocol) => CronHistoryOutcome::Protocol,
+            Err(CronRunHistoryFailure::Deadline) => CronHistoryOutcome::Deadline,
+            Err(CronRunHistoryFailure::Unavailable) => CronHistoryOutcome::Unavailable,
+        };
+    }
     let receipts = match ops
         .cron_run_history(command.job_id().to_owned(), command.limit())
         .await
@@ -289,7 +313,7 @@ async fn load_history(shared: &CronShared, command: CronHistoryCommand) -> CronH
     };
     match shared
         .session_history
-        .load_cron_session_history(session_key, command.limit())
+        .load_cron_session_history(endpoint, session_key, command.limit())
         .await
     {
         Ok(history) => CronHistoryOutcome::Loaded(history),
@@ -300,21 +324,29 @@ async fn load_history(shared: &CronShared, command: CronHistoryCommand) -> CronH
     }
 }
 
-async fn create(shared: &CronShared, command: CronCreateCommand) -> CronJobMutationOutcome {
+async fn create(
+    shared: &CronShared,
+    endpoint: &RuntimeEndpoint,
+    command: CronCreateCommand,
+) -> CronJobMutationOutcome {
     if shared.admission.admit_cron_request().is_err() {
         return CronJobMutationOutcome::Unavailable;
     }
-    match shared.runtime_directory.cron_ops() {
+    match shared.runtime_directory.cron_ops(endpoint) {
         Some(ops) => ops.add_cron_job(command).await,
         None => CronJobMutationOutcome::Unavailable,
     }
 }
 
-async fn update(shared: &CronShared, command: CronUpdateCommand) -> CronJobMutationOutcome {
+async fn update(
+    shared: &CronShared,
+    endpoint: &RuntimeEndpoint,
+    command: CronUpdateCommand,
+) -> CronJobMutationOutcome {
     if shared.admission.admit_cron_request().is_err() {
         return CronJobMutationOutcome::Unavailable;
     }
-    match shared.runtime_directory.cron_ops() {
+    match shared.runtime_directory.cron_ops(endpoint) {
         Some(ops) => {
             let job_id = command.job_id.clone();
             match ops.update_cron_job(command).await {
@@ -328,11 +360,15 @@ async fn update(shared: &CronShared, command: CronUpdateCommand) -> CronJobMutat
     }
 }
 
-async fn delete(shared: &CronShared, command: CronDeleteCommand) -> CronDeleteOutcome {
+async fn delete(
+    shared: &CronShared,
+    endpoint: &RuntimeEndpoint,
+    command: CronDeleteCommand,
+) -> CronDeleteOutcome {
     if shared.admission.admit_cron_request().is_err() {
         return CronDeleteOutcome::Unavailable;
     }
-    match shared.runtime_directory.cron_ops() {
+    match shared.runtime_directory.cron_ops(endpoint) {
         Some(ops) => ops.delete_cron_job(command).await,
         None => CronDeleteOutcome::Unavailable,
     }
@@ -340,20 +376,21 @@ async fn delete(shared: &CronShared, command: CronDeleteCommand) -> CronDeleteOu
 
 async fn trigger(
     shared: &CronShared,
+    endpoint: &RuntimeEndpoint,
     job_id: String,
     call: &mut Option<CronCall>,
 ) -> Result<CronTriggerResult, CronRequestAdmissionClosed> {
     shared.admission.admit_cron_request()?;
-    let Some(ops) = shared.runtime_directory.cron_ops() else {
-        return Ok(CronTriggerResult::OutcomeUnknown);
+    let Some(ops) = shared.runtime_directory.cron_ops(endpoint) else {
+        return Ok(CronTriggerResult::Unavailable);
     };
     reap_active_executions(shared).await;
     let capacity = match shared.execution_capacity.clone().try_acquire_owned() {
         Ok(capacity) => capacity,
-        Err(_) => return Ok(CronTriggerResult::OutcomeUnknown),
+        Err(_) => return Ok(CronTriggerResult::Unavailable),
     };
     let Some(events) = shared.events.clone() else {
-        return Ok(CronTriggerResult::OutcomeUnknown);
+        return Ok(CronTriggerResult::Unavailable);
     };
     let admission = match ops.admit_cron_execution(job_id.clone()).await {
         Ok(Ok(admission)) => admission,
@@ -444,7 +481,10 @@ async fn reap_active_executions(shared: &CronShared) {
         .clone();
     for execution in executions {
         let finished = execution.try_lock().is_ok_and(|execution| {
-            execution.handle.as_ref().is_none_or(OperationHandle::is_finished)
+            execution
+                .handle
+                .as_ref()
+                .is_none_or(OperationHandle::is_finished)
         });
         if finished {
             join_execution(shared, &execution).await;

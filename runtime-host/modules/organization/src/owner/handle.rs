@@ -7,7 +7,6 @@ use std::{
 
 use crate::{ActivityExecutionOutcome, NativeRunSettled, run::event::{TeamRunWake, TeamRunWakeReason}};
 use foundation::execution::OwnerRuntimeHandle;
-use runtime_directory::RuntimeDriverIdentity;
 
 use organization::{
     ActivityClaim, ActivityId, BeginCancellationOutcome, CreateGraphRunOutcome, DeliveryId,
@@ -295,11 +294,15 @@ impl OrganizationHandle {
     pub async fn team_skill_selection_dependency_plan(
         &self,
         selection_id: TeamSkillSelectionId,
+        endpoint: organization::RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
     ) -> Result<TeamSkillDependencyPlanResult, RequestAdmissionClosed> {
         let (reply, reply_rx) = self.reply_channel();
         self.inner
             .send_query(OrganizationQuery::TeamSkillSelectionDependencyPlan {
                 selection_id,
+                endpoint,
+                source_agent,
                 reply,
             })
             .await
@@ -311,6 +314,8 @@ impl OrganizationHandle {
     pub async fn team_skill_materialize(
         &self,
         selection_id: TeamSkillSelectionId,
+        endpoint: organization::RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
         team_id: TeamId,
         idempotency_key: IdempotencyKey,
     ) -> Result<TeamMaterializationCommandOutcome, RequestAdmissionClosed> {
@@ -319,6 +324,8 @@ impl OrganizationHandle {
         self.inner
             .send_command(OrganizationCommand::TeamSkillMaterialize {
                 selection_id,
+                endpoint,
+                source_agent,
                 team_id,
                 idempotency_key,
                 reply,
@@ -1482,21 +1489,23 @@ async fn execute_team_runtime(
                 owner.team_skill_validate(package_root).await.ok()?,
             )
         }
-        TeamRuntimeCommand::DependencyPlan { package_root } => {
-            TeamRuntimeCommandOutcome::DependencyPlan(
-                owner.team_skill_dependency_plan(package_root).await.ok()?,
-            )
+        TeamRuntimeCommand::DependencyPlan { package_root, endpoint, source_agent } => {
+            let selection = owner.team_skill_authorize(package_root).await.ok()?;
+            TeamRuntimeCommandOutcome::DependencyPlan(match selection {
+                Ok(selection) => owner.team_skill_selection_dependency_plan(selection, endpoint, source_agent).await.ok()?,
+                Err(TeamSkillSelectionError::InvalidSelection) => TeamSkillDependencyPlanResult::Invalid,
+                Err(TeamSkillSelectionError::Unavailable) => TeamSkillDependencyPlanResult::Unavailable,
+            })
         }
         TeamRuntimeCommand::ProvisionAgents {
             package_root,
             team_id: Some(team_id),
             idempotency_key,
             endpoint,
+            source_agent,
             source: TeamRuntimeCreateSource::TeamSkill,
             manual_team: None,
-        } if endpoint.as_str()
-            == RuntimeDriverIdentity::open_claw().runtime_endpoint_reference() =>
-        {
+        } => {
             let selection_id = match owner.team_skill_authorize(package_root).await.ok()? {
                 Ok(selection_id) => selection_id,
                 Err(TeamSkillSelectionError::InvalidSelection) => {
@@ -1512,7 +1521,7 @@ async fn execute_team_runtime(
             };
             TeamRuntimeCommandOutcome::ProvisionAgents(
                 owner
-                    .team_skill_materialize(selection_id, team_id, idempotency_key)
+                    .team_skill_materialize(selection_id, endpoint, source_agent, team_id, idempotency_key)
                     .await
                     .ok()?,
             )
@@ -1552,6 +1561,8 @@ async fn execute_team_runtime(
         TeamRuntimeCommand::RunCreate {
             team_id,
             package_root,
+            endpoint,
+            source_agent,
             run_id,
             idempotency_key,
             source,
@@ -1600,6 +1611,8 @@ async fn execute_team_runtime(
                     match owner
                         .team_skill_materialize(
                             selection_id,
+                            endpoint,
+                            source_agent,
                             team_id.clone(),
                             idempotency_key.clone(),
                         )

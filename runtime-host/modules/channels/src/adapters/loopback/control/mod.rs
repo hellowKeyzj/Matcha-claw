@@ -89,6 +89,7 @@ pub enum ChannelControlDelivery {
 impl ChannelControlDelivery {
     pub fn status_code(&self) -> u16 {
         match self {
+            Self::Outcome(ChannelControlDeliveryOutcome::Unsupported) => 501,
             Self::Outcome(_) => 200,
             Self::Unavailable => 503,
         }

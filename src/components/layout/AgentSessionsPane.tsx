@@ -14,6 +14,7 @@ import {
 } from '@/stores/teams';
 import { useChatStore, type ChatSession } from '@/stores/chat';
 import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
+import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
 import { isOrdinarySessionCandidate, type ChatSessionRuntimeEndpointNode } from '@/stores/chat/types';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
@@ -39,6 +40,10 @@ import {
 } from './agent-session-switchboard-model';
 
 const SESSION_BUCKET_COLLAPSE_STORAGE_KEY = 'layout:session-time-bucket-collapsed';
+const RUNTIME_SYMBOLS: Readonly<Record<string, string>> = {
+  openclaw: '🦞',
+  'matcha-agent': '🍵',
+};
 
 type SessionPaneTab = 'agent' | 'team' | 'session';
 type SessionBucketScope = 'session' | 'automation';
@@ -64,7 +69,7 @@ function resolveSelectedRuntimeEndpoint(input: {
       return endpoint;
     }
   }
-  return input.endpoints[0] ?? null;
+  return null;
 }
 
 function createSessionBucketStateKey(bucketId: SessionBucketId, scope: SessionBucketScope = 'session'): string {
@@ -452,6 +457,7 @@ const TeamListSection = memo(function TeamListSection({
 const AgentSwitchboardSection = memo(function AgentSwitchboardSection({
   runtimes,
   endpointByRuntimeScopeKey,
+  managementRuntimeScopeKey,
   newSessionLabel,
   state,
   errorMessage,
@@ -464,6 +470,7 @@ const AgentSwitchboardSection = memo(function AgentSwitchboardSection({
 }: {
   runtimes: AgentSessionSwitchboardRuntimeResult[];
   endpointByRuntimeScopeKey: ReadonlyMap<string, ChatSessionRuntimeEndpointNode>;
+  managementRuntimeScopeKey: string | null;
   newSessionLabel: string;
   state: 'loading' | 'error' | 'ready';
   errorMessage: string | null;
@@ -476,10 +483,13 @@ const AgentSwitchboardSection = memo(function AgentSwitchboardSection({
 }) {
   const visibleRuntimes = runtimes.map((runtime) => {
     const endpoint = endpointByRuntimeScopeKey.get(runtime.runtimeScopeKey);
-    const runtimeState = endpoint?.target?.agentCatalog.source === 'subagent-management' ? state : 'ready';
+    const runtimeState = runtime.runtimeScopeKey === managementRuntimeScopeKey
+      && endpoint?.target?.agentCatalog.source === 'subagent-management' ? state : 'ready';
     return {
       ...runtime,
       runtimeState,
+      runtimeSymbol: endpoint?.endpoint.kind === 'native-runtime'
+        ? RUNTIME_SYMBOLS[endpoint.endpoint.runtimeAdapterId] : undefined,
       agents: runtimeState === 'ready' ? runtime.agents : [],
     };
   });
@@ -490,8 +500,13 @@ const AgentSwitchboardSection = memo(function AgentSwitchboardSection({
   return (
     <div className="space-y-3">
       {visibleRuntimes.map((runtime) => (
-        <section key={runtime.runtimeScopeKey} className="space-y-2">
-          <h3 className="px-2 text-[11px] font-semibold text-muted-foreground">{runtime.runtimeLabel}</h3>
+        <section key={runtime.runtimeScopeKey} className="space-y-1">
+          <h3 className="flex h-7 items-center gap-2 px-2 text-[11px] font-medium text-muted-foreground">
+            <span aria-hidden="true" className="flex h-4 w-4 shrink-0 items-center justify-center text-sm leading-none">
+              {runtime.runtimeSymbol}
+            </span>
+            <span className="min-w-0 truncate">{runtime.runtimeLabel}</span>
+          </h3>
           {runtime.runtimeState === 'loading' ? (
             <p data-testid="agent-list-loading" className="px-2 py-1 text-xs text-muted-foreground">
               {loadingLabel}
@@ -501,7 +516,7 @@ const AgentSwitchboardSection = memo(function AgentSwitchboardSection({
               {errorMessage || fallbackErrorLabel}
             </p>
           ) : null}
-          <div className="space-y-1">
+          <div>
             {runtime.agents.map((agent) => {
               const active = agent.isCurrent;
               const canCreate = Boolean(endpointByRuntimeScopeKey.get(agent.runtimeScopeKey)?.target);
@@ -509,14 +524,16 @@ const AgentSwitchboardSection = memo(function AgentSwitchboardSection({
                 <div
                   key={`${agent.runtimeScopeKey}:${agent.agentId}`}
                   className={cn(
-                    'group flex items-center gap-1 rounded-[calc(var(--radius-interactive)+2px)] pr-1 transition-[background-color,color,box-shadow]',
-                    active ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                    'group flex h-9 items-center gap-1 rounded-lg pr-1 transition-colors',
+                    active ? 'bg-secondary/70 text-foreground' : 'text-muted-foreground hover:bg-secondary/40 hover:text-foreground',
                   )}
                 >
                   <button
                     type="button"
                     data-testid={`agent-item-${agent.agentId}`}
-                    className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-sm font-medium"
+                    className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                    aria-current={active ? 'true' : undefined}
+                    title={agent.agentName}
                     onClick={() => {
                       onOpenAgent(agent);
                       onPick();
@@ -530,17 +547,18 @@ const AgentSwitchboardSection = memo(function AgentSwitchboardSection({
                       className="h-5 w-5"
                       dataTestId={`agent-session-avatar-${agent.agentId}`}
                     />
-                    <span className="min-w-0 flex-1 truncate">{agent.agentName}</span>
+                    <span className={cn('min-w-0 flex-1 truncate', active && 'font-medium')}>{agent.agentName}</span>
                     {agent.sessionCount > 0 ? (
-                      <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                      <span className="text-[11px] tabular-nums text-muted-foreground">
                         {agent.sessionCount}
                       </span>
                     ) : null}
+                    {active ? <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : null}
                   </button>
                   <button
                     type="button"
                     data-testid={`agent-new-session-${agent.agentId}`}
-                    className="shrink-0 rounded-full p-1 text-current/80 opacity-0 transition group-hover:opacity-100 hover:bg-card/15 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed [@media(hover:none)]:opacity-100"
                     aria-label={`${newSessionLabel} ${agent.agentName}`}
                     title={`${newSessionLabel} ${agent.agentName}`}
                     disabled={!canCreate}
@@ -921,6 +939,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const subagentManagementAgentsResource = useSubagentsStore((state) => state.agentsResource);
+  const managementScope = useSubagentsStore((state) => state.managementScope);
   const subagentManagementAgents = Array.isArray(subagentManagementAgentsResource.data) ? subagentManagementAgentsResource.data : [];
   const {
     sessionEntries,
@@ -937,6 +956,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
     deleteSession,
     renameSession,
   } = useChatStore(useShallow(selectAgentSessionsPaneState));
+  const selectedEndpoint = useChatStore((state) => state.sessionRuntimeCatalog.selectedEndpoint);
   const teams = useTeamsStore((state) => state.teams);
   const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
   const runLabels = useTeamRunLabels();
@@ -984,9 +1004,9 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
   const selectedRuntimeEndpoint = useMemo(
     () => resolveSelectedRuntimeEndpoint({
       endpoints: runtimeEndpoints,
-      runtimeScopeKey: currentConversation?.runtimeScopeKey ?? null,
+      runtimeScopeKey: currentConversation?.runtimeScopeKey ?? (selectedEndpoint ? buildRuntimeScopeKey(selectedEndpoint) : null),
     }),
-    [currentConversation?.runtimeScopeKey, runtimeEndpoints],
+    [currentConversation?.runtimeScopeKey, runtimeEndpoints, selectedEndpoint],
   );
 
   const filteredSessionEntries = useMemo(() => {
@@ -1040,6 +1060,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
   const paneViewModel = useAgentSessionsPaneViewModel({
     subagentManagementAgents,
     subagentManagementAgentsResource,
+    subagentManagementRuntimeScopeKey: managementScope ? buildRuntimeScopeKey(managementScope.endpoint) : null,
     sessionEntries: filteredSessionEntries.agentPaneSessionEntries,
     switchboardSessionEntries: filteredSessionEntries.switchboardSessionEntries,
     sessionsLoading,
@@ -1058,12 +1079,6 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
   const activeAgentId = switchboard.currentIdentity.agentId ?? activeAgentNode?.agentId ?? (paneViewModel.activeAgentId || defaultAgentId || '');
   const activeAgentName = switchboard.currentIdentityLabel || activeAgentNode?.agentName || (activeAgentId || t('sidebar.agentSessions'));
   const activeRuntimeLabel = selectedRuntimeEndpoint?.displayName ?? t('switchboard.runtime');
-  const switchboardHeaderTitle = switchboard.currentIdentity.kind === 'team'
-    ? activeAgentName
-    : (activeAgentNode?.agentName || switchboard.currentIdentity.agentId || activeAgentName);
-  const switchboardHeaderMeta = switchboard.currentIdentity.kind === 'team'
-    ? t('switchboard.teamSession')
-    : activeRuntimeLabel;
   const teamSyncKey = teams.map((team) => team.id).join('\n');
 
   useEffect(() => {
@@ -1133,7 +1148,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
 
   const handleCreateSessionForDefaultScope = useCallback(() => {
     const target = selectedRuntimeEndpoint?.target;
-    if (!target) {
+    if (!target?.defaultSessionPromptScope) {
       return;
     }
     void newSessionForScope(target.defaultSessionPromptScope);
@@ -1361,23 +1376,8 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
           data-testid="chat-switchboard"
           role="dialog"
           aria-label={t('switchboard.quickSwitch')}
-          className="absolute left-[52px] top-5 z-30 flex max-h-[min(600px,calc(100vh-32px))] w-[280px] max-w-[calc(100vw-68px)] flex-col overflow-hidden rounded-[22px] border border-border/75 bg-card/96 shadow-[0_18px_48px_rgba(0,0,0,0.26),0_5px_14px_rgba(0,0,0,0.18)] backdrop-blur-md transition-[opacity,transform] duration-150"
+          className="absolute left-[52px] top-5 z-30 flex max-h-[min(420px,calc(100vh-32px))] w-[280px] max-w-[calc(100vw-68px)] flex-col overflow-hidden rounded-[22px] border border-border/75 bg-card/96 shadow-[0_18px_48px_rgba(0,0,0,0.26),0_5px_14px_rgba(0,0,0,0.18)] backdrop-blur-md transition-[opacity,transform] duration-150"
         >
-          <header className="flex items-center justify-between gap-3 border-b border-border/70 px-3.5 py-2.5">
-            <div className="min-w-0">
-              <p className="truncate text-sm font-semibold text-foreground">{switchboardHeaderTitle}</p>
-              <p className="truncate text-xs text-muted-foreground">{switchboardHeaderMeta}</p>
-            </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 shrink-0 rounded-full"
-              aria-label={t('actions.close')}
-              onClick={closeSwitchboard}
-            >
-              <X className="h-4 w-4" />
-            </Button>
-          </header>
           <div className="grid grid-cols-3 gap-1 border-b border-border/70 p-2">
             {(['agent', 'team', 'session'] as const).map((tab) => (
               <button
@@ -1411,6 +1411,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
               <AgentSwitchboardSection
                 runtimes={switchboard.agentResults}
                 endpointByRuntimeScopeKey={endpointByRuntimeScopeKey}
+                managementRuntimeScopeKey={managementScope ? buildRuntimeScopeKey(managementScope.endpoint) : null}
                 newSessionLabel={t('sidebar.newSession')}
                 state={paneViewModel.agentListState}
                 errorMessage={paneViewModel.agentErrorMessage}

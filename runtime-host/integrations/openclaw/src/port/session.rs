@@ -251,9 +251,10 @@ impl OpenClawGateway {
     pub async fn get_session_permission(
         &self,
         session_key: SessionKey,
+        agent_id: &str,
     ) -> Result<SessionPermissionProjection, OpenClawSessionError> {
         SessionOperation::new(Arc::clone(&self.client))
-            .get_session_permission(session_key)
+            .get_session_permission(session_key, agent_id)
             .await
             .map_err(Into::into)
     }
@@ -261,12 +262,13 @@ impl OpenClawGateway {
     pub async fn set_session_permission(
         &self,
         params: SessionPermissionPatchParams,
+        agent_id: &str,
     ) -> Result<
         InvocationOutcome<SessionPermissionProjection, OpenClawSessionError>,
         OpenClawSessionError,
     > {
         SessionOperation::new(Arc::clone(&self.client))
-            .set_session_permission(params)
+            .set_session_permission(params, agent_id)
             .await
             .map(port_outcome)
             .map_err(Into::into)
@@ -661,9 +663,10 @@ impl OpenClawSessionGateway {
     pub async fn get_session_permission(
         &self,
         session_key: SessionKey,
+        agent_id: &str,
     ) -> Result<SessionPermissionProjection, OpenClawSessionError> {
         SessionOperation::new(Arc::clone(&self.client))
-            .get_session_permission(session_key)
+            .get_session_permission(session_key, agent_id)
             .await
             .map_err(Into::into)
     }
@@ -671,12 +674,13 @@ impl OpenClawSessionGateway {
     pub async fn set_session_permission(
         &self,
         params: SessionPermissionPatchParams,
+        agent_id: &str,
     ) -> Result<
         InvocationOutcome<SessionPermissionProjection, OpenClawSessionError>,
         OpenClawSessionError,
     > {
         SessionOperation::new(Arc::clone(&self.client))
-            .set_session_permission(params)
+            .set_session_permission(params, agent_id)
             .await
             .map(port_outcome)
             .map_err(Into::into)

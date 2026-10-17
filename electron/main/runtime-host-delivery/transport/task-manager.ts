@@ -5,7 +5,7 @@ const UNAVAILABLE = { success: false, error: 'Task manager is unavailable' } as 
 type Operation =
   | 'tasks.list' | 'tasks.get' | 'tasks.create' | 'tasks.update'
   | 'todos.get' | 'todos.write';
-type Endpoint = Readonly<{ kind: 'native-runtime'; runtimeAdapterId: 'openclaw'; runtimeInstanceId: 'local' }>;
+type Endpoint = Readonly<{ kind: 'native-runtime'; runtimeAdapterId: 'openclaw' | 'matcha-agent'; runtimeInstanceId: 'local' }>;
 type Identity = Readonly<{ endpoint: Endpoint; agentId: string; sessionKey: string }>;
 type TaskRequest = Readonly<{
   id: 'task.management';
@@ -160,7 +160,7 @@ function isIdentity(value: unknown): value is Identity {
 }
 function isEndpoint(value: unknown): value is Endpoint {
   return isRecord(value) && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.kind === 'native-runtime' && value.runtimeAdapterId === 'openclaw' && value.runtimeInstanceId === 'local';
+    && value.kind === 'native-runtime' && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent') && value.runtimeInstanceId === 'local';
 }
 function sameIdentity(left: Identity, right: Identity): boolean { return left.agentId === right.agentId && left.sessionKey === right.sessionKey && left.endpoint.runtimeAdapterId === right.endpoint.runtimeAdapterId && left.endpoint.runtimeInstanceId === right.endpoint.runtimeInstanceId; }
 function isUnavailable(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['success', 'error']) && value.success === false && value.error === UNAVAILABLE.error; }

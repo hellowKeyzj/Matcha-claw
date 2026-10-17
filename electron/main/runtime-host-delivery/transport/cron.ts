@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
+import { isProductRuntimeScope, type ProductRuntimeScope } from './runtime-scope';
 import { decodeCallReceipt } from '../../../../src/types/call-log/receipt';
 import { isCronDeleteResult, isCronJob, isCronResultRequest } from '../../../../src/types/cron-operation-result';
 import { hasExactKeys, isNonEmptyBoundedText as isNonEmptyString, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson, type LoopbackDecision, type LoopbackJsonResponse } from './client';
@@ -19,7 +20,7 @@ type Operation =
 type CronCrudOperation = Exclude<Operation, 'cron.session-history'>;
 type Endpoint = Readonly<{
   kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw';
+  runtimeAdapterId: 'openclaw' | 'matcha-agent';
   runtimeInstanceId: 'local';
 }>;
 
@@ -34,6 +35,7 @@ type CronRequest = Readonly<{
 type CronSessionHistoryRequest = Readonly<{
   sessionKey: string;
   limit: number;
+  scope?: ProductRuntimeScope;
 }>;
 
 type CronSessionHistoryResponse = Readonly<{
@@ -55,14 +57,14 @@ export type CronTransportResponse = Readonly<{
 }>;
 
 export interface CronTransport {
-  list(): Promise<CronTransportResponse>;
+  list(scope?: unknown): Promise<CronTransportResponse>;
   create(request: unknown): Promise<CronTransportResponse>;
   update(request: unknown): Promise<CronTransportResponse>;
   remove(request: unknown): Promise<CronTransportResponse>;
   toggle(request: unknown): Promise<CronTransportResponse>;
   trigger(request: unknown): Promise<CronTransportResponse>;
   result(request: unknown): Promise<CronTransportResponse>;
-  history(sessionKey: string, limit: number): Promise<CronTransportResponse>;
+  history(sessionKey: string, limit: number, scope?: unknown): Promise<CronTransportResponse>;
 }
 
 type CronE2ETraceStage =
@@ -87,14 +89,16 @@ export function createCronTransport(
   options: CronTransportOptions = {},
 ): CronTransport {
   return {
-    list: () => send('cron.list', '/api/cron/jobs', {}),
+    list: (scope) => send('cron.list', '/api/cron/jobs', scope === undefined ? {} : { scope }),
     create: (request) => send('cron.create', '/api/cron/jobs/create', request),
     update: (request) => send('cron.update', '/api/cron/jobs/update', request),
     remove: (request) => send('cron.delete', '/api/cron/jobs/delete', request),
     toggle: (request) => send('cron.toggle', '/api/cron/jobs/toggle', request),
     trigger: (request) => send('cron.trigger', '/api/cron/jobs/trigger', request),
     result: sendResult,
-    history: (sessionKey, limit) => sendHistory({ sessionKey, limit }),
+    history: async (sessionKey, limit, scope) => scope !== undefined && !isProductRuntimeScope(scope)
+      ? { status: 503, body: UNAVAILABLE }
+      : sendHistory({ sessionKey, limit, ...(scope === undefined ? {} : { scope }) }),
   };
 
   async function sendCronLoopbackJson(request: Readonly<{
@@ -127,7 +131,10 @@ export function createCronTransport(
   }
 
   async function sendResult(request: unknown): Promise<CronTransportResponse> {
-    if (!isCronResultRequest(request)) return { status: 503, body: UNAVAILABLE };
+    if (!isRecord(request)) return { status: 503, body: UNAVAILABLE };
+    const { scope, ...resultRequest } = request;
+    if ((Object.hasOwn(request, 'scope') && !isProductRuntimeScope(scope))
+      || !isCronResultRequest(resultRequest)) return { status: 503, body: UNAVAILABLE };
     const response = await sendCronLoopbackJson({
       path: '/api/cron/results',
       decision: {
@@ -167,6 +174,7 @@ export function createCronTransport(
       query: new URLSearchParams({
         sessionKey: request.sessionKey,
         limit: String(request.limit),
+        ...(request.scope === undefined ? {} : { scope: JSON.stringify(request.scope) }),
       }),
       emptyContentLength: true,
     });
@@ -188,7 +196,8 @@ export function createCronTransport(
     path: string,
     request: unknown,
   ): Promise<CronTransportResponse> {
-    if ((operation === 'cron.list' && !isEmptyObject(request))
+    if ((operation === 'cron.list' && !(isEmptyObject(request)
+      || (isRecord(request) && hasExactKeys(request, ['scope']) && isProductRuntimeScope(request.scope))))
       || (operation !== 'cron.list' && !isCronRequest(request, operation))) {
       return { status: 503, body: UNAVAILABLE };
     }
@@ -244,7 +253,8 @@ function loopbackTraceStage(status: number): CronE2ETraceStage {
 
 function isCronSessionHistoryRequest(value: unknown): value is CronSessionHistoryRequest {
   return isRecord(value)
-    && hasExactKeys(value, ['sessionKey', 'limit'])
+    && (hasExactKeys(value, ['sessionKey', 'limit'])
+      || (hasExactKeys(value, ['sessionKey', 'limit', 'scope']) && isProductRuntimeScope(value.scope)))
     && isNonEmptyString(value.sessionKey)
     && typeof value.limit === 'number'
     && Number.isSafeInteger(value.limit)
@@ -318,7 +328,7 @@ function isEndpoint(value: unknown): value is Endpoint {
   return isRecord(value)
     && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
     && value.kind === 'native-runtime'
-    && value.runtimeAdapterId === 'openclaw'
+    && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
     && value.runtimeInstanceId === 'local';
 }
 

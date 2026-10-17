@@ -21,6 +21,10 @@ pub(crate) struct TaskOwnerKey(String);
 impl TaskCommand {
     pub(crate) fn route(&self) -> foundation::execution::CommandRoute<TaskOwnerKey> {
         let Self::Execute { command, .. } = self;
+        let platform::endpoint::runtime_address::RuntimeScope::Session(identity) = command.scope() else {
+            return foundation::execution::CommandRoute::Exclusive;
+        };
+        let scope_key = identity.endpoint().canonical_key();
         let key = match command {
             TaskManagerCommand::List { target }
             | TaskManagerCommand::Get { target, .. }
@@ -38,7 +42,7 @@ impl TaskCommand {
         if !key.0.is_ascii() || key.0.ends_with(['.', ' ']) {
             return foundation::execution::CommandRoute::Exclusive;
         }
-        foundation::execution::CommandRoute::Keyed(key)
+        foundation::execution::CommandRoute::Keyed(TaskOwnerKey(format!("{scope_key}:{}", key.0)))
     }
 }
 

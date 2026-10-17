@@ -12,7 +12,7 @@ pub fn describe(id: &str, scope: &Value) -> Option<Value> {
         return None;
     }
     match (id, scope.get("kind").and_then(Value::as_str)) {
-        ("workspace.file", Some("session")) => Some(file_descriptor(scope.clone())),
+        ("workspace.file", Some("agent")) => Some(file_descriptor(scope.clone())),
         ("workspace.media", Some("session")) => Some(media_descriptor(scope.clone())),
         _ => None,
     }
@@ -90,20 +90,22 @@ pub fn media_descriptor(scope: Value) -> Value {
 }
 
 fn scoped_descriptor(id: &str, kind: &str, scope: Value, operations: Vec<Value>) -> Value {
+    let identity = runtime_identity_for_scope(id, &scope)
+        .expect("workspace descriptor requires a selected runtime endpoint");
     json!({
         "id": id,
         "kind": kind,
         "scopeKind": scope.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
         "scope": scope,
         "targetKinds": target_kinds(&operations),
-        "runtimeAdapterId": "openclaw",
-        "runtimeInstanceId": "local",
+        "runtimeAdapterId": identity.runtime_adapter_id(),
+        "runtimeInstanceId": identity.runtime_instance_id(),
         "supportLevel": "native",
         "availability": "available",
         "operations": operations,
         "policyScope": id,
         "ownerModuleId": kind,
-        "routeOwnerId": "openclaw",
+        "routeOwnerId": identity.runtime_adapter_id(),
     })
 }
 
@@ -111,13 +113,12 @@ fn runtime_identity_for_scope(
     id: &str,
     scope: &Value,
 ) -> Option<runtime_directory::RuntimeDriverIdentity> {
-    if id != "workspace.file" && id != "workspace.media" {
-        return None;
-    }
-    if scope.get("kind").and_then(Value::as_str)? != "session" {
-        return None;
-    }
-    runtime_identity_for_endpoint(scope.get("identity")?.get("endpoint")?)
+    let endpoint = match (id, scope.get("kind").and_then(Value::as_str)) {
+        ("workspace.file", Some("agent")) => scope.get("endpoint")?,
+        ("workspace.media", Some("session")) => scope.get("identity")?.get("endpoint")?,
+        _ => return None,
+    };
+    runtime_identity_for_endpoint(endpoint)
 }
 
 fn runtime_identity_for_endpoint(

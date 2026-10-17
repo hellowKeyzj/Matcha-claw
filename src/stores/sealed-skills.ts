@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { useAccountStore } from '@/stores/account';
 import { hostApiFetch } from '@/lib/host-api';
-import { waitForSkillsMutation } from '@/lib/skills';
+import { waitForSkillsMutation, requireSkillsScope, selectedSkillsScope } from '@/lib/skills';
+import { buildCapabilityScopeKey, runtimeScopeQuery, type RuntimeScope } from '@/types/desktop/runtime-address';
 import { AppError, normalizeAppError } from '@/lib/error-model';
 import { sealedSkillMutationError } from '@/lib/sealed-skills-error';
 import { runCloudPackageOperation } from '@/lib/cloud-package-call';
@@ -47,7 +48,11 @@ type SealedSkillCloudMutationResult = {
 };
 
 interface SealedSkillsState {
+  scopeKey: string | null;
+  scopeGeneration: number;
+  setScope: (scope: RuntimeScope | null) => void;
   skills: SealedSkillMetadata[];
+  snapshotReady: boolean;
   issues: SealedSkillCatalogIssue[];
   cloudPackages: SealedSkillCloudPackage[];
   installedCloudPackages: InstalledCloudPackage[];
@@ -135,16 +140,16 @@ async function hostListCloudSkillPackages(): Promise<SealedSkillCloudPackagesRes
   return hostApiFetch<SealedSkillCloudPackagesResult>(SEALED_SKILL_CLOUD_ENDPOINTS.list);
 }
 
-async function hostUploadInstalledSkillPackageToCloud(skillKey: string): Promise<{ package: CloudPackageVersion; warning?: 'cleanup-failed' }> {
+async function hostUploadInstalledSkillPackageToCloud(skillKey: string, scope: ReturnType<typeof requireSkillsScope>): Promise<{ package: CloudPackageVersion; warning?: 'cleanup-failed' }> {
   const receipt = await hostApiFetch<CallReceipt>(SEALED_SKILL_CLOUD_ENDPOINTS.uploadInstalledPackage, {
     method: 'POST',
-    body: JSON.stringify({ skillKey }),
+    body: JSON.stringify({ skillKey, scope }),
   });
-  const exported = await waitForSkillsMutation(receipt, 'sealedSkills.exportCloud', { skillKey });
+  const exported = await waitForSkillsMutation(receipt, 'sealedSkills.exportCloud', { skillKey, scope });
   const warning: 'cleanup-failed' | undefined = exported.outcome === 'partial' && exported.reason === 'cleanup-failed' ? 'cleanup-failed' : undefined;
   if (exported.outcome !== 'accepted' && !warning) throw sealedSkillMutationError(exported);
   try {
-    const uploaded = await runCloudPackageOperation('confirmSealedSkillUpload', { callId: receipt.callId });
+    const uploaded = await runCloudPackageOperation('confirmSealedSkillUpload', { callId: receipt.callId, scope });
     return { package: uploaded, ...(warning ? { warning } : {}) };
   } catch (error) {
     if (!warning) throw error;
@@ -155,22 +160,23 @@ async function hostUploadInstalledSkillPackageToCloud(skillKey: string): Promise
   }
 }
 
-async function hostInstallLocalSkillPackage(): Promise<SealedSkillCloudMutationResult> {
+async function hostInstallLocalSkillPackage(scope: ReturnType<typeof requireSkillsScope>): Promise<SealedSkillCloudMutationResult> {
   const receipt = await hostApiFetch<CallReceipt | { outcome: 'canceled' }>(SEALED_SKILL_LOCAL_ENDPOINTS.install, {
     method: 'POST',
+    body: JSON.stringify({ scope }),
     timeoutMs: 120000,
   });
   if ('outcome' in receipt && receipt.outcome === 'canceled') return receipt;
-  const result = await waitForSkillsMutation(receipt, 'sealedSkills.install');
+  const result = await waitForSkillsMutation(receipt, 'sealedSkills.install', { scope });
   if (result.outcome === 'removed' || result.outcome === 'partial') throw new Error('Invalid Skills install result');
   return { ...result, outcome: result.outcome };
 }
 
-async function hostInstallCloudSkillPackage(packageInfo: SealedSkillCloudPackage): Promise<SealedSkillCloudMutationResult> {
+async function hostInstallCloudSkillPackage(packageInfo: SealedSkillCloudPackage, scope: ReturnType<typeof requireSkillsScope>): Promise<SealedSkillCloudMutationResult> {
   const request = buildCloudPackageRequest(packageInfo);
-  const response = await runCloudPackageOperation('install', request);
+  const response = await runCloudPackageOperation('install', { ...request, scope });
   if (response.packageVersionId !== request.packageVersionId) throw new Error('Invalid cloud package installation identity');
-  const installed = await waitForSkillsMutation(response.install, 'sealedSkills.install');
+  const installed = await waitForSkillsMutation(response.install, 'sealedSkills.install', { scope });
   const confirmed = await hostApiFetch<Pick<SealedSkillCloudMutationResult, 'install'>>('/api/packages/install/confirm', {
     method: 'POST',
     body: JSON.stringify({ callId: response.install.callId }),
@@ -182,12 +188,12 @@ async function hostInstallCloudSkillPackage(packageInfo: SealedSkillCloudPackage
   return { ...response, install: { ...confirmed.install, reason: installed.reason } };
 }
 
-async function hostUninstallSealedSkill(skillKey: string) {
+async function hostUninstallSealedSkill(skillKey: string, scope: ReturnType<typeof requireSkillsScope>) {
   const receipt = await hostApiFetch<CallReceipt>('/api/sealed-skills/uninstall', {
     method: 'POST',
-    body: JSON.stringify({ skillKey }),
+    body: JSON.stringify({ skillKey, scope }),
   });
-  return waitForSkillsMutation(receipt, 'sealedSkills.uninstall', { skillKey });
+  return waitForSkillsMutation(receipt, 'sealedSkills.uninstall', { skillKey, scope });
 }
 
 let cloudAccountRevision = 0;
@@ -211,8 +217,40 @@ function clearCloudAccountPackages(error: AppError | null = null): void {
   });
 }
 
+function scopedMutation(): {
+  scope: ReturnType<typeof requireSkillsScope>;
+  set: (partial: Partial<SealedSkillsState> | ((state: SealedSkillsState) => Partial<SealedSkillsState>)) => void;
+  current: () => boolean;
+} {
+  const scope = requireSkillsScope();
+  useSealedSkillsStore.getState().setScope(scope);
+  const key = buildCapabilityScopeKey(scope);
+  const generation = useSealedSkillsStore.getState().scopeGeneration;
+  const current = (): boolean => {
+    const selected = selectedSkillsScope();
+    return Boolean(selected && buildCapabilityScopeKey(selected) === key
+      && useSealedSkillsStore.getState().scopeGeneration === generation);
+  };
+  const set = (partial: Partial<SealedSkillsState> | ((state: SealedSkillsState) => Partial<SealedSkillsState>)) => {
+    if (current()) useSealedSkillsStore.setState(partial);
+  };
+  return { scope, set, current };
+}
+
 export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
+  scopeKey: null,
+  scopeGeneration: 0,
+  setScope: (scope) => {
+    const scopeKey = scope ? buildCapabilityScopeKey(scope) : null;
+    if (scopeKey === get().scopeKey) return;
+    set((state) => ({
+      scopeKey, scopeGeneration: state.scopeGeneration + 1,
+      skills: [], snapshotReady: false, issues: [], loading: false, error: null, localPackageInstalling: false,
+      exportingBySkillKey: {}, uninstallingBySkillKey: {}, cloudUploadingBySkillKey: {}, cloudInstallingByPackageKey: {},
+    }));
+  },
   skills: [],
+  snapshotReady: false,
   issues: [],
   cloudPackages: [],
   installedCloudPackages: [],
@@ -233,11 +271,14 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
   cloudError: null,
 
   fetchSealedSkills: async () => {
+    if (!selectedSkillsScope()) { get().setScope(null); return; }
+    const { scope, set } = scopedMutation();
     set({ loading: true, error: null });
     try {
-      const result = await hostApiFetch<SealedSkillsStatusResult>('/api/sealed-skills/status');
+      const result = await hostApiFetch<SealedSkillsStatusResult>(`/api/sealed-skills/status?${runtimeScopeQuery(scope)}`);
       set({
         skills: Array.isArray(result.skills) ? result.skills.map(toSealedSkillMetadata) : [],
+        snapshotReady: get().snapshotReady || !result.error,
         issues: result.issues ?? [],
         error: result.error ?? null,
       });
@@ -339,6 +380,7 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
   },
 
   exportSkillPackage: async (skillKey) => {
+    const { scope, set, current } = scopedMutation();
     const normalizedSkillKey = skillKey.trim();
     if (!normalizedSkillKey || get().exportingBySkillKey[normalizedSkillKey]) {
       return;
@@ -351,14 +393,16 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
     try {
       const receipt = await hostApiFetch<CallReceipt>('/api/sealed-skills/export', {
         method: 'POST',
-        body: JSON.stringify({ skillKey: normalizedSkillKey }),
+        body: JSON.stringify({ skillKey: normalizedSkillKey, scope }),
       });
-      const result = await waitForSkillsMutation(receipt, 'sealedSkills.export', { skillKey: normalizedSkillKey });
+      const result = await waitForSkillsMutation(receipt, 'sealedSkills.export', { skillKey: normalizedSkillKey, scope });
       const warning: 'cleanup-failed' | undefined = result.outcome === 'partial' && result.reason === 'cleanup-failed' ? 'cleanup-failed' : undefined;
       if (result.outcome !== 'accepted' && !warning) {
         throw sealedSkillMutationError(result);
       }
+      if (!current()) return;
       await get().fetchSealedSkills();
+      if (!current()) return;
       return { refreshed: get().error === null, ...(warning ? { warning } : {}) };
     } finally {
       set((state) => {
@@ -370,6 +414,7 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
   },
 
   uninstallSealedSkill: async (skillKey) => {
+    const { scope, set, current } = scopedMutation();
     const normalizedSkillKey = skillKey.trim();
     if (!normalizedSkillKey || get().uninstallingBySkillKey[normalizedSkillKey]) {
       return;
@@ -380,12 +425,14 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
     }));
 
     try {
-      const result = await hostUninstallSealedSkill(normalizedSkillKey);
+      const result = await hostUninstallSealedSkill(normalizedSkillKey, scope);
       if (result.outcome !== 'removed') {
         throw sealedSkillMutationError(result);
       }
+      if (!current()) return;
       await get().fetchSealedSkills();
       await cloudFetchTask;
+      if (!current()) return;
       await get().fetchCloudSkillPackages();
     } finally {
       set((state) => {
@@ -397,6 +444,7 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
   },
 
   uploadInstalledSkillPackageToCloud: async (skillKey) => {
+    const { scope, set, current } = scopedMutation();
     const normalizedSkillKey = skillKey.trim();
     if (!normalizedSkillKey || get().cloudUploadingBySkillKey[normalizedSkillKey]) {
       return;
@@ -406,9 +454,11 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
       cloudUploadingBySkillKey: { ...state.cloudUploadingBySkillKey, [normalizedSkillKey]: true },
     }));
     try {
-      const result = await hostUploadInstalledSkillPackageToCloud(normalizedSkillKey);
+      const result = await hostUploadInstalledSkillPackageToCloud(normalizedSkillKey, scope);
       await myCloudFetchTask;
+      if (!current()) return;
       await get().fetchMyCloudSkillPackages();
+      if (!current()) return;
       return { refreshed: get().myCloudError === null, ...(result.warning ? { warning: result.warning } : {}) };
     } finally {
       set((state) => {
@@ -419,26 +469,29 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
     }
   },
 
-  installLocalSkillPackage: async () => {
+  installLocalSkillPackage: async (): Promise<boolean> => {
+    const { scope, set, current } = scopedMutation();
     if (get().localPackageInstalling) {
       return false;
     }
 
     set({ localPackageInstalling: true });
     try {
-      const result = await hostInstallLocalSkillPackage();
+      const result = await hostInstallLocalSkillPackage(scope);
       if (result.outcome === 'canceled') {
         return false;
       }
       assertCloudMutationAccepted(result);
+      if (!current()) return false;
       await get().fetchSealedSkills();
-      return true;
+      return current();
     } finally {
       set({ localPackageInstalling: false });
     }
   },
 
   downloadAndInstallCloudSkillPackage: async (packageInfo) => {
+    const { scope, set, current } = scopedMutation();
     const packageKey = getSealedSkillCloudPackageKey(packageInfo);
     if (get().cloudInstallingByPackageKey[packageKey]) {
       return;
@@ -449,10 +502,12 @@ export const useSealedSkillsStore = create<SealedSkillsState>((set, get) => ({
     }));
 
     try {
-      const result = await hostInstallCloudSkillPackage(packageInfo);
+      const result = await hostInstallCloudSkillPackage(packageInfo, scope);
       assertCloudMutationAccepted(result);
+      if (!current()) return;
       await get().fetchSealedSkills();
       await cloudFetchTask;
+      if (!current()) return;
       await get().fetchCloudSkillPackages();
     } finally {
       set((state) => {

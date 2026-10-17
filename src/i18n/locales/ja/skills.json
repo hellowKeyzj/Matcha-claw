@@ -115,6 +115,7 @@
         "search": "スキルパッケージを検索",
         "packageInstalled": "インストール済み",
         "packageAvailable": "未インストール",
+        "enabledLoadUnconfirmed": "インストール済み・有効 · 現在のセッションでの読み込みは未確認",
         "mineTitle": "自分のクラウドパッケージ",
         "mineDescription": "アップロードは下書きとして保存され、公開操作でマーケットに掲載されます。",
         "mineEmpty": "アップロード済みのパッケージはありません。",

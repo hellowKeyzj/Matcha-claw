@@ -23,8 +23,9 @@ fn wire() -> serde_json::Value {
         "deliveryVerificationKey": "MCowBQYDK2VwAyEAI3qD__Jv49yWsjljbNRbVm11047IMl5xFBflSPOROKE",
         "runtimeHostTransportPort": 34101,
         "matcha": {
-            "bunExecutable": format!("{ROOT}/bun"),
-            "entry": format!("{ROOT}/app-server.mjs"),
+            "serverExecutable": format!("{ROOT}/matcha-app-server"),
+            "cliExecutable": format!("{ROOT}/bun"),
+            "cliArgs": [format!("{ROOT}/cli-bun.js")],
             "workingDirectory": ROOT,
             "storageRoot": format!("{ROOT}/storage"),
             "port": 34102,
@@ -97,8 +98,9 @@ fn materializable_wire(root: &TestRoot) -> serde_json::Value {
     value["appLogDir"] = serde_json::Value::String(root.path("userdata/logs"));
     value["runtimeHostStateDir"] = serde_json::Value::String(root.runtime_host_state_dir());
     value["runtimeHostMcpExecutable"] = serde_json::Value::String(root.path("runtime-host"));
-    value["matcha"]["bunExecutable"] = serde_json::Value::String(root.path("bun"));
-    value["matcha"]["entry"] = serde_json::Value::String(root.path("app-server.mjs"));
+    value["matcha"]["serverExecutable"] = serde_json::Value::String(root.path("matcha-app-server"));
+    value["matcha"]["cliExecutable"] = serde_json::Value::String(root.path("bun"));
+    value["matcha"]["cliArgs"] = serde_json::json!([root.path("cli-bun.js")]);
     value["matcha"]["workingDirectory"] = serde_json::Value::String(root.path("work"));
     value["matcha"]["storageRoot"] = serde_json::Value::String(root.path("storage"));
     value["openClaw"]["electronImage"] = serde_json::Value::String(root.path("MatchaClaw"));
@@ -256,8 +258,11 @@ fn materializes_host_and_organization_runtime_input() {
     let webhook_token = parts.webhook_token;
     assert_eq!(parts.runtime_host_transport_port, 34101);
 
-    assert_eq!(input.matcha.bun_executable, Path::new(&root.path("bun")));
-    assert_eq!(input.matcha.entry, Path::new(&root.path("app-server.mjs")));
+    assert_eq!(
+        input.matcha.server_executable,
+        Path::new(&root.path("matcha-app-server"))
+    );
+    assert_eq!(input.matcha.cli_executable, Path::new(&root.path("bun")));
     assert_eq!(
         input.matcha.working_directory,
         Path::new(&root.path("work"))

@@ -3,6 +3,7 @@ mod api;
 mod application;
 mod call;
 pub mod capability;
+pub mod media;
 mod domain;
 mod owner;
 pub mod ports;

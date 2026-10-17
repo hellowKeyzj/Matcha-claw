@@ -156,7 +156,8 @@ mod tests {
                             { "family": "workspace", "availability": "supported" },
                             { "family": "skill", "availability": "supported" },
                             { "family": "channel", "availability": "supported" },
-                            { "family": "lifecycle", "availability": "supported" }
+                            { "family": "lifecycle", "availability": "supported" },
+                            { "family": "usage", "availability": "supported" }
                         ],
                         "controlState": { "connection": null, "readiness": { "ready": true, "phase": "ready" }, "capabilities": null, "updatedAt": null }
                     },
@@ -170,21 +171,22 @@ mod tests {
                         "location": { "kind": "local" },
                         "lifecycle": { "phase": "ready", "connected": true, "ready": true, "updatedAt": null },
                         "displayName": "Matcha Agent",
-                        "agentIds": ["matcha"],
-                        "defaultAgentId": "matcha",
-                        "agents": [{ "agentId": "matcha", "source": "discovered", "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true, "supportsGoal": false } }],
+                        "agentIds": [],
+                        "defaultAgentId": "",
+                        "agents": [],
                         "acceptsDynamicAgents": true,
                         "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true, "supportsGoal": false },
                         "capabilityFamilies": [
                             { "family": "session", "availability": "supported" },
-                            { "family": "task", "availability": "unsupported" },
-                            { "family": "subagent", "availability": "unsupported" },
+                            { "family": "task", "availability": "supported" },
+                            { "family": "subagent", "availability": "supported" },
                             { "family": "team", "availability": "supported" },
-                            { "family": "cron", "availability": "unsupported" },
-                            { "family": "workspace", "availability": "unsupported" },
-                            { "family": "skill", "availability": "unsupported" },
-                            { "family": "channel", "availability": "unsupported" },
-                            { "family": "lifecycle", "availability": "supported" }
+                            { "family": "cron", "availability": "supported" },
+                            { "family": "workspace", "availability": "supported" },
+                            { "family": "skill", "availability": "supported" },
+                            { "family": "channel", "availability": "supported" },
+                            { "family": "lifecycle", "availability": "supported" },
+                            { "family": "usage", "availability": "supported" }
                         ],
                         "controlState": { "connection": null, "readiness": { "ready": true, "phase": "ready" }, "capabilities": null, "updatedAt": null }
                     }

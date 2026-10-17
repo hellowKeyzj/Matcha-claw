@@ -2,7 +2,7 @@ import { hasExactKeys, isNonEmptyBoundedText, isRecord } from '../client';
 
 export type Endpoint = Readonly<{
   kind: 'native-runtime';
-  runtimeAdapterId: 'openclaw';
+  runtimeAdapterId: 'openclaw' | 'matcha-agent';
   runtimeInstanceId: 'local';
 }>;
 
@@ -12,13 +12,19 @@ export type SessionScope = Readonly<{
   sessionKey: string;
 }>;
 
+export type AgentScope = Readonly<{
+  kind: 'agent';
+  endpoint: Endpoint;
+  agentId: string;
+}>;
+
 export type FileTarget = Readonly<{ kind: 'workspace-file' }>;
 
 export function isEndpoint(value: unknown): value is Endpoint {
   return isRecord(value)
     && hasExactKeys(value, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
     && value.kind === 'native-runtime'
-    && value.runtimeAdapterId === 'openclaw'
+    && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent')
     && value.runtimeInstanceId === 'local';
 }
 
@@ -28,6 +34,15 @@ export function isSessionScope(value: unknown): value is SessionScope {
     && value.kind === 'session'
     && isEndpoint(value.endpoint)
     && isNonEmptyBoundedText(value.sessionKey);
+}
+
+export function isAgentScope(value: unknown): value is AgentScope {
+  return isRecord(value)
+    && hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
+    && value.kind === 'agent'
+    && isEndpoint(value.endpoint)
+    && isNonEmptyBoundedText(value.agentId)
+    && value.agentId.trim().length > 0;
 }
 
 export function isFileTarget(value: unknown): value is FileTarget {

@@ -285,7 +285,9 @@ pub(super) async fn apply_prelaunch_projections(
         driver
             .preseed_matcha_workspace_identity()
             .map_err(|_| runtime_directory::RuntimeStartFailure::CompletionFailed)?;
-        let provider = provider.prepare_private_projection().await;
+        let provider = provider.prepare_private_projection(
+            runtime_directory::RuntimeDriverIdentity::open_claw().endpoint(),
+        ).await;
         if matches!(
             provider.providers,
             provider_module::ProviderConfigWriteEffect::Unknown(_)

@@ -27,7 +27,6 @@ use crate::{
 #[derive(Clone)]
 pub struct ChannelShared {
     runtime_directory: Arc<dyn ChannelRuntimeDirectory>,
-    default_endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
 }
 
 pub struct ChannelOwner {
@@ -36,7 +35,6 @@ pub struct ChannelOwner {
 
 pub struct ChannelOwnerInput {
     pub runtime_directory: Arc<dyn ChannelRuntimeDirectory>,
-    pub default_endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
 }
 
 pub struct ChannelGlobalState;
@@ -55,7 +53,6 @@ impl ChannelOwner {
         Self {
             shared: ChannelShared {
                 runtime_directory: input.runtime_directory,
-                default_endpoint: input.default_endpoint,
             },
         }
     }
@@ -260,9 +257,9 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
             }
         }
         match query {
-            ChannelQuery::Catalog { reply, .. } => {
+            ChannelQuery::Catalog { endpoint, reply, .. } => {
                 let outcome =
-                    catalog(shared.runtime_directory.as_ref(), &shared.default_endpoint).await;
+                    catalog(shared.runtime_directory.as_ref(), &endpoint).await;
                 if let Some(call) = &mut call {
                     let summary = match &outcome {
                         crate::catalog::ChannelCatalogOutcome::Catalog(_) => ChannelCallOutcome::Confirmed,
@@ -274,6 +271,7 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
                 let _ = reply.send(outcome);
             }
             ChannelQuery::ConfigRead {
+                endpoint,
                 channel_id,
                 account_id,
                 reply,
@@ -282,7 +280,7 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
                 let outcome =
                     config_read(
                         shared.runtime_directory.as_ref(),
-                        &shared.default_endpoint,
+                        &endpoint,
                         channel_id,
                         account_id,
                     )
@@ -298,12 +296,13 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
                 let _ = reply.send(outcome);
             }
             ChannelQuery::ConfigureForm {
+                endpoint,
                 channel_id, reply, ..
             } => {
                 let outcome =
                     configure_form(
                         shared.runtime_directory.as_ref(),
-                        &shared.default_endpoint,
+                        &endpoint,
                         channel_id,
                     )
                     .await;
@@ -318,6 +317,7 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
                 let _ = reply.send(outcome);
             }
             ChannelQuery::Pairing {
+                endpoint,
                 channel_id,
                 account_id,
                 reply,
@@ -326,7 +326,7 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
                 let outcome =
                     pairing(
                         shared.runtime_directory.as_ref(),
-                        &shared.default_endpoint,
+                        &endpoint,
                         channel_id,
                         account_id,
                     )
@@ -335,15 +335,16 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
                     let summary = match &outcome {
                         crate::status::ChannelPairingOutcome::Listed(_) => ChannelCallOutcome::Confirmed,
                         crate::status::ChannelPairingOutcome::Rejected => ChannelCallOutcome::Rejected,
+                        crate::status::ChannelPairingOutcome::Unsupported => ChannelCallOutcome::Unsupported,
                         _ => ChannelCallOutcome::Unknown,
                     };
                     record_error(call.finish(summary).await);
                 }
                 let _ = reply.send(outcome);
             }
-            ChannelQuery::Status { reply, .. } => {
+            ChannelQuery::Status { endpoint, reply, .. } => {
                 let outcome =
-                    status(shared.runtime_directory.as_ref(), &shared.default_endpoint).await;
+                    status(shared.runtime_directory.as_ref(), &endpoint).await;
                 if let Some(call) = &mut call {
                     let summary = match &outcome {
                         Ok(_) => ChannelCallOutcome::Confirmed,
@@ -354,9 +355,9 @@ async fn handle_channel_query(shared: ChannelShared, query: ChannelQuery) {
                 }
                 let _ = reply.send(outcome);
             }
-            ChannelQuery::Snapshot { reply, .. } => {
+            ChannelQuery::Snapshot { endpoint, reply, .. } => {
                 let outcome =
-                    snapshot(shared.runtime_directory.as_ref(), &shared.default_endpoint).await;
+                    snapshot(shared.runtime_directory.as_ref(), &endpoint).await;
                 if let Some(call) = &mut call {
                     let summary = match &outcome {
                         Ok(_) => ChannelCallOutcome::Confirmed,
@@ -439,19 +440,30 @@ async fn handle_keyed_command(
             reply,
             ..
         } => {
-            lane.insert_login_config(key.clone(), agent_id.clone(), config);
+            lane.insert_login_config(key.clone(), agent_id.clone(), config.clone());
             let effect = if cancellation.is_cancelled() {
-                ChannelMutationEffect::Login(ChannelLoginOutcome::Cancelled)
+                execute_mutation(
+                    shared.runtime_directory.as_ref(),
+                    key.clone(),
+                    ChannelMutation::StopLogin,
+                    CancellationToken::new(),
+                ).await
             } else {
-                tokio::select! {
-                    biased;
-                    effect = execute_mutation(
+                let effect = execute_mutation(
+                    shared.runtime_directory.as_ref(),
+                    key.clone(),
+                    ChannelMutation::LoginStart { force, timeout_ms, agent_id, config },
+                    cancellation.as_ref().clone(),
+                ).await;
+                if cancellation.is_cancelled() {
+                    execute_mutation(
                         shared.runtime_directory.as_ref(),
                         key.clone(),
-                        ChannelMutation::LoginStart { force, timeout_ms },
-                        cancellation.as_ref().clone(),
-                    ) => effect,
-                    _ = cancellation.cancelled() => ChannelMutationEffect::Login(ChannelLoginOutcome::Cancelled),
+                        ChannelMutation::StopLogin,
+                        CancellationToken::new(),
+                    ).await
+                } else {
+                    effect
                 }
             };
             drop(cancellation);
@@ -483,7 +495,12 @@ async fn handle_keyed_command(
                 current_qr_data_url,
             };
             let effect = if cancellation.is_cancelled() {
-                ChannelMutationEffect::Login(ChannelLoginOutcome::Cancelled)
+                execute_mutation(
+                    shared.runtime_directory.as_ref(),
+                    key.clone(),
+                    ChannelMutation::StopLogin,
+                    CancellationToken::new(),
+                ).await
             } else {
                 tokio::select! {
                     biased;
@@ -493,7 +510,9 @@ async fn handle_keyed_command(
                         mutation,
                         cancellation.as_ref().clone(),
                     ) => effect,
-                    _ = cancellation.cancelled() => ChannelMutationEffect::Login(ChannelLoginOutcome::Cancelled),
+                    _ = cancellation.cancelled() => execute_mutation(
+                        shared.runtime_directory.as_ref(), key.clone(), ChannelMutation::StopLogin, CancellationToken::new(),
+                    ).await,
                 }
             };
             drop(cancellation);
@@ -832,13 +851,15 @@ async fn execute_mutation(
                     .await;
                 ChannelMutationEffect::Control(outcome)
             }
-            ChannelMutation::LoginStart { force, timeout_ms } => {
+            ChannelMutation::LoginStart { force, timeout_ms, agent_id, config } => {
                 let outcome = ops
                     .start_channel_login(
                         key.channel_id().to_owned(),
                         force,
                         timeout_ms,
                         key.account_id().map(str::to_owned),
+                        agent_id,
+                        config,
                     )
                     .await;
                 ChannelMutationEffect::Login(outcome)
@@ -1090,7 +1111,6 @@ mod tests {
                 let task = tokio::spawn(async move {
                     let shared = ChannelShared {
                         runtime_directory: Arc::new(EmptyRuntimeDirectory),
-                        default_endpoint: runtime_endpoint(),
                     };
                     ChannelOwner::handle_keyed_command(shared, requested_key, &mut lane, command)
                         .await;

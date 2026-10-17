@@ -1,4 +1,5 @@
-import { statSync } from 'node:fs';
+import { accessSync, constants, statSync } from 'node:fs';
+import { isNativeExecutable } from './native-artifact.mjs';
 import { posix, win32 } from 'node:path';
 import { app } from 'electron';
 import { getPort } from '../../utils/config';
@@ -64,6 +65,7 @@ export interface RuntimeHostBootstrapResolverDependencies {
       | 'OPENCLAW_GATEWAY'
   ) => number;
   readonly isFile?: (absolutePath: string) => boolean;
+  readonly isExecutable?: (absolutePath: string, platform: NodeJS.Platform, arch: NodeJS.Architecture) => boolean;
   readonly resolveRuntimeHostBinary?: (
     options: ResolveRuntimeHostBinaryOptions,
     dependencies: RuntimeHostBinaryResolverDependencies
@@ -106,18 +108,30 @@ export function resolveRuntimeHostBootstrap(
     getOpenClawConfigDir: dependencies.getOpenClawConfigDir ?? getOpenClawConfigDir,
     getRuntimeHostStateDir: dependencies.getRuntimeHostStateDir ?? getRuntimeHostStateDir,
     getPort: dependencies.getPort ?? getRuntimeHostBootstrapPort,
-    isFile,
     runtimeHostBinary,
   });
 
+  const cliRoot = path.dirname(layout.matcha.cliArgs[0]!);
+  const vendorTarget = `${currentProcess.arch}-${currentProcess.platform}`;
+  const platformExecutable = platform === 'unix' ? layout.guardianExecutable : layout.gitBash;
   requireFiles(isFile, [
     currentProcess.execPath,
-    layout.matcha.bunExecutable,
-    layout.matcha.entry,
+    layout.matcha.serverExecutable,
+    layout.matcha.cliExecutable,
+    ...layout.matcha.cliArgs,
+    path.join(cliRoot, 'cli.js'),
+    path.join(cliRoot, 'vendor', 'audio-capture', vendorTarget, 'audio-capture.node'),
     layout.openClaw.entry,
     runtimeHostBinary,
-    ...(platform === 'unix' ? [layout.guardianExecutable] : [layout.gitBash]),
+    platformExecutable,
   ]);
+
+  const executable = dependencies.isExecutable ?? isNativeExecutable;
+  const ripgrep = path.join(cliRoot, 'vendor', 'ripgrep', vendorTarget, platform === 'win32' ? 'rg.exe' : 'rg');
+  if (![layout.matcha.serverExecutable, layout.matcha.cliExecutable, runtimeHostBinary, ripgrep, platformExecutable]
+    .every(file => executable(file, currentProcess.platform, currentProcess.arch))) {
+    throw new RuntimeHostBootstrapResolutionError('RUNTIME_HOST_BOOTSTRAP_ARTIFACT_NOT_FOUND');
+  }
 
   if (platform === 'unix') {
     return {
@@ -147,7 +161,6 @@ export function resolveRuntimeHostBootstrap(
 
 type RuntimeLayoutInput = {
   readonly app: RuntimeHostApp;
-  readonly isFile: (absolutePath: string) => boolean;
   readonly currentProcess: RuntimeHostProcess;
   readonly path: DeliveryPath;
   readonly platform: BootstrapPlatform;
@@ -185,14 +198,15 @@ function resolveRuntimeLayout(input: RuntimeLayoutInput): RuntimeLayout {
   const projectRoot =
     input.mode === 'development' ? requireProjectRoot(input.projectRoot, input.path) : undefined;
   const bunExecutableName = input.platform === 'win32' ? 'bun.exe' : 'bun';
-  const bunExecutable =
+  const cliExecutable =
     input.mode === 'packaged'
       ? input.path.join(resourcesRoot!, 'bin', bunExecutableName)
       : input.path.join(projectRoot!, 'resources', 'bin', input.target, bunExecutableName);
-  const entry =
-    input.mode === 'packaged'
-      ? input.path.join(resourcesRoot!, 'matcha-agent', 'dist', 'cli-bun.js')
-      : input.path.join(projectRoot!, 'matcha-agent', 'scripts', 'dev.ts');
+  const serverName = input.platform === 'win32' ? 'matcha-app-server.exe' : 'matcha-app-server';
+  const serverExecutable = input.mode === 'packaged'
+    ? input.path.join(resourcesRoot!, 'bin', input.target, serverName)
+    : input.path.join(projectRoot!, 'matcha-agent', 'app-server', 'dist', input.target, serverName);
+  const cliEntry = input.path.join(resourcesRoot ?? projectRoot!, 'matcha-agent', 'dist', 'cli-bun.js');
   const workingDirectory = input.mode === 'packaged' ? resourcesRoot! : projectRoot!;
   const openClawDir = input.mode === 'packaged'
     ? input.path.join(resourcesRoot!, 'openclaw')
@@ -223,8 +237,9 @@ function resolveRuntimeLayout(input: RuntimeLayoutInput): RuntimeLayout {
     runtimeHostMcpExecutable: input.runtimeHostBinary,
     runtimeHostTransportPort: input.getPort('MATCHACLAW_RUNTIME_HOST'),
     matcha: {
-      bunExecutable,
-      entry,
+      serverExecutable,
+      cliExecutable,
+      cliArgs: [cliEntry],
       workingDirectory,
       storageRoot,
       port: input.getPort('MATCHA_AGENT_APP_SERVER'),
@@ -274,6 +289,7 @@ function requireFiles(isFile: (absolutePath: string) => boolean, paths: readonly
 
 function runtimeHostArtifactIsFile(absolutePath: string): boolean {
   try {
+    accessSync(absolutePath, constants.R_OK);
     return statSync(absolutePath).isFile();
   } catch {
     return false;

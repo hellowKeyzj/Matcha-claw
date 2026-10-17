@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isNativeExecutable } from '../electron/main/runtime-host-delivery/native-artifact.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, '..');
@@ -73,6 +74,7 @@ export function createRuntimeHostNativeBuildPlan({ rootDir: projectRootDir, plat
     'build',
     ...(profile === 'release' ? ['--release'] : []),
     '--locked',
+    '--offline',
     '--manifest-path',
     manifestPath,
     '--target',
@@ -87,11 +89,25 @@ export function createRuntimeHostNativeBuildPlan({ rootDir: projectRootDir, plat
       cargoArgs: [...cargoBuildArgs, '--package', 'foundation', '--bin', 'runtime-host-guardian'],
       sourceBinaryPath: resolve(targetDir, cargoTarget, cargoOutputDir, 'runtime-host-guardian'),
     };
+  const appServerDir = resolve(projectRootDir ?? rootDir, 'matcha-agent', 'app-server');
+  const appServerBinary = platform === 'win32' ? 'matcha-app-server.exe' : 'matcha-app-server';
+  const appServerTargetDir = resolve(appServerDir, 'target');
+  const appServer = {
+    artifactBinaryPath: resolve(appServerDir, 'dist', targetKey, appServerBinary),
+    sourceBinaryPath: resolve(appServerTargetDir, cargoTarget, cargoOutputDir, appServerBinary),
+    cargoArgs: [
+      'build', ...(profile === 'release' ? ['--release'] : []), '--locked', '--offline',
+      '--manifest-path', resolve(appServerDir, 'Cargo.toml'),
+      '--target', cargoTarget, '--target-dir', appServerTargetDir,
+      '--bin', 'matcha-app-server',
+    ],
+  };
   return {
     artifactBinaryPath: resolve(artifactDir, binaryName),
     cargoArgs: [...cargoBuildArgs, '--package', 'runtime-host', '--bin', 'runtime-host'],
     cargoTarget,
     sourceBinaryPath: resolve(targetDir, cargoTarget, cargoOutputDir, binaryName),
+    appServer,
     ...(guardian ? { guardian } : {}),
   };
 }
@@ -131,7 +147,10 @@ function buildRuntimeHostNative(target) {
   const plan = createRuntimeHostNativeBuildPlan(target);
   requirePath(resolve(rootDir, 'runtime-host', 'Cargo.toml'), 'Cargo workspace manifest');
   requirePath(resolve(rootDir, 'runtime-host', 'Cargo.lock'), 'Cargo lockfile');
+  requirePath(resolve(rootDir, 'matcha-agent', 'app-server', 'Cargo.toml'), 'App Server manifest');
+  requirePath(resolve(rootDir, 'matcha-agent', 'app-server', 'Cargo.lock'), 'App Server lockfile');
   const artifacts = [
+    { binaryName: 'matcha-app-server', ...plan.appServer },
     { binaryName: 'runtime-host', ...plan },
     ...(plan.guardian ? [{ binaryName: 'runtime-host-guardian', ...plan.guardian }] : []),
   ];
@@ -151,6 +170,9 @@ function buildRuntimeHostNative(target) {
       throw new Error(`[build-runtime-host-native] cargo build failed with status ${result.status ?? 'unknown'}`);
     }
 
+    if (!isNativeExecutable(artifact.sourceBinaryPath, target.platform, target.arch)) {
+      throw new Error(`[build-runtime-host-native] invalid ${target.platform}-${target.arch} ${artifact.binaryName} executable`);
+    }
     copyRuntimeHostNativeBinary(artifact, artifact.binaryName);
     console.log(`[build-runtime-host-native] copied ${artifact.artifactBinaryPath}`);
   }

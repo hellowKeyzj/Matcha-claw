@@ -24,6 +24,15 @@ export function LoadingSpinner({ size = 'md', className }: LoadingSpinnerProps) 
   );
 }
 
+export function LoadingState({ label }: { label: string }) {
+  return (
+    <p role="status" className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+      <Loader2 className="size-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+      {label}
+    </p>
+  );
+}
+
 /**
  * Full page loading spinner
  */

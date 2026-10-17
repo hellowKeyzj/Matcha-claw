@@ -455,20 +455,36 @@ exports.default = async function afterPack(context) {
   const nodeModulesRoot = join(__dirname, '..', 'node_modules');
   const pluginsDestRoot = join(resourcesDir, 'openclaw-plugins');
 
-  if (process.env.SKIP_MATCHA_AGENT_BUILD !== '1') {
-    const matchaAgentDist = join(__dirname, '..', 'matcha-agent', 'dist');
-    const matchaAgentDest = join(resourcesDir, 'matcha-agent', 'dist');
-    if (!existsSync(matchaAgentDist)) {
-      throw new Error('matcha-agent/dist was not found. Run build:matcha-agent before packaging.');
+  const { isNativeExecutable } = await import('../electron/main/runtime-host-delivery/native-artifact.mjs');
+  const matchaAgentDist = join(__dirname, '..', 'matcha-agent', 'dist');
+  const matchaAgentDest = join(resourcesDir, 'matcha-agent', 'dist');
+  for (const entry of ['cli.js', 'cli-bun.js', 'cli-node.js']) {
+    if (!require('fs').statSync(join(matchaAgentDist, entry)).isFile()) {
+      throw new Error(`Missing Matcha CLI artifact: ${entry}`);
     }
-    rmSync(matchaAgentDest, { recursive: true, force: true });
-    mkdirSync(dirname(matchaAgentDest), { recursive: true });
-    cpSync(matchaAgentDist, matchaAgentDest, { recursive: true });
-    cleanupMatchaAgentVendor(join(matchaAgentDest, 'vendor'), platform, arch);
-    console.log('[after-pack] ✅ matcha-agent dist copied.');
-  } else {
-    console.log('[after-pack] SKIP_MATCHA_AGENT_BUILD=1 set; skipping matcha-agent resource copy.');
   }
+  for (const targetArch of targetArchitectures(arch)) {
+    const targetBin = join(resourcesDir, 'bin', `${platform}-${targetArch}`);
+    const extension = platform === 'win32' ? '.exe' : '';
+    for (const executable of [
+      join(targetBin, `matcha-app-server${extension}`),
+      join(targetBin, `runtime-host${extension}`),
+      join(resourcesDir, 'bin', `bun${extension}`),
+      ...(platform === 'win32'
+        ? [join(resourcesDir, 'bin', 'git-for-windows', 'bin', 'bash.exe')]
+        : [join(targetBin, 'runtime-host-guardian')]),
+      join(matchaAgentDist, 'vendor', 'ripgrep', `${targetArch}-${platform}`, `rg${extension}`),
+    ]) {
+      if (!isNativeExecutable(executable, platform, targetArch)) {
+        throw new Error(`Invalid ${platform}-${targetArch} executable artifact: ${executable}`);
+      }
+    }
+  }
+  rmSync(matchaAgentDest, { recursive: true, force: true });
+  mkdirSync(dirname(matchaAgentDest), { recursive: true });
+  cpSync(matchaAgentDist, matchaAgentDest, { recursive: true });
+  cleanupMatchaAgentVendor(join(matchaAgentDest, 'vendor'), platform, arch);
+  console.log('[after-pack] Matcha native Server and CLI execution assets verified and copied.');
 
   if (!existsSync(src)) {
     console.warn('[after-pack] ⚠️  build/openclaw/node_modules not found. Run bundle-openclaw first.');

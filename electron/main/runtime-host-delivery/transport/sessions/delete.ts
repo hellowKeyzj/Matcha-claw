@@ -1,7 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
-import { isOpenClawSessionIdentity, isOpenClawSessionScope, type OpenClawSessionIdentity as SessionIdentity } from './management-contract';
-import { sameSessionIdentity } from './session-contract';
+import { isSessionIdentity, sameSessionIdentity, type SessionIdentity } from './session-contract';
 
 const ROUTE = '/api/sessions/delete';
 const UNAVAILABLE = {
@@ -83,8 +82,8 @@ function isSessionDeleteRequest(value: unknown): value is SessionDeleteRequest {
     || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     || value.id !== 'session.management'
     || value.operationId !== 'sessions.delete'
-    || !isOpenClawSessionScope(value.scope)
-    || !isOpenClawSessionScope(value.target)
+    || !isSessionScope(value.scope)
+    || !isSessionScope(value.target)
     || !isSessionDeleteInput(value.input)
     || !sameSessionIdentity(value.scope.identity, value.target.identity)
     || !sameSessionIdentity(value.scope.identity, value.input.sessionIdentity)) {
@@ -93,8 +92,15 @@ function isSessionDeleteRequest(value: unknown): value is SessionDeleteRequest {
   return true;
 }
 
+function isSessionScope(value: unknown): value is SessionDeleteRequest['scope'] {
+  return isRecord(value)
+    && hasExactKeys(value, ['kind', 'identity'])
+    && value.kind === 'session'
+    && isSessionIdentity(value.identity);
+}
+
 function isSessionDeleteInput(value: unknown): value is SessionDeleteRequest['input'] {
   return isRecord(value)
     && hasExactKeys(value, ['sessionIdentity'])
-    && isOpenClawSessionIdentity(value.sessionIdentity);
+    && isSessionIdentity(value.sessionIdentity);
 }

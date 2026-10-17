@@ -153,7 +153,7 @@ async fn handle_request(
                 }
                 "/api/channels/catalog" | "/api/channels/configure" => {
                     let mut verifier = verifier.lock().await;
-                    let decoded = match decode(value, auth, &mut verifier, now_millis()) {
+                    let decoded = match decode(value, auth, &mut verifier, now_millis(), &endpoint) {
                         Ok(request) => request,
                         Err(DecodeError::Unauthorized) => {
                             return Response::fixed(401, "Channel authorization is invalid");

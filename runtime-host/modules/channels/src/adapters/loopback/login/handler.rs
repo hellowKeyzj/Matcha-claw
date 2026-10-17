@@ -64,7 +64,7 @@ pub async fn handle_login(
                 }
             };
             let mut verifier = verifier.lock().await;
-            let command = match decode(value, authorization, &mut verifier, now_millis()) {
+            let command = match decode(value, authorization, &mut verifier, now_millis(), &endpoint) {
                 Ok(command) => command,
                 Err(DecodeError::Unauthorized) => {
                     return (401, serde_json::json!({"outcome": "unknown"}));

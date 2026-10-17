@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { ChannelControlTransport } from '../../main/runtime-host-delivery/transport/channels/control';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
   success: false,
@@ -15,6 +16,7 @@ type RequestBody = Readonly<{
   action: 'connect' | 'disconnect';
   channel: string;
   accountId: string;
+  scope?: ProductRuntimeScope;
 }>;
 
 export async function handleChannelControlRoutes(
@@ -50,7 +52,8 @@ export async function handleChannelControlRoutes(
 
 function isRequest(value: unknown): value is RequestBody {
   if (!isRecord(value)) return false;
-  return Object.keys(value).length === 3
+  return Object.keys(value).every((key) => ['action', 'channel', 'accountId', 'scope'].includes(key))
+    && (!Object.hasOwn(value, 'scope') || isProductRuntimeScope(value.scope))
     && (value.action === 'connect' || value.action === 'disconnect')
     && isIdentity(value.channel)
     && isIdentity(value.accountId);

@@ -305,6 +305,9 @@ pub(crate) fn prepare_runtime_receipt(
     };
     let run = store.facts().run(run_id)
         .ok_or_else(|| failure(TeamCreationFailureReason::RunMissing))?;
+    if let Some(receipt) = run.runtime() {
+        return Ok(receipt.clone());
+    }
     let mut slots = BTreeSet::new();
     for role in materialization.roles() {
         slots.insert((role.role().as_str().to_owned(), RoleSessionRef::initial()));
@@ -330,17 +333,56 @@ pub(crate) fn prepare_runtime_receipt(
             .iter()
             .find(|role| role.role().as_str() == role_id)
             .ok_or_else(|| failure(TeamCreationFailureReason::StoreInvalid))?;
-        bindings.push(RoleSessionReceipt::new(
+        let binding = RoleSessionReceipt::new(
             team.clone(),
             run_id.clone(),
             role.role().clone(),
-            session_ref,
+            session_ref.clone(),
             role.agent().clone(),
             role.endpoint().clone(),
-        ));
+        );
+        bindings.push(if role.endpoint().as_str()
+            == runtime_directory::RuntimeDriverIdentity::matcha_agent().runtime_endpoint_reference()
+        {
+            RoleSessionReceipt::with_endpoint_session_id(
+                team.clone(),
+                run_id.clone(),
+                role.role().clone(),
+                session_ref,
+                matcha_role_session_id(&binding),
+                role.agent().clone(),
+                role.endpoint().clone(),
+            )
+        } else {
+            binding
+        });
     }
     RunRuntimeReceipt::try_new(run_id.clone(), bindings)
         .map_err(|_| failure(TeamCreationFailureReason::StoreInvalid))
+}
+
+fn matcha_role_session_id(binding: &RoleSessionReceipt) -> organization::EndpointSessionId {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(b"matcha-team-role-session-v1");
+    for part in [
+        binding.endpoint().as_str(),
+        binding.team_run().as_str(),
+        binding.role().as_str(),
+        binding.session_ref().as_str(),
+    ] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    let hash = digest.finalize();
+    let mut bytes: [u8; 16] = hash[..16].try_into().expect("SHA-256 contains 16 bytes");
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    organization::EndpointSessionId::try_new(format!(
+        "{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..],
+    )).expect("derived UUID is a valid endpoint session identity")
 }
 
 pub(crate) fn creation_store_failure(stage: TeamCreationStage, error: &StoreFault) -> TeamCreationFailure {

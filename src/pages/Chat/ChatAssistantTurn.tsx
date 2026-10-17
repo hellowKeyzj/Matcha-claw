@@ -353,7 +353,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
         }
         const stat = await hostFileStat({
           endpoint: sessionIdentity.endpoint,
-          sessionKey: sessionIdentity.sessionKey,
+          agentId: sessionIdentity.agentId,
           relativePath,
           ...workspaceContext,
         });

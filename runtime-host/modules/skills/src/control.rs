@@ -59,17 +59,21 @@ pub async fn execute_management_request(
     skills: &crate::SkillsModule,
     input: Value,
 ) -> ManagementOutcome {
+    let scope = match input.get("scope").cloned().and_then(|scope| crate::adapters::loopback::scope::decode(scope).ok()) {
+        Some(scope) => scope,
+        None => return ManagementOutcome::InvalidInput,
+    };
     let request = match decode_management_request(input) {
         Ok(request) => request,
         Err(_) => return ManagementOutcome::InvalidInput,
     };
-    dispatch_management_request(skills, request).await
+    dispatch_management_request(&skills.clone().with_runtime_scope(scope), request).await
 }
 
 pub fn decode_management_request(input: Value) -> Result<ManagementRequest, InvalidControlInput> {
     let request: CapabilityExecuteRequest = decode(input)?;
     if request.id != "skill.management"
-        || !is_openclaw_runtime_scope(&request.scope)
+        || crate::adapters::loopback::scope::decode(request.scope).is_err()
         || !is_skill_capability_request(&request.operation_id, &request.target, &request.input)
     {
         return Err(InvalidControlInput);
@@ -495,17 +499,4 @@ fn valid_bundle_skill_key(value: &str) -> bool {
 
 fn decode<T: for<'de> Deserialize<'de>>(input: Value) -> Result<T, InvalidControlInput> {
     serde_json::from_value(input).map_err(|_| InvalidControlInput)
-}
-
-fn is_openclaw_runtime_scope(value: &Value) -> bool {
-    let identity = runtime_directory::RuntimeDriverIdentity::open_claw();
-    value
-        == &json!({
-            "kind": "runtime-instance",
-            "endpoint": {
-                "kind": "native-runtime",
-                "runtimeAdapterId": identity.runtime_adapter_id(),
-                "runtimeInstanceId": identity.runtime_instance_id(),
-            },
-        })
 }

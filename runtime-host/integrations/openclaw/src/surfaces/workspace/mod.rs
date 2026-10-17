@@ -22,6 +22,7 @@ pub use crate::native_config::workspace::WorkspaceProjectionFixture;
 pub(crate) use access::replace_regular_file;
 pub(crate) use directory::workspace_resource_key;
 
+#[derive(Clone)]
 pub struct OpenClawWorkspaceAccess {
     config: OpenClawConfigStore,
     media: Arc<media::WorkspaceMedia>,
@@ -47,6 +48,22 @@ impl OpenClawWorkspaceAccess {
             .to_str()
             .ok_or(WorkspaceDirectoryFailure::Unavailable)?;
         Ok(TrustedWorkspaceDirectory(directory.to_owned()))
+    }
+
+    pub fn bind_agent_workspace(
+        &self,
+        agent_id: &str,
+    ) -> Result<OpenClawWorkspaceBinding, WorkspaceDirectoryFailure> {
+        let selection = self
+            .selector()
+            .map_err(|_| WorkspaceDirectoryFailure::Unavailable)?
+            .select_agent(agent_id)
+            .ok_or(WorkspaceDirectoryFailure::Unavailable)?;
+        Ok(OpenClawWorkspaceBinding {
+            files: WorkspaceFiles::new(selection),
+            media: Arc::clone(&self.media),
+            state_dir: self.config.state_dir(),
+        })
     }
 
     pub fn bind_workspace(
@@ -123,16 +140,18 @@ impl OpenClawWorkspaceAccess {
         &self,
         session_key: &str,
     ) -> Result<selection::WorkspaceSelection, WorkspaceReadFailure> {
+        self.selector()?
+            .select(session_key)
+            .ok_or(WorkspaceReadFailure::Unavailable)
+    }
+
+    fn selector(&self) -> Result<OpenClawWorkspaceSelector, WorkspaceReadFailure> {
         let config = self
             .config
             .read_workspace_selection()
             .map_err(|_| WorkspaceReadFailure::Unavailable)?;
-        let selector =
-            OpenClawWorkspaceSelector::new(self.config.state_dir_path(), &config.as_value())
-                .map_err(|_| WorkspaceReadFailure::Unavailable)?;
-        selector
-            .select(session_key)
-            .ok_or(WorkspaceReadFailure::Unavailable)
+        OpenClawWorkspaceSelector::new(self.config.state_dir_path(), &config.as_value())
+            .map_err(|_| WorkspaceReadFailure::Unavailable)
     }
 }
 

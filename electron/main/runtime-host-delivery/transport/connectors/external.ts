@@ -1,6 +1,7 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { sessionIdentitiesEqual, validateSessionIdentity, type SessionIdentity } from '../../../../../src/types/desktop/runtime-address';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 import { isConnectorObservationResult } from '../../../../../src/types/connectors-observation';
 
 const UNAVAILABLE = {
@@ -30,7 +31,7 @@ export interface ExternalConnectorsTransport {
 type Request = Readonly<{
   id: 'external.connectors';
   operationId: ExternalConnectorOperation;
-  scope: Readonly<{ kind: 'external-connector-catalog' }>;
+  scope: Readonly<{ kind: 'external-connector-catalog' }> | ProductRuntimeScope;
   target: Readonly<{ kind: 'external-connectors' }>;
   input: Record<string, unknown>;
 }>;
@@ -45,6 +46,7 @@ type ExternalConnectorOperation =
   | 'externalConnectors.sessionMcpServerEnabled'
   | 'externalConnectors.get'
   | 'externalConnectors.upsert'
+  | 'externalConnectors.update'
   | 'externalConnectors.remove';
 
 export function createExternalConnectorsTransport(
@@ -54,6 +56,12 @@ export function createExternalConnectorsTransport(
 ): ExternalConnectorsTransport {
   return {
     async execute(request: unknown): Promise<ExternalConnectorsTransportResponse> {
+      if (isRecord(request) && isCatalogScope(request.scope) && isRecord(request.input)
+        && isRuntimeObservation(request.operationId, request.input)) {
+        request = { ...request, scope: { kind: 'runtime-instance', endpoint: {
+          kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
+        } } };
+      }
       if (!isRequest(request)) return { status: 400, body: INVALID_REQUEST };
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
@@ -70,7 +78,7 @@ export function createExternalConnectorsTransport(
         body: request,
       });
       if (response?.status === 202
-        && (request.operationId === 'externalConnectors.upsert' || request.operationId === 'externalConnectors.remove' || request.operationId === 'externalConnectors.sessionMcpServerEnabled'
+        && (request.operationId === 'externalConnectors.upsert' || request.operationId === 'externalConnectors.update' || request.operationId === 'externalConnectors.remove' || request.operationId === 'externalConnectors.sessionMcpServerEnabled'
           || request.operationId === 'externalConnectors.status' || request.operationId === 'externalConnectors.probe' || request.operationId === 'externalConnectors.sessionStatus')
         && isRecord(response.body) && hasExactKeys(response.body, ['callId', 'accepted'])
         && typeof response.body.callId === 'string' && /^[a-f0-9]{32}$/.test(response.body.callId)
@@ -100,13 +108,12 @@ function isRequest(value: unknown): value is Request {
   if (!isRecord(value)
     || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     || value.id !== 'external.connectors'
-    || !isRecord(value.scope)
-    || !hasExactKeys(value.scope, ['kind'])
-    || value.scope.kind !== 'external-connector-catalog'
     || !isRecord(value.target)
     || !hasExactKeys(value.target, ['kind'])
     || value.target.kind !== 'external-connectors'
     || !isRecord(value.input)) return false;
+  if (isRuntimeObservation(value.operationId, value.input)
+    ? !isProductRuntimeScope(value.scope) : !isCatalogScope(value.scope)) return false;
 
   switch (value.operationId) {
     case 'externalConnectors.list':
@@ -140,10 +147,24 @@ function isRequest(value: unknown): value is Request {
     case 'externalConnectors.upsert':
       return hasExactKeys(value.input, ['kind', 'connector'])
         && value.input.kind === 'upsert'
-        && isConnector(value.input.connector);
+        && isConnectorInput(value.input.connector);
+    case 'externalConnectors.update':
+      return hasExactKeys(value.input, ['kind', 'connectorId', 'patch'])
+        && value.input.kind === 'update'
+        && isConnectorId(value.input.connectorId)
+        && isConnectorPatch(value.input.patch);
     default:
       return false;
   }
+}
+
+function isCatalogScope(value: unknown): boolean {
+  return isRecord(value) && hasExactKeys(value, ['kind']) && value.kind === 'external-connector-catalog';
+}
+
+function isRuntimeObservation(operation: unknown, input: Record<string, unknown>): boolean {
+  return operation === 'externalConnectors.status' || operation === 'externalConnectors.probe'
+    || (operation === 'externalConnectors.observationResult' && !Object.hasOwn(input, 'sessionIdentity'));
 }
 
 function operationKind(operation: ExternalConnectorOperation): string {
@@ -173,6 +194,39 @@ function isSuccessResponse(request: Request, value: unknown): boolean {
 }
 
 function isConnector(value: unknown): boolean {
+  return isRecord(value) && hasOnlyKeys(value, [
+    'id', 'kind', 'displayName', 'description', 'enabled', 'workspaceId', 'sourceId',
+    'mcpServerProgram', 'tags', 'url', 'transport', 'connectionTimeoutMs', 'baseUrl',
+    'provider', 'packageName', 'secretEnv', 'secretHeaders', 'secretConfigRefs',
+  ]) && isConnectorFields(value);
+}
+
+function isConnectorInput(value: unknown): boolean {
+  return isConnectorFields(value) && isRecord(value)
+    && (value.kind === 'mcp-stdio' || value.kind === 'cli' ? isNonemptyText(value.command)
+      : value.kind === 'mcp-http' ? isNonemptyText(value.url)
+        : value.kind === 'http' ? isNonemptyText(value.baseUrl) : isNonemptyText(value.provider));
+}
+
+function isConnectorPatch(value: unknown): boolean {
+  if (!isRecord(value) || !hasOnlyKeys(value, [
+    'displayName', 'description', 'enabled', 'command', 'args', 'cwd', 'env', 'secretEnv',
+    'url', 'transport', 'headers', 'secretHeaders', 'connectionTimeoutMs', 'baseUrl',
+    'provider', 'packageName', 'config', 'secretConfigRefs',
+  ])) return false;
+  return ['displayName', 'description', 'cwd', 'packageName'].every((key) => value[key] === null || optionalText(value[key]))
+    && ['command', 'url', 'baseUrl', 'provider'].every((key) => optionalText(value[key]))
+    && optionalBoolean(value.enabled)
+    && (value.args === null || optionalStringArray(value.args))
+    && ['env', 'headers'].every((key) => value[key] === null || optionalStringMap(value[key]))
+    && (value.transport === undefined || value.transport === null || value.transport === 'streamable-http' || value.transport === 'sse')
+    && (value.connectionTimeoutMs === null || optionalPositive(value.connectionTimeoutMs))
+    && (value.config === null || optionalRecord(value.config))
+    && (value.secretEnv === null || optionalSecretReferenceMap(value.secretEnv, true))
+    && ['secretHeaders', 'secretConfigRefs'].every((key) => value[key] === null || optionalSecretReferenceMap(value[key], false));
+}
+
+function isConnectorFields(value: unknown): boolean {
   if (!isRecord(value) || !hasOnlyKeys(value, [
     'id', 'kind', 'displayName', 'description', 'enabled', 'workspaceId', 'sourceId',
     'mcpServerProgram', 'tags', 'command', 'args', 'cwd', 'env', 'url', 'transport',
@@ -203,8 +257,7 @@ function isConnector(value: unknown): boolean {
 
 function isProgram(value: unknown): boolean {
   if (!isRecord(value) || !hasOnlyKeys(value, [
-    'id', 'source', 'displayName', 'connectorKinds', 'transport', 'command', 'args', 'url',
-    'rootPath', 'envKeys', 'headerKeys',
+    'id', 'source', 'displayName', 'connectorKinds', 'transport',
   ])) return false;
   return isNonemptyText(value.id)
     && isProgramSource(value.source)
@@ -212,13 +265,7 @@ function isProgram(value: unknown): boolean {
     && Array.isArray(value.connectorKinds)
     && value.connectorKinds.length > 0
     && value.connectorKinds.every((kind) => kind === 'mcp-stdio' || kind === 'mcp-http')
-    && (value.transport === undefined || value.transport === 'streamable-http' || value.transport === 'sse')
-    && optionalText(value.command)
-    && optionalStringArray(value.args)
-    && optionalText(value.url)
-    && optionalText(value.rootPath)
-    && optionalStringArray(value.envKeys)
-    && optionalStringArray(value.headerKeys);
+    && (value.transport === undefined || value.transport === 'streamable-http' || value.transport === 'sse');
 }
 
 function optionalSecretReferences(value: Record<string, unknown>, kind: unknown): boolean {

@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isProductRuntimeEndpoint, isProductRuntimeScope, type ProductRuntimeEndpoint, type ProductRuntimeScope } from '../runtime-scope';
 import type { CallReceipt } from '../../../../../src/types/call-log';
 import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import { isCallId } from '../../../../../src/types/call-log/decode';
@@ -217,7 +218,7 @@ export type SkillCapabilityTransportResponse = Readonly<{
 export interface SkillsManagementTransport {
   execute(request: unknown, traceId?: string | null): Promise<SkillCapabilityTransportResponse>;
   operationResult(request: unknown): Promise<SkillsTransportResponse<SkillsOperationResultResponse>>;
-  readStatus(): Promise<SkillsStatusTransportResponse>;
+  readStatus(scope?: unknown): Promise<SkillsStatusTransportResponse>;
   detail(request: unknown): Promise<SkillsDetailTransportResponse>;
   mutateConfig(request: unknown): Promise<SkillsConfigMutationTransportResponse>;
   installClawHub(request: unknown): Promise<ClawHubSkillInstallTransportResponse>;
@@ -239,8 +240,10 @@ export function createSkillsManagementTransport(
   return {
     execute: (request, traceId) => executeCapability(issuer, runtimeHostTransportPort, fetcher, request, traceId),
     async operationResult(request) {
-      if (!isRecord(request) || !hasExactKeys(request, ['callId']) || !isCallId(request.callId)) return rejectedResponse();
-      const observed = await createCallLogTransport(issuer, runtimeHostTransportPort, fetcher).get(request);
+      if (!isRecord(request) || !isCallId(request.callId)
+        || !(hasExactKeys(request, ['callId'])
+          || (hasExactKeys(request, ['callId', 'scope']) && isSkillsRuntimeScope(request.scope)))) return rejectedResponse();
+      const observed = await createCallLogTransport(issuer, runtimeHostTransportPort, fetcher).get({ callId: request.callId });
       if (observed.status !== 200 || !('module' in observed.body) || observed.body.module !== 'skills') return unknownResponse();
       const call = observed.body;
       if (!['succeeded', 'failed', 'rejected', 'unknown'].includes(call.status) || call.detail.resultReady !== true) return unknownResponse();
@@ -261,7 +264,7 @@ export function createSkillsManagementTransport(
       if (response?.status === 404 && isSkillsUninstallNotFoundResult(response.body)) return { status: 404, body: response.body };
       return unknownResponse();
     },
-    readStatus: () => readStatus(issuer, runtimeHostTransportPort, fetcher),
+    readStatus: (scope) => readStatus(issuer, runtimeHostTransportPort, fetcher, scope),
     detail: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.detail, request, 'skills:read', 'skills.detail', 'skills-detail', isSkillsDetailRequest, isSkillsDetailResult),
     mutateConfig: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.config, request, 'skills:config:write', 'skills.config.update', 'skills-config', isSkillsConfigMutationRequest, isSkillsMutationResult),
     installClawHub: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.clawHubInstall, request, 'skills:install', 'skills.install', 'skills-clawhub-install', isClawHubSkillInstallRequest, isSkillsMutationResult),
@@ -272,7 +275,7 @@ export function createSkillsManagementTransport(
     uninstall: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.uninstall, request, 'skills:uninstall', 'skills.uninstall', 'skills-uninstall', isSkillsUninstallRequest, isSkillsUninstallResult),
     importMarkdown: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.importMarkdown, request, 'skills:import', 'skills.import.markdown', 'skills-import-markdown', isSkillsImportMarkdownRequest, isSkillsMutationResult),
     importBundle: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.importBundle, request, 'skills:import', 'skills.import.bundle', 'skills-import-bundle', isSkillsImportBundleRequest, isSkillsMutationResult),
-    readme: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.readme, request, 'skills:read', 'skills.readme', 'skills-readme', isSkillsReadmeRequest, isSkillsReadmeResult),
+    readme: (request) => post(issuer, runtimeHostTransportPort, fetcher, SKILLS_ENDPOINTS.readme, request, 'skills:read', 'skills.readme', 'skills-readme', isSkillsReadmeRequest, (value): value is SkillsReadmeResult => isSkillsReadmeResult(value, request)),
   };
 }
 
@@ -299,7 +302,7 @@ async function executeCapability(
     return {
       valid,
       exactKeys: isRecord(request) && hasExactKeys(request, ['id', 'operationId', 'scope', 'target', 'input']),
-      scopeValid: isRecord(request) && isNativeRuntimeScope(request.scope),
+      scopeValid: isRecord(request) && isSkillsRuntimeScope(request.scope),
       targetValid: target !== null && skillTargetId(target) !== null,
       skillMatches: input?.skillKey === target?.skillId,
       slugMatches: input?.slug === undefined || input.slug === target?.slug,
@@ -336,7 +339,7 @@ async function executeCapability(
       ? { status: 202, body: response.body }
       : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
   }
-  if (response?.status === 200) return projectSkillCapabilityResult(request.operationId, response.body);
+  if (response?.status === 200) return projectSkillCapabilityResult(request, response.body);
   return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
 }
 
@@ -344,7 +347,9 @@ async function readStatus(
   issuer: RuntimeHostDeliveryIssuer,
   runtimeHostTransportPort: number,
   fetcher: typeof fetch,
+  scope?: unknown,
 ): Promise<SkillsStatusTransportResponse> {
+  if (scope !== undefined && !isSkillsRuntimeScope(scope)) return rejectedResponse();
   const response = await get<NativeSkillsStatusResult>(
     issuer,
     runtimeHostTransportPort,
@@ -354,6 +359,7 @@ async function readStatus(
     'skills.status',
     'skills-status',
     isNativeSkillsStatusResult,
+    scope,
   );
   if (response.status !== 200) return unknownResponse();
 
@@ -363,9 +369,10 @@ async function readStatus(
 }
 
 function projectSkillCapabilityResult(
-  operation: SkillCapabilityOperation,
+  request: SkillCapabilityRequest,
   body: unknown,
 ): SkillCapabilityTransportResponse {
+  const operation = request.operationId;
   if (!isRecord(body)) return { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
   if (operation === 'skills.refreshStatus') {
     const native = decodeSkillsStatus(body);
@@ -377,8 +384,9 @@ function projectSkillCapabilityResult(
     return hasExactKeys(body, ['success', 'content', 'filePath'])
       && body.success === true
       && typeof body.content === 'string'
-      && isSkillReferencePath(body.filePath)
-      && isManifestPath(body.filePath)
+      && (isMatchaAgentScope(request.scope)
+        ? isMatchaSkillManifestPath(body.filePath, request.input.skillKey)
+        : isSkillReferencePath(body.filePath) && isManifestPath(body.filePath))
       ? { status: 200, body }
       : { status: 503, body: SKILL_MANAGEMENT_UNAVAILABLE };
   }
@@ -460,7 +468,7 @@ function isSkillCapabilityRequest(value: unknown): value is SkillCapabilityReque
     || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     || value.id !== 'skill.management'
     || !isSkillCapabilityOperation(value.operationId)
-    || !isNativeRuntimeScope(value.scope)
+    || !isSkillsRuntimeScope(value.scope)
     || !isRecord(value.target)
     || !isRecord(value.input)) {
     return false;
@@ -505,15 +513,30 @@ function skillTargetId(target: Record<string, unknown>): string | null {
   return target.skillId;
 }
 
-function isNativeRuntimeScope(value: unknown): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'endpoint'])
-    && value.kind === 'runtime-instance'
-    && isRecord(value.endpoint)
-    && hasExactKeys(value.endpoint, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-    && value.endpoint.kind === 'native-runtime'
-    && value.endpoint.runtimeAdapterId === 'openclaw'
-    && value.endpoint.runtimeInstanceId === 'local';
+export type SkillsRuntimeScope = ProductRuntimeScope | Readonly<{
+  kind: 'agent';
+  endpoint: ProductRuntimeEndpoint;
+  agentId: string;
+}>;
+
+function isMatchaAgentScope(value: unknown): boolean {
+  return isSkillsRuntimeScope(value) && value.kind === 'agent';
+}
+
+function isMatchaSkillManifestPath(value: unknown, skillKey: unknown): value is string {
+  if (typeof value !== 'string' || typeof skillKey !== 'string' || value !== `skills/${skillKey}/SKILL.md`) return false;
+  const stem = skillKey.split('.')[0].replace(/[a-z]/g, (character) => character.toUpperCase());
+  return skillKey.length > 0 && skillKey !== '.' && skillKey !== '..'
+    && !/[. ]$/.test(skillKey) && !/[\p{Cc}/\\:<>"|?*]/u.test(skillKey)
+    && !/^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])$/.test(stem);
+}
+
+export function isSkillsRuntimeScope(value: unknown): value is SkillsRuntimeScope {
+  return (isProductRuntimeScope(value) && value.endpoint.runtimeAdapterId === 'openclaw')
+    || (isRecord(value) && hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
+      && value.kind === 'agent' && isProductRuntimeEndpoint(value.endpoint)
+      && value.endpoint.runtimeAdapterId === 'matcha-agent'
+      && typeof value.agentId === 'string' && /^[A-Za-z0-9_-]+$/.test(value.agentId));
 }
 
 function isCapabilityStringRecord(value: unknown): value is Record<string, string> {
@@ -598,8 +621,9 @@ async function get<T>(
   capability: string,
   subject: string,
   isSuccess: (value: unknown) => value is T,
+  runtimeScope?: SkillsRuntimeScope,
 ): Promise<SkillsTransportResponse<T>> {
-  return send(issuer, runtimeHostTransportPort, fetcher, endpoint, 'GET', undefined, scope, capability, subject, isSuccess);
+  return send(issuer, runtimeHostTransportPort, fetcher, endpoint, 'GET', undefined, scope, capability, subject, isSuccess, runtimeScope);
 }
 
 async function post<T>(
@@ -614,7 +638,10 @@ async function post<T>(
   isRequest: (value: unknown) => boolean,
   isSuccess: (value: unknown) => value is T,
 ): Promise<SkillsTransportResponse<T>> {
-  if (!isRequest(request)) return rejectedResponse();
+  if (!isRecord(request)) return rejectedResponse();
+  const { scope: runtimeScope, ...input } = request;
+  if ((Object.hasOwn(request, 'scope') && !isSkillsRuntimeScope(runtimeScope))
+    || !isRequest(input)) return rejectedResponse();
   return send(issuer, runtimeHostTransportPort, fetcher, endpoint, 'POST', request, scope, capability, subject, isSuccess);
 }
 
@@ -629,6 +656,7 @@ async function send<T>(
   capability: string,
   subject: string,
   isSuccess: (value: unknown) => value is T,
+  runtimeScope?: SkillsRuntimeScope,
 ): Promise<SkillsTransportResponse<T>> {
   const response = await sendLoopbackJson({
     port: runtimeHostTransportPort,
@@ -638,6 +666,7 @@ async function send<T>(
     method,
     fetcher,
     ...(method === 'POST' ? { body: request } : {}),
+    ...(runtimeScope === undefined ? {} : { query: new URLSearchParams({ scope: JSON.stringify(runtimeScope) }) }),
   });
   const admitted = endpoint === SKILLS_ENDPOINTS.clawHubInstall
     || endpoint === SKILLS_ENDPOINTS.clawHubUpdate
@@ -785,13 +814,14 @@ function isSkillsReadmeRequest(value: unknown): value is SkillsReadmeRequest {
     && (value.baseDir === undefined || isSkillReferencePath(value.baseDir));
 }
 
-function isSkillsReadmeResult(value: unknown): value is SkillsReadmeResult {
+function isSkillsReadmeResult(value: unknown, request: unknown): value is SkillsReadmeResult {
   return isRecord(value)
     && hasExactKeys(value, ['success', 'content', 'filePath'])
     && value.success === true
     && isBoundedText(value.content, 48 * 1024)
-    && isSkillReferencePath(value.filePath)
-    && isManifestPath(value.filePath);
+    && (isRecord(request) && isMatchaAgentScope(request.scope)
+      ? isMatchaSkillManifestPath(value.filePath, request.skillKey)
+      : isSkillReferencePath(value.filePath) && isManifestPath(value.filePath));
 }
 
 function isSkillsUninstallResult(value: unknown): value is SkillsUninstallResult {

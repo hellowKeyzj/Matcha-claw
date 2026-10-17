@@ -4,18 +4,15 @@ import { useTranslation } from 'react-i18next';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { StructuredTablePreview } from '@/pages/Chat/components/StructuredTablePreview';
-import { hostFileReadBinary } from '@/lib/host-api';
+import { hostFileReadBinary, type WorkspaceFileContext } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
-import type {
-  SessionIdentity,
-} from '../../types/desktop/runtime-address';
 
 const SHEET_MAX_BYTES = 50 * 1024 * 1024;
 const ROWS_PER_PAGE = 200;
 
 interface SheetViewerProps {
   relativePath: string;
-  sessionIdentity?: SessionIdentity;
+  workspaceContext?: WorkspaceFileContext;
   className?: string;
 }
 
@@ -80,13 +77,14 @@ function formatCell(value: unknown): string {
 
 export function SheetViewer({
   relativePath,
-  sessionIdentity,
+  workspaceContext,
   className,
 }: SheetViewerProps) {
   const { t } = useTranslation('chat');
   const [state, setState] = useState<SheetLoadState>({ status: 'loading' });
   const [sheetIndex, setSheetIndex] = useState(0);
   const [page, setPage] = useState(0);
+  const agentScope = workspaceContext?.agentScope;
 
   useEffect(() => {
     let cancelled = false;
@@ -96,14 +94,14 @@ export function SheetViewer({
 
     void (async () => {
       try {
-        if (!sessionIdentity) {
-          throw new Error('SessionIdentity is required');
+        if (!agentScope) {
+          throw new Error('AgentScope is required');
         }
         const result = await hostFileReadBinary({
           relativePath,
           maxBytes: SHEET_MAX_BYTES,
-          endpoint: sessionIdentity.endpoint,
-          sessionKey: sessionIdentity.sessionKey,
+          endpoint: agentScope.endpoint,
+          agentId: agentScope.agentId,
         });
         if (cancelled) {
           return;
@@ -165,7 +163,7 @@ export function SheetViewer({
     return () => {
       cancelled = true;
     };
-  }, [relativePath, sessionIdentity]);
+  }, [relativePath, agentScope]);
 
   const activeSheet = state.status === 'ready' ? state.sheets[sheetIndex] ?? null : null;
   const totalRows = activeSheet?.rowCount ?? 0;

@@ -143,7 +143,7 @@ async fn execute_task(
             Some(CallFailure::AdmissionClosed),
         );
     }
-    let Some(ops) = shared.runtime_directory.task_ops() else {
+    let Some(ops) = shared.runtime_directory.task_ops(command.scope()) else {
         return (
             failure_for_unavailable_ops(command),
             Some(CallFailure::Unsupported),

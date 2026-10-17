@@ -45,6 +45,18 @@ impl Projection {
         Ok(Self { values, agent_id })
     }
 
+    pub fn from_matcha_source(
+        values: BTreeMap<String, String>,
+        agent_id: String,
+    ) -> Result<Self, ()> {
+        if !valid_matcha_agent_id(&agent_id) {
+            return Err(());
+        }
+        let mut projection = Self::from_source(values, None)?;
+        projection.agent_id = Some(agent_id);
+        Ok(projection)
+    }
+
     pub fn values(&self) -> &BTreeMap<String, String> {
         &self.values
     }
@@ -56,6 +68,13 @@ pub enum Outcome {
     TargetRejected,
     Unavailable,
     Unknown,
+}
+
+pub fn valid_matcha_agent_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 pub fn valid_identity(value: &str) -> bool {

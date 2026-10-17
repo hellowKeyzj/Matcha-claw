@@ -1,4 +1,5 @@
 use foundation::execution::{CommandRoute, QueryRoute};
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 use tokio::sync::oneshot;
 
 use crate::model::{
@@ -9,7 +10,7 @@ use crate::{call::CronCall, ports::CronRequestAdmissionClosed};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum CronOwnerKey {
-    Job(String),
+    Job(String, String),
 }
 
 pub(crate) enum MutationCommand {
@@ -57,10 +58,12 @@ impl MutationCommand {
 
 pub(crate) enum CronCommand {
     Mutate {
+        endpoint: RuntimeEndpoint,
         command: MutationCommand,
         call: CronCall,
     },
     Trigger {
+        endpoint: RuntimeEndpoint,
         job_id: String,
         call: Option<CronCall>,
         reply: oneshot::Sender<Result<CronTriggerResult, CronRequestAdmissionClosed>>,
@@ -72,10 +75,12 @@ pub(crate) enum CronCommand {
 
 pub(crate) enum CronQuery {
     List {
+        endpoint: RuntimeEndpoint,
         call: Option<CronCall>,
         reply: oneshot::Sender<CronListOutcome>,
     },
     LoadHistory {
+        endpoint: RuntimeEndpoint,
         command: CronHistoryCommand,
         call: Option<CronCall>,
         reply: oneshot::Sender<CronHistoryOutcome>,
@@ -85,13 +90,18 @@ pub(crate) enum CronQuery {
 impl CronCommand {
     pub(crate) fn route(&self) -> CommandRoute<CronOwnerKey> {
         match self {
-            Self::Mutate { command, .. } => match command.job_id() {
-                Some(job_id) => CommandRoute::Keyed(CronOwnerKey::Job(job_id.to_owned())),
+            Self::Mutate {
+                endpoint, command, ..
+            } => match command.job_id() {
+                Some(job_id) => CommandRoute::Keyed(CronOwnerKey::Job(
+                    endpoint.canonical_key(),
+                    job_id.to_owned(),
+                )),
                 None => CommandRoute::Exclusive,
             },
-            Self::Trigger { job_id, .. } => {
-                CommandRoute::Keyed(CronOwnerKey::Job(job_id.clone()))
-            }
+            Self::Trigger {
+                endpoint, job_id, ..
+            } => CommandRoute::Keyed(CronOwnerKey::Job(endpoint.canonical_key(), job_id.clone())),
             Self::CancelOperations { .. } => CommandRoute::Exclusive,
         }
     }
@@ -101,9 +111,12 @@ impl CronQuery {
     pub(crate) fn route(&self) -> QueryRoute<CronOwnerKey> {
         match self {
             Self::List { .. } => QueryRoute::Exclusive,
-            Self::LoadHistory { command, .. } => {
-                QueryRoute::Keyed(CronOwnerKey::Job(command.job_id().to_owned()))
-            }
+            Self::LoadHistory {
+                endpoint, command, ..
+            } => QueryRoute::Keyed(CronOwnerKey::Job(
+                endpoint.canonical_key(),
+                command.job_id().to_owned(),
+            )),
         }
     }
 }

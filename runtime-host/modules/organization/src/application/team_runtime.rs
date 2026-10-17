@@ -492,12 +492,15 @@ pub enum TeamRuntimeCommand {
     },
     DependencyPlan {
         package_root: PathBuf,
+        endpoint: organization::RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
     },
     ProvisionAgents {
         package_root: PathBuf,
         team_id: Option<TeamId>,
         idempotency_key: IdempotencyKey,
         endpoint: organization::RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
         source: TeamRuntimeCreateSource,
         manual_team: Option<ManualTeamProvision>,
     },
@@ -509,6 +512,8 @@ pub enum TeamRuntimeCommand {
     RunCreate {
         team_id: Option<TeamId>,
         package_root: PathBuf,
+        endpoint: organization::RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
         run_id: Option<GraphRunId>,
         idempotency_key: IdempotencyKey,
         source: TeamRuntimeCreateSource,
@@ -697,7 +702,7 @@ pub fn decode_team_runtime_command(
                 .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
             if target.len() != 2
                 || target.get("kind") != Some(&json!("team"))
-                || input.len() != 1
+                || input.len() != 1 + usize::from(operation_id == "team.dependencyPlan" && input.contains_key("sourceAgentId"))
                 || target.get("packagePath") != input.get("packagePath")
             {
                 return Err(TeamRuntimeDecodeError::InvalidInput);
@@ -711,7 +716,8 @@ pub fn decode_team_runtime_command(
             if operation_id == "team.packageValidate" {
                 Ok(TeamRuntimeCommand::PackageValidate { package_root })
             } else {
-                Ok(TeamRuntimeCommand::DependencyPlan { package_root })
+                let source_agent = decode_source_agent(input.get("sourceAgentId"), &endpoint, TeamRuntimeCreateSource::TeamSkill)?;
+                Ok(TeamRuntimeCommand::DependencyPlan { package_root, endpoint, source_agent })
             }
         }
         "team.provisionAgents" => decode_team_provision(input, target, endpoint),
@@ -756,7 +762,7 @@ pub fn decode_team_runtime_command(
         | "team.designSnapshot"
         | "team.designGraphPatch" => super::design::decode(operation_id, input, target),
         "team.runStart" => decode_team_run_start(input, target),
-        "team.runCreate" => decode_team_run_create(input, target),
+        "team.runCreate" => decode_team_run_create(input, target, endpoint),
         "team.webhookTriggerFire" => decode_team_webhook_trigger(input, target),
         "team.graphSave" => decode_team_graph_save(input, target),
         "team.graphPatch" => decode_team_graph_patch(input, target),
@@ -890,6 +896,7 @@ fn decode_team_run_delete(
 fn decode_team_run_create(
     input: &serde_json::Map<String, Value>,
     target: &Value,
+    endpoint: organization::RuntimeEndpointReference,
 ) -> Result<TeamRuntimeCommand, TeamRuntimeDecodeError> {
     let target = target
         .as_object()
@@ -903,7 +910,7 @@ fn decode_team_run_create(
     if !input.keys().all(|key| {
         matches!(
             key.as_str(),
-            "packagePath" | "teamId" | "runId" | "idempotencyKey" | "sourceType"
+            "packagePath" | "teamId" | "runId" | "idempotencyKey" | "sourceType" | "sourceAgentId"
         )
     }) {
         return Err(TeamRuntimeDecodeError::InvalidInput);
@@ -926,9 +933,12 @@ fn decode_team_run_create(
         .transpose()?;
     let idempotency_key = decode_idempotency_key(input, "idempotencyKey")?;
     let source = decode_team_runtime_source(input.get("sourceType"))?;
+    let source_agent = decode_source_agent(input.get("sourceAgentId"), &endpoint, source)?;
     Ok(TeamRuntimeCommand::RunCreate {
         team_id,
         package_root: PathBuf::from(package_path),
+        endpoint,
+        source_agent,
         run_id,
         idempotency_key,
         source,
@@ -977,6 +987,22 @@ fn decode_team_runtime_source(
     }
 }
 
+fn decode_source_agent(
+    value: Option<&Value>,
+    endpoint: &organization::RuntimeEndpointReference,
+    source: TeamRuntimeCreateSource,
+) -> Result<Option<organization::ManagedAgentReference>, TeamRuntimeDecodeError> {
+    if matches!(source, TeamRuntimeCreateSource::Manual) {
+        return if value.is_none() { Ok(None) } else { Err(TeamRuntimeDecodeError::InvalidInput) };
+    }
+    match value {
+        Some(Value::String(id)) if !id.trim().is_empty() => organization::ManagedAgentReference::try_new(id.clone())
+            .map(Some).map_err(|_| TeamRuntimeDecodeError::InvalidInput),
+        None if endpoint.as_str() == "endpoint:openclaw" => Ok(None),
+        _ => Err(TeamRuntimeDecodeError::InvalidInput),
+    }
+}
+
 fn decode_team_provision(
     input: &serde_json::Map<String, Value>,
     target: &Value,
@@ -999,6 +1025,7 @@ fn decode_team_provision(
         .ok_or(TeamRuntimeDecodeError::InvalidInput)?;
     let idempotency_key = decode_idempotency_key(input, "idempotencyKey")?;
     let source = decode_team_runtime_source(input.get("sourceType"))?;
+    let source_agent = decode_source_agent(input.get("sourceAgentId"), &endpoint, source)?;
     let manual_team = match source {
         TeamRuntimeCreateSource::TeamSkill => {
             if input.contains_key("manualTeam") {
@@ -1018,7 +1045,7 @@ fn decode_team_provision(
     if !input.keys().all(|key| {
         matches!(
             key.as_str(),
-            "packagePath" | "teamId" | "idempotencyKey" | "sourceType" | "manualTeam"
+            "packagePath" | "teamId" | "idempotencyKey" | "sourceType" | "manualTeam" | "sourceAgentId"
         )
     }) {
         return Err(TeamRuntimeDecodeError::InvalidInput);
@@ -1028,6 +1055,7 @@ fn decode_team_provision(
         team_id,
         idempotency_key,
         endpoint,
+        source_agent,
         source,
         manual_team,
     })

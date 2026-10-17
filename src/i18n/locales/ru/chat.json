@@ -234,12 +234,7 @@
     "retry": "Повторить"
   },
   "welcome": {
-    "title": "Чат MatchaClaw",
-    "subtitle": "Чем могу помочь?",
-    "askQuestions": "Задачи",
-    "askQuestionsDesc": "Работа над задачами",
-    "creativeTasks": "Непрерывное выполнение",
-    "creativeTasksDesc": "Выполнение многошаговых задач"
+    "title": "Что хотите сделать?"
   },
   "input": {
     "teamDesignStart": "Спроектировать граф выполнения",
@@ -444,6 +439,7 @@
     "deleted": "Удалён",
     "revealFailed": "Не удалось показать файл в файловом менеджере",
     "workspaceEmpty": "Нет доступной рабочей директории для просмотра.",
+    "workspaceLoadError": "Не удалось загрузить файлы",
     "workspaceLoadFailed": "Не удалось загрузить рабочую директорию: {{error}}"
   },
   "approval": {

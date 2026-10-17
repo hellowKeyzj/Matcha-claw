@@ -763,7 +763,7 @@
         "channels": "频道",
         "subagents": "Agent",
         "tasks": "任务中心",
-        "teams": "Agents协作",
+        "teams": "团队",
         "plugins": "插件",
         "connectors": "连接器",
         "remoteFleet": "远端运行时",
@@ -989,6 +989,16 @@
         "configured": "已配置",
         "loading": "加载中...",
         "saving": "保存中..."
+    },
+    "runtimeScope": {
+        "selectRuntime": "选择运行时",
+        "loading": "正在加载运行时",
+        "loadFailed": "无法加载运行时",
+        "none": "没有可用的运行时",
+        "starting": "{{runtime}} 正在启动",
+        "unavailable": "{{runtime}} 不可用",
+        "retry": "重新加载",
+        "selectAgent": "选择 Agent"
     },
     "switchboard": {
         "quickSwitch": "快速切换",

@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 import type { CallReceipt } from '../../../../../src/types/call-log';
 import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
@@ -22,6 +23,7 @@ export interface ChannelControlTransport {
     action: ChannelControlAction;
     channel: string;
     accountId: string;
+    scope?: ProductRuntimeScope;
   }>): Promise<ChannelControlTransportResponse>;
 }
 
@@ -32,7 +34,8 @@ export function createChannelControlTransport(
 ): ChannelControlTransport {
   return {
     async control(input): Promise<ChannelControlTransportResponse> {
-      if (!isIdentity(input.channel) || !isIdentity(input.accountId)) {
+      if (!isIdentity(input.channel) || !isIdentity(input.accountId)
+        || (input.scope !== undefined && !isProductRuntimeScope(input.scope))) {
         return { status: 503, body: UNAVAILABLE };
       }
       const response = await sendLoopbackJson({

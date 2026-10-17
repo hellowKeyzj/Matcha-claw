@@ -41,6 +41,7 @@ type HostEventName =
   | 'openclaw:lifecycle'
   | 'openclaw:questions-changed'
   | 'openclaw:cron'
+  | 'cron:changed'
   | 'call:changed'
   | 'calls:resync';
 
@@ -176,6 +177,9 @@ export function registerHostEventBridge(deps: {
           lastError: null,
           updatedAt: event.observedAtMs,
         });
+        return;
+      case 'cron.changed':
+        emit('cron:changed', { endpoint: event.endpoint });
         return;
       case 'openclaw.cron.execution':
         emit('openclaw:cron', {

@@ -1,6 +1,7 @@
 import type { CallReceipt } from '../../../../../src/types/call-log';
 import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 import { hasExactKeys, isNonEmptyBoundedText, isRecord, sendLoopbackJson } from '../client';
 
 const ROUTE_PATH = '/api/team/skill';
@@ -55,11 +56,13 @@ export type TeamSkillTransportResponse<T> = Readonly<{
 export interface TeamSkillTransport {
   authorize(packageRoot: string): Promise<TeamSkillTransportResponse<Readonly<{ selectionId: TeamSkillSelectionId }>>>;
   validate(selectionId: string): Promise<TeamSkillTransportResponse<TeamSkillPackageValidation>>;
-  dependencyPlan(selectionId: string): Promise<TeamSkillTransportResponse<TeamSkillDependencyPlanResult>>;
+  dependencyPlan(selectionId: string, scope?: ProductRuntimeScope, sourceAgentId?: string): Promise<TeamSkillTransportResponse<TeamSkillDependencyPlanResult>>;
   materialize(
     selectionId: string,
     teamId: string,
     idempotencyKey: string,
+    scope?: ProductRuntimeScope,
+    sourceAgentId?: string,
   ): Promise<Readonly<{ status: 202 | 503; body: CallReceipt | typeof UNAVAILABLE }>>;
 }
 
@@ -79,14 +82,14 @@ export function createTeamSkillTransport(
       { operation: 'team.skill.validate', selectionId },
       isValidation,
     ),
-    dependencyPlan: async (selectionId) => request(
+    dependencyPlan: async (selectionId, scope, sourceAgentId) => request(
       'team.skill.dependency-plan',
-      { operation: 'team.skill.dependency-plan', selectionId },
+      { operation: 'team.skill.dependency-plan', selectionId, ...(scope === undefined ? {} : { scope }), ...(sourceAgentId === undefined ? {} : { sourceAgentId }) },
       isDependencyPlan,
     ),
-    materialize: async (selectionId, teamId, idempotencyKey) => request(
+    materialize: async (selectionId, teamId, idempotencyKey, scope, sourceAgentId) => request(
       'team.skill.materialize',
-      { operation: 'team.skill.materialize', selectionId, teamId, idempotencyKey },
+      { operation: 'team.skill.materialize', selectionId, teamId, idempotencyKey, ...(scope === undefined ? {} : { scope }), ...(sourceAgentId === undefined ? {} : { sourceAgentId }) },
       (value): value is CallReceipt => { try { decodeCallReceipt(value); return true; } catch { return false; } },
       202,
     ),
@@ -123,14 +126,26 @@ function isRequest(value: unknown): boolean {
   if (value.operation === 'team.skill.authorize') {
     return hasExactKeys(value, ['operation', 'packageRoot']) && isLocalRoot(value.packageRoot);
   }
+  if (value.operation === 'team.skill.validate') {
+    return hasExactKeys(value, ['operation', 'selectionId']) && isSelectionId(value.selectionId);
+  }
+  if (Object.hasOwn(value, 'scope') && !isProductRuntimeScope(value.scope)) return false;
+  if (Object.hasOwn(value, 'sourceAgentId')
+    && (typeof value.sourceAgentId !== 'string' || value.sourceAgentId.trim().length === 0)) return false;
+  if (isProductRuntimeScope(value.scope) && value.scope.endpoint.runtimeAdapterId === 'matcha-agent'
+    && !Object.hasOwn(value, 'sourceAgentId')) return false;
+  const optionalKeys = [
+    ...(Object.hasOwn(value, 'scope') ? ['scope'] : []),
+    ...(Object.hasOwn(value, 'sourceAgentId') ? ['sourceAgentId'] : []),
+  ];
   if (value.operation === 'team.skill.materialize') {
-    return hasExactKeys(value, ['operation', 'selectionId', 'teamId', 'idempotencyKey'])
+    return hasExactKeys(value, ['operation', 'selectionId', 'teamId', 'idempotencyKey', ...optionalKeys])
       && isSelectionId(value.selectionId)
       && isOpaqueId(value.teamId)
       && isOpaqueId(value.idempotencyKey);
   }
-  return hasExactKeys(value, ['operation', 'selectionId'])
-    && ['team.skill.validate', 'team.skill.dependency-plan'].includes(value.operation)
+  return value.operation === 'team.skill.dependency-plan'
+    && hasExactKeys(value, ['operation', 'selectionId', ...optionalKeys])
     && isSelectionId(value.selectionId);
 }
 

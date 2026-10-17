@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { TeamSkillTransport } from '../../main/runtime-host-delivery/transport/teams/skill';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
   success: false,
@@ -14,12 +15,14 @@ const UNAVAILABLE = {
 type TeamSkillRequest =
   | Readonly<{ operation: 'team.skill.authorize'; packageRoot: string }>
   | Readonly<{ operation: 'team.skill.validate'; selectionId: string }>
-  | Readonly<{ operation: 'team.skill.dependency-plan'; selectionId: string }>
+  | Readonly<{ operation: 'team.skill.dependency-plan'; selectionId: string; scope?: ProductRuntimeScope; sourceAgentId?: string }>
   | Readonly<{
       operation: 'team.skill.materialize';
       selectionId: string;
       teamId: string;
       idempotencyKey: string;
+      scope?: ProductRuntimeScope;
+      sourceAgentId?: string;
     }>;
 
 export async function handleTeamSkillRoutes(
@@ -48,8 +51,8 @@ export async function handleTeamSkillRoutes(
       : request.operation === 'team.skill.validate'
         ? await transport.validate(request.selectionId)
         : request.operation === 'team.skill.dependency-plan'
-          ? await transport.dependencyPlan(request.selectionId)
-          : await transport.materialize(request.selectionId, request.teamId, request.idempotencyKey);
+          ? await transport.dependencyPlan(request.selectionId, request.scope, request.sourceAgentId)
+          : await transport.materialize(request.selectionId, request.teamId, request.idempotencyKey, request.scope, request.sourceAgentId);
     sendJson(res, response.status, response.body);
   } catch {
     sendJson(res, 503, UNAVAILABLE);
@@ -62,14 +65,26 @@ function isRequest(value: unknown): value is TeamSkillRequest {
   if (value.operation === 'team.skill.authorize') {
     return hasExactKeys(value, ['operation', 'packageRoot']) && isLocalRoot(value.packageRoot);
   }
+  if (value.operation === 'team.skill.validate') {
+    return hasExactKeys(value, ['operation', 'selectionId']) && isSelectionId(value.selectionId);
+  }
+  if (Object.hasOwn(value, 'scope') && !isProductRuntimeScope(value.scope)) return false;
+  if (Object.hasOwn(value, 'sourceAgentId')
+    && (typeof value.sourceAgentId !== 'string' || value.sourceAgentId.trim().length === 0)) return false;
+  if (isProductRuntimeScope(value.scope) && value.scope.endpoint.runtimeAdapterId === 'matcha-agent'
+    && !Object.hasOwn(value, 'sourceAgentId')) return false;
+  const optionalKeys = [
+    ...(Object.hasOwn(value, 'scope') ? ['scope'] : []),
+    ...(Object.hasOwn(value, 'sourceAgentId') ? ['sourceAgentId'] : []),
+  ];
   if (value.operation === 'team.skill.materialize') {
-    return hasExactKeys(value, ['operation', 'selectionId', 'teamId', 'idempotencyKey'])
+    return hasExactKeys(value, ['operation', 'selectionId', 'teamId', 'idempotencyKey', ...optionalKeys])
       && isSelectionId(value.selectionId)
       && isOpaqueId(value.teamId)
       && isOpaqueId(value.idempotencyKey);
   }
-  return hasExactKeys(value, ['operation', 'selectionId'])
-    && (value.operation === 'team.skill.validate' || value.operation === 'team.skill.dependency-plan')
+  return value.operation === 'team.skill.dependency-plan'
+    && hasExactKeys(value, ['operation', 'selectionId', ...optionalKeys])
     && isSelectionId(value.selectionId);
 }
 

@@ -121,6 +121,37 @@ fn build_peer_runtime_stage(
         prepared.openclaw_startup_diagnostics.clone(),
     );
     prepared.openclaw_input.report_diagnostic = report_openclaw_diagnostic;
+    let mut clawhub_cli_entries = Vec::new();
+    if let Some(entry) = std::env::var_os("MATCHACLAW_CLAWHUB_CLI_ENTRY") {
+        if !entry.is_empty() {
+            clawhub_cli_entries.push(std::path::PathBuf::from(entry));
+        }
+    }
+    clawhub_cli_entries.push(
+        prepared
+            .openclaw_input
+            .working_directory
+            .join("node_modules/clawhub/bin/clawdhub.js"),
+    );
+    #[cfg(windows)]
+    let clawhub_containment = foundation::process::OneShotContainment::job();
+    #[cfg(unix)]
+    let clawhub_containment = foundation::process::OneShotContainment::guardian(
+        prepared.openclaw_input.guardian_executable.clone(),
+    )
+    .map_err(|error| {
+        ConstructionError::OpenClaw(crate::OpenClawConstructionError::Guardian(error))
+    })?;
+    let skill_marketplace = matcha_agent::skills::Marketplace::new(
+        prepared.openclaw_input.electron_image.clone(),
+        clawhub_cli_entries,
+        prepared.clawhub_registry.registry_bases().to_vec(),
+        prepared
+            .matcha_input
+            .storage_root
+            .join("cache/skill-downloads"),
+        clawhub_containment,
+    );
     let open_claw = OpenClawDriver::prepare(prepared.openclaw_input, prepared.openclaw_secret)
         .map_err(ConstructionError::OpenClaw)?;
     let sealed = resources::provision_sealed_resources(
@@ -164,7 +195,7 @@ fn build_peer_runtime_stage(
         fleet_private_root,
         diagnostics,
     };
-    let mut matcha = MatchaAgentInstance::new(matcha);
+    let mut matcha = MatchaAgentInstance::new(matcha).with_skill_marketplace(skill_marketplace);
     let (event_sinks, events) = events::channels();
     let (matcha_session_sink, matcha_session_events) = mpsc::channel(256);
     let (openclaw_session_sink, openclaw_session_events) = mpsc::channel(256);
@@ -282,6 +313,35 @@ fn wire_session_ingress(owners: &mut owners::RuntimeOwners, runtime: &mut PeerRu
     );
 }
 
+fn wire_cron_receipts(owners: &mut owners::RuntimeOwners, runtime: &PeerRuntimeArtifacts) {
+    let changed = runtime
+        .event_sinks
+        .cron_changed()
+        .expect("Cron change sink must be available during construction");
+    let client = runtime.matcha_runtime_driver.native_client();
+    let lifecycle = runtime.matcha_runtime_driver.lifecycle_handle();
+    let failures = owners.tasks.join_failures();
+    let (mut task, _) = foundation::execution::OwnedTask::spawn(|cancellation| async move {
+        if let Err(error) =
+            matcha_agent::cron::observe_receipts(client, changed, cancellation, lifecycle).await
+        {
+            eprintln!("[matcha-cron] receipt observation stopped: {error}");
+        }
+    });
+    owners
+        .tasks
+        .module_scope_mut("cron")
+        .expect("Cron module scope must exist")
+        .register_event_subscription("matcha-cron-receipts", move || async move {
+            if task.cancel_and_join().await.is_err() {
+                failures
+                    .lock()
+                    .expect("owner join failure state lock poisoned")
+                    .push("matcha-cron-receipts");
+            }
+        });
+}
+
 fn wire_diagnostics_forwarders(owners: &mut owners::RuntimeOwners, runtime: &PeerRuntimeArtifacts) {
     let open_claw_runtime_sink = runtime
         .event_sinks
@@ -310,6 +370,7 @@ fn wire_diagnostics_forwarders(owners: &mut owners::RuntimeOwners, runtime: &Pee
                 .expect("Matcha Agent lifecycle operations must be available")
                 .subscribe(),
             matcha_lifecycle_sink,
+            owners.peer_handle.clone(),
         );
     }
 }
@@ -345,6 +406,7 @@ fn assemble_host(
             admission: Arc::clone(&admission),
             calls: calls.clone(),
             open_claw: Arc::clone(&open_claw),
+            matcha_agent: Arc::clone(&matcha_runtime_driver),
             sealed_resource,
             clawhub_registry,
             runtime_observation: runtime_observation.clone(),
@@ -394,6 +456,7 @@ impl Host {
         let admission = Arc::new(HostAdmission::new());
         let (mut owners, artifacts) = spawn_owner_runtime_stage(provisioned, &runtime, &admission)?;
         wire_session_ingress(&mut owners, &mut runtime);
+        wire_cron_receipts(&mut owners, &runtime);
         wire_diagnostics_forwarders(&mut owners, &runtime);
         Ok(assemble_host(
             parent_callback,

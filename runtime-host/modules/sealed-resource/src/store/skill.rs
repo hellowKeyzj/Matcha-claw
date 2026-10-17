@@ -14,8 +14,8 @@ use crate::{
     api::{
         SealedCloudPackageEntry, SealedCloudPackageMetadata, SealedCloudPackageType,
         SealedPackageAuthorizationKey, SealedPackageAuthorizationKeyring, SealedResourceError,
-        SealedResourceMeteringBinding, SealedResourceMeteringKind, SealedResourceMeteringUse,
-        SealedResourceRead, SealedResourceRejectionDetail, SealedSkillTarget,
+        SealedResourceMeteringBinding, SealedResourceRead, SealedResourceRejectionDetail,
+        SealedSkillTarget,
     },
     descriptor::SealedSkillDescriptor,
     domain::{PackageRelativePath, SkillKey},
@@ -24,6 +24,8 @@ use crate::{
         skill::{SealSkillPackageReceipt, SealedSkillFileRequest, SealedSkillPackage},
     },
 };
+
+mod native;
 
 const SEALED_SKILL_PACKAGE_EXTENSION: &str = "matcha-skillpkg";
 const AUTHORIZATION_KEY_EXTENSION: &str = "authorization-key";
@@ -176,6 +178,7 @@ pub struct SealedSkillStore {
     root: SealedSkillRoot,
     private_directory: PathBuf,
     authorization_keyring: Arc<SealedPackageAuthorizationKeyring>,
+    native_directories: Option<[CanonicalStateDir; 3]>,
     operation_lock: Mutex<()>,
 }
 
@@ -194,6 +197,7 @@ impl SealedSkillStore {
             private_directory,
             root,
             authorization_keyring,
+            native_directories: None,
             operation_lock: Mutex::new(()),
         })
     }
@@ -221,11 +225,37 @@ impl SealedSkillStore {
         )
     }
 
-    pub fn catalog(&self) -> Result<SealedSkillCatalog, SealedResourceError> {
-        let _guard = self
+    fn lock_operation(&self) -> Result<std::sync::MutexGuard<'_, ()>, SealedResourceError> {
+        let guard = self
             .operation_lock
             .lock()
             .map_err(|_| SealedResourceError::Unknown)?;
+        self.verify_native_directories()?;
+        Ok(guard)
+    }
+
+    fn remove_package_lease(&self, package_sha256: &str) -> Result<(), SealedResourceError> {
+        // A native lease is shared by every Agent that installed these encrypted bytes.
+        if self.root.target() == SealedSkillTarget::MatchaAgent {
+            Ok(())
+        } else {
+            self.authorization_keyring.remove(package_sha256)
+        }
+    }
+
+    fn verify_native_directories(&self) -> Result<(), SealedResourceError> {
+        if let Some(directories) = &self.native_directories {
+            for directory in directories {
+                directory
+                    .open()
+                    .map_err(|_| SealedResourceError::Rejected)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn catalog(&self) -> Result<SealedSkillCatalog, SealedResourceError> {
+        let _guard = self.lock_operation()?;
         self.catalog_locked()
     }
 
@@ -248,6 +278,7 @@ impl SealedSkillStore {
                 lock_wait_ms = lock_started.elapsed().as_millis();
             }
             let _guard = guard.map_err(|_| SealedResourceError::Unknown)?;
+            self.verify_native_directories()?;
             let Some(root) = existing_skills_directory(self.root.skills_directory())? else {
                 return Ok(Vec::new());
             };
@@ -288,19 +319,15 @@ impl SealedSkillStore {
         skill_key: SkillKey,
         path: PackageRelativePath,
     ) -> Result<SealedResourceRead, SealedResourceError> {
-        let _guard = self
-            .operation_lock
-            .lock()
-            .map_err(|_| SealedResourceError::Unknown)?;
+        let _guard = self.lock_operation()?;
         let package = self.open_sealed_skill_locked(&skill_key)?;
         let file = package.file(&path).ok_or(SealedResourceError::NotFound)?;
         Ok(SealedResourceRead::new(
             file.content().to_vec(),
-            Some(SealedResourceMeteringBinding::openclaw(
-                SealedResourceMeteringKind::Skill,
+            Some(SealedResourceMeteringBinding::skill(
+                self.root.target(),
                 skill_key.as_str(),
                 package.package_sha256(),
-                SealedResourceMeteringUse::Turn,
             )?),
             package.package_sha256().to_owned(),
         ))
@@ -311,6 +338,9 @@ impl SealedSkillStore {
         skill_key: SkillKey,
         directory: &Path,
     ) -> Result<SealedSkillPackageExport, SealedResourceError> {
+        if self.root.target() == SealedSkillTarget::MatchaAgent {
+            return Err(SealedResourceError::Rejected);
+        }
         self.export_directory_package(skill_key, directory, None, None)
     }
 
@@ -321,6 +351,9 @@ impl SealedSkillStore {
         cloud_public_key: String,
         cloud_key_id: String,
     ) -> Result<SealedSkillPackageExport, SealedResourceError> {
+        if self.root.target() == SealedSkillTarget::MatchaAgent {
+            return Err(SealedResourceError::Rejected);
+        }
         self.export_directory_package(
             skill_key,
             directory,
@@ -336,10 +369,7 @@ impl SealedSkillStore {
         cloud_public_key: Option<&str>,
         cloud_key_id: Option<&str>,
     ) -> Result<SealedSkillPackageExport, SealedResourceError> {
-        let _guard = self
-            .operation_lock
-            .lock()
-            .map_err(|_| SealedResourceError::Unknown)?;
+        let _guard = self.lock_operation()?;
         if platform::trace::enabled() {
             eprintln!(
                 "[startup-trace] source=sealed-skills-export phase=store detail=start skillKey={}",
@@ -367,6 +397,71 @@ impl SealedSkillStore {
                 files.len()
             );
         }
+        self.export_files_locked(
+            skill_key,
+            root,
+            files,
+            descriptor,
+            cloud_public_key,
+            cloud_key_id,
+        )
+    }
+
+    pub(crate) fn export_files_package(
+        &self,
+        skill_key: SkillKey,
+        files: Vec<(String, Vec<u8>)>,
+        cloud: Option<(&str, &str)>,
+    ) -> Result<SealedSkillPackageExport, SealedResourceError> {
+        let _guard = self.lock_operation()?;
+        if self.root.target() != SealedSkillTarget::MatchaAgent
+            || matches!(skill_key.as_str(), "." | "..")
+            || files.len() > MAX_DIRECTORY_FILES
+        {
+            return Err(SealedResourceError::Rejected);
+        }
+        let files = files
+            .into_iter()
+            .map(|(path, bytes)| SealedSkillFileRequest::try_new(path, bytes))
+            .collect::<Result<Vec<_>, _>>()?;
+        let manifest = files
+            .iter()
+            .find(|file| file.path() == &PackageRelativePath::skill_manifest())
+            .ok_or_else(|| {
+                SealedResourceError::rejected_with(SealedResourceRejectionDetail::new(
+                    "missing-skill-md",
+                ))
+            })?;
+        let descriptor = std::str::from_utf8(manifest.content())
+            .ok()
+            .and_then(|content| {
+                SealedSkillDescriptor::parse_skill_manifest(content, skill_key.as_str()).ok()
+            })
+            .ok_or_else(|| {
+                SealedResourceError::rejected_with(SealedResourceRejectionDetail::new(
+                    "invalid-skill-md",
+                ))
+            })?;
+        let root = ensure_skills_directory(self.root.skills_directory())?;
+        self.export_files_locked(
+            skill_key,
+            root,
+            files,
+            descriptor,
+            cloud.map(|(key, _)| key),
+            cloud.map(|(_, id)| id),
+        )
+    }
+
+    fn export_files_locked(
+        &self,
+        skill_key: SkillKey,
+        root: PathBuf,
+        files: Vec<SealedSkillFileRequest>,
+        descriptor: SealedSkillDescriptor,
+        cloud_public_key: Option<&str>,
+        cloud_key_id: Option<&str>,
+    ) -> Result<SealedSkillPackageExport, SealedResourceError> {
         let receipt = match SealedSkillPackage::seal_with_cloud_key(
             skill_key.clone(),
             self.root.target(),
@@ -441,7 +536,7 @@ impl SealedSkillStore {
                     "cleanup-metadata",
                     remove_authorization_key_file(&self.cloud_metadata_path(&package_sha256)),
                 ),
-                ("cleanup-keyring", self.authorization_keyring.remove(&package_sha256)),
+                ("cleanup-keyring", self.remove_package_lease(&package_sha256)),
             ] {
                 if let Err(error) = result {
                     trace_package_issue(stage, &path, sealed_resource_error_detail(error));
@@ -474,10 +569,7 @@ impl SealedSkillStore {
         package_path: PathBuf,
     ) -> Result<SealedSkillCatalogEntry, SealedResourceError> {
         let bytes = read_install_package(&package_path)?;
-        let _guard = self
-            .operation_lock
-            .lock()
-            .map_err(|_| SealedResourceError::Unknown)?;
+        let _guard = self.lock_operation()?;
         let authorization_key = self.read_authorization_key_for_package_bytes(&bytes)?;
         self.install_package_bytes_locked(bytes, authorization_key)
     }
@@ -488,10 +580,7 @@ impl SealedSkillStore {
         authorization_key: SealedPackageAuthorizationKey,
     ) -> Result<SealedSkillCatalogEntry, SealedResourceError> {
         let bytes = read_install_package(&package_path)?;
-        let _guard = self
-            .operation_lock
-            .lock()
-            .map_err(|_| SealedResourceError::Unknown)?;
+        let _guard = self.lock_operation()?;
         self.install_package_bytes_locked(bytes, authorization_key)
     }
 
@@ -501,10 +590,7 @@ impl SealedSkillStore {
         metadata: SealedCloudPackageMetadata,
     ) -> Result<SealedSkillCatalogEntry, SealedResourceError> {
         let bytes = read_install_package(&package_path)?;
-        let _guard = self
-            .operation_lock
-            .lock()
-            .map_err(|_| SealedResourceError::Unknown)?;
+        let _guard = self.lock_operation()?;
         let package_sha256 = hex_digest(&bytes);
         metadata.ensure_matches(SealedCloudPackageType::Skill, &package_sha256)?;
         let authorization_key = self.cloud_authorization_key(&package_sha256)?;
@@ -512,10 +598,7 @@ impl SealedSkillStore {
     }
 
     pub fn remove_package(&self, skill_key: SkillKey) -> Result<bool, SealedResourceError> {
-        let _guard = self
-            .operation_lock
-            .lock()
-            .map_err(|_| SealedResourceError::Unknown)?;
+        let _guard = self.lock_operation()?;
         let Some((path, package_sha256)) = self.find_sealed_package_locked(&skill_key)? else {
             return Ok(false);
         };
@@ -552,6 +635,11 @@ impl SealedSkillStore {
     ) -> Result<SealedSkillCatalogEntry, SealedResourceError> {
         let package =
             SealedSkillPackage::open(receipt.package_bytes(), receipt.authorization_key())?;
+        if self.root.target() == SealedSkillTarget::MatchaAgent
+            && matches!(package.skill_key().as_str(), "." | "..")
+        {
+            return Err(SealedResourceError::Rejected);
+        }
         if package.target() != self.root.target() {
             return Err(SealedResourceError::Rejected);
         }
@@ -779,7 +867,7 @@ impl SealedSkillStore {
     ) -> Result<(), SealedResourceError> {
         remove_authorization_key_file(&self.authorization_key_path(package_sha256))?;
         remove_authorization_key_file(&self.cloud_metadata_path(package_sha256))?;
-        self.authorization_keyring.remove(package_sha256)
+        self.remove_package_lease(package_sha256)
     }
 
     fn open_package_path_locked(

@@ -5,6 +5,7 @@ import type { ChannelType } from '@/types/channel';
 import { waitForCall } from '@/lib/call-log-await';
 import { decodeChannelsCallDetail } from '@/types/call-log/channels';
 import type { CallReceipt } from '@/types/call-log';
+import { runtimeScopeQuery, type RuntimeInstanceScope } from '@/types/desktop/runtime-address';
 
 export function channelErrorCode(error: unknown): string {
   const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
@@ -69,15 +70,12 @@ export interface ChannelPairingRequest {
   status: 'pending' | 'unknown';
 }
 
-export async function hostChannelsFetchSnapshot(): Promise<ChannelSnapshotFetchResult> {
-  return await hostApiFetch<ChannelSnapshotFetchResult>('/api/channels/snapshot');
-}
-
-export async function hostChannelsProbe(): Promise<never> {
-  throw new Error('Channel probe is unavailable');
+export async function hostChannelsFetchSnapshot(scope: RuntimeInstanceScope): Promise<ChannelSnapshotFetchResult> {
+  return await hostApiFetch<ChannelSnapshotFetchResult>(`/api/channels/snapshot?${runtimeScopeQuery(scope)}`);
 }
 
 export async function hostChannelsReadConfig(
+  scope: RuntimeInstanceScope,
   channelType: ChannelType,
   accountId?: string,
   options?: { traceId?: string },
@@ -88,6 +86,7 @@ export async function hostChannelsReadConfig(
       traceId: options?.traceId,
       method: 'POST',
       body: JSON.stringify({
+        scope,
         channel: channelType,
         ...(accountId ? { accountId } : {}),
       }),
@@ -95,7 +94,9 @@ export async function hostChannelsReadConfig(
   );
 }
 
-export async function hostChannelsConfigure(input: {
+export async function hostChannelsConfigure(
+  scope: RuntimeInstanceScope,
+  input: {
   channelType: ChannelType;
   config: Record<string, unknown>;
   accountId?: string;
@@ -107,6 +108,7 @@ export async function hostChannelsConfigure(input: {
     timeoutMs: 240_000,
     method: 'POST',
     body: JSON.stringify({
+      scope,
       action: 'apply',
       channel: input.channelType,
       accountId: input.accountId ?? 'default',
@@ -134,18 +136,21 @@ export async function hostChannelsConfigure(input: {
   };
 }
 
-export async function hostChannelsActivate(input: {
+export async function hostChannelsActivate(
+  scope: RuntimeInstanceScope,
+  input: {
   channelType: ChannelType;
   config: Record<string, unknown>;
   accountId?: string;
   agentId?: string;
 }, options?: { traceId?: string }): Promise<{ success?: boolean; error?: string; warning?: string; pluginInstalled?: boolean; progress?: ChannelLoginProgress }> {
   const agentId = input.agentId?.trim();
-  if (input.channelType === 'whatsapp' || input.channelType === 'openclaw-weixin') {
+  if (input.channelType === 'whatsapp' || input.channelType === 'openclaw-weixin' || input.channelType === 'weixin') {
     const result = await hostApiFetch<ChannelLoginProgress>('/api/channels/login', {
       traceId: options?.traceId,
       method: 'POST',
       body: JSON.stringify({
+        scope,
         action: 'start',
         channel: input.channelType,
         accountId: input.accountId ?? 'default',
@@ -167,11 +172,12 @@ export async function hostChannelsActivate(input: {
         : 'Channel activation outcome is unknown',
     };
   }
-  return await hostChannelsConfigure(input, options);
+  return await hostChannelsConfigure(scope, input, options);
 }
 
 export async function hostChannelsLoginWait(
-  channelType: Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>,
+  scope: RuntimeInstanceScope,
+  channelType: Extract<ChannelType, 'whatsapp' | 'openclaw-weixin' | 'weixin'>,
   accountId: string,
   options: ChannelLoginWaitOptions = {},
 ): Promise<ChannelLoginProgress> {
@@ -181,6 +187,7 @@ export async function hostChannelsLoginWait(
     timeoutMs: options.timeoutMs,
     signal: options.signal,
     body: JSON.stringify({
+      scope,
       action: 'wait',
       channel: channelType,
       accountId,
@@ -209,7 +216,9 @@ async function settleConnectedChannel<T extends ChannelLoginProgress | ChannelAu
   return { ...progress, outcome: record.status === 'rejected' ? 'target_rejected' : 'unknown' };
 }
 
-export async function hostChannelsStartAuthorization(input: {
+export async function hostChannelsStartAuthorization(
+  scope: RuntimeInstanceScope,
+  input: {
   channelType: Extract<ChannelType, 'qqbot' | 'dingtalk' | 'feishu'>;
   accountId?: string;
   agentId?: string;
@@ -220,6 +229,7 @@ export async function hostChannelsStartAuthorization(input: {
     traceId: options?.traceId,
     method: 'POST',
     body: JSON.stringify({
+      scope,
       action: 'start',
       channel: input.channelType,
       accountId: input.accountId ?? 'default',
@@ -231,6 +241,7 @@ export async function hostChannelsStartAuthorization(input: {
 }
 
 export async function hostChannelsWaitAuthorization(
+  scope: RuntimeInstanceScope,
   channelType: Extract<ChannelType, 'qqbot' | 'dingtalk' | 'feishu'>,
   sessionKey: string,
   options: { traceId?: string; timeoutMs?: number; signal?: AbortSignal } = {},
@@ -241,6 +252,7 @@ export async function hostChannelsWaitAuthorization(
     signal: options.signal,
     method: 'POST',
     body: JSON.stringify({
+      scope,
       action: 'wait',
       channel: channelType,
       sessionKey,
@@ -251,6 +263,7 @@ export async function hostChannelsWaitAuthorization(
 }
 
 export async function hostChannelsCancelAuthorization(
+  scope: RuntimeInstanceScope,
   channelType: Extract<ChannelType, 'qqbot' | 'dingtalk' | 'feishu'>,
   sessionKey: string,
   options?: { traceId?: string },
@@ -259,6 +272,7 @@ export async function hostChannelsCancelAuthorization(
     traceId: options?.traceId,
     method: 'POST',
     body: JSON.stringify({
+      scope,
       action: 'cancel',
       channel: channelType,
       sessionKey,
@@ -267,6 +281,7 @@ export async function hostChannelsCancelAuthorization(
 }
 
 export async function hostChannelsValidateCredentials(
+  scope: RuntimeInstanceScope,
   channelType: ChannelType,
   config: Record<string, string>,
   options?: { traceId?: string },
@@ -286,11 +301,12 @@ export async function hostChannelsValidateCredentials(
   }>('/api/channels/credentials/validate', {
     traceId: options?.traceId,
     method: 'POST',
-    body: JSON.stringify({ channelType, config }),
+    body: JSON.stringify({ scope, channelType, config }),
   });
 }
 
 export async function hostChannelsDeleteConfig(
+  scope: RuntimeInstanceScope,
   channelType: ChannelType,
   accountId?: string,
   options?: { traceId?: string },
@@ -298,7 +314,7 @@ export async function hostChannelsDeleteConfig(
   const receipt = await hostApiFetchDecoded('/api/channels/delete-config', decodeCallReceipt, {
     traceId: options?.traceId,
     method: 'POST',
-    body: JSON.stringify({ channel: channelType, accountId }),
+    body: JSON.stringify({ scope, channel: channelType, accountId }),
   });
   const record = await waitForCall(receipt, 'channels');
   const detail = decodeChannelsCallDetail(record.detail);
@@ -313,12 +329,14 @@ export async function hostChannelsDeleteConfig(
 }
 
 export async function hostChannelsConnect(
+  scope: RuntimeInstanceScope,
   channelType: ChannelType,
   accountId?: string,
 ): Promise<{ success: boolean }> {
   const result = await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/control', {
     method: 'POST',
     body: JSON.stringify({
+      scope,
       action: 'connect',
       channel: channelType,
       accountId: accountId ?? 'default',
@@ -328,12 +346,14 @@ export async function hostChannelsConnect(
 }
 
 export async function hostChannelsDisconnect(
+  scope: RuntimeInstanceScope,
   channelType: ChannelType,
   accountId?: string,
 ): Promise<{ success: boolean }> {
   const receipt = await hostApiFetchDecoded('/api/channels/control', decodeCallReceipt, {
     method: 'POST',
     body: JSON.stringify({
+      scope,
       action: 'disconnect',
       channel: channelType,
       accountId: accountId ?? 'default',
@@ -349,7 +369,8 @@ export async function hostChannelsDisconnect(
 }
 
 export async function hostChannelsCancelSession(
-  channelType: Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>,
+  scope: RuntimeInstanceScope,
+  channelType: Extract<ChannelType, 'whatsapp' | 'openclaw-weixin' | 'weixin'>,
   accountId: string,
   options?: { traceId?: string },
 ): Promise<{ outcome: 'cancelled' }> {
@@ -357,6 +378,7 @@ export async function hostChannelsCancelSession(
     traceId: options?.traceId,
     method: 'POST',
     body: JSON.stringify({
+      scope,
       action: 'cancel',
       channel: channelType,
       ...(accountId ? { accountId } : {}),
@@ -364,13 +386,31 @@ export async function hostChannelsCancelSession(
   });
 }
 
+export async function hostChannelsLogout(
+  scope: RuntimeInstanceScope,
+  channelType: ChannelType,
+  accountId: string,
+): Promise<void> {
+  const receipt = await hostApiFetchDecoded('/api/channels/login', decodeCallReceipt, {
+    method: 'POST', body: JSON.stringify({ scope, action: 'logout', channel: channelType, accountId }),
+  });
+  const record = await waitForCall(receipt, 'channels');
+  const detail = decodeChannelsCallDetail(record.detail);
+  if (record.command !== 'logout' || detail.operation !== 'logout' || detail.channel !== channelType
+    || detail.accountId !== accountId || record.status !== 'succeeded') {
+    throw new Error('Channel logout could not be confirmed');
+  }
+}
+
 export async function hostChannelsListPairingRequests(
+  scope: RuntimeInstanceScope,
   channelType: ChannelType,
   accountId?: string,
 ): Promise<{ success: boolean; requests?: ChannelPairingRequest[] }> {
   const result = await hostApiFetch<{ requests: readonly ChannelPairingRequest[] }>('/api/channels/pairing', {
     method: 'POST',
     body: JSON.stringify({
+      scope,
       channel: channelType,
       ...(accountId ? { accountId } : {}),
     }),
@@ -379,12 +419,14 @@ export async function hostChannelsListPairingRequests(
 }
 
 export async function hostChannelsApprovePairingRequest(
+  scope: RuntimeInstanceScope,
   channelType: ChannelType,
   input: { code: string; accountId?: string },
 ): Promise<{ success: boolean }> {
   const result = await hostApiFetch<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }>('/api/channels/pairing', {
     method: 'POST',
     body: JSON.stringify({
+      scope,
       action: 'approve',
       channel: channelType,
       ...(input.accountId ? { accountId: input.accountId } : {}),

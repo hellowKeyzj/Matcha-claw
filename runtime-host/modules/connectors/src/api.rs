@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use crate::{domain::Connector, ports::ConnectorSecretResolverPort};
+use crate::{domain::{Connector, ConnectorPatch}, ports::ConnectorSecretResolverPort};
 use foundation::execution::OwnerRuntimeHandle;
 use platform::call::{CallId, CallReceipt, CallRecorder, CallStatus};
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 
 use crate::owner::observations::{
-    ObservationReadError, ObservationResult, ObservationResults, SessionObservationSubject,
+    ObservationReadError, ObservationResult, ObservationResults, ObservationSubject,
 };
 
 use crate::call::{CallResult, ConnectorCall, ConnectorCallDetail};
@@ -99,7 +100,7 @@ impl ConnectorHandle {
             return Err(());
         }
         match call {
-            Some(call) => call.context.accepted().await.map(Some).map_err(|_| ()),
+            Some(call) => call.accepted().await.map(Some),
             None => Ok(None),
         }
     }
@@ -136,20 +137,35 @@ impl ConnectorHandle {
         rx.await.map(map_catalog_receipt).map_err(|_| ())
     }
 
-    pub(crate) async fn admit_status(&self) -> Result<CallReceipt, ()> {
+    pub(crate) async fn admit_status(
+        &self,
+        endpoint: RuntimeEndpoint,
+        principal: String,
+    ) -> Result<CallReceipt, ()> {
         let call = self
             .begin("externalConnectors.status", ConnectorCallDetail::default())
             .await?
             .ok_or(())?;
-        self.admit_observation(ConnectorQuery::Status { call: call.clone() }, call, None)
-            .await
+        self.admit_observation(
+            ConnectorQuery::Status {
+                endpoint: endpoint.clone(),
+                call: call.clone(),
+            },
+            call,
+            ObservationSubject {
+                principal,
+                endpoint: Some(endpoint),
+                session_identity: None,
+            },
+        )
+        .await
     }
 
     async fn admit_observation(
         &self,
         query: ConnectorQuery,
         mut call: ConnectorCall,
-        session: Option<SessionObservationSubject>,
+        session: ObservationSubject,
     ) -> Result<CallReceipt, ()> {
         if self
             .observations
@@ -173,9 +189,11 @@ impl ConnectorHandle {
         &self,
         call_id: &CallId,
         principal: &str,
+        endpoint: Option<&RuntimeEndpoint>,
         session_identity: Option<&SessionIdentity>,
     ) -> Result<ObservationResult, ObservationReadError> {
-        self.observations.read(call_id, principal, session_identity)
+        self.observations
+            .read(call_id, principal, endpoint, session_identity)
     }
 
     pub(crate) async fn get(&self, id: String) -> Result<GetOutcome, ()> {
@@ -238,6 +256,18 @@ impl ConnectorHandle {
         self.enqueue_upsert(connector).await?.1.ok_or(())
     }
 
+    pub(crate) async fn admit_update(&self, id: String, patch: ConnectorPatch) -> Result<CallReceipt, ()> {
+        self.recorder.as_ref().ok_or(())?;
+        let call = self.begin("externalConnectors.update", ConnectorCallDetail::connector(&id)?).await?;
+        let (reply, _) = oneshot::channel();
+        self.send_command(ConnectorCommand::Update {
+            id,
+            patch: Box::new(patch),
+            call: call.clone(),
+            reply,
+        }, call).await?.ok_or(())
+    }
+
     async fn enqueue_remove(
         &self,
         id: String,
@@ -278,7 +308,12 @@ impl ConnectorHandle {
         self.enqueue_remove(id).await?.1.ok_or(())
     }
 
-    pub(crate) async fn admit_probe(&self, id: String) -> Result<CallReceipt, ()> {
+    pub(crate) async fn admit_probe(
+        &self,
+        id: String,
+        endpoint: RuntimeEndpoint,
+        principal: String,
+    ) -> Result<CallReceipt, ()> {
         let call = self
             .begin(
                 "externalConnectors.probe",
@@ -288,11 +323,16 @@ impl ConnectorHandle {
             .ok_or(())?;
         self.admit_observation(
             ConnectorQuery::Probe {
+                endpoint: endpoint.clone(),
                 id,
                 call: call.clone(),
             },
             call,
-            None,
+            ObservationSubject {
+                principal,
+                endpoint: Some(endpoint),
+                session_identity: None,
+            },
         )
         .await
     }
@@ -318,21 +358,26 @@ impl ConnectorHandle {
                 call: call.clone(),
             },
             call,
-            Some(SessionObservationSubject {
+            ObservationSubject {
                 principal,
-                session_identity,
-            }),
+                endpoint: None,
+                session_identity: Some(session_identity),
+            },
         )
         .await
     }
 
-    pub(crate) async fn openclaw_mcp_servers(&self) -> Result<OpenClawMcpServersOutcome, ()> {
+    pub(crate) async fn openclaw_mcp_servers(
+        &self,
+        endpoint: RuntimeEndpoint,
+    ) -> Result<OpenClawMcpServersOutcome, ()> {
         let call = self
             .begin("openClawMcpServers.list", ConnectorCallDetail::default())
             .await?;
         let (reply, rx) = oneshot::channel();
         self.send_query(
             ConnectorQuery::OpenClawMcpServers {
+                endpoint,
                 call: call.clone(),
                 reply,
             },
@@ -401,6 +446,23 @@ impl ConnectorHandle {
             .ok_or(())
     }
 
+    pub(crate) async fn reproject_private_projection(
+        &self,
+        endpoint: RuntimeEndpoint,
+    ) -> crate::ports::ConnectorProjectionEffect {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .owner
+            .send_command(ConnectorCommand::ReprojectPrivateProjection { endpoint, reply })
+            .await
+            .is_err()
+        {
+            return crate::ports::ConnectorProjectionEffect::Unavailable;
+        }
+        rx.await
+            .unwrap_or(crate::ports::ConnectorProjectionEffect::Unknown)
+    }
+
     pub(crate) async fn configure_private_resolver(
         &self,
         resolver: Arc<dyn ConnectorSecretResolverPort>,
@@ -420,6 +482,7 @@ fn connector_session_target(target: SessionStatusTarget) -> Option<ConnectorSess
     }
     Some(ConnectorSessionTarget {
         endpoint: connector_session_endpoint(target.session_identity.endpoint),
+        agent_id: target.session_identity.agent_id,
         session_key: target.session_identity.session_key,
     })
 }
@@ -433,6 +496,7 @@ fn connector_session_mcp_server_enabled_target(
     Some(ConnectorSessionMcpServerEnabledTarget {
         session: ConnectorSessionTarget {
             endpoint: connector_session_endpoint(target.session_identity.endpoint),
+            agent_id: target.session_identity.agent_id,
             session_key: target.session_identity.session_key,
         },
         server_id: target.server_id,

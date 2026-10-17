@@ -1,4 +1,5 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
+import type { HostSessionModelSelectionResult } from '@/lib/host-api';
 import type { SessionGoalOutcome, SessionGoalView, SessionSendIntent } from '@/types/session-goal';
 import type { SessionOwnership } from '../../types/desktop/session-ownership';
 import type {
@@ -253,7 +254,7 @@ export interface ChatSessionRuntimeEndpointTarget {
   acceptsDynamicAgents: boolean;
   agentCatalog: ChatSessionRuntimeAgentCatalog;
   sessionPromptScopes: AgentScope[];
-  defaultSessionPromptScope: AgentScope;
+  defaultSessionPromptScope: AgentScope | null;
 }
 
 export interface ChatSessionRuntimeCatalogState {
@@ -262,6 +263,7 @@ export interface ChatSessionRuntimeCatalogState {
   endpoints: ChatSessionRuntimeEndpointTarget[];
   directoryRevision: number;
   directoryRevisionByRuntimeScopeKey: Record<string, number>;
+  selectedEndpoint: RuntimeEndpointRef | null;
   defaultSessionPromptScope: AgentScope | null;
 }
 
@@ -304,6 +306,7 @@ export interface ChatSessionRuntimeGraph {
 
 export type ChatCurrentConversationRuntimeState =
   | { state: 'resolving' }
+  | { state: 'unselected' }
   | { state: 'ready'; runtimeScopeKey: string }
   | { state: 'starting'; runtimeScopeKey: string }
   | { state: 'unavailable'; runtimeScopeKey: string; error: string | null };
@@ -418,7 +421,7 @@ export type ChatSendGate =
 
 export type ChatSendResult = (
   | { accepted: true }
-  | { accepted: false; reason: ChatSendRejectReason; error?: string; outcome?: Exclude<SessionGoalOutcome['outcome'], 'succeeded'>; attachmentReselectionRequired?: boolean }
+  | { accepted: false; reason: ChatSendRejectReason; error?: string; outcome?: Exclude<SessionGoalOutcome['outcome'], 'succeeded'>; attachmentReselectionRequired?: boolean; dispatch?: 'not-dispatched' }
 ) & { sessionRecordKey?: string };
 
 export type ChatHistoryLoadMode = 'active' | 'quiet';
@@ -453,8 +456,8 @@ export interface ChatStoreActions {
   newSession: (agentId?: string, traceId?: string | null) => Promise<void>;
   newSessionForScope: (scope: AgentScope) => Promise<void>;
   deleteSession: (key: string) => Promise<void>;
-  forgetAgentSessions: (agentId: string) => void;
-  reconcileAgentSessionTombstones: (agentIds: readonly string[]) => void;
+  forgetAgentSessions: (agentId: string, endpoint: RuntimeEndpointRef) => void;
+  reconcileAgentSessionTombstones: (agentIds: readonly string[], endpoint: RuntimeEndpointRef) => void;
   renameSession: (key: string, label: string) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
@@ -462,6 +465,7 @@ export interface ChatStoreActions {
   jumpViewportToLatest: (sessionKey?: string) => Promise<void>;
   setViewportAnchorItemKey: (itemKey: string | null, sessionKey?: string) => void;
   sendMessage: (text: string, attachments?: ChatSendAttachment[], intent?: SessionSendIntent, operationId?: string) => Promise<ChatSendResult>;
+  selectSessionModel: (key: string, selectionId: string) => Promise<HostSessionModelSelectionResult>;
   abortRun: () => Promise<void>;
   resolveApproval: (approval: ApprovalItem, decision: ApprovalDecision) => Promise<void>;
   syncPendingApprovals: (sessionKeyHint?: string) => Promise<void>;

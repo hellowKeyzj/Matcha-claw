@@ -2,7 +2,7 @@
  * Dashboard Page
  * Main overview page showing system status and usage insights
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronLeft,
@@ -11,15 +11,22 @@ import {
   Loader2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useGatewayStore } from '@/stores/gateway';
+import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
+import {
+  isRuntimeEndpointReady,
+  selectManagementRuntime,
+  supportsRuntimeEndpointCapabilityFamily,
+  useRuntimeEndpointsStore,
+} from '@/stores/runtime-endpoints';
+import { runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
 import { useDashboardUsageStore } from '@/stores/dashboard-usage';
 import { useDashboardUiStore } from '@/stores/dashboard-ui';
 import { FeedbackState } from '@/components/common/FeedbackState';
-import { scheduleIdleReady } from '@/lib/idle-ready';
+import { LoadingState } from '@/components/common/LoadingSpinner';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
+import { useIdleReady } from '@/lib/idle-ready';
 import { trackUiEvent } from '@/lib/telemetry';
 import { useTranslation } from 'react-i18next';
-import { isGatewayOperational } from '@/lib/gateway-status';
 import {
   filterUsageHistoryByWindow,
   groupUsageHistory,
@@ -27,7 +34,6 @@ import {
 import type { UsageSessionDetailEntry } from './usage-history';
 const DEFAULT_USAGE_FETCH_MAX_ATTEMPTS = 2;
 const WINDOWS_USAGE_FETCH_MAX_ATTEMPTS = 3;
-const DASHBOARD_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 
 type UsageSessionDetailViewState =
   | { status: 'idle' }
@@ -37,30 +43,28 @@ type UsageSessionDetailViewState =
 
 export function Dashboard() {
   const { t } = useTranslation('dashboard');
-  const gatewayStatus = useGatewayStore((state) => state.status);
-
-  const isGatewayRunning = isGatewayOperational(gatewayStatus);
+  const runtime = useRuntimeEndpointsStore(selectManagementRuntime);
+  const endpoint = runtime?.endpointRef ?? null;
+  const supportsUsage = Boolean(runtime && supportsRuntimeEndpointCapabilityFamily(runtime, 'usage'));
+  const isUsageRuntimeReady = Boolean(runtime && isRuntimeEndpointReady(runtime) && supportsUsage);
+  const runtimeTransportEpoch = runtime?.controlState.connection?.transportEpoch;
+  const storeEndpoint = useDashboardUsageStore((state) => state.endpoint);
+  const scopeReady = Boolean(endpoint && storeEndpoint && runtimeEndpointsEqual(endpoint, storeEndpoint));
+  const setEndpoint = useDashboardUsageStore((state) => state.setEndpoint);
   const usageFetchMaxAttempts = window.electron?.platform === 'win32'
     ? WINDOWS_USAGE_FETCH_MAX_ATTEMPTS
     : DEFAULT_USAGE_FETCH_MAX_ATTEMPTS;
   const usageHistory = useDashboardUsageStore((state) => state.usageHistory);
   const usageHistoryReady = useDashboardUsageStore((state) => state.usageHistoryReady);
-  const usageInitialLoading = useDashboardUsageStore((state) => state.initialLoading);
+  const usageContentReady = useIdleReady(scopeReady && usageHistoryReady);
   const usageRefreshingState = useDashboardUsageStore((state) => state.refreshing);
-  const usagePanelReady = useDashboardUsageStore((state) => state.usagePanelReady);
-  const usageChartReady = useDashboardUsageStore((state) => state.usageChartReady);
-  const usageDetailListReady = useDashboardUsageStore((state) => state.usageDetailListReady);
   const usageSessionDetails = useDashboardUsageStore((state) => state.sessionDetails);
   const usageFetchError = useDashboardUsageStore((state) => state.error);
-  const setUsagePanelReady = useDashboardUsageStore((state) => state.setUsagePanelReady);
-  const setUsageVisualizationReady = useDashboardUsageStore((state) => state.setUsageVisualizationReady);
   const loadSessionDetails = useDashboardUsageStore((state) => state.loadSessionDetails);
   const refreshUsageHistory = useDashboardUsageStore((state) => state.refreshUsageHistory);
-  const dashboardHeavyContentReady = useDashboardUiStore((state) => state.dashboardHeavyContentReady);
   const usageGroupBy = useDashboardUiStore((state) => state.usageGroupBy);
   const usageWindow = useDashboardUiStore((state) => state.usageWindow);
   const usagePage = useDashboardUiStore((state) => state.usagePage);
-  const setDashboardHeavyContentReady = useDashboardUiStore((state) => state.setDashboardHeavyContentReady);
   const setUsageGroupBy = useDashboardUiStore((state) => state.setUsageGroupBy);
   const setUsageWindow = useDashboardUiStore((state) => state.setUsageWindow);
   const setUsagePage = useDashboardUiStore((state) => state.setUsagePage);
@@ -71,92 +75,31 @@ export function Dashboard() {
     trackUiEvent('dashboard.page_viewed');
   }, []);
 
-  // Fetch token usage history with retry when Gateway just restarted and
-  // history data may not be ready yet.
+  useLayoutEffect(() => {
+    if (scopeReady || (!endpoint && !storeEndpoint)) return;
+    setEndpoint(endpoint);
+    setExpandedUsageSessionId(null);
+    setUsagePage(1);
+  }, [endpoint, scopeReady, setEndpoint, setUsagePage, storeEndpoint]);
+
+  // Retry history reads when the selected runtime becomes ready or reconnects.
   useEffect(() => {
-    if (!isGatewayRunning) {
+    if (!scopeReady || !isUsageRuntimeReady) {
       return;
     }
 
-    const restartMarker = `${gatewayStatus.pid ?? 'na'}:${gatewayStatus.connectedAt ?? 'na'}`;
     void refreshUsageHistory({
       maxAttempts: usageFetchMaxAttempts,
-      restartMarker,
+      restartMarker: String(runtimeTransportEpoch ?? 'na'),
       reason: 'dashboard_refresh',
       silent: true,
     });
-  }, [gatewayStatus.connectedAt, gatewayStatus.pid, isGatewayRunning, refreshUsageHistory, usageFetchMaxAttempts]);
-
-  useEffect(() => {
-    if (dashboardHeavyContentReady) {
-      return;
-    }
-    const cancel = scheduleIdleReady(() => {
-      setDashboardHeavyContentReady(true);
-    }, {
-      idleTimeoutMs: DASHBOARD_HEAVY_CONTENT_IDLE_TIMEOUT_MS,
-      fallbackDelayMs: 120,
-      useAnimationFrame: true,
-    });
-    return cancel;
-  }, [dashboardHeavyContentReady, setDashboardHeavyContentReady]);
-
-  useEffect(() => {
-    if (usagePanelReady) {
-      return;
-    }
-    const cancel = scheduleIdleReady(() => {
-      setUsagePanelReady(true);
-    }, {
-      idleTimeoutMs: 1000,
-      fallbackDelayMs: 80,
-      useAnimationFrame: false,
-    });
-    return cancel;
-  }, [setUsagePanelReady, usagePanelReady]);
-
-  useEffect(() => {
-    if (!usagePanelReady && usageHistory.length > 0) {
-      const cancel = scheduleIdleReady(() => {
-        setUsagePanelReady(true);
-      }, {
-        idleTimeoutMs: 120,
-        fallbackDelayMs: 48,
-        useAnimationFrame: false,
-      });
-      return cancel;
-    }
-    return undefined;
-  }, [setUsagePanelReady, usageHistory.length, usagePanelReady]);
-
-  useEffect(() => {
-    if (!isGatewayRunning || !usagePanelReady || usageHistory.length === 0) {
-      return;
-    }
-    if (usageChartReady && usageDetailListReady) {
-      return;
-    }
-    const cancel = scheduleIdleReady(() => {
-      setUsageVisualizationReady(true);
-    }, {
-      idleTimeoutMs: 320,
-      fallbackDelayMs: 100,
-      useAnimationFrame: true,
-    });
-    return cancel;
-  }, [
-    isGatewayRunning,
-    setUsageVisualizationReady,
-    usageChartReady,
-    usageDetailListReady,
-    usageHistory.length,
-    usagePanelReady,
-  ]);
+  }, [endpoint, isUsageRuntimeReady, refreshUsageHistory, runtimeTransportEpoch, scopeReady, usageFetchMaxAttempts]);
 
   // Calculate statistics safely
   const visibleUsageHistory = useMemo(
-    () => usageHistory,
-    [usageHistory],
+    () => scopeReady ? usageHistory : [],
+    [scopeReady, usageHistory],
   );
   const filteredUsageHistory = useMemo(
     () => filterUsageHistoryByWindow(visibleUsageHistory, usageWindow),
@@ -179,12 +122,10 @@ export function Dashboard() {
     () => filteredUsageHistory.slice((safeUsagePage - 1) * usagePageSize, safeUsagePage * usagePageSize),
     [filteredUsageHistory, safeUsagePage],
   );
-  const usageRefreshing = isGatewayRunning && usageRefreshingState && usageHistoryReady;
+  const usageRefreshing = isUsageRuntimeReady && usageRefreshingState && usageHistoryReady;
   const showUsageRefreshingHint = useDelayedFlag(usageRefreshing, 180);
-  const showUsageInitialLoading = (
-    (!usagePanelReady && !usageHistoryReady)
-    || (isGatewayRunning && usageInitialLoading && visibleUsageHistory.length === 0)
-  );
+  const showUsageInitialLoading = !scopeReady || (!usageHistoryReady && !usageFetchError)
+    || (usageHistoryReady && !usageContentReady);
   const usageSummary = useMemo(
     () => filteredUsageHistory.reduce(
       (acc, entry) => ({
@@ -212,22 +153,27 @@ export function Dashboard() {
           <h1 className="text-lg font-semibold">{t('recentTokenHistory.title')}</h1>
           <p className="text-sm text-muted-foreground">{t('recentTokenHistory.description')}</p>
         </div>
-        {showUsageRefreshingHint && (
-          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            {t('recentTokenHistory.loading')}
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          <RuntimeScopeSelector />
+          {showUsageRefreshingHint && (
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              {t('recentTokenHistory.loading')}
+            </span>
+          )}
+        </div>
       </header>
 
-      {!dashboardHeavyContentReady ? (
-        <div className="space-y-3">
-          <div className="h-4 w-48 animate-pulse rounded bg-muted" />
-          <div className="h-20 w-full animate-pulse rounded bg-muted" />
-          <div className="h-20 w-full animate-pulse rounded bg-muted" />
-        </div>
+      {!endpoint ? (
+        <FeedbackState state="empty" title={t('common:runtimeScope.selectRuntime')} />
+      ) : !runtime ? (
+        <FeedbackState state="error" title={t('common:calls.values.runtimeUnavailable')} />
+      ) : !supportsUsage ? (
+        <FeedbackState state="error" title={t('common:calls.values.unsupported')} />
+      ) : !isUsageRuntimeReady ? (
+        <FeedbackState state="error" title={t('common:calls.values.notReady')} />
       ) : showUsageInitialLoading ? (
-        <FeedbackState state="loading" title={t('recentTokenHistory.loading')} />
+        <LoadingState label={t('recentTokenHistory.loading')} />
       ) : visibleUsageHistory.length === 0 ? (
         usageFetchError ? (
           <FeedbackState
@@ -324,52 +270,24 @@ export function Dashboard() {
           </section>
 
           <section>
-            {!usageChartReady ? (
-              <div className="space-y-3 rounded-lg border p-4">
-                <div className="flex items-center gap-4">
-                  <div className="h-3 w-20 animate-pulse rounded bg-muted" />
-                  <div className="h-3 w-20 animate-pulse rounded bg-muted" />
-                  <div className="h-3 w-20 animate-pulse rounded bg-muted" />
-                </div>
-                {Array.from({ length: 4 }).map((_, index) => (
-                  <div key={`usage-chart-placeholder-${index}`} className="space-y-2">
-                    <div className="h-3 w-1/3 animate-pulse rounded bg-muted" />
-                    <div className="h-3 w-full animate-pulse rounded bg-muted" />
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <UsageBarChart
-                groups={usageGroups}
-                emptyLabel={t('recentTokenHistory.empty')}
-                totalLabel={t('recentTokenHistory.totalTokens')}
-                inputLabel={t('recentTokenHistory.inputShort')}
-                outputLabel={t('recentTokenHistory.outputShort')}
-                cacheLabel={t('recentTokenHistory.cacheShort')}
-              />
-            )}
+            <UsageBarChart
+              groups={usageGroups}
+              emptyLabel={t('recentTokenHistory.empty')}
+              totalLabel={t('recentTokenHistory.totalTokens')}
+              inputLabel={t('recentTokenHistory.inputShort')}
+              outputLabel={t('recentTokenHistory.outputShort')}
+              cacheLabel={t('recentTokenHistory.cacheShort')}
+            />
           </section>
 
           <section className="space-y-3">
-            {!usageDetailListReady ? (
-              <div className="space-y-3">
-                {Array.from({ length: 3 }).map((_, index) => (
-                  <div key={`usage-detail-placeholder-${index}`} className="rounded-lg border p-3">
-                    <div className="h-4 w-2/5 animate-pulse rounded bg-muted" />
-                    <div className="mt-2 h-3 w-3/4 animate-pulse rounded bg-muted" />
-                    <div className="mt-3 h-3 w-full animate-pulse rounded bg-muted" />
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <>
                 <div className="space-y-3">
-                  {pagedUsageHistory.map((entry) => {
+                  {pagedUsageHistory.map((entry, index) => {
                     const detail = usageSessionDetails[entry.sessionId] ?? { status: 'idle' as const };
                     const expanded = expandedUsageSessionId === entry.sessionId;
                     return (
                       <div
-                        key={`${entry.sessionId}-${entry.timestamp}`}
+                        key={`${entry.sessionId}-${entry.timestamp}-${index}`}
                         className="rounded-lg border p-3"
                       >
                         <div className="flex items-start justify-between gap-3">
@@ -459,8 +377,6 @@ export function Dashboard() {
                     </Button>
                   </div>
                 </div>
-              </>
-            )}
           </section>
         </div>
       )}

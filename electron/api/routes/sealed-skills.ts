@@ -2,7 +2,9 @@ import { traceDebug, isTraceEnabled } from '../../utils/trace-logger';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { dialog } from 'electron';
 import type { SealedSkillsTransport } from '../../main/runtime-host-delivery/transport/skills/sealed';
-import type { SkillsManagementTransport } from '../../main/runtime-host-delivery/transport/skills/management';
+import { isSkillsRuntimeScope, type SkillsManagementTransport } from '../../main/runtime-host-delivery/transport/skills/management';
+import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
+import { hasExactKeys, isRecord } from '../../main/runtime-host-delivery/transport/client';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 const INVALID = { outcome: 'rejected' } as const;
@@ -22,7 +24,7 @@ export async function handleSealedSkillsRoutes(
 
   if (operation === 'status') {
     try {
-      const response = await transport.readStatus();
+      const response = await transport.readStatus(readRuntimeScopeQuery(url.searchParams));
       sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, UNKNOWN);
@@ -31,6 +33,16 @@ export async function handleSealedSkillsRoutes(
   }
 
   if (operation === 'installLocal') {
+    let request: unknown;
+    try { request = await parseJsonBody(req); } catch {
+      sendJson(res, 400, INVALID);
+      return true;
+    }
+    if (!isRecord(request) || !(hasExactKeys(request, [])
+      || (hasExactKeys(request, ['scope']) && isSkillsRuntimeScope(request.scope)))) {
+      sendJson(res, 400, INVALID);
+      return true;
+    }
     try {
       const result = await dialog.showOpenDialog({
         properties: ['openFile'],
@@ -41,7 +53,7 @@ export async function handleSealedSkillsRoutes(
         sendJson(res, 200, { outcome: 'canceled' });
         return true;
       }
-      const response = await transport.install({ packagePath });
+      const response = await transport.install({ packagePath, ...(Object.hasOwn(request, 'scope') ? { scope: request.scope } : {}) });
       sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, UNKNOWN);

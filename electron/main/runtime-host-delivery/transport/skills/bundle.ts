@@ -1,6 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
-import { isSkillsCallReceipt, type SkillsCallReceipt } from './management';
+import { isSkillsCallReceipt, isSkillsRuntimeScope, type SkillsCallReceipt } from './management';
 
 const EXPORT_ENDPOINT = '/api/subagents/skill-bundles/export';
 const IMPORT_ENDPOINT = '/api/subagents/skill-bundles/import';
@@ -85,10 +85,12 @@ async function transfer(
 
 function isRequest(operation: 'export' | 'import', value: unknown): boolean {
   if (!isRecord(value)) return false;
+  const { scope, ...input } = value;
+  if (Object.hasOwn(value, 'scope') && !isSkillsRuntimeScope(scope)) return false;
   if (operation === 'export') {
-    return hasExactKeys(value, ['skillKeys']) && Array.isArray(value.skillKeys) && value.skillKeys.every(isSkillKey);
+    return hasExactKeys(input, ['skillKeys']) && Array.isArray(input.skillKeys) && input.skillKeys.every(isSkillKey);
   }
-  return hasExactKeys(value, ['skillBundles']) && Array.isArray(value.skillBundles) && value.skillBundles.every(isBundle);
+  return hasExactKeys(input, ['skillBundles']) && Array.isArray(input.skillBundles) && input.skillBundles.every(isBundle);
 }
 
 function isRejectedResult(value: unknown): value is SkillBundleTransferResult {

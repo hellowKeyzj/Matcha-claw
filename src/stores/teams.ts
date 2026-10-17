@@ -11,7 +11,7 @@ import type { ManualTeamCreation, TeamCreationObserver } from '@/types/team-crea
 import { useChatStore } from '@/stores/chat';
 import { buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
 import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types';
-import { buildSessionIdentityKey, type SessionIdentity } from '../types/desktop/runtime-address';
+import { agentScope, buildSessionIdentityKey, runtimeEndpointsEqual, runtimeInstanceScope, validateRuntimeScope, type AgentScope, type RuntimeInstanceScope, type SessionIdentity } from '../types/desktop/runtime-address';
 import {
   cancelTeamRun,
   classifyTeamCreationFailure,
@@ -89,6 +89,7 @@ export interface ManualTeamProvisionRecord {
 
 export interface TeamMeta {
   id: string;
+  runtimeScope?: AgentScope | RuntimeInstanceScope;
   name: string;
   teamSkillName: string;
   teamSkillVersion: string;
@@ -103,6 +104,7 @@ export interface TeamMeta {
 }
 
 export interface TeamSkillCandidate {
+  runtimeScope: RuntimeInstanceScope;
   displayName: string;
   packagePath: string;
   teamSkillPackage: TeamSkillPackage;
@@ -139,6 +141,7 @@ export interface TeamRoleChatTargetIndexInput {
 }
 
 export interface ManualTeamCandidate {
+  runtimeScope: AgentScope;
   displayName: string;
   manualTeam: ManualTeamProvisionRecord;
 }
@@ -362,6 +365,10 @@ const actionInFlightByKey = new Map<string, { requestId: string; promise: Promis
 export function planTeamSkillCreation(teams: TeamMeta[], candidate: TeamSkillCandidate): TeamSkillCreationPlan {
   const teamSkillName = candidate.teamSkillPackage.name;
   const teamSkillVersion = candidate.teamSkillPackage.version;
+  const scope = runtimeInstanceScope(candidate.runtimeScope.endpoint);
+  teams = teams.filter((team) => runtimeEndpointsEqual(team.runtimeScope?.endpoint ?? {
+    kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
+  }, scope.endpoint));
   const sameVersion = teams.find((team) => team.teamSkillName === teamSkillName && team.teamSkillVersion === teamSkillVersion);
   if (sameVersion) {
     return { action: 'open_existing', teamId: sameVersion.id };
@@ -544,10 +551,32 @@ function isSafeRunId(value: string): boolean {
   return /^[a-zA-Z0-9._-]+$/.test(value);
 }
 
+function selectedTeamScope(scope: AgentScope): AgentScope {
+  if (!scope) throw new Error('Select a real runtime Agent for this team.');
+  return agentScope(scope.endpoint, scope.agentId);
+}
+
+export function resolveTeamRuntimeScope(teamId: string, runId?: string): AgentScope | RuntimeInstanceScope {
+  const state = useTeamsStore.getState();
+  const team = resolveTeamMeta(state.teams, teamId);
+  const targetRunId = runId ?? team.activeRunId;
+  const roles = targetRunId
+    ? state.designByRunId[targetRunId]?.snapshot?.roles
+      ?? state.runListByTeamId[teamId]?.find((run) => run.runId === targetRunId)?.sessions
+      ?? state.rolesByTeamId[teamId]?.filter((role) => role.runId === targetRunId)
+    : state.rolesByTeamId[teamId];
+  const role = roles?.find((role) => role.roleId === 'leader') ?? roles?.[0];
+  if (role) return agentScope(role.sessionIdentity.endpoint, role.sessionIdentity.agentId);
+  if (team.runtimeScope) return team.runtimeScope;
+  // Persisted pre-cutover teams belonged to OpenClaw; never rebind them to a new selection.
+  return { kind: 'runtime-instance', endpoint: { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' } };
+}
+
 function toTeamMeta(input: TeamSkillCandidate, teamId: string, now: number): TeamMeta {
   const packagePath = input.packagePath.trim();
   return {
     id: teamId,
+    runtimeScope: runtimeInstanceScope(input.runtimeScope.endpoint),
     name: input.displayName.trim() || input.teamSkillPackage.name,
     teamSkillName: input.teamSkillPackage.name,
     teamSkillVersion: input.teamSkillPackage.version,
@@ -564,6 +593,7 @@ function toManualTeamMeta(input: ManualTeamCandidate, teamId: string, now: numbe
   const teamName = input.displayName.trim() || input.manualTeam.name;
   return {
     id: teamId,
+    runtimeScope: selectedTeamScope(input.runtimeScope),
     name: teamName,
     teamSkillName: input.manualTeam.name,
     teamSkillVersion: input.manualTeam.version,
@@ -777,6 +807,8 @@ function isTeamMeta(value: unknown): value is TeamMeta {
   const record = value as Record<string, unknown>;
   return typeof record.id === 'string'
     && typeof record.name === 'string'
+    && (record.runtimeScope === undefined || validateRuntimeScope(record.runtimeScope) === null && isRecord(record.runtimeScope)
+      && (record.runtimeScope.kind === 'agent' || record.runtimeScope.kind === 'runtime-instance'))
     && typeof record.teamSkillName === 'string'
     && typeof record.teamSkillVersion === 'string'
     && typeof record.packagePath === 'string'
@@ -968,7 +1000,7 @@ export const useTeamsStore = create<TeamsState>()(
           }));
           return existing.promise;
         }
-        const frozenTarget = { ...target };
+        const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
         const entry: TeamDesignRead = { dirty: false, removed: false, promise: Promise.resolve() };
         designReads.set(key, entry);
         entry.promise = Promise.resolve().then(async () => {
@@ -1064,11 +1096,11 @@ export const useTeamsStore = create<TeamsState>()(
         };
       },
       startDesign: async (target) => {
-        const frozenTarget = { ...target };
+        const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
         await mutateTeamDesign(frozenTarget, 'design-start', (requestId) => startTeamDesign({ ...frozenTarget, idempotencyKey: requestId }));
       },
       startRun: async (target) => {
-        const frozenTarget = { ...target };
+        const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
         const snapshot = get().designByRunId[frozenTarget.runId]?.snapshot;
         if (snapshot?.teamId !== frozenTarget.teamId || snapshot.runId !== frozenTarget.runId
           || !(snapshot.startGate.status === 'intake' && snapshot.designEpoch === null
@@ -1106,7 +1138,7 @@ export const useTeamsStore = create<TeamsState>()(
         });
       },
       exitDesign: async (target) => {
-        const frozenTarget = { ...target };
+        const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
         const snapshot = get().designByRunId[frozenTarget.runId]?.snapshot;
         if (snapshot?.teamId !== frozenTarget.teamId || snapshot.runId !== frozenTarget.runId
           || snapshot.startGate.status !== 'designing'
@@ -1118,7 +1150,7 @@ export const useTeamsStore = create<TeamsState>()(
       },
       submitRunGraphPatch: async (target, operations) => {
         if (operations.length === 0) return;
-        const frozenTarget = { ...target };
+        const frozenTarget = { ...target, scope: resolveTeamRuntimeScope(target.teamId, target.runId) };
         const snapshot = get().designByRunId[target.runId]?.snapshot;
         if (!snapshot || snapshot.teamId !== target.teamId || snapshot.runId !== target.runId) {
           throw new Error('Team run snapshot is required');
@@ -1136,6 +1168,7 @@ export const useTeamsStore = create<TeamsState>()(
             operations,
           });
           await submitTeamRunGraphPatch({
+            scope: frozenTarget.scope,
             runId: frozenTarget.runId,
             summary: 'graph_patch',
             patch: {
@@ -1329,6 +1362,10 @@ export const useTeamsStore = create<TeamsState>()(
       },
       replaceTeamSkillVersion: (input) => {
         const current = resolveTeamMeta(get().teams, input.teamId);
+        const candidateScope = runtimeInstanceScope(input.candidate.runtimeScope.endpoint);
+        if (!runtimeEndpointsEqual(resolveTeamRuntimeScope(current.id).endpoint, candidateScope.endpoint)) {
+          throw new Error('TeamSkill replacement must keep the same runtime endpoint');
+        }
         if (current.teamSkillVersion !== input.expectedCurrentVersion) {
           throw new Error(`TeamSkill version changed from ${input.expectedCurrentVersion} to ${current.teamSkillVersion}.`);
         }
@@ -1337,6 +1374,7 @@ export const useTeamsStore = create<TeamsState>()(
         }
         const duplicate = get().teams.find((team) => (
           team.id !== input.teamId
+          && runtimeEndpointsEqual(resolveTeamRuntimeScope(team.id).endpoint, candidateScope.endpoint)
           && team.teamSkillName === input.candidate.teamSkillPackage.name
           && team.teamSkillVersion === input.candidate.teamSkillPackage.version
         ));
@@ -1353,6 +1391,7 @@ export const useTeamsStore = create<TeamsState>()(
                 ...team,
                 name: input.candidate.displayName.trim() || team.name,
                 teamSkillVersion: input.candidate.teamSkillPackage.version,
+                runtimeScope: candidateScope,
                 teamSkillDescription: input.candidate.teamSkillPackage.description,
                 packagePath,
                 sourcePath: packagePath,
@@ -1402,7 +1441,7 @@ export const useTeamsStore = create<TeamsState>()(
           ...(options?.errorFeedback === 'caller' ? {} : { errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined } }),
         }));
         try {
-          const receipt = await deleteTeamInstance({ teamId });
+          const receipt = await deleteTeamInstance({ teamId, scope: resolveTeamRuntimeScope(teamId) });
           const call = await waitForCall(receipt, 'organization', { timeoutMs: null });
           if (call.command !== 'team.delete'
             || !await matchesOrganizationIdentity(call.detail.teamId, call.detail.teamIdHash, teamId)
@@ -1475,6 +1514,7 @@ export const useTeamsStore = create<TeamsState>()(
         }));
         try {
           const receipt = await provisionTeamAgents({
+            scope: resolveTeamRuntimeScope(teamId),
             teamId: team.id,
             packagePath: team.packagePath,
             idempotencyKey: idempotencyKey(team.id, provisionActionKey(team)),
@@ -1552,6 +1592,7 @@ export const useTeamsStore = create<TeamsState>()(
         try {
           options?.onPhase?.(phase);
           const payload = {
+            scope: resolveTeamRuntimeScope(teamId),
             teamId: team.id,
             packagePath: team.packagePath,
             runId,
@@ -1593,7 +1634,7 @@ export const useTeamsStore = create<TeamsState>()(
           const baseline = get();
           const team = baseline.teams.find((team) => team.id === teamId);
           if (!team) return;
-          const result = await listTeamRuns({ teamId });
+          const result = await listTeamRuns({ teamId, scope: resolveTeamRuntimeScope(teamId) });
           set((state) => {
             const currentTeam = state.teams.find((team) => team.id === teamId);
             if (!currentTeam) return state;
@@ -1667,7 +1708,7 @@ export const useTeamsStore = create<TeamsState>()(
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
-          const receipt = await deleteTeamRun({ runId });
+          const receipt = await deleteTeamRun({ runId, scope: resolveTeamRuntimeScope(teamId, runId) });
           const call = await waitForCall(receipt, 'organization', { timeoutMs: null });
           if (call.command !== 'team.runDelete'
             || !await matchesOrganizationIdentity(call.detail.runId, call.detail.runIdHash, runId)
@@ -1730,6 +1771,7 @@ export const useTeamsStore = create<TeamsState>()(
               let snapshot: TeamRunSnapshotRecord;
               try {
                 snapshot = await readTeamRunSnapshot({
+                  scope: resolveTeamRuntimeScope(teamId, runId),
                   runId,
                   eventCursor: state.eventCursorByRunId[runId],
                   eventLimit: 200,
@@ -1776,6 +1818,7 @@ export const useTeamsStore = create<TeamsState>()(
         }));
         try {
           await submitTeamRunGraphPatch({
+            scope: resolveTeamRuntimeScope(teamId, runId),
             runId,
             summary: 'graph_patch',
             patch: {
@@ -1805,7 +1848,7 @@ export const useTeamsStore = create<TeamsState>()(
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
-          return await exportTeamRunGraphYaml({ runId });
+          return await exportTeamRunGraphYaml({ runId, scope: resolveTeamRuntimeScope(teamId, runId) });
         } catch (error) {
           set((state) => ({
             errorByTeamId: {
@@ -1824,7 +1867,7 @@ export const useTeamsStore = create<TeamsState>()(
           errorByTeamId: { ...state.errorByTeamId, [teamId]: undefined },
         }));
         try {
-          const result = await importTeamRunGraphYaml({ runId, yaml, idempotencyKey: actionKey });
+          const result = await importTeamRunGraphYaml({ runId, scope: resolveTeamRuntimeScope(teamId, runId), yaml, idempotencyKey: actionKey });
           if (result.snapshot) {
             set((state) => teamRunSnapshotPatch(teamId, runId, result.snapshot!, state));
           }
@@ -1845,6 +1888,7 @@ export const useTeamsStore = create<TeamsState>()(
         const actionKey = idempotencyKey(teamId, 'resume');
         await runActionOnce(actionKey, async (requestId) => {
           const result = await resumeTeam({
+            scope: resolveTeamRuntimeScope(teamId),
             teamId,
             idempotencyKey: requestId,
           });
@@ -1869,6 +1913,7 @@ export const useTeamsStore = create<TeamsState>()(
         const state = get();
         const runId = resolveActiveRunId(state, teamId);
         await cancelTeamRun({
+          scope: resolveTeamRuntimeScope(teamId, runId),
           runId,
           reason,
           idempotencyKey: idempotencyKey(teamId, `cancel:${runId}`),
@@ -1884,6 +1929,7 @@ export const useTeamsStore = create<TeamsState>()(
         await mutateTeamDesign({ teamId, runId }, `approval:${approvalId}:${decision}`, async () => {
           try {
             await resolveTeamApproval({
+              scope: resolveTeamRuntimeScope(teamId, runId),
               runId,
               approvalId,
               decision,
@@ -1911,6 +1957,7 @@ export const useTeamsStore = create<TeamsState>()(
         );
         await runActionOnce(actionKey, async () => {
           await submitTeamRunDecision({
+            scope: resolveTeamRuntimeScope(teamId, runId),
             runId: run.runId,
             decision,
             note,

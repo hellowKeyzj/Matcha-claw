@@ -1,4 +1,7 @@
-use platform::capability::CapabilityDecisionVerifier;
+use super::scope::Scope;
+use platform::{
+    capability::CapabilityDecisionVerifier, endpoint::runtime_address::RuntimeEndpoint,
+};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -23,7 +26,7 @@ pub(crate) enum RequestError {
 pub(crate) struct Request {
     id: String,
     operation_id: String,
-    scope: Kind,
+    scope: Scope,
     target: Kind,
     input: Input,
 }
@@ -46,7 +49,7 @@ enum Input {
 }
 
 pub(crate) enum Command {
-    List,
+    List(RuntimeEndpoint),
 }
 
 impl Request {
@@ -73,7 +76,7 @@ impl Request {
 
     fn valid(&self) -> bool {
         self.id == CAPABILITY_ID
-            && self.scope.kind == "openclaw-mcp-servers"
+            && (self.scope.endpoint().is_some() || matches!(self.scope, Scope::OpenclawMcpServers))
             && self.target.kind == "openclaw-mcp-servers"
             && operation_name(&self.operation_id).is_some_and(|kind| match (&self.input, kind) {
                 (Input::List {}, "list") => true,
@@ -83,7 +86,10 @@ impl Request {
 
     pub(crate) fn into_command(self) -> Command {
         match self.input {
-            Input::List {} => Command::List,
+            Input::List {} => Command::List(self.scope.into_endpoint().unwrap_or_else(|| {
+                // This legacy route explicitly names OpenClaw; it is not runtime selection.
+                RuntimeEndpoint::try_new("openclaw", "local").expect("fixed OpenClaw address")
+            })),
         }
     }
 }

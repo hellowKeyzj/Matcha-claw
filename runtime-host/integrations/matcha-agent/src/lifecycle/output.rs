@@ -155,7 +155,7 @@ fn classify_line(stream: OutputStream, bytes: &[u8]) -> Option<StartupDiagnostic
     };
     let line = line.trim();
     if line.is_empty()
-        || line.contains("\"prefix\":\"session-trace\"")
+        || line.starts_with("matcha-app-server listening on http://")
         || stream == OutputStream::Stdout
     {
         return None;
@@ -170,10 +170,19 @@ fn classify_line(stream: OutputStream, bytes: &[u8]) -> Option<StartupDiagnostic
     {
         return Some(StartupDiagnosticCategory::PortConflict);
     }
-    if contains_ascii_case_insensitive(line, "app-server option") {
+    if contains_ascii_case_insensitive(line, "server configuration")
+        || contains_ascii_case_insensitive(line, "configuration lock")
+        || contains_ascii_case_insensitive(line, "management token")
+    {
         return Some(StartupDiagnosticCategory::ConfigurationRejected);
     }
-    if line.contains("[app-server:") {
+    if line.starts_with("matcha-app-server:")
+        || line.rsplit_once(" (-").is_some_and(|(_, suffix)| {
+            suffix
+                .strip_suffix(')')
+                .is_some_and(|code| code.parse::<u32>().is_ok())
+        })
+    {
         return Some(StartupDiagnosticCategory::AppServerReportedError);
     }
 
@@ -205,7 +214,7 @@ mod tests {
         let mut diagnostics = collect(&mut classifier, b"error: Failed to start ser");
         diagnostics.extend(collect(
             &mut classifier,
-            b"ver. Is port 4312 in use?\r\n[app-server:worker.ready] failure\n",
+            b"ver. Is port 4312 in use?\r\nmatcha-app-server: gateway diagnostic write failed\n",
         ));
 
         assert_eq!(
@@ -238,7 +247,7 @@ mod tests {
         let mut classifier = StartupOutputClassifier::new(OutputStream::Stderr);
         let mut input = SECRET_CANARY.as_bytes().to_vec();
         input.extend_from_slice(&[0xff, b'\n']);
-        input.extend_from_slice(b"Unknown app-server option: --synthetic\n");
+        input.extend_from_slice(b"The server configuration is invalid (-32602)\n");
 
         let diagnostics = collect(&mut classifier, &input);
         assert_eq!(
@@ -276,7 +285,7 @@ mod tests {
     #[test]
     fn classifies_an_unterminated_line_once_at_eof_without_raw_content() {
         let mut classifier = StartupOutputClassifier::new(OutputStream::Stderr);
-        let line = format!("[app-server:bootstrap] {SECRET_CANARY}");
+        let line = format!("matcha-app-server: {SECRET_CANARY}");
 
         assert!(collect(&mut classifier, line.as_bytes()).is_empty());
         let diagnostic = classifier.finish();

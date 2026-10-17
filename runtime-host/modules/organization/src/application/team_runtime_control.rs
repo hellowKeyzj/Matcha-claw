@@ -302,7 +302,7 @@ pub enum TeamRuntimeProjectionContext {
 impl TeamRuntimeProjectionContext {
     fn from_command(command: &TeamRuntimeCommand) -> Option<Self> {
         match command {
-            TeamRuntimeCommand::DependencyPlan { package_root } => Some(Self::DependencyPlan {
+            TeamRuntimeCommand::DependencyPlan { package_root, .. } => Some(Self::DependencyPlan {
                 package_root: package_root.clone(),
             }),
             _ => None,

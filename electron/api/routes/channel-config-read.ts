@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { ChannelConfigReadTransport } from '../../main/runtime-host-delivery/transport/channels/config-read';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
 const INVALID = {
@@ -53,11 +54,12 @@ export async function handleChannelConfigReadRoutes(
   return true;
 }
 
-function isRequest(value: unknown): value is { channel: string; accountId?: string } {
+function isRequest(value: unknown): value is { channel: string; accountId?: string; scope?: ProductRuntimeScope } {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
-  if (keys.length < 1 || keys.length > 2 || !keys.every((key) => key === 'channel' || key === 'accountId')) {
+  if (keys.length < 1 || keys.length > 3 || !keys.every((key) => ['channel', 'accountId', 'scope'].includes(key))
+    || (Object.hasOwn(record, 'scope') && !isProductRuntimeScope(record.scope))) {
     return false;
   }
   return isIdentity(record.channel)

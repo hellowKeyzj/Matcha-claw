@@ -143,6 +143,27 @@ where
             return Err(ControlError::Transport("http server"));
         }
     };
+    if let Some(credentials) = runtime.handles.sealed_resource.matcha_reader_credentials() {
+        let source = match matcha_agent::sealed::ReaderSource::new(
+            format!("http://{}", http_server.local_addr()),
+            credentials.token().to_owned(),
+        ) {
+            Ok(source) => source,
+            Err(_) => {
+                let _ = shutdown_runtime(&mut runtime).await;
+                return Err(ControlError::Transport("sealed reader source"));
+            }
+        };
+        if runtime
+            .handles
+            .matcha_agent
+            .set_sealed_reader_source(source)
+            .is_err()
+        {
+            let _ = shutdown_runtime(&mut runtime).await;
+            return Err(ControlError::Transport("sealed reader source"));
+        }
+    }
     runtime.spawn_owner();
     if mcp.publish().is_err() {
         let _ = shutdown_runtime(&mut runtime).await;

@@ -9,11 +9,11 @@ import {
 import {
   type Endpoint,
   type FileTarget,
-  type SessionScope,
+  type AgentScope,
   isEndpoint,
   isFileRelativePath,
   isFileTarget,
-  isSessionScope,
+  isAgentScope,
 } from './contract';
 
 const ROUTE_PATH = '/api/workspace/files/list-dir';
@@ -25,11 +25,11 @@ const UNAVAILABLE = {
 type WorkspaceDirectoryRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.listDir';
-  scope: SessionScope;
+  scope: AgentScope;
   target: FileTarget;
   input: Readonly<{
     endpoint: Endpoint;
-    sessionKey: string;
+    agentId: string;
     relativePath: string;
     includeHidden: boolean;
   }>;
@@ -84,17 +84,19 @@ function isWorkspaceDirectoryRequest(value: unknown): value is WorkspaceDirector
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && value.operationId === 'files.listDir'
-    && isSessionScope(value.scope)
+    && isAgentScope(value.scope)
     && isFileTarget(value.target)
     && isInput(value.input)
-    && value.scope.sessionKey === value.input.sessionKey;
+    && value.scope.agentId === value.input.agentId
+    && value.scope.endpoint.runtimeAdapterId === value.input.endpoint.runtimeAdapterId
+    && value.scope.endpoint.runtimeInstanceId === value.input.endpoint.runtimeInstanceId;
 }
 
 function isInput(value: unknown): value is WorkspaceDirectoryRequest['input'] {
   return isRecord(value)
-    && hasExactKeys(value, ['endpoint', 'sessionKey', 'relativePath', 'includeHidden'])
+    && hasExactKeys(value, ['endpoint', 'agentId', 'relativePath', 'includeHidden'])
     && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.sessionKey)
+    && isNonEmptyBoundedText(value.agentId)
     && (value.relativePath === '' || isFileRelativePath(value.relativePath))
     && typeof value.includeHidden === 'boolean';
 }

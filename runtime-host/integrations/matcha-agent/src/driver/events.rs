@@ -247,8 +247,13 @@ mod tests {
 
     fn envelope(event: RendererEvent) -> RendererEventEnvelope {
         RendererEventEnvelope::new(
-            "route-1".to_owned(),
-            "session-1".to_owned(),
+            sessions_module::state::SessionIdentity::new(
+                "matcha-agent:main:11111111-1111-4111-8111-111111111111",
+                sessions_module::state::SessionProvider::MatchaAgent,
+                "main".to_owned(),
+            )
+            .expect("fixture identity must be valid"),
+            1,
             "run-1".to_owned(),
             1,
             None,

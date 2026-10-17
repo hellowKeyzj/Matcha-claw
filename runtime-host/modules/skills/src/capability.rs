@@ -5,6 +5,20 @@ pub fn listed() -> Vec<serde_json::Value> {
 }
 
 pub fn describe(id: &str, scope: &serde_json::Value) -> Option<serde_json::Value> {
+    if id == "skill.management" && matches!(crate::adapters::loopback::scope::decode(scope.clone()), Ok(platform::endpoint::runtime_address::RuntimeScope::Agent { .. })) {
+        return Some(json!({
+            "id":"skill.management", "kind":"skill-management", "scopeKind":"agent", "scope":scope,
+            "targetKinds":["none","skill","skill-bundle"], "runtimeAdapterId":"matcha-agent", "runtimeInstanceId":"local",
+            "supportLevel":"native", "availability":"available",
+            "operations":[
+                operation("skills.refreshStatus","Refresh skill candidates","none"),
+                operation("skills.exportBundles","Export Agent skill bundles","skill-bundle"),
+                operation("skills.importBundles","Import Agent skill bundles","skill-bundle"),
+                operation("clawhub.openReadme","Read Agent skill manifest","skill"),
+            ],
+            "policyScope":"skill.management", "ownerModuleId":"skills", "routeOwnerId":"matcha-agent",
+        }));
+    }
     let descriptor = match id {
         "skill.management" => management_descriptor(),
         _ => return None,

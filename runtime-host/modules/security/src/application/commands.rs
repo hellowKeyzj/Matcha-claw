@@ -21,6 +21,12 @@ pub enum SecurityCommand {
         correlation: String,
         call: SecurityCall,
     },
+    NativePolicy {
+        target: crate::native_policy::PolicyTarget,
+        principal: String,
+        operation: crate::native_policy::Operation,
+        call: SecurityCall,
+    },
     Operation {
         correlation: String,
         operation_id: String,

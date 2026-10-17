@@ -22,8 +22,9 @@ function unixInput(
     parentCallbackDispatchToken: 'parent-callback-token',
     runtimeHostTransportPort: 32_111,
     matcha: {
-      bunExecutable: '/opt/matcha/bun',
-      entry: '/opt/matcha/app-server.mjs',
+      serverExecutable: '/opt/matcha/matcha-app-server',
+      cliExecutable: '/opt/matcha/bun',
+      cliArgs: ['/opt/matcha/cli-bun.js'],
       workingDirectory: '/opt/matcha',
       storageRoot: '/var/lib/matcha',
       port: 31_001,
@@ -56,8 +57,9 @@ function windowsInput(): WindowsRuntimeHostBootstrapInput {
     parentCallbackDispatchToken: 'parent-callback-token',
     runtimeHostTransportPort: 32_111,
     matcha: {
-      bunExecutable: 'C:\\Matcha\\bun.exe',
-      entry: 'C:\\Matcha\\app-server.mjs',
+      serverExecutable: 'C:\\Matcha\\matcha-app-server.exe',
+      cliExecutable: 'C:\\Matcha\\bun.exe',
+      cliArgs: ['C:\\Matcha\\cli-bun.js'],
       workingDirectory: 'C:\\Matcha',
       storageRoot: 'C:\\ProgramData\\Matcha',
       port: 31_001,
@@ -115,8 +117,9 @@ describe('buildRuntimeHostBootstrap', () => {
       parentCallbackDispatchToken: 'parent-callback-token',
       runtimeHostTransportPort: 32_111,
       matcha: {
-        bunExecutable: '/opt/matcha/bun',
-        entry: '/opt/matcha/app-server.mjs',
+        serverExecutable: '/opt/matcha/matcha-app-server',
+        cliExecutable: '/opt/matcha/bun',
+        cliArgs: ['/opt/matcha/cli-bun.js'],
         workingDirectory: '/opt/matcha',
         storageRoot: '/var/lib/matcha',
         port: 31_001,
@@ -200,9 +203,9 @@ describe('buildRuntimeHostBootstrap', () => {
     [
       'relative Matcha path',
       unixInput({
-        matcha: { ...unixInput().matcha, entry: 'relative/app-server.mjs' },
+        matcha: { ...unixInput().matcha, serverExecutable: 'relative/matcha-app-server' },
       }),
-      'matcha.entry',
+      'matcha.serverExecutable',
     ],
     [
       'NUL-containing OpenClaw path',

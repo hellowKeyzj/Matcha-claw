@@ -28,7 +28,7 @@ hostapi:base-url()
 
 ## 2. capability 是主要业务入口
 
-Renderer 的 session、workspace、provider、channel、skill、plugin、cron 等大部分 mutation 通过：
+Renderer 的 session、workspace media、provider、channel、skill、plugin、cron 等大部分 mutation 通过（workspace file 保留原 `/api/files/*`）：
 
 ```http
 POST /api/capabilities/execute
@@ -70,7 +70,8 @@ POST /api/capabilities/execute
 
 | capability ID | Renderer operation / 用途 | 关键 wrapper / evidence |
 | --- | --- | --- |
-| `workspace.file` | `files.readText`、`writeText`、`stagePaths`、`stageBuffer`、`thumbnail`、`readBinary`、`stat`、`listDir` | [host-api.ts](../../src/lib/host-api.ts#L424-L512) |
+| `workspace.file` | AgentScope；`files.readText/writeText/readBinary/stat/listDir`，仍经 `/api/files/*` | [host-api.ts](../../src/lib/host-api.ts#L964-L995)、[workspace capability](../../runtime-host/modules/workspace/src/capability.rs#L7-L48) |
+| `workspace.media` | 保留 session key wire；`media.prepare/resolve/thumbnail/thumbnails/stagePaths/stageBuffer` | [host-api.ts](../../src/lib/host-api.ts#L1170-L1193)、[media transport](../../electron/main/runtime-host-delivery/transport/workspace/media.ts#L14-L20) |
 | `session.management` | `sessions.list`、`window`、`delete`、`rename`、`archive`、`unarchive`、`updateStatus`、`switch`、`resume`、`state`、`sessions.permission.get/set` | [host-api.ts](../../src/lib/host-api.ts#L546-L555)、[host-api.ts](../../src/lib/host-api.ts#L822-L1168) |
 | `session.prompt` | `sessions.create`、`load`、`abort`、`prompt`、`sendWithMedia` | [host-api.ts](../../src/lib/host-api.ts#L840-L855)、[host-api.ts](../../src/lib/host-api.ts#L924-L1065) |
 | `session.approval` | `approvals.list`、`approvals.resolve` | [host-api.ts](../../src/lib/host-api.ts#L1000-L1025) |
@@ -88,6 +89,39 @@ POST /api/capabilities/execute
 Provider model discovery/import 的 Renderer/Electron public DTO 不扩展：discovery response 仍只允许 `modelId`、`capabilities`、`contextWindow`、`maxTokens`、`timeoutMs`、`aspectRatio`、`resolution`、`quality`；`source`、`checkedAt`、`apiKey`、`baseUrl`、`headers`、`runtimeModelRef`、`accountId` 等 reference/private 字段不得暴露。
 
 `OPEN`: 这不是对每个 operation input/output 的替代类型定义；对应 Renderer wrapper 和 runtime capability descriptor 是字段级权威。后续 Rust cutover 应以 operation family 为单元采集实际 request/response fixture。
+
+### Agent Workspace 文件与 Session Media
+
+`workspace.file` 五操作统一使用 `scope:{kind:'agent',endpoint,agentId}`、target `{kind:'workspace-file'}`；input 为 `{endpoint,agentId,relativePath,...原操作参数}`，scope/input 必须绑定同一 endpoint/agentId，不携带或合成 sessionKey。endpoint 显式选本地 OpenClaw 或 Matcha；文件访问不要求已有 Session。Main 与 Rust 均拒绝旧 session envelope、额外字段及非法 relative path，原成功 DTO、状态码与 public error 保持。[VERIFY: src/lib/host-api.ts:964-995] [VERIFY: electron/main/runtime-host-delivery/transport/workspace/contract.ts:3-19] [VERIFY: electron/main/runtime-host-delivery/transport/workspace/read-text.ts:85-129] [VERIFY: runtime-host/modules/workspace/src/adapters/loopback/text/mod.rs:27-79] [VERIFY: runtime-host/modules/workspace/src/adapters/loopback/text/mod.rs:173-206]
+
+| operation | 原 Renderer → Rust 路由（均 POST） | relativePath 之外的 input |
+| --- | --- | --- |
+| `files.readText` | `/api/files/read-text` → `/api/workspace/files/read-text` | `endpoint,agentId,maxBytes?`；上限仍为 2 MiB |
+| `files.writeText` | `/api/files/write-text` → `/api/workspace/files/write-text` | `endpoint,agentId,content`；UTF-8 上限仍为 2 MiB |
+| `files.readBinary` | `/api/files/binary` → `/api/workspace/files/binary` | `endpoint,agentId,maxBytes?`；上限仍为 50 MiB |
+| `files.stat` | `/api/files/binary` → `/api/workspace/files/binary` | 仅 `endpoint,agentId`，不能带 `maxBytes` |
+| `files.listDir` | `/api/files/list-dir` → `/api/workspace/files/list-dir` | `endpoint,agentId,includeHidden`；Renderer 默认 false，仅此操作允许空 relativePath 表示根 |
+
+仍只有 `/api/files/* → Electron workspace transport → /api/workspace/files/* → workspace owner → native binding` 一条路径。owner 按 Agent 选择 `WorkspaceOps.bind_agent_workspace()`；OpenClaw 复用原 `select_agent` 规则，Matcha 按 agentId 直连现有 native files/list/stat，不增加 app-server 接口或 file 专用 session。[VERIFY: electron/api/routes/files.ts:33-89] [VERIFY: electron/main/runtime-host-delivery/transport/workspace/read-text.ts:20-37] [VERIFY: electron/main/runtime-host-delivery/transport/workspace/read-binary.ts:20-37] [VERIFY: electron/main/runtime-host-delivery/transport/workspace/read-binary.ts:111-126] [VERIFY: electron/main/runtime-host-delivery/transport/workspace/read-directory.ts:19-35] [VERIFY: electron/main/runtime-host-delivery/transport/workspace/read-directory.ts:95-101] [VERIFY: electron/main/runtime-host-delivery/transport/workspace/write-text.ts:19-35] [VERIFY: electron/main/runtime-host-delivery/transport/workspace/write-text.ts:96-103] [VERIFY: runtime-host/modules/workspace/src/owner/actor.rs:458-474] [VERIFY: runtime-host/integrations/openclaw/src/surfaces/workspace/selection.rs:46-65] [VERIFY: runtime-host/integrations/matcha-agent/src/workspace/mod.rs:17-29] [VERIFY: runtime-host/integrations/matcha-agent/src/workspace/binding.rs:121-166] [VERIFY: runtime-host/integrations/matcha-agent/src/client/http.rs:20-37]
+
+Chat 首次 draft 的右侧 WorkspaceBrowser 直接消费当前 AgentScope，挂载后请求 `listDir('')`，不另开后台目录探测；native workspace 字符串只用于显示，根缺省或为 relative 时仍可浏览，不依赖 artifact 或 Session，不伪造绝对路径。SidePanel 以 AgentScope key 隔离浏览器；这是当前源码契约，不是启动应用后的真实文件验收结论。[VERIFY: src/pages/Chat/index.tsx:596-597] [VERIFY: src/pages/Chat/index.tsx:1010-1024] [VERIFY: src/components/file-preview/WorkspaceBrowserBody.tsx:69-108] [VERIFY: src/components/file-preview/WorkspaceBrowserBody.tsx:406-469] [VERIFY: src/pages/Chat/components/ChatSidePanel.tsx:105-106] [VERIFY: src/pages/Chat/components/ChatSidePanel.tsx:507-515]
+
+文件读取失败只归右侧浏览器，不上 Chat banner、不影响 native 聊天 ready/send gate；原更换 workspace 动作经 SidePanel 传入浏览器，仅在 `treeState.status === 'error'` 时显示。浏览器显示根复用 `formatWorkspacePathForDisplay()` 规范 Windows extended DOS/UNC 前缀，不改变 native 路径。[VERIFY: src/pages/Chat/index.tsx:287-298] [VERIFY: src/pages/Chat/index.tsx:595-597] [VERIFY: src/pages/Chat/index.tsx:1279-1294] [VERIFY: src/pages/Chat/index.tsx:1590-1594] [VERIFY: src/pages/Chat/index.tsx:1673-1675] [VERIFY: src/pages/Chat/components/ChatSidePanel.tsx:509-515] [VERIFY: src/components/file-preview/WorkspaceBrowserBody.tsx:309-310] [VERIFY: src/components/file-preview/WorkspaceBrowserBody.tsx:439-461] [VERIFY: src/components/file-preview/WorkspaceBrowserBody.tsx:646-650] [VERIFY: src/components/file-preview/types.ts:30-38]
+
+`workspace.media` 仍经 `/api/capabilities/execute → Electron workspaceMediaTransport → /api/workspace/media`，保留原 `scope:{kind:'session',endpoint,sessionKey}` 与 input 的 endpoint/sessionKey 一致性、真实附件归属和 one-shot resolve；它不是 AgentScope，也不接受为 draft 伪造的 session。file 可浏览不扩大 media 的授权。[VERIFY: src/lib/host-api.ts:1170-1193] [VERIFY: electron/api/routes/capabilities.ts:198-201] [VERIFY: electron/main/runtime-host-delivery/transport/workspace/media.ts:97-149] [VERIFY: runtime-host/modules/workspace/src/adapters/loopback/media/mod.rs:64-93] [VERIFY: runtime-host/integrations/openclaw/src/surfaces/workspace/media/mod.rs:64-98] [VERIFY: runtime-host/integrations/openclaw/src/surfaces/workspace/media/store.rs:66-75] [VERIFY: runtime-host/integrations/matcha-agent/src/workspace/mod.rs:115-130]
+
+### Session 权限与 draft 能力读取
+
+权限复用现有 `session.management / sessions.permission.get|set`：Renderer wrapper → `/api/capabilities/execute` → Electron session adapter → signed `/api/sessions/permission`，无新增 route 或 IPC。GET/SET 的 scope、target、input 必须绑定同一完整 SessionIdentity，input.sessionKey 必须相等；SET 的 `permissionMode` 由 identity.endpoint 判别，拒绝跨 runtime 值。Main 对固定 endpoint 签发 `sessions:read|write`、capability `session.management`、subject `session-permission`；Rust 验证 decision 与 exact envelope 后执行，不把 identity 当成原生权限授权。[VERIFY: src/lib/host-api.ts:1774-1807] [VERIFY: src/types/session-permission.ts:80-109] [VERIFY: electron/api/routes/sessions.ts:113-120] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/permission.ts:57-81] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/permission/mod.rs:120-138] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/permission/mod.rs:204-230]
+
+| peer | 请求与 200 wire | Renderer 结果语义 |
+| --- | --- | --- |
+| OpenClaw | SET 保留 `permissionMode:null` 或 `read-only / guarded / workspace / full`；响应仍是 flat `{supported,mode,pending,canSelectFull,options,defaultMode?,reason?}`，SET 可有 `changed?`，不加 runtime/outcome wire 字段。 | 统一 decoder 补 `runtime:'openclaw'` 与 `outcome:'available'`；unsupported flat projection 转为 unsupported，pending 保留。 |
+| Matcha | SET 仅 `default / acceptEdits / bypassPermissions / plan / dontAsk / auto`，不接受 null。GET 返回 `{runtime:'matcha-agent',mode}`（mode 为 null 或六档）；SET 为 `{runtime:'matcha-agent',mode:六档,persisted:true,applied:boolean}`。 | GET 为 available durable snapshot，无 active/observed；SET 为 confirmed receipt，persisted 与 applied 不合并。 |
+
+两套 mode 不映射。decoder 绑定原请求，拒绝错误 runtime、未知/额外字段及 SET mode 回读不匹配；权限业务失败保留 `unsupported / rejected / unavailable / unknown`（Matcha 分别为 501 / 422 / 503 / 503，OpenClaw 保留旧 unsupported 200 与 unavailable 503 wire）。Electron 未投递为 unavailable，已尝试后失联或畸形响应为 unknown，不 fallback 或自动重试。[VERIFY: src/types/session-permission.ts:4-46] [VERIFY: src/types/session-permission.ts:111-156] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/permission/mod.rs:247-303] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/permission.ts:72-93]
+
+Draft 仅调用 `describe('session.prompt', AgentScope)` 读取现有可执行 `sessions.create` descriptor 的 `sessionConfiguration:{permission:boolean,modelSelection:boolean}`；该字段只允许出现在含 create 的 AgentScope prompt descriptor，不伪造 SessionIdentity，也不代表原生已配置。真实 SessionScope 的 management descriptor 提供权限 get/set，模型仍走原 `sessions.patchModel`，不新增 draft operation。[VERIFY: runtime-host/modules/sessions/src/capability.rs:16-38] [VERIFY: runtime-host/modules/sessions/src/capability.rs:43-51] [VERIFY: runtime-host/modules/sessions/src/capability.rs:87-108] [VERIFY: runtime-host/modules/sessions/src/capability.rs:124-134] [VERIFY: src/types/desktop/capability-descriptor.ts:29] [VERIFY: electron/main/runtime-host-delivery/transport/capabilities.ts:185-190]
 
 ### Cron 系统管理投影
 

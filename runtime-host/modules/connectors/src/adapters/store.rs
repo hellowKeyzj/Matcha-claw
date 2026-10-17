@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use crate::domain::{Connector, ConnectorCatalog, ConnectorError};
+use crate::domain::{Connector, ConnectorCatalog, ConnectorError, ConnectorPatch};
 
 use super::{
     persistence::{ConnectorStorePersistence, StdConnectorStorePersistence},
@@ -133,6 +133,31 @@ impl ConnectorStore {
         }
         let _lock = WriterLock::acquire(&self.lock_path)?;
         self.reload()?;
+        self.commit_upsert(connector)
+    }
+
+    pub(crate) fn update(
+        &mut self,
+        id: &str,
+        patch: ConnectorPatch,
+    ) -> Result<Option<(ConnectorMutation, Connector)>, ConnectorStoreError> {
+        if self.requires_reopen {
+            return Err(ConnectorStoreError::RecoveryRequired);
+        }
+        let _lock = WriterLock::acquire(&self.lock_path)?;
+        self.reload()?;
+        let Some(mut connector) = self.catalog.get(id).cloned() else {
+            return Ok(None);
+        };
+        if crate::domain::is_system_runtime_connector(&connector) {
+            return Err(ConnectorError::SystemManaged.into());
+        }
+        patch.apply(&mut connector)?;
+        let mutation = self.commit_upsert(connector.clone())?;
+        Ok(Some((mutation, connector)))
+    }
+
+    fn commit_upsert(&mut self, connector: Connector) -> Result<ConnectorMutation, ConnectorStoreError> {
         let mut catalog = self.catalog.clone();
         let created = catalog.upsert(connector.clone())?;
         let mut revisions = self.revisions.clone();

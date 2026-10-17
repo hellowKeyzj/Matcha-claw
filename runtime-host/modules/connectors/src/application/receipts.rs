@@ -205,6 +205,7 @@ pub(crate) enum ConnectorCatalogReceipt {
 
 pub(crate) struct ConnectorSessionTarget {
     pub(crate) endpoint: ConnectorSessionEndpoint,
+    pub(crate) agent_id: String,
     pub(crate) session_key: String,
 }
 

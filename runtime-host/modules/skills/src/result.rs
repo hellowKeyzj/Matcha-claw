@@ -158,6 +158,7 @@ pub(crate) struct ResultAccess {
     pub capability: String,
     pub subject: String,
     pub private: bool,
+    pub runtime_scope: Option<platform::endpoint::runtime_address::RuntimeScope>,
 }
 
 pub(crate) struct RetainedResult {

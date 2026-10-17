@@ -5,12 +5,14 @@ pub fn listed() -> Vec<Value> {
 }
 
 pub fn describe(id: &str, scope: &Value) -> Option<Value> {
+    if id == "session.question" { return crate::question::descriptor(scope); }
     let identity = runtime_identity_for_scope(id, scope)?;
     if !runtime_directory::RuntimeCapabilitySurface::for_identity(identity)
         .supports(runtime_directory::RuntimeCapabilityFamily::Session)
     {
         return None;
     }
+    if identity == runtime_directory::RuntimeDriverIdentity::matcha_agent() && id == "session.goal" { return None; }
     match (id, scope.get("kind").and_then(Value::as_str)) {
         ("session.prompt", Some("agent")) => Some(prompt_agent_descriptor(scope.clone())),
         ("session.prompt", Some("session")) => Some(prompt_session_descriptor(scope.clone())),
@@ -18,7 +20,11 @@ pub fn describe(id: &str, scope: &Value) -> Option<Value> {
             Some(management_runtime_descriptor(scope.clone()))
         }
         ("session.management", Some("session")) => {
-            Some(management_session_descriptor(scope.clone()))
+            let mut descriptor = management_session_descriptor(scope.clone());
+            if identity == runtime_directory::RuntimeDriverIdentity::matcha_agent() {
+                descriptor["operations"].as_array_mut()?.retain(|operation| !matches!(operation["id"].as_str(), Some("sessions.archive" | "sessions.unarchive" | "sessions.updateStatus" | "sessions.switch" | "sessions.resume")));
+            }
+            Some(descriptor)
         }
         ("session.goal", Some("session")) => Some(scoped_descriptor(
             "session.goal", "session-goal", scope.clone(), vec![
@@ -35,12 +41,14 @@ pub fn describe(id: &str, scope: &Value) -> Option<Value> {
 }
 
 pub fn prompt_agent_descriptor(scope: Value) -> Value {
-    scoped_descriptor(
+    let mut descriptor = scoped_descriptor(
         "session.prompt",
         "session",
         scope,
         vec![operation("sessions.create", "Create session", "agent")],
-    )
+    );
+    descriptor["sessionConfiguration"] = json!({ "permission": true, "modelSelection": true });
+    descriptor
 }
 
 pub fn prompt_session_descriptor(scope: Value) -> Value {
@@ -86,6 +94,8 @@ pub fn management_session_descriptor(scope: Value) -> Value {
             operation("sessions.content.load", "Load session content", "session"),
             operation("sessions.delete", "Delete session", "session"),
             operation("sessions.rename", "Rename session", "session"),
+            operation("sessions.permission.get", "Get session permission", "session"),
+            operation("sessions.permission.set", "Set session permission", "session"),
             operation("sessions.archive", "Archive session", "session"),
             operation("sessions.unarchive", "Unarchive session", "session"),
             operation("sessions.updateStatus", "Update session status", "session"),
@@ -150,7 +160,8 @@ fn runtime_identity_for_scope(
     scope: &Value,
 ) -> Option<runtime_directory::RuntimeDriverIdentity> {
     match (id, scope.get("kind").and_then(Value::as_str)?) {
-        ("session.prompt" | "session.approval" | "session.modelSelection" | "session.goal", "agent" | "session")
+        ("session.prompt", "agent") => runtime_identity_for_endpoint(scope.get("endpoint")?),
+        ("session.prompt" | "session.approval" | "session.modelSelection" | "session.goal", "session")
         | ("session.management", "session") => {
             runtime_identity_for_endpoint(scope.get("identity")?.get("endpoint")?)
         }

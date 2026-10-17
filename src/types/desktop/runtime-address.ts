@@ -186,6 +186,11 @@ export function buildCapabilityScopeKey(scope: RuntimeScope): string {
   }
 }
 
+export function runtimeScopeQuery(scope: RuntimeScope): string {
+  assertRuntimeScope(scope);
+  return `scope=${encodeURIComponent(JSON.stringify(scope))}`;
+}
+
 export function runtimeEndpointsEqual(left: RuntimeEndpointRef, right: RuntimeEndpointRef): boolean {
   return buildRuntimeEndpointKey(left) === buildRuntimeEndpointKey(right);
 }

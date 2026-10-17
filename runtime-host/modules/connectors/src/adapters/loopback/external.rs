@@ -1,10 +1,14 @@
-use platform::{call::CallId, capability::CapabilityDecisionVerifier};
+use super::scope::Scope;
+use platform::{
+    call::CallId, capability::CapabilityDecisionVerifier,
+    endpoint::runtime_address::RuntimeEndpoint,
+};
 
 use crate::owner::observations::ObservationResult;
 
 use std::collections::BTreeMap;
 
-use crate::domain::{Connector, ConnectorPublicInput, McpProgramSource};
+use crate::domain::{Connector, ConnectorPatch, ConnectorPublicInput, McpProgramSource};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -30,7 +34,7 @@ pub(crate) enum RequestError {
 pub(crate) struct Request {
     id: String,
     operation_id: String,
-    scope: Kind,
+    scope: Scope,
     target: Kind,
     input: Input,
     #[serde(skip)]
@@ -76,6 +80,10 @@ enum Input {
     Upsert {
         #[serde(deserialize_with = "deserialize_public_connector")]
         connector: Box<Connector>,
+    },
+    Update {
+        connector_id: String,
+        patch: Box<ConnectorPatch>,
     },
     Remove {
         connector_id: String,
@@ -244,13 +252,19 @@ fn insert_secret_reference_map(
 pub(crate) enum Command {
     List,
     Catalog,
-    Status,
-    ObservationResult(CallId, Option<SessionIdentity>, String),
+    Status(RuntimeEndpoint, String),
+    ObservationResult(
+        CallId,
+        Option<SessionIdentity>,
+        Option<RuntimeEndpoint>,
+        String,
+    ),
     SessionStatus(SessionStatusTarget, String),
     SessionMcpServerEnabled(SessionMcpServerEnabledTarget),
-    Probe(String),
+    Probe(String, RuntimeEndpoint, String),
     Get(String),
     Upsert(Box<Connector>),
+    Update(String, Box<ConnectorPatch>),
     Remove(String),
 }
 
@@ -280,7 +294,14 @@ impl Request {
 
     fn valid(&self) -> bool {
         self.id == CAPABILITY_ID
-            && self.scope.kind == "external-connector-catalog"
+            && match &self.input {
+                Input::Status {} | Input::Probe { .. } => self.scope.endpoint().is_some(),
+                Input::ObservationResult {
+                    session_identity: None,
+                    ..
+                } => self.scope.endpoint().is_some(),
+                _ => matches!(self.scope, Scope::ExternalConnectorCatalog),
+            }
             && self.target.kind == "external-connectors"
             && operation_name(&self.operation_id).is_some_and(|kind| match (&self.input, kind) {
                 (Input::List {}, "list")
@@ -315,7 +336,8 @@ impl Request {
                 .is_valid(),
                 (Input::Probe { connector_id }, "probe")
                 | (Input::Get { connector_id }, "get")
-                | (Input::Remove { connector_id }, "remove") => valid_connector_id(connector_id),
+                | (Input::Remove { connector_id }, "remove")
+                | (Input::Update { connector_id, .. }, "update") => valid_connector_id(connector_id),
                 (Input::Upsert { connector }, "upsert") => {
                     connector.validate().is_ok() && !is_private_system_runtime_connector(connector)
                 }
@@ -327,11 +349,19 @@ impl Request {
         match self.input {
             Input::List {} => Command::List,
             Input::Catalog {} => Command::Catalog,
-            Input::Status {} => Command::Status,
+            Input::Status {} => Command::Status(
+                self.scope.into_endpoint().expect("validated runtime scope"),
+                self.principal,
+            ),
             Input::ObservationResult {
                 call_id,
                 session_identity,
-            } => Command::ObservationResult(call_id, session_identity, self.principal),
+            } => Command::ObservationResult(
+                call_id,
+                session_identity,
+                self.scope.into_endpoint(),
+                self.principal,
+            ),
             Input::SessionStatus { session_identity } => {
                 Command::SessionStatus(SessionStatusTarget { session_identity }, self.principal)
             }
@@ -344,9 +374,14 @@ impl Request {
                 server_id,
                 enabled,
             }),
-            Input::Probe { connector_id } => Command::Probe(connector_id),
+            Input::Probe { connector_id } => Command::Probe(
+                connector_id,
+                self.scope.into_endpoint().expect("validated runtime scope"),
+                self.principal,
+            ),
             Input::Get { connector_id } => Command::Get(connector_id),
             Input::Upsert { connector } => Command::Upsert(connector),
+            Input::Update { connector_id, patch } => Command::Update(connector_id, patch),
             Input::Remove { connector_id } => Command::Remove(connector_id),
         }
     }
@@ -363,6 +398,7 @@ fn operation_name(operation: &str) -> Option<&'static str> {
         "externalConnectors.probe" => Some("probe"),
         "externalConnectors.get" => Some("get"),
         "externalConnectors.upsert" => Some("upsert"),
+        "externalConnectors.update" => Some("update"),
         "externalConnectors.remove" => Some("remove"),
         _ => None,
     }
@@ -513,7 +549,7 @@ fn status_json(id: &str, observation: &ConnectorObservation) -> Value {
         ConnectorObservation::Unknown => json!({
             "connectorId": id,
             "resultType": "unknown",
-            "reason": "OpenClaw native MCP session status is unavailable",
+            "reason": "Native MCP status is unavailable for this observation context",
             "safeProbe": false,
         }),
     }
@@ -605,14 +641,14 @@ mod tests {
         let request = serde_json::from_value::<Request>(json!({
             "id": "external.connectors",
             "operationId": "externalConnectors.probe",
-            "scope": { "kind": "external-connector-catalog" },
+            "scope": { "kind": "runtime-instance", "endpoint": { "kind": "native-runtime", "runtimeAdapterId": "openclaw", "runtimeInstanceId": "local" } },
             "target": { "kind": "external-connectors" },
             "input": { "kind": "probe", "connectorId": "remote" }
         }))
         .expect("public probe request");
 
         assert!(request.valid());
-        assert!(matches!(request.into_command(), Command::Probe(id) if id == "remote"));
+        assert!(matches!(request.into_command(), Command::Probe(id, _, _) if id == "remote"));
     }
 
     #[test]
@@ -691,9 +727,7 @@ mod tests {
         let request = Request {
             id: CAPABILITY_ID.into(),
             operation_id: "externalConnectors.upsert".into(),
-            scope: Kind {
-                kind: "external-connector-catalog".into(),
-            },
+            scope: Scope::ExternalConnectorCatalog,
             target: Kind {
                 kind: "external-connectors".into(),
             },
@@ -712,7 +746,7 @@ mod tests {
             json!({
                 "connectorId": "remote",
                 "resultType": "unknown",
-                "reason": "OpenClaw native MCP session status is unavailable",
+                "reason": "Native MCP status is unavailable for this observation context",
                 "safeProbe": false,
             })
         );

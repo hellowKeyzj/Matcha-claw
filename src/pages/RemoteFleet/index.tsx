@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { AlertCircle, Plus, RefreshCw, Server } from 'lucide-react';
 import { toast } from 'sonner';
 import { FeedbackState } from '@/components/common/FeedbackState';
+import { LoadingState } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { cn } from '@/lib/utils';
@@ -230,6 +231,7 @@ export function RemoteFleetPage() {
     + runtimes.length
     + endpoints.length;
   const hasFleetData = resourceCount > 0;
+  const initialLoading = !ready && (loading || !error);
 
   useEffect(() => {
     const workspace = workspaceRef.current;
@@ -564,7 +566,8 @@ export function RemoteFleetPage() {
       selection={resolvedSelection}
       activeTab={detailActiveTab}
       onActiveTabChange={setDetailActiveTab}
-      loading={loading && !ready}
+      ready={ready}
+      loading={initialLoading}
       mutatingAction={mutatingAction}
       connections={connections}
       environments={environments}
@@ -671,23 +674,23 @@ export function RemoteFleetPage() {
       <div ref={workspaceRef} className="min-h-0 flex-1 overflow-hidden">
         {mode === 'resources' ? (
           !hasFleetData ? (
-            <div className="flex h-full min-h-0 items-center justify-center overflow-y-auto rounded-2xl border bg-[hsl(var(--shell-surface-muted))] px-6 [border-color:hsl(var(--shell-border))]">
-              <FeedbackState
-                state={loading && !ready ? 'loading' : 'empty'}
-                title={loading && !ready
-                  ? t('remoteFleet.detail.loadingDescription')
-                  : t('remoteFleet.workspace.emptyTitle', { defaultValue: 'Connect your first remote environment' })}
-                description={loading && !ready
-                  ? undefined
-                  : t('remoteFleet.workspace.emptyDescription', { defaultValue: 'Add an SSH host, Docker daemon, Kubernetes cluster, or VM to start managing remote runtimes.' })}
-                action={loading && !ready ? undefined : (
-                  <Button onClick={openRegistration}>
-                    <Plus className="h-4 w-4" />
-                    {t('remoteFleet.workspace.addConnection', { defaultValue: 'Add connection' })}
-                  </Button>
-                )}
-              />
-            </div>
+            initialLoading ? (
+              <LoadingState label={t('remoteFleet.detail.loadingDescription')} />
+            ) : !ready ? null : (
+              <div className="flex h-full min-h-0 items-center justify-center overflow-y-auto rounded-2xl border bg-[hsl(var(--shell-surface-muted))] px-6 [border-color:hsl(var(--shell-border))]">
+                <FeedbackState
+                  state="empty"
+                  title={t('remoteFleet.workspace.emptyTitle', { defaultValue: 'Connect your first remote environment' })}
+                  description={t('remoteFleet.workspace.emptyDescription', { defaultValue: 'Add an SSH host, Docker daemon, Kubernetes cluster, or VM to start managing remote runtimes.' })}
+                  action={(
+                    <Button onClick={openRegistration}>
+                      <Plus className="h-4 w-4" />
+                      {t('remoteFleet.workspace.addConnection', { defaultValue: 'Add connection' })}
+                    </Button>
+                  )}
+                />
+              </div>
+            )
           ) : workspaceLayout === 'single' ? (
             <div className="h-full min-h-0 overflow-hidden rounded-2xl border bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
               {singlePane === 'index' ? (

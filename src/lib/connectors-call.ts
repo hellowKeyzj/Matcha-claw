@@ -5,11 +5,13 @@ import { isCallId } from '../types/call-log/decode';
 import { decodeConnectorsCallDetail, type ConnectorsCallDetail } from '../types/call-log/connectors';
 import type {
   ExternalConnectorSpec,
+  ExternalConnectorSummary,
+  ExternalConnectorPatch,
   ExternalConnectorUpsertMutationReceipt,
   ExternalConnectorRemoveMutationReceipt,
   ExternalConnectorMutationApplied,
 } from '../stores/external-connectors';
-import { sessionIdentitiesEqual, type SessionIdentity } from '../types/desktop/runtime-address';
+import { sessionIdentitiesEqual, runtimeScopeQuery, type RuntimeInstanceScope, type SessionIdentity } from '../types/desktop/runtime-address';
 import { isConnectorObservationResult, type ConnectorObservationResult, type ExternalConnectorConnectionStatus, type SessionConnectorStatus } from '../types/connectors-observation';
 
 async function mutate(path: string, body: object, command: string): Promise<ConnectorsCallDetail> {
@@ -32,10 +34,11 @@ function validateReceipt(receipt: CallReceipt): void {
   }
 }
 
-async function observe(request: { kind: 'status' } | { kind: 'probe'; connectorId: string } | { kind: 'sessionStatus'; sessionIdentity: SessionIdentity }): Promise<ConnectorObservationResult> {
+async function observe(request: { kind: 'status'; scope: RuntimeInstanceScope } | { kind: 'probe'; connectorId: string; scope: RuntimeInstanceScope } | { kind: 'sessionStatus'; sessionIdentity: SessionIdentity }): Promise<ConnectorObservationResult> {
   const { kind } = request;
-  const receipt = await hostApiFetch<CallReceipt>(`/api/external-connectors/${kind === 'sessionStatus' ? 'session-status' : kind}`, kind === 'probe'
-    ? { method: 'POST', body: JSON.stringify({ connectorId: request.connectorId }) }
+  const path = `/api/external-connectors/${kind === 'sessionStatus' ? 'session-status' : kind}${request.kind === 'status' ? `?${runtimeScopeQuery(request.scope)}` : ''}`;
+  const receipt = await hostApiFetch<CallReceipt>(path, request.kind === 'probe'
+    ? { method: 'POST', body: JSON.stringify({ connectorId: request.connectorId, scope: request.scope }) }
     : kind === 'sessionStatus' ? { method: 'POST', body: JSON.stringify({ sessionIdentity: request.sessionIdentity }) } : undefined);
   validateReceipt(receipt);
   const call = await waitForCall(receipt, 'connectors');
@@ -48,7 +51,7 @@ async function observe(request: { kind: 'status' } | { kind: 'probe'; connectorI
   const result = await hostApiFetch<unknown>('/api/external-connectors/observation-result', {
     method: 'POST', body: JSON.stringify({
       callId: receipt.callId,
-      ...(request.kind === 'sessionStatus' ? { sessionIdentity: request.sessionIdentity } : {}),
+      ...(request.kind === 'sessionStatus' ? { sessionIdentity: request.sessionIdentity } : { scope: request.scope }),
     }),
   });
   if (!isConnectorObservationResult(result) || result.callId !== receipt.callId || result.kind !== kind
@@ -60,14 +63,14 @@ async function observe(request: { kind: 'status' } | { kind: 'probe'; connectorI
   return result;
 }
 
-export async function readConnectorStatuses(): Promise<ExternalConnectorConnectionStatus[]> {
-  const result = await observe({ kind: 'status' });
+export async function readConnectorStatuses(scope: RuntimeInstanceScope): Promise<ExternalConnectorConnectionStatus[]> {
+  const result = await observe({ kind: 'status', scope });
   if (result.kind !== 'status') throw new Error('Connector status result is invalid');
   return result.statuses;
 }
 
-export async function probeConnector(connectorId: string): Promise<ExternalConnectorConnectionStatus> {
-  const result = await observe({ kind: 'probe', connectorId });
+export async function probeConnector(scope: RuntimeInstanceScope, connectorId: string): Promise<ExternalConnectorConnectionStatus> {
+  const result = await observe({ kind: 'probe', connectorId, scope });
   if (result.kind !== 'probe') throw new Error('Connector probe result is invalid');
   return result.status;
 }
@@ -88,12 +91,23 @@ function applied(detail: ConnectorsCallDetail): ExternalConnectorMutationApplied
 
 export async function upsertConnector(connector: ExternalConnectorSpec): Promise<ExternalConnectorUpsertMutationReceipt> {
   const detail = await mutate('/api/external-connectors/upsert', { connector }, 'externalConnectors.upsert');
-  if (detail.result !== 'stored' || detail.connectorId !== connector.id || detail.revision === undefined || detail.created === undefined) {
+  return storedConnector(connector.id, detail);
+}
+
+export async function updateConnector(connectorId: string, patch: ExternalConnectorPatch): Promise<ExternalConnectorUpsertMutationReceipt> {
+  const detail = await mutate('/api/external-connectors/update', { connectorId, patch }, 'externalConnectors.update');
+  if (detail.created !== false) throw new Error('Connector update receipt is invalid');
+  return storedConnector(connectorId, detail);
+}
+
+async function storedConnector(connectorId: string, detail: ConnectorsCallDetail): Promise<ExternalConnectorUpsertMutationReceipt> {
+  if (detail.result !== 'stored' || detail.connectorId !== connectorId || detail.revision === undefined || detail.created === undefined) {
     throw new Error('Connector store receipt is invalid');
   }
-  const fact = await hostApiFetch<{ connector: ExternalConnectorSpec }>('/api/external-connectors/get', {
-    method: 'POST', body: JSON.stringify({ connectorId: connector.id }),
+  const fact = await hostApiFetch<{ connector: ExternalConnectorSummary }>('/api/external-connectors/get', {
+    method: 'POST', body: JSON.stringify({ connectorId }),
   });
+  if (fact.connector.id !== connectorId) throw new Error('Connector readback identity is invalid');
   return {
     success: true,
     connector: fact.connector,

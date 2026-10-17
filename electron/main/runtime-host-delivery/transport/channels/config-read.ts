@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import { beginChannelTrace, channelTraceHeaders } from './trace';
 
@@ -12,6 +13,7 @@ const UNAVAILABLE = {
 export type ChannelConfigReadRequest = Readonly<{
   channel: string;
   accountId?: string;
+  scope?: ProductRuntimeScope;
 }>;
 
 export type ChannelConfigReadProjection = Readonly<{
@@ -52,6 +54,7 @@ export function createChannelConfigReadTransport(
         body: {
           channel: input.channel,
           ...(input.accountId !== undefined ? { accountId: input.accountId } : {}),
+          ...(input.scope === undefined ? {} : { scope: input.scope }),
         },
         timeoutMs: REQUEST_TIMEOUT_MS,
       });
@@ -79,9 +82,11 @@ export function createChannelConfigReadTransport(
 }
 
 function isRequest(value: unknown): value is ChannelConfigReadRequest {
-  if (!isRecord(value) || !isIdentity(value.channel)) return false;
-  if (hasExactKeys(value, ['channel'])) return true;
-  return hasExactKeys(value, ['channel', 'accountId']) && isIdentity(value.accountId);
+  if (!isRecord(value) || !isIdentity(value.channel)
+    || (Object.hasOwn(value, 'scope') && !isProductRuntimeScope(value.scope))) return false;
+  const { scope: _scope, ...input } = value;
+  if (hasExactKeys(input, ['channel'])) return true;
+  return hasExactKeys(input, ['channel', 'accountId']) && isIdentity(input.accountId);
 }
 
 function isProjection(value: unknown): value is ChannelConfigReadProjection {

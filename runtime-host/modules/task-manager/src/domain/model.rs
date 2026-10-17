@@ -1,5 +1,6 @@
 use std::fmt;
 
+use platform::endpoint::runtime_address::RuntimeScope;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -453,13 +454,31 @@ impl std::error::Error for TaskInputError {}
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct SessionTarget {
+    scope: RuntimeScope,
     agent_id: String,
     session_key: String,
 }
 
 impl SessionTarget {
-    pub fn try_new(agent_id: String, session_key: String) -> Result<Self, TaskInputError> {
+    pub fn try_new(
+        scope: RuntimeScope,
+        agent_id: String,
+        session_key: String,
+    ) -> Result<Self, TaskInputError> {
+        let RuntimeScope::Session(identity) = &scope else {
+            return Err(TaskInputError);
+        };
+        if identity.agent_id() != agent_id || identity.session_key() != session_key {
+            return Err(TaskInputError);
+        }
         let agent_id = validate_agent_id(agent_id)?;
+        if identity.endpoint().runtime_adapter_id() != "openclaw" {
+            return Ok(Self {
+                scope,
+                agent_id,
+                session_key: required(session_key)?,
+            });
+        }
         if session_key.trim() != session_key || session_key.as_bytes().contains(&0) {
             return Err(TaskInputError);
         }
@@ -483,9 +502,14 @@ impl SessionTarget {
         }
         let session_key = format!("agent:{agent_id}:{endpoint_session_id}");
         Ok(Self {
+            scope,
             agent_id,
             session_key,
         })
+    }
+
+    pub fn scope(&self) -> &RuntimeScope {
+        &self.scope
     }
 
     pub fn agent_id(&self) -> &str {
@@ -511,12 +535,13 @@ pub struct TaskTarget {
 
 impl TaskTarget {
     pub fn try_new(
+        scope: RuntimeScope,
         agent_id: String,
         session_key: String,
         team_key: Option<String>,
     ) -> Result<Self, TaskInputError> {
         Ok(Self {
-            session: SessionTarget::try_new(agent_id, session_key)?,
+            session: SessionTarget::try_new(scope, agent_id, session_key)?,
             team_key: team_key.map(required).transpose()?,
         })
     }
@@ -671,68 +696,81 @@ pub enum TaskCommand {
 }
 
 impl TaskCommand {
+    pub fn scope(&self) -> &RuntimeScope {
+        match self {
+            Self::List { target } | Self::Get { target, .. }
+            | Self::Create { target, .. } | Self::Update { target, .. } => target.session().scope(),
+            Self::TodoWrite { target, .. } | Self::TodoGet { target } => target.scope(),
+        }
+    }
+
     pub fn list(
+        scope: RuntimeScope,
         agent_id: String,
         session_key: String,
         team_key: Option<String>,
     ) -> Result<Self, TaskInputError> {
         Ok(Self::List {
-            target: TaskTarget::try_new(agent_id, session_key, team_key)?,
+            target: TaskTarget::try_new(scope, agent_id, session_key, team_key)?,
         })
     }
 
     pub fn get(
+        scope: RuntimeScope,
         agent_id: String,
         session_key: String,
         team_key: Option<String>,
         task_id: String,
     ) -> Result<Self, TaskInputError> {
         Ok(Self::Get {
-            target: TaskTarget::try_new(agent_id, session_key, team_key)?,
+            target: TaskTarget::try_new(scope, agent_id, session_key, team_key)?,
             task_id: required(task_id)?,
         })
     }
 
     pub fn create(
+        scope: RuntimeScope,
         agent_id: String,
         session_key: String,
         team_key: Option<String>,
         input: TaskCreate,
     ) -> Result<Self, TaskInputError> {
         Ok(Self::Create {
-            target: TaskTarget::try_new(agent_id, session_key, team_key)?,
+            target: TaskTarget::try_new(scope, agent_id, session_key, team_key)?,
             input,
         })
     }
 
     pub fn update(
+        scope: RuntimeScope,
         agent_id: String,
         session_key: String,
         team_key: Option<String>,
         input: TaskUpdate,
     ) -> Result<Self, TaskInputError> {
         Ok(Self::Update {
-            target: TaskTarget::try_new(agent_id, session_key, team_key)?,
+            target: TaskTarget::try_new(scope, agent_id, session_key, team_key)?,
             input,
         })
     }
 
     pub fn todo_write(
+        scope: RuntimeScope,
         agent_id: String,
         session_key: String,
         old_todos: Vec<Todo>,
         new_todos: Vec<Todo>,
     ) -> Result<Self, TaskInputError> {
         Ok(Self::TodoWrite {
-            target: SessionTarget::try_new(agent_id, session_key)?,
+            target: SessionTarget::try_new(scope, agent_id, session_key)?,
             old_todos,
             new_todos,
         })
     }
 
-    pub fn todo_get(agent_id: String, session_key: String) -> Result<Self, TaskInputError> {
+    pub fn todo_get(scope: RuntimeScope, agent_id: String, session_key: String) -> Result<Self, TaskInputError> {
         Ok(Self::TodoGet {
-            target: SessionTarget::try_new(agent_id, session_key)?,
+            target: SessionTarget::try_new(scope, agent_id, session_key)?,
         })
     }
 }
@@ -785,10 +823,16 @@ fn non_empty_list(values: Vec<String>) -> Result<Vec<String>, TaskInputError> {
 mod tests {
     use super::*;
 
+    fn scope(agent: &str, session: &str) -> RuntimeScope {
+        RuntimeScope::Session(platform::endpoint::runtime_address::SessionIdentity::try_new(
+            platform::endpoint::runtime_address::RuntimeEndpoint::try_new("openclaw", "local").unwrap(), agent, session,
+        ).unwrap())
+    }
+
     #[test]
     fn task_crud_builds_a_canonical_agent_scoped_session_key() {
         let command =
-            TaskCommand::list("main".into(), "session-1".into(), Some("team-1".into())).unwrap();
+            TaskCommand::list(scope("main", "session-1"), "main".into(), "session-1".into(), Some("team-1".into())).unwrap();
         let TaskCommand::List { target } = command else {
             panic!("list constructor must create the list command");
         };
@@ -800,7 +844,7 @@ mod tests {
     #[test]
     fn session_target_accepts_bare_and_matching_canonical_session_keys() {
         for session_key in ["session-1", "agent:main:session-1"] {
-            let command = TaskCommand::todo_get("main".into(), session_key.into()).unwrap();
+            let command = TaskCommand::todo_get(scope("main", session_key), "main".into(), session_key.into()).unwrap();
             let TaskCommand::TodoGet { target } = command else {
                 panic!("todo get constructor must create the todo get command");
             };
@@ -824,10 +868,10 @@ mod tests {
             ("main".into(), "session::one".into()),
             ("main".into(), "session\0one".into()),
         ] {
-            assert!(TaskCommand::todo_get(agent, session).is_err());
+            assert!(TaskCommand::todo_get(scope("main", "session-1"), agent, session).is_err());
         }
         assert!(
-            TaskCommand::list("main".into(), "session-1".into(), Some(" team".into())).is_err()
+            TaskCommand::list(scope("main", "session-1"), "main".into(), "session-1".into(), Some(" team".into())).is_err()
         );
     }
 

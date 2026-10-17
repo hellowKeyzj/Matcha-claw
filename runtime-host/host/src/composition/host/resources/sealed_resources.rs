@@ -77,6 +77,15 @@ pub(in crate::composition::host) fn provision_sealed_resources(
         sealed_resource::SealedResourceProvisionError::Skills => ConstructionError::SealedSkills,
         sealed_resource::SealedResourceProvisionError::Agents => ConstructionError::SealedAgents,
     })?;
+    let matcha_root = CanonicalStateDir::provision_private(
+        runtime_local_root
+            .join("runtime-local")
+            .join("matcha-agent"),
+    )
+    .map_err(|_| ConstructionError::SealedSkills)?;
+    let sealed_resource = sealed_resource
+        .with_matcha_skills(matcha_root)
+        .map_err(|_| ConstructionError::SealedSkills)?;
     let fleet_private_root_path = runtime_roots::fleet_private_root_path(runtime_state_dir);
 
     Ok(SealedResources {

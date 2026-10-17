@@ -50,18 +50,19 @@ import { useAccountStore } from '@/stores/account';
 import {
   hostApiFetch,
   hostOpenClawGetSkillsDir,
-  resolveSingleCapabilityScope,
 } from '@/lib/host-api';
 import type { CapabilityTarget } from '../../types/desktop/capability-target';
-import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { waitForSkillsMutation } from '@/lib/skills';
+import { LoadingState } from '@/components/common/LoadingSpinner';
+import { useIdleReady } from '@/lib/idle-ready';
+import { waitForSkillsMutation, requireSkillsScope, selectedSkillsScope, hostImportSkillArchive } from '@/lib/skills';
+import { useRuntimeEndpointsStore, selectManagementEndpoint, selectManagementAgentScope } from '@/stores/runtime-endpoints';
+import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
+import { buildCapabilityScopeKey, runtimeInstanceScope } from '@/types/desktop/runtime-address';
 import { sealedSkillErrorMessage } from '@/lib/sealed-skills-error';
 import { AppError } from '@/lib/error-model';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
 import { readLocalSkillImport } from '@/services/local-path-picker';
-import { scheduleIdleReady } from '@/lib/idle-ready';
-import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { trackUiEvent } from '@/lib/telemetry';
 import { createSessionTraceId, logSessionTrace, summarizeIdentifier, summarizeError } from '@/lib/session-trace';
 import { toast } from 'sonner';
@@ -71,7 +72,6 @@ import { useTranslation } from 'react-i18next';
 
 type SkillAvailabilityKind = 'eligible' | 'missing' | 'disabled' | 'unselectable' | 'unknown';
 const SKILL_MANAGEMENT_CAPABILITY_ID = 'skill.management';
-const SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 const CLAWHUB_MARKETPLACE_PRIMARY_URL = 'https://cn.clawhub-mirror.com';
 const SKILL_CARD_DESCRIPTION_CLASS_NAME = 'mt-3 min-h-10 line-clamp-2 text-sm leading-5 text-muted-foreground group-data-[view=list]/skills:mt-2 group-data-[view=list]/skills:min-h-0';
 const SKILL_CARD_ICON_CLASS_NAME = 'size-11';
@@ -87,7 +87,7 @@ async function skillManagementCapabilityExecute<TResult>(
   target: CapabilityTarget,
   traceId?: string | null,
 ): Promise<TResult> {
-  const scope = await resolveSingleCapabilityScope(SKILL_MANAGEMENT_CAPABILITY_ID);
+  const scope = requireSkillsScope();
   logSessionTrace('skill.open-path.scope', traceId, () => ({
     kind: ['app', 'runtime-instance', 'agent', 'session', 'workspace', 'team-run', 'provider-routing'].includes(scope.kind) ? scope.kind : 'unknown',
     isOpenClawLocal: scope.kind === 'runtime-instance' && scope.endpoint.kind === 'native-runtime'
@@ -140,6 +140,7 @@ function buildMarketplaceSkillUrl(slug: string) {
 }
 
 function getSkillAvailabilityKind(skill: Skill): SkillAvailabilityKind {
+  if (skill.source === 'native-agent-candidate') return 'unknown';
   if (!skill.enabled || skill.unavailableReason === 'disabled') return 'disabled';
   if (skill.unavailableReason === 'missingRequirements' || formatMissingSummary(skill.missing) || (skill.missingCategories?.length ?? 0) > 0) return 'missing';
   if (skill.eligible === true) return 'eligible';
@@ -225,12 +226,15 @@ interface SkillDetailDialogProps {
   skill: Skill;
   onClose: () => void;
   onToggle: (enabled: boolean) => void;
+  selectionCurrent: () => boolean;
   onOpenFolder?: (skill: Skill) => Promise<void> | void;
 }
 
-function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDetailDialogProps) {
+function SkillDetailDialog({ skill, onClose, onToggle, selectionCurrent, onOpenFolder }: SkillDetailDialogProps) {
   const { t } = useTranslation('skills');
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
+  const nativeAgent = skill.runtimeId === 'matcha-agent';
+  const [readme, setReadme] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('info');
   const [envVars, setEnvVars] = useState<Array<{ key: string; value: string }>>([]);
   const [apiKey, setApiKey] = useState('');
@@ -270,6 +274,16 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
   const handleOpenEditor = async () => {
     if (!skill?.id) return;
     try {
+      if (nativeAgent) {
+        const scope = requireSkillsScope();
+        const result = await hostApiFetch<{ success: boolean; content?: string }>('/api/skills/readme', {
+          method: 'POST', body: JSON.stringify({ skillKey: skill.id, scope }),
+        });
+        if (!selectionCurrent()) return;
+        if (!result.success || typeof result.content !== 'string') throw new Error('Skill manifest unavailable');
+        setReadme(result.content);
+        return;
+      }
       const result = await skillManagementCapabilityExecute<{ success: boolean; error?: string }>(
         'clawhub.openReadme',
         {
@@ -320,7 +334,8 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
   };
 
   const handleSaveConfig = async () => {
-    if (isSaving) return;
+    if (isSaving || nativeAgent) return;
+    const scope = requireSkillsScope();
     setIsSaving(true);
     try {
       // Build env object, filtering out empty keys
@@ -343,17 +358,19 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
         { kind: 'skill', skillId: skill.id, slug: skill.slug },
       );
 
-      const result = await waitForSkillsMutation(receipt, 'skills.updateConfig', { skillKey: skill.id });
+      const result = await waitForSkillsMutation(receipt, 'skills.updateConfig', { skillKey: skill.id, scope });
+      if (!selectionCurrent()) return;
       if (result.outcome !== 'accepted') {
-        await fetchSkills({ force: true, fresh: true });
+        await fetchSkills({ force: true, fresh: true, scope });
         throw new Error(`Skill config ${result.outcome}${result.invalidKeys?.length ? ': ' + result.invalidKeys.join(', ') : ''}`);
       }
 
-      await fetchSkills({ force: true, fresh: true });
+      await fetchSkills({ force: true, fresh: true, scope });
+      if (!selectionCurrent()) return;
 
       toast.success(t('detail.configSaved'));
     } catch (err) {
-      toast.error(t('toast.failedSave') + ': ' + String(err));
+      if (selectionCurrent()) toast.error(t('toast.failedSave') + ': ' + String(err));
     } finally {
       setIsSaving(false);
     }
@@ -395,13 +412,14 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
           <div className="px-6">
             <TabsList className="grid w-full grid-cols-2">
               <TabsTrigger value="info">{t('detail.info')}</TabsTrigger>
-              <TabsTrigger value="config" disabled={skill.isCore}>{t('detail.config')}</TabsTrigger>
+              {!nativeAgent && <TabsTrigger value="config" disabled={skill.isCore}>{t('detail.config')}</TabsTrigger>}
             </TabsList>
           </div>
 
           <div className="flex-1 overflow-y-auto">
             <div className="p-6">
               <TabsContent value="info" className="mt-0 space-y-4">
+                {readme !== null && <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded bg-muted p-3 text-sm">{readme}</pre>}
                 <div className="space-y-4">
                   <div>
                     <h3 className="text-sm font-medium text-muted-foreground">{t('detail.description')}</h3>
@@ -584,7 +602,7 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
 
           <div className="flex items-center justify-between p-4 border-t bg-muted/10">
             <div className="flex items-center gap-2">
-              {skill.enabled ? (
+              {nativeAgent ? <span>{t('nativeCandidateShort', { defaultValue: '候选 · 新会话生效' })}</span> : skill.enabled ? (
                 <>
                   <CheckCircle2 className="h-5 w-5 text-green-500" />
                   <span className="text-green-600 dark:text-green-400">{t('detail.enabled')}</span>
@@ -597,11 +615,11 @@ function SkillDetailDialog({ skill, onClose, onToggle, onOpenFolder }: SkillDeta
               )}
             </div>
             <div className="flex items-center gap-2">
-              <Switch
+              {!nativeAgent && <Switch
                 checked={skill.enabled}
                 onCheckedChange={() => onToggle(!skill.enabled)}
                 disabled={skill.isCore}
-              />
+              />}
             </div>
           </div>
         </Tabs>
@@ -789,6 +807,8 @@ interface LocalSkillUploadDialogProps {
   importing: boolean;
   selectedSourceName: string;
   selectedSourcePath: string;
+  nativeAgent: boolean;
+  onArchiveFile: (file: File) => void;
   onClose: () => void;
   onChooseSource: () => void;
   onDropSourcePath: (path: string) => void;
@@ -800,6 +820,8 @@ function LocalSkillUploadDialog({
   importing,
   selectedSourceName,
   selectedSourcePath,
+  nativeAgent,
+  onArchiveFile,
   onClose,
   onChooseSource,
   onDropSourcePath,
@@ -821,6 +843,8 @@ function LocalSkillUploadDialog({
     event.preventDefault();
     event.stopPropagation();
     setDragActive(false);
+    const archive = nativeAgent && Array.from(event.dataTransfer.files).find((file) => file.name.toLowerCase().endsWith('.zip'));
+    if (archive) { onArchiveFile(archive); return; }
     const droppedPaths = Array.from(event.dataTransfer.files)
       .map((file) => window.electron.getPathForFile(file))
       .filter((path): path is string => typeof path === 'string' && path.trim().length > 0);
@@ -893,6 +917,13 @@ function LocalSkillUploadDialog({
             )}
           </div>
 
+          {nativeAgent && <label className="block space-y-2 text-sm">
+            <span>{t('nativeArchiveLabel', { defaultValue: '二进制 ZIP（不超过 32 MiB，以文件名作为技能目录名）' })}</span>
+            <Input type="file" accept=".zip" disabled={importing} onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) onArchiveFile(file);
+            }} />
+          </label>}
           <div className="space-y-2">
             <h3 className="text-sm font-medium text-foreground">{t('marketplace.uploadDialog.requirementsTitle')}</h3>
             <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
@@ -921,6 +952,7 @@ interface SkillGridCardViewModel {
   skillName: string;
   skillDescription: string;
   skillIcon: string;
+  nativeAgent: boolean;
   sourceLabel: string;
   isCore: boolean;
   uninstallable: boolean;
@@ -1012,8 +1044,10 @@ function buildSealedSkillCardModels(sealedSkills: SealedSkillMetadata[], runtime
       skill,
       runtimeProjection: {
         runtimeId,
-        state: runtimeSkill ? (runtimeSkill.enabled ? 'enabled' : 'disabled') : 'syncing',
-        canToggle: skill.installed !== false,
+        state: runtimeId === 'matcha-agent'
+          ? skill.installed === true ? 'enabled' : skill.installed === false ? 'disabled' : 'syncing'
+          : runtimeSkill ? (runtimeSkill.enabled ? 'enabled' : 'disabled') : 'syncing',
+        canToggle: runtimeId !== 'matcha-agent' && skill.installed !== false,
       },
     };
   });
@@ -1029,6 +1063,8 @@ function SealedSkillCard({ model, mutationLocked, uninstalling, cloudUploading, 
   const enabled = runtimeProjection.state === 'enabled';
   const runtimeStateLabel = runtimeProjection.state === 'syncing'
     ? t('availability.unknown')
+    : runtimeProjection.runtimeId === 'matcha-agent'
+    ? enabled ? t('sealed.enabledLoadUnconfirmed') : t('sealed.packageAvailable')
     : enabled ? t('detail.enabled') : t('detail.disabled');
 
   return (
@@ -1063,15 +1099,15 @@ function SealedSkillCard({ model, mutationLocked, uninstalling, cloudUploading, 
       <AgentResourceFooter className={PACKAGE_CARD_FOOTER_CLASS_NAME}>
         <span className="inline-flex min-w-0 items-center gap-2">
           <span className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />
-          <span className="truncate">{runtimeStateLabel}</span>
+          <span className={runtimeProjection.runtimeId === 'matcha-agent' ? 'whitespace-normal' : 'truncate'}>{runtimeStateLabel}</span>
         </span>
-        <Switch
+        {runtimeProjection.runtimeId !== 'matcha-agent' && <Switch
           className="shrink-0"
           checked={enabled}
           onCheckedChange={(checked) => onToggleSkill(skill.skillKey, checked)}
           disabled={mutationLocked || uninstalling || !runtimeProjection.canToggle}
           aria-label={`${runtimeStateLabel}: ${skill.name || skill.skillKey}`}
-        />
+        />}
       </AgentResourceFooter>
     </AgentResourceCard>
   );
@@ -1199,6 +1235,7 @@ const SkillGridCard = memo(function SkillGridCard({
   skillName,
   skillDescription,
   skillIcon,
+  nativeAgent,
   sourceLabel,
   isCore,
   uninstallable,
@@ -1255,24 +1292,35 @@ const SkillGridCard = memo(function SkillGridCard({
           title={missingSummaryLabel}
         >
           <span className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden="true" />
-          <span className="truncate">{availabilityLabel}</span>
+          <span className="truncate">{nativeAgent ? t('nativeCandidateShort', { defaultValue: '候选 · 新会话生效' }) : availabilityLabel}</span>
         </span>
-        <Switch
+        {!nativeAgent && <Switch
           className="relative z-10 shrink-0"
           checked={enabled}
           onCheckedChange={(checked) => onToggleSkill(skillId, checked)}
           disabled={isCore || mutationLocked}
           aria-label={`${enabled ? t('detail.enabled') : t('detail.disabled')}: ${skillName}`}
-        />
+        />}
       </AgentResourceFooter>
     </AgentResourceCard>
   );
 });
 
 export function Skills() {
-  const skills = useSkillsStore((state) => state.skills);
+  const endpoint = useRuntimeEndpointsStore(selectManagementEndpoint);
+  const agentScope = useRuntimeEndpointsStore(selectManagementAgentScope);
+  const nativeAgent = endpoint?.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'matcha-agent';
+  const openClaw = endpoint?.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'openclaw';
+  const scope = useMemo(() => openClaw && endpoint ? runtimeInstanceScope(endpoint) : nativeAgent ? agentScope : null, [openClaw, endpoint, nativeAgent, agentScope]);
+  const scopeKey = scope ? buildCapabilityScopeKey(scope) : null;
+  const selectionCurrent = useCallback(() => {
+    const selected = selectedSkillsScope();
+    return Boolean(selected && buildCapabilityScopeKey(selected) === scopeKey);
+  }, [scopeKey]);
+  const storeScopeKey = useSkillsStore((state) => state.scopeKey);
+  const storedSkills = useSkillsStore((state) => state.skills);
+  const skills = useMemo(() => storeScopeKey === scopeKey ? storedSkills : [], [storeScopeKey, scopeKey, storedSkills]);
   const snapshotReady = useSkillsStore((state) => state.snapshotReady);
-  const initialLoading = useSkillsStore((state) => state.initialLoading);
   const refreshing = useSkillsStore((state) => state.refreshing);
   const mutating = useSkillsStore((state) => state.mutating);
   const mutatingBySkillId = useSkillsStore((state) => state.mutatingBySkillId);
@@ -1289,7 +1337,9 @@ export function Skills() {
   const searching = useSkillsStore((state) => state.searching);
   const searchError = useSkillsStore((state) => state.searchError);
   const installing = useSkillsStore((state) => state.installing);
-  const sealedSkills = useSealedSkillsStore((state) => state.skills);
+  const sealedScopeKey = useSealedSkillsStore((state) => state.scopeKey);
+  const storedSealedSkills = useSealedSkillsStore((state) => state.skills);
+  const sealedSkills = useMemo(() => sealedScopeKey === scopeKey ? storedSealedSkills : [], [sealedScopeKey, scopeKey, storedSealedSkills]);
   const sealedSkillIssues = useSealedSkillsStore((state) => state.issues);
   const cloudPackages = useSealedSkillsStore((state) => state.cloudPackages);
   const installedCloudPackages = useSealedSkillsStore((state) => state.installedCloudPackages);
@@ -1301,6 +1351,7 @@ export function Skills() {
   const fetchMyCloudSkillPackages = useSealedSkillsStore((state) => state.fetchMyCloudSkillPackages);
   const publishCloudSkillPackage = useSealedSkillsStore((state) => state.publishCloudSkillPackage);
   const sealedSkillsLoading = useSealedSkillsStore((state) => state.loading);
+  const sealedSnapshotReady = useSealedSkillsStore((state) => state.snapshotReady);
   const sealedCloudLoading = useSealedSkillsStore((state) => state.cloudLoading);
   const sealedCloudLoaded = useSealedSkillsStore((state) => state.cloudLoaded);
   const localPackageInstalling = useSealedSkillsStore((state) => state.localPackageInstalling);
@@ -1334,6 +1385,7 @@ export function Skills() {
   const marketplaceQuery = searchParams.get('marketSearch') || '';
   const [localSkillDialogOpen, setLocalSkillDialogOpen] = useState(false);
   const [localSkillSourcePath, setLocalSkillSourcePath] = useState('');
+  const [localSkillArchive, setLocalSkillArchive] = useState<File | null>(null);
   const [localSkillImporting, setLocalSkillImporting] = useState(false);
   const [localSkillPackageInstallDialogOpen, setLocalSkillPackageInstallDialogOpen] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
@@ -1342,7 +1394,7 @@ export function Skills() {
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [selectedMarketplaceSkill, setSelectedMarketplaceSkill] = useState<MarketplaceSkill | null>(null);
   const tabParam = searchParams.get('tab');
-  const activeTab = tabParam === 'sealed' || tabParam === 'marketplace' ? tabParam : 'all';
+  const activeTab = (tabParam === 'sealed' && scope) || tabParam === 'marketplace' ? tabParam : 'all';
   const setActiveTab = (tab: string) => {
     setSearchParams((params) => {
       const next = new URLSearchParams(params);
@@ -1364,21 +1416,18 @@ export function Skills() {
   const sourceParam = searchParams.get('source');
   const selectedSource: InstalledSkillSourceFilter = sourceParam === 'built-in' || sourceParam === 'managed' ? sourceParam : 'all';
   const statusParam = searchParams.get('status') || 'all';
-  const selectedStatus = ['enabled', 'disabled', 'eligible', 'missing', 'unselectable', 'unknown'].includes(statusParam) ? statusParam : 'all';
+  const selectedStatus = openClaw && ['enabled', 'disabled', 'eligible', 'missing', 'unselectable', 'unknown'].includes(statusParam) ? statusParam : 'all';
   const view = searchParams.get('view') === 'list' ? 'list' : 'grid';
   const sealedQuery = searchParams.get('packageSearch') || '';
-  const [skillsHeavyContentReady, setSkillsHeavyContentReady] = useState(
-    () => import.meta.env.MODE === 'test' || skills.length > 0 || snapshotReady,
-  );
   const marketplaceDiscoveryAttemptedRef = useRef(false);
 
-  const gatewayProcessRunning = gatewayStatus.processState === 'running';
-  const gatewayReportedReady = gatewayStatus.gatewayReady === true;
+  const gatewayProcessRunning = openClaw ? gatewayStatus.processState === 'running' : Boolean(scope);
+  const gatewayReportedReady = openClaw ? gatewayStatus.gatewayReady === true : snapshotReady && storeScopeKey === scopeKey;
   const gatewayRuntimeKey = `${gatewayStatus.pid ?? 'none'}:${gatewayStatus.connectedAt ?? 'none'}:${gatewayStatus.port}`;
   const [skillsFeatureReady, setSkillsFeatureReady] = useState(
     () => gatewayProcessRunning && gatewayReportedReady,
   );
-  const gatewayBannerState = getSkillsGatewayBannerState(gatewayStatus, skillsFeatureReady);
+  const gatewayBannerState = openClaw ? getSkillsGatewayBannerState(gatewayStatus, skillsFeatureReady) : 'none';
   const [showGatewayBanner, setShowGatewayBanner] = useState(false);
 
   useEffect(() => {
@@ -1400,6 +1449,22 @@ export function Skills() {
   }, [gatewayBannerState]);
 
   useEffect(() => {
+    useSkillsStore.getState().setScope(scope);
+    useSealedSkillsStore.getState().setScope(scope);
+    setSelectedSkill(null);
+    setSelectedMarketplaceSkill(null);
+    setLocalSkillDialogOpen(false);
+    setLocalSkillSourcePath('');
+    setLocalSkillArchive(null);
+    setLocalSkillImporting(false);
+    setLocalSkillPackageInstallDialogOpen(false);
+    setExportDialogOpen(false);
+    setSealedSkillToDelete(null);
+    if (scope) void fetchSkills({ force: true });
+  }, [scopeKey, scope, fetchSkills]);
+
+  useEffect(() => {
+    if (!openClaw) return;
     if (!gatewayProcessRunning) {
       setSkillsFeatureReady(false);
       return;
@@ -1426,55 +1491,36 @@ export function Skills() {
     return () => {
       cancelled = true;
     };
-  }, [fetchSkills, gatewayProcessRunning, gatewayReportedReady, gatewayRuntimeKey, isSealedTabActive, skillsFeatureReady, snapshotReady]);
+  }, [openClaw, fetchSkills, gatewayProcessRunning, gatewayReportedReady, gatewayRuntimeKey, isSealedTabActive, skillsFeatureReady, snapshotReady]);
 
   const refreshPackagePanel = useCallback(() => {
     if (packageTab === 'installed') {
+      if (!scope) return;
       void fetchSealedSkills();
-      void fetchSkills({ force: true, silent: true, fresh: true });
+      void fetchSkills({ force: true, silent: true, fresh: true, scope });
     } else if (packageTab === 'mine') {
       void fetchMyCloudSkillPackages();
     } else {
       void fetchCloudSkillPackages();
     }
-  }, [fetchCloudSkillPackages, fetchMyCloudSkillPackages, fetchSealedSkills, fetchSkills, packageTab]);
+  }, [fetchCloudSkillPackages, fetchMyCloudSkillPackages, fetchSealedSkills, fetchSkills, packageTab, scope]);
 
   useEffect(() => {
     if (isSealedTabActive) refreshPackagePanel();
   }, [isSealedTabActive, refreshPackagePanel, cloudAccountUserId, cloudAccountSignedOut]);
 
-  useEffect(() => {
-    if (skillsHeavyContentReady) {
-      return;
-    }
-    if (snapshotReady) {
-      setSkillsHeavyContentReady(true);
-      return;
-    }
-    const cancel = scheduleIdleReady(() => {
-      setSkillsHeavyContentReady(true);
-    }, {
-      idleTimeoutMs: SKILLS_HEAVY_CONTENT_IDLE_TIMEOUT_MS,
-      fallbackDelayMs: 120,
-      useAnimationFrame: true,
-    });
-    return cancel;
-  }, [skillsHeavyContentReady, snapshotReady]);
-
   // Filter skills
   const safeSkills = useMemo(() => (Array.isArray(skills) ? skills : []), [skills]);
-  const skillById = useMemo(() => {
-    return new Map(safeSkills.map((skill) => [skill.id, skill] as const));
-  }, [safeSkills]);
   const exportableSkills = useMemo(() => {
     return safeSkills.filter((skill) => !skill.isCore && !skill.isBundled);
   }, [safeSkills]);
+  const skillsContentReady = useIdleReady(storeScopeKey === scopeKey && snapshotReady);
   const deferredSkills = useDeferredValue(safeSkills);
   const deferredSearchQuery = useDeferredValue(isAllTabActive ? searchQuery : '');
   const deferredSelectedSource = useDeferredValue(isAllTabActive ? selectedSource : 'all');
   const skillsForView = useMemo(
-    () => (isAllTabActive && skillsHeavyContentReady ? deferredSkills : []),
-    [deferredSkills, isAllTabActive, skillsHeavyContentReady],
+    () => (isAllTabActive && skillsContentReady ? deferredSkills : []),
+    [deferredSkills, isAllTabActive, skillsContentReady],
   );
 
   const filteredSkills = useMemo(() => {
@@ -1506,9 +1552,9 @@ export function Skills() {
       return a.name.localeCompare(b.name);
     });
   }, [deferredSearchQuery, deferredSelectedSource, selectedStatus, skillsForView]);
-  const showInitialLoading = !snapshotReady && initialLoading;
+  const skillsSnapshotReady = storeScopeKey === scopeKey && snapshotReady;
+  const showInitialLoading = Boolean(scope) && !skillsSnapshotReady && (storeScopeKey !== scopeKey || !error);
   const manualRefreshBusy = refreshing || mutating;
-  const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
 
   const filteredSkillCards = useMemo<SkillGridCardViewModel[]>(() => {
     const configurableLabel = t('detail.configurable');
@@ -1522,6 +1568,7 @@ export function Skills() {
         skillName: displayName,
         skillDescription: skill.description,
         skillIcon: skill.icon || '',
+        nativeAgent: skill.runtimeId === 'matcha-agent',
         sourceLabel: resolveSkillSourceLabel(skill, t),
         isCore: Boolean(skill.isCore),
         uninstallable: skill.uninstallable === true,
@@ -1561,25 +1608,26 @@ export function Skills() {
   const handleExportSkillPackage = useCallback(async (skillId: string) => {
     try {
       const result = await exportSkillPackage(skillId);
-      if (!result) return;
+      if (!result || !selectionCurrent()) return;
       if (result.warning) toast.warning(t(result.refreshed ? 'sealed.exportedCleanupFailed' : 'sealed.exportedCleanupRefreshFailed'));
       else if (result.refreshed) toast.success(t('sealed.exported'));
       else toast.warning(t('sealed.exportedRefreshFailed'));
     } catch (err) {
-      toast.error(sealedSkillErrorMessage(err, t, 'sealed.exportFailed'));
+      if (selectionCurrent()) toast.error(sealedSkillErrorMessage(err, t, 'sealed.exportFailed'));
     }
-  }, [exportSkillPackage, t]);
+  }, [exportSkillPackage, selectionCurrent, t]);
 
   const handleConfirmUninstallSealedSkill = useCallback(async () => {
     if (!sealedSkillToDelete) {
       return;
     }
     await uninstallSealedSkill(sealedSkillToDelete.skillKey);
+    if (!selectionCurrent()) return;
     setSealedSkillToDelete(null);
     const state = useSealedSkillsStore.getState();
     if (state.error || state.cloudError) toast.warning(t('sealed.uninstalledRefreshFailed'));
     else toast.success(t('toast.uninstalled'));
-  }, [sealedSkillToDelete, uninstallSealedSkill, t]);
+  }, [sealedSkillToDelete, uninstallSealedSkill, selectionCurrent, t]);
 
   const handleUninstallSealedSkillQuick = useCallback((skillId: string) => {
     const skill = sealedSkills.find((entry) => entry.skillKey === skillId);
@@ -1595,40 +1643,43 @@ export function Skills() {
 
     try {
       const result = await batchSetSkillsEnabled(candidates.map((skill) => skill.id), enable);
+      if (!selectionCurrent()) return;
       const succeeded = result.updated.length;
       trackUiEvent('skills.batch_toggle', { enable, total: candidates.length, succeeded });
       if (result.success) toast.success(enable ? t('toast.batchEnabled', { count: succeeded }) : t('toast.batchDisabled', { count: succeeded }));
       else toast.warning(t('toast.batchPartial', { success: succeeded, total: candidates.length }));
     } catch (error) {
-      toast.error(String(error));
+      if (selectionCurrent()) toast.error(String(error));
     }
-  }, [batchSetSkillsEnabled, filteredSkills, t]);
+  }, [batchSetSkillsEnabled, filteredSkills, selectionCurrent, t]);
 
   // Handle toggle
   const handleToggle = useCallback(async (skillId: string, enable: boolean) => {
     try {
       if (enable) {
         await enableSkill(skillId);
+        if (!selectionCurrent()) return;
         toast.success(t('toast.enabled'));
       } else {
         await disableSkill(skillId);
+        if (!selectionCurrent()) return;
         toast.success(t('toast.disabled'));
       }
       setSelectedSkill((skill) => skill?.id === skillId ? { ...skill, enabled: enable } : skill);
     } catch (err) {
-      toast.error(String(err));
+      if (selectionCurrent()) toast.error(String(err));
     }
-  }, [enableSkill, disableSkill, t]);
+  }, [enableSkill, disableSkill, selectionCurrent, t]);
 
   const handleOpenSkillDetail = useCallback((skillId: string) => {
-    const nextSkill = skillById.get(skillId);
-    if (!nextSkill) {
-      return;
-    }
-    setSelectedSkill(nextSkill);
-  }, [skillById]);
+    const state = useSkillsStore.getState();
+    if (state.scopeKey !== scopeKey || !selectionCurrent()) return;
+    const nextSkill = state.skills.find((skill) => skill.id === skillId);
+    if (nextSkill) setSelectedSkill(nextSkill);
+  }, [scopeKey, selectionCurrent]);
 
   const handleOpenSkillFolder = useCallback(async (skill: Skill) => {
+    if (!openClaw) return;
     const traceId = createSessionTraceId('skill.open-path');
     logSessionTrace('skill.open-path.click', traceId, () => {
       const source = (skill.source || '').trim().toLowerCase();
@@ -1660,7 +1711,7 @@ export function Skills() {
       logSessionTrace('skill.open-path.failed', traceId, () => summarizeError(err));
       toast.error(t('toast.failedOpenActualFolder') + ': ' + String(err));
     }
-  }, [t]);
+  }, [openClaw, t]);
 
   const handleToggleSkillQuick = useCallback((skillId: string, enable: boolean) => {
     void handleToggle(skillId, enable);
@@ -1692,10 +1743,13 @@ export function Skills() {
   const [skillsDirPath, setSkillsDirPath] = useState('~/.openclaw/skills');
 
   useEffect(() => {
+    if (!openClaw) { setSkillsDirPath(''); return; }
+    let cancelled = false;
     hostOpenClawGetSkillsDir()
-      .then((dir) => setSkillsDirPath(dir as string))
+      .then((dir) => { if (!cancelled) setSkillsDirPath(dir as string); })
       .catch(console.error);
-  }, []);
+    return () => { cancelled = true; };
+  }, [openClaw]);
 
   const localSkillSourceName = useMemo(() => {
     if (!localSkillSourcePath) {
@@ -1707,6 +1761,7 @@ export function Skills() {
   const resetLocalSkillDialog = useCallback(() => {
     setLocalSkillDialogOpen(false);
     setLocalSkillSourcePath('');
+    setLocalSkillArchive(null);
     setLocalSkillImporting(false);
   }, []);
 
@@ -1721,7 +1776,7 @@ export function Skills() {
         filters: [
           {
             name: t('marketplace.uploadDialog.skillSourceFilter'),
-            extensions: ['zip', 'md'],
+            extensions: nativeAgent ? ['md'] : ['zip', 'md'],
           },
           {
             name: t('marketplace.uploadDialog.allFilesFilter'),
@@ -1732,19 +1787,33 @@ export function Skills() {
       if (result.canceled || !result.filePaths?.length) {
         return;
       }
+      if (!selectionCurrent()) return;
+      setLocalSkillArchive(null);
       setLocalSkillSourcePath(result.filePaths[0]);
     } catch (error) {
-      toast.error(t('toast.failedImportLocalSkill') + ': ' + String(error));
+      if (selectionCurrent()) toast.error(t('toast.failedImportLocalSkill') + ': ' + String(error));
     }
-  }, [t]);
+  }, [nativeAgent, selectionCurrent, t]);
 
   const handleImportLocalSkill = useCallback(async () => {
     if (localSkillImporting || !localSkillSourcePath.trim()) {
       return;
     }
 
+    const operationScope = requireSkillsScope();
+    const generation = useSkillsStore.getState().scopeGeneration;
     setLocalSkillImporting(true);
     try {
+      if (operationScope.kind === 'agent' && localSkillArchive) {
+        await hostImportSkillArchive(localSkillArchive, localSkillArchive.name.replace(/\.zip$/i, ''), operationScope);
+        if (!selectionCurrent()) return;
+        await fetchSkills({ force: true, scope: operationScope });
+        if (!selectionCurrent()) return;
+        toast.success(t('nativeInstalled', { defaultValue: '已安装到所选 Agent；新会话按原生策略发现' }));
+        resetLocalSkillDialog();
+        return;
+      }
+      if (operationScope.kind === 'agent' && /\.zip$/i.test(localSkillSourcePath)) throw new Error('Use the ZIP file input to preserve binary resources');
       const importedSkill = await readLocalSkillImport(localSkillSourcePath);
       if (!importedSkill) {
         return;
@@ -1753,20 +1822,31 @@ export function Skills() {
       if (!skillKey) {
         throw new Error('Imported skill did not return a skill key');
       }
-      await importLocalSkill(importedSkill);
+      if (useSkillsStore.getState().scopeGeneration !== generation || !selectionCurrent()) return;
+      await importLocalSkill(importedSkill, operationScope);
+      if (useSkillsStore.getState().scopeGeneration !== generation || !selectionCurrent()) return;
+      if (operationScope.kind === 'agent') {
+        await fetchSkills({ force: true, scope: operationScope });
+        if (!selectionCurrent()) return;
+        toast.success(t('nativeInstalled', { defaultValue: '已安装到所选 Agent；新会话按原生策略发现' }));
+        resetLocalSkillDialog();
+        return;
+      }
 
       let enableError: unknown = null;
       try {
-        await enableSkill(skillKey);
+        await enableSkill(skillKey, operationScope);
       } catch (error) {
         enableError = error;
       }
 
+      if (!selectionCurrent()) return;
       try {
-        await fetchSkills({ force: true, fresh: true });
+        await fetchSkills({ force: true, fresh: true, scope: operationScope });
       } catch (error) {
         console.error('Failed to refresh skills after local import:', error);
       }
+      if (!selectionCurrent()) return;
 
       if (enableError) {
         toast.warning(t('toast.importedLocalSkillEnableFailed', { name: skillKey }) + ': ' + String(enableError));
@@ -1776,35 +1856,37 @@ export function Skills() {
 
       resetLocalSkillDialog();
     } catch (error) {
+      if (useSkillsStore.getState().scopeGeneration !== generation || !selectionCurrent()) return;
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('toast.failedImportLocalSkill') + ': ' + message);
     } finally {
-      setLocalSkillImporting(false);
+      if (useSkillsStore.getState().scopeGeneration === generation) setLocalSkillImporting(false);
     }
-  }, [enableSkill, fetchSkills, importLocalSkill, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, t]);
+  }, [enableSkill, fetchSkills, importLocalSkill, localSkillArchive, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, selectionCurrent, t]);
 
   const handleInstallLocalSkillPackage = useCallback(async () => {
     if (localPackageInstalling) {
       return;
     }
+    const operationScope = requireSkillsScope();
     try {
       const installed = await installLocalSkillPackage();
-      if (!installed) {
+      if (!installed || !selectionCurrent()) {
         return;
       }
       if (useSealedSkillsStore.getState().error) toast.warning(t('sealed.installedRefreshFailed'));
       else toast.success(t('sealed.installedLocal'));
       resetLocalSkillPackageInstallDialog();
-      await fetchSkills({ force: true, fresh: true });
+      await fetchSkills({ force: true, fresh: true, scope: operationScope });
     } catch (error) {
-      toast.error(sealedSkillErrorMessage(error, t, 'sealed.installLocalFailed'));
+      if (selectionCurrent()) toast.error(sealedSkillErrorMessage(error, t, 'sealed.installLocalFailed'));
     }
-  }, [fetchSkills, installLocalSkillPackage, localPackageInstalling, resetLocalSkillPackageInstallDialog, t]);
+  }, [fetchSkills, installLocalSkillPackage, localPackageInstalling, resetLocalSkillPackageInstallDialog, selectionCurrent, t]);
 
   const handleUploadInstalledSkillPackageToCloud = useCallback(async (skillKey: string) => {
     try {
       const result = await uploadInstalledSkillPackageToCloud(skillKey);
-      if (!result) return;
+      if (!result || !selectionCurrent()) return;
       const notify = result.warning || !result.refreshed ? toast.warning : toast.success;
       notify(t(result.warning
         ? result.refreshed ? 'sealed.uploadedCleanupFailed' : 'sealed.uploadedCleanupRefreshFailed'
@@ -1821,12 +1903,13 @@ export function Skills() {
         },
       });
     } catch (error) {
+      if (!selectionCurrent()) return;
       toast.error(cloudPackageErrorMessage(error, 'sealed.uploadFailed'), {
         ...(error instanceof AppError && error.details?.exportWarning === 'cleanup-failed'
           ? { description: t('sealed.exportedCleanupFailed') } : {}),
       });
     }
-  }, [cloudPackageErrorMessage, setSearchParams, t, uploadInstalledSkillPackageToCloud]);
+  }, [cloudPackageErrorMessage, selectionCurrent, setSearchParams, t, uploadInstalledSkillPackageToCloud]);
 
   const handlePublishCloudSkillPackage = async (packageVersionId: string) => {
     try {
@@ -1842,6 +1925,7 @@ export function Skills() {
   const handleInstallCloudSkillPackage = useCallback(async (packageInfo: SealedSkillCloudPackage) => {
     try {
       await downloadAndInstallCloudSkillPackage(packageInfo);
+      if (!selectionCurrent()) return;
       const state = useSealedSkillsStore.getState();
       if (state.error || state.cloudError) toast.warning(t('sealed.installedRefreshFailed'));
       else toast.success(t('sealed.installedFromCloud'));
@@ -1852,9 +1936,9 @@ export function Skills() {
         return next;
       }, { replace: true });
     } catch (error) {
-      toast.error(cloudPackageErrorMessage(error, 'sealed.installFromCloudFailed'));
+      if (selectionCurrent()) toast.error(cloudPackageErrorMessage(error, 'sealed.installFromCloudFailed'));
     }
-  }, [cloudPackageErrorMessage, downloadAndInstallCloudSkillPackage, setSearchParams, t]);
+  }, [cloudPackageErrorMessage, downloadAndInstallCloudSkillPackage, selectionCurrent, setSearchParams, t]);
 
   // Handle marketplace search
   const handleMarketplaceSearch = useCallback((e: React.FormEvent) => {
@@ -1889,10 +1973,13 @@ export function Skills() {
 
   // Handle install
   const handleInstall = useCallback(async (slug: string) => {
+    if (!scope) return;
     try {
-      await installSkill(slug);
+      await installSkill(slug, undefined, scope);
+      if (!selectionCurrent()) return;
       toast.success(t('toast.installed'));
     } catch (err) {
+      if (!selectionCurrent()) return;
       const errorCode = normalizeSkillErrorCode(err instanceof Error ? err.message : String(err));
       if (INSTALL_ERROR_CODES.has(errorCode)) {
         toast.error(t(`toast.${errorCode}`, { path: skillsDirPath }), { duration: 10000 });
@@ -1900,7 +1987,7 @@ export function Skills() {
         toast.error(t('toast.failedInstall') + ': ' + errorCode);
       }
     }
-  }, [installSkill, t, skillsDirPath]);
+  }, [installSkill, scope, selectionCurrent, t, skillsDirPath]);
 
   // Initial marketplace load (Discovery)
   useEffect(() => {
@@ -1924,11 +2011,12 @@ export function Skills() {
   const handleUninstall = useCallback(async (skillKey: string, slug?: string) => {
     try {
       await uninstallSkill(skillKey, slug);
+      if (!selectionCurrent()) return;
       toast.success(t('toast.uninstalled'));
     } catch (err) {
-      toast.error(t('toast.failedUninstall') + ': ' + String(err));
+      if (selectionCurrent()) toast.error(t('toast.failedUninstall') + ': ' + String(err));
     }
-  }, [uninstallSkill, t]);
+  }, [uninstallSkill, selectionCurrent, t]);
 
   const handleUninstallSkillQuick = useCallback((skillKey: string, slug?: string) => {
     void handleUninstall(skillKey, slug);
@@ -1956,9 +2044,10 @@ export function Skills() {
   const exportQuery = exportSearch.trim().toLowerCase();
   const filteredExportableSkills = exportableSkills.filter((skill) => [skill.name, skill.id, skill.description].some((value) => value?.toLowerCase().includes(exportQuery)));
   const packagePanelLoading = packageTab === 'installed' ? sealedSkillsLoading : packageTab === 'mine' ? myCloudLoading : sealedCloudLoading;
-  const cloudPanelUnknown = packageTab === 'mine' ? !myCloudLoaded : packageTab === 'market' && !sealedCloudLoaded;
+  const packagePanelUnknown = packageTab === 'installed'
+    ? Boolean(scope) && (sealedScopeKey !== scopeKey || (!sealedSnapshotReady && !sealedSkillsError))
+    : packageTab === 'mine' ? !myCloudLoaded : !sealedCloudLoaded;
   const packagePanelError = packageTab === 'installed' ? sealedSkillsError : packageTab === 'mine' ? myCloudError : sealedCloudError;
-  const packagePanelCount = packageTab === 'installed' ? sealedSkills.length : packageTab === 'mine' ? myCloudPackages.length : cloudPackages.length;
   const packagePanelFilteredCount = packageTab === 'installed' ? filteredSealedSkillCardModels.length : packageTab === 'mine' ? filteredMyCloudPackages.length : filteredCloudPackages.length;
   const packageSearchLabel = t(packageTab === 'installed' ? 'sealed.searchInstalled' : packageTab === 'mine' ? 'sealed.searchMine' : 'sealed.searchMarket');
   const resourceGridClassName = view === 'list' ? 'md:grid-cols-1 xl:grid-cols-1' : undefined;
@@ -1969,10 +2058,11 @@ export function Skills() {
       <Tabs value={activeTab} onValueChange={setActiveTab} className="group/skills space-y-6" data-view={view}>
         <AgentPageSection actions={(
           <>
+            <RuntimeScopeSelector />
             <Button variant="outline" size="icon" className="size-9 rounded-full" aria-label={t('refresh')} title={t('refresh')} onClick={handleRefresh} disabled={isSealedTabActive ? packagePanelLoading || (packageTab === 'installed' && manualRefreshBusy) : (!gatewayProcessRunning || manualRefreshBusy)}>
               <RefreshCw className={cn('size-4', (isSealedTabActive ? packagePanelLoading || (packageTab === 'installed' && refreshing) : refreshing) && 'animate-spin motion-reduce:animate-none')} />
             </Button>
-            {hasInstalledSkills && (
+            {openClaw && hasInstalledSkills && (
               <Button variant="outline" size="sm" className="h-9 gap-2 rounded-full" onClick={handleOpenSkillsFolder}>
                 <FolderOpen className="size-4" />
                 {t('openFolder')}
@@ -1983,13 +2073,14 @@ export function Skills() {
           <TabsList variant="line" aria-label={t('title')}>
             <TabsTrigger value="all" className="gap-2">
               {t('tabs.installed')}
-              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums">{safeSkills.length}</span>
+              {skillsSnapshotReady && <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums">{safeSkills.length}</span>}
             </TabsTrigger>
-            <TabsTrigger value="sealed">{t('tabs.sealed')}</TabsTrigger>
+            {scope && <TabsTrigger value="sealed">{t('tabs.sealed')}</TabsTrigger>}
             <TabsTrigger value="marketplace">{t('tabs.marketplace')}</TabsTrigger>
           </TabsList>
         </AgentPageSection>
 
+      {!scope && <p className="text-sm text-muted-foreground">{t('common:runtimeScope.none')}</p>}
       {/* Gateway Status */}
       {showGatewayBanner && gatewayBannerState !== 'none' && (
         <Card className={cn(
@@ -2013,39 +2104,34 @@ export function Skills() {
         </Card>
       )}
 
-      {showRefreshingHint && (!isSealedTabActive || packageTab === 'installed') && (
-        <div className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-          <RefreshCw className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-          {t('common:status.loading', 'Loading...')}
-        </div>
-      )}
-
 
         {activeTab === 'all' ? (
           <TabsContent value="all" className="space-y-6 mt-6">
           {/* Search and Filter */}
-          <AgentPageToolbar>
-            <div className="relative w-full sm:w-72">
+          <AgentPageToolbar className="w-full max-w-full flex-nowrap overflow-x-auto">
+            <div className="relative min-w-40 max-w-72 flex-1">
               <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
               <Input aria-label={t('search')} placeholder={t('search')} value={searchQuery} onChange={(e) => updateQuery('search', e.target.value)} className="h-9 pl-9 text-sm" />
             </div>
-            <Select aria-label={t('filter.source')} value={selectedSource} onChange={(e) => updateQuery('source', e.target.value)} className="h-9 w-auto max-w-full text-xs">
-              <option value="all">{t('filter.all', { count: sourceStats.all })}</option>
-              <option value="built-in">{t('filter.builtIn', { count: sourceStats.builtIn })}</option>
-              <option value="managed">{t('filter.managed', { count: sourceStats.managed })}</option>
+            <Select aria-label={t('filter.source')} value={selectedSource} onChange={(e) => updateQuery('source', e.target.value)} className="h-9 w-auto max-w-full shrink-0 text-xs">
+              {skillsSnapshotReady ? <>
+                <option value="all">{t('filter.all', { count: sourceStats.all })}</option>
+                <option value="built-in">{t('filter.builtIn', { count: sourceStats.builtIn })}</option>
+                <option value="managed">{t('filter.managed', { count: sourceStats.managed })}</option>
+              </> : <option value={selectedSource}>{t('filter.source')}</option>}
             </Select>
-            <Select aria-label={t('filter.status')} value={selectedStatus} onChange={(e) => updateQuery('status', e.target.value)} className="h-9 w-auto max-w-full text-xs">
+            {openClaw && <Select aria-label={t('filter.status')} value={selectedStatus} onChange={(e) => updateQuery('status', e.target.value)} className="h-9 w-auto max-w-full shrink-0 text-xs">
               <option value="all">{t('filter.allStatuses')}</option>
               <option value="enabled">{t('filter.enabled')}</option>
               <option value="disabled">{t('filter.disabled')}</option>
               {(['eligible', 'missing', 'unselectable', 'unknown'] as const).map((kind) => <option key={kind} value={kind}>{resolveAvailabilityLabel(kind, t)}</option>)}
-            </Select>
-            <div className="flex flex-wrap items-center gap-2">
+            </Select>}
+            {openClaw && <div className="flex shrink-0 items-center gap-2">
               <Button variant="outline" size="sm" className="h-9 text-xs" onClick={() => { void bulkToggleVisible(true); }}>{t('actions.enableVisible')}</Button>
               <Button variant="outline" size="sm" className="h-9 text-xs" onClick={() => { void bulkToggleVisible(false); }}>{t('actions.disableVisible')}</Button>
-            </div>
-            <div className="ml-auto flex items-center gap-3">
-              <span className="text-xs tabular-nums text-muted-foreground" aria-live="polite">{t('count', { count: filteredSkillCards.length })}</span>
+            </div>}
+            <div className="ml-auto flex shrink-0 items-center gap-3 whitespace-nowrap">
+              {skillsSnapshotReady && skillsContentReady && <span className="text-xs tabular-nums text-muted-foreground" aria-live="polite">{t('count', { count: filteredSkillCards.length })}</span>}
               {viewControls}
             </div>
           </AgentPageToolbar>
@@ -2065,29 +2151,9 @@ export function Skills() {
           )}
 
           {/* Skills Grid */}
-          {!skillsHeavyContentReady ? (
-            <AgentResourceGrid className={resourceGridClassName}>
-              {Array.from({ length: 6 }).map((_, index) => (
-                <Card key={`skills-placeholder-${index}`}>
-                  <CardHeader className="pb-3">
-                    <div className="h-4 w-3/5 animate-pulse motion-reduce:animate-none rounded bg-muted" />
-                    <div className="mt-2 h-3 w-4/5 animate-pulse motion-reduce:animate-none rounded bg-muted" />
-                  </CardHeader>
-                  <CardContent>
-                    <div className="h-3 w-full animate-pulse motion-reduce:animate-none rounded bg-muted" />
-                    <div className="mt-2 h-3 w-2/3 animate-pulse motion-reduce:animate-none rounded bg-muted" />
-                    <div className="mt-4 h-6 w-24 animate-pulse motion-reduce:animate-none rounded bg-muted" />
-                  </CardContent>
-                </Card>
-              ))}
-            </AgentResourceGrid>
-          ) : showInitialLoading ? (
-            <Card>
-              <CardContent className="flex flex-col items-center justify-center py-12">
-                <LoadingSpinner size="lg" />
-              </CardContent>
-            </Card>
-          ) : filteredSkillCards.length === 0 ? (
+          {showInitialLoading || (skillsSnapshotReady && !skillsContentReady) ? (
+            <LoadingState label={t('common:status.loading')} />
+          ) : !skillsSnapshotReady ? null : filteredSkillCards.length === 0 ? (
             <Card>
               <CardContent className="flex flex-col items-center justify-center py-12">
                 <Puzzle className="h-12 w-12 text-muted-foreground mb-4" />
@@ -2103,7 +2169,7 @@ export function Skills() {
                 <SkillGridCard
                   key={skill.skillId}
                   {...skill}
-                  mutationLocked={false}
+                  mutationLocked={!scope}
                   onOpenDetail={handleOpenSkillDetail}
                   onToggleSkill={handleToggleSkillQuick}
                   onUninstallSkill={handleUninstallSkillQuick}
@@ -2117,18 +2183,17 @@ export function Skills() {
         {activeTab === 'sealed' ? (
           <TabsContent value="sealed" className="space-y-5 mt-6">
             <Tabs value={packageTab} onValueChange={setPackageTab} className="min-w-0 space-y-5">
-              <TabsList aria-label={t('tabs.sealed')} className="max-w-full">
-                <TabsTrigger value="installed" className="shrink-0">{t('sealed.tabs.installed')}</TabsTrigger>
-                <TabsTrigger value="mine" className="shrink-0">{t('sealed.tabs.mine')}</TabsTrigger>
-                <TabsTrigger value="market" className="shrink-0">{t('sealed.tabs.market')}</TabsTrigger>
-              </TabsList>
-              <AgentPageToolbar>
-                <div className="relative w-full sm:w-72">
+              <AgentPageToolbar className="w-full max-w-full flex-nowrap overflow-x-auto">
+                <TabsList aria-label={t('tabs.sealed')} className="shrink-0">
+                  <TabsTrigger value="installed" className="shrink-0">{t('sealed.tabs.installed')}</TabsTrigger>
+                  <TabsTrigger value="mine" className="shrink-0">{t('sealed.tabs.mine')}</TabsTrigger>
+                  <TabsTrigger value="market" className="shrink-0">{t('sealed.tabs.market')}</TabsTrigger>
+                </TabsList>
+                <div className="relative min-w-40 max-w-72 flex-1">
                   <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
                   <Input aria-label={packageSearchLabel} placeholder={packageSearchLabel} value={sealedQuery} onChange={(e) => updateQuery('packageSearch', e.target.value)} className="h-9 pl-9 text-sm" />
                 </div>
-                <div className="ml-auto flex flex-wrap items-center gap-2">
-                  {viewControls}
+                <div className="ml-auto flex shrink-0 items-center gap-2">
                   {packageTab === 'installed' && (
                     <>
                       <DialogPrimitive.Root open={exportDialogOpen} onOpenChange={(open) => { setExportDialogOpen(open); if (!open) setExportSearch(''); }}>
@@ -2174,12 +2239,10 @@ export function Skills() {
                       </Button>
                     </>
                   )}
+                  {viewControls}
                 </div>
               </AgentPageToolbar>
               <TabsContent value={packageTab} className="mt-0 space-y-4">
-                {packageTab !== 'market' && (
-                  <p className="text-sm text-muted-foreground">{t(packageTab === 'installed' ? 'sealed.installedDescription' : 'sealed.mineDescription')}</p>
-                )}
                 {packagePanelError && (
                   <div role="alert" className="flex flex-wrap items-center gap-2 text-sm">
                     <AlertCircle className="size-4 shrink-0 text-destructive" aria-hidden="true" />
@@ -2200,31 +2263,8 @@ export function Skills() {
                     ))}
                   </ul>
                 )}
-                {cloudPanelUnknown ? (
-                  <p role="status" className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-                    <RefreshCw className="size-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-                    {t('sealed.cloudLoading')}
-                  </p>
-                ) : packageTab === 'installed' && packagePanelLoading && packagePanelCount === 0 ? (
-                  <AgentResourceGrid className={resourceGridClassName} aria-busy="true" aria-label={t('common:status.loading')}>
-                    {Array.from({ length: 6 }, (_, index) => (
-                      <AgentResourceCard key={index} className="gap-3 p-4" aria-hidden="true">
-                        <div className="flex items-center gap-3">
-                          <AgentResourceIcon className={SKILL_CARD_ICON_CLASS_NAME}><Package className="size-5 text-muted-foreground" /></AgentResourceIcon>
-                          <div className="h-4 w-3/5 animate-pulse rounded bg-muted motion-reduce:animate-none" />
-                        </div>
-                        <div className={SKILL_CARD_DESCRIPTION_CLASS_NAME}>
-                          <div className="h-3 w-full animate-pulse rounded bg-muted motion-reduce:animate-none" />
-                          <div className="mt-2 h-3 w-2/3 animate-pulse rounded bg-muted motion-reduce:animate-none" />
-                        </div>
-                        <div className="h-3 w-20 animate-pulse rounded bg-muted motion-reduce:animate-none" />
-                        <AgentResourceFooter className={PACKAGE_CARD_FOOTER_CLASS_NAME}>
-                          <div className="h-3 w-16 animate-pulse rounded bg-muted motion-reduce:animate-none" />
-                          <div className="h-8 w-16 animate-pulse rounded-full bg-muted motion-reduce:animate-none" />
-                        </AgentResourceFooter>
-                      </AgentResourceCard>
-                    ))}
-                  </AgentResourceGrid>
+                {packagePanelUnknown ? (
+                  <LoadingState label={t(packageTab === 'installed' ? 'common:status.loading' : 'sealed.cloudLoading')} />
                 ) : packagePanelFilteredCount === 0 ? (
                   !packagePanelError && <p className="py-8 text-sm text-muted-foreground">{packageSearch ? t('noSkillsSearch') : t(packageTab === 'installed' ? 'sealed.emptyTitle' : packageTab === 'mine' ? 'sealed.mineEmpty' : 'sealed.cloudEmpty')}</p>
                 ) : (
@@ -2320,7 +2360,7 @@ export function Skills() {
                 type="button"
                 variant="outline"
                 className="h-9 gap-2"
-                disabled={false}
+                disabled={!scope}
                 onClick={() => setLocalSkillDialogOpen(true)}
               >
                 <Upload className="h-4 w-4" />
@@ -2354,7 +2394,7 @@ export function Skills() {
                       isInstalling={Boolean(installing[skill.slug] || installing[installedSkill?.id ?? ''])}
                       isInstalled={installedSkill !== undefined}
                       canUninstall={installedSkill?.uninstallable === true}
-                      mutationLocked={false}
+                      mutationLocked={!scope}
                       onOpenDetail={() => setSelectedMarketplaceSkill(skill)}
                       onInstall={() => handleInstall(skill.slug)}
                       onUninstall={() => handleUninstall(installedSkill?.id ?? skill.slug, skill.slug)}
@@ -2406,11 +2446,12 @@ export function Skills() {
       {selectedSkill && (
         <SkillDetailDialog
           skill={selectedSkill}
+          selectionCurrent={selectionCurrent}
           onClose={() => setSelectedSkill(null)}
           onToggle={(enabled) => {
             void handleToggle(selectedSkill.id, enabled);
           }}
-          onOpenFolder={handleOpenSkillFolder}
+          onOpenFolder={openClaw ? handleOpenSkillFolder : undefined}
         />
       )}
 
@@ -2420,7 +2461,7 @@ export function Skills() {
           isInstalled={selectedMarketplaceInstalled}
           isInstalling={selectedMarketplaceInstalling}
           canUninstall={selectedInstalledMarketplaceSkill?.uninstallable === true}
-          mutationLocked={false}
+          mutationLocked={!scope}
           onInstall={() => { void handleInstall(selectedMarketplaceSkill.slug); }}
           onUninstall={() => { void handleUninstall(selectedInstalledMarketplaceSkill?.id ?? selectedMarketplaceSkill.slug, selectedMarketplaceSkill.slug); }}
           onClose={() => setSelectedMarketplaceSkill(null)}
@@ -2432,13 +2473,15 @@ export function Skills() {
         importing={localSkillImporting}
         selectedSourceName={localSkillSourceName}
         selectedSourcePath={localSkillSourcePath}
+        nativeAgent={nativeAgent}
+        onArchiveFile={(file) => { setLocalSkillArchive(file); setLocalSkillSourcePath(file.name); }}
         onClose={() => {
           if (!localSkillImporting) {
             resetLocalSkillDialog();
           }
         }}
         onChooseSource={() => { void handleChooseLocalSkillSource(); }}
-        onDropSourcePath={setLocalSkillSourcePath}
+        onDropSourcePath={(path) => { setLocalSkillArchive(null); setLocalSkillSourcePath(path); }}
         onImport={() => { void handleImportLocalSkill(); }}
       />
 

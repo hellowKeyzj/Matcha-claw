@@ -71,7 +71,6 @@ describe('dashboard page', () => {
     };
     gatewayState.runtimeHost = { lifecycle: 'running' };
     useDashboardUiStore.setState({
-      dashboardHeavyContentReady: true,
       usageGroupBy: 'model',
       usageWindow: '7d',
       usagePage: 1,
@@ -81,9 +80,6 @@ describe('dashboard page', () => {
       usageHistoryReady: false,
       initialLoading: false,
       refreshing: false,
-      usagePanelReady: true,
-      usageChartReady: false,
-      usageDetailListReady: false,
       error: null,
     });
   });

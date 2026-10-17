@@ -4,6 +4,14 @@ use crate::{Catalog, ConfigurationOutcome, Operation, OperationOutcome, PluginEr
 
 pub type PluginsFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+pub trait AgentPluginsPort: Send + Sync {
+    fn catalog<'a>(&'a self, agent_id: &'a str) -> PluginsFuture<'a, Result<crate::AgentCatalog, PluginError>>;
+
+    fn set_enabled<'a>(&'a self, agent_id: &'a str, plugin_id: &'a str, enabled: bool) -> PluginsFuture<'a, ConfigurationOutcome>;
+
+    fn operation<'a>(&'a self, agent_id: &'a str, operation: Operation, plugin_id: &'a str) -> PluginsFuture<'a, OperationOutcome>;
+}
+
 pub trait PluginsPort: Send + Sync {
     fn admit_mutation(&self) -> Result<(), ()>;
 

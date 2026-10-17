@@ -265,6 +265,25 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
             package_path,
             cloud_metadata,
         } => return install_agent_package(shared, endpoint, package_path, cloud_metadata).await,
+        Command::Delete {
+            endpoint: NativeEndpoint::MatchaAgentLocal,
+            input,
+        } => {
+            let Some(ops) = shared
+                .runtime_directory
+                .subagent_ops(NativeEndpoint::MatchaAgentLocal)
+            else {
+                return Outcome::Unsupported;
+            };
+            if !ops.subagent_runtime_ready() {
+                return Outcome::Unavailable;
+            }
+            ops.subagents(Command::Delete {
+                endpoint: NativeEndpoint::MatchaAgentLocal,
+                input,
+            })
+            .await
+        }
         Command::Delete { endpoint, input } => {
             let agent_id = input.agent_id.clone();
             let Some(ops) = shared.runtime_directory.subagent_ops(endpoint) else {
@@ -302,8 +321,11 @@ async fn execute_subagent(shared: &SubagentShared, command: Command) -> Outcome 
             if !ops.subagent_runtime_ready() {
                 return Outcome::Unavailable;
             }
+            let endpoint = command.endpoint();
             let outcome = ops.subagents(command).await;
-            if !matches!(outcome, Outcome::Agents { .. }) {
+            if endpoint == NativeEndpoint::MatchaAgentLocal
+                || !matches!(outcome, Outcome::Agents { .. })
+            {
                 return outcome;
             }
             let sealed_agents = Arc::clone(&shared.sealed_agents);
@@ -374,7 +396,7 @@ async fn install_agent_package(
             endpoint,
             input: AgentCreate {
                 name: plan.agent_id().to_owned(),
-                workspace: plan.workspace().to_owned(),
+                workspace: crate::model::AgentWorkspace::Path(plan.workspace().to_owned()),
                 model: None,
             },
             workspace_initialization: WorkspaceInitialization::EmptyWorkspace,

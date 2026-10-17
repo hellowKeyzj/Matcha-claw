@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{future::Future, time::Duration};
 
 use foundation::process::{
     ProcessObservation,
@@ -7,22 +7,18 @@ use foundation::process::{
 use tokio::time::{Instant, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    lifecycle::secret::Secret,
-    session::client::{AppServerClient, AppServerClientError, AppServerEndpoint},
-};
+use crate::client::{Client, Error};
 
 const STARTUP_PROBE_DEADLINE: Duration = Duration::from_secs(30);
 const STARTUP_PROBE_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 pub struct AppServerReadiness {
-    endpoint: AppServerEndpoint,
-    secret: Arc<Secret>,
+    client: Client,
 }
 
 impl AppServerReadiness {
-    pub fn new(endpoint: AppServerEndpoint, secret: Arc<Secret>) -> Self {
-        Self { endpoint, secret }
+    pub fn new(client: Client) -> Self {
+        Self { client }
     }
 }
 
@@ -32,16 +28,21 @@ impl ReadinessProbe for AppServerReadiness {
         _process: ProcessObservation,
         cancellation: CancellationToken,
     ) -> PolicyFuture<ReadinessResult> {
-        let endpoint = self.endpoint;
-        let secret = Arc::clone(&self.secret);
+        let client = self.client.clone();
+        let probe_cancellation = cancellation.clone();
         Box::pin(wait_for_app_server_readiness(
             cancellation,
             move || {
-                let secret = Arc::clone(&secret);
+                let client = client.clone();
+                let cancellation = probe_cancellation.clone();
                 async move {
-                    AppServerClient::inspect_health_and_initialize(endpoint, &secret)
-                        .await
-                        .map(|_| ())
+                    client.probe_ready(&cancellation).await.map_err(|error| {
+                        if error.is_cancelled() {
+                            ReadinessFailure::Cancelled
+                        } else {
+                            ReadinessFailure::classify(&error)
+                        }
+                    })
                 }
             },
             Instant::now() + STARTUP_PROBE_DEADLINE,
@@ -58,7 +59,7 @@ async fn wait_for_app_server_readiness<F, T>(
 ) -> ReadinessResult
 where
     F: FnMut() -> T,
-    T: Future<Output = Result<(), AppServerClientError>>,
+    T: Future<Output = Result<(), ReadinessFailure>>,
 {
     loop {
         let result = tokio::select! {
@@ -69,7 +70,8 @@ where
         };
         match result {
             Ok(()) => return ReadinessResult::Ready,
-            Err(error) if ReadinessFailure::from(error) == ReadinessFailure::Starting => {
+            Err(ReadinessFailure::Cancelled) => return ReadinessResult::Cancelled,
+            Err(ReadinessFailure::Starting) => {
                 tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => return ReadinessResult::Cancelled,
@@ -86,26 +88,19 @@ where
 enum ReadinessFailure {
     Starting,
     Unavailable,
+    Cancelled,
 }
 
-impl From<AppServerClientError> for ReadinessFailure {
-    fn from(error: AppServerClientError) -> Self {
-        match error {
-            AppServerClientError::HealthDeadline
-            | AppServerClientError::HealthFailed
-            | AppServerClientError::UpgradeDeadline
-            | AppServerClientError::UpgradeFailed
-            | AppServerClientError::RequestDeadline
-            | AppServerClientError::ConnectionClosed
-            | AppServerClientError::Transport => Self::Starting,
-            AppServerClientError::InvalidEndpoint
-            | AppServerClientError::InitializeFailed
-            | AppServerClientError::UnknownResponse
-            | AppServerClientError::Protocol
-            | AppServerClientError::PeerRejected
-            | AppServerClientError::SessionNotFound
-            | AppServerClientError::EventRecoveryRequired
-            | AppServerClientError::CloseFailed => Self::Unavailable,
+impl ReadinessFailure {
+    fn classify(error: &Error) -> Self {
+        Self::classify_kind(error.kind())
+    }
+
+    fn classify_kind(kind: &str) -> Self {
+        match kind {
+            "connect_failed" | "upgrade_failed" | "transport" | "deadline"
+            | "connection_closed" => Self::Starting,
+            _ => Self::Unavailable,
         }
     }
 }
@@ -114,25 +109,25 @@ impl std::fmt::Debug for AppServerReadiness {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AppServerReadiness")
-            .field("endpoint", &self.endpoint)
-            .field("secret", &self.secret)
+            .field("client", &"<redacted>")
             .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{future, time::Duration};
+    use crate::lifecycle::secret::Secret;
+    use std::{future, sync::Arc, time::Duration};
 
     use super::*;
 
     #[test]
     fn debug_redacts_the_owner_secret() {
         let secret = "readiness-secret-canary";
-        let readiness = AppServerReadiness::new(
-            AppServerEndpoint::try_new("127.0.0.1:19001".parse().unwrap()).unwrap(),
+        let readiness = AppServerReadiness::new(Client::new(
+            "127.0.0.1:19001".parse().unwrap(),
             Arc::new(Secret::new(secret.to_owned()).unwrap()),
-        );
+        ));
 
         let debug = format!("{readiness:?}");
         assert!(!debug.contains(secret));
@@ -142,30 +137,31 @@ mod tests {
     #[test]
     fn client_errors_are_classified_without_peer_data() {
         let starting = [
-            AppServerClientError::HealthDeadline,
-            AppServerClientError::HealthFailed,
-            AppServerClientError::UpgradeDeadline,
-            AppServerClientError::UpgradeFailed,
-            AppServerClientError::RequestDeadline,
-            AppServerClientError::ConnectionClosed,
-            AppServerClientError::Transport,
+            "connect_failed",
+            "upgrade_failed",
+            "transport",
+            "deadline",
+            "connection_closed",
         ];
-        for error in starting {
-            assert_eq!(ReadinessFailure::from(error), ReadinessFailure::Starting);
+        for kind in starting {
+            assert_eq!(
+                ReadinessFailure::classify_kind(kind),
+                ReadinessFailure::Starting
+            );
         }
 
         let unavailable = [
-            AppServerClientError::InvalidEndpoint,
-            AppServerClientError::InitializeFailed,
-            AppServerClientError::UnknownResponse,
-            AppServerClientError::Protocol,
-            AppServerClientError::PeerRejected,
-            AppServerClientError::SessionNotFound,
-            AppServerClientError::EventRecoveryRequired,
-            AppServerClientError::CloseFailed,
+            "invalid_endpoint",
+            "unsupported_protocol",
+            "protocol",
+            "unauthorized",
+            "client_shutdown",
         ];
-        for error in unavailable {
-            assert_eq!(ReadinessFailure::from(error), ReadinessFailure::Unavailable);
+        for kind in unavailable {
+            assert_eq!(
+                ReadinessFailure::classify_kind(kind),
+                ReadinessFailure::Unavailable
+            );
         }
     }
 
@@ -185,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn starting_control_retries_until_ready() {
-        let mut results = [Err(AppServerClientError::HealthFailed), Ok(())].into_iter();
+        let mut results = [Err(ReadinessFailure::Starting), Ok(())].into_iter();
 
         assert_eq!(
             wait_for_app_server_readiness(
@@ -204,7 +200,7 @@ mod tests {
         assert_eq!(
             wait_for_app_server_readiness(
                 CancellationToken::new(),
-                || future::ready(Err(AppServerClientError::PeerRejected)),
+                || future::ready(Err(ReadinessFailure::Unavailable)),
                 Instant::now() + Duration::from_secs(1),
                 Duration::ZERO,
             )

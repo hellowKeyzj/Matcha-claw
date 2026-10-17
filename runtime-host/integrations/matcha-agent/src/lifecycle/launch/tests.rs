@@ -44,8 +44,13 @@ fn absolute_path(name: &str) -> PathBuf {
 fn input(root: &TestRoot) -> LaunchInput {
     let working_directory = absolute_path("runtime");
     LaunchInput {
-        bun_executable: absolute_path("bin/bun"),
-        entry: absolute_path("matcha-agent/dist/cli-bun.js"),
+        server_executable: absolute_path("bin/matcha-app-server"),
+        cli_executable: absolute_path("bin/bun"),
+        cli_args: vec![
+            absolute_path("matcha-agent/dist/cli-bun.js")
+                .to_string_lossy()
+                .into_owned(),
+        ],
         working_directory: working_directory.clone(),
         storage_root: root.0.clone(),
         port: 18_790,
@@ -63,7 +68,7 @@ fn input(root: &TestRoot) -> LaunchInput {
 }
 
 #[tokio::test]
-async fn materializes_exact_app_server_specification_without_files() {
+async fn materializes_exact_native_server_specification() {
     let root = TestRoot::new();
     let mut launch = input(&root).try_into_launch_factory().unwrap();
 
@@ -128,7 +133,7 @@ fn rejects_a_storage_leaf_that_is_an_existing_file() {
 
 #[cfg(unix)]
 #[test]
-fn preserves_existing_storage_root_permissions_without_private_material() {
+fn secures_existing_owned_storage_root_without_private_material() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = TestRoot::new();
@@ -139,7 +144,7 @@ fn preserves_existing_storage_root_permissions_without_private_material() {
 
     assert_eq!(
         fs::metadata(&root.0).unwrap().permissions().mode() & 0o777,
-        0o755
+        0o700
     );
     assert!(!root.0.join("private").exists());
     drop(launch);
@@ -149,7 +154,7 @@ fn preserves_existing_storage_root_permissions_without_private_material() {
 fn rejects_static_input_before_provisioning_storage() {
     let root = TestRoot::new();
     let mut input = input(&root);
-    input.bun_executable = PathBuf::from("relative-sensitive-artifact");
+    input.server_executable = PathBuf::from("relative-sensitive-artifact");
 
     let error = match input.try_into_launch_factory() {
         Ok(_) => panic!("invalid matcha-agent launch input was accepted"),
@@ -163,7 +168,7 @@ fn rejects_static_input_before_provisioning_storage() {
 }
 
 #[test]
-fn rejects_an_auth_token_that_cannot_be_exposed_as_an_argument() {
+fn rejects_an_auth_token_that_cannot_be_passed_as_private_environment() {
     let root = TestRoot::new();
     let mut input = input(&root);
     input.secret = Arc::new(Secret::new(format!("{SECRET_CANARY}\0")).unwrap());
@@ -175,11 +180,11 @@ fn rejects_an_auth_token_that_cannot_be_exposed_as_an_argument() {
 
     assert_eq!(
         error,
-        LaunchError::InvalidSpec(InvalidLaunchSpec::ArgumentContainsNul)
+        LaunchError::InvalidSpec(InvalidLaunchSpec::EnvironmentValueContainsNul)
     );
     assert_eq!(
         error.to_string(),
-        "matcha-agent launch specification is invalid: launch argument contains NUL"
+        "matcha-agent launch specification is invalid: public environment value contains NUL"
     );
     assert!(!format!("{error:?} {error}").contains(SECRET_CANARY));
     assert!(!root.0.exists());
@@ -320,25 +325,17 @@ fn rejects_a_reparse_storage_ancestor_before_creating_private_material() {
 }
 
 fn assert_exact_spec(spec: &LaunchSpec, storage_root: &Path, sealed_target: Option<(&str, &str)>) {
-    assert_eq!(spec.executable(), Path::new(&absolute_path("bin/bun")));
+    assert_eq!(
+        spec.executable(),
+        Path::new(&absolute_path("bin/matcha-app-server"))
+    );
     assert_eq!(
         spec.working_directory(),
         Path::new(&absolute_path("runtime"))
     );
     assert_eq!(
         spec.arguments(),
-        [
-            absolute_path("matcha-agent/dist/cli-bun.js").into_os_string(),
-            "app-server".into(),
-            "--host".into(),
-            APP_SERVER_HOST.into(),
-            "--port".into(),
-            "18790".into(),
-            "--storage-root".into(),
-            storage_root.as_os_str().to_owned(),
-            "--auth-token".into(),
-            SECRET_CANARY.into(),
-        ]
+        ["--home".into(), storage_root.as_os_str().to_owned(),]
     );
     let environment = spec.public_environment();
     assert_environment_value(environment, FORCE_COLOR, "0");
@@ -346,7 +343,7 @@ fn assert_exact_spec(spec: &LaunchSpec, storage_root: &Path, sealed_target: Opti
     if let Some(value) = std::env::var_os(CLAUDE_CONFIG_DIR) {
         assert_environment_value(environment, CLAUDE_CONFIG_DIR, value);
     }
-    assert_environment_omits(environment, SECRET_CANARY);
+    assert_environment_value(environment, APP_SERVER_TOKEN_ENV, SECRET_CANARY);
     assert_environment_omits(environment, "ANTHROPIC_API_KEY");
     assert_environment_omits(environment, "OPENAI_API_KEY");
     assert_environment_omits(environment, "MATCHA_AUTH_TOKEN");

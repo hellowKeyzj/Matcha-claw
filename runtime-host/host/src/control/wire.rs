@@ -53,6 +53,20 @@ where
         .ok_or_else(|| D::Error::custom("control event timestamp exceeds the safe integer range"))
 }
 
+#[cfg(test)]
+fn deserialize_cron_endpoint<'de, D>(
+    deserializer: D,
+) -> Result<platform::endpoint::runtime_address::RuntimeEndpoint, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let endpoint = runtime_directory::RuntimeDriverIdentity::matcha_agent().endpoint();
+    (value == serde_json::to_value(&endpoint).map_err(D::Error::custom)?)
+        .then_some(endpoint)
+        .ok_or_else(|| D::Error::custom("invalid Cron endpoint"))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub(crate) struct RequestId(String);
@@ -395,6 +409,11 @@ pub(crate) enum SafeEvent {
     CallsResync {},
     #[serde(rename = "organization.changed")]
     OrganizationChanged {},
+    #[serde(rename = "cron.changed")]
+    CronChanged {
+        #[serde(deserialize_with = "deserialize_cron_endpoint")]
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    },
     #[serde(rename = "openclaw.cron.execution", rename_all = "camelCase")]
     OpenClawCronExecution {
         job_id: CronExecutionId,

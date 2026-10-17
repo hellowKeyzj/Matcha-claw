@@ -120,6 +120,7 @@
         "emptyTitle": "No skill packages yet",
         "packageInstalled": "Installed",
         "packageAvailable": "Not installed",
+        "enabledLoadUnconfirmed": "Installed and enabled · Loading in the current session is unconfirmed",
         "mineTitle": "My cloud packages",
         "mineDescription": "Uploads remain drafts until you publish them to the market.",
         "mineEmpty": "No uploaded packages yet.",

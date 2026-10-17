@@ -5,6 +5,7 @@ pub mod control;
 mod domain;
 mod operations;
 pub mod ports;
+mod scope;
 pub mod projection;
 
 use std::sync::Arc;
@@ -12,13 +13,14 @@ use std::sync::Arc;
 use platform::{
     call::{CallContext, CallLogError, CallReceipt, CallRecorder, CallStatus},
     capability::CapabilityDecisionVerifier,
+    endpoint::runtime_address::RuntimeScope,
     module::{CapabilityDescriptorProvider, CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
 };
 use tokio::sync::Mutex;
 
 pub use domain::{
-    Catalog, CatalogEntry, ConfigurationOutcome, Execution, Operation, OperationOutcome,
-    PluginError, Runtime, RuntimeEntry,
+    AgentCatalog, AgentCatalogEntry, Catalog, CatalogEntry, CatalogSnapshot, ConfigurationOutcome,
+    Execution, Operation, OperationOutcome, PluginError, Runtime, RuntimeEntry,
 };
 
 const MODULE_ID: ModuleId = ModuleId::new("plugins");
@@ -31,13 +33,55 @@ const EFFECTS: &[EffectKind] = &[EffectKind::OwnerTask, EffectKind::Route, Effec
 #[derive(Clone)]
 pub struct PluginsModule {
     plugins: Arc<dyn ports::PluginsPort>,
+    agent_plugins: Option<Arc<dyn ports::AgentPluginsPort>>,
     recorder: Option<CallRecorder>,
     operations: Arc<std::sync::OnceLock<operations::Operations>>,
 }
 
 impl PluginsModule {
     pub fn new(plugins: Arc<dyn ports::PluginsPort>) -> Self {
-        Self { plugins, recorder: None, operations: Arc::new(std::sync::OnceLock::new()) }
+        Self { plugins, agent_plugins: None, recorder: None, operations: Arc::new(std::sync::OnceLock::new()) }
+    }
+
+    pub fn with_agent_plugins(mut self, plugins: Arc<dyn ports::AgentPluginsPort>) -> Self {
+        self.agent_plugins = Some(plugins);
+        self
+    }
+
+    pub async fn catalog_scoped(&self, scope: &RuntimeScope) -> Result<Result<CatalogSnapshot, PluginError>, ()> {
+        if scope::is_openclaw(scope) {
+            return self.catalog().await.map(|result| result.map(CatalogSnapshot::OpenClaw));
+        }
+        let agent_id = scope::agent(scope).ok_or(())?;
+        let plugins = self.agent_plugins.as_ref().ok_or(())?;
+        let mut detail = call::Detail::Catalog {
+            plugin_count: None, installed_count: None, enabled_count: None,
+        };
+        let context = self.begin("plugins.catalog", &detail).await?;
+        let result = plugins.catalog(agent_id).await;
+        let status = match &result {
+            Ok(catalog) => {
+                detail = call::Detail::Catalog {
+                    plugin_count: Some(catalog.plugins.len()), installed_count: None,
+                    enabled_count: Some(catalog.plugins.iter().filter(|plugin| plugin.enabled).count()),
+                };
+                CallStatus::Succeeded
+            }
+            Err(_) => CallStatus::Failed,
+        };
+        Self::finish(context, status, &detail).await;
+        Ok(result.map(CatalogSnapshot::Matcha))
+    }
+
+    fn mutation_target(&self, scope: &RuntimeScope) -> Result<operations::Target, CallLogError> {
+        if scope::is_openclaw(scope) {
+            return Ok(operations::Target::OpenClaw(self.plugins.clone()));
+        }
+        let agent_id = scope::agent(scope).ok_or(CallLogError::Unavailable)?;
+        Ok(operations::Target::Agent {
+            plugins: self.agent_plugins.clone().ok_or(CallLogError::Unavailable)?,
+            agent_id: agent_id.to_owned(),
+        })
     }
 
     pub fn with_call_recorder(mut self, recorder: CallRecorder) -> Self {
@@ -93,7 +137,7 @@ impl PluginsModule {
         let Some(recorder) = self.recorder.as_ref() else {
             return self.plugins.set_enabled(plugin_id, enabled).await;
         };
-        let (_, result) = self.operations().submit(recorder, operations::Mutation::Configuration { plugin_id, enabled }).await.map_err(|_| ())?;
+        let (_, result) = self.operations().submit(recorder, self.mutation_target(&scope::openclaw()).map_err(|_| ())?, operations::Mutation::Configuration { plugin_id, enabled }).await.map_err(|_| ())?;
         result.await.map(ConfigurationOutcome::from).map_err(|_| ())
     }
 
@@ -101,7 +145,7 @@ impl PluginsModule {
         let Some(recorder) = self.recorder.as_ref() else {
             return self.plugins.operation(operation, plugin_id).await;
         };
-        let (_, result) = self.operations().submit(recorder, operations::Mutation::Operation { plugin_id, operation }).await.map_err(|_| ())?;
+        let (_, result) = self.operations().submit(recorder, self.mutation_target(&scope::openclaw()).map_err(|_| ())?, operations::Mutation::Operation { plugin_id, operation }).await.map_err(|_| ())?;
         result.await.map(OperationOutcome::from).map_err(|_| ())
     }
 
@@ -113,14 +157,27 @@ impl PluginsModule {
         self.admit(operations::Mutation::Operation { plugin_id, operation }).await
     }
 
+    pub async fn admit_configuration_scoped(&self, scope: &RuntimeScope, plugin_id: String, enabled: bool) -> Result<CallReceipt, CallLogError> {
+        self.admit_scoped(scope, operations::Mutation::Configuration { plugin_id, enabled }).await
+    }
+
+    pub async fn admit_operation_scoped(&self, scope: &RuntimeScope, operation: Operation, plugin_id: String) -> Result<CallReceipt, CallLogError> {
+        self.admit_scoped(scope, operations::Mutation::Operation { plugin_id, operation }).await
+    }
+
     async fn admit(&self, mutation: operations::Mutation) -> Result<CallReceipt, CallLogError> {
+        self.admit_scoped(&scope::openclaw(), mutation).await
+    }
+
+    async fn admit_scoped(&self, scope: &RuntimeScope, mutation: operations::Mutation) -> Result<CallReceipt, CallLogError> {
+        let target = self.mutation_target(scope)?;
         let recorder = self.recorder.as_ref().ok_or(CallLogError::Unavailable)?;
-        let (receipt, _) = self.operations().submit(recorder, mutation).await?;
+        let (receipt, _) = self.operations().submit(recorder, target, mutation).await?;
         Ok(receipt)
     }
 
     fn operations(&self) -> &operations::Operations {
-        self.operations.get_or_init(|| operations::Operations::spawn(self.plugins.clone()))
+        self.operations.get_or_init(operations::Operations::spawn)
     }
 
     pub async fn stop_operations(&self) {

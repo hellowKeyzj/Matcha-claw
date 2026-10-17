@@ -11,7 +11,6 @@ import {
   hostChannelsDeleteConfig,
   hostChannelsDisconnect,
   hostChannelsFetchSnapshot,
-  hostChannelsProbe,
 } from '@/lib/channel-runtime';
 import {
   isChannelRuntimeConnected,
@@ -20,12 +19,16 @@ import {
   type ChannelRuntimeSummarySnapshot,
 } from '@/lib/channel-status';
 import { CHANNEL_NAMES, type Channel, type ChannelType } from '../types/channel';
+import { buildCapabilityScopeKey, runtimeInstanceScope, type RuntimeInstanceScope } from '@/types/desktop/runtime-address';
+import { useRuntimeEndpointsStore, selectManagementEndpoint } from '@/stores/runtime-endpoints';
 
 interface FetchChannelsOptions {
   silent?: boolean;
 }
 
 interface ChannelsState {
+  scope: RuntimeInstanceScope | null;
+  selectScope: (scope: RuntimeInstanceScope | null) => void;
   channels: Channel[];
   snapshotReady: boolean;
   initialLoading: boolean;
@@ -49,6 +52,7 @@ const CHANNELS_SILENT_REFRESH_MIN_GAP_MS = 1200;
 const CHANNELS_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
 let inflightChannelsFetchPromise: Promise<void> | null = null;
 let channelsSnapshotRevision = 0;
+let channelsScopeRevision = 0;
 let channelsLastFetchAtMs = 0;
 let channelsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -124,7 +128,22 @@ function areChannelsEquivalent(left: Channel[], right: Channel[]): boolean {
   return true;
 }
 
+function isSelectedScope(scope: RuntimeInstanceScope): boolean {
+  const endpoint = selectManagementEndpoint(useRuntimeEndpointsStore.getState());
+  return endpoint !== null && buildCapabilityScopeKey(runtimeInstanceScope(endpoint)) === buildCapabilityScopeKey(scope);
+}
+
 export const useChannelsStore = create<ChannelsState>((set, get) => ({
+  scope: null,
+  selectScope: (scope) => {
+    if ((scope ? buildCapabilityScopeKey(scope) : null) === (get().scope ? buildCapabilityScopeKey(get().scope!) : null)) return;
+    channelsScopeRevision += 1;
+    channelsSnapshotRevision += 1;
+    inflightChannelsFetchPromise = null;
+    channelsLastFetchAtMs = 0;
+    clearChannelsSnapshotRetry();
+    set({ scope, channels: [], snapshotReady: false, initialLoading: false, refreshing: false, mutating: false, mutatingByChannelId: {}, error: null });
+  },
   channels: [],
   snapshotReady: false,
   initialLoading: false,
@@ -134,6 +153,9 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
   error: null,
 
   fetchChannels: async (options) => {
+    const scope = get().scope;
+    if (!scope || !isSelectedScope(scope)) return;
+    const scopeRevision = channelsScopeRevision;
     const silent = options?.silent === true;
     const now = Date.now();
     const hasSnapshot = get().snapshotReady;
@@ -154,8 +176,8 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     const requestRevision = channelsSnapshotRevision;
     const runFetch = (async () => {
       try {
-        const result = await hostChannelsFetchSnapshot();
-        if (requestRevision !== channelsSnapshotRevision) return;
+        const result = await hostChannelsFetchSnapshot(scope);
+        if (requestRevision !== channelsSnapshotRevision || scopeRevision !== channelsScopeRevision || !isSelectedScope(scope)) return;
         const data = result.snapshot as {
             channelOrder?: string[];
             channels?: Record<string, unknown>;
@@ -185,7 +207,9 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
             refreshing: true,
             error: null,
           }));
-          scheduleChannelsSnapshotRetry(() => get().fetchChannels({ silent: true }));
+          scheduleChannelsSnapshotRetry(async () => {
+            if (scopeRevision === channelsScopeRevision && isSelectedScope(scope)) await get().fetchChannels({ silent: true });
+          });
           return;
         }
 
@@ -201,6 +225,18 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
             if (!configured) continue;
 
             const accounts = data.channelAccounts?.[channelId] || [];
+            if (scope.endpoint.kind === 'native-runtime' && scope.endpoint.runtimeAdapterId === 'matcha-agent') {
+              for (const account of accounts) {
+                if (!account.accountId) continue;
+                channels.push({
+                  id: `${channelId}-${account.accountId}`, type: channelId as ChannelType,
+                  name: account.accountId, accountId: account.accountId,
+                  status: 'unknown',
+                  error: account.lastError,
+                });
+              }
+              continue;
+            }
             const defaultAccountId = data.channelDefaultAccountId?.[channelId];
             const summarySignal = summary as ChannelRuntimeSummarySnapshot | undefined;
             const primaryAccount =
@@ -263,7 +299,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
           }));
         }
       } catch (error) {
-        if (requestRevision !== channelsSnapshotRevision) return;
+        if (requestRevision !== channelsSnapshotRevision || scopeRevision !== channelsScopeRevision || !isSelectedScope(scope)) return;
         // Gateway not connected, keep stale channels and surface refresh error.
         const shouldSurfaceError = !silent || !hasSnapshot;
         set((state) => ({
@@ -287,22 +323,13 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
   },
 
-  probeChannels: async () => {
-    set({ refreshing: true, error: null });
-    try {
-      await hostChannelsProbe();
-    } catch (error) {
-      set((state) => ({
-        ...state,
-        error: error instanceof Error ? error.message : 'Failed to probe channels',
-      }));
-    } finally {
-      set({ refreshing: false });
-    }
-    await get().fetchChannels({ silent: true });
-  },
+  probeChannels: async () => { await get().fetchChannels(); },
 
   deleteChannel: async (channelId, options) => {
+    const scope = get().scope;
+    if (!scope || !isSelectedScope(scope)) return false;
+    const scopeRevision = channelsScopeRevision;
+    const current = () => scopeRevision === channelsScopeRevision && isSelectedScope(scope);
     const traceId = isTraceEnabled() ? options?.traceId ?? crypto.randomUUID() : undefined;
     const startedAt = isTraceEnabled() ? Date.now() : 0;
     logChannelTrace('delete.store.start', traceId);
@@ -332,7 +359,8 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     let outcome: 'confirmed' | 'target_rejected' | 'unknown' | 'error' | undefined;
     try {
       logChannelTrace('delete.config.start', traceId, () => ({ accountPresent: false }));
-      const result = await hostChannelsDeleteConfig(channelType, undefined, { traceId });
+      const result = await hostChannelsDeleteConfig(scope, channelType, scope.endpoint.kind === 'native-runtime' && scope.endpoint.runtimeAdapterId === 'matcha-agent' ? channel?.accountId : undefined, { traceId });
+      if (!current()) return false;
       outcome = ['confirmed', 'target_rejected'].includes(result.outcome) ? result.outcome : 'unknown';
       logChannelTrace('delete.config.end', traceId, () => ({ outcome, durationMs: Date.now() - startedAt }));
       if (result.outcome !== 'confirmed') {
@@ -352,6 +380,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
       await get().fetchChannels();
       return true;
     } catch (error) {
+      if (!current()) return false;
       outcome = 'error';
       logChannelTrace('delete.config.end', traceId, () => ({ outcome, errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt }));
       const message = error instanceof Error ? error.message : String(error);
@@ -361,7 +390,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
       return false;
     } finally {
       logChannelTrace('delete.store.end', traceId, () => ({ outcome, durationMs: Date.now() - startedAt }));
-      set((state) => {
+      if (current()) set((state) => {
         const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
         return {
           mutatingByChannelId: next,
@@ -372,6 +401,10 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
   },
 
   connectChannel: async (channelId) => {
+    const scope = get().scope;
+    if (!scope || !isSelectedScope(scope)) return;
+    const scopeRevision = channelsScopeRevision;
+    const current = () => scopeRevision === channelsScopeRevision && isSelectedScope(scope);
     set((state) => {
       const next = incrementMutatingChannel(state.mutatingByChannelId, channelId);
       return {
@@ -392,16 +425,18 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
       return;
     }
     try {
-      const result = await hostChannelsConnect(channel.type, channel.accountId);
+      const result = await hostChannelsConnect(scope, channel.type, channel.accountId);
+      if (!current()) return;
       if (result.success) {
         updateChannel(channelId, { status: 'connected', error: undefined });
       } else {
         updateChannel(channelId, { error: 'Channel connection was not confirmed' });
       }
     } catch (error) {
+      if (!current()) return;
       updateChannel(channelId, { error: error instanceof Error ? error.message : String(error) });
     } finally {
-      set((state) => {
+      if (current()) set((state) => {
         const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
         return {
           mutatingByChannelId: next,
@@ -412,6 +447,10 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
   },
 
   disconnectChannel: async (channelId) => {
+    const scope = get().scope;
+    if (!scope || !isSelectedScope(scope)) return;
+    const scopeRevision = channelsScopeRevision;
+    const current = () => scopeRevision === channelsScopeRevision && isSelectedScope(scope);
     set((state) => {
       const next = incrementMutatingChannel(state.mutatingByChannelId, channelId);
       return {
@@ -433,16 +472,18 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
 
     try {
-      const result = await hostChannelsDisconnect(channel.type, channel.accountId);
+      const result = await hostChannelsDisconnect(scope, channel.type, channel.accountId);
+      if (!current()) return;
       if (result.success) {
-        updateChannel(channelId, { status: 'disconnected', error: undefined });
+        updateChannel(channelId, { status: scope.endpoint.kind === 'native-runtime' && scope.endpoint.runtimeAdapterId === 'matcha-agent' ? 'unknown' : 'disconnected', error: undefined });
       } else {
         updateChannel(channelId, { error: 'Channel disconnection was not confirmed' });
       }
     } catch (error) {
+      if (!current()) return;
       updateChannel(channelId, { error: error instanceof Error ? error.message : String(error) });
     } finally {
-      set((state) => {
+      if (current()) set((state) => {
         const next = decrementMutatingChannel(state.mutatingByChannelId, channelId);
         return {
           mutatingByChannelId: next,

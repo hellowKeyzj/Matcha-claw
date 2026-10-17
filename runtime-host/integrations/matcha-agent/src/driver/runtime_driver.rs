@@ -26,4 +26,8 @@ impl runtime_directory::RuntimeDriver for MatchaRuntimeDriver {
     fn lifecycle_ops(&self) -> Option<&dyn LifecycleOps> {
         Some(self)
     }
+
+    fn runtime_control_ops(&self) -> Option<&dyn runtime_directory::RuntimeControlOps> {
+        Some(self)
+    }
 }

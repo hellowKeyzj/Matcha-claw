@@ -18,6 +18,7 @@ import { createProviderRoutingTransport } from './providers/routing';
 import { createProviderRecoveryTransport } from './providers/recovery';
 import { createSecurityEmergencyTransport } from './security/emergency';
 import { createSecurityPolicyTransport } from './security/policy';
+import { createNativePolicyTransport } from './security/native-policy';
 import { createSecurityRuleCatalogTransport } from './security/rule-catalog';
 import { createSessionAbortTransport } from './sessions/abort';
 import { createSessionApprovalTransport } from './sessions/approvals';
@@ -27,6 +28,7 @@ import { createSessionDeleteTransport } from './sessions/delete';
 import { createSessionEventsTransport } from './sessions/events';
 import { createSessionHistoryTransport } from './sessions/history';
 import { createSessionGoalTransport } from './sessions/goal';
+import { createSessionQuestionTransport } from './sessions/questions';
 import { createSessionListTransport } from './sessions/list';
 import { createSessionModelSelectionTransport } from './sessions/model-selection';
 import { createSessionPermissionTransport } from './sessions/permission';
@@ -120,6 +122,7 @@ export function createRuntimeHostTransportBundle(
     sessionApprovalTransport: createSessionApprovalTransport(issuer, runtimeHostTransportPort),
     sessionSendTransport: createSessionSendTransport(issuer, runtimeHostTransportPort),
     sessionGoalTransport: createSessionGoalTransport(issuer, runtimeHostTransportPort),
+    sessionQuestionTransport: createSessionQuestionTransport(issuer, runtimeHostTransportPort),
     sessionModelSelectionTransport: createSessionModelSelectionTransport(issuer, runtimeHostTransportPort),
     sessionPermissionTransport: createSessionPermissionTransport(issuer, runtimeHostTransportPort),
     securityEmergencyTransport: createSecurityEmergencyTransport(issuer, runtimeHostTransportPort),
@@ -134,6 +137,7 @@ export function createRuntimeHostTransportBundle(
     channelPairingTransport: createChannelPairingTransport(issuer, runtimeHostTransportPort),
     settingsDesiredTransport: createSettingsDesiredTransport(issuer, runtimeHostTransportPort),
     securityPolicyTransport: createSecurityPolicyTransport(issuer, runtimeHostTransportPort),
+    nativePolicyTransport: createNativePolicyTransport(issuer, runtimeHostTransportPort),
     securityRuleCatalogTransport: createSecurityRuleCatalogTransport(issuer, runtimeHostTransportPort),
     cronTransport,
     callLogTransport: createCallLogTransport(issuer, runtimeHostTransportPort),

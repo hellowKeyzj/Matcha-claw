@@ -12,7 +12,7 @@ pub trait TaskRequestAdmission: Send + Sync {
 pub struct TaskRequestAdmissionClosed;
 
 pub trait TaskRuntimeDirectory: Send + Sync {
-    fn task_ops(&self) -> Option<&dyn TaskOps>;
+    fn task_ops(&self, scope: &platform::endpoint::runtime_address::RuntimeScope) -> Option<&dyn TaskOps>;
 }
 
 pub trait TaskOps: Send + Sync {

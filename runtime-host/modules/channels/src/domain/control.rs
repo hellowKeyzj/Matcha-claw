@@ -10,6 +10,7 @@ pub enum ChannelControlAction {
 pub enum ChannelControlOutcome {
     Confirmed,
     Rejected,
+    Unsupported,
     OutcomeUnknown,
 }
 
@@ -18,6 +19,7 @@ pub enum ChannelControlOutcome {
 pub enum ChannelControlDeliveryOutcome {
     Confirmed,
     TargetRejected,
+    Unsupported,
     Unknown,
 }
 
@@ -26,6 +28,7 @@ impl From<ChannelControlOutcome> for ChannelControlDeliveryOutcome {
         match value {
             ChannelControlOutcome::Confirmed => Self::Confirmed,
             ChannelControlOutcome::Rejected => Self::TargetRejected,
+            ChannelControlOutcome::Unsupported => Self::Unsupported,
             ChannelControlOutcome::OutcomeUnknown => Self::Unknown,
         }
     }

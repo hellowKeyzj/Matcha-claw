@@ -1,5 +1,7 @@
 use std::{future::Future, pin::Pin};
 
+use platform::endpoint::runtime_address::RuntimeEndpoint;
+
 use crate::domain::model::{UsageEntry, UsageReadError};
 
 pub type UsageFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -12,7 +14,7 @@ pub trait UsageRequestAdmission: Send + Sync {
 pub struct UsageRequestAdmissionClosed;
 
 pub trait UsageRuntimeDirectory: Send + Sync {
-    fn usage_ops(&self) -> Option<&dyn UsageOps>;
+    fn usage_ops(&self, endpoint: &RuntimeEndpoint) -> Option<&dyn UsageOps>;
 }
 
 pub trait UsageOps: Send + Sync {

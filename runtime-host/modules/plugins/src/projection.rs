@@ -2,6 +2,21 @@ use serde_json::{Value, json};
 
 use crate::{Catalog, CatalogEntry, Execution, Runtime};
 
+pub fn project_catalog_snapshot(catalog: crate::CatalogSnapshot) -> Value {
+    match catalog {
+        crate::CatalogSnapshot::OpenClaw(catalog) => project_catalog(catalog),
+        crate::CatalogSnapshot::Matcha(catalog) => json!({
+            "success": true,
+            "agentId": catalog.agent_id,
+            "sessionState": "not_observed",
+            "plugins": catalog.plugins.into_iter().map(|plugin| json!({
+                "runtime": "matcha-agent", "id": plugin.id, "version": plugin.version,
+                "scope": plugin.scope, "enabled": plugin.enabled, "errorCount": plugin.error_count,
+            })).collect::<Vec<_>>(),
+        }),
+    }
+}
+
 pub fn project_catalog(catalog: Catalog) -> Value {
     json!({
         "success": catalog.success,

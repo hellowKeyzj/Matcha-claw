@@ -3,21 +3,23 @@ import { waitForCall } from './call-log-await';
 import type { CallReceipt } from '@/types/call-log';
 import type { PluginCallOutcome } from '@/types/call-log/plugins';
 import { isCallId } from '@/types/call-log/decode';
+import { pluginRuntime, type PluginScope } from '@/types/plugins';
 
-export async function configurePlugin(pluginId: string, enabled: boolean): Promise<PluginCallOutcome> {
-  return mutate('/api/plugins/configuration', { runtime: 'openclaw', pluginId, enabled }, 'configuration');
+export async function configurePlugin(pluginId: string, enabled: boolean, scope?: PluginScope): Promise<PluginCallOutcome> {
+  return mutate('/api/plugins/configuration', { runtime: pluginRuntime(scope), ...(scope === undefined ? {} : { scope }), pluginId, enabled }, 'configuration');
 }
 
 export async function operatePlugin(
   pluginId: string,
   operation: 'install' | 'update' | 'uninstall',
+  scope?: PluginScope,
 ): Promise<PluginCallOutcome> {
-  return mutate('/api/plugins/operation', { runtime: 'openclaw', pluginId, operation }, 'operation');
+  return mutate('/api/plugins/operation', { runtime: pluginRuntime(scope), ...(scope === undefined ? {} : { scope }), pluginId, operation }, 'operation');
 }
 
 async function mutate(
   path: string,
-  input: Record<string, string | boolean>,
+  input: Record<string, unknown>,
   kind: 'configuration' | 'operation',
 ): Promise<PluginCallOutcome> {
   const response = await hostApiFetch<unknown>(path, { method: 'POST', body: JSON.stringify(input) });

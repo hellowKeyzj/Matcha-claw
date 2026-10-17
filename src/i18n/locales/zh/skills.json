@@ -120,6 +120,7 @@
         "emptyTitle": "暂无技能包",
         "packageInstalled": "已安装",
         "packageAvailable": "未安装",
+        "enabledLoadUnconfirmed": "已安装并启用 · 当前会话加载未确认",
         "mineTitle": "我的云端包",
         "mineDescription": "上传后保留为草稿，点击发布才会进入市场。",
         "mineEmpty": "暂无已上传的包。",

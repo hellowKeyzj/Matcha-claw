@@ -1,7 +1,4 @@
 import type { AttachedFileMeta } from '@/stores/chat';
-import type {
-  SessionIdentity,
-} from '../../types/desktop/runtime-address';
 import {
   classifyFileContentType,
   extnameOf,
@@ -27,8 +24,17 @@ export interface ArtifactPreviewTarget {
   content?: string;
   lineStats?: GeneratedFileLineStats;
   toolId?: string;
-  sessionIdentity?: SessionIdentity;
   relativePath?: string;
+}
+
+export function formatWorkspacePathForDisplay(value: string): string {
+  if (/^\\\\\?\\[A-Za-z]:\\/u.test(value)) {
+    return value.slice(4);
+  }
+  if (/^\\\\\?\\UNC\\[^\\]+\\[^\\]+(?:\\|$)/iu.test(value)) {
+    return `\\\\${value.slice(8)}`;
+  }
+  return value;
 }
 
 function normalizeWorkspacePathSeparators(value: string): string {
@@ -56,7 +62,7 @@ function parseWorkspacePath(value: string, trimTrailingSeparators = false): Pars
     return null;
   }
 
-  const source = normalizeWorkspacePathSeparators(value);
+  const source = normalizeWorkspacePathSeparators(formatWorkspacePathForDisplay(value));
   const normalized = trimTrailingSeparators ? trimWorkspaceRootTrailingSeparators(source) : source;
   if (normalized.includes(':') && !/^[A-Za-z]:\//u.test(normalized)) {
     return null;
@@ -117,6 +123,10 @@ export function resolveWorkspaceRelativePath(
 
   const root = parseWorkspacePath(workspaceRoot, true);
   if (!root || root.kind !== candidate.kind) {
+    return null;
+  }
+  if (root.kind === 'drive'
+    && root.normalized.slice(0, 2).toLowerCase() !== candidate.normalized.slice(0, 2).toLowerCase()) {
     return null;
   }
   const caseInsensitive = root.kind === 'drive' || root.kind === 'unc';

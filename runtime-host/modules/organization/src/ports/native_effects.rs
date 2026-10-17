@@ -28,6 +28,12 @@ pub enum RuntimeReceiptOutcome {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoleSessionRetirementOutcome {
+    Confirmed,
+    OutcomeUnknown,
+}
+
 pub trait OrganizationNativeRuntime: Send + Sync {
     /// Reads native description, AGENTS.md and SOUL.md without modifying agents or files.
     /// A successful result contains one profile per input agent, in the same order.
@@ -108,6 +114,15 @@ pub trait OrganizationNativeRuntime: Send + Sync {
         abort_first: bool,
     ) -> OwnedRuntimeFuture<NativeDeletionEvidence>;
 
+    /// Permanently fences unconfirmed identities; confirmation is not deletion proof.
+    fn retire_unconfirmed_role_sessions(
+        &self,
+        _bindings: Vec<RoleSessionReceipt>,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<RoleSessionRetirementOutcome> {
+        Box::pin(async { RoleSessionRetirementOutcome::OutcomeUnknown })
+    }
+
     fn materialize_team_cancellable(
         &self,
         request: TeamMaterializationRequest,
@@ -160,7 +175,7 @@ pub trait OrganizationNativeRuntime: Send + Sync {
         self.remove_unconfirmed_team(request)
     }
 
-    fn installed_skill_names(&self) -> OwnedRuntimeFuture<Option<Vec<String>>>;
+    fn installed_skill_names(&self, source_agent: Option<ManagedAgentReference>) -> OwnedRuntimeFuture<Option<Vec<String>>>;
 }
 
 pub trait OrganizationRuntimeDirectory: Send + Sync {
@@ -196,7 +211,6 @@ pub trait TeamActivityExecutor: Send + Sync {
         self.execute(request)
     }
 
-    fn open_claw_ready(&self) -> bool;
 }
 
 #[derive(Clone, Eq, PartialEq)]

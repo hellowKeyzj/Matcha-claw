@@ -28,6 +28,7 @@ pub fn decode(
     authorization: &str,
     verifier: &mut CapabilityDecisionVerifier,
     now: u64,
+    endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
 ) -> Result<Request, DecodeError> {
     let mut span = crate::trace::ChannelTraceSpan::begin("channel.loopback.channel_login.decode");
     let result = (|| {
@@ -73,7 +74,19 @@ pub fn decode(
                     force: optional_bool(&body, "force")?.unwrap_or(false),
                     timeout_ms: optional_u64(&body, "timeoutMs")?,
                     account_id: optional_identity(&body, "accountId")?,
-                    agent_id: optional_identity(&body, "agentId")?,
+                    agent_id: if endpoint.runtime_adapter_id() == "matcha-agent" {
+                        body.get("agentId")
+                            .map(|value| {
+                                value
+                                    .as_str()
+                                    .filter(|value| crate::config_read::valid_matcha_agent_id(value))
+                                    .map(str::to_owned)
+                                    .ok_or(DecodeError::Invalid)
+                            })
+                            .transpose()?
+                    } else {
+                        optional_identity(&body, "agentId")?
+                    },
                     config,
                 }
             }
@@ -236,6 +249,7 @@ mod tests {
             &decision("login-agent"),
             &mut verifier,
             1,
+            &platform::endpoint::runtime_address::RuntimeEndpoint::try_new("openclaw", "local").unwrap(),
         )
         .expect("login start decodes");
 

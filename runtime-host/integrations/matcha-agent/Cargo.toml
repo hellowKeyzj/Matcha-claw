@@ -14,6 +14,23 @@ base64.workspace = true
 chrono.workspace = true
 foundation = { version = "0.1.0", path = "../../foundation" }
 organization = { version = "0.1.0", path = "../../modules/organization" }
+provider-module = { package = "provider", version = "0.1.0", path = "../../modules/provider" }
+connectors = { version = "0.1.0", path = "../../modules/connectors" }
+security = { version = "0.1.0", path = "../../modules/security" }
+workspace-module = { package = "workspace", version = "0.1.0", path = "../../modules/workspace" }
+skills-module = { package = "skills", version = "0.1.0", path = "../../modules/skills" }
+plugins-module = { package = "plugins", version = "0.1.0", path = "../../modules/plugins" }
+channels-module = { package = "channels", version = "0.1.0", path = "../../modules/channels" }
+subagents = { version = "0.1.0", path = "../../modules/subagents" }
+task-manager = { version = "0.1.0", path = "../../modules/task-manager" }
+cron = { version = "0.1.0", path = "../../modules/cron" }
+usage = { version = "0.1.0", path = "../../modules/usage" }
+clawhub = { version = "0.1.0", path = "../../external/clawhub" }
+sha2.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+qrcode.workspace = true
+image.workspace = true
 sessions-module = { package = "sessions", version = "0.1.0", path = "../../modules/sessions" }
 toolchain = { version = "0.1.0", path = "../../modules/toolchain" }
 futures-util.workspace = true

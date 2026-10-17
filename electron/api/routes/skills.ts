@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { SkillsManagementTransport } from '../../main/runtime-host-delivery/transport/skills/management';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = { outcome: 'rejected' } as const;
 const UNKNOWN = { outcome: 'unknown' } as const;
@@ -18,7 +19,7 @@ export async function handleSkillsRoutes(
 
   if (operation === 'status') {
     try {
-      const response = await transport.readStatus();
+      const response = await transport.readStatus(readRuntimeScopeQuery(url.searchParams));
       sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, UNKNOWN);

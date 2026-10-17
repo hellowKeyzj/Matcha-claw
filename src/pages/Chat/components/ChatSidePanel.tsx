@@ -1,4 +1,4 @@
-import { memo, useMemo, useSyncExternalStore, type CSSProperties } from 'react';
+import { memo, useMemo, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
 import { ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, Maximize2, Minimize2, PanelRight, SquareActivity } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -19,8 +19,9 @@ import { FilePreviewBody, type FilePreviewMode } from '@/components/file-preview
 import { WorkspaceBrowserBody } from '@/components/file-preview/WorkspaceBrowserBody';
 import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
 import type { WorkspaceFileContext } from '@/lib/host-api';
-import type {
-  SessionIdentity,
+import {
+  buildCapabilityScopeKey,
+  type SessionIdentity,
 } from '../../../types/desktop/runtime-address';
 
 interface ChatSidePanelProps {
@@ -45,6 +46,7 @@ interface ChatSidePanelProps {
   artifactViewMode: FilePreviewMode;
   artifactWorkspaceRoot: string | null;
   artifactWorkspaceContext?: WorkspaceFileContext;
+  workspaceRecoveryAction?: ReactNode;
   onArtifactFocusFile: (file: ArtifactPreviewTarget, options?: { preserveSection?: 'workspace' }) => void;
   onOpenGeneratedArtifactFile: (file: GeneratedFile, options?: { preserveSection?: boolean | 'current' }) => void;
   onOpenArtifactGroup: (groupKey: string, options?: { preserveSection?: boolean | 'current' }) => void;
@@ -80,6 +82,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   artifactViewMode,
   artifactWorkspaceRoot,
   artifactWorkspaceContext,
+  workspaceRecoveryAction,
   onArtifactFocusFile,
   onOpenGeneratedArtifactFile,
   onOpenArtifactGroup,
@@ -99,6 +102,8 @@ export const ChatSidePanel = memo(function ChatSidePanel({
     ['--chat-side-panel-width' as string]: `${width}px`,
   } as CSSProperties;
   const artifactFiles = useMemo(() => artifactFocusedGroupFiles ?? [], [artifactFocusedGroupFiles]);
+  const workspaceOwnerKey = artifactWorkspaceContext?.agentScope
+    ? buildCapabilityScopeKey(artifactWorkspaceContext.agentScope) : '';
   const artifactFocusedGeneratedIndex = useMemo(() => (
     artifactFocusedFile
       ? artifactFiles.findIndex((file) => file.filePath === artifactFocusedFile.filePath)
@@ -274,9 +279,9 @@ export const ChatSidePanel = memo(function ChatSidePanel({
     <div className="min-h-0 overflow-hidden">
       {artifactFocusedFile ? (
         <FilePreviewBody
+          key={`${workspaceOwnerKey}:${artifactFocusedFile.filePath}`}
           file={artifactFocusedFile}
           mode={artifactViewMode}
-          sessionIdentity={sessionIdentity}
           workspaceContext={artifactWorkspaceContext}
           className="h-full"
           headerAccessory={(
@@ -502,11 +507,12 @@ export const ChatSidePanel = memo(function ChatSidePanel({
           {artifactWorkbenchLayout.mode === 'workspace' ? (
             <div data-testid="chat-artifact-workbench" data-layout="workspace" className="min-h-0 flex-1 overflow-hidden">
               <WorkspaceBrowserBody
+                key={workspaceOwnerKey}
                 rootPath={artifactWorkspaceRoot}
                 selectedFilePath={artifactFocusedFile?.filePath ?? null}
                 selectedFile={artifactFocusedFile}
-                sessionIdentity={sessionIdentity}
                 workspaceContext={artifactWorkspaceContext}
+                recoveryAction={workspaceRecoveryAction}
                 availableWidth={width}
                 previewMode={artifactViewMode}
                 onSelectFile={(file) => onArtifactFocusFile(file, { preserveSection: 'workspace' })}

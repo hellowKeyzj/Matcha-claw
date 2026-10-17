@@ -530,9 +530,7 @@ fn start_activity_execution(
             status: ActivityReceiptStatus::TargetUnavailable,
         });
     }
-    if matches!(target, TeamRunActivityTarget::OpenClaw { .. })
-        && open_claw_activity_unavailable(input)
-    {
+    if !input.admission.is_admitted() {
         return ActivityExecutionCompletion::Observation(ActivityExecutionObservation {
             activity_id,
             status: ActivityReceiptStatus::RuntimeUnavailable,
@@ -638,10 +636,6 @@ where
     } else {
         OperationHandle::spawn(future).0
     }
-}
-
-fn open_claw_activity_unavailable(input: &TeamRunCoordinatorInput) -> bool {
-    !input.admission.is_admitted() || !input.activity_executor.open_claw_ready()
 }
 
 fn activity_delivery_id(activity_id: &ActivityId) -> DeliveryId {
@@ -770,9 +764,6 @@ mod tests {
             panic!("shutdown must not execute new work")
         }
 
-        fn open_claw_ready(&self) -> bool {
-            false
-        }
     }
 
     impl crate::ports::TeamRunAdmission for NoRuntime {

@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { AgentResourceCard, AgentResourceFooter, AgentResourcePill } from '@/components/common/AgentPage';
 import { Button } from '@/components/ui/button';
@@ -21,17 +22,18 @@ interface SubagentCardProps {
   deleteLocked?: boolean;
   exportLocked?: boolean;
   packageExportLocked?: boolean;
+  nativeManaged?: boolean;
   modelReady?: boolean;
-  onEdit: () => void;
-  onDelete: () => void;
-  onExport: () => void;
-  onExportPackage: () => void;
-  onUploadPackageToCloud: () => void;
+  onEdit: (agentId: string) => void;
+  onDelete: (agentId: string) => void;
+  onExport: (agent: SubagentSummary) => void;
+  onExportPackage: (agent: SubagentSummary) => void;
+  onUploadPackageToCloud: (agent: SubagentSummary) => void;
   onOpenCloudPackages: () => void;
-  onChat: () => void;
+  onChat: (agentId: string) => void;
 }
 
-export function SubagentCard({
+export const SubagentCard = memo(function SubagentCard({
   agent,
   modelLabel,
   compact = false,
@@ -39,6 +41,7 @@ export function SubagentCard({
   deleteLocked = false,
   exportLocked = false,
   packageExportLocked = false,
+  nativeManaged = false,
   modelReady = true,
   onEdit,
   onDelete,
@@ -63,7 +66,7 @@ export function SubagentCard({
           {t('card.sealed')}
         </AgentResourcePill>
       )}
-      {!agent.sealed && !agent.isDefault && agent.kind !== 'system' && (
+      {!nativeManaged && !agent.sealed && !agent.isDefault && agent.kind !== 'system' && (
         <AgentResourcePill>
           <Package className="h-3 w-3" />
           {t('card.package')}
@@ -85,24 +88,24 @@ export function SubagentCard({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-36">
-        <DropdownMenuItem disabled={exportLocked} onSelect={onExport}>
+        <DropdownMenuItem disabled={exportLocked} onSelect={() => onExport(agent)}>
           <Download className="h-4 w-4" />
           <span className="min-w-0 flex-1 truncate">{t('card.actions.export')}</span>
         </DropdownMenuItem>
-        <DropdownMenuItem disabled={packageExportLocked} onSelect={onExportPackage}>
+        {!nativeManaged && <DropdownMenuItem disabled={packageExportLocked} onSelect={() => onExportPackage(agent)}>
           <Package className="h-4 w-4" />
           <span className="min-w-0 flex-1 truncate">{t('card.actions.exportPackage')}</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled={packageExportLocked} onSelect={onUploadPackageToCloud}>
+        </DropdownMenuItem>}
+        {!nativeManaged && <DropdownMenuItem disabled={packageExportLocked} onSelect={() => onUploadPackageToCloud(agent)}>
           <CloudUpload className="h-4 w-4" />
           <span className="min-w-0 flex-1 truncate">{t('card.actions.uploadPackageToCloud')}</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onOpenCloudPackages}>
+        </DropdownMenuItem>}
+        {!nativeManaged && <DropdownMenuItem onSelect={onOpenCloudPackages}>
           <Download className="h-4 w-4" />
           <span className="min-w-0 flex-1 truncate">{t('card.actions.cloudPackages')}</span>
-        </DropdownMenuItem>
+        </DropdownMenuItem>}
         {compact && (
-          <DropdownMenuItem disabled={editLocked} onSelect={onEdit}>
+          <DropdownMenuItem disabled={editLocked} onSelect={() => onEdit(agent.id)}>
             <Pencil className="h-4 w-4" />
             <span className="min-w-0 flex-1 truncate">{t('card.actions.edit')}</span>
           </DropdownMenuItem>
@@ -112,7 +115,7 @@ export function SubagentCard({
           disabled={deleteLocked}
           title={deleteLocked ? t('card.lockedHint') : undefined}
           className="text-destructive data-[highlighted]:text-destructive"
-          onSelect={onDelete}
+          onSelect={() => onDelete(agent.id)}
         >
           <Trash2 className="h-4 w-4" />
           <span className="min-w-0 flex-1 truncate">{t('card.actions.delete')}</span>
@@ -154,7 +157,7 @@ export function SubagentCard({
       aria-label={`${t('card.actions.chat')} ${agent.id}`}
       disabled={chatDisabled}
       title={chatDisabled ? t('card.modelMissingHint') : undefined}
-      onClick={onChat}
+      onClick={() => onChat(agent.id)}
     >
       <MessageCircle className="h-3.5 w-3.5" />
       {t('card.actions.chat')}
@@ -191,7 +194,7 @@ export function SubagentCard({
           aria-label={`${t('card.actions.edit')} ${agent.id}`}
           disabled={editLocked}
           title={editLocked ? t('card.lockedHint') : undefined}
-          onClick={onEdit}
+          onClick={() => onEdit(agent.id)}
         >
           <Pencil className="h-3.5 w-3.5" />
           {t('card.actions.edit')}
@@ -201,6 +204,6 @@ export function SubagentCard({
       </AgentResourceFooter>
     </AgentResourceCard>
   );
-}
+});
 
 export default SubagentCard;

@@ -58,8 +58,7 @@ function sameRuntimeEndpointScopeKeys(left: readonly string[], right: readonly s
 function hasReadySessionRuntimeCatalog(): boolean {
   const catalog = useChatStore.getState().sessionRuntimeCatalog;
   return catalog.status === 'ready'
-    && catalog.endpoints.length > 0
-    && catalog.defaultSessionPromptScope != null;
+    && catalog.endpoints.length > 0;
 }
 
 function shouldRefreshSessionRuntimeCatalog(): boolean {
@@ -103,7 +102,7 @@ function shouldLoadSelectedSessionCatalog(): boolean {
     return true;
   }
   const endpoint = state.currentConversation?.endpoint
-    ?? state.sessionRuntimeCatalog.defaultSessionPromptScope?.endpoint
+    ?? state.sessionRuntimeCatalog.selectedEndpoint
     ?? null;
   if (!endpoint || state.sessionRuntimeCatalog.status !== 'ready') {
     return !hasSessionCatalogLoaded(state);
@@ -120,14 +119,13 @@ function shouldLoadSelectedSessionCatalog(): boolean {
 
 function resolveSessionQueryTarget(sessionParam: string): string | null {
   const state = useChatStore.getState();
+  if (state.loadedSessions[sessionParam]?.meta.sessionIdentity) return sessionParam;
+  const endpoint = state.currentConversation?.endpoint ?? state.sessionRuntimeCatalog.selectedEndpoint;
+  if (!endpoint) return null;
+  const runtimeScopeKey = buildRuntimeScopeKey(endpoint);
   for (const [recordKey, record] of Object.entries(state.loadedSessions)) {
-    if (!record.meta.sessionIdentity) {
-      continue;
-    }
-    if (recordKey === sessionParam
-      || record.meta.sessionIdentity.sessionKey === sessionParam) {
-      return recordKey;
-    }
+    const identity = record.meta.sessionIdentity;
+    if (identity?.sessionKey === sessionParam && buildRuntimeScopeKey(identity.endpoint) === runtimeScopeKey) return recordKey;
   }
   return null;
 }
@@ -423,7 +421,9 @@ export function useChatInit(input: UseChatInitInput): void {
       }
     });
     const unsubscribeChatRuntimeSelection = useChatStore.subscribe((state, previousState) => {
-      if (state.currentConversation?.runtimeScopeKey !== previousState.currentConversation?.runtimeScopeKey) {
+      const endpoint = state.currentConversation?.endpoint ?? state.sessionRuntimeCatalog.selectedEndpoint;
+      const previousEndpoint = previousState.currentConversation?.endpoint ?? previousState.sessionRuntimeCatalog.selectedEndpoint;
+      if ((endpoint ? buildRuntimeScopeKey(endpoint) : null) !== (previousEndpoint ? buildRuntimeScopeKey(previousEndpoint) : null)) {
         scheduleSidebarResourceEnsure();
       }
     });

@@ -324,7 +324,15 @@ impl TeamSessionExecutor {
         let Some(session_key) = session_ops.agent_scoped_session_key(binding.agent().as_str(), binding.endpoint_session_id().as_str()) else {
             return failed("session_key_unresolved");
         };
-        let Some(session_identity) = SessionIdentity::new(session_key.clone(), session_provider_from_identity(identity), binding.agent().as_str().to_owned()) else {
+        let Ok(session_identity) = SessionIdentity::with_endpoint(
+            session_key.clone(),
+            SessionEndpoint {
+                kind: "native-runtime".to_owned(),
+                runtime_adapter_id: session_provider_from_identity(identity),
+                runtime_instance_id: identity.runtime_instance_id().to_owned(),
+            },
+            binding.agent().as_str().to_owned(),
+        ) else {
             return failed("invalid_session_identity");
         };
         Some((session_identity, session_key))
@@ -409,7 +417,14 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
     ) -> runtime_directory::OwnedRuntimeFuture<Result<(), ActivityExecutionOutcome>> {
         let executor = self.clone();
         Box::pin(async move {
-            if cancellation.is_cancelled() {
+            if cancellation.is_cancelled() || executor.admission.admit_request().is_err() {
+                return Err(ActivityExecutionOutcome::Rejected { rejection: organization::DeliveryRejection::Retryable });
+            }
+            let ready = RuntimeDriverIdentity::from_reference(request.binding().endpoint().as_str())
+                .and_then(|identity| executor.runtime_directory.lookup(&identity.endpoint()))
+                .is_some_and(|driver| driver.session_ops().is_some()
+                    && driver.host_lifecycle_ops().is_some_and(|ops| ops.readiness()));
+            if !ready {
                 return Err(ActivityExecutionOutcome::Rejected { rejection: organization::DeliveryRejection::Retryable });
             }
             let Some((identity, _)) = executor.activity_session_identity(&request) else {
@@ -545,13 +560,4 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
         })
     }
 
-    fn open_claw_ready(&self) -> bool {
-        if self.admission.state().request_admission() != RequestAdmission::Accepting {
-            return false;
-        }
-        self.runtime_directory
-            .lookup(&RuntimeDriverIdentity::open_claw().endpoint())
-            .and_then(|driver| driver.host_lifecycle_ops().map(|ops| ops.readiness()))
-            .unwrap_or(false)
-    }
 }

@@ -151,6 +151,7 @@ fn identity(value: Option<&Value>) -> Option<String> {
 pub enum ChannelPairingDelivery {
     Ok(ChannelPairingList),
     Rejected,
+    Unsupported,
     Unavailable,
 }
 
@@ -159,6 +160,7 @@ impl ChannelPairingDelivery {
         match outcome {
             ChannelPairingOutcome::Listed(requests) => Self::Ok(ChannelPairingList::new(requests)),
             ChannelPairingOutcome::Rejected => Self::Rejected,
+            ChannelPairingOutcome::Unsupported => Self::Unsupported,
             ChannelPairingOutcome::OutcomeUnknown => Self::Unavailable,
         }
     }
@@ -166,6 +168,7 @@ impl ChannelPairingDelivery {
         match self {
             Self::Ok(_) => 200,
             Self::Rejected => 400,
+            Self::Unsupported => 501,
             Self::Unavailable => 503,
         }
     }
@@ -175,6 +178,9 @@ impl ChannelPairingDelivery {
                 .expect("Channel pairing public response is serializable"),
             Self::Rejected => {
                 json!({"success": false, "error": "Channel pairing request is rejected"})
+            }
+            Self::Unsupported => {
+                json!({"success": false, "outcome": "unsupported", "error": "Channel pairing list is not supported by this runtime"})
             }
             Self::Unavailable => {
                 json!({"success": false, "error": "Channel pairing is unavailable"})

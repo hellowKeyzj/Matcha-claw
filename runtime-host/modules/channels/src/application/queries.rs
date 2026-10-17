@@ -18,31 +18,37 @@ use crate::{
 pub enum ChannelQuery {
     Catalog {
         trace: super::trace::CommandTrace,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
         reply: oneshot::Sender<ChannelCatalogOutcome>,
     },
     ConfigRead {
         trace: super::trace::CommandTrace,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
         channel_id: String,
         account_id: Option<String>,
         reply: oneshot::Sender<channel_config_read::Outcome>,
     },
     ConfigureForm {
         trace: super::trace::CommandTrace,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
         channel_id: String,
         reply: oneshot::Sender<ChannelConfigureFormOutcome>,
     },
     Pairing {
         trace: super::trace::CommandTrace,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
         channel_id: String,
         account_id: Option<String>,
         reply: oneshot::Sender<ChannelPairingOutcome>,
     },
     Status {
         trace: super::trace::CommandTrace,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
         reply: oneshot::Sender<Result<ChannelStatusOutcome, ChannelStatusFailure>>,
     },
     Snapshot {
         trace: super::trace::CommandTrace,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
         reply: oneshot::Sender<Result<ChannelSnapshotOutcome, ChannelStatusFailure>>,
     },
 }

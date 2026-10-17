@@ -1,5 +1,6 @@
 use foundation::execution::OwnerRuntimeHandle;
 use platform::call::{CallId, CallReceipt, CallRecorder, CallStatus};
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -36,20 +37,26 @@ impl CronHandle {
         self
     }
 
-    pub(crate) async fn list(&self) -> Result<CronListOutcome, ()> {
+    pub(crate) async fn list(&self, endpoint: RuntimeEndpoint) -> Result<CronListOutcome, ()> {
         let call = CronCall::begin(self.recorder.as_ref(), "list", CronCallDetail::default()).await;
-        self.request_query(call.clone(), |reply| CronQuery::List { call, reply })
-            .await
+        self.request_query(call.clone(), |reply| CronQuery::List {
+            endpoint,
+            call,
+            reply,
+        })
+        .await
     }
 
     pub(crate) async fn load_history(
         &self,
+        endpoint: RuntimeEndpoint,
         command: CronHistoryCommand,
     ) -> Result<CronHistoryOutcome, ()> {
         let mut detail = CronCallDetail::job(command.job_id());
         detail.history_limit = Some(command.limit());
         let call = CronCall::begin(self.recorder.as_ref(), "history", detail).await;
         self.request_query(call.clone(), |reply| CronQuery::LoadHistory {
+            endpoint,
             command,
             call,
             reply,
@@ -61,6 +68,7 @@ impl CronHandle {
         &self,
         command: MutationCommand,
         principal: String,
+        endpoint: RuntimeEndpoint,
     ) -> Result<CallReceipt, ()> {
         let mut call = CronCall::begin(
             Some(self.recorder.as_ref().ok_or(())?),
@@ -72,6 +80,7 @@ impl CronHandle {
         let id = call.id().clone();
         let subject = ResultSubject {
             principal,
+            endpoint: endpoint.clone(),
             command: command.kind(),
             job_id: command.job_id().map(str::to_owned),
         };
@@ -83,6 +92,7 @@ impl CronHandle {
         if self
             .owner
             .try_send_command(CronCommand::Mutate {
+                endpoint,
                 command,
                 call: call.clone(),
             })
@@ -102,6 +112,7 @@ impl CronHandle {
 
     pub(crate) async fn trigger(
         &self,
+        endpoint: RuntimeEndpoint,
         job_id: String,
     ) -> Result<Result<CronTriggerResult, CronRequestAdmissionClosed>, ()> {
         let call = CronCall::begin(
@@ -111,6 +122,7 @@ impl CronHandle {
         )
         .await;
         self.request_command(call.clone(), |reply| CronCommand::Trigger {
+            endpoint,
             job_id,
             call,
             reply,

@@ -55,6 +55,7 @@ pub fn decode(
     authorization: &str,
     verifier: &mut CapabilityDecisionVerifier,
     now: u64,
+    endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
 ) -> Result<Request, DecodeError> {
     let mut span = crate::trace::ChannelTraceSpan::begin("channel.loopback.channel_catalog.decode");
     let result = (|| {
@@ -100,7 +101,17 @@ pub fn decode(
                 let account_id = identity(object.get("accountId")).ok_or(DecodeError::Invalid)?;
                 let agent_id = object
                     .get("agentId")
-                    .map(|value| identity(Some(value)).ok_or(DecodeError::Invalid))
+                    .map(|value| {
+                        if endpoint.runtime_adapter_id() == "matcha-agent" {
+                            value
+                                .as_str()
+                                .filter(|value| crate::config_read::valid_matcha_agent_id(value))
+                                .map(str::to_owned)
+                        } else {
+                            identity(Some(value))
+                        }
+                        .ok_or(DecodeError::Invalid)
+                    })
                     .transpose()?;
                 let values = object.get("values").ok_or(DecodeError::Invalid)?;
                 if !values.is_object() {
@@ -213,6 +224,7 @@ mod tests {
             &decision("agent-config"),
             &mut verifier,
             1,
+            &platform::endpoint::runtime_address::RuntimeEndpoint::try_new("openclaw", "local").unwrap(),
         )
         .expect("configure apply decodes");
 
@@ -246,6 +258,7 @@ mod tests {
                 &decision("unknown-field"),
                 &mut verifier,
                 1,
+                &platform::endpoint::runtime_address::RuntimeEndpoint::try_new("openclaw", "local").unwrap(),
             ),
             Err(DecodeError::Invalid),
         ));

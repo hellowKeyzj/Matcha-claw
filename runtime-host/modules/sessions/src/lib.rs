@@ -41,6 +41,9 @@ pub mod session_history {
 pub mod query {
     pub use crate::application::queries::*;
 }
+pub mod question {
+    pub use crate::application::question::*;
+}
 pub mod rename {
     pub use crate::application::rename::*;
 }
@@ -84,6 +87,7 @@ const PROVIDES: &[CapabilityKey] = &[
     CapabilityKey::new("session.management"),
     CapabilityKey::new("session.goal"),
     CapabilityKey::new("session.approval"),
+    CapabilityKey::new("session.question"),
     CapabilityKey::new("session.modelSelection"),
 ];
 const REQUIRES: &[CapabilityKey] = &[

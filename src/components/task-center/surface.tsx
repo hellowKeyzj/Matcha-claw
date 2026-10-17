@@ -24,7 +24,7 @@ export function TaskCenterStatusFilter({
   onClick,
 }: {
   label: string;
-  count: number;
+  count?: number;
   active: boolean;
   onClick: () => void;
 }) {
@@ -42,7 +42,7 @@ export function TaskCenterStatusFilter({
       onClick={onClick}
     >
       <span>{label}</span>
-      <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
+      {count !== undefined && <span className="text-xs tabular-nums text-muted-foreground">{count}</span>}
     </button>
   );
 }

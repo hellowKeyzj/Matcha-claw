@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import { AgentAvatar } from '@/components/common/AgentAvatar';
 import { buildTemplateAvatarSeed } from '@/lib/agent-avatar';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import type { ModelCatalogEntry, SubagentTemplateDetail } from '@/types/subagent';
@@ -15,6 +16,8 @@ interface SubagentTemplateLoadDialogProps {
   modelOptions: ModelCatalogEntry[];
   modelsLoading: boolean;
   submitting: boolean;
+  canApply: boolean;
+  nativeManaged?: boolean;
   onSubmit: (modelId: string) => Promise<void>;
   onClose: () => void;
 }
@@ -26,6 +29,8 @@ export function SubagentTemplateLoadDialog({
   modelOptions,
   modelsLoading,
   submitting,
+  canApply,
+  nativeManaged = false,
   onSubmit,
   onClose,
 }: SubagentTemplateLoadDialogProps) {
@@ -44,11 +49,12 @@ export function SubagentTemplateLoadDialog({
   }, [modelOptions]);
 
   const modelId = useMemo(() => {
+    if (nativeManaged) return manualModelId;
     if (manualModelId && resolvedModelOptions.some((item) => item.id === manualModelId)) {
       return manualModelId;
     }
     return resolvedModelOptions[0]?.id ?? '';
-  }, [manualModelId, resolvedModelOptions]);
+  }, [manualModelId, nativeManaged, resolvedModelOptions]);
 
   if (!open) {
     return null;
@@ -85,7 +91,7 @@ export function SubagentTemplateLoadDialog({
   const localizedTemplateSummary = tTemplate(`templates.${template.id}.summary`, {
     defaultValue: template.summary ?? '',
   });
-  const canSubmit = !submitting && !modelsLoading && !!modelId.trim() && resolvedModelOptions.length > 0;
+  const canSubmit = canApply && !submitting && (nativeManaged || (!modelsLoading && !!modelId.trim() && resolvedModelOptions.length > 0));
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
@@ -122,7 +128,9 @@ export function SubagentTemplateLoadDialog({
 
           <div className="space-y-1">
             <Label htmlFor="template-load-model">{t('templates.loadDialog.model')}</Label>
-            <Select
+            {nativeManaged ? <Input id="template-load-model" value={manualModelId}
+              placeholder={t('form.nativeModel', { defaultValue: '留空使用原生默认模型' })}
+              onChange={(event) => setManualModelId(event.target.value)} /> : <Select
               id="template-load-model"
               value={modelId}
               disabled={modelsLoading || resolvedModelOptions.length === 0}
@@ -136,8 +144,8 @@ export function SubagentTemplateLoadDialog({
                   {model.displayLabel}
                 </option>
               ))}
-            </Select>
-            {!modelsLoading && resolvedModelOptions.length === 0 && (
+            </Select>}
+            {!nativeManaged && !modelsLoading && resolvedModelOptions.length === 0 && (
               <p className="text-xs text-destructive">{t('form.modelUnavailable')}</p>
             )}
           </div>

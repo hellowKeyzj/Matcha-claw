@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { ChannelPairingTransport } from '../../main/runtime-host-delivery/transport/channels/pairing';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { isProductRuntimeScope, readRuntimeScopeQuery, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
   success: false,
@@ -20,7 +21,7 @@ export async function handleChannelPairingRoutes(
   const pairingChannel = readPairingChannel(url.pathname);
   if (pairingChannel && req.method === 'GET') {
     try {
-      const response = await transport.list(pairingChannel, url.searchParams.get('accountId') ?? undefined);
+      const response = await transport.list(pairingChannel, url.searchParams.get('accountId') ?? undefined, readRuntimeScopeQuery(url.searchParams));
       sendJson(res, response.status, response.body);
     } catch {
       sendJson(res, 503, UNAVAILABLE);
@@ -40,7 +41,7 @@ export async function handleChannelPairingRoutes(
 
   try {
     if (isListRequest(body)) {
-      const response = await transport.list(body.channel, body.accountId);
+      const response = await transport.list(body.channel, body.accountId, body.scope);
       sendJson(res, response.status, response.body);
       return true;
     }
@@ -49,6 +50,7 @@ export async function handleChannelPairingRoutes(
         channel: body.channel,
         ...(body.accountId !== undefined ? { accountId: body.accountId } : {}),
         code: body.code,
+        ...(body.scope === undefined ? {} : { scope: body.scope }),
       });
       sendJson(res, response.status, response.body);
       return true;
@@ -69,9 +71,10 @@ function readPairingChannel(pathname: string): string | null {
   return isIdentity(channel) ? channel : null;
 }
 
-function isListRequest(value: unknown): value is Readonly<{ channel: string; accountId?: string }> {
+function isListRequest(value: unknown): value is Readonly<{ channel: string; accountId?: string; scope?: ProductRuntimeScope }> {
   return isRecord(value)
-    && (hasExactKeys(value, ['channel']) || hasExactKeys(value, ['channel', 'accountId']))
+    && Object.keys(value).every((key) => ['channel', 'accountId', 'scope'].includes(key))
+    && (!Object.hasOwn(value, 'scope') || isProductRuntimeScope(value.scope))
     && isIdentity(value.channel)
     && (value.accountId === undefined || isIdentity(value.accountId));
 }
@@ -81,10 +84,11 @@ function isApprovalRequest(value: unknown): value is Readonly<{
   channel: string;
   accountId?: string;
   code: string;
+  scope?: ProductRuntimeScope;
 }> {
   return isRecord(value)
-    && (hasExactKeys(value, ['action', 'channel', 'code'])
-      || hasExactKeys(value, ['action', 'channel', 'accountId', 'code']))
+    && Object.keys(value).every((key) => ['action', 'channel', 'accountId', 'code', 'scope'].includes(key))
+    && (!Object.hasOwn(value, 'scope') || isProductRuntimeScope(value.scope))
     && value.action === 'approve'
     && isIdentity(value.channel)
     && isApprovalCode(value.code)
@@ -103,11 +107,6 @@ function isIdentity(value: unknown): value is string {
 
 function isApprovalCode(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9]{1,128}$/.test(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

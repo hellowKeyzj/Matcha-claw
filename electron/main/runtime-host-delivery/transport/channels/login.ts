@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 import type { CallReceipt } from '../../../../../src/types/call-log';
 import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
@@ -24,6 +25,7 @@ export type ChannelLoginRequest = Readonly<{
   force?: boolean;
   timeoutMs?: number;
   currentQrDataUrl?: string;
+  scope?: ProductRuntimeScope;
 }>;
 
 type LoginProgress = Readonly<{
@@ -62,7 +64,7 @@ export function createChannelLoginTransport(
       let status = 503;
       let outcome: unknown;
       let errorCode: 'UNAVAILABLE' | 'ABORTED' | 'INVALID_RESPONSE' | undefined;
-      const key = JSON.stringify([input.channel, input.accountId ?? '']);
+      const key = JSON.stringify([input.scope?.endpoint.runtimeAdapterId ?? 'openclaw', input.scope?.endpoint.runtimeInstanceId ?? 'local', input.channel, input.accountId ?? '']);
       if (input.action === 'cancel') {
         pending.get(key)?.abort();
         pending.delete(key);
@@ -119,22 +121,24 @@ export function createChannelLoginTransport(
 }
 
 function isRequest(value: unknown): value is ChannelLoginRequest {
-  if (!isRecord(value) || !isIdentity(value.channel)) return false;
+  if (!isRecord(value) || !isIdentity(value.channel)
+    || (Object.hasOwn(value, 'scope') && !isProductRuntimeScope(value.scope))) return false;
   if (typeof value.action !== 'string' || !['start', 'wait', 'cancel', 'logout'].includes(value.action)) return false;
   if (value.accountId !== undefined && !isIdentity(value.accountId)) return false;
   const keys = Object.keys(value);
   if (value.action === 'cancel' || value.action === 'logout') {
-    return keys.every((key) => key === 'action' || key === 'channel' || key === 'accountId')
-      && keys.length <= 3;
+    return keys.every((key) => key === 'action' || key === 'channel' || key === 'accountId' || key === 'scope')
+      && keys.length <= 4;
   }
   if (value.action === 'start') {
-    return keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'config', 'force', 'timeoutMs'].includes(key))
-      && (value.agentId === undefined || isIdentity(value.agentId))
+    return keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'config', 'force', 'timeoutMs', 'scope'].includes(key))
+      && (value.agentId === undefined || (isProductRuntimeScope(value.scope) && value.scope.endpoint.runtimeAdapterId === 'matcha-agent'
+        ? typeof value.agentId === 'string' && /^[A-Za-z0-9_-]+$/.test(value.agentId) : isIdentity(value.agentId)))
       && (value.config === undefined || isConfig(value.config))
       && (value.force === undefined || typeof value.force === 'boolean')
       && (value.timeoutMs === undefined || isTimeout(value.timeoutMs));
   }
-  if (keys.some((key) => !['action', 'channel', 'accountId', 'sessionKey', 'currentQrDataUrl', 'timeoutMs'].includes(key))) {
+  if (keys.some((key) => !['action', 'channel', 'accountId', 'sessionKey', 'currentQrDataUrl', 'timeoutMs', 'scope'].includes(key))) {
     return false;
   }
   if (value.sessionKey !== undefined && !isIdentity(value.sessionKey)) return false;

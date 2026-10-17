@@ -59,6 +59,57 @@ impl SecurityHandle {
             .begin(command, detail).await.map_err(|_| SecurityOwnerUnavailable)
     }
 
+    pub(crate) async fn native_policy_get(
+        &self,
+        target: crate::native_policy::PolicyTarget,
+        operation: crate::native_policy::Operation,
+    ) -> Result<Value, SecurityOwnerUnavailable> {
+        let detail = SecurityCallDetail::NativePolicy { operation: operation.name(), outcome: None };
+        let context = self.begin_call(operation.name(), &detail).await?;
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        if self.owner.try_send_query(SecurityQuery::NativePolicy { target, operation, reply, context: context.clone() }).is_err() {
+            let _ = context.finish(CallStatus::Rejected, &detail).await;
+            return Err(SecurityOwnerUnavailable);
+        }
+        context.accepted().await.map_err(|_| SecurityOwnerUnavailable)?;
+        rx.await.map_err(|_| SecurityOwnerUnavailable)
+    }
+
+    pub(crate) async fn native_policy_set(
+        &self,
+        target: crate::native_policy::PolicyTarget,
+        principal: String,
+        operation: crate::native_policy::Operation,
+    ) -> Result<CallReceipt, crate::native_policy::Failure> {
+        use crate::native_policy::Failure;
+        let detail = SecurityCallDetail::NativePolicy { operation: operation.name(), outcome: None };
+        let context = self.begin_call(operation.name(), &detail).await.map_err(|_| Failure::unavailable())?;
+        let command = SecurityCommand::NativePolicy { target, principal, operation,
+            call: SecurityCall { context: context.clone(), detail: detail.clone() } };
+        if self.owner.try_send_command(command).is_err() {
+            let _ = context.finish(CallStatus::Rejected, &detail).await;
+            return Err(Failure::unavailable());
+        }
+        context.accepted().await.map_err(|_| Failure::unknown())
+    }
+
+    pub(crate) async fn native_policy_result(
+        &self,
+        target: crate::native_policy::PolicyTarget,
+        principal: String,
+        call_id: platform::call::CallId,
+    ) -> Result<Option<Value>, SecurityOwnerUnavailable> {
+        let detail = SecurityCallDetail::NativePolicy { operation: "nativePolicy.result", outcome: None };
+        let context = self.begin_call("nativePolicy.result", &detail).await?;
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        if self.owner.try_send_query(SecurityQuery::NativePolicyResult { target, principal, call_id, reply, context: context.clone() }).is_err() {
+            let _ = context.finish(CallStatus::Rejected, &detail).await;
+            return Err(SecurityOwnerUnavailable);
+        }
+        context.accepted().await.map_err(|_| SecurityOwnerUnavailable)?;
+        rx.await.map_err(|_| SecurityOwnerUnavailable)?.map_err(|_| SecurityOwnerUnavailable)
+    }
+
     pub(crate) async fn current_policy(&self) -> Result<Value, SecurityOwnerUnavailable> {
         let detail = SecurityCallDetail::PolicyRead;
         let context = self.begin_call("security.policy.read", &detail).await?;

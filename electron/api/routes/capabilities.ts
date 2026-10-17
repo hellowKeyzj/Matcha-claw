@@ -22,6 +22,13 @@ import {
   isOpenClawQuestionResolveInput,
 } from '../../../src/types/openclaw-question';
 import type { SessionPage } from '../../main/renderer-event-routes';
+import { decodeSessionQuestionRequest, SESSION_QUESTION_INVALID } from '../../main/runtime-host-delivery/transport/sessions/questions';
+import { isNativePolicyRequest } from '../../../src/types/native-policy';
+import {
+  NATIVE_POLICY_INVALID,
+  NATIVE_POLICY_OUTCOME_UNKNOWN,
+  NATIVE_POLICY_UNAVAILABLE,
+} from '../../main/runtime-host-delivery/transport/security/native-policy';
 
 const CAPABILITY_NOT_AVAILABLE = {
   success: false,
@@ -107,6 +114,8 @@ type CapabilityRouteContext = SessionCapabilityRouteDeps
     | 'skillsManagementTransport'
     | 'teamRuntimeTransport'
     | 'openClawGatewayTransport'
+    | 'sessionQuestionTransport'
+    | 'nativePolicyTransport'
   >;
 
 type TaskOperation =
@@ -254,6 +263,8 @@ export async function handleCapabilityRoutes(
       const result = decodeCronTriggerResult(response.body);
       if (result) {
         sendJson(res, 200, result);
+      } else if (response.status === 422) {
+        sendJson(res, 200, { success: true, result: { outcome: 'failed' } });
       } else if (response.status === 409) {
         sendJson(res, 200, { success: true, result: { outcome: 'outcome-unknown' } });
       } else {
@@ -267,6 +278,28 @@ export async function handleCapabilityRoutes(
 
   if (!isRecord(body)) {
     sendJson(res, 404, CAPABILITY_NOT_AVAILABLE);
+    return true;
+  }
+
+  if (body.id === 'security.nativePolicy') {
+    if (!isNativePolicyRequest(body)) {
+      sendJson(res, 400, NATIVE_POLICY_INVALID);
+      return true;
+    }
+    try {
+      const response = await deps.runtimeHostTransports.nativePolicyTransport.execute(body);
+      sendJson(res, response.status, response.body);
+    } catch {
+      sendJson(res, 503, body.operationId.endsWith('.set') || body.operationId === 'nativePolicy.result'
+        ? NATIVE_POLICY_OUTCOME_UNKNOWN : NATIVE_POLICY_UNAVAILABLE);
+    }
+    return true;
+  }
+
+  if (body.id === 'session.question') {
+    const response = await executeSessionQuestionCapability(body, deps,
+      deps.sessionObservers.resolve(req.headers[SESSION_PAGE_HEADER.toLowerCase()]));
+    sendJson(res, response.status, response.body);
     return true;
   }
 
@@ -492,6 +525,25 @@ async function executeOpenClawMcpAppCapability(
   }
 }
 
+async function executeSessionQuestionCapability(
+  body: Record<string, unknown>,
+  deps: CapabilityRouteContext,
+  page: SessionPage | undefined,
+): Promise<{ status: number; body: unknown }> {
+  const request = decodeSessionQuestionRequest(body);
+  if (!request || !deps.sessionObservers.isCurrent(page)) {
+    return { status: 400, body: SESSION_QUESTION_INVALID };
+  }
+  try {
+    const response = await deps.runtimeHostTransports.sessionQuestionTransport.execute(request);
+    if (!deps.sessionObservers.isCurrent(page)) return { status: 400, body: SESSION_QUESTION_INVALID };
+    return response;
+  } catch {
+    if (!deps.sessionObservers.isCurrent(page)) return { status: 400, body: SESSION_QUESTION_INVALID };
+    return { status: 503, body: { outcome: request.operationId === 'sessions.questions.respond' ? 'unknown' : 'unavailable' } };
+  }
+}
+
 async function executeOpenClawQuestionCapability(
   body: Record<string, unknown>,
   deps: CapabilityRouteContext,
@@ -650,7 +702,7 @@ function decodeCronTriggerJobId(value: unknown): string | null {
     || !isRecord(value.scope.endpoint)
     || !hasExactKeys(value.scope.endpoint, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
     || value.scope.endpoint.kind !== 'native-runtime'
-    || value.scope.endpoint.runtimeAdapterId !== 'openclaw'
+    || (value.scope.endpoint.runtimeAdapterId !== 'openclaw' && value.scope.endpoint.runtimeAdapterId !== 'matcha-agent')
     || value.scope.endpoint.runtimeInstanceId !== 'local'
     || !isRecord(value.target)
     || !hasExactKeys(value.target, ['kind', 'jobId'])
@@ -841,7 +893,7 @@ function isTaskIdentity(value: unknown): boolean {
     && isRecord(value.endpoint)
     && hasExactKeys(value.endpoint, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
     && value.endpoint.kind === 'native-runtime'
-    && value.endpoint.runtimeAdapterId === 'openclaw'
+    && (value.endpoint.runtimeAdapterId === 'openclaw' || value.endpoint.runtimeAdapterId === 'matcha-agent')
     && value.endpoint.runtimeInstanceId === 'local'
     && isNonEmptyText(value.agentId)
     && isNonEmptyText(value.sessionKey);

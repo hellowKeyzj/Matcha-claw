@@ -54,6 +54,7 @@ pub(crate) fn runtime_module_install_plan(
             runtime_directory::control_loopback::RuntimeControlModule::new(vec![
                 Arc::new(
                     matcha_agent::driver::runtime_control_route::MatchaRuntimeControlRoute::new(
+                        Arc::clone(&handles.matcha_agent),
                         Arc::clone(&runtime_control_lifecycle),
                     ),
                 )

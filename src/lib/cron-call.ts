@@ -4,12 +4,14 @@ import { decodeCallReceipt } from '../types/call-log/receipt';
 import { decodeCronCallDetail } from '../types/call-log/cron';
 import { isCronDeleteResult, isCronJob, type CronDeleteResult, type CronResultCommand } from '../types/cron-operation-result';
 import type { CronJob } from '../types/cron';
+import type { RuntimeInstanceScope } from '../types/desktop/runtime-address';
 
 export type CronMutationOperation = 'cron.create' | 'cron.update' | 'cron.delete' | 'cron.toggle';
 
 export async function waitForCronMutation(
   value: unknown,
   operation: CronMutationOperation,
+  scope: RuntimeInstanceScope,
   jobId?: string,
 ): Promise<CronJob | CronDeleteResult> {
   const command: CronResultCommand = operation === 'cron.toggle' ? 'update'
@@ -22,13 +24,20 @@ export async function waitForCronMutation(
     throw new Error('Invalid Cron mutation call identity');
   }
   if (call.status === 'unknown') throw new Error('Cron operation outcome is unknown');
-  if (call.status === 'rejected' && detail.outcome === 'rejected') throw new Error('Cron operation was rejected');
+  if (call.status === 'rejected' && detail.outcome === 'rejected') {
+    // The scoped result retains precise rejection evidence, including unsupported delivery.
+    await hostApiFetch('/api/cron/results', {
+      method: 'POST',
+      body: JSON.stringify({ callId: receipt.callId, command, scope, ...(command === 'create' ? {} : { jobId }) }),
+    });
+    throw new Error('Cron operation was rejected');
+  }
   if (call.status === 'failed' && detail.outcome === 'unavailable') throw new Error('Cron service is unavailable');
   if (call.status !== 'succeeded' || detail.outcome !== 'applied') throw new Error('Invalid Cron mutation terminal outcome');
 
   const result = await hostApiFetch<unknown>('/api/cron/results', {
     method: 'POST',
-    body: JSON.stringify({ callId: receipt.callId, command, ...(command === 'create' ? {} : { jobId }) }),
+    body: JSON.stringify({ callId: receipt.callId, command, scope, ...(command === 'create' ? {} : { jobId }) }),
   });
   if (command === 'delete') {
     if (!isCronDeleteResult(result) || result.removed !== detail.removed) throw new Error('Invalid cron delete response');

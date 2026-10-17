@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ChannelCatalogTransport } from './catalog';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 import { beginChannelTrace, channelTraceError } from './trace';
 
 const DEFAULT_WAIT_TIMEOUT_MS = 300_000;
@@ -26,6 +27,7 @@ export type ChannelAuthorizationRequest = Readonly<{
   sessionKey?: string;
   config?: Record<string, unknown>;
   timeoutMs?: number;
+  scope?: ProductRuntimeScope;
 }>;
 
 type ChannelAuthorizationProgress = Readonly<{
@@ -58,6 +60,7 @@ type Session = {
   channel: ChannelAuthorizationChannel;
   accountId: string;
   agentId?: string;
+  scope?: ProductRuntimeScope;
   config: Record<string, unknown>;
   controller: AbortController;
   progress: ChannelAuthorizationProgress;
@@ -142,6 +145,7 @@ export function createChannelAuthorizationTransport(
         channel: session.channel,
         accountId: session.accountId,
         ...(session.agentId ? { agentId: session.agentId } : {}),
+        ...(session.scope === undefined ? {} : { scope: session.scope }),
         values: { ...session.config, ...values },
       }, traceId);
 
@@ -210,6 +214,7 @@ export function createChannelAuthorizationTransport(
       channel: input.channel,
       accountId,
       ...(input.agentId ? { agentId: input.agentId } : {}),
+      ...(input.scope === undefined ? {} : { scope: input.scope }),
       config: input.config ?? {},
       controller: new AbortController(),
     };
@@ -622,6 +627,8 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 function isRequest(value: unknown): value is ChannelAuthorizationRequest {
   if (!isRecord(value)) return false;
+  if (Object.hasOwn(value, 'scope')
+    && (!isProductRuntimeScope(value.scope) || value.scope.endpoint.runtimeAdapterId !== 'openclaw')) return false;
   if (value.action !== 'start' && value.action !== 'wait' && value.action !== 'cancel') return false;
   if (value.channel !== 'qqbot' && value.channel !== 'dingtalk' && value.channel !== 'feishu') return false;
   if (value.accountId !== undefined && !isIdentity(value.accountId)) return false;
@@ -632,9 +639,9 @@ function isRequest(value: unknown): value is ChannelAuthorizationRequest {
 
   const keys = Object.keys(value);
   if (value.action === 'start') {
-    return keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'config', 'timeoutMs'].includes(key));
+    return keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'config', 'timeoutMs', 'scope'].includes(key));
   }
-  return keys.every((key) => ['action', 'channel', 'accountId', 'sessionKey', 'timeoutMs'].includes(key));
+  return keys.every((key) => ['action', 'channel', 'accountId', 'sessionKey', 'timeoutMs', 'scope'].includes(key));
 }
 
 function isConfigureOutcome(value: unknown): value is Readonly<{ outcome: 'confirmed' | 'target_rejected' | 'unknown' }> {

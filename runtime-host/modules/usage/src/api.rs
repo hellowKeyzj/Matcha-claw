@@ -1,5 +1,8 @@
 use foundation::execution::OwnerRuntimeHandle;
-use platform::call::{CallContext, CallRecorder, CallStatus};
+use platform::{
+    call::{CallContext, CallRecorder, CallStatus},
+    endpoint::runtime_address::RuntimeEndpoint,
+};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -29,17 +32,27 @@ impl UsageHandle {
         self
     }
 
-    pub(crate) async fn recent(&self, limit: usize) -> Result<Vec<UsageEntry>, UsageReadError> {
+    pub(crate) async fn recent(
+        &self,
+        endpoint: RuntimeEndpoint,
+        limit: usize,
+    ) -> Result<Vec<UsageEntry>, UsageReadError> {
         self.recorded_query(
             "usage.recent",
             UsageCallDetail::recent(limit),
-            |call, reply| UsageQuery::Recent { limit, call, reply },
+            |call, reply| UsageQuery::Recent {
+                endpoint,
+                limit,
+                call,
+                reply,
+            },
         )
         .await
     }
 
     pub(crate) async fn session_timeseries(
         &self,
+        endpoint: RuntimeEndpoint,
         agent_id: String,
         session_id: String,
     ) -> Result<Vec<UsageEntry>, UsageReadError> {
@@ -47,6 +60,7 @@ impl UsageHandle {
             "usage.sessionTimeseries",
             UsageCallDetail::session_timeseries(),
             |call, reply| UsageQuery::SessionTimeseries {
+                endpoint,
                 agent_id,
                 session_id,
                 call,
@@ -90,14 +104,14 @@ impl UsageHandle {
         response.await.unwrap_or(Err(UsageReadError::Unavailable))
     }
 
-    pub(crate) async fn default_limit(&self) -> usize {
-        self.request_query(|reply| UsageQuery::DefaultLimit { reply })
+    pub(crate) async fn default_limit(&self, endpoint: RuntimeEndpoint) -> usize {
+        self.request_query(|reply| UsageQuery::DefaultLimit { endpoint, reply })
             .await
             .unwrap_or(100)
     }
 
-    pub(crate) async fn max_limit(&self) -> usize {
-        self.request_query(|reply| UsageQuery::MaxLimit { reply })
+    pub(crate) async fn max_limit(&self, endpoint: RuntimeEndpoint) -> usize {
+        self.request_query(|reply| UsageQuery::MaxLimit { endpoint, reply })
             .await
             .unwrap_or(1_000)
     }

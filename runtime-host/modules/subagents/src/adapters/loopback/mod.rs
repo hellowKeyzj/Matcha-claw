@@ -382,9 +382,10 @@ impl AgentsRequest {
         let operation = Operation::parse(&self.operation_id).ok_or(RequestError::Invalid)?;
         let input = Input::decode(operation, self.input.clone())?;
         (self.id == operation.capability_id()
-            && self.scope.kind == SCOPE_KIND
-            && self.target.is_valid_for(operation, &self.scope.agent_id)
-            && valid_id(&self.scope.agent_id)
+            && self.scope.is_valid_for(operation)
+            && self
+                .target
+                .is_valid_for(operation, self.scope.agent_id.as_deref())
             && input
                 .endpoint()
                 .is_none_or(|endpoint| &self.scope.endpoint == endpoint)
@@ -411,17 +412,22 @@ impl AgentsRequest {
                 Input::Create {
                     name,
                     workspace,
+                    workspace_mode,
                     model,
                     workspace_initialization,
                     ..
                 },
-            ) => agents::AgentCreate::try_new(name, workspace, model)
-                .map(|input| agents::Command::Create {
-                    endpoint,
-                    input,
-                    workspace_initialization: workspace_initialization.into(),
-                })
-                .map_err(|_| RequestError::Invalid),
+            ) => match (workspace_mode.as_deref(), workspace) {
+                (Some("managed"), None) => agents::AgentCreate::managed(name, model),
+                (None, Some(workspace)) => agents::AgentCreate::try_new(name, workspace, model),
+                _ => Err(()),
+            }
+            .map(|input| agents::Command::Create {
+                endpoint,
+                input,
+                workspace_initialization: workspace_initialization.into(),
+            })
+            .map_err(|_| RequestError::Invalid),
             (
                 Operation::Update,
                 Input::Update {
@@ -644,17 +650,12 @@ impl Operation {
     fn requires_openclaw(self) -> bool {
         matches!(
             self,
-            Self::DisplayConfiguration
-                | Self::PackageExport
+            Self::PackageExport
                 | Self::PackageExportCloud
                 | Self::PackageInstall
-                | Self::SetDescription
-                | Self::SetConfigurationModel
                 | Self::SetSkills
                 | Self::SkillConfiguration
                 | Self::SetSkillConfiguration
-                | Self::ToolConfiguration
-                | Self::SetToolConfiguration
         )
     }
 
@@ -697,7 +698,24 @@ struct Scope {
     kind: String,
     endpoint: Endpoint,
     #[serde(rename = "agentId")]
-    agent_id: String,
+    agent_id: Option<String>,
+}
+
+impl Scope {
+    fn is_valid_for(&self, operation: Operation) -> bool {
+        match self.kind.as_str() {
+            SCOPE_KIND => self.agent_id.as_deref().is_some_and(valid_id),
+            "runtime-instance" => {
+                self.agent_id.is_none()
+                    && self.endpoint.runtime_adapter_id == "matcha-agent"
+                    && matches!(
+                        operation,
+                        Operation::List | Operation::Create | Operation::DisplayConfiguration
+                    )
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -711,11 +729,16 @@ struct Target {
 }
 
 impl Target {
-    fn is_valid_for(&self, operation: Operation, scope_agent_id: &str) -> bool {
+    fn is_valid_for(&self, operation: Operation, scope_agent_id: Option<&str>) -> bool {
         match operation {
             Operation::List | Operation::DisplayConfiguration => {
-                self.kind == AGENT_TARGET_KIND
-                    && self.agent_id.as_deref() == Some(scope_agent_id)
+                self.kind
+                    == (if scope_agent_id.is_some() {
+                        AGENT_TARGET_KIND
+                    } else {
+                        "runtime-instance"
+                    })
+                    && self.agent_id.as_deref() == scope_agent_id
                     && self.subagent_id.is_none()
             }
             Operation::Create => {
@@ -766,7 +789,10 @@ enum Input {
     Create {
         endpoint: Endpoint,
         name: String,
-        workspace: String,
+        #[serde(default)]
+        workspace: Option<String>,
+        #[serde(rename = "workspaceMode", default)]
+        workspace_mode: Option<String>,
         #[serde(default)]
         model: Option<String>,
         #[serde(rename = "workspaceInitialization", default)]
@@ -1083,13 +1109,18 @@ impl Input {
                 Self::Create {
                     name,
                     workspace,
+                    workspace_mode,
                     model,
                     ..
                 },
             ) => {
                 target.subagent_id.is_none()
                     && valid_id(name)
-                    && valid_id(workspace)
+                    && match (workspace_mode.as_deref(), workspace.as_deref()) {
+                        (Some("managed"), None) => true,
+                        (None, Some(path)) => valid_id(path),
+                        _ => false,
+                    }
                     && model.as_deref().is_none_or(valid_id)
             }
             (

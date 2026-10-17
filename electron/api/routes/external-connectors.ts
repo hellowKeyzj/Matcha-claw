@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { ExternalConnectorsTransport } from '../../main/runtime-host-delivery/transport/connectors/external';
 import { validateSessionIdentity } from '../../../src/types/desktop/runtime-address';
+import { isProductRuntimeScope, readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { parseJsonBody, sendJson } from '../route-utils';
 
 const INVALID = {
@@ -21,6 +22,7 @@ type ExternalConnectorOperation =
   | 'externalConnectors.probe'
   | 'externalConnectors.get'
   | 'externalConnectors.upsert'
+  | 'externalConnectors.update'
   | 'externalConnectors.remove';
 
 export async function handleExternalConnectorsRoutes(
@@ -71,7 +73,7 @@ export async function handleExternalConnectorsRoutes(
     return true;
   }
   if (url.pathname === '/api/external-connectors/status' && req.method === 'GET') {
-    await deliver(transport, res, createRequest('externalConnectors.status', { kind: 'status' }));
+    await deliver(transport, res, createRequest('externalConnectors.status', { kind: 'status' }, readRuntimeScopeQuery(url.searchParams)));
     return true;
   }
 
@@ -105,6 +107,7 @@ export async function handleExternalConnectorsRoutes(
     const body = await parseLegacyBody(req, res);
     if (!body) return true;
     if (!(hasExactKeys(body, ['callId'])
+      || (hasExactKeys(body, ['callId', 'scope']) && isProductRuntimeScope(body.scope))
       || (hasExactKeys(body, ['callId', 'sessionIdentity']) && !validateSessionIdentity(body.sessionIdentity)))
       || typeof body.callId !== 'string' || !/^[a-f0-9]{32}$/.test(body.callId)) {
       sendJson(res, 400, INVALID);
@@ -113,21 +116,22 @@ export async function handleExternalConnectorsRoutes(
     await deliver(transport, res, createRequest('externalConnectors.observationResult', {
       kind: 'observationResult', callId: body.callId,
       ...(body.sessionIdentity === undefined ? {} : { sessionIdentity: body.sessionIdentity }),
-    }));
+    }, body.scope));
     return true;
   }
 
   if (url.pathname === '/api/external-connectors/probe' && req.method === 'POST') {
     const body = await parseLegacyBody(req, res);
     if (!body) return true;
-    if (!hasExactKeys(body, ['connectorId']) || !isConnectorId(body.connectorId)) {
+    if (!(hasExactKeys(body, ['connectorId'])
+      || (hasExactKeys(body, ['connectorId', 'scope']) && isProductRuntimeScope(body.scope))) || !isConnectorId(body.connectorId)) {
       sendJson(res, 400, INVALID);
       return true;
     }
     await deliver(transport, res, createRequest('externalConnectors.probe', {
       kind: 'probe',
       connectorId: body.connectorId,
-    }));
+    }, body.scope));
     return true;
   }
 
@@ -141,6 +145,19 @@ export async function handleExternalConnectorsRoutes(
     await deliver(transport, res, createRequest('externalConnectors.upsert', {
       kind: 'upsert',
       connector: body.connector,
+    }));
+    return true;
+  }
+
+  if (url.pathname === '/api/external-connectors/update' && req.method === 'POST') {
+    const body = await parseLegacyBody(req, res);
+    if (!body) return true;
+    if (!hasExactKeys(body, ['connectorId', 'patch']) || !isConnectorId(body.connectorId) || !isRecord(body.patch)) {
+      sendJson(res, 400, INVALID);
+      return true;
+    }
+    await deliver(transport, res, createRequest('externalConnectors.update', {
+      kind: 'update', connectorId: body.connectorId, patch: body.patch,
     }));
     return true;
   }
@@ -162,11 +179,17 @@ export async function handleExternalConnectorsRoutes(
   return false;
 }
 
-function createRequest(operationId: ExternalConnectorOperation, input: Record<string, unknown>) {
+function createRequest(operationId: ExternalConnectorOperation, input: Record<string, unknown>, scope?: unknown) {
+  const runtimeObservation = operationId === 'externalConnectors.status' || operationId === 'externalConnectors.probe'
+    || (operationId === 'externalConnectors.observationResult' && !Object.hasOwn(input, 'sessionIdentity'));
   return {
     id: 'external.connectors',
     operationId,
-    scope: { kind: 'external-connector-catalog' },
+    scope: runtimeObservation
+      ? scope === undefined ? { kind: 'runtime-instance', endpoint: {
+        kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
+      } } : scope
+      : { kind: 'external-connector-catalog' },
     target: { kind: 'external-connectors' },
     input,
   };

@@ -148,7 +148,8 @@ export function resolveAgentScopeForRuntimeEndpoint(
     return null;
   }
   return {
-    ...endpoint.defaultSessionPromptScope,
+    kind: 'agent',
+    endpoint: endpoint.endpoint,
     agentId: normalizedAgentId,
   };
 }
@@ -387,6 +388,7 @@ export function inferUntitledSessionLabel(
 interface UseAgentSessionsPaneViewModelInput {
   subagentManagementAgents: SidebarAgentSummary[];
   subagentManagementAgentsResource: ResourceStateMeta;
+  subagentManagementRuntimeScopeKey: string | null;
   sessionEntries: AgentSessionsPaneSessionEntry[];
   switchboardSessionEntries?: readonly AgentSessionsPaneSessionEntry[];
   sessionsLoading: boolean;
@@ -406,6 +408,7 @@ export function useAgentSessionsPaneViewModel(
   const {
     subagentManagementAgents,
     subagentManagementAgentsResource,
+    subagentManagementRuntimeScopeKey,
     sessionEntries,
     switchboardSessionEntries,
     sessionsLoadedOnce,
@@ -424,16 +427,16 @@ export function useAgentSessionsPaneViewModel(
   );
   const runtimeAgentSummaries = useMemo(
     () => selectedRuntimeEndpoint
-      ? buildRuntimeEndpointAgentSummaries(selectedRuntimeEndpoint, subagentManagementAgents)
+      ? buildRuntimeEndpointAgentSummaries(selectedRuntimeEndpoint, selectedRuntimeEndpoint.runtimeScopeKey === subagentManagementRuntimeScopeKey ? subagentManagementAgents : [])
       : [],
-    [subagentManagementAgents, selectedRuntimeEndpoint],
+    [subagentManagementAgents, subagentManagementRuntimeScopeKey, selectedRuntimeEndpoint],
   );
   const switchboardRuntimeAgentSummariesByScopeKey = useMemo(() => {
     return new Map(switchboardRuntimeEndpoints.map((endpoint) => [
       endpoint.runtimeScopeKey,
-      buildRuntimeEndpointAgentSummaries(endpoint, subagentManagementAgents),
+      buildRuntimeEndpointAgentSummaries(endpoint, endpoint.runtimeScopeKey === subagentManagementRuntimeScopeKey ? subagentManagementAgents : []),
     ] as const));
-  }, [subagentManagementAgents, switchboardRuntimeEndpoints]);
+  }, [subagentManagementAgents, subagentManagementRuntimeScopeKey, switchboardRuntimeEndpoints]);
   const visibleSessionEntries = useMemo(
     () => sessionEntries.filter((entry) => !isAgentSessionSwitchboardAutomationSession(entry.session)),
     [sessionEntries],
@@ -661,7 +664,8 @@ export function useAgentSessionsPaneViewModel(
     },
   }), [currentConversation, selectedRuntimeEndpoint, teams, switchboardRuntimeResults, switchboardSessionBuckets, switchboardSessionSourceIndex.agentSourceByKey, switchboardSessionViewModelByKey]);
 
-  const requiresSubagentManagementCatalog = switchboardRuntimeEndpoints.some((endpoint) => endpoint.target?.agentCatalog.source === 'subagent-management');
+  const requiresSubagentManagementCatalog = switchboardRuntimeEndpoints.some((endpoint) => endpoint.runtimeScopeKey === subagentManagementRuntimeScopeKey
+    && endpoint.target?.agentCatalog.source === 'subagent-management');
   const agentListState = requiresSubagentManagementCatalog
     && !subagentManagementAgentsResource.hasLoadedOnce
     && (subagentManagementAgentsResource.status === 'idle' || subagentManagementAgentsResource.status === 'loading')

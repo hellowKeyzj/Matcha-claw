@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 use crate::api::SecurityHandle;
 
 pub mod emergency;
+mod native_policy;
 pub mod policy;
 
 const SHORT_DEADLINE: Duration = Duration::from_secs(5);
@@ -43,6 +44,8 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
                 RoutePath::ExactWithQuery(policy::OPERATION_ENDPOINT),
                 RoutePath::ExactWithQuery(policy::ENDPOINT),
                 RoutePath::ExactWithQuery(policy::OPERATION_RECEIPT_ENDPOINT),
+                RoutePath::ExactWithQuery(native_policy::ENDPOINT),
+                RoutePath::ExactWithQuery(native_policy::RESULT_ENDPOINT),
             ],
             head_plan,
             move |request| route(dependencies.clone(), request),
@@ -83,6 +86,29 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
         let path = pathname(request.path());
+        if request.method() == "POST"
+            && matches!(
+                path,
+                native_policy::ENDPOINT | native_policy::RESULT_ENDPOINT
+            )
+        {
+            if request.path() != path {
+                return Response::error(400, "Native policy request is invalid").into();
+            }
+            return native_policy::handle(
+                path,
+                request
+                    .headers()
+                    .iter()
+                    .find(|(name, _)| name == "authorization")
+                    .map(|(_, value)| value.as_str()),
+                &request.body,
+                Arc::clone(&dependencies.verifier),
+                dependencies.security,
+            )
+            .await
+            .into();
+        }
         if request.method() == "POST" && path == emergency::AUTHORIZATION_ENDPOINT {
             return emergency::handler::handle(
                 request.method(),
@@ -136,7 +162,14 @@ fn is_security_policy_route(method: &str, path: &str) -> bool {
 }
 
 fn is_security_policy_post_route(path: &str) -> bool {
-    matches!(path, policy::OPERATION_ENDPOINT | policy::ENDPOINT | policy::OPERATION_RECEIPT_ENDPOINT)
+    matches!(
+        path,
+        policy::OPERATION_ENDPOINT
+            | policy::ENDPOINT
+            | policy::OPERATION_RECEIPT_ENDPOINT
+            | native_policy::ENDPOINT
+            | native_policy::RESULT_ENDPOINT
+    )
 }
 
 fn body_policy_for_method(method: &str, max_bytes: usize) -> BodyPolicy {

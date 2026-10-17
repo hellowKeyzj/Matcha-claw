@@ -103,6 +103,8 @@ pub(crate) enum ChannelMutation {
     LoginStart {
         force: bool,
         timeout_ms: Option<u64>,
+        agent_id: Option<String>,
+        config: Zeroizing<Vec<u8>>,
     },
     LoginWait {
         timeout_ms: Option<u64>,
@@ -200,6 +202,7 @@ impl ChannelMutationEffect {
                 }
             }
             Self::Login(outcome) => outcome.trace_outcome(),
+            Self::Control(Control::Unsupported) | Self::Credentials(Credentials::Unsupported) => "unsupported",
             Self::Configure(Configure::Unknown)
             | Self::DeleteConfig(Delete::Unknown)
             | Self::Control(Control::OutcomeUnknown)

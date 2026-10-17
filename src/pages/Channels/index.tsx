@@ -35,7 +35,9 @@ import { Badge } from '@/components/ui/badge';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useChannelsStore } from '@/stores/channels';
 import { useGatewayStore } from '@/stores/gateway';
-import { useSubagentsStore } from '@/stores/subagents';
+import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
+import { useRuntimeEndpointsStore, selectManagementEndpoint, selectManagementAgentScope, isRuntimeEndpointReady, isRuntimeEndpointStarting } from '@/stores/runtime-endpoints';
+import { buildCapabilityScopeKey, runtimeInstanceScope, runtimeEndpointsEqual, type RuntimeInstanceScope } from '@/types/desktop/runtime-address';
 import { StatusBadge, type Status } from '@/components/common/StatusBadge';
 import {
   channelErrorCode,
@@ -46,6 +48,8 @@ import {
   hostChannelsCancelAuthorization,
   hostChannelsCancelSession,
   hostChannelsLoginWait,
+  hostChannelsDisconnect,
+  hostChannelsLogout,
   hostChannelsListPairingRequests,
   hostChannelsReadConfig,
   hostChannelsStartAuthorization,
@@ -108,6 +112,14 @@ function channelConnectionLabelKey(connectionType: ChannelMeta['connectionType']
 }
 
 export function Channels() {
+  const endpoint = useRuntimeEndpointsStore(selectManagementEndpoint);
+  const scope = useMemo(() => endpoint?.kind === 'native-runtime' && ['openclaw', 'matcha-agent'].includes(endpoint.runtimeAdapterId) ? runtimeInstanceScope(endpoint) : null, [endpoint]);
+  useEffect(() => { useChannelsStore.getState().selectScope(scope); }, [scope]);
+  if (!scope) return <div className="space-y-4"><RuntimeScopeSelector /><p className="text-sm text-muted-foreground">请选择运行时。</p></div>;
+  return <ChannelsForRuntime key={buildCapabilityScopeKey(scope)} scope={scope} />;
+}
+
+function ChannelsForRuntime({ scope }: { scope: RuntimeInstanceScope }) {
   const { t } = useTranslation('channels');
   const channels = useChannelsStore((state) => state.channels);
   const snapshotReady = useChannelsStore((state) => state.snapshotReady);
@@ -121,6 +133,11 @@ export function Channels() {
   const deleteChannel = useChannelsStore((state) => state.deleteChannel);
   const gatewayStatus = useGatewayStore((state) => state.status);
   const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
+  const endpoints = useRuntimeEndpointsStore((state) => state.endpoints);
+  const runtime = endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, scope.endpoint));
+  const nativeMatcha = scope.endpoint.kind === 'native-runtime' && scope.endpoint.runtimeAdapterId === 'matcha-agent';
+  const storeScope = useChannelsStore((state) => state.scope);
+  const scopeMatches = storeScope && buildCapabilityScopeKey(storeScope) === buildCapabilityScopeKey(scope);
 
   const [dialogTarget, setDialogTarget] = useState<ChannelDialogTarget | null>(null);
   const [channelToDelete, setChannelToDelete] = useState<{ id: string; type: ChannelType; traceId: string | undefined; startedAt: number } | null>(null);
@@ -132,8 +149,9 @@ export function Channels() {
 
   // Fetch channels on mount
   useEffect(() => {
+    useChannelsStore.getState().selectScope(scope);
     void fetchChannels({ silent: true });
-  }, [fetchChannels]);
+  }, [fetchChannels, scope]);
 
   const scheduleStatusRefresh = useCallback(() => {
     if (statusRefreshPendingRef.current) {
@@ -153,6 +171,7 @@ export function Channels() {
   }, [fetchChannels]);
 
   useEffect(() => {
+    if (nativeMatcha) return;
     const unsubscribe = subscribeHostEvent('gateway:channel-status', (payload: unknown) => {
       if (isRecord(payload) && typeof payload.eventName === 'string' && payload.eventName.startsWith('channel:')) {
         return;
@@ -169,26 +188,26 @@ export function Channels() {
         unsubscribe();
       }
     };
-  }, [scheduleStatusRefresh]);
+  }, [scheduleStatusRefresh, nativeMatcha]);
 
   useEffect(() => {
-    const gatewayOperational = isGatewayOperational(gatewayStatus);
+    const gatewayOperational = nativeMatcha ? Boolean(runtime && isRuntimeEndpointReady(runtime)) : isGatewayOperational(gatewayStatus);
     const previousGatewayOperational = lastGatewayOperationalRef.current;
     lastGatewayOperationalRef.current = gatewayOperational;
     if (!previousGatewayOperational && gatewayOperational) {
       scheduleStatusRefresh();
     }
-  }, [gatewayStatus, scheduleStatusRefresh]);
+  }, [gatewayStatus, scheduleStatusRefresh, nativeMatcha, runtime]);
 
   // Get channel types to display
-  const displayedChannelTypes = getPrimaryChannels();
-  const safeChannels = Array.isArray(channels) ? channels : [];
+  const displayedChannelTypes: ChannelType[] = nativeMatcha ? ['weixin'] : getPrimaryChannels();
+  const safeChannels = scopeMatches && Array.isArray(channels) ? channels : [];
   const configuredChannels: Channel[] = safeChannels;
 
   // Connected/disconnected channel counts
   const connectedCount = configuredChannels.filter((c) => c.status === 'connected').length;
-  const gatewayOperational = isGatewayOperational(gatewayStatus);
-  const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
+  const gatewayOperational = nativeMatcha ? Boolean(runtime && isRuntimeEndpointReady(runtime)) : isGatewayOperational(gatewayStatus);
+  const gatewayPreparing = nativeMatcha ? Boolean(runtime && isRuntimeEndpointStarting(runtime)) : isGatewayPreparing(gatewayStatus, gatewayInitialized);
   const showInitialLoading = !snapshotReady && initialLoading;
   const manualRefreshBusy = refreshing || mutating;
   const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
@@ -229,13 +248,14 @@ export function Channels() {
                 {t('stats.connected')}
               </span>
               <span className="inline-flex h-8 items-center gap-2 rounded-full border bg-[hsl(var(--shell-surface-muted))] px-3 text-xs text-[hsl(var(--shell-text-muted))] [border-color:hsl(var(--shell-border))]">
-                <strong className="text-foreground">{configuredChannels.length - connectedCount}</strong>
+                <strong className="text-foreground">{configuredChannels.filter((channel) => channel.status === 'disconnected').length}</strong>
                 {t('stats.disconnected')}
               </span>
             </div>
           )}
         </div>
-        <div className="flex shrink-0 gap-2">
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <RuntimeScopeSelector />
           <Button
             variant="outline"
             onClick={() => {
@@ -379,8 +399,13 @@ export function Channels() {
       )}
 
       {/* Add Channel Dialog */}
-      {dialogTarget && (
+      {dialogTarget && nativeMatcha ? (
+        <NativeWeixinDialog key={dialogTarget.kind === 'configured' ? dialogTarget.channel.id : 'new'} scope={scope} channel={dialogTarget.kind === 'configured' ? dialogTarget.channel : null}
+          onClose={() => setDialogTarget(null)} onSaved={() => { void fetchChannels(); setDialogTarget(null); }} />
+      ) : dialogTarget && (
         <AddChannelDialog
+          key={dialogTarget.kind === 'catalog' ? 'catalog' : dialogTarget.kind === 'new' ? dialogTarget.type : dialogTarget.channel.id}
+          scope={scope}
           target={dialogTarget}
           onTargetChange={setDialogTarget}
           onClose={() => setDialogTarget((current) => current === dialogTarget ? null : current)}
@@ -417,6 +442,7 @@ export function Channels() {
 
       {pairingChannel && (
         <ChannelPairingDialog
+          scope={scope}
           channel={pairingChannel}
           onClose={() => setPairingChannel(null)}
         />
@@ -437,8 +463,8 @@ interface ChannelCardProps {
 
 function ChannelCard({ channel, isMutating = false, onConfigure, onManagePairing, onDelete }: ChannelCardProps) {
   const { t } = useTranslation('channels');
-  const status = channel.status as Status;
-  const statusLabel = t(`status.${status}`, { defaultValue: status });
+  const status = (channel.status === 'unknown' ? 'stopped' : channel.status) as Status;
+  const statusLabel = channel.status === 'unknown' ? '连接状态未知' : t(`status.${status}`, { defaultValue: status });
 
   return (
     <Card className="h-full bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
@@ -503,15 +529,150 @@ function ChannelCard({ channel, isMutating = false, onConfigure, onManagePairing
   );
 }
 
+function channelScopeCurrent(scope: RuntimeInstanceScope): boolean {
+  const endpoint = selectManagementEndpoint(useRuntimeEndpointsStore.getState());
+  return endpoint !== null && runtimeEndpointsEqual(endpoint, scope.endpoint);
+}
+
+function NativeWeixinDialog({ scope, channel, onClose, onSaved }: {
+  scope: RuntimeInstanceScope;
+  channel: Channel | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const endpoints = useRuntimeEndpointsStore((state) => state.endpoints);
+  const selectedAgentScope = useRuntimeEndpointsStore(selectManagementAgentScope);
+  const agents = endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, scope.endpoint))?.agents ?? [];
+  const [accountId, setAccountId] = useState(channel?.accountId ?? '');
+  const [agentId, setAgentId] = useState(selectedAgentScope && runtimeEndpointsEqual(selectedAgentScope.endpoint, scope.endpoint) ? selectedAgentScope.agentId : '');
+  const [sessionId, setSessionId] = useState('');
+  const [enabled, setEnabled] = useState(true);
+  const [loading, setLoading] = useState(Boolean(channel));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [qr, setQr] = useState<string>();
+  const [code, setCode] = useState('');
+  const sequence = useRef(0);
+  const active = useRef(true);
+  const wait = useRef<AbortController | null>(null);
+  const loginAccount = useRef<string | null>(null);
+  const current = useCallback((id: number) => active.current && sequence.current === id && channelScopeCurrent(scope), [scope]);
+
+  useEffect(() => {
+    active.current = true;
+    const id = ++sequence.current;
+    if (channel?.accountId) {
+      void hostChannelsReadConfig(scope, 'weixin', channel.accountId).then((result) => {
+        if (!current(id)) return;
+        setAgentId(result.agentId ?? '');
+        setSessionId(result.values.sessionId ?? '');
+        setEnabled(result.values.enabled === 'true');
+      }).catch((reason) => {
+        if (current(id)) setError(reason instanceof Error ? reason.message : String(reason));
+      }).finally(() => { if (current(id)) setLoading(false); });
+    }
+    return () => {
+      active.current = false;
+      sequence.current += 1;
+      wait.current?.abort();
+      if (loginAccount.current) void hostChannelsCancelSession(scope, 'weixin', loginAccount.current).catch(() => undefined);
+    };
+  }, [scope, channel, current]);
+
+  const submit = async (action: 'save' | 'login' | 'stop' | 'logout' | 'pair') => {
+    const id = ++sequence.current;
+    setBusy(true);
+    setError(null);
+    try {
+      const account = accountId.trim();
+      if (action === 'pair') {
+        await hostChannelsApprovePairingRequest(scope, 'weixin', { accountId: account, code: code.trim() });
+      } else if (action === 'stop') {
+        if (!(await hostChannelsDisconnect(scope, 'weixin', account)).success) throw new Error('停止消费未确认');
+      } else if (action === 'logout') {
+        await hostChannelsLogout(scope, 'weixin', account);
+      } else {
+        const input = { channelType: 'weixin' as const, accountId: account, agentId, config: { sessionId: sessionId.trim() || null, enabled } };
+        if (action === 'save') {
+          const result = await hostChannelsConfigure(scope, input);
+          if (!result.success) throw new Error(result.error);
+        } else {
+          wait.current?.abort();
+          const controller = new AbortController();
+          wait.current = controller;
+          loginAccount.current = account;
+          const result = await hostChannelsActivate(scope, input);
+          if (!current(id)) {
+            await hostChannelsCancelSession(scope, 'weixin', account).catch(() => undefined);
+            return;
+          }
+          let progress = result.progress;
+          if (!result.success || !progress) throw new Error(result.error || '登录结果未知，请先查看配置再重试');
+          while (progress.outcome === 'progress') {
+            if (progress.qrDataUrl) setQr(progress.qrDataUrl);
+            progress = await hostChannelsLoginWait(scope, 'weixin', account, {
+              sessionKey: progress.sessionKey, currentQrDataUrl: progress.qrDataUrl, timeoutMs: 300_000, signal: controller.signal,
+            });
+            if (!current(id) || controller.signal.aborted) return;
+          }
+          loginAccount.current = null;
+          if (progress.outcome !== 'connected') throw new Error('原生登录未确认；请查看绑定状态后重试');
+          setQr(undefined);
+        }
+      }
+      if (!current(id)) return;
+      toast.success(action === 'login' ? '原生账号已保存，不代表消费会话在线或连接健康。' : action === 'save' ? '绑定已保存，下次原生会话启动时生效。' : '操作已确认');
+      onSaved();
+    } catch (reason) {
+      if (current(id)) setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      if (current(id)) setBusy(false);
+    }
+  };
+  const valid = /^[A-Za-z0-9_.-]{1,128}$/.test(accountId.trim()) && Boolean(agentId)
+    && (!enabled || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId.trim()));
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[hsl(var(--shell-scrim))] p-4">
+      <Card className="max-h-[90vh] w-full max-w-xl overflow-y-auto">
+        <CardHeader className="flex flex-row items-start justify-between">
+          <div><CardTitle>微信 · Matcha 原生绑定</CardTitle><CardDescription>每个 Agent 一个账号；绑定已有 Server 会话，不会自动新建会话。</CardDescription></div>
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label="关闭微信绑定"><X className="h-4 w-4" /></Button>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">启用配置在下次原生会话启动时生效。登录成功只表示账号已保存，不代表在线；停止消费会关闭绑定会话。删除绑定保留原生账号，清除账号请先退出登录。</p>
+          {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : <>
+            <div className="space-y-2"><Label htmlFor="weixin-binding">绑定 ID（不是微信原生账号 ID）</Label><Input id="weixin-binding" value={accountId} disabled={Boolean(channel) || busy} onChange={(event) => setAccountId(event.target.value)} placeholder="字母、数字、下划线、点或连字符" /></div>
+            <div className="space-y-2"><Label htmlFor="weixin-agent">Agent</Label><select id="weixin-agent" className="h-10 w-full rounded-md border bg-background px-3" value={agentId} disabled={busy} onChange={(event) => setAgentId(event.target.value)}><option value="" disabled>请选择 Agent</option>{agents.map((agent) => <option key={agent.agentId} value={agent.agentId}>{agent.displayName || agent.agentId}</option>)}</select></div>
+            <div className="space-y-2"><Label htmlFor="weixin-session">Server Session UUID</Label><Input id="weixin-session" value={sessionId} disabled={busy} onChange={(event) => setSessionId(event.target.value)} placeholder="必须属于所选 Agent 的真实会话 UUID" /></div>
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={enabled} disabled={busy} onChange={(event) => setEnabled(event.target.checked)} />下次会话启动时启用</label>
+            {qr && <div className="space-y-2"><img src={qr} alt="微信原生登录二维码" className="mx-auto h-56 w-56 bg-white p-3" /><p className="text-xs text-muted-foreground">这是原生流程首次返回的二维码，不保证其刷新状态。</p></div>}
+            {channel && <div className="flex gap-2"><Input aria-label="六位微信配对码" value={code} disabled={busy} onChange={(event) => setCode(event.target.value)} placeholder="六位数字配对码" /><Button variant="outline" disabled={busy || !/^\d{6}$/.test(code.trim())} onClick={() => void submit('pair')}>批准配对</Button></div>}
+            <div className="flex flex-wrap justify-end gap-2">
+              {channel && <><Button variant="outline" disabled={busy} onClick={() => void submit('stop')}>停止消费</Button><Button variant="outline" disabled={busy} onClick={() => void submit('logout')}>退出并清除账号</Button></>}
+              <Button variant="outline" disabled={busy || !valid} onClick={() => void submit('save')}>保存绑定</Button>
+              <Button disabled={busy || !valid || !sessionId.trim()} onClick={() => void submit('login')}>{busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <QrCode className="mr-2 h-4 w-4" />}原生登录</Button>
+            </div>
+          </>}
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 // ==================== Channel Pairing Dialog ====================
 
 interface ChannelPairingDialogProps {
+  scope: RuntimeInstanceScope;
   channel: Channel;
   onClose: () => void;
 }
 
-function ChannelPairingDialog({ channel, onClose }: ChannelPairingDialogProps) {
+function ChannelPairingDialog({ scope, channel, onClose }: ChannelPairingDialogProps) {
   const { t } = useTranslation('channels');
+  const active = useRef(true);
+  const requestSequence = useRef(0);
+  useEffect(() => { active.current = true; return () => { active.current = false; requestSequence.current += 1; }; }, []);
   const [requests, setRequests] = useState<ChannelPairingRequest[]>([]);
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(true);
@@ -519,17 +680,19 @@ function ChannelPairingDialog({ channel, onClose }: ChannelPairingDialogProps) {
   const [error, setError] = useState<string | null>(null);
 
   const refreshRequests = useCallback(async () => {
+    const id = ++requestSequence.current;
     setLoading(true);
     setError(null);
     try {
-      const result = await hostChannelsListPairingRequests(channel.type, channel.accountId);
+      const result = await hostChannelsListPairingRequests(scope, channel.type, channel.accountId);
+      if (!active.current || requestSequence.current !== id || !channelScopeCurrent(scope)) return;
       setRequests(result.requests || []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (active.current && requestSequence.current === id && channelScopeCurrent(scope)) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (active.current && requestSequence.current === id && channelScopeCurrent(scope)) setLoading(false);
     }
-  }, [channel.accountId, channel.type]);
+  }, [scope, channel.accountId, channel.type]);
 
   useEffect(() => {
     void refreshRequests();
@@ -543,17 +706,18 @@ function ChannelPairingDialog({ channel, onClose }: ChannelPairingDialogProps) {
     setSubmitting(true);
     setError(null);
     try {
-      await hostChannelsApprovePairingRequest(channel.type, {
+      await hostChannelsApprovePairingRequest(scope, channel.type, {
         code: pairingCode,
         accountId: channel.accountId,
       });
+      if (!active.current || !channelScopeCurrent(scope)) return;
       toast.success(t('pairing.approvedToast'));
       setCode('');
       await refreshRequests();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (active.current && channelScopeCurrent(scope)) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setSubmitting(false);
+      if (active.current && channelScopeCurrent(scope)) setSubmitting(false);
     }
   };
 
@@ -646,17 +810,21 @@ function ChannelPairingDialog({ channel, onClose }: ChannelPairingDialogProps) {
 // ==================== Add Channel Dialog ====================
 
 interface AddChannelDialogProps {
+  scope: RuntimeInstanceScope;
   target: ChannelDialogTarget;
   onTargetChange: (target: ChannelDialogTarget | null) => void;
   onClose: () => void;
   onChannelAdded: () => void;
 }
 
-function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: AddChannelDialogProps) {
+function AddChannelDialog({ scope, target, onTargetChange, onClose, onChannelAdded }: AddChannelDialogProps) {
   const { t } = useTranslation('channels');
+  const active = useRef(true);
+  const operationSequence = useRef(0);
+  useEffect(() => { active.current = true; return () => { active.current = false; operationSequence.current += 1; }; }, []);
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const agents = useSubagentsStore((state) => state.agentsResource.data);
-  const loadAgents = useSubagentsStore((state) => state.loadAgents);
+  const endpoints = useRuntimeEndpointsStore((state) => state.endpoints);
+  const agents = useMemo(() => endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, scope.endpoint))?.agents.map((agent) => ({ id: agent.agentId, name: agent.displayName })) ?? [], [endpoints, scope]);
   const [configValues, setConfigValues] = useState<Record<string, string>>({});
   const [channelName, setChannelName] = useState('');
   const [selectedAgentId, setSelectedAgentId] = useState('');
@@ -710,18 +878,13 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
     ? selectedAgentId
     : undefined;
   const agentOptions = useMemo(() => {
-    const options = agents.some((agent) => agent.id === 'main')
-      ? [...agents]
-      : [{ id: 'main', name: t('dialog.mainAgent') }, ...agents];
+    const options = [...agents];
     for (const id of [loadedAgentId, selectedAgentId]) {
       if (id && !options.some((agent) => agent.id === id)) options.push({ id, name: id });
     }
     return options;
-  }, [agents, loadedAgentId, selectedAgentId, t]);
+  }, [agents, loadedAgentId, selectedAgentId]);
 
-  useEffect(() => {
-    void loadAgents({ silent: true }).catch(() => undefined);
-  }, [loadAgents]);
 
   const clearQrGenerateTimeout = useCallback(() => {
     if (qrGenerateTimeoutRef.current) {
@@ -748,7 +911,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
     if (shouldStartAuthorization && activeSessionKey) {
       try {
         const authChannelType = selectedType as Extract<ChannelType, 'qqbot' | 'dingtalk' | 'feishu'>;
-        await hostChannelsCancelAuthorization(authChannelType, activeSessionKey, { traceId });
+        await hostChannelsCancelAuthorization(scope, authChannelType, activeSessionKey, { traceId });
         logChannelTrace('login.cancel.end', traceId, () => ({ outcome: 'cancelled', durationMs: Date.now() - startedAt }));
       } catch (error) {
         logChannelTrace('login.cancel.end', traceId, () => ({ outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt }));
@@ -759,13 +922,13 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
     if (shouldStartQrLogin && activeAccountId) {
       try {
         const qrChannelType = selectedType as Extract<ChannelType, 'whatsapp' | 'openclaw-weixin'>;
-        await hostChannelsCancelSession(qrChannelType, activeAccountId, { traceId });
+        await hostChannelsCancelSession(scope, qrChannelType, activeAccountId, { traceId });
         logChannelTrace('login.cancel.end', traceId, () => ({ outcome: 'cancelled', durationMs: Date.now() - startedAt }));
       } catch (error) {
         logChannelTrace('login.cancel.end', traceId, () => ({ outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt }));
       }
     }
-  }, [clearQrGenerateTimeout, selectedType, shouldStartAuthorization, shouldStartQrLogin]);
+  }, [clearQrGenerateTimeout, selectedType, shouldStartAuthorization, shouldStartQrLogin, scope]);
 
   // Load existing config when a channel type is selected
   useEffect(() => {
@@ -806,9 +969,9 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
     (async () => {
       try {
-        const result = await hostChannelsReadConfig(selectedType, configuredAccountId, { traceId });
+        const result = await hostChannelsReadConfig(scope, selectedType, configuredAccountId, { traceId });
 
-        if (cancelled) return;
+        if (cancelled || !active.current || !channelScopeCurrent(scope)) return;
 
         const hasValues = Object.keys(result.values).length > 0;
         logChannelTrace('config.read.end', traceId, () => ({ outcome: hasValues ? 'loaded' : 'empty', durationMs: Date.now() - startedAt }));
@@ -817,16 +980,16 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
         setLoadedAgentId(result.agentId ?? '');
         if (hasValues) setIsExistingConfig(true);
       } catch (error) {
-        if (!cancelled) {
+        if (!cancelled && active.current && channelScopeCurrent(scope)) {
           logChannelTrace('config.read.end', traceId, () => ({ outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - startedAt }));
         }
       } finally {
-        if (!cancelled) setLoadedConfigKey(nextConfigKey);
+        if (!cancelled && active.current && channelScopeCurrent(scope)) setLoadedConfigKey(nextConfigKey);
       }
     })();
 
     return () => { cancelled = true; };
-  }, [selectedType, configuredAccountId, isConfiguredChannelEdit, clearQrGenerateTimeout]);
+  }, [selectedType, configuredAccountId, isConfiguredChannelEdit, clearQrGenerateTimeout, scope]);
 
   // Focus first input when form is ready (avoids Windows focus loss after native dialogs)
   useEffect(() => {
@@ -842,12 +1005,15 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
   const handleValidate = async () => {
     if (!selectedType) return;
+    const request = ++operationSequence.current;
+    const current = () => active.current && request === operationSequence.current && channelScopeCurrent(scope);
 
     setValidating(true);
     setValidationResult(null);
 
     try {
-      const result = await hostChannelsValidateCredentials(selectedType, configValues);
+      const result = await hostChannelsValidateCredentials(scope, selectedType, configValues);
+      if (!current()) return;
 
       const warnings = result.warnings || [];
       if (result.valid && result.details) {
@@ -863,19 +1029,22 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
         warnings,
       });
     } catch (error) {
+      if (!current()) return;
       setValidationResult({
         valid: false,
         errors: [String(error)],
         warnings: [],
       });
     } finally {
-      setValidating(false);
+      if (current()) setValidating(false);
     }
   };
 
 
   const handleConnect = async () => {
     if (!selectedType || !meta) return;
+    const request = ++operationSequence.current;
+    const current = () => active.current && request === operationSequence.current && channelScopeCurrent(scope);
 
     const traceId = isTraceEnabled() ? crypto.randomUUID() : undefined;
     const startedAt = isTraceEnabled() ? Date.now() : 0;
@@ -889,6 +1058,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
     setValidationResult(null);
     if (shouldStartQrLogin || shouldStartAuthorization) {
       await stopActiveLoginSession();
+      if (!current()) return;
     }
     const explicitAgentId = agentIdToSave;
 
@@ -897,6 +1067,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
       if (shouldStartQrLogin) {
         clearQrGenerateTimeout();
         qrGenerateTimeoutRef.current = setTimeout(() => {
+          if (!current()) return;
           logChannelTrace('login.qr.timeout', traceId, () => ({ errorCode: 'TIMEOUT', durationMs: Date.now() - startedAt }));
           setConnecting(false);
           toast.error(t('toast.qrGenerateTimeout'));
@@ -908,7 +1079,8 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
         activePhase = 'login.start';
         phaseStartedAt = loginStartedAt;
         logChannelTrace('login.start.start', traceId);
-        const startResult = await hostChannelsActivate({ channelType: qrChannelType, accountId, agentId: explicitAgentId, config: configValues }, { traceId });
+        const startResult = await hostChannelsActivate(scope, { channelType: qrChannelType, accountId, agentId: explicitAgentId, config: configValues }, { traceId });
+        if (!current()) { await hostChannelsCancelSession(scope, qrChannelType, accountId, { traceId }).catch(() => undefined); return; }
         logChannelTrace('login.start.end', traceId, () => ({ outcome: startResult.success ? 'accepted' : 'unconfirmed', durationMs: Date.now() - loginStartedAt }));
         activePhase = null;
         const progress = startResult.progress;
@@ -938,7 +1110,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
           const waitStartedAt = isTraceEnabled() ? Date.now() : 0;
           logChannelTrace('login.wait.start', traceId);
           try {
-            waitResult = await hostChannelsLoginWait(qrChannelType, accountId, {
+            waitResult = await hostChannelsLoginWait(scope, qrChannelType, accountId, {
               traceId,
               timeoutMs: 300_000,
               sessionKey,
@@ -948,10 +1120,10 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
             logChannelTrace('login.wait.end', traceId, () => ({ outcome: ['progress', 'connected', 'target_rejected'].includes(waitResult.outcome) ? waitResult.outcome : 'unknown', durationMs: Date.now() - waitStartedAt }));
           } catch (error) {
             logChannelTrace('login.wait.end', traceId, () => ({ outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - waitStartedAt }));
-            if (waitController.signal.aborted) { outcome = 'cancelled'; return; }
+            if (!current() || waitController.signal.aborted) { outcome = 'cancelled'; return; }
             throw error;
           }
-          if (waitController.signal.aborted) { outcome = 'cancelled'; return; }
+          if (!current() || waitController.signal.aborted) { outcome = 'cancelled'; return; }
           if (waitResult.sessionKey) {
             sessionKey = waitResult.sessionKey;
           }
@@ -991,12 +1163,13 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
         activePhase = 'login.start';
         phaseStartedAt = loginStartedAt;
         logChannelTrace('login.start.start', traceId);
-        const startResult = await hostChannelsStartAuthorization({
+        const startResult = await hostChannelsStartAuthorization(scope, {
           channelType: authorizationChannelType,
           accountId,
           ...(explicitAgentId ? { agentId: explicitAgentId } : {}),
           config: configValues,
         }, { traceId });
+        if (!current()) { if (startResult.sessionKey) await hostChannelsCancelAuthorization(scope, authorizationChannelType, startResult.sessionKey, { traceId }).catch(() => undefined); return; }
         logChannelTrace('login.start.end', traceId, () => ({ outcome: startResult.outcome, durationMs: Date.now() - loginStartedAt }));
         activePhase = null;
         if (startResult.sessionKey) authSessionKeyRef.current = startResult.sessionKey;
@@ -1029,7 +1202,7 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
           const waitStartedAt = isTraceEnabled() ? Date.now() : 0;
           logChannelTrace('login.wait.start', traceId);
           try {
-            waitResult = await hostChannelsWaitAuthorization(authorizationChannelType, sessionKey, {
+            waitResult = await hostChannelsWaitAuthorization(scope, authorizationChannelType, sessionKey, {
               traceId,
               timeoutMs: 300_000,
               signal: waitController.signal,
@@ -1037,10 +1210,10 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
             logChannelTrace('login.wait.end', traceId, () => ({ outcome: ['progress', 'connected', 'target_rejected'].includes(waitResult.outcome) ? waitResult.outcome : 'unknown', durationMs: Date.now() - waitStartedAt }));
           } catch (error) {
             logChannelTrace('login.wait.end', traceId, () => ({ outcome: 'error', errorCode: channelErrorCode(error), durationMs: Date.now() - waitStartedAt }));
-            if (waitController.signal.aborted) { outcome = 'cancelled'; return; }
+            if (!current() || waitController.signal.aborted) { outcome = 'cancelled'; return; }
             throw error;
           }
-          if (waitController.signal.aborted) { outcome = 'cancelled'; return; }
+          if (!current() || waitController.signal.aborted) { outcome = 'cancelled'; return; }
           if (waitResult.sessionKey) {
             sessionKey = waitResult.sessionKey;
             authSessionKeyRef.current = waitResult.sessionKey;
@@ -1083,7 +1256,8 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
         activePhase = 'validation';
         phaseStartedAt = validationStartedAt;
         logChannelTrace('validation.start', traceId);
-        const validationResponse = await hostChannelsValidateCredentials(selectedType, configValues, { traceId });
+        const validationResponse = await hostChannelsValidateCredentials(scope, selectedType, configValues, { traceId });
+        if (!current()) return;
         logChannelTrace('validation.end', traceId, () => ({ outcome: validationResponse.valid ? 'valid' : 'invalid', durationMs: Date.now() - validationStartedAt }));
 
         activePhase = null;
@@ -1127,7 +1301,8 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
       activePhase = 'config';
       phaseStartedAt = configStartedAt;
       logChannelTrace('config.start', traceId);
-      const saveResult = await hostChannelsConfigure({ channelType: selectedType, accountId, agentId: explicitAgentId, config }, { traceId });
+      const saveResult = await hostChannelsConfigure(scope, { channelType: selectedType, accountId, agentId: explicitAgentId, config }, { traceId });
+      if (!current()) return;
       logChannelTrace('config.end', traceId, () => ({ outcome: saveResult.success ? 'confirmed' : 'unconfirmed', durationMs: Date.now() - configStartedAt }));
       activePhase = null;
       if (!saveResult?.success) {
@@ -1142,8 +1317,9 @@ function AddChannelDialog({ target, onTargetChange, onClose, onChannelAdded }: A
 
       // Brief delay so user can see the success state before dialog closes
       await new Promise((resolve) => setTimeout(resolve, 800));
-      onChannelAdded();
+      if (current()) onChannelAdded();
     } catch (error) {
+      if (!current()) return;
       clearQrGenerateTimeout();
       outcome = 'error';
       if (activePhase) logChannelTrace(`${activePhase}.end`, traceId, () => ({ outcome, errorCode: channelErrorCode(error), durationMs: Date.now() - phaseStartedAt }));

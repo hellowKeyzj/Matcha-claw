@@ -28,6 +28,7 @@ pub(crate) struct HostHandles {
     pub calls: call_log::CallLogModule,
     pub peer: PeerHandle,
     pub open_claw: Arc<OpenClawDriver>,
+    pub matcha_agent: Arc<matcha_agent::driver::MatchaRuntimeDriver>,
     pub session_module: SessionModule,
     pub session: SessionHandle,
     pub provider: ProviderModule,

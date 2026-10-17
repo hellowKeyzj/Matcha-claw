@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isProductRuntimeEndpoint, type ProductRuntimeEndpoint } from './transport/runtime-scope';
 
 export const RUNTIME_HOST_CONTROL_VERSION = 1;
 export const MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES = 1024 * 1024;
@@ -63,6 +64,7 @@ export type RuntimeHostSafeEvent =
   | { readonly type: 'call.changed'; readonly callId: string; readonly revision: number }
   | { readonly type: 'calls.resync' }
   | { readonly type: 'organization.changed' }
+  | { readonly type: 'cron.changed'; readonly endpoint: ProductRuntimeEndpoint }
   | {
       readonly type: 'openclaw.lifecycle';
       readonly sequence: number | null;
@@ -516,6 +518,10 @@ function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
         && isRuntimeHostPeerLifecycle(value.lifecycle)
         && typeof value.ready === 'boolean'
         && isNonNegativeSafeInteger(value.observedAtMs);
+    case 'cron.changed':
+      return hasExactKeys(value, ['type', 'endpoint'])
+        && isProductRuntimeEndpoint(value.endpoint)
+        && value.endpoint.runtimeAdapterId === 'matcha-agent';
     case 'openclaw.cron.execution':
       return hasExactKeys(value, ['type', 'jobId', 'runId', 'status'])
         && isCronExecutionId(value.jobId)

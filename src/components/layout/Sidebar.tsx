@@ -27,7 +27,6 @@ import { useChatStore, type ApprovalItem } from '@/stores/chat';
 import { selectSidebarNewSessionAction, selectSidebarPendingBlockersState } from '@/stores/chat/selectors';
 import { readSessionsFromState, resolveSessionListLabel } from '@/stores/chat/session-helpers';
 import { getSessionItemCount } from '@/stores/chat/store-state-helpers';
-import { useGatewayStore } from '@/stores/gateway';
 import { useTeamsStore } from '@/stores/teams';
 import { useTaskCenterStore } from '@/stores/task-center-store';
 import { useAccountStore } from '@/stores/account';
@@ -45,7 +44,8 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { SubscriptionPlanDialog } from '@/components/billing/SubscriptionPlanDialog';
 import { hostApiFetch } from '@/lib/host-api';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { isRuntimeEndpointReady, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
 import { preloadLazyRouteForPath } from '@/lib/route-preload';
 import { prefetchSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
 import type { AccountSubscriptionProjection, AccountUsageProjection, CloudUser } from '@/lib/account';
@@ -751,8 +751,6 @@ export function Sidebar({
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const newSession = useChatStore(selectSidebarNewSessionAction);
   const currentSessionKey = useChatStore((state) => state.currentSessionKey);
-  const gatewayStatus = useGatewayStore((state) => state.status);
-  const gatewayOperational = isGatewayOperational(gatewayStatus);
   const taskCenterInitialized = useTaskCenterStore((state) => state.initialized);
   const initTaskCenter = useTaskCenterStore((state) => state.init);
   const refreshTaskCenter = useTaskCenterStore((state) => state.refreshTasks);
@@ -809,14 +807,12 @@ export function Sidebar({
       return;
     }
 
-    if (!gatewayOperational) {
-      return;
-    }
-
     if (path === '/tasks') {
       const chatState = useChatStore.getState();
       const currentSession = readSessionsFromState(chatState).find((session) => session.key === currentSessionKey);
-      if (!currentSession) {
+      const runtime = currentSession && useRuntimeEndpointsStore.getState().endpoints.find(
+        (entry) => runtimeEndpointsEqual(entry.endpointRef, currentSession.sessionIdentity.endpoint));
+      if (!currentSession || !runtime || !isRuntimeEndpointReady(runtime) || !supportsRuntimeEndpointCapabilityFamily(runtime, 'task')) {
         return;
       }
       const taskSession = {
@@ -834,7 +830,6 @@ export function Sidebar({
       return;
     }
   }, [
-    gatewayOperational,
     initTaskCenter,
     refreshTaskCenter,
     taskCenterInitialized,

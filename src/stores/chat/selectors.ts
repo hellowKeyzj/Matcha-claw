@@ -1,4 +1,20 @@
 import type { ChatSession, ChatSessionImageGenerationRuntimeState, ChatStoreState } from './types';
+import { agentScope, type AgentScope } from '../../types/desktop/runtime-address';
+let selectedAgentConversation: ChatStoreState['currentConversation'] = null;
+let selectedAgentScope: AgentScope | null = null;
+
+export function selectRuntimeEndpoint(state: ChatStoreState) {
+  return state.currentConversation?.endpoint ?? state.sessionRuntimeCatalog.selectedEndpoint;
+}
+
+export function selectRuntimeAgentScope(state: ChatStoreState) {
+  const conversation = state.currentConversation;
+  if (selectedAgentConversation !== conversation) {
+    selectedAgentConversation = conversation;
+    selectedAgentScope = conversation ? agentScope(conversation.endpoint, conversation.agentId) : null;
+  }
+  return selectedAgentScope;
+}
 import {
   deriveSessionImageGenerationPendingStateFromItems,
 } from '../../types/session/render-item';

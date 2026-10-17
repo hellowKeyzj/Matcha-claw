@@ -45,7 +45,7 @@ async fn handle_request(request: Request, dependencies: super::super::Dependenci
                 .workspace
                 .stat_file(
                     request.endpoint(),
-                    request.session_key().to_owned(),
+                    request.agent_id().to_owned(),
                     request.relative_path().to_owned(),
                 )
                 .await
@@ -57,7 +57,7 @@ async fn handle_request(request: Request, dependencies: super::super::Dependenci
                 .workspace
                 .read_binary(
                     request.endpoint(),
-                    request.session_key().to_owned(),
+                    request.agent_id().to_owned(),
                     request.relative_path().to_owned(),
                     request.max_bytes(),
                 )

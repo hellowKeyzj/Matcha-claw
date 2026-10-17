@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 import type { CallReceipt } from '../../../../../src/types/call-log';
 import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
@@ -10,6 +11,7 @@ const UNKNOWN = { outcome: 'unknown' } as const;
 export type ChannelDeleteConfigRequest = Readonly<{
   channel: string;
   accountId?: string;
+  scope?: ProductRuntimeScope;
 }>;
 
 export type ChannelDeleteConfigTransportResponse =
@@ -67,7 +69,8 @@ export function createChannelDeleteConfigTransport(
 
 function isRequest(value: ChannelDeleteConfigRequest): boolean {
   return isRecord(value)
-    && Object.keys(value).every((key) => key === 'channel' || key === 'accountId')
+    && Object.keys(value).every((key) => ['channel', 'accountId', 'scope'].includes(key))
+    && (!Object.hasOwn(value, 'scope') || isProductRuntimeScope(value.scope))
     && isIdentity(value.channel)
     && (value.accountId === undefined || isIdentity(value.accountId));
 }

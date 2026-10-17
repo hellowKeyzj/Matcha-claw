@@ -27,6 +27,27 @@ pub struct Catalog {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentCatalogEntry {
+    pub id: String,
+    pub version: String,
+    pub scope: String,
+    pub enabled: bool,
+    pub error_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentCatalog {
+    pub agent_id: String,
+    pub plugins: Vec<AgentCatalogEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogSnapshot {
+    OpenClaw(Catalog),
+    Matcha(AgentCatalog),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeEntry {
     pub id: String,
     pub status: &'static str,

@@ -152,7 +152,7 @@ export function LibraryHome(props: LibraryHomeProps): JSX.Element {
 
   return (
     <>
-      <div className="grid h-full min-h-0 overflow-hidden xl:grid-cols-[300px_minmax(0,1fr)]">
+      <div className="grid h-full min-h-0 grid-cols-[300px_minmax(0,1fr)] overflow-hidden">
         <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
           <div className="px-5 py-5">
             <div className="flex items-center justify-between gap-2">

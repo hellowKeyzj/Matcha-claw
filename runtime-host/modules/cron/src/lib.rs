@@ -24,8 +24,12 @@ const MODULE_ID: ModuleId = ModuleId::new("cron");
 const PROVIDES: &[CapabilityKey] = &[CapabilityKey::new("scheduler.cron")];
 const REQUIRES: &[CapabilityKey] = &[CapabilityKey::new("runtime.cron")];
 const ROUTES: &[&str] = &["cron.loopback"];
-const EVENTS: &[&str] = &[];
-const EFFECTS: &[EffectKind] = &[EffectKind::OwnerTask, EffectKind::Route];
+const EVENTS: &[&str] = &["matcha-cron-receipts"];
+const EFFECTS: &[EffectKind] = &[
+    EffectKind::OwnerTask,
+    EffectKind::Route,
+    EffectKind::EventSubscription,
+];
 
 pub use domain::model::{self, *};
 pub use owner::actor::CronOwnerInput;

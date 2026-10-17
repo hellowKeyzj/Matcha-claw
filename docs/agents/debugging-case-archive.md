@@ -91,6 +91,76 @@ DP-xxx 或 `none`
 
 ## 6. 当前归档案例
 
+## Case: 去除首屏骨架时误删渲染调度
+
+### Status
+
+archived
+
+### Linked pattern
+
+none；P2、P3、P6 已覆盖测量和行为验证，不新增同义 pattern。
+
+### Source incident
+
+2026-10-17，任务、技能、Agent、仪表盘首屏骨架修正。
+
+### Symptom
+
+进入页面先出现大量空卡片；移除后，用户追问是否同时牺牲了性能。
+
+### Surface path
+
+页面加载态、idle 调度、卡片挂载和刷新。
+
+### Real minimum loop
+
+使用真实资源进入页面，导航获得反馈，真实内容完整可用，刷新保持已有快照。
+
+### Wrong path taken
+
+把加载装饰与性能调度一起删除，未先测量；又把外壳提前出现误当作整体性能提升。
+
+### Missed first probe
+
+同数据规模、同缓存条件下，分别记录导航反馈、真实内容就绪和主线程阻塞；核对开发态追踪开销。
+
+### Root cause
+
+修复边界错误：空骨架只是展示，调度控制昂贵挂载，两者不能一刀切处理。
+
+### Root cause boundary
+
+Renderer 展示与渲染调度，不是资源 API 或数据模型。
+
+### Correct first-round plan
+
+保留资源快照和现有虚拟化、延后搜索，独立替换骨架；用实测决定是否调整调度及更新边界。
+
+### Fix boundary
+
+页面渲染、稳定回调与卡片更新；不为优化改变业务契约。
+
+### Verification closure
+
+开发态暖路由各三次采样：纯恢复 idle/transition 虽降低部分阻塞，却使技能、Agent 卡片到齐中位数分别晚约 85ms、61ms，因此缓存快照不再额外等待 idle。收紧卡片更新边界后，三秒观测窗内超过 50ms 的阻塞总量中位数由技能 370ms、Agent 203ms 降至 98ms、14ms；卡片到齐未证实提速。开发态、样本量和文档生命周期变化均限制结论，不能外推生产收益。
+
+### Reusable rule
+
+消除空骨架不授权删除性能机制；外壳更快不等于完整可用更快。先区分展示、数据状态与调度，再测量修正。
+
+### Applies to
+
+首屏加载、渐进挂载、列表刷新和路由切换优化。
+
+### Does not apply to
+
+已证明无昂贵挂载且不承担性能职责的纯展示状态。
+
+### Archive note
+
+具体误删已由既有归属与验证原则、个人执行记忆覆盖，保留简短案例供追溯。
+
 ## Case: Provider private resolver blocking client 关闭异步 owner
 
 ### Status

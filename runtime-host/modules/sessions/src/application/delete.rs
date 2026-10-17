@@ -1,17 +1,15 @@
 use serde::Serialize;
 
+use crate::state::SessionIdentity;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionDeleteCommand {
-    pub agent_id: String,
-    pub session_key: String,
+    pub identity: SessionIdentity,
 }
 
 impl SessionDeleteCommand {
-    pub fn new(agent_id: String, session_key: String) -> Self {
-        Self {
-            agent_id,
-            session_key,
-        }
+    pub fn new(identity: SessionIdentity) -> Self {
+        Self { identity }
     }
 }
 

@@ -6,8 +6,9 @@ const MAX_PORT = 65_535;
 export type RuntimeHostBootstrapPlatform = 'unix' | 'win32';
 
 export interface RuntimeHostBootstrapMatchaInput {
-  readonly bunExecutable: string;
-  readonly entry: string;
+  readonly serverExecutable: string;
+  readonly cliExecutable: string;
+  readonly cliArgs: readonly string[];
   readonly workingDirectory: string;
   readonly storageRoot: string;
   readonly port: number;
@@ -76,8 +77,9 @@ export function buildRuntimeHostBootstrap(input: RuntimeHostBootstrapInput): Uin
   validateBootstrapInput(input);
 
   const matcha = {
-    bunExecutable: input.matcha.bunExecutable,
-    entry: input.matcha.entry,
+    serverExecutable: input.matcha.serverExecutable,
+    cliExecutable: input.matcha.cliExecutable,
+    cliArgs: input.matcha.cliArgs,
     workingDirectory: input.matcha.workingDirectory,
     storageRoot: input.matcha.storageRoot,
     port: input.matcha.port,
@@ -205,8 +207,12 @@ function validateMatchaInput(
   input: RuntimeHostBootstrapMatchaInput,
   platform: RuntimeHostBootstrapPlatform
 ): void {
-  validateAbsolutePath(input.bunExecutable, 'matcha.bunExecutable', platform);
-  validateAbsolutePath(input.entry, 'matcha.entry', platform);
+  validateAbsolutePath(input.serverExecutable, 'matcha.serverExecutable', platform);
+  validateAbsolutePath(input.cliExecutable, 'matcha.cliExecutable', platform);
+  if (!Array.isArray(input.cliArgs)
+    || input.cliArgs.some(value => typeof value !== 'string' || value.includes('\0'))) {
+    throw new RuntimeHostBootstrapValidationError('matcha.cliArgs');
+  }
   validateAbsolutePath(input.workingDirectory, 'matcha.workingDirectory', platform);
   validateAbsolutePath(input.storageRoot, 'matcha.storageRoot', platform);
   validatePort(input.port, 'matcha.port');

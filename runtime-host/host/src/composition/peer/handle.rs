@@ -70,10 +70,29 @@ impl PeerHandle {
         &self,
     ) -> Result<runtime_directory::Directory, ()> {
         let state = self.state().await?;
-        Ok(runtime_directory::Directory::from_lifecycles(
+        let mut directory = runtime_directory::Directory::from_lifecycles(
             runtime_lifecycle(state.matcha().lifecycle()),
             runtime_lifecycle(state.open_claw().lifecycle()),
-        ).with_goal_support(|identity| self.runtime_directory.supports_goal(&identity.endpoint())))
+        ).with_goal_support(|identity| self.runtime_directory.supports_goal(&identity.endpoint()));
+        let identity = runtime_directory::RuntimeDriverIdentity::matcha_agent();
+        if directory.endpoints()[1].lifecycle().is_ready() {
+            let driver = self.runtime_directory.lookup(&identity.endpoint()).ok_or(())?;
+            let ops = driver.subagent_ops().ok_or(())?;
+            let subagents::Outcome::Agents { default_id, agents, .. } = ops
+                .subagents(subagents::Command::List {
+                    endpoint: subagents::NativeEndpoint::MatchaAgentLocal,
+                })
+                .await
+            else {
+                return Err(());
+            };
+            directory = directory.with_agent_catalog(
+                identity,
+                default_id,
+                agents.into_iter().map(|agent| agent.id).collect(),
+            );
+        }
+        Ok(directory)
     }
 
     pub(crate) async fn request_peer_autostart(
@@ -93,6 +112,16 @@ impl PeerHandle {
             .await
             .map_err(|_| super::AutostartOpenClawError::PeerUnavailable)?
             .map(|_| ())
+    }
+
+    pub(crate) async fn matcha_ready(
+        &self,
+        process: foundation::process::ProcessObservation,
+    ) -> Result<(), ()> {
+        self.owner
+            .send_command(PeerCommand::MatchaReady { process })
+            .await
+            .map_err(|_| ())
     }
 
     pub(crate) async fn open_claw_status(&self) -> Result<RuntimeState, ()> {

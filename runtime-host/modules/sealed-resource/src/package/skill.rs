@@ -103,6 +103,13 @@ pub(crate) struct SealedSkillPackageManifest {
     descriptor: SealedSkillDescriptor,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SealedSkillManifestFile {
+    pub path: PackageRelativePath,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
 impl SealedSkillPackageManifest {
     pub(crate) fn skill_key(&self) -> &SkillKey {
         &self.skill_key
@@ -199,6 +206,60 @@ impl SealedSkillPackage {
             target: wire.manifest.target,
             descriptor: wire.manifest.descriptor.into_descriptor()?,
         })
+    }
+
+    pub(crate) fn native_manifest_files(
+        bytes: &[u8],
+    ) -> Result<Vec<SealedSkillManifestFile>, SealedResourceError> {
+        let (wire, _) = open_wire(bytes)?;
+        let mut files = Vec::new();
+        let mut total = 0_u64;
+        for file in wire.manifest.files {
+            let path =
+                PackageRelativePath::parse(file.path).map_err(|_| SealedResourceError::Rejected)?;
+            total = total
+                .checked_add(file.size_bytes)
+                .ok_or(SealedResourceError::Rejected)?;
+            if file.size_bytes > MAX_FILE_BYTES as u64
+                || total > MAX_PACKAGE_BYTES as u64
+                || files.len() >= MAX_PACKAGE_FILES
+                || files
+                    .iter()
+                    .any(|file: &SealedSkillManifestFile| file.path == path)
+                || file.sha256.len() != 64
+                || !file
+                    .sha256
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            {
+                return Err(SealedResourceError::Rejected);
+            }
+            files.push(SealedSkillManifestFile {
+                path,
+                size_bytes: file.size_bytes,
+                sha256: file.sha256,
+            });
+        }
+        if !files
+            .iter()
+            .any(|file| file.path == PackageRelativePath::skill_manifest())
+        {
+            return Err(SealedResourceError::Rejected);
+        }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(files)
+    }
+
+    pub(crate) fn with_cloud_envelope(
+        bytes: &[u8],
+        authorization: &SealedPackageAuthorizationKey,
+        public_key: &str,
+        key_id: &str,
+    ) -> Result<Vec<u8>, SealedResourceError> {
+        let (mut wire, _) = open_wire(bytes)?;
+        wire.cloud_envelope =
+            super::common::encrypt_cloud_envelope(public_key, key_id, authorization.as_bytes())?;
+        serde_json::to_vec(&wire).map_err(|_| SealedResourceError::Unknown)
     }
 
     pub(crate) fn open(
@@ -390,6 +451,7 @@ struct PackageManifestFile {
 fn parse_skill_target_code(value: &str) -> Result<SealedSkillTarget, SealedResourceError> {
     match value {
         "openclaw" => Ok(SealedSkillTarget::OpenClaw),
+        "matcha-agent" => Ok(SealedSkillTarget::MatchaAgent),
         _ => Err(SealedResourceError::Rejected),
     }
 }

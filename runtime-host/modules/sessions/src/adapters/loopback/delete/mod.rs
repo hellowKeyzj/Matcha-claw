@@ -3,7 +3,10 @@ use platform::capability::CapabilityDecisionVerifier;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::delete::{SessionDeleteCommand, SessionDeleteOutcome};
+use crate::{
+    delete::{SessionDeleteCommand, SessionDeleteOutcome},
+    state::{SessionEndpoint, SessionIdentity, SessionProvider},
+};
 
 pub(crate) mod handler;
 
@@ -12,9 +15,6 @@ const OPERATION_ID: &str = "sessions.delete";
 const AUTHORIZATION_ENDPOINT: &str = "/api/sessions/delete";
 const AUTHORIZATION_SCOPE: &str = "sessions:write";
 const AUTHORIZATION_SUBJECT: &str = "session-delete";
-const RUNTIME_KIND: &str = "native-runtime";
-const RUNTIME_ADAPTER_ID: &str = "openclaw";
-const RUNTIME_INSTANCE_ID: &str = "local";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RequestError {
@@ -57,30 +57,6 @@ struct Input {
     session_identity: SessionIdentity,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SessionIdentity {
-    endpoint: Endpoint,
-    agent_id: String,
-    session_key: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Endpoint {
-    kind: String,
-    runtime_adapter_id: String,
-    runtime_instance_id: String,
-}
-
-impl Endpoint {
-    fn is_openclaw_local(&self) -> bool {
-        self.kind == RUNTIME_KIND
-            && self.runtime_adapter_id == RUNTIME_ADAPTER_ID
-            && self.runtime_instance_id == RUNTIME_INSTANCE_ID
-    }
-}
-
 impl SessionDeleteRequest {
     pub(crate) fn decode(
         value: Value,
@@ -114,22 +90,23 @@ impl SessionDeleteRequest {
             && self.target.kind == "session"
             && self.scope.identity == self.target.identity
             && self.scope.identity == self.input.session_identity
-            && self.scope.identity.endpoint.is_openclaw_local())
+            && self.scope.identity.validate().is_ok()
+            && self.scope.identity.endpoint
+                == SessionEndpoint::local(self.scope.identity.provider()))
         .then_some(())
         .ok_or(RequestError::Invalid)
     }
 
     pub(crate) fn into_command(self) -> Result<SessionDeleteCommand, RequestError> {
-        if !valid_openclaw_session_key(
-            &self.input.session_identity.agent_id,
-            &self.input.session_identity.session_key,
-        ) {
+        if self.input.session_identity.provider() == SessionProvider::OpenClaw
+            && !valid_openclaw_session_key(
+                &self.input.session_identity.agent_id,
+                &self.input.session_identity.session_key,
+            )
+        {
             return Err(RequestError::Invalid);
         }
-        Ok(SessionDeleteCommand::new(
-            self.input.session_identity.agent_id,
-            self.input.session_identity.session_key,
-        ))
+        Ok(SessionDeleteCommand::new(self.input.session_identity))
     }
 }
 
@@ -225,8 +202,8 @@ mod tests {
             .into_command()
             .unwrap();
 
-        assert_eq!(command.agent_id, "main");
-        assert_eq!(command.session_key, "agent:main:session-1");
+        assert_eq!(command.identity.agent_id, "main");
+        assert_eq!(command.identity.session_key, "agent:main:session-1");
     }
 
     #[test]
@@ -244,10 +221,10 @@ mod tests {
             },
             {
                 let mut value = request();
-                value["scope"]["identity"]["endpoint"]["runtimeAdapterId"] = json!("matcha-agent");
-                value["target"]["identity"]["endpoint"]["runtimeAdapterId"] = json!("matcha-agent");
+                value["scope"]["identity"]["endpoint"]["runtimeAdapterId"] = json!("unknown");
+                value["target"]["identity"]["endpoint"]["runtimeAdapterId"] = json!("unknown");
                 value["input"]["sessionIdentity"]["endpoint"]["runtimeAdapterId"] =
-                    json!("matcha-agent");
+                    json!("unknown");
                 value
             },
             {

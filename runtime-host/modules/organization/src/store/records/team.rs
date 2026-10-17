@@ -128,6 +128,8 @@ impl From<Rejection> for MaterializationRejection {
 struct Request {
     endpoint: String,
     source: Source,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_agent: Option<String>,
     agents: Vec<Agent>,
     idempotency_key: String,
 }
@@ -144,6 +146,8 @@ struct Agent {
     role: String,
     binding: Binding,
     tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skills: Vec<String>,
     agents_markdown: Option<Body>,
 }
 
@@ -168,6 +172,8 @@ struct RoleReceipt {
     ownership: Ownership,
     endpoint: String,
     native_workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skills: Vec<(String, [u8; 32])>,
     agents_markdown: Option<Body>,
 }
 
@@ -636,6 +642,7 @@ impl Request {
                         },
                     },
                     tools: agent.tools().to_vec(),
+                    skills: agent.skills().to_vec(),
                     agents_markdown: agent
                         .agents_markdown()
                         .map(|text| Body::put(content, intent.team(), text.as_bytes()))
@@ -645,6 +652,7 @@ impl Request {
             .collect::<Result<Vec<_>, StoreFault>>()?;
         Ok(Self {
             endpoint: intent.endpoint().as_str().to_owned(),
+            source_agent: intent.source_agent().map(|agent| agent.as_str().to_owned()),
             source: match intent.source() {
                 MaterializationSource::Manual => Source::Manual,
                 MaterializationSource::TeamSkill => Source::TeamSkill,
@@ -673,7 +681,7 @@ impl Request {
                             .map_err(|_| StoreFault::InvalidFacts)?,
                     ),
                 }
-                .with_tools(agent.tools);
+                .with_tools(agent.tools).with_skills(agent.skills);
                 if let Some(body) = agent.agents_markdown {
                     value = value.with_agents_markdown(body.text(content, team)?);
                 }
@@ -690,7 +698,8 @@ impl Request {
             },
             agents,
         )
-        .map_err(|_| StoreFault::InvalidFacts)?;
+        .map_err(|_| StoreFault::InvalidFacts)?
+        .with_source_agent(self.source_agent.map(ManagedAgentReference::try_new).transpose().map_err(|_| StoreFault::InvalidFacts)?);
         Ok(TeamMaterializationRequest::new(
             intent,
             IdempotencyKey::try_new(self.idempotency_key).map_err(|_| StoreFault::InvalidFacts)?,
@@ -715,6 +724,7 @@ impl Receipt {
                         RoleMaterializationOwnership::External => Ownership::External,
                     },
                     endpoint: role.endpoint().as_str().to_owned(),
+                    skills: role.skills().to_vec(),
                     native_workspace: role
                         .native_workspace()
                         .map(|workspace| workspace.as_str().to_owned()),
@@ -762,6 +772,7 @@ impl Receipt {
                         RoleMaterializationReceipt::with_ownership(id, agent, ownership, endpoint)
                     }
                 };
+                receipt = receipt.with_skills(role.skills);
                 if let Some(body) = role.agents_markdown {
                     receipt = receipt.with_agents_markdown(body.text(content, team)?);
                 }

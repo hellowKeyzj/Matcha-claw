@@ -1,7 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
-import { isOpenClawSessionIdentity, isOpenClawSessionScope, type OpenClawSessionIdentity as SessionIdentity } from './management-contract';
-import { sameSessionIdentity } from './session-contract';
+import { isSessionIdentity, sameSessionIdentity, type SessionIdentity } from './session-contract';
 
 const ROUTE = '/api/sessions/rename';
 const UNAVAILABLE = {
@@ -84,17 +83,24 @@ function isSessionRenameRequest(value: unknown): value is SessionRenameRequest {
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'session.management'
     && value.operationId === 'sessions.rename'
-    && isOpenClawSessionScope(value.scope)
-    && isOpenClawSessionScope(value.target)
+    && isSessionScope(value.scope)
+    && isSessionScope(value.target)
     && isSessionRenameInput(value.input)
     && sameSessionIdentity(value.scope.identity, value.target.identity)
     && sameSessionIdentity(value.scope.identity, value.input.sessionIdentity);
 }
 
+function isSessionScope(value: unknown): value is SessionRenameRequest['scope'] {
+  return isRecord(value)
+    && hasExactKeys(value, ['kind', 'identity'])
+    && value.kind === 'session'
+    && isSessionIdentity(value.identity);
+}
+
 function isSessionRenameInput(value: unknown): value is SessionRenameRequest['input'] {
   return isRecord(value)
     && hasExactKeys(value, ['sessionIdentity', 'label'])
-    && isOpenClawSessionIdentity(value.sessionIdentity)
+    && isSessionIdentity(value.sessionIdentity)
     && typeof value.label === 'string'
     && value.label.trim().length > 0;
 }

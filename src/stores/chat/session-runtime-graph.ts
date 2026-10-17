@@ -5,6 +5,7 @@ import type {
 import {
   isSessionRuntimeEndpointReady,
   isSessionRuntimeEndpointStarting,
+  supportsSessionChat,
 } from '../runtime-endpoints';
 import type { RuntimeEndpointSummary } from '../../types/runtime-topology';
 import type {
@@ -64,7 +65,7 @@ function findSessionPromptScope(
   target: ChatSessionRuntimeEndpointTarget,
   agentId: string,
 ): AgentScope | null {
-  const scopes = [target.defaultSessionPromptScope, ...target.sessionPromptScopes];
+  const scopes = target.sessionPromptScopes;
   return scopes.find((scope) => (
     scope.agentId === agentId
     && sameRuntimeEndpointScope(scope.endpoint, target.endpoint)
@@ -85,7 +86,7 @@ function collectTargetAgentIds(target: ChatSessionRuntimeEndpointTarget): string
   for (const entry of readAgentCatalogEntries(target.agentCatalog)) {
     addAgentId(agentIds, entry.id);
   }
-  addAgentId(agentIds, target.defaultSessionPromptScope.agentId);
+  if (target.defaultSessionPromptScope) addAgentId(agentIds, target.defaultSessionPromptScope.agentId);
   for (const scope of target.sessionPromptScopes) {
     if (sameRuntimeEndpointScope(scope.endpoint, target.endpoint)) {
       addAgentId(agentIds, scope.agentId);
@@ -187,7 +188,7 @@ function resolveEndpointDisplayName(endpoint: RuntimeEndpointAccumulator): strin
 }
 
 function resolveEndpointDefaultAgentId(endpoint: RuntimeEndpointAccumulator): string | null {
-  return endpoint.target?.defaultSessionPromptScope.agentId ?? null;
+  return endpoint.target?.defaultSessionPromptScope?.agentId ?? null;
 }
 
 function resolvePreferredSessionKey(sessions: ChatSessionRuntimeSessionNode[]): string | null {
@@ -265,12 +266,12 @@ export function resolveCurrentConversationRuntimeState(input: {
 }): ChatCurrentConversationRuntimeState {
   const conversation = input.currentConversation;
   if (!conversation) {
-    return { state: 'resolving' };
+    return { state: input.directoryStatus === 'idle' || input.directoryStatus === 'loading' ? 'resolving' : 'unselected' };
   }
   const runtimeScopeKey = conversation.runtimeScopeKey;
   const directoryEndpoint = input.directoryEndpoints.find((endpoint) => buildRuntimeScopeKey(endpoint.endpointRef) === runtimeScopeKey);
   if (directoryEndpoint) {
-    if (isSessionRuntimeEndpointReady(directoryEndpoint)) {
+    if (isSessionRuntimeEndpointReady(directoryEndpoint) && supportsSessionChat(directoryEndpoint, conversation.agentId)) {
       return { state: 'ready', runtimeScopeKey };
     }
     if (isSessionRuntimeEndpointStarting(directoryEndpoint)) {
@@ -293,17 +294,23 @@ export function resolveCurrentConversationRuntimeState(input: {
 
 export function buildCurrentConversationFromSessionRecord(
   record: ChatSessionRecord,
+  previous?: ChatCurrentConversation | null,
 ): ChatCurrentSessionConversation | null {
   const identity = record.meta.sessionIdentity;
   if (!identity) {
     return null;
+  }
+  const sessionRecordKey = buildSessionRecordKey(identity);
+  if (previous?.kind === 'session' && previous.sessionRecordKey === sessionRecordKey
+    && previous.endpointSessionId === record.meta.endpointSessionId) {
+    return previous;
   }
   return {
     kind: 'session',
     runtimeScopeKey: buildRuntimeScopeKey(identity.endpoint),
     endpoint: identity.endpoint,
     agentId: identity.agentId,
-    sessionRecordKey: buildSessionRecordKey(identity),
+    sessionRecordKey,
     endpointSessionId: record.meta.endpointSessionId,
     sessionIdentity: identity,
   };

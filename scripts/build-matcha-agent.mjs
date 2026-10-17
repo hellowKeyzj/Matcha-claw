@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { prepareMatchaRipgrep } from './download-matcha-ripgrep.mjs';
+import { isNativeExecutable } from '../electron/main/runtime-host-delivery/native-artifact.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, '..');
@@ -18,9 +19,8 @@ const bundledBunPath = resolve(
   `${process.platform}-${process.arch}`,
   isWindows ? 'bun.exe' : 'bun',
 );
-const usesBundledBun = existsSync(bundledBunPath);
-const bunCommand = usesBundledBun ? bundledBunPath : 'bun';
-const bunPathPrefix = usesBundledBun ? dirname(bundledBunPath) : '';
+const bunCommand = bundledBunPath;
+const bunPathPrefix = dirname(bundledBunPath);
 
 if (process.env.SKIP_MATCHA_AGENT_BUILD === '1') {
   console.log('[build-matcha-agent] SKIP_MATCHA_AGENT_BUILD=1 set; skipping matcha-agent build.');
@@ -53,9 +53,6 @@ function run(command, args, options = {}) {
 
   if (result.error) {
     console.error(`[build-matcha-agent] failed to spawn ${command}:`, result.error);
-    if (command === 'bun') {
-      console.error('[build-matcha-agent] install Bun or run `pnpm run bun:download` first.');
-    }
     process.exit(1);
   }
 
@@ -67,19 +64,71 @@ function run(command, args, options = {}) {
 requirePath(resolve(matchaAgentDir, 'package.json'), 'matcha-agent/package.json');
 requirePath(resolve(matchaAgentDir, 'bun.lock'), 'matcha-agent/bun.lock');
 
-run(bunCommand, ['install', '--frozen-lockfile'], {
-  env: {
-    CLAUDE_CODE_SKIP_CHROME_MCP_SETUP: '1',
-    HUSKY: '0',
-  },
-});
-for (const arch of ['x64', 'arm64']) {
-  await prepareMatchaRipgrep(process.platform, arch);
+requirePath(resolve(matchaAgentDir, 'node_modules', 'vite', 'bin', 'vite.js'), 'installed CLI build dependencies');
+if (!isNativeExecutable(bundledBunPath, process.platform, process.arch)) {
+  throw new Error('[build-matcha-agent] target-matched bundled Bun executable is required.');
 }
+const ifNeeded = process.argv.includes('--if-needed');
+const architectures = ifNeeded ? [process.arch] : ['x64', 'arm64'];
+for (const arch of architectures) {
+  const target = `${arch}-${process.platform}`;
+  const ripgrep = resolve(matchaAgentDir, 'src', 'utils', 'vendor', 'ripgrep', target, isWindows ? 'rg.exe' : 'rg');
+  if (!isNativeExecutable(ripgrep, process.platform, arch)) {
+    throw new Error(`[build-matcha-agent] target-matched ripgrep executable is required for ${target}.`);
+  }
+  requirePath(resolve(matchaAgentDir, 'vendor', 'audio-capture', target, 'audio-capture.node'), `audio-capture ${target}`);
+}
+
+const outputFiles = ['cli-node.js', 'cli-bun.js', 'cli.js'].map(file => resolve(matchaAgentDir, 'dist', file));
+for (const arch of architectures) {
+  const target = `${arch}-${process.platform}`;
+  outputFiles.push(
+    resolve(matchaAgentDir, 'dist', 'vendor', 'audio-capture', target, 'audio-capture.node'),
+    resolve(matchaAgentDir, 'dist', 'vendor', 'ripgrep', target, isWindows ? 'rg.exe' : 'rg'),
+  );
+}
+const receiptPath = resolve(matchaAgentDir, 'dist', '.build-inputs.sha256');
+const fingerprint = buildInputFingerprint();
+if (ifNeeded && existsSync(receiptPath)
+  && readFileSync(receiptPath, 'utf8').trim() === fingerprint
+  && runtimeArtifactsReady()) {
+  console.log('[build-matcha-agent] current');
+  process.exit(0);
+}
+
 run(bunCommand, ['run', 'build:vite']);
-
-requirePath(resolve(matchaAgentDir, 'dist', 'cli-node.js'), 'matcha-agent/dist/cli-node.js');
-requirePath(resolve(matchaAgentDir, 'dist', 'cli-bun.js'), 'matcha-agent/dist/cli-bun.js');
-requirePath(resolve(matchaAgentDir, 'dist', 'cli.js'), 'matcha-agent/dist/cli.js');
-
+if (!runtimeArtifactsReady()) {
+  throw new Error('[build-matcha-agent] built CLI runtime artifacts are missing or invalid.');
+}
+writeFileSync(receiptPath, `${fingerprint}\n`);
 console.log('[build-matcha-agent] built matcha-agent/dist');
+
+function runtimeArtifactsReady() {
+  return outputFiles.every(file => existsSync(file) && statSync(file).isFile())
+    && architectures.every(arch => isNativeExecutable(
+      resolve(matchaAgentDir, 'dist', 'vendor', 'ripgrep', `${arch}-${process.platform}`, isWindows ? 'rg.exe' : 'rg'),
+      process.platform, arch,
+    ));
+}
+
+function buildInputFingerprint() {
+  const hash = createHash('sha256');
+  hash.update(JSON.stringify([process.platform, process.arch,
+    Object.keys(process.env).filter(key => key.startsWith('FEATURE_')).sort()]));
+  function add(path) {
+    const stat = statSync(path);
+    hash.update(JSON.stringify([path, stat.size, stat.mtimeMs]));
+    if (!stat.isDirectory()) return;
+    for (const entry of readdirSync(path, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (['node_modules', '.git', 'target', '.cache'].includes(entry.name) || entry.isSymbolicLink()) continue;
+      add(resolve(path, entry.name));
+    }
+  }
+  for (const input of ['package.json', 'bun.lock', 'vite.config.ts', 'tsconfig.json', 'tsconfig.base.json',
+    'src', 'scripts', 'packages', 'vendor/audio-capture']) {
+    add(resolve(matchaAgentDir, input));
+  }
+  add(fileURLToPath(import.meta.url));
+  add(bundledBunPath);
+  return hash.digest('hex');
+}

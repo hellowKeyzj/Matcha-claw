@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 
 const PAIRING_PATH = '/api/channels/pairing';
@@ -26,8 +27,8 @@ export type ChannelPairingTransportResponse = Readonly<{
 }>;
 
 export interface ChannelPairingTransport {
-  list(channel: string, accountId?: string): Promise<ChannelPairingTransportResponse>;
-  approve(input: Readonly<{ channel: string; accountId?: string; code: string }>): Promise<ChannelPairingApprovalResponse>;
+  list(channel: string, accountId?: string, scope?: unknown): Promise<ChannelPairingTransportResponse>;
+  approve(input: Readonly<{ channel: string; accountId?: string; code: string; scope?: ProductRuntimeScope }>): Promise<ChannelPairingApprovalResponse>;
 }
 
 export function createChannelPairingTransport(
@@ -36,8 +37,9 @@ export function createChannelPairingTransport(
   fetcher: typeof fetch = fetch,
 ): ChannelPairingTransport {
   return {
-    async list(channel: string, accountId?: string): Promise<ChannelPairingTransportResponse> {
-      if (!isIdentity(channel) || (accountId !== undefined && !isIdentity(accountId))) return { status: 400, body: UNAVAILABLE };
+    async list(channel: string, accountId?: string, scope?: unknown): Promise<ChannelPairingTransportResponse> {
+      if (!isIdentity(channel) || (accountId !== undefined && !isIdentity(accountId))
+        || (scope !== undefined && !isProductRuntimeScope(scope))) return { status: 400, body: UNAVAILABLE };
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: PAIRING_PATH,
@@ -53,6 +55,7 @@ export function createChannelPairingTransport(
         body: {
           channel,
           ...(accountId ? { accountId } : {}),
+          ...(scope === undefined ? {} : { scope }),
         },
       });
       if (response?.status === 200 && isPairingList(response.body)) return { status: 200, body: response.body };
@@ -61,7 +64,8 @@ export function createChannelPairingTransport(
     async approve(input): Promise<ChannelPairingApprovalResponse> {
       if (!isIdentity(input.channel)
         || !isApprovalCode(input.code)
-        || (input.accountId !== undefined && !isIdentity(input.accountId))) {
+        || (input.accountId !== undefined && !isIdentity(input.accountId))
+        || (input.scope !== undefined && !isProductRuntimeScope(input.scope))) {
         return { status: 400, body: UNAVAILABLE };
       }
       const response = await sendLoopbackJson({
@@ -81,6 +85,7 @@ export function createChannelPairingTransport(
           channel: input.channel,
           ...(input.accountId ? { accountId: input.accountId } : {}),
           code: input.code,
+          ...(input.scope === undefined ? {} : { scope: input.scope }),
         },
       });
       if (response?.status === 200 && isApprovalResponse(response.body)) return { status: 200, body: response.body };

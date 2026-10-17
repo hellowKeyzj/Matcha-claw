@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 import type {
-  AgentScope,
+  AgentScope, RuntimeEndpointRef, RuntimeInstanceScope,
 } from '../types/desktop/runtime-address';
 import type { CapabilityTarget } from '../types/desktop/capability-target';
 import {
@@ -17,7 +17,9 @@ import {
   resolveAgentAvatarStyle,
   type AgentAvatarStyle,
 } from '@/lib/agent-avatar';
-import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import { hostApiFetch } from '@/lib/host-api';
+import { agentScope, buildCapabilityScopeKey, runtimeEndpointsEqual, runtimeInstanceScope } from '@/types/desktop/runtime-address';
+import { selectManagementEndpoint, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { hostExportSkillBundles, hostSkillsMutation } from '@/lib/skills';
 import { isSubagentMutation, subagentMutationError, waitForSubagentMutation, waitForSubagentResult } from '@/lib/subagent-call';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
@@ -47,7 +49,6 @@ import type {
 
 import type { CloudPackageListPage, CloudPackageVersion, InstalledCloudPackage, InstalledCloudPackageList } from '@/types/cloud-package';
 
-const MAIN_AGENT_ID = 'main';
 const CONFIG_DISPLAY_CACHE_TTL_MS = 1000;
 const SUBAGENT_SNAPSHOT_NOT_READY_RETRY_MS = 1200;
 const SUBAGENT_AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
@@ -70,31 +71,25 @@ let latestAvailableModelsRequestId = 0;
 
 async function subagentManagementCapabilityExecute<TResult>(
   operationId: string,
-  scope: AgentScope,
+  scope: SubagentManagementScope,
   input: Record<string, unknown>,
   target: CapabilityTarget,
   timeoutMs?: number,
 ): Promise<TResult> {
-  try {
-    const result = await hostApiFetch<unknown>('/api/subagents/agents', {
-      method: 'POST',
-      body: JSON.stringify({
-        id: SUBAGENT_MANAGEMENT_CAPABILITY_ID,
-        operationId,
-        scope,
-        target,
-        input,
-      }),
-      timeoutMs,
-    });
-    return isSubagentMutation(operationId)
-      ? await waitForSubagentMutation<TResult>(result, operationId, scope.endpoint, typeof input.agentId === 'string' ? input.agentId : undefined)
-      : result as TResult;
-  } finally {
-    if (isSubagentMutation(operationId) && operationId !== 'subagents.package.export') {
-      invalidateAgentsSnapshot();
-    }
-  }
+  const result = await hostApiFetch<unknown>('/api/subagents/agents', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: SUBAGENT_MANAGEMENT_CAPABILITY_ID,
+      operationId,
+      scope,
+      target,
+      input,
+    }),
+    timeoutMs,
+  });
+  return isSubagentMutation(operationId)
+    ? await waitForSubagentMutation<TResult>(result, operationId, scope.endpoint, typeof input.agentId === 'string' ? input.agentId : undefined)
+    : result as TResult;
 }
 
 interface AgentFileGetResult {
@@ -110,6 +105,7 @@ interface AgentsCreateResult {
 }
 
 interface CreateAgentOptions {
+  scope?: SubagentManagementScope;
   workspaceInitialization?: SubagentWorkspaceInitialization;
 }
 
@@ -153,28 +149,65 @@ interface SubagentDisplayConfigResult {
 }
 
 interface ReadConfigForDisplayOptions {
+  scope?: SubagentManagementScope;
   forceRefresh?: boolean;
 }
 
 interface LoadAgentsOptions {
   silent?: boolean;
+  scope?: SubagentManagementScope;
+}
+
+export type SubagentManagementScope = AgentScope | RuntimeInstanceScope;
+let activeManagementKey: string | null = null;
+let activeManagementScope: SubagentManagementScope | null = null;
+
+function scopeKey(scope: SubagentManagementScope): string { return buildCapabilityScopeKey(scope); }
+function isCurrentScope(scope: SubagentManagementScope): boolean {
+  const selected = selectedManagementScope();
+  return activeManagementScope === scope && selected !== null && scopeKey(selected) === scopeKey(scope);
+}
+function requireAgentScope(scope: SubagentManagementScope): AgentScope {
+  if (scope.kind !== 'agent') throw new Error('Select a real management Agent before this operation.');
+  return scope;
+}
+function activateManagementScope(scope: SubagentManagementScope | null): void {
+  const key = scope ? scopeKey(scope) : null;
+  if (activeManagementKey === key) return;
+  activeManagementKey = key;
+  activeManagementScope = scope ? { ...scope } : null;
+  resetManagementCaches();
+  useSubagentsStore.setState({ managementScope: activeManagementScope, agentsResource: createIdleResourceState<SubagentSummary[]>([]), managedAgentId: null, selectedAgentId: null, persistedFilesByAgent: {}, mutating: false, error: null });
 }
 
 interface SubagentRpcOptions {
-  scope?: AgentScope;
+  scope?: SubagentManagementScope;
   target?: CapabilityTarget;
   timeoutMs?: number;
 }
 
-async function resolveSubagentManagementScope(): Promise<AgentScope> {
-  const scope = await resolveSingleCapabilityScope(SUBAGENT_MANAGEMENT_CAPABILITY_ID);
-  if (scope.kind !== 'agent') {
-    throw new Error('subagent.management scope must be agent');
-  }
-  return scope;
+export function getSubagentManagementScope(endpoint: RuntimeEndpointRef | null): SubagentManagementScope | null {
+  if (!endpoint) return null;
+  if (endpoint.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'matcha-agent') return runtimeInstanceScope(endpoint);
+  const runtime = useRuntimeEndpointsStore.getState().endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, endpoint));
+  return runtime?.defaultAgentId ? agentScope(endpoint, runtime.defaultAgentId) : null;
 }
 
-function buildSubagentTarget(_scope: AgentScope, subagentId: string): CapabilityTarget {
+function selectedManagementScope(): SubagentManagementScope | null {
+  return getSubagentManagementScope(selectManagementEndpoint(useRuntimeEndpointsStore.getState()));
+}
+
+async function resolveSubagentManagementScope(capturedScope?: SubagentManagementScope): Promise<SubagentManagementScope> {
+  if (capturedScope) {
+    if (!isCurrentScope(capturedScope)) throw new Error('Management scope changed before Agent operation.');
+    return capturedScope;
+  }
+  activateManagementScope(selectedManagementScope());
+  if (!activeManagementScope) throw new Error('Select a runtime first.');
+  return activeManagementScope;
+}
+
+function buildSubagentTarget(_scope: SubagentManagementScope, subagentId: string): CapabilityTarget {
   return {
     kind: 'subagent',
     subagentId,
@@ -184,6 +217,7 @@ function buildSubagentTarget(_scope: AgentScope, subagentId: string): Capability
 interface SubagentsState {
   agents: SubagentSummary[];
   agentsResource: ResourceStateMeta<SubagentSummary[]>;
+  managementScope: SubagentManagementScope | null;
   cloudPackages: SubagentCloudPackage[];
   installedCloudPackages: InstalledCloudPackage[];
   cloudLoading: boolean;
@@ -207,11 +241,12 @@ interface SubagentsState {
   loadAvailableModels: (options?: { force?: boolean }) => Promise<void>;
   selectAgent: (agentId: string | null) => void;
   setManagedAgentId: (agentId: string | null) => void;
-  loadPersistedFilesForAgent: (agentId: string) => Promise<Partial<Record<SubagentTargetFile, string>>>;
+  setManagementScope: (scope: SubagentManagementScope | null) => void;
+  loadPersistedFilesForAgent: (agentId: string, scope?: SubagentManagementScope) => Promise<Partial<Record<SubagentTargetFile, string>>>;
   createAgent: (input: {
     name: string;
     description?: string | null;
-    workspace: string;
+    workspace?: string;
     model?: string;
     avatarSeed?: string;
     avatarStyle?: AgentAvatarStyle;
@@ -220,56 +255,70 @@ interface SubagentsState {
     template: SubagentTemplateDetail;
     model: string;
     localizedName?: string;
-  }) => Promise<SubagentCreateResult>;
+  }, scope?: SubagentManagementScope) => Promise<SubagentCreateResult>;
   exportAgentConfig: (agentId: string) => Promise<SubagentConfigPackage>;
   exportAgentPackage: (agentId: string) => Promise<SubagentPackageExportResult>;
   uploadAgentPackageToCloud: (agentId: string) => Promise<SubagentCloudPackageUploadResult>;
   installAgentPackageFromCloud: (packageVersionId: string) => Promise<SubagentCloudPackageInstallResult>;
-  importAgentConfig: (input: unknown) => Promise<SubagentImportResult>;
+  importAgentConfig: (input: unknown, scope?: SubagentManagementScope) => Promise<SubagentImportResult>;
   updateAgent: (input: {
     agentId: string;
     name: string;
     description?: string | null;
-    workspace: string;
+    workspace?: string;
     model?: string;
     skills?: string[] | null;
     avatarSeed?: string | null;
     avatarStyle?: AgentAvatarStyle | null;
-  }) => Promise<void>;
-  deleteAgent: (agentId: string) => Promise<void>;
+  }, scope?: SubagentManagementScope) => Promise<void>;
+  deleteAgent: (agentId: string, deleteFiles?: boolean, scope?: SubagentManagementScope) => Promise<void>;
 }
 
 async function rpc<T>(method: string, params?: unknown, options?: SubagentRpcOptions): Promise<T> {
   const capabilityOperationId = resolveSubagentCapabilityOperation(method);
   if (capabilityOperationId) {
-    const scope = options?.scope ?? await resolveSubagentManagementScope();
-    const input = buildSubagentCapabilityInput(capabilityOperationId, scope, readRpcParams(params));
-    return await subagentManagementCapabilityExecute<T>(
-      capabilityOperationId,
-      scope,
-      input,
-      options?.target ?? buildSubagentCapabilityTarget(capabilityOperationId, scope, input),
-      options?.timeoutMs,
-    );
+    const managementScope = options?.scope ?? await resolveSubagentManagementScope();
+    if (!isCurrentScope(managementScope)) throw new Error('Management scope changed before Agent operation.');
+    const rpcParams = readRpcParams(params);
+    const scope = typeof rpcParams.agentId === 'string'
+      ? agentScope(managementScope.endpoint, rpcParams.agentId)
+      : managementScope;
+    const input = buildSubagentCapabilityInput(capabilityOperationId, scope, rpcParams);
+    try {
+      return await subagentManagementCapabilityExecute<T>(
+        capabilityOperationId,
+        scope,
+        input,
+        options?.target ?? buildSubagentCapabilityTarget(capabilityOperationId, scope, input),
+        options?.timeoutMs,
+      );
+    } finally {
+      if (isCurrentScope(managementScope) && isSubagentMutation(capabilityOperationId) && capabilityOperationId !== 'subagents.package.export') {
+        invalidateAgentsSnapshot();
+      }
+    }
   }
   throw new Error(`Unsupported subagent runtime method: ${method}`);
 }
 
 function buildSubagentCapabilityInput(
   operationId: string,
-  scope: AgentScope,
+  scope: SubagentManagementScope,
   params: Record<string, unknown>,
 ): Record<string, unknown> {
   const endpoint = scope.endpoint;
   if (operationId === 'subagents.list') return { kind: 'list', endpoint };
   if (operationId === 'subagents.displayConfig.get') return { kind: 'displayConfiguration', endpoint };
+  if (scope.kind !== 'agent' && !['subagents.list', 'subagents.displayConfig.get', 'subagents.create'].includes(operationId)) requireAgentScope(scope);
   if (operationId === 'subagents.create') {
     const workspaceInitialization = readWorkspaceInitialization(params.workspaceInitialization);
     return {
       kind: 'create',
       endpoint,
       name: getRequiredString(params.name, 'Subagent name is required'),
-      workspace: getRequiredString(params.workspace, 'Subagent workspace is required'),
+      ...(endpoint.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'matcha-agent'
+        ? { workspaceMode: 'managed' }
+        : { workspace: getRequiredString(params.workspace, 'Subagent workspace is required') }),
       model: getOptionalString(params.model) ?? null,
       ...(workspaceInitialization ? { workspaceInitialization } : {}),
     };
@@ -316,9 +365,9 @@ function buildSubagentCapabilityInput(
   return params;
 }
 
-function buildSubagentCapabilityTarget(operationId: string, scope: AgentScope, input: Record<string, unknown>): CapabilityTarget {
+function buildSubagentCapabilityTarget(operationId: string, scope: SubagentManagementScope, input: Record<string, unknown>): CapabilityTarget {
   if (operationId === 'subagents.list' || operationId === 'subagents.displayConfig.get') {
-    return { kind: 'agent', agentId: scope.agentId };
+    return scope.kind === 'agent' ? { kind: 'agent', agentId: scope.agentId } : { kind: 'runtime-instance' };
   }
   const agentId = getOptionalString(input.agentId);
   return agentId ? { kind: 'subagent', subagentId: agentId } : { kind: 'subagent' };
@@ -626,6 +675,8 @@ function invalidateAgentsSnapshot(): void {
 }
 
 async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Promise<ConfigDisplaySnapshot> {
+  const scope = options?.scope ?? await resolveSubagentManagementScope();
+  if (!isCurrentScope(scope)) return createEmptyConfigDisplaySnapshot();
   const forceRefresh = options?.forceRefresh === true;
   const nowMs = Date.now();
 
@@ -640,12 +691,12 @@ async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Prom
   const generation = configDisplayGeneration;
   const task = (async () => {
     try {
-      const configGetResult = await rpc<SubagentDisplayConfigResult>('displayConfig.get', {});
-      if (generation !== configDisplayGeneration) {
+      const configGetResult = await rpc<SubagentDisplayConfigResult>('displayConfig.get', {}, { scope });
+      if (generation !== configDisplayGeneration || !isCurrentScope(scope)) {
         return createEmptyConfigDisplaySnapshot();
       }
       if (!isSnapshotReady(configGetResult)) {
-        scheduleAgentsSnapshotRetry(() => useSubagentsStore.getState().loadAgents({ silent: true }));
+        scheduleAgentsSnapshotRetry(() => useSubagentsStore.getState().loadAgents({ silent: true, scope }));
         if (configDisplayCache) {
           return configDisplayCache.snapshot;
         }
@@ -661,6 +712,7 @@ async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Prom
       }
       return snapshot;
     } catch {
+      if (!isCurrentScope(scope)) return createEmptyConfigDisplaySnapshot();
       if (configDisplayCache) {
         return configDisplayCache.snapshot;
       }
@@ -678,19 +730,9 @@ async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Prom
 }
 
 function resolveDefaultAgentId(result: AgentsListResult): string {
-  const fromResult = getOptionalString(result.defaultId);
-  if (fromResult) {
-    return fromResult;
-  }
-
-  for (const agent of result.agents) {
-    const id = getOptionalString(agent?.id);
-    if (id) {
-      return id;
-    }
-  }
-
-  return MAIN_AGENT_ID;
+  const defaultId = getRequiredString(result.defaultId, 'Default Agent is missing from the runtime roster.');
+  if (!result.agents.some((agent) => agent.id === defaultId)) throw new Error('Default Agent is missing from the runtime roster.');
+  return defaultId;
 }
 
 function normalizeAvatarPresentation(
@@ -707,12 +749,14 @@ function normalizeAvatarPresentation(
   };
 }
 
+function avatarStorageKey(): string { return `${SUBAGENT_AVATAR_STORAGE_KEY}:${activeManagementKey ?? 'unselected'}`; }
+
 function readStoredAvatarPresentations(): Record<string, SubagentAvatarPresentation> {
   if (typeof window === 'undefined') {
     return {};
   }
   try {
-    const raw = window.localStorage.getItem(SUBAGENT_AVATAR_STORAGE_KEY);
+    const raw = window.localStorage.getItem(avatarStorageKey());
     if (!raw) {
       return {};
     }
@@ -749,10 +793,10 @@ function writeStoredAvatarPresentations(
   }
   const entries = Object.entries(presentations);
   if (entries.length === 0) {
-    window.localStorage.removeItem(SUBAGENT_AVATAR_STORAGE_KEY);
+    window.localStorage.removeItem(avatarStorageKey());
     return;
   }
-  window.localStorage.setItem(SUBAGENT_AVATAR_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  window.localStorage.setItem(avatarStorageKey(), JSON.stringify(Object.fromEntries(entries)));
 }
 
 function persistAvatarPresentation(
@@ -873,7 +917,8 @@ function assertDeletableAgent(agentId: string, agents: SubagentSummary[]): void 
   }
 }
 
-async function updateAgentSkillsConfig(scope: AgentScope, agentId: string, skills: string[] | undefined): Promise<void> {
+async function updateAgentSkillsConfig(scope: SubagentManagementScope, agentId: string, skills: string[] | undefined): Promise<void> {
+  if (scope.endpoint.kind !== 'native-runtime' || scope.endpoint.runtimeAdapterId !== 'openclaw') throw new Error('Native Agent skill selection is unsupported.');
   await rpc('skills.set', { agentId, skills }, {
     scope,
     target: buildSubagentTarget(scope, agentId),
@@ -894,7 +939,7 @@ async function importSkillBundles(
   return { ok: result.outcome === 'accepted' };
 }
 
-async function updateAgentDescriptionConfig(scope: AgentScope, agentId: string, description: string | undefined): Promise<void> {
+async function updateAgentDescriptionConfig(scope: SubagentManagementScope, agentId: string, description: string | undefined): Promise<void> {
   await rpc('description.set', { agentId, description }, {
     scope,
     target: buildSubagentTarget(scope, agentId),
@@ -954,9 +999,9 @@ function normalizeAgentFileContent(result: AgentFileGetResult): string {
   return getOptionalString(result?.file?.content) ?? '';
 }
 
-async function fetchPersistedFilesForAgent(agentId: string): Promise<Partial<Record<SubagentTargetFile, string>>> {
+async function fetchPersistedFilesForAgent(agentId: string, sourceScope?: SubagentManagementScope): Promise<Partial<Record<SubagentTargetFile, string>>> {
   const fileByName: Partial<Record<SubagentTargetFile, string>> = {};
-  const managementScope = await resolveSubagentManagementScope();
+  const managementScope = sourceScope ?? await resolveSubagentManagementScope();
   const target = buildSubagentTarget(managementScope, agentId);
   await Promise.all(SUBAGENT_TARGET_FILES.map(async (name) => {
     const result = await rpc<AgentFileGetResult>('agents.files.get', { agentId, name }, {
@@ -977,23 +1022,30 @@ const pendingDeletedAgentIds = new Set<string>();
 const unconfirmedDeletedAgentIds = new Set<string>();
 let inflightLoadAgentsTask: Promise<void> | null = null;
 
-export function __resetSubagentsStoreInternalCachesForTest(): void {
+function resetManagementCaches(): void {
   configDisplayCache = null;
   configDisplayReadTask = null;
-  configDisplayReadTaskSeq = 0;
-  configDisplayReadSeq = 0;
-  configDisplayGeneration = 0;
+  configDisplayGeneration += 1;
   persistedFilesLoadTasks.clear();
   pendingDeletedAgentIds.clear();
   unconfirmedDeletedAgentIds.clear();
-  latestLoadAgentsRequestId = 0;
-  agentMutationChain = Promise.resolve();
-  agentMutationTails.clear();
+  latestLoadAgentsRequestId += 1;
   activeMutatingOperationCount = 0;
   inflightLoadAgentsTask = null;
+  queuedLoadAgentsTask = null;
+  if (agentsSnapshotRetryTimer) clearTimeout(agentsSnapshotRetryTimer);
+  agentsSnapshotRetryTimer = null;
+}
+
+export function __resetSubagentsStoreInternalCachesForTest(): void {
+  resetManagementCaches();
+  agentMutationChain = Promise.resolve();
+  agentMutationTails.clear();
+  activeManagementScope = null;
+  activeManagementKey = null;
   availableModelsLoaded = false;
   inflightAvailableModelsTask = null;
-  latestAvailableModelsRequestId = 0;
+  latestAvailableModelsRequestId += 1;
 }
 
 function normalizeAgentIdForComparison(agentId: string): string {
@@ -1082,16 +1134,17 @@ function finishGlobalMutating(setState: (partial: Partial<SubagentsState>) => vo
   setState({ mutating: false });
 }
 
-async function resolvePersistedFilesForAgent(agentId: string): Promise<Partial<Record<SubagentTargetFile, string>>> {
-  const activeTask = persistedFilesLoadTasks.get(agentId);
+async function resolvePersistedFilesForAgent(agentId: string, scope: SubagentManagementScope): Promise<Partial<Record<SubagentTargetFile, string>>> {
+  const key = JSON.stringify([scopeKey(scope), agentId]);
+  const activeTask = persistedFilesLoadTasks.get(key);
   if (activeTask) {
     return activeTask;
   }
-  const task = fetchPersistedFilesForAgent(agentId)
+  const task = fetchPersistedFilesForAgent(agentId, scope)
     .finally(() => {
-      persistedFilesLoadTasks.delete(agentId);
+      if (persistedFilesLoadTasks.get(key) === task) persistedFilesLoadTasks.delete(key);
     });
-  persistedFilesLoadTasks.set(agentId, task);
+  persistedFilesLoadTasks.set(key, task);
   return task;
 }
 
@@ -1144,6 +1197,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     return readAgentsFromState(this);
   },
   agentsResource: createIdleResourceState<SubagentSummary[]>([]),
+  managementScope: null,
   cloudPackages: [],
   installedCloudPackages: [],
   cloudLoading: false,
@@ -1205,12 +1259,15 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
 
   loadAgents: async (options) => {
+    const scope = options?.scope ?? await resolveSubagentManagementScope();
+    if (!isCurrentScope(scope)) return;
     const silent = options?.silent === true;
     if (inflightLoadAgentsTask) {
       if (!queuedLoadAgentsTask) {
         queuedLoadAgentsTask = inflightLoadAgentsTask.finally(async () => {
+          if (!isCurrentScope(scope)) return;
           queuedLoadAgentsTask = null;
-          await get().loadAgents(options);
+          await get().loadAgents({ ...options, scope });
         });
       }
       await queuedLoadAgentsTask;
@@ -1221,10 +1278,10 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     const task = Promise.resolve().then(async () => {
       try {
         const [result, configSnapshot] = await Promise.all([
-          rpc<AgentsListResult>('agents.list', {}),
-          readConfigForDisplay(),
+          rpc<AgentsListResult>('agents.list', {}, { scope }),
+          readConfigForDisplay({ scope }),
         ]);
-        if (requestId !== latestLoadAgentsRequestId) {
+        if (requestId !== latestLoadAgentsRequestId || !isCurrentScope(scope)) {
           return;
         }
         if (!isSnapshotReady(result)) {
@@ -1241,7 +1298,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
               },
               error: message ?? null,
             });
-            scheduleAgentsSnapshotRetry(() => get().loadAgents({ silent: true }));
+            scheduleAgentsSnapshotRetry(() => get().loadAgents({ silent: true, scope }));
             return;
           }
           if (message) {
@@ -1261,13 +1318,14 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
             }),
             error: null,
           });
-          scheduleAgentsSnapshotRetry(() => get().loadAgents({ silent: true }));
+          scheduleAgentsSnapshotRetry(() => get().loadAgents({ silent: true, scope }));
           return;
         }
         settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result));
         const retainedAgentIds = [...result.agents.map((agent) => agent.id), ...unconfirmedDeletedAgentIds];
         useChatStore.getState().reconcileAgentSessionTombstones(
           retainedAgentIds.filter((agentId) => !isAgentPendingDeletion(agentId)),
+          scope.endpoint,
         );
         try {
           pruneStoredAvatarPresentations(retainedAgentIds);
@@ -1285,7 +1343,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         const hasSelected = selectedAgentId && normalizedAgents.some((agent) => agent.id === selectedAgentId);
         const managedAgentId = stateSnapshot.managedAgentId;
         const hasManaged = managedAgentId && normalizedAgents.some((agent) => agent.id === managedAgentId);
-        const defaultAgentId = normalizedAgents.find((agent) => agent.isDefault)?.id ?? normalizedAgents[0]?.id ?? null;
+        const defaultAgentId = normalizedAgents.find((agent) => agent.isDefault)?.id ?? null;
         const nextSelectedAgentId = hasSelected
           ? selectedAgentId
           : result.selectionRequired === true
@@ -1316,7 +1374,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           });
         }
       } catch (error) {
-        if (requestId !== latestLoadAgentsRequestId) {
+        if (requestId !== latestLoadAgentsRequestId || !isCurrentScope(scope)) {
           return;
         }
         const stateSnapshot = get();
@@ -1350,6 +1408,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
 
   loadAvailableModels: async (options) => {
+    const sourceScope = activeManagementScope;
     const force = options?.force === true;
     const traceId = createSessionTraceId('available-models');
     const startedAt = traceId ? performance.now() : 0;
@@ -1401,7 +1460,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         set({
           availableModels: normalizedModels,
           modelsLoading: false,
-          error: null,
+          ...(sourceScope && isCurrentScope(sourceScope) ? { error: null } : {}),
         });
         logSessionTrace('models.available.result', traceId, () => ({
           requestId, force, outcome: 'success', count: get().availableModels.length, loading: get().modelsLoading,
@@ -1424,7 +1483,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         }
         set({
           modelsLoading: false,
-          error: getErrorMessage(error) || 'Failed to load models',
+          ...(sourceScope && isCurrentScope(sourceScope) ? { error: getErrorMessage(error) || 'Failed to load models' } : {}),
         });
         logSessionTrace('models.available.result', traceId, () => ({
           requestId, force, outcome: 'error', count: get().availableModels.length, loading: get().modelsLoading,
@@ -1444,12 +1503,15 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
   selectAgent: (agentId) => set({ selectedAgentId: agentId }),
   setManagedAgentId: (agentId) => set({ managedAgentId: agentId }),
-  loadPersistedFilesForAgent: async (agentId) => {
+  setManagementScope: activateManagementScope,
+  loadPersistedFilesForAgent: async (agentId, capturedScope) => {
+    const scope = await resolveSubagentManagementScope(capturedScope);
     if (!agentId) {
       return {};
     }
     try {
-      const files = await resolvePersistedFilesForAgent(agentId);
+      const files = await resolvePersistedFilesForAgent(agentId, scope);
+      if (!isCurrentScope(scope)) return files;
       set((state) => ({
         persistedFilesByAgent: {
           ...state.persistedFilesByAgent,
@@ -1458,7 +1520,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }));
       return files;
     } catch (error) {
-      set({
+      if (isCurrentScope(scope)) set({
         error: getErrorMessage(error) || 'Failed to load agent files',
       });
       throw error;
@@ -1472,10 +1534,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     avatarSeed,
     avatarStyle,
   }, options) => {
+    const managementScope = await resolveSubagentManagementScope(options?.scope);
     const creation: Promise<SubagentCreateResult> = runSerializedAgentMutation(async () => {
+      if (!isCurrentScope(managementScope)) throw new Error('Management scope changed before Agent creation.');
       beginGlobalMutating(set);
       try {
-        const managementScope = await resolveSubagentManagementScope();
         const trimmedName = name.trim();
         if (!trimmedName) {
           throw new Error('Subagent name is required');
@@ -1493,11 +1556,13 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         if (hasSubagentNameConflict(trimmedName, agents)) {
           throw new Error('Invalid subagent name: duplicate');
         }
-        const resolvedWorkspace = workspace.trim() || buildSubagentWorkspacePath({
+        const managedWorkspace = managementScope.endpoint.kind === 'native-runtime' && managementScope.endpoint.runtimeAdapterId === 'matcha-agent';
+        if (managedWorkspace && workspace?.trim()) throw new Error('This runtime requires a Server-managed workspace.');
+        const resolvedWorkspace = managedWorkspace ? undefined : workspace?.trim() || buildSubagentWorkspacePath({
           name: trimmedName,
           agents,
         });
-        if (!resolvedWorkspace) {
+        if (!managedWorkspace && !resolvedWorkspace) {
           throw new Error('Subagent workspace is required');
         }
         const createResult = await rpc<AgentsCreateResult>('agents.create', {
@@ -1513,6 +1578,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         if (!createdAgentId) {
           throw new Error('Subagent creation returned an invalid receipt');
         }
+        if (!isCurrentScope(managementScope)) return { agentId: createdAgentId };
         trackAgentMutation(createdAgentId, creation);
         unconfirmedDeletedAgentIds.delete(createdAgentId);
         const normalizedCreatedAgentId = normalizeAgentIdForComparison(createdAgentId);
@@ -1528,37 +1594,36 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
             warnings.push(buildCreateDescriptionWarning(createdAgentId, error));
           }
         }
+        if (!isCurrentScope(managementScope)) return toSubagentCreateResult(createdAgentId, warnings);
         try {
           persistAvatarPresentation(createdAgentId, avatarPresentation);
         } catch (error) {
           warnings.push(buildCreateAvatarWarning(createdAgentId, error));
         }
         try {
-          await get().loadAgents({ silent: true });
+          if (isCurrentScope(managementScope)) await get().loadAgents({ silent: true, scope: managementScope });
         } catch (error) {
           warnings.push(buildCreateRefreshWarning(createdAgentId, error));
         }
         return toSubagentCreateResult(createdAgentId, warnings);
       } catch (error) {
         const message = getErrorMessage(error) || 'Failed to create subagent';
-        set({
-          error: message,
-        });
+        if (isCurrentScope(managementScope)) set({ error: message });
         if (error instanceof Error) {
           throw error;
         }
         throw new Error(message, { cause: error });
       } finally {
-        finishGlobalMutating(set);
+        if (isCurrentScope(managementScope)) finishGlobalMutating(set);
       }
     });
     return creation;
   },
 
-  createAgentFromTemplate: async ({ template, model, localizedName }) => {
-    const managementScope = await resolveSubagentManagementScope();
+  createAgentFromTemplate: async ({ template, model, localizedName }, capturedScope) => {
+    const managementScope = await resolveSubagentManagementScope(capturedScope);
     const modelId = getOptionalString(model);
-    if (!modelId) {
+    if (!modelId && (managementScope.endpoint.kind !== 'native-runtime' || managementScope.endpoint.runtimeAdapterId !== 'matcha-agent')) {
       throw new Error('Model is required');
     }
     const templateName = getOptionalString(template.name);
@@ -1568,28 +1633,29 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     const localizedTemplateName = getOptionalString(localizedName);
     const createResult = await get().createAgent({
       name: templateName,
-      workspace: '',
       model: modelId,
       avatarSeed: buildTemplateAvatarSeed(template.id),
       avatarStyle: DEFAULT_AGENT_AVATAR_STYLE,
-    }, { workspaceInitialization: 'emptyWorkspace' });
+    }, { scope: managementScope, workspaceInitialization: 'emptyWorkspace' });
     const createdAgentId = createResult.agentId;
+    return runSerializedAgentMutation(async () => {
     const warnings = createResult.warning ? [createResult.warning] : [];
+    if (!isCurrentScope(managementScope)) return toSubagentCreateResult(createdAgentId, warnings);
     if (localizedTemplateName && localizedTemplateName !== templateName) {
       const createdAgent = readAgentsFromState(get()).find((agent) => agent.id === createdAgentId);
       const workspace = getOptionalString(createdAgent?.workspace);
-      if (workspace) {
+      if (workspace || (managementScope.endpoint.kind === 'native-runtime' && managementScope.endpoint.runtimeAdapterId === 'matcha-agent')) {
         try {
           await rpc('agents.update', {
             agentId: createdAgentId,
             name: localizedTemplateName,
-            workspace,
+            ...(managementScope.endpoint.kind === 'native-runtime' && managementScope.endpoint.runtimeAdapterId === 'matcha-agent' ? {} : { workspace }),
             model: modelId,
           }, {
             scope: managementScope,
             target: buildSubagentTarget(managementScope, createdAgentId),
           });
-          await get().loadAgents({ silent: true });
+          if (isCurrentScope(managementScope)) await get().loadAgents({ silent: true, scope: managementScope });
         } catch (error) {
           warnings.push(buildTemplateRenameWarning(createdAgentId, error));
         }
@@ -1609,7 +1675,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       return toSubagentCreateResult(createdAgentId, warnings);
     }
 
-    beginGlobalMutating(set);
+    if (isCurrentScope(managementScope)) beginGlobalMutating(set);
     try {
       for (const [name, content] of fileEntries) {
         await rpc('agents.files.set', {
@@ -1621,16 +1687,18 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           target: buildSubagentTarget(managementScope, createdAgentId),
         });
       }
-      await get().loadPersistedFilesForAgent(createdAgentId);
+      await fetchPersistedFilesForAgent(createdAgentId, managementScope);
     } catch (error) {
       warnings.push(buildTemplateFilesWarning(createdAgentId, error));
     } finally {
-      finishGlobalMutating(set);
+      if (isCurrentScope(managementScope)) finishGlobalMutating(set);
     }
     return toSubagentCreateResult(createdAgentId, warnings);
+    }, createdAgentId);
   },
 
   exportAgentConfig: async (agentId) => {
+    const managementScope = await resolveSubagentManagementScope();
     const agent = readAgentsFromState(get()).find((entry) => entry.id === agentId);
     if (!agent) {
       throw new Error('Agent not found');
@@ -1641,7 +1709,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     if (agent.sealed) {
       throw new Error('Sealed agent config cannot be exported');
     }
-    const files = await fetchPersistedFilesForAgent(agentId);
+    const files = await fetchPersistedFilesForAgent(agentId, managementScope);
     const skills = normalizeSkillAllowlist(agent.skills);
     const skillBundles = skills ? await exportSkillBundles(skills) : undefined;
     return {
@@ -1682,6 +1750,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
 
   uploadAgentPackageToCloud: async (agentId) => {
+    const scope = await resolveSubagentManagementScope();
+    if (scope.endpoint.kind !== 'native-runtime' || scope.endpoint.runtimeAdapterId !== 'openclaw') throw new Error('This runtime does not support sealed Agent packages.');
     const normalizedAgentId = agentId.trim();
     if (!normalizedAgentId) {
       throw new Error('Agent id is required');
@@ -1698,6 +1768,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   },
 
   installAgentPackageFromCloud: async (packageVersionId) => {
+    const managementScope = await resolveSubagentManagementScope();
+    if (managementScope.endpoint.kind !== 'native-runtime' || managementScope.endpoint.runtimeAdapterId !== 'openclaw') throw new Error('This runtime does not support sealed Agent packages.');
     set((state) => ({ cloudInstallingByVersionId: { ...state.cloudInstallingByVersionId, [packageVersionId]: true } }));
     try {
       let result: { packageId?: string; packageVersionId?: string; install?: { outcome?: string; agentId?: string } };
@@ -1707,7 +1779,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         const receipt = decodeCallReceipt(admitted.install);
         const terminal = await waitForSubagentResult(receipt, 'subagents.package.install', {
           kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
-        }).finally(invalidateAgentsSnapshot);
+        }).finally(() => { if (isCurrentScope(managementScope)) invalidateAgentsSnapshot(); });
         const confirmed = await hostApiFetch<typeof result>('/api/packages/install/confirm', {
           method: 'POST', body: JSON.stringify({ callId: receipt.callId }),
         });
@@ -1721,7 +1793,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       if (result.install?.outcome !== 'accepted' || !result.install.agentId) {
         throw new Error(i18n.t('subagents:transfer.installPackageUnexpectedResult'));
       }
-      await get().loadAgents({ silent: true });
+      if (isCurrentScope(managementScope)) await get().loadAgents({ silent: true, scope: managementScope });
       await get().loadCloudPackages();
       return {
         agentId: result.install.agentId,
@@ -1737,16 +1809,18 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
   },
 
-  importAgentConfig: async (input) => {
-    const managementScope = await resolveSubagentManagementScope();
+  importAgentConfig: async (input, capturedScope) => {
+    const managementScope = await resolveSubagentManagementScope(capturedScope);
     const packageData = normalizeSubagentConfigPackage(input);
+    if (managementScope.endpoint.kind === 'native-runtime' && managementScope.endpoint.runtimeAdapterId === 'matcha-agent' && (packageData.agent.skills !== undefined || packageData.agent.skillBundles?.length)) throw new Error('Native Agent skill selection/import is unsupported.');
     const createResult = await get().createAgent({
       name: packageData.agent.name,
       description: packageData.agent.description,
-      workspace: '',
-    }, { workspaceInitialization: 'emptyWorkspace' });
+    }, { scope: managementScope, workspaceInitialization: 'emptyWorkspace' });
     const createdAgentId = createResult.agentId;
+    return runSerializedAgentMutation(async () => {
     const warnings = createResult.warning ? [createResult.warning] : [];
+    if (!isCurrentScope(managementScope)) return toSubagentCreateResult(createdAgentId, warnings);
     const fileEntries = Object.entries(packageData.agent.files)
       .filter((entry): entry is [SubagentTargetFile, string] => {
         const [fileName, content] = entry;
@@ -1774,7 +1848,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
 
     if (fileEntries.length > 0) {
-      beginGlobalMutating(set);
+      if (isCurrentScope(managementScope)) beginGlobalMutating(set);
       try {
         for (const [name, content] of fileEntries) {
           await rpc('agents.files.set', {
@@ -1786,23 +1860,27 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
             target: buildSubagentTarget(managementScope, createdAgentId),
           });
         }
-        await get().loadPersistedFilesForAgent(createdAgentId);
+        await fetchPersistedFilesForAgent(createdAgentId, managementScope);
       } catch (error) {
         warnings.push(buildCreateWarning(createdAgentId, `人设文件写入失败：${getErrorMessage(error)}`));
       } finally {
-        finishGlobalMutating(set);
+        if (isCurrentScope(managementScope)) finishGlobalMutating(set);
       }
     }
 
     try {
-      await get().loadAgents({ silent: true });
+      if (isCurrentScope(managementScope)) await get().loadAgents({ silent: true, scope: managementScope });
     } catch (error) {
       warnings.push(buildCreateRefreshWarning(createdAgentId, error));
     }
     return toSubagentCreateResult(createdAgentId, warnings);
+    }, createdAgentId);
   },
 
-  updateAgent: async ({ agentId, name, description, workspace, model, skills, avatarSeed, avatarStyle }) => runSerializedAgentMutation(async () => {
+  updateAgent: async ({ agentId, name, description, workspace, model, skills, avatarSeed, avatarStyle }, capturedScope) => {
+    const managementScope = await resolveSubagentManagementScope(capturedScope);
+    return runSerializedAgentMutation(async () => {
+    if (!isCurrentScope(managementScope)) throw new Error('Management scope changed before Agent update.');
     const current = readAgentsFromState(get()).find((agent) => agent.id === agentId);
     const explicitSkillAllowlistRequested = skills !== undefined;
     const nextExplicitSkillAllowlist = skills === null
@@ -1817,7 +1895,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     const identityChanged = !(
       current
       && equalOptionalTrimmedString(current.name, name)
-      && equalOptionalTrimmedString(current.workspace, workspace)
+      && (workspace === undefined || equalOptionalTrimmedString(current.workspace, workspace))
     );
     const modelChanged = !(
       current
@@ -1839,20 +1917,23 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     }
 
     const nextName = name.trim();
-    const nextWorkspace = workspace.trim();
+    const nextWorkspace = workspace?.trim();
     const nextModel = getOptionalString(model);
+    if (managementScope.endpoint.kind === 'native-runtime' && managementScope.endpoint.runtimeAdapterId === 'matcha-agent'
+      && workspace !== undefined && !equalOptionalTrimmedString(current?.workspace, workspace)) {
+      throw new Error('This runtime requires a Server-managed workspace.');
+    }
 
     beginGlobalMutating(set);
     try {
       if (identityChanged || modelChanged || descriptionChanged || explicitSkillAllowlistRequested) {
-        const managementScope = await resolveSubagentManagementScope();
         if (identityChanged || modelChanged) {
           const updatePayload: Record<string, unknown> = {
             agentId,
           };
           if (identityChanged) {
             updatePayload.name = nextName;
-            updatePayload.workspace = nextWorkspace;
+            if (workspace !== undefined) updatePayload.workspace = nextWorkspace;
           }
           if (modelChanged) {
             updatePayload.model = nextModel ?? null;
@@ -1869,36 +1950,40 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           await updateAgentSkillsConfig(managementScope, agentId, nextExplicitSkillAllowlist);
         }
       }
+      if (!isCurrentScope(managementScope)) return;
       if (avatarSeedChanged || avatarStyleChanged) {
         persistAvatarPresentation(agentId, normalizeAvatarPresentation({
           avatarSeed: avatarSeedChanged ? nextAvatarSeed : current?.avatarSeed,
           avatarStyle: avatarStyleChanged ? nextAvatarStyle : current?.avatarStyle,
         }));
       }
-      await get().loadAgents({ silent: true });
+      if (isCurrentScope(managementScope)) await get().loadAgents({ silent: true, scope: managementScope });
     } catch (error) {
       const message = getErrorMessage(error) || 'Failed to update subagent';
-      set({ error: message });
+      if (isCurrentScope(managementScope)) set({ error: message });
       if (error instanceof Error) {
         throw error;
       }
       throw new Error(message, { cause: error });
     } finally {
-      finishGlobalMutating(set);
+      if (isCurrentScope(managementScope)) finishGlobalMutating(set);
     }
   }, agentId, () => {
     const current = readAgentsFromState(get()).find((agent) => agent.id === agentId);
     // Native updates share one configuration document; local presentation does not.
     return Boolean(current
       && equalOptionalTrimmedString(current.name, name)
-      && equalOptionalTrimmedString(current.workspace, workspace)
+      && (workspace === undefined || equalOptionalTrimmedString(current.workspace, workspace))
       && equalOptionalTrimmedString(current.model, model)
       && (description === undefined || equalOptionalTrimmedString(current.description, description))
       && skills === undefined);
-  }),
+  });
+  },
 
-  deleteAgent: async (agentId) => runSerializedAgentMutation(async () => {
-    const managementScope = await resolveSubagentManagementScope();
+  deleteAgent: async (agentId, deleteFiles = false, capturedScope) => {
+    const managementScope = await resolveSubagentManagementScope(capturedScope);
+    return runSerializedAgentMutation(async () => {
+    if (!isCurrentScope(managementScope)) throw new Error('Management scope changed before Agent deletion.');
     try {
       assertDeletableAgent(agentId, readAgentsFromState(get()));
     } catch (error) {
@@ -1912,17 +1997,18 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
     const agentsSnapshot = readAgentsFromState(get());
     unconfirmedDeletedAgentIds.add(agentId);
     try {
-      await rpc('agents.delete', { agentId, deleteFiles: true }, {
+      await rpc('agents.delete', { agentId, deleteFiles }, {
         scope: managementScope,
         target: buildSubagentTarget(managementScope, agentId),
       });
+      if (!isCurrentScope(managementScope)) { useChatStore.getState().forgetAgentSessions(agentId, managementScope.endpoint); return; }
       unconfirmedDeletedAgentIds.delete(agentId);
       const normalizedAgentId = normalizeAgentIdForComparison(agentId);
       if (normalizedAgentId) pendingDeletedAgentIds.add(normalizedAgentId);
       set((state) => {
         const nextAgents = state.agentsResource.data.filter((entry) => entry.id !== agentId);
         const selectedAgentId = state.selectedAgentId === agentId
-          ? (nextAgents[0]?.id ?? null)
+          ? (managementScope.endpoint.kind === 'native-runtime' && managementScope.endpoint.runtimeAdapterId === 'matcha-agent' ? null : (nextAgents[0]?.id ?? null))
           : state.selectedAgentId;
         const managedAgentId = state.managedAgentId === agentId
           ? null
@@ -1936,8 +2022,9 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
           managedAgentId,
         };
       });
-      useChatStore.getState().forgetAgentSessions(agentId);
+      useChatStore.getState().forgetAgentSessions(agentId, managementScope.endpoint);
       if (agentsSnapshot.find((agent) => agent.id === agentId)?.sealed) await get().loadCloudPackages();
+      if (!isCurrentScope(managementScope)) return;
       try {
         persistAvatarPresentation(agentId, undefined);
       } catch {
@@ -1945,12 +2032,13 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }
     } catch (error) {
       const message = getErrorMessage(error) || 'Failed to delete subagent';
-      set({ error: message });
+      if (isCurrentScope(managementScope)) set({ error: message });
       throw error instanceof Error ? error : new Error(message, { cause: error });
     } finally {
-      finishGlobalMutating(set);
+      if (isCurrentScope(managementScope)) finishGlobalMutating(set);
     }
-  }, agentId),
+  }, agentId);
+  },
 }));
 
 function normalizeSubagentsStatePatch<T extends Partial<SubagentsState> | SubagentsState>(patch: T): T {
@@ -1995,3 +2083,7 @@ useSubagentsStore.getState = (() => {
     agents: readAgentsFromState(state),
   };
 }) as typeof useSubagentsStore.getState;
+
+useRuntimeEndpointsStore.subscribe(() => {
+  activateManagementScope(selectedManagementScope());
+});

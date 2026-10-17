@@ -23,12 +23,13 @@ interface TaskCenterState {
   mutating: boolean;
   initialized: boolean;
   error: string | null;
-  init: (session?: { recordKey: string; sessionIdentity: SessionIdentity }) => Promise<void>;
+  init: (session?: { recordKey: string; sessionIdentity: SessionIdentity } | null) => Promise<void>;
   refreshTasks: (options?: { sessionKey?: string; sessionIdentity?: SessionIdentity; teamKey?: string; silent?: boolean; background?: boolean; invalidate?: boolean }) => Promise<void>;
   deleteTaskById: (payload: { taskId: string; sessionKey?: string; sessionIdentity?: SessionIdentity; teamKey?: string }) => Promise<void>;
   clearError: () => void;
 }
 
+let activeTaskCenterMutation: symbol | null = null;
 const taskCenterInitPromises = new Map<string, Promise<void>>();
 const taskCenterRefreshPromises = new Map<string, {
   promise: Promise<TaskListSnapshot | null>;
@@ -47,25 +48,6 @@ function scopeKeyForOptions(sessionKey: string, teamKey?: string): string {
   return teamKey && teamKey.trim().length > 0 ? `team:${teamKey.trim()}` : scopeKeyForSession(sessionKey);
 }
 
-function taskScopeForOptions(sessionKey: string, sessionIdentity: SessionIdentity, teamKey?: string): TaskScope {
-  const normalizedTeamKey = teamKey?.trim();
-  if (normalizedTeamKey) {
-    return {
-      type: 'team',
-      key: `team:${normalizedTeamKey}`,
-      label: `Team · ${normalizedTeamKey}`,
-      teamKey: normalizedTeamKey,
-    };
-  }
-  return {
-    type: 'session',
-    key: scopeKeyForSession(sessionKey),
-    label: sessionIdentity.sessionKey,
-    sessionKey: sessionIdentity.sessionKey,
-    agentId: sessionIdentity.agentId,
-  };
-}
-
 function reportTaskCenterSnapshot(sessionKey: string, sessionIdentity: SessionIdentity, snapshot: TaskListSnapshot): void {
   useTaskSnapshotStore.getState().reportTaskCenterSnapshot({
     sessionKey: sessionIdentity.sessionKey,
@@ -75,16 +57,6 @@ function reportTaskCenterSnapshot(sessionKey: string, sessionIdentity: SessionId
     todos: snapshot.todos,
     source: 'replay',
   });
-}
-
-function reportEmptyTaskSnapshot(sessionKey: string, sessionIdentity: SessionIdentity, teamKey?: string): TaskScope {
-  const scope = taskScopeForOptions(sessionKey, sessionIdentity, teamKey);
-  reportTaskCenterSnapshot(sessionKey, sessionIdentity, {
-    scope,
-    tasks: [],
-    todos: [],
-  });
-  return scope;
 }
 
 export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
@@ -101,10 +73,12 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
   init: async (session) => {
     const resolvedSessionKey = typeof session?.recordKey === 'string' && session.recordKey.trim().length > 0
       ? session.recordKey.trim()
-      : get().sessionKey;
-    const sessionIdentity = session?.sessionIdentity ?? get().sessionIdentity;
+      : session === null ? null : get().sessionKey;
+    const sessionIdentity = session === null ? null : session?.sessionIdentity ?? get().sessionIdentity;
     if (!resolvedSessionKey || !sessionIdentity) {
+      activeTaskCenterMutation = null;
       set({
+        mutating: false,
         sessionKey: null,
         sessionIdentity: null,
         selectedScopeKey: null,
@@ -116,19 +90,22 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
       });
       return;
     }
+    activeTaskCenterMutation = null;
+    set({
+      mutating: false,
+      sessionKey: resolvedSessionKey,
+      sessionIdentity,
+      selectedScopeKey: scopeKeyForSession(resolvedSessionKey),
+      selectedScope: null,
+      initialLoading: true,
+      refreshing: false,
+      error: null,
+    });
     const pendingInit = taskCenterInitPromises.get(scopeKeyForSession(resolvedSessionKey));
     if (pendingInit) {
       await pendingInit;
       return;
     }
-    set({
-      sessionKey: resolvedSessionKey,
-      sessionIdentity,
-      selectedScopeKey: scopeKeyForSession(resolvedSessionKey),
-      initialLoading: true,
-      refreshing: false,
-      error: null,
-    });
     const task = get().refreshTasks({ sessionKey: resolvedSessionKey, sessionIdentity, silent: true })
       .finally(() => {
         if (get().sessionKey === resolvedSessionKey) {
@@ -164,7 +141,11 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
       && get().sessionIdentity !== null
       && buildSessionIdentityKey(get().sessionIdentity!) === identityKey;
     if (!background) {
+      const selectionChanged = get().sessionKey !== resolvedSessionKey || get().selectedScopeKey !== requestedScopeKey
+        || !get().sessionIdentity || buildSessionIdentityKey(get().sessionIdentity!) !== identityKey;
+      if (selectionChanged) activeTaskCenterMutation = null;
       set({
+        ...(selectionChanged ? { mutating: false, selectedScope: null } : {}),
         sessionKey: resolvedSessionKey,
         sessionIdentity,
         selectedScopeKey: requestedScopeKey,
@@ -212,10 +193,8 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     try {
       const snapshot = await pending.promise;
       if (!snapshot) {
-        // Keep the public foreground unsupported behavior; background is not an empty snapshot.
         if (background) return;
-        const emptyScope = reportEmptyTaskSnapshot(resolvedSessionKey, sessionIdentity, teamKey);
-        if (ownsSelection()) set({ selectedScope: emptyScope, refreshing: false, error: null, initialized: true });
+        if (ownsSelection()) set({ refreshing: false, error: 'Task management is not available for this session', initialized: true });
         return;
       }
       reportTaskCenterSnapshot(resolvedSessionKey, sessionIdentity, snapshot);
@@ -248,10 +227,15 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     }
     const selectedScope = get().selectedScope;
     const activeTeamKey = teamKey ?? selectedScope?.teamKey;
+    const mutation = Symbol();
+    activeTaskCenterMutation = mutation;
+    const ownsSelection = () => activeTaskCenterMutation === mutation;
+    const refresh = () => get().refreshTasks({ sessionKey: resolvedSessionKey, sessionIdentity: resolvedSessionIdentity,
+      ...(activeTeamKey ? { teamKey: activeTeamKey } : {}), silent: true, invalidate: true, background: true });
     set({ mutating: true, error: null });
     try {
       if (!await isTaskManagementAvailable(resolvedSessionIdentity)) {
-        set({ error: 'Task management is not available for this session' });
+        if (ownsSelection()) set({ error: 'Task management is not available for this session' });
         return;
       }
       const result = await updateTask({
@@ -261,18 +245,17 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
         status: 'deleted',
         ...(activeTeamKey ? { teamKey: activeTeamKey } : {}),
       });
-      const refreshOptions = { sessionKey: resolvedSessionKey, sessionIdentity: resolvedSessionIdentity, ...(activeTeamKey ? { teamKey: activeTeamKey } : {}), silent: true, invalidate: true };
       if (result.outcome !== 'applied') {
-        await get().refreshTasks(refreshOptions);
-        set({ error: `Task delete was ${result.outcome}` });
+        await refresh();
+        if (ownsSelection()) set({ error: `Task delete was ${result.outcome}` });
         return;
       }
       reportTaskCenterSnapshot(resolvedSessionKey, resolvedSessionIdentity, result.snapshot);
-      await get().refreshTasks(refreshOptions);
+      await refresh();
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      if (ownsSelection()) set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
-      set({ mutating: false });
+      if (ownsSelection()) { activeTaskCenterMutation = null; set({ mutating: false }); }
     }
   },
 

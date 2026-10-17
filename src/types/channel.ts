@@ -12,6 +12,7 @@ export type ChannelType =
   | 'telegram'
   | 'discord'
   | 'openclaw-weixin'
+  | 'weixin'
   | 'signal'
   | 'feishu'
   | 'wecom'
@@ -26,7 +27,7 @@ export type ChannelType =
 /**
  * Channel connection status
  */
-export type ChannelStatus = 'connected' | 'disconnected' | 'connecting' | 'error';
+export type ChannelStatus = 'connected' | 'disconnected' | 'connecting' | 'error' | 'unknown';
 
 /**
  * Channel connection type
@@ -114,6 +115,7 @@ export const CHANNEL_ICON_IDS: Record<ChannelType, ChannelIconId> = {
   telegram: 'telegram',
   discord: 'discord',
   'openclaw-weixin': 'wechat',
+  weixin: 'wechat',
   signal: 'signal',
   feishu: 'feishu',
   wecom: 'wecom',
@@ -135,6 +137,7 @@ export const CHANNEL_NAMES: Record<ChannelType, string> = {
   telegram: 'Telegram',
   discord: 'Discord',
   'openclaw-weixin': 'WeChat',
+  weixin: 'WeChat (Matcha Agent)',
   signal: 'Signal',
   feishu: 'Feishu / Lark',
   wecom: 'WeCom',
@@ -151,6 +154,17 @@ export const CHANNEL_NAMES: Record<ChannelType, string> = {
  * Channel metadata with configuration information
  */
 export const CHANNEL_META: Record<ChannelType, ChannelMeta> = {
+  weixin: {
+    id: 'weixin', name: 'WeChat (Matcha Agent)', iconId: 'wechat',
+    description: '绑定所选 Agent 的原生会话，配置于下次会话启动生效；每个 Agent 仅支持一个微信账号。',
+    connectionType: 'qr', setupFlows: [{ mode: 'guided', flow: { kind: 'qr-login' } }],
+    configFields: [
+      { key: 'sessionId', label: 'Session ID', type: 'text', required: true },
+      { key: 'enabled', label: '启用会话绑定', type: 'select', required: true,
+        options: [{ value: 'true', label: '启用' }, { value: 'false', label: '停用' }] },
+    ],
+    instructions: ['请选择真实 Agent，并填写属于该 Agent 的 Session ID。', '扫码成功只表示账号登录，不代表会话消费者在线。'],
+  },
   'openclaw-weixin': {
     id: 'openclaw-weixin',
     name: 'WeChat',

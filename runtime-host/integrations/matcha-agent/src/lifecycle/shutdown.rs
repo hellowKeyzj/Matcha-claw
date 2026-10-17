@@ -4,19 +4,20 @@ use foundation::process::{
     ProcessObservation,
     supervision::{GracefulStop, GracefulStopResult, PolicyFuture},
 };
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::stdio::MatchaStdinControl;
+use crate::client::{Client, Delivery, Error};
 
 const GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 pub struct MatchaGracefulStop {
-    stdin: MatchaStdinControl,
+    client: Client,
 }
 
 impl MatchaGracefulStop {
-    pub fn new(stdin: MatchaStdinControl) -> Self {
-        Self { stdin }
+    pub fn new(client: Client) -> Self {
+        Self { client }
     }
 }
 
@@ -30,70 +31,82 @@ impl GracefulStop for MatchaGracefulStop {
         _process: ProcessObservation,
         cancellation: CancellationToken,
     ) -> PolicyFuture<GracefulStopResult> {
-        let stdin = self.stdin.clone();
-        Box::pin(request_stdin_stop(cancellation, async move {
-            stdin.close_stdin().await
-        }))
+        let client = self.client.clone();
+        Box::pin(async move {
+            request_shutdown(
+                &cancellation,
+                client.call_cancellable("server.shutdown", json!({}), &cancellation),
+            )
+            .await
+        })
     }
 }
 
-async fn request_stdin_stop(
-    cancellation: CancellationToken,
-    request: impl Future<Output = std::io::Result<()>>,
+async fn request_shutdown(
+    cancellation: &CancellationToken,
+    request: impl Future<Output = Result<Value, Error>>,
 ) -> GracefulStopResult {
     tokio::select! {
         biased;
         _ = cancellation.cancelled() => GracefulStopResult::Cancelled,
         result = request => match result {
-            Ok(()) => GracefulStopResult::Requested,
-            Err(_) => GracefulStopResult::Rejected,
+            Ok(response) if response.get("status").and_then(Value::as_str) == Some("stopping") => GracefulStopResult::Requested,
+            Err(error) if error.is_cancelled() => GracefulStopResult::Cancelled,
+            // Delivery uncertainty is not a rejection, nor proof of exit. The
+            // Foundation owner must observe exit and retain independent cleanup failures.
+            Err(error) if error.delivery() == Delivery::Unknown => GracefulStopResult::Requested,
+            _ => GracefulStopResult::Rejected,
         },
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{future, io};
-
     use super::*;
+    use crate::lifecycle::secret::Secret;
+    use std::{future, sync::Arc};
 
     #[test]
     fn grace_period_is_five_seconds() {
-        let stop = MatchaGracefulStop::new(MatchaStdinControl::new());
-
+        let client = Client::new(
+            "127.0.0.1:19001".parse().unwrap(),
+            Arc::new(Secret::new("test-secret".into()).unwrap()),
+        );
+        let stop = MatchaGracefulStop::new(client);
         assert_eq!(stop.grace_period(), Duration::from_secs(5));
     }
 
     #[tokio::test]
-    async fn successful_stdin_close_is_requested() {
+    async fn accepted_shutdown_is_only_requested() {
         assert_eq!(
-            request_stdin_stop(CancellationToken::new(), future::ready(Ok(()))).await,
-            GracefulStopResult::Requested,
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_stdin_close_is_rejected() {
-        assert_eq!(
-            request_stdin_stop(
-                CancellationToken::new(),
-                future::ready(Err(io::Error::other("fixed close failure"))),
+            request_shutdown(
+                &CancellationToken::new(),
+                future::ready(Ok(json!({ "status": "stopping" })))
             )
             .await,
-            GracefulStopResult::Rejected,
+            GracefulStopResult::Requested
         );
     }
 
     #[tokio::test]
-    async fn cancellation_precedes_an_already_completed_close() {
-        for request_result in [Ok(()), Err(io::Error::other("fixed close failure"))] {
-            let cancellation = CancellationToken::new();
-            cancellation.cancel();
+    async fn unexpected_shutdown_reply_is_rejected() {
+        assert_eq!(
+            request_shutdown(&CancellationToken::new(), future::ready(Ok(json!({})))).await,
+            GracefulStopResult::Rejected
+        );
+    }
 
-            assert_eq!(
-                request_stdin_stop(cancellation, future::ready(request_result)).await,
-                GracefulStopResult::Cancelled,
-            );
-        }
+    #[tokio::test]
+    async fn cancellation_precedes_an_already_completed_request() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert_eq!(
+            request_shutdown(
+                &cancellation,
+                future::ready(Ok(json!({ "status": "stopping" })))
+            )
+            .await,
+            GracefulStopResult::Cancelled
+        );
     }
 }

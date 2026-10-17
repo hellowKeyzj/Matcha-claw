@@ -9,11 +9,11 @@ import {
 import {
   type Endpoint,
   type FileTarget,
-  type SessionScope,
+  type AgentScope,
   isEndpoint,
   isFileRelativePath,
   isFileTarget,
-  isSessionScope,
+  isAgentScope,
 } from './contract';
 
 const MAX_CONTENT_BYTES = 2 * 1024 * 1024;
@@ -26,11 +26,11 @@ const UNAVAILABLE = {
 type WorkspaceWriteRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.writeText';
-  scope: SessionScope;
+  scope: AgentScope;
   target: FileTarget;
   input: Readonly<{
     endpoint: Endpoint;
-    sessionKey: string;
+    agentId: string;
     relativePath: string;
     content: string;
   }>;
@@ -85,17 +85,19 @@ function isWorkspaceWriteRequest(value: unknown): value is WorkspaceWriteRequest
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && value.operationId === 'files.writeText'
-    && isSessionScope(value.scope)
+    && isAgentScope(value.scope)
     && isFileTarget(value.target)
     && isInput(value.input)
-    && value.scope.sessionKey === value.input.sessionKey;
+    && value.scope.agentId === value.input.agentId
+    && value.scope.endpoint.runtimeAdapterId === value.input.endpoint.runtimeAdapterId
+    && value.scope.endpoint.runtimeInstanceId === value.input.endpoint.runtimeInstanceId;
 }
 
 function isInput(value: unknown): value is WorkspaceWriteRequest['input'] {
   return isRecord(value)
-    && hasExactKeys(value, ['endpoint', 'sessionKey', 'relativePath', 'content'])
+    && hasExactKeys(value, ['endpoint', 'agentId', 'relativePath', 'content'])
     && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.sessionKey)
+    && isNonEmptyBoundedText(value.agentId)
     && isFileRelativePath(value.relativePath)
     && typeof value.content === 'string'
     && Buffer.byteLength(value.content, 'utf8') <= MAX_CONTENT_BYTES;

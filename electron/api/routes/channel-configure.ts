@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { ChannelCatalogTransport } from '../../main/runtime-host-delivery/transport/channels/catalog';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
 const INVALID = {
@@ -12,13 +13,14 @@ const UNAVAILABLE = {
   error: 'Channel configuration is unavailable',
 } as const;
 
-type FormRequest = Readonly<{ action: 'form'; channel: string }>;
+type FormRequest = Readonly<{ action: 'form'; channel: string; scope?: ProductRuntimeScope }>;
 type ApplyRequest = Readonly<{
   action: 'apply';
   channel: string;
   accountId: string;
   agentId?: string;
   values: Record<string, unknown>;
+  scope?: ProductRuntimeScope;
 }>;
 
 export async function handleChannelConfigureRoutes(
@@ -42,7 +44,7 @@ export async function handleChannelConfigureRoutes(
   const finish = beginChannelTrace(() => isApplyRequest(body) ? 'route.configure.apply' : 'route.configure.form', traceId);
   try {
     if (isFormRequest(body)) {
-      const response = await transport.form(body.channel, traceId);
+      const response = await transport.form(body.channel, traceId, body.scope);
       finish?.(response.status, response.body);
       sendJson(res, response.status, response.body);
       return true;
@@ -53,6 +55,7 @@ export async function handleChannelConfigureRoutes(
         accountId: body.accountId,
         ...(body.agentId ? { agentId: body.agentId } : {}),
         values: body.values,
+        ...(body.scope === undefined ? {} : { scope: body.scope }),
       }, traceId);
       finish?.(response.status, response.body);
       sendJson(res, response.status, response.body);
@@ -71,7 +74,8 @@ export async function handleChannelConfigureRoutes(
 
 function isFormRequest(value: unknown): value is FormRequest {
   return isRecord(value)
-    && Object.keys(value).length === 2
+    && Object.keys(value).every((key) => ['action', 'channel', 'scope'].includes(key))
+    && (!Object.hasOwn(value, 'scope') || isProductRuntimeScope(value.scope))
     && value.action === 'form'
     && isIdentity(value.channel);
 }
@@ -80,12 +84,14 @@ function isApplyRequest(value: unknown): value is ApplyRequest {
   if (!isRecord(value)) return false;
   const keys = Object.keys(value);
   return keys.length >= 4
-    && keys.length <= 5
-    && keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'values'].includes(key))
+    && keys.length <= 6
+    && keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'values', 'scope'].includes(key))
+    && (!Object.hasOwn(value, 'scope') || isProductRuntimeScope(value.scope))
     && value.action === 'apply'
     && isIdentity(value.channel)
     && isIdentity(value.accountId)
-    && (value.agentId === undefined || isIdentity(value.agentId))
+    && (value.agentId === undefined || (isProductRuntimeScope(value.scope) && value.scope.endpoint.runtimeAdapterId === 'matcha-agent'
+      ? typeof value.agentId === 'string' && /^[A-Za-z0-9_-]+$/.test(value.agentId) : isIdentity(value.agentId)))
     && isRecord(value.values);
 }
 

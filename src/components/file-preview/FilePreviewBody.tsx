@@ -42,7 +42,6 @@ interface FilePreviewBodyProps {
   headerLeadingAccessory?: ReactNode;
   headerAccessory?: ReactNode;
   headerTrailingAccessory?: ReactNode;
-  sessionIdentity?: ArtifactPreviewTarget['sessionIdentity'];
   workspaceContext?: WorkspaceFileContext;
 }
 
@@ -108,6 +107,7 @@ function PreviewFallbackAction({
   revealLabel,
   onOpen,
   onReveal,
+  disabled,
   className,
 }: {
   label: string;
@@ -116,6 +116,7 @@ function PreviewFallbackAction({
   revealLabel: string;
   onOpen: () => void;
   onReveal: () => void;
+  disabled?: boolean;
   className?: string;
 }) {
   return (
@@ -124,11 +125,11 @@ function PreviewFallbackAction({
         <p className="text-sm text-foreground">{label}</p>
         <p className="mt-2 text-sm text-muted-foreground">{description}</p>
         <div className="mt-4 flex items-center justify-center gap-2">
-          <Button type="button" size="sm" className="gap-1.5" onClick={onOpen}>
+          <Button type="button" size="sm" className="gap-1.5" onClick={onOpen} disabled={disabled}>
             <ExternalLink className="h-3.5 w-3.5" />
             {openLabel}
           </Button>
-          <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={onReveal}>
+          <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={onReveal} disabled={disabled}>
             <FolderOpen className="h-3.5 w-3.5" />
             {revealLabel}
           </Button>
@@ -146,7 +147,6 @@ export function FilePreviewBody({
   headerLeadingAccessory,
   headerAccessory,
   headerTrailingAccessory,
-  sessionIdentity,
   workspaceContext,
 }: FilePreviewBodyProps) {
   const { t } = useTranslation(['chat', 'common']);
@@ -155,18 +155,18 @@ export function FilePreviewBody({
   const [pathCopied, setPathCopied] = useState(false);
   const previewInstanceKey = `${file.filePath || file.fileName}:${mode}`;
   const shouldUseInlineSnapshot = file.sourceTool !== 'write' && !!file.content;
-  const fileSessionIdentity = sessionIdentity ?? file.sessionIdentity;
-  const fileEndpoint = fileSessionIdentity?.endpoint;
-  const fileSessionKey = fileSessionIdentity?.sessionKey;
+  const fileAgentScope = workspaceContext?.agentScope;
+  const fileEndpoint = fileAgentScope?.endpoint;
+  const fileAgentId = fileAgentScope?.agentId;
   const transportRelativePath = resolveWorkspaceRelativePath(
     file.relativePath ?? file.filePath,
     workspaceContext?.workspaceRoot,
   );
-  const canDirectOpen = !!file.filePath;
+  const canDirectOpen = /^(?:[A-Za-z]:[\\/]|\/|\\\\)/u.test(file.filePath);
   const fileTooLargeForPreview = typeof file.fileSize === 'number' && file.fileSize > INLINE_BINARY_PREVIEW_MAX_BYTES;
   const shouldConfirmDirectOpen = shouldOfferDirectOpenFallback(file.ext, file.fileSize);
   const openInSystemApp = useCallback(async () => {
-    if (!file.filePath) {
+    if (!canDirectOpen) {
       return;
     }
     try {
@@ -188,16 +188,16 @@ export function FilePreviewBody({
         error: error instanceof Error ? error.message : String(error),
       }));
     }
-  }, [file.fileName, file.filePath, file.fileSize, shouldConfirmDirectOpen, t]);
+  }, [canDirectOpen, file.fileName, file.filePath, file.fileSize, shouldConfirmDirectOpen, t]);
   const revealInFileManager = useCallback(async () => {
-    if (!file.filePath) {
+    if (!canDirectOpen) {
       return;
     }
     const success = await revealArtifactPathInFileManager(file.filePath);
     if (!success) {
       toast.error(t('artifacts.revealFailed'));
     }
-  }, [file.filePath, t]);
+  }, [canDirectOpen, file.filePath, t]);
 
   useEffect(() => {
     setPathCopied(false);
@@ -239,15 +239,15 @@ export function FilePreviewBody({
 
     void (async () => {
       try {
-        if (!fileEndpoint || !fileSessionKey) {
-          throw new Error('SessionIdentity is required');
+        if (!fileEndpoint || !fileAgentId) {
+          throw new Error('AgentScope is required');
         }
         if (!transportRelativePath) {
           throw new Error('Workspace relative path is unavailable');
         }
         const result: ReadTextFileResult = await hostFileReadText({
           endpoint: fileEndpoint,
-          sessionKey: fileSessionKey,
+          agentId: fileAgentId,
           relativePath: transportRelativePath,
         });
         if (cancelled) {
@@ -280,7 +280,7 @@ export function FilePreviewBody({
     return () => {
       cancelled = true;
     };
-  }, [fileEndpoint, file.filePath, fileSessionKey, shouldLoadTextPreview, transportRelativePath]);
+  }, [fileEndpoint, file.filePath, fileAgentId, shouldLoadTextPreview, transportRelativePath]);
 
   const shouldLoadBinaryPreview = useMemo(() => (
     mode === 'preview' && file.contentType === 'image'
@@ -298,15 +298,15 @@ export function FilePreviewBody({
 
     void (async () => {
       try {
-        if (!fileEndpoint || !fileSessionKey) {
-          throw new Error('SessionIdentity is required');
+        if (!fileEndpoint || !fileAgentId) {
+          throw new Error('AgentScope is required');
         }
         if (!transportRelativePath) {
           throw new Error('Workspace relative path is unavailable');
         }
         const result = await hostFileReadBinary({
           endpoint: fileEndpoint,
-          sessionKey: fileSessionKey,
+          agentId: fileAgentId,
           relativePath: transportRelativePath,
           maxBytes: INLINE_BINARY_PREVIEW_MAX_BYTES,
         });
@@ -343,12 +343,13 @@ export function FilePreviewBody({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [file.filePath, file.mimeType, fileEndpoint, fileSessionKey, shouldLoadBinaryPreview, transportRelativePath]);
+  }, [file.filePath, file.mimeType, fileEndpoint, fileAgentId, shouldLoadBinaryPreview, transportRelativePath]);
 
   const content = (() => {
     if (file.isDirectory) {
       return (
         <PreviewFallbackAction
+          disabled={!canDirectOpen}
           label={t('artifacts.directoryPreviewTitle')}
           description={t('artifacts.directoryPreviewDescription')}
           openLabel={shouldConfirmDirectOpen ? t('artifacts.openDirectly') : t('artifacts.openExternal')}
@@ -419,7 +420,7 @@ export function FilePreviewBody({
           key={previewInstanceKey}
           relativePath={transportRelativePath}
           fileName={file.fileName}
-          sessionIdentity={fileSessionIdentity}
+          workspaceContext={workspaceContext}
           className="h-full"
         />
       );
@@ -470,7 +471,7 @@ export function FilePreviewBody({
         <SheetViewer
           key={previewInstanceKey}
           relativePath={transportRelativePath}
-          sessionIdentity={fileSessionIdentity}
+          workspaceContext={workspaceContext}
           className="h-full"
         />
       );
@@ -612,6 +613,7 @@ export function FilePreviewBody({
               }}
               title={t('artifacts.reveal')}
               aria-label={t('artifacts.reveal')}
+              disabled={!canDirectOpen}
             >
               <FolderOpen className="h-3.5 w-3.5" />
             </Button>
@@ -625,6 +627,7 @@ export function FilePreviewBody({
               }}
               title={shouldConfirmDirectOpen ? t('artifacts.openDirectly') : t('artifacts.openExternal')}
               aria-label={shouldConfirmDirectOpen ? t('artifacts.openDirectly') : t('artifacts.openExternal')}
+              disabled={!canDirectOpen}
             >
               <ExternalLink className="h-3.5 w-3.5" />
             </Button>

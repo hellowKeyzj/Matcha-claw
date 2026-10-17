@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use platform::call::CallId;
+use platform::{call::CallId, endpoint::runtime_address::RuntimeEndpoint};
 
 use crate::{
     application::receipts::ConnectorObservationReceipt,
@@ -24,13 +24,14 @@ pub(crate) enum ObservationResult {
     },
 }
 
-pub(crate) struct SessionObservationSubject {
+pub(crate) struct ObservationSubject {
     pub(crate) principal: String,
-    pub(crate) session_identity: SessionIdentity,
+    pub(crate) endpoint: Option<RuntimeEndpoint>,
+    pub(crate) session_identity: Option<SessionIdentity>,
 }
 
 struct ObservationSlot {
-    session: Option<SessionObservationSubject>,
+    session: ObservationSubject,
     state: ObservationState,
 }
 
@@ -51,11 +52,7 @@ pub(crate) enum ObservationReadError {
 }
 
 impl ObservationResults {
-    pub(crate) fn reserve(
-        &self,
-        call_id: &CallId,
-        session: Option<SessionObservationSubject>,
-    ) -> Result<(), ()> {
+    pub(crate) fn reserve(&self, call_id: &CallId, session: ObservationSubject) -> Result<(), ()> {
         let mut slots = self.0.lock().expect("connector observations lock");
         purge(&mut slots);
         if slots.len() >= CAPACITY {
@@ -92,16 +89,17 @@ impl ObservationResults {
         &self,
         call_id: &CallId,
         principal: &str,
+        endpoint: Option<&RuntimeEndpoint>,
         session_identity: Option<&SessionIdentity>,
     ) -> Result<ObservationResult, ObservationReadError> {
         let mut slots = self.0.lock().expect("connector observations lock");
         purge(&mut slots);
         let slot = slots.get(call_id).ok_or(ObservationReadError::Missing)?;
-        match (&slot.session, session_identity) {
-            (None, None) => {}
-            (Some(subject), Some(identity))
-                if subject.principal == principal && &subject.session_identity == identity => {}
-            _ => return Err(ObservationReadError::Missing),
+        if slot.session.principal != principal
+            || slot.session.endpoint.as_ref() != endpoint
+            || slot.session.session_identity.as_ref() != session_identity
+        {
+            return Err(ObservationReadError::Missing);
         }
         match &slot.state {
             ObservationState::Pending => Err(ObservationReadError::Pending),

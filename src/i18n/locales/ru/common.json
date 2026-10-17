@@ -987,6 +987,16 @@
         "loading": "Загрузка...",
         "saving": "Сохранение..."
     },
+    "runtimeScope": {
+        "selectRuntime": "Выбрать среду выполнения",
+        "loading": "Загрузка сред выполнения",
+        "loadFailed": "Не удалось загрузить среды выполнения",
+        "none": "Нет доступных сред выполнения",
+        "starting": "{{runtime}} запускается",
+        "unavailable": "{{runtime}} недоступен",
+        "retry": "Загрузить заново",
+        "selectAgent": "Выбрать агента"
+    },
     "switchboard": {
         "quickSwitch": "Быстрое переключение",
         "runtime": "Runtime",

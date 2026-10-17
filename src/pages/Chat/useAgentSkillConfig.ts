@@ -1,9 +1,11 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { useAgentSkillConfigStore, type AgentSkillConfigView } from '@/stores/agent-skill-config';
+import { buildAgentSkillConfigKey, useAgentSkillConfigStore, type AgentSkillConfigView } from '@/stores/agent-skill-config';
+import type { AgentScope } from '@/types/desktop/runtime-address';
 import type { AgentSkillOption } from './components/AgentSkillConfigPanel';
 
 interface UseAgentSkillConfigInput {
   currentAgentId?: string | null;
+  scope: AgentScope | null;
 }
 
 interface UseAgentSkillConfigResult {
@@ -74,13 +76,14 @@ type LocalSkillSelection = {
   readonly skillIds: readonly string[];
 };
 
-export function useAgentSkillConfig({ currentAgentId }: UseAgentSkillConfigInput): UseAgentSkillConfigResult {
+export function useAgentSkillConfig({ currentAgentId, scope }: UseAgentSkillConfigInput): UseAgentSkillConfigResult {
   const normalizedAgentId = currentAgentId?.trim() || null;
+  const configKey = normalizedAgentId && scope ? buildAgentSkillConfigKey(scope, normalizedAgentId) : null;
   const view = useAgentSkillConfigStore((state) => (
-    normalizedAgentId ? state.viewByAgentId[normalizedAgentId] : undefined
+    configKey ? state.viewByAgentId[configKey] : undefined
   ));
   const loading = useAgentSkillConfigStore((state) => (
-    normalizedAgentId ? state.loadingByAgentId[normalizedAgentId] === true : false
+    configKey ? state.loadingByAgentId[configKey] === true : false
   ));
   const loadAgentSkillConfig = useAgentSkillConfigStore((state) => state.loadAgentSkillConfig);
   const setAgentSkillConfig = useAgentSkillConfigStore((state) => state.setAgentSkillConfig);
@@ -90,10 +93,10 @@ export function useAgentSkillConfig({ currentAgentId }: UseAgentSkillConfigInput
   const savingAgentIdRef = useRef<string | null>(null);
   const writeSeqRef = useRef(0);
 
-  const localSelectedSkillIds = localSelection?.agentId === normalizedAgentId
+  const localSelectedSkillIds = localSelection?.agentId === configKey
     ? localSelection.skillIds
     : null;
-  const savingSkillId = savingSelection?.agentId === normalizedAgentId
+  const savingSkillId = savingSelection?.agentId === configKey
     ? savingSelection.skillId
     : null;
   const isSavingCurrentAgentSkillConfig = savingSkillId !== null;
@@ -127,29 +130,27 @@ export function useAgentSkillConfig({ currentAgentId }: UseAgentSkillConfigInput
   ), [view?.options]);
 
   const prepare = useCallback(() => {
-    if (!normalizedAgentId) {
-      return;
-    }
-    void loadAgentSkillConfig(normalizedAgentId).catch(() => undefined);
-  }, [loadAgentSkillConfig, normalizedAgentId]);
+    if (!normalizedAgentId || !scope) return;
+    void loadAgentSkillConfig(normalizedAgentId, scope).catch(() => undefined);
+  }, [loadAgentSkillConfig, normalizedAgentId, scope]);
 
   const resetSession = useCallback(() => {
     writeSeqRef.current += 1;
     setLocalSelection((currentSelection) => (
-      currentSelection?.agentId === normalizedAgentId ? null : currentSelection
+      currentSelection?.agentId === configKey ? null : currentSelection
     ));
-  }, [normalizedAgentId]);
+  }, [configKey]);
 
   const toggleSkill = useCallback((skillId: string, checked: boolean) => {
     const agentId = normalizedAgentId;
     const currentView = view;
-    if (!agentId || !currentView || currentView.agentId !== agentId || !currentView.revision) {
+    if (!agentId || !scope || !configKey || !currentView || currentView.agentId !== agentId || !currentView.revision) {
       return;
     }
     if (currentView.support.supportType === 'unsupported') {
       return;
     }
-    if (savingAgentIdRef.current === agentId) {
+    if (savingAgentIdRef.current === configKey) {
       return;
     }
 
@@ -171,9 +172,9 @@ export function useAgentSkillConfig({ currentAgentId }: UseAgentSkillConfigInput
       return;
     }
 
-    setLocalSelection({ agentId, skillIds: nextSelectedSkillIds });
-    savingAgentIdRef.current = agentId;
-    setSavingSelection({ agentId, skillId });
+    setLocalSelection({ agentId: configKey, skillIds: nextSelectedSkillIds });
+    savingAgentIdRef.current = configKey;
+    setSavingSelection({ agentId: configKey, skillId });
     const writeSeq = writeSeqRef.current + 1;
     writeSeqRef.current = writeSeq;
 
@@ -184,30 +185,30 @@ export function useAgentSkillConfig({ currentAgentId }: UseAgentSkillConfigInput
         selectedSkillIds: nextSelectedSkillIds,
         inheritedDefaultSkillKeys: currentView.inheritedDefaultSkillKeys,
       }),
-    }).then(() => {
+    }, scope).then(() => {
       if (writeSeqRef.current !== writeSeq) {
         return;
       }
       setLocalSelection((currentSelection) => (
-        currentSelection?.agentId === agentId ? null : currentSelection
+        currentSelection?.agentId === configKey ? null : currentSelection
       ));
     }).catch(() => {
       if (writeSeqRef.current !== writeSeq) {
         return;
       }
       setLocalSelection((currentSelection) => (
-        currentSelection?.agentId === agentId ? null : currentSelection
+        currentSelection?.agentId === configKey ? null : currentSelection
       ));
     }).finally(() => {
-      if (savingAgentIdRef.current !== agentId) {
+      if (savingAgentIdRef.current !== configKey) {
         return;
       }
       savingAgentIdRef.current = null;
       setSavingSelection((currentSavingSelection) => (
-        currentSavingSelection?.agentId === agentId ? null : currentSavingSelection
+        currentSavingSelection?.agentId === configKey ? null : currentSavingSelection
       ));
     });
-  }, [localSelectedSkillIds, normalizedAgentId, selectedSkillIds, setAgentSkillConfig, view]);
+  }, [configKey, localSelectedSkillIds, normalizedAgentId, scope, selectedSkillIds, setAgentSkillConfig, view]);
 
   return {
     selectedSkillIds,

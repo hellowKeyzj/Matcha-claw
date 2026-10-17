@@ -87,6 +87,10 @@ pub(crate) trait RuntimeDriver:
         None
     }
 
+    fn native_policy_ops(&self) -> Option<&dyn security::native_policy::NativePolicyOps> {
+        None
+    }
+
     fn settings_ops(&self) -> Option<&dyn ::settings::ports::SettingsOps> {
         None
     }
@@ -118,6 +122,13 @@ impl security::ports::SecurityRuntimeDirectory for RuntimeDriverDirectory {
         self.openclaw_driver_ref()?.security_ops()
     }
 
+    fn native_policy_ops_for_endpoint(
+        &self,
+        endpoint: &RuntimeEndpoint,
+    ) -> Option<&dyn security::native_policy::NativePolicyOps> {
+        self.driver_ref(endpoint)?.native_policy_ops()
+    }
+
     fn restart_security_runtime<'a>(&'a self) -> security::ports::SecurityFuture<'a, bool> {
         Box::pin(async move {
             let Some(driver) = self.security_driver() else {
@@ -138,14 +149,20 @@ impl settings::ports::SettingsRuntimeDirectory for RuntimeDriverDirectory {
 }
 
 impl ::cron::CronRuntimeDirectory for RuntimeDriverDirectory {
-    fn cron_ops(&self) -> Option<&dyn ::cron::CronOps> {
-        self.openclaw_driver_ref()?.cron_ops()
+    fn cron_ops(&self, endpoint: &RuntimeEndpoint) -> Option<&dyn ::cron::CronOps> {
+        self.driver_ref(endpoint)?.cron_ops()
     }
 }
 
 impl task_manager::TaskRuntimeDirectory for RuntimeDriverDirectory {
-    fn task_ops(&self) -> Option<&dyn task_manager::TaskOps> {
-        self.openclaw_driver_ref()?.task_ops()
+    fn task_ops(
+        &self,
+        scope: &platform::endpoint::runtime_address::RuntimeScope,
+    ) -> Option<&dyn task_manager::TaskOps> {
+        let platform::endpoint::runtime_address::RuntimeScope::Session(identity) = scope else {
+            return None;
+        };
+        self.driver_ref(identity.endpoint())?.task_ops()
     }
 }
 
@@ -163,6 +180,12 @@ impl subagents::SubagentRuntimeDirectory for RuntimeDriverDirectory {
     }
 }
 
+impl skills_module::SkillsRuntimeDirectory for RuntimeDriverDirectory {
+    fn skill_ops(&self, endpoint: &RuntimeEndpoint) -> Option<&dyn skills_module::SkillRuntimeOps> {
+        self.driver_ref(endpoint)?.skill_ops()
+    }
+}
+
 impl workspace::WorkspaceRuntimeDirectory for RuntimeDriverDirectory {
     fn workspace_ops(&self, endpoint: &RuntimeEndpoint) -> Option<&dyn workspace::WorkspaceOps> {
         self.driver_ref(endpoint)?.workspace_ops()
@@ -170,14 +193,20 @@ impl workspace::WorkspaceRuntimeDirectory for RuntimeDriverDirectory {
 }
 
 impl usage::UsageRuntimeDirectory for RuntimeDriverDirectory {
-    fn usage_ops(&self) -> Option<&dyn usage::UsageOps> {
-        self.openclaw_driver_ref()?.usage_ops()
+    fn usage_ops(&self, endpoint: &RuntimeEndpoint) -> Option<&dyn usage::UsageOps> {
+        self.driver_ref(endpoint)?.usage_ops()
     }
 }
 
 impl connectors::ports::ConnectorRuntimeDirectory for RuntimeDriverDirectory {
-    fn connector_ops(&self) -> Option<&dyn connectors::ports::ConnectorOps> {
-        self.openclaw_driver_ref()?.connector_ops()
+    fn connector_endpoints(&self) -> Vec<RuntimeEndpoint> {
+        if self.is_closed() {
+            return Vec::new();
+        }
+        self.drivers.all_drivers_ref()
+            .filter(|driver| driver.connector_ops().is_some())
+            .map(|driver| driver.endpoint())
+            .collect()
     }
 
     fn connector_ops_for_endpoint(
@@ -208,24 +237,16 @@ impl provider_module::ProviderRuntimeDirectory for RuntimeDriverDirectory {
 
     fn provider_runtime_identity_ops(
         &self,
+        endpoint: &RuntimeEndpoint,
     ) -> Option<&dyn provider_module::ProviderRuntimeIdentityOps> {
-        if self.is_closed() {
-            return None;
-        }
-        Some(
-            self.drivers
-                .lookup_ref(&RuntimeDriverIdentity::open_claw().endpoint())
-                .expect("OpenClaw provider identity driver must be registered")
-                .provider_module_runtime_identity_ops()
-                .expect("OpenClaw provider identity ops must be registered"),
-        )
+        self.driver_ref(endpoint)?.provider_module_runtime_identity_ops()
     }
 
     fn provider_private_projection_ops(
         &self,
+        endpoint: &RuntimeEndpoint,
     ) -> Option<&dyn provider_module::ProviderPrivateProjectionOps> {
-        self.openclaw_driver_ref()?
-            .provider_module_private_projection_ops()
+        self.driver_ref(endpoint)?.provider_module_private_projection_ops()
     }
 }
 
@@ -379,7 +400,63 @@ impl RuntimeDriverDirectory {
 }
 
 impl RuntimeDriver for MatchaRuntimeDriver {
+    fn task_ops(&self) -> Option<&dyn task_manager::TaskOps> {
+        Some(self)
+    }
+
+    fn channel_ops(&self) -> Option<&dyn channels::ports::ChannelOps> {
+        Some(self.native_channels())
+    }
+
+    fn subagent_ops(&self) -> Option<&dyn subagents::SubagentOps> {
+        Some(self)
+    }
+
+    fn skill_ops(&self) -> Option<&dyn skills_module::SkillRuntimeOps> {
+        Some(self)
+    }
+
+    fn workspace_ops(&self) -> Option<&dyn workspace::WorkspaceOps> {
+        Some(self)
+    }
+
+    fn connector_ops(&self) -> Option<&dyn ::connectors::ports::ConnectorOps> {
+        Some(self)
+    }
+
+    fn native_policy_ops(&self) -> Option<&dyn security::native_policy::NativePolicyOps> {
+        Some(self)
+    }
+
+    fn runtime_control_ops(&self) -> Option<&dyn RuntimeControlOps> {
+        Some(self)
+    }
+
+    fn cron_ops(&self) -> Option<&dyn ::cron::CronOps> {
+        Some(self)
+    }
+
+    fn usage_ops(&self) -> Option<&dyn ::usage::UsageOps> {
+        Some(self)
+    }
+
     fn host_lifecycle_ops(&self) -> Option<&dyn LifecycleOps> {
+        Some(self)
+    }
+
+    fn provider_module_config_ops(&self) -> Option<&dyn provider_module::ProviderConfigOps> {
+        Some(self)
+    }
+
+    fn provider_module_runtime_identity_ops(
+        &self,
+    ) -> Option<&dyn provider_module::ProviderRuntimeIdentityOps> {
+        Some(self)
+    }
+
+    fn provider_module_private_projection_ops(
+        &self,
+    ) -> Option<&dyn provider_module::ProviderPrivateProjectionOps> {
         Some(self)
     }
 }

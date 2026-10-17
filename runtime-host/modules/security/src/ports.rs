@@ -10,6 +10,11 @@ use crate::{
 pub type SecurityFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait SecurityRuntimeDirectory: Send + Sync {
+    fn native_policy_ops_for_endpoint(
+        &self,
+        endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> Option<&dyn crate::native_policy::NativePolicyOps>;
+
     fn security_ops(&self) -> Option<&dyn SecurityOps>;
 
     fn restart_security_runtime<'a>(&'a self) -> SecurityFuture<'a, bool>;

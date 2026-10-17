@@ -3,6 +3,7 @@ mod api;
 mod application;
 mod domain;
 mod owner;
+pub mod native_policy;
 pub mod ports;
 
 use std::sync::Arc;

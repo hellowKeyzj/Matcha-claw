@@ -338,10 +338,34 @@ impl SealedResourceMeteringBinding {
         package_sha256: &str,
         usage: SealedResourceMeteringUse,
     ) -> Result<Self, SealedResourceError> {
+        Self::for_runtime("openclaw", kind, key, package_sha256, usage)
+    }
+
+    pub(crate) fn skill(
+        target: SealedSkillTarget,
+        key: &str,
+        package_sha256: &str,
+    ) -> Result<Self, SealedResourceError> {
+        Self::for_runtime(
+            target.as_str(),
+            SealedResourceMeteringKind::Skill,
+            key,
+            package_sha256,
+            SealedResourceMeteringUse::Turn,
+        )
+    }
+
+    fn for_runtime(
+        runtime: &str,
+        kind: SealedResourceMeteringKind,
+        key: &str,
+        package_sha256: &str,
+        usage: SealedResourceMeteringUse,
+    ) -> Result<Self, SealedResourceError> {
         let payload = SealedResourceMeteringPayload {
             v: 1,
             kind,
-            runtime: "openclaw",
+            runtime,
             package_sha256,
             key,
             usage,
@@ -385,12 +409,14 @@ struct SealedResourceMeteringPayload<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SealedSkillTarget {
     OpenClaw,
+    MatchaAgent,
 }
 
 impl SealedSkillTarget {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenClaw => "openclaw",
+            Self::MatchaAgent => "matcha-agent",
         }
     }
 }

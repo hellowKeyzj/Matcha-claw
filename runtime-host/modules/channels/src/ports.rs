@@ -37,6 +37,8 @@ pub trait ChannelOps: Send + Sync {
         force: bool,
         timeout_ms: Option<u64>,
         account_id: Option<String>,
+        agent_id: Option<String>,
+        config: Zeroizing<Vec<u8>>,
     ) -> ChannelFuture<'a, ChannelLoginOutcome>;
 
     fn wait_channel_login_owned(

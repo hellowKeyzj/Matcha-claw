@@ -182,12 +182,7 @@
         "retry": "再試行"
     },
     "welcome": {
-        "title": "MatchaClaw チャット",
-        "subtitle": "AI アシスタントの準備ができました。下の入力欄から会話を始めましょう。",
-        "askQuestions": "質問する",
-        "askQuestionsDesc": "あらゆるトピックについて回答を得る",
-        "creativeTasks": "クリエイティブタスク",
-        "creativeTasksDesc": "ライティング、ブレスト、アイデア"
+        "title": "今日は何をしますか？"
     },
     "input": {
         "teamDesignStart": "実行グラフを設計",
@@ -392,6 +387,7 @@
         "deleted": "削除",
         "revealFailed": "ファイルマネージャーで場所を表示できませんでした",
         "workspaceEmpty": "参照できるワークスペースディレクトリがありません。",
+        "workspaceLoadError": "ファイルを読み込めません",
         "workspaceLoadFailed": "ワークスペースの読み込みに失敗しました: {{error}}"
     },
     "approval": {

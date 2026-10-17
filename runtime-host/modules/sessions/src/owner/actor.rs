@@ -740,6 +740,10 @@ impl SessionLane {
                 let outcome = self.handle_approval(shared, command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
+            Question { command, reply } => {
+                let outcome = self.handle_question(shared, command).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
             ModelSelection { command, reply } => {
                 let outcome = self.handle_model_selection(shared, command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
@@ -1554,20 +1558,23 @@ impl SessionLane {
         lane_key: &str,
         command: crate::delete::SessionDeleteCommand,
     ) -> SessionDeleteOutcome {
-        let driver = match shared
-            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
+        if command.identity.validate().is_err()
+            || command.identity.endpoint
+                != crate::state::SessionEndpoint::local(command.identity.provider())
         {
+            return SessionDeleteOutcome::TargetRejected;
+        }
+        let Some(endpoint) = identity_endpoint(&command.identity) else {
+            return SessionDeleteOutcome::TargetRejected;
+        };
+        let driver = match shared.running_session_driver(Some(endpoint)) {
             Ok(driver) => driver,
             Err(_) => return SessionDeleteOutcome::Unknown,
         };
         let Some(ops) = driver.session_ops() else {
             return SessionDeleteOutcome::Unknown;
         };
-        let identity = SessionIdentity {
-            session_key: command.session_key.clone(),
-            endpoint: crate::state::SessionEndpoint::local(SessionProvider::OpenClaw),
-            agent_id: command.agent_id.clone(),
-        };
+        let identity = command.identity.clone();
         let outcome = ops.delete_session(command).await;
         if outcome == SessionDeleteOutcome::Succeeded {
             self.retire_deleted_receive(shared, &identity);
@@ -1582,9 +1589,16 @@ impl SessionLane {
         shared: &SessionShared,
         command: crate::rename::SessionRenameCommand,
     ) -> SessionRenameOutcome {
-        let driver = match shared
-            .running_session_driver(Some(RuntimeDriverIdentity::open_claw().endpoint()))
+        if command.identity.validate().is_err()
+            || command.identity.endpoint
+                != crate::state::SessionEndpoint::local(command.identity.provider())
         {
+            return SessionRenameOutcome::TargetRejected;
+        }
+        let Some(endpoint) = identity_endpoint(&command.identity) else {
+            return SessionRenameOutcome::TargetRejected;
+        };
+        let driver = match shared.running_session_driver(Some(endpoint)) {
             Ok(driver) => driver,
             Err(_) => return SessionRenameOutcome::Unknown,
         };
@@ -1633,8 +1647,11 @@ impl SessionLane {
             Err(RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending) => {
                 return SessionPermissionOutcome::Unavailable;
             }
-            Err(RuntimeOperationFailure::TargetRejected | RuntimeOperationFailure::Unknown) => {
-                return SessionPermissionOutcome::Unavailable;
+            Err(RuntimeOperationFailure::TargetRejected) => {
+                return SessionPermissionOutcome::Rejected;
+            }
+            Err(RuntimeOperationFailure::Unknown) => {
+                return SessionPermissionOutcome::Unknown;
             }
         };
         let Some(ops) = driver.session_ops() else {
@@ -1767,6 +1784,10 @@ impl SessionLane {
             }
             SessionQuery::PendingApprovals { command, reply } => {
                 let outcome = shared.handle_pending_approvals(command).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
+            SessionQuery::PendingQuestions { command, reply } => {
+                let outcome = self.handle_pending_questions(shared, command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             SessionQuery::Observe { command, reply } => self.observe(shared, command, reply, call).await,

@@ -63,7 +63,9 @@ impl SessionAdmission {
         if input.endpoint != self.endpoint {
             return Err(InvalidSessionCreate);
         }
-        if !valid_agent_id(&input.agent_id) {
+        if !valid_identity(&input.agent_id, MAX_SESSION_KEY_BYTES)
+            || (self.provider == SessionProvider::OpenClaw && !valid_agent_id(&input.agent_id))
+        {
             return Err(InvalidSessionCreate);
         }
         let endpoint_session_id = match input.endpoint_session_id {
@@ -73,6 +75,7 @@ impl SessionAdmission {
                 }
                 endpoint_session_id
             }
+            None if self.provider == SessionProvider::MatchaAgent => random_uuid_v4()?,
             None => generated_endpoint_session_id(now_ms)?,
         };
         let session_key = session_key(&input.agent_id, &endpoint_session_id)
@@ -105,7 +108,7 @@ impl SessionCreateCommand {
         endpoint_session_id: String,
         session_key: String,
     ) -> Result<Self, InvalidSessionCreate> {
-        if !valid_identity(&agent_id, MAX_AGENT_ID_BYTES)
+        if !valid_identity(&agent_id, crate::state::MAX_ID_BYTES)
             || !valid_identity(&endpoint_session_id, MAX_ENDPOINT_SESSION_ID_BYTES)
             || !valid_identity(&session_key, MAX_SESSION_KEY_BYTES)
         {
@@ -362,7 +365,7 @@ mod tests {
         let key = command.session_key().to_owned();
         let native_id = command.endpoint_session_id();
 
-        assert!(native_id.starts_with("session-7-"));
+        assert_eq!(native_id.len(), 36);
         assert!(!native_id.contains(':'));
         assert_eq!(key, format!("matcha-agent:main:{native_id}"));
     }

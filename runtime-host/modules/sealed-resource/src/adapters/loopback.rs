@@ -42,16 +42,19 @@ impl Dependencies {
 pub(crate) fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
     ModuleDescriptor::new(
         ModuleId::new("sealed-resource"),
-        vec![RouteDescriptor::bound(
-            "sealed-resource.loopback",
-            &[
-                RoutePath::ExactWithQuery(AUTHORIZE_PACKAGE_ENDPOINT),
-                RoutePath::ExactWithQuery(CLOUD_PACKAGES_ENDPOINT),
-                RoutePath::ExactWithQuery(CLEAR_AUTHORIZATIONS_ENDPOINT),
-            ],
-            head_plan,
-            move |request| route(dependencies.clone(), request),
-        )],
+        vec![
+            crate::adapters::native::descriptor(dependencies.sealed_resource.native_skills.clone()),
+            RouteDescriptor::bound(
+                "sealed-resource.loopback",
+                &[
+                    RoutePath::ExactWithQuery(AUTHORIZE_PACKAGE_ENDPOINT),
+                    RoutePath::ExactWithQuery(CLOUD_PACKAGES_ENDPOINT),
+                    RoutePath::ExactWithQuery(CLEAR_AUTHORIZATIONS_ENDPOINT),
+                ],
+                head_plan,
+                move |request| route(dependencies.clone(), request),
+            ),
+        ],
     )
 }
 

@@ -3,12 +3,12 @@
  * Manages skill/plugin state
  */
 import { create } from 'zustand';
+import { buildCapabilityScopeKey, runtimeScopeQuery, type RuntimeScope } from '@/types/desktop/runtime-address';
 import {
   hostApiFetch,
-  resolveSingleCapabilityScope,
 } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
-import { hostSkillsMutation, waitForSkillsOperation } from '@/lib/skills';
+import { hostSkillsMutation, waitForSkillsOperation, selectedSkillsScope, requireSkillsScope } from '@/lib/skills';
 import type { SkillsBatchStateResult } from '@/types/skills-operation-result';
 import type { Skill, MarketplaceSkill, SkillMissingCategory, SkillMissingRequirements, SkillUnavailableReason } from '../types/skill';
 import type { CapabilityTarget } from '../types/desktop/capability-target';
@@ -130,13 +130,14 @@ async function skillManagementCapabilityExecute<TResult>(
   operationId: string,
   input: Record<string, unknown>,
   target: CapabilityTarget,
+  scope: RuntimeScope,
 ): Promise<TResult> {
   return await hostApiFetch<TResult>('/api/capabilities/execute', {
     method: 'POST',
     body: JSON.stringify({
       id: SKILL_MANAGEMENT_CAPABILITY_ID,
       operationId,
-      scope: await resolveSingleCapabilityScope(SKILL_MANAGEMENT_CAPABILITY_ID),
+      scope,
       target,
       input,
     }),
@@ -174,7 +175,25 @@ function decrementMutatingSkill(
   };
 }
 
+function scopedState(scope: RuntimeScope, followSelection = true) {
+  const key = buildCapabilityScopeKey(scope);
+  useSkillsStore.getState().setScope(scope);
+  const generation = useSkillsStore.getState().scopeGeneration;
+  const current = () => {
+    const selected = selectedSkillsScope();
+    return (!followSelection || Boolean(selected && buildCapabilityScopeKey(selected) === key))
+      && useSkillsStore.getState().scopeGeneration === generation;
+  };
+  const set = (partial: Partial<SkillsState> | ((state: SkillsState) => Partial<SkillsState>)) => {
+    if (current()) useSkillsStore.setState(partial);
+  };
+  return { set, current };
+}
+
 interface SkillsState {
+  scopeKey: string | null;
+  scopeGeneration: number;
+  setScope: (scope: RuntimeScope | null) => void;
   skills: Skill[];
   searchResults: MarketplaceSkill[];
   snapshotReady: boolean;
@@ -188,12 +207,12 @@ interface SkillsState {
   error: string | null;
 
   // Actions
-  fetchSkills: (options?: { force?: boolean; silent?: boolean; fresh?: boolean }) => Promise<void>;
+  fetchSkills: (options?: { force?: boolean; silent?: boolean; fresh?: boolean; scope?: RuntimeScope }) => Promise<void>;
   searchSkills: (query: string) => Promise<void>;
-  installSkill: (slug: string, version?: string) => Promise<void>;
-  importLocalSkill: (payload: LocalSkillImportPayload) => Promise<string>;
+  installSkill: (slug: string, version?: string, scope?: RuntimeScope) => Promise<void>;
+  importLocalSkill: (payload: LocalSkillImportPayload, scope?: RuntimeScope) => Promise<string>;
   uninstallSkill: (skillKey: string, slug?: string) => Promise<void>;
-  enableSkill: (skillId: string) => Promise<void>;
+  enableSkill: (skillId: string, scope?: RuntimeScope) => Promise<void>;
   disableSkill: (skillId: string) => Promise<void>;
   batchSetSkillsEnabled: (skillIds: string[], enabled: boolean) => Promise<SkillsBatchStateResult>;
   setSkills: (skills: Skill[]) => void;
@@ -201,6 +220,17 @@ interface SkillsState {
 }
 
 export const useSkillsStore = create<SkillsState>((set, get) => ({
+  scopeKey: null,
+  scopeGeneration: 0,
+  setScope: (scope) => {
+    const key = scope ? buildCapabilityScopeKey(scope) : null;
+    if (get().scopeKey === key) return;
+    clearSkillsSnapshotRetry();
+    inflightSkillsFetch = null;
+    lastSkillsFetchAt = 0;
+    set({ scopeKey: key, scopeGeneration: get().scopeGeneration + 1, skills: [], snapshotReady: false,
+      initialLoading: false, refreshing: false, mutating: false, mutatingBySkillId: {}, installing: {}, error: null });
+  },
   skills: [],
   searchResults: [],
   snapshotReady: false,
@@ -214,6 +244,10 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   error: null,
 
   fetchSkills: async (options) => {
+    const scope = options?.scope ?? selectedSkillsScope();
+    if (!scope) { get().setScope(null); return; }
+    const { set, current } = scopedState(scope, !options?.scope);
+    const generation = get().scopeGeneration;
     const force = options?.force === true;
     const silent = options?.silent === true;
     const fresh = options?.fresh === true;
@@ -223,7 +257,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     if (inflightSkillsFetch) {
       await inflightSkillsFetch;
       if (force || fresh) {
-        await get().fetchSkills({ force: true, silent, fresh });
+        if (current()) await get().fetchSkills({ force: true, silent, fresh, scope: options?.scope });
       }
       return;
     }
@@ -258,9 +292,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
             'skills.refreshStatus',
             {},
             { kind: 'none' },
+            scope,
           )
-          : hostApiFetch<GatewaySkillsStatusResult>('/api/skills/status');
+          : hostApiFetch<GatewaySkillsStatusResult>(`/api/skills/status?${runtimeScopeQuery(scope)}`);
         const gatewayData = await gatewayPromise;
+        if (!current()) return;
 
         let combinedSkills: Skill[] = [];
         const currentSkills = get().skills;
@@ -273,7 +309,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
             refreshing: true,
             error: gatewayData.error ?? null,
           }));
-          scheduleSkillsSnapshotRetry(() => get().fetchSkills({ force: true, silent: true }));
+          scheduleSkillsSnapshotRetry(() => current() ? get().fetchSkills({ force: true, silent: true, scope: options?.scope }) : Promise.resolve());
           return;
         }
 
@@ -284,13 +320,13 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
           combinedSkills = gatewayData.skills.map((s: GatewaySkillStatus) => {
             return {
               id: s.skillKey,
-              runtimeId: 'openclaw',
+              runtimeId: scope.kind === 'agent' ? 'matcha-agent' : 'openclaw',
               slug: s.slug,
               name: s.name || s.skillKey,
               description: s.description || '',
               enabled: !s.disabled,
               icon: s.emoji || '📦',
-              version: s.version || '1.0.0',
+              version: s.version || (scope.kind === 'agent' ? undefined : '1.0.0'),
               author: s.author,
               selectable: typeof s.selectable === 'boolean' ? s.selectable : undefined,
               eligible: typeof s.eligible === 'boolean' ? s.eligible : undefined,
@@ -336,7 +372,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
           error: errorKey ?? appError.message,
         });
       } finally {
-        inflightSkillsFetch = null;
+        if (get().scopeGeneration === generation) inflightSkillsFetch = null;
       }
     })();
 
@@ -387,7 +423,9 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  installSkill: async (slug: string, version?: string) => {
+  installSkill: async (slug, version, sourceScope) => {
+    const scope = sourceScope ?? requireSkillsScope();
+    const { set, current } = scopedState(scope, !sourceScope);
     if (get().installing[slug]) {
       return;
     }
@@ -401,7 +439,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
     try {
       const result = await hostSkillsMutation('/api/skills/clawhub/install',
-        { slug, ...(version ? { version } : {}) }, 'skills.clawhub.install', { timeoutMs: null });
+        { slug, ...(version ? { version } : {}), scope }, 'skills.clawhub.install', { timeoutMs: null });
       if (result.outcome !== 'accepted') {
         const appError = normalizeAppError(new Error('Install failed'), {
           module: 'skills',
@@ -410,8 +448,10 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'install');
         throw new Error(errorKey ?? appError.message);
       }
-      await get().enableSkill(slug);
-      await get().fetchSkills({ force: true, fresh: true });
+      if (!current()) return;
+      if (scope.kind === 'runtime-instance') await get().enableSkill(slug, scope);
+      if (!current()) return;
+      await get().fetchSkills({ force: true, fresh: true, scope });
     } catch (error) {
       console.error('Install error:', error);
       throw error;
@@ -429,8 +469,10 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  importLocalSkill: async (payload) => {
-    const skillKey = payload.skillKey.trim();
+  importLocalSkill: async (payload, sourceScope) => {
+    const scope = sourceScope ?? requireSkillsScope();
+    const { set } = scopedState(scope, !sourceScope);
+    const skillKey = scope.kind === 'agent' ? payload.skillKey.trim().toLowerCase().replace(/-+/g, '-') : payload.skillKey.trim();
     if (!skillKey) {
       throw new Error('Imported skill key is required');
     }
@@ -446,14 +488,13 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       };
     });
     try {
-      const endpoint = payload.kind === 'markdown'
-        ? '/api/skills/import/markdown'
-        : '/api/skills/import/bundle';
+      const markdown = payload.kind === 'markdown' && scope.kind !== 'agent';
+      const endpoint = markdown ? '/api/skills/import/markdown' : '/api/skills/import/bundle';
       const body = payload.kind === 'markdown'
-        ? { content: payload.content }
+        ? markdown ? { content: payload.content } : { skillKey, files: [{ path: 'SKILL.md', content: payload.content }] }
         : { skillKey, files: payload.files };
-      const result = await hostSkillsMutation(endpoint, body,
-        payload.kind === 'markdown' ? 'skills.import.markdown' : 'skills.import.bundle', { timeoutMs: null });
+      const result = await hostSkillsMutation(endpoint, { ...body, scope },
+        markdown ? 'skills.import.markdown' : 'skills.import.bundle', { timeoutMs: null });
       if (result.outcome !== 'accepted') {
         throw new Error('Skill import failed');
       }
@@ -473,6 +514,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   },
 
   uninstallSkill: async (skillKey: string, slug?: string) => {
+    const scope = requireSkillsScope();
+    const { set, current } = scopedState(scope);
     set((state) => {
       const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, skillKey);
       return {
@@ -482,7 +525,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       };
     });
     try {
-      const result = await hostSkillsMutation('/api/skills/uninstall', { skillKey, ...(slug ? { slug } : {}) }, 'skills.uninstall');
+      const result = await hostSkillsMutation('/api/skills/uninstall', { skillKey, ...(slug ? { slug } : {}), scope }, 'skills.uninstall');
       if (result.outcome !== 'removed') {
         throw new Error('Uninstall failed');
       }
@@ -491,7 +534,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
           skill.id !== skillKey && (!slug || skill.slug !== slug)
         ),
       }));
-      void get().fetchSkills({ force: true, silent: true, fresh: true });
+      if (current()) void get().fetchSkills({ force: true, silent: true, fresh: true, scope });
     } catch (error) {
       console.error('Uninstall error:', error);
       throw error;
@@ -509,7 +552,10 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
-  enableSkill: async (skillId) => {
+  enableSkill: async (skillId, sourceScope) => {
+    const scope = sourceScope ?? requireSkillsScope();
+    if (scope.kind !== 'runtime-instance') throw new Error('This runtime has no per-skill enable switch');
+    const { set, current } = scopedState(scope, !sourceScope);
     const { updateSkill } = get();
     set((state) => {
       const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, skillId);
@@ -520,10 +566,11 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled: true }, 'skills.config');
+      const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled: true, scope }, 'skills.config');
       if (result.outcome !== 'accepted') {
         throw new Error('Failed to enable skill');
       }
+      if (!current()) return;
       const currentSkill = get().skills.find((skill) => skill.id === skillId);
       if (currentSkill) {
         updateSkill(skillId, {
@@ -531,7 +578,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
           ...(currentSkill.unavailableReason === 'disabled' ? { unavailableReason: null } : {}),
         });
       } else {
-        await get().fetchSkills({ force: true, silent: true, fresh: true });
+        await get().fetchSkills({ force: true, silent: true, fresh: true, scope });
       }
     } catch (error) {
       console.error('Failed to enable skill:', error);
@@ -548,6 +595,9 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   },
 
   disableSkill: async (skillId) => {
+    const scope = requireSkillsScope();
+    if (scope.kind !== 'runtime-instance') throw new Error('This runtime has no per-skill enable switch');
+    const { set, current } = scopedState(scope);
     const { updateSkill, skills } = get();
 
     const skill = skills.find((s) => s.id === skillId);
@@ -563,14 +613,15 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled: false }, 'skills.config');
+      const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled: false, scope }, 'skills.config');
       if (result.outcome !== 'accepted') {
         throw new Error('Failed to disable skill');
       }
+      if (!current()) return;
       if (skill) {
         updateSkill(skillId, { enabled: false });
       } else {
-        await get().fetchSkills({ force: true, silent: true, fresh: true });
+        await get().fetchSkills({ force: true, silent: true, fresh: true, scope });
       }
     } catch (error) {
       console.error('Failed to disable skill:', error);
@@ -587,6 +638,9 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   },
 
   batchSetSkillsEnabled: async (skillIds, enabled) => {
+    const scope = requireSkillsScope();
+    if (scope.kind !== 'runtime-instance') throw new Error('This runtime has no per-skill enable switch');
+    const { set } = scopedState(scope);
     const uniqueSkillIds = [...new Set(skillIds.map((skillId) => skillId.trim()).filter(Boolean))];
     if (uniqueSkillIds.length === 0) {
       return { kind: 'batchState', success: true, outcome: 'accepted', enabled, requested: [], updated: [], invalidKeys: [], failed: [] };
@@ -612,8 +666,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
 
     try {
       const input = { skillKeys: uniqueSkillIds, enabled };
-      const receipt = await skillManagementCapabilityExecute<unknown>('skills.updateBatchState', input, { kind: 'skill' });
-      const result = await waitForSkillsOperation(receipt, 'skills.updateBatchState', input);
+      const receipt = await skillManagementCapabilityExecute<unknown>('skills.updateBatchState', input, { kind: 'skill' }, scope);
+      const result = await waitForSkillsOperation(receipt, 'skills.updateBatchState', { ...input, scope });
       if (result.kind !== 'batchState') throw new Error('Invalid Skills batch result');
       const updatedSkillIdSet = new Set(result.updated);
       set((state) => ({

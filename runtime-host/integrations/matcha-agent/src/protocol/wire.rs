@@ -5,7 +5,7 @@ use serde_json::{Number, Value};
 
 use super::{error::DecodeError, grammar};
 
-pub const APP_SERVER_PROTOCOL_VERSION: &str = "matcha-agent-app-server-v1";
+pub const APP_SERVER_PROTOCOL_VERSION: &str = "matcha-app-server-v1";
 pub const JSON_RPC_VERSION: &str = "2.0";
 
 #[cfg(test)]
@@ -126,9 +126,7 @@ pub struct JsonRpcError {
     pub code: i64,
     message: &'static str,
     #[serde(skip)]
-    has_data: bool,
-    #[serde(skip)]
-    session_not_found: bool,
+    data: Option<Value>,
 }
 
 impl fmt::Debug for JsonRpcError {
@@ -136,32 +134,35 @@ impl fmt::Debug for JsonRpcError {
         formatter
             .debug_struct("JsonRpcError")
             .field("code", &self.code)
-            .field("has_data", &self.has_data)
+            .field("has_data", &self.data.is_some())
             .finish()
     }
 }
 
 impl JsonRpcError {
-    pub(super) const fn peer_rejection(code: i64, has_data: bool) -> Self {
+    pub(crate) fn remote(code: i64, data: Option<Value>) -> Self {
         Self {
             code,
             message: "app-server request rejected",
-            has_data,
-            session_not_found: false,
+            data,
         }
     }
 
-    pub(super) const fn session_not_found(code: i64, has_data: bool) -> Self {
-        Self {
-            code,
-            message: "app-server request rejected",
-            has_data,
-            session_not_found: true,
-        }
+    pub(crate) fn kind(&self) -> &str {
+        self.data
+            .as_ref()
+            .and_then(|data| data.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("remote_error")
     }
 
-    pub(crate) const fn is_session_not_found(&self) -> bool {
-        self.session_not_found
+    pub(crate) fn data(&self) -> Option<&Value> {
+        self.data.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(super) fn peer_rejection(code: i64, has_data: bool) -> Self {
+        Self::remote(code, has_data.then_some(Value::Null))
     }
 }
 
@@ -385,7 +386,7 @@ mod tests {
 
     #[test]
     fn versions_are_fixed() {
-        assert_eq!(APP_SERVER_PROTOCOL_VERSION, "matcha-agent-app-server-v1");
+        assert_eq!(APP_SERVER_PROTOCOL_VERSION, "matcha-app-server-v1");
         assert!(decode(r#"{"jsonrpc":"1.0","id":7,"method":"initialize"}"#).is_err());
         assert!(decode(r#"{"id":7,"method":"initialize"}"#).is_err());
     }

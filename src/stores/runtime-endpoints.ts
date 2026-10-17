@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { hostRuntimeEndpointsList } from '@/lib/host-api';
 import { isTraceEnabled } from '@/lib/trace-logger';
 import { subscribeHostEvent } from '@/lib/host-events';
-import { buildRuntimeEndpointKey, runtimeEndpointsEqual, type RuntimeEndpointRef } from '../types/desktop/runtime-address';
+import { agentScope, buildRuntimeEndpointKey, runtimeEndpointsEqual, type AgentScope, type RuntimeEndpointRef } from '../types/desktop/runtime-address';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 
 const RUNTIME_ENDPOINT_DIRECTORY_PENDING_MESSAGE = 'runtime endpoint directory is unavailable';
@@ -28,6 +28,8 @@ interface RuntimeEndpointsState {
   revision: number;
   changedRuntimeScopeKeys: string[];
   revisionByRuntimeScopeKey: Record<string, number>;
+  managementEndpoint: RuntimeEndpointRef | null;
+  selectManagementEndpoint: (endpoint: RuntimeEndpointRef) => void;
   refresh: () => Promise<void>;
   init: () => void;
 }
@@ -96,13 +98,19 @@ export function supportsRuntimeEndpointCapabilityFamily(
 
 export function isSessionRuntimeEndpointCandidate(endpoint: RuntimeEndpointSummary): boolean {
   return endpoint.capabilities.chat
-    && supportsRuntimeEndpointCapabilityFamily(endpoint, 'session')
-    && endpoint.defaultAgentId.trim().length > 0;
+    && supportsRuntimeEndpointCapabilityFamily(endpoint, 'session');
+}
+
+export function supportsSessionChat(endpoint: RuntimeEndpointSummary, agentId: string): boolean {
+  if (!isSessionRuntimeEndpointCandidate(endpoint) || !agentId) return false;
+  const agent = endpoint.agents.find((entry) => entry.agentId === agentId);
+  return agent ? agent.capabilities.chat === true : endpoint.acceptsDynamicAgents;
 }
 
 export function supportsSessionGoal(endpoints: readonly RuntimeEndpointSummary[], endpoint: RuntimeEndpointRef | null, agentId: string): boolean {
   const runtime = endpoint ? endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, endpoint)) : undefined;
-  if (!runtime?.capabilities.supportsGoal || !agentId) return false;
+  if (!runtime?.capabilities.supportsGoal || !agentId
+    || runtime.endpointRef.kind !== 'native-runtime' || runtime.endpointRef.runtimeAdapterId !== 'openclaw') return false;
   const agent = runtime.agents.find((agent) => agent.agentId === agentId);
   return agent ? agent.capabilities.supportsGoal : runtime.acceptsDynamicAgents;
 }
@@ -171,12 +179,11 @@ function asRuntimeReadinessEvent(payload: unknown): RuntimeReadinessEvent | null
 function isRuntimeEndpointRefreshEvent(payload: unknown): boolean {
   const event = asRuntimeReadinessEvent(payload);
   return event != null
-    && (event.ready === true
-      || event.processState === 'running'
-      || event.status === 'running'
-      || event.status === 'degraded'
-      || event.hostLifecycle === 'running'
-      || event.runtimeLifecycle === 'running');
+    && (typeof event.ready === 'boolean'
+      || typeof event.processState === 'string'
+      || typeof event.status === 'string'
+      || typeof event.hostLifecycle === 'string'
+      || typeof event.runtimeLifecycle === 'string');
 }
 
 function scheduleRuntimeEndpointRefresh(refresh: () => Promise<void>): void {
@@ -242,6 +249,46 @@ export function findRuntimeEndpointByAdapter(
   return endpoints.find((endpoint) => endpoint.runtimeAdapterId === runtimeAdapterId) ?? null;
 }
 
+export function selectManagementRuntime(state: RuntimeEndpointsState): RuntimeEndpointSummary | null {
+  const endpoint = state.managementEndpoint;
+  if (endpoint) {
+    const selected = state.endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, endpoint));
+    if (selected) return selected;
+  }
+  const ready = state.endpoints.filter(isRuntimeEndpointReady);
+  if (ready.length > 0) return findRuntimeEndpointByAdapter(ready, 'openclaw') ?? ready[0];
+  const starting = state.endpoints.filter(isRuntimeEndpointStarting);
+  return findRuntimeEndpointByAdapter(starting, 'openclaw') ?? starting[0]
+    ?? findRuntimeEndpointByAdapter(state.endpoints, 'openclaw') ?? state.endpoints[0] ?? null;
+}
+
+let managementEndpoint: RuntimeEndpointRef | null = null;
+
+export function selectManagementEndpoint(state: RuntimeEndpointsState): RuntimeEndpointRef | null {
+  const endpoint = selectManagementRuntime(state)?.endpointRef ?? null;
+  if (!managementEndpoint || !endpoint || !runtimeEndpointsEqual(managementEndpoint, endpoint)) managementEndpoint = endpoint;
+  return managementEndpoint;
+}
+
+let managementAgentRuntime: RuntimeEndpointSummary | null = null;
+let managementAgentScope: AgentScope | null = null;
+
+export function selectManagementAgentScope(state: RuntimeEndpointsState): AgentScope | null {
+  const runtime = selectManagementRuntime(state);
+  if (managementAgentRuntime !== runtime) {
+    managementAgentRuntime = runtime;
+    const agent = runtime?.agents.find((entry) => entry.agentId === runtime.defaultAgentId)
+      ?? runtime?.agents[0];
+    const endpoint = selectManagementEndpoint(state);
+    if (!endpoint || !agent) managementAgentScope = null;
+    else if (!managementAgentScope || managementAgentScope.agentId !== agent.agentId
+      || !runtimeEndpointsEqual(managementAgentScope.endpoint, endpoint)) {
+      managementAgentScope = agentScope(endpoint, agent.agentId);
+    }
+  }
+  return managementAgentScope;
+}
+
 export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get) => ({
   status: 'idle',
   error: null,
@@ -250,6 +297,13 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
   revision: 0,
   changedRuntimeScopeKeys: [],
   revisionByRuntimeScopeKey: {},
+  managementEndpoint: null,
+  selectManagementEndpoint: (endpoint) => {
+    const state = get();
+    const target = state.endpoints.find((entry) => runtimeEndpointsEqual(entry.endpointRef, endpoint));
+    if (!target || (state.managementEndpoint && runtimeEndpointsEqual(state.managementEndpoint, target.endpointRef))) return;
+    set({ managementEndpoint: target.endpointRef });
+  },
 
   refresh: async () => {
     const requestSequence = runtimeEndpointLoadSequence + 1;
@@ -284,7 +338,10 @@ export const useRuntimeEndpointsStore = create<RuntimeEndpointsState>((set, get)
       }
       set((state) => {
         const changedRuntimeScopeKeys = changedRuntimeEndpointScopeKeys(state.endpoints, endpoints);
+        const managementRuntime = selectManagementRuntime({ ...state, endpoints });
         return {
+          managementEndpoint: state.managementEndpoint
+            ?? (managementRuntime && isRuntimeEndpointReady(managementRuntime) ? managementRuntime.endpointRef : null),
           status: 'ready',
           error: null,
           endpoints: [...endpoints],

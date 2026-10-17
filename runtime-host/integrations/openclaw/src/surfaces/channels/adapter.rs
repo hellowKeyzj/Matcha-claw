@@ -406,6 +406,7 @@ impl ChannelOps for OpenClawDriver {
             span.finish(match outcome {
                 channels::control::ChannelControlOutcome::Confirmed => "confirmed",
                 channels::control::ChannelControlOutcome::Rejected => "rejected",
+                channels::control::ChannelControlOutcome::Unsupported => "unsupported",
                 channels::control::ChannelControlOutcome::OutcomeUnknown => "unknown",
             });
             outcome
@@ -418,6 +419,8 @@ impl ChannelOps for OpenClawDriver {
         force: bool,
         timeout_ms: Option<u64>,
         account_id: Option<String>,
+        _agent_id: Option<String>,
+        _config: Zeroizing<Vec<u8>>,
     ) -> channels::ports::ChannelFuture<'a, channels::login::Outcome> {
         Box::pin(async move {
             let mut span = ChannelTraceSpan::begin("openclaw.channel.login_start");

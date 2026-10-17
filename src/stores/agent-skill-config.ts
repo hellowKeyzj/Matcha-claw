@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import { hostApiFetch } from '@/lib/host-api';
+import { buildCapabilityScopeKey } from '@/types/desktop/runtime-address';
 import { waitForSubagentMutation } from '@/lib/subagent-call';
 import {
   createSessionTraceId,
@@ -75,8 +76,8 @@ interface AgentSkillConfigState {
   viewByAgentId: Record<string, AgentSkillConfigView>;
   loadingByAgentId: Record<string, boolean>;
   errorByAgentId: Record<string, string | null>;
-  loadAgentSkillConfig: (agentId: string, options?: LoadAgentSkillConfigOptions) => Promise<AgentSkillConfigView>;
-  setAgentSkillConfig: (command: SetAgentSkillConfigCommand) => Promise<AgentSkillConfigView>;
+  loadAgentSkillConfig: (agentId: string, scope: AgentScope, options?: LoadAgentSkillConfigOptions) => Promise<AgentSkillConfigView>;
+  setAgentSkillConfig: (command: SetAgentSkillConfigCommand, scope: AgentScope) => Promise<AgentSkillConfigView>;
 }
 
 const inflightReadByAgentId = new Map<string, Promise<AgentSkillConfigView>>();
@@ -182,6 +183,7 @@ function normalizeAgentSkillConfigView(payload: unknown, requestedAgentId: strin
   const agentId = typeof record.agentId === 'string' && record.agentId.trim()
     ? record.agentId.trim()
     : requestedAgentId;
+  if (agentId !== requestedAgentId) throw new Error('Agent skill configuration target mismatch.');
   const selectionMode = record.selectionMode === 'usesExplicitSkillAllowlist'
     ? 'usesExplicitSkillAllowlist'
     : 'inheritsDefaultSkills';
@@ -223,12 +225,8 @@ function normalizeSetAgentSkillConfigCommand(command: SetAgentSkillConfigCommand
     };
 }
 
-async function resolveAgentSkillConfigScope(): Promise<AgentScope> {
-  const scope = await resolveSingleCapabilityScope(SUBAGENT_SKILLS_CAPABILITY_ID);
-  if (scope.kind !== 'agent') {
-    throw new Error(`subagent.skills requires agent scope, got ${scope.kind}. Reconnect the runtime and try again.`);
-  }
-  return scope;
+export function buildAgentSkillConfigKey(scope: AgentScope, agentId: string): string {
+  return JSON.stringify([buildCapabilityScopeKey(scope), agentId]);
 }
 
 function buildAgentSkillConfigTarget(agentId: string): CapabilityTarget {
@@ -268,18 +266,11 @@ async function agentSkillConfigCapabilityExecute<TResult>(
   operationId: string,
   input: Record<string, unknown>,
   targetAgentId: string,
+  scope: AgentScope,
 ): Promise<TResult> {
   const traceId = createSessionTraceId(`subagent-skills:${operationId}`);
-  let scope: AgentScope;
-  try {
-    scope = await resolveAgentSkillConfigScope();
-  } catch (error) {
-    logSessionTrace('renderer.subagent.skills.scope-error', traceId, () => ({
-      operationId,
-      targetAgentId: summarizeIdentifier(targetAgentId),
-      error: summarizeError(error),
-    }));
-    throw error;
+  if (scope.endpoint.kind !== 'native-runtime' || scope.endpoint.runtimeAdapterId !== 'openclaw') {
+    throw new Error('This runtime does not expose Agent skill selection.');
   }
   const target = buildAgentSkillConfigTarget(targetAgentId);
   logSessionTrace('renderer.subagent.skills.request', traceId, () => ({
@@ -317,16 +308,17 @@ async function agentSkillConfigCapabilityExecute<TResult>(
   }
 }
 
-async function fetchAgentSkillConfigView(agentId: string): Promise<AgentSkillConfigView> {
+async function fetchAgentSkillConfigView(agentId: string, scope: AgentScope): Promise<AgentSkillConfigView> {
   const result = await agentSkillConfigCapabilityExecute<unknown>(
     'subagentSkills.get',
     { agentId },
     agentId,
+    scope,
   );
   return normalizeAgentSkillConfigView(result, agentId);
 }
 
-async function persistAgentSkillConfig(command: SetAgentSkillConfigCommand): Promise<AgentSkillConfigView> {
+async function persistAgentSkillConfig(command: SetAgentSkillConfigCommand, scope: AgentScope): Promise<AgentSkillConfigView> {
   const result = await agentSkillConfigCapabilityExecute<SetAgentSkillConfigResult>(
     'subagentSkills.set',
     {
@@ -335,6 +327,7 @@ async function persistAgentSkillConfig(command: SetAgentSkillConfigCommand): Pro
       selection: command.selection,
     },
     command.agentId,
+    scope,
   );
 
   switch (result.resultType) {
@@ -345,7 +338,7 @@ async function persistAgentSkillConfig(command: SetAgentSkillConfigCommand): Pro
       useAgentSkillConfigStore.setState((state) => ({
         viewByAgentId: {
           ...state.viewByAgentId,
-          [latestView.agentId]: latestView,
+          [buildAgentSkillConfigKey(scope, latestView.agentId)]: latestView,
         },
       }));
       throw new Error('Agent skill configuration changed before your update was saved. The latest configuration has been loaded; review it, reapply your skill selection if needed, and save again.');
@@ -370,56 +363,56 @@ export const useAgentSkillConfigStore = create<AgentSkillConfigState>((set, get)
   loadingByAgentId: {},
   errorByAgentId: {},
 
-  loadAgentSkillConfig: async (rawAgentId, options) => {
+  loadAgentSkillConfig: async (rawAgentId, scope, options) => {
     const agentId = normalizeAgentId(rawAgentId);
     if (!agentId) {
       throw new Error('Agent id is required before loading skill configuration. Select an agent and try again.');
     }
 
-    const cachedView = get().viewByAgentId[agentId];
+    const cachedView = get().viewByAgentId[buildAgentSkillConfigKey(scope, agentId)];
     if (cachedView && options?.force !== true) {
       return cachedView;
     }
 
-    const inflightRead = inflightReadByAgentId.get(agentId);
+    const inflightRead = inflightReadByAgentId.get(buildAgentSkillConfigKey(scope, agentId));
     if (inflightRead) {
       return await inflightRead;
     }
 
-    const readGeneration = getViewCacheGeneration(agentId);
+    const readGeneration = getViewCacheGeneration(buildAgentSkillConfigKey(scope, agentId));
 
     if (options?.silent !== true) {
       set((state) => ({
         loadingByAgentId: {
           ...state.loadingByAgentId,
-          [agentId]: true,
+          [buildAgentSkillConfigKey(scope, agentId)]: true,
         },
         errorByAgentId: {
           ...state.errorByAgentId,
-          [agentId]: null,
+          [buildAgentSkillConfigKey(scope, agentId)]: null,
         },
       }));
     }
 
-    const readTask = fetchAgentSkillConfigView(agentId)
+    const readTask = fetchAgentSkillConfigView(agentId, scope)
       .then((view) => {
-        const shouldUpdateCachedView = getViewCacheGeneration(agentId) === readGeneration;
+        const shouldUpdateCachedView = getViewCacheGeneration(buildAgentSkillConfigKey(scope, agentId)) === readGeneration;
         set((state) => ({
           viewByAgentId: shouldUpdateCachedView
             ? {
               ...state.viewByAgentId,
-              [view.agentId]: view,
+              [buildAgentSkillConfigKey(scope, view.agentId)]: view,
             }
             : state.viewByAgentId,
           loadingByAgentId: {
             ...state.loadingByAgentId,
-            [agentId]: false,
-            [view.agentId]: false,
+            [buildAgentSkillConfigKey(scope, agentId)]: false,
+            [buildAgentSkillConfigKey(scope, view.agentId)]: false,
           },
           errorByAgentId: {
             ...state.errorByAgentId,
-            [agentId]: null,
-            [view.agentId]: null,
+            [buildAgentSkillConfigKey(scope, agentId)]: null,
+            [buildAgentSkillConfigKey(scope, view.agentId)]: null,
           },
         }));
         return view;
@@ -432,56 +425,56 @@ export const useAgentSkillConfigStore = create<AgentSkillConfigState>((set, get)
         set((state) => ({
           loadingByAgentId: {
             ...state.loadingByAgentId,
-            [agentId]: false,
+            [buildAgentSkillConfigKey(scope, agentId)]: false,
           },
           errorByAgentId: {
             ...state.errorByAgentId,
-            [agentId]: message,
+            [buildAgentSkillConfigKey(scope, agentId)]: message,
           },
         }));
         throw error;
       })
       .finally(() => {
-        if (inflightReadByAgentId.get(agentId) === readTask) {
-          inflightReadByAgentId.delete(agentId);
+        if (inflightReadByAgentId.get(buildAgentSkillConfigKey(scope, agentId)) === readTask) {
+          inflightReadByAgentId.delete(buildAgentSkillConfigKey(scope, agentId));
         }
       });
 
-    inflightReadByAgentId.set(agentId, readTask);
+    inflightReadByAgentId.set(buildAgentSkillConfigKey(scope, agentId), readTask);
     return await readTask;
   },
 
-  setAgentSkillConfig: async (rawCommand) => {
+  setAgentSkillConfig: async (rawCommand, scope) => {
     const command = normalizeSetAgentSkillConfigCommand(rawCommand);
-    invalidateViewCacheForAgent(command.agentId);
-    inflightReadByAgentId.delete(command.agentId);
+    invalidateViewCacheForAgent(buildAgentSkillConfigKey(scope, command.agentId));
+    inflightReadByAgentId.delete(buildAgentSkillConfigKey(scope, command.agentId));
     set((state) => ({
       loadingByAgentId: {
         ...state.loadingByAgentId,
-        [command.agentId]: true,
+        [buildAgentSkillConfigKey(scope, command.agentId)]: true,
       },
       errorByAgentId: {
         ...state.errorByAgentId,
-        [command.agentId]: null,
+        [buildAgentSkillConfigKey(scope, command.agentId)]: null,
       },
     }));
 
     try {
-      const view = await persistAgentSkillConfig(command);
+      const view = await persistAgentSkillConfig(command, scope);
       set((state) => ({
         viewByAgentId: {
           ...state.viewByAgentId,
-          [view.agentId]: view,
+          [buildAgentSkillConfigKey(scope, view.agentId)]: view,
         },
         loadingByAgentId: {
           ...state.loadingByAgentId,
-          [command.agentId]: false,
-          [view.agentId]: false,
+          [buildAgentSkillConfigKey(scope, command.agentId)]: false,
+          [buildAgentSkillConfigKey(scope, view.agentId)]: false,
         },
         errorByAgentId: {
           ...state.errorByAgentId,
-          [command.agentId]: null,
-          [view.agentId]: null,
+          [buildAgentSkillConfigKey(scope, command.agentId)]: null,
+          [buildAgentSkillConfigKey(scope, view.agentId)]: null,
         },
       }));
       return view;
@@ -493,11 +486,11 @@ export const useAgentSkillConfigStore = create<AgentSkillConfigState>((set, get)
       set((state) => ({
         loadingByAgentId: {
           ...state.loadingByAgentId,
-          [command.agentId]: false,
+          [buildAgentSkillConfigKey(scope, command.agentId)]: false,
         },
         errorByAgentId: {
           ...state.errorByAgentId,
-          [command.agentId]: message,
+          [buildAgentSkillConfigKey(scope, command.agentId)]: message,
         },
       }));
       throw error;

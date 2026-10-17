@@ -2,7 +2,7 @@
  * Cron Page
  * Manage scheduled tasks
  */
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   Plus,
   Clock,
@@ -38,6 +38,7 @@ import {
   DropdownMenuItem,
 } from '@/components/ui/dropdown-menu';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { LoadingState } from '@/components/common/LoadingSpinner';
 import { TaskCenterPageTitle } from '@/components/task-center/page-title';
 import {
   TaskCenterEmptyState,
@@ -45,12 +46,12 @@ import {
   TaskCenterSurface,
   TaskCenterToolbar,
 } from '@/components/task-center/surface';
-import { useChatStore } from '@/stores/chat';
 import { useCronStore } from '@/stores/cron';
-import { useGatewayStore } from '@/stores/gateway';
+import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
+import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { agentScope as createAgentScope, buildCapabilityScopeKey, buildRuntimeEndpointKey, runtimeInstanceScope, type RuntimeEndpointRef } from '@/types/desktop/runtime-address';
 import { useSkillsStore } from '@/stores/skills';
 import { useSubagentsStore } from '@/stores/subagents';
-import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
 import { hostChannelsFetchSnapshot } from '@/lib/channel-runtime';
 import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/lib/provider-models';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
@@ -119,7 +120,7 @@ function toLocalDateInputValue(date: Date): string {
 }
 
 function toLocalTimeInputValue(date: Date): string {
-  return `${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}`;
+  return `${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}:${padDatePart(date.getSeconds())}.${String(date.getMilliseconds()).padStart(3, '0')}`;
 }
 
 function createDefaultOnceDateTime(): { onceDate: string; onceTime: string } {
@@ -173,7 +174,7 @@ function createScheduleForm(schedule: CronJob['schedule'] | undefined): Schedule
   };
 }
 
-function buildScheduleInput(form: ScheduleForm): BuildScheduleResult {
+function buildScheduleInput(form: ScheduleForm, timezone?: string): BuildScheduleResult {
   if (form.mode === 'periodic') {
     const expr = form.periodicType === 'custom'
       ? form.cronExpr.trim()
@@ -181,7 +182,7 @@ function buildScheduleInput(form: ScheduleForm): BuildScheduleResult {
     if (!expr) {
       return { ok: false, errorKey: 'toast.scheduleRequired' };
     }
-    return { ok: true, schedule: expr, previewExpr: expr };
+    return { ok: true, schedule: { kind: 'cron', expr, ...(timezone ? { tz: timezone } : {}) }, previewExpr: expr };
   }
 
   if (!form.onceDate || !form.onceTime) {
@@ -260,7 +261,7 @@ function parseCronSchedule(schedule: unknown, t: TFunction<'cron'>): string {
   if (schedule && typeof schedule === 'object') {
     const s = schedule as { kind?: string; expr?: string; tz?: string; everyMs?: number; at?: string };
     if (s.kind === 'cron' && typeof s.expr === 'string') {
-      return parseCronExpr(s.expr, t);
+      return `${parseCronExpr(s.expr, t)}${s.tz ? ` (${s.tz})` : ''}`;
     }
     if (s.kind === 'every' && typeof s.everyMs === 'number') {
       const ms = s.everyMs;
@@ -416,13 +417,18 @@ interface TaskDialogProps {
   job?: CronJob;
   agents: Array<{ id: string; name: string }>;
   defaultAgentId: string;
+  endpoint: RuntimeEndpointRef;
+  isCurrentScope: () => boolean;
   onClose: () => void;
   onSave: (input: CronJobCreateInput | CronJobUpdateInput) => Promise<void>;
 }
 
-function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialogProps) {
+function TaskDialog({ job, agents, defaultAgentId, endpoint, isCurrentScope, onClose, onSave }: TaskDialogProps) {
+  const isMatcha = endpoint.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'matcha-agent';
   const { t } = useTranslation('cron');
   const [saving, setSaving] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   const [name, setName] = useState(job?.name || '');
   const [agentId, setAgentId] = useState(job?.agentId || defaultAgentId);
@@ -461,18 +467,26 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
   const [deliveryChannels, setDeliveryChannels] = useState<DeliveryChannelGroup[]>([]);
   const [deliveryChannelsLoading, setDeliveryChannelsLoading] = useState(false);
   const [deliveryChannelsLoaded, setDeliveryChannelsLoaded] = useState(false);
+  const skillsScopeKey = useSkillsStore((state) => state.scopeKey);
+  const skillsScope = useMemo(() => isMatcha ? createAgentScope(endpoint, agentId) : runtimeInstanceScope(endpoint), [isMatcha, endpoint, agentId]);
+  const expectedSkillsScopeKey = buildCapabilityScopeKey(skillsScope);
   const skills = useSkillsStore((state) => state.skills);
   const skillsInitialLoading = useSkillsStore((state) => state.initialLoading);
   const fetchSkills = useSkillsStore((state) => state.fetchSkills);
   const availableSkills = useMemo(() => skills.filter((skill) => (
-    skill.enabled
+    skillsScopeKey === expectedSkillsScopeKey
+    && skill.enabled
     && skill.eligible === true
     && skill.selectable !== false
     && !skill.unavailableReason
     && !skill.missingCategories?.length
-  )), [skills]);
-  const scheduleResult = buildScheduleInput({ mode: scheduleMode, periodicType, cronExpr, onceDate, onceTime });
-  const schedulePreview = scheduleResult.ok && scheduleResult.previewExpr ? estimateNextRun(scheduleResult.previewExpr) : null;
+  )), [skills, skillsScopeKey, expectedSkillsScopeKey]);
+  const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const timezone = job && typeof job.schedule === 'object' && job.schedule.kind === 'cron'
+    ? job.schedule.tz ?? (isMatcha ? 'UTC' : localTimezone)
+    : localTimezone;
+  const scheduleResult = buildScheduleInput({ mode: scheduleMode, periodicType, cronExpr, onceDate, onceTime }, timezone);
+  const schedulePreview = timezone === localTimezone && scheduleResult.ok && scheduleResult.previewExpr ? estimateNextRun(scheduleResult.previewExpr) : null;
   const deliveryChannelOptions = useMemo(() => {
     const options = [...deliveryChannels];
     if (deliveryChannel && !options.some((entry) => entry.channelType === deliveryChannel)) {
@@ -494,7 +508,7 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
       }
       options.set(agent.id, agent.name || agent.id);
     }
-    if (!options.has(defaultAgentId)) {
+    if (defaultAgentId && !options.has(defaultAgentId)) {
       options.set(defaultAgentId, defaultAgentId);
     }
     if (job?.agentId && !options.has(job.agentId)) {
@@ -505,20 +519,18 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
   const selectedAgentName = agentOptions.find((agent) => agent.id === agentId)?.name ?? agentId ?? defaultAgentId;
 
   useEffect(() => {
-    void loadAvailableModels();
-  }, [loadAvailableModels]);
+    if (!isMatcha) void loadAvailableModels();
+  }, [loadAvailableModels, isMatcha]);
 
   useEffect(() => {
-    const { snapshotReady, initialLoading } = useSkillsStore.getState();
-    if (!snapshotReady && !initialLoading) {
-      void fetchSkills({ silent: true });
-    }
-  }, [fetchSkills]);
+    void fetchSkills({ silent: true, scope: skillsScope });
+  }, [fetchSkills, skillsScope]);
 
   useEffect(() => {
+    if (isMatcha) return;
     let cancelled = false;
     setDeliveryChannelsLoading(true);
-    void hostChannelsFetchSnapshot()
+    void hostChannelsFetchSnapshot(runtimeInstanceScope(endpoint))
       .then((result) => {
         if (cancelled || !result.success) {
           return;
@@ -540,7 +552,7 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isMatcha, endpoint]);
 
   useEffect(() => {
     if (job || !deliveryChannelsLoaded || deliveryMode !== 'announce' || deliveryChannel.trim()) {
@@ -590,6 +602,7 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
   };
 
   const handleSubmit = async () => {
+    if (!isCurrentScope()) return;
     if (!name.trim()) {
       toast.error(t('toast.nameRequired'));
       return;
@@ -599,9 +612,18 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
       return;
     }
 
+    if (!agentId.trim()) {
+      toast.error(t('dialog.agent', { defaultValue: 'Select an Agent' }));
+      return;
+    }
+    if (isMatcha && deliveryMode === 'announce') {
+      toast.error(t('toast.deliveryChannelUnsupported'));
+      return;
+    }
+
     const shouldSubmitSchedule = !job || scheduleTouched;
     const finalSchedule = shouldSubmitSchedule
-      ? buildScheduleInput({ mode: scheduleMode, periodicType, cronExpr, onceDate, onceTime })
+      ? buildScheduleInput({ mode: scheduleMode, periodicType, cronExpr, onceDate, onceTime }, timezone)
       : null;
     if (finalSchedule && !finalSchedule.ok) {
       toast.error(t(finalSchedule.errorKey));
@@ -637,10 +659,10 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
 
     const input: CronJobCreateInput | CronJobUpdateInput = {
       name: name.trim(),
-      agentId: agentId.trim() || defaultAgentId,
+      agentId: agentId.trim(),
       message: message.trim(),
       enabled: job?.enabled ?? true,
-      ...(!job || modelTouched ? { model: resolveModelRuntimeReference(availableModels, selectedModel) ?? null } : {}),
+      ...(!job || modelTouched ? { model: isMatcha ? selectedModel.trim() || null : resolveModelRuntimeReference(availableModels, selectedModel) ?? null } : {}),
       ...(shouldSubmitDelivery ? { delivery: finalDelivery } : {}),
       ...(finalSchedule && finalSchedule.ok ? { schedule: finalSchedule.schedule } : {}),
     };
@@ -648,12 +670,13 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
     setSaving(true);
     try {
       await onSave(input);
+      if (!mounted.current || !isCurrentScope()) return;
       onClose();
       toast.success(job ? t('toast.updated') : t('toast.created'));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      if (mounted.current && isCurrentScope()) toast.error(err instanceof Error ? err.message : String(err));
     } finally {
-      setSaving(false);
+      if (mounted.current) setSaving(false);
     }
   };
 
@@ -731,6 +754,7 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
                     type="button"
                     variant={deliveryMode === 'announce' ? 'default' : 'outline'}
                     size="sm"
+                    disabled={isMatcha}
                     onClick={() => {
                       setDeliveryMode('announce');
                       setDeliveryTouched(true);
@@ -740,6 +764,7 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
                   </Button>
                 </div>
 
+                {isMatcha && <p className="text-xs text-muted-foreground">{t('toast.deliveryChannelUnsupported')}</p>}
                 {deliveryMode === 'announce' && (
                   <div className="space-y-3">
                     <div className="space-y-1.5">
@@ -836,7 +861,16 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
                         className="min-h-[180px] resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:shadow-none"
                       />
                       <div className="flex min-w-0 items-center gap-2 px-3 pb-3 pt-1">
-                        <DropdownMenu>
+                        {isMatcha ? (
+                          <Input
+                            aria-label={t('dialog.model')}
+                            placeholder={t('dialog.followAgent')}
+                            title={t('dialog.nativeModelHint', { defaultValue: 'Native model ID; uses the Agent’s existing provider binding.' })}
+                            value={selectedModel}
+                            onChange={(event) => { setSelectedModel(event.target.value); setModelTouched(true); }}
+                            className="h-8 max-w-64 font-mono text-xs"
+                          />
+                        ) : <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
                               type="button"
@@ -889,7 +923,7 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
                               </DropdownMenuItem>
                             ))}
                           </DropdownMenuContent>
-                        </DropdownMenu>
+                        </DropdownMenu>}
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
@@ -1012,6 +1046,7 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
                         <Input
                           id="once-time"
                           type="time"
+                          step="0.001"
                           value={onceTime}
                           onChange={(event) => {
                             setOnceTime(event.target.value);
@@ -1053,29 +1088,31 @@ function TaskDialog({ job, agents, defaultAgentId, onClose, onSave }: TaskDialog
 // Job Row Component
 interface CronJobCardProps {
   job: CronJob;
+  agentName: string;
   isMutating: boolean;
+  isCurrentScope: () => boolean;
   onToggle: (enabled: boolean) => void;
   onEdit: () => void;
   onDelete: () => void;
   onTrigger: () => Promise<{ ran: boolean; reason?: string }>;
 }
 
-function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }: CronJobCardProps) {
+function CronJobCard({ job, agentName, isMutating, isCurrentScope, onToggle, onEdit, onDelete, onTrigger }: CronJobCardProps) {
   const { t } = useTranslation('cron');
   const [triggering, setTriggering] = useState(false);
-  const agents = useSubagentsStore((state) => (
-    Array.isArray(state.agentsResource.data) ? state.agentsResource.data : []
-  ));
-  const agentName = agents.find((agent) => agent.id === job.agentId)?.name ?? job.agentId;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const isRunning = Boolean(job.runningAt);
   const failedLastRun = isFailedCronJob(job);
   const actionsDisabled = isMutating || triggering;
   const deliveryText = formatCronDeliveryText(job);
 
   const handleTrigger = async () => {
+    if (!isCurrentScope()) return;
     setTriggering(true);
     try {
       const result = await onTrigger();
+      if (!mounted.current || !isCurrentScope()) return;
       if (result.ran) {
         toast.success(t('toast.triggered'));
       } else if (result.reason === 'already-running') {
@@ -1084,10 +1121,11 @@ function CronJobCard({ job, isMutating, onToggle, onEdit, onDelete, onTrigger }:
         toast.warning(t('toast.notTriggered', '任务未触发'));
       }
     } catch (error) {
+      if (!mounted.current || !isCurrentScope()) return;
       console.error('Failed to trigger cron job:', error);
       toast.error(t('toast.failedTrigger', { error: error instanceof Error ? error.message : String(error) }));
     } finally {
-      setTriggering(false);
+      if (mounted.current) setTriggering(false);
     }
   };
 
@@ -1251,59 +1289,61 @@ export function Cron({ embedded = false }: CronProps) {
     toggleJob,
     deleteJob,
     triggerJob,
+    setEndpoint,
+    endpoint: storeEndpoint,
   } = useCronStore();
-  const gatewayStatus = useGatewayStore((state) => state.status);
-  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
-  const defaultAgentId = useChatStore((state) => {
-    const meta = state.loadedSessions[state.currentSessionKey]?.meta;
-    return meta?.agentId ?? 'main';
-  });
-  const agentsResource = useSubagentsStore((state) => state.agentsResource);
-  const loadAgents = useSubagentsStore((state) => state.loadAgents);
-  const requestedAgentsLoadRef = useRef(false);
+  const endpoint = useRuntimeEndpointsStore(selectManagementEndpoint);
+  const runtime = useRuntimeEndpointsStore(selectManagementRuntime);
+  const endpointKey = endpoint ? buildRuntimeEndpointKey(endpoint) : '';
+  const selectionGeneration = useMemo(() => Symbol(endpointKey), [endpointKey]);
+  const selectionRef = useRef<symbol | null>(null);
+  useLayoutEffect(() => {
+    selectionRef.current = selectionGeneration;
+    return () => { selectionRef.current = null; };
+  }, [selectionGeneration]);
+  const defaultAgentId = runtime?.agents.find((agent) => agent.agentId === runtime.defaultAgentId)?.agentId ?? runtime?.agents[0]?.agentId ?? '';
+  const isCurrentScope = useCallback(() => {
+    const currentRuntime = selectManagementRuntime(useRuntimeEndpointsStore.getState());
+    const currentEndpoint = useCronStore.getState().endpoint;
+    return selectionRef.current === selectionGeneration
+      && currentRuntime !== null && isRuntimeEndpointReady(currentRuntime)
+      && buildRuntimeEndpointKey(currentRuntime.endpointRef) === endpointKey
+      && currentEndpoint !== null && buildRuntimeEndpointKey(currentEndpoint) === endpointKey;
+  }, [endpointKey, selectionGeneration]);
   const [dialog, setDialog] = useState<{ job?: CronJob } | null>(null);
   const editingJob = dialog?.job;
   const [jobToDelete, setJobToDelete] = useState<{ id: string } | null>(null);
   const [statusFilter, setStatusFilter] = useState<CronStatusFilter>('all');
 
-  const isGatewayRunning = isGatewayOperational(gatewayStatus);
-  const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
-  const availableAgents = Array.isArray(agentsResource.data)
-    ? agentsResource.data.map((agent) => ({ id: agent.id, name: agent.name || agent.id }))
-    : [];
+  const isRuntimeReady = Boolean(runtime && isRuntimeEndpointReady(runtime));
+  const runtimePreparing = Boolean(runtime && isRuntimeEndpointStarting(runtime));
+  const scopeReady = endpointKey === (storeEndpoint ? buildRuntimeEndpointKey(storeEndpoint) : '');
+  const availableAgents = runtime?.agents.map((agent) => ({ id: agent.agentId, name: agent.displayName || agent.agentId })) ?? [];
+  const runtimeWarning = !endpoint
+    ? t('common:runtimeScope.selectRuntime')
+    : t(runtimePreparing ? 'common:runtimeScope.starting' : 'common:runtimeScope.unavailable', { runtime: runtime?.displayName });
   const manualRefreshBusy = refreshing || mutating;
-  const showInitialLoading = !snapshotReady && initialLoading;
-  const showRefreshingHint = useDelayedFlag(refreshing && snapshotReady, 180);
+  const hasSnapshot = scopeReady && snapshotReady;
+  const showInitialLoading = isRuntimeReady && !hasSnapshot && (!scopeReady || initialLoading || !error);
+  const showRefreshingHint = useDelayedFlag(refreshing && hasSnapshot, 180);
 
-  // Fetch jobs on mount
-  useEffect(() => {
-    if (isGatewayRunning) {
-      void fetchJobs({ silent: true });
-    }
-  }, [fetchJobs, isGatewayRunning]);
+  useLayoutEffect(() => {
+    setEndpoint(endpoint);
+  }, [endpoint, setEndpoint]);
+
+  useLayoutEffect(() => {
+    setDialog(null);
+    setJobToDelete(null);
+    setStatusFilter('all');
+  }, [endpointKey]);
 
   useEffect(() => {
-    if (!isGatewayRunning) {
-      requestedAgentsLoadRef.current = false;
-      return;
-    }
-    if (agentsResource.status === 'ready') {
-      requestedAgentsLoadRef.current = false;
-      return;
-    }
-    if (agentsResource.status !== 'idle' && agentsResource.status !== 'error') {
-      return;
-    }
-    if (requestedAgentsLoadRef.current) {
-      return;
-    }
-    requestedAgentsLoadRef.current = true;
-    void loadAgents({ silent: true });
-  }, [agentsResource.status, isGatewayRunning, loadAgents]);
+    if (endpoint && isRuntimeReady) void fetchJobs({ silent: true });
+  }, [endpoint, fetchJobs, isRuntimeReady]);
 
   const visibleJobs = useMemo(
-    () => jobs.filter((job) => !job.systemManaged || job.enabled),
-    [jobs],
+    () => scopeReady ? jobs.filter((job) => !job.systemManaged || job.enabled) : [],
+    [jobs, scopeReady],
   );
 
   // Statistics
@@ -1347,34 +1387,31 @@ export function Cron({ embedded = false }: CronProps) {
   );
 
   const handleSave = useCallback(async (input: CronJobCreateInput | CronJobUpdateInput) => {
-    if (!isGatewayRunning) {
-      throw new Error(gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning'));
-    }
+    if (!isCurrentScope()) throw new Error(runtimeWarning);
     if (editingJob) {
       await updateJob(editingJob.id, input);
     } else {
       await createJob(input as CronJobCreateInput);
     }
-  }, [isGatewayRunning, editingJob, gatewayPreparing, createJob, updateJob, t]);
+    if (!isCurrentScope()) throw new Error(runtimeWarning);
+  }, [isCurrentScope, editingJob, runtimeWarning, createJob, updateJob]);
 
   const handleToggle = useCallback(async (id: string, enabled: boolean) => {
-    if (!isGatewayRunning) {
-      toast.error(gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning'));
-      return;
-    }
+    if (!isCurrentScope()) return;
     try {
       await toggleJob(id, enabled);
-      toast.success(enabled ? t('toast.enabled') : t('toast.paused'));
+      if (isCurrentScope()) toast.success(enabled ? t('toast.enabled') : t('toast.paused'));
     } catch {
-      toast.error(t('toast.failedUpdate'));
+      if (isCurrentScope()) toast.error(t('toast.failedUpdate'));
     }
-  }, [isGatewayRunning, gatewayPreparing, toggleJob, t]);
+  }, [isCurrentScope, toggleJob, t]);
 
   return (
     <div className="space-y-5">
       {!embedded && (
         <header className="flex items-center justify-between">
           <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
+          <RuntimeScopeSelector />
         </header>
       )}
 
@@ -1394,7 +1431,7 @@ export function Cron({ embedded = false }: CronProps) {
               aria-label={t('refresh')}
               title={t('refresh')}
               onClick={() => { void fetchJobs(); }}
-              disabled={!isGatewayRunning || manualRefreshBusy}
+              disabled={!isRuntimeReady || !scopeReady || manualRefreshBusy}
             >
               <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
             </Button>
@@ -1403,7 +1440,7 @@ export function Cron({ embedded = false }: CronProps) {
               onClick={() => {
                 setDialog({});
               }}
-              disabled={!isGatewayRunning || mutating}
+              disabled={!isRuntimeReady || !scopeReady || mutating}
             >
               <Plus className="h-4 w-4" />
               {t('newTask')}
@@ -1415,29 +1452,29 @@ export function Cron({ embedded = false }: CronProps) {
           <TaskCenterStatusFilter
             key={option.value}
             label={option.label}
-            count={option.count}
+            count={hasSnapshot ? option.count : undefined}
             active={statusFilter === option.value}
             onClick={() => setStatusFilter(option.value)}
           />
         ))}
       </TaskCenterToolbar>
 
-      {!isGatewayRunning && (
-        <Card className={gatewayPreparing ? 'border-border bg-muted/30' : 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10'}>
+      {!isRuntimeReady && (
+        <Card className={runtimePreparing ? 'border-border bg-muted/30' : 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/10'}>
           <CardContent className="flex items-center gap-3 py-4">
-            {gatewayPreparing ? (
+            {runtimePreparing ? (
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             ) : (
               <AlertCircle className="h-5 w-5 text-yellow-600" />
             )}
-            <span className={gatewayPreparing ? 'text-muted-foreground' : 'text-yellow-700 dark:text-yellow-400'}>
-              {gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning')}
+            <span className={runtimePreparing ? 'text-muted-foreground' : 'text-yellow-700 dark:text-yellow-400'}>
+              {runtimeWarning}
             </span>
           </CardContent>
         </Card>
       )}
 
-      {error && (
+      {scopeReady && error && (
         <Card className="border-destructive">
           <CardContent className="flex items-center gap-2 py-4 text-destructive">
             <AlertCircle className="h-5 w-5" />
@@ -1447,27 +1484,8 @@ export function Cron({ embedded = false }: CronProps) {
       )}
 
       {showInitialLoading ? (
-        <TaskCenterSurface>
-          <div className="overflow-x-auto">
-            <div className="min-w-[760px] divide-y">
-              {Array.from({ length: 5 }).map((_, index) => (
-                <div
-                  key={`cron-loading-row-${index}`}
-                  className="grid grid-cols-[112px_minmax(0,1fr)_140px] items-center gap-5 px-5 py-4"
-                >
-                  <div className="h-4 w-24 animate-pulse rounded bg-muted" />
-                  <div className="space-y-2">
-                    <div className="h-4 w-64 animate-pulse rounded bg-muted" />
-                    <div className="h-10 w-full animate-pulse rounded-lg bg-muted" />
-                    <div className="h-3 w-80 animate-pulse rounded bg-muted" />
-                  </div>
-                  <div className="ml-auto h-8 w-28 animate-pulse rounded-full bg-muted" />
-                </div>
-              ))}
-            </div>
-          </div>
-        </TaskCenterSurface>
-      ) : visibleJobs.length === 0 ? (
+        <LoadingState label={t('common:status.loading', 'Loading...')} />
+      ) : !hasSnapshot ? null : visibleJobs.length === 0 ? (
         <TaskCenterSurface>
           <TaskCenterEmptyState
             icon={Clock}
@@ -1478,7 +1496,7 @@ export function Cron({ embedded = false }: CronProps) {
               onClick={() => {
                 setDialog({});
               }}
-              disabled={!isGatewayRunning}
+              disabled={!isRuntimeReady || !scopeReady}
             >
               <Plus className="h-4 w-4" />
               {t('empty.create')}
@@ -1497,19 +1515,21 @@ export function Cron({ embedded = false }: CronProps) {
               <div className="min-w-[760px] divide-y">
                 {filteredJobs.map((job) => (
                   <CronJobCard
-                    key={job.id}
+                    key={`${endpointKey}:${job.id}`}
                     job={job}
-                    isMutating={Boolean(mutatingByJobId[job.id])}
+                    agentName={availableAgents.find((agent) => agent.id === job.agentId)?.name ?? job.agentId}
+                    isMutating={!isRuntimeReady || Boolean(mutatingByJobId[job.id])}
+                    isCurrentScope={isCurrentScope}
                     onToggle={(enabled) => handleToggle(job.id, enabled)}
                     onEdit={() => {
-                      setDialog({ job });
+                      if (isCurrentScope()) setDialog({ job });
                     }}
-                    onDelete={() => setJobToDelete({ id: job.id })}
+                    onDelete={() => { if (isCurrentScope()) setJobToDelete({ id: job.id }); }}
                     onTrigger={async () => {
-                      if (!isGatewayRunning) {
-                        throw new Error(gatewayPreparing ? t('gatewayPreparing') : t('gatewayWarning'));
-                      }
-                      return triggerJob(job.id);
+                      if (!isCurrentScope()) throw new Error(runtimeWarning);
+                      const result = await triggerJob(job.id);
+                      if (!isCurrentScope()) throw new Error(runtimeWarning);
+                      return result;
                     }}
                   />
                 ))}
@@ -1520,11 +1540,14 @@ export function Cron({ embedded = false }: CronProps) {
       )}
 
       {/* Create/Edit Dialog */}
-      {dialog && (
+      {dialog && endpoint && scopeReady && (
         <TaskDialog
+          key={endpointKey}
           job={editingJob}
           agents={availableAgents}
           defaultAgentId={defaultAgentId}
+          endpoint={endpoint}
+          isCurrentScope={isCurrentScope}
           onClose={() => {
             setDialog((current) => current === dialog ? null : current);
           }}
@@ -1533,20 +1556,23 @@ export function Cron({ embedded = false }: CronProps) {
       )}
 
       <ConfirmDialog
-        open={!!jobToDelete}
+        key={endpointKey}
+        open={scopeReady && !!jobToDelete}
         title={t('common:actions.confirm', 'Confirm')}
         message={t('card.deleteConfirm')}
         confirmLabel={t('common:actions.delete', 'Delete')}
         cancelLabel={t('common:actions.cancel', 'Cancel')}
         variant="destructive"
         onConfirm={async () => {
-          if (jobToDelete) {
+          if (jobToDelete && isCurrentScope()) {
             await deleteJob(jobToDelete.id);
+            if (!isCurrentScope()) return;
             setJobToDelete(null);
             toast.success(t('toast.deleted'));
           }
         }}
         onError={(deleteError) => {
+          if (!isCurrentScope()) return;
           toast.error(t('toast.failedDelete', { error: deleteError instanceof Error ? deleteError.message : String(deleteError) }));
         }}
         onCancel={() => setJobToDelete(null)}

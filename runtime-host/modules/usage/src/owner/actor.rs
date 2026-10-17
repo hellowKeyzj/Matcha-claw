@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use foundation::execution::{LaneRetention, OwnerSpec};
-use platform::call::{CallContext, CallStatus};
+use platform::{
+    call::{CallContext, CallStatus},
+    endpoint::runtime_address::RuntimeEndpoint,
+};
 
 use crate::{
     application::{
@@ -87,11 +90,11 @@ impl OwnerSpec for UsageOwner {
 
     async fn handle_direct_query(shared: Self::Shared, query: Self::Query) {
         match query {
-            UsageQuery::DefaultLimit { reply } => {
-                let _ = reply.send(default_limit(&shared));
+            UsageQuery::DefaultLimit { endpoint, reply } => {
+                let _ = reply.send(default_limit(&shared, &endpoint));
             }
-            UsageQuery::MaxLimit { reply } => {
-                let _ = reply.send(max_limit(&shared));
+            UsageQuery::MaxLimit { endpoint, reply } => {
+                let _ = reply.send(max_limit(&shared, &endpoint));
             }
             UsageQuery::Recent { .. } | UsageQuery::SessionTimeseries { .. } => unreachable!(),
         }
@@ -111,17 +114,25 @@ impl OwnerSpec for UsageOwner {
         query: Self::Query,
     ) {
         match query {
-            UsageQuery::Recent { limit, call, reply } => {
-                let _ = reply.send(recent(&shared, limit, call.as_ref()).await);
+            UsageQuery::Recent {
+                endpoint,
+                limit,
+                call,
+                reply,
+            } => {
+                let _ = reply.send(recent(&shared, &endpoint, limit, call.as_ref()).await);
             }
             UsageQuery::SessionTimeseries {
+                endpoint,
                 agent_id,
                 session_id,
                 call,
                 reply,
             } => {
-                let _ = reply
-                    .send(session_timeseries(&shared, &agent_id, &session_id, call.as_ref()).await);
+                let _ = reply.send(
+                    session_timeseries(&shared, &endpoint, &agent_id, &session_id, call.as_ref())
+                        .await,
+                );
             }
             UsageQuery::DefaultLimit { .. } | UsageQuery::MaxLimit { .. } => unreachable!(),
         }
@@ -138,12 +149,13 @@ impl OwnerSpec for UsageOwner {
 
 async fn recent(
     shared: &UsageShared,
+    endpoint: &RuntimeEndpoint,
     limit: usize,
     context: Option<&CallContext<UsageCallDetail>>,
 ) -> Result<Vec<UsageEntry>, UsageReadError> {
     let detail = UsageCallDetail::recent(limit);
     admit(shared, context, UsageCallDetail::recent(limit)).await?;
-    let result = match shared.runtime_directory.usage_ops() {
+    let result = match shared.runtime_directory.usage_ops(endpoint) {
         Some(ops) => ops.usage_recent(limit).await,
         None => Err(UsageReadError::Unavailable),
     };
@@ -153,12 +165,13 @@ async fn recent(
 
 async fn session_timeseries(
     shared: &UsageShared,
+    endpoint: &RuntimeEndpoint,
     agent_id: &str,
     session_id: &str,
     context: Option<&CallContext<UsageCallDetail>>,
 ) -> Result<Vec<UsageEntry>, UsageReadError> {
     admit(shared, context, UsageCallDetail::session_timeseries()).await?;
-    let result = match shared.runtime_directory.usage_ops() {
+    let result = match shared.runtime_directory.usage_ops(endpoint) {
         Some(ops) => ops.session_usage_timeseries(agent_id, session_id).await,
         None => Err(UsageReadError::Unavailable),
     };
@@ -216,16 +229,16 @@ async fn settle(
     call::finish(context, status, &detail.observed(result)).await;
 }
 
-fn default_limit(shared: &UsageShared) -> usize {
+fn default_limit(shared: &UsageShared, endpoint: &RuntimeEndpoint) -> usize {
     shared
         .runtime_directory
-        .usage_ops()
+        .usage_ops(endpoint)
         .map_or(100, |ops| ops.default_usage_limit())
 }
 
-fn max_limit(shared: &UsageShared) -> usize {
+fn max_limit(shared: &UsageShared, endpoint: &RuntimeEndpoint) -> usize {
     shared
         .runtime_directory
-        .usage_ops()
+        .usage_ops(endpoint)
         .map_or(1_000, |ops| ops.max_usage_limit())
 }

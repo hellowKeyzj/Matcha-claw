@@ -12,6 +12,7 @@ use super::{
     create::{SessionCreateCommand, SessionCreateOutcome},
     delete::{SessionDeleteCommand, SessionDeleteOutcome},
     model_selection::{SessionModelSelectionCommand, SessionModelSelectionOutcome},
+    question::{SessionQuestionCommand, SessionQuestionOutcome},
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
@@ -174,6 +175,10 @@ pub enum SessionCommand {
         command: SessionApprovalCommand,
         reply: oneshot::Sender<SessionApprovalOutcome>,
     },
+    Question {
+        command: SessionQuestionCommand,
+        reply: oneshot::Sender<SessionQuestionOutcome>,
+    },
     ModelSelection {
         command: SessionModelSelectionCommand,
         reply: oneshot::Sender<SessionModelSelectionOutcome>,
@@ -246,6 +251,9 @@ impl SessionCommand {
             Self::Approval { reply, .. } => {
                 let _ = reply.send(SessionApprovalOutcome::Unavailable);
             }
+            Self::Question { reply, .. } => {
+                let _ = reply.send(SessionQuestionOutcome::unknown());
+            }
             Self::ModelSelection { reply, .. } => {
                 let _ = reply.send(SessionModelSelectionOutcome::Unavailable);
             }
@@ -279,26 +287,13 @@ impl SessionCommand {
                 CommandRoute::Keyed(session_identity_lane_key(identity))
             }
             Self::Delete {
-                command:
-                    super::delete::SessionDeleteCommand {
-                        agent_id,
-                        session_key,
-                    },
+                command: super::delete::SessionDeleteCommand { identity },
                 ..
             }
             | Self::Rename {
-                command:
-                    super::rename::SessionRenameCommand {
-                        agent_id,
-                        session_key,
-                        ..
-                    },
+                command: super::rename::SessionRenameCommand { identity, .. },
                 ..
-            } => CommandRoute::Keyed(session_identity_lane_key(&SessionIdentity {
-                session_key: session_key.clone(),
-                endpoint: super::state::SessionEndpoint::local(SessionProvider::OpenClaw),
-                agent_id: agent_id.clone(),
-            })),
+            } => CommandRoute::Keyed(session_identity_lane_key(identity)),
             Self::ModelSelection {
                 command:
                     super::model_selection::SessionModelSelectionCommand {
@@ -313,6 +308,9 @@ impl SessionCommand {
                 command.session_key(),
             )),
             Self::Goal { command, .. } => {
+                CommandRoute::Keyed(session_identity_lane_key(&command.identity))
+            }
+            Self::Question { command, .. } => {
                 CommandRoute::Keyed(session_identity_lane_key(&command.identity))
             }
             Self::GoalCompleted { command, .. } => {

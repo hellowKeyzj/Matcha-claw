@@ -4,6 +4,7 @@ import type {
   ChannelLoginTransport,
 } from '../../main/runtime-host-delivery/transport/channels/login';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { isProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
 const INVALID = { outcome: 'rejected' } as const;
@@ -48,22 +49,24 @@ export async function handleChannelLoginRoutes(
 }
 
 function isRequest(value: unknown): value is ChannelLoginRequest {
-  if (!isRecord(value) || !isIdentity(value.channel)) return false;
+  if (!isRecord(value) || !isIdentity(value.channel)
+    || (Object.hasOwn(value, 'scope') && !isProductRuntimeScope(value.scope))) return false;
   if (value.action !== 'start' && value.action !== 'wait' && value.action !== 'cancel' && value.action !== 'logout') return false;
   if (value.accountId !== undefined && !isIdentity(value.accountId)) return false;
 
   const keys = Object.keys(value);
   if (value.action === 'cancel' || value.action === 'logout') {
-    return keys.every((key) => key === 'action' || key === 'channel' || key === 'accountId') && keys.length <= 3;
+    return keys.every((key) => key === 'action' || key === 'channel' || key === 'accountId' || key === 'scope') && keys.length <= 4;
   }
   if (value.action === 'start') {
-    return keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'config', 'force', 'timeoutMs'].includes(key))
-      && (value.agentId === undefined || isIdentity(value.agentId))
+    return keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'config', 'force', 'timeoutMs', 'scope'].includes(key))
+      && (value.agentId === undefined || (isProductRuntimeScope(value.scope) && value.scope.endpoint.runtimeAdapterId === 'matcha-agent'
+        ? typeof value.agentId === 'string' && /^[A-Za-z0-9_-]+$/.test(value.agentId) : isIdentity(value.agentId)))
       && (value.config === undefined || isConfig(value.config))
       && (value.force === undefined || typeof value.force === 'boolean')
       && (value.timeoutMs === undefined || isTimeout(value.timeoutMs));
   }
-  return keys.every((key) => ['action', 'channel', 'accountId', 'sessionKey', 'currentQrDataUrl', 'timeoutMs'].includes(key))
+  return keys.every((key) => ['action', 'channel', 'accountId', 'sessionKey', 'currentQrDataUrl', 'timeoutMs', 'scope'].includes(key))
     && (value.sessionKey === undefined || isIdentity(value.sessionKey))
     && (value.currentQrDataUrl === undefined || isQrDataUrl(value.currentQrDataUrl))
     && (value.timeoutMs === undefined || isTimeout(value.timeoutMs));

@@ -21,6 +21,7 @@ pub struct RoleAgentMaterialization {
     role: RoleId,
     agent: RoleMaterializationAgent,
     tools: Vec<String>,
+    skills: Vec<String>,
     agents_markdown: Option<String>,
 }
 
@@ -52,6 +53,7 @@ impl RoleAgentMaterialization {
             role,
             agent: RoleMaterializationAgent::Managed { name },
             tools: Vec::new(),
+            skills: Vec::new(),
             agents_markdown: None,
         })
     }
@@ -61,6 +63,7 @@ impl RoleAgentMaterialization {
             role,
             agent: RoleMaterializationAgent::External { agent },
             tools: Vec::new(),
+            skills: Vec::new(),
             agents_markdown: None,
         }
     }
@@ -80,6 +83,15 @@ impl RoleAgentMaterialization {
 
     pub fn with_agents_markdown(mut self, agents_markdown: impl Into<String>) -> Self {
         self.agents_markdown = Some(agents_markdown.into());
+        self
+    }
+
+    pub fn skills(&self) -> &[String] {
+        &self.skills
+    }
+
+    pub fn with_skills(mut self, skills: Vec<String>) -> Self {
+        self.skills = skills;
         self
     }
 
@@ -105,6 +117,7 @@ pub struct TeamMaterializationIntent {
     team: TeamId,
     endpoint: RuntimeEndpointReference,
     source: MaterializationSource,
+    source_agent: Option<ManagedAgentReference>,
     agents: Vec<RoleAgentMaterialization>,
 }
 
@@ -131,6 +144,7 @@ impl TeamMaterializationIntent {
             team,
             endpoint,
             source,
+            source_agent: None,
             agents,
         })
     }
@@ -141,6 +155,15 @@ impl TeamMaterializationIntent {
 
     pub fn endpoint(&self) -> &RuntimeEndpointReference {
         &self.endpoint
+    }
+
+    pub fn source_agent(&self) -> Option<&ManagedAgentReference> {
+        self.source_agent.as_ref()
+    }
+
+    pub fn with_source_agent(mut self, source_agent: Option<ManagedAgentReference>) -> Self {
+        self.source_agent = source_agent;
+        self
     }
 
     pub fn source(&self) -> MaterializationSource {
@@ -204,6 +227,7 @@ pub struct RoleMaterializationReceipt {
     ownership: RoleMaterializationOwnership,
     endpoint: RuntimeEndpointReference,
     native_workspace: Option<NativeWorkspaceReceipt>,
+    skills: Vec<(String, [u8; 32])>,
     agents_markdown: Option<String>,
 }
 
@@ -248,6 +272,7 @@ impl RoleMaterializationReceipt {
             ownership,
             endpoint,
             native_workspace: None,
+            skills: Vec::new(),
             agents_markdown: None,
         }
     }
@@ -265,6 +290,7 @@ impl RoleMaterializationReceipt {
             ownership,
             endpoint,
             native_workspace: Some(native_workspace),
+            skills: Vec::new(),
             agents_markdown: None,
         }
     }
@@ -283,6 +309,15 @@ impl RoleMaterializationReceipt {
 
     pub fn endpoint(&self) -> &RuntimeEndpointReference {
         &self.endpoint
+    }
+
+    pub fn skills(&self) -> &[(String, [u8; 32])] {
+        &self.skills
+    }
+
+    pub fn with_skills(mut self, skills: Vec<(String, [u8; 32])>) -> Self {
+        self.skills = skills;
+        self
     }
 
     pub fn native_workspace(&self) -> Option<&NativeWorkspaceReceipt> {

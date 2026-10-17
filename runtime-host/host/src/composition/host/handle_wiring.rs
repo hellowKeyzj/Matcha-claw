@@ -6,6 +6,7 @@ pub(super) struct HostHandleInput {
     pub(super) admission: Arc<super::super::admission::HostAdmission>,
     pub(super) calls: call_log::CallLogModule,
     pub(super) open_claw: Arc<openclaw::driver::OpenClawDriver>,
+    pub(super) matcha_agent: Arc<matcha_agent::driver::MatchaRuntimeDriver>,
     pub(super) sealed_resource: sealed_resource::SealedResourceModule,
     pub(super) clawhub_registry: clawhub::ClawHubRegistryClient,
     pub(super) runtime_observation: ::diagnostics::RuntimeFlightRecorder,
@@ -17,6 +18,7 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) 
         admission,
         calls,
         open_claw,
+        matcha_agent,
         sealed_resource,
         clawhub_registry,
         runtime_observation,
@@ -31,6 +33,7 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) 
         Arc::new(owners.peer_handle.clone()),
     ));
     let plugins_handle = plugins_module::PluginsModule::new(plugins_adapter)
+        .with_agent_plugins(Arc::new(matcha_agent::plugins::Plugins::new(matcha_agent.native_client())))
         .with_call_recorder(calls.recorder());
     let plugins = plugins_handle.clone();
     owners
@@ -49,12 +52,19 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) 
         open_claw.clone(),
         clawhub_registry,
     ));
-    let skills_handle = skills_module::SkillsModule::new(
+    let selected_skills = Arc::new(skills_module::selection::SelectedSkillsPort::new(
         skills_adapter.clone(),
+        runtime_directory.clone(),
+    ));
+    let mut skills_handle = skills_module::SkillsModule::new(
+        selected_skills,
         skills_adapter,
         sealed_resource.skills_port(),
     )
     .with_call_recorder(calls.recorder());
+    if let Some(factory) = sealed_resource.matcha_skills_factory() {
+        skills_handle = skills_handle.with_sealed_skill_factory(factory);
+    }
     let skills = skills_handle.clone();
     owners
         .tasks
@@ -80,6 +90,7 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) 
         calls,
         peer: owners.peer_handle.clone(),
         open_claw,
+        matcha_agent,
         session_module: owners.session_module.clone(),
         session: owners.session_handle.clone(),
         provider: owners.provider_module.clone(),

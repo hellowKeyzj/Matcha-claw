@@ -22,23 +22,19 @@ impl OpenClawDriver {
         }
         match command {
             Command::List { .. } => {
-                let result = self
-                    .gateway
-                    .list_agents()
-                    .await
-                    .map(|mut list| {
-                        // Matcha's default/system identity does not change OpenClaw's native default.
-                        if let Some(agent) = list
-                            .agents
-                            .iter_mut()
-                            .find(|agent| agent.id == MAIN_AGENT_ID)
-                        {
-                            agent.kind = super::AgentKind::System;
-                            list.default_id = MAIN_AGENT_ID.to_owned();
-                            list.selection_required = false;
-                        }
-                        list
-                    });
+                let result = self.gateway.list_agents().await.map(|mut list| {
+                    // Matcha's default/system identity does not change OpenClaw's native default.
+                    if let Some(agent) = list
+                        .agents
+                        .iter_mut()
+                        .find(|agent| agent.id == MAIN_AGENT_ID)
+                    {
+                        agent.kind = super::AgentKind::System;
+                        list.default_id = MAIN_AGENT_ID.to_owned();
+                        list.selection_required = false;
+                    }
+                    list
+                });
                 agents_read(result)
             }
             Command::Create {
@@ -46,7 +42,10 @@ impl OpenClawDriver {
                 workspace_initialization,
                 ..
             } => {
-                let workspace = input.workspace.clone();
+                let agents::AgentWorkspace::Path(workspace) = &input.workspace else {
+                    return Outcome::Unsupported;
+                };
+                let workspace = workspace.clone();
                 let Ok(input) = native_create(input) else {
                     return Outcome::Rejected;
                 };
@@ -77,10 +76,9 @@ impl OpenClawDriver {
                 let Ok(input) = native_update(input) else {
                     return Outcome::Rejected;
                 };
-                agents_mutation(
-                    self.gateway.update_agent(input).await,
-                    |agent| Outcome::Updated(agent_updated(agent)),
-                )
+                agents_mutation(self.gateway.update_agent(input).await, |agent| {
+                    Outcome::Updated(agent_updated(agent))
+                })
             }
             Command::Delete { ref input, .. }
                 if input.agent_id.trim().eq_ignore_ascii_case(MAIN_AGENT_ID) =>
@@ -91,21 +89,16 @@ impl OpenClawDriver {
                 let Ok(input) = native_delete(input) else {
                     return Outcome::Rejected;
                 };
-                agents_mutation(
-                    self.gateway.delete_agent(input).await,
-                    |agent| Outcome::Deleted(agent_deleted(agent)),
-                )
+                agents_mutation(self.gateway.delete_agent(input).await, |agent| {
+                    Outcome::Deleted(agent_deleted(agent))
+                })
             }
             Command::ListFiles { agent_id, .. } => {
                 agents_files(self.gateway.list_agent_files(agent_id).await)
             }
             Command::GetFile { agent_id, name, .. } => {
                 let name = native_file_name(name);
-                agents_file(
-                    self.gateway
-                        .get_agent_file(agent_id, name)
-                        .await,
-                )
+                agents_file(self.gateway.get_agent_file(agent_id, name).await)
             }
             Command::SetFile {
                 agent_id,
@@ -115,9 +108,7 @@ impl OpenClawDriver {
             } => {
                 let name = native_file_name(name);
                 agents_mutation(
-                    self.gateway
-                        .set_agent_file(agent_id, name, content)
-                        .await,
+                    self.gateway.set_agent_file(agent_id, name, content).await,
                     |file| Outcome::File(agent_file(file)),
                 )
             }
@@ -155,7 +146,10 @@ impl OpenClawDriver {
             } => match self.gateway.set_agent_skills(agent_id, skills).await {
                 Ok(outcome) => agents::configuration_mutation(configuration_mutation(outcome)),
                 Err((unknown_skill_keys, non_canonical_skill_keys)) => Outcome::SkillConfiguration(
-                    agents::SkillConfigurationOutcome::InvalidSkillKeys { unknown_skill_keys, non_canonical_skill_keys },
+                    agents::SkillConfigurationOutcome::InvalidSkillKeys {
+                        unknown_skill_keys,
+                        non_canonical_skill_keys,
+                    },
                 ),
             },
             Command::SkillConfiguration {

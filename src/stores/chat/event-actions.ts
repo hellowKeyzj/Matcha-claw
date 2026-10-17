@@ -237,7 +237,7 @@ export function handleStoreSessionUpdateEvent(
   if (!sourceSessionKey) {
     return;
   }
-  if (isAgentSessionTombstoned(sessionUpdate.snapshot.catalog.sessionIdentity.agentId)) {
+  if (isAgentSessionTombstoned(sessionUpdate.snapshot.catalog.sessionIdentity.agentId, sessionUpdate.snapshot.catalog.sessionIdentity.endpoint)) {
     return;
   }
   const targetSessionKey = resolveSessionUpdateRecordKey(

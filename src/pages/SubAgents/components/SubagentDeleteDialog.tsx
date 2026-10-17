@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -6,7 +7,8 @@ interface SubagentDeleteDialogProps {
   open: boolean;
   agentId: string | null;
   deleting: boolean;
-  onConfirm: () => Promise<void>;
+  onConfirm: (deleteFiles: boolean) => Promise<void>;
+  nativeManaged?: boolean;
   onClose: () => void;
 }
 
@@ -15,9 +17,11 @@ export function SubagentDeleteDialog({
   agentId,
   deleting,
   onConfirm,
+  nativeManaged = false,
   onClose,
 }: SubagentDeleteDialogProps) {
   const { t } = useTranslation('subagents');
+  const [deleteFiles, setDeleteFiles] = useState(false);
 
   if (!open || !agentId) {
     return null;
@@ -37,8 +41,12 @@ export function SubagentDeleteDialog({
           </Button>
         </header>
         <p className="mt-2 text-sm text-muted-foreground">{t('deleteDialog.description')}</p>
+        {nativeManaged && <label className="mt-3 flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={deleteFiles} disabled={deleting} onChange={(event) => setDeleteFiles(event.target.checked)} />
+          {t('deleteDialog.deleteFiles', { defaultValue: '同时删除运行时托管的 Agent 文件（不可恢复）' })}
+        </label>}
         <div className="mt-4 flex justify-end">
-          <Button variant="destructive" type="button" onClick={() => void onConfirm()} disabled={deleting}>
+          <Button variant="destructive" type="button" onClick={() => void onConfirm(nativeManaged ? deleteFiles : true)} disabled={deleting}>
             {deleting ? t('deleteDialog.deleting') : t('deleteDialog.confirm')}
           </Button>
         </div>

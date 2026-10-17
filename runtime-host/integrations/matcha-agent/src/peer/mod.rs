@@ -1,14 +1,15 @@
 mod construction;
+mod errors;
 pub(crate) mod lifecycle;
-mod session_create;
+mod renderer;
+pub(crate) mod session_create;
 
 pub use construction::{ConstructionError, MatchaPeerFactory, MatchaPeerInput};
-pub use lifecycle::{
-    JoinError, LifecycleError, MatchaPeer, MatchaPeerLifecycleHandle, MatchaPeerSessionHandle,
+pub use errors::{JoinError, LifecycleError, ShutdownError};
+pub use lifecycle::{MatchaPeer, MatchaPeerLifecycleHandle, MatchaPeerSessionHandle};
+pub use renderer::{
     RendererApprovalPhase, RendererEvent, RendererEventEnvelope, RendererMessageLifecycle,
-    RendererRunPhase, RendererToolPhase, RoleSessionError,
-    RoleSessionNativeHandle, RoleSessionOwnership, RoleSessionPromptHandle,
-    SessionSubscriptionItem, ShutdownError,
+    RendererRunPhase, RendererToolPhase, SessionSubscriptionItem,
 };
 
 #[cfg(test)]

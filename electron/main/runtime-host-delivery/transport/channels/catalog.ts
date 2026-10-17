@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 import { isRecord, sendLoopbackJson } from '../client';
 import { beginChannelTrace, channelTraceError, channelTraceHeaders } from './trace';
 
@@ -38,6 +39,7 @@ type ChannelConfigureInput = Readonly<{
   accountId: string;
   agentId?: string;
   values: Record<string, unknown>;
+  scope?: ProductRuntimeScope;
 }>;
 
 export type ChannelCatalogTransportResponse = Readonly<{
@@ -51,8 +53,8 @@ export type ChannelConfigureTransportResponse = Readonly<{
 }>;
 
 export interface ChannelCatalogTransport {
-  read(): Promise<ChannelCatalogTransportResponse>;
-  form(channel: string, traceId?: string): Promise<ChannelConfigureTransportResponse>;
+  read(scope?: unknown): Promise<ChannelCatalogTransportResponse>;
+  form(channel: string, traceId?: string, scope?: ProductRuntimeScope): Promise<ChannelConfigureTransportResponse>;
   apply(input: ChannelConfigureInput, traceId?: string): Promise<ChannelConfigureTransportResponse>;
 }
 
@@ -62,7 +64,8 @@ export function createChannelCatalogTransport(
   fetcher: typeof fetch = fetch,
 ): ChannelCatalogTransport {
   return {
-    async read(): Promise<ChannelCatalogTransportResponse> {
+    async read(scope?: unknown): Promise<ChannelCatalogTransportResponse> {
+      if (scope !== undefined && !isProductRuntimeScope(scope)) return { status: 503, body: UNAVAILABLE };
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: CATALOG_ENDPOINT,
@@ -75,20 +78,20 @@ export function createChannelCatalogTransport(
         },
         method: 'POST',
         fetcher,
-        body: {},
+        body: scope === undefined ? {} : { scope },
       });
       if (response?.status === 200 && isChannelCatalog(response.body)) {
         return { status: 200, body: response.body };
       }
       return { status: 503, body: UNAVAILABLE };
     },
-    async form(channel, traceId): Promise<ChannelConfigureTransportResponse> {
-      if (!isIdentity(channel)) return { status: 503, body: UNAVAILABLE };
+    async form(channel, traceId, scope): Promise<ChannelConfigureTransportResponse> {
+      if (!isIdentity(channel) || (scope !== undefined && !isProductRuntimeScope(scope))) return { status: 503, body: UNAVAILABLE };
       return await requestConfigure(
         issuer,
         runtimeHostTransportPort,
         fetcher,
-        { action: 'form', channel },
+        { action: 'form', channel, ...(scope === undefined ? {} : { scope }) },
         isChannelConfigureForm,
         'transport.configure.form',
         traceId,
@@ -97,8 +100,10 @@ export function createChannelCatalogTransport(
     async apply(input, traceId): Promise<ChannelConfigureTransportResponse> {
       if (!isIdentity(input.channel)
         || !isIdentity(input.accountId)
-        || (input.agentId !== undefined && !isIdentity(input.agentId))
-        || !isValuesObject(input.values)) {
+        || (input.agentId !== undefined && !(input.scope?.endpoint.runtimeAdapterId === 'matcha-agent'
+          ? typeof input.agentId === 'string' && /^[A-Za-z0-9_-]+$/.test(input.agentId) : isIdentity(input.agentId)))
+        || !isValuesObject(input.values)
+        || (input.scope !== undefined && !isProductRuntimeScope(input.scope))) {
         return { status: 503, body: UNAVAILABLE };
       }
       return await requestConfigure(

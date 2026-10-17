@@ -67,6 +67,7 @@ function resolveBootstrap(input: {
       return 18_789;
     },
     isFile: (file) => files.has(file),
+    isExecutable: (file) => files.has(file),
     resolveRuntimeHostBinary: () =>
       path.join(
         modeRoot,
@@ -95,9 +96,10 @@ function expectedFiles(input: {
     modeRoot,
     ...(input.isPackaged ? ['bin', target] : ['runtime-host', 'dist', target])
   );
-  const entry = input.isPackaged
-    ? path.join(modeRoot, 'matcha-agent', 'dist', 'cli-bun.js')
-    : path.join(modeRoot, 'matcha-agent', 'scripts', 'dev.ts');
+  const entry = path.join(modeRoot, 'matcha-agent', 'dist', 'cli-bun.js');
+  const server = path.join(modeRoot,
+    ...(input.isPackaged ? ['bin', target] : ['matcha-agent', 'app-server', 'dist', target]),
+    input.platform === 'win32' ? 'matcha-app-server.exe' : 'matcha-app-server');
   const bun = input.isPackaged
     ? path.join(modeRoot, 'bin', input.platform === 'win32' ? 'bun.exe' : 'bun')
     : path.join(
@@ -118,7 +120,11 @@ function expectedFiles(input: {
   return [
     electronImage,
     bun,
+    server,
     entry,
+    path.join(modeRoot, 'matcha-agent', 'dist', 'cli.js'),
+    path.join(modeRoot, 'matcha-agent', 'dist', 'vendor', 'audio-capture', `${input.arch}-${input.platform}`, 'audio-capture.node'),
+    path.join(modeRoot, 'matcha-agent', 'dist', 'vendor', 'ripgrep', `${input.arch}-${input.platform}`, input.platform === 'win32' ? 'rg.exe' : 'rg'),
     openClawEntry,
     path.join(
       runtimeHostDirectory,
@@ -174,7 +180,10 @@ describe('resolveRuntimeHostBootstrap', () => {
         ),
         runtimeHostTransportPort: 32_111,
         matcha: {
-          bunExecutable: isPackaged
+          serverExecutable: path.join(modeRoot,
+            ...(isPackaged ? ['bin', target] : ['matcha-agent', 'app-server', 'dist', target]),
+            platform === 'win32' ? 'matcha-app-server.exe' : 'matcha-app-server'),
+          cliExecutable: isPackaged
             ? path.join(modeRoot, 'bin', platform === 'win32' ? 'bun.exe' : 'bun')
             : path.join(
                 modeRoot,
@@ -183,9 +192,7 @@ describe('resolveRuntimeHostBootstrap', () => {
                 target,
                 platform === 'win32' ? 'bun.exe' : 'bun'
               ),
-          entry: isPackaged
-            ? path.join(modeRoot, 'matcha-agent', 'dist', 'cli-bun.js')
-            : path.join(modeRoot, 'matcha-agent', 'scripts', 'dev.ts'),
+          cliArgs: [path.join(modeRoot, 'matcha-agent', 'dist', 'cli-bun.js')],
           workingDirectory: modeRoot,
           storageRoot,
           port: 32_112,
@@ -240,8 +247,9 @@ describe('resolveRuntimeHostBootstrap', () => {
     });
 
     expect(bootstrap.matcha).toMatchObject({
-      bunExecutable: win32.join(windowsProjectRoot, 'resources', 'bin', 'win32-x64', 'bun.exe'),
-      entry: win32.join(windowsProjectRoot, 'matcha-agent', 'scripts', 'dev.ts'),
+      serverExecutable: win32.join(windowsProjectRoot, 'matcha-agent', 'app-server', 'dist', 'win32-x64', 'matcha-app-server.exe'),
+      cliExecutable: win32.join(windowsProjectRoot, 'resources', 'bin', 'win32-x64', 'bun.exe'),
+      cliArgs: [win32.join(windowsProjectRoot, 'matcha-agent', 'dist', 'cli-bun.js')],
       workingDirectory: windowsProjectRoot,
     });
     expect(bootstrap.openClaw).toMatchObject({

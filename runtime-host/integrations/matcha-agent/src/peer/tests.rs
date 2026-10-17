@@ -21,10 +21,7 @@ use foundation::process::supervision::{RestartOutcome, TerminationCompletion};
 use toolchain::{NativeToolchain, ToolchainPlatform, UnsupportedToolchainCommandPort};
 
 use super::*;
-use crate::{
-    lifecycle::{launch::LaunchError, secret::Secret},
-    session::client::AppServerClientError,
-};
+use crate::lifecycle::{launch::LaunchError, secret::Secret};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -62,8 +59,13 @@ fn absolute_path(name: &str) -> PathBuf {
 
 fn input(root: &TestRoot) -> MatchaPeerInput {
     MatchaPeerInput {
-        bun_executable: absolute_path("bin/bun"),
-        entry: absolute_path("matcha-agent/dist/cli-bun.js"),
+        server_executable: absolute_path("bin/matcha-app-server"),
+        cli_executable: absolute_path("bin/bun"),
+        cli_args: vec![
+            absolute_path("matcha-agent/dist/cli-bun.js")
+                .to_string_lossy()
+                .into_owned(),
+        ],
         working_directory: absolute_path("runtime"),
         storage_root: root.0.join("storage"),
         port: 18_790,
@@ -98,8 +100,9 @@ fn toolchain() -> Arc<NativeToolchain> {
 #[cfg(windows)]
 struct PackagedMatchaArtifact {
     resources: PathBuf,
-    bun_executable: PathBuf,
-    entry: PathBuf,
+    server_executable: PathBuf,
+    cli_executable: PathBuf,
+    cli_args: Vec<String>,
     git_bash: PathBuf,
 }
 
@@ -109,11 +112,26 @@ impl PackagedMatchaArtifact {
         let unpacked = std::env::var_os("MATCHACLAW_PACKAGED_UNPACKED")?;
         let resources = PathBuf::from(unpacked).join("resources");
         let artifact = Self {
-            bun_executable: resources.join("bin").join("bun.exe"),
-            entry: resources
-                .join("matcha-agent")
-                .join("dist")
-                .join("cli-bun.js"),
+            server_executable: resources
+                .join("bin")
+                .join(format!(
+                    "win32-{}",
+                    if cfg!(target_arch = "aarch64") {
+                        "arm64"
+                    } else {
+                        "x64"
+                    }
+                ))
+                .join("matcha-app-server.exe"),
+            cli_executable: resources.join("bin").join("bun.exe"),
+            cli_args: vec![
+                resources
+                    .join("matcha-agent")
+                    .join("dist")
+                    .join("cli-bun.js")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
             git_bash: resources
                 .join("bin")
                 .join("git-for-windows")
@@ -122,8 +140,9 @@ impl PackagedMatchaArtifact {
             resources,
         };
         (artifact.resources.join("app.asar").is_file()
-            && artifact.bun_executable.is_file()
-            && artifact.entry.is_file()
+            && artifact.server_executable.is_file()
+            && artifact.cli_executable.is_file()
+            && PathBuf::from(&artifact.cli_args[0]).is_file()
             && artifact.git_bash.is_file())
         .then_some(artifact)
     }
@@ -132,8 +151,9 @@ impl PackagedMatchaArtifact {
 #[cfg(windows)]
 fn packaged_input(root: &TestRoot, artifact: &PackagedMatchaArtifact) -> MatchaPeerInput {
     MatchaPeerInput {
-        bun_executable: artifact.bun_executable.clone(),
-        entry: artifact.entry.clone(),
+        server_executable: artifact.server_executable.clone(),
+        cli_executable: artifact.cli_executable.clone(),
+        cli_args: artifact.cli_args.clone(),
         working_directory: artifact.resources.clone(),
         storage_root: root.0.join("storage"),
         port: available_loopback_port(),
@@ -208,10 +228,16 @@ async fn packaged_app_server_fixture_proves_real_artifact_lifecycle() {
         Ok(foundation::process::supervision::StartOutcome::Started)
     );
     assert_eq!(peer.snapshot().phase(), SupervisorPhase::Running);
-    assert!(matches!(
-        peer.list_history().await,
-        crate::session::history::HistoryResult::Complete(_)
-    ));
+    let catalog = peer
+        .native_client()
+        .call("sessions.list", serde_json::json!({"limit": 100}))
+        .await
+        .expect("packaged server must list native sessions");
+    assert!(
+        catalog
+            .get("sessions")
+            .is_some_and(serde_json::Value::is_array)
+    );
 
     let first_pid = peer
         .snapshot()
@@ -285,18 +311,15 @@ fn factory_rejects_invalid_endpoint_without_spawning() {
 
     let error = MatchaPeerFactory::try_new(input, secret()).unwrap_err();
 
-    assert_eq!(
-        error,
-        ConstructionError::Endpoint(AppServerClientError::InvalidEndpoint)
-    );
-    assert_eq!(error.to_string(), "app-server endpoint is invalid");
+    assert_eq!(error, ConstructionError::Launch(LaunchError::InvalidInput));
+    assert_eq!(error.to_string(), "matcha-agent launch input is invalid");
 }
 
 #[test]
 fn factory_rejects_invalid_launch_without_spawning() {
     let root = TestRoot::new();
     let mut input = input(&root);
-    input.bun_executable = PathBuf::from("relative-sensitive-artifact");
+    input.server_executable = PathBuf::from("relative-sensitive-artifact");
 
     let error = match MatchaPeerFactory::try_new(input, secret()) {
         Ok(_) => panic!("invalid matcha-agent launch input was accepted"),

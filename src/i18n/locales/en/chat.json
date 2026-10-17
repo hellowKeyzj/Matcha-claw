@@ -1,11 +1,15 @@
 {
     "runtimePreparing": {
-        "title": "Starting runtime",
-        "description": "Runtime Host is preparing chat runtimes. You can start chatting in a moment."
+        "title": "Preparing chat",
+        "description": "Preparing the chat runtime and agent information. Please wait."
+    },
+    "runtimePreparationFailed": {
+        "title": "Chat preparation failed",
+        "description": "The runtime and agent information could not be prepared. Check the runtime status in Settings."
     },
     "runtimeUnavailable": {
-        "title": "No runtime available",
-        "description": "No chat runtime endpoint is available. Try again shortly or check Runtime Host in Settings."
+        "title": "Current runtime unavailable",
+        "description": "The current chat runtime or selected agent is unavailable. Choose another on the left or check the runtime status in Settings."
     },
     "workspaceUnavailable": {
         "title": "Workspace unavailable",
@@ -224,12 +228,7 @@
         "retry": "Retry"
     },
     "welcome": {
-        "title": "MatchaClaw Chat",
-        "subtitle": "Your AI assistant is ready. Start a conversation below.",
-        "askQuestions": "Ask Questions",
-        "askQuestionsDesc": "Get answers on any topic",
-        "creativeTasks": "Creative Tasks",
-        "creativeTasksDesc": "Writing, brainstorming, ideas"
+        "title": "What would you like to do?"
     },
     "input": {
         "teamDesignStart": "Design run graph",
@@ -269,6 +268,30 @@
         "permissionFullRequiresAccess": "Full access is not available for this session",
         "permissionLoading": "Loading permissions…",
         "permissionPending": "Switching permissions…",
+        "configurationCreating": "Creating the session and applying configuration…",
+        "configurationCreateUnknown": "Session creation is unconfirmed. Do not send again.",
+        "configurationOutcome": {
+            "unsupported": "Configuration not applied: this operation is unsupported",
+            "unavailable": "Configuration not applied: the runtime is unavailable",
+            "rejected": "Configuration rejected. Adjust it before retrying the send.",
+            "unknown": "Configuration outcome unconfirmed; message not sent"
+        },
+        "permissionUnavailable": "Permission controls are temporarily unavailable",
+        "permissionUnknown": "Permission operation outcome is unconfirmed",
+        "permissionRejected": "The runtime rejected the permission request",
+        "permissionSavedNotApplied": "Applies on next launch",
+        "permissionNativeDefault": "Standard approval",
+        "permissionNativeDefaultDescription": "Use the native standard permission approval flow.",
+        "permissionAcceptEdits": "Accept edits",
+        "permissionAcceptEditsDescription": "Accept file edits automatically; other operations follow native permission rules.",
+        "permissionBypass": "Bypass approval",
+        "permissionBypassDescription": "Request skipping native permission prompts, subject to runtime authorization.",
+        "permissionPlan": "Plan mode",
+        "permissionPlanDescription": "Use native planning permissions without making changes.",
+        "permissionDontAsk": "Do not ask",
+        "permissionDontAskDescription": "Do not prompt; deny operations that would require approval.",
+        "permissionAuto": "Automatic review",
+        "permissionAutoDescription": "Let the native runtime assess operation permissions automatically.",
         "permissionUnsupported": "Permission controls are not available yet",
         "permissionLoadFailed": "Failed to load permissions: {{error}}",
         "permissionSwitchFailed": "Failed to switch permissions: {{error}}",
@@ -446,6 +469,7 @@
         "deleted": "Deleted",
         "revealFailed": "Failed to reveal the file in your file manager",
         "workspaceEmpty": "No workspace directory is available to browse.",
+        "workspaceLoadError": "Unable to load files",
         "workspaceLoadFailed": "Workspace load failed: {{error}}"
     },
     "approval": {

@@ -110,10 +110,10 @@ impl ProviderRuntimeDirectory for Directory {
     fn provider_model_discovery_ops(&self) -> Option<&dyn ProviderModelDiscoveryOps> {
         None
     }
-    fn provider_runtime_identity_ops(&self) -> Option<&dyn ProviderRuntimeIdentityOps> {
+    fn provider_runtime_identity_ops(&self, _: &RuntimeEndpoint) -> Option<&dyn ProviderRuntimeIdentityOps> {
         None
     }
-    fn provider_private_projection_ops(&self) -> Option<&dyn ProviderPrivateProjectionOps> {
+    fn provider_private_projection_ops(&self, _: &RuntimeEndpoint) -> Option<&dyn ProviderPrivateProjectionOps> {
         None
     }
 }

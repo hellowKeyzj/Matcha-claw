@@ -3,14 +3,15 @@
  * Manages chat messages, sessions, streaming, and thinking state.
  * Communicates with runtime-host session APIs.
  */
-import { create } from 'zustand';
+import { create, type StoreApi, type UseBoundStore } from 'zustand';
 import { createIdleResourceStatusState } from '@/lib/resource-state';
-import { useComposerDraftStore } from '../composer-drafts';
+import { executeComposerSend, executeSessionModelSelection } from './session-initialization';
 import { hostSessionApprovals, hostSessionRename, hostSessionResolveApproval } from '@/lib/host-api';
 import {
   isRuntimeEndpointDirectoryPending,
   isSessionRuntimeEndpointReady,
   isSessionRuntimeEndpointStarting,
+  supportsSessionChat,
   useRuntimeEndpointsStore,
 } from '../runtime-endpoints';
 import { executeStoreAbortRun } from './abort-handlers';
@@ -30,6 +31,7 @@ import {
   executeLoadOlderViewportItems,
   executeLoadSessions,
   executeNewSession,
+  executeNewSessionDraft,
   executeNewSessionForScope,
   executeOpenAgentConversation,
   executeReconcileAgentSessionTombstones,
@@ -38,13 +40,13 @@ import {
   executeSelectSessionRuntimeEndpoint,
   executeSetViewportAnchorItemKey,
   executeSwitchSession,
+  resolveCurrentConversationAfterCatalogRefresh,
 } from './session-actions';
 import { buildTaskBridgeState, normalizeTaskSessionKey } from './session-helpers';
 import {
   EMPTY_SESSION_RUNTIME_GRAPH,
   buildCurrentConversationFromSessionRecord,
   buildSessionRuntimeGraph,
-  createDraftCurrentConversation,
 } from './session-runtime-graph';
 import { createChatStoreKernel } from './store-kernel';
 import {
@@ -101,6 +103,7 @@ function readSessionPromptScopes(endpoint: RuntimeEndpointSummary): AgentScope[]
     ...endpoint.agents.map((agent) => agent.agentId),
   ]);
   return [...agentIds]
+    .filter((agentId) => supportsSessionChat(endpoint, agentId))
     .map((agentId) => buildAgentScope(endpoint, agentId))
     .filter((scope): scope is AgentScope => scope != null);
 }
@@ -134,7 +137,7 @@ function buildAgentCatalog(endpoint: RuntimeEndpointSummary): ChatSessionRuntime
 }
 
 function buildDefaultSessionPromptScope(endpoint: RuntimeEndpointSummary): AgentScope | null {
-  return buildAgentScope(endpoint, endpoint.defaultAgentId);
+  return supportsSessionChat(endpoint, endpoint.defaultAgentId) ? buildAgentScope(endpoint, endpoint.defaultAgentId) : null;
 }
 
 function sessionEndpointMeta(endpoint: RuntimeEndpointRef): { protocolId: string | null; runtimeEndpointId: string } {
@@ -153,7 +156,7 @@ function sessionEndpointMeta(endpoint: RuntimeEndpointRef): { protocolId: string
 
 function compareRuntimeEndpointTarget(left: ChatSessionRuntimeEndpointTarget, right: ChatSessionRuntimeEndpointTarget): number {
   return left.endpointId.localeCompare(right.endpointId)
-    || left.defaultSessionPromptScope.agentId.localeCompare(right.defaultSessionPromptScope.agentId)
+    || (left.defaultSessionPromptScope?.agentId ?? '').localeCompare(right.defaultSessionPromptScope?.agentId ?? '')
     || JSON.stringify(left.defaultSessionPromptScope).localeCompare(JSON.stringify(right.defaultSessionPromptScope));
 }
 
@@ -175,7 +178,7 @@ function buildSessionRuntimeEndpointTargets(endpoints: RuntimeEndpointSummary[])
         acceptsDynamicAgents: endpoint.acceptsDynamicAgents,
         agentCatalog: buildAgentCatalog(endpoint),
         sessionPromptScopes,
-        defaultSessionPromptScope: buildDefaultSessionPromptScope(endpoint)!,
+        defaultSessionPromptScope: buildDefaultSessionPromptScope(endpoint),
       };
     })
     .sort(compareRuntimeEndpointTarget);
@@ -186,26 +189,27 @@ function matchesCurrentSessionRuntime(
   state: ChatStoreState,
 ): boolean {
   const endpoint = state.currentConversation?.endpoint
-    ?? getSessionMeta(state, state.currentSessionKey).sessionIdentity?.endpoint;
+    ?? getSessionMeta(state, state.currentSessionKey).sessionIdentity?.endpoint
+    ?? state.sessionRuntimeCatalog.selectedEndpoint;
   return Boolean(endpoint && sameRuntimeEndpointScope(target.endpoint, endpoint));
 }
 
-function selectDefaultSessionPromptScope(
+function selectDefaultSessionRuntimeTarget(
   targets: ChatSessionRuntimeEndpointTarget[],
   state: ChatStoreState,
-): AgentScope | null {
-  if (targets.length === 0) {
-    return null;
-  }
-  return targets.find((target) => matchesCurrentSessionRuntime(target, state))?.defaultSessionPromptScope
-    ?? targets[0]!.defaultSessionPromptScope;
+): ChatSessionRuntimeEndpointTarget | null {
+  const selected = targets.find((target) => matchesCurrentSessionRuntime(target, state));
+  if (selected) return selected;
+  if (state.currentConversation || getSessionMeta(state, state.currentSessionKey).sessionIdentity
+    || state.sessionRuntimeCatalog.selectedEndpoint) return null;
+  return targets.find((target) => target.runtimeAdapterId === 'openclaw') ?? targets[0] ?? null;
 }
 
 function syncSessionRuntimeProjectionAfterHistoryLoad(set: (partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState), replace?: false) => void, sessionKey: string): void {
   set((state) => {
     const sessionRuntimeGraph = buildSessionRuntimeGraph(state.sessionRuntimeCatalog, state.loadedSessions);
     const currentConversation = sessionKey === state.currentSessionKey && state.loadedSessions[sessionKey]
-      ? buildCurrentConversationFromSessionRecord(state.loadedSessions[sessionKey]!)
+      ? buildCurrentConversationFromSessionRecord(state.loadedSessions[sessionKey]!, state.currentConversation)
       : state.currentConversation;
     return {
       sessionRuntimeGraph,
@@ -214,7 +218,7 @@ function syncSessionRuntimeProjectionAfterHistoryLoad(set: (partial: Partial<Cha
   });
 }
 
-export const useChatStore = create<ChatStoreState>((set, get) => {
+export const useChatStore: UseBoundStore<StoreApi<ChatStoreState>> = create<ChatStoreState>((set, get) => {
   const runtimeKernel = createChatStoreKernel(set);
   const { beginMutating, finishMutating, historyRuntime, sessionRunCache } = runtimeKernel;
   let sessionRuntimeBootstrapSequence = 0;
@@ -354,6 +358,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
       endpoints: [],
       directoryRevision: 0,
       directoryRevisionByRuntimeScopeKey: {},
+      selectedEndpoint: null,
       defaultSessionPromptScope: null,
     },
     sessionCatalogLoadedAtByRuntimeScopeKey: {},
@@ -432,11 +437,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         if (sessionRuntimeBootstrapSequence !== requestSequence) {
           return;
         }
-        const stateBeforeCatalogUpdate = get();
         const endpointSource = status === 'ready' ? endpoints : [];
         const targets = buildSessionRuntimeEndpointTargets(endpointSource);
-        const defaultSessionPromptScope = selectDefaultSessionPromptScope(targets, stateBeforeCatalogUpdate);
-        if (!defaultSessionPromptScope) {
+        if (targets.length === 0) {
           const starting = status === 'loading' || endpoints.some(isSessionRuntimeEndpointStarting);
           const message = status === 'error' && error
             ? error
@@ -451,6 +454,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
               endpoints: targets,
               directoryRevision: revision,
               directoryRevisionByRuntimeScopeKey: revisionByRuntimeScopeKey,
+              selectedEndpoint: state.currentConversation?.endpoint ?? state.sessionRuntimeCatalog.selectedEndpoint,
               defaultSessionPromptScope: null,
             };
             return {
@@ -467,22 +471,35 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
           return;
         }
         set((state) => {
+          const contextTarget = selectDefaultSessionRuntimeTarget(targets, state);
+          const defaultSessionPromptScope = contextTarget?.sessionPromptScopes.find((scope) => scope.agentId === state.currentConversation?.agentId)
+            ?? contextTarget?.defaultSessionPromptScope ?? null;
           const sessionRuntimeCatalog = {
             status: 'ready' as const,
             error: null,
             endpoints: targets,
             directoryRevision: revision,
             directoryRevisionByRuntimeScopeKey: revisionByRuntimeScopeKey,
+            selectedEndpoint: state.currentConversation?.endpoint ?? state.sessionRuntimeCatalog.selectedEndpoint ?? contextTarget?.endpoint ?? null,
             defaultSessionPromptScope,
           };
           const sessionRuntimeGraph = buildSessionRuntimeGraph(sessionRuntimeCatalog, state.loadedSessions);
-          const currentConversation = state.currentSessionKey && state.loadedSessions[state.currentSessionKey]
-            ? buildCurrentConversationFromSessionRecord(state.loadedSessions[state.currentSessionKey]!)
-            : state.currentConversation ?? createDraftCurrentConversation(defaultSessionPromptScope.endpoint, defaultSessionPromptScope.agentId);
+          const currentConversation = state.currentConversation ?? resolveCurrentConversationAfterCatalogRefresh({
+            previousConversation: null,
+            currentSessionKey: state.currentSessionKey,
+            contextTarget,
+            graph: sessionRuntimeGraph,
+            loadedSessions: state.loadedSessions,
+            lastSelectedSessionKeyByRuntimeScopeKey: state.lastSelectedSessionKeyByRuntimeScopeKey,
+          });
           return {
+            currentSessionKey: currentConversation?.kind === 'session' ? currentConversation.sessionRecordKey : '',
             currentConversation,
             sessionRuntimeGraph,
-            sessionRuntimeCatalog,
+            sessionRuntimeCatalog: {
+              ...sessionRuntimeCatalog,
+              selectedEndpoint: currentConversation?.endpoint ?? sessionRuntimeCatalog.selectedEndpoint,
+            },
           };
         });
       } catch (error) {
@@ -515,18 +532,18 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     selectSessionRuntimeEndpoint: (endpoint) => {
       executeSelectSessionRuntimeEndpoint(sessionInput, endpoint);
     },
-    newSession: async (agentId, traceId) => {
-      await executeNewSession(sessionInput, agentId, traceId);
+    newSession: async (agentId) => {
+      executeNewSessionDraft(sessionInput, agentId);
     },
     newSessionForScope: async (scope) => {
       await executeNewSessionForScope(sessionInput, scope);
     },
     deleteSession: (key) => executeDeleteSession(sessionInput, key),
-    forgetAgentSessions: (agentId) => {
-      executeForgetAgentSessions(sessionInput, agentId);
+    forgetAgentSessions: (agentId, endpoint) => {
+      executeForgetAgentSessions(sessionInput, agentId, endpoint);
     },
-    reconcileAgentSessionTombstones: (agentIds) => {
-      executeReconcileAgentSessionTombstones(agentIds);
+    reconcileAgentSessionTombstones: (agentIds, endpoint) => {
+      executeReconcileAgentSessionTombstones(agentIds, endpoint);
     },
     renameSession: (key, label) => executeRenameSession({
       ...sessionInput,
@@ -584,37 +601,17 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
     setViewportAnchorItemKey: (itemKey, sessionKey) => {
       executeSetViewportAnchorItemKey(sessionInput, itemKey, sessionKey);
     },
-    sendMessage: async (text, attachments, intent, operationId) => {
-      const conversation = get().currentConversation;
-      if (conversation?.kind === 'draft') {
-        const draftKey = `${conversation.runtimeScopeKey}:agent:${conversation.agentId}:draft`;
-        const mode = intent ? useComposerDraftStore.getState().modes[draftKey] : null;
-        const created = await executeNewSession(sessionInput, undefined, undefined, mode ? { key: draftKey, modeId: mode.id } : undefined);
-        const createdIdentity = created ? get().loadedSessions[created.sessionRecordKey]?.meta.sessionIdentity : null;
-        if (!created || get().currentSessionKey !== created.sessionRecordKey || !createdIdentity
-          || buildSessionIdentityKey(createdIdentity) !== buildSessionIdentityKey(created.sessionIdentity)) {
-          return { accepted: false, reason: 'missing-session', error: 'Conversation changed or session creation failed',
-            ...(intent && created ? { sessionRecordKey: created.sessionRecordKey } : {}) };
-        }
-      }
-      if (!get().currentSessionKey) {
-        const error = get().error ?? 'Session runtime is not ready';
-        return { accepted: false, reason: 'missing-session', error };
-      }
-      const sessionRecordKey = get().currentSessionKey;
-      const result = await executeStoreSend({
-        set,
-        get,
-        sessionRunCache,
-        beginMutating,
-        finishMutating,
-        text,
-        attachments,
-        intent,
-        operationId,
-      });
-      return intent ? { ...result, sessionRecordKey } : result;
-    },
+    selectSessionModel: (key, selectionId) => executeSessionModelSelection({
+      ...sessionInput, subscribe: (listener) => useChatStore.subscribe(listener),
+    }, key, selectionId),
+    sendMessage: (text, attachments, intent, operationId) => executeComposerSend({
+      ...sessionInput,
+      subscribe: (listener) => useChatStore.subscribe(listener),
+      create: (draft) => executeNewSession(sessionInput, undefined, undefined, draft),
+      send: () => executeStoreSend({
+        set, get, sessionRunCache, beginMutating, finishMutating, text, attachments, intent, operationId,
+      }),
+    }, { text, attachments, intent, operationId }),
     abortRun: async () => {
       await executeStoreAbortRun({
         set,
@@ -755,7 +752,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => {
         const sessionRuntimeGraph = buildSessionRuntimeGraph(sessionRuntimeCatalog, loadedSessions);
         return {
           ...(normalizedSessionKey === state.currentSessionKey ? {
-            currentConversation: buildCurrentConversationFromSessionRecord(loadedSessions[normalizedSessionKey]!),
+            currentConversation: buildCurrentConversationFromSessionRecord(loadedSessions[normalizedSessionKey]!, state.currentConversation),
             sessionRuntimeCatalog,
           } : {}),
           sessionRuntimeGraph,

@@ -55,7 +55,10 @@ fn project_entry(entry: &Entry) -> Value {
 }
 
 fn unavailable_reason(entry: &Entry) -> Option<&'static str> {
-    if !entry.enabled {
+    if entry.source.as_deref() == Some("native-agent-candidate")
+        || entry.source.as_deref() == Some("matcha-sealed") && entry.base_dir.is_none() {
+        None
+    } else if !entry.enabled {
         Some("disabled")
     } else if !entry.missing_categories.is_empty() {
         Some("missingRequirements")

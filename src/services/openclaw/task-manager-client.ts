@@ -1,6 +1,5 @@
 import { hostApiFetch, hostCapabilityDescribe } from '@/lib/host-api';
 import {
-  buildSessionIdentityKey,
   sessionScope,
   type SessionIdentity,
 } from '../../types/desktop/runtime-address';
@@ -69,24 +68,14 @@ type TaskOperation =
   | 'todos.write';
 
 const TASK_MANAGEMENT_CAPABILITY_ID = 'task.management';
-const availableTaskManagementCapabilityKeys = new Set<string>();
-
-export async function isTaskManagementAvailable(sessionIdentity: SessionIdentity): Promise<boolean> {
-  const cacheKey = buildSessionIdentityKey(sessionIdentity);
-  if (availableTaskManagementCapabilityKeys.has(cacheKey)) {
-    return true;
-  }
+export async function isTaskManagementAvailable(sessionIdentity: SessionIdentity, operationId: TaskOperation = 'tasks.list'): Promise<boolean> {
   try {
     const { capability } = await hostCapabilityDescribe({
       id: TASK_MANAGEMENT_CAPABILITY_ID,
       scope: sessionScope(sessionIdentity),
     });
-    const available = capability.availability === 'available'
-      && capability.operations.some((operation) => operation.id === 'tasks.list');
-    if (available) {
-      availableTaskManagementCapabilityKeys.add(cacheKey);
-    }
-    return available;
+    return capability.availability === 'available'
+      && capability.operations.some((operation) => operation.id === operationId);
   } catch (error) {
     if (error instanceof Error && error.message === 'Capability is not available') {
       return false;
@@ -104,7 +93,7 @@ async function taskManagementApi<T>(operationId: TaskOperation, payload: {
     throw new Error('Task manager session identity is invalid');
   }
   const identity = payload.sessionIdentity;
-  if (!await isTaskManagementAvailable(identity)) {
+  if (!await isTaskManagementAvailable(identity, operationId)) {
     throw new TaskManagementUnavailableError();
   }
   return await hostApiFetch<T>('/api/capabilities/execute', {
@@ -210,21 +199,14 @@ export async function listTaskSnapshot(payload: {
   sessionIdentity: SessionIdentity;
   teamKey?: string;
 }): Promise<TaskListSnapshot> {
-  try {
-    const result = await taskManagementApi<{ scope?: unknown; tasks?: unknown[]; todos?: unknown[] }>('tasks.list', {
-      sessionKey: payload.sessionKey,
-      sessionIdentity: payload.sessionIdentity,
-      input: {
-        ...(payload.teamKey ? { teamKey: payload.teamKey } : {}),
-      },
-    });
-    return normalizeSnapshot(result);
-  } catch (error) {
-    if (error instanceof TaskManagementUnavailableError) {
-      return { tasks: [], todos: [] };
-    }
-    throw error;
-  }
+  const result = await taskManagementApi<{ scope?: unknown; tasks?: unknown[]; todos?: unknown[] }>('tasks.list', {
+    sessionKey: payload.sessionKey,
+    sessionIdentity: payload.sessionIdentity,
+    input: {
+      ...(payload.teamKey ? { teamKey: payload.teamKey } : {}),
+    },
+  });
+  return normalizeSnapshot(result);
 }
 
 export async function getTask(payload: { sessionKey: string; sessionIdentity: SessionIdentity; taskId: string }): Promise<Task | null> {

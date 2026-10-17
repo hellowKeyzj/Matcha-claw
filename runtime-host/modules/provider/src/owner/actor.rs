@@ -232,7 +232,7 @@ impl ProviderOwner {
                     send_reply(call, reply, outcome).await;
                     return;
                 }
-                let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops()
+                let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops(&crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint())
                 else {
                     let outcome = self.settle_account_transaction(
                         &mut call,
@@ -285,7 +285,7 @@ impl ProviderOwner {
                     send_reply(call, reply, outcome).await;
                     return;
                 }
-                let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops()
+                let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops(&crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint())
                 else {
                     let outcome = self.settle_account_transaction(
                         &mut call,
@@ -377,8 +377,8 @@ impl ProviderOwner {
                 let outcome = self.finish_routing_mutation(outcome, &mut call).await;
                 send_reply(call, reply, outcome).await;
             }
-            ProviderCommand::PreparePrivateProjection { reply } => {
-                let effect = self.prepare_private_projection();
+            ProviderCommand::PreparePrivateProjection { endpoint, reply } => {
+                let effect = self.prepare_private_projection(&endpoint).await;
                 self.update_snapshot();
                 let _ = reply.send(effect);
             }
@@ -662,14 +662,17 @@ impl ProviderOwner {
         }
     }
 
-    fn prepare_private_projection(&mut self) -> ProviderPrivateProjectionEffect {
+    async fn prepare_private_projection(
+        &mut self,
+        endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> ProviderPrivateProjectionEffect {
         if self.cascade.reload().is_err() {
             return ProviderPrivateProjectionEffect::unknown(
                 "provider-cascade-unavailable",
                 "Provider cascade is unavailable",
             );
         }
-        let Some(private_projection) = self.runtime_directory.provider_private_projection_ops()
+        let Some(private_projection) = self.runtime_directory.provider_private_projection_ops(endpoint)
         else {
             return ProviderPrivateProjectionEffect::unknown(
                 "provider-private-projection-unavailable",
@@ -677,11 +680,12 @@ impl ProviderOwner {
             );
         };
         private_projection.prepare_private_projection(ProviderPrivateProjectionCommand {
+            resolver: self.accounts.private_resolver(),
             accounts: self.cascade.accounts(),
             models: self.cascade.catalog(),
             routing: self.cascade.routing(),
             now_millis: now_millis(),
-        })
+        }).await
     }
 
     async fn reconcile(
@@ -728,7 +732,7 @@ impl ProviderOwner {
         if self.cascade.reload().is_err() || Instant::now() >= deadline {
             return ProviderNativeConfigurationEffect::Unavailable;
         }
-        let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops() else {
+        let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops(&crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint()) else {
             return ProviderNativeConfigurationEffect::Unavailable;
         };
         let accounts = self.cascade.accounts().to_vec();
@@ -758,6 +762,7 @@ impl ProviderOwner {
                 return ProviderNativeConfigurationEffect::Unavailable;
             }
             let command = crate::ProviderNativeConfigurationCommand {
+                resolver: self.accounts.private_resolver(),
                 accounts: &accounts,
                 models: &catalog,
                 routing: routing.as_ref(),
@@ -1004,7 +1009,7 @@ fn selectable_provider_models_for_snapshot(
     capability: ProviderModelCapability,
 ) -> ProviderModelSelectableOutcome {
     let snapshot = snapshot.load_full();
-    let Some(identity_ops) = runtime.provider_runtime_identity_ops() else {
+    let Some(identity_ops) = runtime.provider_runtime_identity_ops(&crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint()) else {
         return ProviderModelSelectableOutcome::Unavailable;
     };
     let Ok(identities) = identity_ops.runtime_identities(&snapshot.accounts) else {

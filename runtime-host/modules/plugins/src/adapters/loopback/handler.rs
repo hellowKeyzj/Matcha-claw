@@ -28,6 +28,7 @@ pub(super) async fn catalog(
 ) -> Response {
     match catalog_request(
         &request.head.headers,
+        request.path(),
         verifier,
         plugins,
         super::now_millis(),
@@ -53,6 +54,7 @@ pub(super) async fn runtime(
 ) -> Response {
     match runtime_request(
         &request.head.headers,
+        request.path(),
         verifier,
         plugins,
         super::now_millis(),
@@ -133,6 +135,7 @@ pub(super) async fn configuration(
 
 pub async fn catalog_request(
     headers: &[(String, String)],
+    path: &str,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     plugins: PluginsModule,
     now: u64,
@@ -148,15 +151,16 @@ pub async fn catalog_request(
     )
     .await?;
     plugins
-        .catalog()
+        .catalog_scoped(&crate::scope::query(path).map_err(|_| RequestError::Invalid)?.unwrap_or_else(crate::scope::openclaw))
         .await
         .map_err(|_| RequestError::Invalid)?
-        .map(projection::project_catalog)
+        .map(projection::project_catalog_snapshot)
         .map_err(|_| RequestError::Invalid)
 }
 
 pub async fn runtime_request(
     headers: &[(String, String)],
+    path: &str,
     verifier: Arc<Mutex<CapabilityDecisionVerifier>>,
     plugins: PluginsModule,
     now: u64,
@@ -171,6 +175,10 @@ pub async fn runtime_request(
         "plugin-runtime",
     )
     .await?;
+    if crate::scope::query(path).map_err(|_| RequestError::Invalid)?
+        .is_some_and(|scope| !crate::scope::is_openclaw(&scope)) {
+        return Err(RequestError::Invalid);
+    }
     plugins
         .runtime()
         .await
@@ -183,6 +191,8 @@ pub async fn runtime_request(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ConfigurationRequest {
     runtime: String,
+    #[serde(default, deserialize_with = "crate::scope::deserialize_optional")]
+    scope: Option<platform::endpoint::runtime_address::RuntimeScope>,
     plugin_id: String,
     enabled: bool,
 }
@@ -191,6 +201,8 @@ struct ConfigurationRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OperationRequest {
     runtime: String,
+    #[serde(default, deserialize_with = "crate::scope::deserialize_optional")]
+    scope: Option<platform::endpoint::runtime_address::RuntimeScope>,
     operation: String,
     plugin_id: String,
 }
@@ -214,12 +226,13 @@ pub async fn operation_request(
     .await?;
     let request: OperationRequest =
         serde_json::from_slice(body).map_err(|_| RequestError::Invalid)?;
-    if request.runtime != "openclaw" || request.plugin_id.trim().is_empty() {
+    let scope = mutation_scope(&request.runtime, request.scope)?;
+    if request.plugin_id.trim().is_empty() {
         return Err(RequestError::Invalid);
     }
     let operation = Operation::from_wire(&request.operation).ok_or(RequestError::Invalid)?;
     let receipt = plugins
-        .admit_operation(operation, request.plugin_id)
+        .admit_operation_scoped(&scope, operation, request.plugin_id)
         .await
         .map_err(|_| RequestError::Unavailable)?;
     Ok(json!(receipt))
@@ -244,14 +257,29 @@ pub async fn configuration_request(
     .await?;
     let request: ConfigurationRequest =
         serde_json::from_slice(body).map_err(|_| RequestError::Invalid)?;
-    if request.runtime != "openclaw" || request.plugin_id.trim().is_empty() {
+    let scope = mutation_scope(&request.runtime, request.scope)?;
+    if request.plugin_id.trim().is_empty() {
         return Err(RequestError::Invalid);
     }
     let receipt = plugins
-        .admit_configuration(request.plugin_id, request.enabled)
+        .admit_configuration_scoped(&scope, request.plugin_id, request.enabled)
         .await
         .map_err(|_| RequestError::Unavailable)?;
     Ok(json!(receipt))
+}
+
+fn mutation_scope(runtime: &str, value: Option<platform::endpoint::runtime_address::RuntimeScope>) -> Result<platform::endpoint::runtime_address::RuntimeScope, RequestError> {
+    let scope = match value {
+        Some(scope) => scope,
+        None if runtime == "openclaw" => crate::scope::openclaw(),
+        None => return Err(RequestError::Invalid),
+    };
+    if (runtime == "openclaw" && crate::scope::is_openclaw(&scope))
+        || (runtime == "matcha-agent" && crate::scope::agent(&scope).is_some()) {
+        Ok(scope)
+    } else {
+        Err(RequestError::Invalid)
+    }
 }
 
 async fn verify(

@@ -36,6 +36,8 @@ pub(crate) enum OrganizationCommand {
     },
     TeamSkillMaterialize {
         selection_id: TeamSkillSelectionId,
+        endpoint: organization::RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
         team_id: TeamId,
         idempotency_key: IdempotencyKey,
         reply: crate::call::CallReply<TeamMaterializationCommandOutcome>,
@@ -77,6 +79,14 @@ pub(crate) enum OrganizationCommand {
         idempotency_key: String,
         settlement: TeamDeleteRunNativeSettlement,
         native: organization::NativeDeletionEvidence,
+        observed_at: u64,
+        cancellation: tokio_util::sync::CancellationToken,
+    },
+    TeamDeleteUnconfirmedRunSettled {
+        team_id: TeamId,
+        run_id: GraphRunId,
+        idempotency_key: String,
+        outcome: crate::ports::native_effects::RoleSessionRetirementOutcome,
         observed_at: u64,
         cancellation: tokio_util::sync::CancellationToken,
     },

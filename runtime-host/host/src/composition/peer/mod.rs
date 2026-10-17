@@ -26,3 +26,13 @@ pub(crate) enum PeerLaneKey {
 
 pub(crate) type PeerGlobalState = ();
 pub(crate) type PeerLaneState = ();
+
+#[derive(Default)]
+pub(crate) struct MatchaReadyProjection {
+    process: Option<foundation::process::ProcessObservation>,
+    provider: Option<provider_module::ProviderPrivateProjectionEffect>,
+    connector: Option<connectors::ports::ConnectorProjectionEffect>,
+    sealed: Option<
+        Result<matcha_agent::sealed::ProjectionReceipt, matcha_agent::sealed::ProjectionError>,
+    >,
+}

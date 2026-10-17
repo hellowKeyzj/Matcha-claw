@@ -22,12 +22,12 @@ use organization::{
     },
 };
 
-use crate::ports::RuntimeReceiptOutcome;
+use crate::ports::{RuntimeReceiptOutcome, native_effects::RoleSessionRetirementOutcome};
 use platform::trace::{
     current_session_trace, identifier_hash, runtime_trace, session_trace, with_session_trace,
 };
 use serde_json::json;
-use runtime_directory::{OwnedRuntimeFuture, RuntimeDriverIdentity};
+use runtime_directory::OwnedRuntimeFuture;
 
 use crate::{
     ActivityExecutionOutcome, OrganizationNativeRuntime, OrganizationRuntimeDirectory,
@@ -93,6 +93,7 @@ pub(crate) struct OrganizationRunLane {
 
 struct TeamSkillRuntime {
     runtime: Arc<dyn OrganizationNativeRuntime>,
+    endpoint: RuntimeEndpointReference,
 }
 
 pub(crate) struct OrganizationOwner {
@@ -283,28 +284,37 @@ impl OrganizationShared {
         runtime.delete_role_sessions_cancellable(run_id, bindings, abort_first, cancellation)
     }
 
-    fn team_skill_runtime(&self) -> Option<TeamSkillRuntime> {
+    fn team_retire_unconfirmed_role_sessions(
+        &self,
+        bindings: Vec<organization::RoleSessionReceipt>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<RoleSessionRetirementOutcome> {
+        let Some(runtime) = self.team_runtime_for_bindings(&bindings) else {
+            return Box::pin(async { RoleSessionRetirementOutcome::OutcomeUnknown });
+        };
+        runtime.retire_unconfirmed_role_sessions(bindings, cancellation)
+    }
+
+    fn team_skill_runtime(&self, endpoint: &RuntimeEndpointReference) -> Option<TeamSkillRuntime> {
         self.runtime_directory
-            .open_claw_runtime()
-            .map(|runtime| TeamSkillRuntime { runtime })
+            .team_runtime_for_endpoint(endpoint)
+            .map(|runtime| TeamSkillRuntime { runtime, endpoint: endpoint.clone() })
     }
 }
 
 impl TeamSkillRuntime {
     fn endpoint(&self) -> RuntimeEndpointReference {
-        RuntimeEndpointReference::try_new(
-            RuntimeDriverIdentity::open_claw().runtime_endpoint_reference(),
-        )
-        .expect("team skill runtime endpoint must be a valid Organization endpoint reference")
+        self.endpoint.clone()
     }
 
     async fn installed_skill_names(
         &self,
+        source_agent: Option<organization::ManagedAgentReference>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Option<Vec<String>> {
         tokio::select! {
             _ = cancellation.cancelled() => None,
-            names = self.runtime.installed_skill_names() => names,
+            names = self.runtime.installed_skill_names(source_agent) => names,
         }
     }
 }
@@ -340,12 +350,14 @@ impl OrganizationGlobalState {
         &mut self,
         shared: &OrganizationShared,
         selection_id: TeamSkillSelectionId,
+        endpoint: RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> TeamSkillDependencyPlanResult {
-        let Some(runtime) = shared.team_skill_runtime() else {
+        let Some(runtime) = shared.team_skill_runtime(&endpoint) else {
             return TeamSkillDependencyPlanResult::Unavailable;
         };
-        let installed_names = match runtime.installed_skill_names(cancellation).await {
+        let installed_names = match runtime.installed_skill_names(source_agent, cancellation).await {
             Some(names) => names,
             None => return TeamSkillDependencyPlanResult::Unavailable,
         };
@@ -358,6 +370,8 @@ impl OrganizationGlobalState {
         &mut self,
         shared: &OrganizationShared,
         selection_id: TeamSkillSelectionId,
+        endpoint: RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
         team_id: TeamId,
         idempotency_key: IdempotencyKey,
         call: Option<&crate::call::CallReply<TeamMaterializationCommandOutcome>>,
@@ -366,10 +380,10 @@ impl OrganizationGlobalState {
             tokio_util::sync::CancellationToken::new,
             crate::call::CallReply::cancellation,
         );
-        let Some(runtime) = shared.team_skill_runtime() else {
+        let Some(runtime) = shared.team_skill_runtime(&endpoint) else {
             return TeamMaterializationCommandOutcome::Unavailable;
         };
-        let installed_names = match runtime.installed_skill_names(cancellation.clone()).await {
+        let installed_names = match runtime.installed_skill_names(source_agent.clone(), cancellation.clone()).await {
             Some(names) => names,
             None => return TeamMaterializationCommandOutcome::Unavailable,
         };
@@ -398,7 +412,7 @@ impl OrganizationGlobalState {
                         idempotency_key,
                     )
                 }) {
-                Ok(Ok(materialization)) => materialization,
+                Ok(Ok(materialization)) => materialization.with_source_agent(source_agent),
                 Ok(Err(_)) | Err(TeamSkillSelectionError::InvalidSelection) => {
                     return TeamMaterializationCommandOutcome::Rejected;
                 }
@@ -509,6 +523,32 @@ impl OrganizationGlobalState {
         let mut pending_settlement = false;
         for run_id in self.team_run_ids_for_team(&team_id) {
             let requires_native_delete = self.team_run_requires_native_delete(&run_id);
+            if !requires_native_delete && self.store.facts().materialization(&team_id).is_some_and(|receipt| {
+                receipt.endpoint().as_str() == runtime_directory::RuntimeDriverIdentity::matcha_agent().runtime_endpoint_reference()
+            }) {
+                let retirement_key = match self.store.facts().run(&run_id).map(|run| run.lifecycle().state()) {
+                    Some(GraphRunLifecycleState::Tombstoned { .. }) => continue,
+                    Some(GraphRunLifecycleState::Cancelling { idempotency_key, .. }
+                        | GraphRunLifecycleState::Cancelled { idempotency_key, .. }
+                        | GraphRunLifecycleState::OutcomeUnknown { idempotency_key, .. }) => idempotency_key.clone(),
+                    _ => idempotency_key.as_str().to_owned(),
+                };
+                pending_settlement = true;
+                self.team_run.begin_cancellation(&mut self.store, &run_id, &retirement_key, observed_at)?;
+                let Ok(receipt) = prepare_runtime_receipt(&self.store, &team_id, &run_id) else {
+                    continue;
+                };
+                self.spawn_team_delete_unconfirmed_run_task(
+                    shared,
+                    &team_id,
+                    run_id,
+                    &retirement_key,
+                    receipt.bindings().to_vec(),
+                    observed_at,
+                    cancellation.clone(),
+                );
+                continue;
+            }
             match self.team_run.begin_cancellation(
                 &mut self.store,
                 &run_id,
@@ -644,6 +684,51 @@ impl OrganizationGlobalState {
         self.team_delete_tasks.push(task);
     }
 
+    fn spawn_team_delete_unconfirmed_run_task(
+        &mut self,
+        shared: &OrganizationShared,
+        team_id: &TeamId,
+        run_id: GraphRunId,
+        idempotency_key: &str,
+        bindings: Vec<organization::RoleSessionReceipt>,
+        observed_at: u64,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) {
+        self.reap_team_delete_tasks();
+        let Some(command_target) = shared.command_target.get().cloned() else {
+            return;
+        };
+        let task_key = (run_id.as_str().to_owned(), idempotency_key.to_owned());
+        if self.team_delete_run_tasks.contains_key(&task_key) {
+            return;
+        }
+        self.team_delete_run_tasks.insert(task_key, team_id.clone());
+        let team_id = team_id.clone();
+        let idempotency_key = idempotency_key.to_owned();
+        let operation_cancellation = cancellation.child_token();
+        let mut native = shared.team_retire_unconfirmed_role_sessions(
+            bindings, operation_cancellation.clone(),
+        );
+        let (task, _) = OwnedTask::spawn(move |task_cancellation| async move {
+            let outcome = tokio::select! {
+                outcome = &mut native => outcome,
+                _ = task_cancellation.cancelled() => {
+                    operation_cancellation.cancel();
+                    native.await
+                }
+            };
+            let _ = command_target.send_command(OrganizationCommand::TeamDeleteUnconfirmedRunSettled {
+                team_id,
+                run_id,
+                idempotency_key,
+                outcome,
+                observed_at,
+                cancellation,
+            }).await;
+        });
+        self.team_delete_tasks.push(task);
+    }
+
     fn spawn_team_delete_removal_task(
         &mut self,
         shared: &OrganizationShared,
@@ -717,6 +802,34 @@ impl OrganizationGlobalState {
         }
     }
 
+    fn complete_team_delete_unconfirmed_run(
+        &mut self,
+        team_id: &TeamId,
+        run_id: GraphRunId,
+        idempotency_key: &str,
+        outcome: RoleSessionRetirementOutcome,
+        observed_at: u64,
+    ) -> Result<bool, StoreFault> {
+        let run = self.store.facts().run(&run_id).ok_or(StoreFault::InvalidFacts)?;
+        if run.team() != team_id || run.runtime().is_some() {
+            return Err(StoreFault::InvalidFacts);
+        }
+        if outcome == RoleSessionRetirementOutcome::OutcomeUnknown {
+            if matches!(run.lifecycle().state(), GraphRunLifecycleState::Cancelling { .. }) {
+                self.team_run.settle_cancellation(
+                    &mut self.store, &run_id, idempotency_key, RoleAbortOutcome::OutcomeUnknown, observed_at,
+                )?;
+            }
+            return Ok(false);
+        }
+        if matches!(run.lifecycle().state(), GraphRunLifecycleState::Cancelled { .. }
+            | GraphRunLifecycleState::Tombstoned { .. })
+        {
+            return self.tombstone_team_delete_cancelled_run(run_id, idempotency_key, observed_at);
+        }
+        self.tombstone_team_delete_run_after_local_cancellation(run_id, idempotency_key, observed_at)
+    }
+
     fn team_run_ids_for_team(&self, team_id: &TeamId) -> Vec<GraphRunId> {
         let mut run_ids = self
             .store
@@ -777,12 +890,13 @@ impl OrganizationGlobalState {
         team_id: &TeamId,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<bool, StoreFault> {
-        if !self
+        if self.team_delete_has_pending_tasks(team_id) || !self
             .store
             .facts()
             .runs()
             .filter(|run| run.team() == team_id)
-            .all(|run| run.runtime().is_none())
+            .all(|run| run.runtime().is_none()
+                && matches!(run.lifecycle().state(), GraphRunLifecycleState::Tombstoned { .. }))
         {
             return Ok(false);
         }
@@ -1090,6 +1204,7 @@ impl OwnerSpec for OrganizationOwner {
             }
             OrganizationCommand::TeamDelete { .. }
             | OrganizationCommand::TeamDeleteRunNativeSettled { .. }
+            | OrganizationCommand::TeamDeleteUnconfirmedRunSettled { .. }
             | OrganizationCommand::TeamDeleteRemovalSettled { .. }
             | OrganizationCommand::RunPurge { .. }
             | OrganizationCommand::RecoverMaterializationReceipts { .. }
@@ -1664,6 +1779,7 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::TeamSkillMaterialize { .. }
             | OrganizationCommand::TeamDelete { .. }
             | OrganizationCommand::TeamDeleteRunNativeSettled { .. }
+            | OrganizationCommand::TeamDeleteUnconfirmedRunSettled { .. }
             | OrganizationCommand::TeamDeleteRemovalSettled { .. }
             | OrganizationCommand::RunPurge { .. }
             | OrganizationCommand::WebhookTriggerFire { .. }
@@ -1692,6 +1808,8 @@ impl OwnerSpec for OrganizationOwner {
             }
             OrganizationCommand::TeamSkillMaterialize {
                 selection_id,
+                endpoint,
+                source_agent,
                 team_id,
                 idempotency_key,
                 reply,
@@ -1704,6 +1822,8 @@ impl OwnerSpec for OrganizationOwner {
                     .materialize_team_skill_selection(
                         &shared,
                         selection_id,
+                        endpoint,
+                        source_agent,
                         team_id,
                         idempotency_key,
                         Some(&reply),
@@ -1755,6 +1875,7 @@ impl OwnerSpec for OrganizationOwner {
                 cancellation,
             } => {
                 let task_key = (run_id.as_str().to_owned(), idempotency_key.clone());
+                state.team_delete_run_tasks.remove(&task_key);
                 let settled = match state.refresh() {
                     Ok(()) => match state.complete_team_delete_run_native_evidence(
                         run_id,
@@ -1772,7 +1893,30 @@ impl OwnerSpec for OrganizationOwner {
                     },
                     Err(error) => Err(error),
                 };
+                state.settle_team_delete_reply(&team_id, settled).await;
+            }
+            OrganizationCommand::TeamDeleteUnconfirmedRunSettled {
+                team_id,
+                run_id,
+                idempotency_key,
+                outcome,
+                observed_at,
+                cancellation,
+            } => {
+                let task_key = (run_id.as_str().to_owned(), idempotency_key.clone());
                 state.team_delete_run_tasks.remove(&task_key);
+                let settled = match state.refresh() {
+                    Ok(()) => match state.complete_team_delete_unconfirmed_run(
+                        &team_id, run_id, &idempotency_key, outcome, observed_at,
+                    ) {
+                        Ok(true) => state
+                            .start_team_delete_removal_if_ready(&shared, &team_id, cancellation)
+                            .map(|_| TeamDeleteOutcome::Deleted),
+                        Ok(false) => Ok(TeamDeleteOutcome::OutcomeUnknown),
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => Err(error),
+                };
                 state.settle_team_delete_reply(&team_id, settled).await;
             }
             OrganizationCommand::TeamDeleteRemovalSettled { team_id, outcome } => {
@@ -2152,10 +2296,12 @@ impl OwnerSpec for OrganizationOwner {
             }
             OrganizationQuery::TeamSkillSelectionDependencyPlan {
                 selection_id,
+                endpoint,
+                source_agent,
                 reply,
             } => {
                 let outcome = state
-                    .plan_team_skill_dependencies(&shared, selection_id, reply.cancellation())
+                    .plan_team_skill_dependencies(&shared, selection_id, endpoint, source_agent, reply.cancellation())
                     .await;
                 let _ = reply.send(outcome).await;
             }
@@ -3299,6 +3445,8 @@ pub(crate) mod tests {
                 .materialize_team_skill_selection(
                     &shared,
                     selection_id,
+                    RuntimeEndpointReference::try_new("endpoint:openclaw").unwrap(),
+                    None,
                     team_id(),
                     idempotency_key("team-skill:materialize"),
                     None,
@@ -4131,7 +4279,7 @@ pub(crate) mod tests {
             Box::pin(async move { evidence })
         }
 
-        fn installed_skill_names(&self) -> OwnedRuntimeFuture<Option<Vec<String>>> {
+        fn installed_skill_names(&self, _source_agent: Option<organization::ManagedAgentReference>) -> OwnedRuntimeFuture<Option<Vec<String>>> {
             Box::pin(async { Some(Vec::new()) })
         }
     }

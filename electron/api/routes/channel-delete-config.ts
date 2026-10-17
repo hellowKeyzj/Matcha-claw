@@ -4,6 +4,7 @@ import type {
   ChannelDeleteConfigTransport,
 } from '../../main/runtime-host-delivery/transport/channels/delete-config';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { isProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
 const INVALID = { outcome: 'rejected' } as const;
@@ -46,7 +47,8 @@ export async function handleChannelDeleteConfigRoutes(
 
 function isRequest(value: unknown): value is ChannelDeleteConfigRequest {
   return isRecord(value)
-    && Object.keys(value).every((key) => key === 'channel' || key === 'accountId')
+    && Object.keys(value).every((key) => ['channel', 'accountId', 'scope'].includes(key))
+    && (!Object.hasOwn(value, 'scope') || isProductRuntimeScope(value.scope))
     && isIdentity(value.channel)
     && (value.accountId === undefined || isIdentity(value.accountId));
 }

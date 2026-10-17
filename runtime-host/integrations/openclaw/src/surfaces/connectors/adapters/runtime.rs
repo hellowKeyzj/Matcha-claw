@@ -46,6 +46,7 @@ impl ConnectorOps for OpenClawDriver {
 
     fn observe_mcp_server_status<'a>(
         &'a self,
+        _agent_id: String,
         session_key: String,
     ) -> ::connectors::ports::ConnectorFuture<
         'a,
@@ -62,6 +63,7 @@ impl ConnectorOps for OpenClawDriver {
 
     fn set_mcp_session_server_enabled<'a>(
         &'a self,
+        _agent_id: String,
         session_key: String,
         server_name: String,
         enabled: bool,

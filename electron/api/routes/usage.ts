@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { UsageTransport } from '../../main/runtime-host-delivery/transport/usage';
 import { sendJson } from '../route-utils';
+import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const UNAVAILABLE = {
   success: false,
@@ -18,7 +19,7 @@ export async function handleUsageRoutes(
   const rawLimit = url.searchParams.get('limit');
   const limit = rawLimit === null ? undefined : Number(rawLimit);
   try {
-    const response = await transport.read(limit);
+    const response = await transport.read(limit, readRuntimeScopeQuery(url.searchParams));
     sendJson(res, response.status, response.body);
   } catch {
     sendJson(res, 503, UNAVAILABLE);

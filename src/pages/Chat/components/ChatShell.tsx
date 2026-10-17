@@ -248,7 +248,7 @@ export function ChatShell({
 
           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
             {isEmptyState ? (
-              <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-3 pb-8 pt-16 md:px-4 md:pb-10 md:pt-20">
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-12 pt-20 sm:px-8 md:pb-20">
                 {emptyState}
               </div>
             ) : (

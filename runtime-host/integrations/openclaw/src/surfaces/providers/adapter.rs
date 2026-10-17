@@ -98,10 +98,12 @@ impl provider_module::ProviderRuntimeIdentityOps for OpenClawDriver {
 }
 
 impl provider_module::ProviderPrivateProjectionOps for OpenClawDriver {
-    fn prepare_private_projection(
-        &self,
-        command: provider_module::ProviderPrivateProjectionCommand<'_>,
-    ) -> provider_module::ProviderPrivateProjectionEffect {
-        crate::surfaces::providers::prepare_private_projection(self.state_dir.clone(), command)
+    fn prepare_private_projection<'a>(
+        &'a self,
+        command: provider_module::ProviderPrivateProjectionCommand<'a>,
+    ) -> provider_module::ProviderFuture<'a, provider_module::ProviderPrivateProjectionEffect> {
+        Box::pin(async move {
+            crate::surfaces::providers::prepare_private_projection(self.state_dir.clone(), command)
+        })
     }
 }

@@ -105,6 +105,8 @@ Renderer public capability、Electron transport 与 Rust internal control 是三
 
 Renderer 通过 `hostApiFetch` 和 preload 暴露的受限 IPC 调用 Electron Host API。Renderer 只消费公开 DTO 和 Renderer event projection，不读取 Rust bootstrap、peer token、native path、child stderr、private state directory 或 peer-private protocol data。
 
+Renderer 的管理选择与聊天选择完全独立、共用真实 runtime / Agent directory，页面按业务构造显式 scope，既有 Session / Team 操作保留自身 identity 而不随选择重绑定。[VERIFY: src/stores/runtime-endpoints.ts:23-36] [VERIFY: src/components/common/RuntimeScopeSelector.tsx:12-24] [VERIFY: src/components/layout/AgentSessionsPane.tsx:947-948] [VERIFY: src/stores/teams.ts:559-572]
+
 | Module | Interface | 实现位置 |
 |---|---|---|
 | Renderer product entry | 页面、store、view projection 与 Host API client | `src/pages/**`, `src/stores/**`, `src/lib/host-api.ts` |
@@ -512,7 +514,7 @@ owner 通过 `RouteDescriptor::bound(id, paths, head_plan, dispatch)` 声明静�
 | Transport family | Target Interface / Module | 典型路径 |
 |---|---|---|
 | Session | `SessionHandle` / `SessionOwner`，必要时经 RuntimeDriver `SessionOps` | `transport/sessions/**`, `transport/session_*.rs`, `host/src/sessions/**` |
-| Workspace | `workspace` owner module，经 `WorkspaceOps` port 读取/写入 OpenClaw native workspace projection | `modules/workspace/src/**`, `integrations/openclaw/src/workspace/**` |
+| Workspace | `workspace` owner 经 `WorkspaceOps` 绑定 native Agent Workspace：file 五操作使用 AgentScope，media 保留真实 Session key 与附件授权，不互换或伪造 scope。[VERIFY: runtime-host/modules/workspace/src/ports.rs:27-63] [VERIFY: runtime-host/modules/workspace/src/application/commands.rs:135-148] [VERIFY: runtime-host/modules/workspace/src/owner/actor.rs:458-474] | `modules/workspace/src/**`, `integrations/openclaw/src/surfaces/workspace/**`, `integrations/matcha-agent/src/workspace/**` |
 | Organization / TeamRun | `organization` owner module；TeamRun effect 经 native effects/runtime ports；session terminal settlement 经 `SessionTerminalHook` / Organization terminal hook；共用 Matcha MCP artifact 的 TeamRun callback 只经 Organization fixed API | `modules/organization/src/adapters/loopback/**`, `modules/organization/src/owner/**`, `host/src/composition/host/organization_ports.rs`, `host/src/mcp/**` |
 | Provider / Settings / Security / Channel / Connector | `provider`、`settings`、`security`、`channels`、`connectors` owner modules | `modules/provider/**`, `modules/settings/**`, `modules/security/**`, `modules/channels/**`, `modules/connectors/**` |
 | External ClawHub marketplace | `ClawHubRegistryClient`；search 直连 external registry，install 经 `skills` owner module / OpenClaw skills port | `external/clawhub/**`, `modules/skills/src/**`, `integrations/openclaw/src/skill.rs` |

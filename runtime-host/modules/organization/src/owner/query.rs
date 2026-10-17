@@ -35,6 +35,8 @@ pub(crate) enum OrganizationQuery {
     },
     TeamSkillSelectionDependencyPlan {
         selection_id: TeamSkillSelectionId,
+        endpoint: organization::RuntimeEndpointReference,
+        source_agent: Option<organization::ManagedAgentReference>,
         reply: crate::call::CallReply<TeamSkillDependencyPlanResult>,
     },
     RunList {

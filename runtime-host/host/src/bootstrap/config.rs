@@ -69,8 +69,9 @@ impl Bootstrap {
         Ok(BootstrapParts {
             host: HostInput {
                 matcha: MatchaAgentInput {
-                    bun_executable: self.matcha.bun_executable,
-                    entry: self.matcha.entry,
+                    server_executable: self.matcha.server_executable,
+                    cli_executable: self.matcha.cli_executable,
+                    cli_args: self.matcha.cli_args,
                     working_directory: self.matcha.working_directory,
                     storage_root: self.matcha.storage_root,
                     port: self.matcha.port,
@@ -139,8 +140,9 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
     let runtime_observation = runtime_observation(wire.runtime_observation)?;
     let runtime_host_transport_port = port(wire.runtime_host_transport_port)?;
     let matcha = MatchaConfig {
-        bun_executable: absolute(wire.matcha.bun_executable)?,
-        entry: absolute(wire.matcha.entry)?,
+        server_executable: absolute(wire.matcha.server_executable)?,
+        cli_executable: absolute(wire.matcha.cli_executable)?,
+        cli_args: arguments(wire.matcha.cli_args)?,
         working_directory: absolute(wire.matcha.working_directory)?,
         storage_root: absolute(wire.matcha.storage_root)?,
         port: port(wire.matcha.port)?,
@@ -186,8 +188,9 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
 }
 
 struct MatchaConfig {
-    bun_executable: PathBuf,
-    entry: PathBuf,
+    server_executable: PathBuf,
+    cli_executable: PathBuf,
+    cli_args: Vec<String>,
     working_directory: PathBuf,
     storage_root: PathBuf,
     port: u16,
@@ -274,8 +277,9 @@ struct ProviderCredentialResolverWire {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MatchaWire {
-    bun_executable: String,
-    entry: String,
+    server_executable: String,
+    cli_executable: String,
+    cli_args: Vec<String>,
     working_directory: String,
     storage_root: String,
     port: u16,
@@ -332,6 +336,13 @@ fn absolute(value: String) -> Result<PathBuf, BootstrapError> {
 
     let path = PathBuf::from(value);
     path.is_absolute().then_some(path).ok_or(BootstrapError)
+}
+
+fn arguments(values: Vec<String>) -> Result<Vec<String>, BootstrapError> {
+    if values.iter().any(|value| value.contains('\0')) {
+        return Err(BootstrapError);
+    }
+    Ok(values)
 }
 
 fn non_empty(value: String) -> Result<String, BootstrapError> {

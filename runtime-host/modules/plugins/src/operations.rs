@@ -5,10 +5,9 @@ use futures_util::{FutureExt, future::Shared};
 use platform::call::{CallContext, CallFuture, CallLogError, CallReceipt, CallRecorder, CallStatus};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use crate::{ConfigurationOutcome, Operation, OperationOutcome, call, ports::PluginsPort};
+use crate::{ConfigurationOutcome, Operation, OperationOutcome, call, ports::{AgentPluginsPort, PluginsPort}};
 
 pub(crate) struct Operations {
-    plugins: Arc<dyn PluginsPort>,
     sender: mpsc::Sender<Command>,
     task: Mutex<Option<OwnedTask<()>>>,
     lifecycle: TaskHandle,
@@ -39,7 +38,13 @@ impl Mutation {
     }
 }
 
+pub(crate) enum Target {
+    OpenClaw(Arc<dyn PluginsPort>),
+    Agent { plugins: Arc<dyn AgentPluginsPort>, agent_id: String },
+}
+
 struct Command {
+    target: Target,
     mutation: Mutation,
     context: CallContext<call::Detail>,
     accepted: Shared<CallFuture<CallReceipt>>,
@@ -47,9 +52,8 @@ struct Command {
 }
 
 impl Operations {
-    pub(crate) fn spawn(plugins: Arc<dyn PluginsPort>) -> Self {
+    pub(crate) fn spawn() -> Self {
         let (sender, mut receiver) = mpsc::channel::<Command>(32);
-        let worker_plugins = plugins.clone();
         let (task, lifecycle) = OwnedTask::spawn(move |cancellation| async move {
             let mut closing = false;
             loop {
@@ -69,7 +73,7 @@ impl Operations {
                     call::Outcome::Rejected
                 } else {
                     match command.context.running().await {
-                        Ok(()) => execute(worker_plugins.as_ref(), &command.mutation).await,
+                        Ok(()) => execute(&command.target, &command.mutation).await,
                         Err(_) => {
                             eprintln!("[plugins-call] running transition failed");
                             call::Outcome::Unknown
@@ -83,17 +87,19 @@ impl Operations {
                 let _ = command.reply.send(outcome);
             }
         });
-        Self { plugins, sender, task: Mutex::new(Some(task)), lifecycle }
+        Self { sender, task: Mutex::new(Some(task)), lifecycle }
     }
 
     pub(crate) async fn submit(
         &self,
         recorder: &CallRecorder,
+        target: Target,
         mutation: Mutation,
     ) -> Result<(CallReceipt, oneshot::Receiver<call::Outcome>), CallLogError> {
         let detail = mutation.detail(None);
         let context = recorder.begin(mutation.command(), &detail).await?;
-        if self.lifecycle.is_cancelled() || self.plugins.admit_mutation().is_err() {
+        if self.lifecycle.is_cancelled()
+            || matches!(&target, Target::OpenClaw(plugins) if plugins.admit_mutation().is_err()) {
             let detail = mutation.detail(Some(call::Outcome::Rejected));
             context.finish(CallStatus::Rejected, &detail).await?;
             return Err(CallLogError::Unavailable);
@@ -113,7 +119,7 @@ impl Operations {
         let accepted: CallFuture<CallReceipt> = Box::pin(async move { admission_context.accepted().await });
         let accepted = accepted.shared();
         let (reply, receiver) = oneshot::channel();
-        permit.send(Command { mutation, context, accepted: accepted.clone(), reply });
+        permit.send(Command { target, mutation, context, accepted: accepted.clone(), reply });
         Ok((accepted.await?, receiver))
     }
 
@@ -126,14 +132,18 @@ impl Operations {
     }
 }
 
-async fn execute(plugins: &dyn PluginsPort, mutation: &Mutation) -> call::Outcome {
-    match mutation {
-        Mutation::Configuration { plugin_id, enabled } => plugins
+async fn execute(target: &Target, mutation: &Mutation) -> call::Outcome {
+    match (target, mutation) {
+        (Target::OpenClaw(plugins), Mutation::Configuration { plugin_id, enabled }) => plugins
             .set_enabled_admitted(plugin_id.clone(), *enabled).await
             .map(call::Outcome::from).unwrap_or(call::Outcome::Unknown),
-        Mutation::Operation { plugin_id, operation } => plugins
+        (Target::OpenClaw(plugins), Mutation::Operation { plugin_id, operation }) => plugins
             .operation_admitted(*operation, plugin_id.clone()).await
             .map(call::Outcome::from).unwrap_or(call::Outcome::Unknown),
+        (Target::Agent { plugins, agent_id }, Mutation::Configuration { plugin_id, enabled }) =>
+            plugins.set_enabled(agent_id, plugin_id, *enabled).await.into(),
+        (Target::Agent { plugins, agent_id }, Mutation::Operation { plugin_id, operation }) =>
+            plugins.operation(agent_id, *operation, plugin_id).await.into(),
     }
 }
 

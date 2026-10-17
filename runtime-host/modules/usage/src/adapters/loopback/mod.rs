@@ -2,12 +2,13 @@ use std::{sync::Arc, time::Duration};
 
 use platform::{
     capability::CapabilityDecisionVerifier,
+    endpoint::runtime_address::RuntimeEndpoint,
     loopback::{
         BodyPolicy, ModuleDescriptor, ModuleId, Request, RequestHead, Response, RouteDescriptor,
         RouteFuture, RouteHeadPlan, RoutePath,
     },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -80,15 +81,28 @@ async fn handle(request: Request, dependencies: Dependencies) -> Response {
     else {
         return response(ResponseBody::unauthorized());
     };
+    let (scope, capability, subject) = if parsed.endpoint.runtime_adapter_id() == "openclaw" {
+        (
+            AUTHORIZATION_SCOPE,
+            AUTHORIZATION_CAPABILITY,
+            AUTHORIZATION_SUBJECT,
+        )
+    } else {
+        (
+            "matcha-agent:usage-history:read",
+            "matcha-agent.usage.history",
+            "matcha-agent-usage-history",
+        )
+    };
     let mut verifier = dependencies.verifier.lock().await;
     if verifier
         .verify(
             authorization,
             now_millis(),
             RECENT_PATH,
-            AUTHORIZATION_SCOPE,
-            AUTHORIZATION_CAPABILITY,
-            AUTHORIZATION_SUBJECT,
+            scope,
+            capability,
+            subject,
         )
         .is_err()
     {
@@ -96,27 +110,37 @@ async fn handle(request: Request, dependencies: Dependencies) -> Response {
     }
     drop(verifier);
 
+    let is_matcha = parsed.endpoint.runtime_adapter_id() == "matcha-agent";
     let result = match parsed.route {
         Route::Recent => {
             let limit = match decode_limit(
                 parsed.limit.as_deref(),
-                dependencies.usage.default_limit().await,
-                dependencies.usage.max_limit().await,
+                dependencies
+                    .usage
+                    .default_limit(parsed.endpoint.clone())
+                    .await,
+                dependencies.usage.max_limit(parsed.endpoint.clone()).await,
             ) {
                 Ok(limit) => limit,
                 Err(()) => return response(ResponseBody::bad_request()),
             };
-            dependencies.usage.recent(limit).await
+            dependencies.usage.recent(parsed.endpoint, limit).await
         }
         Route::SessionTimeseries => {
             dependencies
                 .usage
-                .session_timeseries(parsed.agent_id, parsed.session_id)
+                .session_timeseries(parsed.endpoint, parsed.agent_id, parsed.session_id)
                 .await
         }
         Route::Unknown => return Response::not_found(),
         Route::Invalid => return response(ResponseBody::bad_request()),
     };
+    if is_matcha && result.is_err() {
+        return response(ResponseBody::fixed(
+            503,
+            "Matcha usage history is unavailable",
+        ));
+    }
     response(UsageDelivery::from_result(result).into_response_body())
 }
 
@@ -130,6 +154,7 @@ enum Route {
 
 struct RequestView {
     route: Route,
+    endpoint: RuntimeEndpoint,
     limit: Option<String>,
     session_id: String,
     agent_id: String,
@@ -147,6 +172,7 @@ impl RequestView {
             Ok(query) => query,
             Err(()) => Self {
                 route: Route::Invalid,
+                endpoint: legacy_openclaw_endpoint(),
                 limit: Some(String::new()),
                 session_id: String::new(),
                 agent_id: String::new(),
@@ -164,6 +190,7 @@ fn parse_query(pathname: &str, query: Option<&str>) -> Result<RequestView, ()> {
     let mut limit = None;
     let mut session_id = None;
     let mut agent_id = None;
+    let mut scope = None;
     if let Some(query) = query {
         for pair in query.split('&') {
             let Some((name, value)) = pair.split_once('=') else {
@@ -175,6 +202,7 @@ fn parse_query(pathname: &str, query: Option<&str>) -> Result<RequestView, ()> {
                 "limit" if limit.is_none() => limit = Some(value),
                 "sessionId" if session_id.is_none() => session_id = Some(value),
                 "agentId" if agent_id.is_none() => agent_id = Some(value),
+                "scope" if scope.is_none() => scope = Some(value),
                 _ => return Err(()),
             }
         }
@@ -190,10 +218,49 @@ fn parse_query(pathname: &str, query: Option<&str>) -> Result<RequestView, ()> {
     }
     Ok(RequestView {
         route,
+        endpoint: match scope {
+            Some(scope) => usage_endpoint(&scope)?,
+            None => legacy_openclaw_endpoint(),
+        },
         limit,
         session_id: session_id.unwrap_or_default(),
         agent_id: agent_id.unwrap_or_default(),
     })
+}
+
+fn legacy_openclaw_endpoint() -> RuntimeEndpoint {
+    // Unscoped requests belong only to the original OpenClaw history route.
+    RuntimeEndpoint::try_new("openclaw", "local").expect("fixed endpoint is valid")
+}
+
+fn usage_endpoint(value: &str) -> Result<RuntimeEndpoint, ()> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Scope {
+        kind: String,
+        endpoint: Endpoint,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Endpoint {
+        kind: String,
+        runtime_adapter_id: String,
+        runtime_instance_id: String,
+    }
+    let scope: Scope = serde_json::from_str(value).map_err(|_| ())?;
+    let endpoint = scope.endpoint;
+    if scope.kind != "runtime-instance"
+        || endpoint.kind != "native-runtime"
+        || endpoint.runtime_instance_id != "local"
+        || !matches!(
+            endpoint.runtime_adapter_id.as_str(),
+            "openclaw" | "matcha-agent"
+        )
+    {
+        return Err(());
+    }
+    RuntimeEndpoint::try_new(endpoint.runtime_adapter_id, endpoint.runtime_instance_id)
+        .map_err(|_| ())
 }
 
 fn decode_limit(

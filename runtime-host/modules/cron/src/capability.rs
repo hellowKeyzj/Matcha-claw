@@ -1,19 +1,24 @@
 use serde_json::{Value, json};
 
 pub fn listed() -> Vec<serde_json::Value> {
-    vec![scheduler_descriptor()]
+    vec![
+        scheduler_descriptor(),
+        descriptor(runtime_directory::RuntimeDriverIdentity::matcha_agent()),
+    ]
 }
 
 pub fn describe(id: &str, scope: &serde_json::Value) -> Option<serde_json::Value> {
-    let descriptor = match id {
-        "scheduler.cron" => scheduler_descriptor(),
-        _ => return None,
-    };
-    (descriptor.get("scope") == Some(scope)).then_some(descriptor)
+    (id == "scheduler.cron")
+        .then(listed)?
+        .into_iter()
+        .find(|descriptor| descriptor.get("scope") == Some(scope))
 }
 
 pub fn scheduler_descriptor() -> Value {
-    let identity = runtime_directory::RuntimeDriverIdentity::open_claw();
+    descriptor(runtime_directory::RuntimeDriverIdentity::open_claw())
+}
+
+fn descriptor(identity: runtime_directory::RuntimeDriverIdentity) -> Value {
     json!({
         "id": "scheduler.cron",
         "kind": "scheduler-cron",

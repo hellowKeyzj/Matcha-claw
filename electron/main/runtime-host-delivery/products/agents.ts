@@ -33,14 +33,17 @@ type Endpoint = Readonly<{
   runtimeInstanceId: 'local';
 }>;
 
+type AgentScope = Readonly<{ kind: 'agent'; endpoint: Endpoint; agentId: string }>;
+type AgentsScope = AgentScope | Readonly<{ kind: 'runtime-instance'; endpoint: Endpoint }>;
+type RuntimeTarget = Readonly<{ kind: 'runtime-instance' }>;
 type AgentTarget = Readonly<{ kind: 'agent'; agentId: string }>;
 type SubagentTarget = Readonly<{ kind: 'subagent'; subagentId?: string }>;
 type CapabilityId = 'subagent.management' | 'subagent.skills' | 'subagent.tools';
 type AgentsRequest = Readonly<{
   id: CapabilityId;
   operationId: Operation;
-  scope: Readonly<{ kind: 'agent'; endpoint: Endpoint; agentId: string }>;
-  target: AgentTarget | SubagentTarget;
+  scope: AgentsScope;
+  target: AgentTarget | SubagentTarget | RuntimeTarget;
   input: Record<string, unknown>;
 }>;
 
@@ -177,7 +180,7 @@ function summarizeAgentsRequest(request: AgentsRequest): Record<string, unknown>
     operationId: request.operationId,
     adapter: request.scope.endpoint.runtimeAdapterId,
     instance: request.scope.endpoint.runtimeInstanceId,
-    scopeAgentId: summarizeIdentifier(request.scope.agentId),
+    scopeAgentId: summarizeIdentifier(request.scope.kind === 'agent' ? request.scope.agentId : null),
     targetKind: request.target.kind,
     targetAgentId: summarizeIdentifier(request.target.kind === 'agent' ? request.target.agentId : null),
     targetSubagentId: summarizeIdentifier(request.target.kind === 'subagent' ? request.target.subagentId ?? null : null),
@@ -201,8 +204,8 @@ function isAgentsRequest(value: unknown): value is AgentsRequest {
     || !isCapabilityId(value.id)
     || !isOperation(value.operationId)
     || !operationMatchesCapability(value.id, value.operationId)
-    || !isScope(value.scope)
-    || !isTarget(value.target, value.operationId)
+    || !isScope(value.scope, value.operationId)
+    || !isTarget(value.target, value.operationId, value.scope)
     || !isRecord(value.input)) return false;
   return isInput(value.input, value.operationId, value.scope.endpoint, value.target);
 }
@@ -334,18 +337,23 @@ function isCompensation(value: unknown): boolean {
     && (value.outcome !== 'deleted' || (value.failedCount === 0 && value.purgeFailedCount === 0));
 }
 
-function isScope(value: unknown): value is Readonly<{ kind: 'agent'; endpoint: Endpoint; agentId: string }> {
-  return isRecord(value)
-    && hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
-    && value.kind === 'agent'
-    && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.agentId, 4096);
+function isScope(value: unknown, operation: Operation): value is AgentsScope {
+  if (!isRecord(value) || !isEndpoint(value.endpoint)) return false;
+  if (value.kind === 'runtime-instance') {
+    return hasExactKeys(value, ['kind', 'endpoint'])
+      && value.endpoint.runtimeAdapterId === 'matcha-agent'
+      && (operation === 'subagents.list' || operation === 'subagents.create' || operation === 'subagents.displayConfig.get');
+  }
+  return hasExactKeys(value, ['kind', 'endpoint', 'agentId'])
+    && value.kind === 'agent' && isNonEmptyBoundedText(value.agentId, 4096);
 }
 
-function isTarget(value: unknown, operation: Operation): value is AgentTarget | SubagentTarget {
+function isTarget(value: unknown, operation: Operation, scope: AgentsScope): value is AgentTarget | SubagentTarget | RuntimeTarget {
   if (!isRecord(value)) return false;
   if (operation === 'subagents.list' || operation === 'subagents.displayConfig.get') {
-    return hasExactKeys(value, ['kind', 'agentId']) && value.kind === 'agent' && isNonEmptyBoundedText(value.agentId, 4096);
+    return scope.kind === 'runtime-instance'
+      ? hasExactKeys(value, ['kind']) && value.kind === 'runtime-instance'
+      : hasExactKeys(value, ['kind', 'agentId']) && value.kind === 'agent' && value.agentId === scope.agentId;
   }
   if (value.kind !== 'subagent') return false;
   if (operation === 'subagents.create' || operation === 'subagents.package.install') return hasExactKeys(value, ['kind']);
@@ -356,14 +364,14 @@ function isInput(
   value: Record<string, unknown>,
   operation: Operation,
   endpoint: Endpoint,
-  target: AgentTarget | SubagentTarget,
+  target: AgentTarget | SubagentTarget | RuntimeTarget,
 ): boolean {
   const targetMatches = (agentId: unknown) => target.kind === 'subagent' && target.subagentId === agentId;
   if (operation === 'subagentSkills.get' || operation === 'subagentTools.get') {
     return hasExactKeys(value, ['agentId'])
       && targetMatches(value.agentId)
       && isNonEmptyBoundedText(value.agentId, 4096)
-      && endpoint.runtimeAdapterId === 'openclaw';
+      && (operation === 'subagentTools.get' || endpoint.runtimeAdapterId === 'openclaw');
   }
   if (operation === 'subagentSkills.set') {
     return hasExactKeys(value, ['agentId', 'revision', 'selection'])
@@ -378,16 +386,22 @@ function isInput(
       && targetMatches(value.agentId)
       && isNonEmptyBoundedText(value.agentId, 4096)
       && isNonEmptyBoundedText(value.revision, 4096)
-      && isToolSelection(value.selection)
-      && endpoint.runtimeAdapterId === 'openclaw';
+      && isToolSelection(value.selection);
   }
 
   const sameEndpoint = isEndpoint(value.endpoint) && endpointsEqual(value.endpoint, endpoint);
   if (!sameEndpoint) return false;
   if (operation === 'subagents.list') return hasExactKeys(value, ['kind', 'endpoint'])
     && value.kind === 'list'
-    && target.kind === 'agent';
+    && (target.kind === 'agent' || target.kind === 'runtime-instance');
   if (operation === 'subagents.create') {
+    if (Object.hasOwn(value, 'workspaceMode')) {
+      return hasAllowedKeys(value, ['kind', 'endpoint', 'name', 'workspaceMode', 'model', 'workspaceInitialization'], ['kind', 'endpoint', 'name', 'workspaceMode'])
+        && value.kind === 'create' && value.workspaceMode === 'managed'
+        && isNonEmptyBoundedText(value.name, 4096)
+        && (!Object.hasOwn(value, 'model') || value.model === null || isNonEmptyBoundedText(value.model, 4096))
+        && (!Object.hasOwn(value, 'workspaceInitialization') || isWorkspaceInitialization(value.workspaceInitialization));
+    }
     return hasAllowedKeys(value, ['kind', 'endpoint', 'name', 'workspace', 'model', 'workspaceInitialization'], ['kind', 'endpoint', 'name', 'workspace', 'model'])
       && value.kind === 'create'
       && isNonEmptyBoundedText(value.name, 4096)
@@ -421,24 +435,21 @@ function isInput(
   if (operation === 'subagents.displayConfig.get') {
     return hasExactKeys(value, ['kind', 'endpoint'])
       && value.kind === 'displayConfiguration'
-      && target.kind === 'agent'
-      && endpoint.runtimeAdapterId === 'openclaw';
+      && (target.kind === 'agent' || target.kind === 'runtime-instance');
   }
   if (operation === 'subagents.description.set') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'description'])
       && value.kind === 'setDescription'
       && targetMatches(value.agentId)
       && isNonEmptyBoundedText(value.agentId, 4096)
-      && (value.description === null || isNonEmptyBoundedText(value.description, 4096))
-      && endpoint.runtimeAdapterId === 'openclaw';
+      && (value.description === null || isNonEmptyBoundedText(value.description, 4096));
   }
   if (operation === 'subagents.model.set') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'model'])
       && value.kind === 'setConfigurationModel'
       && targetMatches(value.agentId)
       && isNonEmptyBoundedText(value.agentId, 4096)
-      && (value.model === null || isModelInput(value.model))
-      && endpoint.runtimeAdapterId === 'openclaw';
+      && (value.model === null || isModelInput(value.model));
   }
   if (operation === 'subagents.skills.set') {
     return hasExactKeys(value, ['kind', 'endpoint', 'agentId', 'skills'])
@@ -522,7 +533,8 @@ function isSuccess(value: unknown, operation: Operation): boolean {
     && isNonEmptyBoundedText(value.defaultId, 4096)
     && typeof value.selectionRequired === 'boolean'
     && Array.isArray(value.agents)
-    && value.agents.every(isAgent);
+    && value.agents.every(isAgent)
+    && value.agents.some((agent) => isRecord(agent) && agent.id === value.defaultId);
   if (operation === 'subagents.files.list') return hasExactKeys(value, ['success', 'files'])
     && Array.isArray(value.files) && value.files.every(isFile);
   if (operation === 'subagents.displayConfig.get') return hasExactKeys(value, ['success', 'defaults', 'agents'])
@@ -539,7 +551,7 @@ function isAgent(value: unknown): boolean {
   return isRecord(value)
     && hasExactKeys(value, ['id', 'name', 'workspace', 'model', 'kind', 'sealed'])
     && isNonEmptyBoundedText(value.id, 4096)
-    && (value.name === null || isNonEmptyBoundedText(value.name, 4096))
+    && (value.name === null || typeof value.name === 'string')
     && (value.workspace === null || isNonEmptyBoundedText(value.workspace, 4096))
     && (value.model === null || isNonEmptyBoundedText(value.model, 4096))
     && (value.kind === 'agent' || value.kind === 'system')

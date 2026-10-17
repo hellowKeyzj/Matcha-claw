@@ -1,3 +1,5 @@
+import type { NativePolicyOperation } from '../native-policy';
+
 export type SecurityEffect = 'confirmed' | 'rejected' | 'unavailable' | 'unknown';
 export type SecurityOperation =
   | 'quickAudit' | 'checkIntegrity' | 'rebaselineIntegrity' | 'scanSkills'
@@ -11,7 +13,8 @@ export type SecurityCallDetail =
   | { kind: 'audit'; page: number; pageSize: number; total: number | null; outcome: SecurityEffect | null }
   | { kind: 'operation'; correlation: string; operation: SecurityOperation; outcome: SecurityEffect | null }
   | { kind: 'operationReceipt'; correlation: string }
-  | { kind: 'ruleCatalog' };
+  | { kind: 'ruleCatalog' }
+  | { kind: 'nativePolicy'; operation: NativePolicyOperation; outcome: SecurityEffect | null };
 
 declare module '../call-log' {
   interface CallDetailByModule { security: SecurityCallDetail }
@@ -45,6 +48,13 @@ export function decodeSecurityCallDetail(value: unknown): SecurityCallDetail | u
     case 'audit':
       if (exact(['kind', 'page', 'pageSize', 'total', 'outcome']) && integer(detail.page) && (detail.page as number) > 0 && (detail.page as number) <= 10_000 && integer(detail.pageSize) && (detail.pageSize as number) > 0 && (detail.pageSize as number) <= 200 && (detail.total === null || integer(detail.total)) && nullableMember(detail.outcome, EFFECTS)) {
         return { kind: 'audit', page: detail.page as number, pageSize: detail.pageSize as number, total: detail.total as number | null, outcome: detail.outcome as SecurityEffect | null };
+      }
+      break;
+    case 'nativePolicy':
+      if (exact(['kind', 'operation', 'outcome']) && typeof detail.operation === 'string'
+        && ['nativePermissions.get', 'nativePermissions.set', 'nativeHooks.get', 'nativeHooks.set', 'nativeSandbox.status', 'nativeSandbox.set', 'nativePolicy.result'].includes(detail.operation)
+        && nullableMember(detail.outcome, EFFECTS)) {
+        return { kind: 'nativePolicy', operation: detail.operation as NativePolicyOperation, outcome: detail.outcome as SecurityEffect | null };
       }
       break;
     case 'operationReceipt':

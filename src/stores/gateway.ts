@@ -423,6 +423,8 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               const updates = decodeGatewayChannelStatusUpdates(payload);
               if (updates.length === 0) return;
               const state = useChannelsStore.getState();
+              const endpoint = state.scope?.endpoint;
+              if (endpoint?.kind !== 'native-runtime' || endpoint.runtimeAdapterId !== 'openclaw' || endpoint.runtimeInstanceId !== 'local') return;
               for (const update of updates) {
                 const channel = state.channels.find((item) => item.type === update.channelId);
                 if (channel) {

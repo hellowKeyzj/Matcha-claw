@@ -1,4 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use foundation::process::{ShutdownOutcome, supervision::SupervisorSnapshot};
 use sessions_module::command::SessionIngressEvent;
@@ -9,7 +12,7 @@ use crate::{
     lifecycle::{output::StartupDiagnosticCategory, secret::Secret},
     peer::{
         ConstructionError, MatchaPeer, MatchaPeerFactory, MatchaPeerInput,
-        MatchaPeerLifecycleHandle, MatchaPeerSessionHandle, RoleSessionNativeHandle,
+        MatchaPeerLifecycleHandle, MatchaPeerSessionHandle,
     },
 };
 
@@ -22,7 +25,9 @@ pub struct MatchaAgentInstance {
 pub struct MatchaRuntimeDriver {
     lifecycle: MatchaPeerLifecycleHandle,
     session: MatchaPeerSessionHandle,
-    native: RoleSessionNativeHandle,
+    channels: crate::channels::Channels,
+    skill_marketplace: Option<crate::skills::Marketplace>,
+    sealed_reader_source: Arc<OnceLock<crate::sealed::ReaderSource>>,
     renderer_events: Option<mpsc::Sender<SessionIngressEvent>>,
 }
 
@@ -31,7 +36,9 @@ impl MatchaRuntimeDriver {
         Self {
             lifecycle: peer.lifecycle_handle(),
             session: peer.session_handle(),
-            native: peer.role_session_native_handle(),
+            channels: crate::channels::Channels::new(peer.native_client()),
+            skill_marketplace: None,
+            sealed_reader_source: Arc::new(OnceLock::new()),
             renderer_events: None,
         }
     }
@@ -44,8 +51,31 @@ impl MatchaRuntimeDriver {
         self.session.clone()
     }
 
-    pub fn native_handle(&self) -> RoleSessionNativeHandle {
-        self.native.clone()
+    pub fn native_client(&self) -> crate::client::Client {
+        self.session.native_client()
+    }
+
+    pub fn native_channels(&self) -> &crate::channels::Channels {
+        &self.channels
+    }
+
+    pub fn native_skills(&self) -> crate::skills::Skills {
+        let skills = crate::skills::Skills::new(self.native_client());
+        match &self.skill_marketplace {
+            Some(marketplace) => skills.with_marketplace(marketplace.clone()),
+            None => skills,
+        }
+    }
+
+    pub fn set_sealed_reader_source(
+        &self,
+        source: crate::sealed::ReaderSource,
+    ) -> Result<(), crate::sealed::ReaderSource> {
+        self.sealed_reader_source.set(source)
+    }
+
+    pub fn sealed_reader_source(&self) -> Option<&crate::sealed::ReaderSource> {
+        self.sealed_reader_source.get()
     }
 
     pub fn renderer_events(&self) -> Option<mpsc::Sender<SessionIngressEvent>> {
@@ -64,6 +94,11 @@ impl MatchaAgentInstance {
             peer: Some(peer),
             driver,
         }
+    }
+
+    pub fn with_skill_marketplace(mut self, marketplace: crate::skills::Marketplace) -> Self {
+        self.driver.skill_marketplace = Some(marketplace);
+        self
     }
 
     pub fn runtime_driver(&self) -> Arc<MatchaRuntimeDriver> {
@@ -103,8 +138,9 @@ impl MatchaAgentInstance {
 }
 
 pub struct MatchaAgentInput {
-    pub bun_executable: PathBuf,
-    pub entry: PathBuf,
+    pub server_executable: PathBuf,
+    pub cli_executable: PathBuf,
+    pub cli_args: Vec<String>,
     pub working_directory: PathBuf,
     pub storage_root: PathBuf,
     pub port: u16,
@@ -122,8 +158,9 @@ pub fn build_peer(
 ) -> Result<MatchaPeer, ConstructionError> {
     Ok(MatchaPeerFactory::try_new(
         MatchaPeerInput {
-            bun_executable: input.bun_executable,
-            entry: input.entry,
+            server_executable: input.server_executable,
+            cli_executable: input.cli_executable,
+            cli_args: input.cli_args,
             working_directory: input.working_directory,
             storage_root: input.storage_root,
             port: input.port,

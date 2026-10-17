@@ -1,5 +1,6 @@
 use std::{future::Future, path::PathBuf, pin::Pin};
 
+use platform::endpoint::runtime_address::{RuntimeEndpoint, RuntimeScope};
 use tokio_util::sync::CancellationToken;
 
 use crate::{bundle, install, management, status};
@@ -46,7 +47,29 @@ impl CloudPackageMetadata {
     }
 }
 
+pub struct SkillSource {
+    pub files: Vec<(String, Vec<u8>)>,
+    pub sha256: String,
+}
+
 pub trait SkillRuntimeOps: Send + Sync {
+    fn skill_source_for_scope<'a>(
+        &'a self,
+        _scope: &'a RuntimeScope,
+        _skill_key: &'a str,
+    ) -> SkillsFuture<'a, Result<SkillSource, SealedSkillError>> {
+        Box::pin(async { Err(SealedSkillError::Rejected) })
+    }
+
+    fn remove_skill_source_for_scope<'a>(
+        &'a self,
+        _scope: &'a RuntimeScope,
+        _skill_key: &'a str,
+        _expected_sha256: &'a str,
+    ) -> SkillsFuture<'a, Result<(), SealedSkillError>> {
+        Box::pin(async { Err(SealedSkillError::Rejected) })
+    }
+
     fn installed_skill_names<'a>(&'a self) -> SkillsFuture<'a, Option<Vec<String>>>;
 
     fn install_clawhub_skill<'a>(
@@ -78,9 +101,63 @@ pub trait SkillRuntimeOps: Send + Sync {
     }
 
     fn skill_bundles<'a>(&'a self, command: bundle::Command) -> SkillsFuture<'a, bundle::Outcome>;
+
+    fn skill_status_for_scope<'a>(
+        &'a self,
+        _scope: &'a RuntimeScope,
+    ) -> SkillsFuture<'a, status::Outcome> {
+        Box::pin(async { status::Outcome::Unavailable })
+    }
+
+    fn install_clawhub_skill_for_scope<'a>(
+        &'a self,
+        _scope: &'a RuntimeScope,
+        _command: install::Command,
+        _cancellation: CancellationToken,
+    ) -> SkillsFuture<'a, install::Outcome> {
+        Box::pin(async { install::Outcome::Rejected })
+    }
+
+    fn manage_skills_for_scope<'a>(
+        &'a self,
+        _scope: &'a RuntimeScope,
+        _command: management::Command,
+        _cancellation: CancellationToken,
+    ) -> SkillsFuture<'a, management::Outcome> {
+        Box::pin(async { management::Outcome::Unavailable })
+    }
+
+    fn skill_bundles_for_scope<'a>(
+        &'a self,
+        _scope: &'a RuntimeScope,
+        _command: bundle::Command,
+    ) -> SkillsFuture<'a, bundle::Outcome> {
+        Box::pin(async { bundle::Outcome::Rejected })
+    }
+}
+
+pub trait SkillsRuntimeDirectory: Send + Sync {
+    fn skill_ops(&self, endpoint: &RuntimeEndpoint) -> Option<&dyn SkillRuntimeOps>;
 }
 
 pub trait SkillsPort: Send + Sync {
+    fn skill_source_for_scope<'a>(
+        &'a self,
+        _scope: &'a RuntimeScope,
+        _skill_key: &'a str,
+    ) -> SkillsFuture<'a, Result<SkillSource, SealedSkillError>> {
+        Box::pin(async { Err(SealedSkillError::Rejected) })
+    }
+
+    fn remove_skill_source_for_scope<'a>(
+        &'a self,
+        _scope: &'a RuntimeScope,
+        _skill_key: &'a str,
+        _expected_sha256: &'a str,
+    ) -> SkillsFuture<'a, Result<(), SealedSkillError>> {
+        Box::pin(async { Err(SealedSkillError::Rejected) })
+    }
+
     fn install_clawhub_skill<'a>(
         &'a self,
         command: install::Command,
@@ -113,6 +190,55 @@ pub trait SkillsPort: Send + Sync {
         &'a self,
         command: bundle::Command,
     ) -> SkillsFuture<'a, Result<bundle::Outcome, ()>>;
+
+    fn skill_status_for_scope<'a>(
+        &'a self,
+        scope: &'a RuntimeScope,
+    ) -> SkillsFuture<'a, Result<status::Outcome, ()>> {
+        if crate::selection::is_openclaw_scope(scope) {
+            self.skill_status()
+        } else {
+            Box::pin(async { Ok(status::Outcome::Unavailable) })
+        }
+    }
+
+    fn install_clawhub_skill_for_scope<'a>(
+        &'a self,
+        scope: &'a RuntimeScope,
+        command: install::Command,
+        cancellation: CancellationToken,
+    ) -> SkillsFuture<'a, Result<install::Outcome, ()>> {
+        if crate::selection::is_openclaw_scope(scope) {
+            self.install_clawhub_skill_cancellable(command, cancellation)
+        } else {
+            Box::pin(async { Ok(install::Outcome::Rejected) })
+        }
+    }
+
+    fn manage_skills_for_scope<'a>(
+        &'a self,
+        scope: &'a RuntimeScope,
+        command: management::Command,
+        cancellation: CancellationToken,
+    ) -> SkillsFuture<'a, Result<management::Outcome, ()>> {
+        if crate::selection::is_openclaw_scope(scope) {
+            self.manage_skills_cancellable(command, cancellation)
+        } else {
+            Box::pin(async { Ok(management::Outcome::Unavailable) })
+        }
+    }
+
+    fn skill_bundles_for_scope<'a>(
+        &'a self,
+        scope: &'a RuntimeScope,
+        command: bundle::Command,
+    ) -> SkillsFuture<'a, Result<bundle::Outcome, ()>> {
+        if crate::selection::is_openclaw_scope(scope) {
+            self.skill_bundles(command)
+        } else {
+            Box::pin(async { Ok(bundle::Outcome::Rejected) })
+        }
+    }
 }
 
 pub trait ClawHubSearchPort: Send + Sync {
@@ -260,6 +386,13 @@ impl std::fmt::Debug for SealedSkillPackageExport {
     }
 }
 
+pub trait SealedSkillStoreFactoryPort: Send + Sync {
+    fn for_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<std::sync::Arc<dyn SealedSkillStorePort>, SealedSkillError>;
+}
+
 pub trait SealedSkillStorePort: Send + Sync {
     fn sealed_catalog(&self) -> Result<SealedSkillCatalog, SealedSkillError>;
 
@@ -276,6 +409,33 @@ pub trait SealedSkillStorePort: Send + Sync {
         cloud_public_key: String,
         cloud_key_id: String,
     ) -> Result<SealedSkillPackageExport, SealedSkillError>;
+
+    fn export_sealed_skill_files(
+        &self,
+        _skill_key: String,
+        _files: Vec<(String, Vec<u8>)>,
+    ) -> Result<SealedSkillExport, SealedSkillError> {
+        Err(SealedSkillError::Rejected)
+    }
+
+    fn export_cloud_sealed_skill_files(
+        &self,
+        _skill_key: String,
+        _files: Vec<(String, Vec<u8>)>,
+        _cloud_public_key: String,
+        _cloud_key_id: String,
+    ) -> Result<SealedSkillPackageExport, SealedSkillError> {
+        Err(SealedSkillError::Rejected)
+    }
+
+    fn export_installed_cloud_sealed_skill_package(
+        &self,
+        _skill_key: String,
+        _cloud_public_key: String,
+        _cloud_key_id: String,
+    ) -> Result<SealedSkillPackageExport, SealedSkillError> {
+        Err(SealedSkillError::Rejected)
+    }
 
     fn install_sealed_skill(
         &self,

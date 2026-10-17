@@ -29,8 +29,6 @@ pub const TODOS_WRITE_PATH: &str = "/api/tasks/todos/write";
 
 const MANAGEMENT_CAPABILITY: &str = "task.management";
 const RUNTIME_KIND: &str = "native-runtime";
-const RUNTIME_ADAPTER_ID: &str = "openclaw";
-const RUNTIME_INSTANCE_ID: &str = "local";
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 const TASK_MANAGER_REQUEST_BYTES: usize = 2 * 1024 * 1024 + 64 * 1024;
@@ -166,11 +164,19 @@ struct Endpoint {
     runtime_instance_id: String,
 }
 
-impl Endpoint {
-    fn is_openclaw_local(&self) -> bool {
-        self.kind == RUNTIME_KIND
-            && self.runtime_adapter_id == RUNTIME_ADAPTER_ID
-            && self.runtime_instance_id == RUNTIME_INSTANCE_ID
+impl SessionIdentity {
+    fn scope(&self) -> Result<platform::endpoint::runtime_address::RuntimeScope, ()> {
+        if self.endpoint.kind != RUNTIME_KIND {
+            return Err(());
+        }
+        let endpoint = platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
+            self.endpoint.runtime_adapter_id.clone(),
+            self.endpoint.runtime_instance_id.clone(),
+        ).map_err(|_| ())?;
+        let identity = platform::endpoint::runtime_address::SessionIdentity::try_new(
+            endpoint, self.agent_id.clone(), self.session_key.clone(),
+        ).map_err(|_| ())?;
+        Ok(platform::endpoint::runtime_address::RuntimeScope::Session(identity))
     }
 }
 
@@ -349,6 +355,7 @@ fn decode_command(path: &str, value: Value, operation: &str) -> Result<TaskComma
             )?;
             validate_identity(&request, &request.input.session_identity)?;
             TaskCommand::list(
+                request.input.session_identity.scope()?,
                 request.input.session_identity.agent_id,
                 request.input.session_identity.session_key,
                 request.input.team_key,
@@ -365,6 +372,7 @@ fn decode_command(path: &str, value: Value, operation: &str) -> Result<TaskComma
             )?;
             validate_identity(&request, &request.input.session_identity)?;
             TaskCommand::get(
+                request.input.session_identity.scope()?,
                 request.input.session_identity.agent_id,
                 request.input.session_identity.session_key,
                 request.input.team_key,
@@ -390,6 +398,7 @@ fn decode_command(path: &str, value: Value, operation: &str) -> Result<TaskComma
             )
             .map_err(|_| ())?;
             TaskCommand::create(
+                request.input.session_identity.scope()?,
                 request.input.session_identity.agent_id,
                 request.input.session_identity.session_key,
                 request.input.team_key,
@@ -424,6 +433,7 @@ fn decode_command(path: &str, value: Value, operation: &str) -> Result<TaskComma
             )
             .map_err(|_| ())?;
             TaskCommand::update(
+                request.input.session_identity.scope()?,
                 request.input.session_identity.agent_id,
                 request.input.session_identity.session_key,
                 request.input.team_key,
@@ -441,6 +451,7 @@ fn decode_command(path: &str, value: Value, operation: &str) -> Result<TaskComma
             )?;
             validate_identity(&request, &request.input.session_identity)?;
             TaskCommand::todo_get(
+                request.input.session_identity.scope()?,
                 request.input.session_identity.agent_id,
                 request.input.session_identity.session_key,
             )
@@ -458,6 +469,7 @@ fn decode_command(path: &str, value: Value, operation: &str) -> Result<TaskComma
             let old_todos = todos(request.input.old_todos)?;
             let new_todos = todos(request.input.new_todos)?;
             TaskCommand::todo_write(
+                request.input.session_identity.scope()?,
                 request.input.session_identity.agent_id,
                 request.input.session_identity.session_key,
                 old_todos,
@@ -482,7 +494,7 @@ fn decode_request<T: for<'de> Deserialize<'de>>(
         && request.scope.kind == scope_kind
         && request.target.kind == target_kind
         && request.scope.identity == request.target.identity
-        && request.scope.identity.endpoint.is_openclaw_local())
+        && request.scope.identity.scope().is_ok())
     .then_some(request)
     .ok_or(())
 }

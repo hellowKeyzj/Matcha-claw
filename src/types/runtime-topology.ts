@@ -113,7 +113,7 @@ export interface RuntimeEndpointControlStateSummary {
   updatedAt: number | null;
 }
 
-export type RuntimeCapabilityFamily = 'session' | 'task' | 'subagent' | 'team' | 'cron' | 'workspace' | 'skill' | 'channel' | 'lifecycle';
+export type RuntimeCapabilityFamily = 'session' | 'task' | 'subagent' | 'team' | 'cron' | 'workspace' | 'skill' | 'channel' | 'usage' | 'lifecycle';
 
 export interface RuntimeEndpointCapabilityFamilySummary {
   family: RuntimeCapabilityFamily;

@@ -347,8 +347,9 @@ fn host_input(root: &TestRoot) -> HostInput {
 
     HostInput {
         matcha: MatchaAgentInput {
-            bun_executable: absolute_path("bin/bun"),
-            entry: absolute_path("matcha-agent/dist/cli-bun.js"),
+            server_executable: absolute_path("bin/matcha-app-server"),
+            cli_executable: absolute_path("bin/bun"),
+            cli_args: vec![absolute_path("matcha-agent/dist/cli-bun.js").to_string_lossy().into_owned()],
             working_directory: absolute_path("runtime"),
             storage_root: root.matcha_storage_parent.join("app-server"),
             port: 18_790,

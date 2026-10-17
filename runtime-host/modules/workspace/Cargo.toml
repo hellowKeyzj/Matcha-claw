@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 base64.workspace = true
 foundation = { version = "0.1.0", path = "../../foundation" }
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 platform = { version = "0.1.0", path = "../../platform" }
 runtime-directory = { version = "0.1.0", path = "../runtime-directory" }
 serde.workspace = true

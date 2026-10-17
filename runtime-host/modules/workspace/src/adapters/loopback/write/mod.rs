@@ -10,7 +10,7 @@ pub(crate) mod handler;
 const CAPABILITY_ID: &str = "workspace.file";
 const OPERATION_ID: &str = "files.writeText";
 const RUNTIME_KIND: &str = "native-runtime";
-const SCOPE_KIND: &str = "session";
+const SCOPE_KIND: &str = "agent";
 const TARGET_KIND: &str = "workspace-file";
 pub(super) const AUTHORIZATION_ENDPOINT: &str = "/api/workspace/files/write-text";
 const AUTHORIZATION_SCOPE: &str = "workspace-files:write";
@@ -66,8 +66,8 @@ impl WorkspaceWriteRequest {
             && self.target.kind == TARGET_KIND
             && self.scope.endpoint == self.input.endpoint
             && self.scope.endpoint.runtime_endpoint().is_some()
-            && valid_session_key(&self.scope.session_key)
-            && self.scope.session_key == self.input.session_key
+            && valid_agent_id(&self.scope.agent_id)
+            && self.scope.agent_id == self.input.agent_id
             && valid_relative_path(&self.input.relative_path)
             && self.input.content.len() <= MAX_CONTENT_BYTES)
             .then_some(())
@@ -80,8 +80,8 @@ impl WorkspaceWriteRequest {
             .runtime_endpoint()
             .expect("workspace write endpoint validated")
     }
-    pub(crate) fn session_key(&self) -> &str {
-        &self.input.session_key
+    pub(crate) fn agent_id(&self) -> &str {
+        &self.input.agent_id
     }
 
     pub(crate) fn relative_path(&self) -> &str {
@@ -93,8 +93,8 @@ impl WorkspaceWriteRequest {
     }
 }
 
-fn valid_session_key(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 4096 && !value.as_bytes().contains(&0)
+fn valid_agent_id(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 4096 && !value.as_bytes().contains(&0)
 }
 
 fn valid_relative_path(value: &str) -> bool {
@@ -116,8 +116,8 @@ fn valid_relative_path(value: &str) -> bool {
 struct Scope {
     kind: String,
     endpoint: Endpoint,
-    #[serde(rename = "sessionKey")]
-    session_key: String,
+    #[serde(rename = "agentId")]
+    agent_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -130,8 +130,8 @@ struct Target {
 #[serde(deny_unknown_fields)]
 struct Input {
     endpoint: Endpoint,
-    #[serde(rename = "sessionKey")]
-    session_key: String,
+    #[serde(rename = "agentId")]
+    agent_id: String,
     #[serde(rename = "relativePath")]
     relative_path: String,
     content: String,

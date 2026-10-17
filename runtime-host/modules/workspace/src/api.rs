@@ -45,14 +45,14 @@ impl WorkspaceHandle {
     pub(crate) async fn read_text(
         &self,
         endpoint: RuntimeEndpoint,
-        session_key: String,
+        agent_id: String,
         relative_path: String,
         limit: usize,
     ) -> Result<Result<WorkspaceTextReceipt, WorkspaceReadFailure>, ()> {
         self.request_command(Operation::ReadText, 1, |reply| {
             WorkspaceOperation::ReadText {
                 endpoint,
-                session_key,
+                agent_id,
                 relative_path,
                 limit,
                 reply,
@@ -64,14 +64,14 @@ impl WorkspaceHandle {
     pub(crate) async fn read_binary(
         &self,
         endpoint: RuntimeEndpoint,
-        session_key: String,
+        agent_id: String,
         relative_path: String,
         limit: usize,
     ) -> Result<Result<WorkspaceBinaryReceipt, WorkspaceBinaryFailure>, ()> {
         self.request_command(Operation::ReadBinary, 1, |reply| {
             WorkspaceOperation::ReadBinary {
                 endpoint,
-                session_key,
+                agent_id,
                 relative_path,
                 limit,
                 reply,
@@ -83,13 +83,13 @@ impl WorkspaceHandle {
     pub(crate) async fn stat_file(
         &self,
         endpoint: RuntimeEndpoint,
-        session_key: String,
+        agent_id: String,
         relative_path: String,
     ) -> Result<Result<WorkspaceStatReceipt, WorkspaceStatFailure>, ()> {
         self.request_command(Operation::StatFile, 1, |reply| {
             WorkspaceOperation::StatFile {
                 endpoint,
-                session_key,
+                agent_id,
                 relative_path,
                 reply,
             }
@@ -100,14 +100,14 @@ impl WorkspaceHandle {
     pub(crate) async fn list_directory(
         &self,
         endpoint: RuntimeEndpoint,
-        session_key: String,
+        agent_id: String,
         relative_path: String,
         include_hidden: bool,
     ) -> Result<Result<WorkspaceDirectoryReceipt, WorkspaceListFailure>, ()> {
         self.request_command(Operation::ListDirectory, 1, |reply| {
             WorkspaceOperation::ListDirectory {
                 endpoint,
-                session_key,
+                agent_id,
                 relative_path,
                 include_hidden,
                 reply,
@@ -119,14 +119,14 @@ impl WorkspaceHandle {
     pub(crate) async fn write_text(
         &self,
         endpoint: RuntimeEndpoint,
-        session_key: String,
+        agent_id: String,
         relative_path: String,
         content: String,
     ) -> Result<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>, ()> {
         self.request_command(Operation::WriteText, 1, |reply| {
             WorkspaceOperation::WriteText {
                 endpoint,
-                session_key,
+                agent_id,
                 relative_path,
                 content,
                 reply,
@@ -299,17 +299,17 @@ impl WorkspaceHandle {
         // Only native config selection and enqueue share this FIFO, never file/media effects.
         let ingress = self.shared.ingress.clone().lock_owned().await;
         let operation = command(reply);
-        let (endpoint, session_key) = operation.scope();
-        let endpoint = endpoint.clone();
-        let session_key = session_key.to_owned();
+        let (endpoint, selection) = operation.scope();
+        let scope_key = selection.owner_key(endpoint.clone());
         let recorded = RecordedCall { context, detail };
         let sent = if operation.needs_workspace() {
             let shared = self.shared.clone();
-            self.shared.blocking(move || {
-                let binding = shared.bind(&endpoint, &session_key);
+            self.shared.effect(async move {
+                let (endpoint, selection) = operation.scope();
+                let binding = shared.bind(endpoint, selection).await;
                 let key = match binding.as_ref().and_then(|binding| binding.resource_key()) {
-                    Some(resource_key) => WorkspaceOwnerKey::Directory(endpoint, resource_key.to_owned()),
-                    None => WorkspaceOwnerKey::Session(endpoint, session_key),
+                    Some(resource_key) => WorkspaceOwnerKey::Directory(endpoint.clone(), resource_key.to_owned()),
+                    None => scope_key,
                 };
                 let sent = permit.send(WorkspaceCommand { key, binding, operation, call: recorded });
                 drop(ingress);
@@ -317,7 +317,7 @@ impl WorkspaceHandle {
             }).await.and_then(|sent| sent)
         } else {
             let sent = permit.send(WorkspaceCommand {
-                key: WorkspaceOwnerKey::Session(endpoint, session_key),
+                key: scope_key,
                 binding: None,
                 operation,
                 call: recorded,

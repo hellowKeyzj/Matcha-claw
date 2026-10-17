@@ -6,10 +6,9 @@ import { traceLog } from '@/lib/trace-logger';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type SetStateAction } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ApprovalItem, type ChatSessionRuntimeState, type ChatStoreState } from '@/stores/chat';
-import { selectCurrentChatSendGate } from '@/stores/chat/selectors';
+import { selectCurrentChatSendGate, selectRuntimeAgentScope } from '@/stores/chat/selectors';
 import {
   ABORT_STOPPING_TIMEOUT_ERROR,
   ABORT_UNKNOWN_ERROR,
@@ -18,18 +17,22 @@ import {
 } from '@/stores/chat/abort-handlers';
 import { isRunActive } from '@/stores/chat/types';
 import { buildCurrentConversationFromSessionRecord, resolveCurrentConversationRuntimeState } from '@/stores/chat/session-runtime-graph';
-import { supportsSessionGoal, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { isRuntimeEndpointReady, supportsSessionGoal, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
-import { useTeamsStore } from '@/stores/teams';
+import { resolveTeamRuntimeScope, useTeamsStore } from '@/stores/teams';
 import type { TeamDesignTarget } from '@/types/team-design';
 import { useComposerDraftStore, clampComposerDraftSelection, type ComposerDraftSelection } from '@/stores/composer-drafts';
 import type { GatewayTransportIssue } from '../../types/session/runtime-state';
 import {
+  agentScope,
+  buildCapabilityScopeKey,
   buildSessionIdentityKey,
   runtimeEndpointsEqual,
+  runtimeInstanceScope,
   sessionIdentitiesEqual,
+  sessionScope,
   type SessionIdentity,
 } from '../../types/desktop/runtime-address';
 import { getCronSessionBaseKey, parseCronSessionKey } from '@/stores/chat/cron-session-utils';
@@ -38,14 +41,12 @@ import type {
 } from '../../types/session/render-item';
 import type {
   SessionWindowStateSnapshot,
-  SessionWireIdentity,
 } from '../../types/session/snapshot';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import {
   createEmptySessionRecord,
   getPendingApprovals,
   getSessionApprovalStatus,
-  patchSessionMeta,
 } from '@/stores/chat/store-state-helpers';
 import { hasVisibleRuntimeError } from '@/stores/chat/runtime-error-view';
 import { resolveSessionOperationTarget } from '@/stores/chat/session-identity';
@@ -70,10 +71,12 @@ import { useChatWindowDockController } from './useChatWindowDockController';
 import { useAgentSkillConfig } from './useAgentSkillConfig';
 import { useChatView } from './useChatView';
 import { useChatQuestions } from './useChatQuestions';
+import { useSessionQuestions } from './useSessionQuestions';
+import { SessionQuestionDock } from './components/SessionQuestionDock';
 import { useChatGoals } from './useChatGoals';
+import { useChatPermissions } from './useChatPermissions';
 import { ChatGoalDock } from './ChatGoalDock';
 import { ChatQuestionDock } from './components/ChatQuestionDock';
-import { useWorkspaceAvailability } from '@/hooks/use-workspace-availability';
 import {
   applyAssistantPresentationToItems,
   type ChatAssistantCatalogAgent,
@@ -81,13 +84,8 @@ import {
 } from './chat-render-item-model';
 import {
   hostApiFetch,
-  hostSessionPatch,
-  hostSessionPermissionGet,
-  hostSessionPermissionSet,
+  hostCapabilityDescribe,
   hostSessionWindowFetch,
-  type HostSessionPermissionResult,
-  type SessionPermissionMode,
-  type SessionPermissionSelection,
 } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { pickLocalDirectory } from '@/services/local-path-picker';
@@ -154,109 +152,10 @@ const GATEWAY_CONNECT_FAILED_PREFIX = 'Gateway connect failed: ';
 const GATEWAY_RPC_TIMEOUT_PREFIX = 'Gateway RPC timeout: ';
 const STARTUP_TRACE_PREFIX = '[startup-trace]';
 
-type ChatRuntimeBranch = 'starting' | 'unavailable' | 'ready';
-
-type ChatSessionPermissionOption = Readonly<{
-  mode: SessionPermissionSelection;
-  labelKey: string;
-  descriptionKey: string;
-  disabled?: boolean;
-}>;
-
-type ChatSessionPermissionProjection = Readonly<{
-  loading: boolean;
-  switching: boolean;
-  supported: boolean;
-  pending: boolean;
-  defaultMode: SessionPermissionMode | null;
-  canSelectFull: boolean;
-  options: ChatSessionPermissionOption[];
-  mode: SessionPermissionSelection;
-}>;
-
-const SESSION_PERMISSION_OPTIONS: ChatSessionPermissionOption[] = [
-  { mode: null, labelKey: 'input.permissionDefaultWithMode', descriptionKey: 'input.permissionDefaultDescription' },
-  { mode: 'read-only', labelKey: 'input.permissionReadOnly', descriptionKey: 'input.permissionReadOnlyDescription' },
-  { mode: 'guarded', labelKey: 'input.permissionGuarded', descriptionKey: 'input.permissionGuardedDescription' },
-  { mode: 'workspace', labelKey: 'input.permissionWorkspace', descriptionKey: 'input.permissionWorkspaceDescription' },
-  { mode: 'full', labelKey: 'input.permissionFull', descriptionKey: 'input.permissionFullDescription' },
-];
-
-function createSessionPermissionProjection(
-  overrides?: Partial<Omit<ChatSessionPermissionProjection, 'options'>> & { options?: ChatSessionPermissionOption[] },
-): ChatSessionPermissionProjection {
-  const canSelectFull = overrides?.canSelectFull ?? false;
-  return {
-    loading: overrides?.loading ?? false,
-    switching: overrides?.switching ?? false,
-    supported: overrides?.supported ?? false,
-    pending: overrides?.pending ?? false,
-    defaultMode: overrides?.defaultMode ?? null,
-    canSelectFull,
-    options: overrides?.options ?? SESSION_PERMISSION_OPTIONS.map((option) => ({
-      ...option,
-      ...(option.mode === 'full' && !canSelectFull ? { disabled: true } : {}),
-    })),
-    mode: overrides?.mode ?? null,
-  };
-}
-
-function sessionPermissionProjectionFromResult(result: HostSessionPermissionResult): ChatSessionPermissionProjection {
-  const modes = new Set(result.options);
-  return createSessionPermissionProjection({
-    loading: false,
-    switching: false,
-    supported: result.supported,
-    pending: result.pending,
-    defaultMode: result.defaultMode ?? null,
-    canSelectFull: result.canSelectFull,
-    options: result.supported
-      ? SESSION_PERMISSION_OPTIONS
-        .filter((option) => option.mode === null || modes.has(option.mode))
-        .map((option) => ({
-          ...option,
-          ...(option.mode === 'full' && !result.canSelectFull ? { disabled: true } : {}),
-        }))
-      : [],
-    mode: result.mode,
-  });
-}
-
-function sessionIdentityToWire(identity: SessionIdentity | null | undefined): SessionWireIdentity | null {
-  if (!identity || identity.endpoint.kind !== 'native-runtime') {
-    return null;
-  }
-  if (identity.endpoint.runtimeAdapterId !== 'openclaw' && identity.endpoint.runtimeAdapterId !== 'matcha-agent') {
-    return null;
-  }
-  return {
-    sessionKey: identity.sessionKey,
-    endpoint: {
-      kind: identity.endpoint.kind,
-      runtimeAdapterId: identity.endpoint.runtimeAdapterId,
-      runtimeInstanceId: identity.endpoint.runtimeInstanceId,
-    },
-    agentId: identity.agentId,
-  };
-}
+type ChatRuntimeBranch = 'starting' | 'unselected' | 'unavailable' | 'ready';
 
 function isImageGenerationActive(runtime: ChatSessionRuntimeState): boolean {
   return runtime.imageGeneration?.active === true;
-}
-
-function workspaceAvailabilityKey(identity: SessionIdentity | null | undefined): string {
-  if (!identity || identity.endpoint.kind !== 'native-runtime') {
-    return '';
-  }
-  if (identity.endpoint.runtimeAdapterId !== 'openclaw' || identity.endpoint.runtimeInstanceId !== 'local') {
-    return '';
-  }
-  return JSON.stringify({
-    runtimeAdapterId: identity.endpoint.runtimeAdapterId,
-    runtimeInstanceId: identity.endpoint.runtimeInstanceId,
-    agentId: identity.agentId,
-    sessionKey: identity.sessionKey,
-  });
 }
 
 function chatStartupTraceSummary(source: string, phase: ChatRuntimeBranch) {
@@ -630,12 +529,15 @@ export function Chat({ isActive = true }: ChatProps) {
   const agents = useSubagentsStore((state) => (
     Array.isArray(state.agentsResource.data) ? state.agentsResource.data : EMPTY_AGENTS
   ));
-  const availableModels = useSubagentsStore((state) => state.availableModels);
-  const modelsLoading = useSubagentsStore((state) => state.modelsLoading);
+  const providerModels = useSubagentsStore((state) => state.availableModels);
+  const providerModelsLoading = useSubagentsStore((state) => state.modelsLoading);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const updateAgent = useSubagentsStore((state) => state.updateAgent);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
-  const currentAgent = currentAgentId ? agents.find((agent) => agent.id === currentAgentId) : undefined;
+  const managementScope = useSubagentsStore((state) => state.managementScope);
+  const currentAgent = currentAgentId && managementScope && currentConversation
+    && runtimeEndpointsEqual(managementScope.endpoint, currentConversation.endpoint)
+    ? agents.find((agent) => agent.id === currentAgentId) : undefined;
   const loadedSessionsForDraftCleanup = useChatStore((state) => state.loadedSessions);
   const loadedSessionKeys = useMemo(() => Object.keys(loadedSessionsForDraftCleanup), [loadedSessionsForDraftCleanup]);
   const composerDraft = useComposerDraftStore((state) => currentComposerDraftKey ? state.drafts[currentComposerDraftKey] ?? '' : '');
@@ -644,6 +546,10 @@ export function Chat({ isActive = true }: ChatProps) {
   const setComposerDraft = useComposerDraftStore((state) => state.setDraft);
   const clearComposerDraft = useComposerDraftStore((state) => state.clearDraft);
   const setComposerSelection = useComposerDraftStore((state) => state.setSelection);
+  const composerConfiguration = useComposerDraftStore((state) => currentComposerDraftKey ? state.configurations[currentComposerDraftKey] : undefined);
+  const composerInitialization = useComposerDraftStore((state) => currentComposerDraftKey ? state.initializations[currentComposerDraftKey] : undefined);
+  const setModelSelection = useComposerDraftStore((state) => state.setModelSelection);
+  const setPermissionSelection = useComposerDraftStore((state) => state.setPermissionSelection);
   const userAvatarDataUrl = useSettingsStore((state) => state.userAvatarDataUrl);
   const [skillPreview, setSkillPreview] = useState<ChatSkillPreviewState | null>(null);
   const [artifactActiveSection, setArtifactActiveSection] = useState<ChatArtifactSection>('changes');
@@ -651,10 +557,15 @@ export function Chat({ isActive = true }: ChatProps) {
   const [artifactFocusedFilePath, setArtifactFocusedFilePath] = useState<string | null>(null);
   const [artifactFocusedFileOverride, setArtifactFocusedFileOverride] = useState<ArtifactPreviewTarget | null>(null);
   const [artifactViewMode, setArtifactViewMode] = useState<'preview' | 'diff'>('diff');
+  const [artifactSelectionOwnerKey, setArtifactSelectionOwnerKey] = useState(currentComposerDraftKey);
+  if (artifactSelectionOwnerKey !== currentComposerDraftKey) {
+    setArtifactSelectionOwnerKey(currentComposerDraftKey);
+    setArtifactFocusedGroupKey(null);
+    setArtifactFocusedFilePath(null);
+    setArtifactFocusedFileOverride(null);
+  }
   const [visibleRuntimeError, setVisibleRuntimeError] = useState<string | null>(null);
   const [exportingMarkdown, setExportingMarkdown] = useState(false);
-  const [sessionPermission, setSessionPermission] = useState<ChatSessionPermissionProjection>(() => createSessionPermissionProjection({ loading: true }));
-  const sessionPermissionOperationRef = useRef<{ identityKey: string; sequence: number } | null>(null);
   const skillPreviewRequestSeqRef = useRef(0);
   const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
   const chatLayoutRef = useRef<HTMLDivElement>(null);
@@ -676,9 +587,37 @@ export function Chat({ isActive = true }: ChatProps) {
     directoryEndpoints: runtimeEndpointDirectory.endpoints,
   }), [currentRuntimeConversation, runtimeEndpointDirectory.endpoints, runtimeEndpointDirectory.error, runtimeEndpointDirectory.status, sessionRuntimeGraph]);
   const currentConversationEndpoint = currentConversation?.endpoint ?? null;
+  const isOpenClawModelSession = currentConversationEndpoint?.kind === 'native-runtime' && currentConversationEndpoint.runtimeAdapterId === 'openclaw';
+  const isMatchaModelSession = currentConversationEndpoint?.kind === 'native-runtime' && currentConversationEndpoint.runtimeAdapterId === 'matcha-agent';
+  const usesHostModelCandidates = isOpenClawModelSession || isMatchaModelSession;
+  const availableModels = usesHostModelCandidates ? providerModels : EMPTY_AGENTS;
+  const modelsLoading = usesHostModelCandidates && providerModelsLoading;
   const currentChatRuntimeAvailable = currentConversationRuntime.state === 'ready';
-  const sessionRuntimeInitializing = (currentConversationRuntime.state === 'resolving' && (sessionRuntimeCatalog.status === 'idle' || sessionRuntimeCatalog.status === 'loading'))
-    || (currentConversationRuntime.state === 'starting' && currentSession.items.length === 0);
+  const currentConfigurationScope = useMemo(() => currentConversationEndpoint && currentAgentId
+    ? agentScope(currentConversationEndpoint, currentAgentId) : null, [currentAgentId, currentConversationEndpoint]);
+  const currentSkillsScope = useMemo(() => isOpenClawModelSession && currentConversationEndpoint
+    ? runtimeInstanceScope(currentConversationEndpoint) : isMatchaModelSession ? currentConfigurationScope : null,
+  [currentConfigurationScope, currentConversationEndpoint, isMatchaModelSession, isOpenClawModelSession]);
+  const currentDraftScope = currentConversation?.kind === 'draft' ? currentConfigurationScope : null;
+  const draftConfigurationScopeKey = currentDraftScope ? buildCapabilityScopeKey(currentDraftScope) : '';
+  const draftConfigurationOwner = useMemo(() => ({ scope: currentDraftScope, ready: currentChatRuntimeAvailable, scopeKey: draftConfigurationScopeKey }), [currentDraftScope, currentChatRuntimeAvailable, draftConfigurationScopeKey]);
+  const [draftConfigurationCapability, setDraftConfigurationCapability] = useState<{
+    owner: typeof draftConfigurationOwner; permission: boolean; modelSelection: boolean;
+  } | null>(null);
+  const draftConfigurationReady = currentChatRuntimeAvailable && Boolean(currentDraftScope)
+    && draftConfigurationCapability?.owner === draftConfigurationOwner;
+  const composerInitializationBusy = composerInitialization?.kind === 'creating' || composerInitialization?.kind === 'createUnknown'
+    || composerInitialization?.kind === 'pending' && !composerInitialization.outcome;
+  const composerConfigurationStatus = composerInitialization?.kind === 'createUnknown' ? t('input.configurationCreateUnknown')
+    : composerInitialization?.kind === 'creating' ? t('input.configurationCreating')
+      : composerInitialization?.kind === 'pending' && composerInitialization.outcome
+        ? t(`input.configurationOutcome.${composerInitialization.outcome}`) : null;
+  const sessionRuntimeInitializing = currentSession.items.length === 0 && (
+    currentConversationRuntime.state === 'resolving'
+    || currentConversationRuntime.state === 'starting'
+    || (currentConversationRuntime.state === 'unselected' && runtimeEndpointDirectory.status !== 'error'
+      && (sessionRuntimeCatalog.status === 'idle' || sessionRuntimeCatalog.status === 'loading'))
+  );
   const currentRuntimeReconnecting = currentConversationRuntime.state === 'starting';
   const currentWorkspaceIdentity = currentSessionConversation?.sessionIdentity ?? currentSession.meta.sessionIdentity;
   const teamOwnership = currentWorkspaceIdentity && currentSession.meta.sessionIdentity
@@ -689,6 +628,12 @@ export function Chat({ isActive = true }: ChatProps) {
   const designTeamId = teamOwnership?.kind === 'team' && teamOwnership.roleId === 'leader' ? teamGraphTeamId : null;
   const designRunId = teamOwnership?.kind === 'team' && teamOwnership.roleId === 'leader' ? teamGraphRunId : null;
   const designTeamKnown = useTeamsStore((state) => Boolean(designTeamId && state.teams.some((team) => team.id === designTeamId)));
+  const designRuntimeAvailable = designTeamKnown && designTeamId && designRunId
+    ? runtimeEndpointDirectory.endpoints.some((entry) => {
+        const scope = resolveTeamRuntimeScope(designTeamId, designRunId);
+        return 'endpoint' in scope && runtimeEndpointsEqual(entry.endpointRef, scope.endpoint)
+          && isRuntimeEndpointReady(entry) && supportsRuntimeEndpointCapabilityFamily(entry, 'team');
+      }) : false;
   const designRecord = useTeamsStore((state) => designRunId ? state.designByRunId[designRunId] : undefined);
   const observeTeamDesign = useTeamsStore((state) => state.observeTeamDesign);
   const startDesign = useTeamsStore((state) => state.startDesign);
@@ -700,19 +645,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const [pendingDesignAction, setPendingDesignAction] = useState<{ contextKey: string; action: 'start' | 'exit' } | null>(null);
   const currentDesignContextRef = useRef(designContextKey);
   currentDesignContextRef.current = designContextKey;
-  const currentWorkspaceAvailabilityKey = workspaceAvailabilityKey(currentWorkspaceIdentity);
   const currentWorkspacePath = currentAgent?.workspace?.trim() ?? '';
-  const workspaceAvailabilityTargets = useMemo(() => (
-    workspaceActive && isGatewayRunning && currentChatRuntimeAvailable && currentWorkspaceAvailabilityKey
-      ? [{
-          key: currentWorkspaceAvailabilityKey,
-          path: currentWorkspacePath,
-          sessionIdentity: currentWorkspaceIdentity,
-        }]
-      : []
-  ), [currentChatRuntimeAvailable, currentWorkspaceAvailabilityKey, currentWorkspaceIdentity, currentWorkspacePath, isGatewayRunning, workspaceActive]);
-  const workspaceAvailability = useWorkspaceAvailability(workspaceAvailabilityTargets);
-  const currentWorkspaceUnavailable = workspaceAvailability[currentWorkspaceAvailabilityKey] === 'unavailable';
   const handleComposerDraftChange = useCallback((update: SetStateAction<string>) => {
     setComposerDraft(currentComposerDraftKey, update);
   }, [currentComposerDraftKey, setComposerDraft]);
@@ -720,11 +653,12 @@ export function Chat({ isActive = true }: ChatProps) {
     setComposerSelection(currentComposerDraftKey, selection);
   }, [currentComposerDraftKey, setComposerSelection]);
   const canChooseWorkspaceForCurrentAgent = !!currentAgent
+    && currentConversationEndpoint?.kind === 'native-runtime' && currentConversationEndpoint.runtimeAdapterId === 'openclaw'
     && (currentAgent.kind !== 'system' || Boolean(currentAgent.isDefault))
     && !!currentAgentId;
-  const chatRuntimeBranch: ChatRuntimeBranch = currentConversationRuntime.state === 'ready'
-    ? 'ready'
-    : (currentConversationRuntime.state === 'unavailable' ? 'unavailable' : 'starting');
+  const chatRuntimeBranch: ChatRuntimeBranch = currentConversationRuntime.state === 'resolving'
+    ? 'starting'
+    : currentConversationRuntime.state;
   const chatSideEffectsActive = workspaceActive && currentChatRuntimeAvailable;
   const goalSupported = supportsSessionGoal(runtimeEndpointDirectory.endpoints, currentConversationEndpoint, currentAgentId ?? '');
   const chatGoals = useChatGoals(currentWorkspaceIdentity, currentSessionRecordKey, currentSession.meta.endpointSessionId, currentComposerDraftKey, goalSupported && chatSideEffectsActive, currentSession.meta.goal);
@@ -740,6 +674,13 @@ export function Chat({ isActive = true }: ChatProps) {
     workspaceActive,
     currentChatRuntimeAvailable && isGatewayRunning,
     questionRecoveryKey,
+  );
+  const sessionQuestions = useSessionQuestions(
+    currentWorkspaceIdentity,
+    currentSession.meta.endpointSessionId,
+    workspaceActive,
+    currentChatRuntimeAvailable,
+    String(sessionRuntimeCatalog.directoryRevision),
   );
   const observedIdentitiesKey = useMemo(() => {
     if (!connectorSessionIdentity) return '[]';
@@ -860,9 +801,9 @@ export function Chat({ isActive = true }: ChatProps) {
     teamGraphSurface,
   } = useChatSidePanelController(chatSideEffectsActive, chatLayoutRef, currentWorkspaceIdentity ?? undefined);
   useEffect(() => {
-    if (!chatSideEffectsActive || !isGatewayRunning || !designTeamKnown || !designTeamId || !designRunId) return;
+    if (!chatSideEffectsActive || !designRuntimeAvailable || !designTeamKnown || !designTeamId || !designRunId) return;
     return observeTeamDesign({ teamId: designTeamId, runId: designRunId });
-  }, [chatSideEffectsActive, isGatewayRunning, designTeamKnown, designTeamId, designRunId, observeTeamDesign]);
+  }, [chatSideEffectsActive, designRuntimeAvailable, designTeamKnown, designTeamId, designRunId, observeTeamDesign]);
   const openedDesignNavigationRef = useRef<string | null>(null);
   useEffect(() => {
     const surface = (location.state as { teamDesignSurface?: Extract<ChatRuntimeSurfaceDescriptor, { kind: 'team-graph' }> } | null)?.teamDesignSurface;
@@ -873,8 +814,8 @@ export function Chat({ isActive = true }: ChatProps) {
     openChatRuntimeSurface(surface);
   }, [location.key, location.state, chatSideEffectsActive, currentWorkspaceIdentity, teamGraphTeamId, teamGraphRunId]);
   const designActionDisabled = !designTeamKnown || !designSnapshot || designSnapshot.startGate.status === 'started'
-    || Boolean(designRecord?.loading) || designActionPending || !isGatewayRunning || !chatSideEffectsActive
-    || currentWorkspaceUnavailable || isRunActive(currentSession.runtime) || isImageGenerationActive(currentSession.runtime)
+    || Boolean(designRecord?.loading) || designActionPending || !designRuntimeAvailable || !chatSideEffectsActive
+    || isRunActive(currentSession.runtime) || isImageGenerationActive(currentSession.runtime)
     || approvalStatus === 'awaiting_approval' || !currentSendGate.canSend;
   const runDesignAction = async (action: (target: TeamDesignTarget) => Promise<void>, focusComposer = false): Promise<void> => {
     if (!designTeamId || !designRunId || designActionDisabled) return;
@@ -890,7 +831,7 @@ export function Chat({ isActive = true }: ChatProps) {
       }
       if (focusComposer) composerRef.current?.focus();
     } catch (error) {
-      toast.error(t('teams:design.actionFailed', { error: error instanceof Error ? error.message : String(error) }));
+      if (currentDesignContextRef.current === contextKey) toast.error(t('teams:design.actionFailed', { error: error instanceof Error ? error.message : String(error) }));
     } finally {
       if (pending) setPendingDesignAction((current) => current === pending ? null : current);
     }
@@ -920,6 +861,7 @@ export function Chat({ isActive = true }: ChatProps) {
     toggleSkill: toggleSkillConfigSelection,
   } = useAgentSkillConfig({
     currentAgentId,
+    scope: useChatStore(selectRuntimeAgentScope),
   });
 
   useEffect(() => {
@@ -929,59 +871,66 @@ export function Chat({ isActive = true }: ChatProps) {
   }, [currentAgentId, resetSkillConfigSession]);
 
   useEffect(() => {
-    if (!currentChatRuntimeAvailable) {
+    if (!currentChatRuntimeAvailable || !usesHostModelCandidates) {
       return;
     }
     void loadAvailableModels();
-  }, [currentChatRuntimeAvailable, loadAvailableModels]);
-
-  const currentSessionPermissionIdentity = useMemo(() => sessionIdentityToWire(
-    currentSessionConversation?.sessionIdentity ?? currentSession.meta.sessionIdentity,
-  ), [currentSession.meta.sessionIdentity, currentSessionConversation?.sessionIdentity]);
-  const currentSessionPermissionIdentityKey = currentSessionPermissionIdentity
-    ? JSON.stringify(currentSessionPermissionIdentity)
-    : '';
-
-  useLayoutEffect(() => {
-    sessionPermissionOperationRef.current = isGatewayRunning && currentSessionPermissionIdentityKey
-      ? { identityKey: currentSessionPermissionIdentityKey, sequence: 0 }
-      : null;
-    return () => {
-      sessionPermissionOperationRef.current = null;
-    };
-  }, [currentSessionPermissionIdentityKey, isGatewayRunning]);
+  }, [currentChatRuntimeAvailable, loadAvailableModels, usesHostModelCandidates]);
 
   useEffect(() => {
-    const owner = sessionPermissionOperationRef.current;
-    if (!isGatewayRunning || !currentSessionPermissionIdentity || !owner) {
-      setSessionPermission(createSessionPermissionProjection());
-      return;
-    }
-    const sequence = ++owner.sequence;
-    const isCurrent = () => sessionPermissionOperationRef.current === owner && owner.sequence === sequence;
+    setDraftConfigurationCapability(null);
+    if (!currentChatRuntimeAvailable || !currentDraftScope) return;
     let cancelled = false;
-    setSessionPermission((current) => createSessionPermissionProjection({
-      ...current,
-      loading: true,
-      switching: false,
-      pending: false,
+    void hostCapabilityDescribe({ id: 'session.prompt', scope: currentDraftScope })
+      .then(({ capability }) => {
+        if (cancelled) return;
+        const available = capability.availability === 'available'
+          && capability.operations.some((operation) => operation.id === 'sessions.create');
+        setDraftConfigurationCapability({
+          owner: draftConfigurationOwner,
+          permission: available && capability.sessionConfiguration?.permission === true,
+          modelSelection: available && capability.sessionConfiguration?.modelSelection === true,
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setDraftConfigurationCapability({ owner: draftConfigurationOwner, permission: false, modelSelection: false });
+      });
+    return () => { cancelled = true; };
+  }, [currentChatRuntimeAvailable, currentDraftScope, draftConfigurationOwner]);
+
+  const modelSelectionIdentityKey = currentSessionConversation && currentWorkspaceIdentity
+    ? buildSessionIdentityKey(currentWorkspaceIdentity) : '';
+  const modelSelectionSupported = Boolean(usesHostModelCandidates && currentChatRuntimeAvailable && modelSelectionIdentityKey
+    && currentWorkspaceIdentity && runtimeEndpointDirectory.endpoints.some((entry) => {
+      if (!runtimeEndpointsEqual(entry.endpointRef, currentWorkspaceIdentity.endpoint) || !entry.capabilities.modelSelection) return false;
+      const agent = entry.agents.find((agent) => agent.agentId === currentWorkspaceIdentity.agentId);
+      return agent ? agent.capabilities.modelSelection : entry.acceptsDynamicAgents;
     }));
-    void hostSessionPermissionGet({ identity: currentSessionPermissionIdentity })
-      .then((result) => {
-        if (!cancelled && isCurrent()) {
-          setSessionPermission(sessionPermissionProjectionFromResult(result));
+  const modelSelectionOwner = useMemo(() => ({ conversation: currentSessionConversation, identityKey: modelSelectionIdentityKey, supported: modelSelectionSupported }), [currentSessionConversation, modelSelectionIdentityKey, modelSelectionSupported]);
+  const [modelSelectionCapabilityOwner, setModelSelectionCapabilityOwner] = useState<typeof modelSelectionOwner | null>(null);
+  const modelSelectionAvailable = modelSelectionSupported && modelSelectionCapabilityOwner === modelSelectionOwner;
+  const modelSelectionOperationRef = useRef<{ owner: typeof modelSelectionOwner } | null>(null);
+  const [modelSelectionOperation, setModelSelectionOperation] = useState<{ owner: typeof modelSelectionOwner } | null>(null);
+  const modelSwitching = modelSelectionOperation?.owner === modelSelectionOwner;
+  const currentModelSelectionOwnerRef = useRef<typeof modelSelectionOwner | null>(null);
+  useLayoutEffect(() => {
+    currentModelSelectionOwnerRef.current = modelSelectionOwner;
+    return () => { currentModelSelectionOwnerRef.current = null; };
+  }, [modelSelectionOwner]);
+  useEffect(() => {
+    setModelSelectionCapabilityOwner(null);
+    if (!modelSelectionSupported || !currentWorkspaceIdentity) return;
+    let cancelled = false;
+    void hostCapabilityDescribe({ id: 'session.modelSelection', scope: sessionScope(currentWorkspaceIdentity) })
+      .then(({ capability }) => {
+        if (!cancelled && capability.availability === 'available'
+          && capability.operations.some((operation) => operation.id === 'sessions.patchModel')) {
+          setModelSelectionCapabilityOwner(modelSelectionOwner);
         }
       })
-      .catch((error) => {
-        if (!cancelled && isCurrent()) {
-          setSessionPermission(createSessionPermissionProjection());
-          toast.error(t('input.permissionLoadFailed', { error: error instanceof Error ? error.message : String(error) }));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [currentSessionPermissionIdentity, currentSessionPermissionIdentityKey, isGatewayRunning, t]);
+      .catch(() => { if (!cancelled) setModelSelectionCapabilityOwner(null); });
+    return () => { cancelled = true; };
+  }, [currentWorkspaceIdentity, modelSelectionOwner, modelSelectionSupported, runtimeEndpointDirectory.endpoints]);
 
   useEffect(() => {
     if (!chatSideEffectsActive) {
@@ -997,13 +946,14 @@ export function Chat({ isActive = true }: ChatProps) {
     runActive: isRunActive(currentSession.runtime),
   });
   const assistantCatalogAgents = useMemo<ChatAssistantCatalogAgent[]>(
-    () => agents.map((agent) => ({
-      id: agent.id,
-      agentName: agent.name,
-      avatarSeed: agent.avatarSeed,
-      avatarStyle: agent.avatarStyle,
-    })),
-    [agents],
+    () => managementScope && currentConversationEndpoint && runtimeEndpointsEqual(managementScope.endpoint, currentConversationEndpoint)
+      ? agents.map((agent) => ({
+          id: agent.id,
+          agentName: agent.name,
+          avatarSeed: agent.avatarSeed,
+          avatarStyle: agent.avatarStyle,
+        })) : [],
+    [agents, currentConversationEndpoint, managementScope],
   );
   const imageGenerationActive = isImageGenerationActive(currentSession.runtime);
   const imageGenerationLabel = t('input.imageGenerationActive');
@@ -1058,12 +1008,11 @@ export function Chat({ isActive = true }: ChatProps) {
   const artifactFocusedGroupFiles = artifactWorkbenchSelection.focusedGroupFiles;
   const artifactFocusedFile = artifactWorkbenchSelection.focusedFile;
   const defaultArtifactWorkspaceRoot = useMemo(() => {
-    const endpoint = currentConversationEndpoint;
-    const currentWorkspace = endpoint?.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'openclaw'
-      ? currentAgent?.workspace
-      : undefined;
+    if (currentConversationEndpoint?.kind === 'native-runtime') {
+      return currentAgent?.workspace?.trim() || null;
+    }
     return resolveArtifactWorkspaceRoot({
-      currentWorkspace,
+      currentWorkspace: currentAgent?.workspace,
       artifactFiles,
       artifactFocusedFile,
     });
@@ -1071,7 +1020,8 @@ export function Chat({ isActive = true }: ChatProps) {
   const artifactWorkspaceRoot = defaultArtifactWorkspaceRoot;
   const artifactWorkspaceContext = useMemo(() => ({
     workspaceRoot: artifactWorkspaceRoot || undefined,
-  }), [artifactWorkspaceRoot]);
+    agentScope: currentConfigurationScope ?? undefined,
+  }), [artifactWorkspaceRoot, currentConfigurationScope]);
   const openGeneratedArtifact = useCallback((file: GeneratedFile, options?: OpenGeneratedArtifactOptions) => {
     const canShowChanges = supportsInlineDiff(file);
     const nextTarget = buildArtifactPreviewTargetFromGeneratedFile(file);
@@ -1272,19 +1222,25 @@ export function Chat({ isActive = true }: ChatProps) {
     ?? currentSession.meta.modelState?.selected?.ref
     ?? '';
   const currentSessionModelEntry = useMemo(() => {
-    return resolveModelCatalogEntry(availableModels, currentSessionModelReference);
-  }, [availableModels, currentSessionModelReference]);
-  const currentSessionModelId = currentSessionModelEntry?.id ?? currentSessionModelReference;
+    return isOpenClawModelSession
+      ? resolveModelCatalogEntry(availableModels, currentSessionModelReference)
+      : availableModels.find((model) => model.id === currentSession.meta.modelState?.selectionId);
+  }, [availableModels, currentSession.meta.modelState?.selectionId, currentSessionModelReference, isOpenClawModelSession]);
+  const currentSessionModelId = isMatchaModelSession
+    ? currentSession.meta.modelState?.selectionId ?? ''
+    : currentSessionModelEntry?.id ?? currentSessionModelReference;
   const contextUsage = useMemo(() => buildChatContextUsageViewModel({
     snapshot: currentSession.contextTokens,
     currentModelId: currentSessionModelId,
-    availableModels,
-  }), [availableModels, currentSession.contextTokens, currentSessionModelId]);
+    availableModels: isOpenClawModelSession ? availableModels : EMPTY_AGENTS,
+  }), [availableModels, currentSession.contextTokens, currentSessionModelId, isOpenClawModelSession]);
   const [workspaceRecoveryPending, setWorkspaceRecoveryPending] = useState(false);
   const handleChooseWorkspaceForCurrentAgent = useCallback(async () => {
     if (!canChooseWorkspaceForCurrentAgent || !currentAgent || workspaceRecoveryPending) {
       return;
     }
+    const conversation = useChatStore.getState().currentConversation;
+    const isCurrent = () => useChatStore.getState().currentConversation === conversation;
     setWorkspaceRecoveryPending(true);
     try {
       const selectedPath = await pickLocalDirectory({
@@ -1292,7 +1248,7 @@ export function Chat({ isActive = true }: ChatProps) {
         defaultPath: currentWorkspacePath || undefined,
         buttonLabel: t('workspaceUnavailable.pickButton'),
       });
-      if (!selectedPath) {
+      if (!selectedPath || !isCurrent()) {
         return;
       }
       await updateAgent({
@@ -1301,10 +1257,14 @@ export function Chat({ isActive = true }: ChatProps) {
         workspace: selectedPath,
         model: currentAgent.model,
       });
+      if (!isCurrent()) return;
       await newSession(currentAgentId);
-      toast.success(t('workspaceUnavailable.updateSuccess'));
+      const selected = useChatStore.getState().currentConversation;
+      if (conversation && selected?.agentId === conversation.agentId && runtimeEndpointsEqual(selected.endpoint, conversation.endpoint)) {
+        toast.success(t('workspaceUnavailable.updateSuccess'));
+      }
     } catch (error) {
-      toast.error(t('workspaceUnavailable.updateFailed', { error: error instanceof Error ? error.message : String(error) }));
+      if (isCurrent()) toast.error(t('workspaceUnavailable.updateFailed', { error: error instanceof Error ? error.message : String(error) }));
     } finally {
       setWorkspaceRecoveryPending(false);
     }
@@ -1316,40 +1276,42 @@ export function Chat({ isActive = true }: ChatProps) {
       runtimeNotice={currentSession.runtime.runtimeNotice}
     />
   ) : null;
-  const workspaceUnavailableBanner = currentWorkspaceUnavailable ? (
-    <div className="mx-auto w-full max-w-[56rem] rounded-[22px] border border-yellow-500/24 bg-card px-4 py-3 shadow-sm">
-      <div className="flex items-start gap-3 text-left">
-        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-yellow-600" />
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-foreground">{t('workspaceUnavailable.title')}</p>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            {t('workspaceUnavailable.description', { path: currentWorkspacePath || t('workspaceUnavailable.unknownPath') })}
-          </p>
-          {canChooseWorkspaceForCurrentAgent ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="mt-3 h-8 rounded-full border-yellow-500/28 bg-background/95 px-3 text-xs text-foreground hover:bg-background"
-              disabled={workspaceRecoveryPending}
-              onClick={() => {
-                void handleChooseWorkspaceForCurrentAgent();
-              }}
-            >
-              {workspaceRecoveryPending
-                ? t('workspaceUnavailable.updating')
-                : t('workspaceUnavailable.chooseWorkspaceAndNewSession')}
-            </Button>
-          ) : null}
-        </div>
-      </div>
-    </div>
+  const workspaceRecoveryAction = canChooseWorkspaceForCurrentAgent ? (
+    <Button
+      type="button"
+      variant="link"
+      size="sm"
+      className="h-auto justify-start whitespace-normal p-0 text-left text-xs"
+      disabled={workspaceRecoveryPending}
+      onClick={() => {
+        void handleChooseWorkspaceForCurrentAgent();
+      }}
+    >
+      {workspaceRecoveryPending
+        ? t('workspaceUnavailable.updating')
+        : t('workspaceUnavailable.chooseWorkspaceAndNewSession')}
+    </Button>
   ) : null;
   const activeRun = isRunActive(currentSession.runtime)
     || currentSession.runtime.activeRunId != null;
+  const permissionPicker = useChatPermissions({
+    scope: currentConfigurationScope,
+    identity: currentSessionConversation?.sessionIdentity ?? null,
+    ready: currentChatRuntimeAvailable,
+    activeRun,
+    draft: currentConversation?.kind === 'draft',
+    draftAvailable: draftConfigurationReady && draftConfigurationCapability?.permission === true,
+    draftLoading: Boolean(currentDraftScope) && currentChatRuntimeAvailable && !draftConfigurationReady,
+    initializationBusy: composerInitializationBusy,
+    pendingSelection: composerConfiguration?.permissionSelection,
+    pendingConfiguration: composerInitialization?.kind === 'pending',
+    onSelectIntent: (selection) => setPermissionSelection(currentComposerDraftKey, selection),
+  });
   const modelPicker = useMemo(() => {
-    const currentModelId = currentSessionModelId;
-    if (!currentModelId && availableModels.length === 0 && !modelsLoading) {
+    const intendedModelId = composerConfiguration?.modelSelectionId;
+    const currentModelId = intendedModelId ?? currentSessionModelId;
+    if (!currentModelId && availableModels.length === 0 && !modelsLoading
+      && !(isMatchaModelSession && (currentSession.meta.modelState?.selected || currentSession.meta.modelState?.active))) {
       return null;
     }
     const triggerLabels = new Map<string, string>();
@@ -1360,17 +1322,19 @@ export function Chat({ isActive = true }: ChatProps) {
       id: model.id,
       label: model.displayLabel,
     }));
+    const selectedLabel = currentModelId
+      ? triggerLabels.get(currentModelId) ?? resolveModelTriggerLabel(currentModelId)
+      : currentSession.meta.modelState?.selected?.model ?? t('input.pickModel');
     return {
       currentModelId,
-      currentLabel: currentModelId
-        ? triggerLabels.get(currentModelId) ?? resolveModelTriggerLabel(currentModelId)
-        : t('input.pickModel'),
+      currentLabel: selectedLabel,
       options,
       loading: modelsLoading,
-      switching: false,
-      disabled: activeRun || !currentSessionRecordKey,
+      switching: modelSwitching,
+      disabled: activeRun || modelSwitching || !currentChatRuntimeAvailable || composerInitializationBusy || (currentDraftScope
+        ? !draftConfigurationReady || draftConfigurationCapability?.modelSelection !== true : !modelSelectionAvailable),
     };
-  }, [activeRun, availableModels, currentSessionModelId, currentSessionRecordKey, modelsLoading, t]);
+  }, [activeRun, availableModels, composerConfiguration?.modelSelectionId, composerInitializationBusy, currentChatRuntimeAvailable, currentDraftScope, currentSession.meta.modelState, currentSessionModelId, draftConfigurationCapability, draftConfigurationReady, isMatchaModelSession, modelSelectionAvailable, modelSwitching, modelsLoading, t]);
   const composerContextTraceRef = useRef<string | null>(null);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
@@ -1380,7 +1344,7 @@ export function Chat({ isActive = true }: ChatProps) {
       endpointSessionId: summarizeIdentifier(connectorEndpointSessionId),
       conversationKind: currentConversation?.kind ?? null, runtimeState: currentConversationRuntime.state,
       directoryStatus: runtimeEndpointDirectory.status, gatewayRunning: isGatewayRunning,
-      workspaceUnavailable: currentWorkspaceUnavailable, composerDisabled: !currentChatRuntimeAvailable || currentWorkspaceUnavailable,
+      composerDisabled: !currentChatRuntimeAvailable,
       historyStatus: currentSession.meta.historyStatus, runPhase: currentSession.runtime.runPhase,
       activeRun: summarizeIdentifier(currentSession.runtime.activeRunId), modelBlockedByRun: activeRun,
       modelState: {
@@ -1461,109 +1425,36 @@ export function Chat({ isActive = true }: ChatProps) {
       currentModelSelectionId: summarizeIdentifier(currentModelSelectionId),
       activeRun: Boolean(activeRun),
     }));
-    if (!currentSessionRecordKey || !currentSessionConversation) {
-      logSessionTrace('model-selection.skipped', traceId, () => ({ reason: 'missing-current-session' }));
+    if (!normalizedModelSelectionId || !modelPicker || modelPicker.disabled || modelPicker.loading
+      || !availableModels.some((model) => model.id === normalizedModelSelectionId)) return;
+    if (currentConversation?.kind === 'draft' || composerInitialization?.kind === 'pending') {
+      setModelSelection(currentComposerDraftKey, normalizedModelSelectionId);
       return;
     }
-    if (!normalizedModelSelectionId || normalizedModelSelectionId === currentModelSelectionId) {
-      logSessionTrace('model-selection.skipped', traceId, () => ({
-        reason: !normalizedModelSelectionId ? 'missing-model-selection' : 'unchanged-model-selection',
-      }));
-      return;
-    }
-    if (activeRun) {
-      logSessionTrace('model-selection.skipped', traceId, () => ({ reason: 'active-run' }));
-      return;
-    }
+    if (!currentSessionRecordKey || !currentSessionConversation || normalizedModelSelectionId === currentModelSelectionId) return;
+    const conversation = currentSessionConversation;
+    if (currentModelSelectionOwnerRef.current !== modelSelectionOwner
+      || modelSelectionOperationRef.current?.owner === modelSelectionOwner
+      || useChatStore.getState().currentConversation !== conversation) return;
+    const operation = { owner: modelSelectionOwner };
+    modelSelectionOperationRef.current = operation;
+    setModelSelectionOperation(operation);
+    const isCurrent = () => currentModelSelectionOwnerRef.current === modelSelectionOwner
+      && modelSelectionOperationRef.current === operation
+      && useChatStore.getState().currentConversation === conversation;
     try {
-      const target = resolveSessionOperationTarget(useChatStore.getState(), currentSessionRecordKey);
-      logSessionTrace('model-selection.target', traceId, () => ({
-        recordKey: summarizeIdentifier(currentSessionRecordKey),
-        endpointSessionId: summarizeIdentifier(target.endpointSessionId),
-        sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
-        modelSelectionId: summarizeIdentifier(normalizedModelSelectionId),
-      }));
-      const result = await hostSessionPatch({
-        ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
-        sessionIdentity: target.sessionIdentity,
-        modelSelectionId: normalizedModelSelectionId,
-      }, { traceId });
+      const result = await useChatStore.getState().selectSessionModel(currentSessionRecordKey, normalizedModelSelectionId);
       logSessionTrace('model-selection.result', traceId, () => ({ outcome: result.outcome }));
-      if (result.outcome !== 'succeeded') {
-        throw new Error(result.outcome);
-      }
-      useChatStore.setState((state) => ({
-        loadedSessions: patchSessionMeta(state, currentSessionRecordKey, {
-          modelState: result.modelState,
-        }),
-      }));
-      logSessionTrace('model-selection.applied', traceId, () => ({
-        recordKey: summarizeIdentifier(currentSessionRecordKey),
-        selected: {
-          provider: summarizeIdentifier(result.modelState.selected?.provider),
-          model: summarizeIdentifier(result.modelState.selected?.model),
-          ref: summarizeIdentifier(result.modelState.selected?.ref),
-        },
-        active: {
-          provider: summarizeIdentifier(result.modelState.active?.provider),
-          model: summarizeIdentifier(result.modelState.active?.model),
-          ref: summarizeIdentifier(result.modelState.active?.ref),
-        },
-        selectionId: summarizeIdentifier(result.modelState.selectionId),
-      }));
-      void loadSessions();
+      if (result.outcome !== 'succeeded') throw new Error(result.outcome);
+      if (isCurrent()) void loadSessions();
     } catch (error) {
-      logSessionTrace('model-selection.error', traceId, () => ({
-        ...summarizeError(error),
-        errorName: error instanceof Error ? 'Error' : typeof error,
-      }));
-      const message = error instanceof Error ? error.message : String(error);
-      toast.error(t('input.modelSwitchFailed', { error: message }));
+      logSessionTrace('model-selection.error', traceId, () => summarizeError(error));
+      if (isCurrent()) toast.error(t('input.modelSwitchFailed', { error: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      if (modelSelectionOperationRef.current === operation) modelSelectionOperationRef.current = null;
+      setModelSelectionOperation((current) => current === operation ? null : current);
     }
-  }, [activeRun, currentSessionConversation, currentSessionModelId, currentSessionRecordKey, loadSessions, t]);
-
-  const handleSelectSessionPermission = useCallback(async (selection: SessionPermissionSelection) => {
-    const owner = sessionPermissionOperationRef.current;
-    if (!currentSessionPermissionIdentity
-      || !owner
-      || owner.identityKey !== currentSessionPermissionIdentityKey
-      || selection === sessionPermission.mode
-      || sessionPermission.loading
-      || sessionPermission.switching
-      || sessionPermission.pending
-      || !sessionPermission.supported
-      || activeRun
-      || (selection === 'full' && !sessionPermission.canSelectFull)) {
-      return;
-    }
-    const sequence = ++owner.sequence;
-    const isCurrent = () => sessionPermissionOperationRef.current === owner && owner.sequence === sequence;
-    const previousPermission = sessionPermission;
-    setSessionPermission(createSessionPermissionProjection({
-      ...sessionPermission,
-      switching: true,
-      pending: true,
-      mode: selection,
-    }));
-    try {
-      const result = await hostSessionPermissionSet({
-        identity: currentSessionPermissionIdentity,
-        selection,
-      });
-      if (isCurrent()) {
-        setSessionPermission(sessionPermissionProjectionFromResult(result));
-      }
-    } catch (error) {
-      if (isCurrent()) {
-        setSessionPermission(createSessionPermissionProjection({
-          ...previousPermission,
-          switching: false,
-          pending: false,
-        }));
-      }
-      toast.error(t('input.permissionSwitchFailed', { error: error instanceof Error ? error.message : String(error) }));
-    }
-  }, [activeRun, currentSessionPermissionIdentity, currentSessionPermissionIdentityKey, sessionPermission, t]);
+  }, [activeRun, availableModels, composerInitialization?.kind, currentComposerDraftKey, currentConversation?.kind, currentSessionConversation, currentSessionModelId, currentSessionRecordKey, loadSessions, modelPicker, modelSelectionOwner, setModelSelection, t]);
 
   const handlePreviewSkill = useCallback(async (skill: {
     id: string;
@@ -1658,6 +1549,7 @@ export function Chat({ isActive = true }: ChatProps) {
         onRefresh={() => { void chatGoals.refresh(); }}
       /> : null}
       onStop={abortRun}
+      skillsScope={currentSkillsScope}
       skillManager={{
         label: t('toolbar.skillConfig'),
         title: t('skillConfigDialog.titleWithAgent', { agent: currentAgent?.name || currentAgentId }),
@@ -1676,13 +1568,8 @@ export function Chat({ isActive = true }: ChatProps) {
           void handleSelectModel(modelSelectionId);
         },
       } : null}
-      permissionPicker={{
-        ...sessionPermission,
-        disabled: !isGatewayRunning || activeRun || !currentSessionPermissionIdentity,
-        onSelect: (mode) => {
-          void handleSelectSessionPermission(mode);
-        },
-      }}
+      permissionPicker={permissionPicker}
+      configurationStatus={composerConfigurationStatus}
       contextUsage={contextUsage}
       onOpenTeamGraph={teamGraphTeamId && teamGraphRunId && currentWorkspaceIdentity ? () => {
         openChatRuntimeSurface({ kind: 'team-graph', sourceSessionIdentity: currentWorkspaceIdentity, teamId: teamGraphTeamId, runId: teamGraphRunId });
@@ -1700,7 +1587,7 @@ export function Chat({ isActive = true }: ChatProps) {
         onExit: () => { void runDesignAction(exitDesign, true); },
         onRun: () => { void runDesignAction(startRun); },
       } : null}
-      disabled={!currentChatRuntimeAvailable || currentWorkspaceUnavailable}
+      disabled={!currentChatRuntimeAvailable}
       reconnecting={currentRuntimeReconnecting}
       sending={isRunActive(currentSession.runtime)}
       imageGenerationActive={imageGenerationActive}
@@ -1714,12 +1601,6 @@ export function Chat({ isActive = true }: ChatProps) {
       runPhase={currentSession.runtime.runPhase}
     />
   );
-  const welcomeInputNode = workspaceUnavailableBanner ? (
-    <div className="space-y-2">
-      {workspaceUnavailableBanner}
-      {inputNode}
-    </div>
-  ) : inputNode;
 
   if (sessionRuntimeInitializing) {
     return (
@@ -1727,6 +1608,16 @@ export function Chat({ isActive = true }: ChatProps) {
         title={t('runtimePreparing.title')}
         description={t('runtimePreparing.description')}
         tone="loading"
+      />
+    );
+  }
+
+  if (currentConversationRuntime.state === 'unselected' && currentSession.items.length === 0
+    && (runtimeEndpointDirectory.status === 'error' || sessionRuntimeCatalog.status === 'error')) {
+    return (
+      <ChatOffline
+        title={t('runtimePreparationFailed.title')}
+        description={runtimeEndpointDirectory.error || sessionRuntimeCatalog.error || t('runtimePreparationFailed.description')}
       />
     );
   }
@@ -1760,10 +1651,11 @@ export function Chat({ isActive = true }: ChatProps) {
         onSidePanelResizeCommit={chatWindowDock.commitSidePanelWidth}
         onComposerWheel={handleComposerWheel}
         onComposerGeometryChange={handleComposerGeometryChange}
-        isEmptyState={liveView.isEmptyState && chatQuestions.questions.length === 0 && !chatQuestions.error}
-        emptyState={<WelcomeScreen input={welcomeInputNode} />}
+        isEmptyState={liveView.isEmptyState && chatQuestions.questions.length === 0 && !chatQuestions.error && sessionQuestions.questions.length === 0 && !sessionQuestions.error}
+        emptyState={<WelcomeScreen input={inputNode} />}
         sidePanel={(
           <ChatSidePanel
+            key={currentComposerDraftKey}
             mode={sidePanelMode}
             width={sidePanelWidth}
             activeTab={activeSidePanelTab}
@@ -1780,6 +1672,7 @@ export function Chat({ isActive = true }: ChatProps) {
             artifactViewMode={artifactViewMode}
             artifactWorkspaceRoot={artifactWorkspaceRoot}
             artifactWorkspaceContext={artifactWorkspaceContext}
+            workspaceRecoveryAction={workspaceRecoveryAction}
             onArtifactFocusFile={handleArtifactFocusTarget}
             onOpenGeneratedArtifactFile={openGeneratedArtifact}
             onOpenArtifactGroup={handleOpenArtifactGroup}
@@ -1849,14 +1742,14 @@ export function Chat({ isActive = true }: ChatProps) {
             jumpToBottomLabel={t('liveThread.jumpToBottom')}
           />
         )}
-        errorBanner={workspaceUnavailableBanner ?? (visibleRuntimeError ? (
+        errorBanner={visibleRuntimeError ? (
           <ChatErrorBanner
             error={visibleRuntimeError}
             dismissLabel={t('common:actions.dismiss')}
             onDismiss={clearError}
           />
-        ) : runtimeStatusDock)}
-        approvalDock={approvalStatus === 'awaiting_approval' || chatQuestions.questions.length > 0 || chatQuestions.error ? (
+        ) : runtimeStatusDock}
+        approvalDock={approvalStatus === 'awaiting_approval' || chatQuestions.questions.length > 0 || chatQuestions.error || sessionQuestions.questions.length > 0 || sessionQuestions.error ? (
           <>
             {approvalStatus === 'awaiting_approval' ? (
               <ChatApprovalDock
@@ -1875,6 +1768,15 @@ export function Chat({ isActive = true }: ChatProps) {
               submittingId={chatQuestions.submittingId}
               onRefresh={chatQuestions.refresh}
               onResolve={chatQuestions.resolve}
+            />
+            <SessionQuestionDock
+              key={sessionQuestions.scopeKey}
+              questions={sessionQuestions.questions}
+              confirmed={sessionQuestions.confirmed}
+              error={sessionQuestions.error}
+              submittingId={sessionQuestions.submittingId}
+              onRefresh={sessionQuestions.refresh}
+              onRespond={sessionQuestions.respond}
             />
           </>
         ) : null}

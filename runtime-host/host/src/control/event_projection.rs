@@ -41,6 +41,11 @@ pub(crate) fn project_observed(
         ),
         HostEvent::OpenClaw(event) => project_openclaw_observed(event, observation),
         HostEvent::CronExecution(event) => project_cron_execution_observed(event, observation),
+        HostEvent::CronChanged { endpoint } => project_accepted(
+            observation,
+            "cron.changed",
+            SafeEvent::CronChanged { endpoint },
+        ),
         HostEvent::OpenClawRuntime => project_accepted(
             observation,
             OPENCLAW_RUNTIME_EVENT,

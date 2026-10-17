@@ -90,6 +90,7 @@ pub(super) async fn export(
         capability: AUTHORIZATION_CAPABILITY.into(),
         subject: AUTHORIZATION_SUBJECT.into(),
         private: false,
+        runtime_scope: handle.runtime_scope.clone(),
     };
     let command = Command::Export {
         skill_keys: request.skill_keys,

@@ -1,570 +1,58 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
-use serde_json::Value;
-
-use super::{approval::ApprovalRecord, protocol_event::EventEnvelope};
-
-const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-const MAX_SESSION_ID_BYTES: usize = 240;
-const WINDOWS_RESERVED_SESSION_IDS: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-];
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ValidationError(&'static str);
-
-impl ValidationError {
-    pub(crate) const fn new(message: &'static str) -> Self {
-        Self(message)
-    }
-
-    pub fn message(self) -> &'static str {
-        self.0
-    }
-}
-
-impl fmt::Display for ValidationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0)
-    }
-}
-
-impl std::error::Error for ValidationError {}
-
-macro_rules! string_id {
-    ($name:ident, $error:literal) => {
-        #[derive(Clone, Eq, Hash, PartialEq, Serialize)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn try_new(value: impl Into<String>) -> Result<Self, ValidationError> {
-                let value = value.into();
-                if value.trim().is_empty() {
-                    return Err(ValidationError::new($error));
-                }
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl fmt::Debug for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(concat!(stringify!($name), "([REDACTED])"))
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::try_new(String::deserialize(deserializer)?).map_err(D::Error::custom)
-            }
-        }
-    };
-}
-
-#[derive(Clone, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Eq, PartialEq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct SessionId(String);
 
 impl SessionId {
-    pub fn try_new(value: impl Into<String>) -> Result<Self, ValidationError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, InvalidId> {
         let value = value.into();
-        if !is_native_session_id(&value) {
-            return Err(ValidationError::new(
-                "session id must be a portable native session id",
-            ));
-        }
-        Ok(Self(value))
+        valid_uuid(&value).then_some(Self(value)).ok_or(InvalidId)
     }
-
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
-
+impl<'de> Deserialize<'de> for SessionId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_new(String::deserialize(deserializer)?)
+            .map_err(|_| serde::de::Error::custom("invalid native session UUID"))
+    }
+}
 impl fmt::Debug for SessionId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SessionId([REDACTED])")
+        formatter.write_str("SessionId(<redacted>)")
     }
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidId;
 
-impl<'de> Deserialize<'de> for SessionId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::try_new(String::deserialize(deserializer)?).map_err(D::Error::custom)
-    }
+pub fn valid_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+            }
+        })
 }
 
-fn is_native_session_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_SESSION_ID_BYTES
-        && is_native_session_id_start(value.as_bytes()[0])
-        && value.bytes().all(is_native_session_id_byte)
-        && !WINDOWS_RESERVED_SESSION_IDS
-            .iter()
-            .any(|reserved| value.eq_ignore_ascii_case(reserved))
-}
-
-const fn is_native_session_id_start(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-}
-
-const fn is_native_session_id_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
-}
-
-string_id!(RunId, "run id must be a non-empty string");
-string_id!(MessageId, "message id must be a non-empty string");
-string_id!(EventId, "event id must be a non-empty string");
-string_id!(WorkerId, "worker id must be a non-empty string");
-string_id!(ClientId, "client id must be a non-empty string");
-string_id!(ApprovalId, "approval id must be a non-empty string");
-string_id!(OptionId, "option id must be a non-empty string");
-string_id!(ToolCallId, "tool call id must be a non-empty string");
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Sequence(u64);
-
 impl Sequence {
-    pub fn try_new(value: u64) -> Result<Self, ValidationError> {
-        if value > MAX_SAFE_INTEGER {
-            return Err(ValidationError::new(
-                "sequence must be a non-negative JavaScript-safe integer",
-            ));
-        }
-        Ok(Self(value))
+    pub fn try_new(value: u64) -> Result<Self, InvalidId> {
+        (value <= sessions_module::state::MAX_SAFE_INTEGER)
+            .then_some(Self(value))
+            .ok_or(InvalidId)
     }
-
-    pub fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 }
 
-impl<'de> Deserialize<'de> for Sequence {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::try_new(u64::deserialize(deserializer)?).map_err(D::Error::custom)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InitializeCapabilities {
-    pub event_replay: bool,
-    pub snapshots: bool,
-    pub approvals: bool,
-    pub sdk_message_envelope: bool,
-    pub blob_store: bool,
-    pub session_transcript: bool,
-}
-
-impl InitializeCapabilities {
-    pub(crate) fn is_v1(&self) -> bool {
-        self.event_replay
-            && self.snapshots
-            && self.approvals
-            && self.sdk_message_envelope
-            && self.blob_store
-            && self.session_transcript
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InitializeResult {
-    pub protocol_version: String,
-    pub server_version: String,
-    pub capabilities: InitializeCapabilities,
-}
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionRecord {
-    pub session_id: SessionId,
-    pub created_at: String,
-    pub updated_at: String,
-    pub title: Option<String>,
-    pub runtime: RuntimeKind,
-    pub transcript_ref: Option<String>,
-    pub has_conversation: Option<bool>,
-    pub last_seq: Sequence,
-    pub last_snapshot_version: u64,
-    pub model: Option<String>,
-    pub model_selection_id: Option<String>,
-    pub provider_fingerprint: Option<String>,
-    pub permission_mode: Option<String>,
-    pub worker_state: WorkerRuntimeState,
-}
-
-impl fmt::Debug for SessionRecord {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SessionRecord")
-            .field("session_id", &self.session_id)
-            .field("has_created_at", &!self.created_at.is_empty())
-            .field("has_updated_at", &!self.updated_at.is_empty())
-            .field("has_title", &self.title.is_some())
-            .field("runtime", &self.runtime)
-            .field("has_transcript_ref", &self.transcript_ref.is_some())
-            .field("has_conversation", &self.has_conversation)
-            .field("last_seq", &self.last_seq)
-            .field("last_snapshot_version", &self.last_snapshot_version)
-            .field("has_model", &self.model.is_some())
-            .field("has_model_selection_id", &self.model_selection_id.is_some())
-            .field(
-                "has_provider_fingerprint",
-                &self.provider_fingerprint.is_some(),
-            )
-            .field("has_permission_mode", &self.permission_mode.is_some())
-            .field("worker_state", &self.worker_state)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum RuntimeKind {
-    #[serde(rename = "matcha-agent")]
-    MatchaAgent,
-}
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(
-    tag = "state",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum WorkerRuntimeState {
-    Unloaded {
-        reason: UnloadedReason,
-    },
-    Spawning {
-        worker_id: WorkerId,
-        started_at: String,
-    },
-    Ready {
-        worker_id: WorkerId,
-        pid: u32,
-        last_heartbeat_at: String,
-    },
-    Running {
-        worker_id: WorkerId,
-        run_id: RunId,
-        started_at: String,
-    },
-    WaitingForApproval {
-        worker_id: WorkerId,
-        run_id: RunId,
-        approval_ids: Vec<ApprovalId>,
-    },
-    Stopping {
-        worker_id: WorkerId,
-        reason: WorkerStopReason,
-    },
-    Crashed {
-        worker_id: WorkerId,
-        exit_code: Option<i32>,
-        signal: Option<String>,
-        restartable: bool,
-    },
-}
-
-impl fmt::Debug for WorkerRuntimeState {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unloaded { reason } => formatter
-                .debug_struct("WorkerRuntimeState::Unloaded")
-                .field("reason", reason)
-                .finish(),
-            Self::Spawning { .. } => formatter
-                .debug_struct("WorkerRuntimeState::Spawning")
-                .finish_non_exhaustive(),
-            Self::Ready { .. } => formatter
-                .debug_struct("WorkerRuntimeState::Ready")
-                .finish_non_exhaustive(),
-            Self::Running { .. } => formatter
-                .debug_struct("WorkerRuntimeState::Running")
-                .finish_non_exhaustive(),
-            Self::WaitingForApproval { approval_ids, .. } => formatter
-                .debug_struct("WorkerRuntimeState::WaitingForApproval")
-                .field("approval_count", &approval_ids.len())
-                .finish_non_exhaustive(),
-            Self::Stopping { reason, .. } => formatter
-                .debug_struct("WorkerRuntimeState::Stopping")
-                .field("reason", reason)
-                .finish_non_exhaustive(),
-            Self::Crashed {
-                exit_code,
-                signal,
-                restartable,
-                ..
-            } => formatter
-                .debug_struct("WorkerRuntimeState::Crashed")
-                .field("has_exit_code", &exit_code.is_some())
-                .field("has_signal", &signal.is_some())
-                .field("restartable", restartable)
-                .finish_non_exhaustive(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum UnloadedReason {
-    IdleTimeout,
-    NotStarted,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum WorkerStopReason {
-    Cancel,
-    Shutdown,
-    Restart,
-}
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionListResult {
-    pub sessions: Vec<SessionRecord>,
-}
-
-impl fmt::Debug for SessionListResult {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SessionListResult")
-            .field("session_count", &self.sessions.len())
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionPromptResult {
-    pub run_id: RunId,
-}
-
-impl fmt::Debug for SessionPromptResult {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SessionPromptResult")
-            .field("run_id", &self.run_id)
-            .finish()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionTranscriptWindow {
-    pub total_item_count: usize,
-    pub window_start_offset: usize,
-    pub window_end_offset: usize,
-}
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionTranscriptResult {
-    pub lines: Vec<String>,
-    pub window: SessionTranscriptWindow,
-}
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionContentResult {
-    pub content_ref: String,
-    pub offset: u64,
-    pub text: String,
-    pub next_offset: u64,
-    pub total_bytes: u64,
-    pub complete: bool,
-}
-
-impl fmt::Debug for SessionContentResult {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SessionContentResult")
-            .field("offset", &self.offset)
-            .field("next_offset", &self.next_offset)
-            .field("total_bytes", &self.total_bytes)
-            .field("complete", &self.complete)
-            .finish_non_exhaustive()
-    }
-}
-
-impl fmt::Debug for SessionTranscriptResult {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SessionTranscriptResult")
-            .field("line_count", &self.lines.len())
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionSnapshot {
-    pub session: SessionRecord,
-    pub version: u64,
-    pub updated_at: String,
-    pub runs: Vec<RunRecord>,
-    pub messages: Vec<EventEnvelope>,
-    pub pending_approvals: Vec<ApprovalRecord>,
-    pub usage: Option<UsageSummary>,
-}
-
-impl fmt::Debug for SessionSnapshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SessionSnapshot")
-            .field("version", &self.version)
-            .field("run_count", &self.runs.len())
-            .field("message_count", &self.messages.len())
-            .field("pending_approval_count", &self.pending_approvals.len())
-            .field("has_usage", &self.usage.is_some())
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunRecord {
-    pub run_id: RunId,
-    pub session_id: SessionId,
-    pub prompt_id: String,
-    pub status: RunStatus,
-}
-
-impl fmt::Debug for RunRecord {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RunRecord")
-            .field("status", &self.status)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum RunStatus {
-    Queued {
-        queued_at: String,
-    },
-    Running {
-        started_at: String,
-        worker_id: WorkerId,
-    },
-    WaitingForApproval {
-        approval_ids: Vec<ApprovalId>,
-    },
-    Completed {
-        completed_at: String,
-        stop_reason: StopReason,
-    },
-    Cancelled {
-        completed_at: String,
-        reason: String,
-    },
-    Failed {
-        completed_at: String,
-        error: ClassifiedError,
-    },
-    Interrupted {
-        completed_at: String,
-        reason: RunInterruptionReason,
-    },
-}
-
-impl fmt::Debug for RunStatus {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Queued { .. } => formatter.debug_struct("Queued").finish_non_exhaustive(),
-            Self::Running { .. } => formatter.debug_struct("Running").finish_non_exhaustive(),
-            Self::WaitingForApproval { approval_ids } => formatter
-                .debug_struct("WaitingForApproval")
-                .field("approval_count", &approval_ids.len())
-                .finish(),
-            Self::Completed { stop_reason, .. } => formatter
-                .debug_struct("Completed")
-                .field("stop_reason", stop_reason)
-                .finish(),
-            Self::Cancelled { .. } => formatter.debug_struct("Cancelled").finish_non_exhaustive(),
-            Self::Failed { error, .. } => formatter
-                .debug_struct("Failed")
-                .field("error", error)
-                .finish_non_exhaustive(),
-            Self::Interrupted { reason, .. } => formatter
-                .debug_struct("Interrupted")
-                .field("reason", reason)
-                .finish(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StopReason {
-    EndTurn,
-    MaxTokens,
-    MaxTurnRequests,
-    Refusal,
-    Cancelled,
-    Error,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RunInterruptionReason {
-    WorkerCrashed,
-    ServerShutdown,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageSummary {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cached_read_tokens: u64,
-    pub cached_write_tokens: u64,
-    pub total_tokens: u64,
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClassifiedError {
-    #[serde(rename = "type")]
-    pub kind: ClassifiedErrorKind,
-    pub message: String,
-    pub retryable: bool,
-    pub details: Option<Value>,
-}
-
-impl fmt::Debug for ClassifiedError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ClassifiedError")
-            .field("kind", &self.kind)
-            .field("retryable", &self.retryable)
-            .field("has_details", &self.details.is_some())
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClassifiedErrorKind {
     InvalidRequest,
     Auth,
@@ -575,317 +63,98 @@ pub enum ClassifiedErrorKind {
     Internal,
 }
 
-#[derive(Clone, PartialEq)]
-pub enum WorkerResponse {
-    Accepted {
-        request_id: String,
-    },
-    Rejected {
-        request_id: String,
-        error: ClassifiedError,
-    },
-}
-
-impl fmt::Debug for WorkerResponse {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Accepted { .. } => formatter
-                .debug_struct("WorkerResponse::Accepted")
-                .finish_non_exhaustive(),
-            Self::Rejected { error, .. } => formatter
-                .debug_struct("WorkerResponse::Rejected")
-                .field("error", error)
-                .finish_non_exhaustive(),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for WorkerResponse {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let response = WorkerResponseWire::deserialize(deserializer)?;
-        match (response.ok, response.error) {
-            (true, None) => Ok(Self::Accepted {
-                request_id: response.id,
-            }),
-            (false, Some(error)) => Ok(Self::Rejected {
-                request_id: response.id,
-                error,
-            }),
-            _ => Err(D::Error::custom("worker response shape is invalid")),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct WorkerResponseWire {
-    id: String,
-    ok: bool,
-    error: Option<ClassifiedError>,
-}
-
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionCancelResult {
-    pub cancelled_run_ids: Vec<RunId>,
-    pub worker_response: WorkerResponse,
+pub struct SessionRecord {
+    pub session_id: SessionId,
+    pub agent_id: String,
+    pub status: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub title: Option<String>,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub provider_id: Option<String>,
+    pub model_selection_id: Option<String>,
+    pub provider_fingerprint: Option<String>,
 }
 
-impl fmt::Debug for SessionCancelResult {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SessionCancelResult")
-            .field("cancelled_run_count", &self.cancelled_run_ids.len())
-            .field("worker_response", &self.worker_response)
-            .finish_non_exhaustive()
+impl SessionRecord {
+    pub(crate) fn validate(&self, id: &str, agent: Option<&str>) -> bool {
+        self.session_id.as_str() == id
+            && valid_agent_id(&self.agent_id)
+            && agent.is_none_or(|agent| agent == self.agent_id)
+            && matches!(self.status.as_str(), "open" | "closed" | "deleting")
+            && self.created_at_ms <= sessions_module::state::MAX_SAFE_INTEGER
+            && self.updated_at_ms <= sessions_module::state::MAX_SAFE_INTEGER
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunRecord {
+    pub run_id: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub status: RunStatus,
+}
 
-    fn assert_debug_redacts(value: &impl fmt::Debug, canaries: &[&str]) {
-        let debug = format!("{value:?}");
-        for canary in canaries {
-            assert!(
-                !debug.contains(canary),
-                "debug output leaked {canary}: {debug}"
-            );
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum RunStatus {
+    Queued,
+    Starting,
+    Running,
+    CancelRequested,
+    Succeeded,
+    Failed,
+    Cancelled,
+    OutcomeUnknown,
+}
+impl RunStatus {
+    pub fn phase(self) -> sessions_module::state::RunPhase {
+        use sessions_module::state::RunPhase;
+        match self {
+            Self::Queued => RunPhase::Queued,
+            Self::Starting | Self::Running => RunPhase::Started,
+            Self::CancelRequested => RunPhase::CancellationRequested,
+            Self::Succeeded => RunPhase::Completed,
+            Self::Failed => RunPhase::Failed,
+            Self::Cancelled => RunPhase::Cancelled,
+            Self::OutcomeUnknown => RunPhase::Interrupted,
         }
     }
-
-    #[test]
-    fn validated_identifiers_reject_empty_values_without_echoing_them() {
-        let secret = "  ";
-        let error = SessionId::try_new(secret).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "session id must be a portable native session id"
-        );
-        assert!(!error.to_string().contains(secret));
-        assert!(Sequence::try_new(MAX_SAFE_INTEGER + 1).is_err());
+    pub fn terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::OutcomeUnknown
+        )
     }
-
-    #[test]
-    fn native_session_id_rejects_host_keys_and_path_segments() {
-        for value in [
-            "matcha-agent:matcha:session-1",
-            "../session-1",
-            "session.1",
-            "session 1",
-            "CON",
-        ] {
-            assert!(SessionId::try_new(value).is_err(), "accepted {value}");
-        }
-        assert!(SessionId::try_new("session-1").is_ok());
-        assert!(SessionId::try_new("role_session-1").is_ok());
+}
+impl RunRecord {
+    pub fn validate(&self, session_id: &str) -> bool {
+        self.session_id == session_id && valid_uuid(&self.run_id) && valid_uuid(&self.message_id)
     }
+}
 
-    #[test]
-    fn identifier_debug_redacts_every_identity_kind() {
-        assert_debug_redacts(
-            &SessionId::try_new("session-id-canary").unwrap(),
-            &["session-id-canary"],
-        );
-        assert_debug_redacts(
-            &RunId::try_new("run-id-canary").unwrap(),
-            &["run-id-canary"],
-        );
-        assert_debug_redacts(
-            &MessageId::try_new("message-id-canary").unwrap(),
-            &["message-id-canary"],
-        );
-        assert_debug_redacts(
-            &EventId::try_new("event-id-canary").unwrap(),
-            &["event-id-canary"],
-        );
-        assert_debug_redacts(
-            &WorkerId::try_new("worker-id-canary").unwrap(),
-            &["worker-id-canary"],
-        );
-        assert_debug_redacts(
-            &ClientId::try_new("client-id-canary").unwrap(),
-            &["client-id-canary"],
-        );
-        assert_debug_redacts(
-            &ApprovalId::try_new("approval-id-canary").unwrap(),
-            &["approval-id-canary"],
-        );
-        assert_debug_redacts(
-            &OptionId::try_new("option-id-canary").unwrap(),
-            &["option-id-canary"],
-        );
-        assert_debug_redacts(
-            &ToolCallId::try_new("tool-call-id-canary").unwrap(),
-            &["tool-call-id-canary"],
-        );
+pub fn valid_agent_id(value: &str) -> bool {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return false;
     }
-
-    #[test]
-    fn worker_state_debug_redacts_identity_timestamps_and_details() {
-        let states = [
-            WorkerRuntimeState::Spawning {
-                worker_id: WorkerId::try_new("spawning-worker-canary").unwrap(),
-                started_at: "spawning-timestamp-canary".into(),
-            },
-            WorkerRuntimeState::Ready {
-                worker_id: WorkerId::try_new("ready-worker-canary").unwrap(),
-                pid: 42,
-                last_heartbeat_at: "heartbeat-timestamp-canary".into(),
-            },
-            WorkerRuntimeState::Running {
-                worker_id: WorkerId::try_new("running-worker-canary").unwrap(),
-                run_id: RunId::try_new("running-run-canary").unwrap(),
-                started_at: "running-timestamp-canary".into(),
-            },
-            WorkerRuntimeState::WaitingForApproval {
-                worker_id: WorkerId::try_new("approval-worker-canary").unwrap(),
-                run_id: RunId::try_new("approval-run-canary").unwrap(),
-                approval_ids: vec![ApprovalId::try_new("approval-canary").unwrap()],
-            },
-            WorkerRuntimeState::Stopping {
-                worker_id: WorkerId::try_new("stopping-worker-canary").unwrap(),
-                reason: WorkerStopReason::Cancel,
-            },
-            WorkerRuntimeState::Crashed {
-                worker_id: WorkerId::try_new("crashed-worker-canary").unwrap(),
-                exit_code: Some(1),
-                signal: Some("crash-signal-canary".into()),
-                restartable: true,
-            },
-        ];
-        let canaries = [
-            "spawning-worker-canary",
-            "spawning-timestamp-canary",
-            "ready-worker-canary",
-            "heartbeat-timestamp-canary",
-            "running-worker-canary",
-            "running-run-canary",
-            "running-timestamp-canary",
-            "approval-worker-canary",
-            "approval-run-canary",
-            "approval-canary",
-            "stopping-worker-canary",
-            "crashed-worker-canary",
-            "crash-signal-canary",
-        ];
-
-        for state in states {
-            assert_debug_redacts(&state, &canaries);
+    #[cfg(windows)]
+    {
+        let upper = value.to_ascii_uppercase();
+        let numbered_device = upper
+            .strip_prefix("COM")
+            .or_else(|| upper.strip_prefix("LPT"))
+            .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'));
+        if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered_device {
+            return false;
         }
     }
-
-    #[test]
-    fn session_result_debug_redacts_workspace_metadata_and_transcript() {
-        let session = SessionRecord {
-            session_id: SessionId::try_new("record-session-canary").unwrap(),
-            created_at: "created-timestamp-canary".into(),
-            updated_at: "updated-timestamp-canary".into(),
-            title: Some("session-title-canary".into()),
-            runtime: RuntimeKind::MatchaAgent,
-            transcript_ref: Some("transcript-ref-canary".into()),
-            has_conversation: Some(true),
-            last_seq: Sequence::try_new(7).unwrap(),
-            last_snapshot_version: 3,
-            model: Some("model-name-canary".into()),
-            model_selection_id: Some("model-selection-canary".into()),
-            provider_fingerprint: Some("provider-fingerprint-canary".into()),
-            permission_mode: Some("permission-mode-canary".into()),
-            worker_state: WorkerRuntimeState::Running {
-                worker_id: WorkerId::try_new("record-worker-canary").unwrap(),
-                run_id: RunId::try_new("record-run-canary").unwrap(),
-                started_at: "record-worker-timestamp-canary".into(),
-            },
-        };
-        let canaries = [
-            "record-session-canary",
-            "created-timestamp-canary",
-            "updated-timestamp-canary",
-            "session-title-canary",
-            "transcript-ref-canary",
-            "model-name-canary",
-            "model-selection-canary",
-            "provider-fingerprint-canary",
-            "permission-mode-canary",
-            "record-worker-canary",
-            "record-run-canary",
-            "record-worker-timestamp-canary",
-        ];
-
-        assert_debug_redacts(&session, &canaries);
-        assert_debug_redacts(
-            &SessionListResult {
-                sessions: vec![session],
-            },
-            &canaries,
-        );
-        assert_debug_redacts(
-            &SessionPromptResult {
-                run_id: RunId::try_new("prompt-run-canary").unwrap(),
-            },
-            &["prompt-run-canary"],
-        );
-        assert_debug_redacts(
-            &SessionTranscriptResult {
-                lines: vec!["transcript-line-canary".into()],
-                window: SessionTranscriptWindow {
-                    total_item_count: 1,
-                    window_start_offset: 0,
-                    window_end_offset: 1,
-                },
-            },
-            &["transcript-line-canary"],
-        );
-    }
-
-    #[test]
-    fn error_response_and_cancel_debug_redact_peer_payloads() {
-        let error = ClassifiedError {
-            kind: ClassifiedErrorKind::Worker,
-            message: "peer-message-canary".into(),
-            retryable: true,
-            details: Some(serde_json::json!({
-                "raw-key-canary": "raw-value-canary"
-            })),
-        };
-        let error_canaries = ["peer-message-canary", "raw-key-canary", "raw-value-canary"];
-        assert_debug_redacts(&error, &error_canaries);
-        assert_debug_redacts(
-            &WorkerResponse::Accepted {
-                request_id: "accepted-request-canary".into(),
-            },
-            &["accepted-request-canary"],
-        );
-        assert_debug_redacts(
-            &WorkerResponse::Rejected {
-                request_id: "rejected-request-canary".into(),
-                error: error.clone(),
-            },
-            &[
-                "rejected-request-canary",
-                "peer-message-canary",
-                "raw-key-canary",
-                "raw-value-canary",
-            ],
-        );
-        assert_debug_redacts(
-            &SessionCancelResult {
-                cancelled_run_ids: vec![RunId::try_new("cancelled-run-canary").unwrap()],
-                worker_response: WorkerResponse::Rejected {
-                    request_id: "cancel-request-canary".into(),
-                    error,
-                },
-            },
-            &[
-                "cancelled-run-canary",
-                "cancel-request-canary",
-                "peer-message-canary",
-                "raw-key-canary",
-                "raw-value-canary",
-            ],
-        );
-    }
+    true
 }

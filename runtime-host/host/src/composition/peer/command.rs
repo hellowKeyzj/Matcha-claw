@@ -57,6 +57,9 @@ impl RuntimeLifecycleCall {
 
 pub(crate) enum PeerCommand {
     AutostartMatcha,
+    MatchaReady {
+        process: foundation::process::ProcessObservation,
+    },
     AutostartOpenClaw {
         reservation: Option<OwnedMutexGuard<()>>,
         reply: oneshot::Sender<Result<RuntimeState, AutostartOpenClawError>>,
@@ -103,7 +106,9 @@ impl PeerCommand {
             | Self::RestartRuntime { reservation, .. }
             | Self::RepairRuntime { reservation, .. }
             | Self::RestartOpenClawAfterPluginChange { reservation, .. } => reservation,
-            Self::AutostartMatcha => unreachable!("Matcha has no OpenClaw reservation"),
+            Self::AutostartMatcha | Self::MatchaReady { .. } => {
+                unreachable!("Matcha has no OpenClaw reservation")
+            }
         };
         *reservation = Some(permit);
         true
@@ -111,7 +116,9 @@ impl PeerCommand {
 
     pub(crate) fn route_command(&self) -> CommandRoute<PeerLaneKey> {
         let endpoint = match self {
-            Self::AutostartMatcha => RuntimeDriverIdentity::matcha_agent().endpoint(),
+            Self::AutostartMatcha | Self::MatchaReady { .. } => {
+                RuntimeDriverIdentity::matcha_agent().endpoint()
+            }
             Self::AutostartOpenClaw { .. } | Self::RestartOpenClawAfterPluginChange { .. } => {
                 RuntimeDriverIdentity::open_claw().endpoint()
             }

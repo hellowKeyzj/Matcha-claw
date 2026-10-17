@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AgentsTransport } from '../runtime-host-delivery/products/agents';
 import type { SealedSkillsTransport } from '../runtime-host-delivery/transport/skills/sealed';
 import type { CallLogTransport } from '../runtime-host-delivery/transport/call-log';
-import { isSkillsCallReceipt } from '../runtime-host-delivery/transport/skills/management';
+import { isSkillsCallReceipt, isSkillsRuntimeScope } from '../runtime-host-delivery/transport/skills/management';
 import { waitForCallRecord, type SubscribeCalls } from '../../../src/types/call-log/wait';
 import type { CloudPackageOperationErrorCode, CloudPackageOperationRequests, CloudPackageOperationResults, CloudPackageOperationKind } from '../../../src/types/cloud-package-operation';
 import type { CloudPackageLocalDownload, CloudPackageVersion, CloudSealedCloudKey } from './types';
@@ -36,12 +36,17 @@ export async function executePackageOperation<K extends CloudPackageOperationKin
   switch (kind) {
     case 'download': return publicDownload(await session.download(request as CloudPackageOperationRequests['download'])) as CloudPackageOperationResults[K];
     case 'install': {
-      const prepared = await session.prepare(request as CloudPackageOperationRequests['install']);
+      const { scope, ...download } = request as CloudPackageOperationRequests['install'];
+      if (scope !== undefined && !isSkillsRuntimeScope(scope)) throw new PackageOperationError('nativeRejected', 400, 'Package runtime scope is invalid');
+      const prepared = await session.prepare(download);
       try {
         session.assertCurrent();
+        if (prepared.cloudMetadata.packageType === 'agent' && scope?.endpoint.runtimeAdapterId === 'matcha-agent') {
+          throw new PackageOperationError('nativeRejected', 409, 'Agent package installation is not supported by this runtime');
+        }
         const installed = prepared.cloudMetadata.packageType === 'agent'
           ? await transports.agentsTransport.execute(agentRequest('install', undefined, { packagePath: prepared.download.packagePath, cloudMetadata: prepared.cloudMetadata }))
-          : await transports.sealedSkillsTransport.install({ packagePath: prepared.download.packagePath, cloudMetadata: prepared.cloudMetadata });
+          : await transports.sealedSkillsTransport.install({ packagePath: prepared.download.packagePath, cloudMetadata: prepared.cloudMetadata, ...(scope === undefined ? {} : { scope }) });
         if (installed.status !== 202 || !isSkillsCallReceipt(installed.body)) {
           throw new PackageOperationError(installed.status === 409 || installed.status === 422 || installed.status === 400 ? 'nativeRejected' : 'outcomeUnknown', installed.status >= 400 ? installed.status : 502, 'Package installation was not admitted; check the installed packages before retrying');
         }
@@ -51,7 +56,8 @@ export async function executePackageOperation<K extends CloudPackageOperationKin
       } finally { session.release(prepared); }
     }
     case 'confirmSealedSkillUpload': {
-      const { callId } = request as CloudPackageOperationRequests['confirmSealedSkillUpload'];
+      const { callId, scope } = request as CloudPackageOperationRequests['confirmSealedSkillUpload'];
+      if (scope !== undefined && !isSkillsRuntimeScope(scope)) throw new PackageOperationError('nativeRejected', 400, 'Package runtime scope is invalid');
       session.assertCurrent();
       const call = await transports.callLogTransport.get({ callId });
       session.assertCurrent();
@@ -64,7 +70,7 @@ export async function executePackageOperation<K extends CloudPackageOperationKin
             && call.body.detail.result === 'partial' && call.body.detail.reason === 'cleanup-failed'))) {
         throw new PackageOperationError('exportUnconfirmed', 409, 'Cloud skill export is not confirmed');
       }
-      const exported = await transports.sealedSkillsTransport.exportCloudResult(callId);
+      const exported = await transports.sealedSkillsTransport.exportCloudResult(callId, scope);
       session.assertCurrent();
       if (exported.status !== 200 || !('result' in exported.body) || exported.body.callId !== callId
         || exported.body.command !== 'sealedSkills.exportCloud' || exported.body.result.kind !== 'sealedCloudExport'

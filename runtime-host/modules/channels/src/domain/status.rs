@@ -86,6 +86,7 @@ impl ChannelPairingRequest {
 pub enum ChannelPairingOutcome {
     Listed(Vec<ChannelPairingRequest>),
     Rejected,
+    Unsupported,
     OutcomeUnknown,
 }
 

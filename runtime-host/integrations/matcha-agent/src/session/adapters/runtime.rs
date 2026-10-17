@@ -1,561 +1,526 @@
-use super::model as session_adapter;
-use super::timeline::{load_matcha_content, load_matcha_timeline};
-use super::*;
+use super::{interaction, model::send_failure, model_selection, permission};
+use crate::{
+    client::Client,
+    driver::MatchaRuntimeDriver,
+    session::{
+        model::{RunRecord, RunStatus, SessionId, SessionRecord, valid_agent_id, valid_uuid},
+        projection::parse_session_key,
+        rpc::{self, Failure, FailureKind},
+    },
+};
+use runtime_directory::RuntimeDriverIdentity;
+use serde::Deserialize;
+use serde_json::json;
+use sessions_module::{
+    SessionFuture, SessionOps,
+    abort::{SessionAbortCommand, SessionAbortOutcome},
+    approval::{
+        PendingApprovalsCommand, PendingApprovalsOutcome, SessionApprovalCommand,
+        SessionApprovalOutcome,
+    },
+    create::{SessionAdmission, SessionCreateCommand, SessionCreateOutcome, project_matcha_create},
+    delete::{SessionDeleteCommand, SessionDeleteOutcome},
+    model_selection::{
+        MatchaSessionModelRuntimeCommand, ResolvedSessionModelSelection,
+        SessionModelSelectionOutcome,
+    },
+    rename::{SessionRenameCommand, SessionRenameOutcome},
+    send::{SessionSendCommand, SessionSendOutcome},
+    session_catalog::{
+        SessionCatalog, SessionCatalogCommand, SessionCatalogEntry, SessionCatalogOutcome,
+    },
+    session_history::{SessionHistoryCommand, SessionHistoryOutcome},
+    session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
+    timeline,
+};
 use tokio_util::sync::CancellationToken;
 
 impl SessionOps for MatchaRuntimeDriver {
     fn admission(&self) -> SessionAdmission {
-        let identity = RuntimeDriverIdentity::matcha_agent();
         SessionAdmission::new(
-            identity.endpoint(),
+            RuntimeDriverIdentity::matcha_agent().endpoint(),
             sessions_module::state::SessionProvider::MatchaAgent,
         )
     }
-
     fn prepare_observation(
         &self,
         request: sessions_module::SessionObservationRequest,
-    ) -> Result<std::sync::Arc<dyn sessions_module::SessionObservation>, sessions_module::RuntimeOperationFailure> {
+    ) -> Result<
+        std::sync::Arc<dyn sessions_module::SessionObservation>,
+        sessions_module::RuntimeOperationFailure,
+    > {
         super::observation::prepare(self.session_handle(), self.renderer_events(), request)
     }
-
-    fn agent_scoped_session_key(
-        &self,
-        agent_id: &str,
-        endpoint_session_id: &str,
-    ) -> Option<String> {
-        let identity = RuntimeDriverIdentity::matcha_agent();
-        let session_id = SessionId::try_new(endpoint_session_id.to_owned()).ok()?;
-        Some(format!(
-            "{}:{}:{}",
-            identity.runtime_adapter_id(),
-            agent_id,
-            session_id.as_str()
-        ))
+    fn agent_scoped_session_key(&self, agent: &str, id: &str) -> Option<String> {
+        (valid_agent_id(agent) && valid_uuid(id)).then(|| format!("matcha-agent:{agent}:{id}"))
     }
-
     fn abort_session<'a>(
         &'a self,
         command: SessionAbortCommand,
-    ) -> sessions_module::SessionFuture<'a, SessionAbortOutcome> {
-        let session = self.session_handle();
-        Box::pin(async move { abort_session_with_handle(session, command).await })
+    ) -> SessionFuture<'a, SessionAbortOutcome> {
+        let client = self.native_client();
+        Box::pin(async move { abort(&client, command).await })
     }
-
     fn create_session<'a>(
         &'a self,
         command: SessionCreateCommand,
         epoch: u64,
-    ) -> sessions_module::SessionFuture<'a, SessionCreateOutcome> {
-        let session = self.session_handle();
-        Box::pin(async move { create_session(session, command, epoch).await })
+    ) -> SessionFuture<'a, SessionCreateOutcome> {
+        let client = self.native_client();
+        Box::pin(async move {
+            if command.endpoint() != &RuntimeDriverIdentity::matcha_agent().endpoint()
+                || parse_session_key(command.session_key())
+                    != Some((command.agent_id(), command.endpoint_session_id()))
+            {
+                return SessionCreateOutcome::TargetRejected;
+            }
+            let Ok(id) = SessionId::try_new(command.endpoint_session_id().to_owned()) else {
+                return SessionCreateOutcome::TargetRejected;
+            };
+            match crate::peer::session_create::create(&client, command.agent_id(), &id).await {
+                Ok(record) => project_matcha_create(
+                    command.session_key().to_owned(),
+                    record.session_id.as_str().to_owned(),
+                    Some(record.agent_id),
+                    epoch,
+                ),
+                Err(error) => match error.kind() {
+                    FailureKind::Rejected => SessionCreateOutcome::TargetRejected,
+                    FailureKind::Unknown => SessionCreateOutcome::Unknown,
+                    _ => SessionCreateOutcome::Unavailable,
+                },
+            }
+        })
     }
-
     fn load_session_catalog<'a>(
         &'a self,
         command: SessionCatalogCommand,
-    ) -> sessions_module::SessionFuture<'a, SessionCatalogOutcome> {
-        let session = self.session_handle();
-        Box::pin(async move { load_session_catalog(session, command).await })
+    ) -> SessionFuture<'a, SessionCatalogOutcome> {
+        let client = self.native_client();
+        Box::pin(async move {
+            let identity = RuntimeDriverIdentity::matcha_agent();
+            if command.endpoint() != &identity.endpoint() {
+                return SessionCatalogOutcome::Unavailable;
+            }
+            match records(&client).await {
+                Ok(records) => {
+                    SessionCatalogOutcome::Listed(SessionCatalog {
+                        sessions: records
+                            .into_iter()
+                            .map(|record| {
+                                SessionCatalogEntry {
+                            endpoint: identity.endpoint(),
+                            key: format!(
+                                "matcha-agent:{}:{}",
+                                record.agent_id,
+                                record.session_id.as_str()
+                            ),
+                            agent_id: record.agent_id,
+                            endpoint_session_id: record.session_id.as_str().to_owned(),
+                            ownership: None,
+                            model_state: record.model.as_deref().and_then(|model| {
+                                sessions_module::state::SessionModelState::selected_from_ref(model)
+                                    .ok()
+                            }).map(|mut model| {
+                                model.selection_id = record.model_selection_id;
+                                model
+                            }),
+                            updated_at: Some(record.updated_at_ms),
+                            preferred: Some(false),
+                            protocol_id: Some(identity.protocol_id().to_owned()),
+                            runtime_endpoint_id: Some(identity.endpoint_id()),
+                        }
+                            })
+                            .collect(),
+                    })
+                }
+                Err(_) => SessionCatalogOutcome::Unavailable,
+            }
+        })
     }
-
-    fn send_model_runtime_command<'a>(
+    fn rename_session<'a>(
         &'a self,
-        command: &'a SessionSendCommand,
-    ) -> sessions_module::SessionFuture<
-        'a,
-        Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome>,
-    > {
-        self.send_model_runtime_command_cancellable(command, CancellationToken::new())
+        command: SessionRenameCommand,
+    ) -> SessionFuture<'a, SessionRenameOutcome> {
+        let client = self.native_client();
+        Box::pin(async move {
+            let result = async {
+                if command.identity.validate().is_err()
+                    || command.identity.endpoint
+                        != sessions_module::state::SessionEndpoint::local(
+                            sessions_module::state::SessionProvider::MatchaAgent,
+                        )
+                {
+                    return Err(Failure::InvalidInput);
+                }
+                let (agent, id) = parse_session_key(&command.identity.session_key)
+                    .ok_or(Failure::InvalidInput)?;
+                if agent != command.identity.agent_id {
+                    return Err(Failure::InvalidInput);
+                }
+                rpc::get(&client, id, Some(agent)).await?;
+                let record: SessionRecord = rpc::decode(
+                    rpc::call(
+                        &client,
+                        "sessions.rename",
+                        json!({"sessionId":id,"title":command.label}),
+                    )
+                    .await?,
+                )?;
+                if !record.validate(id, Some(agent))
+                    || record.title.as_deref() != Some(command.label.as_str())
+                {
+                    return Err(Failure::InvalidReadback);
+                }
+                Ok(())
+            }
+            .await;
+            match result {
+                Ok(()) => SessionRenameOutcome::Succeeded,
+                Err(error) if error.kind() == FailureKind::Rejected => {
+                    SessionRenameOutcome::TargetRejected
+                }
+                Err(_) => SessionRenameOutcome::Unknown,
+            }
+        })
     }
-
-    fn send_model_runtime_command_cancellable<'a>(
+    fn delete_session<'a>(
         &'a self,
-        command: &'a SessionSendCommand,
-        cancellation: CancellationToken,
-    ) -> sessions_module::SessionFuture<
-        'a,
-        Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome>,
-    > {
-        let session = self.session_handle();
-        Box::pin(async move { send_model_runtime_command(session, command, cancellation).await })
+        command: SessionDeleteCommand,
+    ) -> SessionFuture<'a, SessionDeleteOutcome> {
+        let client = self.native_client();
+        Box::pin(async move {
+            let result = async {
+                if command.identity.validate().is_err()
+                    || command.identity.endpoint
+                        != sessions_module::state::SessionEndpoint::local(
+                            sessions_module::state::SessionProvider::MatchaAgent,
+                        )
+                {
+                    return Err(Failure::InvalidInput);
+                }
+                let (agent, id) = parse_session_key(&command.identity.session_key)
+                    .ok_or(Failure::InvalidInput)?;
+                if agent != command.identity.agent_id {
+                    return Err(Failure::InvalidInput);
+                }
+                let record = match rpc::get(&client, id, Some(agent)).await {
+                    Ok(record) => Some(record),
+                    Err(error) if error.native_kind() == Some("session_deleting") => Some(
+                        records(&client)
+                            .await?
+                            .into_iter()
+                            .find(|record| {
+                                record.session_id.as_str() == id && record.agent_id == agent
+                            })
+                            .ok_or(Failure::InvalidReadback)?,
+                    ),
+                    // A missing row is not proof of deletion. Only the Server's
+                    // agent-bound, completed tombstone can acknowledge a lost reply.
+                    Err(error) if error.is_not_found() => None,
+                    Err(error) => return Err(error),
+                };
+                if record.is_some_and(|record| record.status != "deleting") {
+                    let closed: SessionRecord = rpc::decode(
+                        rpc::call(&client, "sessions.close", json!({"sessionId":id})).await?,
+                    )?;
+                    if !closed.validate(id, Some(agent)) || closed.status != "closed" {
+                        return Err(Failure::InvalidReadback);
+                    }
+                }
+                let receipt = rpc::call(
+                    &client,
+                    "sessions.delete",
+                    json!({"sessionId":id,"expectedAgentId":agent}),
+                )
+                .await?;
+                if receipt.get("sessionId").and_then(|v| v.as_str()) != Some(id)
+                    || receipt.get("deleted").and_then(|v| v.as_bool()) != Some(true)
+                    || receipt.get("cleanupComplete").and_then(|v| v.as_bool()) != Some(true)
+                    || receipt.get("scope").and_then(|v| v.as_str()) != Some("session")
+                {
+                    return Err(Failure::InvalidReadback);
+                }
+                Ok(())
+            }
+            .await;
+            match result {
+                Ok(()) => SessionDeleteOutcome::Succeeded,
+                Err(error) if error.kind() == FailureKind::Rejected => {
+                    SessionDeleteOutcome::TargetRejected
+                }
+                Err(_) => SessionDeleteOutcome::Unknown,
+            }
+        })
     }
-
-    fn load_session_history<'a>(
-        &'a self,
-        command: SessionHistoryCommand,
-    ) -> sessions_module::SessionFuture<'a, SessionHistoryOutcome> {
-        let session = self.session_handle();
-        Box::pin(async move { load_session_history(session, command).await })
-    }
-
-    fn load_session_timeline<'a>(
-        &'a self,
-        command: session_timeline::Command,
-        epoch: u64,
-    ) -> sessions_module::SessionFuture<'a, session_timeline::Outcome> {
-        let session = self.session_handle();
-        Box::pin(async move { load_matcha_timeline(session, command, epoch).await })
-    }
-
-    fn load_session_content<'a>(
-        &'a self,
-        command: session_timeline::ContentCommand,
-    ) -> sessions_module::SessionFuture<'a, session_timeline::ContentOutcome> {
-        let session = self.session_handle();
-        Box::pin(async move { load_matcha_content(session, command).await })
-    }
-
-    fn pending_approvals<'a>(
-        &'a self,
-        command: PendingApprovalsCommand,
-    ) -> sessions_module::SessionFuture<'a, PendingApprovalsOutcome> {
-        let session = self.session_handle();
-        Box::pin(async move { pending_approvals_with_handle(session, command).await })
-    }
-
-    fn respond_to_approval<'a>(
-        &'a self,
-        command: SessionApprovalCommand,
-    ) -> sessions_module::SessionFuture<'a, SessionApprovalOutcome> {
-        let session = self.session_handle();
-        Box::pin(async move { respond_to_approval_with_handle(session, command).await })
-    }
-
     fn send_session<'a>(
         &'a self,
         command: SessionSendCommand,
-    ) -> sessions_module::SessionFuture<'a, SessionSendOutcome> {
+    ) -> SessionFuture<'a, SessionSendOutcome> {
         self.send_session_cancellable(command, CancellationToken::new())
     }
-
     fn send_session_cancellable<'a>(
         &'a self,
         command: SessionSendCommand,
         cancellation: CancellationToken,
-    ) -> sessions_module::SessionFuture<'a, SessionSendOutcome> {
-        let session = self.session_handle();
-        Box::pin(async move { send_session_with_handle(session, command, cancellation).await })
+    ) -> SessionFuture<'a, SessionSendOutcome> {
+        let client = self.native_client();
+        Box::pin(async move {
+            if command.intent.is_some() {
+                return SessionSendOutcome::Unsupported;
+            }
+            if cancellation.is_cancelled() {
+                return SessionSendOutcome::Unavailable;
+            }
+            let record = match rpc::bound(
+                &client,
+                &command.identity,
+                command.endpoint_session_id.as_deref(),
+            )
+            .await
+            {
+                Ok(record) => record,
+                Err(error) => return send_failure(error),
+            };
+            let content = match super::model::content(&command) {
+                Ok(content) => content,
+                Err(outcome) => return outcome,
+            };
+            let result = rpc::call_cancellable(
+                &client,
+                "runs.submit",
+                json!({"sessionId":record.session_id.as_str(),"content":content}),
+                &cancellation,
+            )
+            .await;
+            match result {
+                Ok(receipt) => match (
+                    receipt.get("sessionId").and_then(|v| v.as_str()),
+                    receipt.get("runId").and_then(|v| v.as_str()),
+                    receipt.get("status").and_then(|v| v.as_str()),
+                ) {
+                    (Some(id), Some(run), Some("queued"))
+                        if id == record.session_id.as_str() && valid_uuid(run) =>
+                    {
+                        SessionSendOutcome::Queued {
+                            run_id: run.to_owned(),
+                        }
+                    }
+                    _ => SessionSendOutcome::Unknown,
+                },
+                Err(error) => send_failure(error),
+            }
+        })
     }
-
+    fn send_model_runtime_command<'a>(
+        &'a self,
+        command: &'a SessionSendCommand,
+    ) -> SessionFuture<'a, Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome>>
+    {
+        self.send_model_runtime_command_cancellable(command, CancellationToken::new())
+    }
+    fn send_model_runtime_command_cancellable<'a>(
+        &'a self,
+        command: &'a SessionSendCommand,
+        cancellation: CancellationToken,
+    ) -> SessionFuture<'a, Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome>>
+    {
+        let client = self.native_client();
+        Box::pin(async move { model_selection::restore(&client, command, &cancellation).await })
+    }
     fn select_session_model<'a>(
         &'a self,
         command: ResolvedSessionModelSelection,
-    ) -> sessions_module::SessionFuture<'a, SessionModelSelectionOutcome> {
+    ) -> SessionFuture<'a, SessionModelSelectionOutcome> {
         self.select_session_model_cancellable(command, CancellationToken::new())
     }
-
     fn select_session_model_cancellable<'a>(
         &'a self,
         command: ResolvedSessionModelSelection,
         cancellation: CancellationToken,
-    ) -> sessions_module::SessionFuture<'a, SessionModelSelectionOutcome> {
-        let session = self.session_handle();
-        Box::pin(async move { select_session_model_with_handle(session, command, cancellation).await })
+    ) -> SessionFuture<'a, SessionModelSelectionOutcome> {
+        let client = self.native_client();
+        Box::pin(async move { model_selection::select(&client, command, &cancellation).await })
     }
-
+    fn load_session_history<'a>(
+        &'a self,
+        command: SessionHistoryCommand,
+    ) -> SessionFuture<'a, SessionHistoryOutcome> {
+        let client = self.native_client();
+        Box::pin(async move { super::timeline::history(&client, command).await })
+    }
+    fn load_session_timeline<'a>(
+        &'a self,
+        command: timeline::Command,
+        epoch: u64,
+    ) -> SessionFuture<'a, timeline::Outcome> {
+        let client = self.native_client();
+        Box::pin(async move { super::timeline::load(&client, command, epoch).await })
+    }
+    fn load_session_content<'a>(
+        &'a self,
+        command: timeline::ContentCommand,
+    ) -> SessionFuture<'a, timeline::ContentOutcome> {
+        let client = self.native_client();
+        Box::pin(async move { super::timeline::content(&client, command).await })
+    }
+    fn pending_approvals<'a>(
+        &'a self,
+        command: PendingApprovalsCommand,
+    ) -> SessionFuture<'a, PendingApprovalsOutcome> {
+        let client = self.native_client();
+        Box::pin(async move { interaction::approvals(&client, command).await })
+    }
+    fn respond_to_approval<'a>(
+        &'a self,
+        command: SessionApprovalCommand,
+    ) -> SessionFuture<'a, SessionApprovalOutcome> {
+        let client = self.native_client();
+        Box::pin(async move { interaction::approve(&client, command).await })
+    }
+    fn pending_questions<'a>(
+        &'a self,
+        command: sessions_module::question::PendingQuestionsCommand,
+    ) -> SessionFuture<'a, sessions_module::question::PendingQuestionsOutcome> {
+        let client = self.native_client();
+        Box::pin(async move { interaction::questions(&client, command).await })
+    }
+    fn respond_to_question<'a>(
+        &'a self,
+        command: sessions_module::question::SessionQuestionCommand,
+    ) -> SessionFuture<'a, sessions_module::question::SessionQuestionOutcome> {
+        let client = self.native_client();
+        Box::pin(async move { interaction::answer(&client, command).await })
+    }
     fn session_permission<'a>(
         &'a self,
-        _command: SessionPermissionCommand,
-    ) -> sessions_module::SessionFuture<'a, SessionPermissionOutcome> {
-        Box::pin(async { SessionPermissionOutcome::unsupported() })
+        command: SessionPermissionCommand,
+    ) -> SessionFuture<'a, SessionPermissionOutcome> {
+        let client = self.native_client();
+        Box::pin(async move { permission::apply(&client, command).await })
     }
 }
 
-pub(super) async fn abort_session_with_handle(
-    session: MatchaPeerSessionHandle,
-    command: SessionAbortCommand,
-) -> SessionAbortOutcome {
-    let session_id =
-        match session_adapter::matcha_native_session_id(command.endpoint_session_id.as_deref()) {
-            Ok(session_id) => session_id,
-            Err(()) => return SessionAbortOutcome::Rejected,
-        };
-    let params = match command.run_id {
-        Some(run_id) => match crate::session::model::RunId::try_new(run_id) {
-            Ok(run_id) => {
-                crate::session::request::SessionCancelParams::new(session_id).with_run_id(run_id)
-            }
-            Err(_) => return SessionAbortOutcome::Rejected,
-        },
-        None => crate::session::request::SessionCancelParams::new(session_id),
-    };
-    match session.cancel_session(params).await {
-        InvocationOutcome::Succeeded(_) => SessionAbortOutcome::Succeeded,
-        InvocationOutcome::TargetRejected(_) => SessionAbortOutcome::Rejected,
-        InvocationOutcome::Cancelled | InvocationOutcome::Unknown => SessionAbortOutcome::Unknown,
-    }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogPage {
+    sessions: Vec<SessionRecord>,
+    next_before_session_id: Option<String>,
 }
-
-pub(super) async fn pending_approvals_with_handle(
-    session: MatchaPeerSessionHandle,
-    command: PendingApprovalsCommand,
-) -> PendingApprovalsOutcome {
-    let session_id = match crate::session::model::SessionId::try_new(command.session_id) {
-        Ok(session_id) => session_id,
-        Err(_) => return PendingApprovalsOutcome::Rejected,
-    };
-    match session.pending_approvals(session_id).await {
-        Ok(approvals) => PendingApprovalsOutcome::Found(PendingApprovals {
-            approvals: approvals
-                .into_iter()
-                .map(|(approval_id, option_ids)| PendingApproval {
-                    approval_id: approval_id.as_str().to_owned(),
-                    option_ids: option_ids
-                        .into_iter()
-                        .map(|option_id| option_id.as_str().to_owned())
-                        .collect(),
-                })
-                .collect(),
-        }),
-        Err(crate::session::client::AppServerClientError::ConnectionClosed) => {
-            PendingApprovalsOutcome::Unavailable
+async fn records(client: &Client) -> Result<Vec<SessionRecord>, Failure> {
+    let mut records = Vec::new();
+    let mut before = None::<String>;
+    loop {
+        let mut params = json!({"limit":100});
+        if let Some(before) = &before {
+            params["beforeSessionId"] = json!(before);
         }
-        Err(crate::session::client::AppServerClientError::Protocol) => {
-            PendingApprovalsOutcome::Unknown
+        let page: CatalogPage = rpc::decode(rpc::call(client, "sessions.list", params).await?)?;
+        if page.sessions.iter().any(|record| {
+            !record.validate(record.session_id.as_str(), None)
+                || records
+                    .iter()
+                    .any(|prior: &SessionRecord| prior.session_id == record.session_id)
+        }) {
+            return Err(Failure::InvalidReadback);
         }
-        Err(_) => PendingApprovalsOutcome::Rejected,
-    }
-}
-
-pub(super) async fn respond_to_approval_with_handle(
-    session: MatchaPeerSessionHandle,
-    command: SessionApprovalCommand,
-) -> SessionApprovalOutcome {
-    let session_id = match crate::session::model::SessionId::try_new(command.session_id) {
-        Ok(session_id) => session_id,
-        Err(_) => return SessionApprovalOutcome::Rejected,
-    };
-    let approval_id = match crate::session::model::ApprovalId::try_new(command.approval_id) {
-        Ok(approval_id) => approval_id,
-        Err(_) => return SessionApprovalOutcome::Rejected,
-    };
-    let option_id = match crate::session::model::OptionId::try_new(command.option_id) {
-        Ok(option_id) => option_id,
-        Err(_) => return SessionApprovalOutcome::Rejected,
-    };
-    match session
-        .respond_to_approval(crate::session::approval::ApprovalRespondParams::new(
-            session_id,
-            approval_id,
-            option_id,
-        ))
-        .await
-    {
-        InvocationOutcome::Succeeded(()) => SessionApprovalOutcome::Responded,
-        InvocationOutcome::TargetRejected(_) => SessionApprovalOutcome::Rejected,
-        InvocationOutcome::Cancelled | InvocationOutcome::Unknown => {
-            SessionApprovalOutcome::Unknown
+        let next = page.next_before_session_id;
+        if next.is_some()
+            && (page
+                .sessions
+                .last()
+                .map(|record| record.session_id.as_str())
+                != next.as_deref()
+                || next == before)
+        {
+            return Err(Failure::InvalidReadback);
+        }
+        records.extend(page.sessions);
+        before = next;
+        if before.is_none() {
+            return Ok(records);
         }
     }
 }
 
-pub(super) async fn select_session_model_with_handle(
-    session: MatchaPeerSessionHandle,
-    command: ResolvedSessionModelSelection,
-    cancellation: CancellationToken,
-) -> SessionModelSelectionOutcome {
-    let trace_id = command.trace_id.as_deref();
-    let diagnostic = &command.diagnostic;
-    let session_id = match session_adapter::matcha_native_session_id(
-        command.endpoint_session_id.as_deref(),
-    ) {
-        Ok(session_id) => session_id,
-        Err(()) => {
-            session_trace::log(
-                "runtime.matcha.model-selection.set-model.rejected",
-                trace_id,
-                || serde_json::json!({
-                    "reason": SessionModelSelectionRejection::InvalidSessionKey.as_str(),
-                    "sessionKey": session_trace::id_shape(Some(&command.session_key)),
-                    "endpointSessionId": session_trace::id_shape(command.endpoint_session_id.as_deref()),
-                }),
-            );
-            return SessionModelSelectionOutcome::target_rejected(
-                SessionModelSelectionRejection::InvalidSessionKey,
-            );
-        }
-    };
-    let SessionModelSelectionBinding::Matcha {
-        model,
-        provider_fingerprint,
-        provider_runtime,
-    } = command.binding
-    else {
-        session_trace::log(
-            "runtime.matcha.model-selection.set-model.rejected",
-            trace_id,
-            || serde_json::json!({
-                "reason": SessionModelSelectionRejection::BindingMismatch.as_str(),
-                "sessionId": session_trace::id_shape(Some(session_id.as_str())),
-            }),
-        );
-        return SessionModelSelectionOutcome::target_rejected(
-            SessionModelSelectionRejection::BindingMismatch,
-        );
-    };
-    let session_id_shape = || session_trace::id_shape(command.endpoint_session_id.as_deref());
-    session_trace::log(
-        "runtime.matcha.model-selection.set-model.dispatch",
-        trace_id,
-        || serde_json::json!({
-            "sessionId": session_id_shape(),
-            "model": session_trace::id_shape(Some(&model)),
-            "modelSelectionId": session_trace::id_shape(Some(&command.model_selection_id)),
-            "providerFingerprint": session_trace::id_shape(Some(&provider_fingerprint)),
-            "providerRuntime": session_adapter::matcha_provider_runtime_trace(&provider_runtime),
-            "accountId": session_trace::id_shape(diagnostic.as_ref().map(|diagnostic| diagnostic.account_id())),
-            "modelId": session_trace::id_shape(diagnostic.as_ref().map(|diagnostic| diagnostic.model_id())),
-            "protocol": diagnostic.as_ref().and_then(|diagnostic| diagnostic.protocol()),
-            "authMode": diagnostic.as_ref().map(|diagnostic| diagnostic.auth_mode()),
-        }),
-    );
-    let params =
-        match crate::session::request::SessionSetModelParams::try_new(session_id, model.clone()) {
-            Ok(params) => params
-                .with_model_selection_id(command.model_selection_id)
-                .with_provider_fingerprint(provider_fingerprint)
-                .with_provider_runtime(session_adapter::matcha_provider_runtime(provider_runtime)),
-            Err(_) => {
-                session_trace::log(
-                    "runtime.matcha.model-selection.set-model.rejected",
-                    trace_id,
-                    || serde_json::json!({
-                        "reason": SessionModelSelectionRejection::InvalidModel.as_str(),
-                        "sessionId": session_id_shape(),
-                        "model": session_trace::id_shape(Some(&model)),
-                    }),
-                );
-                return SessionModelSelectionOutcome::target_rejected(
-                    SessionModelSelectionRejection::InvalidModel,
-                );
-            }
-        };
-    let outcome = match session.set_session_model_cancellable(params, &cancellation).await {
-        InvocationOutcome::Succeeded(_) => SessionModelSelectionOutcome::Succeeded {
-            model_state: sessions_module::state::SessionModelState::selected_from_ref(
-                model.as_str(),
-            )
-            .expect("validated Matcha session model ref builds model state"),
-        },
-        InvocationOutcome::TargetRejected(
-            crate::session::client::AppServerClientError::SessionNotFound,
-        ) => SessionModelSelectionOutcome::target_rejected(
-            SessionModelSelectionRejection::SessionNotFound,
-        ),
-        InvocationOutcome::TargetRejected(_) => SessionModelSelectionOutcome::target_rejected(
-            SessionModelSelectionRejection::RuntimeTargetRejected,
-        ),
-        InvocationOutcome::Cancelled => SessionModelSelectionOutcome::Unavailable,
-        InvocationOutcome::Unknown => SessionModelSelectionOutcome::OutcomeUnknown,
-    };
-    session_trace::log(
-        "runtime.matcha.model-selection.set-model.outcome",
-        trace_id,
-        || serde_json::json!({
-            "sessionId": session_id_shape(),
-            "model": session_trace::id_shape(Some(&model)),
-            "outcome": session_adapter::session_model_selection_outcome_label(&outcome),
-            "rejectionReason": outcome.rejection_reason(),
-        }),
-    );
-    outcome
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunsPage {
+    runs: Vec<RunRecord>,
+    next_before_run_id: Option<String>,
 }
-
-pub(super) async fn send_model_runtime_command(
-    session: MatchaPeerSessionHandle,
-    command: &SessionSendCommand,
-    cancellation: CancellationToken,
-) -> Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome> {
-    let Some(session_id) = command
-        .endpoint_session_id
-        .as_deref()
-        .and_then(|session_id| SessionId::try_new(session_id.to_owned()).ok())
-    else {
-        return Err(SessionSendOutcome::Rejected);
-    };
-    let session = match session.load_session_cancellable(session_id, &cancellation).await {
-        InvocationOutcome::Succeeded(session) => session,
-        InvocationOutcome::TargetRejected(error) => return Err(session_adapter::load_session_failure_outcome(error)),
-        InvocationOutcome::Cancelled => return Err(SessionSendOutcome::Unavailable),
-        InvocationOutcome::Unknown => return Err(SessionSendOutcome::Unknown),
-    };
-    if !matches!(
-        session.worker_state,
-        crate::session::model::WorkerRuntimeState::Unloaded { .. }
-    ) {
-        return Ok(None);
-    }
-    if session.model_selection_id.is_none() && session.provider_fingerprint.is_none() {
-        return Ok(None);
-    }
-    let Some(model) = session.model else {
-        return Ok(None);
-    };
-    let model_runtime = MatchaSessionModelRuntimeCommand::try_new(
-        command.identity.session_key.clone(),
-        command.endpoint_session_id.clone(),
-        model,
-        session.model_selection_id,
-        session.provider_fingerprint,
-    )
-    .map_err(|_| SessionSendOutcome::Rejected)?
-    .with_trace_id(command.trace_id().map(str::to_owned));
-    Ok(Some(model_runtime))
-}
-
-pub(super) async fn create_session(
-    session: MatchaPeerSessionHandle,
-    command: SessionCreateCommand,
-    epoch: u64,
-) -> SessionCreateOutcome {
-    let agent_id = command.agent_id_owned();
-    let session_key = command.session_key().to_owned();
-    let endpoint_session_id = command.endpoint_session_id().to_owned();
-    if command.provider() != sessions_module::state::SessionProvider::MatchaAgent {
-        return SessionCreateOutcome::TargetRejected;
-    }
-    let session_id = match SessionId::try_new(endpoint_session_id.clone()) {
-        Ok(session_id) => session_id,
-        Err(_) => return SessionCreateOutcome::TargetRejected,
-    };
-    match session.create_session(session_id).await {
-        InvocationOutcome::Succeeded(returned) => {
-            let _ = returned;
-            project_matcha_create(session_key, endpoint_session_id, Some(agent_id), epoch)
+pub(super) async fn runs(client: &Client, id: &str) -> Result<Vec<RunRecord>, Failure> {
+    let mut runs = Vec::new();
+    let mut before = None::<String>;
+    loop {
+        let mut params = json!({"sessionId":id,"limit":100});
+        if let Some(before) = &before {
+            params["beforeRunId"] = json!(before);
         }
-        InvocationOutcome::Cancelled | InvocationOutcome::Unknown => {
-            SessionCreateOutcome::Unavailable
+        let page: RunsPage = rpc::decode(rpc::call(client, "runs.list", params).await?)?;
+        if page.runs.iter().any(|run| {
+            !run.validate(id)
+                || runs
+                    .iter()
+                    .any(|prior: &RunRecord| prior.run_id == run.run_id)
+        }) {
+            return Err(Failure::InvalidReadback);
         }
-        InvocationOutcome::TargetRejected(_) => SessionCreateOutcome::TargetRejected,
-    }
-}
-
-pub(super) async fn load_session_catalog(
-    session: MatchaPeerSessionHandle,
-    command: SessionCatalogCommand,
-) -> SessionCatalogOutcome {
-    let identity = RuntimeDriverIdentity::matcha_agent();
-    if command.endpoint() != &identity.endpoint() {
-        return SessionCatalogOutcome::Unavailable;
-    }
-    match session.list_history().await {
-        HistoryResult::Complete(catalog) => SessionCatalogOutcome::Listed(SessionCatalog {
-            sessions: catalog
-                .sessions()
-                .iter()
-                .map(|session| {
-                    let endpoint_session_id = session.session_id().as_str().to_owned();
-                    SessionCatalogEntry {
-                        endpoint: identity.endpoint(),
-                        key: format!(
-                            "{}:{}:{}",
-                            identity.runtime_adapter_id(),
-                            identity.default_agent_id(),
-                            endpoint_session_id
-                        ),
-                        agent_id: identity.default_agent_id().to_owned(),
-                        endpoint_session_id,
-                        ownership: None,
-                        model_state: None,
-                        updated_at: chrono::DateTime::parse_from_rfc3339(
-                            session.session_facts().updated_at(),
-                        )
-                        .ok()
-                        .and_then(|timestamp| u64::try_from(timestamp.timestamp_millis()).ok()),
-                        preferred: Some(false),
-                        protocol_id: Some(identity.protocol_id().to_owned()),
-                        runtime_endpoint_id: Some(identity.endpoint_id()),
-                    }
-                })
-                .collect(),
-        }),
-        HistoryResult::NotFound
-        | HistoryResult::Unavailable
-        | HistoryResult::Unknown
-        | HistoryResult::Incomplete(_) => SessionCatalogOutcome::Unavailable,
-    }
-}
-
-pub(super) async fn load_session_history(
-    session: MatchaPeerSessionHandle,
-    command: SessionHistoryCommand,
-) -> SessionHistoryOutcome {
-    let Some(session_id) = command
-        .endpoint_session_id()
-        .and_then(|session_id| SessionId::try_new(session_id.to_owned()).ok())
-    else {
-        return SessionHistoryOutcome::Failed(SessionHistoryFailure::Protocol);
-    };
-    let limit = command
-        .limit()
-        .and_then(|limit| usize::try_from(limit).ok())
-        .unwrap_or(HydrationWindowRequest::MAX_LIMIT);
-    let request = HydrationWindowRequest::new(HydrationWindowMode::Latest, limit, None);
-    let result = session.load_history(session_id, request).await;
-    match result {
-        HistoryResult::Complete(snapshot) => {
-            SessionHistoryOutcome::Loaded(project_matcha_hydration(&snapshot))
+        let next = page.next_before_run_id;
+        if next.is_some()
+            && (page.runs.last().map(|run| run.run_id.as_str()) != next.as_deref()
+                || next == before)
+        {
+            return Err(Failure::InvalidReadback);
         }
-        HistoryResult::Unavailable => {
-            SessionHistoryOutcome::Failed(SessionHistoryFailure::Unavailable)
-        }
-        HistoryResult::NotFound | HistoryResult::Unknown | HistoryResult::Incomplete(_) => {
-            SessionHistoryOutcome::Failed(SessionHistoryFailure::Protocol)
+        runs.extend(page.runs);
+        before = next;
+        if before.is_none() {
+            return Ok(runs);
         }
     }
 }
-
-fn project_matcha_hydration(snapshot: &HydrationSnapshot) -> SessionHistoryView {
-    SessionHistoryView {
-        messages: snapshot
-            .messages()
-            .iter()
-            .filter_map(|message| {
-                match message.role() {
-                    HydratedMessageRole::User => Some(SessionHistoryRole::User),
-                    HydratedMessageRole::Assistant => Some(SessionHistoryRole::Assistant),
-                    HydratedMessageRole::System => None,
+async fn abort(client: &Client, command: SessionAbortCommand) -> SessionAbortOutcome {
+    let result = async {
+        let record = rpc::bound(
+            client,
+            &command.identity,
+            command.endpoint_session_id.as_deref(),
+        )
+        .await?;
+        if command.approval_ids.is_some() {
+            return Err(Failure::InvalidInput);
+        }
+        let selected = match command.run_id {
+            Some(id) => {
+                let run: RunRecord =
+                    rpc::decode(rpc::call(client, "runs.get", json!({"runId":id})).await?)?;
+                if run.run_id != id || !run.validate(record.session_id.as_str()) {
+                    return Err(Failure::InvalidReadback);
                 }
-                .map(|role| SessionHistoryMessage {
-                    role,
-                    text: message.text().to_owned(),
-                })
-            })
-            .collect(),
-    }
-}
-
-pub(super) async fn send_session_with_handle(
-    session: MatchaPeerSessionHandle,
-    command: SessionSendCommand,
-    cancellation: CancellationToken,
-) -> SessionSendOutcome {
-    if command.intent.is_some() {
-        return SessionSendOutcome::Unsupported;
-    }
-    let trace_id = platform::trace::enabled()
-        .then(|| command.trace_id().map(str::to_owned))
-        .flatten();
-    let session_id = match session_adapter::matcha_native_session_id(command.endpoint_session_id.as_deref()) {
-        Ok(session_id) => session_id,
-        Err(()) => return SessionSendOutcome::Rejected,
-    };
-    let params = match session_adapter::session_prompt_params(command, session_id) {
-        Ok(params) => params,
-        Err(()) => return SessionSendOutcome::Rejected,
-    };
-    match session.prompt_session_cancellable(params, &cancellation).await {
-        InvocationOutcome::Succeeded(result) => SessionSendOutcome::Succeeded {
-            run_id: result.run_id.as_str().to_owned(), status: SessionSendStatus::Started,
-            goal: None,
-        },
-        InvocationOutcome::TargetRejected(error) => {
-            session_trace::log("runtime.matcha.send.prompt-rejected", trace_id.as_deref(),
-                || serde_json::json!({ "error": session_adapter::app_server_client_error_kind(error) }));
-            SessionSendOutcome::Rejected
+                vec![run]
+            }
+            None => runs(client, record.session_id.as_str()).await?,
+        };
+        for run in selected.into_iter().filter(|run| !run.status.terminal()) {
+            let returned: RunRecord =
+                rpc::decode(rpc::call(client, "runs.cancel", json!({"runId":run.run_id})).await?)?;
+            if !returned.validate(record.session_id.as_str())
+                || returned.run_id != run.run_id
+                || (!returned.status.terminal() && returned.status != RunStatus::CancelRequested)
+            {
+                return Err(Failure::InvalidReadback);
+            }
         }
-        InvocationOutcome::Cancelled => SessionSendOutcome::Unavailable,
-        InvocationOutcome::Unknown => SessionSendOutcome::Unknown,
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => SessionAbortOutcome::Succeeded,
+        Err(error) => match error.kind() {
+            FailureKind::Rejected => SessionAbortOutcome::Rejected,
+            FailureKind::Unknown => SessionAbortOutcome::Unknown,
+            _ => SessionAbortOutcome::Unavailable,
+        },
     }
 }

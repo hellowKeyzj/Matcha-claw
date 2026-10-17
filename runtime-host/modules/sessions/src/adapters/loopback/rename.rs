@@ -9,16 +9,16 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::rename::{SessionRenameCommand, SessionRenameOutcome};
+use crate::{
+    rename::{SessionRenameCommand, SessionRenameOutcome},
+    state::{SessionEndpoint, SessionIdentity, SessionProvider},
+};
 
 const CAPABILITY_ID: &str = "session.management";
 const OPERATION_ID: &str = "sessions.rename";
 const AUTHORIZATION_ENDPOINT: &str = "/api/sessions/rename";
 const AUTHORIZATION_SCOPE: &str = "sessions:write";
 const AUTHORIZATION_SUBJECT: &str = "session-rename";
-const RUNTIME_KIND: &str = "native-runtime";
-const RUNTIME_ADAPTER_ID: &str = "openclaw";
-const RUNTIME_INSTANCE_ID: &str = "local";
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
 
@@ -64,30 +64,6 @@ struct Input {
     label: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SessionIdentity {
-    endpoint: Endpoint,
-    agent_id: String,
-    session_key: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Endpoint {
-    kind: String,
-    runtime_adapter_id: String,
-    runtime_instance_id: String,
-}
-
-impl Endpoint {
-    fn is_openclaw_local(&self) -> bool {
-        self.kind == RUNTIME_KIND
-            && self.runtime_adapter_id == RUNTIME_ADAPTER_ID
-            && self.runtime_instance_id == RUNTIME_INSTANCE_ID
-    }
-}
-
 impl Request {
     fn decode(
         value: Value,
@@ -121,22 +97,25 @@ impl Request {
             && self.target.kind == "session"
             && self.scope.identity == self.target.identity
             && self.scope.identity == self.input.session_identity
-            && self.scope.identity.endpoint.is_openclaw_local())
+            && self.scope.identity.validate().is_ok()
+            && self.scope.identity.endpoint
+                == SessionEndpoint::local(self.scope.identity.provider()))
         .then_some(())
         .ok_or(RequestError::Invalid)
     }
 
     fn into_command(self) -> Result<SessionRenameCommand, RequestError> {
-        if !valid_openclaw_session_key(
-            &self.input.session_identity.agent_id,
-            &self.input.session_identity.session_key,
-        ) || !valid_session_label(&self.input.label)
+        if (self.input.session_identity.provider() == SessionProvider::OpenClaw
+            && !valid_openclaw_session_key(
+                &self.input.session_identity.agent_id,
+                &self.input.session_identity.session_key,
+            ))
+            || !valid_session_label(&self.input.label)
         {
             return Err(RequestError::Invalid);
         }
         Ok(SessionRenameCommand::new(
-            self.input.session_identity.agent_id,
-            self.input.session_identity.session_key,
+            self.input.session_identity,
             self.input.label,
         ))
     }
@@ -289,8 +268,8 @@ mod tests {
             .into_command()
             .unwrap();
 
-        assert_eq!(command.agent_id, "main");
-        assert_eq!(command.session_key, "agent:main:session-1");
+        assert_eq!(command.identity.agent_id, "main");
+        assert_eq!(command.identity.session_key, "agent:main:session-1");
         assert_eq!(command.label, "Renamed");
     }
 
@@ -304,10 +283,10 @@ mod tests {
             },
             {
                 let mut value = request();
-                value["scope"]["identity"]["endpoint"]["runtimeAdapterId"] = json!("matcha-agent");
-                value["target"]["identity"]["endpoint"]["runtimeAdapterId"] = json!("matcha-agent");
+                value["scope"]["identity"]["endpoint"]["runtimeAdapterId"] = json!("unknown");
+                value["target"]["identity"]["endpoint"]["runtimeAdapterId"] = json!("unknown");
                 value["input"]["sessionIdentity"]["endpoint"]["runtimeAdapterId"] =
-                    json!("matcha-agent");
+                    json!("unknown");
                 value
             },
             {

@@ -19,7 +19,7 @@ use windows_sys::{
 };
 
 use self::security::{SecurityDescriptor, ensure_owner_only, verify_owner_only};
-use super::StateDirError;
+use super::{StateDirError, StateFileReplaceError};
 
 static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
 
@@ -44,14 +44,91 @@ impl StateDirHandle {
         self._handle.as_raw_handle() as F::HANDLE
     }
 
+    /// The returned file holds an exclusive lock until dropped; the name is never removed.
+    pub fn lock_regular_file(&self, name: &str) -> Result<std::fs::File, StateDirError> {
+        if name.contains(['\0', ':']) {
+            return Err(StateDirError);
+        }
+        let name = relative_name(name)?;
+        let security = SecurityDescriptor::owner_only()?;
+        let mut object_name = unicode_string(&name);
+        let attributes = OBJECT_ATTRIBUTES {
+            Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: self.raw_handle(),
+            ObjectName: &mut object_name,
+            Attributes: F::OBJ_CASE_INSENSITIVE | F::OBJ_DONT_REPARSE,
+            SecurityDescriptor: security.attributes().lpSecurityDescriptor.cast(),
+            SecurityQualityOfService: null(),
+        };
+        let mut status = IO_STATUS_BLOCK::default();
+        let mut raw = null_mut();
+        let result = unsafe {
+            NFS::NtCreateFile(
+                &mut raw,
+                F::GENERIC_READ
+                    | F::GENERIC_WRITE
+                    | FS::READ_CONTROL
+                    | FS::WRITE_DAC
+                    | FS::SYNCHRONIZE,
+                &attributes,
+                &mut status,
+                null(),
+                FS::FILE_ATTRIBUTE_NORMAL,
+                FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE,
+                NFS::FILE_OPEN_IF,
+                NFS::FILE_NON_DIRECTORY_FILE
+                    | NFS::FILE_OPEN_REPARSE_POINT
+                    | NFS::FILE_SYNCHRONOUS_IO_NONALERT,
+                null(),
+                0,
+            )
+        };
+        if result < 0 {
+            return Err(StateDirError);
+        }
+        // SAFETY: NtCreateFile returned a new owned handle anchored to this directory.
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+        let raw = handle.as_raw_handle() as F::HANDLE;
+        verify_regular_file(raw)?;
+        let mut information = FS::FILE_STANDARD_INFO::default();
+        if unsafe {
+            FS::GetFileInformationByHandleEx(
+                raw,
+                FS::FileStandardInfo,
+                (&mut information as *mut FS::FILE_STANDARD_INFO).cast(),
+                size_of::<FS::FILE_STANDARD_INFO>() as u32,
+            )
+        } == 0
+            || information.NumberOfLinks != 1
+            || information.DeletePending
+        {
+            return Err(StateDirError);
+        }
+        ensure_owner_only(raw)?;
+        verify_owner_only(raw)?;
+        let file = std::fs::File::from(handle);
+        file.try_lock().map_err(|_| StateDirError)?;
+        Ok(file)
+    }
+
     pub fn replace_regular_file_bounded(
         &self,
         name: &str,
         contents: &[u8],
         byte_limit: usize,
     ) -> Result<(), StateDirError> {
+        self.replace_regular_file_bounded_detailed(name, contents, byte_limit)
+            .map_err(|_| StateDirError)
+    }
+
+    pub fn replace_regular_file_bounded_detailed(
+        &self,
+        name: &str,
+        contents: &[u8],
+        byte_limit: usize,
+    ) -> Result<(), StateFileReplaceError> {
         if contents.len() > byte_limit {
-            return Err(StateDirError);
+            return Err(StateDirError.into());
         }
         let target = relative_name(name)?;
         let mut temporary = create_temporary_file(self)?;
@@ -59,11 +136,16 @@ impl StateDirHandle {
             || unsafe { FS::FlushFileBuffers(temporary.as_raw_handle() as F::HANDLE) } == 0
             || rename_into_place(&temporary, self, &target).is_err()
         {
-            remove_file(&mut temporary)?;
-            return Err(StateDirError);
+            return Err(StateFileReplaceError {
+                commit_unknown: false,
+                cleanup_failed: remove_file(&mut temporary).is_err(),
+            });
         }
         if unsafe { FS::FlushFileBuffers(temporary.as_raw_handle() as F::HANDLE) } == 0 {
-            return Err(StateDirError);
+            return Err(StateFileReplaceError {
+                commit_unknown: true,
+                cleanup_failed: false,
+            });
         }
         Ok(())
     }
@@ -403,6 +485,101 @@ pub(super) fn provision(path: &Path) -> Result<(PathBuf, StateDirIdentity), Stat
     let identity = identity(directory.as_raw_handle() as F::HANDLE)?;
     let path = canonical_path(directory.as_raw_handle() as F::HANDLE)?;
     Ok((path, identity))
+}
+
+pub(super) fn provision_private(path: &Path) -> Result<(PathBuf, StateDirIdentity), StateDirError> {
+    validate_components(path)?;
+    let mut root = PathBuf::new();
+    let mut custody: Vec<OwnedHandle> = Vec::new();
+    let security = SecurityDescriptor::owner_only()?;
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            root.push(component.as_os_str());
+            continue;
+        };
+        if custody.is_empty() {
+            let directory = open_handle(&root, FS::FILE_TRAVERSE)?;
+            verify_attributes(directory.as_raw_handle() as F::HANDLE)?;
+            custody.push(directory);
+        }
+        let last = components.peek().is_none();
+        let parent = custody.last().ok_or(StateDirError)?;
+        let (directory, created) = provision_directory_relative(
+            parent.as_raw_handle() as F::HANDLE,
+            name,
+            &security,
+            last,
+        )?;
+        let handle = directory.as_raw_handle() as F::HANDLE;
+        if last {
+            if !created {
+                ensure_owner_only(handle)?;
+            }
+            verify_owner_only(handle)?;
+            let identity = identity(handle)?;
+            return Ok((canonical_path(handle)?, identity));
+        }
+        if created {
+            verify_owner_only(handle)?;
+        }
+        custody.push(directory);
+    }
+    Err(StateDirError)
+}
+
+fn provision_directory_relative(
+    parent: F::HANDLE,
+    name: &OsStr,
+    security: &SecurityDescriptor,
+    private: bool,
+) -> Result<(OwnedHandle, bool), StateDirError> {
+    let name: Vec<u16> = name.encode_wide().collect();
+    if name.is_empty() || name.contains(&0) || size_of_val(name.as_slice()) > u16::MAX as usize {
+        return Err(StateDirError);
+    }
+    let mut object_name = unicode_string(&name);
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent,
+        ObjectName: &mut object_name,
+        Attributes: F::OBJ_CASE_INSENSITIVE | F::OBJ_DONT_REPARSE,
+        SecurityDescriptor: security.attributes().lpSecurityDescriptor.cast(),
+        SecurityQualityOfService: null(),
+    };
+    let mut status = IO_STATUS_BLOCK::default();
+    let mut raw = null_mut();
+    let access = FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::FILE_TRAVERSE | FS::SYNCHRONIZE;
+    let result = unsafe {
+        NFS::NtCreateFile(
+            &mut raw,
+            access
+                | if private {
+                    FS::FILE_ADD_FILE | FS::WRITE_DAC
+                } else {
+                    0
+                },
+            &attributes,
+            &mut status,
+            null(),
+            FS::FILE_ATTRIBUTE_DIRECTORY,
+            FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE,
+            NFS::FILE_OPEN_IF,
+            NFS::FILE_DIRECTORY_FILE
+                | NFS::FILE_OPEN_REPARSE_POINT
+                | NFS::FILE_SYNCHRONOUS_IO_NONALERT,
+            null(),
+            0,
+        )
+    };
+    if result < 0 {
+        return Err(StateDirError);
+    }
+    // SAFETY: NtCreateFile returned an owned directory handle anchored to the retained parent.
+    let directory = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+    verify_attributes(directory.as_raw_handle() as F::HANDLE)?;
+    // FILE_CREATED is the NtCreateFile IO_STATUS_BLOCK disposition, not an NTSTATUS.
+    Ok((directory, status.Information == 2))
 }
 
 pub(super) fn open(

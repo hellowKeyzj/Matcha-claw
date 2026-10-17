@@ -81,6 +81,10 @@ impl ProviderAccountsOwner {
         self.private_resolver = private_resolver;
     }
 
+    pub(super) fn private_resolver(&self) -> &Resolver {
+        &self.private_resolver
+    }
+
     pub(super) async fn begin_transaction(
         &self,
         account_id: ProviderAccountId,

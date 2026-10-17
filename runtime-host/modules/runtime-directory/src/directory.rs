@@ -83,6 +83,30 @@ impl Directory {
         self
     }
 
+    pub fn with_agent_catalog(
+        mut self,
+        identity: RuntimeDriverIdentity,
+        default_agent_id: String,
+        agent_ids: Vec<String>,
+    ) -> Self {
+        let endpoint = self.endpoints.iter_mut().find(|endpoint| {
+            endpoint.runtime_adapter_id == identity.runtime_adapter_id()
+                && endpoint.runtime_instance_id == identity.runtime_instance_id()
+        }).expect("fixed peer must exist in directory");
+        endpoint.default_agent_id = if agent_ids.contains(&default_agent_id) {
+            default_agent_id
+        } else {
+            String::new()
+        };
+        endpoint.agents = agent_ids.iter().map(|agent_id| Agent {
+            agent_id: agent_id.clone(),
+            source: "discovered",
+            capabilities: endpoint.capabilities.clone(),
+        }).collect();
+        endpoint.agent_ids = agent_ids;
+        self
+    }
+
     pub fn endpoints(&self) -> &[Endpoint; 2] {
         &self.endpoints
     }
@@ -140,12 +164,12 @@ pub struct Endpoint {
     location: Location,
     lifecycle: Lifecycle,
     display_name: &'static str,
-    agent_ids: [&'static str; 1],
-    default_agent_id: &'static str,
-    agents: [Agent; 1],
+    agent_ids: Vec<String>,
+    default_agent_id: String,
+    agents: Vec<Agent>,
     accepts_dynamic_agents: bool,
     capabilities: Capabilities,
-    capability_families: [CapabilityFamily; 9],
+    capability_families: [CapabilityFamily; 10],
     control_state: ControlState,
 }
 
@@ -195,15 +219,15 @@ impl Endpoint {
         self.display_name
     }
 
-    pub fn agent_ids(&self) -> &[&'static str; 1] {
+    pub fn agent_ids(&self) -> &[String] {
         &self.agent_ids
     }
 
-    pub fn default_agent_id(&self) -> &'static str {
-        self.default_agent_id
+    pub fn default_agent_id(&self) -> &str {
+        &self.default_agent_id
     }
 
-    pub fn agents(&self) -> &[Agent; 1] {
+    pub fn agents(&self) -> &[Agent] {
         &self.agents
     }
 
@@ -215,7 +239,7 @@ impl Endpoint {
         &self.capabilities
     }
 
-    pub fn capability_families(&self) -> &[CapabilityFamily; 9] {
+    pub fn capability_families(&self) -> &[CapabilityFamily; 10] {
         &self.capability_families
     }
 
@@ -253,17 +277,25 @@ impl Endpoint {
             location: Location { kind: "local" },
             lifecycle: lifecycle.clone(),
             display_name: identity.display_name(),
-            agent_ids: [identity.default_agent_id()],
-            default_agent_id: identity.default_agent_id(),
-            agents: [Agent {
-                agent_id: identity.default_agent_id(),
-                source: if lifecycle.ready {
-                    "discovered"
-                } else {
-                    "declared"
-                },
-                capabilities: capabilities.clone(),
-            }],
+            agent_ids: if identity == RuntimeDriverIdentity::matcha_agent() {
+                Vec::new()
+            } else {
+                vec![identity.default_agent_id().to_owned()]
+            },
+            default_agent_id: if identity == RuntimeDriverIdentity::matcha_agent() {
+                String::new()
+            } else {
+                identity.default_agent_id().to_owned()
+            },
+            agents: if identity == RuntimeDriverIdentity::matcha_agent() {
+                Vec::new()
+            } else {
+                vec![Agent {
+                    agent_id: identity.default_agent_id().to_owned(),
+                    source: if lifecycle.ready { "discovered" } else { "declared" },
+                    capabilities: capabilities.clone(),
+                }]
+            },
             accepts_dynamic_agents: true,
             capabilities,
             capability_families: CapabilityFamily::from_surface(surface),
@@ -410,14 +442,14 @@ impl Lifecycle {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Agent {
-    agent_id: &'static str,
+    agent_id: String,
     source: &'static str,
     capabilities: Capabilities,
 }
 
 impl Agent {
-    pub fn agent_id(&self) -> &'static str {
-        self.agent_id
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
     }
 
     pub fn source(&self) -> &'static str {
@@ -498,7 +530,7 @@ impl CapabilityFamily {
         self.availability
     }
 
-    fn from_surface(surface: crate::RuntimeCapabilitySurface) -> [Self; 9] {
+    fn from_surface(surface: crate::RuntimeCapabilitySurface) -> [Self; 10] {
         [
             Self::new(
                 "session",
@@ -524,6 +556,7 @@ impl CapabilityFamily {
                 "lifecycle",
                 surface.supports(RuntimeCapabilityFamily::Lifecycle),
             ),
+            Self::new("usage", surface.supports(RuntimeCapabilityFamily::Usage)),
         ]
     }
 
@@ -642,13 +675,13 @@ mod tests {
         assert_eq!(matcha.runtime_adapter_id(), "matcha-agent");
         assert_eq!(matcha.runtime_instance_id(), "local");
         assert_eq!(matcha.display_name(), "Matcha Agent");
-        assert_eq!(matcha.default_agent_id(), "matcha");
-        assert_eq!(matcha.agent_ids(), &["matcha"]);
+        assert!(matcha.default_agent_id().is_empty());
+        assert!(matcha.agent_ids().is_empty());
         assert!(matcha.capabilities().chat());
         assert_eq!(matcha.capability_families()[1].family(), "task");
         assert_eq!(
             matcha.capability_families()[1].availability(),
-            "unsupported"
+            "supported"
         );
         assert_eq!(matcha.capability_families()[3].family(), "team");
         assert_eq!(matcha.capability_families()[3].availability(), "supported");

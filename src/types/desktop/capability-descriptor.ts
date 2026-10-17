@@ -26,6 +26,7 @@ export interface CapabilityDescriptor {
   supportLevel: CapabilitySupportLevel;
   availability: CapabilityAvailability;
   operations: CapabilityOperationDescriptor[];
+  sessionConfiguration?: { permission: boolean; modelSelection: boolean };
   policyScope: string;
   ownerModuleId: string;
   routeOwnerId: string;

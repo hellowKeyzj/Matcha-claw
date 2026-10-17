@@ -1,4 +1,5 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
+import { isProductRuntimeScope } from '../runtime-scope';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 
 const PUBLIC_STATUS_ERROR = 'Channel status reported an error';
@@ -59,8 +60,8 @@ export type ChannelSnapshotTransportResponse = Readonly<{
 }>;
 
 export interface ChannelStatusTransport {
-  read(): Promise<ChannelStatusTransportResponse>;
-  readSnapshot(): Promise<ChannelSnapshotTransportResponse>;
+  read(scope?: unknown): Promise<ChannelStatusTransportResponse>;
+  readSnapshot(scope?: unknown): Promise<ChannelSnapshotTransportResponse>;
 }
 
 export function createChannelStatusTransport(
@@ -69,7 +70,8 @@ export function createChannelStatusTransport(
   fetcher: typeof fetch = fetch,
 ): ChannelStatusTransport {
   return {
-    async read(): Promise<ChannelStatusTransportResponse> {
+    async read(scope?: unknown): Promise<ChannelStatusTransportResponse> {
+      if (scope !== undefined && !isProductRuntimeScope(scope)) return { status: 503, body: UNAVAILABLE };
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: '/api/channels/status',
@@ -82,7 +84,7 @@ export function createChannelStatusTransport(
         },
         method: 'POST',
         fetcher,
-        body: {},
+        body: scope === undefined ? {} : { scope },
       });
       if (response?.status === 200 && isChannelStatus(response.body)) {
         return { status: 200, body: response.body };
@@ -90,7 +92,8 @@ export function createChannelStatusTransport(
       return { status: 503, body: UNAVAILABLE };
     },
 
-    async readSnapshot(): Promise<ChannelSnapshotTransportResponse> {
+    async readSnapshot(scope?: unknown): Promise<ChannelSnapshotTransportResponse> {
+      if (scope !== undefined && !isProductRuntimeScope(scope)) return { status: 503, body: UNAVAILABLE };
       const response = await sendLoopbackJson({
         port: runtimeHostTransportPort,
         path: '/api/channels/status',
@@ -103,7 +106,7 @@ export function createChannelStatusTransport(
         },
         method: 'POST',
         fetcher,
-        body: { operation: 'snapshot' },
+        body: { operation: 'snapshot', ...(scope === undefined ? {} : { scope }) },
       });
       if (response?.status === 200 && isChannelSnapshot(response.body)) {
         return { status: 200, body: response.body };
@@ -156,7 +159,7 @@ export function isChannelSnapshot(value: unknown): value is ChannelSnapshot {
   if (new Set(channelOrder).size !== channelOrder.length
     || !hasExactKeys(channels, channelOrder)
     || !hasExactKeys(channelAccounts, channelOrder)
-    || !hasExactKeys(channelDefaultAccountId, channelOrder)) {
+    || !hasOnlyKeys(channelDefaultAccountId, channelOrder)) {
     return false;
   }
 
@@ -166,7 +169,9 @@ export function isChannelSnapshot(value: unknown): value is ChannelSnapshot {
       && Array.isArray(accounts)
       && accounts.every(isChannelAccountSnapshot)
       && new Set(accounts.map((account) => account.accountId)).size === accounts.length
-      && isIdentifier(channelDefaultAccountId[channel]);
+      && (!Object.hasOwn(channelDefaultAccountId, channel)
+        || (isIdentifier(channelDefaultAccountId[channel])
+          && accounts.some((account) => account.accountId === channelDefaultAccountId[channel])));
   });
 }
 

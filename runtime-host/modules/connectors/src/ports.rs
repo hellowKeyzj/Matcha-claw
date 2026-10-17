@@ -169,7 +169,8 @@ where
     fn resolve<'a>(
         &'a self,
         reference: &'a ConnectorSecretRef,
-    ) -> ConnectorFuture<'a, Result<ConnectorSecretResolution, ConnectorSecretAuthorityPortError>> {
+    ) -> ConnectorFuture<'a, Result<ConnectorSecretResolution, ConnectorSecretAuthorityPortError>>
+    {
         Box::pin(async move {
             match self.source.lookup(reference).map_err(|error| match error {
                 ConnectorSecretFactSourceError::Unavailable => {
@@ -238,7 +239,8 @@ fn valid_reference(value: &str) -> bool {
 pub type ConnectorFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait ConnectorRuntimeDirectory: Send + Sync {
-    fn connector_ops(&self) -> Option<&dyn ConnectorOps>;
+    /// Enumerates explicit targets only for projection of the global desired catalog.
+    fn connector_endpoints(&self) -> Vec<RuntimeEndpoint>;
 
     fn connector_ops_for_endpoint(&self, endpoint: &RuntimeEndpoint) -> Option<&dyn ConnectorOps>;
 }
@@ -262,11 +264,13 @@ pub trait ConnectorOps: Send + Sync {
 
     fn observe_mcp_server_status<'a>(
         &'a self,
+        agent_id: String,
         session_key: String,
     ) -> ConnectorFuture<'a, Result<McpServerStatusList, ConnectorOperationFailure>>;
 
     fn set_mcp_session_server_enabled<'a>(
         &'a self,
+        agent_id: String,
         session_key: String,
         server_name: String,
         enabled: bool,

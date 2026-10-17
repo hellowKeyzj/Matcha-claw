@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::session_permission::{
     NativeEndpoint, SessionPermissionAction, SessionPermissionCommand, SessionPermissionMode,
-    SessionPermissionOutcome,
+    SessionPermissionOutcome, SessionPermissionProjection, SessionPermissionSelection, MatchaPermissionMode,
 };
 
 pub(crate) mod handler;
@@ -179,15 +179,19 @@ impl SessionPermissionRequest {
         let action = match operation {
             Operation::Get => SessionPermissionAction::Get,
             Operation::Set => {
-                let permission_mode = match object.get("permissionMode") {
-                    Some(Value::Null) => None,
-                    Some(value) => Some(
-                        serde_json::from_value::<SessionPermissionMode>(value.clone())
+                let value = object.get("permissionMode").ok_or(RequestError::Invalid)?;
+                let selection = match session_identity.endpoint.parse() {
+                    Some(NativeEndpoint::OpenClawLocal) => SessionPermissionSelection::OpenClaw(
+                        serde_json::from_value::<Option<SessionPermissionMode>>(value.clone())
                             .map_err(|_| RequestError::Invalid)?,
                     ),
-                    None => return Err(RequestError::Invalid),
+                    Some(NativeEndpoint::MatchaAgentLocal) => SessionPermissionSelection::MatchaAgent(
+                        serde_json::from_value::<MatchaPermissionMode>(value.clone())
+                            .map_err(|_| RequestError::Invalid)?,
+                    ),
+                    _ => return Err(RequestError::Invalid),
                 };
-                SessionPermissionAction::Set { permission_mode }
+                SessionPermissionAction::Set { selection }
             }
         };
         Ok(ParsedInput {
@@ -235,61 +239,67 @@ fn operation_from_value(value: &Value) -> Option<Operation> {
     }
 }
 
-fn permission_mode(mode: SessionPermissionMode) -> &'static str {
-    match mode {
-        SessionPermissionMode::ReadOnly => "read-only",
-        SessionPermissionMode::Guarded => "guarded",
-        SessionPermissionMode::Workspace => "workspace",
-        SessionPermissionMode::Full => "full",
-    }
-}
-
-pub(crate) enum SessionPermissionDelivery {
-    Outcome(SessionPermissionOutcome),
-    Unavailable,
-}
-
-impl From<SessionPermissionOutcome> for SessionPermissionDelivery {
-    fn from(outcome: SessionPermissionOutcome) -> Self {
-        match outcome {
-            SessionPermissionOutcome::Unavailable => Self::Unavailable,
-            outcome => Self::Outcome(outcome),
-        }
-    }
+pub(crate) struct SessionPermissionDelivery {
+    endpoint: NativeEndpoint,
+    outcome: SessionPermissionOutcome,
 }
 
 impl SessionPermissionDelivery {
+    pub(crate) fn new(
+        endpoint: NativeEndpoint,
+        action: SessionPermissionAction,
+        outcome: SessionPermissionOutcome,
+    ) -> Self {
+        let valid = match (&outcome, endpoint, action) {
+            (SessionPermissionOutcome::Projection(_), NativeEndpoint::OpenClawLocal, SessionPermissionAction::Get) => true,
+            (SessionPermissionOutcome::Projection(projection), NativeEndpoint::OpenClawLocal,
+                SessionPermissionAction::Set { selection: SessionPermissionSelection::OpenClaw(expected) }) => !projection.supported || projection.mode == expected,
+            (SessionPermissionOutcome::MatchaSnapshot { .. }, NativeEndpoint::MatchaAgentLocal, SessionPermissionAction::Get) => true,
+            (SessionPermissionOutcome::MatchaUpdated { mode, .. }, NativeEndpoint::MatchaAgentLocal,
+                SessionPermissionAction::Set { selection: SessionPermissionSelection::MatchaAgent(expected) }) => *mode == expected,
+            (SessionPermissionOutcome::Unsupported | SessionPermissionOutcome::Rejected
+                | SessionPermissionOutcome::Unknown | SessionPermissionOutcome::Unavailable, _, _) => true,
+            _ => false,
+        };
+        Self { endpoint, outcome: if valid { outcome } else { SessionPermissionOutcome::Unknown } }
+    }
+
     pub(crate) fn status_code(&self) -> u16 {
-        match self {
-            Self::Outcome(_) => 200,
-            Self::Unavailable => 503,
+        match self.outcome {
+            SessionPermissionOutcome::Projection(_) | SessionPermissionOutcome::MatchaSnapshot { .. }
+                | SessionPermissionOutcome::MatchaUpdated { .. } => 200,
+            SessionPermissionOutcome::Unsupported if self.endpoint == NativeEndpoint::OpenClawLocal => 200,
+            SessionPermissionOutcome::Unsupported => 501,
+            SessionPermissionOutcome::Rejected => 422,
+            SessionPermissionOutcome::Unavailable | SessionPermissionOutcome::Unknown => 503,
         }
     }
 
     pub(crate) fn body(&self) -> Value {
-        match self {
-            Self::Outcome(SessionPermissionOutcome::Projection(projection)) => {
-                let mut body = serde_json::json!({
-                    "supported": projection.supported,
-                    "mode": projection.mode.map(permission_mode),
-                    "pending": projection.pending,
-                    "canSelectFull": projection.can_select_full,
-                    "options": projection.options.iter().map(|mode| permission_mode(*mode)).collect::<Vec<_>>(),
-                });
-                if let Some(default_mode) = projection.default_mode {
-                    body["defaultMode"] = serde_json::json!(permission_mode(default_mode));
-                }
+        match &self.outcome {
+            SessionPermissionOutcome::Projection(projection) => {
+                let mut body = serde_json::json!(projection);
                 if projection.reason.is_some() {
                     body["reason"] = serde_json::json!("Session permission is unsupported");
                 }
                 body
             }
-            Self::Outcome(SessionPermissionOutcome::Unavailable) | Self::Unavailable => {
-                serde_json::json!({
-                    "success": false,
-                    "error": "Session permission is unavailable",
-                })
+            SessionPermissionOutcome::MatchaSnapshot { mode } => serde_json::json!({
+                "runtime": "matcha-agent", "mode": mode,
+            }),
+            SessionPermissionOutcome::MatchaUpdated { mode, applied } => serde_json::json!({
+                "runtime": "matcha-agent", "mode": mode, "persisted": true, "applied": applied,
+            }),
+            SessionPermissionOutcome::Unsupported if self.endpoint == NativeEndpoint::OpenClawLocal => {
+                serde_json::json!(SessionPermissionProjection::unsupported("Session permission is unsupported"))
             }
+            SessionPermissionOutcome::Unsupported => serde_json::json!({ "outcome": "unsupported" }),
+            SessionPermissionOutcome::Rejected => serde_json::json!({ "outcome": "rejected" }),
+            SessionPermissionOutcome::Unknown => serde_json::json!({ "outcome": "unknown" }),
+            SessionPermissionOutcome::Unavailable if self.endpoint == NativeEndpoint::OpenClawLocal => serde_json::json!({
+                "success": false, "error": "Session permission is unavailable",
+            }),
+            SessionPermissionOutcome::Unavailable => serde_json::json!({ "outcome": "unavailable" }),
         }
     }
 }

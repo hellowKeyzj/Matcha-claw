@@ -1,6 +1,8 @@
 import { create } from 'zustand';
+import { selectManagementEndpoint, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { buildCapabilityScopeKey, runtimeEndpointsEqual, runtimeScopeQuery, type RuntimeInstanceScope } from '@/types/desktop/runtime-address';
 import { hostApiFetch } from '@/lib/host-api';
-import { probeConnector, readConnectorStatuses, removeConnector, upsertConnector } from '@/lib/connectors-call';
+import { probeConnector, readConnectorStatuses, removeConnector, updateConnector, upsertConnector } from '@/lib/connectors-call';
 import type { ExternalConnectorConnectionStatus } from '@/types/connectors-observation';
 
 export type { ExternalConnectorConnectionStatus, ExternalConnectorConnectionStatusResultType } from '@/types/connectors-observation';
@@ -34,16 +36,8 @@ export interface ExternalMcpServerProgramDescriptor {
   readonly id: string;
   readonly source: ExternalMcpServerProgramSource;
   readonly displayName: string;
-  readonly rootPath?: string;
-  readonly manifestPath?: string;
-  readonly entrypointPath?: string;
   readonly connectorKinds: readonly Extract<ExternalConnectorKind, 'mcp-stdio' | 'mcp-http'>[];
-  readonly command?: string;
-  readonly args?: readonly string[];
-  readonly url?: string;
   readonly transport?: 'streamable-http' | 'sse';
-  readonly envKeys?: readonly string[];
-  readonly headerKeys?: readonly string[];
 }
 
 export interface ExternalConnectorSecretRef {
@@ -102,8 +96,35 @@ export type ExternalConnectorSpec =
   | ExternalConnectorHttpSpec
   | ExternalConnectorSdkSpec;
 
+export type ExternalConnectorSummary =
+  | Omit<ExternalConnectorProcessSpec, 'command' | 'args' | 'cwd' | 'env'>
+  | Omit<ExternalConnectorMcpHttpSpec, 'headers'>
+  | Omit<ExternalConnectorHttpSpec, 'headers'>
+  | Omit<ExternalConnectorSdkSpec, 'config'>;
+
+export interface ExternalConnectorPatch {
+  readonly displayName?: string | null;
+  readonly description?: string | null;
+  readonly enabled?: boolean;
+  readonly command?: string;
+  readonly args?: readonly string[] | null;
+  readonly cwd?: string | null;
+  readonly env?: Record<string, string> | null;
+  readonly secretEnv?: Record<string, ExternalConnectorSecretRef> | null;
+  readonly url?: string;
+  readonly transport?: 'streamable-http' | 'sse' | null;
+  readonly headers?: Record<string, string> | null;
+  readonly secretHeaders?: Record<string, ExternalConnectorSecretRef> | null;
+  readonly connectionTimeoutMs?: number | null;
+  readonly baseUrl?: string;
+  readonly provider?: string;
+  readonly packageName?: string | null;
+  readonly config?: Record<string, unknown> | null;
+  readonly secretConfigRefs?: Record<string, ExternalConnectorSecretRef> | null;
+}
+
 type ExternalConnectorListPayload = {
-  connectors: ExternalConnectorSpec[];
+  connectors: ExternalConnectorSummary[];
 };
 
 type OpenClawMcpServerListPayload = {
@@ -137,7 +158,7 @@ export interface ExternalConnectorMutationObserved {
 
 export interface ExternalConnectorUpsertMutationReceipt {
   readonly success: true;
-  readonly connector: ExternalConnectorSpec;
+  readonly connector: ExternalConnectorSummary;
   readonly resultType: 'created' | 'updated';
   readonly desired: ExternalConnectorMutationDesired & { readonly status: 'stored' };
   readonly applied: ExternalConnectorMutationApplied;
@@ -159,7 +180,9 @@ export type ExternalConnectorMutationReceipt =
 export type ExternalConnectorMutationPayload = ExternalConnectorUpsertMutationReceipt;
 
 type ExternalConnectorsState = {
-  connectors: ExternalConnectorSpec[];
+  scope: RuntimeInstanceScope | null;
+  selectScope: (scope: RuntimeInstanceScope | null) => void;
+  connectors: ExternalConnectorSummary[];
   connectorStatuses: Record<string, ExternalConnectorConnectionStatus>;
   mcpServers: OpenClawMcpServerSummary[];
   mcpServerPrograms: ExternalMcpServerProgramDescriptor[];
@@ -170,6 +193,7 @@ type ExternalConnectorsState = {
   refresh: () => Promise<void>;
   probe: (connectorId: string) => Promise<ExternalConnectorConnectionStatus>;
   upsert: (connector: ExternalConnectorSpec) => Promise<ExternalConnectorMutationPayload>;
+  update: (connectorId: string, patch: ExternalConnectorPatch) => Promise<ExternalConnectorMutationPayload>;
   remove: (connectorId: string) => Promise<void>;
   clearError: () => void;
 };
@@ -178,12 +202,17 @@ function toConnectorStatusMap(statuses: ExternalConnectorConnectionStatus[]): Re
   return Object.fromEntries(statuses.map((status) => [status.connectorId, status]));
 }
 
-async function readOpenClawMcpServers(): Promise<OpenClawMcpServerSummary[]> {
-  const payload = await hostApiFetch<OpenClawMcpServerListPayload>('/api/openclaw/mcp-servers');
+async function readOpenClawMcpServers(scope: RuntimeInstanceScope): Promise<OpenClawMcpServerSummary[]> {
+  const payload = await hostApiFetch<OpenClawMcpServerListPayload>(`/api/openclaw/mcp-servers?${runtimeScopeQuery(scope)}`);
   return Array.isArray(payload.servers) ? payload.servers : [];
 }
 
-export const useExternalConnectorsStore = create<ExternalConnectorsState>((set) => {
+export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, get) => {
+  let scopeRevision = 0;
+  const current = (scope: RuntimeInstanceScope, revision: number) => {
+    const endpoint = selectManagementEndpoint(useRuntimeEndpointsStore.getState());
+    return revision === scopeRevision && endpoint !== null && runtimeEndpointsEqual(endpoint, scope.endpoint);
+  };
   let refreshPromise: Promise<void> | null = null;
   let refreshChanges: {
     connectors: Set<string>;
@@ -223,7 +252,60 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set) 
     set({ mutatingId: [...pendingOperations.values()].at(-1) ?? null });
   }
 
+  async function saveConnector(connectorId: string, save: () => Promise<ExternalConnectorMutationPayload>): Promise<ExternalConnectorMutationPayload> {
+    const scope = get().scope;
+    const revision = scopeRevision;
+    if (!scope || !current(scope, revision)) throw new Error('请选择运行时');
+    const operation = beginOperation(connectorId);
+    try {
+      const result = await save();
+      if (!current(scope, revision)) return result;
+      const mcpServersReadId = ++latestMcpServersReadId;
+      latestMutationMcpServersReadId = mcpServersReadId;
+      invalidateRefreshError();
+      if (acceptConnectorRevision(connectorId, result.desired.revision)) {
+        refreshChanges?.connectors.add(connectorId);
+        refreshChanges?.statuses.add(connectorId);
+        latestStatusOperations.set(connectorId, operation);
+        set((state) => ({
+          connectors: [...state.connectors.filter((item) => item.id !== result.connector.id), result.connector]
+            .sort((a, b) => a.id.localeCompare(b.id)),
+          connectorStatuses: {
+            ...state.connectorStatuses,
+            [result.connector.id]: {
+              connectorId: result.connector.id,
+              resultType: 'unknown',
+              safeProbe: false,
+            },
+          },
+        }));
+      }
+      const mcpServers = await readOpenClawMcpServers(scope);
+      if (current(scope, revision) && mcpServersReadId === latestMutationMcpServersReadId && mcpServersReadId > latestMcpServersCommitId) {
+        latestMcpServersCommitId = mcpServersReadId;
+        set({ mcpServers });
+      }
+      return result;
+    } catch (error) {
+      if (current(scope, revision)) set({ error: error instanceof Error ? error.message : '保存连接器失败' });
+      throw error;
+    } finally {
+      if (current(scope, revision)) finishOperation(connectorId, operation);
+    }
+  }
+
   return ({
+  scope: null,
+  selectScope: (scope) => {
+    if ((scope ? buildCapabilityScopeKey(scope) : null) === (get().scope ? buildCapabilityScopeKey(get().scope!) : null)) return;
+    scopeRevision += 1;
+    refreshPromise = null;
+    refreshChanges = null;
+    pendingOperations.clear();
+    connectorRevisions.clear();
+    latestStatusOperations.clear();
+    set({ scope, connectors: [], connectorStatuses: {}, mcpServers: [], mcpServerPrograms: [], ready: false, loading: false, mutatingId: null, error: null });
+  },
   connectors: [],
   connectorStatuses: {},
   mcpServers: [],
@@ -234,6 +316,9 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set) 
   error: null,
 
   refresh: () => {
+    const scope = get().scope;
+    const revision = scopeRevision;
+    if (!scope || !current(scope, revision)) return Promise.resolve();
     if (refreshPromise) return refreshPromise;
     const mcpServersReadId = ++latestMcpServersReadId;
     const changes = { connectors: new Set<string>(), statuses: new Set<string>(), errorInvalidated: false };
@@ -245,9 +330,10 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set) 
         const [payload, catalog, statuses, mcpServers] = await Promise.all([
           hostApiFetch<ExternalConnectorListPayload>('/api/external-connectors'),
           hostApiFetch<ExternalMcpServerProgramCatalogPayload>('/api/external-connectors/mcp-server-programs'),
-          readConnectorStatuses(),
-          readOpenClawMcpServers(),
+          readConnectorStatuses(scope),
+          readOpenClawMcpServers(scope),
         ]);
+        if (!current(scope, revision)) return;
         const publishMcpServers = mcpServersReadId > latestMcpServersCommitId;
         if (publishMcpServers) latestMcpServersCommitId = mcpServersReadId;
         set((state) => {
@@ -273,24 +359,30 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set) 
           };
         });
       } catch (error) {
+        if (!current(scope, revision)) return;
         set({
           loading: false,
           ...(!changes.errorInvalidated ? { error: error instanceof Error ? error.message : '加载连接器失败' } : {}),
         });
         throw error;
       } finally {
-        refreshPromise = null;
-        refreshChanges = null;
+        if (revision === scopeRevision) {
+          refreshPromise = null;
+          refreshChanges = null;
+        }
       }
     })();
     return refreshPromise;
   },
 
   probe: async (connectorId) => {
+    const scope = get().scope;
+    const revision = scopeRevision;
+    if (!scope || !current(scope, revision)) throw new Error('请选择运行时');
     const operation = beginOperation(connectorId);
     try {
-      const status = await probeConnector(connectorId);
-      if (latestStatusOperations.get(connectorId) === operation) {
+      const status = await probeConnector(scope, connectorId);
+      if (current(scope, revision) && latestStatusOperations.get(connectorId) === operation) {
         invalidateRefreshError();
         refreshChanges?.statuses.add(connectorId);
         set((state) => ({
@@ -302,55 +394,24 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set) 
       }
       return status;
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : '检测连接器失败' });
+      if (current(scope, revision)) set({ error: error instanceof Error ? error.message : '检测连接器失败' });
       throw error;
     } finally {
-      finishOperation(connectorId, operation);
+      if (current(scope, revision)) finishOperation(connectorId, operation);
     }
   },
 
-  upsert: async (connector) => {
-    const operation = beginOperation(connector.id);
-    try {
-      const result = await upsertConnector(connector);
-      const mcpServersReadId = ++latestMcpServersReadId;
-      latestMutationMcpServersReadId = mcpServersReadId;
-      invalidateRefreshError();
-      if (acceptConnectorRevision(connector.id, result.desired.revision)) {
-        refreshChanges?.connectors.add(connector.id);
-        refreshChanges?.statuses.add(connector.id);
-        latestStatusOperations.set(connector.id, operation);
-        set((state) => ({
-          connectors: [...state.connectors.filter((item) => item.id !== result.connector.id), result.connector]
-            .sort((a, b) => a.id.localeCompare(b.id)),
-          connectorStatuses: {
-            ...state.connectorStatuses,
-            [result.connector.id]: {
-              connectorId: result.connector.id,
-              resultType: 'unknown',
-              safeProbe: false,
-            },
-          },
-        }));
-      }
-      const mcpServers = await readOpenClawMcpServers();
-      if (mcpServersReadId === latestMutationMcpServersReadId && mcpServersReadId > latestMcpServersCommitId) {
-        latestMcpServersCommitId = mcpServersReadId;
-        set({ mcpServers });
-      }
-      return result;
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : '保存连接器失败' });
-      throw error;
-    } finally {
-      finishOperation(connector.id, operation);
-    }
-  },
+  upsert: (connector) => saveConnector(connector.id, () => upsertConnector(connector)),
+  update: (connectorId, patch) => saveConnector(connectorId, () => updateConnector(connectorId, patch)),
 
   remove: async (connectorId) => {
+    const scope = get().scope;
+    const revision = scopeRevision;
+    if (!scope || !current(scope, revision)) throw new Error('请选择运行时');
     const operation = beginOperation(connectorId);
     try {
       const result = await removeConnector(connectorId);
+      if (!current(scope, revision)) return;
       const mcpServersReadId = ++latestMcpServersReadId;
       latestMutationMcpServersReadId = mcpServersReadId;
       invalidateRefreshError();
@@ -366,16 +427,16 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set) 
           };
         });
       }
-      const mcpServers = await readOpenClawMcpServers();
-      if (mcpServersReadId === latestMutationMcpServersReadId && mcpServersReadId > latestMcpServersCommitId) {
+      const mcpServers = await readOpenClawMcpServers(scope);
+      if (current(scope, revision) && mcpServersReadId === latestMutationMcpServersReadId && mcpServersReadId > latestMcpServersCommitId) {
         latestMcpServersCommitId = mcpServersReadId;
         set({ mcpServers });
       }
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : '删除连接器失败' });
+      if (current(scope, revision)) set({ error: error instanceof Error ? error.message : '删除连接器失败' });
       throw error;
     } finally {
-      finishOperation(connectorId, operation);
+      if (current(scope, revision)) finishOperation(connectorId, operation);
     }
   },
 

@@ -1,4 +1,5 @@
 use foundation::execution::QueryRoute;
+use platform::endpoint::runtime_address::RuntimeEndpoint;
 
 use crate::call::ConnectorCall;
 use tokio::sync::oneshot;
@@ -21,6 +22,7 @@ pub(crate) enum ConnectorQuery {
         reply: oneshot::Sender<ConnectorCatalogReceipt>,
     },
     Status {
+        endpoint: RuntimeEndpoint,
         call: ConnectorCall,
     },
     Get {
@@ -29,6 +31,7 @@ pub(crate) enum ConnectorQuery {
         reply: oneshot::Sender<ConnectorGetReceipt>,
     },
     Probe {
+        endpoint: RuntimeEndpoint,
         id: String,
         call: ConnectorCall,
     },
@@ -38,6 +41,7 @@ pub(crate) enum ConnectorQuery {
         call: ConnectorCall,
     },
     OpenClawMcpServers {
+        endpoint: RuntimeEndpoint,
         call: Option<ConnectorCall>,
         reply: oneshot::Sender<OpenClawMcpServersReceipt>,
     },

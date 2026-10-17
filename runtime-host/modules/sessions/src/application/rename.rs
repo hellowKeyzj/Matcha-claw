@@ -1,19 +1,16 @@
 use serde::Serialize;
 
+use crate::state::SessionIdentity;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionRenameCommand {
-    pub agent_id: String,
-    pub session_key: String,
+    pub identity: SessionIdentity,
     pub label: String,
 }
 
 impl SessionRenameCommand {
-    pub fn new(agent_id: String, session_key: String, label: String) -> Self {
-        Self {
-            agent_id,
-            session_key,
-            label,
-        }
+    pub fn new(identity: SessionIdentity, label: String) -> Self {
+        Self { identity, label }
     }
 }
 

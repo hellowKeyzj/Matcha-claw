@@ -101,8 +101,10 @@ pub(super) fn forward_matcha_lifecycle_changes(
     scope: &mut ModuleScope,
     mut snapshots: tokio::sync::watch::Receiver<SupervisorSnapshot>,
     events: tokio::sync::mpsc::Sender<SupervisorSnapshot>,
+    peer: crate::composition::peer::PeerHandle,
 ) {
     let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
+        let mut notified_process = None;
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,
@@ -110,7 +112,20 @@ pub(super) fn forward_matcha_lifecycle_changes(
                     if changed.is_err() {
                         break;
                     }
-                    let snapshot = snapshots.borrow().clone();
+                    let snapshot = snapshots.borrow_and_update().clone();
+                    if snapshot.phase() == foundation::process::supervision::SupervisorPhase::Running {
+                        if let Some(process) = snapshot.process().filter(|process| Some(*process) != notified_process) {
+                            tokio::select! {
+                                _ = cancellation.cancelled() => break,
+                                sent = peer.matcha_ready(process) => {
+                                    if sent.is_err() {
+                                        break;
+                                    }
+                                    notified_process = Some(process);
+                                }
+                            }
+                        }
+                    }
                     tokio::select! {
                         _ = cancellation.cancelled() => break,
                         sent = events.send(snapshot) => {

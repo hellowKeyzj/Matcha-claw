@@ -386,6 +386,26 @@ impl OwnerSpec for SecurityOwner {
                     correlation, outcome: Some(outcome),
                 }, outcome.effect()).await;
             }
+            SecurityCommand::NativePolicy { target, principal, operation, call } => {
+                let name = operation.name();
+                let key = target.receipt_key(&principal, call.context.id());
+                if call.running().await.is_err() {
+                    call.finish(&call.detail, Effect::Unknown).await;
+                    return;
+                }
+                let result = match shared.operation_receipts.begin_native_policy(&key) {
+                    Ok(None) => {
+                        let result = execute_native_policy(&shared, target, operation).await;
+                        if shared.operation_receipts.settle_native_policy(&key, security_operation::Outcome::Confirmed(result.clone())).is_ok() {
+                            result
+                        } else { serde_json::json!(crate::native_policy::Failure::unknown()) }
+                    }
+                    Ok(Some(prior)) => native_policy_receipt(prior),
+                    Err(_) => serde_json::json!(crate::native_policy::Failure::unavailable()),
+                };
+                let effect = native_policy_effect(&result);
+                call.finish(&SecurityCallDetail::NativePolicy { operation: name, outcome: Some(effect) }, effect).await;
+            }
             SecurityCommand::Operation {
                 correlation,
                 operation_id,
@@ -442,12 +462,60 @@ impl OwnerSpec for SecurityOwner {
     }
 }
 
+async fn execute_native_policy(
+    shared: &SecurityShared,
+    target: crate::native_policy::PolicyTarget,
+    operation: crate::native_policy::Operation,
+) -> Value {
+    if !target.is_valid() { return serde_json::json!(crate::native_policy::Failure::rejected()); }
+    let Some(ops) = shared.runtime_directory.native_policy_ops_for_endpoint(&target.endpoint) else {
+        return serde_json::json!(crate::native_policy::Failure::new(crate::native_policy::FailureOutcome::Unsupported, "native_policy_unsupported"));
+    };
+    crate::native_policy::execute(ops, target, operation).await
+}
+
+fn native_policy_effect(result: &Value) -> Effect {
+    match result.get("outcome").and_then(Value::as_str) {
+        Some("available" | "confirmed") => Effect::Confirmed,
+        Some("unsupported" | "rejected") => Effect::Rejected,
+        Some("unavailable") => Effect::Unavailable,
+        _ => Effect::Unknown,
+    }
+}
+
+fn native_policy_receipt(outcome: security_operation::Outcome) -> Value {
+    match outcome {
+        security_operation::Outcome::Confirmed(result) => result,
+        security_operation::Outcome::Rejected => serde_json::json!(crate::native_policy::Failure::rejected()),
+        security_operation::Outcome::Unavailable => serde_json::json!(crate::native_policy::Failure::unavailable()),
+        security_operation::Outcome::Unknown => serde_json::json!(crate::native_policy::Failure::unknown()),
+    }
+}
+
 async fn handle_security_query(
     shared: SecurityShared,
     global: Option<&SecurityGlobalState>,
     query: SecurityQuery,
 ) {
     match query {
+        SecurityQuery::NativePolicy { target, operation, reply, context } => {
+            let name = operation.name();
+            let result = if context.running().await.is_ok() {
+                execute_native_policy(&shared, target, operation).await
+            } else { serde_json::json!(crate::native_policy::Failure::unknown()) };
+            let effect = native_policy_effect(&result);
+            let _ = context.finish(effect.status(), &SecurityCallDetail::NativePolicy { operation: name, outcome: Some(effect) }).await;
+            let _ = reply.send(result);
+        }
+        SecurityQuery::NativePolicyResult { target, principal, call_id, reply, context } => {
+            let result = if context.running().await.is_ok() {
+                shared.operation_receipts.native_policy_receipt(&target.receipt_key(&principal, &call_id))
+                    .map(|receipt| receipt.map(native_policy_receipt))
+            } else { Err(()) };
+            let effect = if result.is_ok() { Effect::Confirmed } else { Effect::Unavailable };
+            let _ = context.finish(effect.status(), &SecurityCallDetail::NativePolicy { operation: "nativePolicy.result", outcome: Some(effect) }).await;
+            let _ = reply.send(result);
+        }
         SecurityQuery::CurrentPolicy { reply, context } => {
             let result = match global {
                 Some(global) if context.running().await.is_ok() => global.current_policy().await,

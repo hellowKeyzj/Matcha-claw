@@ -110,6 +110,7 @@ pub(super) async fn handle_management(
             capability: capability.into(),
             subject: subject.into(),
             private: false,
+            runtime_scope: handle.runtime_scope.clone(),
         };
         let worker = handle.clone();
         let receipt = handle
@@ -271,6 +272,7 @@ pub(super) async fn handle_capability_execute(
             capability: operation_id,
             subject: "skill-management".into(),
             private: false,
+            runtime_scope: handle.runtime_scope.clone(),
         };
         let worker = handle.clone();
         let receipt = handle

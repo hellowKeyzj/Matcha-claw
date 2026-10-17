@@ -20,6 +20,7 @@ import {
   Trash2,
   Unplug,
 } from 'lucide-react';
+import { LoadingState } from '@/components/common/LoadingSpinner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -138,6 +139,7 @@ export interface RemoteFleetDetailPanelProps {
   readonly onActiveTabChange: (tab: RemoteFleetDetailTab) => void;
   readonly showBackAction?: boolean;
   readonly onBackToIndex?: () => void;
+  readonly ready: boolean;
   readonly loading: boolean;
   readonly mutatingAction: string | null;
   readonly connections: readonly RemoteFleetConnectionSummary[];
@@ -345,25 +347,6 @@ function leaseListItems(leases: readonly RemoteFleetLeaseSummary[], t: Translate
     subtitle: lease.expiresAt,
     meta: <RemoteFleetFieldRow label={t('remoteFleet.fields.owner', { defaultValue: 'Owner' })} value={lease.ownerKind} />,
   }));
-}
-
-function LoadingState({ t }: { readonly t: Translate }) {
-  return (
-    <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div className="border-b border-border/70 px-5 py-5">
-        <div className="h-3 w-40 animate-pulse rounded-full bg-muted" />
-        <div className="mt-4 h-8 w-72 max-w-full animate-pulse rounded-lg bg-muted" />
-        <p className="mt-3 text-sm text-muted-foreground">
-          {t('remoteFleet.detail.loadingDescription', { defaultValue: 'Loading the selected Remote Fleet resource.' })}
-        </p>
-      </div>
-      <div className="space-y-5 p-5">
-        <div className="h-16 animate-pulse rounded-xl bg-muted/70" />
-        <div className="h-28 animate-pulse rounded-xl bg-muted/60" />
-        <div className="h-40 animate-pulse rounded-xl bg-muted/50" />
-      </div>
-    </section>
-  );
 }
 
 function EmptyState({
@@ -706,6 +689,7 @@ export function RemoteFleetDetailPanel({
   onActiveTabChange,
   showBackAction = false,
   onBackToIndex,
+  ready,
   loading,
   mutatingAction,
   connections,
@@ -738,19 +722,14 @@ export function RemoteFleetDetailPanel({
 }: RemoteFleetDetailPanelProps) {
   const { t } = useTranslation('common');
   const translate: Translate = t;
-  const inventoryIsEmpty = connections.length === 0
-    && environments.length === 0
-    && managedResources.length === 0
-    && nodes.length === 0
-    && agents.length === 0
-    && runtimes.length === 0
-    && endpoints.length === 0;
-
-  if (loading && !selection.kind && inventoryIsEmpty) {
-    return <LoadingState t={translate} />;
-  }
+  const loadingState = loading ? (
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-5">
+      <LoadingState label={translate('remoteFleet.detail.loadingDescription', { defaultValue: 'Loading the selected Remote Fleet resource.' })} />
+    </section>
+  ) : null;
 
   if (!selection.kind || !selection.id) {
+    if (!ready) return loadingState;
     return (
       <EmptyState
         icon={<Server className="h-5 w-5" />}
@@ -1363,6 +1342,7 @@ export function RemoteFleetDetailPanel({
   }
 
   if (!detail) {
+    if (!ready) return loadingState;
     return (
       <EmptyState
         icon={selection.kind === 'agent' ? <Bot className="h-5 w-5" /> : selection.kind === 'endpoint' ? <Network className="h-5 w-5" /> : selection.kind === 'managedResource' ? <Database className="h-5 w-5" /> : selection.kind === 'environment' ? <Boxes className="h-5 w-5" /> : <Server className="h-5 w-5" />}

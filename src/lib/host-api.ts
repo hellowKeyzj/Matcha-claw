@@ -1,6 +1,10 @@
 import { invokeIpc } from '@/lib/api-client';
 import type { CallReceipt } from '@/types/call-log';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
+import { decodeSecurityCallDetail } from '@/types/call-log/security';
+import { waitForCall } from './call-log-await';
+import { decodeNativePolicyResult, isNativePolicyRequest, type NativePolicyRequest, type NativePolicyResult } from '@/types/native-policy';
+import { createSessionPermissionRequest, decodeSessionPermissionResult, type SessionPermissionGetResult, type SessionPermissionSetResult, type SessionPermissionSelection } from '@/types/session-permission';
 import { decodeWikiCallResult, type WikiCallResult } from '@/types/wiki-call-result';
 import { decodeWikiNavigation, type WikiNavigation } from '@/types/wiki-navigation';
 import { decodeWikiSelectionTask, type WikiSelectionInput, type WikiSelectionSnapshot, type WikiSelectionTask } from '@/types/wiki-selection';
@@ -38,6 +42,7 @@ import {
   agentScope,
   runtimeInstanceScope,
   sessionScope,
+  type AgentScope,
   type RuntimeEndpointRef,
   type RuntimeScope,
   type SessionIdentity,
@@ -50,6 +55,11 @@ import {
   type OpenClawQuestionResolveInput,
   type OpenClawQuestionResolveResult,
 } from '../types/openclaw-question';
+import {
+  decodeSessionQuestionListResult, decodeSessionQuestionRespondResult,
+  type SessionQuestionListInput, type SessionQuestionListResult,
+  type SessionQuestionRespondInput, type SessionQuestionRespondResult,
+} from '../types/session-question';
 import type { SessionSendIntent, SessionGoalUpdateInput, SessionGoalClearInput, SessionGoalOutcome, SessionGoalReceipt } from '../types/session-goal';
 import type { CapabilityTarget } from '../types/desktop/capability-target';
 import type { CapabilityDescriptor } from '../types/desktop/capability-descriptor';
@@ -73,7 +83,6 @@ import {
   type SessionModelState,
   type SessionObservationResult,
   type SessionView,
-  type SessionWireIdentity,
 } from '../types/session/snapshot';
 
 const DEFAULT_HOST_API_PORT = 13210;
@@ -159,6 +168,7 @@ export interface StagedFilePayload {
 
 export interface WorkspaceFileContext {
   workspaceRoot?: string;
+  agentScope?: AgentScope;
 }
 
 export interface ReadBinaryFileResult {
@@ -190,23 +200,6 @@ export interface OpenClawCliCommandPayload {
   error?: string;
 }
 
-export type SessionPermissionMode = 'read-only' | 'guarded' | 'workspace' | 'full';
-export type SessionPermissionSelection = SessionPermissionMode | null;
-
-export type HostSessionPermissionResult = Readonly<{
-  supported: boolean;
-  mode: SessionPermissionSelection;
-  defaultMode?: SessionPermissionMode;
-  pending: boolean;
-  canSelectFull: boolean;
-  options: readonly SessionPermissionMode[];
-  reason?: string;
-}>;
-
-export type HostSessionPermissionSetResult = HostSessionPermissionResult & Readonly<{
-  changed?: boolean;
-}>;
-
 export type HostSessionCatalogItem = SessionCatalogItem;
 
 export type HostSessionLoadResult = SessionView;
@@ -228,8 +221,8 @@ export type HostSessionPromptResult = Readonly<{
   error?: string;
 }>;
 
-function capabilityScopeCacheKey(capabilityId: string, scope?: RuntimeScope): string {
-  return scope ? `${capabilityId}:${buildCapabilityScopeKey(scope)}` : capabilityId;
+function capabilityScopeCacheKey(capabilityId: string, scope: RuntimeScope): string {
+  return `${capabilityId}:${buildCapabilityScopeKey(scope)}`;
 }
 
 function describeCapabilityScope(scope: RuntimeScope): string {
@@ -239,13 +232,11 @@ function describeCapabilityScope(scope: RuntimeScope): string {
 function resolveCapabilityScopeFromList(
   capabilityId: string,
   capabilities: readonly CapabilityDescriptor[],
-  sourceScope?: RuntimeScope,
+  sourceScope: RuntimeScope,
 ): RuntimeScope {
   const available = capabilities.filter((capability) => capability.id === capabilityId && capability.availability === 'available');
-  const matched = sourceScope
-    ? available.find((capability) => buildCapabilityScopeKey(capability.scope) === buildCapabilityScopeKey(sourceScope))
-    : null;
-  const scope = matched?.scope ?? (available.length === 1 ? available[0]!.scope : null);
+  const matched = available.find((capability) => buildCapabilityScopeKey(capability.scope) === buildCapabilityScopeKey(sourceScope));
+  const scope = matched?.scope;
   if (!scope) {
     const scopeHint = sourceScope ? ` for source scope ${describeCapabilityScope(sourceScope)}` : '';
     const availableHint = available.length > 0
@@ -256,7 +247,7 @@ function resolveCapabilityScopeFromList(
   return scope;
 }
 
-async function resolveCapabilityScope(capabilityId: string, sourceScope?: RuntimeScope): Promise<RuntimeScope> {
+async function resolveCapabilityScope(capabilityId: string, sourceScope: RuntimeScope): Promise<RuntimeScope> {
   const cacheKey = capabilityScopeCacheKey(capabilityId, sourceScope);
   const now = Date.now();
   const cached = capabilityScopeCache.get(cacheKey);
@@ -268,8 +259,9 @@ async function resolveCapabilityScope(capabilityId: string, sourceScope?: Runtim
     return await inflight;
   }
   const task = (async () => {
-    const { capabilities } = await hostCapabilitiesList();
-    const scope = resolveCapabilityScopeFromList(capabilityId, capabilities, sourceScope);
+    if (!sourceScope) throw new Error(`Select a RuntimeScope for capability: ${capabilityId}`);
+    const { capability } = await hostCapabilityDescribe({ id: capabilityId, scope: sourceScope });
+    const scope = resolveCapabilityScopeFromList(capabilityId, [capability], sourceScope);
     capabilityScopeCache.set(cacheKey, {
       scope,
       expiresAt: Date.now() + CAPABILITY_SCOPE_CACHE_TTL_MS,
@@ -289,7 +281,7 @@ async function resolveCapabilityScope(capabilityId: string, sourceScope?: Runtim
   }
 }
 
-export async function resolveSingleCapabilityScope(capabilityId: string, sourceScope?: RuntimeScope): Promise<RuntimeScope> {
+export async function resolveSingleCapabilityScope(capabilityId: string, sourceScope: RuntimeScope): Promise<RuntimeScope> {
   return resolveCapabilityScope(capabilityId, sourceScope);
 }
 
@@ -308,11 +300,14 @@ function withSessionTraceHeader(headers: HeadersInit | undefined, traceId: strin
   return record;
 }
 
+type HttpFailureDecoder<T> = (status: number, payload: unknown) => T | null;
+
 function parseUnifiedProxyResponse<T>(
   envelope: HostApiProxyEnvelope,
   path: string,
   method: string,
   startedAt: number,
+  decodeFailure?: HttpFailureDecoder<T>,
 ): T {
   const status = envelope.ok ? envelope.data.status : 502;
   trackUiEvent('hostapi.fetch', {
@@ -322,10 +317,18 @@ function parseUnifiedProxyResponse<T>(
     durationMs: Date.now() - startedAt,
     status,
   });
+  if (envelope.ok && envelope.data.status >= 400 && decodeFailure) {
+    const result = decodeFailure(envelope.data.status, envelope.data.json);
+    if (result !== null) return result;
+  }
   return unwrapHostApiProxyEnvelope<T>(envelope, { method, path }).data;
 }
 
 export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): Promise<T> {
+  return hostApiFetchWithFailure<T>(path, init);
+}
+
+async function hostApiFetchWithFailure<T>(path: string, init?: HostApiRequestInit, decodeFailure?: HttpFailureDecoder<T>): Promise<T> {
   const startedAt = Date.now();
   const method = init?.method || 'GET';
   const signal = init?.signal ?? null;
@@ -403,7 +406,7 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
     startupStage = 'parse';
     if (startupTracing) startupFailureCode = envelope.ok ? 'HTTP_ERROR' : resolveHostApiProxyErrorCode(envelope.error) ?? 'UNAVAILABLE';
     traceStartup('parse.start');
-    const result = parseUnifiedProxyResponse<T>(envelope, path, method, startedAt);
+    const result = parseUnifiedProxyResponse<T>(envelope, path, method, startedAt, decodeFailure);
     traceStartup('parse.end', () => ({ outcome: 'parsed', status: startupStatus }));
     traceStartup('end', () => ({ outcome: 'success', status: startupStatus }));
     return result;
@@ -960,7 +963,7 @@ export async function hostWikiDismissGraphInsight(payload: { projectId?: string;
 
 type WorkspaceFileRequest = {
   endpoint: RuntimeEndpointRef;
-  sessionKey: string;
+  agentId: string;
   relativePath: string;
 };
 
@@ -970,20 +973,12 @@ function workspaceFileInput(
 ): Record<string, unknown> {
   return {
     endpoint: payload.endpoint,
-    sessionKey: payload.sessionKey,
+    agentId: payload.agentId,
     relativePath: payload.relativePath,
     ...(payload.maxBytes === undefined ? {} : { maxBytes: payload.maxBytes }),
     ...(payload.content === undefined ? {} : { content: payload.content }),
     ...(includeHiddenDefault ? { includeHidden: payload.includeHidden ?? false } : {}),
   };
-}
-
-function workspaceFileScope(payload: WorkspaceFileRequest): RuntimeScope {
-  return {
-    kind: 'session',
-    endpoint: payload.endpoint,
-    sessionKey: payload.sessionKey,
-  } as unknown as RuntimeScope;
 }
 
 function workspaceFilePayload(
@@ -993,7 +988,7 @@ function workspaceFilePayload(
   return buildCapabilityExecutePayload({
     id: WORKSPACE_FILE_CAPABILITY_ID,
     operationId,
-    scope: workspaceFileScope(payload),
+    scope: agentScope(payload.endpoint, payload.agentId),
     target: { kind: 'workspace-file' },
     body: workspaceFileInput(payload, operationId === 'files.listDir'),
   });
@@ -1451,6 +1446,40 @@ export async function hostFileStat(
   return typeof result === 'string' ? { ok: false, error: result } : result;
 }
 
+export async function hostNativePolicyCall(request: NativePolicyRequest): Promise<NativePolicyResult> {
+  if (!isNativePolicyRequest(request)) throw new Error('Native policy request is invalid');
+  const { capability } = await hostCapabilityDescribe({ id: request.id, scope: request.scope });
+  if (capability.availability !== 'available' || !capability.operations.some((operation) => operation.id === request.operationId)) {
+    throw new Error('Native policy is not available');
+  }
+  const execute = (value: NativePolicyRequest) => hostCapabilityExecute(value, {
+    decodeFailure: (status, payload) => {
+      const result = decodeNativePolicyResult(payload, value);
+      return result && ((status === 422 && result.outcome === 'rejected')
+        || (status === 501 && result.outcome === 'unsupported')
+        || (status === 503 && (result.outcome === 'unavailable' || result.outcome === 'unknown'))) ? result : null;
+    },
+  });
+  const response = await execute(request);
+  const result = decodeNativePolicyResult(response, request);
+  if (result) return result;
+  if (!request.operationId.endsWith('.set')) throw new Error('Invalid native policy result');
+  const receipt = decodeCallReceipt(response);
+  const call = await waitForCall(receipt, 'security');
+  const detail = decodeSecurityCallDetail(call.detail);
+  if (call.command !== request.operationId || detail?.kind !== 'nativePolicy' || detail.operation !== request.operationId || !detail.outcome) {
+    throw new Error('Invalid native policy call identity');
+  }
+  const resultRequest: NativePolicyRequest = { ...request, operationId: 'nativePolicy.result',
+    input: { callId: receipt.callId, ...(request.input.sessionIdentity ? { sessionIdentity: request.input.sessionIdentity } : {}) } };
+  const terminal = decodeNativePolicyResult(await execute(resultRequest), resultRequest);
+  if (!terminal) throw new Error('Invalid native policy result');
+  const outcome = terminal.outcome === 'confirmed' ? 'confirmed' : terminal.outcome === 'unsupported' ? 'rejected' : terminal.outcome;
+  const status = outcome === 'confirmed' ? 'succeeded' : outcome === 'unavailable' ? 'failed' : outcome;
+  if (terminal.outcome === 'available' || detail.outcome !== outcome || call.status !== status) throw new Error('Invalid native policy call outcome');
+  return terminal;
+}
+
 export async function hostFileListDir(
   payload: WorkspaceFileRequest & WorkspaceFileContext & { includeHidden?: boolean },
   options?: { timeoutMs?: number },
@@ -1582,7 +1611,7 @@ async function hostCapabilityExecute<TResult = unknown>(
     target?: CapabilityTarget | null;
     input?: unknown;
   },
-  options?: SessionCapabilityOptions,
+  options?: SessionCapabilityOptions & { decodeFailure?: HttpFailureDecoder<TResult> },
 ): Promise<TResult> {
   const tracing = !!options?.traceId && isSessionTraceEnabled();
   const serializeStartedAt = tracing ? performance.now() : 0;
@@ -1590,12 +1619,12 @@ async function hostCapabilityExecute<TResult = unknown>(
   if (tracing) logSessionTrace('hostapi.capability.serialized', options?.traceId, () => ({
     serializeElapsedMs: performance.now() - serializeStartedAt, requestLength: body.length,
   }));
-  return hostApiFetch('/api/capabilities/execute', {
+  return hostApiFetchWithFailure('/api/capabilities/execute', {
     method: 'POST',
     body,
     timeoutMs: options?.timeoutMs,
     traceId: options?.traceId,
-  });
+  }, options?.decodeFailure);
 }
 
 export async function hostOpenClawBrowserRequest<TResult = unknown>(
@@ -1663,77 +1692,36 @@ export async function hostOpenClawQuestionResolve(
   return result;
 }
 
+export async function hostSessionQuestionList(input: SessionQuestionListInput): Promise<SessionQuestionListResult> {
+  const result = decodeSessionQuestionListResult(await hostCapabilityExecute({
+    id: 'session.question', operationId: 'sessions.questions.list',
+    scope: sessionScope(input.sessionIdentity), target: { kind: 'session', identity: input.sessionIdentity }, input,
+  }, { decodeFailure: (status, payload) => {
+    const result = decodeSessionQuestionListResult(payload);
+    return status === 503 && result?.outcome === 'unavailable' ? result : null;
+  } }));
+  if (!result) throw new Error('Invalid session question list result');
+  return result;
+}
+
+export async function hostSessionQuestionRespond(input: SessionQuestionRespondInput): Promise<SessionQuestionRespondResult> {
+  const result = decodeSessionQuestionRespondResult(await hostCapabilityExecute({
+    id: 'session.question', operationId: 'sessions.questions.respond',
+    scope: sessionScope(input.sessionIdentity), target: { kind: 'session', identity: input.sessionIdentity }, input,
+  }, { decodeFailure: (status, payload) => {
+    const result = decodeSessionQuestionRespondResult(payload);
+    return status === 503 && result?.outcome === 'unknown' ? result : null;
+  } }));
+  if (!result) throw new Error('Invalid session question respond result');
+  return result;
+}
+
 function bindSessionIdentityInput<T extends { sessionIdentity: SessionIdentity }>(
   payload: T,
 ): T & { sessionKey: string } {
   return {
     ...payload,
     sessionKey: payload.sessionIdentity.sessionKey,
-  };
-}
-
-function sessionWireIdentityScope(identity: SessionWireIdentity): RuntimeScope {
-  return { kind: 'session', identity } as unknown as RuntimeScope;
-}
-
-function isSessionPermissionMode(value: unknown): value is SessionPermissionMode {
-  return value === 'read-only' || value === 'guarded' || value === 'workspace' || value === 'full';
-}
-
-function isSessionPermissionSelection(value: unknown): value is SessionPermissionSelection {
-  return value === null || isSessionPermissionMode(value);
-}
-
-function decodeHostSessionPermissionResult(
-  value: unknown,
-  optionalKeys: readonly string[] = [],
-): HostSessionPermissionResult {
-  if (!isRecord(value)
-    || !hasAllowedKeys(value, ['supported', 'mode', 'pending', 'canSelectFull', 'options'], ['defaultMode', 'reason', ...optionalKeys])
-    || typeof value.supported !== 'boolean'
-    || !isSessionPermissionSelection(value.mode)
-    || typeof value.pending !== 'boolean'
-    || typeof value.canSelectFull !== 'boolean'
-    || !Array.isArray(value.options)
-    || !value.options.every(isSessionPermissionMode)
-    || (value.reason !== undefined && typeof value.reason !== 'string')) {
-    throw new Error('Invalid session permission result');
-  }
-  if (!value.supported) {
-    if (value.mode !== null || value.pending || value.canSelectFull || value.options.length !== 0) {
-      throw new Error('Invalid session permission result');
-    }
-    return {
-      supported: false,
-      mode: null,
-      pending: false,
-      canSelectFull: false,
-      options: [],
-      ...(value.reason === undefined ? {} : { reason: value.reason }),
-    };
-  }
-  if (value.defaultMode !== undefined && !isSessionPermissionMode(value.defaultMode)) {
-    throw new Error('Invalid session permission result');
-  }
-  return {
-    supported: true,
-    mode: value.mode,
-    ...(value.defaultMode === undefined ? {} : { defaultMode: value.defaultMode }),
-    pending: value.pending,
-    canSelectFull: value.canSelectFull,
-    options: value.options,
-    ...(value.reason === undefined ? {} : { reason: value.reason }),
-  };
-}
-
-function decodeHostSessionPermissionSetResult(value: unknown): HostSessionPermissionSetResult {
-  const result = decodeHostSessionPermissionResult(value, ['changed']);
-  if (isRecord(value) && Object.hasOwn(value, 'changed') && typeof value.changed !== 'boolean') {
-    throw new Error('Invalid session permission result');
-  }
-  return {
-    ...result,
-    ...(isRecord(value) && typeof value.changed === 'boolean' ? { changed: value.changed } : {}),
   };
 }
 
@@ -1778,38 +1766,39 @@ export async function hostSessionWindowFetch(
 }
 
 export async function hostSessionPermissionGet(
-  payload: { identity: SessionWireIdentity },
+  payload: { identity: SessionIdentity },
   options?: SessionCapabilityOptions,
-): Promise<HostSessionPermissionResult> {
-  const result = await sessionCapabilityExecute<unknown>({
-    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
-    operationId: 'sessions.permission.get',
-    scope: sessionWireIdentityScope(payload.identity),
-    target: { kind: 'session', identity: payload.identity },
-    payload: {
-      sessionKey: payload.identity.sessionKey,
-      sessionIdentity: payload.identity,
+): Promise<SessionPermissionGetResult> {
+  const request = createSessionPermissionRequest(payload.identity);
+  let failure: SessionPermissionGetResult | null = null;
+  const response = await hostCapabilityExecute<unknown>(request, {
+    ...options, timeoutMs: options?.timeoutMs ?? SESSION_PEER_RPC_TIMEOUT_MS,
+    decodeFailure: (status, value) => {
+      failure = decodeSessionPermissionResult(status, value, request);
+      return failure;
     },
-  }, options);
-  return decodeHostSessionPermissionResult(result);
+  });
+  const result = failure ?? decodeSessionPermissionResult(200, response, request);
+  if (!result) throw new Error('Invalid session permission result');
+  return result;
 }
 
 export async function hostSessionPermissionSet(
-  payload: { identity: SessionWireIdentity; selection: SessionPermissionSelection },
+  payload: { identity: SessionIdentity; selection: SessionPermissionSelection },
   options?: SessionCapabilityOptions,
-): Promise<HostSessionPermissionSetResult> {
-  const result = await sessionCapabilityExecute<unknown>({
-    capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
-    operationId: 'sessions.permission.set',
-    scope: sessionWireIdentityScope(payload.identity),
-    target: { kind: 'session', identity: payload.identity },
-    payload: {
-      sessionKey: payload.identity.sessionKey,
-      sessionIdentity: payload.identity,
-      permissionMode: payload.selection,
+): Promise<SessionPermissionSetResult> {
+  const request = createSessionPermissionRequest(payload.identity, payload.selection);
+  let failure: SessionPermissionSetResult | null = null;
+  const response = await hostCapabilityExecute<unknown>(request, {
+    ...options, timeoutMs: options?.timeoutMs ?? SESSION_PEER_RPC_TIMEOUT_MS,
+    decodeFailure: (status, value) => {
+      failure = decodeSessionPermissionResult(status, value, request);
+      return failure;
     },
-  }, options);
-  return decodeHostSessionPermissionSetResult(result);
+  });
+  const result = failure ?? decodeSessionPermissionResult(200, response, request);
+  if (!result) throw new Error('Invalid session permission result');
+  return result;
 }
 
 export async function hostSessionContentLoad(

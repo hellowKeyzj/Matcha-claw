@@ -22,6 +22,7 @@ use super::{
     delete::{SessionDeleteCommand, SessionDeleteOutcome},
     model_selection::{SessionModelSelectionCommand, SessionModelSelectionOutcome},
     query::SessionQuery,
+    question::{PendingQuestionsCommand, PendingQuestionsOutcome, SessionQuestionCommand, SessionQuestionOutcome},
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
     session_catalog::{SessionCatalogCommand, SessionCatalogOutcome},
@@ -274,6 +275,20 @@ impl SessionHandle {
     ) -> Result<SessionApprovalOutcome, ()> {
         self.request_command(|reply| SessionCommand::Approval { command, reply })
             .await
+    }
+
+    pub async fn pending_questions(
+        &self,
+        command: PendingQuestionsCommand,
+    ) -> Result<PendingQuestionsOutcome, ()> {
+        self.request_query(|reply| SessionQuery::PendingQuestions { command, reply }).await
+    }
+
+    pub async fn respond_to_question(
+        &self,
+        command: SessionQuestionCommand,
+    ) -> Result<SessionQuestionOutcome, ()> {
+        self.request_command(|reply| SessionCommand::Question { command, reply }).await
     }
 
     pub async fn select_model(

@@ -2,6 +2,12 @@ import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { trackUiEvent } from '@/lib/telemetry';
 import type { UsageHistoryEntry, UsageSessionDetailEntry } from '@/pages/Dashboard/usage-history';
+import {
+  runtimeEndpointsEqual,
+  runtimeInstanceScope,
+  runtimeScopeQuery,
+  type RuntimeEndpointRef,
+} from '@/types/desktop/runtime-address';
 
 const DEFAULT_USAGE_FETCH_MAX_ATTEMPTS = 2;
 const USAGE_FETCH_RETRY_DELAY_MS = 1500;
@@ -22,17 +28,14 @@ type UsageSessionDetailState =
   | { status: 'error'; message: string };
 
 interface DashboardUsageState {
+  endpoint: RuntimeEndpointRef | null;
   usageHistory: UsageHistoryEntry[];
   usageHistoryReady: boolean;
   initialLoading: boolean;
   refreshing: boolean;
-  usagePanelReady: boolean;
-  usageChartReady: boolean;
-  usageDetailListReady: boolean;
   sessionDetails: Record<string, UsageSessionDetailState>;
   error: string | null;
-  setUsagePanelReady: (ready: boolean) => void;
-  setUsageVisualizationReady: (ready: boolean) => void;
+  setEndpoint: (endpoint: RuntimeEndpointRef | null) => void;
   loadSessionDetails: (sessionId: string, agentId: string) => Promise<void>;
   refreshUsageHistory: (options?: RefreshUsageHistoryOptions) => Promise<void>;
 }
@@ -43,6 +46,7 @@ let sessionDetailsCache: Record<string, UsageSessionDetailState> = {};
 let inflightUsageRefreshTask: Promise<void> | null = null;
 let inflightUsageRefreshMarker: string | null = null;
 let latestUsageRefreshRequestId = 0;
+let usageScopeGeneration = 0;
 const inflightSessionDetailTasks = new Map<string, Promise<void>>();
 
 function cloneUsageHistory(entries: UsageHistoryEntry[]): UsageHistoryEntry[] {
@@ -81,33 +85,41 @@ function delay(ms: number): Promise<void> {
 }
 
 export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => ({
+  endpoint: null,
   usageHistory: cloneUsageHistory(usageHistoryCache),
   usageHistoryReady: usageHistoryReadyCache,
   initialLoading: !usageHistoryReadyCache,
   refreshing: false,
-  usagePanelReady: usageHistoryReadyCache,
-  usageChartReady: false,
-  usageDetailListReady: false,
   sessionDetails: cloneUsageSessionDetails(sessionDetailsCache),
   error: null,
 
-  setUsagePanelReady: (ready) => {
-    set((state) => (state.usagePanelReady === ready ? state : { usagePanelReady: ready }));
-  },
-
-  setUsageVisualizationReady: (ready) => {
-    set((state) => (
-      state.usageChartReady === ready && state.usageDetailListReady === ready
-        ? state
-        : {
-          usageChartReady: ready,
-          usageDetailListReady: ready,
-        }
-    ));
+  setEndpoint: (endpoint) => {
+    const previous = get().endpoint;
+    if (previous === endpoint || (previous && endpoint && runtimeEndpointsEqual(previous, endpoint))) return;
+    usageScopeGeneration += 1;
+    latestUsageRefreshRequestId += 1;
+    usageHistoryCache = [];
+    usageHistoryReadyCache = false;
+    sessionDetailsCache = {};
+    inflightUsageRefreshTask = null;
+    inflightUsageRefreshMarker = null;
+    inflightSessionDetailTasks.clear();
+    set({
+      endpoint,
+      usageHistory: [],
+      usageHistoryReady: false,
+      initialLoading: false,
+      refreshing: false,
+      sessionDetails: {},
+      error: null,
+    });
   },
 
   loadSessionDetails: async (sessionId, agentId) => {
-    if (!sessionId || !agentId) return;
+    const endpoint = get().endpoint;
+    if (!endpoint || !sessionId || !agentId) return;
+    const scope = runtimeInstanceScope(endpoint);
+    const generation = usageScopeGeneration;
     const current = get().sessionDetails[sessionId];
     if (current?.status === 'loaded' || current?.status === 'loading') {
       const inflight = inflightSessionDetailTasks.get(sessionId);
@@ -126,7 +138,8 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
       });
 
       try {
-        const payload = await hostApiFetch<unknown>(`/api/runtime-host/usage/session-timeseries?sessionId=${encodeURIComponent(sessionId)}&agentId=${encodeURIComponent(agentId)}`);
+        const payload = await hostApiFetch<unknown>(`/api/runtime-host/usage/session-timeseries?sessionId=${encodeURIComponent(sessionId)}&agentId=${encodeURIComponent(agentId)}&${runtimeScopeQuery(scope)}`);
+        if (generation !== usageScopeGeneration) return;
         const detail: UsageSessionDetailState = {
           status: 'loaded',
           entries: normalizeUsageSessionDetails(payload),
@@ -137,6 +150,7 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
           return { sessionDetails: next };
         });
       } catch (error) {
+        if (generation !== usageScopeGeneration) return;
         const message = error instanceof Error ? error.message : String(error);
         const detail: UsageSessionDetailState = { status: 'error', message };
         set((state) => {
@@ -158,6 +172,9 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
   },
 
   refreshUsageHistory: async (options) => {
+    const endpoint = get().endpoint;
+    if (!endpoint) return;
+    const scope = runtimeInstanceScope(endpoint);
     const restartMarker = options?.restartMarker ?? 'na:na';
     const reason = options?.reason ?? 'background_refresh';
     const silent = options?.silent === true;
@@ -222,7 +239,7 @@ export const useDashboardUsageStore = create<DashboardUsageState>((set, get) => 
         });
 
         try {
-          const payload = await hostApiFetch<UsageHistoryEntry[]>('/api/runtime-host/usage/recent');
+          const payload = await hostApiFetch<UsageHistoryEntry[]>(`/api/runtime-host/usage/recent?${runtimeScopeQuery(scope)}`);
           if (requestId !== latestUsageRefreshRequestId) {
             return;
           }

@@ -28,6 +28,7 @@ pub(crate) enum SecurityCallDetail {
     },
     OperationReceipt { correlation: String },
     RuleCatalog,
+    NativePolicy { operation: &'static str, outcome: Option<Effect> },
 }
 
 impl CallDetail for SecurityCallDetail {

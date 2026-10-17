@@ -14,12 +14,40 @@ pub enum SessionPermissionMode {
     Full,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MatchaPermissionMode {
+    Default,
+    AcceptEdits,
+    BypassPermissions,
+    Plan,
+    DontAsk,
+    Auto,
+}
+
+impl MatchaPermissionMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::AcceptEdits => "acceptEdits",
+            Self::BypassPermissions => "bypassPermissions",
+            Self::Plan => "plan",
+            Self::DontAsk => "dontAsk",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionPermissionSelection {
+    OpenClaw(Option<SessionPermissionMode>),
+    MatchaAgent(MatchaPermissionMode),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionPermissionAction {
     Get,
-    Set {
-        permission_mode: Option<SessionPermissionMode>,
-    },
+    Set { selection: SessionPermissionSelection },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +69,15 @@ impl SessionPermissionCommand {
             || !valid_bounded_identity(&session_key, MAX_SESSION_KEY_BYTES)
         {
             return Err(InvalidCommand);
+        }
+        if let SessionPermissionAction::Set { selection } = action {
+            if !matches!(
+                (endpoint, selection),
+                (NativeEndpoint::OpenClawLocal, SessionPermissionSelection::OpenClaw(_))
+                    | (NativeEndpoint::MatchaAgentLocal, SessionPermissionSelection::MatchaAgent(_))
+            ) {
+                return Err(InvalidCommand);
+            }
         }
         Ok(Self {
             endpoint,
@@ -120,6 +157,11 @@ impl SessionPermissionMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionPermissionOutcome {
     Projection(SessionPermissionProjection),
+    MatchaSnapshot { mode: Option<MatchaPermissionMode> },
+    MatchaUpdated { mode: MatchaPermissionMode, applied: bool },
+    Unsupported,
+    Rejected,
+    Unknown,
     Unavailable,
 }
 
@@ -128,10 +170,8 @@ impl SessionPermissionOutcome {
         Self::Projection(projection)
     }
 
-    pub fn unsupported() -> Self {
-        Self::Projection(SessionPermissionProjection::unsupported(
-            "Session permission is unsupported",
-        ))
+    pub const fn unsupported() -> Self {
+        Self::Unsupported
     }
 }
 

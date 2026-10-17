@@ -1,5 +1,5 @@
 use sessions_module::{
-    RuntimeDriverIdentity, SessionHandle,
+    SessionHandle,
     session_history::{
         SessionHistoryCommand, SessionHistoryFailure, SessionHistoryMessage, SessionHistoryOutcome,
         SessionHistoryRole, SessionHistoryView,
@@ -20,6 +20,7 @@ impl CronSessionHistory {
 impl ::cron::CronSessionHistoryPort for CronSessionHistory {
     fn load_cron_session_history<'a>(
         &'a self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
         session_key: String,
         limit: u64,
     ) -> ::cron::ports::CronFuture<
@@ -28,7 +29,7 @@ impl ::cron::CronSessionHistoryPort for CronSessionHistory {
     > {
         Box::pin(async move {
             let Some(command) = SessionHistoryCommand::new(
-                RuntimeDriverIdentity::open_claw().endpoint(),
+                endpoint,
                 session_key,
                 None,
                 Some(limit),

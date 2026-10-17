@@ -19,11 +19,15 @@ import { TaskCenterPageTitle } from '@/components/task-center/page-title';
 import { TaskCenterEmptyState, TaskCenterStatusFilter, TaskCenterSurface, TaskCenterToolbar } from '@/components/task-center/surface';
 import { Select } from '@/components/ui/select';
 import { DatePicker } from '@/components/ui/date-picker';
-import { useGatewayStore } from '@/stores/gateway';
+import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
+import { LoadingState } from '@/components/common/LoadingSpinner';
+import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { buildRuntimeEndpointKey, buildSessionIdentityKey, runtimeEndpointsEqual, type RuntimeEndpointRef, type SessionIdentity } from '@/types/desktop/runtime-address';
+import { buildSessionRecordKey } from '@/stores/chat/session-identity';
 import { useTaskCenterStore } from '@/stores/task-center-store';
-import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
-import { scheduleIdleReady } from '@/lib/idle-ready';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
+import { useIdleReady } from '@/lib/idle-ready';
+import { createErrorResourceState, createIdleResourceState, createLoadingResourceState, createReadyResourceState } from '@/lib/resource-state';
 import { cn } from '@/lib/utils';
 import { Cron } from '@/pages/Cron';
 import { listTaskSnapshot, type Task } from '@/services/openclaw/task-manager-client';
@@ -51,13 +55,16 @@ type TaskCenterScopeFilter =
   | { type: 'team'; teamId: string };
 
 type TaskStatusFilter = 'all' | 'running' | 'waiting' | 'completed' | 'incomplete';
-type ScopedTask = Task & { scopeKey?: string; scopeType?: 'agent' | 'team'; sourceSessionKey?: string; sourceTeamKey?: string };
+type ScopedTask = Task & { scopeKey?: string; scopeType?: 'agent' | 'team'; sourceSessionKey?: string; sourceSessionIdentity?: SessionIdentity; sourceTeamKey?: string };
 type TaskDeleteTarget = {
   id: string;
   viewKey: string;
   sourceSessionKey: string;
+  sourceSessionIdentity: SessionIdentity;
   sourceTeamKey: string | null;
 };
+type TaskQuerySession = { key: string; sessionIdentity: SessionIdentity };
+type TaskTeamState = Pick<ReturnType<typeof useTeamsStore.getState>, 'teams' | 'rolesByTeamId' | 'runListByTeamId' | 'designByRunId'>;
 
 const TASK_POLLING_FAST_MS = 5_000;
 const TASK_POLLING_NORMAL_MS = 20_000;
@@ -68,7 +75,6 @@ const TASK_LIST_SCROLL_THRESHOLD_PX = 160;
 const TASK_LIST_VIRTUAL_THRESHOLD = 50;
 const TASK_LIST_ESTIMATED_ROW_HEIGHT = 96;
 const TASK_LIST_VIRTUAL_OVERSCAN = 6;
-const TASK_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
 
 function resolveTaskCenterTab(value: string | null): TaskCenterTab {
   if (value === 'scheduled') {
@@ -124,8 +130,27 @@ function taskViewKey(task: ScopedTask): string {
   return `${task.scopeKey ?? task.sourceSessionKey ?? task.sourceTeamKey ?? 'task'}:${task.id}`;
 }
 
-function resolveTaskSession(sessions: ReturnType<typeof readSessionsFromState>, sessionKey: string) {
-  return sessions.find((session) => session.key === sessionKey) ?? null;
+function resolveTaskQuerySessions(endpoint: RuntimeEndpointRef | null, filter: TaskCenterScopeFilter, sessions: ReturnType<typeof readSessionsFromState>, teamState: TaskTeamState): TaskQuerySession[] {
+  if (!endpoint) return [];
+  if (filter.type === 'agent') return sessions.filter((session) => session.sessionIdentity.agentId === filter.agentId
+    && runtimeEndpointsEqual(session.sessionIdentity.endpoint, endpoint));
+  const team = teamState.teams.find((team) => team.id === filter.teamId);
+  if (!team) return [];
+  const runId = team.activeRunId;
+  const roles = runId
+    ? teamState.designByRunId[runId]?.snapshot?.roles
+      ?? teamState.runListByTeamId[team.id]?.find((run) => run.runId === runId)?.sessions
+      ?? teamState.rolesByTeamId[team.id]?.filter((role) => role.runId === runId)
+    : teamState.rolesByTeamId[team.id];
+  const role = roles?.find((role) => role.roleId === 'leader') ?? roles?.[0];
+  if (!role || !runtimeEndpointsEqual(role.sessionIdentity.endpoint, endpoint)) return [];
+  const identity = role.sessionIdentity;
+  const session = sessions.find((session) => buildSessionIdentityKey(session.sessionIdentity) === buildSessionIdentityKey(identity));
+  return [{ key: session?.key ?? buildSessionRecordKey(identity), sessionIdentity: identity }];
+}
+
+function taskQueryKey(endpointKey: string, filter: TaskCenterScopeFilter, sessions: TaskQuerySession[]): string {
+  return JSON.stringify([endpointKey, formatFilterValue(filter), sessions.map((session) => [session.key, buildSessionIdentityKey(session.sessionIdentity)]).sort()]);
 }
 
 function isIncompleteTask(task: Task): boolean {
@@ -150,33 +175,31 @@ function formatDateTime(value: number | undefined): string {
 export function TasksPage() {
   const { t, i18n } = useTranslation('tasks');
   const [searchParams, setSearchParams] = useSearchParams();
-  const gatewayStatus = useGatewayStore((state) => state.status);
-  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
-  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
-  const currentAgentId = useChatStore((state) => {
-    const meta = state.loadedSessions[state.currentSessionKey]?.meta;
-    return meta?.agentId ?? meta?.sessionIdentity?.agentId ?? 'main';
-  });
+  const selectedEndpoint = useRuntimeEndpointsStore(selectManagementEndpoint);
+  const endpointKey = selectedEndpoint ? buildRuntimeEndpointKey(selectedEndpoint) : '';
+  const runtime = useRuntimeEndpointsStore(selectManagementRuntime);
+  const gatewayOperational = Boolean(runtime && isRuntimeEndpointReady(runtime) && supportsRuntimeEndpointCapabilityFamily(runtime, 'task'));
+  const gatewayPreparing = Boolean(runtime && isRuntimeEndpointStarting(runtime));
   const sessions = useChatStore((state) => readSessionsFromState(state));
-  const sessionsLoadedOnce = useChatStore((state) => state.sessionCatalogStatus.hasLoadedOnce);
+  const sessionCatalogStatus = useChatStore((state) => state.sessionCatalogStatus);
+  const endpointSessionsLoadedAt = useChatStore((state) => state.sessionCatalogLoadedAtByRuntimeScopeKey[endpointKey]);
   const loadSessions = useChatStore((state) => state.loadSessions);
   const teams = useTeamsStore((state) => state.teams);
-  const {
-    initialLoading,
-    refreshing,
-    mutating,
-    initialized,
-    error,
-    init,
-    refreshTasks,
-    deleteTaskById,
-  } = useTaskCenterStore();
+  const rolesByTeamId = useTeamsStore((state) => state.rolesByTeamId);
+  const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
+  const designByRunId = useTeamsStore((state) => state.designByRunId);
+  const deleteTaskById = useTaskCenterStore((state) => state.deleteTaskById);
+  const [mutating, setMutating] = useState(false);
 
+  const endpointSessions = useMemo(() => sessions.filter((session) => selectedEndpoint
+    && runtimeEndpointsEqual(session.sessionIdentity.endpoint, selectedEndpoint)), [selectedEndpoint, sessions]);
+  const agentIds = useMemo(() => uniqueSorted(runtime?.agents.map((agent) => agent.agentId) ?? []), [runtime?.agents]);
+  const preferredAgentId = runtime && agentIds.includes(runtime.defaultAgentId) ? runtime.defaultAgentId : agentIds[0] ?? '';
   const [scopeFilter, setScopeFilter] = useState<TaskCenterScopeFilter>(() => ({
     type: 'agent',
-    agentId: currentAgentId,
+    agentId: preferredAgentId,
   }));
-  const [scopedTasks, setScopedTasks] = useState<ScopedTask[]>([]);
+  const [scopedTasks, setScopedTasks] = useState(() => createIdleResourceState<ScopedTask[]>([]));
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [statsWindow, setStatsWindow] = useState<TaskStatsWindow>('all');
   const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>('all');
@@ -184,24 +207,52 @@ export function TasksPage() {
   const [dateTo, setDateTo] = useState('');
   const [statsNowMs, setStatsNowMs] = useState<number>(() => Date.now());
   const [visibleTaskCount, setVisibleTaskCount] = useState(INITIAL_TASK_LIST_BATCH);
-  const agentIds = useMemo(() => {
-    return uniqueSorted([
-      currentAgentId,
-      ...sessions.map((session) => session.agentId ?? ''),
-    ]);
-  }, [currentAgentId, sessions]);
-  const tasks = scopedTasks;
-  const [taskHeavyContentReady, setTaskHeavyContentReady] = useState(() => tasks.length > 0 || initialized);
+  const tasks = scopedTasks.data;
+  const taskContentReady = useIdleReady();
   const [taskToDelete, setTaskToDelete] = useState<TaskDeleteTarget | null>(null);
 
   const [taskListScrollTop, setTaskListScrollTop] = useState(0);
   const [taskListViewportHeight, setTaskListViewportHeight] = useState(0);
   const scopedTasksRequestSeqRef = useRef(0);
-  const activeScopeRef = useRef<TaskCenterScopeFilter | null>(null);
+  const querySessions = useMemo(() => resolveTaskQuerySessions(selectedEndpoint, scopeFilter, sessions, {
+    teams, rolesByTeamId, runListByTeamId, designByRunId,
+  }), [selectedEndpoint, scopeFilter, sessions, teams, rolesByTeamId, runListByTeamId, designByRunId]);
+  const queryKey = taskQueryKey(endpointKey, scopeFilter, querySessions);
+  const agentAvailable = scopeFilter.type !== 'agent' || agentIds.includes(scopeFilter.agentId);
+  const requestContext = useMemo(() => ({ queryKey, agentAvailable }), [queryKey, agentAvailable]);
+  const activeScopeRef = useRef<typeof requestContext | null>(null);
   useLayoutEffect(() => {
-    activeScopeRef.current = scopeFilter;
-    return () => { activeScopeRef.current = null; };
-  }, [scopeFilter]);
+    activeScopeRef.current = requestContext;
+    scopedTasksRequestSeqRef.current += 1;
+    setScopedTasks(createIdleResourceState([]));
+    setTaskToDelete(null);
+    setSelectedTaskId(null);
+    setMutating(false);
+    return () => { activeScopeRef.current = null; scopedTasksRequestSeqRef.current += 1; };
+  }, [requestContext]);
+  const ownsContext = useCallback(() => {
+    if (activeScopeRef.current !== requestContext) return false;
+    const runtimeState = useRuntimeEndpointsStore.getState();
+    const endpoint = selectManagementEndpoint(runtimeState);
+    const currentRuntime = selectManagementRuntime(runtimeState);
+    if (!endpoint || buildRuntimeEndpointKey(endpoint) !== endpointKey || !currentRuntime
+      || !isRuntimeEndpointReady(currentRuntime) || !supportsRuntimeEndpointCapabilityFamily(currentRuntime, 'task')) return false;
+    const currentSessions = resolveTaskQuerySessions(endpoint, scopeFilter, readSessionsFromState(useChatStore.getState()), useTeamsStore.getState());
+    return taskQueryKey(endpointKey, scopeFilter, currentSessions) === requestContext.queryKey
+      && (scopeFilter.type !== 'agent' || currentRuntime.agents.some((agent) => agent.agentId === scopeFilter.agentId)) === requestContext.agentAvailable;
+  }, [endpointKey, requestContext, scopeFilter]);
+  const previousEndpointKeyRef = useRef(endpointKey);
+  const manualScopeFilterRef = useRef(false);
+  useEffect(() => {
+    const endpointChanged = previousEndpointKeyRef.current !== endpointKey;
+    previousEndpointKeyRef.current = endpointKey;
+    if (endpointChanged) manualScopeFilterRef.current = false;
+    setScopeFilter((current) => {
+      if (!endpointChanged && (manualScopeFilterRef.current || current.type === 'team' || agentIds.includes(current.agentId))) return current;
+      return current.type === 'agent' && current.agentId === preferredAgentId
+        ? current : { type: 'agent', agentId: preferredAgentId };
+    });
+  }, [agentIds, endpointKey, preferredAgentId]);
   const taskListScrollRef = useRef<HTMLDivElement | null>(null);
   const getTaskListScrollElement = useCallback(() => {
     if (taskListScrollRef.current?.isConnected) return taskListScrollRef.current;
@@ -210,115 +261,93 @@ export function TasksPage() {
     return element;
   }, []);
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
-  const gatewayOperational = isGatewayOperational(gatewayStatus);
-  const gatewayPreparing = isGatewayPreparing(gatewayStatus, gatewayInitialized);
-  const manualRefreshBusy = refreshing || mutating;
-  const showInitialLoading = initialLoading;
-  const showRefreshingHint = useDelayedFlag(refreshing && initialized, 180);
-  const tasksForView = useMemo(
-    () => (taskHeavyContentReady ? tasks : []),
-    [taskHeavyContentReady, tasks],
-  );
-
-  useEffect(() => {
-    const currentSession = resolveTaskSession(sessions, currentSessionKey);
-    if (!initialized) {
-      void init(currentSession ? {
-        recordKey: currentSession.key,
-        sessionIdentity: currentSession.sessionIdentity,
-      } : undefined);
-      return;
-    }
-    if (!currentSession) {
-      return;
-    }
-    void refreshTasks({
-      sessionKey: currentSession.key,
-      sessionIdentity: currentSession.sessionIdentity,
-      silent: true,
-    });
-  }, [currentSessionKey, init, initialized, refreshTasks, sessions]);
+  const scopedTasksLoading = scopedTasks.status === 'loading';
+  const scopedTasksError = scopedTasks.error ?? (scopeFilter.type === 'agent' && endpointSessionsLoadedAt === undefined ? sessionCatalogStatus.error : null);
+  const manualRefreshBusy = mutating || scopedTasksLoading || sessionCatalogStatus.status === 'loading';
+  const showInitialLoading = gatewayOperational && !scopedTasks.hasLoadedOnce
+    && !scopedTasksError && (scopedTasks.status === 'idle' || scopedTasksLoading);
+  const showRefreshingHint = useDelayedFlag(scopedTasksLoading && scopedTasks.hasLoadedOnce, 180);
 
   const loadScopedTasks = useCallback(async () => {
-    if (activeScopeRef.current !== scopeFilter) return;
-    const requestSeq = scopedTasksRequestSeqRef.current + 1;
-    scopedTasksRequestSeqRef.current = requestSeq;
-    const isCurrentRequest = () => activeScopeRef.current === scopeFilter
-      && scopedTasksRequestSeqRef.current === requestSeq;
-    const clearScopedTasksIfCurrent = () => {
-      if (isCurrentRequest()) {
-        setScopedTasks([]);
-      }
-    };
+    if (!ownsContext() || !gatewayOperational) return;
+    const requestSeq = ++scopedTasksRequestSeqRef.current;
+    const isCurrentRequest = () => ownsContext() && scopedTasksRequestSeqRef.current === requestSeq;
+    setScopedTasks((previous) => isCurrentRequest() ? createLoadingResourceState(previous) : previous);
 
     try {
       const chatState = useChatStore.getState();
-      const activeSessionKey = chatState.currentSessionKey;
-      const activeSessions = readSessionsFromState(chatState);
-      if (!activeSessionKey) {
-        clearScopedTasksIfCurrent();
-        return;
-      }
-      const activeSession = resolveTaskSession(activeSessions, activeSessionKey);
-      if (!activeSession) {
-        clearScopedTasksIfCurrent();
-        return;
-      }
+      const scopedSessions = resolveTaskQuerySessions(selectedEndpoint, scopeFilter, readSessionsFromState(chatState), useTeamsStore.getState());
       if (scopeFilter.type === 'team') {
+        const activeSession = scopedSessions[0];
+        if (!activeSession) throw new Error('The selected Team has no session identity in this runtime; team tasks cannot be queried');
         const snapshot = await listTaskSnapshot({ sessionKey: activeSession.sessionIdentity.sessionKey, sessionIdentity: activeSession.sessionIdentity, teamKey: scopeFilter.teamId });
-        if (!isCurrentRequest()) {
-          return;
-        }
-        setScopedTasks(snapshot.tasks.map((task) => ({
+        if (!isCurrentRequest()) return;
+        setScopedTasks((previous) => isCurrentRequest() ? createReadyResourceState(snapshot.tasks.map((task) => ({
           ...task,
           scopeKey: snapshot.scope?.key ?? `team:${scopeFilter.teamId}`,
-          scopeType: 'team',
+          scopeType: 'team' as const,
           sourceSessionKey: activeSession.key,
+          sourceSessionIdentity: activeSession.sessionIdentity,
           sourceTeamKey: scopeFilter.teamId,
-        })));
+        }))) : previous);
         return;
       }
-      const scopedSessions = activeSessions.filter((session) => session.agentId === scopeFilter.agentId);
-      const uniqueSessionKeys = uniqueSorted(scopedSessions.map((session) => session.key));
-      const sessionByKey = new Map(scopedSessions.map((session) => [session.key, session]));
-      const snapshots = await Promise.all(uniqueSessionKeys.map(async (sessionKey) => {
-        const session = sessionByKey.get(sessionKey)!;
-        return {
-          sessionKey,
-          snapshot: await listTaskSnapshot({ sessionKey: session.sessionIdentity.sessionKey, sessionIdentity: session.sessionIdentity }),
-        };
-      }));
-      if (!isCurrentRequest()) {
-        return;
+      if (!agentAvailable) throw new Error('The selected Agent is not available in this runtime');
+      if (scopedSessions.length === 0 && (chatState.sessionCatalogStatus.error
+        || chatState.sessionCatalogLoadedAtByRuntimeScopeKey[endpointKey] === undefined)) {
+        throw new Error(chatState.sessionCatalogStatus.error ?? 'Session catalog is not available for the selected runtime');
       }
-      setScopedTasks(snapshots.flatMap(({ sessionKey, snapshot }) => snapshot.tasks.map((task) => ({
-        ...task,
-        scopeKey: snapshot.scope?.key ?? sessionKey,
-        scopeType: 'agent' as const,
-        sourceSessionKey: sessionKey,
-      }))));
-    } catch {
-      clearScopedTasksIfCurrent();
+      const results = await Promise.allSettled(scopedSessions.map(async (session) => ({
+        sessionKey: session.key,
+        sessionIdentity: session.sessionIdentity,
+        snapshot: await listTaskSnapshot({ sessionKey: session.sessionIdentity.sessionKey, sessionIdentity: session.sessionIdentity, teamKey: '' }),
+      })));
+      if (!isCurrentRequest()) return;
+      const failedSessionKeys = new Set<string>();
+      const failures: string[] = [];
+      const loadedTasks = results.flatMap<ScopedTask>((result, index) => {
+        if (result.status === 'rejected') {
+          failedSessionKeys.add(scopedSessions[index].key);
+          failures.push(`${scopedSessions[index].sessionIdentity.sessionKey}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+          return [];
+        }
+        const { sessionKey, sessionIdentity, snapshot } = result.value;
+        return snapshot.tasks.map((task) => ({
+          ...task,
+          scopeKey: snapshot.scope?.key ?? sessionKey,
+          scopeType: 'agent',
+          sourceSessionKey: sessionKey,
+          sourceSessionIdentity: sessionIdentity,
+        }));
+      });
+      setScopedTasks((previous) => {
+        if (!isCurrentRequest()) return previous;
+        const data = [...loadedTasks, ...previous.data.filter((task) => task.sourceSessionKey && failedSessionKeys.has(task.sourceSessionKey))];
+        return failures.length > 0
+          ? createErrorResourceState({ ...previous, data, hasLoadedOnce: previous.hasLoadedOnce || results.some((result) => result.status === 'fulfilled') }, failures.join('\n'))
+          : createReadyResourceState(data);
+      });
+    } catch (error) {
+      if (!isCurrentRequest()) return;
+      setScopedTasks((previous) => isCurrentRequest()
+        ? createErrorResourceState(previous, error instanceof Error ? error.message : String(error)) : previous);
     }
-  }, [scopeFilter]);
+  }, [agentAvailable, endpointKey, gatewayOperational, ownsContext, scopeFilter, selectedEndpoint]);
 
   useEffect(() => {
-    if (!sessionsLoadedOnce) {
-      void loadSessions();
-    }
-  }, [loadSessions, sessionsLoadedOnce]);
+    if (gatewayOperational) void loadSessions();
+  }, [endpointKey, gatewayOperational, loadSessions]);
 
   useEffect(() => {
-    if (!sessionsLoadedOnce) {
-      return;
-    }
+    if (scopeFilter.type === 'agent' && agentAvailable && endpointSessionsLoadedAt === undefined && endpointSessions.length === 0
+      && (sessionCatalogStatus.status === 'idle' || sessionCatalogStatus.status === 'loading')) return;
     const rafId = window.requestAnimationFrame(() => {
       void loadScopedTasks();
     });
     return () => {
       window.cancelAnimationFrame(rafId);
     };
-  }, [loadScopedTasks, sessions, sessionsLoadedOnce]);
+  }, [agentAvailable, endpointSessions.length, endpointSessionsLoadedAt, loadScopedTasks, scopeFilter.type, sessionCatalogStatus.status]);
 
   useEffect(() => {
     const updateNow = () => {
@@ -345,28 +374,6 @@ export function TasksPage() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
-
-  useEffect(() => {
-    if (taskHeavyContentReady) {
-      return;
-    }
-    if (initialized && tasks.length <= TASK_LIST_VIRTUAL_THRESHOLD) {
-      const rafId = window.requestAnimationFrame(() => {
-        setTaskHeavyContentReady(true);
-      });
-      return () => {
-        window.cancelAnimationFrame(rafId);
-      };
-    }
-    const cancel = scheduleIdleReady(() => {
-      setTaskHeavyContentReady(true);
-    }, {
-      idleTimeoutMs: TASK_HEAVY_CONTENT_IDLE_TIMEOUT_MS,
-      fallbackDelayMs: 120,
-      useAnimationFrame: true,
-    });
-    return cancel;
-  }, [initialized, taskHeavyContentReady, tasks.length]);
 
   const hasActiveTasks = useMemo(
     () => tasks.some((task) => task.status === 'pending' || task.status === 'in_progress'),
@@ -401,10 +408,8 @@ export function TasksPage() {
       }
       clearTimer();
       timer = window.setTimeout(() => {
-        void refreshTasks({ silent: true }).finally(() => {
-          void loadScopedTasks().finally(() => {
-            scheduleNext();
-          });
+        void loadScopedTasks().finally(() => {
+          scheduleNext();
         });
       }, resolveDelay());
     };
@@ -415,10 +420,8 @@ export function TasksPage() {
       }
       clearTimer();
       if (document.visibilityState === 'visible') {
-        void refreshTasks({ silent: true }).finally(() => {
-          void loadScopedTasks().finally(() => {
-            scheduleNext();
-          });
+        void loadScopedTasks().finally(() => {
+          scheduleNext();
         });
         return;
       }
@@ -432,11 +435,11 @@ export function TasksPage() {
       clearTimer();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [activeTab, gatewayOperational, hasActiveTasks, loadScopedTasks, refreshTasks]);
+  }, [activeTab, gatewayOperational, hasActiveTasks, loadScopedTasks]);
 
   const dateRange = useMemo(() => resolveDateRangeMs(dateFrom, dateTo), [dateFrom, dateTo]);
   const longTasks = useMemo(() => {
-    return tasksForView.filter((task) => {
+    return tasks.filter((task) => {
       if (dateRange.startMs == null && dateRange.endMs == null) {
         return true;
       }
@@ -452,7 +455,7 @@ export function TasksPage() {
       }
       return true;
     });
-  }, [dateRange.endMs, dateRange.startMs, tasksForView]);
+  }, [dateRange.endMs, dateRange.startMs, tasks]);
   const statsTasks = useMemo(() => {
     if (statsWindow === 'all' || statsWindow === 'custom') {
       return longTasks;
@@ -468,8 +471,8 @@ export function TasksPage() {
     () => statsTasks.filter((task) => matchesStatusFilter(task, statusFilter)),
     [statsTasks, statusFilter],
   );
-  const shouldUseVirtualTaskList = taskHeavyContentReady && filteredTasks.length > TASK_LIST_VIRTUAL_THRESHOLD;
-  const showTaskContent = !showInitialLoading && taskHeavyContentReady;
+  const shouldUseVirtualTaskList = filteredTasks.length > TASK_LIST_VIRTUAL_THRESHOLD;
+  const showTaskContent = !showInitialLoading && taskContentReady;
   const taskListResetKey = `${formatFilterValue(scopeFilter)}:${statsWindow}:${dateFrom}:${dateTo}:${statusFilter}:${filteredTasks.length === 0 ? 'empty' : 'filled'}`;
   useEffect(() => {
     const rafId = window.requestAnimationFrame(() => {
@@ -572,7 +575,7 @@ export function TasksPage() {
     if (shouldUseVirtualTaskList) {
       return;
     }
-    if (activeTab !== 'long' || !taskHeavyContentReady) {
+    if (activeTab !== 'long' || !showTaskContent) {
       return;
     }
     if (visibleTaskCount >= filteredTasks.length) {
@@ -593,7 +596,7 @@ export function TasksPage() {
     filteredTasks.length,
     getTaskListScrollElement,
     shouldUseVirtualTaskList,
-    taskHeavyContentReady,
+    showTaskContent,
     visibleTaskCount,
     visibleTasks.length,
   ]);
@@ -668,43 +671,48 @@ export function TasksPage() {
   const incompleteCount = taskStatusSummary.incomplete;
 
   const handleDeleteTask = (task: ScopedTask) => {
-    if (!task.id || !task.sourceSessionKey) {
+    if (!task.id || !task.sourceSessionKey || !task.sourceSessionIdentity || !ownsContext()) {
       return;
     }
     setTaskToDelete({
       id: task.id,
       viewKey: taskViewKey(task),
       sourceSessionKey: task.sourceSessionKey,
+      sourceSessionIdentity: task.sourceSessionIdentity,
       sourceTeamKey: task.sourceTeamKey ?? null,
     });
   };
 
   const confirmDeleteTask = async () => {
     const deleteTarget = taskToDelete;
-    if (!deleteTarget) {
-      return;
+    if (!deleteTarget || !ownsContext()) return;
+    const sourceIdentityKey = buildSessionIdentityKey(deleteTarget.sourceSessionIdentity);
+    if (!querySessions.some((session) => session.key === deleteTarget.sourceSessionKey
+      && buildSessionIdentityKey(session.sessionIdentity) === sourceIdentityKey)) return;
+    setMutating(true);
+    try {
+      await deleteTaskById({
+        taskId: deleteTarget.id,
+        sessionKey: deleteTarget.sourceSessionKey,
+        sessionIdentity: deleteTarget.sourceSessionIdentity,
+        teamKey: deleteTarget.sourceTeamKey ?? '',
+      });
+      if (!ownsContext()) return;
+      scopedTasksRequestSeqRef.current += 1;
+      const next = useTaskCenterStore.getState();
+      if (next.error) {
+        toast.error(next.error);
+        return;
+      }
+      toast.success(t('toast.deleted'));
+      setScopedTasks((prev) => ({ ...prev, data: prev.data.filter((task) => taskViewKey(task) !== deleteTarget.viewKey) }));
+      if (selectedTaskId === deleteTarget.viewKey) {
+        setSelectedTaskId(null);
+      }
+      setTaskToDelete(null);
+    } finally {
+      if (ownsContext()) setMutating(false);
     }
-    const sourceSession = resolveTaskSession(sessions, deleteTarget.sourceSessionKey);
-    if (!sourceSession) {
-      return;
-    }
-    await deleteTaskById({
-      taskId: deleteTarget.id,
-      sessionKey: sourceSession.key,
-      sessionIdentity: sourceSession.sessionIdentity,
-      ...(deleteTarget.sourceTeamKey ? { teamKey: deleteTarget.sourceTeamKey } : {}),
-    });
-    const next = useTaskCenterStore.getState();
-    if (next.error) {
-      toast.error(next.error);
-      return;
-    }
-    toast.success(t('toast.deleted'));
-    setScopedTasks((prev) => prev.filter((task) => taskViewKey(task) !== deleteTarget.viewKey));
-    if (selectedTaskId === deleteTarget.viewKey) {
-      setSelectedTaskId(null);
-    }
-    setTaskToDelete(null);
   };
 
   const handleTabChange = (nextValue: string) => {
@@ -729,6 +737,7 @@ export function TasksPage() {
     <section className="space-y-6">
       <header className="flex items-center justify-between">
         <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
+        <RuntimeScopeSelector />
       </header>
       <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-4">
         <TabsList className="grid w-full max-w-sm grid-cols-2">
@@ -745,6 +754,7 @@ export function TasksPage() {
                   onChange={(event) => {
                     const next = parseFilterValue(event.target.value);
                     if (next) {
+                      manualScopeFilterRef.current = true;
                       setScopeFilter(next);
                       setSelectedTaskId(null);
                     }
@@ -752,6 +762,9 @@ export function TasksPage() {
                   className="h-9 w-auto max-w-44 py-1 pl-3 pr-9 text-sm"
                   aria-label={t('scope.label', { defaultValue: 'Scope' })}
                 >
+                  {scopeFilter.type === 'agent' && !agentIds.includes(scopeFilter.agentId) && (
+                    <option value={formatFilterValue(scopeFilter)} disabled>{scopeFilter.agentId || t('common:runtimeScope.selectAgent')}</option>
+                  )}
                   {agentIds.map((agentId) => (
                     <option key={`agent:${agentId}`} value={`agent:${agentId}`}>
                       Agent: {agentId}
@@ -801,41 +814,41 @@ export function TasksPage() {
                   aria-label={t('refresh')}
                   title={t('refresh')}
                   onClick={() => {
-                    void loadSessions().then(() => loadScopedTasks());
+                    if (ownsContext()) void loadSessions().then(() => loadScopedTasks());
                   }}
-                  disabled={manualRefreshBusy}
+                  disabled={!gatewayOperational || manualRefreshBusy}
                 >
-                  <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} aria-hidden="true" />
+                  <RefreshCw className={cn('h-4 w-4', scopedTasksLoading && 'animate-spin')} aria-hidden="true" />
                 </Button>
               </>
             )}
           >
             <TaskCenterStatusFilter
-              count={statsTasks.length}
+              count={scopedTasks.hasLoadedOnce ? statsTasks.length : undefined}
               label={t('cron:filters.all')}
               active={statusFilter === 'all'}
               onClick={() => setStatusFilter('all')}
             />
             <TaskCenterStatusFilter
-              count={runningCount}
+              count={scopedTasks.hasLoadedOnce ? runningCount : undefined}
               label={t('stats.running')}
               active={statusFilter === 'running'}
               onClick={() => setStatusFilter((prev) => (prev === 'running' ? 'all' : 'running'))}
             />
             <TaskCenterStatusFilter
-              count={waitingCount}
+              count={scopedTasks.hasLoadedOnce ? waitingCount : undefined}
               label={t('stats.waiting')}
               active={statusFilter === 'waiting'}
               onClick={() => setStatusFilter((prev) => (prev === 'waiting' ? 'all' : 'waiting'))}
             />
             <TaskCenterStatusFilter
-              count={completedCount}
+              count={scopedTasks.hasLoadedOnce ? completedCount : undefined}
               label={t('stats.completed')}
               active={statusFilter === 'completed'}
               onClick={() => setStatusFilter((prev) => (prev === 'completed' ? 'all' : 'completed'))}
             />
             <TaskCenterStatusFilter
-              count={incompleteCount}
+              count={scopedTasks.hasLoadedOnce ? incompleteCount : undefined}
               label={t('stats.incomplete')}
               active={statusFilter === 'incomplete'}
               onClick={() => setStatusFilter((prev) => (prev === 'incomplete' ? 'all' : 'incomplete'))}
@@ -870,7 +883,8 @@ export function TasksPage() {
                 gatewayPreparing ? 'text-muted-foreground' : 'text-yellow-700 dark:text-yellow-300',
               )}>
                 {gatewayPreparing ? <Loader2 className="h-5 w-5 animate-spin" /> : <AlertCircle className="h-5 w-5" />}
-                {gatewayPreparing ? t('gatewayPreparing') : t('gatewayNotRunning')}
+                {!selectedEndpoint ? t('common:runtimeScope.selectRuntime')
+                  : t(gatewayPreparing ? 'common:runtimeScope.starting' : 'common:runtimeScope.unavailable', { runtime: runtime?.displayName })}
               </CardContent>
             </Card>
           )}
@@ -882,33 +896,20 @@ export function TasksPage() {
             </div>
           )}
 
-          {error && (
-            <Card className="border-destructive">
-              <CardContent className="py-4 text-destructive">{error}</CardContent>
+          {scopedTasksError && (
+            <Card className="border-destructive" role="alert">
+              <CardContent className="whitespace-pre-line py-4 text-destructive">{scopedTasksError}</CardContent>
             </Card>
           )}
 
-          <TaskCenterSurface>
-            {!showTaskContent ? (
-              <div className="grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">
-                <div className="h-[70vh] overflow-hidden border-b bg-card lg:border-b-0 lg:border-r">
-                  {Array.from({ length: 6 }).map((_, index) => (
-                    <div key={`task-initial-placeholder-${index}`} className="h-24 border-b px-4 py-3">
-                      <div className="h-4 w-4/5 animate-pulse rounded bg-muted" />
-                      <div className="mt-3 h-2 w-full animate-pulse rounded bg-muted" />
-                      <div className="mt-2 h-2 w-16 animate-pulse rounded bg-muted" />
-                    </div>
-                  ))}
-                </div>
-                <div className="h-[70vh] space-y-3 bg-card p-5">
-                  <div className="h-4 w-40 animate-pulse rounded bg-muted" />
-                  <div className="h-16 w-full animate-pulse rounded bg-muted" />
-                  <div className="h-20 w-full animate-pulse rounded bg-muted" />
-                </div>
-              </div>
-            ) : filteredTasks.length === 0 ? (
-              <TaskCenterEmptyState icon={ListTodo} title={t('empty')} />
-            ) : (
+          {showInitialLoading || (scopedTasks.hasLoadedOnce && !taskContentReady) ? (
+            <LoadingState label={t('common:status.loading')} />
+          ) : !scopedTasks.hasLoadedOnce ? null : filteredTasks.length === 0 ? (
+            <TaskCenterSurface>
+              <TaskCenterEmptyState icon={scopedTasksError ? AlertCircle : ListTodo} title={scopedTasksError ? t('common:status.error') : t('empty')} />
+            </TaskCenterSurface>
+          ) : (
+            <TaskCenterSurface>
               <div className="grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">
                 <div className="flex h-[70vh] min-w-0 flex-col overflow-hidden border-b bg-card lg:border-b-0 lg:border-r">
                   <CardHeader className="shrink-0 border-b px-4 py-4">
@@ -1048,8 +1049,8 @@ export function TasksPage() {
                   </StableScrollArea>
                 </div>
               </div>
-            )}
-          </TaskCenterSurface>
+            </TaskCenterSurface>
+          )}
         </TabsContent>
 
         <TabsContent value="scheduled" className="mt-0">

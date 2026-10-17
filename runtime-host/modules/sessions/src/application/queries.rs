@@ -6,6 +6,7 @@ use super::{
     abort::{SessionAbortCommand, SessionAbortOutcome},
     approval::{PendingApprovalsCommand, PendingApprovalsOutcome},
     commands::{session_identity_lane_key, session_lane_key},
+    question::{PendingQuestionsCommand, PendingQuestionsOutcome},
     session_catalog::{SessionCatalogCommand, SessionCatalogOutcome},
     session_history::{SessionHistoryCommand, SessionHistoryOutcome},
     state::SessionView,
@@ -52,6 +53,10 @@ pub enum SessionQuery {
         command: PendingApprovalsCommand,
         reply: oneshot::Sender<PendingApprovalsOutcome>,
     },
+    PendingQuestions {
+        command: PendingQuestionsCommand,
+        reply: oneshot::Sender<PendingQuestionsOutcome>,
+    },
     Timeline {
         command: SessionTimelineCommand,
         reply: oneshot::Sender<SessionTimelineOutcome>,
@@ -95,6 +100,9 @@ impl SessionQuery {
             Self::PendingApprovals { reply, .. } => {
                 let _ = reply.send(PendingApprovalsOutcome::Unavailable);
             }
+            Self::PendingQuestions { reply, .. } => {
+                let _ = reply.send(PendingQuestionsOutcome::Unavailable);
+            }
             Self::Timeline { reply, .. } => {
                 let _ = reply.send(SessionTimelineOutcome::unavailable(
                     super::timeline::UnavailableReason::RuntimeUnavailable,
@@ -127,6 +135,9 @@ impl SessionQuery {
             | Self::ListSessions { .. }
             | Self::GetSession { .. } => QueryRoute::Direct,
             Self::Observe { command, .. } => {
+                QueryRoute::Keyed(session_identity_lane_key(&command.identity))
+            }
+            Self::PendingQuestions { command, .. } => {
                 QueryRoute::Keyed(session_identity_lane_key(&command.identity))
             }
             Self::PendingApprovals { command, .. } => QueryRoute::Keyed(session_lane_key(

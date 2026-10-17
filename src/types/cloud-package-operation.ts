@@ -1,6 +1,7 @@
 import type { CallReceipt } from './call-log';
 import { decodeCallReceipt } from './call-log/receipt';
 import type { CloudPackageVersion } from './cloud-package';
+import type { AgentScope, RuntimeInstanceScope } from './desktop/runtime-address';
 
 export type CloudPackageOperationKind = 'download' | 'install' | 'uploadSealedAgent' | 'confirmSealedSkillUpload';
 export type CloudPackageDownloadInput = Readonly<{
@@ -13,9 +14,9 @@ export type CloudPackageDownloadInput = Readonly<{
 }>;
 export type CloudPackageOperationRequests = {
   download: CloudPackageDownloadInput;
-  install: CloudPackageDownloadInput;
+  install: CloudPackageDownloadInput & Readonly<{ scope?: RuntimeInstanceScope | AgentScope }>;
   uploadSealedAgent: Readonly<{ agentId: string }>;
-  confirmSealedSkillUpload: Readonly<{ callId: string }>;
+  confirmSealedSkillUpload: Readonly<{ callId: string; scope?: RuntimeInstanceScope | AgentScope }>;
 };
 export type CloudPackageDownloadResult = Readonly<{
   packageVersionId: string;

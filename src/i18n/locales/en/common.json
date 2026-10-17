@@ -990,6 +990,16 @@
         "loading": "Loading...",
         "saving": "Saving..."
     },
+    "runtimeScope": {
+        "selectRuntime": "Select runtime",
+        "loading": "Loading runtimes",
+        "loadFailed": "Could not load runtimes",
+        "none": "No runtimes available",
+        "starting": "{{runtime}} is starting",
+        "unavailable": "{{runtime}} is unavailable",
+        "retry": "Reload",
+        "selectAgent": "Select agent"
+    },
     "switchboard": {
         "quickSwitch": "Quick switch",
         "runtime": "Runtime",

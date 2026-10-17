@@ -296,6 +296,7 @@ async fn export_cloud(
         capability: "sealedSkills.exportCloud".into(),
         subject: "sealed-skills-export-cloud".into(),
         private: true,
+        runtime_scope: handle.runtime_scope.clone(),
     };
     let worker = handle.clone();
     let receipt = handle

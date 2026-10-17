@@ -188,7 +188,7 @@ impl TeamMaterializationLifecycle {
         };
         let next = match outcome {
             MaterializationOperationOutcome::Confirmed { receipt } => {
-                if !receipt_matches_request(&receipt, request) {
+                if !materialization_matches_request(&receipt, request) {
                     return Err(MaterializationLifecycleError::ReceiptDoesNotMatchIntent);
                 }
                 Self::Confirmed(receipt)
@@ -220,7 +220,7 @@ impl TeamMaterializationLifecycle {
                 Ok(MaterializationRecordOutcome::Replayed)
             }
             Self::Requested(request) | Self::OutcomeUnknown(request) => {
-                if !receipt_matches_request(&receipt, request) {
+                if !materialization_matches_request(&receipt, request) {
                     return Err(MaterializationLifecycleError::ReceiptDoesNotMatchIntent);
                 }
                 *self = Self::Confirmed(receipt);
@@ -334,6 +334,19 @@ fn cleanup_outcome(
             Ok(TeamMaterializationCleanup::OutcomeUnknown(removal.clone()))
         }
     }
+}
+
+fn materialization_matches_request(
+    receipt: &MaterializationReceipt,
+    request: &TeamMaterializationRequest,
+) -> bool {
+    receipt_matches_request(receipt, request)
+        && request.intent().agents().iter().all(|requested| {
+            receipt.roles().iter().find(|role| role.role() == requested.role()).is_some_and(|role| {
+                role.skills().len() == requested.skills().len()
+                    && role.skills().iter().zip(requested.skills()).all(|((name, _), requested)| name == requested)
+            })
+        })
 }
 
 fn receipt_matches_request(

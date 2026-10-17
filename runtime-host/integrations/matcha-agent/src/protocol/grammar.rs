@@ -103,20 +103,11 @@ fn decode_error(value: &Value, id: Option<JsonRpcId>) -> Result<JsonRpcError, De
         .get("code")
         .and_then(Value::as_i64)
         .ok_or_else(|| invalid(id.clone(), "error code must be an integer"))?;
-    let message = object
+    object
         .get("message")
         .and_then(Value::as_str)
-        .ok_or_else(|| invalid(id.clone(), "error message must be a string"))?;
-    let has_data = object.contains_key("data");
-    let session_not_found = message
-        .strip_prefix("Session not found: ")
-        .is_some_and(|session_id| {
-            !session_id.is_empty() && !session_id.bytes().any(|byte| byte.is_ascii_control())
-        });
-    if session_not_found {
-        return Ok(JsonRpcError::session_not_found(code, has_data));
-    }
-    Ok(JsonRpcError::peer_rejection(code, has_data))
+        .ok_or_else(|| invalid(id, "error message must be a string"))?;
+    Ok(JsonRpcError::remote(code, object.get("data").cloned()))
 }
 
 fn object(

@@ -31,6 +31,12 @@ impl Server {
         })
     }
 
+    pub(crate) fn local_addr(&self) -> std::net::SocketAddr {
+        self.listener
+            .local_addr()
+            .expect("HTTP substrate listener has a local address")
+    }
+
     pub(crate) fn into_scoped_extension(self) -> (ModuleScope, oneshot::Receiver<io::Result<()>>) {
         let mut scope = ModuleScope::new(HOST_HTTP_EXTENSION_SCOPE_ID);
         let (finished, completion) = oneshot::channel();

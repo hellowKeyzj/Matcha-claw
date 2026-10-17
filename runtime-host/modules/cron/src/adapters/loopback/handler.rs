@@ -173,7 +173,7 @@ async fn handle(
         let (status, body) = result_body(cron.read_result(&input.call_id, &subject));
         return Response { status, body };
     }
-    let (request, principal) = match CronRequest::decode(
+    let (request, principal, endpoint) = match CronRequest::decode(
         &request.path,
         value,
         authorization,
@@ -196,7 +196,7 @@ async fn handle(
         CronRequest::List => {
             debug_cron_transport("owner_request_entered");
             let outcome = cron
-                .list()
+                .list(endpoint)
                 .await
                 .unwrap_or(crate::model::CronListOutcome::Unavailable);
             if !matches!(outcome, crate::model::CronListOutcome::Listed(_)) {
@@ -205,16 +205,16 @@ async fn handle(
             list_body(outcome)
         }
         CronRequest::Create(command) => {
-            admit_body(&cron, MutationCommand::Create(command), principal).await
+            admit_body(&cron, MutationCommand::Create(command), principal, endpoint).await
         }
         CronRequest::Update(command) => {
-            admit_body(&cron, MutationCommand::Update(command), principal).await
+            admit_body(&cron, MutationCommand::Update(command), principal, endpoint).await
         }
         CronRequest::Delete(command) => {
-            admit_body(&cron, MutationCommand::Delete(command), principal).await
+            admit_body(&cron, MutationCommand::Delete(command), principal, endpoint).await
         }
         CronRequest::Trigger(job_id) => trigger_body(
-            cron.trigger(job_id)
+            cron.trigger(endpoint, job_id)
                 .await
                 .unwrap_or(Err(crate::ports::CronRequestAdmissionClosed)),
         ),
@@ -226,8 +226,9 @@ async fn admit_body(
     cron: &CronHandle,
     command: MutationCommand,
     principal: String,
+    endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
 ) -> (u16, Value) {
-    match cron.admit(command, principal).await {
+    match cron.admit(command, principal, endpoint).await {
         Ok(receipt) => (
             202,
             serde_json::json!({ "callId": receipt.call_id, "accepted": true }),
@@ -265,12 +266,13 @@ fn split_target(target: &str) -> Result<(String, Option<String>), ()> {
 }
 
 async fn handle_history(cron: CronHandle, query: CronHistoryQuery) -> Response {
+    let endpoint = query.endpoint.clone();
     let command = match query.into_command() {
         Ok(command) => command,
         Err(DecodeError::Invalid | DecodeError::Unauthorized) => return Response::bad_request(),
     };
     let outcome = cron
-        .load_history(command)
+        .load_history(endpoint, command)
         .await
         .unwrap_or(crate::model::CronHistoryOutcome::Unavailable);
     let (status, body) = history_body(outcome);

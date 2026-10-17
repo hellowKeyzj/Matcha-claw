@@ -5,6 +5,7 @@ pub mod create;
 pub mod delete;
 pub mod model_selection;
 pub mod queries;
+pub mod question;
 pub mod rename;
 pub mod runtime_error;
 pub mod send;

@@ -1,10 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
-import type { CloudPackageDownloadRequest, CloudPackageListQuery } from '../../main/cloud-account/types';
-import { isSkillsCallReceipt } from '../../main/runtime-host-delivery/transport/skills/management';
+import type { CloudPackageListQuery } from '../../main/cloud-account/types';
+import { isSkillsCallReceipt, isSkillsRuntimeScope, type SkillsRuntimeScope } from '../../main/runtime-host-delivery/transport/skills/management';
 import { isCallId } from '../../../src/types/call-log/decode';
-import { isCloudPackageOperationId } from '../../../src/types/cloud-package-operation';
+import { isCloudPackageOperationId, type CloudPackageOperationRequests } from '../../../src/types/cloud-package-operation';
 import { PackageOperationError } from '../../main/cloud-account/package-operations';
 
 class InvalidPackageRequestError extends Error {}
@@ -20,6 +20,7 @@ type SkillInstallResult = Readonly<{
 
 type SealedSkillPackageUploadRequest = Readonly<{
   skillKey?: unknown;
+  scope?: unknown;
 }>;
 
 type SealedAgentPackageUploadRequest = Readonly<{
@@ -126,6 +127,7 @@ export async function handlePackageRoutes(
           skillKey: body.skillKey,
           cloudPublicKey: cloudKey.publicKey,
           cloudKeyId: cloudKey.keyId,
+          scope: body.scope,
         }));
         if (exported.status !== 202 || !isSkillsCallReceipt(exported.body)) {
           sendJson(res, exported.status === 200 || exported.status === 202 ? 502 : exported.status, { success: false, error: runtimeExportError(exported.body, 'Skill package cloud export failed') });
@@ -140,10 +142,13 @@ export async function handlePackageRoutes(
     }
     if (req.method === 'POST' && url.pathname === '/api/packages/upload/sealed-skill/confirm') {
       const body = await parsePackageJsonBody<Record<string, unknown>>(req);
-      if (!isRecord(body) || Object.keys(body).length !== 1 || !isCallId(body.callId)) {
+      if (!isRecord(body) || !Object.keys(body).every((key) => key === 'callId' || key === 'scope') || !isCallId(body.callId)
+        || (Object.hasOwn(body, 'scope') && !isSkillsRuntimeScope(body.scope))) {
         throw new InvalidPackageRequestError('Invalid package export callId');
       }
-      sendJson(res, 202, ctx.cloudAccountService.admitPackageOperation('confirmSealedSkillUpload', { callId: body.callId }));
+      sendJson(res, 202, ctx.cloudAccountService.admitPackageOperation('confirmSealedSkillUpload', {
+        callId: body.callId, ...(body.scope === undefined ? {} : { scope: body.scope as SkillsRuntimeScope }),
+      }));
       return true;
     }
     if (req.method === 'POST' && url.pathname === '/api/packages/upload/sealed-agent') {
@@ -165,7 +170,7 @@ export async function handlePackageRoutes(
       return true;
     }
     if (req.method === 'POST' && url.pathname === '/api/packages/install') {
-      const body = await parsePackageDownloadRequest(req);
+      const body = await parsePackageDownloadRequest(req, true);
       sendJson(res, 202, ctx.cloudAccountService.admitPackageOperation('install', body));
       return true;
     }
@@ -242,11 +247,15 @@ async function parsePackageJsonBody<T>(req: IncomingMessage): Promise<T> {
   }
 }
 
-async function parseSealedSkillPackageUploadRequest(req: IncomingMessage): Promise<{ skillKey: string }> {
+async function parseSealedSkillPackageUploadRequest(req: IncomingMessage): Promise<{ skillKey: string; scope?: SkillsRuntimeScope }> {
   const body = await parsePackageJsonBody<SealedSkillPackageUploadRequest>(req);
+  if (!isRecord(body) || !Object.keys(body).every((key) => key === 'skillKey' || key === 'scope')
+    || (Object.hasOwn(body, 'scope') && !isSkillsRuntimeScope(body.scope))) {
+    throw new InvalidPackageRequestError('Invalid sealed skill upload request');
+  }
   const skillKey = typeof body.skillKey === 'string' ? body.skillKey.trim() : '';
   if (!isSkillKey(skillKey)) throw new InvalidPackageRequestError('Invalid skillKey');
-  return { skillKey };
+  return { skillKey, ...(body.scope === undefined ? {} : { scope: body.scope as SkillsRuntimeScope }) };
 }
 
 async function parseSealedAgentPackageUploadRequest(req: IncomingMessage): Promise<{ agentId: string }> {
@@ -257,10 +266,11 @@ async function parseSealedAgentPackageUploadRequest(req: IncomingMessage): Promi
   return { agentId };
 }
 
-async function parsePackageDownloadRequest(req: IncomingMessage): Promise<CloudPackageDownloadRequest> {
+async function parsePackageDownloadRequest(req: IncomingMessage, allowRuntimeScope = false): Promise<CloudPackageOperationRequests['install']> {
   const body = await parsePackageJsonBody<Record<string, unknown>>(req);
   if (!isRecord(body) || !Object.hasOwn(body, 'packageVersionId')
-    || !Object.keys(body).every((key) => ['packageVersionId', 'packageType', 'filename', 'clientVersion', 'installId', 'source'].includes(key))
+    || !Object.keys(body).every((key) => ['packageVersionId', 'packageType', 'filename', 'clientVersion', 'installId', 'source'].includes(key) || (allowRuntimeScope && key === 'scope'))
+    || (Object.hasOwn(body, 'scope') && !isSkillsRuntimeScope(body.scope))
     || !['packageType', 'filename', 'clientVersion', 'installId', 'source'].every((key) => body[key] === undefined || (typeof body[key] === 'string' && body[key].length <= 512 && !body[key].includes('\0')))) {
     throw new InvalidPackageRequestError('Invalid package download request');
   }
@@ -273,7 +283,8 @@ async function parsePackageDownloadRequest(req: IncomingMessage): Promise<CloudP
     clientVersion: optionalString(body.clientVersion),
     installId: optionalString(body.installId),
     source: optionalString(body.source),
-  }) as CloudPackageDownloadRequest;
+    scope: body.scope,
+  }) as CloudPackageOperationRequests['install'];
 }
 
 function isSkillKey(value: string): boolean {

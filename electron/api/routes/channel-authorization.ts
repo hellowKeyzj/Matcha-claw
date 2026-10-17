@@ -4,6 +4,7 @@ import type {
   ChannelAuthorizationTransport,
 } from '../../main/runtime-host-delivery/transport/channels/authorization';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { isProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
 const INVALID = { outcome: 'rejected' } as const;
@@ -47,6 +48,8 @@ export async function handleChannelAuthorizationRoutes(
 
 function isRequest(value: unknown): value is ChannelAuthorizationRequest {
   if (!isRecord(value)) return false;
+  if (Object.hasOwn(value, 'scope')
+    && (!isProductRuntimeScope(value.scope) || value.scope.endpoint.runtimeAdapterId !== 'openclaw')) return false;
   if (value.action !== 'start' && value.action !== 'wait' && value.action !== 'cancel') return false;
   if (value.channel !== 'qqbot' && value.channel !== 'dingtalk' && value.channel !== 'feishu') return false;
   if (value.accountId !== undefined && !isIdentity(value.accountId)) return false;
@@ -57,10 +60,10 @@ function isRequest(value: unknown): value is ChannelAuthorizationRequest {
 
   const keys = Object.keys(value);
   if (value.action === 'start') {
-    return keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'config', 'timeoutMs'].includes(key));
+    return keys.every((key) => ['action', 'channel', 'accountId', 'agentId', 'config', 'timeoutMs', 'scope'].includes(key));
   }
   if (value.sessionKey === undefined) return false;
-  return keys.every((key) => ['action', 'channel', 'accountId', 'sessionKey', 'timeoutMs'].includes(key));
+  return keys.every((key) => ['action', 'channel', 'accountId', 'sessionKey', 'timeoutMs', 'scope'].includes(key));
 }
 
 function isIdentity(value: unknown): value is string {

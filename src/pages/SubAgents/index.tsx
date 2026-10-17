@@ -1,25 +1,29 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Loader2, Plus, Upload } from 'lucide-react';
+import { Plus, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { AgentPage, AgentPageSection, AgentResourceCard, AgentResourceGrid } from '@/components/common/AgentPage';
+import { AgentPage, AgentPageSection, AgentResourceGrid } from '@/components/common/AgentPage';
+import { LoadingState } from '@/components/common/LoadingSpinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { invokeIpc } from '@/lib/api-client';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
+import { useIdleReady } from '@/lib/idle-ready';
 import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
 import {
   getSubagentTemplateById,
   getSubagentTemplateCatalog,
 } from '@/services/openclaw/subagent-template-catalog';
-import { useGatewayStore } from '@/stores/gateway';
-import { useAgentSkillConfigStore } from '@/stores/agent-skill-config';
-import { useAgentToolConfigStore } from '@/stores/agent-tool-config';
-import { useSubagentsStore } from '@/stores/subagents';
+import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
+import { useChatStore } from '@/stores/chat';
+import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { agentScope, buildCapabilityScopeKey } from '@/types/desktop/runtime-address';
+import { buildAgentSkillConfigKey, useAgentSkillConfigStore } from '@/stores/agent-skill-config';
+import { buildAgentToolConfigKey, useAgentToolConfigStore } from '@/stores/agent-tool-config';
+import { getSubagentManagementScope, useSubagentsStore } from '@/stores/subagents';
 import type { SubagentCloudPackage, SubagentSummary, SubagentTemplateCatalogResult, SubagentTemplateDetail } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
-import { isGatewayOperational, isGatewayRecovering } from '@/lib/gateway-status';
 import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/lib/provider-models';
 import { SubagentCard } from './components/SubagentCard';
 import { SubagentDeleteDialog } from './components/SubagentDeleteDialog';
@@ -30,8 +34,7 @@ import { SubagentResourceToolbar } from './components/SubagentResourceToolbar';
 
 type DialogMode = 'create' | 'edit';
 type SubagentEditorTab = 'basic' | 'persona' | 'skills' | 'tools';
-type AgentListState = 'starting' | 'loading' | 'ready';
-const SUBAGENTS_HEAVY_CONTENT_IDLE_TIMEOUT_MS = 320;
+type AgentListState = 'directoryLoading' | 'directoryError' | 'none' | 'starting' | 'unavailable' | 'noAgent' | 'loading' | 'error' | 'ready';
 const EMPTY_AGENTS: SubagentSummary[] = [];
 
 function packageLabel(packageInfo: SubagentCloudPackage): string {
@@ -63,8 +66,21 @@ export function SubAgents() {
       return next;
     }, { replace: key !== 'tab' });
   };
+  const endpoint = useRuntimeEndpointsStore(selectManagementEndpoint);
+  const selectedRuntime = useRuntimeEndpointsStore(selectManagementRuntime);
+  const directoryStatus = useRuntimeEndpointsStore((state) => state.status);
+  const directoryError = useRuntimeEndpointsStore((state) => state.error);
+  const refreshRuntimeEndpoints = useRuntimeEndpointsStore((state) => state.refresh);
+  const openAgentConversation = useChatStore((state) => state.openAgentConversation);
+  const nativeManaged = endpoint?.kind === 'native-runtime' && endpoint.runtimeAdapterId === 'matcha-agent';
+  const managementScope = getSubagentManagementScope(endpoint);
+  const managementKey = managementScope ? buildCapabilityScopeKey(managementScope) : '';
+  const runtimeReady = Boolean(selectedRuntime && isRuntimeEndpointReady(selectedRuntime));
+  const managementReady = directoryStatus === 'ready' && runtimeReady && Boolean(managementScope);
+  const resourceScope = useSubagentsStore((state) => state.managementScope);
+  const resourceMatches = Boolean(managementKey && resourceScope && buildCapabilityScopeKey(resourceScope) === managementKey);
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
-  const agents = Array.isArray(agentsResource.data) ? agentsResource.data : EMPTY_AGENTS;
+  const agents = resourceMatches && Array.isArray(agentsResource.data) ? agentsResource.data : EMPTY_AGENTS;
   const cloudPackages = useSubagentsStore((state) => state.cloudPackages);
   const loadCloudPackages = useSubagentsStore((state) => state.loadCloudPackages);
   const installedCloudPackages = useSubagentsStore((state) => state.installedCloudPackages);
@@ -81,11 +97,13 @@ export function SubAgents() {
   const error = useSubagentsStore((state) => state.error);
   const availableModels = useSubagentsStore((state) => state.availableModels);
   const modelsLoading = useSubagentsStore((state) => state.modelsLoading);
-  const managedAgentId = useSubagentsStore((state) => state.managedAgentId);
+  const storedManagedAgentId = useSubagentsStore((state) => state.managedAgentId);
+  const managedAgentId = resourceMatches ? storedManagedAgentId : null;
   const persistedFilesByAgent = useSubagentsStore((state) => state.persistedFilesByAgent);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const loadAvailableModels = useSubagentsStore((state) => state.loadAvailableModels);
   const setManagedAgentId = useSubagentsStore((state) => state.setManagedAgentId);
+  const setManagementScope = useSubagentsStore((state) => state.setManagementScope);
   const loadPersistedFilesForAgent = useSubagentsStore((state) => state.loadPersistedFilesForAgent);
   const createAgent = useSubagentsStore((state) => state.createAgent);
   const updateAgent = useSubagentsStore((state) => state.updateAgent);
@@ -110,6 +128,7 @@ export function SubAgents() {
   const [dialogMode, setDialogMode] = useState<DialogMode>('create');
   const [dialogInitialTab, setDialogInitialTab] = useState<SubagentEditorTab>('basic');
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
+  const editingScope = useMemo(() => endpoint && editingAgentId ? agentScope(endpoint, editingAgentId) : null, [endpoint, editingAgentId]);
   const [deletingAgentId, setDeletingAgentId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [templateCatalog, setTemplateCatalog] = useState<SubagentTemplateCatalogResult>({ categories: [], templates: [] });
@@ -121,43 +140,49 @@ export function SubAgents() {
   const [templateDialogSubmitting, setTemplateDialogSubmitting] = useState(false);
   const [cloudPackagesOpen, setCloudPackagesOpen] = useState(false);
   const [activeTemplate, setActiveTemplate] = useState<SubagentTemplateDetail | null>(null);
-  const [subagentsHeavyContentReady, setSubagentsHeavyContentReady] = useState(
-    () => import.meta.env.MODE === 'test' || agents.length > 0 || agentsResource.hasLoadedOnce,
-  );
-  const gatewayInitialized = useGatewayStore((state) => state.isInitialized);
-  const gatewayStatus = useGatewayStore((state) => state.status);
-  const gatewayOperational = isGatewayOperational(gatewayStatus);
   const templateLoadRequestIdRef = useRef(0);
-  const hasRequestedAgentsForCurrentGatewayRunRef = useRef(false);
-  const persistedContentByFile = managedAgentId ? (persistedFilesByAgent[managedAgentId] ?? {}) : {};
-  const editingSkillConfigView = editingAgentId ? (skillConfigViewByAgentId[editingAgentId] ?? null) : null;
-  const editingSkillConfigLoading = editingAgentId ? Boolean(skillConfigLoadingByAgentId[editingAgentId]) : false;
-  const editingSkillConfigError = editingAgentId ? (skillConfigErrorByAgentId[editingAgentId] ?? null) : null;
-  const editingToolConfigView = editingAgentId ? (toolConfigViewByAgentId[editingAgentId] ?? null) : null;
-  const editingToolConfigLoading = editingAgentId ? Boolean(toolConfigLoadingByAgentId[editingAgentId]) : false;
-  const editingToolConfigError = editingAgentId ? (toolConfigErrorByAgentId[editingAgentId] ?? null) : null;
+  const persistedContentByFile = resourceMatches && managedAgentId ? (persistedFilesByAgent[managedAgentId] ?? {}) : {};
+  const skillConfigKey = editingScope && editingAgentId ? buildAgentSkillConfigKey(editingScope, editingAgentId) : null;
+  const toolConfigKey = editingScope && editingAgentId ? buildAgentToolConfigKey(editingScope, editingAgentId) : null;
+  const editingSkillConfigView = !nativeManaged && skillConfigKey ? (skillConfigViewByAgentId[skillConfigKey] ?? null) : null;
+  const editingSkillConfigLoading = !nativeManaged && skillConfigKey ? Boolean(skillConfigLoadingByAgentId[skillConfigKey]) : false;
+  const editingSkillConfigError = !nativeManaged && skillConfigKey ? (skillConfigErrorByAgentId[skillConfigKey] ?? null) : null;
+  const editingToolConfigView = toolConfigKey ? (toolConfigViewByAgentId[toolConfigKey] ?? null) : null;
+  const editingToolConfigLoading = toolConfigKey ? Boolean(toolConfigLoadingByAgentId[toolConfigKey]) : false;
+  const editingToolConfigError = toolConfigKey ? (toolConfigErrorByAgentId[toolConfigKey] ?? null) : null;
+  const isCurrentPage = useCallback(() => {
+    const directory = useRuntimeEndpointsStore.getState();
+    const selectedScope = getSubagentManagementScope(selectManagementEndpoint(directory));
+    const runtime = selectManagementRuntime(directory);
+    return resourceMatches && resourceScope !== null
+      && useSubagentsStore.getState().managementScope === resourceScope
+      && selectedScope !== null && buildCapabilityScopeKey(selectedScope) === buildCapabilityScopeKey(resourceScope)
+      && directory.status === 'ready' && runtime !== null && isRuntimeEndpointReady(runtime);
+  }, [resourceMatches, resourceScope]);
   const hasAvailableModels = availableModels.length > 0;
-  const hasAgentCards = agents.length > 0;
-  const gatewayPending = !gatewayInitialized || isGatewayRecovering(gatewayStatus);
-  const agentListState: AgentListState = gatewayPending && !agentsResource.hasLoadedOnce
-    ? 'starting'
-    : (!hasAgentCards && !agentsResource.hasLoadedOnce && (
-      agentsResource.status === 'loading'
-      || agentsResource.status === 'idle'
-      || !subagentsHeavyContentReady
-    ) ? 'loading' : 'ready');
-  const showNoModelGuide = agentListState !== 'starting' && !modelsLoading && !hasAvailableModels;
+  const hasLoadedAgents = resourceMatches && agentsResource.hasLoadedOnce;
+  const subagentsContentReady = useIdleReady(hasLoadedAgents);
+  const agentListState: AgentListState = directoryStatus === 'idle' || directoryStatus === 'loading'
+    ? 'directoryLoading'
+    : directoryStatus === 'error' ? 'directoryError'
+      : !selectedRuntime ? 'none'
+        : !runtimeReady ? (isRuntimeEndpointStarting(selectedRuntime) ? 'starting' : 'unavailable')
+          : !managementScope ? 'noAgent'
+            : resourceMatches && !hasLoadedAgents && agentsResource.status === 'error' ? 'error'
+              : !hasLoadedAgents ? 'loading' : 'ready';
+  const agentListMessage = agentListState === 'directoryError' ? t('common:runtimeScope.loadFailed')
+    : agentListState === 'none' ? t('common:runtimeScope.none')
+      : agentListState === 'noAgent' ? t('common:runtimeScope.selectAgent')
+        : agentListState === 'starting' || agentListState === 'unavailable'
+          ? t(`common:runtimeScope.${agentListState}`, { runtime: selectedRuntime?.displayName })
+          : agentListState === 'error' ? agentsResource.error
+            : t('common:runtimeScope.loading');
+  const agentListBusy = agentListState === 'directoryLoading' || agentListState === 'starting';
+  const showNoModelGuide = !nativeManaged && agentListState === 'ready' && !modelsLoading && !hasAvailableModels;
   const showRefreshingHint = useDelayedFlag(
-    agentsResource.hasLoadedOnce && agentsResource.status === 'loading',
+    managementReady && hasLoadedAgents && agentsResource.status === 'loading',
     180,
   );
-
-  useEffect(() => {
-    if (!gatewayOperational) {
-      return;
-    }
-    void loadAvailableModels();
-  }, [gatewayOperational, loadAvailableModels]);
 
   useEffect(() => {
     if (!cloudPackagesOpen) return;
@@ -166,28 +191,36 @@ export function SubAgents() {
   }, [cloudPackagesOpen, loadCloudPackages, loadMyCloudPackages]);
 
   useEffect(() => {
-    if (!gatewayOperational) {
-      hasRequestedAgentsForCurrentGatewayRunRef.current = false;
-      return;
-    }
-    if (hasRequestedAgentsForCurrentGatewayRunRef.current) {
-      return;
-    }
-    hasRequestedAgentsForCurrentGatewayRunRef.current = true;
-    if (agentsResource.status !== 'loading') {
-      void loadAgents({ silent: true });
-    }
-  }, [agentsResource.status, gatewayOperational, loadAgents]);
+    setManagementScope(getSubagentManagementScope(selectManagementEndpoint(useRuntimeEndpointsStore.getState())));
+    setDialogOpen(false);
+    setEditingAgentId(null);
+    setDeletingAgentId(null);
+    setDeleting(false);
+    setCloudPackagesOpen(false);
+    templateLoadRequestIdRef.current += 1;
+    setTemplateDialogOpen(false);
+    setTemplateDialogLoading(false);
+    setTemplateDialogSubmitting(false);
+  }, [managementKey, resourceScope, setManagementScope]);
 
   useEffect(() => {
-    if (!managedAgentId) {
-      return;
-    }
-    void loadPersistedFilesForAgent(managedAgentId);
-  }, [managedAgentId, loadPersistedFilesForAgent]);
+    if (!managementReady || !resourceMatches) return;
+    const scope = useSubagentsStore.getState().managementScope;
+    if (scope) void loadAgents({ silent: true, scope }).catch(() => {
+      // Error state is already set by the subagents store.
+    });
+    if (!nativeManaged) void loadAvailableModels();
+  }, [resourceScope, resourceMatches, managementReady, nativeManaged, loadAgents, loadAvailableModels]);
 
   useEffect(() => {
-    if (!managedAgentId || dialogOpen || editingAgentId) {
+    if (!managedAgentId || !resourceScope || !resourceMatches || !managementReady) {
+      return;
+    }
+    void loadPersistedFilesForAgent(managedAgentId, resourceScope).catch(() => {});
+  }, [managedAgentId, resourceScope, resourceMatches, managementReady, loadPersistedFilesForAgent]);
+
+  useEffect(() => {
+    if (!managedAgentId || !managementReady || dialogOpen || editingAgentId) {
       return;
     }
     const managedAgent = agents.find((agent) => agent.id === managedAgentId);
@@ -200,19 +233,19 @@ export function SubAgents() {
     setDialogInitialTab('persona');
     setEditingAgentId(managedAgentId);
     setDialogOpen(true);
-  }, [agents, dialogOpen, editingAgentId, managedAgentId, setManagedAgentId, t]);
+  }, [agents, dialogOpen, editingAgentId, managedAgentId, managementReady, setManagedAgentId, t]);
 
   useEffect(() => {
-    if (!editingAgentId || !dialogOpen || dialogMode !== 'edit') {
+    if (!editingAgentId || !editingScope || !resourceMatches || !managementReady || !dialogOpen || dialogMode !== 'edit') {
       return;
     }
-    void loadAgentSkillConfig(editingAgentId).catch(() => {
+    if (!nativeManaged) void loadAgentSkillConfig(editingAgentId, editingScope).catch(() => {
       // Error state is already set by the skill config store.
     });
-    void loadAgentToolConfig(editingAgentId).catch(() => {
+    void loadAgentToolConfig(editingAgentId, editingScope).catch(() => {
       // Error state is already set by the tool config store.
     });
-  }, [dialogMode, dialogOpen, editingAgentId, loadAgentSkillConfig, loadAgentToolConfig]);
+  }, [dialogMode, dialogOpen, editingAgentId, editingScope, resourceMatches, managementReady, nativeManaged, loadAgentSkillConfig, loadAgentToolConfig]);
 
   useEffect(() => {
     let cancelled = false;
@@ -241,63 +274,21 @@ export function SubAgents() {
     };
   }, []);
 
-  useEffect(() => {
-    if (agents.length > 0 && !subagentsHeavyContentReady) {
-      setSubagentsHeavyContentReady(true);
-    }
-  }, [agents.length, subagentsHeavyContentReady]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let rafId: number | undefined;
-    let timeoutId: number | undefined;
-    let idleId: number | undefined;
-
-    const markReady = () => {
-      if (!cancelled) {
-        setSubagentsHeavyContentReady(true);
-      }
-    };
-
-    const scheduleIdle = () => {
-      if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
-        idleId = window.requestIdleCallback(markReady, { timeout: SUBAGENTS_HEAVY_CONTENT_IDLE_TIMEOUT_MS });
-      } else {
-        timeoutId = window.setTimeout(markReady, 120);
-      }
-    };
-
-    rafId = window.requestAnimationFrame(() => {
-      scheduleIdle();
-    });
-
-    return () => {
-      cancelled = true;
-      if (typeof rafId === 'number') {
-        window.cancelAnimationFrame(rafId);
-      }
-      if (typeof timeoutId === 'number') {
-        window.clearTimeout(timeoutId);
-      }
-      if (typeof idleId === 'number' && 'cancelIdleCallback' in window && typeof window.cancelIdleCallback === 'function') {
-        window.cancelIdleCallback(idleId);
-      }
-    };
-  }, []);
-
   const filteredAgents = useMemo(() => {
+    if (!subagentsContentReady) return EMPTY_AGENTS;
     if (!deferredAgentSearch) return agents;
     return agents.filter((agent) => (
       `${agent.id} ${agent.name ?? ''} ${agent.description ?? ''} ${agent.model ?? ''}`
         .toLocaleLowerCase().includes(deferredAgentSearch)
     ));
-  }, [agents, deferredAgentSearch]);
+  }, [agents, deferredAgentSearch, subagentsContentReady]);
 
   const editingAgent: SubagentSummary | undefined = editingAgentId
     ? (agents.find((agent) => agent.id === editingAgentId) ?? (editingAgentId === managedAgentId ? { id: editingAgentId, name: editingAgentId } : undefined))
     : undefined;
 
   const openCreateDialog = () => {
+    if (!isCurrentPage()) return;
     setDialogMode('create');
     setDialogInitialTab('basic');
     setEditingAgentId(null);
@@ -305,7 +296,8 @@ export function SubAgents() {
     setDialogOpen(true);
   };
 
-  const openEditDialog = (agentId: string, initialTab: SubagentEditorTab = 'basic') => {
+  const openEditDialog = useCallback((agentId: string, initialTab: SubagentEditorTab = 'basic') => {
+    if (!isCurrentPage()) return;
     const agent = agents.find((entry) => entry.id === agentId);
     if (agent?.sealed) {
       toast.error(t('sealed.editDisabled'));
@@ -316,7 +308,22 @@ export function SubAgents() {
     setEditingAgentId(agentId);
     setManagedAgentId(agentId);
     setDialogOpen(true);
-  };
+  }, [agents, isCurrentPage, setManagedAgentId, t]);
+
+  const handleDeleteAgent = useCallback((agentId: string) => {
+    if (!isCurrentPage()) return;
+    setDeletingAgentId(agentId);
+  }, [isCurrentPage]);
+
+  const handleOpenCloudPackages = useCallback(() => {
+    if (!nativeManaged && isCurrentPage()) setCloudPackagesOpen(true);
+  }, [isCurrentPage, nativeManaged]);
+
+  const handleChat = useCallback((agentId: string) => {
+    if (!endpoint || !isCurrentPage()) return;
+    openAgentConversation(agentId, endpoint);
+    navigate('/');
+  }, [endpoint, isCurrentPage, navigate, openAgentConversation]);
 
   const handleLoadTemplate = useCallback(async (templateId: string) => {
     const requestId = templateLoadRequestIdRef.current + 1;
@@ -357,12 +364,14 @@ export function SubAgents() {
   };
 
   const handleExportAgentConfig = useCallback(async (agent: SubagentSummary) => {
+    if (!isCurrentPage()) return;
     if (agent.sealed) {
       toast.error(t('sealed.configExportDisabled'));
       return;
     }
     try {
       const packageData = await exportAgentConfig(agent.id);
+      if (!isCurrentPage()) return;
       const fileNameBase = normalizeSubagentNameToSlug(packageData.agent.name) || agent.id;
       const result = await invokeIpc<{ canceled?: boolean; filePath?: string }>('dialog:writeSelectedTextFile', {
         title: t('transfer.exportDialogTitle'),
@@ -376,16 +385,17 @@ export function SubAgents() {
     } catch (error) {
       toast.error(t('transfer.exportFailed', { message: error instanceof Error ? error.message : String(error) }));
     }
-  }, [exportAgentConfig, t]);
+  }, [exportAgentConfig, isCurrentPage, t]);
 
   const handleExportAgentPackage = useCallback(async (agent: SubagentSummary) => {
+    if (!isCurrentPage()) return;
     try {
       const result = await exportAgentPackage(agent.id);
       toast.success(t('transfer.exportPackageSuccess', { fileName: result.fileName }));
     } catch (error) {
       toast.error(t('transfer.exportPackageFailed', { message: error instanceof Error ? error.message : String(error) }));
     }
-  }, [exportAgentPackage, t]);
+  }, [exportAgentPackage, isCurrentPage, t]);
 
   const cloudPackageErrorMessage = useCallback((error: unknown, fallback: string) => {
     const message = error instanceof Error ? error.message : String(error);
@@ -403,29 +413,33 @@ export function SubAgents() {
   };
 
   const handleUploadAgentPackageToCloud = useCallback(async (agent: SubagentSummary) => {
+    if (!isCurrentPage()) return;
     try {
       const result = await uploadAgentPackageToCloud(agent.id);
       toast.success(t('transfer.uploadPackageSuccess', { fileName: result.fileName ?? agent.name ?? agent.id }));
     } catch (error) {
       toast.error(cloudPackageErrorMessage(error, 'cloudPackages.uploadFailed'));
     }
-  }, [cloudPackageErrorMessage, t, uploadAgentPackageToCloud]);
+  }, [cloudPackageErrorMessage, isCurrentPage, t, uploadAgentPackageToCloud]);
 
   const handleInstallAgentPackageFromCloud = useCallback(async (packageInfo: SubagentCloudPackage) => {
+    if (!isCurrentPage()) return;
     try {
       const result = await installAgentPackageFromCloud(packageInfo.packageVersionId);
+      if (!isCurrentPage()) return;
       if (result.warning) {
         toast.warning(result.warning);
       } else {
         toast.success(t('transfer.installPackageSuccess', { agentId: result.agentId }));
       }
-      void loadPersistedFilesForAgent(result.agentId);
+      if (resourceScope) void loadPersistedFilesForAgent(result.agentId, resourceScope).catch(() => {});
     } catch (error) {
       toast.error(cloudPackageErrorMessage(error, 'cloudPackages.installFailed'));
     }
-  }, [cloudPackageErrorMessage, installAgentPackageFromCloud, loadPersistedFilesForAgent, t]);
+  }, [cloudPackageErrorMessage, installAgentPackageFromCloud, isCurrentPage, loadPersistedFilesForAgent, resourceScope, t]);
 
   const handleImportAgentConfig = useCallback(async () => {
+    if (!isCurrentPage()) return;
     try {
       const result = await invokeIpc<{ canceled?: boolean; filePath?: string; content?: string }>('dialog:readSelectedTextFile', {
         title: t('transfer.importDialogTitle'),
@@ -435,8 +449,10 @@ export function SubAgents() {
       if (result?.canceled || typeof result?.content !== 'string') {
         return;
       }
-      const importResult = await importAgentConfig(JSON.parse(result.content) as unknown);
-      void loadPersistedFilesForAgent(importResult.agentId);
+      if (!resourceScope || !isCurrentPage()) return;
+      const importResult = await importAgentConfig(JSON.parse(result.content) as unknown, resourceScope);
+      if (!isCurrentPage()) return;
+      void loadPersistedFilesForAgent(importResult.agentId, resourceScope).catch(() => {});
       setManagedAgentId(importResult.agentId);
       if (importResult.warning) {
         toast.warning(importResult.warning);
@@ -446,27 +462,26 @@ export function SubAgents() {
     } catch (error) {
       toast.error(t('transfer.importFailed', { message: error instanceof Error ? error.message : String(error) }));
     }
-  }, [importAgentConfig, loadPersistedFilesForAgent, setManagedAgentId, t]);
+  }, [importAgentConfig, isCurrentPage, loadPersistedFilesForAgent, resourceScope, setManagedAgentId, t]);
 
   return (
     <AgentPage>
       <Tabs value={activeTab} onValueChange={(value) => updateAgentQuery('tab', value, 'agents')} className="space-y-6">
         <AgentPageSection actions={
           <>
+            <RuntimeScopeSelector />
             {(showRefreshingHint || mutating) && (
               <span role="status" className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-                <span className="size-2 animate-pulse rounded-full bg-primary" />
+                <span className="size-2 animate-pulse rounded-full bg-primary motion-reduce:animate-none" />
                 {mutating ? t('status.mutating') : t('status.refreshing')}
               </span>
             )}
-            {agentListState !== 'starting' && (
-              <Button variant="outline" size="sm" className="gap-2 rounded-full" onClick={handleImportAgentConfig}>
-                <Upload className="size-4" aria-hidden="true" />
-                {t('transfer.import')}
-              </Button>
-            )}
-            {activeTab === 'agents' && agentListState !== 'starting' && (
-              <Button size="sm" className="gap-2 rounded-full" onClick={openCreateDialog}>
+            <Button variant="outline" size="sm" className="gap-2 rounded-full" disabled={!managementReady || !resourceMatches} onClick={handleImportAgentConfig}>
+              <Upload className="size-4" aria-hidden="true" />
+              {t('transfer.import')}
+            </Button>
+            {activeTab === 'agents' && (
+              <Button size="sm" className="gap-2 rounded-full" disabled={!managementReady || !resourceMatches} onClick={openCreateDialog}>
                 <Plus className="size-4" aria-hidden="true" />
                 {t('newSubagent')}
               </Button>
@@ -476,16 +491,16 @@ export function SubAgents() {
           <TabsList variant="line" aria-label={t('title')}>
             <TabsTrigger value="agents" className="gap-2">
               {t('tabs.agents')}
-              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">{agents.length}</span>
+              {hasLoadedAgents && <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">{agents.length}</span>}
             </TabsTrigger>
             <TabsTrigger value="templates" className="gap-2">
               {t('tabs.templates')}
-              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">{templateCatalog.templates.length}</span>
+              {!templatesLoading && !templateError && <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">{templateCatalog.templates.length}</span>}
             </TabsTrigger>
           </TabsList>
         </AgentPageSection>
 
-        {error && (
+        {resourceMatches && error && (agentListState !== 'error' || activeTab !== 'agents') && (
           <p className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
             {error}
           </p>
@@ -510,16 +525,16 @@ export function SubAgents() {
           {activeTab === 'templates' && (
             <SubagentTemplateLibrary
               catalog={templateCatalog}
-              loading={templatesLoading || !subagentsHeavyContentReady}
+              loading={templatesLoading || !subagentsContentReady}
               error={templateError}
               templateLoadingId={templateLoadingId}
-              modelsUnavailable={modelsLoading || !hasAvailableModels}
+              modelsUnavailable={false}
               onLoad={handleLoadTemplateCard}
             />
           )}
         </TabsContent>
         <TabsContent value="agents" className="mt-0 space-y-6">
-          {agentListState !== 'starting' && (
+          {agentListState === 'ready' && subagentsContentReady && (
             <SubagentResourceToolbar
               search={agentSearch}
               onSearchChange={(value) => updateAgentQuery('search', value)}
@@ -529,97 +544,86 @@ export function SubAgents() {
               onViewChange={(value) => updateAgentQuery('view', value, 'grid')}
             />
           )}
-          {agentListState === 'starting' ? (
-            <div role="status" className="flex min-h-[360px] flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-border bg-card/60 p-8 text-center">
-              <div className="flex size-14 items-center justify-center rounded-2xl border border-border bg-muted/40 text-muted-foreground">
-                <Loader2 className="size-6 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-              </div>
+          {agentListState === 'loading' || agentListBusy || (agentListState === 'ready' && !subagentsContentReady) ? (
+            <LoadingState label={t('common:status.loading')} />
+          ) : agentListState !== 'ready' ? (
+            <div role={agentListState === 'directoryError' || agentListState === 'error' ? 'alert' : 'status'} className="flex min-h-[360px] flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-border bg-card/60 p-8 text-center">
               <div className="space-y-1">
-                <h3 className="text-base font-medium text-foreground">{t('startup.title')}</h3>
-                <p className="text-sm text-muted-foreground">{t('startup.description')}</p>
+                <h3 className="text-base font-medium text-foreground">{agentListMessage}</h3>
+                {agentListState === 'directoryError' && directoryError && <p className="text-sm text-muted-foreground">{directoryError}</p>}
               </div>
+              {!agentListBusy && <Button variant="outline" size="sm" onClick={() => {
+                if (agentListState === 'error' && resourceScope && isCurrentPage()) {
+                  void loadAgents({ scope: resourceScope }).catch(() => {
+                    // Error state is already set by the subagents store.
+                  });
+                } else {
+                  void refreshRuntimeEndpoints();
+                }
+              }}>{t('common:runtimeScope.retry')}</Button>}
             </div>
-          ) : agentListState === 'loading' ? (
-            <AgentResourceGrid data-testid="subagent-card-grid" aria-busy="true">
-              {Array.from({ length: 6 }).map((_, index) => (
-                <AgentResourceCard key={index} className="gap-5">
-                  <div className="flex items-center gap-3">
-                    <div className="size-10 animate-pulse rounded-xl bg-muted" />
-                    <div className="h-4 w-2/5 animate-pulse rounded bg-muted" />
-                  </div>
-                  <div className="h-10 w-4/5 animate-pulse rounded bg-muted" />
-                  <div className="h-7 w-full animate-pulse rounded bg-muted" />
-                </AgentResourceCard>
-              ))}
-            </AgentResourceGrid>
           ) : (
             <AgentResourceGrid data-testid="subagent-card-grid" className={agentView === 'list' ? 'md:grid-cols-1 xl:grid-cols-1' : undefined}>
               {filteredAgents.map((agent) => (
                 <SubagentCard
                   key={agent.id}
                   agent={agent}
+                  nativeManaged={nativeManaged}
                   compact={agentView === 'list'}
                   modelLabel={resolveModelCatalogEntry(availableModels, agent.model)?.modelLabel ?? agent.model?.trim()}
                   editLocked={(agent.kind === 'system' && !agent.isDefault) || Boolean(agent.sealed)}
                   deleteLocked={Boolean(agent.isDefault) || agent.kind === 'system'}
                   exportLocked={agent.kind === 'system' || Boolean(agent.sealed)}
-                  packageExportLocked={agent.kind === 'system'}
-                  modelReady={(agent.kind !== 'system' || Boolean(agent.isDefault)) && Boolean(agent.model?.trim())}
-                  onEdit={() => openEditDialog(agent.id)}
-                  onDelete={() => {
-                    setDeletingAgentId(agent.id);
-                  }}
-                  onExport={() => {
-                    void handleExportAgentConfig(agent);
-                  }}
-                  onExportPackage={() => {
-                    void handleExportAgentPackage(agent);
-                  }}
-                  onUploadPackageToCloud={() => {
-                    void handleUploadAgentPackageToCloud(agent);
-                  }}
-                  onOpenCloudPackages={() => {
-                    setCloudPackagesOpen(true);
-                  }}
-                  onChat={() => {
-                    const query = new URLSearchParams({ agent: agent.id }).toString();
-                    navigate(`/?${query}`);
-                  }}
+                  packageExportLocked={nativeManaged || agent.kind === 'system'}
+                  modelReady={nativeManaged || ((agent.kind !== 'system' || Boolean(agent.isDefault)) && Boolean(agent.model?.trim()))}
+                  onEdit={openEditDialog}
+                  onDelete={handleDeleteAgent}
+                  onExport={handleExportAgentConfig}
+                  onExportPackage={handleExportAgentPackage}
+                  onUploadPackageToCloud={handleUploadAgentPackageToCloud}
+                  onOpenCloudPackages={handleOpenCloudPackages}
+                  onChat={handleChat}
                 />
               ))}
             </AgentResourceGrid>
           )}
-          {agentListState === 'ready' && agentsResource.hasLoadedOnce && filteredAgents.length === 0 && (
+          {agentListState === 'ready' && subagentsContentReady && agentsResource.hasLoadedOnce && filteredAgents.length === 0 && (
             <p className="py-10 text-center text-sm text-muted-foreground">{t(agents.length ? 'search.empty' : 'empty')}</p>
           )}
         </TabsContent>
       </Tabs>
-      <SubagentDeleteDialog
+      {deletingAgentId && <SubagentDeleteDialog
+        nativeManaged={nativeManaged}
+        key={`${managementKey}:${deletingAgentId ?? ""}`}
         open={Boolean(deletingAgentId)}
         agentId={deletingAgentId}
         deleting={deleting}
-        onConfirm={async () => {
+        onConfirm={async (deleteFiles) => {
           if (!deletingAgentId) {
             return;
           }
           setDeleting(true);
           try {
-            await deleteAgent(deletingAgentId);
-            setDeletingAgentId(null);
+            if (!resourceScope || !isCurrentPage()) return;
+            await deleteAgent(deletingAgentId, deleteFiles, resourceScope);
+            if (isCurrentPage()) setDeletingAgentId(null);
           } catch (error) {
             toast.error(error instanceof Error ? error.message : String(error));
           } finally {
-            setDeleting(false);
+            if (isCurrentPage()) setDeleting(false);
           }
         }}
         onClose={() => setDeletingAgentId(null)}
-      />
-      <SubagentFormDialog
+      />}
+      {dialogOpen && <SubagentFormDialog
+        key={`${managementKey}:${dialogMode}:${editingAgentId ?? ''}:${dialogOpen}`}
+        nativePolicyScope={nativeManaged ? editingScope : null}
         open={dialogOpen}
         mode={dialogMode}
+        managedWorkspace={nativeManaged}
         agentId={editingAgentId}
         initialTab={dialogInitialTab}
-        lockBasicInfo={Boolean(dialogMode === 'edit' && editingAgent?.isDefault)}
+        lockBasicInfo={Boolean(!nativeManaged && dialogMode === 'edit' && editingAgent?.isDefault)}
         title={dialogMode === 'create' ? t('createDialogTitle') : t('editDialogTitle')}
         existingAgents={agents}
         modelOptions={availableModels}
@@ -633,16 +637,18 @@ export function SubAgents() {
         toolConfigError={editingToolConfigError}
         persistedContentByFile={persistedContentByFile}
         onSubmit={async (values) => {
+          if (!resourceScope || !isCurrentPage()) return;
           if (dialogMode === 'create') {
             try {
               const createResult = await createAgent({
                 name: values.name,
                 description: values.description,
-                workspace: values.workspace,
-                model: resolveModelRuntimeReference(availableModels, values.model),
+                ...(nativeManaged ? {} : { workspace: values.workspace }),
+                model: nativeManaged ? values.model.trim() || undefined : resolveModelRuntimeReference(availableModels, values.model),
                 avatarSeed: values.avatarSeed,
                 avatarStyle: values.avatarStyle,
-              });
+              }, { scope: resourceScope });
+              if (!isCurrentPage()) return;
               if (createResult.warning) {
                 toast.warning(createResult.warning);
               }
@@ -652,45 +658,45 @@ export function SubAgents() {
             }
             return;
           }
-          if (!editingAgentId) {
+          if (!editingAgentId || !editingScope) {
             return;
           }
-          const isDefaultAgent = Boolean(editingAgent?.isDefault);
+          const isDefaultAgent = !nativeManaged && Boolean(editingAgent?.isDefault);
           const resolvedName = isDefaultAgent
             ? (editingAgent?.name ?? values.name)
             : values.name;
           const resolvedWorkspace = isDefaultAgent
             ? (editingAgent?.workspace ?? values.workspace)
             : values.workspace;
+          if (values.skillConfig) {
+            await setAgentSkillConfig({
+              agentId: editingAgentId,
+              revision: values.skillConfig.revision,
+              selection: values.skillConfig.selection,
+            }, editingScope);
+          }
+          if (!isCurrentPage()) return;
+          if (values.toolConfig) {
+            await setAgentToolConfig({
+              agentId: editingAgentId,
+              revision: values.toolConfig.revision,
+              selection: values.toolConfig.selection,
+            }, editingScope);
+          }
+          if (!isCurrentPage()) return;
           await updateAgent({
             agentId: editingAgentId,
             name: resolvedName,
             description: values.description,
-            workspace: resolvedWorkspace,
-            model: resolveModelRuntimeReference(availableModels, values.model),
+            ...(nativeManaged ? {} : { workspace: resolvedWorkspace }),
+            model: nativeManaged ? values.model.trim() || undefined : resolveModelRuntimeReference(availableModels, values.model),
             avatarSeed: values.avatarSeed,
             avatarStyle: values.avatarStyle,
-          });
-          if (values.skillConfig) {
-            const latestSkillConfig = await loadAgentSkillConfig(editingAgentId, { force: true, silent: true });
-            await setAgentSkillConfig({
-              agentId: editingAgentId,
-              revision: latestSkillConfig.revision,
-              selection: values.skillConfig.selection,
-            });
-          }
-          if (values.toolConfig) {
-            const latestToolConfig = await loadAgentToolConfig(editingAgentId, { force: true, silent: true });
-            await setAgentToolConfig({
-              agentId: editingAgentId,
-              revision: latestToolConfig.revision,
-              selection: values.toolConfig.selection,
-            });
-          }
-          closeFormDialog();
+          }, resourceScope);
+          if (isCurrentPage()) closeFormDialog();
         }}
         onClose={closeFormDialog}
-      />
+      />}
 
       <Sheet open={cloudPackagesOpen} onOpenChange={setCloudPackagesOpen}>
         <SheetContent aria-describedby={undefined} className="w-[28rem] overflow-y-auto sm:max-w-[28rem]">
@@ -731,7 +737,7 @@ export function SubAgents() {
                 </div>
                 <div className="mt-3 flex justify-end gap-2">
                   {installedCloudPackages.some((item) => item.packageType === 'agent' && (item.packageVersionId === packageInfo.packageVersionId || item.packageSha256 === packageInfo.version)) ? <span className="text-sm text-muted-foreground">{t('cloudPackages.installed')}</span> : (
-                    <Button size="sm" disabled={!packageInfo.downloadable || Boolean(cloudInstallingByVersionId[packageInfo.packageVersionId])} onClick={() => void handleInstallAgentPackageFromCloud(packageInfo)}>
+                    <Button size="sm" disabled={!managementReady || !resourceMatches || !packageInfo.downloadable || Boolean(cloudInstallingByVersionId[packageInfo.packageVersionId])} onClick={() => void handleInstallAgentPackageFromCloud(packageInfo)}>
                       {t(cloudInstallingByVersionId[packageInfo.packageVersionId] ? 'cloudPackages.installing' : 'cloudPackages.install')}
                     </Button>
                   )}
@@ -743,14 +749,17 @@ export function SubAgents() {
       </Sheet>
 
       <SubagentTemplateLoadDialog
+        key={managementKey}
+        nativeManaged={nativeManaged}
         open={templateDialogOpen}
         loading={templateDialogLoading}
         template={activeTemplate}
         modelOptions={availableModels}
         modelsLoading={modelsLoading}
         submitting={templateDialogSubmitting}
+        canApply={managementReady && resourceMatches}
         onSubmit={async (modelId) => {
-          if (!activeTemplate) {
+          if (!activeTemplate || !resourceScope || !isCurrentPage()) {
             return;
           }
           setTemplateDialogSubmitting(true);
@@ -760,17 +769,18 @@ export function SubAgents() {
             });
             const createResult = await createAgentFromTemplate({
               template: activeTemplate,
-              model: resolveModelRuntimeReference(availableModels, modelId) ?? modelId,
+              model: nativeManaged ? modelId.trim() : resolveModelRuntimeReference(availableModels, modelId) ?? modelId,
               localizedName: localizedTemplateName,
-            });
+            }, resourceScope);
+            if (!isCurrentPage()) return;
             setManagedAgentId(createResult.agentId);
-            void loadPersistedFilesForAgent(createResult.agentId);
+            if (resourceScope) void loadPersistedFilesForAgent(createResult.agentId, resourceScope).catch(() => {});
             setTemplateDialogOpen(false);
             if (createResult.warning) {
               toast.warning(createResult.warning);
             }
           } finally {
-            setTemplateDialogSubmitting(false);
+            if (isCurrentPage()) setTemplateDialogSubmitting(false);
           }
         }}
         onClose={() => {

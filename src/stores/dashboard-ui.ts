@@ -6,11 +6,9 @@ const DEFAULT_USAGE_WINDOW: UsageWindow = '7d';
 const DEFAULT_USAGE_PAGE = 1;
 
 interface DashboardUiState {
-  dashboardHeavyContentReady: boolean;
   usageGroupBy: UsageGroupBy;
   usageWindow: UsageWindow;
   usagePage: number;
-  setDashboardHeavyContentReady: (ready: boolean) => void;
   setUsageGroupBy: (nextGroupBy: UsageGroupBy) => void;
   setUsageWindow: (nextWindow: UsageWindow) => void;
   setUsagePage: (nextPage: number | ((previousPage: number) => number)) => void;
@@ -24,18 +22,9 @@ function normalizeUsagePage(nextPage: number): number {
 }
 
 export const useDashboardUiStore = create<DashboardUiState>((set) => ({
-  dashboardHeavyContentReady: false,
   usageGroupBy: DEFAULT_USAGE_GROUP_BY,
   usageWindow: DEFAULT_USAGE_WINDOW,
   usagePage: DEFAULT_USAGE_PAGE,
-
-  setDashboardHeavyContentReady: (ready) => {
-    set((state) => (
-      state.dashboardHeavyContentReady === ready
-        ? state
-        : { dashboardHeavyContentReady: ready }
-    ));
-  },
 
   setUsageGroupBy: (nextGroupBy) => {
     set((state) => (

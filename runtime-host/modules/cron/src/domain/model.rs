@@ -201,6 +201,7 @@ pub struct InvalidCronCommand;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CronHistoryCommand {
+    agent_id: String,
     job_id: String,
     run_session_id: Option<String>,
     limit: u64,
@@ -210,7 +211,10 @@ impl CronHistoryCommand {
     pub fn try_new(session_key: String, limit: u64) -> Result<Self, InvalidCronCommand> {
         let (job_id, run_session_id) =
             parse_history_target(&session_key).ok_or(InvalidCronCommand)?;
+        let parts: Vec<_> = session_key.split(':').collect();
+        let agent_id = parts[usize::from(parts.first() == Some(&"agent"))].to_owned();
         Ok(Self {
+            agent_id,
             job_id,
             run_session_id,
             limit,
@@ -219,6 +223,14 @@ impl CronHistoryCommand {
 
     pub fn job_id(&self) -> &str {
         &self.job_id
+    }
+
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    pub fn run_session_id(&self) -> Option<&str> {
+        self.run_session_id.as_deref()
     }
 
     pub fn limit(&self) -> u64 {
@@ -437,6 +449,7 @@ pub enum CronListOutcome {
 pub enum CronJobMutationOutcome {
     Applied(Box<CronJobView>),
     Rejected,
+    UnsupportedDelivery,
     OutcomeUnknown,
     Unavailable,
 }
@@ -457,6 +470,8 @@ pub enum CronDeleteOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CronTriggerResult {
     Accepted,
+    Rejected,
+    Unavailable,
     Skipped(CronTriggerSkipReason),
     OutcomeUnknown,
 }

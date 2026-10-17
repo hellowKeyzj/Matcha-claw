@@ -1,4 +1,5 @@
 import { AgentAvatar } from '@/components/common/AgentAvatar';
+import { formatWorkspacePathForDisplay } from '@/components/file-preview/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -22,7 +23,9 @@ import type { ModelCatalogEntry, SubagentSummary, SubagentTargetFile } from '@/t
 import type { AgentSkillConfigView, SetAgentSkillConfigCommand } from '@/stores/agent-skill-config';
 import type { AgentToolConfigOption, AgentToolConfigView, SetAgentToolConfigCommand } from '@/stores/agent-tool-config';
 import { ChevronDown, RefreshCw, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { AgentScope } from '@/types/desktop/runtime-address';
+import { NativePolicySection } from './NativePolicySection';
 import { useTranslation } from 'react-i18next';
 import { SubagentFilesPreview } from './SubagentFilesPreview';
 
@@ -55,6 +58,8 @@ interface SubagentFormDialogProps {
   agentId?: string | null;
   initialTab?: SubagentFormTab;
   lockBasicInfo?: boolean;
+  managedWorkspace?: boolean;
+  nativePolicyScope?: AgentScope | null;
   existingAgents: Pick<SubagentSummary, 'id' | 'workspace' | 'isDefault'>[];
   modelOptions: ModelCatalogEntry[];
   modelsLoading: boolean;
@@ -115,6 +120,8 @@ export function SubagentFormDialog({
   agentId,
   initialTab = 'basic',
   lockBasicInfo = false,
+  managedWorkspace = false,
+  nativePolicyScope = null,
   existingAgents,
   modelOptions,
   modelsLoading,
@@ -131,6 +138,9 @@ export function SubagentFormDialog({
 }: SubagentFormDialogProps) {
   const { t } = useTranslation('subagents');
   const [values, setValues] = useState<SubagentFormValues>(EMPTY_VALUES);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const initialBasicValues = useRef(initialValues);
+  const initialized = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [avatarPickerPage, setAvatarPickerPage] = useState(0);
   const [activeTab, setActiveTab] = useState<SubagentFormTab>('basic');
@@ -160,24 +170,26 @@ export function SubagentFormDialog({
   );
 
   useEffect(() => {
-    if (!open) {
+    if (!open || initialized.current) {
       return;
     }
-    const initialName = initialValues?.name ?? '';
-    const initialWorkspace = mode === 'create'
+    initialized.current = true;
+    const initial = initialBasicValues.current;
+    const initialName = initial?.name ?? '';
+    const initialWorkspace = mode === 'create' && !managedWorkspace
       ? buildWorkspaceValue(initialName)
-      : (initialValues?.workspace ?? '');
+      : (initial?.workspace ?? '');
     const initialAvatarSeed = mode === 'create'
-      ? (initialValues?.avatarSeed ?? buildAvatarPickerSeeds({ agentName: initialName, page: 0, count: 1 })[0] ?? '')
-      : (initialValues?.avatarSeed ?? '');
-    const initialAvatarStyle = initialValues?.avatarStyle ?? DEFAULT_AGENT_AVATAR_STYLE;
-    const initialModel = initialValues?.model ?? '';
+      ? (initial?.avatarSeed ?? buildAvatarPickerSeeds({ agentName: initialName, page: 0, count: 1 })[0] ?? '')
+      : (initial?.avatarSeed ?? '');
+    const initialAvatarStyle = initial?.avatarStyle ?? DEFAULT_AGENT_AVATAR_STYLE;
+    const initialModel = initial?.model ?? '';
     const resolvedInitialModel = resolveModelCatalogEntry(modelOptions, initialModel)?.id;
     setValues({
       name: initialName,
-      description: initialValues?.description ?? '',
+      description: initial?.description ?? '',
       workspace: initialWorkspace,
-      model: resolvedInitialModel ?? (initialModel || (mode === 'create' ? (modelOptions[0]?.id ?? '') : '')),
+      model: managedWorkspace ? initialModel : resolvedInitialModel ?? (initialModel || (mode === 'create' ? (modelOptions[0]?.id ?? '') : '')),
       avatarSeed: initialAvatarSeed,
       avatarStyle: initialAvatarStyle,
     });
@@ -187,7 +199,7 @@ export function SubagentFormDialog({
   }, [
     buildWorkspaceValue,
     initialTab,
-    initialValues,
+    managedWorkspace,
     mode,
     modelOptions,
     open,
@@ -208,10 +220,10 @@ export function SubagentFormDialog({
     }
     const usesAgentPolicy = toolConfigView.selectionMode === 'usesAgentToolPolicy' && toolConfigView.toolPolicy;
     setToolSelectionMode(usesAgentPolicy ? 'explicit' : 'inherit');
-    setToolProfile(usesAgentPolicy ? toolConfigView.toolPolicy?.profile ?? 'full' : 'full');
+    setToolProfile(usesAgentPolicy ? toolConfigView.toolPolicy?.profile ?? (managedWorkspace ? 'default' : 'full') : (managedWorkspace ? 'default' : 'full'));
     setAllowedToolKeys(usesAgentPolicy ? [...(toolConfigView.toolPolicy?.allow ?? [])] : []);
     setDeniedToolKeys(usesAgentPolicy ? [...(toolConfigView.toolPolicy?.deny ?? [])] : []);
-  }, [agentId, mode, open, toolConfigView]);
+  }, [agentId, managedWorkspace, mode, open, toolConfigView]);
 
   const avatarPickerSeeds = useMemo(() => (
     buildAvatarPickerSeeds({
@@ -241,7 +253,7 @@ export function SubagentFormDialog({
   }, [avatarPickerSeeds, mode, open, values.avatarSeed]);
 
   useEffect(() => {
-    if (!open || mode !== 'create') {
+    if (!open || mode !== 'create' || managedWorkspace) {
       return;
     }
     setValues((prev) => {
@@ -254,19 +266,20 @@ export function SubagentFormDialog({
         workspace: nextWorkspace,
       };
     });
-  }, [buildWorkspaceValue, mode, open]);
+  }, [buildWorkspaceValue, managedWorkspace, mode, open]);
 
   useEffect(() => {
-    if (!open || mode !== 'create' || values.model || modelOptions.length !== 1) {
+    if (!open || managedWorkspace || mode !== 'create' || values.model || modelOptions.length !== 1) {
       return;
     }
     setValues((prev) => ({ ...prev, model: modelOptions[0].id }));
-  }, [mode, modelOptions, open, values.model]);
+  }, [managedWorkspace, mode, modelOptions, open, values.model]);
 
   useEffect(() => {
     if (!open) {
       return;
     }
+    if (managedWorkspace) return;
     const current = values.model.trim();
     if (!current) {
       return;
@@ -279,7 +292,7 @@ export function SubagentFormDialog({
     if (!resolvedModel && mode === 'create') {
       setValues((prev) => ({ ...prev, model: modelOptions.length === 1 ? modelOptions[0].id : '' }));
     }
-  }, [mode, modelOptions, open, resolvedModelOptions, values.model]);
+  }, [managedWorkspace, mode, modelOptions, open, resolvedModelOptions, values.model]);
 
   const toolProfileOptions = useMemo(() => {
     const catalogProfiles = toolConfigView?.toolProfiles ?? [];
@@ -318,7 +331,7 @@ export function SubagentFormDialog({
   const duplicateName = mode === 'create'
     ? hasSubagentNameConflict(values.name, existingAgents)
     : false;
-  const missingModel = mode === 'create' && !values.model.trim();
+  const missingModel = !managedWorkspace && mode === 'create' && !values.model.trim();
   const hasModelOptions = resolvedModelOptions.length > 0;
   const currentModel = values.model.trim();
   const showCurrentModelOption = mode === 'edit'
@@ -344,11 +357,11 @@ export function SubagentFormDialog({
     );
   const canSubmit = !submitting
     && !!values.name.trim()
-    && (basicInfoLocked || !!values.workspace.trim())
+    && (managedWorkspace || basicInfoLocked || !!values.workspace.trim())
     && !duplicateName
     && !missingModel
-    && (mode === 'edit' || hasModelOptions)
-    && !modelsLoading;
+    && (managedWorkspace || mode === 'edit' || hasModelOptions)
+    && (managedWorkspace || !modelsLoading);
 
   const buildSkillConfigValue = (): SubagentFormValues['skillConfig'] => {
     if (!skillConfigChanged || !skillConfigView) {
@@ -385,14 +398,17 @@ export function SubagentFormDialog({
         <Label htmlFor="subagent-workspace">{t('form.workspace')}</Label>
         <Input
           id="subagent-workspace"
-          value={values.workspace}
+          value={managedWorkspace && !values.workspace ? t('form.managedWorkspace', { defaultValue: '由运行时管理的私有工作区' }) : formatWorkspacePathForDisplay(values.workspace)}
           readOnly
           className="text-muted-foreground"
         />
       </div>
       <div className="space-y-1">
         <Label htmlFor="subagent-model">{t('form.model')}</Label>
-        <Select
+        {managedWorkspace ? (
+          <Input id="subagent-model" value={values.model} placeholder={t('form.nativeModel', { defaultValue: '留空使用原生默认模型' })}
+            onChange={(event) => setValues((prev) => ({ ...prev, model: event.target.value }))} />
+        ) : <Select
           id="subagent-model"
           value={values.model}
           disabled={modelsLoading || (mode === 'create' && !hasModelOptions)}
@@ -415,8 +431,8 @@ export function SubagentFormDialog({
               {model.displayLabel}
             </option>
           ))}
-        </Select>
-        {!modelsLoading && !hasModelOptions && (
+        </Select>}
+        {!managedWorkspace && !modelsLoading && !hasModelOptions && (
           <p className="text-xs text-destructive">{t('form.modelUnavailable')}</p>
         )}
       </div>
@@ -424,12 +440,12 @@ export function SubagentFormDialog({
   );
 
   const renderBasicInfo = () => (
-    <div className="space-y-6">
+    <div className="space-y-6 [container-type:inline-size]">
       <section className="space-y-3">
         <h3 className="text-sm font-semibold text-foreground">{t('form.basicInfo')}</h3>
-        <div className={cn('grid gap-4 md:grid-cols-1')}>
-          {mode === 'create' ? (
-            <div className="grid gap-4 xl:grid-cols-[320px,minmax(0,1fr)] xl:items-start">
+        <div className="grid items-start gap-4 [@container(min-width:48rem)]:grid-cols-[320px_minmax(0,1fr)]">
+          <div className="min-w-0 w-full max-w-[320px]">
+            {mode === 'create' ? (
               <div className="space-y-2">
                 <Label>{t('form.avatar')}</Label>
                 <div className="rounded-lg border bg-muted/20 p-2.5">
@@ -492,46 +508,7 @@ export function SubagentFormDialog({
                   </div>
                 </div>
               </div>
-              <div className="space-y-3">
-                <div className="space-y-1">
-                  <Label htmlFor="subagent-name">{t('form.name')}</Label>
-                  <Input
-                    id="subagent-name"
-                    value={values.name}
-                    readOnly={basicInfoLocked}
-                    className={basicInfoLocked ? 'text-muted-foreground' : undefined}
-                    onChange={(event) => {
-                      if (basicInfoLocked) {
-                        return;
-                      }
-                      const nextName = event.target.value;
-                      setValues((prev) => ({
-                        ...prev,
-                        name: nextName,
-                        workspace: buildWorkspaceValue(nextName),
-                      }));
-                    }}
-                  />
-                  {duplicateName && (
-                    <p className="text-xs text-destructive">{t('form.nameDuplicate')}</p>
-                  )}
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="subagent-description">{t('form.description')}</Label>
-                  <Textarea
-                    id="subagent-description"
-                    rows={2}
-                    className="resize-none"
-                    value={values.description}
-                    placeholder={t('form.descriptionPlaceholder')}
-                    onChange={(event) => setValues((prev) => ({ ...prev, description: event.target.value }))}
-                  />
-                </div>
-                {renderModelAndWorkspaceFields()}
-              </div>
-            </div>
-          ) : (
-            <div className="grid gap-4 xl:grid-cols-[320px,minmax(0,1fr)]">
+            ) : (
               <div className="space-y-3 rounded-xl border bg-muted/20 p-4">
                 <div className="flex items-center justify-between gap-3">
                   <Label>{t('form.avatar')}</Label>
@@ -605,45 +582,46 @@ export function SubagentFormDialog({
                   })}
                 </div>
               </div>
-              <div className="space-y-6">
-                <div className="space-y-1">
-                  <Label htmlFor="subagent-name">{t('form.name')}</Label>
-                  <Input
-                    id="subagent-name"
-                    value={values.name}
-                    readOnly={basicInfoLocked}
-                    className={basicInfoLocked ? 'text-muted-foreground' : undefined}
-                    onChange={(event) => {
-                      if (basicInfoLocked) {
-                        return;
-                      }
-                      const nextName = event.target.value;
-                      setValues((prev) => ({
-                        ...prev,
-                        name: nextName,
-                      }));
-                    }}
-                  />
-                  {duplicateName && (
-                    <p className="text-xs text-destructive">{t('form.nameDuplicate')}</p>
-                  )}
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="subagent-description">{t('form.description')}</Label>
-                  <Textarea
-                    id="subagent-description"
-                    rows={3}
-                    value={values.description}
-                    readOnly={basicInfoLocked}
-                    className={cn('resize-none', basicInfoLocked && 'text-muted-foreground')}
-                    placeholder={t('form.descriptionPlaceholder')}
-                    onChange={(event) => setValues((prev) => ({ ...prev, description: event.target.value }))}
-                  />
-                </div>
-                {renderModelAndWorkspaceFields()}
-              </div>
+            )}
+          </div>
+          <div className={cn('min-w-0', mode === 'create' ? 'space-y-3' : 'space-y-6')}>
+            <div className="space-y-1">
+              <Label htmlFor="subagent-name">{t('form.name')}</Label>
+              <Input
+                id="subagent-name"
+                value={values.name}
+                readOnly={basicInfoLocked}
+                className={basicInfoLocked ? 'text-muted-foreground' : undefined}
+                onChange={(event) => {
+                  if (basicInfoLocked) {
+                    return;
+                  }
+                  const nextName = event.target.value;
+                  setValues((prev) => ({
+                    ...prev,
+                    name: nextName,
+                    workspace: mode === 'create' && !managedWorkspace ? buildWorkspaceValue(nextName) : prev.workspace,
+                  }));
+                }}
+              />
+              {duplicateName && (
+                <p className="text-xs text-destructive">{t('form.nameDuplicate')}</p>
+              )}
             </div>
-          )}
+            <div className="space-y-1">
+              <Label htmlFor="subagent-description">{t('form.description')}</Label>
+              <Textarea
+                id="subagent-description"
+                rows={mode === 'create' ? 2 : 3}
+                value={values.description}
+                readOnly={basicInfoLocked}
+                className={cn('resize-none', basicInfoLocked && 'text-muted-foreground')}
+                placeholder={t('form.descriptionPlaceholder')}
+                onChange={(event) => setValues((prev) => ({ ...prev, description: event.target.value }))}
+              />
+            </div>
+            {renderModelAndWorkspaceFields()}
+          </div>
         </div>
       </section>
     </div>
@@ -662,6 +640,7 @@ export function SubagentFormDialog({
   );
 
   const renderSkillConfig = () => {
+    if (managedWorkspace) return <p className="rounded-xl border p-4 text-sm text-muted-foreground">{t('form.nativeSkillsUnsupported', { defaultValue: '此运行时不提供逐 Agent 技能开关；技能由原生 CLI 发现和授权。' })}</p>;
     const skillOptions = skillConfigView?.options ?? [];
     const unsupportedReason = skillConfigView?.support.supportType === 'unsupported'
       ? skillConfigView.support.reason
@@ -674,7 +653,7 @@ export function SubagentFormDialog({
             <Switch
               aria-label={t('form.useAllSkills')}
               checked={skillSelectionMode === 'inherit'}
-              disabled={skillConfigLoading || Boolean(unsupportedReason)}
+              disabled={!skillConfigView || skillConfigLoading || Boolean(unsupportedReason)}
               onCheckedChange={(checked) => setSkillSelectionMode(checked ? 'inherit' : 'explicit')}
             />
             <span>{t('form.useAllSkills')}</span>
@@ -735,6 +714,44 @@ export function SubagentFormDialog({
       setAllowedToolKeys((prev) => nextSetting === 'allow' ? toggleStringKey(prev, toolKey, true) : toggleStringKey(prev, toolKey, false));
       setDeniedToolKeys((prev) => nextSetting === 'deny' ? toggleStringKey(prev, toolKey, true) : toggleStringKey(prev, toolKey, false));
     };
+    if (managedWorkspace) {
+      const disabled = !toolConfigView || toolConfigLoading || Boolean(toolConfigError) || Boolean(unsupportedReason);
+      return (
+        <section className="flex min-h-0 flex-col gap-3 rounded-xl border p-4">
+          <h3 className="text-sm font-semibold">{t('form.toolConfig')}</h3>
+          <p className="text-xs text-muted-foreground">{t('form.nativeToolsHint', { defaultValue: '以下是原生 CLI 可配置工具子集，不代表当前可用工具。更改仅作用于后续 CLI 实例；执行仍受原生权限与组织策略约束，不会自动授权。' })}</p>
+          {toolConfigError ? <p role="alert" className="text-sm text-destructive">{toolConfigError}</p> : null}
+          {unsupportedReason ? <p className="text-sm text-muted-foreground">{t(`form.capabilities.unsupported.${unsupportedReason}`)}</p> : null}
+          <label className="flex items-center gap-2 text-sm">
+            <Switch checked={toolSelectionMode === 'inherit'} disabled={disabled}
+              onCheckedChange={(checked) => setToolSelectionMode(checked ? 'inherit' : 'explicit')} />
+            {t('form.nativeToolsInherit', { defaultValue: '使用原生默认工具配置' })}
+          </label>
+          {toolSelectionMode === 'explicit' && <>
+            <Label htmlFor="native-tool-profile">{t('form.toolProfile')}</Label>
+            <Select id="native-tool-profile" value={toolProfile} disabled={disabled} onChange={(event) => {
+              setToolProfile(event.target.value);
+              if (event.target.value === 'default') setAllowedToolKeys([]);
+            }}>
+              {(toolConfigView?.toolProfiles ?? []).map((profile) => <option key={profile.profileKey} value={profile.profileKey}>{profile.displayName}</option>)}
+            </Select>
+            <div className="min-h-0 space-y-2 overflow-y-auto">
+              {toolOptions.filter((tool) => tool.optionType === 'tool').map((tool) => (
+                <div key={tool.toolKey} className="flex items-center justify-between gap-3 rounded-lg border p-2">
+                  <span className="text-sm">{tool.displayName}</span>
+                  <Select aria-label={tool.displayName} className="w-auto" value={readToolPolicySetting(tool.toolKey)} disabled={disabled}
+                    onChange={(event) => setToolPolicySetting(tool.toolKey, event.target.value as 'default' | 'allow' | 'deny')}>
+                    <option value="default">{t('form.capabilities.policyDefault')}</option>
+                    {toolProfile === 'native' && <option value="allow">{t('form.nativeToolsInclude', { defaultValue: '加入显式工具列表' })}</option>}
+                    <option value="deny">{t('form.capabilities.deny')}</option>
+                  </Select>
+                </div>
+              ))}
+            </div>
+          </>}
+        </section>
+      );
+    }
     const readToolEffectiveState = (tool: AgentToolConfigOption, groupPolicyOption?: AgentToolConfigOption): ToolEffectiveState => {
       if (tool.deniedByGlobalPolicy || groupPolicyOption?.deniedByGlobalPolicy) {
         return 'deniedByGlobalPolicy';
@@ -843,7 +860,7 @@ export function SubagentFormDialog({
             <Switch
               aria-label={t('form.useAllTools')}
               checked={toolSelectionMode === 'inherit'}
-              disabled={toolConfigLoading || Boolean(unsupportedReason)}
+              disabled={!toolConfigView || toolConfigLoading || Boolean(unsupportedReason)}
               onCheckedChange={(checked) => setToolSelectionMode(checked ? 'inherit' : 'explicit')}
             />
             <span>{t('form.useAllTools')}</span>
@@ -989,7 +1006,10 @@ export function SubagentFormDialog({
         <TabsContent value="basic" className="min-h-0 flex-1 overflow-y-auto pr-1">{renderBasicInfo()}</TabsContent>
         <TabsContent value="persona" className="min-h-0 flex-1 overflow-y-auto pr-1">{renderPersonaConfig()}</TabsContent>
         <TabsContent value="skills" className="min-h-0 flex-1 overflow-y-auto pr-1">{renderSkillConfig()}</TabsContent>
-        <TabsContent value="tools" className="min-h-0 flex-1 overflow-hidden">{renderToolConfig()}</TabsContent>
+        <TabsContent value="tools" className="min-h-0 flex-1 space-y-4 overflow-y-auto">
+          {renderToolConfig()}
+          {managedWorkspace && nativePolicyScope && <NativePolicySection scope={nativePolicyScope} />}
+        </TabsContent>
       </div>
     </Tabs>
   ) : (
@@ -1003,6 +1023,7 @@ export function SubagentFormDialog({
       return;
     }
     setSubmitting(true);
+    setSubmitError(null);
     try {
       const skillConfig = buildSkillConfigValue();
       const toolConfig = buildToolConfigValue();
@@ -1016,6 +1037,8 @@ export function SubagentFormDialog({
         ...(skillConfig ? { skillConfig } : {}),
         ...(toolConfig ? { toolConfig } : {}),
       });
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : '保存未完成；已确认的更改会保留，请检查后再试。');
     } finally {
       setSubmitting(false);
     }
@@ -1040,6 +1063,7 @@ export function SubagentFormDialog({
         <div className="mt-5 flex min-h-0 flex-1 flex-col gap-6">
           {formContent}
 
+          {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
           <div className="flex shrink-0 justify-end gap-2 border-t pt-3">
             <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
               {t('form.cancel')}

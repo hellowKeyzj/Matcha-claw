@@ -12,7 +12,6 @@ use std::sync::Arc;
 use foundation::execution::{OwnedTask, OwnerRuntimeConfig, OwnerRuntimeSystem};
 use platform::{
     capability::CapabilityDecisionVerifier,
-    endpoint::runtime_address::RuntimeEndpoint,
     module::{CapabilityDescriptorProvider, CapabilityKey, EffectKind, ModuleDescriptor, ModuleId},
 };
 use tokio::sync::Mutex;
@@ -36,12 +35,11 @@ pub use projection::config_read;
 #[derive(Clone)]
 pub struct ChannelModule {
     handle: ChannelHandle,
-    endpoint: RuntimeEndpoint,
 }
 
 impl ChannelModule {
-    fn new(handle: ChannelHandle, endpoint: RuntimeEndpoint) -> Self {
-        Self { handle, endpoint }
+    fn new(handle: ChannelHandle) -> Self {
+        Self { handle }
     }
 
     pub fn with_call_recorder(mut self, recorder: platform::call::CallRecorder) -> Self {
@@ -72,7 +70,6 @@ impl ChannelModule {
         adapters::loopback::descriptor(adapters::loopback::Dependencies::new(
             verifier,
             self.handle.clone(),
-            self.endpoint.clone(),
         ))
     }
 }
@@ -81,14 +78,10 @@ pub fn spawn_owner(
     system: &OwnerRuntimeSystem,
     input: ChannelOwnerInput,
 ) -> (ChannelModule, OwnedTask<()>) {
-    let endpoint = input.default_endpoint.clone();
     let owner = ChannelOwner::new(input);
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(64, ChannelOwner::lane_retention()),
     );
-    (
-        ChannelModule::new(ChannelHandle::new(handle), endpoint),
-        task,
-    )
+    (ChannelModule::new(ChannelHandle::new(handle)), task)
 }

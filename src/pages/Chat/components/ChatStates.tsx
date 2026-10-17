@@ -1,43 +1,23 @@
 import type { ReactNode } from 'react';
-import { AlertCircle, Bot, MessageSquare, Sparkles } from 'lucide-react';
+import { AlertCircle, MessageSquareText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-export function WelcomeScreen({ input }: { input?: ReactNode }) {
+export function WelcomeScreen({ input }: { input: ReactNode }) {
   const { t } = useTranslation('chat');
   return (
-    <div
+    <section
       data-testid="chat-welcome-screen"
-      className="mx-auto flex w-full max-w-[56rem] flex-col items-center px-3 pt-8 text-center md:px-4 md:pt-12"
+      className="mx-auto my-auto w-full min-w-0 max-w-[44rem] py-8 text-left"
     >
-      <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-border/50 bg-background text-foreground shadow-none">
-        <Bot className="h-[18px] w-[18px]" />
+      <div className="mb-7 flex items-center gap-2.5 text-foreground">
+        <MessageSquareText aria-hidden="true" className="h-6 w-6" strokeWidth={1.5} />
+        <span className="text-sm font-semibold tracking-[-0.01em]">MatchaClaw</span>
       </div>
-      <h2 className="max-w-2xl text-[2rem] font-semibold tracking-[-0.05em] text-foreground md:text-[2.35rem]">
+      <h2 className="max-w-xl text-balance text-[2rem] font-semibold leading-tight tracking-[-0.035em] text-foreground md:text-[2.25rem]">
         {t('welcome.title')}
       </h2>
-
-      {input ? (
-        <div className="mt-8 w-full">
-          {input}
-        </div>
-      ) : null}
-
-      <div className="mt-8 grid w-full gap-3 md:grid-cols-2">
-        {[
-          { icon: MessageSquare, title: t('welcome.askQuestions'), desc: t('welcome.askQuestionsDesc') },
-          { icon: Sparkles, title: t('welcome.creativeTasks'), desc: t('welcome.creativeTasksDesc') },
-        ].map((item, i) => (
-          <div
-            key={i}
-            className="rounded-[1.35rem] border border-border/52 bg-background px-4 py-4 text-left shadow-none md:px-5 md:py-[18px]"
-          >
-            <item.icon className="mb-3 h-[18px] w-[18px] text-foreground" />
-            <h3 className="font-medium text-foreground">{item.title}</h3>
-            <p className="mt-1 text-sm leading-6 text-muted-foreground">{item.desc}</p>
-          </div>
-        ))}
-      </div>
-    </div>
+      <div className="mt-7 w-full">{input}</div>
+    </section>
   );
 }
 

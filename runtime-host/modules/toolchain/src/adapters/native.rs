@@ -54,7 +54,7 @@ impl ToolchainPlatform {
 const PYTHON_INSTALL_ARGUMENTS: [&str; 3] = ["python", "install", "3.12"];
 const PYTHON_READINESS_ARGUMENTS: [&str; 3] = ["python", "find", "3.12"];
 const PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const INSTALL_TIMEOUT: Duration = Duration::from_secs(30);
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
 const UV_TOOL_ID: &str = "uv";
 
 use crate::domain::model::{

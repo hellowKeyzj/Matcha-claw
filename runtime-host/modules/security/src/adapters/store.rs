@@ -148,9 +148,19 @@ struct PersistedReceipts {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedReceipt {
+    #[serde(default)]
+    namespace: ReceiptNamespace,
     correlation: String,
     outcome: PersistedOperationOutcome,
     body: Option<Value>,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ReceiptNamespace {
+    #[default]
+    Operation,
+    NativePolicy,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -194,22 +204,39 @@ impl SecurityOperationReceiptStore {
     }
 
     pub(crate) fn receipt(&self, correlation: &str) -> Result<Option<operation::Outcome>, ()> {
+        self.receipt_in(correlation, ReceiptNamespace::Operation)
+    }
+
+    pub(crate) fn native_policy_receipt(&self, key: &str) -> Result<Option<operation::Outcome>, ()> {
+        self.receipt_in(key, ReceiptNamespace::NativePolicy)
+    }
+
+    fn receipt_in(&self, correlation: &str, namespace: ReceiptNamespace) -> Result<Option<operation::Outcome>, ()> {
         let state = self.state.lock().map_err(|_| ())?;
-        Ok(state.receipts.iter().find(|receipt| receipt.correlation == correlation)
+        Ok(state.receipts.iter().find(|receipt| receipt.correlation == correlation && receipt.namespace == namespace)
             .filter(|receipt| receipt.outcome != PersistedOperationOutcome::Pending)
             .map(receipt_outcome))
     }
 
     pub(crate) fn begin(&self, correlation: &str) -> Result<Option<operation::Outcome>, ()> {
+        self.begin_in(correlation, ReceiptNamespace::Operation)
+    }
+
+    pub(crate) fn begin_native_policy(&self, key: &str) -> Result<Option<operation::Outcome>, ()> {
+        self.begin_in(key, ReceiptNamespace::NativePolicy)
+    }
+
+    fn begin_in(&self, correlation: &str, namespace: ReceiptNamespace) -> Result<Option<operation::Outcome>, ()> {
         let mut state = self.state.lock().map_err(|_| ())?;
         if let Some(receipt) = state
             .receipts
             .iter()
-            .find(|receipt| receipt.correlation == correlation)
+            .find(|receipt| receipt.correlation == correlation && receipt.namespace == namespace)
         {
             return Ok(Some(receipt_outcome(receipt)));
         }
         state.receipts.push(PersistedReceipt {
+            namespace,
             correlation: correlation.into(),
             outcome: PersistedOperationOutcome::Pending,
             body: None,
@@ -220,15 +247,24 @@ impl SecurityOperationReceiptStore {
     }
 
     pub(crate) fn settle(&self, correlation: &str, outcome: operation::Outcome) -> Result<(), ()> {
+        self.settle_in(correlation, outcome, ReceiptNamespace::Operation)
+    }
+
+    pub(crate) fn settle_native_policy(&self, key: &str, outcome: operation::Outcome) -> Result<(), ()> {
+        self.settle_in(key, outcome, ReceiptNamespace::NativePolicy)
+    }
+
+    fn settle_in(&self, correlation: &str, outcome: operation::Outcome, namespace: ReceiptNamespace) -> Result<(), ()> {
         let mut state = self.state.lock().map_err(|_| ())?;
         if let Some(receipt) = state
             .receipts
             .iter_mut()
-            .find(|receipt| receipt.correlation == correlation)
+            .find(|receipt| receipt.correlation == correlation && receipt.namespace == namespace)
         {
             write_outcome(receipt, outcome);
         } else {
             let mut receipt = PersistedReceipt {
+                namespace,
                 correlation: correlation.into(),
                 outcome: PersistedOperationOutcome::Pending,
                 body: None,

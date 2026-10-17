@@ -10,11 +10,11 @@ import {
 import {
   type Endpoint,
   type FileTarget,
-  type SessionScope,
+  type AgentScope,
   isEndpoint,
   isFileRelativePath,
   isFileTarget,
-  isSessionScope,
+  isAgentScope,
 } from './contract';
 
 const MAX_BINARY_BYTES = 50 * 1024 * 1024;
@@ -27,11 +27,11 @@ const UNAVAILABLE = {
 type WorkspaceBinaryRequest = Readonly<{
   id: 'workspace.file';
   operationId: 'files.readBinary' | 'files.stat';
-  scope: SessionScope;
+  scope: AgentScope;
   target: FileTarget;
   input: Readonly<{
     endpoint: Endpoint;
-    sessionKey: string;
+    agentId: string;
     relativePath: string;
     maxBytes?: number;
   }>;
@@ -87,10 +87,12 @@ function isWorkspaceBinaryRequest(value: unknown): value is WorkspaceBinaryReque
     && hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     && value.id === 'workspace.file'
     && (value.operationId === 'files.readBinary' || value.operationId === 'files.stat')
-    && isSessionScope(value.scope)
+    && isAgentScope(value.scope)
     && isFileTarget(value.target)
     && isInput(value.input, value.operationId)
-    && value.scope.sessionKey === value.input.sessionKey;
+    && value.scope.agentId === value.input.agentId
+    && value.scope.endpoint.runtimeAdapterId === value.input.endpoint.runtimeAdapterId
+    && value.scope.endpoint.runtimeInstanceId === value.input.endpoint.runtimeInstanceId;
 }
 
 function withBoundedMaxBytes(request: WorkspaceBinaryRequest): WorkspaceBinaryRequest {
@@ -114,12 +116,12 @@ function isInput(
     return false;
   }
   const hasRequiredFields = operationId === 'files.readBinary'
-    ? hasExactKeys(value, ['endpoint', 'sessionKey', 'relativePath'])
-      || hasExactKeys(value, ['endpoint', 'sessionKey', 'relativePath', 'maxBytes'])
-    : hasExactKeys(value, ['endpoint', 'sessionKey', 'relativePath']);
+    ? hasExactKeys(value, ['endpoint', 'agentId', 'relativePath'])
+      || hasExactKeys(value, ['endpoint', 'agentId', 'relativePath', 'maxBytes'])
+    : hasExactKeys(value, ['endpoint', 'agentId', 'relativePath']);
   return hasRequiredFields
     && isEndpoint(value.endpoint)
-    && isNonEmptyBoundedText(value.sessionKey)
+    && isNonEmptyBoundedText(value.agentId)
     && isFileRelativePath(value.relativePath)
     && (operationId === 'files.stat' || value.maxBytes === undefined || isSafeInteger(value.maxBytes));
 }

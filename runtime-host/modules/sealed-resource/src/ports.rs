@@ -31,7 +31,7 @@ const PROVIDES: &[CapabilityKey] = &[
     CapabilityKey::new("sealed-agent-store.read"),
 ];
 const REQUIRES: &[CapabilityKey] = &[];
-const ROUTES: &[&str] = &["sealed-resource.loopback"];
+const ROUTES: &[&str] = &["sealed-resource.loopback", "sealed-resource.native-reader"];
 const EVENTS: &[&str] = &[];
 const EFFECTS: &[EffectKind] = &[
     EffectKind::FilesystemRead,
@@ -46,6 +46,7 @@ pub struct SealedResourceModule {
     skills: Arc<dyn skills_module::SealedSkillStorePort>,
     agents: Arc<dyn subagents::SealedAgentStorePort>,
     authorization_keyring: Arc<SealedPackageAuthorizationKeyring>,
+    pub(crate) native_skills: Option<Arc<crate::native::NativeSealedSkills>>,
     call_recorder: Option<CallRecorder>,
 }
 
@@ -71,6 +72,7 @@ impl SealedResourceModule {
             )),
             agents: Arc::new(SealedAgentStoreAdapter::new(agent_store, runtime_token)),
             authorization_keyring,
+            native_skills: None,
             call_recorder: None,
         }
     }
@@ -110,6 +112,34 @@ impl SealedResourceModule {
             runtime_token,
             authorization_keyring,
         ))
+    }
+
+    pub fn with_matcha_skills(
+        mut self,
+        root: CanonicalStateDir,
+    ) -> Result<Self, SealedResourceError> {
+        if self.native_skills.is_some() {
+            return Err(SealedResourceError::Rejected);
+        }
+        self.native_skills = Some(Arc::new(crate::native::NativeSealedSkills::new(
+            root,
+            Arc::clone(&self.authorization_keyring),
+        )?));
+        Ok(self)
+    }
+
+    pub fn matcha_skills_factory(
+        &self,
+    ) -> Option<Arc<dyn skills_module::SealedSkillStoreFactoryPort>> {
+        self.native_skills
+            .as_ref()
+            .map(|skills| Arc::clone(skills) as Arc<dyn skills_module::SealedSkillStoreFactoryPort>)
+    }
+
+    pub fn matcha_reader_credentials(&self) -> Option<crate::NativeSealedReaderCredentials> {
+        self.native_skills
+            .as_ref()
+            .map(|skills| skills.credentials())
     }
 
     pub fn skills_port(&self) -> Arc<dyn skills_module::SealedSkillStorePort> {
@@ -164,6 +194,9 @@ impl SealedResourceModule {
         let result = (|| {
             let mut packages = self.skill_store.cloud_packages()?;
             packages.extend(self.agent_store.cloud_packages()?);
+            if let Some(native) = &self.native_skills {
+                packages.extend(native.cloud_packages()?);
+            }
             packages.sort_by(|left, right| left.package_sha256.cmp(&right.package_sha256));
             packages.dedup_by(|left, right| left.package_sha256 == right.package_sha256);
             Ok(packages)
@@ -296,13 +329,13 @@ impl SealedResourceModule {
     }
 }
 
-struct SealedSkillStoreAdapter {
+pub(crate) struct SealedSkillStoreAdapter {
     store: Arc<SealedSkillStore>,
     runtime_token: Option<Arc<str>>,
 }
 
 impl SealedSkillStoreAdapter {
-    fn new(store: Arc<SealedSkillStore>, runtime_token: Option<Arc<str>>) -> Self {
+    pub(crate) fn new(store: Arc<SealedSkillStore>, runtime_token: Option<Arc<str>>) -> Self {
         Self {
             store,
             runtime_token,
@@ -352,6 +385,52 @@ impl skills_module::SealedSkillStorePort for SealedSkillStoreAdapter {
             SkillKey::parse(skill_key).map_err(|_| skill_projection::rejected_error())?;
         self.store
             .export_cloud_directory_package(skill_key, &directory, cloud_public_key, cloud_key_id)
+            .map(project_skill_export)
+            .map_err(project_skill_error)
+    }
+
+    fn export_sealed_skill_files(
+        &self,
+        skill_key: String,
+        files: Vec<(String, Vec<u8>)>,
+    ) -> Result<skills_module::SealedSkillExport, skills_module::SealedSkillError> {
+        let key = SkillKey::parse(skill_key).map_err(|_| skill_projection::rejected_error())?;
+        self.store
+            .export_files_package(key, files, None)
+            .map(|export| {
+                skills_module::SealedSkillExport::new(
+                    skill_projection::project_entry(SealedSkillCatalogEntryProjectionInput(
+                        export.entry().clone(),
+                    )),
+                    export.cleanup_failed(),
+                )
+            })
+            .map_err(project_skill_error)
+    }
+
+    fn export_cloud_sealed_skill_files(
+        &self,
+        skill_key: String,
+        files: Vec<(String, Vec<u8>)>,
+        cloud_public_key: String,
+        cloud_key_id: String,
+    ) -> Result<skills_module::SealedSkillPackageExport, skills_module::SealedSkillError> {
+        let key = SkillKey::parse(skill_key).map_err(|_| skill_projection::rejected_error())?;
+        self.store
+            .export_files_package(key, files, Some((&cloud_public_key, &cloud_key_id)))
+            .map(project_skill_export)
+            .map_err(project_skill_error)
+    }
+
+    fn export_installed_cloud_sealed_skill_package(
+        &self,
+        skill_key: String,
+        cloud_public_key: String,
+        cloud_key_id: String,
+    ) -> Result<skills_module::SealedSkillPackageExport, skills_module::SealedSkillError> {
+        let key = SkillKey::parse(skill_key).map_err(|_| skill_projection::rejected_error())?;
+        self.store
+            .export_installed_cloud_package(key, &cloud_public_key, &cloud_key_id)
             .map(project_skill_export)
             .map_err(project_skill_error)
     }
@@ -681,7 +760,7 @@ impl skill_projection::SealedErrorProjection for SealedResourceErrorProjectionIn
     }
 }
 
-fn project_skill_error(error: SealedResourceError) -> skills_module::SealedSkillError {
+pub(crate) fn project_skill_error(error: SealedResourceError) -> skills_module::SealedSkillError {
     match error.rejection_detail() {
         Some(detail) => {
             skills_module::SealedSkillError::rejected_with(detail.reason(), detail.message())

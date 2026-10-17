@@ -56,6 +56,17 @@ impl CanonicalStateDir {
         Ok(Self { path, identity })
     }
 
+    /// Also makes an existing self-owned, non-shared-writable directory private.
+    pub fn provision_private(path: impl AsRef<Path>) -> Result<Self, StateDirError> {
+        let path = path.as_ref();
+        if !path.is_absolute() {
+            return Err(StateDirError);
+        }
+
+        let (path, identity) = platform::provision_private(path)?;
+        Ok(Self { path, identity })
+    }
+
     pub fn open(&self) -> Result<StateDirHandle, StateDirError> {
         platform::open(&self.path, &self.identity)
     }
@@ -115,14 +126,47 @@ impl fmt::Display for StateDirError {
 
 impl std::error::Error for StateDirError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StateFileReplaceError {
+    commit_unknown: bool,
+    cleanup_failed: bool,
+}
+
+impl StateFileReplaceError {
+    pub const fn commit_unknown(&self) -> bool {
+        self.commit_unknown
+    }
+
+    pub const fn cleanup_failed(&self) -> bool {
+        self.cleanup_failed
+    }
+}
+
+impl From<StateDirError> for StateFileReplaceError {
+    fn from(_: StateDirError) -> Self {
+        Self {
+            commit_unknown: false,
+            cleanup_failed: false,
+        }
+    }
+}
+
+impl fmt::Display for StateFileReplaceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("state file replacement failed")
+    }
+}
+
+impl std::error::Error for StateFileReplaceError {}
+
 #[cfg(unix)]
 mod platform {
-    pub(super) use super::posix::{StateDirIdentity, open, provision};
+    pub(super) use super::posix::{StateDirIdentity, open, provision, provision_private};
 }
 
 #[cfg(windows)]
 mod platform {
-    pub(super) use super::windows::{StateDirIdentity, open, provision};
+    pub(super) use super::windows::{StateDirIdentity, open, provision, provision_private};
 }
 
 #[cfg(unix)]

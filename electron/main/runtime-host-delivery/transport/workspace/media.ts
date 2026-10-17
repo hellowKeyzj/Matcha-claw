@@ -108,7 +108,12 @@ function isRequest(value: unknown): value is Request {
   }
 
   const input = value.input;
-  if (!isEndpoint(input.endpoint) || input.sessionKey !== value.scope.sessionKey) return false;
+  if (!isEndpoint(input.endpoint) || input.sessionKey !== value.scope.sessionKey
+    || input.endpoint.runtimeAdapterId !== value.scope.endpoint.runtimeAdapterId
+    || input.endpoint.runtimeInstanceId !== value.scope.endpoint.runtimeInstanceId) return false;
+  if (input.endpoint.runtimeAdapterId === 'matcha-agent'
+    && (Object.hasOwn(input, 'gatewayUrl')
+      || (Array.isArray(input.paths) && input.paths.some((path) => isRecord(path) && Object.hasOwn(path, 'gatewayUrl'))))) return false;
   switch (value.operationId) {
     case 'media.prepare':
       return exact(input, ['endpoint', 'sessionKey', 'relativePath', 'mimeType'])

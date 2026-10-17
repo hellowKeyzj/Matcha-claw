@@ -1,11 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { hostFileReadBinary } from '@/lib/host-api';
+import { hostFileReadBinary, type WorkspaceFileContext } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
-import type {
-  SessionIdentity,
-} from '../../types/desktop/runtime-address';
 
 const PDF_MAX_BYTES = 50 * 1024 * 1024;
 const PDF_VIEWER_PARAMS = 'toolbar=0&navpanes=0&scrollbar=1&view=FitH&zoom=page-width';
@@ -13,7 +10,7 @@ const PDF_VIEWER_PARAMS = 'toolbar=0&navpanes=0&scrollbar=1&view=FitH&zoom=page-
 interface PdfViewerProps {
   relativePath: string;
   fileName?: string;
-  sessionIdentity?: SessionIdentity;
+  workspaceContext?: WorkspaceFileContext;
   surface?: 'default' | 'workspace';
   className?: string;
 }
@@ -46,12 +43,13 @@ function toBlobPart(bytes: Uint8Array): ArrayBuffer {
 export function PdfViewer({
   relativePath,
   fileName,
-  sessionIdentity,
+  workspaceContext,
   surface = 'default',
   className,
 }: PdfViewerProps) {
   const { t } = useTranslation('chat');
   const [state, setState] = useState<PdfLoadState>({ status: 'loading' });
+  const agentScope = workspaceContext?.agentScope;
 
   useEffect(() => {
     let cancelled = false;
@@ -61,14 +59,14 @@ export function PdfViewer({
 
     void (async () => {
       try {
-        if (!sessionIdentity) {
-          throw new Error('SessionIdentity is required');
+        if (!agentScope) {
+          throw new Error('AgentScope is required');
         }
         const result = await hostFileReadBinary({
           relativePath,
           maxBytes: PDF_MAX_BYTES,
-          endpoint: sessionIdentity.endpoint,
-          sessionKey: sessionIdentity.sessionKey,
+          endpoint: agentScope.endpoint,
+          agentId: agentScope.agentId,
         });
         if (cancelled) {
           return;
@@ -108,7 +106,7 @@ export function PdfViewer({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [relativePath, sessionIdentity]);
+  }, [relativePath, agentScope]);
 
   if (state.status === 'loading') {
     return (

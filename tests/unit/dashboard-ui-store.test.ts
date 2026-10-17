@@ -9,7 +9,6 @@ describe('dashboard ui store', () => {
     const { useDashboardUiStore } = await import('@/stores/dashboard-ui');
     const state = useDashboardUiStore.getState();
 
-    expect(state.dashboardHeavyContentReady).toBe(false);
     expect(state.usageGroupBy).toBe('model');
     expect(state.usageWindow).toBe('7d');
     expect(state.usagePage).toBe(1);

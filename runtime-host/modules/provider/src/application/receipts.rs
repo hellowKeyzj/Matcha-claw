@@ -396,6 +396,19 @@ pub enum ProviderSessionEndpoint {
     MatchaAgentLocal,
 }
 
+impl ProviderSessionEndpoint {
+    pub fn runtime_endpoint(self) -> platform::endpoint::runtime_address::RuntimeEndpoint {
+        platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
+            match self {
+                Self::OpenClawLocal => "openclaw",
+                Self::MatchaAgentLocal => "matcha-agent",
+            },
+            "local",
+        )
+        .expect("fixed native runtime endpoints are valid")
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderSessionModelSelectionOutcome {
     Selected(ProviderSessionModelSelection),

@@ -542,11 +542,14 @@ impl ProviderHandle {
         rx.await.map_err(|_| ())
     }
 
-    pub async fn prepare_private_projection(&self) -> ProviderPrivateProjectionEffect {
+    pub async fn prepare_private_projection(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> ProviderPrivateProjectionEffect {
         let (reply, rx) = oneshot::channel();
         if self
             .owner
-            .send_command(ProviderCommand::PreparePrivateProjection { reply })
+            .send_command(ProviderCommand::PreparePrivateProjection { endpoint, reply })
             .await
             .is_err()
         {
@@ -673,6 +676,7 @@ pub(crate) enum ProviderCommand {
         reply: oneshot::Sender<ProviderRoutingReplaceOutcome>,
     },
     PreparePrivateProjection {
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
         reply: oneshot::Sender<ProviderPrivateProjectionEffect>,
     },
 }

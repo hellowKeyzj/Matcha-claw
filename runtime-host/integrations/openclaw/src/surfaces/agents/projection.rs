@@ -3,7 +3,10 @@ use crate::native_config::agent_configuration as native_agent_configuration;
 use subagents as agents;
 
 pub(crate) fn native_create(input: agents::AgentCreate) -> Result<super::AgentCreate, ()> {
-    super::AgentCreate::try_new(input.name, input.workspace, input.model).map_err(|_| ())
+    let agents::AgentWorkspace::Path(workspace) = input.workspace else {
+        return Err(());
+    };
+    super::AgentCreate::try_new(input.name, workspace, input.model).map_err(|_| ())
 }
 
 pub(crate) fn native_update(input: agents::AgentUpdate) -> Result<super::AgentUpdate, ()> {
@@ -62,9 +65,7 @@ pub(crate) fn agents_read(
             | super::AgentsReadFailure::Protocol
             | super::AgentsReadFailure::Deadline
             | super::AgentsReadFailure::Authentication,
-        ) => {
-            agents::Outcome::Unavailable
-        }
+        ) => agents::Outcome::Unavailable,
     }
 }
 
@@ -79,9 +80,7 @@ pub(crate) fn agents_files(
             | super::AgentsReadFailure::Protocol
             | super::AgentsReadFailure::Deadline
             | super::AgentsReadFailure::Authentication,
-        ) => {
-            agents::Outcome::Unavailable
-        }
+        ) => agents::Outcome::Unavailable,
     }
 }
 
@@ -96,9 +95,7 @@ pub(crate) fn agents_file(
             | super::AgentsReadFailure::Protocol
             | super::AgentsReadFailure::Deadline
             | super::AgentsReadFailure::Authentication,
-        ) => {
-            agents::Outcome::Unavailable
-        }
+        ) => agents::Outcome::Unavailable,
     }
 }
 

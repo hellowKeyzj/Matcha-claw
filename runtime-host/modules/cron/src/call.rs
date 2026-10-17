@@ -208,6 +208,8 @@ impl CronCall {
                 self.detail.skip_reason = Some(reason.into());
                 (CallStatus::Succeeded, Outcome::Skipped)
             }
+            Ok(CronTriggerResult::Rejected) => (CallStatus::Rejected, Outcome::Rejected),
+            Ok(CronTriggerResult::Unavailable) => (CallStatus::Failed, Outcome::Unavailable),
             Ok(CronTriggerResult::OutcomeUnknown) => (CallStatus::Unknown, Outcome::OutcomeUnknown),
             Err(_) => (CallStatus::Rejected, Outcome::Unavailable),
         };

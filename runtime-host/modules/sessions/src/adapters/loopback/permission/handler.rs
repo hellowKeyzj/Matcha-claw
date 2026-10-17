@@ -46,8 +46,10 @@ pub(crate) async fn handle(
         Ok(command) => command,
         Err(_) => return Response::bad_request(),
     };
+    let endpoint = command.endpoint;
+    let action = command.action();
     if matches!(
-        command.endpoint,
+        endpoint,
         crate::session_permission::NativeEndpoint::Unsupported
     ) {
         let operation = match command.action() {
@@ -55,16 +57,19 @@ pub(crate) async fn handle(
             crate::session_permission::SessionPermissionAction::Set { .. } => "sessions.permission.set",
         };
         session.record_boundary_outcome(operation, crate::call::SessionsCallOutcome::Unsupported).await;
-        return Response::from_delivery(SessionPermissionDelivery::Outcome(
-            crate::session_permission::SessionPermissionOutcome::unsupported(),
+        return Response::from_delivery(SessionPermissionDelivery::new(
+            endpoint, action, crate::session_permission::SessionPermissionOutcome::Unsupported,
         ));
     }
     drop(verifier);
     let outcome = match session.session_permission(command).await {
         Ok(outcome) => outcome,
-        Err(_) => return Response::unavailable(),
+        Err(_) => match action {
+            crate::session_permission::SessionPermissionAction::Get => crate::session_permission::SessionPermissionOutcome::Unavailable,
+            crate::session_permission::SessionPermissionAction::Set { .. } => crate::session_permission::SessionPermissionOutcome::Unknown,
+        },
     };
-    Response::from_delivery(outcome.into())
+    Response::from_delivery(SessionPermissionDelivery::new(endpoint, action, outcome))
 }
 
 impl Response {
@@ -74,10 +79,6 @@ impl Response {
 
     fn unauthorized() -> Self {
         Self::fixed(401, "Session permission authorization is invalid")
-    }
-
-    fn unavailable() -> Self {
-        Self::from_delivery(SessionPermissionDelivery::Unavailable)
     }
 
     fn fixed(status: u16, error: &'static str) -> Self {

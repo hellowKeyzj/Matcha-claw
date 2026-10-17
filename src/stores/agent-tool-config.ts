@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { hostApiFetch, resolveSingleCapabilityScope } from '@/lib/host-api';
+import { hostApiFetch } from '@/lib/host-api';
+import { buildCapabilityScopeKey } from '@/types/desktop/runtime-address';
 import { waitForSubagentMutation } from '@/lib/subagent-call';
 import {
   createSessionTraceId,
@@ -22,7 +23,7 @@ export type AgentToolConfigSupport =
   | { supportType: 'unsupported'; reason: AgentToolConfigUnsupportedReason };
 
 export type AgentToolSelectionMode = 'inheritsDefaultTools' | 'usesAgentToolPolicy';
-export type AgentToolCatalogSource = 'core' | 'plugin';
+export type AgentToolCatalogSource = 'core' | 'plugin' | 'native';
 export type AgentToolCatalogRisk = 'low' | 'medium' | 'high';
 
 export interface AgentToolPolicy {
@@ -95,8 +96,8 @@ interface AgentToolConfigState {
   viewByAgentId: Record<string, AgentToolConfigView>;
   loadingByAgentId: Record<string, boolean>;
   errorByAgentId: Record<string, string | null>;
-  loadAgentToolConfig: (agentId: string, options?: LoadAgentToolConfigOptions) => Promise<AgentToolConfigView>;
-  setAgentToolConfig: (command: SetAgentToolConfigCommand) => Promise<AgentToolConfigView>;
+  loadAgentToolConfig: (agentId: string, scope: AgentScope, options?: LoadAgentToolConfigOptions) => Promise<AgentToolConfigView>;
+  setAgentToolConfig: (command: SetAgentToolConfigCommand, scope: AgentScope) => Promise<AgentToolConfigView>;
 }
 
 const inflightReadByAgentId = new Map<string, Promise<AgentToolConfigView>>();
@@ -171,7 +172,7 @@ function normalizeToolPolicy(value: unknown): AgentToolPolicy | null {
 }
 
 function normalizeCatalogSource(value: unknown, fallback: AgentToolCatalogSource = 'core'): AgentToolCatalogSource {
-  return value === 'plugin' || value === 'core' ? value : fallback;
+  return value === 'plugin' || value === 'core' || value === 'native' ? value : fallback;
 }
 
 function normalizeCatalogRisk(value: unknown): AgentToolCatalogRisk | undefined {
@@ -278,6 +279,7 @@ function normalizeAgentToolConfigView(payload: unknown, requestedAgentId: string
   const agentId = typeof record.agentId === 'string' && record.agentId.trim()
     ? record.agentId.trim()
     : requestedAgentId;
+  if (agentId !== requestedAgentId) throw new Error('Agent tool configuration target mismatch.');
   const selectionMode = record.selectionMode === 'usesAgentToolPolicy'
     ? 'usesAgentToolPolicy'
     : 'inheritsDefaultTools';
@@ -327,12 +329,8 @@ function normalizeSetAgentToolConfigCommand(command: SetAgentToolConfigCommand):
     };
 }
 
-async function resolveAgentToolConfigScope(): Promise<AgentScope> {
-  const scope = await resolveSingleCapabilityScope(SUBAGENT_TOOLS_CAPABILITY_ID);
-  if (scope.kind !== 'agent') {
-    throw new Error(`subagent.tools requires agent scope, got ${scope.kind}. Reconnect the runtime and try again.`);
-  }
-  return scope;
+export function buildAgentToolConfigKey(scope: AgentScope, agentId: string): string {
+  return JSON.stringify([buildCapabilityScopeKey(scope), agentId]);
 }
 
 function buildAgentToolConfigTarget(agentId: string): CapabilityTarget {
@@ -373,19 +371,9 @@ async function agentToolConfigCapabilityExecute<TResult>(
   operationId: string,
   input: Record<string, unknown>,
   targetAgentId: string,
+  scope: AgentScope,
 ): Promise<TResult> {
   const traceId = createSessionTraceId(`subagent-tools:${operationId}`);
-  let scope: AgentScope;
-  try {
-    scope = await resolveAgentToolConfigScope();
-  } catch (error) {
-    logSessionTrace('renderer.subagent.tools.scope-error', traceId, () => ({
-      operationId,
-      targetAgentId: summarizeIdentifier(targetAgentId),
-      error: summarizeError(error),
-    }));
-    throw error;
-  }
   const target = buildAgentToolConfigTarget(targetAgentId);
   logSessionTrace('renderer.subagent.tools.request', traceId, () => ({
     operationId,
@@ -422,16 +410,17 @@ async function agentToolConfigCapabilityExecute<TResult>(
   }
 }
 
-async function fetchAgentToolConfigView(agentId: string): Promise<AgentToolConfigView> {
+async function fetchAgentToolConfigView(agentId: string, scope: AgentScope): Promise<AgentToolConfigView> {
   const result = await agentToolConfigCapabilityExecute<unknown>(
     'subagentTools.get',
     { agentId },
     agentId,
+    scope,
   );
   return normalizeAgentToolConfigView(result, agentId);
 }
 
-async function persistAgentToolConfig(command: SetAgentToolConfigCommand): Promise<AgentToolConfigView> {
+async function persistAgentToolConfig(command: SetAgentToolConfigCommand, scope: AgentScope): Promise<AgentToolConfigView> {
   const result = await agentToolConfigCapabilityExecute<SetAgentToolConfigResult>(
     'subagentTools.set',
     {
@@ -440,6 +429,7 @@ async function persistAgentToolConfig(command: SetAgentToolConfigCommand): Promi
       selection: command.selection,
     },
     command.agentId,
+    scope,
   );
 
   switch (result.resultType) {
@@ -450,7 +440,7 @@ async function persistAgentToolConfig(command: SetAgentToolConfigCommand): Promi
       useAgentToolConfigStore.setState((state) => ({
         viewByAgentId: {
           ...state.viewByAgentId,
-          [latestView.agentId]: latestView,
+          [buildAgentToolConfigKey(scope, latestView.agentId)]: latestView,
         },
       }));
       throw new Error('Agent tool configuration changed before your update was saved. The latest configuration has been loaded; review it, reapply your tool selection if needed, and save again.');
@@ -470,56 +460,56 @@ export const useAgentToolConfigStore = create<AgentToolConfigState>((set, get) =
   loadingByAgentId: {},
   errorByAgentId: {},
 
-  loadAgentToolConfig: async (rawAgentId, options) => {
+  loadAgentToolConfig: async (rawAgentId, scope, options) => {
     const agentId = normalizeAgentId(rawAgentId);
     if (!agentId) {
       throw new Error('Agent id is required before loading tool configuration. Select an agent and try again.');
     }
 
-    const cachedView = get().viewByAgentId[agentId];
+    const cachedView = get().viewByAgentId[buildAgentToolConfigKey(scope, agentId)];
     if (cachedView && options?.force !== true) {
       return cachedView;
     }
 
-    const inflightRead = inflightReadByAgentId.get(agentId);
+    const inflightRead = inflightReadByAgentId.get(buildAgentToolConfigKey(scope, agentId));
     if (inflightRead) {
       return await inflightRead;
     }
 
-    const readGeneration = getViewCacheGeneration(agentId);
+    const readGeneration = getViewCacheGeneration(buildAgentToolConfigKey(scope, agentId));
 
     if (options?.silent !== true) {
       set((state) => ({
         loadingByAgentId: {
           ...state.loadingByAgentId,
-          [agentId]: true,
+          [buildAgentToolConfigKey(scope, agentId)]: true,
         },
         errorByAgentId: {
           ...state.errorByAgentId,
-          [agentId]: null,
+          [buildAgentToolConfigKey(scope, agentId)]: null,
         },
       }));
     }
 
-    const readTask = fetchAgentToolConfigView(agentId)
+    const readTask = fetchAgentToolConfigView(agentId, scope)
       .then((view) => {
-        const shouldUpdateCachedView = getViewCacheGeneration(agentId) === readGeneration;
+        const shouldUpdateCachedView = getViewCacheGeneration(buildAgentToolConfigKey(scope, agentId)) === readGeneration;
         set((state) => ({
           viewByAgentId: shouldUpdateCachedView
             ? {
               ...state.viewByAgentId,
-              [view.agentId]: view,
+              [buildAgentToolConfigKey(scope, view.agentId)]: view,
             }
             : state.viewByAgentId,
           loadingByAgentId: {
             ...state.loadingByAgentId,
-            [agentId]: false,
-            [view.agentId]: false,
+            [buildAgentToolConfigKey(scope, agentId)]: false,
+            [buildAgentToolConfigKey(scope, view.agentId)]: false,
           },
           errorByAgentId: {
             ...state.errorByAgentId,
-            [agentId]: null,
-            [view.agentId]: null,
+            [buildAgentToolConfigKey(scope, agentId)]: null,
+            [buildAgentToolConfigKey(scope, view.agentId)]: null,
           },
         }));
         return view;
@@ -532,56 +522,56 @@ export const useAgentToolConfigStore = create<AgentToolConfigState>((set, get) =
         set((state) => ({
           loadingByAgentId: {
             ...state.loadingByAgentId,
-            [agentId]: false,
+            [buildAgentToolConfigKey(scope, agentId)]: false,
           },
           errorByAgentId: {
             ...state.errorByAgentId,
-            [agentId]: message,
+            [buildAgentToolConfigKey(scope, agentId)]: message,
           },
         }));
         throw error;
       })
       .finally(() => {
-        if (inflightReadByAgentId.get(agentId) === readTask) {
-          inflightReadByAgentId.delete(agentId);
+        if (inflightReadByAgentId.get(buildAgentToolConfigKey(scope, agentId)) === readTask) {
+          inflightReadByAgentId.delete(buildAgentToolConfigKey(scope, agentId));
         }
       });
 
-    inflightReadByAgentId.set(agentId, readTask);
+    inflightReadByAgentId.set(buildAgentToolConfigKey(scope, agentId), readTask);
     return await readTask;
   },
 
-  setAgentToolConfig: async (rawCommand) => {
+  setAgentToolConfig: async (rawCommand, scope) => {
     const command = normalizeSetAgentToolConfigCommand(rawCommand);
-    invalidateViewCacheForAgent(command.agentId);
-    inflightReadByAgentId.delete(command.agentId);
+    invalidateViewCacheForAgent(buildAgentToolConfigKey(scope, command.agentId));
+    inflightReadByAgentId.delete(buildAgentToolConfigKey(scope, command.agentId));
     set((state) => ({
       loadingByAgentId: {
         ...state.loadingByAgentId,
-        [command.agentId]: true,
+        [buildAgentToolConfigKey(scope, command.agentId)]: true,
       },
       errorByAgentId: {
         ...state.errorByAgentId,
-        [command.agentId]: null,
+        [buildAgentToolConfigKey(scope, command.agentId)]: null,
       },
     }));
 
     try {
-      const view = await persistAgentToolConfig(command);
+      const view = await persistAgentToolConfig(command, scope);
       set((state) => ({
         viewByAgentId: {
           ...state.viewByAgentId,
-          [view.agentId]: view,
+          [buildAgentToolConfigKey(scope, view.agentId)]: view,
         },
         loadingByAgentId: {
           ...state.loadingByAgentId,
-          [command.agentId]: false,
-          [view.agentId]: false,
+          [buildAgentToolConfigKey(scope, command.agentId)]: false,
+          [buildAgentToolConfigKey(scope, view.agentId)]: false,
         },
         errorByAgentId: {
           ...state.errorByAgentId,
-          [command.agentId]: null,
-          [view.agentId]: null,
+          [buildAgentToolConfigKey(scope, command.agentId)]: null,
+          [buildAgentToolConfigKey(scope, view.agentId)]: null,
         },
       }));
       return view;
@@ -593,11 +583,11 @@ export const useAgentToolConfigStore = create<AgentToolConfigState>((set, get) =
       set((state) => ({
         loadingByAgentId: {
           ...state.loadingByAgentId,
-          [command.agentId]: false,
+          [buildAgentToolConfigKey(scope, command.agentId)]: false,
         },
         errorByAgentId: {
           ...state.errorByAgentId,
-          [command.agentId]: message,
+          [buildAgentToolConfigKey(scope, command.agentId)]: message,
         },
       }));
       throw error;

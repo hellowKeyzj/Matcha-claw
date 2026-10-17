@@ -38,6 +38,7 @@ pub(crate) enum ControlDelivery {
 pub struct ChannelHandle {
     owner: OwnerRuntimeHandle<ChannelCommand, ChannelQuery>,
     recorder: Option<platform::call::CallRecorder>,
+    endpoint: Option<platform::endpoint::runtime_address::RuntimeEndpoint>,
     login_cancellations: Arc<Mutex<Vec<(ChannelKey, Weak<CancellationToken>)>>>,
 }
 
@@ -46,8 +47,23 @@ impl ChannelHandle {
         Self {
             owner,
             recorder: None,
+            endpoint: None,
             login_cancellations: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub(crate) fn with_endpoint(
+        mut self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> Self {
+        self.endpoint = Some(endpoint);
+        self
+    }
+
+    fn endpoint(&self) -> platform::endpoint::runtime_address::RuntimeEndpoint {
+        self.endpoint
+            .clone()
+            .expect("loopback binds the request runtime before dispatch")
     }
 
     fn login_cancellation(
@@ -127,6 +143,7 @@ impl ChannelHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         if self
             .send_query(ChannelQuery::Catalog {
+                endpoint: self.endpoint(),
                 trace,
                 reply,
             })
@@ -146,6 +163,7 @@ impl ChannelHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         if self
             .send_query(ChannelQuery::ConfigureForm {
+                endpoint: self.endpoint(),
                 trace,
                 channel_id,
                 reply,
@@ -172,6 +190,7 @@ impl ChannelHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         if self
             .send_query(ChannelQuery::ConfigRead {
+                endpoint: self.endpoint(),
                 trace,
                 channel_id,
                 account_id,
@@ -449,6 +468,7 @@ impl ChannelHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         if self
             .send_query(ChannelQuery::Pairing {
+                endpoint: self.endpoint(),
                 trace,
                 channel_id,
                 account_id,
@@ -472,6 +492,7 @@ impl ChannelHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         if self
             .send_query(ChannelQuery::Status {
+                endpoint: self.endpoint(),
                 trace,
                 reply,
             })
@@ -493,6 +514,7 @@ impl ChannelHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         if self
             .send_query(ChannelQuery::Snapshot {
+                endpoint: self.endpoint(),
                 trace,
                 reply,
             })

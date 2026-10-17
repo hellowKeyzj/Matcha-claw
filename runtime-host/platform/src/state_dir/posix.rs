@@ -13,7 +13,7 @@ use std::{
     },
 };
 
-use super::StateDirError;
+use super::{StateDirError, StateFileReplaceError};
 
 const DIRECTORY_MODE: libc::mode_t = 0o700;
 const TEMPORARY_MODE: libc::mode_t = 0o600;
@@ -50,6 +50,34 @@ impl std::fmt::Debug for StateDirHandle {
 }
 
 impl StateDirHandle {
+    /// The returned file holds an exclusive lock until dropped; the name is never removed.
+    pub fn lock_regular_file(&self, name: &str) -> Result<std::fs::File, StateDirError> {
+        let name = relative_name(name)?;
+        let descriptor = unsafe {
+            libc::openat(
+                self._descriptor.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_NONBLOCK
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC,
+                TEMPORARY_MODE as libc::c_uint,
+            )
+        };
+        if descriptor == -1 {
+            return Err(StateDirError);
+        }
+        // SAFETY: openat returned a new owned descriptor without following links.
+        let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        verify_owner_only(file.as_raw_fd(), libc::S_IFREG, TEMPORARY_MODE)?;
+        if metadata(file.as_raw_fd())?.st_nlink != 1 {
+            return Err(StateDirError);
+        }
+        file.try_lock().map_err(|_| StateDirError)?;
+        Ok(file)
+    }
+
     pub fn clone_descriptor(&self) -> Result<OwnedFd, StateDirError> {
         let descriptor =
             unsafe { libc::fcntl(self._descriptor.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
@@ -66,20 +94,36 @@ impl StateDirHandle {
         contents: &[u8],
         byte_limit: usize,
     ) -> Result<(), StateDirError> {
+        self.replace_regular_file_bounded_detailed(name, contents, byte_limit)
+            .map_err(|_| StateDirError)
+    }
+
+    pub fn replace_regular_file_bounded_detailed(
+        &self,
+        name: &str,
+        contents: &[u8],
+        byte_limit: usize,
+    ) -> Result<(), StateFileReplaceError> {
         if contents.len() > byte_limit {
-            return Err(StateDirError);
+            return Err(StateDirError.into());
         }
         let name = relative_name(name)?;
         let (temporary, temporary_name) = create_temporary_file(self)?;
-        let result = write_and_replace(self, &temporary, &temporary_name, &name, contents);
+        let mut published = false;
+        let result = write_and_replace(
+            self,
+            &temporary,
+            &temporary_name,
+            &name,
+            contents,
+            &mut published,
+        );
         match result {
             Ok(()) => Ok(()),
-            Err(error) => {
-                if remove_temporary(self, &temporary_name).is_err() {
-                    return Err(StateDirError);
-                }
-                Err(error)
-            }
+            Err(_) => Err(StateFileReplaceError {
+                commit_unknown: published,
+                cleanup_failed: !published && remove_temporary(self, &temporary_name).is_err(),
+            }),
         }
     }
 
@@ -227,6 +271,7 @@ fn write_and_replace(
     temporary_name: &CString,
     target_name: &CString,
     contents: &[u8],
+    published: &mut bool,
 ) -> Result<(), StateDirError> {
     write_all(temporary, contents)?;
     if unsafe { libc::fsync(temporary.as_raw_fd()) } != 0 {
@@ -244,6 +289,7 @@ fn write_and_replace(
     {
         return Err(StateDirError);
     }
+    *published = true;
     if unsafe { libc::fsync(directory_fd) } != 0 {
         return Err(StateDirError);
     }
@@ -274,6 +320,17 @@ fn remove_temporary(directory: &StateDirHandle, name: &CString) -> Result<(), St
 }
 
 pub(super) fn provision(path: &Path) -> Result<(PathBuf, StateDirIdentity), StateDirError> {
+    provision_with(path, false)
+}
+
+pub(super) fn provision_private(path: &Path) -> Result<(PathBuf, StateDirIdentity), StateDirError> {
+    provision_with(path, true)
+}
+
+fn provision_with(
+    path: &Path,
+    make_private: bool,
+) -> Result<(PathBuf, StateDirIdentity), StateDirError> {
     let components = components(path)?;
     let (parent_components, leaf) = components.split_at(components.len() - 1);
     let parent = open_chain(parent_components)?;
@@ -292,6 +349,18 @@ pub(super) fn provision(path: &Path) -> Result<(PathBuf, StateDirIdentity), Stat
     let directory = open_at(parent.as_raw_fd(), leaf)?;
     if created {
         secure_created(directory.as_raw_fd())?;
+    } else if make_private {
+        let metadata = metadata(directory.as_raw_fd())?;
+        if metadata.st_uid != unsafe { libc::geteuid() }
+            || metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || metadata.st_mode & 0o022 != 0
+        {
+            return Err(StateDirError);
+        }
+        verify_no_extended_acl(directory.as_raw_fd())?;
+        if unsafe { libc::fchmod(directory.as_raw_fd(), DIRECTORY_MODE) } == -1 {
+            return Err(StateDirError);
+        }
     }
     let identity = identity(directory.as_raw_fd())?;
     verify_private(directory.as_raw_fd())?;

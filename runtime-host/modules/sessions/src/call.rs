@@ -11,6 +11,7 @@ use crate::{
     delete::SessionDeleteOutcome,
     model_selection::SessionModelSelectionOutcome,
     query::SessionQuery,
+    question::{PendingQuestionsOutcome, SessionQuestionOutcome},
     ports::{SessionObserveOutcome, SessionReleaseOutcome},
     rename::SessionRenameOutcome,
     send::SessionSendOutcome,
@@ -225,11 +226,19 @@ impl SessionCommand {
             ),
             Delete { command, .. } => (
                 "sessions.delete",
-                SessionsCallDetail::session(SessionProvider::OpenClaw, &command.session_key, None),
+                SessionsCallDetail::session(
+                    command.identity.provider(),
+                    command.identity.session_key(),
+                    None,
+                ),
             ),
             Rename { command, .. } => (
                 "sessions.rename",
-                SessionsCallDetail::session(SessionProvider::OpenClaw, &command.session_key, None),
+                SessionsCallDetail::session(
+                    command.identity.provider(),
+                    command.identity.session_key(),
+                    None,
+                ),
             ),
             Approval { command, .. } => (
                 "sessions.approvals.respond",
@@ -238,6 +247,10 @@ impl SessionCommand {
                     native_session_ref: Some(reference(&command.session_id)),
                     ..SessionsCallDetail::default()
                 },
+            ),
+            Question { command, .. } => (
+                "sessions.questions.respond",
+                SessionsCallDetail::session(command.identity.provider(), command.identity.session_key(), Some(&command.target.session_id)),
             ),
             ModelSelection { command, .. } => (
                 "sessions.model",
@@ -309,6 +322,10 @@ impl SessionQuery {
                     native_session_ref: Some(reference(&command.session_id)),
                     ..SessionsCallDetail::default()
                 },
+            ),
+            PendingQuestions { command, .. } => (
+                "sessions.questions.list",
+                SessionsCallDetail::session(command.identity.provider(), command.identity.session_key(), Some(&command.endpoint_session_id)),
             ),
             Timeline { command, .. } => (
                 match command.operation() {
@@ -518,6 +535,31 @@ impl CallOutcome for PendingApprovalsOutcome {
     }
 }
 
+impl CallOutcome for PendingQuestionsOutcome {
+    fn summarize(&self, detail: &mut SessionsCallDetail) -> CallStatus {
+        let outcome = match self {
+            Self::Listed { questions } => { detail.count = Some(questions.len()); SessionsCallOutcome::Complete }
+            Self::TargetRejected => SessionsCallOutcome::Rejected,
+            Self::Unknown => SessionsCallOutcome::Unknown,
+            Self::Unsupported => SessionsCallOutcome::Unsupported,
+            Self::Unavailable => SessionsCallOutcome::Unavailable,
+        };
+        detail.outcome(outcome)
+    }
+}
+
+impl CallOutcome for SessionQuestionOutcome {
+    fn summarize(&self, detail: &mut SessionsCallDetail) -> CallStatus {
+        detail.outcome(match self {
+            Self::Responded { .. } => SessionsCallOutcome::Responded,
+            Self::TargetRejected { .. } => SessionsCallOutcome::Rejected,
+            Self::Unknown { .. } => SessionsCallOutcome::Unknown,
+            Self::Unsupported => SessionsCallOutcome::Unsupported,
+            Self::Unavailable { .. } => SessionsCallOutcome::Unavailable,
+        })
+    }
+}
+
 impl CallOutcome for timeline::Outcome {
     fn summarize(&self, detail: &mut SessionsCallDetail) -> CallStatus {
         let outcome = match self {
@@ -603,7 +645,10 @@ impl CallOutcome for SessionPermissionOutcome {
     fn summarize(&self, detail: &mut SessionsCallDetail) -> CallStatus {
         let outcome = match self {
             Self::Projection(projection) if projection.supported => SessionsCallOutcome::Complete,
-            Self::Projection(_) => SessionsCallOutcome::Unsupported,
+            Self::MatchaSnapshot { .. } | Self::MatchaUpdated { .. } => SessionsCallOutcome::Complete,
+            Self::Projection(_) | Self::Unsupported => SessionsCallOutcome::Unsupported,
+            Self::Rejected => SessionsCallOutcome::Rejected,
+            Self::Unknown => SessionsCallOutcome::Unknown,
             Self::Unavailable => SessionsCallOutcome::Unavailable,
         };
         detail.outcome(outcome)

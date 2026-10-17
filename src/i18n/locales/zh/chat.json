@@ -1,11 +1,15 @@
 {
     "runtimePreparing": {
-        "title": "正在启动运行时",
-        "description": "Runtime Host 正在准备会话运行时，马上就可以开始对话。"
+        "title": "正在准备聊天",
+        "description": "正在准备聊天运行时和 Agent 信息，请稍候。"
+    },
+    "runtimePreparationFailed": {
+        "title": "聊天准备失败",
+        "description": "无法准备运行时和 Agent 信息，请到设置中检查运行时状态。"
     },
     "runtimeUnavailable": {
-        "title": "没有可用运行时",
-        "description": "当前没有可用的聊天运行时 endpoint。请稍后重试，或到设置中检查 Runtime Host。"
+        "title": "当前运行时不可用",
+        "description": "当前聊天运行时或所选 Agent 不可用。请在左侧重新选择，或到设置中检查运行时状态。"
     },
     "workspaceUnavailable": {
         "title": "工作区不可用",
@@ -184,12 +188,7 @@
         "retry": "重试"
     },
     "welcome": {
-        "title": "MatchaClaw 聊天",
-        "subtitle": "您的 AI 助手已就绪。在下方开始对话。",
-        "askQuestions": "提问",
-        "askQuestionsDesc": "获取任何话题的答案",
-        "creativeTasks": "创意任务",
-        "creativeTasksDesc": "写作、头脑风暴、创意"
+        "title": "今天想做什么？"
     },
     "input": {
         "teamDesignStart": "设计运行图",
@@ -207,7 +206,7 @@
         "pickWiki": "选择知识库",
         "wikiPickerLabel": "知识库：{{name}}",
         "wikiLoading": "正在加载知识库…",
-        "wikiEmpty": "暂无知识库，请先在知识库页面创建或打开。",
+        "wikiEmpty": "请先在 Wiki 创建或打开知识库",
         "wikiRetry": "加载失败，点击重试",
         "wikiLoadFailed": "无法加载知识库，请重试。",
         "wikiSwitched": "已切换到知识库「{{name}}」",
@@ -229,6 +228,30 @@
         "permissionFullRequiresAccess": "当前无权选择完全访问",
         "permissionLoading": "权限加载中…",
         "permissionPending": "权限切换中…",
+        "configurationCreating": "正在创建会话并应用配置…",
+        "configurationCreateUnknown": "会话创建结果未确认，请勿重复发送",
+        "configurationOutcome": {
+            "unsupported": "配置尚未应用：运行时不支持此操作",
+            "unavailable": "配置尚未应用：运行时暂不可用",
+            "rejected": "配置请求被拒绝，请调整后重试发送",
+            "unknown": "配置结果未确认，尚未发送消息"
+        },
+        "permissionUnavailable": "权限控制暂不可用",
+        "permissionUnknown": "权限操作结果未确认",
+        "permissionRejected": "运行时已拒绝权限请求",
+        "permissionSavedNotApplied": "下次启动生效",
+        "permissionNativeDefault": "标准模式",
+        "permissionNativeDefaultDescription": "需要授权时询问",
+        "permissionAcceptEdits": "自动编辑",
+        "permissionAcceptEditsDescription": "修改文件免确认，其他操作按需确认",
+        "permissionBypass": "跳过权限检查",
+        "permissionBypassDescription": "跳过常规确认，直接执行",
+        "permissionPlan": "规划模式",
+        "permissionPlanDescription": "只分析、出方案，不修改文件",
+        "permissionDontAsk": "不询问",
+        "permissionDontAskDescription": "需要额外授权的操作直接拒绝",
+        "permissionAuto": "自动模式",
+        "permissionAutoDescription": "AI 判断是否允许操作",
         "permissionUnsupported": "权限控制暂未接入",
         "permissionLoadFailed": "权限加载失败：{{error}}",
         "permissionSwitchFailed": "权限切换失败：{{error}}",
@@ -406,6 +429,7 @@
         "deleted": "删除",
         "revealFailed": "在文件管理器中定位失败",
         "workspaceEmpty": "当前没有可浏览的工作区目录。",
+        "workspaceLoadError": "暂时无法读取文件",
         "workspaceLoadFailed": "工作区读取失败：{{error}}"
     },
     "approval": {

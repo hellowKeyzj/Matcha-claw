@@ -1,5 +1,5 @@
 mod accounts;
 pub(crate) mod actor;
 pub(crate) mod discovery;
-mod models;
+pub(crate) mod models;
 mod routing;

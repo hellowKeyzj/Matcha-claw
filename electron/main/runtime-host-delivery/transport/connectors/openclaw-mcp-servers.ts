@@ -1,5 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 
 const ENDPOINT = '/api/openclaw/mcp-servers';
 const UNAVAILABLE = {
@@ -16,7 +17,7 @@ type Operation = 'openClawMcpServers.list';
 type Request = Readonly<{
   id: 'openclaw.mcpServers';
   operationId: Operation;
-  scope: Readonly<{ kind: 'openclaw-mcp-servers' }>;
+  scope: Readonly<{ kind: 'openclaw-mcp-servers' }> | ProductRuntimeScope;
   target: Readonly<{ kind: 'openclaw-mcp-servers' }>;
   input: Record<string, unknown>;
 }>;
@@ -65,9 +66,8 @@ function isRequest(value: unknown): value is Request {
   if (!isRecord(value)
     || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     || value.id !== 'openclaw.mcpServers'
-    || !isRecord(value.scope)
-    || !hasExactKeys(value.scope, ['kind'])
-    || value.scope.kind !== 'openclaw-mcp-servers'
+    || !(isProductRuntimeScope(value.scope) || (isRecord(value.scope)
+      && hasExactKeys(value.scope, ['kind']) && value.scope.kind === 'openclaw-mcp-servers'))
     || !isRecord(value.target)
     || !hasExactKeys(value.target, ['kind'])
     || value.target.kind !== 'openclaw-mcp-servers'

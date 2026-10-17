@@ -66,6 +66,10 @@ mac:
       to: bin
     - from: runtime-host/dist/darwin-${arch}
       to: bin/darwin-${arch}
+    - from: matcha-agent/app-server/dist/darwin-${arch}
+      to: bin/darwin-${arch}
+      filter:
+        - matcha-app-server
     - from: resources/cli/posix/
       to: cli/
   category: public.app-category.productivity
@@ -107,6 +111,19 @@ dmg:
       x: 410
       y: 220
 
+linux:
+  extraResources:
+    - from: resources/bin/linux-${arch}
+      to: bin
+    - from: runtime-host/dist/linux-${arch}
+      to: bin/linux-${arch}
+    - from: matcha-agent/app-server/dist/linux-${arch}
+      to: bin/linux-${arch}
+      filter:
+        - matcha-app-server
+    - from: resources/cli/posix/
+      to: cli/
+
 # Windows Configuration
 win:
   # Skip update signature verification: Windows builds have no code-signing
@@ -119,6 +136,10 @@ win:
       to: bin/win32-${arch}
       filter:
         - "**/*"
+    - from: matcha-agent/app-server/dist/win32-${arch}
+      to: bin/win32-${arch}
+      filter:
+        - matcha-app-server.exe
     - from: resources/cli/win32/
       to: cli/
   icon: resources/icons/icon.ico

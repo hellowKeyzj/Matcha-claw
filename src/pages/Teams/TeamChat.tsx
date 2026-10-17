@@ -5,11 +5,11 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { useChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
-import { useTeamsStore } from '@/stores/teams';
+import { isRuntimeEndpointReady, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
+import { resolveTeamRuntimeScope, useTeamsStore } from '@/stores/teams';
 import { useTranslation } from 'react-i18next';
 import { useTeamRunLabels } from '@/hooks/use-team-run-labels';
-import { isGatewayOperational } from '@/lib/gateway-status';
 import { readTeamWebhookAuth, type TeamApprovalRecord, type TeamWebhookAuthProjection } from '@/services/openclaw/team-runtime-client';
 import { TeamRunGraphCanvas } from './TeamRunGraphCanvas';
 import { useTeamGraphLabels } from './team-graph-labels';
@@ -56,8 +56,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const graphLabels = useTeamGraphLabels();
   const runLabels = useTeamRunLabels();
   const navigate = useNavigate();
-  const gatewayStatus = useGatewayStore((state) => state.status);
-  const isGatewayRunning = isGatewayOperational(gatewayStatus);
+  const endpoints = useRuntimeEndpointsStore((state) => state.endpoints);
 
   const teams = useTeamsStore((state) => state.teams);
   const activeTeamId = useTeamsStore((state) => state.activeTeamId);
@@ -81,6 +80,9 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const resolvedTeamId = teamId ?? activeTeamId ?? undefined;
   const team = teams.find((row) => row.id === resolvedTeamId);
   const run = useTeamsStore((state) => (resolvedTeamId ? state.runByTeamId[resolvedTeamId] : undefined));
+  const runtimeScope = team ? resolveTeamRuntimeScope(team.id, run?.runId) : null;
+  const runtime = endpoints.find((entry) => runtimeScope && runtimeEndpointsEqual(entry.endpointRef, runtimeScope.endpoint));
+  const runtimeReady = Boolean(runtime && isRuntimeEndpointReady(runtime) && supportsRuntimeEndpointCapabilityFamily(runtime, 'team'));
   const runList = useTeamsStore((state) => (resolvedTeamId ? (state.runListByTeamId[resolvedTeamId] ?? []) : []));
   const approvals = useTeamsStore((state) => resolvedTeamId ? state.approvalsByTeamId[resolvedTeamId] ?? EMPTY_APPROVALS : EMPTY_APPROVALS);
   const pendingApprovals = approvals.filter((approval) => approval.runId === run?.runId && approval.status === 'pending');
@@ -97,7 +99,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
   const [webhookAuth, setWebhookAuth] = useState<TeamWebhookAuthProjection | null>(null);
 
   useEffect(() => {
-    if (!team || !resolvedTeamId || !isGatewayRunning) {
+    if (!team || !resolvedTeamId || !runtimeReady) {
       return;
     }
     setActiveTeam(team.id);
@@ -105,15 +107,15 @@ export function TeamChat({ teamId }: { teamId?: string }) {
       await syncRunList(team.id);
       await refreshSnapshot(team.id);
     })();
-  }, [isGatewayRunning, team, resolvedTeamId, setActiveTeam, syncRunList, refreshSnapshot]);
+  }, [runtimeReady, team, resolvedTeamId, setActiveTeam, syncRunList, refreshSnapshot]);
 
   useEffect(() => {
-    if (!resolvedTeamId || !run?.runId || !isGatewayRunning) return;
+    if (!resolvedTeamId || !run?.runId || !runtimeReady) return;
     return observeTeamDesign({ teamId: resolvedTeamId, runId: run.runId });
-  }, [resolvedTeamId, run?.runId, isGatewayRunning, observeTeamDesign]);
+  }, [resolvedTeamId, run?.runId, runtimeReady, observeTeamDesign]);
 
   useEffect(() => {
-    if (!isGatewayRunning) {
+    if (!runtimeReady) {
       setWebhookAuth(null);
       return;
     }
@@ -128,7 +130,7 @@ export function TeamChat({ teamId }: { teamId?: string }) {
     return () => {
       cancelled = true;
     };
-  }, [isGatewayRunning]);
+  }, [runtimeReady]);
 
   const runUiAction = async (actionId: string, action: () => Promise<void>): Promise<void> => {
     if (pendingActionId) {

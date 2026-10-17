@@ -55,6 +55,7 @@ pub use application::{
     ProviderTextGenerationUnavailableReason,
 };
 pub use owner::actor::ProviderOwnerInput;
+pub use owner::models::{provider_execution_endpoint, provider_execution_protocol};
 pub use ports::{
     DiscoveredProviderModel, ProviderAppliedStatus, ProviderConfigOps, ProviderConfigWriteEffect,
     ProviderFuture, ProviderModelDiscoveryOps, ProviderModelDiscoveryPortOutcome,
@@ -127,8 +128,11 @@ impl ProviderModule {
             .await
     }
 
-    pub async fn prepare_private_projection(&self) -> ProviderPrivateProjectionEffect {
-        self.handle.prepare_private_projection().await
+    pub async fn prepare_private_projection(
+        &self,
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    ) -> ProviderPrivateProjectionEffect {
+        self.handle.prepare_private_projection(endpoint).await
     }
 }
 

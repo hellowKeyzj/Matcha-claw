@@ -16,5 +16,6 @@ pub struct Validation {
 pub enum Outcome {
     Validated(Validation),
     TargetRejected,
+    Unsupported,
     Unknown,
 }

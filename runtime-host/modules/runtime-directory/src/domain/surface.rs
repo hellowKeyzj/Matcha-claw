@@ -11,6 +11,7 @@ pub struct RuntimeCapabilitySurface {
     skill: RuntimeFamilyAvailability,
     channel: RuntimeFamilyAvailability,
     lifecycle: RuntimeFamilyAvailability,
+    usage: RuntimeFamilyAvailability,
     platform: RuntimeFamilyAvailability,
 }
 
@@ -34,6 +35,7 @@ impl RuntimeCapabilitySurface {
             skill: RuntimeFamilyAvailability::Supported,
             channel: RuntimeFamilyAvailability::Supported,
             lifecycle: RuntimeFamilyAvailability::Supported,
+            usage: RuntimeFamilyAvailability::Supported,
             platform: RuntimeFamilyAvailability::Supported,
         }
     }
@@ -41,14 +43,15 @@ impl RuntimeCapabilitySurface {
     pub const fn matcha_agent() -> Self {
         Self {
             session: RuntimeFamilyAvailability::Supported,
-            task: RuntimeFamilyAvailability::Unsupported,
-            subagent: RuntimeFamilyAvailability::Unsupported,
+            task: RuntimeFamilyAvailability::Supported,
+            subagent: RuntimeFamilyAvailability::Supported,
             team: RuntimeFamilyAvailability::Supported,
-            cron: RuntimeFamilyAvailability::Unsupported,
-            workspace: RuntimeFamilyAvailability::Unsupported,
-            skill: RuntimeFamilyAvailability::Unsupported,
-            channel: RuntimeFamilyAvailability::Unsupported,
+            cron: RuntimeFamilyAvailability::Supported,
+            workspace: RuntimeFamilyAvailability::Supported,
+            skill: RuntimeFamilyAvailability::Supported,
+            channel: RuntimeFamilyAvailability::Supported,
             lifecycle: RuntimeFamilyAvailability::Supported,
+            usage: RuntimeFamilyAvailability::Supported,
             platform: RuntimeFamilyAvailability::Unsupported,
         }
     }
@@ -64,6 +67,7 @@ impl RuntimeCapabilitySurface {
             RuntimeCapabilityFamily::Skill => self.skill,
             RuntimeCapabilityFamily::Channel => self.channel,
             RuntimeCapabilityFamily::Lifecycle => self.lifecycle,
+            RuntimeCapabilityFamily::Usage => self.usage,
             RuntimeCapabilityFamily::Platform => self.platform,
         }
     }
@@ -129,6 +133,7 @@ pub enum RuntimeCapabilityFamily {
     Skill,
     Channel,
     Lifecycle,
+    Usage,
     Platform,
 }
 
@@ -138,6 +143,7 @@ impl RuntimeCapabilityFamily {
             "session.prompt"
             | "session.management"
             | "session.approval"
+            | "session.question"
             | "session.modelSelection"
             | "session.goal"
             | "tool.invoke" => Some(Self::Session),

@@ -1,21 +1,8 @@
-import {
-  buildCapabilityScopeKey,
-  validateRuntimeScope,
-  type RuntimeScope,
-} from '../../../src/types/desktop/runtime-address';
+import { isProductRuntimeScope, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 import { isTeamDesignPatchOperation, isTeamGraphVersion } from '../../../src/types/team-design';
 
 export const TEAM_RUNTIME_CAPABILITY_ID = 'team.runtime';
-
-const TEAM_RUNTIME_SCOPE: RuntimeScope = {
-  kind: 'runtime-instance',
-  endpoint: {
-    kind: 'native-runtime',
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-  },
-};
 
 const TEAM_RUNTIME_OPERATIONS = [
   ['team.packageValidate', 'Validate TeamSkill package', 'team'],
@@ -56,14 +43,23 @@ export function isTeamRuntimeCapabilityRequest(value: unknown): value is Record<
   if (!isRecord(value)
     || !hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
     || value.id !== TEAM_RUNTIME_CAPABILITY_ID
-    || !isRuntimeScope(value.scope)
-    || !sameRuntimeScope(value.scope, TEAM_RUNTIME_SCOPE)
+    || !isProductRuntimeScope(value.scope)
     || !isRecord(value.input)) {
     return false;
   }
 
   const operation = readOperation(value.operationId);
-  return operation !== null && validateOperation(operation, value.target, value.input);
+  return operation !== null
+    && isSourceAgentValid(operation, value.scope, value.input)
+    && validateOperation(operation, value.target, value.input);
+}
+
+function isSourceAgentValid(operation: TeamRuntimeOperationId, scope: ProductRuntimeScope, input: Record<string, unknown>): boolean {
+  if (operation !== 'team.dependencyPlan' && operation !== 'team.provisionAgents' && operation !== 'team.runCreate') return true;
+  if (operation !== 'team.dependencyPlan' && input.sourceType === 'manual') return !Object.hasOwn(input, 'sourceAgentId');
+  return Object.hasOwn(input, 'sourceAgentId')
+    ? typeof input.sourceAgentId === 'string' && input.sourceAgentId.trim().length > 0
+    : scope.endpoint.runtimeAdapterId === 'openclaw';
 }
 
 function validateOperation(
@@ -371,14 +367,6 @@ function hasOnlyKeys(value: Record<string, unknown>, expected: readonly string[]
 
 function hasRequiredKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   return expected.every((key) => Object.hasOwn(value, key));
-}
-
-function isRuntimeScope(value: unknown): value is RuntimeScope {
-  return validateRuntimeScope(value) === null;
-}
-
-function sameRuntimeScope(left: RuntimeScope, right: RuntimeScope): boolean {
-  return buildCapabilityScopeKey(left) === buildCapabilityScopeKey(right);
 }
 
 function isOpaque(value: unknown): boolean {

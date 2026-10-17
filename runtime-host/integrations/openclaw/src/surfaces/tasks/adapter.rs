@@ -10,7 +10,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
         Box::pin(async move {
             match command {
                 ::task_manager::TaskCommand::List { target } => {
-                    let scope = match task_scope(self, &target) {
+                    let scope = match task_scope(self, &target).await {
                         Ok(scope) => scope,
                         Err(()) => {
                             return ::task_manager::TaskOutcome::List(
@@ -24,7 +24,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     ))
                 }
                 ::task_manager::TaskCommand::Get { target, task_id } => {
-                    let scope = match task_scope(self, &target) {
+                    let scope = match task_scope(self, &target).await {
                         Ok(scope) => scope,
                         Err(()) => {
                             return ::task_manager::TaskOutcome::Get(
@@ -38,7 +38,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     ))
                 }
                 ::task_manager::TaskCommand::Create { target, input } => {
-                    let scope = match task_scope(self, &target) {
+                    let scope = match task_scope(self, &target).await {
                         Ok(scope) => scope,
                         Err(()) => {
                             return ::task_manager::TaskOutcome::Create(
@@ -60,7 +60,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     ))
                 }
                 ::task_manager::TaskCommand::Update { target, input } => {
-                    let scope = match task_scope(self, &target) {
+                    let scope = match task_scope(self, &target).await {
                         Ok(scope) => scope,
                         Err(()) => {
                             return ::task_manager::TaskOutcome::Update(
@@ -86,7 +86,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     old_todos,
                     new_todos,
                 } => {
-                    let scope = match task_scope(self, &target) {
+                    let scope = match task_scope(self, &target).await {
                         Ok(scope) => scope,
                         Err(()) => {
                             return ::task_manager::TaskOutcome::TodoWrite(
@@ -118,7 +118,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     ))
                 }
                 ::task_manager::TaskCommand::TodoGet { target } => {
-                    let scope = match task_scope(self, &target) {
+                    let scope = match task_scope(self, &target).await {
                         Ok(scope) => scope,
                         Err(()) => {
                             return ::task_manager::TaskOutcome::TodoGet(
@@ -140,12 +140,13 @@ impl ::task_manager::TaskOps for OpenClawDriver {
     }
 }
 
-fn task_scope<T>(open_claw: &OpenClawDriver, target: &T) -> Result<openclaw_tasks::TaskScope, ()>
+async fn task_scope<T>(open_claw: &OpenClawDriver, target: &T) -> Result<openclaw_tasks::TaskScope, ()>
 where
     T: TaskScopeTarget,
 {
     let workspace = open_claw
         .trusted_workspace_directory(target.session_key())
+        .await
         .map_err(|_| ())?;
     openclaw_tasks::TaskScope::try_new(
         target.session_key().to_owned(),

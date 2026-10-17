@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { ChannelCatalogTransport } from '../../main/runtime-host-delivery/transport/channels/catalog';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { isProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
   success: false,
@@ -26,18 +27,23 @@ export async function handleChannelCatalogRoutes(
     sendJson(res, 400, INVALID);
     return true;
   }
-  if (!isEmptyObject(body)) {
+  if (!isEmptyObject(body)
+    && !(isRecord(body) && Object.keys(body).length === 1 && isProductRuntimeScope(body.scope))) {
     sendJson(res, 400, INVALID);
     return true;
   }
 
   try {
-    const response = await transport.read();
+    const response = await transport.read(isRecord(body) ? body.scope : undefined);
     sendJson(res, response.status === 200 ? 200 : 503, response.status === 200 ? response.body : UNAVAILABLE);
   } catch {
     sendJson(res, 503, UNAVAILABLE);
   }
   return true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function isEmptyObject(value: unknown): value is Record<string, never> {

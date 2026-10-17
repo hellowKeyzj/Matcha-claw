@@ -28,6 +28,14 @@ impl TeamMaterialization {
         &self.request
     }
 
+    pub fn with_source_agent(mut self, source: Option<ManagedAgentReference>) -> Self {
+        self.request = TeamMaterializationRequest::new(
+            self.request.intent().clone().with_source_agent(source),
+            self.request.idempotency_key().clone(),
+        );
+        self
+    }
+
     pub(crate) fn with_leader_agents_markdown(
         mut self,
         markdown: impl Into<String>,
@@ -151,11 +159,16 @@ pub fn compile_team_skill_materialization(
         .map_err(|_| TeamMaterializationError::Invalid)?;
         let team_role = TeamRole::try_new(role.clone(), package_role.purpose(), RoleKind::Member)
             .map_err(|_| TeamMaterializationError::Invalid)?;
-        agents.push(
-            RoleAgentMaterialization::managed(role.clone(), package_role.id())
-                .map_err(|_| TeamMaterializationError::Invalid)?
-                .with_tools(package_role.tools().to_vec()),
-        );
+        let agent = RoleAgentMaterialization::managed(role.clone(), package_role.id())
+            .map_err(|_| TeamMaterializationError::Invalid)?
+            .with_tools(package_role.tools().to_vec());
+        agents.push(if endpoint.as_str()
+            == runtime_directory::RuntimeDriverIdentity::matcha_agent().runtime_endpoint_reference()
+        {
+            agent.with_agents_markdown(package_role.agents_markdown()).with_skills(package_role.skills().to_vec())
+        } else {
+            agent
+        });
         assignments.push(RoleAssignment::new(member.member_id().clone(), role));
         members.push(member);
         roles.push(team_role);

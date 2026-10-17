@@ -9,7 +9,6 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    agents::{AgentsReadFailure, OpenClawAgents},
     gateway::{
         client::{GatewayClient, GatewayClientError},
         delivery::MutationDelivery,
@@ -290,37 +289,51 @@ impl SessionOperation {
     pub(crate) async fn get_session_permission(
         &self,
         session_key: protocol::SessionKey,
+        agent_id: &str,
     ) -> Result<SessionPermissionProjection, OperationError> {
-        self.session_permission_projection(session_key).await
+        self.session_permission_projection(session_key, agent_id).await
     }
 
     pub(crate) async fn set_session_permission(
         &self,
         params: SessionPermissionPatchParams,
+        agent_id: &str,
     ) -> Result<InvocationOutcome<SessionPermissionProjection, OperationError>, OperationError>
     {
         let expected_key = params.key().clone();
+        let expected_mode = params.selection();
         let request_id = next_request_id("sessions-patch-permission")?;
         let request = request(&request_id, protocol::SESSIONS_PATCH_METHOD, params)?;
-        match self
-            .mutate(request, |response| {
-                protocol::decode_session_permission_patch_result(
+        match self.gateway.rpc_mutation(request).await {
+            MutationDelivery::NotWritten(_) => Err(OperationError::Transport),
+            MutationDelivery::MayHaveReached(_) => Ok(InvocationOutcome::Unknown),
+            MutationDelivery::Response(response) if response.request_id() != request_id => {
+                Ok(InvocationOutcome::Unknown)
+            }
+            MutationDelivery::Response(GatewayResponse::Failure { error, .. }) => {
+                // UNAVAILABLE can follow a committed mode whose live application failed.
+                if matches!(error.code(), "INVALID_REQUEST" | "FORBIDDEN") {
+                    Ok(InvocationOutcome::TargetRejected(OperationError::gateway_rejected(error)))
+                } else {
+                    Ok(InvocationOutcome::Unknown)
+                }
+            }
+            MutationDelivery::Response(response) => {
+                let receipt = protocol::decode_session_permission_patch_result(
                     &request_id,
                     response,
                     &expected_key,
-                )
-            })
-            .await
-        {
-            InvocationOutcome::Succeeded(_) => self
-                .session_permission_projection(expected_key)
-                .await
-                .map(InvocationOutcome::Succeeded),
-            InvocationOutcome::TargetRejected(error) => {
-                Ok(InvocationOutcome::TargetRejected(error))
+                );
+                if !receipt.is_ok_and(|receipt| receipt.mode == expected_mode) {
+                    return Ok(InvocationOutcome::Unknown);
+                }
+                Ok(match self.session_permission_projection(expected_key, agent_id).await {
+                    Ok(projection) if projection.supported && projection.mode == expected_mode => {
+                        InvocationOutcome::Succeeded(projection)
+                    }
+                    Ok(_) | Err(_) => InvocationOutcome::Unknown,
+                })
             }
-            InvocationOutcome::Cancelled => Ok(InvocationOutcome::Cancelled),
-            InvocationOutcome::Unknown => Ok(InvocationOutcome::Unknown),
         }
     }
 
@@ -371,11 +384,17 @@ impl SessionOperation {
     async fn session_permission_projection(
         &self,
         session_key: protocol::SessionKey,
+        agent_id: &str,
     ) -> Result<SessionPermissionProjection, OperationError> {
         let params = SessionsListParams::default()
             .try_with_limit(100)?
+            .try_for_agent(agent_id)?
             .try_with_search(session_key.as_str())?;
-        let result = self.list_sessions(params).await?;
+        let request_id = next_request_id("sessions-list-permission")?;
+        let request = request(&request_id, protocol::SESSIONS_LIST_METHOD, params)?;
+        let response = self.permission_query(&request_id, request).await?;
+        let result = protocol::decode_sessions_list_result(&request_id, response)
+            .map_err(|_| OperationError::UnknownResponse)?;
         let Some(summary) = result
             .sessions
             .into_iter()
@@ -385,26 +404,51 @@ impl SessionOperation {
                 "OpenClaw session was not found",
             ));
         };
-        let default_mode = match summary.agent_id.as_ref() {
-            Some(agent_id) => self.default_permission_mode(agent_id.as_str()).await?,
-            None => None,
-        };
+        if summary.agent_id.as_ref().is_some_and(|agent| agent.as_str() != agent_id) {
+            return Err(OperationError::Rejected);
+        }
+        let default_mode = self.default_permission_mode(agent_id).await?;
         Ok(SessionPermissionProjection::supported(
             summary.permission_mode,
             default_mode,
             summary.permission_mode_pending.unwrap_or(false),
+            // The control handshake requires and verifies operator.admin for every connection.
             true,
         ))
+    }
+
+    async fn permission_query(
+        &self,
+        request_id: &str,
+        request: wire::RpcRequest,
+    ) -> Result<GatewayResponse, OperationError> {
+        let response = self.gateway.rpc_query(request).await.map_err(|error| match error {
+            GatewayClientError::Protocol | GatewayClientError::RpcFailed => OperationError::UnknownResponse,
+            error => error.into(),
+        })?;
+        if response.request_id() != request_id {
+            return Err(OperationError::UnknownResponse);
+        }
+        match response {
+            GatewayResponse::Failure { error, .. } => {
+                match error.code() {
+                    "INVALID_REQUEST" | "FORBIDDEN" => Err(OperationError::gateway_rejected(error)),
+                    "UNAVAILABLE" => Err(OperationError::Transport),
+                    _ => Err(OperationError::UnknownResponse),
+                }
+            }
+            response => Ok(response),
+        }
     }
 
     async fn default_permission_mode(
         &self,
         agent_id: &str,
     ) -> Result<Option<SessionPermissionMode>, OperationError> {
-        let agents = OpenClawAgents::new(Arc::clone(&self.gateway))
-            .list()
-            .await
-            .map_err(OperationError::from)?;
+        let request_id = next_request_id("agents-list-permission")?;
+        let request = wire::agents::list_request(request_id.clone())?;
+        let response = self.permission_query(&request_id, request).await?;
+        let agents = wire::agents::decode_list(response).map_err(|_| OperationError::UnknownResponse)?;
         let Some(agent) = agents.agents.iter().find(|agent| agent.id == agent_id) else {
             return Ok(None);
         };
@@ -413,7 +457,7 @@ impl SessionOperation {
             .as_deref()
             .map(|mode| serde_json::from_value(Value::String(mode.to_owned())))
             .transpose()
-            .map_err(|_| OperationError::Protocol)
+            .map_err(|_| OperationError::UnknownResponse)
     }
 
     async fn mutate<T>(
@@ -522,18 +566,6 @@ impl From<GatewayClientError> for OperationError {
 impl From<protocol::ValidationError> for OperationError {
     fn from(_: protocol::ValidationError) -> Self {
         Self::Protocol
-    }
-}
-
-impl From<AgentsReadFailure> for OperationError {
-    fn from(value: AgentsReadFailure) -> Self {
-        match value {
-            AgentsReadFailure::Unavailable
-            | AgentsReadFailure::Deadline
-            | AgentsReadFailure::Authentication => Self::Transport,
-            AgentsReadFailure::Protocol => Self::Protocol,
-            AgentsReadFailure::Rejected => Self::Rejected,
-        }
     }
 }
 

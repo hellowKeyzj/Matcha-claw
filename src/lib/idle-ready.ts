@@ -1,3 +1,5 @@
+import { startTransition, useEffect, useState } from 'react';
+
 interface IdleReadyOptions {
   idleTimeoutMs: number;
   fallbackDelayMs?: number;
@@ -113,3 +115,15 @@ export function scheduleIdleReady(callback: () => void, options: IdleReadyOption
   };
 }
 
+export function useIdleReady(initialReady = false): boolean {
+  const [ready, setReady] = useState(() => initialReady || import.meta.env.MODE === 'test');
+
+  useEffect(() => {
+    if (ready) return;
+    return scheduleIdleReady(() => {
+      startTransition(() => setReady(true));
+    }, { idleTimeoutMs: 320 });
+  }, [ready]);
+
+  return ready;
+}

@@ -170,9 +170,15 @@ impl Command {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentWorkspace {
+    Managed,
+    Path(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentCreate {
     pub name: String,
-    pub workspace: String,
+    pub workspace: AgentWorkspace,
     pub model: Option<String>,
 }
 
@@ -183,7 +189,18 @@ impl AgentCreate {
         }
         Ok(Self {
             name,
-            workspace,
+            workspace: AgentWorkspace::Path(workspace),
+            model,
+        })
+    }
+
+    pub fn managed(name: String, model: Option<String>) -> Result<Self, ()> {
+        if !valid_text(&name) || !valid_optional_text(&model) {
+            return Err(());
+        }
+        Ok(Self {
+            name,
+            workspace: AgentWorkspace::Managed,
             model,
         })
     }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use platform::endpoint::runtime_address::RuntimeEndpoint;
 
@@ -22,38 +22,45 @@ pub trait WorkspaceRuntimeDirectory: Send + Sync {
     fn workspace_ops(&self, endpoint: &RuntimeEndpoint) -> Option<&dyn WorkspaceOps>;
 }
 
+pub type WorkspaceFuture<'a, T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>;
+
 pub trait WorkspaceOps: Send + Sync {
-    fn trusted_workspace_directory(
-        &self,
-        session_key: &str,
-    ) -> Result<WorkspaceDirectoryRoot, WorkspaceDirectoryFailure>;
+    fn bind_agent_workspace<'a>(
+        &'a self,
+        agent_id: &'a str,
+    ) -> WorkspaceFuture<'a, Arc<dyn WorkspaceBinding>, WorkspaceDirectoryFailure>;
 
-    fn bind_workspace(
-        &self,
-        session_key: &str,
-    ) -> Result<Arc<dyn WorkspaceBinding>, WorkspaceDirectoryFailure>;
+    fn trusted_workspace_directory<'a>(
+        &'a self,
+        session_key: &'a str,
+    ) -> WorkspaceFuture<'a, WorkspaceDirectoryRoot, WorkspaceDirectoryFailure>;
 
-    fn resolve_media(
-        &self,
-        session_key: &str,
-        reference: &str,
-    ) -> Result<ResolvedWorkspaceMedia, WorkspaceMediaFailure>;
+    fn bind_workspace<'a>(
+        &'a self,
+        session_key: &'a str,
+    ) -> WorkspaceFuture<'a, Arc<dyn WorkspaceBinding>, WorkspaceDirectoryFailure>;
 
-    fn thumbnail_media_gateway(
-        &self,
-        session_key: &str,
-        gateway_url: &str,
-        mime_type: &str,
-        agent_id: &str,
-    ) -> Result<WorkspaceMediaThumbnail, WorkspaceMediaFailure>;
+    fn resolve_media<'a>(
+        &'a self,
+        session_key: &'a str,
+        reference: &'a str,
+    ) -> WorkspaceFuture<'a, ResolvedWorkspaceMedia, WorkspaceMediaFailure>;
 
-    fn stage_buffer_media(
-        &self,
-        session_key: &str,
-        base64: &str,
-        file_name: &str,
-        mime_type: &str,
-    ) -> Result<WorkspaceMediaReceipt, WorkspaceMediaFailure>;
+    fn thumbnail_media_gateway<'a>(
+        &'a self,
+        session_key: &'a str,
+        gateway_url: &'a str,
+        mime_type: &'a str,
+        agent_id: &'a str,
+    ) -> WorkspaceFuture<'a, WorkspaceMediaThumbnail, WorkspaceMediaFailure>;
+
+    fn stage_buffer_media<'a>(
+        &'a self,
+        session_key: &'a str,
+        base64: &'a str,
+        file_name: &'a str,
+        mime_type: &'a str,
+    ) -> WorkspaceFuture<'a, WorkspaceMediaReceipt, WorkspaceMediaFailure>;
 
     fn workspace_runtime_ready(&self) -> bool;
 }
@@ -62,54 +69,57 @@ pub trait WorkspaceOps: Send + Sync {
 pub trait WorkspaceBinding: Send + Sync {
     fn resource_key(&self) -> Option<&str>;
 
-    fn read_text(
-        &self,
-        relative_path: &str,
+    fn read_text<'a>(
+        &'a self,
+        relative_path: &'a str,
         limit: usize,
-    ) -> Result<WorkspaceTextReceipt, WorkspaceReadFailure>;
+    ) -> WorkspaceFuture<'a, WorkspaceTextReceipt, WorkspaceReadFailure>;
 
-    fn read_binary(
-        &self,
-        relative_path: &str,
+    fn read_binary<'a>(
+        &'a self,
+        relative_path: &'a str,
         limit: usize,
-    ) -> Result<WorkspaceBinaryReceipt, WorkspaceBinaryFailure>;
+    ) -> WorkspaceFuture<'a, WorkspaceBinaryReceipt, WorkspaceBinaryFailure>;
 
-    fn stat_file(&self, relative_path: &str) -> Result<WorkspaceStatReceipt, WorkspaceStatFailure>;
+    fn stat_file<'a>(
+        &'a self,
+        relative_path: &'a str,
+    ) -> WorkspaceFuture<'a, WorkspaceStatReceipt, WorkspaceStatFailure>;
 
-    fn list_directory(
-        &self,
-        relative_path: &str,
+    fn list_directory<'a>(
+        &'a self,
+        relative_path: &'a str,
         include_hidden: bool,
-    ) -> Result<WorkspaceDirectoryReceipt, WorkspaceListFailure>;
+    ) -> WorkspaceFuture<'a, WorkspaceDirectoryReceipt, WorkspaceListFailure>;
 
-    fn write_text(
-        &self,
-        relative_path: &str,
-        content: &str,
-    ) -> Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>;
+    fn write_text<'a>(
+        &'a self,
+        relative_path: &'a str,
+        content: &'a str,
+    ) -> WorkspaceFuture<'a, WorkspaceWriteReceipt, WorkspaceWriteFailure>;
 
-    fn prepare_media(
-        &self,
-        session_key: &str,
-        relative_path: &str,
-        mime_type: &str,
-    ) -> Result<WorkspaceMediaReceipt, WorkspaceMediaFailure>;
+    fn prepare_media<'a>(
+        &'a self,
+        session_key: &'a str,
+        relative_path: &'a str,
+        mime_type: &'a str,
+    ) -> WorkspaceFuture<'a, WorkspaceMediaReceipt, WorkspaceMediaFailure>;
 
-    fn thumbnail_media(
-        &self,
-        relative_path: &str,
-        mime_type: &str,
-    ) -> Result<WorkspaceMediaThumbnail, WorkspaceMediaFailure>;
+    fn thumbnail_media<'a>(
+        &'a self,
+        relative_path: &'a str,
+        mime_type: &'a str,
+    ) -> WorkspaceFuture<'a, WorkspaceMediaThumbnail, WorkspaceMediaFailure>;
 
-    fn thumbnails_media(
-        &self,
-        session_key: &str,
-        paths: &[WorkspaceMediaPath],
-    ) -> Result<Vec<WorkspaceMediaThumbnailEntry>, WorkspaceMediaFailure>;
+    fn thumbnails_media<'a>(
+        &'a self,
+        session_key: &'a str,
+        paths: &'a [WorkspaceMediaPath],
+    ) -> WorkspaceFuture<'a, Vec<WorkspaceMediaThumbnailEntry>, WorkspaceMediaFailure>;
 
-    fn stage_paths_media(
-        &self,
-        session_key: &str,
-        paths: &[WorkspaceMediaPath],
-    ) -> Result<Vec<WorkspaceMediaReceipt>, WorkspaceMediaFailure>;
+    fn stage_paths_media<'a>(
+        &'a self,
+        session_key: &'a str,
+        paths: &'a [WorkspaceMediaPath],
+    ) -> WorkspaceFuture<'a, Vec<WorkspaceMediaReceipt>, WorkspaceMediaFailure>;
 }

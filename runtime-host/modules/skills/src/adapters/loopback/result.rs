@@ -18,6 +18,7 @@ pub(super) const PRIVATE_ENDPOINT: &str = "/api/sealed-skills/export-cloud/resul
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ResultRequest {
     call_id: String,
+    scope: Option<serde_json::Value>,
 }
 
 pub(super) async fn handle(
@@ -36,6 +37,16 @@ pub(super) async fn handle(
     let Some(access) = results.access(&call_id, private).await else {
         return not_found();
     };
+    let scope = match body.scope.map(super::scope::decode).transpose() {
+        Ok(scope) => scope,
+        Err(()) => return Response::json(400, json!({ "outcome": "rejected" })),
+    };
+    let legacy_scope = platform::endpoint::runtime_address::RuntimeScope::RuntimeInstance(
+        runtime_directory::RuntimeDriverIdentity::open_claw().endpoint(),
+    );
+    if scope.as_ref().unwrap_or(&legacy_scope) != access.runtime_scope.as_ref().unwrap_or(&legacy_scope) {
+        return not_found();
+    }
     let Some(token) = request
         .head
         .headers

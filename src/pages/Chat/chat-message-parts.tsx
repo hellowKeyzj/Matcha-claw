@@ -641,7 +641,7 @@ export const UserMessageMetaBar = memo(function UserMessageMetaBar({
           title={t('reuseMessage')}
           aria-busy={loading}
           disabled={loading}
-          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/75 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20 disabled:cursor-wait motion-reduce:transition-none"
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center text-muted-foreground/75 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20 disabled:cursor-wait motion-reduce:transition-none"
           onClick={onReuse}
         >
           {loading ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <CornerDownLeft aria-hidden="true" className="h-4 w-4" />}

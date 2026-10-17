@@ -167,7 +167,7 @@ fn open_payload<T: DeserializeOwned>(
     Ok(decoded)
 }
 
-fn encrypt_cloud_envelope(
+pub(super) fn encrypt_cloud_envelope(
     public_key_pem: &str,
     key_id: &str,
     authorization_key: &[u8; KEY_BYTES],

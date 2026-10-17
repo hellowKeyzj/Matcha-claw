@@ -9,6 +9,9 @@ pub fn listed() -> Vec<serde_json::Value> {
 }
 
 pub fn describe(id: &str, scope: &serde_json::Value) -> Option<serde_json::Value> {
+    if let Some(bootstrap) = matcha_scope(scope) {
+        return matcha_descriptor(id, scope.clone(), bootstrap);
+    }
     let descriptor = match id {
         "subagent.management" => management_descriptor(),
         "subagent.skills" => skills_descriptor(),
@@ -106,6 +109,95 @@ fn native_agent_scope(identity: runtime_directory::RuntimeDriverIdentity) -> Val
         },
         "agentId": identity.default_agent_id(),
     })
+}
+
+fn matcha_scope(scope: &Value) -> Option<bool> {
+    let object = scope.as_object()?;
+    let endpoint = object.get("endpoint")?.as_object()?;
+    let identity = runtime_directory::RuntimeDriverIdentity::matcha_agent();
+    if endpoint.len() != 3
+        || endpoint.get("kind")?.as_str()? != "native-runtime"
+        || endpoint.get("runtimeAdapterId")?.as_str()? != identity.runtime_adapter_id()
+        || endpoint.get("runtimeInstanceId")?.as_str()? != identity.runtime_instance_id()
+    {
+        return None;
+    }
+    match object.get("kind")?.as_str()? {
+        "runtime-instance" if object.len() == 2 => Some(true),
+        "agent"
+            if object.len() == 3
+                && object.get("agentId")?.as_str().is_some_and(|id| {
+                    !id.is_empty()
+                        && id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                }) =>
+        {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+fn matcha_descriptor(id: &str, scope: Value, bootstrap: bool) -> Option<Value> {
+    let (kind, operations, target_kinds) = match id {
+        "subagent.management" => {
+            let target = if bootstrap {
+                "runtime-instance"
+            } else {
+                "agent"
+            };
+            let mut operations = vec![
+                operation("subagents.list", "List agents", target),
+                operation(
+                    "subagents.displayConfig.get",
+                    "Get Agent configuration",
+                    target,
+                ),
+                operation("subagents.create", "Create managed Agent", "subagent"),
+            ];
+            if !bootstrap {
+                operations.extend([
+                    operation(
+                        "subagents.description.set",
+                        "Set Agent description",
+                        "subagent",
+                    ),
+                    operation("subagents.model.set", "Set Agent model", "subagent"),
+                    operation("subagents.update", "Update Agent", "subagent"),
+                    operation("subagents.delete", "Delete Agent", "subagent"),
+                    operation("subagents.files.get", "Get Agent file", "subagent"),
+                    operation("subagents.files.set", "Set Agent file", "subagent"),
+                    operation("subagents.files.list", "List Agent files", "subagent"),
+                ]);
+            }
+            ("subagent-management", operations, vec![target, "subagent"])
+        }
+        "subagent.tools" if !bootstrap => (
+            "subagent-tools",
+            vec![
+                operation(
+                    "subagentTools.get",
+                    "Get native configurable tools",
+                    "subagent",
+                ),
+                operation(
+                    "subagentTools.set",
+                    "Set native configurable tools",
+                    "subagent",
+                ),
+            ],
+            vec!["subagent"],
+        ),
+        _ => return None,
+    };
+    Some(json!({
+        "id":id,"kind":kind,"scopeKind":if bootstrap {"runtime-instance"} else {"agent"},
+        "scope":scope,"targetKinds":target_kinds,
+        "runtimeAdapterId":"matcha-agent","runtimeInstanceId":"local",
+        "supportLevel":"native","availability":"available","operations":operations,
+        "policyScope":id,"ownerModuleId":"agent","routeOwnerId":"matcha-agent",
+    }))
 }
 
 fn operation(id: &'static str, title: &'static str, target_kind: &'static str) -> Value {

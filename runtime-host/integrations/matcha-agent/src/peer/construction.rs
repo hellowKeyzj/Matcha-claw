@@ -12,6 +12,7 @@ use toolchain::NativeToolchain;
 
 use super::lifecycle::MatchaPeer;
 use crate::{
+    client::Client,
     lifecycle::{
         launch::{LaunchError, LaunchFactory, LaunchInput},
         output::StartupDiagnosticCategory,
@@ -20,14 +21,14 @@ use crate::{
         restart::CrashRestartPolicy,
         secret::Secret,
         shutdown::MatchaGracefulStop,
-        stdio::{MatchaStdinControl, MatchaStdioActivation},
+        stdio::MatchaStdioActivation,
     },
-    session::client::{AppServerClientError, AppServerEndpoint},
 };
 
 pub struct MatchaPeerInput {
-    pub bun_executable: PathBuf,
-    pub entry: PathBuf,
+    pub server_executable: PathBuf,
+    pub cli_executable: PathBuf,
+    pub cli_args: Vec<String>,
     pub working_directory: PathBuf,
     pub storage_root: PathBuf,
     pub port: u16,
@@ -42,7 +43,7 @@ pub struct MatchaPeerInput {
 pub struct MatchaPeerFactory {
     launch: LaunchFactory,
     working_directory: PathBuf,
-    endpoint: AppServerEndpoint,
+    endpoint: SocketAddr,
     secret: Arc<Secret>,
     report_diagnostic: Arc<dyn Fn(StartupDiagnosticCategory) + Send + Sync>,
     #[cfg(unix)]
@@ -59,14 +60,13 @@ impl fmt::Debug for MatchaPeerFactory {
 
 impl MatchaPeerFactory {
     pub fn try_new(input: MatchaPeerInput, secret: Secret) -> Result<Self, ConstructionError> {
-        let endpoint =
-            AppServerEndpoint::try_new(SocketAddr::from((Ipv4Addr::LOCALHOST, input.port)))
-                .map_err(ConstructionError::Endpoint)?;
+        let endpoint = SocketAddr::from((Ipv4Addr::LOCALHOST, input.port));
         let secret = Arc::new(secret);
         let working_directory = input.working_directory.clone();
         let launch = LaunchInput {
-            bun_executable: input.bun_executable,
-            entry: input.entry,
+            server_executable: input.server_executable,
+            cli_executable: input.cli_executable,
+            cli_args: input.cli_args,
             working_directory: input.working_directory,
             storage_root: input.storage_root,
             port: input.port,
@@ -75,7 +75,8 @@ impl MatchaPeerFactory {
             #[cfg(windows)]
             git_bash: input.git_bash,
         }
-        .try_into_launch_factory()?;
+        .try_into_launch_factory()?
+        .report_diagnostics(Arc::clone(&input.report_diagnostic));
 
         #[cfg(unix)]
         if !input.guardian_executable.is_absolute() {
@@ -94,14 +95,13 @@ impl MatchaPeerFactory {
     }
 
     pub fn build(self) -> MatchaPeer {
-        let stdin = MatchaStdinControl::new();
+        let native = Client::new(self.endpoint, self.secret);
         let report_diagnostic = self.report_diagnostic;
-        let stdio_activation = MatchaStdioActivation::new(
-            stdin.clone(),
-            Arc::new(move |diagnostic| report_diagnostic(diagnostic.category())),
-        );
-        let readiness = AppServerReadiness::new(self.endpoint, Arc::clone(&self.secret));
-        let graceful_stop = MatchaGracefulStop::new(stdin);
+        let stdio_activation = MatchaStdioActivation::new(Arc::new(move |diagnostic| {
+            report_diagnostic(diagnostic.category());
+        }));
+        let readiness = AppServerReadiness::new(native.clone());
+        let graceful_stop = MatchaGracefulStop::new(native.clone());
 
         #[cfg(windows)]
         let containment = ProcessContainment::job();
@@ -119,19 +119,12 @@ impl MatchaPeerFactory {
         );
         let handle = supervisor.handle();
 
-        MatchaPeer::new(
-            handle,
-            supervisor,
-            self.working_directory,
-            self.endpoint,
-            self.secret,
-        )
+        MatchaPeer::new(handle, supervisor, self.working_directory, native)
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConstructionError {
-    Endpoint(AppServerClientError),
     Launch(LaunchError),
     #[cfg(unix)]
     Guardian(InvalidGuardianExecutable),
@@ -140,7 +133,6 @@ pub enum ConstructionError {
 impl fmt::Display for ConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Endpoint(error) => error.fmt(formatter),
             Self::Launch(error) => error.fmt(formatter),
             #[cfg(unix)]
             Self::Guardian(error) => error.fmt(formatter),
@@ -151,7 +143,6 @@ impl fmt::Display for ConstructionError {
 impl std::error::Error for ConstructionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Endpoint(error) => Some(error),
             Self::Launch(error) => Some(error),
             #[cfg(unix)]
             Self::Guardian(error) => Some(error),

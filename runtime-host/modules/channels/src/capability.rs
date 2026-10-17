@@ -1,15 +1,16 @@
 use serde_json::{Value, json};
 
 pub fn listed() -> Vec<serde_json::Value> {
-    vec![integration_descriptor()]
+    vec![integration_descriptor(), matcha_descriptor()]
 }
 
 pub fn describe(id: &str, scope: &serde_json::Value) -> Option<serde_json::Value> {
-    let descriptor = match id {
-        "integration.channel" => integration_descriptor(),
-        _ => return None,
-    };
-    (descriptor.get("scope") == Some(scope)).then_some(descriptor)
+    if id != "integration.channel" {
+        return None;
+    }
+    listed()
+        .into_iter()
+        .find(|descriptor| descriptor.get("scope") == Some(scope))
 }
 
 pub fn integration_descriptor() -> Value {
@@ -40,6 +41,29 @@ pub fn integration_descriptor() -> Value {
         "policyScope": "integration.channel",
         "ownerModuleId": "integration",
         "routeOwnerId": "openclaw",
+    })
+}
+
+fn matcha_descriptor() -> Value {
+    json!({
+        "id":"integration.channel", "kind":"integration-channel", "scopeKind":"runtime-instance",
+        "scope":{"kind":"runtime-instance","endpoint":{"kind":"native-runtime","runtimeAdapterId":"matcha-agent","runtimeInstanceId":"local"}},
+        "runtimeAdapterId":"matcha-agent", "runtimeInstanceId":"local",
+        "targetKinds":["channel","channel-account","channel-config","channel-login","channel-pairing","channel-status","channel-snapshot"],
+        "supportLevel":"native", "availability":"available", "supportedChannels":["weixin"],
+        "operations":[
+            operation("channels.catalog.read", "Read native WeChat binding catalog", "channel"),
+            operation("channels.configure", "Configure Agent/session binding for next launch", "channel-config"),
+            operation("channels.config.read", "Read channel binding", "channel-config"),
+            operation("channels.config.delete", "Close consumer, clear native account and delete binding", "channel-config"),
+            {"id":"channels.runtime.control","title":"Disconnect bound session consumer","targetKind":"channel-account","targetRequired":true,"actions":["disconnect"],"unsupportedActions":["connect"]},
+            {"id":"channels.login","title":"Native WeChat login","targetKind":"channel-login","targetRequired":true,"actions":["start","wait","cancel","logout"],"qrRefreshObservable":false},
+            operation("channels.pairing.approve", "Approve native WeChat pairing code", "channel-pairing"),
+            operation("channels.status.read", "Read consumer observations; account health unknown", "channel-status"),
+            operation("channels.snapshot.read", "Read configured binding and consumer snapshot", "channel-snapshot")
+        ],
+        "unsupportedOperations":["channels.credentials.validate","channels.pairing.list"],
+        "policyScope":"integration.channel", "ownerModuleId":"integration", "routeOwnerId":"matcha-agent"
     })
 }
 

@@ -1,4 +1,4 @@
-use platform::call::CallContext;
+use platform::{call::CallContext, endpoint::runtime_address::RuntimeEndpoint};
 use tokio::sync::oneshot;
 
 use crate::domain::model::{UsageEntry, UsageReadError};
@@ -9,20 +9,24 @@ pub(crate) enum UsageCommand {}
 
 pub(crate) enum UsageQuery {
     Recent {
+        endpoint: RuntimeEndpoint,
         limit: usize,
         call: Option<CallContext<UsageCallDetail>>,
         reply: oneshot::Sender<Result<Vec<UsageEntry>, UsageReadError>>,
     },
     SessionTimeseries {
+        endpoint: RuntimeEndpoint,
         agent_id: String,
         session_id: String,
         call: Option<CallContext<UsageCallDetail>>,
         reply: oneshot::Sender<Result<Vec<UsageEntry>, UsageReadError>>,
     },
     DefaultLimit {
+        endpoint: RuntimeEndpoint,
         reply: oneshot::Sender<usize>,
     },
     MaxLimit {
+        endpoint: RuntimeEndpoint,
         reply: oneshot::Sender<usize>,
     },
 }

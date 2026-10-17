@@ -14,6 +14,7 @@ use crate::{
     delete::{SessionDeleteCommand, SessionDeleteOutcome},
     goal::{SessionGoalCommand, SessionGoalOutcome},
     model_selection::{ResolvedSessionModelSelection, SessionModelSelectionOutcome},
+    question::{PendingQuestionsCommand, PendingQuestionsOutcome, SessionQuestionCommand, SessionQuestionOutcome},
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
     session_catalog::{SessionCatalogCommand, SessionCatalogOutcome},
@@ -299,6 +300,20 @@ pub trait SessionOps: Send + Sync {
         command: ResolvedSessionModelSelection,
         cancellation: CancellationToken,
     ) -> SessionFuture<'a, SessionModelSelectionOutcome>;
+
+    fn pending_questions<'a>(
+        &'a self,
+        _command: PendingQuestionsCommand,
+    ) -> SessionFuture<'a, PendingQuestionsOutcome> {
+        Box::pin(async { PendingQuestionsOutcome::Unsupported })
+    }
+
+    fn respond_to_question<'a>(
+        &'a self,
+        _command: SessionQuestionCommand,
+    ) -> SessionFuture<'a, SessionQuestionOutcome> {
+        Box::pin(async { SessionQuestionOutcome::Unsupported })
+    }
 
     fn supports_goal(&self) -> bool {
         false
