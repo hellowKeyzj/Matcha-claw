@@ -70,6 +70,7 @@ pub struct Config {
     pub agent_deletions: BTreeMap<String, AgentDeletion>,
     pub providers: BTreeMap<String, Value>,
     pub mcp_servers: BTreeMap<String, Value>,
+    pub search: Option<crate::search::Projection>,
     #[serde(skip)]
     pub private_provider_env: crate::provider::PrivateProjection,
     #[serde(skip)]
@@ -92,6 +93,7 @@ impl Default for Config {
             agent_deletions: BTreeMap::new(),
             providers: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
+            search: None,
             private_provider_env: Default::default(),
             private_mcp_env: Default::default(),
             private_sealed: Default::default(),

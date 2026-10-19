@@ -36,10 +36,10 @@ import type {
   PermissionDecisionReason,
 } from 'src/utils/permissions/PermissionResult.js'
 import { hasPermissionsToUseTool } from 'src/utils/permissions/permissions.js'
-import { writeToStdout } from 'src/utils/process.js'
 import { jsonStringify } from 'src/utils/slowOperations.js'
 import { z } from 'zod/v4'
 import { notifyCommandLifecycle } from '../utils/commandLifecycle.js'
+import { persistTaskContextBinding } from '../utils/tasks.js'
 import { normalizeControlMessageKeys } from '../utils/controlMessageCompat.js'
 import { executePermissionRequestHooks } from '../utils/hooks.js'
 import {
@@ -143,6 +143,64 @@ export class StructuredIO {
     Promise.resolve(null)
 
   private inputClosed = false
+  private sleepState: 'open' | 'preparing' | 'ready' = 'open'
+  private outputBarrier?: { message: StdoutMessage; resolve: () => void }
+  private pendingPermissionHooks = 0
+  private environmentUpdated = false
+
+  get hasSessionOnlyEnvironment(): boolean {
+    return this.environmentUpdated
+  }
+
+  get acceptsInput(): boolean {
+    return this.sleepState === 'open'
+  }
+
+  get hasPendingRequests(): boolean {
+    return this.pendingRequests.size > 0 || this.pendingPermissionHooks > 0
+  }
+
+  get hasPrependedInput(): boolean {
+    return this.prependedLines.length > 0
+  }
+
+  prepareToSleep(): void {
+    this.sleepState = 'preparing'
+  }
+
+  resumeInput(): void {
+    this.sleepState = 'open'
+  }
+
+  finishPreparingToSleep(): void {
+    this.sleepState = 'ready'
+  }
+
+  /** A local marker in the existing FIFO, never a wire message. */
+  flushOutput(): Promise<void> {
+    return new Promise<void>(resolve => {
+      const message: StdoutMessage = { type: 'keep_alive' }
+      this.outputBarrier = { message, resolve }
+      this.outbound.enqueue(message)
+    })
+  }
+
+  consumeOutputBarrier(message: StdoutMessage): boolean {
+    if (this.outputBarrier?.message !== message) return false
+    this.outputBarrier.resolve()
+    this.outputBarrier = undefined
+    return true
+  }
+
+  flushStdout(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (process.stdout.destroyed) {
+        reject(new Error('Output stream closed'))
+        return
+      }
+      process.stdout.write('', error => (error ? reject(error) : resolve()))
+    })
+  }
   private unexpectedResponseCallback?: (
     response: SDKControlResponse,
   ) => Promise<void>
@@ -204,6 +262,7 @@ export class StructuredIO {
    * prependedLines between each yielded message.
    */
   prependUserMessage(content: string): void {
+    if (!this.acceptsInput) throw new Error('Session is preparing to sleep')
     this.prependedLines.push(
       jsonStringify({
         type: 'user',
@@ -287,6 +346,7 @@ export class StructuredIO {
    * callback is aborted via the signal — otherwise the callback hangs.
    */
   injectControlResponse(response: SDKControlResponse): void {
+    if (!this.acceptsInput) return
     const responseInner = response.response as
       | {
           request_id?: string
@@ -347,6 +407,8 @@ export class StructuredIO {
   private async processLine(
     line: string,
   ): Promise<StdinMessage | SDKMessage | undefined> {
+    // Once ready, only the input iterator reaching EOF may advance shutdown.
+    if (!this.acceptsInput) return undefined
     // Skip empty lines (e.g. from double newlines in piped stdin)
     if (!line) {
       return undefined
@@ -366,9 +428,11 @@ export class StructuredIO {
         // by the REPL process itself, not just child Bash commands.
         const variables = message.variables ?? {}
         const keys = Object.keys(variables)
+        if (keys.length > 0) this.environmentUpdated = true
         for (const [key, value] of Object.entries(variables)) {
           process.env[key] = value
         }
+        persistTaskContextBinding()
         logForDebugging(
           `[structuredIO] applied update_environment_variables: ${keys.join(', ')}`,
         )
@@ -486,7 +550,11 @@ export class StructuredIO {
   }
 
   async write(message: StdoutMessage): Promise<void> {
-    writeToStdout(ndjsonSafeStringify(message) + '\n')
+    await new Promise<void>((resolve, reject) => {
+      process.stdout.write(ndjsonSafeStringify(message) + '\n', error =>
+        error ? reject(error) : resolve(),
+      )
+    })
   }
 
   private async sendRequest<Response>(
@@ -500,7 +568,7 @@ export class StructuredIO {
       request_id: requestId,
       request,
     }
-    if (this.inputClosed) {
+    if (this.inputClosed || !this.acceptsInput) {
       throw new Error('Stream closed')
     }
     if (signal?.aborted) {
@@ -600,13 +668,18 @@ export class StructuredIO {
 
       try {
         // Start the hook evaluation (runs in background)
+        this.pendingPermissionHooks++
         const hookPromise = executePermissionRequestHooksForSDK(
           tool.name,
           toolUseID,
           input,
           toolUseContext,
           mainPermissionResult.suggestions,
-        ).then(decision => ({ source: 'hook' as const, decision }))
+        )
+          .then(decision => ({ source: 'hook' as const, decision }))
+          .finally(() => {
+            this.pendingPermissionHooks--
+          })
 
         // Start the SDK permission prompt immediately (don't wait for hooks)
         const requestId = randomUUID()

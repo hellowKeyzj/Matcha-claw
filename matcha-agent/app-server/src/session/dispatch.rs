@@ -264,6 +264,7 @@ impl Sessions {
                     active: None,
                     cli: None,
                     native: native::Snapshot::default(),
+                    idle: super::idle::Idle::Dormant,
                     launching: false,
                     launch_error: None,
                     sending: false,
@@ -271,6 +272,7 @@ impl Sessions {
                     consuming: false,
                     cancel_in_flight: false,
                     storage_fault: None,
+                    run_storage_unknown: None,
                 }),
                 wake: Notify::new(),
                 changed: Notify::new(),
@@ -356,20 +358,15 @@ impl Sessions {
         let record = &execution.record;
         let mut result = record.view();
         if input.history {
-            let path =
-                history::locate(&record.runtime, &record.workspace, &record.session_id).await?;
-            result["history"] = match path {
-                Some(path) => {
-                    history::read(
-                        &path,
-                        &record.session_id,
-                        input.offset,
-                        input.limit.unwrap_or(80),
-                    )
-                    .await?
-                }
-                None => json!({ "messages": [], "total": 0, "nextOffset": null }),
-            };
+            result["history"] = history::read(
+                &self.0.database,
+                &record.runtime,
+                &record.workspace,
+                &record.session_id,
+                input.offset,
+                input.limit.unwrap_or(80),
+            )
+            .await?;
         }
         Ok(result)
     }
@@ -398,7 +395,11 @@ impl Sessions {
                 "The previous CLI instance cleanup was not confirmed",
             ));
         }
-        if execution.closing || execution.launching || execution.sending {
+        if execution.closing
+            || execution.idle.handing_off()
+            || execution.launching
+            || execution.sending
+        {
             return Err(rpc::Error::conflict(
                 "session_transition_in_progress",
                 "Wait for session cleanup or startup to finish",
@@ -441,6 +442,7 @@ impl Sessions {
             || !execution.queue.is_empty()
             || execution.native.busy
             || execution.closing
+            || execution.idle.handing_off()
         {
             return Err(rpc::Error::conflict(
                 "session_busy",
@@ -478,16 +480,16 @@ impl Sessions {
         let agent_id = session.data.lock().await.record.agent_id.clone();
         let _guard = self.agent_guard(&agent_id).await;
         self.accepting().map_err(super::not_sent)?;
-        let (instance_id, previous) = {
+        let (control, previous) = {
             let mut execution = session.data.lock().await;
             execution.record.mutable().map_err(super::not_sent)?;
-            if execution.closing {
+            if execution.closing || execution.idle.handing_off() {
                 return Err(super::not_sent(rpc::Error::conflict(
                     "session_closing",
                     "Session cleanup is in progress",
                 )));
             }
-            let instance_id = execution
+            let control = execution
                 .cli
                 .as_ref()
                 .ok_or_else(|| {
@@ -496,21 +498,17 @@ impl Sessions {
                         "This session has no live CLI instance",
                     ))
                 })?
-                .instance_id()
-                .to_owned();
+                .admit()?;
             let previous = execution.native.proactive;
             execution.native.proactive = native::Proactive::OutcomeUnknown;
             if let Some(active) = execution.active.as_mut() {
                 active.ownership_ambiguous = true;
             }
-            (instance_id, previous)
+            (control, previous)
         };
-        let response = self
-            .control_instance(
-                &input.session_id,
-                &instance_id,
-                json!({ "subtype": "set_proactive", "enabled": input.enabled }),
-            )
+        let instance_id = control.instance_id();
+        let response = control
+            .request(json!({ "subtype": "set_proactive", "enabled": input.enabled }))
             .await;
         let mut execution = session.data.lock().await;
         let same_instance = execution
@@ -579,8 +577,8 @@ impl Sessions {
         let _guard = self.agent_guard(&agent_id).await;
         self.accepting()?;
         let snapshot = self.0.config.snapshot().await;
-        let cli = {
-            let execution = session.data.lock().await;
+        let (cli, control) = {
+            let mut execution = session.data.lock().await;
             execution.record.mutable()?;
             if let Some(binding) = binding {
                 let provider = binding
@@ -608,13 +606,26 @@ impl Sessions {
                     .with_data(json!({ "requiresRestart": true, "nativeRequestSent": false })));
                 }
             }
-            if execution.closing || execution.launching || execution.sending {
-                return Err(rpc::Error::conflict(
+            if execution.closing
+                || execution.idle.handing_off()
+                || execution.launching
+                || execution.sending
+            {
+                return Err(super::not_sent(rpc::Error::conflict(
                     "session_transition_in_progress",
                     "Wait for session startup or cleanup",
-                ));
+                )));
             }
-            execution.cli.clone()
+            execution.idle.activity();
+            session.wake.notify_one();
+            (
+                execution.cli.clone(),
+                execution
+                    .cli
+                    .as_ref()
+                    .map(crate::cli::Cli::admit)
+                    .transpose()?,
+            )
         };
         let response = if let Some(cli) = &cli {
             cli.initialized().await?;
@@ -622,12 +633,15 @@ impl Sessions {
                 return Err(rpc::Error::conflict("native_model_override", "The current CLI model is fixed by its Provider environment; close and select the model before resuming").with_data(json!({ "requiresRestart": true, "nativeRequestSent": false })));
             }
             Some(
-                cli.request(if model {
-                    json!({ "subtype": "set_model", "model": selected })
-                } else {
-                    json!({ "subtype": "set_permission_mode", "mode": selected })
-                })
-                .await?,
+                control
+                    .as_ref()
+                    .expect("CLI control admission")
+                    .request(if model {
+                        json!({ "subtype": "set_model", "model": selected })
+                    } else {
+                        json!({ "subtype": "set_permission_mode", "mode": selected })
+                    })
+                    .await?,
             )
         } else {
             None
@@ -682,25 +696,17 @@ impl Sessions {
 
     async fn list_runs(&self, input: Runs) -> rpc::Result<Value> {
         self.session(&input.session_id).await?;
-        let mut runs = record::list_runs(&self.0.database, &input.session_id).await?;
-        if let Some(cursor) = input.before_run_id {
-            validate_uuid(&cursor)?;
-            let index = runs
-                .iter()
-                .position(|record| record.run.run_id == cursor)
-                .ok_or_else(|| rpc::Error::not_found("Run cursor"))?;
-            runs.drain(..=index);
+        if let Some(cursor) = &input.before_run_id {
+            validate_uuid(cursor)?;
         }
-        let limit = input.limit.unwrap_or(100);
-        let more = runs.len() > limit;
-        runs.truncate(limit);
-        let next = if more {
-            runs.last().map(|record| record.run.run_id.clone())
-        } else {
-            None
-        };
-        Ok(
-            json!({ "runs": runs.into_iter().map(|record| record.run).collect::<Vec<_>>(), "nextBeforeRunId": next }),
+        rpc::value(
+            record::list_runs(
+                &self.0.database,
+                &input.session_id,
+                input.before_run_id.as_deref(),
+                input.limit.unwrap_or(100),
+            )
+            .await?,
         )
     }
 
@@ -713,6 +719,8 @@ impl Sessions {
         let session = self.session(&record.run.session_id).await?;
         let mut execution = session.data.lock().await;
         execution.record.mutable()?;
+        execution.idle.activity();
+        session.wake.notify_one();
         if let Some(index) = execution
             .queue
             .iter()
@@ -720,20 +728,16 @@ impl Sessions {
         {
             let mut cancelled = execution.queue[index].clone();
             cancelled.finish(run::Status::Cancelled, "cancelled_before_send", None);
-            record::save_run(&self.0.database, &cancelled).await?;
+            self.save_run_locked(&mut execution, &cancelled).await?;
             execution.queue.remove(index);
-            self.0
-                .events
-                .append(
-                    &cancelled.run.session_id,
-                    Some(run_id),
-                    "run.terminal",
-                    rpc::value(&cancelled.run)?,
-                )
-                .await?;
             return rpc::value(cancelled.run);
         }
         let cli = execution.cli.clone();
+        let control = execution
+            .cli
+            .as_ref()
+            .map(crate::cli::Cli::admit)
+            .transpose()?;
         let Some(active) = execution
             .active
             .as_mut()
@@ -748,7 +752,8 @@ impl Sessions {
         let mut requested = active.record.clone();
         requested.run.status = run::Status::CancelRequested;
         requested.run.cancel_requested_at_ms = Some(rpc::now_ms());
-        record::save_run(&self.0.database, &requested).await?;
+        self.save_run_locked(&mut execution, &requested).await?;
+        let active = execution.active.as_mut().expect("active run checked");
         active.record = requested;
         let result = rpc::value(&active.record.run)?;
         if !active.input_started {
@@ -784,7 +789,10 @@ impl Sessions {
             changed.await;
         };
         let response = if send {
-            cli.request(json!({ "subtype": "interrupt" }))
+            control
+                .as_ref()
+                .expect("CLI control admission")
+                .request(json!({ "subtype": "interrupt" }))
                 .await
                 .map(|_| ())
         } else {

@@ -116,9 +116,9 @@ impl Child {
         }
     }
 
-    pub(super) fn terminate_tree(&mut self) -> rpc::Result<()> {
+    pub(super) fn terminate_tree(&mut self) -> rpc::Result<bool> {
         let Some(group) = self.group else {
-            return Ok(());
+            return Ok(false);
         };
         // Proves that our direct child has not been reaped/reused before using
         // a numeric process-group ID. An external reaper means no kill authority.
@@ -142,8 +142,9 @@ impl Child {
                     error,
                 ));
             }
+            return Ok(false);
         }
-        Ok(())
+        Ok(true)
     }
 
     pub(super) async fn wait(&mut self) -> rpc::Result<(Option<i32>, Option<i32>)> {

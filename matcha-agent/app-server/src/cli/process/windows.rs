@@ -188,15 +188,16 @@ impl Child {
         }
     }
 
-    pub(super) fn terminate_tree(&mut self) -> rpc::Result<()> {
+    pub(super) fn terminate_tree(&mut self) -> rpc::Result<bool> {
         if self.active_processes()? == 0 {
-            return Ok(());
+            return Ok(false);
         }
         bool_ok(
             unsafe { J::TerminateJobObject(self.job.as_raw_handle().cast(), 1) },
             "process_tree_cleanup_failed",
             "CLI owned Job could not be terminated",
-        )
+        )?;
+        Ok(true)
     }
 
     pub(super) async fn wait(&mut self) -> rpc::Result<(Option<i32>, Option<i32>)> {

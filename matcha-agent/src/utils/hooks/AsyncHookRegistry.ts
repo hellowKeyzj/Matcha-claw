@@ -82,6 +82,10 @@ export function registerPendingAsyncHook({
   })
 }
 
+export function hasPendingAsyncHooks(): boolean {
+  return pendingHooks.size > 0
+}
+
 export function getPendingAsyncHooks(): PendingAsyncHook[] {
   return Array.from(pendingHooks.values()).filter(
     hook => !hook.responseAttachmentSent,

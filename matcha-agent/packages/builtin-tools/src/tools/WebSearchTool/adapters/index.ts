@@ -12,6 +12,7 @@ import { ApiSearchAdapter } from './apiAdapter.js'
 import { BingSearchAdapter } from './bingAdapter.js'
 import { BraveSearchAdapter } from './braveAdapter.js'
 import { ExaSearchAdapter } from './exaAdapter.js'
+import { SearxngSearchAdapter } from './searxngAdapter.js'
 import { TavilySearchAdapter } from './tavilyAdapter.js'
 import type { WebSearchAdapter } from './types.js'
 
@@ -22,35 +23,60 @@ export type {
   WebSearchAdapter,
 } from './types.js'
 
-export type SearchAdapterKey = 'api' | 'bing' | 'brave' | 'exa' | 'tavily'
+export type SearchAdapterKey =
+  | 'api'
+  | 'bing'
+  | 'brave'
+  | 'exa'
+  | 'tavily'
+  | 'searxng'
 
 let cachedAdapter: WebSearchAdapter | null = null
-let cachedAdapterKey: SearchAdapterKey | null = null
+let cachedAdapterIdentity: string | null = null
 
-export function createAdapter(): WebSearchAdapter {
+export function getSearchAdapterKey(): SearchAdapterKey {
   // 1. Explicit env override
   const envAdapter = process.env.WEB_SEARCH_ADAPTER
   // 2. Settings preference (set via /web-tools panel)
   const settingsAdapter = getSettings_DEPRECATED().webSearchAdapter
 
-  const adapterKey: SearchAdapterKey =
-    envAdapter === 'api' ||
+  return envAdapter === 'api' ||
     envAdapter === 'bing' ||
     envAdapter === 'brave' ||
     envAdapter === 'exa' ||
-    envAdapter === 'tavily'
-      ? envAdapter
-      : settingsAdapter === 'api' ||
-          settingsAdapter === 'bing' ||
-          settingsAdapter === 'brave' ||
-          settingsAdapter === 'exa' ||
-          settingsAdapter === 'tavily'
-        ? settingsAdapter
-        : 'tavily' // 3. Default
+    envAdapter === 'tavily' ||
+    envAdapter === 'searxng'
+    ? envAdapter
+    : settingsAdapter === 'api' ||
+        settingsAdapter === 'bing' ||
+        settingsAdapter === 'brave' ||
+        settingsAdapter === 'exa' ||
+        settingsAdapter === 'tavily' ||
+        settingsAdapter === 'searxng'
+      ? settingsAdapter
+      : 'tavily' // 3. Default
+}
 
-  if (cachedAdapter && cachedAdapterKey === adapterKey) return cachedAdapter
+export function createAdapter(): WebSearchAdapter {
+  const adapterKey = getSearchAdapterKey()
+  const settings = getSettings_DEPRECATED()
+  // Bound to one instance; configuration changes cannot retain an old adapter.
+  const identity = JSON.stringify([
+    adapterKey,
+    settings.searxng,
+    settings.tavilyEndpointUrl,
+    settings.braveApiKey,
+    settings.exaApiKey,
+    settings.exaEndpointUrl,
+  ])
+  if (cachedAdapter && cachedAdapterIdentity === identity) return cachedAdapter
 
   switch (adapterKey) {
+    case 'searxng':
+      if (!settings.searxng)
+        throw new Error('SearXNG search settings are missing')
+      cachedAdapter = new SearxngSearchAdapter(settings.searxng)
+      break
     case 'api':
       cachedAdapter = new ApiSearchAdapter()
       break
@@ -69,6 +95,6 @@ export function createAdapter(): WebSearchAdapter {
       break
   }
 
-  cachedAdapterKey = adapterKey
+  cachedAdapterIdentity = identity
   return cachedAdapter
 }

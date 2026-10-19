@@ -437,7 +437,7 @@ fn project_context(context: Value) -> Value {
                 .then(|| Value::String(kind.to_owned()))
             }),
             "delivery" => value.as_str().and_then(|delivery| {
-                matches!(delivery, "notSent" | "sent" | "unknown")
+                matches!(delivery, "notSent" | "sent" | "responseReceived" | "unknown")
                     .then(|| Value::String(delivery.to_owned()))
             }),
             "phase" => value.as_str().and_then(|phase| {

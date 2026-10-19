@@ -60,14 +60,7 @@ pub async fn environment(
         })?;
         environment.insert(name, value);
     }
-    let provider_sources = config
-        .providers
-        .values()
-        .map(ProviderConfig::parse)
-        .collect::<rpc::Result<Vec<_>>>()?
-        .iter()
-        .flat_map(|provider| provider.env.values().map(|source| env_name(source.clone())))
-        .collect::<std::collections::BTreeSet<_>>();
+    let provider_sources = provider_sources(config)?;
     let mut references = BTreeMap::new();
     for (target, source) in &config.cli.env {
         // Explicit provider bindings own all provider targets; global CLI references cannot
@@ -222,6 +215,17 @@ pub async fn environment(
     Ok(environment)
 }
 
+pub(crate) fn provider_sources(config: &Config) -> rpc::Result<std::collections::BTreeSet<String>> {
+    Ok(config
+        .providers
+        .values()
+        .map(ProviderConfig::parse)
+        .collect::<rpc::Result<Vec<_>>>()?
+        .iter()
+        .flat_map(|provider| provider.env.values().map(|source| env_name(source.clone())))
+        .collect())
+}
+
 pub(crate) async fn launch(
     config: &Config,
     paths: &Paths,
@@ -324,7 +328,7 @@ fn settings_file(paths: &Paths, agent_id: &str) -> rpc::Result<PathBuf> {
     Ok(paths.state(agent_id)?.join("settings.json"))
 }
 
-fn env_name(name: String) -> String {
+pub(crate) fn env_name(name: String) -> String {
     if cfg!(windows) {
         name.to_ascii_uppercase()
     } else {

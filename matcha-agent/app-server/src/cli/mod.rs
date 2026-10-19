@@ -1,7 +1,9 @@
 pub mod command;
+pub(crate) mod idle;
 pub mod process;
 pub mod projection;
 pub mod protocol;
+mod search;
 
 use crate::{
     config::{AgentConfig, Config, Paths},
@@ -72,9 +74,13 @@ struct Instance {
     model_overrides: [bool; 3],
     has_autonomous_inputs: bool,
     sealed: Option<crate::sealed::InstanceGuard>,
+    search: tokio::sync::Mutex<search::State>,
     pending: Mutex<Pending>,
     incoming: Mutex<HashSet<String>>,
+    admission: Arc<tokio::sync::RwLock<idle::Admission>>,
+    activity: watch::Sender<tokio::time::Instant>,
     closing: AtomicBool,
+    output_fault: AtomicBool,
     initialized: watch::Sender<Option<rpc::Result<Value>>>,
     closed: watch::Sender<Option<rpc::Result<()>>>,
     initializer: Mutex<Option<JoinHandle<()>>>,
@@ -83,8 +89,13 @@ struct Instance {
 
 #[derive(Default)]
 struct Pending {
-    requests: BTreeMap<String, oneshot::Sender<rpc::Result<Value>>>,
+    requests: BTreeMap<String, PendingRequest>,
     failure: Option<Error>,
+}
+
+struct PendingRequest {
+    response: oneshot::Sender<rpc::Result<Value>>,
+    _admission: Option<Arc<idle::Lease>>,
 }
 
 impl Cli {
@@ -201,9 +212,13 @@ impl Cli {
             model_overrides,
             has_autonomous_inputs,
             sealed,
+            search: tokio::sync::Mutex::new(search::State::default()),
             pending: Mutex::new(Pending::default()),
             incoming: Mutex::new(HashSet::new()),
+            admission: idle::admission(),
+            activity: watch::channel(tokio::time::Instant::now()).0,
             closing: AtomicBool::new(false),
+            output_fault: AtomicBool::new(false),
             initialized,
             closed,
             initializer: Mutex::new(None),
@@ -235,6 +250,9 @@ impl Cli {
         let initializer = tokio::spawn(async move {
             let result = async {
                 let initialized = initializing.request(initialize).await?;
+                if let Some(projection) = &spec.config.search {
+                    initializing.apply_search(Some(projection)).await?;
+                }
                 if required_sandbox {
                     let response = initializing
                         .request(json!({"subtype": "get_settings"}))
@@ -295,14 +313,7 @@ impl Cli {
     }
 
     pub async fn request(&self, request: Value) -> rpc::Result<Value> {
-        if request.get("subtype").and_then(Value::as_str) == Some("initialize") {
-            return Err(not_sent(Error::conflict(
-                "native_already_initialized",
-                "This CLI instance is already initialized",
-            )));
-        }
-        self.initialized().await.map_err(not_sent)?;
-        self.0.instance.request(request).await
+        self.admit()?.request(request).await
     }
 
     pub async fn send_user(
@@ -321,6 +332,7 @@ impl Cli {
                 "User input requires a message UUID and text or native content blocks",
             )));
         }
+        let _control = self.admit()?;
         self.initialized().await.map_err(not_sent)?;
         self.0.instance.ensure_open()?;
         self.0
@@ -333,6 +345,10 @@ impl Cli {
     }
 
     pub async fn respond(&self, request_id: &str, response: Value) -> rpc::Result<()> {
+        self.admit()?.respond(request_id, response).await
+    }
+
+    async fn respond_admitted(&self, request_id: &str, response: Value) -> rpc::Result<()> {
         let valid = match response.get("subtype").and_then(Value::as_str) {
             Some("success") => response.get("response").is_none_or(Value::is_object),
             Some("error") => response.get("error").is_some_and(Value::is_string),
@@ -410,7 +426,11 @@ impl Instance {
         Ok(())
     }
 
-    async fn request(&self, request: Value) -> rpc::Result<Value> {
+    async fn request_admitted(
+        &self,
+        request: Value,
+        admission: Option<Arc<idle::Lease>>,
+    ) -> rpc::Result<Value> {
         if !request.is_object()
             || request
                 .get("subtype")
@@ -433,13 +453,24 @@ impl Instance {
                     "The native CLI instance is closed",
                 )));
             }
-            pending.requests.insert(request_id.clone(), sender);
+            pending.requests.insert(
+                request_id.clone(),
+                PendingRequest {
+                    response: sender,
+                    _admission: admission,
+                },
+            );
         }
-        let _remove = RemovePending {
-            instance: self,
-            request_id: &request_id,
-        };
-        self.process.send(bytes).await?;
+        // Cancellation of the caller cannot release its admission while the native
+        // control may still be running. The response or instance close releases it.
+        if let Err(error) = self.process.send(bytes).await {
+            self.pending
+                .lock()
+                .expect("native pending lock")
+                .requests
+                .remove(&request_id);
+            return Err(error);
+        }
         response.await.map_err(|_| Error::new(-32006, "native_response_lost", "The native control response could not be observed")
             .with_data(json!({"instanceId": self.instance_id, "nativeRequestId": request_id, "delivery": "unknown"})))?
     }
@@ -455,7 +486,7 @@ impl Instance {
         };
         self.incoming.lock().expect("native requests lock").clear();
         for (request_id, sender) in requests {
-            let _ = sender.send(Err(Error::new(-32006, "native_response_lost", "The native CLI closed before the control response was observed")
+            let _ = sender.response.send(Err(Error::new(-32006, "native_response_lost", "The native CLI closed before the control response was observed")
                 .with_data(json!({"instanceId": self.instance_id, "nativeRequestId": request_id, "reason": reason, "delivery": "unknown"}))));
         }
     }
@@ -495,22 +526,6 @@ impl Instance {
             }
             instance.closed.send_replace(Some(result));
         });
-    }
-}
-
-struct RemovePending<'a> {
-    instance: &'a Instance,
-    request_id: &'a str,
-}
-
-impl Drop for RemovePending<'_> {
-    fn drop(&mut self) {
-        self.instance
-            .pending
-            .lock()
-            .expect("native pending lock")
-            .requests
-            .remove(self.request_id);
     }
 }
 
@@ -651,6 +666,7 @@ async fn read_output(
             }
         }
         if !fault_reported && let Some(error) = &fault {
+            instance.output_fault.store(true, Ordering::Release);
             fault_reported = true;
             instance.reject_pending("output_fault");
             emitted.push(CliEvent::Fault(error.clone()));
@@ -668,6 +684,7 @@ async fn read_output(
     }
     instance.reject_pending("output_closed");
     if exit.is_none() {
+        instance.output_fault.store(true, Ordering::Release);
         let error = Error::new(
             -32006,
             "native_exit_unobserved",
@@ -747,7 +764,7 @@ fn decode_line(
                         .with_data(json!({"instanceId": instance.instance_id, "nativeRequestId": request_id, "delivery": "sent", "pendingPermissionCount": pending_permissions}))
                         .with_source(NativeControlFailure(response)))
                 };
-                let _ = sender.send(result);
+                let _ = sender.response.send(result);
             } else {
                 *orphan_responses = orphan_responses.saturating_add(1);
             }

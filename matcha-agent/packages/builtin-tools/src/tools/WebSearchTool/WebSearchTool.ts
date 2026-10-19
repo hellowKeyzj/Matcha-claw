@@ -3,7 +3,7 @@ import { z } from 'zod/v4'
 import { buildTool, type ToolDef } from 'src/Tool.js'
 import { lazySchema } from 'src/utils/lazySchema.js'
 import { jsonStringify } from 'src/utils/slowOperations.js'
-import { createAdapter } from './adapters/index.js'
+import { createAdapter, getSearchAdapterKey } from './adapters/index.js'
 import { getWebSearchPrompt, WEB_SEARCH_TOOL_NAME } from './prompt.js'
 import {
   getToolUseSummary,
@@ -26,7 +26,32 @@ const inputSchema = lazySchema(() =>
     num_results: z
       .number()
       .optional()
-      .describe('Number of search results to return (default: 8)'),
+      .describe(
+        'Number of search results to return (SearXNG: 1–10; otherwise default: 8)',
+      ),
+    categories: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'SearXNG category IDs separated by commas; overrides configured categories',
+      ),
+    language: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('SearXNG search language; overrides the configured language'),
+    engines: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Exact SearXNG engine IDs separated by commas; never adds other category engines',
+      ),
+    safesearch: z
+      .union([z.literal(0), z.literal(1), z.literal(2)])
+      .optional()
+      .describe('SearXNG safe search: 0 off, 1 moderate, 2 strict'),
     livecrawl: z
       .enum(['fallback', 'preferred'])
       .optional()
@@ -163,6 +188,19 @@ export const WebSearchTool = buildTool({
         errorCode: 2,
       }
     }
+    if (
+      getSearchAdapterKey() !== 'searxng' &&
+      [input.categories, input.language, input.engines, input.safesearch].some(
+        value => value !== undefined,
+      )
+    ) {
+      return {
+        result: false,
+        message:
+          'categories, language, engines and safesearch require the SearXNG search adapter',
+        errorCode: 3,
+      }
+    }
     return { result: true }
   },
   async call(input, context, _canUseTool, _parentMessage, onProgress) {
@@ -174,6 +212,10 @@ export const WebSearchTool = buildTool({
       allowedDomains: input.allowed_domains,
       blockedDomains: input.blocked_domains,
       numResults: input.num_results,
+      categories: input.categories,
+      language: input.language,
+      engines: input.engines,
+      safeSearch: input.safesearch,
       livecrawl: input.livecrawl,
       searchType: input.search_type,
       contextMaxCharacters: input.context_max_characters,

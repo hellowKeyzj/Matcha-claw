@@ -58,20 +58,24 @@ export function installStreamJsonStdoutGuard(): void {
 
   process.stdout.write = function (
     chunk: string | Uint8Array,
-    encodingOrCb?: BufferEncoding | ((err?: Error) => void),
-    cb?: (err?: Error) => void,
+    encodingOrCb?: BufferEncoding | ((err?: Error | null) => void),
+    cb?: (err?: Error | null) => void,
   ): boolean {
     const text =
       typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8')
 
+    const callback = typeof encodingOrCb === 'function' ? encodingOrCb : cb
     buffer += text
     let newlineIdx: number
     let wrote = true
+    let callbackForwarded = false
     while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
       const line = buffer.slice(0, newlineIdx)
       buffer = buffer.slice(newlineIdx + 1)
       if (isJsonLine(line)) {
-        wrote = originalWrite!(line + '\n')
+        const lastLine = buffer.indexOf('\n') === -1
+        wrote = originalWrite!(line + '\n', lastLine ? callback : undefined)
+        if (lastLine && callback) callbackForwarded = true
       } else {
         process.stderr.write(`${STDOUT_GUARD_MARKER} ${line}\n`)
         logForDebugging(
@@ -80,12 +84,9 @@ export function installStreamJsonStdoutGuard(): void {
       }
     }
 
-    // Fire the callback once buffering is done. We report success even when
-    // a line was diverted — the caller's intent (emit text) was honored,
-    // just on a different fd.
-    const callback = typeof encodingOrCb === 'function' ? encodingOrCb : cb
-    if (callback) {
-      queueMicrotask(() => callback())
+    // Even empty/partial/diverted writes must wait for earlier stdout data.
+    if (callback && !callbackForwarded) {
+      originalWrite!('', callback)
     }
     return wrote
   } as typeof process.stdout.write

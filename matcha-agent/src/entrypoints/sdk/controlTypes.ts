@@ -7,6 +7,8 @@
 import type { z } from 'zod'
 import type {
   SDKControlRequestSchema,
+  SDKControlPrepareToSleepRequestSchema,
+  SDKControlPrepareToSleepResponseSchema,
   SDKControlResponseSchema,
   SDKControlInitializeRequestSchema,
   SDKControlInitializeResponseSchema,
@@ -20,6 +22,12 @@ import type {
 } from './controlSchemas.js'
 import type { SDKPartialAssistantMessageSchema } from './coreSchemas.js'
 
+export type SDKControlPrepareToSleepRequest = z.infer<
+  ReturnType<typeof SDKControlPrepareToSleepRequestSchema>
+>
+export type SDKControlPrepareToSleepResponse = z.infer<
+  ReturnType<typeof SDKControlPrepareToSleepResponseSchema>
+>
 export type SDKControlRequest = z.infer<
   ReturnType<typeof SDKControlRequestSchema>
 >

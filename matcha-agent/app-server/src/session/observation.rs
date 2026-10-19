@@ -304,6 +304,8 @@ impl Sessions {
         if !items.is_empty() {
             self.0.events.append_batch(&session_id, None, items).await?;
         }
+        execution.idle.activity();
+        session.wake.notify_one();
         Ok(())
     }
 }

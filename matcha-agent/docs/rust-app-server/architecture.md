@@ -84,7 +84,10 @@ App Server
 | Agent 定义、服务配置、绑定 | 对应 Rust 管理模块 | CLI 只消费有效执行配置投影 |
 | 逻辑 Session、业务 Run 与排队 | session / run | 进程模块不另建业务执行状态机 |
 | CLI 句柄、stdio、退出事实及实际启动输入风险 | cli 的执行实例 | Session 消费实例启动快照，不从 Agent 配置重复推断；运行期歧义继续由原生观察累积 |
+| 连续空闲 5 分钟的实例休眠 | Session executor + CLI 原生握手 | CLI 原子封输入并检查 busy/resident/持久恢复条件，flush 后复查才返回 ready；Session 再 close、consumer join 并确认 graceful exit 才安全回收；不调用取消队列的 close_execution，不关闭逻辑 Session，新消息仍从原 durable 队列按同 UUID resume。 [VERIFY: matcha-agent/app-server/src/session/idle.rs] [VERIFY: matcha-agent/app-server/src/session/execution.rs] [VERIFY: matcha-agent/app-server/src/cli/idle.rs] [VERIFY: matcha-agent/src/cli/print.ts] |
 | 工具执行、上下文、压缩、原生 transcript | CLI 原生引擎 | Rust 不双写、不用展示消息重建 |
+| TaskList / Todo 写入 | CLI 原生 owner | Rust 只转发原生 mutation，保留 persisted/applied/unknown 回执 |
+| TaskList / Todo 已落盘读取 | task 模块 | 始终读原生事项文件/会话 transcript 主链，不启动 CLI；TaskList 复用原生锁协议，Todo 不冒充实时 AppState；Session 只提供 native_files / persisted_history 窄接口。 [VERIFY: matcha-agent/app-server/src/task.rs] [VERIFY: matcha-agent/app-server/src/task/lock.rs] [VERIFY: matcha-agent/app-server/src/task/todos.rs] [VERIFY: matcha-agent/app-server/src/session/mod.rs] |
 | 原生子 Agent/Team roster、邮箱和任务领取 | CLI 原生实现 | Rust 不直接改原生状态文件假装完成操作 |
 | Proactive tick 与自主执行 | CLI 原生实现 | Session 只按实例转发开关、记录 ACK/未知与结果归属风险，不另建主动执行引擎 |
 | 服务端事件、顺序、回放 | events 与所属业务模块 | 是管理事实，不是第二份 transcript |

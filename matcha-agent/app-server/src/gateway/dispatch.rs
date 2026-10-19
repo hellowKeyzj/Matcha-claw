@@ -1,7 +1,7 @@
 use super::Gateway;
 use crate::{
     agent, channel, config, mcp, memory, plugin, policy, prompt, provider, retention, rpc,
-    schedule, sealed, skill, task, team, tool, usage, workflow, workspace,
+    schedule, search, sealed, skill, task, team, tool, usage, workflow, workspace,
 };
 use serde_json::{Value, json};
 
@@ -12,6 +12,8 @@ const METHODS: &[&str] = &[
     "server.shutdown",
     "config.get",
     "config.update",
+    "search.project",
+    "search.observe",
     "agents.list",
     "agents.get",
     "agents.create",
@@ -183,6 +185,7 @@ pub(super) async fn dispatch(gateway: &Gateway, method: &str, params: Value) -> 
             "server.capabilities requires an empty object",
         )),
         Some("config") => config::dispatch(method, params, config).await,
+        Some("search") => search::dispatch(method, params, config, sessions).await,
         Some("agents") => agent::dispatch(method, params, config, sessions).await,
         Some("workspace") => workspace::dispatch(method, params, config).await,
         Some("memory") => memory::dispatch(method, params, config).await,
@@ -206,7 +209,7 @@ pub(super) async fn dispatch(gateway: &Gateway, method: &str, params: Value) -> 
             policy::dispatch(method, params, config, sessions).await
         }
         Some("tools") => tool::dispatch(method, params, config, sessions).await,
-        Some("tasks" | "todos") => task::dispatch(method, params, config, sessions).await,
+        Some("tasks" | "todos") => task::dispatch(method, params, config, sessions, &gateway.diagnostics).await,
         Some("teams") => team::dispatch(method, params, config, sessions).await,
         Some("workflows") => workflow::dispatch(method, params, config, sessions).await,
         Some("schedules") => schedule::dispatch(method, params, config, sessions).await,

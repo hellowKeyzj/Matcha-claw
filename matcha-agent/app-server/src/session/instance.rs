@@ -54,7 +54,7 @@ impl Sessions {
             if let Some(error) = &execution.storage_fault {
                 return Err(error.clone());
             }
-            if waited && !execution.launching {
+            if waited && !execution.launching && !execution.idle.handing_off() {
                 if let Some(error) = &execution.launch_error {
                     return Err(error.clone());
                 }
@@ -65,14 +65,20 @@ impl Sessions {
                     )));
                 }
             }
-            if execution.launching || (execution.consuming && execution.cli.is_none()) {
+            if execution.idle.handing_off()
+                || execution.launching
+                || (execution.consuming && execution.cli.is_none())
+            {
+                let launching = execution.launching;
                 drop(execution);
                 drop(admission);
                 changed.await;
-                waited = true;
+                waited |= launching;
                 continue;
             }
             if execution.cli.is_some() {
+                execution.idle.activity();
+                session.wake.notify_one();
                 let mut snapshot = execution.native.view(
                     &execution.record.session_id,
                     &execution.record.agent_id,
@@ -170,6 +176,9 @@ impl Sessions {
             None if spec.resume => return Err(rpc::Error::not_found("Native transcript")),
             None => {}
         }
+        let _search_guard = self.search_guard().await;
+        // The launch spec may predate a concurrent search projection commit.
+        spec.config.search = self.0.config.checked_snapshot().await?.search;
         let (cli, receiver) = match Cli::start(spec, self.0.diagnostics.clone()).await {
             Ok(started) => started,
             Err(error) => {
@@ -187,6 +196,7 @@ impl Sessions {
             let mut execution = session.data.lock().await;
             execution.cli = Some(cli.clone());
             execution.native = native::Snapshot::default();
+            execution.idle = super::idle::Idle::Dormant;
             execution.consuming = true;
             if let Some(active) = execution.active.as_mut() {
                 active.ownership_ambiguous |= cli.has_autonomous_inputs();

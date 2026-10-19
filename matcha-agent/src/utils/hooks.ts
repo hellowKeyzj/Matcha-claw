@@ -150,6 +150,7 @@ import { execPromptHook } from './hooks/execPromptHook.js'
 import type { Message, AssistantMessage } from '../types/message.js'
 import { execAgentHook } from './hooks/execAgentHook.js'
 import { execHttpHook } from './hooks/execHttpHook.js'
+import { hasActivePostSamplingHooks } from './hooks/postSamplingHooks.js'
 import type { ShellCommand } from './ShellCommand.js'
 import {
   getSessionHooks,
@@ -2085,7 +2086,24 @@ export function getUserPromptSubmitHookBlockingMessage(
  * @param messages Optional conversation history for prompt/function hooks
  * @returns Async generator that yields progress messages and hook results
  */
-async function* executeHooks({
+let activeHookExecutions = 0
+
+export function hasActiveHookExecutions(): boolean {
+  return activeHookExecutions > 0 || hasActivePostSamplingHooks()
+}
+
+async function* executeHooks(
+  options: Parameters<typeof executeHooksImpl>[0],
+): AsyncGenerator<AggregatedHookResult> {
+  activeHookExecutions++
+  try {
+    yield* executeHooksImpl(options)
+  } finally {
+    activeHookExecutions--
+  }
+}
+
+async function* executeHooksImpl({
   hookInput,
   toolUseID,
   matchQuery,
@@ -3137,7 +3155,18 @@ export function hasBlockingResult(results: HookOutsideReplResult[]): boolean {
  * @param timeoutMs Optional timeout in milliseconds for hook execution
  * @returns Array of HookOutsideReplResult objects containing command, succeeded, and output
  */
-async function executeHooksOutsideREPL({
+async function executeHooksOutsideREPL(
+  options: Parameters<typeof executeHooksOutsideREPLImpl>[0],
+): Promise<HookOutsideReplResult[]> {
+  activeHookExecutions++
+  try {
+    return await executeHooksOutsideREPLImpl(options)
+  } finally {
+    activeHookExecutions--
+  }
+}
+
+async function executeHooksOutsideREPLImpl({
   getAppState,
   hookInput,
   matchQuery,

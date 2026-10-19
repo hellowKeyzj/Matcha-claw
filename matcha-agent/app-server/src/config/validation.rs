@@ -169,6 +169,9 @@ pub(super) fn validate(config: &Config) -> rpc::Result<()> {
         validate_id(provider_id)?;
         crate::provider::ProviderConfig::parse(provider)?;
     }
+    if let Some(search) = &config.search {
+        search.validate()?;
+    }
     crate::mcp::validate_config(config)?;
     crate::schedule::validate_config(config)?;
     crate::channel::validate_config(config)?;

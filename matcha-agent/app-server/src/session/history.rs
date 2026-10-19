@@ -9,7 +9,7 @@ use chrono::DateTime;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{config::validate_id, rpc};
+use crate::{config::validate_id, persistence::Database, rpc};
 
 pub(super) async fn locate(
     runtime: &Path,
@@ -20,40 +20,53 @@ pub(super) async fn locate(
     let runtime = runtime.to_owned();
     let workspace = workspace.to_owned();
     let session_id = session_id.to_owned();
-    tokio::task::spawn_blocking(move || locate_sync(&runtime, &workspace, &session_id))
-        .await
-        .map_err(|error| rpc::Error::internal("history_locate_task").with_source(error))?
+    tokio::task::spawn_blocking(move || {
+        Ok(locate_sync(&runtime, &workspace, &session_id)?.map(|(path, _, _)| path))
+    })
+    .await
+    .map_err(|error| rpc::Error::internal("history_locate_task").with_source(error))?
+}
+
+pub(super) async fn read_all(
+    runtime: &Path,
+    workspace: &Path,
+    session_id: &str,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> rpc::Result<Vec<Value>> {
+    super::validate_uuid(session_id)?;
+    let runtime = runtime.to_owned();
+    let workspace = workspace.to_owned();
+    let session_id = session_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let Some((_, transcript, chain)) = locate_sync(&runtime, &workspace, &session_id)? else {
+            return Ok(Vec::new());
+        };
+        Ok(chain
+            .into_iter()
+            .map(|index| transcript.messages[index].value.clone())
+            .collect())
+    })
+    .await
+    .map_err(|error| rpc::Error::internal("history_read_task").with_source(error))?
 }
 
 pub(super) async fn read(
-    path: &Path,
+    database: &Database,
+    runtime: &Path,
+    workspace: &Path,
     session_id: &str,
     offset: usize,
     limit: usize,
 ) -> rpc::Result<Value> {
     super::validate_uuid(session_id)?;
-    let path = path.to_owned();
+    let runtime = runtime.to_owned();
+    let workspace = workspace.to_owned();
     let session_id = session_id.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let project = path.parent().ok_or_else(path_error)?;
-        let projects = project.parent().ok_or_else(path_error)?;
-        let runtime = projects.parent().ok_or_else(path_error)?;
-        if projects.file_name().is_none_or(|name| name != "projects")
-            || path
-                .file_name()
-                .is_none_or(|name| name != format!("{session_id}.jsonl").as_str())
-        {
-            return Err(path_error());
-        }
-        let (runtime, workspace) = locations(runtime, &runtime.with_file_name("workspace"))?
-            .ok_or_else(|| rpc::Error::not_found("Native transcript"))?;
-        let relative = Path::new("projects")
-            .join(project.file_name().ok_or_else(path_error)?)
-            .join(format!("{session_id}.jsonl"));
-        let path = checked(&runtime, &relative)?
-            .ok_or_else(|| rpc::Error::not_found("Native transcript"))?;
-        let transcript = load(&path)?;
-        let chain = transcript.chain(&session_id, &workspace)?;
+    let mut page = tokio::task::spawn_blocking(move || -> rpc::Result<Value> {
+        let Some((_, transcript, chain)) = locate_sync(&runtime, &workspace, &session_id)? else {
+            return Ok(json!({ "messages": [], "total": 0, "nextOffset": null }));
+        };
         let total = chain.len();
         let start = offset.min(total);
         let end = start.saturating_add(limit).min(total);
@@ -68,10 +81,24 @@ pub(super) async fn read(
         }))
     })
     .await
-    .map_err(|error| rpc::Error::internal("history_read_task").with_source(error))?
+    .map_err(|error| rpc::Error::internal("history_read_task").with_source(error))??;
+    let candidates = page["messages"]
+        .as_array()
+        .expect("history page messages")
+        .iter()
+        .filter(|message| message["type"] == "user" && message["isSidechain"] != true)
+        .filter_map(|message| message["uuid"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    page["managedInputMessageIds"] =
+        json!(super::record::managed_input_message_ids(database, candidates).await?);
+    Ok(page)
 }
 
-fn locate_sync(runtime: &Path, workspace: &Path, session_id: &str) -> rpc::Result<Option<PathBuf>> {
+fn locate_sync(
+    runtime: &Path,
+    workspace: &Path,
+    session_id: &str,
+) -> rpc::Result<Option<(PathBuf, Transcript, Vec<usize>)>> {
     let Some((runtime, workspace)) = locations(runtime, workspace)? else {
         return Ok(None);
     };
@@ -109,16 +136,18 @@ fn locate_sync(runtime: &Path, workspace: &Path, session_id: &str) -> rpc::Resul
             ));
         }
     }
-    if let Some(path) = &found {
-        let transcript = load(path)?;
-        if transcript.chain(session_id, &workspace)?.is_empty() {
-            return Err(rpc::Error::unavailable(
-                "history_chain_absent",
-                "The native transcript has no conversation chain",
-            ));
-        }
+    let Some(path) = found else {
+        return Ok(None);
+    };
+    let transcript = load(&path)?;
+    let chain = transcript.chain(session_id, &workspace)?;
+    if chain.is_empty() {
+        return Err(rpc::Error::unavailable(
+            "history_chain_absent",
+            "The native transcript has no conversation chain",
+        ));
     }
-    Ok(found)
+    Ok(Some((path, transcript, chain)))
 }
 
 pub(super) async fn delete(runtime: &Path, workspace: &Path, session_id: &str) -> rpc::Result<()> {

@@ -662,13 +662,33 @@ export const SettingsSchema = lazySchema(() =>
           'Skip the WebFetch blocklist check for enterprise environments with restrictive security policies',
         ),
       webSearchAdapter: z
-        .enum(['api', 'bing', 'brave', 'exa', 'tavily'])
+        .enum(['api', 'bing', 'brave', 'exa', 'tavily', 'searxng'])
         .optional()
         .describe(
           'Web search backend adapter. "tavily" uses Tavily Search API (default), ' +
             '"api" uses Anthropic server-side search, "bing" scrapes Bing HTML, ' +
-            '"brave" uses Brave Search API, "exa" uses Exa AI.',
+            '"brave" uses Brave Search API, "exa" uses Exa AI, "searxng" uses a SearXNG instance.',
         ),
+      searxng: z
+        .strictObject({
+          baseUrl: z.url().refine(value => {
+            const url = new URL(value)
+            return (
+              ['http:', 'https:'].includes(url.protocol) &&
+              !url.username &&
+              !url.password &&
+              !url.search &&
+              !url.hash
+            )
+          }, 'SearXNG requires an HTTP(S) base URL without credentials, query or fragment'),
+          categories: z.string().min(1),
+          language: z.string().min(1),
+          engines: z.string().min(1).optional(),
+          safeSearch: z.number().int().min(0).max(2),
+          resultCount: z.number().int().min(1).max(10),
+          revision: z.string().min(1),
+        })
+        .optional(),
       webFetchAdapter: z
         .enum(['tavily', 'http'])
         .optional()

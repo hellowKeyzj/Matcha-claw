@@ -108,6 +108,37 @@ impl Events {
         run_id: Option<&str>,
         items: Vec<(String, Value)>,
     ) -> rpc::Result<Vec<Event>> {
+        self.append_batch_with(session_id, run_id, items, |_| Ok(()))
+            .await
+    }
+
+    pub(crate) async fn append_with<F>(
+        &self,
+        session_id: &str,
+        run_id: Option<&str>,
+        kind: &str,
+        payload: Value,
+        persist: F,
+    ) -> rpc::Result<Event>
+    where
+        F: FnOnce(&Transaction<'_>) -> rpc::Result<()> + Send + 'static,
+    {
+        let mut events = self
+            .append_batch_with(session_id, run_id, vec![(kind.to_owned(), payload)], persist)
+            .await?;
+        Ok(events.remove(0))
+    }
+
+    async fn append_batch_with<F>(
+        &self,
+        session_id: &str,
+        run_id: Option<&str>,
+        items: Vec<(String, Value)>,
+        persist: F,
+    ) -> rpc::Result<Vec<Event>>
+    where
+        F: FnOnce(&Transaction<'_>) -> rpc::Result<()> + Send + 'static,
+    {
         validate_session(session_id)?;
         if run_id.is_some_and(str::is_empty) || items.iter().any(|(kind, _)| kind.is_empty()) {
             return Err(rpc::Error::invalid(
@@ -150,6 +181,7 @@ impl Events {
                     .map_err(|source| storage_error("events_begin_failed", source))?;
                 let result = (|| {
                     let previous = durable_latest(&transaction, &session_id)?;
+                    persist(&transaction)?;
                     let latest = previous
                         .checked_add(count as u64)
                         .filter(|seq| *seq <= i64::MAX as u64)
@@ -200,6 +232,7 @@ impl Events {
                             "events_commit_unknown",
                             "Event commit could not be confirmed; replay before retrying",
                         )
+                        .with_data(json!({ "storageOutcome": "unknown" }))
                         .with_source(source)
                     } else {
                         storage_error("events_commit_failed", source)
@@ -575,7 +608,7 @@ fn validate_cursor(cursor: u64, latest: u64) -> rpc::Result<()> {
     Ok(())
 }
 
-fn durable_latest(connection: &Connection, session_id: &str) -> rpc::Result<u64> {
+pub(crate) fn durable_latest(connection: &Connection, session_id: &str) -> rpc::Result<u64> {
     crate::session::assert_live_session(connection, session_id)?;
     let (latest, tail): (u64, u64) = connection.query_row(
         "SELECT COALESCE((SELECT seq FROM session_event_heads WHERE session_id = ?1), 0),
@@ -684,6 +717,7 @@ fn rollback(transaction: &Transaction<'_>, error: rpc::Error) -> rpc::Error {
             .clone()
             .with_data(json!({
                 "rollbackKind": "events_rollback_failed", "rollbackSqliteCode": sqlite_code,
+                "storageOutcome": "unknown",
             }))
             .with_source(RollbackFailure {
                 operation: error,

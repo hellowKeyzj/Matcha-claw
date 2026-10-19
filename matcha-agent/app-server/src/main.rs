@@ -24,6 +24,7 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> rpc::Result<()> {
     let mut args = env::args_os().skip(1);
     let mut root = env::var_os("MATCHA_AGENT_HOME").map(PathBuf::from);
+    let mut search_disable = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--home") => {
@@ -33,13 +34,14 @@ async fn run() -> rpc::Result<()> {
                         .ok_or_else(|| rpc::Error::invalid("--home requires a directory"))?,
                 )
             }
+            Some("--search-disable") => search_disable = true,
             Some("--version") => {
                 println!("matcha-app-server {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             Some("--help" | "-h") => {
                 println!(
-                    "matcha-app-server [--home DIRECTORY]\nDefault: MATCHA_AGENT_HOME or ~/.matcha-agent"
+                    "matcha-app-server [--home DIRECTORY] [--search-disable]\nDefault: MATCHA_AGENT_HOME or ~/.matcha-agent\n--search-disable: remove the search projection while the server is stopped"
                 );
                 return Ok(());
             }
@@ -54,6 +56,11 @@ async fn run() -> rpc::Result<()> {
         .ok_or_else(|| rpc::Error::invalid("Home directory is unavailable; provide --home"))?;
     let paths = Paths::new(root);
     let config = Arc::new(ConfigStore::open(paths).await?);
+    if search_disable {
+        let observed = matcha_app_server::search::disable_offline(&config).await?;
+        println!("{observed}");
+        return Ok(());
+    }
     let listener = tokio::net::TcpListener::bind(config.snapshot().await.listen)
         .await
         .map_err(|_| {

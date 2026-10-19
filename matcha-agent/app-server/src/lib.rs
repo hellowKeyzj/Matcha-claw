@@ -16,6 +16,7 @@ pub mod provider;
 pub mod retention;
 pub mod rpc;
 pub mod schedule;
+pub mod search;
 pub mod sealed;
 pub mod session;
 pub mod skill;

@@ -7,6 +7,8 @@ import { uniq } from './array.js'
 import { logForDebugging } from './debug.js'
 import { getClaudeConfigHomeDir, getTeamsDir, isEnvTruthy } from './envUtils.js'
 import { errorMessage, getErrnoCode } from './errors.js'
+import { getFsImplementation } from './fsOperations.js'
+import { writeFileSyncAndFlush_DEPRECATED } from './file.js'
 import { lazySchema } from './lazySchema.js'
 import * as lockfile from './lockfile.js'
 import { logError } from './log.js'
@@ -24,6 +26,31 @@ const tasksUpdated = createSignal()
  * (matching where tmux/iTerm2 teammates look), not under the session ID.
  */
 let leaderTeamName: string | undefined
+let writeMainTaskContext: ((teamName: string | undefined) => void) | undefined
+
+/** Bind once after resume resolves, outside any in-process teammate context. */
+export function initializeTaskContextBinding(): void {
+  const sessionId = getSessionId()
+  const dir = join(getClaudeConfigHomeDir(), 'session-env', sessionId)
+  const inMainContext = AsyncLocalStorage.snapshot()
+  writeMainTaskContext = teamName =>
+    inMainContext(() => {
+      getFsImplementation().mkdirSync(dir, { mode: 0o700 })
+      writeFileSyncAndFlush_DEPRECATED(
+        join(dir, 'task-context.json'),
+        jsonStringify({
+          listId: sanitizePathComponent(resolveTaskListId(teamName, sessionId)),
+          todoV2: isTodoV2Enabled(),
+        }),
+        { encoding: 'utf-8', mode: 0o600 },
+      )
+    })
+  persistTaskContextBinding()
+}
+
+export function persistTaskContextBinding(): void {
+  writeMainTaskContext?.(leaderTeamName)
+}
 
 /**
  * Sets the leader's team name for task list resolution.
@@ -31,6 +58,7 @@ let leaderTeamName: string | undefined
  */
 export function setLeaderTeamName(teamName: string): void {
   if (leaderTeamName === teamName) return
+  writeMainTaskContext?.(teamName)
   leaderTeamName = teamName
   // Changing the task list ID is a "tasks updated" event for subscribers —
   // they're now looking at a different directory.
@@ -43,6 +71,7 @@ export function setLeaderTeamName(teamName: string): void {
  */
 export function clearLeaderTeamName(): void {
   if (leaderTeamName === undefined) return
+  writeMainTaskContext?.(undefined)
   leaderTeamName = undefined
   notifyTasksUpdated()
 }
@@ -201,11 +230,18 @@ export async function resetTaskList(taskListId: string): Promise<void> {
  * Priority:
  * 1. CLAUDE_CODE_TASK_LIST_ID - explicit task list ID
  * 2. In-process teammate: leader's team name (so teammates share the leader's task list)
- * 3. CLAUDE_CODE_TEAM_NAME - set when running as a process-based teammate
+ * 3. Process teammate team name from CLI arguments
  * 4. Leader team name - set when the leader creates a team via TeamCreate
  * 5. Session ID - fallback for standalone sessions
  */
 export function getTaskListId(): string {
+  return resolveTaskListId(leaderTeamName, getSessionId())
+}
+
+function resolveTaskListId(
+  teamName: string | undefined,
+  sessionId: string,
+): string {
   if (process.env.CLAUDE_CODE_TASK_LIST_ID) {
     return process.env.CLAUDE_CODE_TASK_LIST_ID
   }
@@ -215,7 +251,7 @@ export function getTaskListId(): string {
   if (teammateCtx) {
     return teammateCtx.teamName
   }
-  return getTeamName() || leaderTeamName || getSessionId()
+  return getTeamName() || teamName || sessionId
 }
 
 /**

@@ -2,6 +2,7 @@ mod deletion;
 mod dispatch;
 mod execution;
 mod history;
+mod idle;
 mod instance;
 mod native;
 mod observation;
@@ -11,6 +12,7 @@ mod run;
 
 use std::{
     collections::{BTreeMap, VecDeque},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -35,6 +37,13 @@ pub async fn prepare_database(database: &Database) -> rpc::Result<()> {
 #[derive(Clone)]
 pub struct Sessions(Arc<Inner>);
 
+pub(crate) struct NativeFiles {
+    pub session_id: String,
+    pub agent_id: String,
+    pub runtime: PathBuf,
+    pub workspace: PathBuf,
+}
+
 struct Inner {
     config: Arc<ConfigStore>,
     database: Database,
@@ -44,6 +53,8 @@ struct Inner {
     media: crate::workspace::Media,
     sessions: RwLock<BTreeMap<String, Arc<Session>>>,
     agent_guards: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    search_guard: Mutex<()>,
+    history_reads: Arc<tokio::sync::Semaphore>,
     shutdown: AtomicBool,
     shutdown_guard: Mutex<()>,
 }
@@ -64,6 +75,7 @@ struct Execution {
     active: Option<run::Active>,
     cli: Option<Cli>,
     native: native::Snapshot,
+    idle: idle::Idle,
     launching: bool,
     launch_error: Option<rpc::Error>,
     sending: bool,
@@ -71,6 +83,7 @@ struct Execution {
     consuming: bool,
     cancel_in_flight: bool,
     storage_fault: Option<rpc::Error>,
+    run_storage_unknown: Option<rpc::Error>,
 }
 
 impl Execution {
@@ -111,6 +124,8 @@ impl Sessions {
             media,
             sessions: RwLock::new(BTreeMap::new()),
             agent_guards: Mutex::new(BTreeMap::new()),
+            search_guard: Mutex::new(()),
+            history_reads: Arc::new(tokio::sync::Semaphore::new(8)),
             shutdown: AtomicBool::new(false),
             shutdown_guard: Mutex::new(()),
         }));
@@ -123,17 +138,7 @@ impl Sessions {
             };
             for mut pending in pending_runs {
                 pending.finish(run::Status::OutcomeUnknown, "server_restarted", None);
-                record::save_run(&owner.0.database, &pending).await?;
-                owner
-                    .0
-                    .events
-                    .append(
-                        &session_id,
-                        Some(&pending.run.run_id),
-                        "run.terminal",
-                        rpc::value(&pending.run)?,
-                    )
-                    .await?;
+                record::save_run(&owner.0.events, &pending).await?;
             }
             let session = Arc::new(Session {
                 data: Mutex::new(Execution {
@@ -142,6 +147,7 @@ impl Sessions {
                     active: None,
                     cli: None,
                     native: native::Snapshot::default(),
+                    idle: idle::Idle::Dormant,
                     launching: false,
                     launch_error: None,
                     sending: false,
@@ -149,6 +155,7 @@ impl Sessions {
                     consuming: false,
                     cancel_in_flight: false,
                     storage_fault: None,
+                    run_storage_unknown: None,
                 }),
                 wake: Notify::new(),
                 changed: Notify::new(),
@@ -195,6 +202,38 @@ impl Sessions {
         let session = self.stored_session(session_id).await?;
         session.data.lock().await.record.mutable()?;
         Ok(session)
+    }
+
+    pub(crate) async fn native_files(&self, session_id: &str) -> rpc::Result<NativeFiles> {
+        let session = self.stored_session(session_id).await?;
+        let execution = session.data.lock().await;
+        execution.record.mutable()?;
+        Ok(NativeFiles {
+            session_id: execution.record.session_id.clone(),
+            agent_id: execution.record.agent_id.clone(),
+            runtime: execution.record.runtime.clone(),
+            workspace: execution.record.workspace.clone(),
+        })
+    }
+
+    pub(crate) async fn persisted_history(&self, session_id: &str) -> rpc::Result<Vec<Value>> {
+        let session = self.stored_session(session_id).await?;
+        let permit = self
+            .0
+            .history_reads
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| rpc::Error::internal("history_reader_closed"))?;
+        let execution = session.data.lock().await;
+        execution.record.mutable()?;
+        history::read_all(
+            &execution.record.runtime,
+            &execution.record.workspace,
+            &execution.record.session_id,
+            permit,
+        )
+        .await
     }
 
     fn accepting(&self) -> rpc::Result<()> {
@@ -247,8 +286,9 @@ impl Sessions {
             }
             let pending = run::Record::new(&execution.record.session_id, content);
             let run_id = pending.run.run_id.clone();
-            record::save_run(&owner.0.database, &pending).await?;
+            owner.save_run_locked(&mut execution, &pending).await?;
             execution.queue.push_back(pending);
+            execution.idle.activity();
             session.wake.notify_one();
             Ok(run_id)
         })
@@ -262,10 +302,20 @@ impl Sessions {
         })?
     }
 
-    async fn current_cli(&self, session_id: &str, instance_id: Option<&str>) -> rpc::Result<Cli> {
+    async fn current_cli(
+        &self,
+        session_id: &str,
+        instance_id: Option<&str>,
+    ) -> rpc::Result<crate::cli::idle::Control> {
         let session = self.session(session_id).await.map_err(not_sent)?;
         let execution = session.data.lock().await;
         execution.record.mutable().map_err(not_sent)?;
+        if execution.closing || execution.idle.handing_off() {
+            return Err(not_sent(rpc::Error::unavailable(
+                "native_instance_handoff",
+                "The native CLI instance is handing off; the control request was not sent",
+            )));
+        }
         let cli = execution.cli.as_ref().ok_or_else(|| {
             not_sent(rpc::Error::unavailable(
                 "native_instance_absent",
@@ -278,7 +328,7 @@ impl Sessions {
                 "The requested CLI instance is no longer current",
             )));
         }
-        Ok(cli.clone())
+        cli.admit()
     }
 
     pub async fn control(&self, session_id: &str, request: Value) -> rpc::Result<Value> {
@@ -334,6 +384,27 @@ impl Sessions {
         Ok(snapshot)
     }
 
+    pub(crate) async fn search_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.search_guard.lock().await
+    }
+
+    pub(crate) async fn search_instances(&self) -> (Vec<Cli>, bool) {
+        let sessions: Vec<_> = self.0.sessions.read().await.values().cloned().collect();
+        let mut instances = Vec::new();
+        let mut transitioning = false;
+        for session in sessions {
+            let execution = session.data.lock().await;
+            transitioning |= execution.launching
+                || execution.closing
+                || execution.idle.handing_off()
+                || execution.record.native_cleanup_failed;
+            if let Some(cli) = &execution.cli {
+                instances.push(cli.clone());
+            }
+        }
+        (instances, transitioning)
+    }
+
     pub async fn provider_agents(
         &self,
         provider_ids: &std::collections::BTreeSet<String>,
@@ -353,6 +424,7 @@ impl Sessions {
             if provider.is_some_and(|id| provider_ids.contains(id)) {
                 affected.insert(execution.record.agent_id.clone());
                 if execution.cli.is_some()
+                    || execution.idle.handing_off()
                     || execution.launching
                     || execution.consuming
                     || execution.record.native_cleanup_failed

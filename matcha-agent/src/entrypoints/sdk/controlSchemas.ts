@@ -95,6 +95,14 @@ export const SDKControlInitializeResponseSchema = lazySchema(() =>
     ),
 )
 
+export const SDKControlPrepareToSleepRequestSchema = lazySchema(() =>
+  z.strictObject({ subtype: z.literal('prepare_to_sleep') }),
+)
+
+export const SDKControlPrepareToSleepResponseSchema = lazySchema(() =>
+  z.strictObject({ status: z.enum(['ready', 'busy', 'resident']) }),
+)
+
 export const SDKControlInterruptRequestSchema = lazySchema(() =>
   z
     .object({
@@ -541,6 +549,9 @@ export const SDKControlGetSettingsResponseSchema = lazySchema(() =>
           // String levels only — numeric effort is ant-only and the
           // Zod→proto generator can't emit enum∪number unions.
           effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).nullable(),
+          webSearchAdapter: z
+            .enum(['api', 'bing', 'brave', 'exa', 'tavily', 'searxng'])
+            .optional(),
         })
         .optional()
         .describe(
@@ -583,6 +594,7 @@ export const SDKControlElicitationResponseSchema = lazySchema(() =>
 
 export const SDKControlRequestInnerSchema = lazySchema(() =>
   z.union([
+    SDKControlPrepareToSleepRequestSchema(),
     SDKControlInterruptRequestSchema(),
     SDKControlPermissionRequestSchema(),
     SDKControlInitializeRequestSchema(),

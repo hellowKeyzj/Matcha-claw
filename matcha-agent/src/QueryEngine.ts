@@ -65,7 +65,11 @@ import {
 import { headlessProfilerCheckpoint } from './utils/headlessProfiler.js'
 import { registerStructuredOutputEnforcement } from './utils/hooks/hookHelpers.js'
 import { getInMemoryErrors } from './utils/log.js'
-import { countToolCalls, SYNTHETIC_MESSAGES } from './utils/messages.js'
+import {
+  countToolCalls,
+  SYNTHETIC_MESSAGES,
+  SYNTHETIC_MODEL,
+} from './utils/messages.js'
 import {
   getMainLoopModel,
   parseUserSpecifiedModel,
@@ -671,8 +675,59 @@ export class QueryEngine {
       })
     }
 
-    // Track current message usage (reset on each message_start)
+    // Stream usage is provisional until completion; fallback assistants are
+    // already complete. Both paths settle once per response, not content block.
     let currentMessageUsage: NonNullableUsage = EMPTY_USAGE
+    let currentMessageId: string | undefined
+    let currentMessageStopReason: string | null = null
+    let currentAssistantMessage: Message | undefined
+    let hasInputUsage = false
+    let hasOutputUsage = false
+    const settledMessageIds = new Set<string>()
+    const settleUsage = (
+      id: string | undefined,
+      usage: NonNullable<Message['message']>['usage'],
+    ) => {
+      if (
+        !id ||
+        settledMessageIds.has(id) ||
+        typeof usage?.input_tokens !== 'number' ||
+        typeof usage.output_tokens !== 'number'
+      ) {
+        return
+      }
+      const completeUsage = updateUsage(
+        EMPTY_USAGE,
+        usage as BetaMessageDeltaUsage,
+      )
+      this.totalUsage = accumulateUsage(this.totalUsage, {
+        ...completeUsage,
+        service_tier:
+          typeof usage.service_tier === 'string'
+            ? usage.service_tier
+            : completeUsage.service_tier,
+        inference_geo:
+          typeof usage.inference_geo === 'string'
+            ? usage.inference_geo
+            : completeUsage.inference_geo,
+      })
+      settledMessageIds.add(id)
+    }
+    const settleAssistantUsage = (msg: Message | undefined) => {
+      if (
+        msg?.message?.model !== SYNTHETIC_MODEL &&
+        msg?.message?.stop_reason != null
+      ) {
+        settleUsage(msg.message.id, msg.message.usage)
+      }
+    }
+    const settleCompletedUsage = () => {
+      if (currentMessageStopReason != null && hasInputUsage && hasOutputUsage) {
+        settleUsage(currentMessageId, currentMessageUsage)
+      }
+      // Claude mutates the last block before yielding its terminal delta.
+      settleAssistantUsage(currentAssistantMessage)
+    }
     let turnCount = 1
     let hasAcknowledgedInitialMessages = false
     // Track structured output from StructuredOutput tool calls
@@ -689,7 +744,7 @@ export class QueryEngine {
       ? countToolCalls(this.mutableMessages, SYNTHETIC_OUTPUT_TOOL_NAME)
       : 0
 
-    for await (const message of query({
+    const queryMessages = query({
       messages,
       systemPrompt,
       userContext,
@@ -700,7 +755,16 @@ export class QueryEngine {
       querySource: 'sdk',
       maxTurns,
       taskBudget,
-    })) {
+    })
+    async function* withUsageSettlement() {
+      try {
+        yield* queryMessages
+      } finally {
+        settleCompletedUsage()
+      }
+    }
+
+    for await (const message of withUsageSettlement()) {
       // Record assistant, user, and compact boundary messages
       if (
         message.type === 'assistant' ||
@@ -789,6 +853,12 @@ export class QueryEngine {
           if (stopReason != null) {
             lastStopReason = stopReason
           }
+          if (msg.message?.model !== SYNTHETIC_MODEL) {
+            currentAssistantMessage = msg
+            if (msg.message?.id !== currentMessageId) {
+              settleAssistantUsage(msg)
+            }
+          }
           this.mutableMessages.push(msg)
           yield* normalizeMessage(msg)
           break
@@ -819,21 +889,22 @@ export class QueryEngine {
             message as unknown as { event: Record<string, unknown> }
           ).event
           if (event.type === 'message_start') {
-            // Reset current message usage for new message
-            currentMessageUsage = EMPTY_USAGE
             const eventMessage = event.message as {
-              usage: BetaMessageDeltaUsage
+              id?: string
+              usage?: BetaMessageDeltaUsage
             }
-            currentMessageUsage = updateUsage(
-              currentMessageUsage,
-              eventMessage.usage,
-            )
+            currentMessageId = eventMessage.id
+            currentMessageStopReason = null
+            currentAssistantMessage = undefined
+            hasInputUsage = typeof eventMessage.usage?.input_tokens === 'number'
+            hasOutputUsage = false
+            currentMessageUsage = updateUsage(EMPTY_USAGE, eventMessage.usage)
           }
           if (event.type === 'message_delta') {
-            currentMessageUsage = updateUsage(
-              currentMessageUsage,
-              event.usage as BetaMessageDeltaUsage,
-            )
+            const usage = event.usage as BetaMessageDeltaUsage | undefined
+            hasInputUsage ||= typeof usage?.input_tokens === 'number'
+            hasOutputUsage ||= typeof usage?.output_tokens === 'number'
+            currentMessageUsage = updateUsage(currentMessageUsage, usage)
             // Capture stop_reason from message_delta. The assistant message
             // is yielded at content_block_stop with stop_reason=null; the
             // real value only arrives here (see claude.ts message_delta
@@ -841,18 +912,20 @@ export class QueryEngine {
             const delta = event.delta as { stop_reason?: string | null }
             if (delta.stop_reason != null) {
               lastStopReason = delta.stop_reason
+              currentMessageStopReason = delta.stop_reason
             }
           }
           if (event.type === 'message_stop') {
             const snapshot = (message as StreamEvent).usageSnapshot
             if (snapshot) {
               currentMessageUsage = { ...currentMessageUsage, ...snapshot }
+              hasInputUsage ||= typeof snapshot.input_tokens === 'number'
+              hasOutputUsage ||= typeof snapshot.output_tokens === 'number'
             }
-            // Accumulate current message usage into total
-            this.totalUsage = accumulateUsage(
-              this.totalUsage,
-              currentMessageUsage,
-            )
+            if (hasInputUsage && hasOutputUsage) {
+              settleUsage(currentMessageId, currentMessageUsage)
+            }
+            settleAssistantUsage(currentAssistantMessage)
           }
 
           if (includePartialMessages) {
@@ -892,6 +965,7 @@ export class QueryEngine {
           }
           // Handle max turns reached signal from query.ts
           else if (attachment.type === 'max_turns_reached') {
+            settleCompletedUsage()
             if (persistSession) {
               if (
                 isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
@@ -1029,6 +1103,7 @@ export class QueryEngine {
 
       // Check if USD budget has been exceeded
       if (maxBudgetUsd !== undefined && getTotalCost() >= maxBudgetUsd) {
+        settleCompletedUsage()
         if (persistSession) {
           if (
             isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
@@ -1074,6 +1149,7 @@ export class QueryEngine {
           10,
         )
         if (callsThisQuery >= maxRetries) {
+          settleCompletedUsage()
           if (persistSession) {
             if (
               isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||

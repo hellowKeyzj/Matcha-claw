@@ -11,6 +11,11 @@ export interface SearchOptions {
   onProgress?: (progress: SearchProgress) => void
   /** Number of search results to return (default: 8) */
   numResults?: number
+  /** SearXNG category and engine IDs, separated by commas. */
+  categories?: string
+  language?: string
+  engines?: string
+  safeSearch?: 0 | 1 | 2
   /** Live crawl mode (default: 'fallback') */
   livecrawl?: 'fallback' | 'preferred'
   /** Search type (default: 'auto') */

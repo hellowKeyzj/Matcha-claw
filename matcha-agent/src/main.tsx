@@ -1036,10 +1036,10 @@ async function getInputPrompt(
     // Input hijacking breaks MCP.
     !process.argv.includes('mcp')
   ) {
+    process.stdin.setEncoding('utf8');
     if (inputFormat === 'stream-json') {
       return process.stdin;
     }
-    process.stdin.setEncoding('utf8');
     let data = '';
     const onData = (chunk: string) => {
       data += chunk;

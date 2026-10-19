@@ -4,7 +4,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{persistence::Database, rpc};
+use crate::{events::Events, persistence::Database, rpc};
 
 use super::run;
 
@@ -83,7 +83,13 @@ fn encode<T: Serialize>(record: &T) -> rpc::Result<String> {
 
 pub(super) async fn prepare_database(database: &Database) -> rpc::Result<()> {
     database.call(|connection| {
-        connection.execute_batch(
+        let transaction = connection.transaction()
+            .map_err(|error| sqlite_error("session_schema_begin", error))?;
+        let has_input_messages: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='managed_input_messages')",
+            [], |row| row.get(0),
+        ).map_err(|error| sqlite_error("session_schema_read", error))?;
+        transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS managed_sessions (
                 session_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL, record TEXT NOT NULL
@@ -93,13 +99,28 @@ pub(super) async fn prepare_database(database: &Database) -> rpc::Result<()> {
                 created_at_ms INTEGER NOT NULL, status TEXT NOT NULL, record TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS managed_runs_session ON managed_runs(session_id,created_at_ms,run_id);
+             CREATE INDEX IF NOT EXISTS managed_runs_by_status ON managed_runs(session_id,status,created_at_ms,run_id);
+             CREATE TABLE IF NOT EXISTS managed_input_messages (
+                message_id TEXT PRIMARY KEY NOT NULL,
+                agent_id TEXT NOT NULL, source_session_id TEXT NOT NULL
+             ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS managed_session_deletions (
                 session_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
                 had_session INTEGER NOT NULL CHECK(had_session IN (0,1)),
                 cleanup_complete INTEGER NOT NULL CHECK(cleanup_complete IN (0,1)),
                 requested_at_ms INTEGER NOT NULL
              );",
-        ).map_err(|error| sqlite_error("session_schema", error))
+        ).map_err(|error| sqlite_error("session_schema", error))?;
+        if !has_input_messages {
+            // Forks retain input UUIDs even after source session records are deleted.
+            transaction.execute(
+                "INSERT INTO managed_input_messages(message_id,agent_id,source_session_id)
+                 SELECT json_extract(r.record,'$.run.messageId'),s.agent_id,r.session_id
+                 FROM managed_runs r JOIN managed_sessions s ON s.session_id=r.session_id",
+                [],
+            ).map_err(|error| sqlite_error("run_input_backfill", error))?;
+        }
+        commit(transaction, "session_schema_commit")
     }).await
 }
 
@@ -367,19 +388,55 @@ fn commit(transaction: rusqlite::Transaction<'_>, kind: &str) -> rpc::Result<()>
     })
 }
 
-pub(super) async fn save_run(database: &Database, record: &run::Record) -> rpc::Result<()> {
-    let record = record.clone();
-    let encoded = encode(&record)?;
-    let status = serde_json::to_string(&record.run.status)
+pub(super) async fn save_run(events: &Events, record: &run::Record) -> rpc::Result<()> {
+    let payload = rpc::value(&record.run)?;
+    let kind = if record.run.status.terminal() {
+        "run.terminal"
+    } else {
+        "run.changed"
+    };
+    let stored = record.clone();
+    let encoded = encode(&stored)?;
+    let status = serde_json::to_string(&stored.run.status)
         .map_err(|error| storage("run_record_encode").with_source(error))?;
+    events.append_with(
+        &record.run.session_id, Some(&record.run.run_id), kind, payload,
+        move |transaction| {
+            transaction.execute(
+                "INSERT INTO managed_runs(run_id,session_id,created_at_ms,status,record) VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,record=excluded.record",
+                params![stored.run.run_id, stored.run.session_id, stored.run.created_at_ms, status, encoded],
+            ).map_err(|error| sqlite_error("run_write", error))?;
+            if stored.run.status == run::Status::Queued {
+                transaction.execute(
+                    "INSERT INTO managed_input_messages(message_id,agent_id,source_session_id)
+                     SELECT ?1,agent_id,session_id FROM managed_sessions WHERE session_id=?2",
+                    params![stored.run.message_id, stored.run.session_id],
+                ).map_err(|error| sqlite_error("run_input_write", error))?;
+            }
+            Ok(())
+        },
+    ).await?;
+    Ok(())
+}
+
+pub(super) async fn managed_input_message_ids(
+    database: &Database,
+    candidates: Vec<String>,
+) -> rpc::Result<Vec<String>> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let encoded = encode(&candidates)?;
     database.call(move |connection| {
-        assert_live_session(connection, &record.run.session_id)?;
-        connection.execute(
-            "INSERT INTO managed_runs(run_id,session_id,created_at_ms,status,record) VALUES(?1,?2,?3,?4,?5)
-             ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,record=excluded.record",
-            params![record.run.run_id, record.run.session_id, record.run.created_at_ms, status, encoded],
-        ).map_err(|error| sqlite_error("run_write", error))?;
-        Ok(())
+        let mut statement = connection.prepare(
+            "SELECT value FROM json_each(?1) AS candidate
+             WHERE EXISTS(SELECT 1 FROM managed_input_messages WHERE message_id=candidate.value)",
+        ).map_err(|error| sqlite_error("run_input_read", error))?;
+        statement.query_map([encoded], |row| row.get(0))
+            .map_err(|error| sqlite_error("run_input_read", error))?
+            .map(|row| row.map_err(|error| sqlite_error("run_input_read", error)))
+            .collect()
     }).await
 }
 
@@ -424,17 +481,76 @@ pub(super) async fn pending_runs(
 pub(super) async fn list_runs(
     database: &Database,
     session_id: &str,
-) -> rpc::Result<Vec<run::Record>> {
+    before_run_id: Option<&str>,
+    limit: usize,
+) -> rpc::Result<run::Page> {
     let session_id = session_id.to_owned();
+    let before_run_id = before_run_id.map(str::to_owned);
+    let read_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
     database.call(move |connection| {
-        assert_live_session(connection, &session_id)?;
-        let mut statement = connection.prepare(
-            "SELECT record FROM managed_runs WHERE session_id=?1 ORDER BY created_at_ms DESC,run_id DESC",
-        ).map_err(|error| sqlite_error("run_read", error))?;
-        statement.query_map([session_id], |row| row.get::<_, String>(0))
-            .map_err(|error| sqlite_error("run_read", error))?
-            .map(|row| serde_json::from_str(&row.map_err(|error| sqlite_error("run_read", error))?)
-                .map_err(|error| storage("run_record_decode").with_source(error)))
-            .collect()
+        let transaction = connection.transaction()
+            .map_err(|error| sqlite_error("run_snapshot_begin", error))?;
+        let latest_seq = crate::events::durable_latest(&transaction, &session_id)?;
+        let current_run = current_run(&transaction, &session_id)?;
+        let cursor = if let Some(run_id) = before_run_id {
+            let created_at_ms: u64 = transaction.query_row(
+                "SELECT created_at_ms FROM managed_runs WHERE session_id=?1 AND run_id=?2",
+                params![session_id, run_id], |row| row.get(0),
+            ).optional().map_err(|error| sqlite_error("run_read", error))?
+                .ok_or_else(|| rpc::Error::not_found("Run cursor"))?;
+            Some((created_at_ms, run_id))
+        } else {
+            None
+        };
+        let mut runs = {
+            let sql = if cursor.is_some() {
+                "SELECT record FROM managed_runs WHERE session_id=?1 AND (created_at_ms,run_id)<(?2,?3)
+                 ORDER BY created_at_ms DESC,run_id DESC LIMIT ?4"
+            } else {
+                "SELECT record FROM managed_runs WHERE session_id=?1 ORDER BY created_at_ms DESC,run_id DESC LIMIT ?2"
+            };
+            let mut statement = transaction.prepare(sql)
+                .map_err(|error| sqlite_error("run_read", error))?;
+            let mut rows = match &cursor {
+                Some((at_ms, run_id)) => statement.query(params![session_id, at_ms, run_id, read_limit]),
+                None => statement.query(params![session_id, read_limit]),
+            }.map_err(|error| sqlite_error("run_read", error))?;
+            let mut runs = Vec::new();
+            while let Some(row) = rows.next().map_err(|error| sqlite_error("run_read", error))? {
+                let encoded: String = row.get(0).map_err(|error| sqlite_error("run_read", error))?;
+                let record: run::Record = serde_json::from_str(&encoded)
+                    .map_err(|error| storage("run_record_decode").with_source(error))?;
+                runs.push(record.run);
+            }
+            runs
+        };
+        let more = runs.len() > limit;
+        runs.truncate(limit);
+        let next_before_run_id = if more {
+            runs.last().map(|run| run.run_id.clone())
+        } else {
+            None
+        };
+        transaction.commit().map_err(|error| sqlite_error("run_snapshot_commit", error))?;
+        Ok(run::Page { runs, next_before_run_id, current_run, latest_seq })
     }).await
+}
+
+fn current_run(connection: &rusqlite::Connection, session_id: &str) -> rpc::Result<Option<run::Run>> {
+    for sql in [
+        "SELECT record FROM managed_runs WHERE session_id=?1 AND status IN ('\"starting\"','\"running\"','\"cancelRequested\"')
+         ORDER BY created_at_ms DESC,run_id DESC LIMIT 1",
+        "SELECT record FROM managed_runs WHERE session_id=?1 AND status='\"queued\"'
+         ORDER BY created_at_ms,run_id LIMIT 1",
+        "SELECT record FROM managed_runs WHERE session_id=?1 ORDER BY created_at_ms DESC,run_id DESC LIMIT 1",
+    ] {
+        let encoded: Option<String> = connection.query_row(sql, [session_id], |row| row.get(0))
+            .optional().map_err(|error| sqlite_error("run_read", error))?;
+        if let Some(encoded) = encoded {
+            let record: run::Record = serde_json::from_str(&encoded)
+                .map_err(|error| storage("run_record_decode").with_source(error))?;
+            return Ok(Some(record.run));
+        }
+    }
+    Ok(None)
 }

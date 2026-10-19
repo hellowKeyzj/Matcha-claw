@@ -538,7 +538,10 @@ function mergeArrays<T>(targetArray: T[], sourceArray: T[]): T[] {
 export function settingsMergeCustomizer(
   objValue: unknown,
   srcValue: unknown,
+  key?: string,
 ): unknown {
+  // A search projection is one configuration identity, not a partial patch.
+  if (key === 'searxng') return srcValue
   if (Array.isArray(objValue) && Array.isArray(srcValue)) {
     return mergeArrays(objValue, srcValue)
   }

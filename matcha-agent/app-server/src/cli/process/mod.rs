@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -66,6 +66,7 @@ struct Control {
     input_closed: CancellationToken,
     closing: CancellationToken,
     pid: Arc<AtomicU32>,
+    graceful_exit: Arc<AtomicBool>,
     completion: Mutex<Completion>,
 }
 
@@ -101,6 +102,7 @@ impl Process {
         let input_closed = CancellationToken::new();
         let closing = CancellationToken::new();
         let pid = Arc::new(AtomicU32::new(child.pid()));
+        let graceful_exit = Arc::new(AtomicBool::new(false));
         let stop_reading = CancellationToken::new();
         let stdout_task = tokio::spawn(read_stdout(
             stdout,
@@ -120,6 +122,7 @@ impl Process {
             input_closed.clone(),
             closing.clone(),
             pid.clone(),
+            graceful_exit.clone(),
             output,
             stdout_task,
             stderr_task,
@@ -134,6 +137,7 @@ impl Process {
                 input_closed,
                 closing,
                 pid,
+                graceful_exit,
                 completion: Mutex::new(Completion::Running(task)),
             })),
             receiver,
@@ -145,6 +149,10 @@ impl Process {
             0 => None,
             pid => Some(pid),
         }
+    }
+
+    pub fn exited_gracefully(&self) -> bool {
+        self.0.graceful_exit.load(Ordering::Acquire)
     }
 
     // Bytes include their caller-owned framing/LF; successful writing is not CLI ACK.
@@ -366,6 +374,7 @@ async fn finish(
     input_closed: CancellationToken,
     closing: CancellationToken,
     pid: Arc<AtomicU32>,
+    graceful_exit: Arc<AtomicBool>,
     output: mpsc::Sender<Output>,
     stdout: JoinHandle<rpc::Result<()>>,
     stderr: JoinHandle<rpc::Result<()>>,
@@ -385,19 +394,29 @@ async fn finish(
         .then(|| Instant::now() + RESOURCE_WINDOW);
     input_closed.cancel();
     input.lock().await.take();
-    match observed_exit {
-        Some(Err(error)) => failures.push(error),
-        Some(Ok(())) => {}
+    let natural_exit = match observed_exit {
+        Some(Err(error)) => {
+            failures.push(error);
+            false
+        }
+        Some(Ok(())) => true,
         None => match timeout(RESOURCE_WINDOW, child.exited()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => failures.push(error),
-            Err(_) => {} // This is the graceful resource window, not a business deadline.
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                failures.push(error);
+                false
+            }
+            Err(_) => false, // Resource grace window, not a business deadline.
         },
-    }
+    };
 
-    if let Err(error) = child.terminate_tree() {
-        failures.push(error);
-    }
+    let forced = match child.terminate_tree() {
+        Ok(forced) => forced,
+        Err(error) => {
+            failures.push(error);
+            true
+        }
+    };
     let status = match timeout(RESOURCE_WINDOW, child.wait()).await {
         Ok(Ok(status)) => {
             pid.store(0, Ordering::Release);
@@ -472,6 +491,10 @@ async fn finish(
             ),
         }
     }
+    graceful_exit.store(
+        natural_exit && !forced && status == Some((Some(0), None)) && failures.is_empty(),
+        Ordering::Release,
+    );
     if !failures.is_empty() {
         cleanup_error.send(Output::ReadFailed {
             stream: "cleanup",

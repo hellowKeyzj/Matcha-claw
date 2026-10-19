@@ -95,3 +95,14 @@ Server 管理配置的预期方向是“全局默认 → Agent 设置 → 操作
 根目录、身份与路径校验、配置 schema、存储 writer 和提交责任均以 [contracts.md](contracts.md) 为共享接口。Agent ID 的平台大小写/保留名称碰撞由 config 集中校验；Session ID 为 UUID。原生 transcript 定位只扫描指定 Agent runtime/projects 并核对原生会话信息，不自行替换 cwd-key 编码。
 
 实现存在不等于跨平台运行已验证；平台、CLI、提交不确定与资源清理的证据统一记录在 [progress.md](progress.md)。
+
+## 8. 2026-10-18 Electron 托管根统一
+
+Electron 托管与独立 Server 正常启动统一默认 `~/.matcha-agent`；不再以 Electron userData 下 `matcha-agent/app-server` 为第二套默认，也不添加旧根 fallback、双目录扫描或自动隐式迁移。这里只统一 Matcha Agent-owned home，Electron AppData 中的 Host state/logs 不迁移。[VERIFY: electron/utils/paths.ts:46-70,83-92] [VERIFY: electron/main/runtime-host-delivery/bootstrap-resources.ts:199-202,240-254]
+
+- Electron：`MATCHA_AGENT_HOME` 只要存在就直接交 Node `resolve`，含空串（解析为 Electron cwd）；不 trim、不展开 `~`。变量不存在时，仅 `MATCHACLAW_E2E=1` 且 `MATCHACLAW_E2E_USER_DATA_DIR` trim 后非空才使用 `<e2eUserData>/matcha-agent`，否则使用 `os.homedir()/.matcha-agent`。[VERIFY: electron/utils/paths.ts:46-56]
+- 注入链为 `getMatchaAgentHome()` → bootstrap `matcha.storageRoot` → Rust Integration 原有 `--home <storage_root>`，不改变 Integration 启动契约。独立 Server 仍按 `--home > MATCHA_AGENT_HOME > USERPROFILE/HOME/.matcha-agent` 选择根，再绝对化、canonicalize；E2E 例外仅在 Electron resolver。[VERIFY: electron/main/runtime-host-delivery/bootstrap-resources.ts:109-111,199-202,248-254] [VERIFY: runtime-host/integrations/matcha-agent/src/lifecycle/launch.rs:225-233] [VERIFY: matcha-agent/app-server/src/main.rs:24-57] [VERIFY: matcha-agent/app-server/src/config/mod.rs:210-232]
+
+**现场迁移记录（非产品迁移规则）**：目标原本不存在；用户确认退出后，主代理复核 Electron/Host/Server/CLI 全部退出，再备份、离线重定位并发布 `~/.matcha-agent`。旧 active 根移为同父 `app-server.pre-home-move-20261018-220040` 原数据备份，不再作 active 根或 fallback。SQLite `managed_sessions.record` 持久化绝对 workspace/runtime/transcript 路径，原生 JSONL 保存 cwd，transcript 定位还关联原生 projects 目录；仅 rename 不保证恢复。本次仅重定位已确认受搬迁影响的会话 workspace/runtime、cwd-key 桶、JSONL 顶层 cwd 与原生 metadata 的 cwd/autoMemoryDirectory，用户自选外部 workspace 保持不动，不做全局路径替换。[VERIFY: matcha-agent/app-server/src/config/mod.rs:210-232] [VERIFY: matcha-agent/app-server/src/session/dispatch.rs:233-258] [VERIFY: matcha-agent/app-server/src/session/record.rs:19-43,270-281] [VERIFY: matcha-agent/app-server/src/session/history.rs:287-313,353-380] [VERIFY: matcha-agent/src/utils/sessionStorage.ts:199-225,437-439,1070-1088]
+
+本机新根发布与真实 Server 的 3 条会话只读恢复检查已完成；真实模型 resume、UI、跨平台仍未验。文件/逐表保全、原生路径重定位、临时失败与检查详情单列于 [Integration 验证账](../../../docs/architecture-knowledge/modules/openclaw-matcha-integrations/dev.md#2026-10-18-matcha-agent-家目录统一--验证边界)；迁移工具仅为本机临时工具，不进入仓库或产品启动链。

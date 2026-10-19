@@ -68,7 +68,7 @@ import {
   createUserMessage,
   normalizeContentFromAPI,
 } from '../../../utils/messages.js'
-import type { SDKAssistantMessageError } from '../../../entrypoints/agentSdkTypes.js'
+import { getAssistantMessageFromError } from '../errors.js'
 import {
   isSearchExtraToolsEnabled,
   isDeferredToolsDeltaEnabled,
@@ -601,12 +601,12 @@ export async function* queryModelOpenAI(
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error)
     logForDebugging(`[OpenAI] Error: ${errorMessage}`, { level: 'error' })
-    yield createAssistantAPIErrorMessage({
-      content: `API Error: ${errorMessage}`,
+    yield {
+      ...getAssistantMessageFromError(
+        error instanceof Error ? error : new Error(errorMessage),
+        options.model,
+      ),
       apiError: 'api_error',
-      error: (error instanceof Error
-        ? error
-        : new Error(String(error))) as unknown as SDKAssistantMessageError,
-    })
+    }
   }
 }

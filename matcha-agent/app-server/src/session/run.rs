@@ -128,6 +128,15 @@ impl Active {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Page {
+    pub runs: Vec<Run>,
+    pub next_before_run_id: Option<String>,
+    pub current_run: Option<Run>,
+    pub latest_seq: u64,
+}
+
 pub(super) fn validate_content(content: &Value) -> rpc::Result<()> {
     match content {
         Value::String(text) if !text.trim().is_empty() => Ok(()),

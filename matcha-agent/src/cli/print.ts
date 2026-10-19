@@ -98,8 +98,12 @@ import {
 import { expandPath } from 'src/utils/path.js'
 import { extractReadFilesFromMessages } from 'src/utils/queryHelpers.js'
 import { registerHookEventHandler } from 'src/utils/hooks/hookEvents.js'
+import { getHooksConfigFromSnapshot } from 'src/utils/hooks/hooksConfigSnapshot.js'
 import { executeFilePersistence } from 'src/utils/filePersistence/filePersistence.js'
-import { finalizePendingAsyncHooks } from 'src/utils/hooks/AsyncHookRegistry.js'
+import {
+  finalizePendingAsyncHooks,
+  hasPendingAsyncHooks,
+} from 'src/utils/hooks/AsyncHookRegistry.js'
 import {
   gracefulShutdown,
   gracefulShutdownSync,
@@ -125,6 +129,7 @@ import type {
   SDKControlResponse,
   SDKControlMcpSetServersResponse,
   SDKControlReloadPluginsResponse,
+  SDKControlPrepareToSleepResponse,
 } from 'src/entrypoints/sdk/controlTypes.js'
 import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk'
 import type { PermissionMode as InternalPermissionMode } from 'src/types/permissions.js'
@@ -214,6 +219,7 @@ import {
   restoreSessionMetadata,
   recordTranscript,
   flushSessionStorage,
+  getNodeEnv,
   getTranscriptPathForSession,
 } from 'src/utils/sessionStorage.js'
 import { incrementPromptCount } from 'src/utils/commitAttribution.js'
@@ -239,7 +245,10 @@ import {
   runElicitationHooks,
   runElicitationResultHooks,
 } from 'src/services/mcp/elicitationHandler.js'
-import { executeNotificationHooks } from 'src/utils/hooks.js'
+import {
+  executeNotificationHooks,
+  hasActiveHookExecutions,
+} from 'src/utils/hooks.js'
 import {
   ElicitRequestSchema,
   ElicitationCompleteNotificationSchema,
@@ -262,9 +271,26 @@ import {
 import { createModelSwitchBreadcrumbs, createAssistantMessage, createUserMessage } from 'src/utils/messages.js'
 import { TodoListSchema } from 'src/utils/todo/types.js'
 import { activeTodos, writeTodos } from 'src/utils/todo/state.js'
-import { createTask, deleteTaskStrict, getTaskListId, isTodoV2Enabled, patchTask, readTask, readTasks, readTaskView, sanitizePathComponent, withTaskListLock } from 'src/utils/tasks.js'
+import {
+  createTask,
+  deleteTaskStrict,
+  getTaskListId,
+  initializeTaskContextBinding,
+  isTodoV2Enabled,
+  patchTask,
+  readTask,
+  readTasks,
+  readTaskView,
+  sanitizePathComponent,
+  withTaskListLock,
+} from 'src/utils/tasks.js'
 import { TODO_WRITE_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/TodoWriteTool/constants.js'
-import { SDKControlGetTodosRequestSchema, SDKControlWriteTodosRequestSchema, SDKControlTaskRequestSchema } from 'src/entrypoints/sdk/controlSchemas.js'
+import {
+  SDKControlGetTodosRequestSchema,
+  SDKControlWriteTodosRequestSchema,
+  SDKControlTaskRequestSchema,
+  SDKControlPrepareToSleepRequestSchema,
+} from 'src/entrypoints/sdk/controlSchemas.js'
 import { collectContextData } from 'src/commands/context/context-noninteractive.js'
 import { LOCAL_COMMAND_STDOUT_TAG } from 'src/constants/xml.js'
 import {
@@ -298,6 +324,10 @@ import {
   setFlagSettingsInline,
   getMainThreadAgentType,
   getAllowedChannels,
+  getScheduledTasksEnabled,
+  getSessionCronTasks,
+  getSessionCreatedTeams,
+  getRegisteredHooks,
   setAllowedChannels,
   type ChannelEntry,
 } from 'src/bootstrap/state.js'
@@ -350,6 +380,7 @@ import { refreshActivePlugins } from '../utils/plugins/refresh.js'
 import { loadAllPluginsCacheOnly } from '../utils/plugins/pluginLoader.js'
 import {
   isTeamLead,
+  isTeammate,
   hasActiveInProcessTeammates,
   hasWorkingInProcessTeammates,
   waitForTeammatesToBecomeIdle,
@@ -715,6 +746,8 @@ export async function runHeadless(
     restoredWorkerState: structuredIO.restoredWorkerState,
   })
 
+  initializeTaskContextBinding()
+
   // SessionStart hooks can emit initialUserMessage — the first user turn for
   // headless orchestrator sessions where stdin is empty and additionalContext
   // alone (an attachment, not a turn) would leave the REPL with nothing to
@@ -896,6 +929,7 @@ export async function runHeadless(
     options,
     turnInterruptionState,
   )) {
+    if (structuredIO.consumeOutputBarrier(message)) continue
     if (transformToStreamlined) {
       // Streamlined mode: transform messages and stream immediately
       const transformed = transformToStreamlined(message)
@@ -1040,6 +1074,15 @@ function runHeadlessStreaming(
   turnInterruptionState?: TurnInterruptionState,
 ): AsyncIterable<StdoutMessage> {
   let running = false
+  let activeRuns = 0
+  let hasSessionOnlyControlState = false
+  let pendingBackgroundOperations = 0
+  function trackBackgroundOperation<T>(operation: Promise<T>): Promise<T> {
+    pendingBackgroundOperations++
+    return operation.finally(() => {
+      pendingBackgroundOperations--
+    })
+  }
   let runPhase:
     | 'draining_commands'
     | 'waiting_for_agents'
@@ -1090,6 +1133,7 @@ function runHeadlessStreaming(
   // notifySessionMetadataChanged, both of which onChangeAppState now covers);
   // keeping it would double-emit status messages.
   setPermissionModeChangedListener(newMode => {
+    if (!structuredIO.acceptsInput) return
     // Only emit for SDK-exposed modes.
     if (
       newMode === 'default' ||
@@ -1315,91 +1359,99 @@ function runHeadlessStreaming(
       try {
         connection.client.setRequestHandler(
           ElicitRequestSchema,
-          async (request, extra) => {
-            logMCPDebug(
-              serverName,
-              `Elicitation request received in print mode (mode: ${request.params.mode === 'url' ? 'url' : 'form'})`,
-            )
+          (request, extra) =>
+            trackBackgroundOperation(
+              (async () => {
+                if (!structuredIO.acceptsInput)
+                  return { action: 'cancel' as const }
+                logMCPDebug(
+                  serverName,
+                  `Elicitation request received in print mode (mode: ${request.params.mode === 'url' ? 'url' : 'form'})`,
+                )
 
-            const mode = request.params.mode === 'url' ? 'url' : 'form'
+                const mode = request.params.mode === 'url' ? 'url' : 'form'
 
-            logEvent('tengu_mcp_elicitation_shown', {
-              mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-            })
+                logEvent('tengu_mcp_elicitation_shown', {
+                  mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                })
 
-            // Run elicitation hooks first — they can provide a response programmatically
-            const hookResponse = await runElicitationHooks(
-              serverName,
-              request.params,
-              extra.signal,
-            )
-            if (hookResponse) {
-              logMCPDebug(
-                serverName,
-                `Elicitation resolved by hook (action: ${hookResponse.action})`,
-              )
-              logEvent('tengu_mcp_elicitation_response', {
-                mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                action:
-                  hookResponse.action as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-              })
-              return hookResponse
-            }
+                // Run elicitation hooks first — they can provide a response programmatically
+                const hookResponse = await runElicitationHooks(
+                  serverName,
+                  request.params,
+                  extra.signal,
+                )
+                if (hookResponse) {
+                  logMCPDebug(
+                    serverName,
+                    `Elicitation resolved by hook (action: ${hookResponse.action})`,
+                  )
+                  logEvent('tengu_mcp_elicitation_response', {
+                    mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                    action:
+                      hookResponse.action as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                  })
+                  return hookResponse
+                }
 
-            // Delegate to SDK consumer via control protocol
-            const url =
-              'url' in request.params
-                ? (request.params.url as string)
-                : undefined
-            const requestedSchema =
-              'requestedSchema' in request.params
-                ? (request.params.requestedSchema as
-                    | Record<string, unknown>
-                    | undefined)
-                : undefined
+                // Delegate to SDK consumer via control protocol
+                const url =
+                  'url' in request.params
+                    ? (request.params.url as string)
+                    : undefined
+                const requestedSchema =
+                  'requestedSchema' in request.params
+                    ? (request.params.requestedSchema as
+                        | Record<string, unknown>
+                        | undefined)
+                    : undefined
 
-            const elicitationId =
-              'elicitationId' in request.params
-                ? (request.params.elicitationId as string | undefined)
-                : undefined
+                const elicitationId =
+                  'elicitationId' in request.params
+                    ? (request.params.elicitationId as string | undefined)
+                    : undefined
 
-            const rawResult = await structuredIO.handleElicitation(
-              serverName,
-              request.params.message,
-              requestedSchema,
-              extra.signal,
-              mode,
-              url,
-              elicitationId,
-            )
+                const rawResult = await structuredIO.handleElicitation(
+                  serverName,
+                  request.params.message,
+                  requestedSchema,
+                  extra.signal,
+                  mode,
+                  url,
+                  elicitationId,
+                )
 
-            const result = await runElicitationResultHooks(
-              serverName,
-              rawResult,
-              extra.signal,
-              mode,
-              elicitationId,
-            )
+                const result = await runElicitationResultHooks(
+                  serverName,
+                  rawResult,
+                  extra.signal,
+                  mode,
+                  elicitationId,
+                )
 
-            logEvent('tengu_mcp_elicitation_response', {
-              mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-              action:
-                result.action as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-            })
-            return result
-          },
+                logEvent('tengu_mcp_elicitation_response', {
+                  mode: mode as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                  action:
+                    result.action as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                })
+                return result
+              })(),
+            ),
         )
 
         // Surface completion notifications to SDK consumers (URL mode)
         connection.client.setNotificationHandler(
           ElicitationCompleteNotificationSchema,
           notification => {
+            if (!structuredIO.acceptsInput) return
             const { elicitationId } = notification.params
             logMCPDebug(serverName, 'Elicitation completion notification')
-            void executeNotificationHooks({
-              message: `MCP server "${serverName}" confirmed elicitation ${elicitationId} complete`,
-              notificationType: 'elicitation_complete',
-            })
+            void trackBackgroundOperation(
+              executeNotificationHooks({
+                message: `MCP server "${serverName}" confirmed elicitation ${elicitationId} complete`,
+                notificationType: 'elicitation_complete',
+              }),
+            )
             output.enqueue({
               type: 'system',
               subtype: 'elicitation_complete',
@@ -1491,7 +1543,7 @@ function runHeadlessStreaming(
     }
   }
 
-  void updateSdkMcp()
+  void trackBackgroundOperation(updateSdkMcp())
 
   // State for dynamically added MCP servers (via mcp_set_servers control message)
   // These are separate from SDK MCP servers and support all transport types
@@ -1774,9 +1826,11 @@ function runHeadlessStreaming(
   // mid-session; the next interactive run reconciles.
   if (!isBareMode()) {
     if (isEnvTruthy(process.env.CLAUDE_CODE_SYNC_PLUGIN_INSTALL)) {
-      pluginInstallPromise = installPluginsAndApplyMcpInBackground()
+      pluginInstallPromise = trackBackgroundOperation(
+        installPluginsAndApplyMcpInBackground(),
+      )
     } else {
-      void installPluginsAndApplyMcpInBackground()
+      void trackBackgroundOperation(installPluginsAndApplyMcpInBackground())
     }
   }
 
@@ -1851,7 +1905,7 @@ function runHeadlessStreaming(
     const { response, sdkServersChanged } =
       await applyMcpServerChanges(supportedConfigs)
     if (sdkServersChanged) {
-      void updateSdkMcp()
+      void trackBackgroundOperation(updateSdkMcp())
     }
     logForDebugging(
       `Headless MCP refresh: added=${response.added.length}, removed=${response.removed.length}`,
@@ -1860,10 +1914,13 @@ function runHeadlessStreaming(
 
   // Subscribe to skill changes for hot reloading
   const unsubscribeSkillChanges = skillChangeDetector.subscribe(() => {
+    if (!structuredIO.acceptsInput) return
     clearCommandsCache()
-    void getCommands(cwd()).then(newCommands => {
-      currentCommands = newCommands
-    })
+    void trackBackgroundOperation(
+      getCommands(cwd()).then(newCommands => {
+        currentCommands = newCommands
+      }),
+    )
   })
 
   // Proactive mode: schedule a tick to keep the model looping autonomously.
@@ -1876,28 +1933,31 @@ function runHeadlessStreaming(
             if (
               !proactiveModule?.isProactiveActive() ||
               proactiveModule.isProactivePaused() ||
+              !structuredIO.acceptsInput ||
               inputClosed
             ) {
               return
             }
-            void (async () => {
-              const commands = await createProactiveAutonomyCommands({
-                basePrompt: `<${TICK_TAG}>${new Date().toLocaleTimeString()}</${TICK_TAG}>`,
-                currentDir: cwd(),
-                shouldCreate: () => !inputClosed,
-              })
-              if (inputClosed) {
-                await cancelQueuedAutonomyCommands({ commands })
-                return
-              }
-              for (const command of commands) {
-                enqueue({
-                  ...command,
-                  uuid: randomUUID(),
+            void trackBackgroundOperation(
+              (async () => {
+                const commands = await createProactiveAutonomyCommands({
+                  basePrompt: `<${TICK_TAG}>${new Date().toLocaleTimeString()}</${TICK_TAG}>`,
+                  currentDir: cwd(),
+                  shouldCreate: () => structuredIO.acceptsInput && !inputClosed,
                 })
-              }
-              void run()
-            })().catch(error => {
+                if (!structuredIO.acceptsInput || inputClosed) {
+                  await cancelQueuedAutonomyCommands({ commands })
+                  return
+                }
+                for (const command of commands) {
+                  enqueue({
+                    ...command,
+                    uuid: randomUUID(),
+                  })
+                }
+                void run()
+              })(),
+            ).catch(error => {
               logError(error)
               logForDebugging(
                 `[Proactive] failed to create headless tick: ${error}`,
@@ -1919,8 +1979,17 @@ function runHeadlessStreaming(
 
   let todoControlInFlight: Promise<void> | undefined
   const run = async () => {
+    if (!structuredIO.acceptsInput) return
+    activeRuns++
+    try {
+      await runOnce()
+    } finally {
+      activeRuns--
+    }
+  }
+  const runOnce = async () => {
     if (todoControlInFlight) await todoControlInFlight
-    if (running) {
+    if (!structuredIO.acceptsInput || running) {
       return
     }
 
@@ -2365,26 +2434,28 @@ function runHeadlessStreaming(
           bridgeHandle?.sendResult()
 
           if (feature('FILE_PERSISTENCE') && turnStartTime !== undefined) {
-            void executeFilePersistence(
-              {
-                turnStartTime,
-              } as import('src/utils/filePersistence/types.js').TurnStartTime,
-              abortController.signal,
-              result => {
-                const filesResult = result as unknown as {
-                  persistedFiles: { filename: string; file_id: string }[]
-                  failedFiles: { filename: string; error: string }[]
-                }
-                output.enqueue({
-                  type: 'system' as const,
-                  subtype: 'files_persisted' as const,
-                  files: filesResult.persistedFiles,
-                  failed: filesResult.failedFiles,
-                  processed_at: new Date().toISOString(),
-                  uuid: randomUUID(),
-                  session_id: getSessionId(),
-                })
-              },
+            void trackBackgroundOperation(
+              executeFilePersistence(
+                {
+                  turnStartTime,
+                } as import('src/utils/filePersistence/types.js').TurnStartTime,
+                abortController.signal,
+                result => {
+                  const filesResult = result as unknown as {
+                    persistedFiles: { filename: string; file_id: string }[]
+                    failedFiles: { filename: string; error: string }[]
+                  }
+                  output.enqueue({
+                    type: 'system' as const,
+                    subtype: 'files_persisted' as const,
+                    files: filesResult.persistedFiles,
+                    failed: filesResult.failedFiles,
+                    processed_at: new Date().toISOString(),
+                    uuid: randomUUID(),
+                    session_id: getSessionId(),
+                  })
+                },
+              ),
             )
           }
 
@@ -2806,6 +2877,7 @@ function runHeadlessStreaming(
     /* eslint-enable @typescript-eslint/no-require-imports */
 
     const enqueueUdsInboxMessages = (): boolean => {
+      if (!structuredIO.acceptsInput) return false
       const entries = drainInbox()
       for (const entry of entries) {
         const value =
@@ -2856,24 +2928,26 @@ function runHeadlessStreaming(
       logSuffix: string
       onSuccess: (command: QueuedCommand) => void | Promise<void>
     }): void => {
-      if (inputClosed) return
-      void (async () => {
-        const command = await createAutonomyQueuedPromptIfNoActiveSource({
-          basePrompt: params.basePrompt,
-          trigger: 'scheduled-task',
-          currentDir: cwd(),
-          sourceId: params.sourceId,
-          sourceLabel: params.sourceLabel,
-          workload: WORKLOAD_CRON,
-          shouldCreate: () => !inputClosed,
-        })
-        if (!command) return
-        if (inputClosed) {
-          await cancelQueuedAutonomyCommands({ commands: [command] })
-          return
-        }
-        await params.onSuccess(command)
-      })().catch(error => {
+      if (!structuredIO.acceptsInput || inputClosed) return
+      void trackBackgroundOperation(
+        (async () => {
+          const command = await createAutonomyQueuedPromptIfNoActiveSource({
+            basePrompt: params.basePrompt,
+            trigger: 'scheduled-task',
+            currentDir: cwd(),
+            sourceId: params.sourceId,
+            sourceLabel: params.sourceLabel,
+            workload: WORKLOAD_CRON,
+            shouldCreate: () => structuredIO.acceptsInput && !inputClosed,
+          })
+          if (!command) return
+          if (!structuredIO.acceptsInput || inputClosed) {
+            await cancelQueuedAutonomyCommands({ commands: [command] })
+            return
+          }
+          await params.onSuccess(command)
+        })(),
+      ).catch(error => {
         logError(error)
         logForDebugging(
           `[ScheduledTasks] failed to enqueue headless task${params.logSuffix}: ${error}`,
@@ -2928,7 +3002,7 @@ function runHeadlessStreaming(
           onSuccess: enqueueAndRun,
         })
       },
-      isLoading: () => running || inputClosed,
+      isLoading: () => !structuredIO.acceptsInput || running || inputClosed,
       getJitterConfig: cronJitterConfigModule?.getCronJitterConfig,
       isKilled: () => !cronGate?.isKairosCronEnabled(),
     })
@@ -3006,6 +3080,87 @@ function runHeadlessStreaming(
     flow: Promise<void>
   } | null = null
 
+  function sleepStatus():
+    | SDKControlPrepareToSleepResponse['status']
+    | undefined {
+    const state = getAppState()
+    const tasks = Object.values(state.tasks)
+    const hookConfig = getHooksConfigFromSnapshot()
+    const registeredHooks = getRegisteredHooks()
+    const hasResidentHooks =
+      !isBareMode() &&
+      (['ConfigChange', 'FileChanged', 'SessionEnd'] as const).some(
+        event =>
+          (hookConfig?.[event]?.length ?? 0) > 0 ||
+          (registeredHooks?.[event]?.length ?? 0) > 0 ||
+          !!state.sessionHooks.get(getSessionId())?.hooks[event],
+      )
+    const udsActive =
+      feature('UDS_INBOX') &&
+      (
+        require('../utils/udsMessaging.js') as typeof import('../utils/udsMessaging.js')
+      ).getUdsMessagingSocketPath() !== undefined
+    if (
+      state.teamContext ||
+      isTeammate() ||
+      getSessionCreatedTeams().size > 0 ||
+      tasks.some(
+        task =>
+          task.type === 'in_process_teammate' &&
+          (task.status === 'pending' || task.status === 'running'),
+      ) ||
+      bridgeHandle ||
+      structuredIO instanceof RemoteIO ||
+      getAllowedChannels().length > 0 ||
+      proactiveModule?.isProactiveActive() ||
+      (cronScheduler && getScheduledTasksEnabled()) ||
+      getSessionCronTasks().length > 0 ||
+      udsActive ||
+      hasResidentHooks ||
+      isSessionPersistenceDisabled() ||
+      getSettings_DEPRECATED()?.cleanupPeriodDays === 0 ||
+      isEnvTruthy(process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY) ||
+      (getNodeEnv() === 'test' &&
+        !isEnvTruthy(process.env.TEST_ENABLE_SESSION_PERSISTENCE)) ||
+      hasSessionOnlyControlState ||
+      structuredIO.hasSessionOnlyEnvironment ||
+      pendingSeeds.size > 0 ||
+      (feature('EXTRACT_MEMORIES') && isExtractModeActive())
+    )
+      return 'resident'
+    if (
+      running ||
+      activeRuns > 0 ||
+      hasCommandsInQueue() ||
+      heldBackResult ||
+      todoControlInFlight ||
+      pendingBackgroundOperations > 0 ||
+      structuredIO.hasPendingRequests ||
+      structuredIO.hasPrependedInput ||
+      hasPendingAsyncHooks() ||
+      hasActiveHookExecutions() ||
+      suggestionState.inflightPromise ||
+      suggestionState.pendingSuggestion ||
+      tasks.some(
+        task =>
+          task.status === 'pending' ||
+          task.status === 'running' ||
+          !task.notified,
+      ) ||
+      activeOAuthFlows.size > 0 ||
+      oauthAuthPromises.size > 0 ||
+      claudeOAuth ||
+      state.inbox.messages.some(message => message.status !== 'processed') ||
+      state.workerSandboxPermissions.queue.length > 0 ||
+      state.pendingWorkerRequest ||
+      state.pendingSandboxRequest ||
+      state.speculation.status !== 'idle' ||
+      isShuttingDown()
+    )
+      return 'busy'
+    return undefined
+  }
+
   // This is essentially spawning a parallel async task- we have two
   // running in parallel- one reading from stdin and adding to the
   // queue to be processed and another reading from the queue,
@@ -3040,7 +3195,44 @@ function runHeadlessStreaming(
         // The schema union doesn't include end_session, channel_enable, mcp_authenticate,
         // claude_authenticate, etc. so accessing their properties narrows to `never`.
         const req = msg.request as Record<string, unknown>
-        if (msg.request.subtype === 'interrupt') {
+        if (msg.request.subtype === 'prepare_to_sleep') {
+          if (!SDKControlPrepareToSleepRequestSchema().safeParse(req).success) {
+            sendControlResponseError(msg, 'Invalid prepare_to_sleep request')
+            continue
+          }
+          // Sealing and inspecting native facts run in one JS turn, without an await.
+          structuredIO.prepareToSleep()
+          const status = sleepStatus()
+          if (status) {
+            structuredIO.resumeInput()
+            sendControlResponseSuccess(msg, { status })
+            continue
+          }
+          try {
+            await recordTranscript(mutableMessages)
+            await flushSessionStorage()
+            await structuredIO.flushInternalEvents()
+            for (const event of drainSdkEvents()) output.enqueue(event)
+            await structuredIO.flushOutput()
+            await structuredIO.flushStdout()
+            const changedStatus = sleepStatus()
+            if (changedStatus) {
+              structuredIO.resumeInput()
+              sendControlResponseSuccess(msg, { status: changedStatus })
+            } else {
+              cronScheduler?.stop()
+              idleTimeout.stop()
+              unsubscribeSkillChanges()
+              unsubscribeAuthStatus?.()
+              statusListeners.delete(rateLimitListener)
+              structuredIO.finishPreparingToSleep()
+              sendControlResponseSuccess(msg, { status: 'ready' })
+            }
+          } catch {
+            structuredIO.resumeInput()
+            sendControlResponseSuccess(msg, { status: 'busy' })
+          }
+        } else if (msg.request.subtype === 'interrupt') {
           // Track escapes for attribution (ant-only feature)
           if (feature('COMMIT_ATTRIBUTION')) {
             setAppState(prev => ({
@@ -3073,6 +3265,18 @@ function runHeadlessStreaming(
           sendControlResponseSuccess(msg)
           break // exits for-await → falls through to inputClosed=true drain below
         } else if (msg.request.subtype === 'initialize') {
+          if (
+            msg.request.hooks ||
+            msg.request.agents ||
+            msg.request.systemPrompt !== undefined ||
+            msg.request.appendSystemPrompt !== undefined ||
+            msg.request.jsonSchema ||
+            msg.request.sdkMcpServers?.length ||
+            msg.request.promptSuggestions ||
+            msg.request.agentProgressSummaries
+          ) {
+            hasSessionOnlyControlState = true
+          }
           // SDK MCP server names from the initialize message
           // Populated by both browser and ProcessTransport sessions
           if (
@@ -3128,6 +3332,7 @@ function runHeadlessStreaming(
             void run()
           }
         } else if (msg.request.subtype === 'set_permission_mode') {
+          hasSessionOnlyControlState = true
           const m = msg.request // for typescript (TODO: use readonly types to avoid this)
           setAppState(prev => ({
             ...prev,
@@ -3148,6 +3353,7 @@ function runHeadlessStreaming(
             requestedModel === 'default'
               ? getDefaultMainLoopModel()
               : requestedModel
+          hasSessionOnlyControlState = true
           activeUserSpecifiedModel = model
           setMainLoopModelOverride(model)
           notifySessionMetadataChanged({ model })
@@ -3155,6 +3361,7 @@ function runHeadlessStreaming(
 
           sendControlResponseSuccess(msg)
         } else if (msg.request.subtype === 'set_max_thinking_tokens') {
+          hasSessionOnlyControlState = true
           if (msg.request.max_thinking_tokens === null) {
             options.thinkingConfig = undefined
           } else if (msg.request.max_thinking_tokens === 0) {
@@ -3367,6 +3574,7 @@ function runHeadlessStreaming(
               const content = (
                 raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw
               ).replaceAll('\r\n', '\n')
+              hasSessionOnlyControlState = true
               pendingSeeds.set(normalizedPath, {
                 content,
                 timestamp: diskMtime,
@@ -3379,6 +3587,7 @@ function runHeadlessStreaming(
           }
           sendControlResponseSuccess(msg)
         } else if (msg.request.subtype === 'mcp_set_servers') {
+          hasSessionOnlyControlState = true
           const { response, sdkServersChanged } = await applyMcpServerChanges(
             msg.request.servers as Record<
               string,
@@ -3389,7 +3598,7 @@ function runHeadlessStreaming(
 
           // Connect SDK servers AFTER response to avoid deadlock
           if (sdkServersChanged) {
-            void updateSdkMcp()
+            void trackBackgroundOperation(updateSdkMcp())
           }
         } else if (msg.request.subtype === 'reload_plugins') {
           try {
@@ -3534,6 +3743,7 @@ function runHeadlessStreaming(
             }
           }
         } else if (msg.request.subtype === 'mcp_toggle') {
+          hasSessionOnlyControlState = true
           const currentAppState = getAppState()
           const { serverName, enabled } = msg.request
           elicitationRegistered.delete(serverName)
@@ -3962,22 +4172,24 @@ function runHeadlessStreaming(
             // which can't be read while we're parked. Capture the binding;
             // claudeOAuth is nulled in flow's own .finally.
             const { flow } = claudeOAuth
-            void flow.then(
-              () => {
-                const accountInfo = getAccountInformation()
-                sendControlResponseSuccess(msg, {
-                  account: {
-                    email: accountInfo?.email,
-                    organization: accountInfo?.organization,
-                    subscriptionType: accountInfo?.subscription,
-                    tokenSource: accountInfo?.tokenSource,
-                    apiKeySource: accountInfo?.apiKeySource,
-                    apiProvider: getAPIProvider(),
-                  },
-                })
-              },
-              (error: unknown) =>
-                sendControlResponseError(msg, errorMessage(error)),
+            void trackBackgroundOperation(
+              flow.then(
+                () => {
+                  const accountInfo = getAccountInformation()
+                  sendControlResponseSuccess(msg, {
+                    account: {
+                      email: accountInfo?.email,
+                      organization: accountInfo?.organization,
+                      subscriptionType: accountInfo?.subscription,
+                      tokenSource: accountInfo?.tokenSource,
+                      apiKeySource: accountInfo?.apiKeySource,
+                      apiProvider: getAPIProvider(),
+                    },
+                  })
+                },
+                (error: unknown) =>
+                  sendControlResponseError(msg, errorMessage(error)),
+              ),
             )
           }
         } else if (req.subtype === 'mcp_clear_auth') {
@@ -4029,6 +4241,7 @@ function runHeadlessStreaming(
             sendControlResponseSuccess(msg, {})
           }
         } else if (msg.request.subtype === 'apply_flag_settings') {
+          hasSessionOnlyControlState = true
           // Snapshot the current model before applying — we need to detect
           // model switches so we can inject breadcrumbs and notify listeners.
           const prevModel = getMainLoopModel()
@@ -4086,6 +4299,9 @@ function runHeadlessStreaming(
 
           sendControlResponseSuccess(msg)
         } else if (msg.request.subtype === 'get_settings') {
+          const { getSearchAdapterKey } = await import(
+            '@claude-code-best/builtin-tools/tools/WebSearchTool/adapters/index.js'
+          )
           const currentAppState = getAppState()
           const model = getMainLoopModel()
           // modelSupportsEffort gate matches claude.ts — applied.effort must
@@ -4099,6 +4315,7 @@ function runHeadlessStreaming(
               model,
               // Numeric effort (ant-only) → null; SDK schema is string-level only.
               effort: typeof effort === 'string' ? effort : null,
+              webSearchAdapter: getSearchAdapterKey(),
             },
           })
         } else if (msg.request.subtype === 'stop_task') {
@@ -4126,25 +4343,30 @@ function runHeadlessStreaming(
               ? abortController
               : createAbortController()
           ).signal
-          void (async () => {
-            try {
-              const title = await generateSessionTitle(description, titleSignal)
-              if (title && persist) {
-                try {
-                  saveAiGeneratedTitle(getSessionId() as UUID, title)
-                } catch (e) {
-                  logError(e)
+          void trackBackgroundOperation(
+            (async () => {
+              try {
+                const title = await generateSessionTitle(
+                  description,
+                  titleSignal,
+                )
+                if (title && persist) {
+                  try {
+                    saveAiGeneratedTitle(getSessionId() as UUID, title)
+                  } catch (e) {
+                    logError(e)
+                  }
                 }
+                sendControlResponseSuccess(msg, { title })
+              } catch (e) {
+                // Unreachable in practice — generateSessionTitle wraps its
+                // own body and returns null, saveAiGeneratedTitle is wrapped
+                // above. Propagate (not swallow) so unexpected failures are
+                // visible to the SDK caller (hostComms.ts catches and logs).
+                sendControlResponseError(msg, errorMessage(e))
               }
-              sendControlResponseSuccess(msg, { title })
-            } catch (e) {
-              // Unreachable in practice — generateSessionTitle wraps its
-              // own body and returns null, saveAiGeneratedTitle is wrapped
-              // above. Propagate (not swallow) so unexpected failures are
-              // visible to the SDK caller (hostComms.ts catches and logs).
-              sendControlResponseError(msg, errorMessage(e))
-            }
-          })()
+            })(),
+          )
         } else if (req.subtype === 'side_question') {
           // Same fire-and-forget pattern as generate_session_title above —
           // the forked agent's API roundtrip must not block the stdin loop.
@@ -4162,49 +4384,51 @@ function runHeadlessStreaming(
           // coordinator mode or memory-mechanics extras — acceptable, the
           // alternative is the side question failing entirely.
           const question = req.question as string
-          void (async () => {
-            try {
-              const saved = getLastCacheSafeParams()
-              const cacheSafeParams = saved
-                ? {
-                    ...saved,
-                    // If the last turn was interrupted, the snapshot holds an
-                    // already-aborted controller; createChildAbortController in
-                    // createSubagentContext would propagate it and the fork
-                    // would die before sending a request. The controller is
-                    // not part of the cache key — swapping in a fresh one is
-                    // safe. Same guard as generate_session_title above.
-                    toolUseContext: {
-                      ...saved.toolUseContext,
-                      abortController: createAbortController(),
-                    },
-                  }
-                : await buildSideQuestionFallbackParams({
-                    tools: buildAllTools(getAppState()),
-                    commands: currentCommands,
-                    mcpClients: [
-                      ...getAppState().mcp.clients,
-                      ...sdkClients,
-                      ...dynamicMcpState.clients,
-                    ],
-                    messages: mutableMessages,
-                    readFileState,
-                    getAppState,
-                    setAppState,
-                    customSystemPrompt: options.systemPrompt,
-                    appendSystemPrompt: options.appendSystemPrompt,
-                    thinkingConfig: options.thinkingConfig,
-                    agents: currentAgents,
-                  })
-              const result = await runSideQuestion({
-                question,
-                cacheSafeParams,
-              })
-              sendControlResponseSuccess(msg, { response: result.response })
-            } catch (e) {
-              sendControlResponseError(msg, errorMessage(e))
-            }
-          })()
+          void trackBackgroundOperation(
+            (async () => {
+              try {
+                const saved = getLastCacheSafeParams()
+                const cacheSafeParams = saved
+                  ? {
+                      ...saved,
+                      // If the last turn was interrupted, the snapshot holds an
+                      // already-aborted controller; createChildAbortController in
+                      // createSubagentContext would propagate it and the fork
+                      // would die before sending a request. The controller is
+                      // not part of the cache key — swapping in a fresh one is
+                      // safe. Same guard as generate_session_title above.
+                      toolUseContext: {
+                        ...saved.toolUseContext,
+                        abortController: createAbortController(),
+                      },
+                    }
+                  : await buildSideQuestionFallbackParams({
+                      tools: buildAllTools(getAppState()),
+                      commands: currentCommands,
+                      mcpClients: [
+                        ...getAppState().mcp.clients,
+                        ...sdkClients,
+                        ...dynamicMcpState.clients,
+                      ],
+                      messages: mutableMessages,
+                      readFileState,
+                      getAppState,
+                      setAppState,
+                      customSystemPrompt: options.systemPrompt,
+                      appendSystemPrompt: options.appendSystemPrompt,
+                      thinkingConfig: options.thinkingConfig,
+                      agents: currentAgents,
+                    })
+                const result = await runSideQuestion({
+                  question,
+                  cacheSafeParams,
+                })
+                sendControlResponseSuccess(msg, { response: result.response })
+              } catch (e) {
+                sendControlResponseError(msg, errorMessage(e))
+              }
+            })(),
+          )
         } else if (
           (feature('PROACTIVE') || feature('KAIROS')) &&
           (msg.request as { subtype: string }).subtype === 'set_proactive'

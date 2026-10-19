@@ -23,6 +23,11 @@ export type PostSamplingHook = (
 
 // Internal registry for post-sampling hooks
 const postSamplingHooks: PostSamplingHook[] = []
+let activeExecutions = 0
+
+export function hasActivePostSamplingHooks(): boolean {
+  return activeExecutions > 0
+}
 
 /**
  * Register a post-sampling hook that will be called after model sampling completes
@@ -59,12 +64,17 @@ export async function executePostSamplingHooks(
     querySource,
   }
 
-  for (const hook of postSamplingHooks) {
-    try {
-      await hook(context)
-    } catch (error) {
-      // Log but don't fail on hook errors
-      logError(toError(error))
+  activeExecutions++
+  try {
+    for (const hook of postSamplingHooks) {
+      try {
+        await hook(context)
+      } catch (error) {
+        // Log but don't fail on hook errors
+        logError(toError(error))
+      }
     }
+  } finally {
+    activeExecutions--
   }
 }

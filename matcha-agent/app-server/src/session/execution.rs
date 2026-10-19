@@ -11,12 +11,32 @@ impl Sessions {
         let executing = session.clone();
         let task = tokio::spawn(async move {
             loop {
-                tokio::select! {
+                let (deadline, activity) = {
+                    let mut execution = executing.data.lock().await;
+                    let activity = execution.cli.as_ref().map(Cli::activity);
+                    (execution.idle_deadline(), activity)
+                };
+                let sleep = tokio::select! {
                     _ = executing.stopped.cancelled() => break,
-                    _ = executing.wake.notified() => {}
-                }
+                    _ = executing.wake.notified() => false,
+                    _ = async {
+                        match activity {
+                            Some(mut activity) => { let _ = activity.changed().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => false,
+                    _ = async {
+                        match deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => true,
+                };
                 if owner.0.shutdown.load(Ordering::Acquire) {
                     break;
+                }
+                if sleep {
+                    owner.sleep_instance(executing.clone()).await;
                 }
                 if let Err(error) = owner.advance(executing.clone()).await {
                     owner.execution_fault(&executing, error).await;
@@ -35,6 +55,7 @@ impl Sessions {
         let config = self.0.config.snapshot().await;
         let mut execution = session.data.lock().await;
         if execution.closing
+            || execution.idle.handing_off()
             || execution.launching
             || (execution.consuming && execution.cli.is_none())
             || execution.record.status != record::Status::Open
@@ -55,7 +76,7 @@ impl Sessions {
             .clone();
         pending.run.status = run::Status::Starting;
         pending.run.started_at_ms = Some(rpc::now_ms());
-        record::save_run(&self.0.database, &pending).await?;
+        self.save_run_locked(&mut execution, &pending).await?;
         execution.queue.pop_front();
         let run_id = pending.run.run_id.clone();
         execution.active = Some(run::Active {
@@ -136,8 +157,11 @@ impl Sessions {
             session.wake.notify_one();
             return Ok(());
         }
-        active.record.run.status = run::Status::Running;
-        record::save_run(&self.0.database, &active.record).await?;
+        let mut running = active.record.clone();
+        running.run.status = run::Status::Running;
+        self.save_run_locked(&mut execution, &running).await?;
+        let active = execution.active.as_mut().expect("active run checked");
+        active.record = running;
         active.input_started = true;
         let message_id = active.record.run.message_id.clone();
         let content = active
@@ -155,11 +179,17 @@ impl Sessions {
             Ok(()) => {
                 if let Some(active) = execution
                     .active
-                    .as_mut()
+                    .as_ref()
                     .filter(|active| active.record.run.run_id == run_id)
                 {
-                    active.record.content = None;
-                    record::save_run(&self.0.database, &active.record).await?;
+                    let mut delivered = active.record.clone();
+                    delivered.content = None;
+                    self.save_run_locked(&mut execution, &delivered).await?;
+                    execution
+                        .active
+                        .as_mut()
+                        .expect("active run checked")
+                        .record = delivered;
                 }
             }
             Err(error) => {
@@ -237,6 +267,32 @@ impl Sessions {
         Ok(())
     }
 
+    pub(super) async fn save_run_locked(
+        &self,
+        execution: &mut super::Execution,
+        record: &run::Record,
+    ) -> rpc::Result<()> {
+        if let Some(error) = &execution.run_storage_unknown {
+            return Err(error.clone());
+        }
+        if let Err(error) = record::save_run(&self.0.events, record).await {
+            let error = error.with_data(json!({ "runId": record.run.run_id }));
+            if error.code == -32006
+                || error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("storageOutcome"))
+                    .and_then(Value::as_str)
+                    == Some("unknown")
+            {
+                execution.run_storage_unknown = Some(error.clone());
+            }
+            execution.fault(error.clone());
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(super) async fn finish_locked(
         &self,
         execution: &mut super::Execution,
@@ -249,17 +305,8 @@ impl Sessions {
         };
         let mut terminal = active.record.clone();
         terminal.finish(status, reason, result);
-        record::save_run(&self.0.database, &terminal).await?;
+        self.save_run_locked(execution, &terminal).await?;
         execution.active = None;
-        self.0
-            .events
-            .append(
-                &terminal.run.session_id,
-                Some(&terminal.run.run_id),
-                "run.terminal",
-                rpc::value(&terminal.run)?,
-            )
-            .await?;
         Ok(())
     }
 
@@ -358,8 +405,8 @@ impl Sessions {
                     }
                 }
             }
-            let mut retained = std::collections::VecDeque::new();
-            while let Some(queued) = execution.queue.pop_front() {
+            let mut index = 0;
+            while let Some(queued) = execution.queue.get(index) {
                 let mut terminal = queued.clone();
                 terminal.finish(
                     run::Status::Cancelled,
@@ -370,35 +417,19 @@ impl Sessions {
                     },
                     None,
                 );
-                match record::save_run(&self.0.database, &terminal).await {
+                match self.save_run_locked(&mut execution, &terminal).await {
                     Ok(()) => {
-                        let saved = match rpc::value(&terminal.run) {
-                            Ok(payload) => self
-                                .0
-                                .events
-                                .append(
-                                    &terminal.run.session_id,
-                                    Some(&terminal.run.run_id),
-                                    "run.terminal",
-                                    payload,
-                                )
-                                .await
-                                .map(|_| ()),
-                            Err(error) => Err(error),
-                        };
-                        if let Err(error) = saved {
-                            failures
-                                .push(error.with_data(json!({ "stage": "queued_terminal_event" })));
-                        }
+                        execution.queue.remove(index);
                     }
                     Err(error) => {
-                        execution.fault(error.clone());
                         failures.push(error.with_data(json!({ "stage": "queued_terminal_write" })));
-                        retained.push_back(queued);
+                        if execution.run_storage_unknown.is_some() {
+                            break;
+                        }
+                        index += 1;
                     }
                 }
             }
-            execution.queue = retained;
         }
         // Keep the consumer live while close joins the bounded CLI reader.
         loop {
@@ -447,6 +478,7 @@ impl Sessions {
             execution.native.proactive = native::Proactive::Unobserved;
             execution.consuming = false;
             execution.closing = false;
+            execution.idle = super::idle::Idle::Dormant;
             if execution.record.native_cleanup_failed && failures.is_empty() {
                 failures.push(
                     execution
