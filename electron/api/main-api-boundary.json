@@ -4,6 +4,7 @@
     "agents.ts",
     "app.ts",
     "billing.ts",
+    "board.ts",
     "capabilities.ts",
     "calls.ts",
     "channel-authorization.ts",
@@ -22,6 +23,7 @@
     "diagnostics.ts",
     "fleet.ts",
     "external-connectors.ts",
+    "search.ts",
     "settings-desired.ts",
     "security-policy.ts",
     "security.ts",
@@ -87,6 +89,7 @@
     "/api/capabilities/list",
     "/api/capabilities/describe",
     "/api/capabilities/execute",
+    "/api/board/execute",
     "/api/calls/list",
     "/api/calls/get",
     "/api/calls/history",
@@ -117,6 +120,13 @@
     "/api/diagnostics/gateway-snapshot",
     "/api/diagnostics/archive",
     "/api/diagnostics/archive/download",
+    "/api/search",
+    "/api/search/config",
+    "/api/search/prepare",
+    "/api/search/restart",
+    "/api/search/verify",
+    "/api/search/stop",
+    "/api/search/logs",
     "/api/settings",
     "/api/settings/desired",
     "/api/settings/desired/projection",
@@ -422,6 +432,10 @@
     ],
     [
       "POST",
+      "/api/board/execute"
+    ],
+    [
+      "POST",
       "/api/calls/list"
     ],
     [
@@ -539,6 +553,34 @@
     [
       "POST",
       "/api/diagnostics/archive/download"
+    ],
+    [
+      "GET",
+      "/api/search"
+    ],
+    [
+      "PUT",
+      "/api/search/config"
+    ],
+    [
+      "POST",
+      "/api/search/prepare"
+    ],
+    [
+      "POST",
+      "/api/search/restart"
+    ],
+    [
+      "POST",
+      "/api/search/verify"
+    ],
+    [
+      "POST",
+      "/api/search/stop"
+    ],
+    [
+      "GET",
+      "/api/search/logs"
     ],
     [
       "GET",

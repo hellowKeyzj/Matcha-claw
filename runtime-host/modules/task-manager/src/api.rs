@@ -3,11 +3,12 @@ use platform::call::{CallRecorder, CallStatus};
 use tokio::sync::oneshot;
 
 use crate::{
+    TaskExecution, TaskFailure, TaskFailureCode, TaskFailureStage,
     application::{
         call::{CallFailure, TaskCall, TaskCallDetail, command_name, record_error},
         commands::{TaskCommand as OwnerCommand, TaskQuery},
     },
-    domain::model::{TaskCommand, TaskOutcome},
+    domain::model::TaskCommand,
 };
 
 #[derive(Clone)]
@@ -29,7 +30,7 @@ impl TaskHandle {
         self
     }
 
-    pub(crate) async fn task_manager(&self, command: TaskCommand) -> Result<TaskOutcome, ()> {
+    pub(crate) async fn task_manager(&self, command: TaskCommand) -> Result<TaskExecution, ()> {
         let detail = TaskCallDetail::from_command(&command);
         let context = if let Some(recorder) = &self.recorder {
             match recorder.begin(command_name(&command), &detail).await {
@@ -60,6 +61,10 @@ impl TaskHandle {
             if let Some(context) = context {
                 let mut detail = detail;
                 detail.failure = Some(CallFailure::OwnerUnavailable);
+                detail.diagnostic = Some(TaskFailure::new(
+                    TaskFailureStage::Admission,
+                    TaskFailureCode::OwnerUnavailable,
+                ));
                 record_error(context.finish(CallStatus::Rejected, &detail).await);
             }
             return Err(());

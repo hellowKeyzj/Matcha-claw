@@ -632,6 +632,7 @@ fn run_with_host(home: &Home, input: &[u8]) -> std::process::Output {
         .unwrap(),
         organization_store: organization::open_organization_store(&home.0.join("state")).unwrap(),
         runtime_state_dir: home.0.join("state"),
+        searxng_resources_dir: home.0.join("searxng"),
         app_log_dir: home.0.join("logs"),
         parent_callback_base_url: "http://127.0.0.1:1".into(),
         parent_callback_dispatch_token: "mcp-test-parent-token".into(),

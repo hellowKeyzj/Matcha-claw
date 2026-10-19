@@ -448,6 +448,24 @@ runtime-host session ingress、event bridge、protocol adapter、canonical sessi
 
 该案例补强 DP-001 的 verification closure 和 field mapping 要求。默认定位顺序仍由 DP-001 承载；本文只保留本次 app-server 接入事故的追溯摘要。
 
+### 2026-10-18：回执丢失与两套等待来源
+
+本次不是 terminal ingress 丢失：应用日志已记录 Matcha `202 queued + runId`，Electron 后续返回 `200 unknown`；同一轮 terminal 已被 Renderer 接受，native runtime 已 done，本地未关联发送仍把展示派生成 submitted。store 空助手与页面 runtime 空助手同时存在，形成两处“正在思考”。源码中两个 OpenClaw-only queued 条件丢弃 Matcha 回执；共享发送状态又要求 native 助手携同 runId 才接管，而 Matcha 消息按独立 SDK UUID 投影、runId 为 null。
+
+先前建议统一删除两端占位，随后退回“仅改 Matcha 分支”，又把 `ChatSessionRecord.runtime` 误当 native 唯一 authority，从 receipt 反复派生 OpenClaw UI owner；均未同时保住结构性多 runtime 与原 OpenClaw 行为。后续 shared 先算 `nextAbort`、再用 `messages.abort === undefined ? nextAbort : messages.abort` 允许 concrete override，仍是双 owner，undefined 委托没有消除重复裁决。既有宪法 §26、P4/P7 与 runtime 语义隔离规则已覆盖，属于执行未遵守，不新增同义规则。
+
+当前源码收口：accepted native facts 留在既有 `projectionStore/windowStore`；OpenClaw send-start、queued／started ACK 绑定、乐观清理、native pending／stopping merge 与原 UI gate 归 `openclaw-session`。Matcha 保持 native runtime、独立 SDK UUID 助手与 latest-tail activity，不补造助手或消息 runId。shared receipt 只管操作／回执／unknown／exact terminal 关联；`SessionMessageState.abort` 必填，两个模型明确返回取消状态，分别负责 OpenClaw UI 停止退休与 Matcha exact 关联退休，shared 仅提交。[VERIFY: src/stores/chat/session-presentation.ts] [VERIFY: src/stores/chat/openclaw-session.ts] [VERIFY: src/stores/chat/matcha-session.ts] [VERIFY: src/stores/chat/send-handlers.ts] [VERIFY: src/stores/chat/store-state-helpers.ts]
+
+同案续查还遗漏两条边界：一是共享正文路径直接套 OpenClaw cleaner，Matcha 正常原文也可能被当 envelope／内部控制文本清掉；发送／等待模型分离并不自动隔离 store 投影、pending user 确认、message segments、复制及列表可见性／头像分组。二是 Matcha 回执已绑定 known R，terminal delta 丢失后再取得 full view，单有 inactive runtime／final 助手仍不提供该 R 的 exact 结束证据，未结 receipt 不能据此安全退休。
+
+已核正文落点是唯一 `getSessionTextModel(identity?)`：OpenClaw 直接引用原 user／assistant cleaner，Matcha 与无 identity 中性展示原文直返；store user 投影、pending user／receipt 确认、阅读窗及附件 hydrate 归并，以及 Turn segments／纯文本复制、List 可见性／头像分组消费同一策略，不改 cleaner 算法。[VERIFY: src/stores/chat/session-presentation.ts:21-63] [VERIFY: src/stores/chat/openclaw-session.ts:15-18] [VERIFY: src/stores/chat/matcha-session.ts:6-9] [VERIFY: src/stores/chat/store-state-helpers.ts:446-575] [VERIFY: src/stores/chat/store-state-helpers.ts:1454-1506] [VERIFY: src/stores/chat/store-state-helpers.ts:1742] [VERIFY: src/stores/chat/store-state-helpers.ts:1866] [VERIFY: src/stores/chat/attachment-helpers.ts:341-383] [VERIFY: src/pages/Chat/ChatAssistantTurn.tsx:110-121] [VERIFY: src/pages/Chat/ChatAssistantTurn.tsx:291-311] [VERIFY: src/pages/Chat/components/ChatList.tsx:187-246]
+
+同案后续把漏事件恢复扩大为每次 ACK 后额外查询，属于范围扩张；方案已叫停并撤回，本次不实现替代。
+
+等待闪烁续案又将 Matcha 当前无头像 activity 当作必须保留的 runtime 差异，用户明确纠正应与 OpenClaw 一样发送后立即显示「头像＋正在思考」。原生 SDK 消息身份与等待行的外观不是同一约束：现在等待仍不造消息、run 或 native 状态，但复用正常助手的 MessageShell 与当前 agent presentation。错误在于把实现现状当作产品要求，不是缺少通用架构规则；既有宪法 §26／调试 P6 已覆盖，后续实现检查同时核对用户可见结果与原生事实边界，不追加同义规则。[VERIFY: src/stores/chat/matcha-session.ts:70-85] [VERIFY: src/pages/Chat/components/ChatList.tsx:465-476] [VERIFY: src/pages/Chat/index.tsx:913-941]
+
+不新增状态存储或 OpenClaw 专属 record 字段；上述遗漏仍由既有宪法 §26、P4/P7 与语义隔离规则覆盖，原因是执行未遵守，不再补同义长期规则。最终集成检查单独记本轮，不沿用前轮成绩；源码、编译与已有测试不替代两端实际发送验收，live 与全部 OpenClaw 等价仍未验证。
+
 ## Case: Gateway retry re-entered prepare
 
 ### Status

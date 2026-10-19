@@ -16,6 +16,8 @@ pub enum HostEvent {
     MatchaLifecycle(SupervisorSnapshot),
     CallChanged(platform::call::CallChanged),
     CallsResync,
+    Board(board::BoardEvent),
+    BoardResync,
     OrganizationChanged,
 }
 
@@ -26,6 +28,7 @@ pub struct HostEvents {
     open_claw_runtime: mpsc::Receiver<()>,
     matcha_lifecycle: mpsc::Receiver<SupervisorSnapshot>,
     calls: Option<broadcast::Receiver<platform::call::CallChanged>>,
+    board: Option<board::BoardEventSubscription>,
     organization:
         Option<tokio::sync::watch::Receiver<organization::TeamRunWake>>,
     open_claw_open: bool,
@@ -35,6 +38,10 @@ pub struct HostEvents {
 }
 
 impl HostEvents {
+    pub(super) fn set_board_events(&mut self, events: board::BoardEventSubscription) {
+        self.board = Some(events);
+    }
+
     pub(super) fn set_call_changes(
         &mut self,
         changes: broadcast::Receiver<platform::call::CallChanged>,
@@ -57,11 +64,22 @@ impl HostEvents {
                 && !self.open_claw_runtime_open
                 && !self.matcha_lifecycle_open
                 && self.calls.is_none()
+                && self.board.is_none()
                 && self.organization.is_none()
             {
                 return None;
             }
             tokio::select! {
+                event = async {
+                    match self.board.as_mut() {
+                        Some(board) => board.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match event {
+                    Ok(event) => return Some(HostEvent::Board(event)),
+                    Err(board::BoardSubscriptionFailure::Lagged) => return Some(HostEvent::BoardResync),
+                    Err(board::BoardSubscriptionFailure::Closed) => self.board = None,
+                },
                 changed = async {
                     match self.cron_changed.as_mut() {
                         Some(changes) => changes.changed().await,
@@ -181,6 +199,7 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
             open_claw_runtime: open_claw_runtime_events,
             matcha_lifecycle: matcha_lifecycle_events,
             calls: None,
+            board: None,
             organization: None,
             open_claw_open: true,
             cron_open: true,

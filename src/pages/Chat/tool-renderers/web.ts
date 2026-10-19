@@ -2,6 +2,7 @@ import type { TFunction } from 'i18next';
 import type { SessionRenderToolCard } from '../../../types/session/tool-card';
 import type { ToolActivityTextBlock, ToolActivityTrailingLabel, ToolActivityContent } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
+import type { ToolActivityDescriptor } from './types';
 
 const WEB_TOOL_NAMES = new Set([
   'webfetch',
@@ -232,6 +233,18 @@ function buildTrailingLabels(query: string | null, url: string | null, output: W
 
 export function canRenderWebToolActivity(tool: SessionRenderToolCard): boolean {
   return isWebToolName(tool.name) || isWebToolName(tool.displayTitle);
+}
+
+export function describeWebToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityDescriptor {
+  const input = readInput(tool);
+  const query = resolveQuery(input);
+  const url = firstInputUrl(input);
+  return {
+    kind: query || isSearchToolName(tool.name) ? 'search' : 'fetch',
+    title: resolveTitle(tool, query, url, { results: [] }, t),
+    label: tool.displayTitle?.trim() || tool.name,
+    ...(url ? { target: url } : {}),
+  };
 }
 
 export function renderWebToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {

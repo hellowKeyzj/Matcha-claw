@@ -4,14 +4,14 @@ use foundation::execution::OwnedTask;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use sessions_module::{
     SessionHandle, SessionIngressProducer,
-    command::{SessionEvent, SessionIngressEvent, SessionIngestOutcome, session_identity_lane_key},
+    command::{SessionIngress, SessionIngressEvent, SessionIngestOutcome, session_identity_lane_key},
     state::SessionIdentity,
 };
 use tokio::sync::{mpsc, oneshot};
 
 struct PendingIngress {
     identity: SessionIdentity,
-    event: SessionEvent,
+    event: SessionIngress,
     receipt: Option<oneshot::Sender<bool>>,
 }
 
@@ -83,10 +83,11 @@ async fn ingest(
     let PendingIngress { identity, event, receipt } = ingress;
     let context = sessions_module::trace::enabled().then(|| serde_json::json!({
         "identity": sessions_module::trace::identity_shape(&identity),
-        "generation": event.binding.generation(), "sourceEpoch": event.binding.source_epoch(),
-        "nativeCursor": event.cursor, "runHash": event.run_id.as_deref().map(sessions_module::trace::fingerprint),
+        "generation": event.binding().generation(), "sourceEpoch": event.binding().source_epoch(),
+        "nativeCursor": match &event { SessionIngress::Event(event) => event.cursor, SessionIngress::ObservationFailed { .. } | SessionIngress::RestoredTerminal { .. } => None },
+        "runHash": match &event { SessionIngress::Event(event) => event.run_id.as_deref().map(sessions_module::trace::fingerprint), SessionIngress::RestoredTerminal { terminal, .. } => Some(sessions_module::trace::fingerprint(&terminal.run_id)), SessionIngress::ObservationFailed { .. } => None },
     }));
-    let outcome = producer.ingest_ingress_event(SessionIngressEvent::new(identity, event)).await;
+    let outcome = producer.ingest_ingress_event(SessionIngressEvent::from_ingress(identity, event)).await;
     if sessions_module::trace::enabled() {
         use sessions_module::trace;
         let summary = match &outcome {
@@ -94,6 +95,7 @@ async fn ingest(
                 "outcome": "applied", "identity": trace::identity_shape(&delta.identity),
                 "epoch": delta.epoch, "seq": delta.seq, "cursor": delta.cursor,
             }),
+            Ok(SessionIngestOutcome::TerminalRestored) => serde_json::json!({ "outcome": "terminal_restored" }),
             Ok(SessionIngestOutcome::Consumed { cursor }) => serde_json::json!({ "outcome": "consumed", "nativeCursor": cursor }),
             Ok(SessionIngestOutcome::Duplicate { cursor }) => serde_json::json!({ "outcome": "duplicate", "nativeCursor": cursor }),
             Ok(SessionIngestOutcome::Stale { cursor, received }) => serde_json::json!({ "outcome": "stale", "nativeCursor": cursor, "receivedNativeCursor": received }),
@@ -111,7 +113,7 @@ async fn ingest(
     if let Some(receipt) = receipt {
         let accepted = matches!(
             &outcome,
-            Ok(SessionIngestOutcome::Applied(_) | SessionIngestOutcome::Consumed { .. })
+            Ok(SessionIngestOutcome::Applied(_) | SessionIngestOutcome::Consumed { .. } | SessionIngestOutcome::TerminalRestored)
         );
         let delivered = receipt.send(accepted).is_ok();
         if sessions_module::trace::enabled() {

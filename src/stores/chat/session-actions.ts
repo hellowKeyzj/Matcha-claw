@@ -27,6 +27,8 @@ import {
   createEmptySessionRecord,
   getSessionItemCount,
   getSessionMeta,
+  getSessionRuntime,
+  resolveSessionRuntime,
   getSessionViewportState,
   patchSessionMeta,
   patchSessionRecord,
@@ -632,7 +634,7 @@ function shouldMarkSessionLoadingOnSwitch(
   if (!sessionKey) {
     return false;
   }
-  if (isRunActive(sessionRecord.runtime)) {
+  if (isRunActive(resolveSessionRuntime(sessionRecord))) {
     return false;
   }
   return sessionRecord.meta.historyStatus !== 'ready' && getSessionItemCount(sessionRecord) === 0;
@@ -1095,13 +1097,13 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   const currentState = get();
   const requestedRecord = currentState.loadedSessions[key];
   const requestedIdentity = requestedRecord?.meta.sessionIdentity;
-  const pendingTurnKey = requestedRecord?.runtime.pendingTurnKey;
+  const pendingTurnKey = getSessionRuntime(currentState, key).pendingTurnKey;
   const selectedConversation = buildCurrentConversationForSessionKey(currentState.loadedSessions, key);
   const isCurrent = () => get().currentSessionKey === key
     && get().currentConversation === selectedConversation
     && get().loadedSessions[key]?.meta.sessionIdentity === requestedIdentity
-    && (!get().loadedSessions[key]?.runtime.pendingTurnKey
-      || get().loadedSessions[key]?.runtime.pendingTurnKey === pendingTurnKey);
+    && (!getSessionRuntime(get(), key).pendingTurnKey
+      || getSessionRuntime(get(), key).pendingTurnKey === pendingTurnKey);
   logSessionTrace('switch-session.request', traceId, () => ({
     requestedSessionKey: summarizeIdentifier(key),
     currentSessionKey: summarizeIdentifier(currentState.currentSessionKey),

@@ -19,6 +19,10 @@ use super::plugin_companion::{CompanionSkillEffect, CompanionSkillIntent, compan
 mod managed_reconcile;
 pub use managed_reconcile::{ManagedPluginReconcile, PluginReconcileError};
 
+pub(super) fn link_search_plugin(state: &CanonicalStateDir, openclaw_root: &Path) -> Result<bool, PluginReconcileError> {
+    managed_reconcile::repair_channel_peer_link(&state.as_path().join("extensions"), "searxng", openclaw_root)
+}
+
 const MANIFEST: &str = "openclaw.plugin.json";
 const PACKAGE: &str = "package.json";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
@@ -151,6 +155,7 @@ const MANAGED_PLUGIN_IDS: &[&str] = &[
     "volcengine",
     "opencode",
     "opencode-go",
+    "searxng",
     "dingtalk",
     "openclaw-lark",
     "wecom",

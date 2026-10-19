@@ -11,6 +11,7 @@ pub(super) struct PrepareHostInput {
     pub(super) open_claw_secret: openclaw::gateway::auth::GatewaySecret,
     pub(super) organization_store: organization::OrganizationStore,
     pub(super) runtime_state_dir: PathBuf,
+    pub(super) searxng_resources_dir: PathBuf,
     pub(super) app_log_dir: PathBuf,
     pub(super) runtime_observation: ::diagnostics::RuntimeObservationConfig,
 }
@@ -29,6 +30,7 @@ pub(super) struct PreparedHost {
     pub(super) openclaw_startup_diagnostics: ::diagnostics::RuntimeStartupDiagnostics,
     pub(super) clawhub_registry: clawhub::ClawHubRegistryClient,
     pub(super) toolchain: Arc<::toolchain::NativeToolchain>,
+    pub(super) search_service: Arc<searxng::Service>,
     pub(super) runtime_host_mcp_executable: PathBuf,
     pub(super) runtime_host_mcp_state_dir: PathBuf,
     pub(super) sealed_runtime_token: Option<Arc<str>>,
@@ -43,6 +45,7 @@ pub(super) struct ProvisionedHost {
     pub(super) openclaw_startup_diagnostics: ::diagnostics::RuntimeStartupDiagnostics,
     pub(super) clawhub_registry: clawhub::ClawHubRegistryClient,
     pub(super) toolchain: Arc<::toolchain::NativeToolchain>,
+    pub(super) search_service: Arc<searxng::Service>,
     pub(super) runtime_host_mcp_executable: PathBuf,
     pub(super) runtime_host_mcp_state_dir: PathBuf,
     pub(super) sealed_resource: sealed_resource::SealedResourceModule,
@@ -59,6 +62,7 @@ pub(super) fn prepare_host(input: PrepareHostInput) -> PreparedHost {
         open_claw_secret,
         organization_store,
         runtime_state_dir,
+        searxng_resources_dir,
         app_log_dir,
         runtime_observation,
     } = input;
@@ -70,6 +74,17 @@ pub(super) fn prepare_host(input: PrepareHostInput) -> PreparedHost {
     let runtime_host_mcp_state_dir = open_claw.runtime_host_mcp_state_dir.clone();
     let sealed_runtime_token = open_claw.sealed_token.clone().map(Arc::<str>::from);
     let toolchain = super::resources::provision_native_toolchain(&open_claw);
+    let search_service = Arc::new(searxng::Service::new(searxng::ServiceInput {
+        resources_dir: searxng_resources_dir,
+        state_dir: runtime_state_dir.join("search"),
+        python_environment: Arc::new(super::ports::search::SearchPython::new(Arc::clone(
+            &toolchain,
+        ))),
+        #[cfg(unix)]
+        guardian_executable: Some(open_claw.guardian_executable.clone()),
+        #[cfg(windows)]
+        guardian_executable: None,
+    }));
 
     PreparedHost {
         matcha_input: matcha,
@@ -85,6 +100,7 @@ pub(super) fn prepare_host(input: PrepareHostInput) -> PreparedHost {
         openclaw_startup_diagnostics: diagnostics.openclaw_startup,
         clawhub_registry,
         toolchain,
+        search_service,
         runtime_host_mcp_executable,
         runtime_host_mcp_state_dir,
         sealed_runtime_token,

@@ -112,6 +112,10 @@ impl Observations {
         }
     }
 
+    pub(crate) fn is_source_active(&self, epoch: u64) -> bool {
+        self.current_epoch.load(Ordering::Acquire) == epoch
+    }
+
     pub(crate) fn deactivate(&self, epoch: u64) {
         let _entries = self.entries.lock().expect("observation registry lock poisoned");
         let result = self.current_epoch.compare_exchange(epoch, 0, Ordering::AcqRel, Ordering::Acquire);
@@ -124,9 +128,9 @@ impl Observations {
     pub(crate) async fn enqueue_ingress(&self, sender: &mpsc::Sender<SessionIngressEvent>, event: SessionIngressEvent) -> Result<(), RuntimeOperationFailure> {
         let (identity, event) = event.into_parts();
         let key = identity_key(&identity);
-        let generation = event.binding.generation();
-        let epoch = event.binding.source_epoch();
-        let (event, receipt) = SessionIngressEvent::new(identity, event).with_receipt();
+        let generation = event.binding().generation();
+        let epoch = event.binding().source_epoch();
+        let (event, receipt) = SessionIngressEvent::from_ingress(identity, event).with_receipt();
         sender.send(event).await.map_err(|_| RuntimeOperationFailure::Unavailable)?;
         let mut entries = self.entries.lock().expect("observation registry lock poisoned");
         if let Some(entry) = entries.get_mut(&key).filter(|entry|

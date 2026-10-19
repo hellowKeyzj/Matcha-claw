@@ -578,21 +578,25 @@ impl SessionShared {
         })
     }
 
-    async fn prepare_matcha_send_model_runtime(
+    pub(crate) async fn prepare_matcha_session_model_runtime(
         &self,
-        command: &SessionSendCommand,
+        identity: &SessionIdentity,
+        endpoint_session_id: Option<&str>,
+        trace_id: Option<&str>,
         cancellation: &CancellationToken,
     ) -> Result<(), SessionSendOutcome> {
-        if command.identity.provider() != SessionProvider::MatchaAgent {
+        if identity.provider() != SessionProvider::MatchaAgent {
             return Ok(());
         }
         let driver = self
-            .running_session_driver(identity_endpoint(&command.identity))
+            .running_session_driver(identity_endpoint(identity))
             .map_err(send_driver_failure)?;
         let Some(ops) = driver.session_ops() else {
             return Err(SessionSendOutcome::Unsupported);
         };
-        let Some(model_runtime) = ops.send_model_runtime_command_cancellable(command, cancellation.clone()).await? else {
+        let Some(model_runtime) = ops.session_model_runtime_command_cancellable(
+            identity, endpoint_session_id, trace_id, cancellation.clone(),
+        ).await? else {
             return Ok(());
         };
         if cancellation.is_cancelled() { return Err(SessionSendOutcome::Unavailable); }
@@ -694,9 +698,9 @@ impl SessionLane {
                 self.terminal_permit.take();
                 let _ = reply.send(outcome);
             }
-            SyncTerminals { identity, generation, terminals, permit, reply } => {
+            SyncTerminals { identity, generation, terminals, publish, permit, reply } => {
                 self.terminal_permit = Some(permit);
-                let accepted = self.sync_terminals(shared, &identity, generation, terminals).await;
+                let accepted = self.sync_terminals(shared, &identity, generation, terminals, publish).await;
                 self.terminal_permit.take();
                 let _ = reply.send(accepted);
             }
@@ -708,6 +712,13 @@ impl SessionLane {
             GoalCompleted { command, demand_lease, outcome, reply, call } => {
                 let outcome = self.complete_goal(shared, &command, &demand_lease, outcome).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
+            ObservationFailed { identity, binding, failure, reply } => {
+                let accepted = self.observation_failed(shared, &identity, &binding, failure).await;
+                let _ = reply.send(accepted);
+            }
+            ObserveReplyCompleted { identity, generation, waiter_id, acquired } => {
+                self.observe_reply_completed(shared, identity, generation, waiter_id, acquired).await;
             }
             SyncCompleted { identity, generation, result } => self.sync_completed(shared, identity, generation, result).await,
             ObservationClosed { identity, generation, restarted } => self.observation_closed(shared, identity, generation, restarted).await,
@@ -1418,7 +1429,9 @@ impl SessionLane {
             let outcome = {
                 let send = async {
                     if cancellation.is_cancelled() { return SessionSendOutcome::Unavailable; }
-                    match shared.prepare_matcha_send_model_runtime(&command, &cancellation).await {
+                    match shared.prepare_matcha_session_model_runtime(
+                        &command.identity, command.endpoint_session_id.as_deref(), command.trace_id(), &cancellation,
+                    ).await {
                         Ok(()) if cancellation.is_cancelled() => SessionSendOutcome::Unavailable,
                         Ok(()) => match shared.running_session_driver(identity_endpoint(&command.identity)) {
                             Ok(driver) => match driver.session_ops() {

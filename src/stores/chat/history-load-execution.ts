@@ -22,6 +22,8 @@ import {
   applySessionView,
   buildItemRenderFingerprint,
   getSessionItems,
+  getSessionRuntime,
+  resolveSessionRuntime,
   getSessionViewportState,
   patchSessionMeta,
   patchSessionViewportState,
@@ -301,7 +303,7 @@ export async function executeViewportWindowLoad(
     sessionIdentity: summarizeSessionIdentity(identity),
     mode: request.mode,
     requestedOffset: request.mode === 'older' ? beforeViewport.windowStartOffset : null,
-    pendingTurnHash: summarizeIdentifier(currentState.loadedSessions[sessionKey].runtime.pendingTurnKey).hash,
+    pendingTurnHash: summarizeIdentifier(getSessionRuntime(currentState, sessionKey).pendingTurnKey).hash,
   } : null;
   let readbackStage = 'target';
   try {
@@ -331,8 +333,8 @@ export async function executeViewportWindowLoad(
     const responseState = deps.get();
     if (!isCurrent(responseState)
       || (request.mode === 'older' && getSessionViewportState(responseState, sessionKey).windowStartOffset !== beforeViewport.windowStartOffset)
-      || (request.mode === 'latest' && responseState.loadedSessions[sessionKey].runtime.pendingTurnKey
-        && responseState.loadedSessions[sessionKey].runtime.pendingTurnKey !== currentState.loadedSessions[sessionKey].runtime.pendingTurnKey)) {
+      || (request.mode === 'latest' && getSessionRuntime(responseState, sessionKey).pendingTurnKey
+        && getSessionRuntime(responseState, sessionKey).pendingTurnKey !== getSessionRuntime(currentState, sessionKey).pendingTurnKey)) {
       if (traceId) logSessionTrace('session.window.readback.drop', traceId, () => ({
         ...traceContext,
         reason: requests.get(sessionKey) !== requestId ? 'request-superseded'
@@ -341,7 +343,7 @@ export async function executeViewportWindowLoad(
         requestCurrent: requests.get(sessionKey) === requestId,
         currentIdentity: summarizeSessionIdentity(responseState.loadedSessions[sessionKey]?.meta.sessionIdentity),
         currentOffset: getSessionViewportState(responseState, sessionKey).windowStartOffset,
-        currentPendingTurnHash: summarizeIdentifier(responseState.loadedSessions[sessionKey]?.runtime.pendingTurnKey).hash,
+        currentPendingTurnHash: summarizeIdentifier(getSessionRuntime(responseState, sessionKey).pendingTurnKey).hash,
       }));
       return;
     }
@@ -452,8 +454,8 @@ export function createApplyLoadedMessagesPipeline(
   const isCurrent = (state: ChatStoreState) => (
     !abortSignal.aborted && !shouldAbortHistoryProcessing()
     && isHistorySessionIdentityCurrent(state, requestedSessionKey, requestedIdentity)
-    && (!state.loadedSessions[requestedSessionKey]?.runtime.pendingTurnKey
-      || state.loadedSessions[requestedSessionKey].runtime.pendingTurnKey === requestedRecord?.runtime.pendingTurnKey)
+    && (!getSessionRuntime(state, requestedSessionKey).pendingTurnKey
+      || getSessionRuntime(state, requestedSessionKey).pendingTurnKey === resolveSessionRuntime(requestedRecord).pendingTurnKey)
   );
 
   return async (window: HistoryWindowResult) => {
@@ -597,8 +599,8 @@ export async function executeHistoryLoad(
     abortController.signal.aborted
     || (deps.isObservationCurrent !== undefined && !deps.isObservationCurrent())
     || !isHistorySessionIdentityCurrent(get(), requestedSessionKey, requestedIdentity)
-    || (!!get().loadedSessions[requestedSessionKey]?.runtime.pendingTurnKey
-      && get().loadedSessions[requestedSessionKey].runtime.pendingTurnKey !== requestedRecord?.runtime.pendingTurnKey)
+    || (!!getSessionRuntime(get(), requestedSessionKey).pendingTurnKey
+      && getSessionRuntime(get(), requestedSessionKey).pendingTurnKey !== resolveSessionRuntime(requestedRecord).pendingTurnKey)
     || (scope === 'foreground' && get().currentSessionKey !== requestedSessionKey)
     || (scope === 'foreground' && historyLoadRunId !== historyRuntime.getHistoryLoadRunId())
   );

@@ -24,6 +24,7 @@ pub struct MatchaAgentInstance {
 #[derive(Clone)]
 pub struct MatchaRuntimeDriver {
     lifecycle: MatchaPeerLifecycleHandle,
+    pub(crate) search: crate::search::OfflineControl,
     session: MatchaPeerSessionHandle,
     channels: crate::channels::Channels,
     skill_marketplace: Option<crate::skills::Marketplace>,
@@ -35,6 +36,7 @@ impl MatchaRuntimeDriver {
     fn new(peer: &MatchaPeer) -> Self {
         Self {
             lifecycle: peer.lifecycle_handle(),
+            search: peer.search_control(),
             session: peer.session_handle(),
             channels: crate::channels::Channels::new(peer.native_client()),
             skill_marketplace: None,

@@ -1,4 +1,5 @@
 pub mod agents;
+pub(crate) mod board;
 pub mod channels;
 pub mod connectors;
 pub(crate) mod cron;

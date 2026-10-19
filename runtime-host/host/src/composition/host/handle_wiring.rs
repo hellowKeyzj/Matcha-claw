@@ -88,6 +88,7 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) 
     HostHandles {
         admission,
         calls,
+        board: owners.board.clone(),
         peer: owners.peer_handle.clone(),
         open_claw,
         matcha_agent,
@@ -103,6 +104,7 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) 
         organization_module: owners.organization_module.clone(),
         organization: owners.organization_handle.clone(),
         toolchain: toolchain_handle,
+        search: owners.search.clone(),
         platform_tools: platform_tools_handle,
         plugins: plugins_handle,
         sealed_resource,

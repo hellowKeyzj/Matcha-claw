@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState, memo, type MouseEvent, type PointerEvent } from 'react';
-import { Copy, Check, ChevronDown, ChevronRight, CornerDownLeft, SquareTerminal, Code2, FileText, Film, Music, FileArchive, File, ZoomIn, Loader2 } from 'lucide-react';
+import { Copy, Check, ChevronDown, ChevronRight, CornerDownLeft, SquareTerminal, Code2, FileText, FilePenLine, FilePlus2, Search, Globe, Wrench, ExternalLink, Film, Music, FileArchive, File, ZoomIn, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { invokeIpc } from '@/lib/api-client';
@@ -16,10 +16,17 @@ import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
 import { shouldKeepAssistantAttachmentVisible } from './artifact-paths';
 import {
   buildCanvasActivityViewModel,
+  buildToolActivityPreview,
   buildToolActivityViewModel,
   type ToolActivityTrailingLabel,
   type ToolActivityViewModel,
 } from './tool-activity-view-model';
+import { describeToolActivity, getToolActivityStatus, summarizeToolActivities } from './tool-renderers';
+import type { ToolActivityDisclosure, ToolActivityKind } from './tool-renderers/types';
+import { getToolDisclosureKey, getToolGroupDisclosureKey } from './chat-tool-groups';
+import { useToolActivityDisclosure } from './useToolActivityDisclosure';
+import ToolBrowserCard from './tool-browser-card';
+import { ToolWidgetCard } from './tool-widget-card';
 
 export interface MessageLightboxState {
   src: string;
@@ -56,6 +63,22 @@ function useVersionedDisclosure(collapseVersion: number) {
   return [expanded, toggle] as const;
 }
 
+const TOOL_ACTIVITY_ICONS = {
+  command: SquareTerminal,
+  read: FileText,
+  edit: FilePenLine,
+  write: FilePlus2,
+  search: Search,
+  fetch: Globe,
+  generic: Wrench,
+};
+
+function ToolActivityKindIcon({ kind, status }: { kind: ToolActivityKind; status: SessionRenderToolCard['status'] }) {
+  if (status === 'running') return <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-500" />;
+  const Icon = TOOL_ACTIVITY_ICONS[kind];
+  return <Icon className={`h-3.5 w-3.5 shrink-0 ${status === 'error' ? 'text-destructive' : 'text-muted-foreground'}`} />;
+}
+
 function activityTrailingClassName(label: ToolActivityTrailingLabel): string {
   return `shrink-0 text-[13px] ${label.tone === 'muted' ? 'text-muted-foreground/75' : 'text-muted-foreground/85'}`;
 }
@@ -77,32 +100,34 @@ function ToolActivityTextBlock({
   onCopy?: () => void;
 }) {
   const { t } = useTranslation('chat');
-  const trimmedText = block.text.trim();
-  if (!trimmedText) {
+  const text = block.text;
+  if (!text.trim()) {
     return null;
   }
 
   if (block.kind === 'notice') {
     return (
       <div className="w-full rounded-[14px] bg-muted px-4 py-3 text-[12px] text-muted-foreground">
-        {trimmedText}
+        {text}
       </div>
     );
   }
 
+  const isCommand = block.format === 'command';
+  const diffLines = block.format === 'diff' ? text.split(/\r\n|\r|\n/) : null;
   return (
-    <div className={COMPACT_TEXT_BLOCK}>
+    <div className={`${COMPACT_TEXT_BLOCK} ${isCommand ? 'border-zinc-700 bg-zinc-950 text-zinc-100' : ''}`}>
       {(block.title || onCopy) ? (
-        <div className="flex h-9 items-center justify-between gap-3 border-b border-border/35 px-3.5 text-foreground">
+        <div className={`flex h-9 items-center justify-between gap-3 border-b px-3.5 ${isCommand ? 'border-zinc-800 text-zinc-400' : 'border-border/35 text-muted-foreground'}`}>
           <div className="flex min-w-0 items-center gap-2">
-            {block.title ? <Code2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : null}
-            {block.title ? <span className="truncate text-[12px] font-medium uppercase tracking-wide text-muted-foreground">{block.title}</span> : null}
+            {block.title ? (isCommand ? <SquareTerminal className="h-3.5 w-3.5 shrink-0" /> : <Code2 className="h-3.5 w-3.5 shrink-0" />) : null}
+            {block.title ? <span className="truncate text-[12px] font-medium uppercase tracking-wide">{block.title}</span> : null}
           </div>
           {onCopy ? (
             <button
               type="button"
-              aria-label={t(copied ? 'toolActivity.inputCopied' : 'toolActivity.copyInput')}
-              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] text-muted-foreground transition-colors hover:bg-background/95 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
+              aria-label={t(copied ? 'toolActivity.copied' : 'toolActivity.copy')}
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] transition-colors hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20"
               onClick={onCopy}
             >
               {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
@@ -112,22 +137,28 @@ function ToolActivityTextBlock({
       ) : null}
       <pre
         data-tool-output-scroll="true"
-        className={`${COMPACT_OUTPUT_SCROLL_AREA} max-w-full px-3.5 py-3 text-[12px] leading-6 text-foreground`}
+        tabIndex={0}
+        className={`${COMPACT_OUTPUT_SCROLL_AREA} max-w-full py-3 font-mono text-[12px] leading-6 ${block.format === 'diff' ? '' : 'px-3.5'} ${isCommand ? 'text-zinc-100' : 'text-foreground'}`}
       >
-        {trimmedText}
+        {diffLines ? diffLines.map((line, index) => (
+          <span
+            key={index}
+            className={`block min-h-6 px-3.5 ${line.startsWith('+') && !line.startsWith('+++') ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' : line.startsWith('-') && !line.startsWith('---') ? 'bg-rose-500/10 text-rose-700 dark:text-rose-400' : line.startsWith('@@') ? 'text-sky-600 dark:text-sky-400' : ''}`}
+          >
+            {line}{index < diffLines.length - 1 ? '\n' : null}
+          </span>
+        )) : text}
       </pre>
     </div>
   );
 }
 
-type ToolActivityBrowserTabPreview = NonNullable<ToolActivityViewModel['browserTabPreview']>;
 type ToolActivityApprovalReview = NonNullable<ToolActivityViewModel['approvalReviews']>[number];
 type ToolActivityApprovalReviewOutcome = NonNullable<ToolActivityViewModel['approvalReviewOutcome']>;
 type ToolActivityDiffStat = NonNullable<ToolActivityViewModel['diffStat']>;
 type ToolActivityProgressReceipt = NonNullable<ToolActivityViewModel['progressReceipt']>;
 type ToolActivityPublicDetails = NonNullable<ToolActivityViewModel['publicDetails']>;
 type ToolActivityPublicDetailValue = ToolActivityPublicDetails[string];
-type ToolActivityCanvasPreview = NonNullable<ToolActivityViewModel['canvasPreview']>;
 
 interface StructuredDetailRow {
   label: string;
@@ -220,33 +251,6 @@ function shouldHideRawDetailsBlock(activity: ToolActivityViewModel, t: TFunction
     || collectPublicDetailRows(activity.publicDetails, t, 1).length > 0;
 }
 
-function resolveCanvasFramePreview(activity: ToolActivityViewModel, showCanvasFrame: boolean): ToolActivityCanvasPreview | null {
-  if (!activity.canvasPreview) return null;
-  return showCanvasFrame || activity.canvasPreview.url ? activity.canvasPreview : null;
-}
-
-function ToolActivityBrowserTabCard({ preview }: { preview?: ToolActivityBrowserTabPreview }) {
-  const { t } = useTranslation('chat');
-  if (!preview) return null;
-  return (
-    <div className={COMPACT_STRUCTURED_CARD}>
-      <div className="flex min-w-0 items-center gap-2 text-[12px] font-medium text-foreground">
-        <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <span className="truncate">{preview.title ?? t('toolActivity.browserTab')}</span>
-      </div>
-      {preview.url ? (
-        <div className="mt-1 truncate font-mono text-[11px] leading-5 text-muted-foreground" title={preview.url}>{preview.url}</div>
-      ) : null}
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        <span className={COMPACT_META_CHIP}>{preview.target}</span>
-        <span className={COMPACT_META_CHIP}>target {preview.targetId}</span>
-        <span className={COMPACT_META_CHIP}>profile {preview.profile}</span>
-        {preview.node ? <span className={COMPACT_META_CHIP}>node {preview.node}</span> : null}
-      </div>
-    </div>
-  );
-}
-
 function ToolActivityApprovalReviews({
   reviews,
   outcome,
@@ -337,7 +341,7 @@ function ToolActivityProgressReceiptCard({ receipt }: { receipt?: ToolActivityPr
   const percent = receipt.totalCount > 0 ? Math.max(0, Math.min(100, (receipt.completedCount / receipt.totalCount) * 100)) : 0;
 
   return (
-    <div className={COMPACT_STRUCTURED_CARD}>
+    <div role="status" className={COMPACT_STRUCTURED_CARD}>
       <div className="flex items-center justify-between gap-2">
         <div className="text-[12px] font-medium text-foreground">{t('toolActivity.progress')}</div>
         <span className={COMPACT_META_CHIP}>{receipt.completedCount}/{receipt.totalCount}</span>
@@ -382,12 +386,22 @@ function ToolActivityStructuredDetails({ details }: { details?: ToolActivityPubl
   );
 }
 
-function ToolActivityStructuredContent({ activity }: { activity: ToolActivityViewModel }) {
+function ToolActivityStructuredContent({ activity, sessionIdentity, onOpen, tool, latestBrowserTool = false, onRuntimeSendMessage, onRuntimeOpenLink }: {
+  activity: ToolActivityViewModel;
+  sessionIdentity?: SessionIdentity;
+  onOpen?: () => void;
+  tool?: SessionRenderToolCard;
+  latestBrowserTool?: boolean;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
+}) {
   const { t } = useTranslation('chat');
   const showDiffStatCard = activity.diffStatPlacement !== 'header';
   return (
     <>
-      <ToolActivityBrowserTabCard preview={activity.browserTabPreview} />
+      {activity.browserTabPreview ? <ToolBrowserCard preview={activity.browserTabPreview} sessionIdentity={sessionIdentity} onOpen={onOpen}
+        latest={latestBrowserTool} revision={tool ? `${tool.id}:${tool.updatedAt ?? ''}` : undefined} status={tool ? getToolActivityStatus(tool) : undefined} /> : null}
+      {activity.canvasPreview ? <ToolWidgetCard preview={activity.canvasPreview} sessionIdentity={sessionIdentity} onOpen={onOpen} onSendMessage={onRuntimeSendMessage} onOpenLink={onRuntimeOpenLink} /> : null}
       <ToolActivityApprovalReviews reviews={activity.approvalReviews ?? []} outcome={activity.approvalReviewOutcome} />
       {showDiffStatCard ? <ToolActivityDiffStatCard title={t('toolActivity.liveChanges')} diffStat={activity.liveDiffStat} /> : null}
       {showDiffStatCard && !activity.liveDiffStat ? <ToolActivityDiffStatCard title={t('toolActivity.fileChanges')} diffStat={activity.diffStat} /> : null}
@@ -397,37 +411,219 @@ function ToolActivityStructuredContent({ activity }: { activity: ToolActivityVie
   );
 }
 
+function ToolActivitySurfaceButton({
+  title,
+  onOpen,
+}: {
+  title: string;
+  onOpen: () => void;
+}) {
+  const { t } = useTranslation('chat');
+  return (
+    <button
+      type="button"
+      aria-label={`${t('toolActivity.openSurface')} · ${title}`}
+      title={t('toolActivity.openSurface')}
+      className={`${COMPACT_ICON_TOGGLE} h-7 w-7 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border/50`}
+      onClick={onOpen}
+    >
+      <ExternalLink className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+function ToolActivityPreview({
+  tool,
+  activity,
+  showTitle = false,
+  sessionIdentity,
+  latestBrowserTool,
+  onOpenToolSurface,
+  onRuntimeSendMessage,
+  onRuntimeOpenLink,
+}: {
+  tool: SessionRenderToolCard;
+  activity: ToolActivityViewModel;
+  showTitle?: boolean;
+  sessionIdentity?: SessionIdentity;
+  latestBrowserTool?: boolean;
+  onOpenToolSurface?: (tool: SessionRenderToolCard, sessionIdentity: SessionIdentity) => void;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
+}) {
+  const onOpen = activity.canOpenSurface && onOpenToolSurface && sessionIdentity ? () => onOpenToolSurface(tool, sessionIdentity) : undefined;
+  return (
+    <div data-tool-activity-preview="true" className="w-full space-y-2">
+      {showTitle ? (
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate text-[12px] text-muted-foreground">{activity.title}</span>
+          {!activity.browserTabPreview && !activity.canvasPreview && onOpen ? (
+            <ToolActivitySurfaceButton title={activity.title} onOpen={onOpen} />
+          ) : null}
+        </div>
+      ) : null}
+      <ToolActivityStructuredContent activity={activity} sessionIdentity={sessionIdentity} onOpen={onOpen} tool={tool} latestBrowserTool={latestBrowserTool} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
+    </div>
+  );
+}
+
+function collapseToolActivityPreviews(previews: ReadonlyArray<ToolActivityViewModel | null>, tools: ReadonlyArray<SessionRenderToolCard>, latestBrowserTools: ReadonlySet<SessionRenderToolCard> | undefined, t: TFunction<'chat'>) {
+  const latestTabs = new Map<string, number>();
+  const result = previews.map((preview) => preview ? { ...preview, approvalReviews: undefined, approvalReviewOutcome: undefined } : null);
+  for (let index = result.length - 1; index >= 0; index -= 1) {
+    const preview = result[index];
+    if (!preview) continue;
+    const tab = preview.browserTabPreview;
+    if (tab) {
+      const key = JSON.stringify([tab.target, tab.node ?? '', tab.profile, tab.targetId]);
+      const previousIndex = latestTabs.get(key);
+      if (previousIndex === undefined) latestTabs.set(key, index);
+      else {
+        const hidden = latestBrowserTools?.has(tools[index]) ? result[previousIndex]! : preview;
+        hidden.browserTabPreview = undefined;
+        hidden.canOpenSurface = hidden.canvasPreview?.runtimeSurface !== undefined;
+        if (hidden !== preview) latestTabs.set(key, index);
+      }
+    }
+  }
+  return result.map((preview) => preview && (preview.canOpenSurface || hasToolActivityStructuredContent(preview, t)) ? preview : null);
+}
+
 export const ToolCardList = memo(function ToolCardList({
   tools,
   collapseVersion,
+  sessionIdentity,
+  groupKey,
+  disclosure,
+  latestBrowserTools,
+  onOpenToolSurface,
+  onRuntimeSendMessage,
+  onRuntimeOpenLink,
 }: {
   tools: ReadonlyArray<SessionRenderToolCard>;
   collapseVersion: number;
   sessionIdentity?: SessionIdentity;
+  groupKey?: string;
+  disclosure?: ToolActivityDisclosure;
+  latestBrowserTools?: ReadonlySet<SessionRenderToolCard>;
+  onOpenToolSurface?: (tool: SessionRenderToolCard, sessionIdentity: SessionIdentity) => void;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }) {
+  const { t } = useTranslation('chat');
+  const localDisclosure = useToolActivityDisclosure(disclosure ? undefined : sessionIdentity, collapseVersion);
+  const activeDisclosure = disclosure ?? localDisclosure;
+  const disclosureKey = getToolGroupDisclosureKey(groupKey ?? (tools[0] ? getToolDisclosureKey(tools[0]) : ''));
+  const expanded = activeDisclosure.expandedKeys.has(disclosureKey);
+  const summary = useMemo(() => summarizeToolActivities(tools, t), [tools, t]);
+  const previews = useMemo(() => tools.map((tool) => buildToolActivityPreview(tool, t, sessionIdentity)), [tools, t, sessionIdentity]);
+  const collapsedPreviews = useMemo(() => collapseToolActivityPreviews(previews, tools, latestBrowserTools, t), [previews, tools, latestBrowserTools, t]);
+  const approvalStatus = useMemo(() => {
+    let status: ToolActivityApprovalReviewOutcome['status'] | undefined;
+    for (const preview of previews) {
+      const reviews = preview?.approvalReviews ?? [];
+      const outcome = preview?.approvalReviewOutcome?.status;
+      if (outcome === 'denied' || reviews.some((review) => ['denied', 'timed_out', 'aborted'].includes(review.status))) return 'denied';
+      if (outcome === 'reviewing' || reviews.some((review) => review.status === 'in_progress')) status = 'reviewing';
+      else if (!status && (outcome === 'approved' || reviews.some((review) => review.status === 'approved'))) status = 'approved';
+    }
+    return status;
+  }, [previews]);
+  const statusCounts = useMemo(() => {
+    const counts = new Map<SessionRenderToolCard['status'], number>();
+    for (const tool of tools) {
+      const status = getToolActivityStatus(tool);
+      if (status !== 'completed') counts.set(status, (counts.get(status) ?? 0) + 1);
+    }
+    return counts;
+  }, [tools]);
+  let runningTool: SessionRenderToolCard | undefined;
+  for (let index = tools.length - 1; index >= 0; index -= 1) {
+    if (tools[index].status === 'running') {
+      runningTool = tools[index];
+      break;
+    }
+  }
+  const title = runningTool ? `${describeToolActivity(runningTool, t).title}…` : summary;
   if (tools.length === 0) {
     return null;
   }
 
   return (
-    <div className="flex w-full flex-col items-start gap-1.5">
-      {tools.map((tool, index) => (
-        <ToolCard
-          key={tool.toolCallId || tool.id || `${tool.name}-${index}`}
-          tool={tool}
-          collapseVersion={collapseVersion}
-        />
-      ))}
+    <div data-compact-rail="tool-group" className={`${COMPACT_SIDE_RAIL_TRACK} gap-1.5 text-sm`}>
+      <button
+        type="button"
+        data-chat-local-geometry-anchor="true"
+        aria-label={t(expanded ? 'toolActivity.collapse' : 'toolActivity.expand', { title })}
+        aria-expanded={expanded}
+        className={`${COMPACT_SIDE_RAIL_HEADER} w-full text-left`}
+        onClick={() => activeDisclosure.toggle(disclosureKey)}
+      >
+        <span className={COMPACT_ICON_TOGGLE}>
+          {runningTool ? <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-500" /> : expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        </span>
+        <span className="min-w-0 truncate text-[14px] leading-6" title={title}>{title}</span>
+        <span className="shrink-0 text-[11px] text-muted-foreground/75">{tools.length}</span>
+        {approvalStatus ? <span className={`${COMPACT_META_CHIP} ${approvalStatus === 'denied' ? 'text-destructive' : ''}`}>{t('toolActivity.approvalReview')} · {approvalStatus}</span> : null}
+        {[...statusCounts].map(([status, count]) => (
+          <span key={status} className={`shrink-0 text-[11px] ${status === 'error' ? 'text-destructive' : 'text-muted-foreground/75'}`}>
+            {t(`toolStatus.${status}`)} {count}
+          </span>
+        ))}
+      </button>
+      {expanded ? (
+        <div className="flex w-full flex-col items-start gap-1.5 border-l border-border/40 pl-4">
+          {tools.map((tool, index) => (
+            <ToolCard
+              key={getToolDisclosureKey(tool)}
+              tool={tool}
+              preview={previews[index]}
+              disclosure={activeDisclosure}
+              sessionIdentity={sessionIdentity}
+              latestBrowserTool={latestBrowserTools?.has(tool) ?? false}
+              onOpenToolSurface={onOpenToolSurface}
+              onRuntimeSendMessage={onRuntimeSendMessage}
+              onRuntimeOpenLink={onRuntimeOpenLink}
+            />
+          ))}
+        </div>
+      ) : collapsedPreviews.some(Boolean) ? (
+        <div className="w-full space-y-2 pl-7">
+          {tools.map((tool, index) => collapsedPreviews[index] ? (
+            <ToolActivityPreview
+              key={getToolDisclosureKey(tool)}
+              tool={tool}
+              activity={collapsedPreviews[index]!}
+              showTitle
+              sessionIdentity={sessionIdentity}
+              latestBrowserTool={latestBrowserTools?.has(tool) ?? false}
+              onOpenToolSurface={onOpenToolSurface}
+              onRuntimeSendMessage={onRuntimeSendMessage}
+              onRuntimeOpenLink={onRuntimeOpenLink}
+            />
+          ) : null)}
+        </div>
+      ) : null}
     </div>
   );
 });
 
 export const AssistantEmbeddedToolResults = memo(function AssistantEmbeddedToolResults({
   embeddedToolResults,
+  sourceTool,
   collapseVersion,
+  sessionIdentity,
+  onOpenToolSurface,
+  onRuntimeSendMessage,
+  onRuntimeOpenLink,
 }: {
   embeddedToolResults: ReadonlyArray<SessionRenderAssistantBubbleToolResult>;
+  sourceTool?: SessionRenderToolCard;
   collapseVersion: number;
+  sessionIdentity?: SessionIdentity;
+  onOpenToolSurface?: (tool: SessionRenderToolCard, sessionIdentity: SessionIdentity) => void;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }) {
   if (embeddedToolResults.length === 0) {
     return null;
@@ -436,7 +632,7 @@ export const AssistantEmbeddedToolResults = memo(function AssistantEmbeddedToolR
   return (
     <div className="flex w-full flex-col items-start gap-2">
       {embeddedToolResults.map((item) => (
-        <AssistantEmbeddedToolResultCard key={item.key} item={item} collapseVersion={collapseVersion} />
+        <AssistantEmbeddedToolResultCard key={item.key} item={item} sourceTool={sourceTool} collapseVersion={collapseVersion} sessionIdentity={sessionIdentity} onOpenToolSurface={onOpenToolSurface} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
       ))}
     </div>
   );
@@ -692,53 +888,100 @@ export const AssistantMessageMetaBar = memo(function AssistantMessageMetaBar({
   );
 });
 
+function ToolActivityBody({
+  activity,
+  expanded,
+  showCanvasFrame = false,
+  sessionIdentity,
+  onOpen,
+  tool,
+  latestBrowserTool,
+  onRuntimeSendMessage,
+  onRuntimeOpenLink,
+}: {
+  activity: ToolActivityViewModel;
+  expanded: boolean;
+  showCanvasFrame?: boolean;
+  sessionIdentity?: SessionIdentity;
+  onOpen?: () => void;
+  tool?: SessionRenderToolCard;
+  latestBrowserTool?: boolean;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
+}) {
+  const { t } = useTranslation('chat');
+  const [copiedText, setCopiedText] = useState<string | null>(null);
+  const copyBlockText = useCallback((text: string) => {
+    if (!text.trim()) return;
+    void navigator.clipboard.writeText(text);
+    setCopiedText(text);
+    window.setTimeout(() => setCopiedText(null), 1600);
+  }, []);
+  const hideRawDetails = shouldHideRawDetailsBlock(activity, t);
+  const textBlocks = activity.textBlocks.filter((block) =>
+    !(hideRawDetails && block.kind === 'details')
+    && !(activity.canvasPreview?.rawText && block.kind === 'output' && block.text === activity.canvasPreview.rawText));
+  const parameters = activity.parameters ?? [];
+  const parameterText = parameters.map(({ name, value }) => `${name}: ${value}`).join('\n');
+  const details = (
+    <>
+      {parameters.length > 0 ? (
+        <div className={COMPACT_STRUCTURED_CARD}>
+          <div className="flex items-center justify-between gap-2 text-[12px] font-medium text-foreground">
+            <span>{t('toolActivity.skill.parameters')}</span>
+            <button
+              type="button"
+              aria-label={t(copiedText === parameterText ? 'toolActivity.copied' : 'toolActivity.copy')}
+              className={`${COMPACT_ICON_TOGGLE} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border/50`}
+              onClick={() => copyBlockText(parameterText)}
+            >
+              {copiedText === parameterText ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+            </button>
+          </div>
+          <div data-tool-output-scroll="true" tabIndex={0} className={COMPACT_OUTPUT_SCROLL_AREA}>
+            <StructuredDetailsRows rows={parameters.map(({ name, value }) => ({ label: name, value }))} />
+          </div>
+        </div>
+      ) : null}
+      <ToolActivityStructuredContent activity={activity} sessionIdentity={sessionIdentity} onOpen={onOpen} tool={tool} latestBrowserTool={latestBrowserTool} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
+      {textBlocks.map((block, index) => (
+        <ToolActivityTextBlock
+          key={`${block.kind}-${index}`}
+          block={block}
+          copied={copiedText === block.text}
+          onCopy={block.copyable || block.kind === 'output' ? () => copyBlockText(block.text) : undefined}
+        />
+      ))}
+    </>
+  );
+
+  return expanded ? <div className="mt-2 w-full space-y-2">{details}</div> : showCanvasFrame && activity.canvasPreview ? (
+    <div className="mt-2 w-full">
+      <ToolWidgetCard preview={activity.canvasPreview} sessionIdentity={sessionIdentity} onOpen={onOpen} onSendMessage={onRuntimeSendMessage} onOpenLink={onRuntimeOpenLink} />
+    </div>
+  ) : null;
+}
+
 function ToolActivityRail({
   activity,
   collapseVersion,
-  railKind,
-  showCanvasFrame = false,
+  sessionIdentity,
+  onOpen,
+  onRuntimeSendMessage,
+  onRuntimeOpenLink,
 }: {
   activity: ToolActivityViewModel;
   collapseVersion: number;
-  railKind: 'tool' | 'embedded-tool-result';
-  showCanvasFrame?: boolean;
+  sessionIdentity?: SessionIdentity;
+  onOpen?: () => void;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }) {
   const { t } = useTranslation('chat');
   const [expanded, toggleExpanded] = useVersionedDisclosure(collapseVersion);
-  const [copiedText, setCopiedText] = useState<string | null>(null);
-  const copyBlockText = useCallback((text: string) => {
-    const trimmedText = text.trim();
-    if (!trimmedText) {
-      return;
-    }
-    void navigator.clipboard.writeText(trimmedText);
-    setCopiedText(trimmedText);
-    window.setTimeout(() => setCopiedText(null), 1600);
-  }, []);
-
-  const canvasFrame = resolveCanvasFramePreview(activity, showCanvasFrame);
-  const hasStructuredContent = hasToolActivityStructuredContent(activity, t);
-  const canExpand = activity.canExpand || hasStructuredContent;
-  const textBlocks = shouldHideRawDetailsBlock(activity, t)
-    ? activity.textBlocks.filter((block) => block.kind !== 'details')
-    : activity.textBlocks;
-
-  const renderTextBlocks = (blocks: ToolActivityViewModel['textBlocks']) => (
-    blocks.map((block, index) => (
-      <ToolActivityTextBlock
-        key={`${block.kind}-${index}`}
-        block={block}
-        copied={copiedText === block.text.trim()}
-        onCopy={block.copyable ? () => copyBlockText(block.text) : undefined}
-      />
-    ))
-  );
-
+  const canExpand = activity.canExpand || hasToolActivityStructuredContent(activity, t);
   return (
-    <div
-      data-compact-rail={railKind}
-      className={`${COMPACT_SIDE_RAIL_TRACK} text-sm`}
-    >
+    <div data-compact-rail="embedded-tool-result" className={`${COMPACT_SIDE_RAIL_TRACK} text-sm`}>
       <button
         type="button"
         data-chat-local-geometry-anchor="true"
@@ -753,72 +996,115 @@ function ToolActivityRail({
         </span>
         <span className="min-w-0 truncate text-[14px] leading-6">{activity.title}</span>
         {activity.trailingLabels.map((label, index) => (
-          <span key={`${label.text}-${index}`} className={activityTrailingClassName(label)}>
-            {label.text}
-          </span>
+          <span key={`${label.text}-${index}`} className={activityTrailingClassName(label)}>{label.text}</span>
         ))}
-        {canExpand ? (
-          expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />
-        ) : null}
+        {canExpand ? expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : null}
       </button>
-      {canvasFrame ? (
-        <div className="mt-2 pl-7">
-          <div className="w-full overflow-hidden rounded-[20px] bg-muted">
-            <iframe
-              title={canvasFrame.title}
-              src={canvasFrame.url}
-              className="block w-full border-0 bg-white"
-              style={{ height: `${canvasFrame.preferredHeight ?? 320}px` }}
-            />
-          </div>
-          {expanded ? (
-            <div className="mt-2 space-y-2">
-              <ToolActivityStructuredContent activity={activity} />
-              {textBlocks.length > 0 ? renderTextBlocks(textBlocks) : null}
-            </div>
-          ) : null}
-        </div>
-      ) : expanded && canExpand ? (
-        <div className="mt-2 w-full space-y-2 pl-0">
-          <ToolActivityStructuredContent activity={activity} />
-          {textBlocks.length > 0 ? renderTextBlocks(textBlocks) : null}
-        </div>
-      ) : null}
+      <ToolActivityBody activity={activity} expanded={expanded && canExpand} showCanvasFrame sessionIdentity={sessionIdentity} onOpen={onOpen} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
     </div>
   );
 }
 
-function ToolCard({
-  tool,
-  collapseVersion,
-}: {
+function ToolActivityDetails({ tool, sessionIdentity, onOpen, latestBrowserTool, onRuntimeSendMessage, onRuntimeOpenLink }: {
   tool: SessionRenderToolCard;
-  collapseVersion: number;
+  sessionIdentity?: SessionIdentity;
+  onOpen?: () => void;
+  latestBrowserTool?: boolean;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }) {
   const { t } = useTranslation('chat');
-  const activity = useMemo(() => buildToolActivityViewModel(tool, t), [tool, t]);
-  return <ToolActivityRail activity={activity} collapseVersion={collapseVersion} railKind="tool" />;
+  const activity = useMemo(() => buildToolActivityViewModel(tool, t, sessionIdentity), [tool, t, sessionIdentity]);
+  return (
+    <>
+      {activity.trailingLabels.length > 0 ? (
+        <div className={`flex flex-wrap items-center gap-2 text-[11px] ${activity.isError ? 'text-destructive' : 'text-muted-foreground'}`}>
+          {activity.trailingLabels.map((label, index) => <span key={`${label.text}-${index}`}>{label.text}</span>)}
+        </div>
+      ) : null}
+      <ToolActivityBody activity={activity} expanded sessionIdentity={sessionIdentity} onOpen={onOpen} tool={tool} latestBrowserTool={latestBrowserTool} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
+    </>
+  );
 }
+
+const ToolCard = memo(function ToolCard({
+  tool,
+  preview,
+  disclosure,
+  sessionIdentity,
+  latestBrowserTool,
+  onOpenToolSurface,
+  onRuntimeSendMessage,
+  onRuntimeOpenLink,
+}: {
+  tool: SessionRenderToolCard;
+  preview: ToolActivityViewModel | null;
+  disclosure: ToolActivityDisclosure;
+  sessionIdentity?: SessionIdentity;
+  latestBrowserTool?: boolean;
+  onOpenToolSurface?: (tool: SessionRenderToolCard, sessionIdentity: SessionIdentity) => void;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
+}) {
+  const { t } = useTranslation('chat');
+  const descriptor = useMemo(() => describeToolActivity(tool, t), [tool, t]);
+  const status = getToolActivityStatus(tool);
+  const key = getToolDisclosureKey(tool);
+  const expanded = disclosure.expandedKeys.has(key);
+  const onOpen = preview?.canOpenSurface && onOpenToolSurface && sessionIdentity ? () => onOpenToolSurface(tool, sessionIdentity) : undefined;
+  return (
+    <div data-compact-rail="tool" className={`${COMPACT_SIDE_RAIL_TRACK} text-sm`}>
+      <div className="flex w-full min-w-0 items-center gap-1">
+        <button
+          type="button"
+          data-chat-local-geometry-anchor="true"
+          aria-label={t(expanded ? 'toolActivity.collapse' : 'toolActivity.expand', { title: descriptor.title })}
+          aria-expanded={expanded}
+          className={`${COMPACT_SIDE_RAIL_HEADER} min-w-0 flex-1 text-left`}
+          onClick={() => disclosure.toggle(key)}
+        >
+          <span className={COMPACT_ICON_TOGGLE}><ToolActivityKindIcon kind={descriptor.kind} status={status} /></span>
+          <span className="min-w-0 truncate text-[13px] leading-6" title={descriptor.title}>{descriptor.title}</span>
+          {status !== 'completed' ? <span className={`shrink-0 text-[11px] ${status === 'error' ? 'text-destructive' : 'text-muted-foreground/75'}`}>{t(`toolStatus.${status}`)}</span> : null}
+          {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+        </button>
+        {!preview?.browserTabPreview && !preview?.canvasPreview && onOpen ? <ToolActivitySurfaceButton title={descriptor.title} onOpen={onOpen} /> : null}
+      </div>
+      {expanded ? (
+        <div className="w-full pl-7"><ToolActivityDetails tool={tool} sessionIdentity={sessionIdentity} onOpen={onOpen} latestBrowserTool={latestBrowserTool} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} /></div>
+      ) : preview ? (
+        <div className="mt-1 w-full pl-7"><ToolActivityPreview tool={tool} activity={preview} sessionIdentity={sessionIdentity} latestBrowserTool={latestBrowserTool} onOpenToolSurface={onOpenToolSurface} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} /></div>
+      ) : null}
+    </div>
+  );
+});
 
 function AssistantEmbeddedToolResultCard({
   item,
+  sourceTool,
   collapseVersion,
+  sessionIdentity,
+  onOpenToolSurface,
+  onRuntimeSendMessage,
+  onRuntimeOpenLink,
 }: {
   item: SessionRenderAssistantBubbleToolResult;
+  sourceTool?: SessionRenderToolCard;
   collapseVersion: number;
+  sessionIdentity?: SessionIdentity;
+  onOpenToolSurface?: (tool: SessionRenderToolCard, sessionIdentity: SessionIdentity) => void;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }) {
   const { t } = useTranslation('chat');
-  const activity = useMemo(() => buildCanvasActivityViewModel(item, t), [item, t]);
+  const activity = useMemo(() => buildCanvasActivityViewModel(item, t, sourceTool, sessionIdentity), [item, t, sourceTool, sessionIdentity]);
   if (!activity) {
     return null;
   }
   return (
-    <ToolActivityRail
-      activity={activity}
-      collapseVersion={collapseVersion}
-      railKind="embedded-tool-result"
-      showCanvasFrame
-    />
+    <ToolActivityRail activity={activity} collapseVersion={collapseVersion} sessionIdentity={sessionIdentity}
+      onOpen={activity.canOpenSurface && sourceTool && sessionIdentity && onOpenToolSurface ? () => onOpenToolSurface(sourceTool, sessionIdentity) : undefined}
+      onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
   );
 }
 

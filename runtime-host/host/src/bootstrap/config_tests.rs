@@ -17,6 +17,7 @@ fn wire() -> serde_json::Value {
         "appVersion": "1.0.0",
         "appLogDir": format!("{ROOT}/userdata/logs"),
         "runtimeHostStateDir": format!("{ROOT}/runtime-host"),
+        "searxngResourcesDir": format!("{ROOT}/searxng"),
         "runtimeHostMcpExecutable": format!("{ROOT}/runtime-host"),
         "parentCallbackBaseUrl": "http://127.0.0.1:34100",
         "parentCallbackDispatchToken": "test-parent-dispatch-token",
@@ -97,6 +98,7 @@ fn materializable_wire(root: &TestRoot) -> serde_json::Value {
     let mut value = wire();
     value["appLogDir"] = serde_json::Value::String(root.path("userdata/logs"));
     value["runtimeHostStateDir"] = serde_json::Value::String(root.runtime_host_state_dir());
+    value["searxngResourcesDir"] = serde_json::Value::String(root.path("searxng"));
     value["runtimeHostMcpExecutable"] = serde_json::Value::String(root.path("runtime-host"));
     value["matcha"]["serverExecutable"] = serde_json::Value::String(root.path("matcha-app-server"));
     value["matcha"]["cliExecutable"] = serde_json::Value::String(root.path("bun"));

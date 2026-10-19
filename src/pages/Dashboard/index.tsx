@@ -148,13 +148,13 @@ export function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <header className="flex flex-row items-start justify-between gap-3">
-        <div className="space-y-1">
+      <header>
+        <div className="flex min-h-11 items-center justify-between gap-4">
           <h1 className="text-lg font-semibold">{t('recentTokenHistory.title')}</h1>
-          <p className="text-sm text-muted-foreground">{t('recentTokenHistory.description')}</p>
-        </div>
-        <div className="flex items-center gap-3">
           <RuntimeScopeSelector />
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">{t('recentTokenHistory.description')}</p>
           {showUsageRefreshingHint && (
             <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />

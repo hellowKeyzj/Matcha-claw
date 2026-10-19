@@ -337,6 +337,7 @@ export interface SessionRenderUserMessageItem extends SessionRenderItemBase {
 export interface SessionAssistantTurnItem extends SessionRenderItemBase {
   kind: 'assistant-turn';
   role: 'assistant';
+  messageId?: string;
   identitySource: SessionTurnBindingSource;
   identityMode: SessionTurnIdentityMode;
   identityConfidence: SessionTurnIdentityConfidence;

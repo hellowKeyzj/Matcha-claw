@@ -7,6 +7,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { StableScrollArea } from '@/components/scroll';
@@ -19,7 +20,6 @@ import { TaskCenterPageTitle } from '@/components/task-center/page-title';
 import { TaskCenterEmptyState, TaskCenterStatusFilter, TaskCenterSurface, TaskCenterToolbar } from '@/components/task-center/surface';
 import { Select } from '@/components/ui/select';
 import { DatePicker } from '@/components/ui/date-picker';
-import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
 import { LoadingState } from '@/components/common/LoadingSpinner';
 import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { buildRuntimeEndpointKey, buildSessionIdentityKey, runtimeEndpointsEqual, type RuntimeEndpointRef, type SessionIdentity } from '@/types/desktop/runtime-address';
@@ -29,6 +29,8 @@ import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useIdleReady } from '@/lib/idle-ready';
 import { createErrorResourceState, createIdleResourceState, createLoadingResourceState, createReadyResourceState } from '@/lib/resource-state';
 import { cn } from '@/lib/utils';
+import { AppError } from '@/lib/error-model';
+import { decodeTaskFailure } from '@/types/desktop/task-failure';
 import { Cron } from '@/pages/Cron';
 import { listTaskSnapshot, type Task } from '@/services/openclaw/task-manager-client';
 import { useChatStore } from '@/stores/chat';
@@ -172,6 +174,27 @@ function formatDateTime(value: number | undefined): string {
   return new Date(Number(value)).toLocaleString();
 }
 
+function formatTaskFailure(error: unknown, t: TFunction<'tasks'>): string {
+  const failure = error instanceof AppError ? decodeTaskFailure(error.details?.taskFailure) : null;
+  if (failure) return t('failure.detail', { stage: t(`failure.stages.${failure.stage}`), reason: t(`failure.reasons.${failure.code}`) });
+  if (error instanceof AppError && (error.code === 'TIMEOUT' || error.code === 'ABORTED')) {
+    return t('failure.detail', { stage: t('failure.stages.transport'), reason: t(`failure.reasons.${error.code === 'TIMEOUT' ? 'deadline' : 'cancelled'}`) });
+  }
+  const message = typeof error === 'string' ? error : error instanceof Error ? error.message : '';
+  if (message === 'The selected Team has no session identity in this runtime; team tasks cannot be queried'
+    || message === 'The selected Agent is not available in this runtime'
+    || message === 'Session catalog is not available for the selected runtime') {
+    const reason = message.startsWith('The selected Team') ? 'teamSessionMissing'
+      : message.startsWith('The selected Agent') ? 'agentUnavailable' : 'sessionCatalogUnavailable';
+    return t('failure.detail', { stage: t('failure.stages.session_lookup'), reason: t(`failure.${reason}`) });
+  }
+  const reason = message === 'Task delete was unknown' ? t('failure.outcomeUnknown')
+    : message === 'Task delete was rejected' || message === 'Task manager request was rejected' ? t('failure.reasons.request_rejected')
+      : message === 'Task manager is unavailable' || message === 'Task management is not available for this session' ? t('failure.unavailable')
+        : t('failure.unrecorded');
+  return t('failure.detail', { stage: t('failure.unknownStage'), reason });
+}
+
 export function TasksPage() {
   const { t, i18n } = useTranslation('tasks');
   const [searchParams, setSearchParams] = useSearchParams();
@@ -262,7 +285,8 @@ export function TasksPage() {
   }, []);
   const activeTab = resolveTaskCenterTab(searchParams.get('tab'));
   const scopedTasksLoading = scopedTasks.status === 'loading';
-  const scopedTasksError = scopedTasks.error ?? (scopeFilter.type === 'agent' && endpointSessionsLoadedAt === undefined ? sessionCatalogStatus.error : null);
+  const scopedTasksError = scopedTasks.error ?? (scopeFilter.type === 'agent' && endpointSessionsLoadedAt === undefined && sessionCatalogStatus.error
+    ? formatTaskFailure(new Error('Session catalog is not available for the selected runtime'), t) : null);
   const manualRefreshBusy = mutating || scopedTasksLoading || sessionCatalogStatus.status === 'loading';
   const showInitialLoading = gatewayOperational && !scopedTasks.hasLoadedOnce
     && !scopedTasksError && (scopedTasks.status === 'idle' || scopedTasksLoading);
@@ -295,7 +319,7 @@ export function TasksPage() {
       if (!agentAvailable) throw new Error('The selected Agent is not available in this runtime');
       if (scopedSessions.length === 0 && (chatState.sessionCatalogStatus.error
         || chatState.sessionCatalogLoadedAtByRuntimeScopeKey[endpointKey] === undefined)) {
-        throw new Error(chatState.sessionCatalogStatus.error ?? 'Session catalog is not available for the selected runtime');
+        throw new Error('Session catalog is not available for the selected runtime');
       }
       const results = await Promise.allSettled(scopedSessions.map(async (session) => ({
         sessionKey: session.key,
@@ -308,7 +332,7 @@ export function TasksPage() {
       const loadedTasks = results.flatMap<ScopedTask>((result, index) => {
         if (result.status === 'rejected') {
           failedSessionKeys.add(scopedSessions[index].key);
-          failures.push(`${scopedSessions[index].sessionIdentity.sessionKey}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+          failures.push(formatTaskFailure(result.reason, t));
           return [];
         }
         const { sessionKey, sessionIdentity, snapshot } = result.value;
@@ -324,15 +348,15 @@ export function TasksPage() {
         if (!isCurrentRequest()) return previous;
         const data = [...loadedTasks, ...previous.data.filter((task) => task.sourceSessionKey && failedSessionKeys.has(task.sourceSessionKey))];
         return failures.length > 0
-          ? createErrorResourceState({ ...previous, data, hasLoadedOnce: previous.hasLoadedOnce || results.some((result) => result.status === 'fulfilled') }, failures.join('\n'))
+          ? createErrorResourceState({ ...previous, data, hasLoadedOnce: previous.hasLoadedOnce || results.some((result) => result.status === 'fulfilled') }, Array.from(new Set(failures)).join('\n'))
           : createReadyResourceState(data);
       });
     } catch (error) {
       if (!isCurrentRequest()) return;
       setScopedTasks((previous) => isCurrentRequest()
-        ? createErrorResourceState(previous, error instanceof Error ? error.message : String(error)) : previous);
+        ? createErrorResourceState(previous, formatTaskFailure(error, t)) : previous);
     }
-  }, [agentAvailable, endpointKey, gatewayOperational, ownsContext, scopeFilter, selectedEndpoint]);
+  }, [agentAvailable, endpointKey, gatewayOperational, ownsContext, scopeFilter, selectedEndpoint, t]);
 
   useEffect(() => {
     if (gatewayOperational) void loadSessions();
@@ -701,7 +725,8 @@ export function TasksPage() {
       scopedTasksRequestSeqRef.current += 1;
       const next = useTaskCenterStore.getState();
       if (next.error) {
-        toast.error(next.error);
+        toast.error(next.error === 'Task delete was unknown' ? t('failure.outcomeUnknown')
+          : next.error === 'Task delete was rejected' ? t('failure.reasons.request_rejected') : t('failure.unrecorded'));
         return;
       }
       toast.success(t('toast.deleted'));
@@ -735,10 +760,7 @@ export function TasksPage() {
 
   return (
     <section className="space-y-6">
-      <header className="flex items-center justify-between">
-        <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
-        <RuntimeScopeSelector />
-      </header>
+      <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
       <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-4">
         <TabsList className="grid w-full max-w-sm grid-cols-2">
           <TabsTrigger value="long">{t('tabs.long')}</TabsTrigger>

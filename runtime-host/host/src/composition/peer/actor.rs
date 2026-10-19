@@ -688,6 +688,39 @@ async fn handle_query(shared: &PeerShared, query: PeerQuery) {
             .await;
             let _ = reply.send(result);
         }
+        PeerQuery::OpenClawCanvasRequest {
+            request,
+            call,
+            reply,
+        } => {
+            if !run_call(
+                call.as_ref(),
+                openclaw::gateway::loopback::GatewayOperation::CanvasRequest,
+            )
+            .await
+            {
+                let _ = reply.send(Ok(openclaw::port::OpenClawGatewayRequestOutcome::Unavailable));
+                return;
+            }
+            let result = match shared.admission().admit_request() {
+                Ok(()) => Ok(shared.open_claw().canvas_request(request).await),
+                Err(error) => Err(error),
+            };
+            finish_gateway_call(
+                call,
+                openclaw::gateway::loopback::GatewayOperation::CanvasRequest,
+                &result,
+            )
+            .await;
+            let _ = reply.send(result);
+        }
+        PeerQuery::OpenClawProgressCardRequest { request, reply } => {
+            let result = match shared.admission().admit_request() {
+                Ok(()) => Ok(shared.open_claw().progress_card_request(request).await),
+                Err(error) => Err(error),
+            };
+            let _ = reply.send(result);
+        }
         PeerQuery::OpenClawQuestionList { request, reply } => {
             let result = match shared.admission().admit_request() {
                 Ok(()) => Ok(shared.open_claw().question_list(request).await),

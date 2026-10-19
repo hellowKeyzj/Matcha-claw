@@ -182,7 +182,7 @@ const CONTROL_SCOPES: [&str; 5] = [
     "operator.approvals",
     "operator.questions",
 ];
-const CONTROL_CAPS: [&str; 2] = ["agent-kind", "tool-events"];
+const CONTROL_CAPS: [&str; 4] = ["agent-kind", "tool-events", "board-view", "inline-widgets"];
 const CONTROL_EVENTS: [&str; 1] = ["tick"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -419,6 +419,10 @@ impl GatewayClient {
         }
     }
 
+    pub(crate) fn http_origin(&self) -> String {
+        self.endpoint.http_url("")
+    }
+
     pub(crate) async fn config_transaction(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.config_writes.lock().await
     }
@@ -466,6 +470,12 @@ impl GatewayClient {
             GatewayControlConnectionState::Ready { control, .. } if control.supports_goal => Ok(()),
             GatewayControlConnectionState::Ready { .. } => Err(RuntimeOperationFailure::Unsupported),
             _ => Err(RuntimeOperationFailure::Unavailable),
+        }
+    }
+
+    pub(crate) fn set_board_event_sink(&self, sink: Option<board::BoardEventSink>) {
+        if let Some(ingest) = &self.event_ingest {
+            ingest.set_board_event_sink(sink);
         }
     }
 
@@ -780,7 +790,7 @@ impl GatewayClient {
                 "historyWithTraceElapsedMs": history_elapsed_ms, "timingScope": "subscribe_and_history_calls_including_internal_trace_excluding_sync_result_trace",
                 "failure": result.as_ref().err().map(observation_failure_kind),
                 "syncSourceEpoch": result.as_ref().ok().and_then(|sync| sync.source_epoch),
-                "cut": result.as_ref().ok().map(|sync| match sync.cut { sessions_module::ports::SessionSyncCut::Snapshot => "snapshot", sessions_module::ports::SessionSyncCut::EventFrontier { .. } => "event_frontier" }),
+                "cut": result.as_ref().ok().map(|sync| match sync.cut { sessions_module::ports::SessionSyncCut::Snapshot => "snapshot", sessions_module::ports::SessionSyncCut::EventFrontier { .. } => "event_frontier", sessions_module::ports::SessionSyncCut::Restored { .. } => "restored" }),
                 "terminalRunCount": result.as_ref().ok().map(|sync| sync.terminal_runs.len()),
                 "retiredItemCount": result.as_ref().ok().map(|sync| sync.retired_item_ids.len()) }));
         }
@@ -1159,6 +1169,9 @@ impl GatewayClient {
                     };
                     self.trace_first_control_ready(attempt_number);
                     self.bump_control_readiness();
+                    if let (Some(ingest), Some(epoch)) = (&self.event_ingest, epoch) {
+                        ingest.control_ready(&self.observations, epoch);
+                    }
                     return;
                 }
                 Err(error) => {

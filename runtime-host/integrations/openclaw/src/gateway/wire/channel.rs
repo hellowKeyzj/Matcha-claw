@@ -637,8 +637,16 @@ pub(crate) enum ChannelConfigPatchOutcome {
 
 pub(crate) fn is_config_restart_required(error: &super::GatewayError) -> bool {
     error.code == "UNAVAILABLE"
-        && (error.message.contains("restart-pending")
-            || error.message.contains("applied-restart-required"))
+        && matches!(
+            error
+                .message
+                .strip_prefix("config.patch ")
+                .or_else(|| error.message.strip_prefix("config.apply ")),
+            Some(
+                "persisted and was accepted for restart; wait for the Gateway to restart, then run config.get to confirm the active revision"
+                    | "persisted and updated the active Gateway, but a recovery restart is required; wait for the Gateway to restart, then run config.get to confirm the active revision"
+            )
+        )
 }
 
 pub(crate) fn decode_config_patch(
@@ -1015,7 +1023,10 @@ mod tests {
             decode_config_patch(response(json!({"ok": true}))),
             Ok(ConfigPatchOutcome::Written)
         );
-        for message in ["restart-pending", "applied-restart-required"] {
+        for message in [
+            "config.patch persisted and was accepted for restart; wait for the Gateway to restart, then run config.get to confirm the active revision",
+            "config.apply persisted and updated the active Gateway, but a recovery restart is required; wait for the Gateway to restart, then run config.get to confirm the active revision",
+        ] {
             let frame = json!({
                 "type": "res", "id": "restart", "ok": false,
                 "error": {"code": "UNAVAILABLE", "message": message}

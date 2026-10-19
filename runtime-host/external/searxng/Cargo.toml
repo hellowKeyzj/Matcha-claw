@@ -1,0 +1,17 @@
+[package]
+name = "searxng"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+foundation = { path = "../../foundation" }
+getrandom.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

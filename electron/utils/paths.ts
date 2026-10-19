@@ -41,6 +41,21 @@ export function getOpenClawConfigDir(): string {
 }
 
 /**
+ * Get the Matcha Agent-owned home directory, shared with standalone App Server.
+ */
+export function getMatchaAgentHome(): string {
+  const configuredDirectory = process.env.MATCHA_AGENT_HOME;
+  if (configuredDirectory !== undefined) {
+    return resolve(configuredDirectory);
+  }
+  const e2eUserDataDir = process.env.MATCHACLAW_E2E_USER_DATA_DIR?.trim();
+  if (process.env.MATCHACLAW_E2E === '1' && e2eUserDataDir) {
+    return resolve(join(e2eUserDataDir, 'matcha-agent'));
+  }
+  return join(homedir(), '.matcha-agent');
+}
+
+/**
  * Get the MatchaClaw-owned runtime-host state directory.
  */
 export function getRuntimeHostStateDir(): string {

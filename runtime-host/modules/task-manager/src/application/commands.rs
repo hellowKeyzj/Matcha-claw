@@ -1,15 +1,14 @@
 use tokio::sync::oneshot;
 
 use crate::{
-    application::call::TaskCall,
-    domain::model::{TaskCommand as TaskManagerCommand, TaskOutcome},
+    TaskExecution, application::call::TaskCall, domain::model::TaskCommand as TaskManagerCommand,
 };
 
 pub(crate) enum TaskCommand {
     Execute {
         command: TaskManagerCommand,
         call: Option<TaskCall>,
-        reply: oneshot::Sender<TaskOutcome>,
+        reply: oneshot::Sender<TaskExecution>,
     },
 }
 

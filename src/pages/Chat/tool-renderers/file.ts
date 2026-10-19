@@ -2,7 +2,7 @@ import type { TFunction } from 'i18next';
 import type { SessionRenderToolCard } from '../../../types/session/tool-card';
 import type { ToolActivityContent } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
-import { matchKnownToolName, normalizeToolName } from './types';
+import { matchKnownToolName, normalizeToolName, type ToolActivityDescriptor } from './types';
 
 type FileOperation = 'create' | 'update';
 
@@ -499,6 +499,7 @@ function buildTextBlocks(projection: FileToolProjection, t: TFunction<'chat'>): 
       title: fileCount > 1 ? t('toolActivity.file.diffFiles', { count: fileCount }) : t('toolActivity.file.diff'),
       text: truncateText(projection.diffText, t),
       copyable: false,
+      format: 'diff',
     });
   } else if (projection.content != null) {
     blocks.push({
@@ -520,10 +521,20 @@ function buildTextBlocks(projection: FileToolProjection, t: TFunction<'chat'>): 
 }
 
 export function isFileToolActivityName(name: string): boolean {
-  const normalized = name.replace(/[^a-z0-9]/gi, '').toLowerCase();
-  return matchKnownToolName(normalizeToolName(name)) === 'file'
-    || /^openclaw.*(create|update|write|edit).*file/.test(normalized)
-    || /^openclaw.*file.*(create|update|write|edit)/.test(normalized);
+  return matchKnownToolName(normalizeToolName(name)) === 'file';
+}
+
+export function describeFileToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityDescriptor {
+  const input = isRecord(tool.input) ? tool.input : parseStructuredText(tool.inputText);
+  const target = readPathFrom(input) ?? undefined;
+  const operation = readOperationFrom(input);
+  const kind = operation === 'create' || (!operation && /write/i.test(tool.name)) ? 'write' : 'edit';
+  return {
+    kind,
+    title: t(kind === 'write' ? 'toolActivity.file.write' : 'toolActivity.file.update', { name: basename(target ?? null, t) }),
+    label: tool.displayTitle?.trim() || tool.name,
+    ...(target ? { target } : {}),
+  };
 }
 
 export function buildFileToolActivityContent(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {

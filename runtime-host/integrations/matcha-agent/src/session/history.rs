@@ -1,5 +1,6 @@
 use super::{
     model::SessionRecord,
+    normalization,
     rpc::{self, Failure},
 };
 use crate::client::Client;
@@ -13,6 +14,7 @@ pub struct Page {
     pub messages: Vec<Value>,
     pub total: usize,
     pub next_offset: Option<usize>,
+    pub managed_input_message_ids: Vec<String>,
 }
 
 pub(crate) async fn page(
@@ -27,26 +29,44 @@ pub(crate) async fn page(
         "sessions.get",
         json!({"sessionId":id,"history":true,"offset":offset,"limit":limit}),
     )
-    .await?;
-    let record: SessionRecord = rpc::decode(value.clone())?;
+    .await
+    .inspect_err(|error| error.trace("history.rpc", Some("sessions.get"), id))?;
+    let record: SessionRecord = rpc::decode(value.clone())
+        .inspect_err(|error| error.trace("history.record_decode", Some("sessions.get"), id))?;
     if !record.validate(id, Some(agent)) {
+        Failure::InvalidReadback.trace("history.record_identity", Some("sessions.get"), id);
         return Err(Failure::InvalidReadback);
     }
     let page: Page = rpc::decode(
         value
             .get("history")
             .cloned()
-            .ok_or(Failure::InvalidReadback)?,
-    )?;
+            .ok_or(Failure::InvalidReadback)
+            .inspect_err(|error| error.trace("history.page_missing", Some("sessions.get"), id))?,
+    )
+    .inspect_err(|error| error.trace("history.page_decode", Some("sessions.get"), id))?;
     let start = offset.min(page.total);
     let end = start
         .checked_add(page.messages.len())
-        .ok_or(Failure::InvalidReadback)?;
+        .ok_or(Failure::InvalidReadback)
+        .inspect_err(|error| error.trace("history.pagination", Some("sessions.get"), id))?;
     if page.total as u64 > sessions_module::state::MAX_SAFE_INTEGER
         || page.messages.len() > limit
         || end > page.total
         || page.next_offset != (end < page.total).then_some(end)
     {
+        Failure::InvalidReadback.trace("history.pagination", Some("sessions.get"), id);
+        return Err(Failure::InvalidReadback);
+    }
+    let mut inputs = std::collections::HashSet::new();
+    if page.managed_input_message_ids.iter().any(|uuid| {
+        !inputs.insert(uuid)
+            || !page.messages.iter().any(|row| {
+                row["type"] == "user"
+                    && row.get("uuid").and_then(Value::as_str) == Some(uuid.as_str())
+            })
+    }) {
+        Failure::InvalidReadback.trace("history.input_identity", Some("sessions.get"), id);
         return Err(Failure::InvalidReadback);
     }
     Ok(page)
@@ -92,20 +112,45 @@ pub(crate) async fn message(
     id: &str,
     agent: &str,
     uuid: &str,
-) -> Result<Value, Failure> {
+    index: usize,
+) -> Result<String, Failure> {
     let mut offset = 0;
     loop {
         let page = page(client, id, agent, offset, 200).await?;
-        if let Some(row) = page
-            .messages
-            .into_iter()
-            .find(|row| row.get("uuid").and_then(Value::as_str) == Some(uuid))
-        {
-            return Ok(row);
+        for raw in &page.messages {
+            let managed_input = raw.get("uuid").and_then(Value::as_str).is_some_and(|uuid| {
+                page.managed_input_message_ids
+                    .iter()
+                    .any(|input| input == uuid)
+            });
+            for message in normalization::messages(raw, managed_input)
+                .inspect_err(|error| error.trace("history.normalize", None, id))?
+            {
+                if message.row.get("uuid").and_then(Value::as_str) != Some(uuid) {
+                    continue;
+                }
+                let block = message
+                    .source
+                    .block(index)
+                    .inspect_err(|error| error.trace("history.content_source", None, id))?;
+                return block
+                    .as_str()
+                    .or_else(|| {
+                        block
+                            .get("text")
+                            .or_else(|| block.get("thinking"))
+                            .and_then(Value::as_str)
+                    })
+                    .map(str::to_owned)
+                    .ok_or(Failure::InvalidInput);
+            }
         }
         match page.next_offset {
             Some(next) if next > offset => offset = next,
-            _ => return Err(Failure::InvalidReadback),
+            _ => {
+                Failure::InvalidReadback.trace("history.message_missing", Some("sessions.get"), id);
+                return Err(Failure::InvalidReadback);
+            }
         }
     }
 }

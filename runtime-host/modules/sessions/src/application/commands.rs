@@ -34,6 +34,7 @@ pub enum SessionEnsureOutcome {
 #[derive(Clone, Debug)]
 pub enum SessionIngestOutcome {
     Applied(SessionDelta),
+    TerminalRestored,
     Consumed { cursor: u64 },
     Duplicate { cursor: u64 },
     Stale { cursor: u64, received: u64 },
@@ -58,15 +59,55 @@ pub struct SessionEvent {
     pub changes: Vec<super::state::SessionChange>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionObservationFailure {
+    InvalidReadback,
+}
+
+pub enum SessionIngress {
+    Event(SessionEvent),
+    ObservationFailed {
+        binding: SessionEventBinding,
+        failure: SessionObservationFailure,
+    },
+    /// Recovery side effects only; never advances a native frontier or publishes replay.
+    RestoredTerminal {
+        binding: SessionEventBinding,
+        terminal: crate::ports::SessionTerminalRun,
+        assistant_texts: Vec<String>,
+    },
+}
+
+impl SessionIngress {
+    pub fn binding(&self) -> &SessionEventBinding {
+        match self {
+            Self::Event(event) => &event.binding,
+            Self::ObservationFailed { binding, .. } | Self::RestoredTerminal { binding, .. } => binding,
+        }
+    }
+}
+
 pub struct SessionIngressEvent {
     identity: SessionIdentity,
-    event: SessionEvent,
+    ingress: SessionIngress,
     receipt: Option<oneshot::Sender<bool>>,
 }
 
 impl SessionIngressEvent {
     pub fn new(identity: SessionIdentity, event: SessionEvent) -> Self {
-        Self { identity, event, receipt: None }
+        Self::from_ingress(identity, SessionIngress::Event(event))
+    }
+
+    pub fn observation_failed(
+        identity: SessionIdentity,
+        binding: SessionEventBinding,
+        failure: SessionObservationFailure,
+    ) -> Self {
+        Self::from_ingress(identity, SessionIngress::ObservationFailed { binding, failure })
+    }
+
+    pub fn from_ingress(identity: SessionIdentity, ingress: SessionIngress) -> Self {
+        Self { identity, ingress, receipt: None }
     }
 
     pub fn with_receipt(mut self) -> (Self, oneshot::Receiver<bool>) {
@@ -79,8 +120,8 @@ impl SessionIngressEvent {
         self.receipt.take()
     }
 
-    pub fn into_parts(self) -> (SessionIdentity, SessionEvent) {
-        (self.identity, self.event)
+    pub fn into_parts(self) -> (SessionIdentity, SessionIngress) {
+        (self.identity, self.ingress)
     }
 }
 
@@ -111,6 +152,18 @@ pub enum SessionCommand {
         event: SessionEvent,
         reply: oneshot::Sender<SessionIngestOutcome>,
     },
+    ObservationFailed {
+        identity: SessionIdentity,
+        binding: SessionEventBinding,
+        failure: SessionObservationFailure,
+        reply: oneshot::Sender<bool>,
+    },
+    ObserveReplyCompleted {
+        identity: SessionIdentity,
+        generation: u64,
+        waiter_id: u64,
+        acquired: bool,
+    },
     SyncCompleted {
         identity: SessionIdentity,
         generation: u64,
@@ -120,6 +173,7 @@ pub enum SessionCommand {
         identity: SessionIdentity,
         generation: u64,
         terminals: Vec<(crate::ports::SessionTerminalRun, Vec<String>)>,
+        publish: bool,
         permit: crate::owner::terminal::TerminalPermit,
         reply: oneshot::Sender<Option<crate::state::SyncTerminalChanges>>,
     },
@@ -222,7 +276,8 @@ impl SessionCommand {
             Self::Ingest { reply, .. } | Self::TerminalIngest { reply, .. } => {
                 let _ = reply.send(SessionIngestOutcome::RuntimeNotFound);
             }
-            Self::SyncCompleted { .. } | Self::ObservationClosed { .. } => {}
+            Self::SyncCompleted { .. } | Self::ObservationClosed { .. } | Self::ObserveReplyCompleted { .. } => {}
+            Self::ObservationFailed { reply, .. } => { let _ = reply.send(false); }
             Self::SyncTerminals { reply, .. } => { let _ = reply.send(None); }
             Self::TerminalDelivered { reply, .. } => { let _ = reply.send(false); }
             Self::Release { reply, .. } => {
@@ -276,6 +331,8 @@ impl SessionCommand {
                 CommandRoute::Keyed(session_identity_lane_key(identity))
             }
             Self::Ingest { identity, .. }
+            | Self::ObservationFailed { identity, .. }
+            | Self::ObserveReplyCompleted { identity, .. }
             | Self::SyncCompleted { identity, .. }
             | Self::SyncTerminals { identity, .. }
             | Self::TerminalIngest { identity, .. }

@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use super::actor::{SessionLane, SessionShared};
 use crate::{
     call::SessionCall,
-    command::{SessionCommand, session_identity_lane_key},
+    command::{SessionCommand, SessionObservationFailure, session_identity_lane_key},
     ports::{
         RuntimeOperationFailure, SessionObservation, SessionObservationRequest,
         SessionObserveCommand, SessionObserveOutcome, SessionReleaseOutcome, SessionSync,
@@ -48,7 +48,7 @@ pub(super) struct Observation {
     terminal_sync: Arc<AtomicBool>,
     close_after_sync: Option<bool>,
     restart_after_close: bool,
-    recovery_available: bool,
+    recovery: Recovery,
     needs_sync: bool,
     leases: HashSet<String>,
     runs: HashSet<String>,
@@ -58,17 +58,45 @@ pub(super) struct Observation {
     waiters: Vec<Waiter>,
 }
 
+#[derive(Clone, Copy)]
+enum Recovery {
+    Available,
+    Exhausted,
+    Failed(SessionObservationFailure),
+}
+
+impl Recovery {
+    fn failure(self) -> Option<RuntimeOperationFailure> {
+        match self {
+            Self::Failed(SessionObservationFailure::InvalidReadback) => Some(RuntimeOperationFailure::Unknown),
+            _ => None,
+        }
+    }
+
+    fn renew(&mut self) {
+        if self.failure().is_none() { *self = Self::Available; }
+    }
+}
+
 struct Waiter {
     command: timeline::Command,
     reply: WaiterReply,
     call: Option<SessionCall>,
 }
 
+impl Waiter {
+    fn pending(&self) -> bool {
+        !matches!(&self.reply, WaiterReply::Observe { reply: None, .. })
+    }
+}
+
 enum WaiterReply {
     Observe {
         lease_id: String,
         lease_added: bool,
-        reply: oneshot::Sender<SessionObserveOutcome>,
+        generation: u64,
+        waiter_id: u64,
+        reply: Option<oneshot::Sender<SessionObserveOutcome>>,
     },
     Timeline(oneshot::Sender<timeline::Outcome>),
     Send {
@@ -83,17 +111,27 @@ impl Observation {
         if let Some(task) = &self.task { task.cancel(); }
     }
 
-    fn take_failed_waiters(&mut self) -> Vec<Waiter> {
-        let waiters = std::mem::take(&mut self.waiters);
-        for waiter in &waiters {
-            if let WaiterReply::Observe {
-                lease_id,
-                lease_added: true,
-                ..
-            } = &waiter.reply
-            {
-                self.leases.remove(lease_id);
+    // Keep observe demand ownership until the watcher confirms delivery or cancellation.
+    fn take_waiter(&mut self, index: usize) -> Waiter {
+        let waiter = &mut self.waiters[index];
+        if let WaiterReply::Observe { lease_id, generation, waiter_id, reply, .. } = &mut waiter.reply {
+            Waiter {
+                command: waiter.command.clone(),
+                reply: WaiterReply::Observe {
+                    lease_id: lease_id.clone(), lease_added: false,
+                    generation: *generation, waiter_id: *waiter_id, reply: reply.take(),
+                },
+                call: waiter.call.take(),
             }
+        } else {
+            self.waiters.remove(index)
+        }
+    }
+
+    fn take_failed_waiters(&mut self) -> Vec<Waiter> {
+        let mut waiters = Vec::new();
+        while let Some(index) = self.waiters.iter().position(Waiter::pending) {
+            waiters.push(self.take_waiter(index));
         }
         waiters
     }
@@ -115,13 +153,13 @@ pub(super) fn valid_lease_id(value: &str) -> bool {
 }
 
 impl SessionShared {
-    pub(super) fn terminal_sync_pending(&self, identity: &SessionIdentity) -> bool {
+    pub(crate) fn terminal_sync_pending(&self, identity: &SessionIdentity) -> bool {
         self.observations.lock().expect("session observation lock")
             .get(&session_identity_lane_key(identity))
             .is_some_and(|entry| entry.terminal_sync.load(Ordering::Acquire))
     }
 
-    pub(super) fn observation_generation(&self, identity: &SessionIdentity) -> Option<u64> {
+    pub(crate) fn observation_generation(&self, identity: &SessionIdentity) -> Option<u64> {
         self.observations
             .lock()
             .expect("session observation lock")
@@ -155,7 +193,8 @@ impl SessionShared {
     fn watch_observe_reply(
         &self,
         identity: &SessionIdentity,
-        lease_id: &str,
+        generation: u64,
+        waiter_id: u64,
         mut reply: oneshot::Sender<SessionObserveOutcome>,
     ) -> oneshot::Sender<SessionObserveOutcome> {
         let (forward, mut received) = oneshot::channel();
@@ -165,25 +204,34 @@ impl SessionShared {
             .cloned()
             .expect("session completion handle");
         let identity = identity.clone();
-        let lease_id = lease_id.to_owned();
+        let self_shared = self.clone();
         let (task, _) = OwnedTask::spawn(move |cancel| async move {
-            tokio::select! {
+            let acquired = tokio::select! {
                 _ = cancel.cancelled() => return,
-                _ = reply.closed() => {},
+                _ = reply.closed() => false,
                 result = &mut received => {
-                    if let Ok(outcome) = result {
-                        if reply.send(outcome).is_ok() { return; }
+                    match result {
+                        Ok(outcome) => {
+                            let acquired = matches!(&outcome, SessionObserveOutcome::Observed { .. });
+                            reply.send(outcome).is_ok() && acquired
+                        }
+                        Err(_) => false,
                     }
                 }
+            };
+            let Ok(mut producer) = self_shared.producer() else { return; };
+            loop {
+                let epoch = producer.retry_epoch();
+                if let Ok(slot) = sender.reserve_control().await {
+                    if slot.send(SessionCommand::Producing {
+                        producer: producer.inherited(),
+                        command: Box::new(SessionCommand::ObserveReplyCompleted {
+                            identity: identity.clone(), generation, waiter_id, acquired,
+                        }),
+                    }).is_ok() { break; }
+                }
+                producer.wait_retry(epoch).await;
             }
-            let (release_reply, _) = oneshot::channel();
-            let _ = sender
-                .send_command(SessionCommand::Release {
-                    identity,
-                    lease_id,
-                    reply: release_reply,
-                })
-                .await;
         });
         let mut tasks = self.read_tasks.lock().expect("session read tasks lock");
         tasks.retain(|task| task.try_lock().map_or(true, |task| !task.is_finished()));
@@ -210,7 +258,7 @@ impl SessionShared {
     pub(super) async fn shutdown_observations(&self) {
         let entries =
             std::mem::take(&mut *self.observations.lock().expect("session observation lock"));
-        for (_, mut entry) in entries {
+        for (_, entry) in entries {
             if let Some(task) = &entry.task { task.cancel(); }
             if let Some(handle) = entry.handle {
                 handle.close().await;
@@ -230,14 +278,9 @@ impl SessionLane {
     ) -> Result<(), RuntimeOperationFailure> {
         if shared.terminal_delivery.is_stopping() { return Err(RuntimeOperationFailure::Unavailable); }
         let key = session_identity_lane_key(identity);
-        if shared
-            .observations
-            .lock()
-            .expect("session observation lock")
-            .get(&key)
-            .is_some_and(|entry| entry.closing || entry.handle.is_some())
-        {
-            return Ok(());
+        if let Some(entry) = shared.observations.lock().expect("session observation lock").get(&key) {
+            if let Some(failure) = entry.recovery.failure() { return Err(failure); }
+            if entry.closing || entry.handle.is_some() { return Ok(()); }
         }
         let endpoint = platform::endpoint::runtime_address::RuntimeEndpoint::try_new(
             identity.provider().as_str(),
@@ -284,7 +327,7 @@ impl SessionLane {
                     terminal_sync: Arc::new(AtomicBool::new(false)),
                     close_after_sync: None,
                     restart_after_close: false,
-                    recovery_available: true,
+                    recovery: Recovery::Available,
                     needs_sync: false,
                     leases: HashSet::new(),
                     runs: HashSet::new(),
@@ -314,6 +357,7 @@ impl SessionLane {
         let Some(entry) = observations.get_mut(&session_identity_lane_key(identity)) else {
             return;
         };
+        if entry.recovery.failure().is_some() { return; }
         if entry.closing || entry.baseline.is_some() {
             if crate::trace::enabled() {
                 crate::trace::log_unscoped("sessions.sync.skip", || serde_json::json!({
@@ -374,6 +418,17 @@ impl SessionLane {
                     "succeeded": result.is_ok(),
                 }));
             }
+            if let Ok(sync) = &result
+                && let crate::ports::SessionSyncCut::Restored { cursor, contiguous } = sync.cut
+                && (sync.view.identity != identity
+                    || sync.view.validate().is_err()
+                    || sync.source_epoch.is_none_or(|epoch| epoch == 0 || epoch > crate::state::MAX_SAFE_INTEGER)
+                    || cursor > crate::state::MAX_SAFE_INTEGER
+                    || !contiguous
+                    || sync.replay_baseline.is_some())
+            {
+                result = Err(RuntimeOperationFailure::Unknown);
+            }
             if let Ok(sync) = &mut result && sync.view.identity == identity {
                 for terminals in sync.terminal_runs.chunks(crate::state::MAX_CHANGE_COUNT) {
                     let terminals: Vec<_> = terminals.iter().map(|terminal|
@@ -385,7 +440,8 @@ impl SessionLane {
                         let (reply, received) = oneshot::channel();
                         if let Ok(slot) = sender.reserve_control().await {
                             let _ = slot.send(SessionCommand::SyncTerminals {
-                                identity: identity.clone(), generation, terminals: terminals.clone(), permit, reply,
+                                identity: identity.clone(), generation, terminals: terminals.clone(),
+                                publish: !matches!(sync.cut, crate::ports::SessionSyncCut::Restored { .. }), permit, reply,
                             });
                             if let Ok(Some(changes)) = received.await {
                                 if let Some(baseline) = &mut sync.replay_baseline {
@@ -475,7 +531,10 @@ impl SessionLane {
             crate::call::reply(call.as_ref(), reply, SessionObserveOutcome::Unavailable).await;
             return;
         }
-        let reply = shared.watch_observe_reply(&identity, &command.lease_id, reply);
+        let generation = shared.observations.lock().expect("session observation lock")
+            .get(&session_identity_lane_key(&identity)).expect("prepared observation").generation;
+        let waiter_id = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        let reply = shared.watch_observe_reply(&identity, generation, waiter_id, reply);
         let timeline = self.latest_command(&identity, command.window);
         let immediate = {
             let mut entries = shared
@@ -485,7 +544,7 @@ impl SessionLane {
             let entry = entries
                 .get_mut(&session_identity_lane_key(&identity))
                 .expect("prepared observation");
-            entry.recovery_available = true;
+            entry.recovery.renew();
             if entry.closing {
                 entry.restart_after_close = true;
             }
@@ -509,12 +568,16 @@ impl SessionLane {
                         else if entry.committed_view.is_none() { "no_committed_view" } else { "reuse_committed_view" },
                 }));
             }
-            if ready {
-                entry.leases.insert(command.lease_id.clone());
-                entry.committed_view.clone()
-            } else {
-                None
-            }
+            let immediate = if ready { entry.committed_view.clone() } else { None };
+            let lease_added = entry.leases.insert(command.lease_id.clone());
+            entry.waiters.push(Waiter {
+                command: timeline.clone(),
+                reply: WaiterReply::Observe {
+                    lease_id: command.lease_id, lease_added, generation, waiter_id, reply: Some(reply),
+                },
+                call,
+            });
+            immediate
         };
         if let Some(mut view) = immediate {
             let current = self.state.as_ref().expect("observation state").view();
@@ -533,35 +596,15 @@ impl SessionLane {
                 std::slice::from_mut(&mut view),
             )
             .await;
-            crate::call::reply(
-                call.as_ref(),
-                reply,
-                SessionObserveOutcome::Observed {
-                    lease_id: command.lease_id,
-                    view,
-                },
-            )
-            .await;
+            let waiter = {
+                let mut entries = shared.observations.lock().expect("session observation lock");
+                let entry = entries.get_mut(&session_identity_lane_key(&identity)).expect("prepared observation");
+                let index = entry.waiters.iter().position(|waiter| matches!(&waiter.reply,
+                    WaiterReply::Observe { waiter_id: id, .. } if *id == waiter_id)).expect("observe waiter");
+                entry.take_waiter(index)
+            };
+            finish_waiter(waiter, Some(view)).await;
             return;
-        }
-        {
-            let mut entries = shared
-                .observations
-                .lock()
-                .expect("session observation lock");
-            let entry = entries
-                .get_mut(&session_identity_lane_key(&identity))
-                .expect("prepared observation");
-            let lease_added = entry.leases.insert(command.lease_id.clone());
-            entry.waiters.push(Waiter {
-                command: timeline.clone(),
-                reply: WaiterReply::Observe {
-                    lease_id: command.lease_id,
-                    lease_added,
-                    reply,
-                },
-                call,
-            });
         }
         self.start_sync(shared, &identity, timeline);
     }
@@ -594,7 +637,7 @@ impl SessionLane {
             let entry = entries
                 .get_mut(&session_identity_lane_key(&identity))
                 .expect("prepared observation");
-            entry.recovery_available = true;
+            entry.recovery.renew();
             if entry.closing {
                 entry.restart_after_close = true;
             }
@@ -665,7 +708,7 @@ impl SessionLane {
             if entry.waiters.len() >= MAX_WAITERS {
                 Some(waiter)
             } else {
-                entry.recovery_available = true;
+                entry.recovery.renew();
                 if entry.closing {
                     entry.restart_after_close = true;
                 }
@@ -696,7 +739,7 @@ impl SessionLane {
             let entry = entries
                 .get_mut(&session_identity_lane_key(identity))
                 .expect("prepared observation");
-            entry.recovery_available = true;
+            entry.recovery.renew();
             if entry.closing {
                 return Err(RuntimeOperationFailure::Unavailable);
             }
@@ -739,7 +782,7 @@ impl SessionLane {
         if entry.closing {
             return Err(RuntimeOperationFailure::Unavailable);
         }
-        entry.recovery_available = true;
+        entry.recovery.renew();
         entry.leases.insert(lease.clone());
         let needs_sync = entry.committed_view.is_none() || entry.needs_sync;
         drop(entries);
@@ -824,6 +867,77 @@ impl SessionLane {
         }
     }
 
+    pub(super) async fn observe_reply_completed(
+        &mut self,
+        shared: &SessionShared,
+        identity: SessionIdentity,
+        generation: u64,
+        waiter_id: u64,
+        acquired: bool,
+    ) {
+        let waiter = {
+            let mut entries = shared.observations.lock().expect("session observation lock");
+            let Some(entry) = entries.get_mut(&session_identity_lane_key(&identity)) else { return; };
+            let Some(index) = entry.waiters.iter().position(|waiter| matches!(&waiter.reply,
+                WaiterReply::Observe { generation: pending_generation, waiter_id: pending_id, .. }
+                    if *pending_generation == generation && *pending_id == waiter_id)) else { return; };
+            let waiter = entry.waiters.remove(index);
+            if let WaiterReply::Observe { lease_id, lease_added, .. } = &waiter.reply {
+                if acquired {
+                    for pending in &mut entry.waiters {
+                        if let WaiterReply::Observe { lease_id: pending_id, lease_added, .. } = &mut pending.reply
+                            && pending_id.as_str() == lease_id.as_str()
+                        {
+                            *lease_added = false;
+                        }
+                    }
+                } else if *lease_added {
+                    if let Some(WaiterReply::Observe { lease_added, .. }) = entry.waiters.iter_mut()
+                        .map(|waiter| &mut waiter.reply)
+                        .find(|reply| matches!(reply, WaiterReply::Observe { lease_id: pending_id, .. } if pending_id.as_str() == lease_id.as_str()))
+                    {
+                        *lease_added = true;
+                    } else {
+                        entry.leases.remove(lease_id);
+                    }
+                }
+            }
+            if !entry.demanded() && !entry.needs_sync && entry.handle.is_none()
+                && !entry.closing && entry.baseline.is_none() && entry.recovery.failure().is_none()
+            {
+                entries.remove(&session_identity_lane_key(&identity));
+            }
+            waiter
+        };
+        if waiter.pending() { finish_waiter(waiter, None).await; }
+        self.continue_observation(shared, &identity);
+    }
+
+    pub(super) async fn observation_failed(
+        &mut self,
+        shared: &SessionShared,
+        identity: &SessionIdentity,
+        binding: &crate::state::SessionEventBinding,
+        failure: SessionObservationFailure,
+    ) -> bool {
+        if binding.identity() != identity { return false; }
+        let waiters = {
+            let mut entries = shared.observations.lock().expect("session observation lock");
+            let Some(entry) = entries.get_mut(&session_identity_lane_key(identity)) else { return false; };
+            if binding.generation() != Some(entry.generation) || entry.closing || entry.handle.is_none() {
+                return false;
+            }
+            entry.recovery = Recovery::Failed(failure);
+            entry.needs_sync = false;
+            entry.restart_after_close = false;
+            if entry.close_after_sync.is_some() { entry.close_after_sync = Some(false); }
+            entry.take_failed_waiters()
+        };
+        self.close_observation(shared, identity, false);
+        for waiter in waiters { finish_failed_waiter(waiter, RuntimeOperationFailure::Unknown).await; }
+        true
+    }
+
     pub(super) async fn release(
         &mut self,
         shared: &SessionShared,
@@ -848,7 +962,7 @@ impl SessionLane {
             }
         };
         for waiter in waiters {
-            if let WaiterReply::Observe { lease_id, reply, .. } = waiter.reply {
+            if let WaiterReply::Observe { lease_id, reply: Some(reply), .. } = waiter.reply {
                 crate::call::reply(
                     waiter.call.as_ref(),
                     reply,
@@ -906,6 +1020,7 @@ impl SessionLane {
             entry.close_after_sync = Some(entry.close_after_sync.unwrap_or(false) || restart);
             return;
         }
+        let restart = restart && entry.recovery.failure().is_none();
         if entry.closing {
             if crate::trace::enabled() {
                 crate::trace::log_unscoped("sessions.observation.close_skip", || serde_json::json!({
@@ -1023,7 +1138,8 @@ impl SessionLane {
                     "hasHandle": entry.handle.is_some(), "demanded": entry.demanded(),
                 }));
             }
-            if !entry.demanded() && !entry.needs_sync {
+            // A failed receive lifecycle must not be recreated by the next observe.
+            if !entry.demanded() && !entry.needs_sync && entry.recovery.failure().is_none() {
                 entries.remove(&key);
                 return;
             }
@@ -1060,6 +1176,7 @@ impl SessionLane {
             let Some(entry) = entries.get(&session_identity_lane_key(identity)) else {
                 return;
             };
+            if entry.recovery.failure().is_some() { return; }
             if entry.closing || entry.baseline.is_some() || entry.handle.is_none() {
                 if crate::trace::enabled() {
                     crate::trace::log_unscoped("sessions.observation.continue_skip", || serde_json::json!({
@@ -1076,7 +1193,8 @@ impl SessionLane {
             }
             let command = entry
                 .waiters
-                .first()
+                .iter()
+                .find(|waiter| waiter.pending())
                 .map(|waiter| waiter.command.clone())
                 .or_else(|| {
                     if entry.needs_sync {
@@ -1118,6 +1236,7 @@ impl SessionLane {
         identity: &SessionIdentity,
         generation: u64,
         terminals: Vec<(crate::ports::SessionTerminalRun, Vec<String>)>,
+        publish: bool,
     ) -> Option<crate::state::SyncTerminalChanges> {
         if shared.observation_generation(identity) != Some(generation) { return None; }
         let before = self.state.as_ref()?;
@@ -1145,7 +1264,11 @@ impl SessionLane {
         }
         for (delta, snapshots) in committed {
             shared.receive_event(identity, &delta.changes);
-            shared.emit_session_delta(&delta, snapshots);
+            if publish {
+                shared.emit_session_delta(&delta, snapshots);
+            } else {
+                shared.emit_terminals(snapshots);
+            }
         }
         Some(changes)
     }
@@ -1157,7 +1280,7 @@ impl SessionLane {
         generation: u64,
         result: Result<SessionSync, RuntimeOperationFailure>,
     ) {
-        let (baseline, command, items_mode) = {
+        let (baseline, command, items_mode, handle) = {
             let mut entries = shared
                 .observations
                 .lock()
@@ -1193,12 +1316,23 @@ impl SessionLane {
             let Some(command) = entry.active_command.take() else {
                 return;
             };
-            let items_mode = entry.handle.as_ref().expect("sync observation handle").items_sync_mode();
+            let handle = Arc::clone(entry.handle.as_ref().expect("sync observation handle"));
+            let items_mode = handle.items_sync_mode();
             entry.task.take();
             entry.terminal_sync.store(false, Ordering::Release);
             shared.terminal_delivery.notify();
-            (baseline, command, items_mode)
+            (baseline, command, items_mode, handle)
         };
+        let failed = shared.observations.lock().expect("session observation lock")
+            .get_mut(&session_identity_lane_key(&identity)).is_some_and(|entry| {
+                if entry.recovery.failure().is_none() { return false; }
+                entry.close_after_sync = None;
+                true
+            });
+        if failed {
+            self.close_observation(shared, &identity, false);
+            return;
+        }
         let input_trace_started = crate::trace::enabled().then(Instant::now);
         if crate::trace::enabled() {
             if let Ok(sync) = &result {
@@ -1210,6 +1344,7 @@ impl SessionLane {
                     "sourceEpoch": sync.source_epoch, "cut": match sync.cut {
                         crate::ports::SessionSyncCut::Snapshot => serde_json::json!({ "kind": "snapshot" }),
                         crate::ports::SessionSyncCut::EventFrontier { cursor, contiguous } => serde_json::json!({ "kind": "event_frontier", "nativeCursor": cursor, "contiguous": contiguous }),
+                        crate::ports::SessionSyncCut::Restored { cursor, contiguous } => serde_json::json!({ "kind": "restored", "nativeCursor": cursor, "contiguous": contiguous }),
                     },
                     "retiredItemCount": sync.retired_item_ids.len(),
                     "retiredItemHashes": sync.retired_item_ids.iter().take(crate::state::MAX_ITEMS).map(|id| crate::trace::fingerprint(id)).collect::<Vec<_>>(),
@@ -1224,6 +1359,7 @@ impl SessionLane {
             .err()
             .copied()
             .unwrap_or(RuntimeOperationFailure::Unavailable);
+        let mut committed_cut = None;
         let view = match result {
             Ok(mut sync) if sync.view.identity == identity => {
                 super::session_ownership::enrich_views(
@@ -1277,7 +1413,7 @@ impl SessionLane {
                                 .expect("sync observation");
                             entry.committed_command = Some(command.clone());
                             entry.committed_view = Some(view.clone());
-                            entry.recovery_available = true;
+                            entry.recovery.renew();
                             for terminal in &sync.terminal_runs {
                                 entry.runs.remove(&terminal.run_id);
                                 entry.notified_terminals.insert(terminal.run_id.clone());
@@ -1285,6 +1421,7 @@ impl SessionLane {
                         }
                         self.state = Some(next.clone());
                         shared.store_snapshot_state(next).await;
+                        committed_cut = Some((sync.source_epoch, sync.cut));
                         if crate::trace::enabled() {
                             let trace_started = Instant::now();
                             crate::trace::log_unscoped("sessions.sync.reconciled", || serde_json::json!({
@@ -1363,16 +1500,16 @@ impl SessionLane {
                     .get_mut(&session_identity_lane_key(&identity))
                     .expect("sync observation");
                 let restart = failure != RuntimeOperationFailure::TargetRejected
-                    && entry.recovery_available
+                    && matches!(entry.recovery, Recovery::Available)
                     && entry.demanded();
                 if crate::trace::enabled() {
                     crate::trace::log_unscoped("sessions.sync.failure_close", || serde_json::json!({
                         "identity": crate::trace::identity_shape(&identity), "generation": entry.generation,
-                        "restart": restart, "recoveryAvailable": entry.recovery_available,
+                        "restart": restart, "recoveryAvailable": matches!(entry.recovery, Recovery::Available),
                         "needsSync": entry.needs_sync, "closing": entry.closing, "demanded": entry.demanded(),
                     }));
                 }
-                entry.recovery_available = false;
+                entry.recovery = Recovery::Exhausted;
                 let waiters = if restart {
                     Vec::new()
                 } else {
@@ -1390,6 +1527,11 @@ impl SessionLane {
             self.close_observation(shared, &identity, restart);
             return;
         }
+        if let Some((source_epoch, cut)) = committed_cut
+            && shared.observation_generation(&identity) == Some(generation)
+        {
+            handle.accept_sync(generation, source_epoch, cut);
+        }
         // Retain the remaining waiters as demand while each send resumes.
         loop {
             let waiter = {
@@ -1400,8 +1542,8 @@ impl SessionLane {
                 let entry = entries
                     .get_mut(&session_identity_lane_key(&identity))
                     .expect("sync observation");
-                entry.waiters.iter().position(|waiter| waiter.command == command)
-                    .map(|index| entry.waiters.remove(index))
+                entry.waiters.iter().position(|waiter| waiter.pending() && waiter.command == command)
+                    .map(|index| entry.take_waiter(index))
             };
             let Some(waiter) = waiter else { break; };
             match waiter {
@@ -1431,16 +1573,17 @@ impl SessionLane {
             let Some(entry) = entries.get_mut(&session_identity_lane_key(identity)) else {
                 return;
             };
+            if entry.recovery.failure().is_some() { return; }
             if crate::trace::enabled() {
                 crate::trace::log_unscoped("sessions.observation.recover", || serde_json::json!({
                     "identity": crate::trace::identity_shape(identity), "generation": entry.generation,
                     "needsSyncBefore": entry.needs_sync, "needsSyncAfter": true, "closing": entry.closing,
-                    "restart": entry.recovery_available, "hasBaseline": entry.baseline.is_some(),
+                    "restart": matches!(entry.recovery, Recovery::Available), "hasBaseline": entry.baseline.is_some(),
                 }));
             }
             entry.needs_sync = true;
-            let restart = entry.recovery_available;
-            entry.recovery_available = false;
+            let restart = matches!(entry.recovery, Recovery::Available);
+            entry.recovery = Recovery::Exhausted;
             restart
         };
         self.close_observation(shared, identity, restart);
@@ -1501,9 +1644,10 @@ async fn finish_failed_waiter(waiter: Waiter, failure: RuntimeOperationFailure) 
             };
             crate::call::reply(waiter.call.as_ref(), reply, outcome).await;
         }
-        WaiterReply::Observe { reply, .. } => {
+        WaiterReply::Observe { reply: Some(reply), .. } => {
             crate::call::reply(waiter.call.as_ref(), reply, observe_failure(failure)).await
         }
+        WaiterReply::Observe { reply: None, .. } => {}
         WaiterReply::Timeline(reply) => {
             let reason = match failure {
                 RuntimeOperationFailure::TargetRejected => {
@@ -1533,13 +1677,14 @@ async fn finish_waiter(waiter: Waiter, view: Option<SessionView>) {
             crate::call::reply(waiter.call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
         }
         WaiterReply::Observe {
-            lease_id, reply, ..
+            lease_id, reply: Some(reply), ..
         } => {
             let outcome = view
                 .map(|view| SessionObserveOutcome::Observed { lease_id, view })
                 .unwrap_or(SessionObserveOutcome::Unavailable);
             crate::call::reply(waiter.call.as_ref(), reply, outcome).await;
         }
+        WaiterReply::Observe { reply: None, .. } => {}
         WaiterReply::Timeline(reply) => {
             let outcome = view
                 .map(|view| {

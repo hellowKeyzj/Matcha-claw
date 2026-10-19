@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use foundation::execution::OwnerRuntimeHandle;
 use openclaw::gateway::request::{
-    OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
-    OpenClawQuestionListGatewayRequest, OpenClawQuestionResolveGatewayRequest,
+    OpenClawBrowserGatewayRequest, OpenClawCanvasGatewayRequest, OpenClawMcpAppGatewayRequest,
+    OpenClawProgressCardGatewayRequest, OpenClawQuestionListGatewayRequest,
+    OpenClawQuestionResolveGatewayRequest,
 };
 use platform::call::CallReceipt;
 use runtime_directory::{RuntimeControlLifecycleError, call::RuntimeControlCallContext};
@@ -435,6 +436,29 @@ impl PeerHandle {
         .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
     }
 
+    pub(crate) async fn open_claw_canvas_request(
+        &self,
+        request: OpenClawCanvasGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
+    ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
+        self.request_query(|reply| PeerQuery::OpenClawCanvasRequest {
+            request,
+            call,
+            reply,
+        })
+        .await
+        .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+    }
+
+    pub(crate) async fn open_claw_progress_card_request(
+        &self,
+        request: OpenClawProgressCardGatewayRequest,
+    ) -> Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed> {
+        self.request_query(|reply| PeerQuery::OpenClawProgressCardRequest { request, reply })
+            .await
+            .map_err(|_| crate::RequestAdmissionClosed::new(crate::HostPhase::ShutDown))?
+    }
+
     pub(crate) async fn open_claw_question_list(
         &self,
         request: OpenClawQuestionListGatewayRequest,
@@ -505,6 +529,12 @@ impl PeerHandle {
                 (
                     call,
                     openclaw::gateway::loopback::GatewayOperation::McpAppRequest,
+                )
+            }),
+            PeerQuery::OpenClawCanvasRequest { call, .. } => call.clone().map(|call| {
+                (
+                    call,
+                    openclaw::gateway::loopback::GatewayOperation::CanvasRequest,
                 )
             }),
             PeerQuery::OpenClawQuestionResolve { call, .. } => call.clone().map(|call| {

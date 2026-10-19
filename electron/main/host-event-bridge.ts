@@ -1,10 +1,12 @@
 import type { BrowserWindow } from 'electron';
+import { decodeBoardChangedEvent, decodeBoardCommandEvent } from '../../src/types/board';
 import type { HostEventBus } from '../api/event-bus';
 import type { DirectRuntimeHostExit } from './runtime-host-delivery/direct-host';
 import type { RuntimeHostLifecycle } from './runtime-host-delivery/lifecycle-owner';
 import {
   decodeSessionDelta,
   decodeSessionResync,
+  isSessionIdentity,
 } from './runtime-host-delivery/transport/sessions/session-contract';
 import {
   readGatewayStatusProjection,
@@ -145,6 +147,23 @@ export function registerHostEventBridge(deps: {
 
   unsubscribers.push(deps.runtimeHost.onSafeEvent((event) => {
     switch (event.type) {
+      case 'board:changed': {
+        const payload = decodeBoardChangedEvent({ identity: event.identity, revision: event.revision,
+          ...(event.widget === undefined ? {} : { widget: event.widget }) });
+        if (isSessionIdentity(payload.identity)) deps.sessionObservers.publish(payload.identity, 'board:changed', payload);
+        return;
+      }
+      case 'board:command': {
+        const payload = decodeBoardCommandEvent({ identity: event.identity, command: event.command });
+        if (isSessionIdentity(payload.identity)) deps.sessionObservers.publish(payload.identity, 'board:command', payload);
+        return;
+      }
+      case 'board:resync':
+        deps.sessionObservers.publishHint('board:resync');
+        return;
+      case 'openclaw.progress.changed':
+        deps.sessionObservers.publishHint('openclaw:progress-changed');
+        return;
       case 'call.changed':
         emit('call:changed', { callId: event.callId, revision: event.revision });
         return;
@@ -191,6 +210,7 @@ export function registerHostEventBridge(deps: {
     }
   }));
   unsubscribers.push(deps.runtimeHost.onDisconnect(() => {
+    deps.sessionObservers.publishHint('board:resync');
     emit('runtime-host:disconnected', {});
   }));
   unsubscribers.push(deps.runtimeHost.onExit((exit) => {

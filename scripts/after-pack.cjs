@@ -512,7 +512,7 @@ exports.default = async function afterPack(context) {
     { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
     { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
     { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
-    ...['qianfan', 'stepfun', 'tencent', 'xiaomi', 'qwen', 'kimi', 'volcengine', 'opencode'].map((pluginId) => ({
+    ...['qianfan', 'stepfun', 'tencent', 'xiaomi', 'qwen', 'kimi', 'volcengine', 'opencode', 'searxng'].map((pluginId) => ({
       pluginId,
       required: true,
       localSourceCandidates: [join(__dirname, '..', 'build', 'openclaw-plugins', pluginId)],

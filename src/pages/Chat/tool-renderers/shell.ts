@@ -2,6 +2,7 @@ import type { TFunction } from 'i18next';
 import type { SessionRenderToolCard } from '../../../types/session/tool-card';
 import type { ToolActivityTextBlock, ToolActivityTrailingLabel, ToolActivityContent } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText } from './result-content';
+import type { ToolActivityDescriptor } from './types';
 
 const SHELL_TOOL_NAME_PATTERN = /^(bash|shell|powershell|pwsh|terminal|command|exec|runcommand|run_command|run-command|run command|cmd|sh)$/i;
 const COMMAND_KEYS = ['command', 'cmd', 'script', 'code', 'query'];
@@ -143,7 +144,7 @@ function shellLabel(toolName: string, command: string): string {
 }
 
 function titleFromCommand(command: string, label: string, t: TFunction<'chat'>): string {
-  const summary = truncateText(compactWhitespace(command), TITLE_COMMAND_LIMIT);
+  const summary = truncateText(compactWhitespace(command.match(/\S[^\r\n]*/)?.[0] ?? ''), TITLE_COMMAND_LIMIT);
   if (summary) {
     return summary;
   }
@@ -262,6 +263,7 @@ function buildTextBlocks(command: string, label: string, output: ParsedShellOutp
       title: t('toolActivity.shell.command', { name: label }),
       text: command.trim(),
       copyable: true,
+      format: 'command',
     });
   }
   if (output.stdout) {
@@ -310,6 +312,18 @@ export function isShellToolCard(tool: SessionRenderToolCard): boolean {
   return SHELL_TOOL_NAME_PATTERN.test(tool.name.trim()) || SHELL_TOOL_NAME_PATTERN.test(tool.displayTitle.trim());
 }
 
+export function describeShellToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityDescriptor {
+  const description = readStringField(tool.input, ['description'])
+    ?? readStringField(parseJsonObject(tool.inputText ?? ''), ['description']);
+  const command = description ? '' : readCommand(tool);
+  const label = shellLabel(tool.name, command.match(/\S[^\r\n]*/)?.[0] ?? '');
+  return {
+    kind: 'command',
+    title: description ? truncateText(compactWhitespace(description), TITLE_COMMAND_LIMIT) : titleFromCommand(command, label, t),
+    label: tool.displayTitle?.trim() || tool.name,
+  };
+}
+
 export function shellToolActivityRenderer(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {
   const command = readCommand(tool).trim();
   const label = shellLabel(`${tool.name} ${tool.displayTitle}`, command);
@@ -317,7 +331,7 @@ export function shellToolActivityRenderer(tool: SessionRenderToolCard, t: TFunct
   const textBlocks = buildTextBlocks(command, label, output, t);
 
   return {
-    title: titleFromCommand(command, label, t),
+    title: describeShellToolActivity(tool, t).title,
     hasOutputError: isNonZeroExitCode(output.exitCode),
     canExpand: textBlocks.length > 0,
     trailingLabels: buildTrailingLabels(tool, output, t),

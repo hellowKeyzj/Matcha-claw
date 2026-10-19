@@ -3,8 +3,9 @@ use tokio::sync::oneshot;
 use foundation::execution::QueryRoute;
 
 use openclaw::gateway::request::{
-    OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
-    OpenClawQuestionListGatewayRequest, OpenClawQuestionResolveGatewayRequest,
+    OpenClawBrowserGatewayRequest, OpenClawCanvasGatewayRequest, OpenClawMcpAppGatewayRequest,
+    OpenClawProgressCardGatewayRequest, OpenClawQuestionListGatewayRequest,
+    OpenClawQuestionResolveGatewayRequest,
 };
 
 use crate::{
@@ -106,6 +107,19 @@ pub(crate) enum PeerQuery {
             Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
         >,
     },
+    OpenClawCanvasRequest {
+        request: OpenClawCanvasGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
+        reply: oneshot::Sender<
+            Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
+        >,
+    },
+    OpenClawProgressCardRequest {
+        request: OpenClawProgressCardGatewayRequest,
+        reply: oneshot::Sender<
+            Result<openclaw::port::OpenClawGatewayRequestOutcome, crate::RequestAdmissionClosed>,
+        >,
+    },
     OpenClawQuestionList {
         request: OpenClawQuestionListGatewayRequest,
         reply: oneshot::Sender<
@@ -138,17 +152,23 @@ impl PeerQuery {
             | Self::OpenClawControlUiUrl { .. }
             | Self::OpenClawGatewaySnapshot { .. }
             | Self::OpenClawControlSnapshot { .. }
+            | Self::OpenClawCanvasRequest { .. }
             | Self::OpenClawQuestionList { .. } => QueryRoute::Direct,
             // Generic browser paths can include profile/config transactions; keep their lane.
             Self::OpenClawBrowserRequest { .. } => {
                 QueryRoute::Keyed(PeerLaneKey::Lifecycle(RuntimeDriverIdentity::open_claw().endpoint()))
             }
             // Model-context writes are shared by every view in the native session.
-            Self::OpenClawMcpAppRequest { request, .. } => {
+            Self::OpenClawMcpAppRequest { request, .. } => QueryRoute::Keyed(PeerLaneKey::McpApp {
+                identity: sessions_module::command::session_identity_lane_key(
+                    &request.session_identity,
+                ),
+            }),
+            Self::OpenClawProgressCardRequest { request, .. } => {
                 QueryRoute::Keyed(PeerLaneKey::McpApp {
-                    session_key: request.session_key
-                        .trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
-                        .to_owned(),
+                    identity: sessions_module::command::session_identity_lane_key(
+                        &request.session_identity,
+                    ),
                 })
             }
             Self::OpenClawQuestionResolve { request, .. } => {

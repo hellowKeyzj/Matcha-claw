@@ -169,7 +169,7 @@ pub struct Endpoint {
     agents: Vec<Agent>,
     accepts_dynamic_agents: bool,
     capabilities: Capabilities,
-    capability_families: [CapabilityFamily; 10],
+    capability_families: [CapabilityFamily; 11],
     control_state: ControlState,
 }
 
@@ -239,7 +239,7 @@ impl Endpoint {
         &self.capabilities
     }
 
-    pub fn capability_families(&self) -> &[CapabilityFamily; 10] {
+    pub fn capability_families(&self) -> &[CapabilityFamily; 11] {
         &self.capability_families
     }
 
@@ -530,7 +530,7 @@ impl CapabilityFamily {
         self.availability
     }
 
-    fn from_surface(surface: crate::RuntimeCapabilitySurface) -> [Self; 10] {
+    fn from_surface(surface: crate::RuntimeCapabilitySurface) -> [Self; 11] {
         [
             Self::new(
                 "session",
@@ -557,6 +557,7 @@ impl CapabilityFamily {
                 surface.supports(RuntimeCapabilityFamily::Lifecycle),
             ),
             Self::new("usage", surface.supports(RuntimeCapabilityFamily::Usage)),
+            Self::new("board", surface.supports(RuntimeCapabilityFamily::Board)),
         ]
     }
 

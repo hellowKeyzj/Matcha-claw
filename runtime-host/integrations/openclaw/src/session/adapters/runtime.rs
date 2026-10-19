@@ -271,14 +271,19 @@ impl OpenClawDriver {
             }
         };
         let params =
-            crate::session::protocol::SessionModelPatchParams::new(session_key, Some(model));
+            crate::session::protocol::SessionModelPatchParams::new(session_key, Some(model.clone()));
         match self
             .session_gateway
             .patch_session_model_diagnostic_cancellable(params, &cancellation)
             .await
         {
-            Ok(InvocationOutcome::Succeeded(result)) => SessionModelSelectionOutcome::Succeeded {
-                model_state: result.resolved.model_state(),
+            Ok(InvocationOutcome::Succeeded(result)) => {
+                let mut model_state = result.resolved.model_state();
+                if model_state.selected_ref() != Some(model.as_str()) {
+                    return SessionModelSelectionOutcome::OutcomeUnknown;
+                }
+                model_state.selection_id = Some(command.model_selection_id);
+                SessionModelSelectionOutcome::Succeeded { model_state }
             },
             Ok(InvocationOutcome::TargetRejected(
                 crate::port::SessionModelPatchFailure::TargetRejected(Some(rejection)),

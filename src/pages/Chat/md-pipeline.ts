@@ -4,6 +4,7 @@ import type Renderer from 'markdown-it/lib/renderer.mjs';
 import katex from 'katex';
 import { trackUiTiming } from '@/lib/telemetry';
 import type { AttachedFileMeta } from '@/stores/chat';
+import { installMarkdownDetails } from './md-details';
 
 const MARKDOWN_RENDER_CACHE_TTL_MS = 10 * 60_000;
 const MARKDOWN_RENDER_CACHE_MAX_ENTRIES = 240;
@@ -212,6 +213,8 @@ function createMarkdownRenderer(): MarkdownIt {
     breaks: true,
     linkify: false,
   });
+
+  installMarkdownDetails(renderer);
 
   const defaultLinkOpenRenderer = renderer.renderer.rules.link_open
     ?? ((tokens: Token[], idx: number, options: MarkdownRenderOptions, _env: Parameters<Renderer['render']>[2], self: Renderer) => self.renderToken(tokens, idx, options));

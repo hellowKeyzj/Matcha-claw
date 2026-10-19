@@ -1,6 +1,8 @@
 mod cron_history;
 mod diagnostics_archive;
 pub(crate) mod organization;
+pub(crate) mod search;
+pub(crate) mod tasks;
 mod team_member_introductions;
 mod wiki_ingest_llm;
 

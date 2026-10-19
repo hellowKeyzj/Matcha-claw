@@ -15,10 +15,10 @@ use tokio::sync::Mutex;
 
 use crate::{
     gateway::request::{
-        OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest,
+        OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest, OpenClawCanvasGatewayRequest, OpenClawProgressCardGatewayRequest,
         OpenClawQuestionListGatewayRequest, OpenClawQuestionResolveGatewayRequest,
-        decode_browser_request, decode_mcp_app_request, decode_question_list_request,
-        decode_question_resolve_request,
+        decode_browser_request, decode_mcp_app_request, decode_canvas_request, decode_progress_card_request, is_mcp_app_operation_id,
+        decode_question_list_request, decode_question_resolve_request,
     },
     port::OpenClawGatewayRequestOutcome,
 };
@@ -37,12 +37,13 @@ const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_EXECUTE_BYTES: usize = 1_000_000;
 const BROWSER_SCOPE: &str = "openclaw.browser";
 const MCP_APP_SCOPE: &str = "openclaw.mcpApp";
+const CANVAS_SCOPE: &str = "openclaw.canvas";
+const CANVAS_OPERATION: &str = "canvas.document.view";
 const QUESTION_SCOPE: &str = "openclaw.question";
 const BROWSER_OPERATION: &str = "browser.request";
 const QUESTION_LIST_OPERATION: &str = "question.list";
 const QUESTION_RESOLVE_OPERATION: &str = "question.resolve";
 const BROWSER_SUBJECT: &str = "openclaw-browser";
-const MCP_APP_SUBJECT: &str = "openclaw-mcp-app";
 const QUESTION_SUBJECT: &str = "openclaw-question";
 
 #[derive(Clone, Copy, Serialize)]
@@ -51,6 +52,8 @@ pub enum GatewayOperation {
     BrowserRequest,
     #[serde(rename = "mcp.app.request")]
     McpAppRequest,
+    #[serde(rename = "canvas.document.view")]
+    CanvasRequest,
     #[serde(rename = "question.resolve")]
     QuestionResolve,
 }
@@ -74,6 +77,7 @@ pub async fn begin_gateway_call(
     let command = match operation {
         GatewayOperation::BrowserRequest => "browser.request",
         GatewayOperation::McpAppRequest => "mcp.app.request",
+        GatewayOperation::CanvasRequest => "canvas.document.view",
         GatewayOperation::QuestionResolve => "question.resolve",
     };
     calls.begin(command, &GatewayCallDetail { runtime: "openclaw", operation }).await
@@ -90,6 +94,13 @@ pub async fn finish_gateway_call(
         | OpenClawGatewayRequestOutcome::CapacityExhausted
         | OpenClawGatewayRequestOutcome::Unavailable => CallStatus::Rejected,
         OpenClawGatewayRequestOutcome::OutcomeUnknown => CallStatus::Unknown,
+        OpenClawGatewayRequestOutcome::SurfaceRejected(failure) => {
+            if *failure == crate::port::OpenClawSurfaceFailure::OutcomeUnknown {
+                CallStatus::Unknown
+            } else {
+                CallStatus::Rejected
+            }
+        },
     };
     finish_gateway_call_status(call, operation, status).await
 }
@@ -115,6 +126,17 @@ pub trait OpenClawGatewayCapabilityPort: Send + Sync {
         &self,
         request: OpenClawMcpAppGatewayRequest,
         call: Option<GatewayCallContext>,
+    ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
+
+    fn canvas_request(
+        &self,
+        request: OpenClawCanvasGatewayRequest,
+        call: Option<GatewayCallContext>,
+    ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
+
+    fn progress_card_request(
+        &self,
+        request: OpenClawProgressCardGatewayRequest,
     ) -> OpenClawGatewayCapabilityFuture<Result<OpenClawGatewayRequestOutcome, ()>>;
 
     fn question_list(
@@ -227,13 +249,19 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
             EXECUTE_ENDPOINT,
             decoded.authorization.scope,
             decoded.authorization.capability.as_str(),
-            decoded.authorization.subject,
+            &decoded.authorization.subject,
         )
         .is_err()
     {
         return unauthorized();
     }
 
+    if let Invocation::ProgressCard(request) = decoded.invocation {
+        return match dependencies.gateway.progress_card_request(request).await {
+            Ok(outcome) => response_for_outcome(outcome),
+            Err(_) => response_for_outcome(OpenClawGatewayRequestOutcome::SurfaceRejected(crate::port::OpenClawSurfaceFailure::Unavailable)),
+        };
+    }
     if let Invocation::QuestionList(request) = decoded.invocation {
         return match dependencies.gateway.question_list(request).await {
             Ok(outcome) => response_for_outcome(outcome),
@@ -243,8 +271,9 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
     let operation = match &decoded.invocation {
         Invocation::Browser(_) => GatewayOperation::BrowserRequest,
         Invocation::McpApp(_) => GatewayOperation::McpAppRequest,
+        Invocation::Canvas(_) => GatewayOperation::CanvasRequest,
         Invocation::QuestionResolve(_) => GatewayOperation::QuestionResolve,
-        Invocation::QuestionList(_) => unreachable!("question reads return before mutation audit"),
+        Invocation::QuestionList(_) | Invocation::ProgressCard(_) => unreachable!("reads return before mutation audit"),
     };
     let call = match &dependencies.calls {
         Some(calls) => match begin_gateway_call(calls, operation).await {
@@ -256,8 +285,9 @@ async fn handle(dependencies: Dependencies, request: Request) -> Response {
     let outcome = match decoded.invocation {
         Invocation::Browser(request) => dependencies.gateway.browser_request(request, call).await,
         Invocation::McpApp(request) => dependencies.gateway.mcp_app_request(request, call).await,
+        Invocation::Canvas(request) => dependencies.gateway.canvas_request(request, call).await,
         Invocation::QuestionResolve(request) => dependencies.gateway.question_resolve(request, call).await,
-        Invocation::QuestionList(_) => unreachable!("question reads return before mutation audit"),
+        Invocation::QuestionList(_) | Invocation::ProgressCard(_) => unreachable!("reads return before mutation audit"),
     };
     match outcome {
         Ok(outcome) => response_for_outcome(outcome),
@@ -283,12 +313,14 @@ struct DecodeRequest {
 struct RouteAuthorization {
     scope: &'static str,
     capability: String,
-    subject: &'static str,
+    subject: String,
 }
 
 enum Invocation {
     Browser(OpenClawBrowserGatewayRequest),
     McpApp(OpenClawMcpAppGatewayRequest),
+    Canvas(OpenClawCanvasGatewayRequest),
+    ProgressCard(OpenClawProgressCardGatewayRequest),
     QuestionList(OpenClawQuestionListGatewayRequest),
     QuestionResolve(OpenClawQuestionResolveGatewayRequest),
 }
@@ -307,37 +339,53 @@ impl DecodeRequest {
                 authorization: RouteAuthorization {
                     scope: BROWSER_SCOPE,
                     capability: BROWSER_OPERATION.to_owned(),
-                    subject: BROWSER_SUBJECT,
+                    subject: BROWSER_SUBJECT.to_owned(),
                 },
                 invocation: Invocation::Browser(
                     decode_browser_request(wire.input).map_err(|_| DecodeError)?,
                 ),
             }),
-            ("openclaw.mcpApp", operation_id) if operation_id.starts_with("mcp.app.") => {
-                let mut input = wire.input.as_object().cloned().ok_or(DecodeError)?;
-                if input.contains_key("operationId") {
-                    return Err(DecodeError);
-                }
-                input.insert(
-                    "operationId".to_owned(),
-                    Value::String(wire.operation_id.clone()),
-                );
+            ("openclaw.mcpApp", operation_id) if is_mcp_app_operation_id(operation_id) => {
+                let request = decode_mcp_app_request(surface_input(wire.input, &wire.operation_id)?)
+                    .map_err(|_| DecodeError)?;
                 Ok(Self {
                     authorization: RouteAuthorization {
                         scope: MCP_APP_SCOPE,
                         capability: wire.operation_id,
-                        subject: MCP_APP_SUBJECT,
+                        subject: surface_subject(&request.session_identity)?,
                     },
-                    invocation: Invocation::McpApp(
-                        decode_mcp_app_request(Value::Object(input)).map_err(|_| DecodeError)?,
-                    ),
+                    invocation: Invocation::McpApp(request),
+                })
+            }
+            ("openclaw.canvas", CANVAS_OPERATION) => {
+                let request = decode_canvas_request(surface_input(wire.input, &wire.operation_id)?)
+                    .map_err(|_| DecodeError)?;
+                Ok(Self {
+                    authorization: RouteAuthorization {
+                        scope: CANVAS_SCOPE,
+                        capability: wire.operation_id,
+                        subject: surface_subject(&request.session_identity)?,
+                    },
+                    invocation: Invocation::Canvas(request),
+                })
+            }
+            ("openclaw.progress", "progressCard.get") => {
+                let request = decode_progress_card_request(surface_input(wire.input, &wire.operation_id)?)
+                    .map_err(|_| DecodeError)?;
+                Ok(Self {
+                    authorization: RouteAuthorization {
+                        scope: "openclaw.progress",
+                        capability: wire.operation_id,
+                        subject: surface_subject(&request.session_identity)?,
+                    },
+                    invocation: Invocation::ProgressCard(request),
                 })
             }
             ("openclaw.question", QUESTION_LIST_OPERATION) => Ok(Self {
                 authorization: RouteAuthorization {
                     scope: QUESTION_SCOPE,
                     capability: QUESTION_LIST_OPERATION.to_owned(),
-                    subject: QUESTION_SUBJECT,
+                    subject: QUESTION_SUBJECT.to_owned(),
                 },
                 invocation: Invocation::QuestionList(
                     decode_question_list_request(wire.input).map_err(|_| DecodeError)?,
@@ -347,7 +395,7 @@ impl DecodeRequest {
                 authorization: RouteAuthorization {
                     scope: QUESTION_SCOPE,
                     capability: QUESTION_RESOLVE_OPERATION.to_owned(),
-                    subject: QUESTION_SUBJECT,
+                    subject: QUESTION_SUBJECT.to_owned(),
                 },
                 invocation: Invocation::QuestionResolve(
                     decode_question_resolve_request(wire.input).map_err(|_| DecodeError)?,
@@ -358,9 +406,25 @@ impl DecodeRequest {
     }
 }
 
+fn surface_input(input: Value, operation_id: &str) -> Result<Value, DecodeError> {
+    let input = input.as_object().ok_or(DecodeError)?;
+    if input.get("operationId").and_then(Value::as_str) != Some(operation_id) { return Err(DecodeError); }
+    Ok(Value::Object(input.clone()))
+}
+
+fn surface_subject(identity: &sessions_module::state::SessionIdentity) -> Result<String, DecodeError> {
+    use platform::endpoint::runtime_address::{RuntimeEndpoint, SessionIdentity};
+    let endpoint = RuntimeEndpoint::try_new("openclaw", "local").map_err(|_| DecodeError)?;
+    Ok(SessionIdentity::try_new(endpoint, &identity.agent_id, &identity.session_key)
+        .map_err(|_| DecodeError)?.canonical_key())
+}
+
 fn response_for_outcome(outcome: OpenClawGatewayRequestOutcome) -> Response {
     match outcome {
         OpenClawGatewayRequestOutcome::Succeeded(payload) => Response::json(200, payload),
+        OpenClawGatewayRequestOutcome::SurfaceRejected(failure) => Response::json(
+            failure.http_status(), json!({ "error": failure.public_error() }),
+        ),
         OpenClawGatewayRequestOutcome::CapacityExhausted => Response::json(
             409,
             json!({ "success": false, "error": "OpenClaw Gateway request capacity is exhausted" }),

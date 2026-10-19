@@ -25,6 +25,7 @@ mod owners;
 pub(crate) mod ports;
 mod provisioning;
 mod resources;
+mod search_lifecycle;
 mod session_ingress;
 #[allow(dead_code)]
 mod session_shutdown;
@@ -89,6 +90,7 @@ fn prepare_host_stage(
         open_claw_secret,
         organization_store,
         runtime_state_dir,
+        searxng_resources_dir,
         app_log_dir,
         parent_callback_base_url,
         parent_callback_dispatch_token,
@@ -104,6 +106,7 @@ fn prepare_host_stage(
         open_claw_secret,
         organization_store,
         runtime_state_dir,
+        searxng_resources_dir,
         app_log_dir,
         runtime_observation,
     });
@@ -188,6 +191,7 @@ fn build_peer_runtime_stage(
         openclaw_startup_diagnostics: prepared.openclaw_startup_diagnostics,
         clawhub_registry: prepared.clawhub_registry,
         toolchain: prepared.toolchain,
+        search_service: prepared.search_service,
         runtime_host_mcp_executable: prepared.runtime_host_mcp_executable,
         runtime_host_mcp_state_dir: prepared.runtime_host_mcp_state_dir,
         sealed_resource: sealed.sealed_resource,
@@ -242,6 +246,7 @@ fn spawn_owner_runtime_stage(
         openclaw_startup_diagnostics,
         clawhub_registry,
         toolchain,
+        search_service,
         runtime_host_mcp_executable,
         runtime_host_mcp_state_dir,
         sealed_resource,
@@ -266,6 +271,7 @@ fn spawn_owner_runtime_stage(
         runtime_observation: runtime_observation.clone(),
         diagnostics: diagnostics.clone(),
         toolchain: Arc::clone(&toolchain),
+        search_service,
         open_claw: Arc::clone(&runtime.open_claw),
         matcha_driver: runtime.matcha_runtime_driver.clone(),
         admission: Arc::clone(admission),
@@ -399,6 +405,12 @@ fn assemble_host(
         session_delta_source,
         ..
     } = runtime;
+    events.set_board_events(
+        owners
+            .board
+            .subscribe_events()
+            .expect("Board event subscription must be available during construction"),
+    );
     events.set_call_changes(calls.subscribe());
     events.set_organization_changes(owners.organization_handle.subscribe_schedule_changes());
     let handles = handle_wiring::build_handles(
@@ -458,6 +470,21 @@ impl Host {
         wire_session_ingress(&mut owners, &mut runtime);
         wire_cron_receipts(&mut owners, &runtime);
         wire_diagnostics_forwarders(&mut owners, &runtime);
+        search_lifecycle::observe_runtime_changes(
+            owners
+                .tasks
+                .module_scope_mut("search")
+                .expect("search module scope must exist"),
+            owners.search.clone(),
+            &admission,
+            runtime.open_claw.owner().subscribe(),
+            runtime.open_claw.control_readiness(),
+            runtime
+                .matcha_runtime_driver
+                .host_lifecycle_ops()
+                .expect("Matcha Agent lifecycle operations must be available")
+                .subscribe(),
+        );
         Ok(assemble_host(
             parent_callback,
             admission,

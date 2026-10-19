@@ -1,6 +1,9 @@
 use std::{future::Future, pin::Pin};
 
-use crate::domain::model::{TaskCommand, TaskOutcome, TaskRuntimeFailure};
+use crate::{
+    TaskExecution,
+    domain::model::{TaskCommand, TaskOutcome, TaskRuntimeFailure},
+};
 
 pub type TaskFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -15,8 +18,15 @@ pub trait TaskRuntimeDirectory: Send + Sync {
     fn task_ops(&self, scope: &platform::endpoint::runtime_address::RuntimeScope) -> Option<&dyn TaskOps>;
 }
 
+pub trait TaskSessionPreparation: Send + Sync {
+    fn prepare<'a>(
+        &'a self,
+        target: &'a crate::SessionTarget,
+    ) -> TaskFuture<'a, Result<(), crate::TaskFailure>>;
+}
+
 pub trait TaskOps: Send + Sync {
-    fn task_manager<'a>(&'a self, command: TaskCommand) -> TaskFuture<'a, TaskOutcome>;
+    fn task_manager<'a>(&'a self, command: TaskCommand) -> TaskFuture<'a, TaskExecution>;
 
     fn task_runtime_ready(&self) -> bool;
 }

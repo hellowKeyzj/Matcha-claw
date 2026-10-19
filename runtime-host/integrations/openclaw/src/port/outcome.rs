@@ -18,6 +18,41 @@ pub enum OpenClawGatewayRequestOutcome {
     Unavailable,
     CapacityExhausted,
     OutcomeUnknown,
+    SurfaceRejected(OpenClawSurfaceFailure),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenClawSurfaceFailure {
+    ViewExpired,
+    InvalidRequest,
+    Unavailable,
+    Rejected,
+    InvalidResponse,
+    CapacityExhausted,
+    OutcomeUnknown,
+}
+
+impl OpenClawSurfaceFailure {
+    pub fn public_error(self) -> Value {
+        let (code, message) = match self {
+            Self::ViewExpired => ("MCP_APP_VIEW_EXPIRED", "MCP App view expired; reopen it from this conversation."),
+            Self::InvalidRequest => ("SURFACE_INVALID_REQUEST", "The runtime surface request is invalid."),
+            Self::Unavailable => ("SURFACE_UNAVAILABLE", "The runtime surface is unavailable; reconnect the runtime and reopen it."),
+            Self::Rejected => ("SURFACE_REJECTED", "The runtime declined this surface operation; reopen the view before trying again."),
+            Self::InvalidResponse => ("SURFACE_INVALID_RESPONSE", "The runtime returned an invalid surface response; reopen the view."),
+            Self::CapacityExhausted => ("SURFACE_CAPACITY_EXHAUSTED", "The runtime surface is busy; wait for the current operation to finish."),
+            Self::OutcomeUnknown => ("SURFACE_OUTCOME_UNKNOWN", "The surface operation outcome is unknown; check its result before trying again."),
+        };
+        serde_json::json!({ "code": code, "message": message })
+    }
+
+    pub fn http_status(self) -> u16 {
+        match self {
+            Self::InvalidRequest => 400,
+            Self::ViewExpired | Self::Rejected | Self::CapacityExhausted => 409,
+            Self::Unavailable | Self::InvalidResponse | Self::OutcomeUnknown => 503,
+        }
+    }
 }
 
 pub(super) fn gateway_request_outcome(delivery: MutationDelivery) -> OpenClawGatewayRequestOutcome {

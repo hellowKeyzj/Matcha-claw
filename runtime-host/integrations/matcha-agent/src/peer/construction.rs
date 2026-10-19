@@ -46,6 +46,7 @@ pub struct MatchaPeerFactory {
     endpoint: SocketAddr,
     secret: Arc<Secret>,
     report_diagnostic: Arc<dyn Fn(StartupDiagnosticCategory) + Send + Sync>,
+    search: crate::search::OfflineControl,
     #[cfg(unix)]
     guardian_executable: PathBuf,
 }
@@ -63,6 +64,13 @@ impl MatchaPeerFactory {
         let endpoint = SocketAddr::from((Ipv4Addr::LOCALHOST, input.port));
         let secret = Arc::new(secret);
         let working_directory = input.working_directory.clone();
+        let search = crate::search::OfflineControl::new(
+            input.server_executable.clone(),
+            input.storage_root.clone(),
+            working_directory.clone(),
+            #[cfg(unix)]
+            input.guardian_executable.clone(),
+        );
         let launch = LaunchInput {
             server_executable: input.server_executable,
             cli_executable: input.cli_executable,
@@ -89,6 +97,7 @@ impl MatchaPeerFactory {
             endpoint,
             secret,
             report_diagnostic: input.report_diagnostic,
+            search,
             #[cfg(unix)]
             guardian_executable: input.guardian_executable,
         })
@@ -119,7 +128,7 @@ impl MatchaPeerFactory {
         );
         let handle = supervisor.handle();
 
-        MatchaPeer::new(handle, supervisor, self.working_directory, native)
+        MatchaPeer::new(handle, supervisor, self.working_directory, native, self.search)
     }
 }
 

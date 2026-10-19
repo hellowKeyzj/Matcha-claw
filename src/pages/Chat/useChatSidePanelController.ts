@@ -5,18 +5,21 @@ import { useChatStore } from '@/stores/chat';
 import { isGatewayOperational } from '@/lib/gateway-status';
 import { buildSessionIdentityKey, sessionIdentitiesEqual, validateSessionIdentity, type SessionIdentity } from '@/types/desktop/runtime-address';
 import {
+  CHAT_WORKSPACE_LAYOUT,
   clampChatSidePanelWidth,
-  getDefaultChatSidePanelWidth,
   resolveChatSidePanelLayout,
-  type ChatSidePanelWidthPolicy,
   type ChatSidePanelMode,
 } from '@/components/layout/chat-workspace-layout';
 
-export type ChatSidePanelTab = 'artifacts' | 'runtime';
+import { decodeOpenClawRuntimeSurfaceDescriptor, type OpenClawRuntimeSurfaceDescriptor } from '@/types/openclaw-runtime-surface';
+import type { BoardChatDock } from '@/types/board';
+
+export type ChatSidePanelTab = 'artifacts' | 'runtime' | 'board';
 
 export const CHAT_RUNTIME_SURFACE_OPEN_EVENT = 'chat:open-runtime-surface';
 
 export type ChatRuntimeSurfaceDescriptor =
+  | OpenClawRuntimeSurfaceDescriptor
   | {
     readonly kind: 'team-graph';
     readonly sourceSessionIdentity: SessionIdentity;
@@ -26,100 +29,46 @@ export type ChatRuntimeSurfaceDescriptor =
   }
   | {
     readonly kind: 'browser-tab';
+    readonly sourceSessionIdentity: SessionIdentity;
     readonly targetId: string;
     readonly profile: string;
     readonly target: 'host' | 'node';
     readonly node?: string;
     readonly title?: string;
     readonly url?: string;
-    readonly toolName?: string;
-    readonly toolCallId?: string;
-  }
-  | {
-    readonly kind: 'mcp-app';
-    readonly title?: string;
-    readonly url?: string;
-    readonly viewId?: string;
-    readonly surface?: 'assistant_message' | 'node_panel';
-    readonly preferredHeight?: number;
-    readonly sandbox?: 'strict' | 'scripts';
-    readonly boardWidgetName?: string;
-    readonly toolName?: string;
-    readonly toolCallId?: string;
-    readonly mcpApp?: {
-      readonly viewId: string;
-      readonly serverName?: string;
-      readonly toolName?: string;
-      readonly uiResourceUri?: string;
-      readonly toolCallId?: string;
-      readonly originSessionKey?: string;
-      readonly resultMetaState?: 'unavailable';
-    };
   };
-
-type SharedChatRuntimeSurface = Exclude<ChatRuntimeSurfaceDescriptor, { kind: 'team-graph' }>;
-
-let chatRuntimeSurfaceSnapshot: SharedChatRuntimeSurface | null = null;
-const chatRuntimeSurfaceListeners = new Set<() => void>();
-
-export function getChatRuntimeSurfaceSnapshot(): SharedChatRuntimeSurface | null {
-  return chatRuntimeSurfaceSnapshot;
-}
-
-export function subscribeChatRuntimeSurface(listener: () => void): () => void {
-  chatRuntimeSurfaceListeners.add(listener);
-  return () => {
-    chatRuntimeSurfaceListeners.delete(listener);
-  };
-}
 
 export function openChatRuntimeSurface(surface: ChatRuntimeSurfaceDescriptor): void {
   window.dispatchEvent(new CustomEvent<ChatRuntimeSurfaceDescriptor>(CHAT_RUNTIME_SURFACE_OPEN_EVENT, { detail: surface }));
 }
 
-function publishChatRuntimeSurface(surface: SharedChatRuntimeSurface): void {
-  chatRuntimeSurfaceSnapshot = surface;
-  for (const listener of chatRuntimeSurfaceListeners) {
-    listener();
-  }
-}
 
 interface ChatSidePanelState {
   open: boolean;
   activeTab: ChatSidePanelTab;
-  lightWidth: number;
-  artifactWidth: number;
+  width: number;
 }
 
 function isStoredSidePanelTab(value: string | null): value is ChatSidePanelTab {
-  return value === 'artifacts' || value === 'runtime';
-}
-
-function resolveSidePanelWidthPolicy(tab: ChatSidePanelTab): ChatSidePanelWidthPolicy {
-  return tab === 'artifacts' ? 'artifacts' : 'light';
+  return value === 'artifacts' || value === 'runtime' || value === 'board';
 }
 
 function readStoredPanelState(): ChatSidePanelState {
   try {
     const storedTab = window.localStorage.getItem('chat:side-panel-tab');
-    const storedLightWidth = Number(window.localStorage.getItem('chat:side-panel-light-width'));
-    const storedArtifactWidth = Number(window.sessionStorage.getItem('chat:side-panel-artifact-width'));
+    const storedWidth = Number(window.localStorage.getItem('chat:side-panel-width'));
     return {
       open: false,
       activeTab: isStoredSidePanelTab(storedTab) ? storedTab : 'artifacts',
-      lightWidth: Number.isFinite(storedLightWidth) && storedLightWidth > 0
-        ? storedLightWidth
-        : getDefaultChatSidePanelWidth('light'),
-      artifactWidth: Number.isFinite(storedArtifactWidth) && storedArtifactWidth > 0
-        ? storedArtifactWidth
-        : getDefaultChatSidePanelWidth('artifacts'),
+      width: Number.isFinite(storedWidth) && storedWidth > 0
+        ? storedWidth
+        : CHAT_WORKSPACE_LAYOUT.sidePanelDefaultWidth,
     };
   } catch {
     return {
       open: false,
       activeTab: 'artifacts',
-      lightWidth: getDefaultChatSidePanelWidth('light'),
-      artifactWidth: getDefaultChatSidePanelWidth('artifacts'),
+      width: CHAT_WORKSPACE_LAYOUT.sidePanelDefaultWidth,
     };
   }
 }
@@ -141,27 +90,23 @@ export function useChatSidePanelController(
   const loadSessions = useChatStore((state) => state.loadSessions);
   const resizeRafRef = useRef<number | null>(null);
   const [panelState, setPanelState] = useState<ChatSidePanelState>(() => readStoredPanelState());
-  const [selectedTeamGraphSurface, setTeamGraphSurface] = useState<Extract<ChatRuntimeSurfaceDescriptor, { kind: 'team-graph' }> | null>(null);
+  const [runtimeSurface, setRuntimeSurface] = useState<ChatRuntimeSurfaceDescriptor | null>(null);
+  const [boardChatDock, setBoardChatDock] = useState<BoardChatDock>('left');
+  const [boardFullscreen, setBoardFullscreen] = useState(false);
   const sessionIdentityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
   const [selectedSessionIdentityKey, setSelectedSessionIdentityKey] = useState(sessionIdentityKey);
   if (selectedSessionIdentityKey !== sessionIdentityKey) {
     setSelectedSessionIdentityKey(sessionIdentityKey);
-    setTeamGraphSurface(null);
+    setRuntimeSurface(null);
+    setBoardChatDock('left');
+    setBoardFullscreen(false);
   }
-  const teamGraphSurface = selectedTeamGraphSurface && sessionIdentity
-    && sessionIdentitiesEqual(selectedTeamGraphSurface.sourceSessionIdentity, sessionIdentity)
-    ? selectedTeamGraphSurface
-    : null;
   const [containerWidth, setContainerWidth] = useState<number>(() => (
     typeof window === 'undefined' ? 0 : window.innerWidth
   ));
   const isGatewayRunning = isGatewayOperational(gatewayStatus);
-  const activeWidthPolicy = resolveSidePanelWidthPolicy(panelState.activeTab);
-  const activeStoredWidth = activeWidthPolicy === 'artifacts'
-    ? panelState.artifactWidth
-    : panelState.lightWidth;
   const activePreferredWidth = clampChatSidePanelWidth(
-    activeStoredWidth,
+    panelState.width,
     Number.POSITIVE_INFINITY,
   );
   const artifactWorkbenchFullscreen = (
@@ -177,12 +122,11 @@ export function useChatSidePanelController(
   useEffect(() => {
     try {
       window.localStorage.setItem('chat:side-panel-tab', panelState.activeTab);
-      window.localStorage.setItem('chat:side-panel-light-width', String(panelState.lightWidth));
-      window.sessionStorage.setItem('chat:side-panel-artifact-width', String(panelState.artifactWidth));
+      window.localStorage.setItem('chat:side-panel-width', String(panelState.width));
     } catch {
       // ignore localStorage errors
     }
-  }, [panelState.activeTab, panelState.artifactWidth, panelState.lightWidth]);
+  }, [panelState.activeTab, panelState.width]);
 
   useEffect(() => {
     return () => {
@@ -196,20 +140,17 @@ export function useChatSidePanelController(
       if (!surface) {
         return;
       }
-      if (surface.kind === 'team-graph') {
-        if (!enabled || !sessionIdentity || validateSessionIdentity(surface.sourceSessionIdentity)
-          || !sessionIdentitiesEqual(surface.sourceSessionIdentity, sessionIdentity)
-          || typeof surface.teamId !== 'string' || !surface.teamId.trim()
-          || typeof surface.runId !== 'string' || !surface.runId.trim()) {
-          return;
-        }
-        setTeamGraphSurface(surface);
-      } else if (surface.kind === 'browser-tab' || surface.kind === 'mcp-app') {
-        setTeamGraphSurface(null);
-        publishChatRuntimeSurface(surface);
-      } else {
+      if (!enabled || !sessionIdentity) return;
+      if (surface.kind === 'team-graph' || surface.kind === 'browser-tab') {
+        if (validateSessionIdentity(surface.sourceSessionIdentity)
+          || !sessionIdentitiesEqual(surface.sourceSessionIdentity, sessionIdentity)) return;
+        if (surface.kind === 'team-graph' && (typeof surface.teamId !== 'string' || !surface.teamId.trim()
+          || typeof surface.runId !== 'string' || !surface.runId.trim())) return;
+      } else if (!decodeOpenClawRuntimeSurfaceDescriptor(surface)
+        || !sessionIdentitiesEqual(surface.sessionIdentity, sessionIdentity)) {
         return;
       }
+      setRuntimeSurface(surface);
       setPanelState((prev) => ({
         ...prev,
         open: true,
@@ -309,28 +250,14 @@ export function useChatSidePanelController(
       open: false,
     }));
     clearChatTakeoverMode();
+    setRuntimeSurface(null);
+    setBoardFullscreen(false);
   }, [clearChatTakeoverMode]);
 
   const setSidePanelWidth = useCallback((nextWidth: number) => {
     setPanelState((prev) => {
-      const nextPolicy = resolveSidePanelWidthPolicy(prev.activeTab);
       const clamped = clampChatSidePanelWidth(nextWidth, readContainerWidth(chatLayoutRef));
-      if (nextPolicy === 'artifacts') {
-        if (prev.artifactWidth === clamped) {
-          return prev;
-        }
-        return {
-          ...prev,
-          artifactWidth: clamped,
-        };
-      }
-      if (prev.lightWidth === clamped) {
-        return prev;
-      }
-      return {
-        ...prev,
-        lightWidth: clamped,
-      };
+      return prev.width === clamped ? prev : { ...prev, width: clamped };
     });
   }, [chatLayoutRef]);
 
@@ -357,7 +284,12 @@ export function useChatSidePanelController(
         : layout.sidePanelWidth,
     sidePanelPreferredWidth: activePreferredWidth,
     activeSidePanelTab: panelState.activeTab,
-    teamGraphSurface,
+    runtimeSurface,
+    sidePanelInline: panelState.activeTab === 'board' && (boardFullscreen || boardChatDock === 'bottom' || boardChatDock === 'hidden'),
+    boardChatDock: panelState.activeTab === 'board' ? boardChatDock : undefined,
+    boardFullscreen: panelState.open && panelState.activeTab === 'board' && boardFullscreen,
+    setBoardChatDock,
+    setBoardFullscreen,
     artifactWorkbenchFullscreen,
     openSidePanel,
     setActiveSidePanelTab,

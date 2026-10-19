@@ -43,6 +43,7 @@ const MANAGED_SOURCES: &[(&str, &[&str])] = &[
     ("kimi", &["kimi"]),
     ("volcengine", &["volcengine"]),
     ("opencode", &["opencode"]),
+    ("searxng", &["searxng"]),
     ("dingtalk", &["dingtalk"]),
     (
         "openclaw-lark",
@@ -532,8 +533,8 @@ fn discover_managed_bundles(
 
 fn validate_bundle_metadata(path: &Path) -> Result<(String, String), PluginReconcileError> {
     reject_symlinks(path, path)?;
-    let manifest = read_metadata_file(&path.join(MANIFEST))?;
-    let package = read_metadata_file(&path.join(PACKAGE))?;
+    let manifest = read_metadata_file(&path.join(MANIFEST), MAX_METADATA_BYTES)?;
+    let package = read_metadata_file(&path.join(PACKAGE), MAX_METADATA_BYTES)?;
     let id = text(manifest.get("id")).ok_or_else(|| PluginReconcileError::InvalidSource {
         path: path.join(MANIFEST),
         reason: "manifest id missing",
@@ -571,7 +572,10 @@ fn valid_plugin_id(id: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn read_metadata_file(path: &Path) -> Result<Map<String, Value>, PluginReconcileError> {
+fn read_metadata_file(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Map<String, Value>, PluginReconcileError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             PluginReconcileError::InvalidSource {
@@ -582,7 +586,7 @@ fn read_metadata_file(path: &Path) -> Result<Map<String, Value>, PluginReconcile
             PluginReconcileError::Io(error)
         }
     })?;
-    if !metadata.is_file() || metadata.len() > MAX_METADATA_BYTES {
+    if !metadata.is_file() || metadata.len() > max_bytes {
         return Err(PluginReconcileError::InvalidSource {
             path: path.to_owned(),
             reason: "metadata file is not a bounded regular file",
@@ -786,7 +790,7 @@ fn install_bundle(
 fn patch_staged_bundle(bundle: &ManagedBundle, staging: &Path) -> Result<(), PluginReconcileError> {
     if bundle.source_id != bundle.id {
         let manifest_path = staging.join(MANIFEST);
-        let mut manifest = read_metadata_file(&manifest_path)?;
+        let mut manifest = read_metadata_file(&manifest_path, MAX_METADATA_BYTES)?;
         manifest.insert("id".to_owned(), Value::String(bundle.id.clone()));
         let bytes = serde_json::to_vec_pretty(&manifest).map_err(|_| {
             PluginReconcileError::InvalidSource {
@@ -797,7 +801,7 @@ fn patch_staged_bundle(bundle: &ManagedBundle, staging: &Path) -> Result<(), Plu
         fs::write(manifest_path, bytes).map_err(PluginReconcileError::io)?;
     }
 
-    let package = read_metadata_file(&staging.join(PACKAGE))?;
+    let package = read_metadata_file(&staging.join(PACKAGE), MAX_METADATA_BYTES)?;
     for entry in plugin_runtime_entries(&package) {
         let entry_path = staging.join(&entry);
         let metadata = fs::symlink_metadata(&entry_path).map_err(PluginReconcileError::io)?;

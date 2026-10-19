@@ -1,9 +1,11 @@
 use std::{fs, io, path::Path};
 
 use super::{
-    PluginReconcileError, is_reparse_point, managed_target_exists, read_metadata_file, remove_link,
-    safe_remove_tree,
+    MAX_METADATA_BYTES, PluginReconcileError, is_reparse_point, managed_target_exists,
+    read_metadata_file, remove_link, safe_remove_tree,
 };
+
+const MAX_HOST_PACKAGE_BYTES: u64 = 256 * 1024;
 
 pub(crate) fn repair_channel_peer_link(
     extensions: &Path,
@@ -16,7 +18,7 @@ pub(crate) fn repair_channel_peer_link(
         });
     }
     let target = extensions.join(plugin_id);
-    let package = read_metadata_file(&target.join("package.json"))?;
+    let package = read_metadata_file(&target.join("package.json"), MAX_METADATA_BYTES)?;
     let declares_host = ["peerDependencies", "dependencies"].iter().any(|key| {
         package
             .get(*key)
@@ -64,7 +66,8 @@ fn link_error(error: PluginReconcileError) -> io::Error {
 }
 
 fn repair_host_link(target: &Path, openclaw_root: &Path) -> io::Result<()> {
-    let host = read_metadata_file(&openclaw_root.join("package.json")).map_err(link_error)?;
+    let host = read_metadata_file(&openclaw_root.join("package.json"), MAX_HOST_PACKAGE_BYTES)
+        .map_err(link_error)?;
     if host.get("name").and_then(serde_json::Value::as_str) != Some("openclaw") {
         return Err(io::ErrorKind::InvalidData.into());
     }
@@ -93,7 +96,8 @@ fn repair_host_link(target: &Path, openclaw_root: &Path) -> io::Result<()> {
             remove_link(&link)?;
         }
         Ok(metadata) if metadata.is_dir() => {
-            let package = read_metadata_file(&link.join("package.json")).map_err(link_error)?;
+            let package = read_metadata_file(&link.join("package.json"), MAX_HOST_PACKAGE_BYTES)
+                .map_err(link_error)?;
             if package.get("name").and_then(serde_json::Value::as_str) != Some("openclaw") {
                 return Err(io::ErrorKind::AlreadyExists.into());
             }

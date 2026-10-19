@@ -4,8 +4,7 @@ export const CHAT_WORKSPACE_LAYOUT = {
   sidebarDefaultWidth: 256,
   sidePanelMinWidth: 260,
   sidePanelMaxWidth: 1600,
-  sidePanelLightDefaultWidth: 360,
-  sidePanelArtifactDefaultWidth: 640,
+  sidePanelDefaultWidth: 640,
   paneResizerWidth: 6,
   chatMainLightMinWidth: 360,
   chatMainMinWidth: 180,
@@ -23,19 +22,12 @@ export interface ChatWorkspaceLayoutResult {
 }
 
 export type ChatSidePanelMode = 'docked' | 'overlay';
-export type ChatSidePanelWidthPolicy = 'light' | 'artifacts';
 export type ChatWindowDockPhase = 'closed' | 'opening' | 'open' | 'closing';
 
 export interface ChatSidePanelLayoutResult {
   sidePanelOpen: boolean;
   sidePanelMode: ChatSidePanelMode;
   sidePanelWidth: number;
-}
-
-export function getDefaultChatSidePanelWidth(policy: ChatSidePanelWidthPolicy): number {
-  return policy === 'artifacts'
-    ? CHAT_WORKSPACE_LAYOUT.sidePanelArtifactDefaultWidth
-    : CHAT_WORKSPACE_LAYOUT.sidePanelLightDefaultWidth;
 }
 
 export function clampPaneWidth(value: number, min: number, max: number): number {
@@ -115,7 +107,7 @@ export function clampChatSidePanelWidth(
 export function resolveChatSidePanelLayout(
   open: boolean,
   containerWidth: number,
-  width: number = getDefaultChatSidePanelWidth('light'),
+  width: number = CHAT_WORKSPACE_LAYOUT.sidePanelDefaultWidth,
 ): ChatSidePanelLayoutResult {
   return {
     sidePanelOpen: open,

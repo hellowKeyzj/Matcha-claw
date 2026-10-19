@@ -155,7 +155,6 @@ interface ChatInputProps {
   skillManager?: SkillManagerState | null;
   modelPicker?: ModelPickerState | null;
   permissionPicker?: PermissionPickerState | null;
-  configurationStatus?: string | null;
   contextUsage?: ChatContextUsageViewModel | null;
   onOpenTeamGraph?: () => void;
   teamDesign?: { status: TeamStartGateStatus | null; disabled: boolean; starting: boolean; exiting: boolean; error: string | null; onStart: () => void; onExit: () => void; onRun: () => void } | null;
@@ -409,7 +408,6 @@ export const ChatInput = memo(function ChatInput({
   skillManager = null,
   modelPicker = null,
   permissionPicker = null,
-  configurationStatus = null,
   contextUsage = null,
   onOpenTeamGraph,
   teamDesign = null,
@@ -1732,7 +1730,6 @@ export const ChatInput = memo(function ChatInput({
             )}
           </div>
 
-          {configurationStatus ? <p role="status" aria-live="polite" className="px-1 text-[11px] text-muted-foreground">{configurationStatus}</p> : null}
           <div className={cn(CHAT_LAYOUT_TOKENS.inputActionsRow, 'border-t border-border/35 pt-1.5')}>
             <div className={cn(
               'flex w-full min-w-0 items-end gap-1.5',

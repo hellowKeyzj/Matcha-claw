@@ -1,0 +1,17 @@
+[package]
+name = "search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+foundation = { version = "0.1.0", path = "../../foundation" }
+platform = { version = "0.1.0", path = "../../platform" }
+runtime-directory = { version = "0.1.0", path = "../runtime-directory" }
+searxng = { version = "0.1.0", path = "../../external/searxng" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true

@@ -389,6 +389,7 @@ fn host_input(root: &TestRoot) -> HostInput {
         open_claw_secret: GatewaySecret::new(entropy()).unwrap(),
         organization_store: organization::open_organization_store(&root.state_parent).unwrap(),
         runtime_state_dir: root.state_parent.join("runtime-host"),
+        searxng_resources_dir: root.state_parent.join("searxng"),
         app_log_dir: root.state_parent.join("userdata-logs"),
         parent_callback_base_url: "http://127.0.0.1:34100".into(),
         parent_callback_dispatch_token: "test-parent-dispatch-token".into(),

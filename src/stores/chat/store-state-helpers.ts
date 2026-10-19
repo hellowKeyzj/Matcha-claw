@@ -4,7 +4,8 @@ import {
   buildSessionIdentityKey,
   type SessionIdentity,
 } from '../../types/desktop/runtime-address';
-import { isRunActive } from './types';
+import { currentSessionSend, recordSendTerminals } from './send-state';
+import { deriveSessionRuntime, getSessionMessageReplacementIndex, getSessionTextModel, prepareSessionProjectionItems, projectSessionMessages, sessionTerminalRunIds, type SessionTextModel } from './session-presentation';
 import type {
   ApprovalStatus,
   ApprovalItem,
@@ -49,7 +50,6 @@ import {
   summarizeSnapshotForTodoToolDebug,
 } from './todo-tool-debug';
 import { findLatestAssistantTextFromItems } from './timeline-message';
-import { sanitizeCanonicalUserText } from './message-helpers';
 import { projectSessionMedia } from './media-projection';
 import { syncViewportState } from './viewport-state';
 import { useTaskCenterStore } from '../task-center-store';
@@ -443,17 +443,22 @@ function createUserConfirmationState(
   };
 }
 
-function userTextMatches(left: SessionRenderItem, right: SessionRenderItem): boolean {
+function userTextMatches(
+  left: SessionRenderItem,
+  right: SessionRenderItem,
+  normalizeUserText: SessionTextModel['user'],
+): boolean {
   if (left.kind !== 'user-message' || right.kind !== 'user-message') {
     return false;
   }
-  const leftText = sanitizeCanonicalUserText(left.text).trim();
-  return leftText.length > 0 && leftText === sanitizeCanonicalUserText(right.text).trim();
+  const leftText = normalizeUserText(left.text).trim();
+  return leftText.length > 0 && leftText === normalizeUserText(right.text).trim();
 }
 
 function isUserConfirmedByAuthoritativeItems(
   pending: SessionRenderItem,
   confirmationState: UserConfirmationState,
+  normalizeUserText: SessionTextModel['user'],
 ): boolean {
   if (pending.kind !== 'user-message') {
     return false;
@@ -476,7 +481,7 @@ function isUserConfirmedByAuthoritativeItems(
   const authoritative = confirmationState.newAuthoritativeUsers[
     confirmationState.nextSequentialNewAuthoritativeIndex
   ];
-  if (!authoritative || !userTextMatches(authoritative, pending)) {
+  if (!authoritative || !userTextMatches(authoritative, pending, normalizeUserText)) {
     return false;
   }
   confirmationState.consumedNewAuthoritativeIndexes.add(
@@ -489,11 +494,12 @@ function isUserConfirmedByAuthoritativeItems(
 function dropReconciledOptimisticItems(
   currentItems: SessionRenderItem[],
   nextItems: SessionRenderItem[],
+  normalizeUserText: SessionTextModel['user'],
 ): SessionRenderItem[] {
   const confirmationState = createUserConfirmationState(currentItems, nextItems);
   const pendingItems = currentItems.filter((item) => (
     isPendingUserItem(item)
-      && !isUserConfirmedByAuthoritativeItems(item, confirmationState)
+      && !isUserConfirmedByAuthoritativeItems(item, confirmationState, normalizeUserText)
   ));
   if (pendingItems.length === 0) {
     return nextItems;
@@ -531,11 +537,12 @@ function dropReconciledOptimisticItems(
 export function reconcileSessionItems(
   currentItems: SessionRenderItem[],
   nextItems: SessionRenderItem[],
+  normalizeUserText: SessionTextModel['user'] = getSessionTextModel().user,
 ): SessionRenderItem[] {
   if (currentItems === nextItems) {
     return currentItems;
   }
-  const canonicalNextItems = dropReconciledOptimisticItems(currentItems, nextItems);
+  const canonicalNextItems = dropReconciledOptimisticItems(currentItems, nextItems, normalizeUserText);
   if (canonicalNextItems.length === 0) {
     return currentItems.length === 0 ? currentItems : canonicalNextItems;
   }
@@ -565,7 +572,7 @@ export function reconcileSessionItems(
     item.kind === 'user-message'
     && item.rendererReceiptRunId
     && !canonicalNextItems.some((nextItem) => nextItem.key === item.key)
-    && !isUserConfirmedByAuthoritativeItems(item, receiptConfirmationState)
+    && !isUserConfirmedByAuthoritativeItems(item, receiptConfirmationState, normalizeUserText)
     && canonicalNextItems.some((nextItem) => (
       (
         nextItem.kind === 'assistant-turn'
@@ -914,7 +921,7 @@ function areApprovalListsEquivalent(left: readonly ApprovalComparable[], right: 
 }
 
 export function resolveSessionRuntime(session: ChatSessionRecord | undefined): ChatSessionRuntimeState {
-  return session?.runtime ?? createEmptySessionRuntime();
+  return session ? deriveSessionRuntime(session) : createEmptySessionRuntime();
 }
 
 export function resolveSessionMeta(session: ChatSessionRecord | undefined): ChatSessionMetaState {
@@ -997,6 +1004,8 @@ export function patchSessionRecord(
   const nextRecord = {
     meta: patch.meta ?? current.meta,
     runtime: patch.runtime ?? current.runtime,
+    send: patch.send === undefined ? current.send : patch.send,
+    abort: patch.abort === undefined ? current.abort : patch.abort,
     items: patch.items ?? current.items,
     window: patch.window ?? current.window,
     contextTokens: Object.prototype.hasOwnProperty.call(patch, 'contextTokens')
@@ -1006,6 +1015,8 @@ export function patchSessionRecord(
   if (
     current.meta === nextRecord.meta
     && current.runtime === nextRecord.runtime
+    && current.send === nextRecord.send
+    && current.abort === nextRecord.abort
     && current.items === nextRecord.items
     && current.window === nextRecord.window
     && areSessionContextTokensEquivalent(current.contextTokens, nextRecord.contextTokens)
@@ -1031,11 +1042,18 @@ export function patchSessionMeta(
   if (areSessionMetaEquivalent(current.meta, nextMeta)) {
     return state.loadedSessions;
   }
+  const identityChanged = !sessionIdentitiesEquivalent(current.meta.sessionIdentity, nextMeta.sessionIdentity);
   return {
     ...state.loadedSessions,
     [sessionKey]: {
       ...current,
       meta: nextMeta,
+      ...(identityChanged ? {
+        send: null,
+        abort: null,
+        items: current.items.filter((item) => !item.key.startsWith('renderer-assistant:')
+          && !(item.kind === 'user-message' && isPendingUserItem(item))),
+      } : {}),
     },
   };
 }
@@ -1131,28 +1149,6 @@ export function patchSessionTurnItem(
   return patchSessionRecord(state, sessionKey, { items });
 }
 
-function reconcileRuntimeProjection(
-  current: ChatSessionRuntimeState,
-  next: ChatSessionRuntimeState,
-): ChatSessionRuntimeState {
-  const sameRun = current.activeRunId === next.activeRunId
-    || (current.activeRunId === null && current.pendingTurnKey !== null);
-  if (!sameRun || !isRunActive(next)) return next;
-  const stopping = current.runPhase === 'stopping';
-  const abortIssue = current.lastIssue?.code?.startsWith('chat.abort.') === true;
-  if (!stopping && !abortIssue) return next;
-  return {
-    ...next,
-    ...(stopping ? { runPhase: 'stopping' as const, updatedAt: current.updatedAt }
-      : abortIssue && next.runPhase === 'stopping' ? { runPhase: current.runPhase } : {}),
-    ...(next.activeRunId === null && current.pendingTurnKey !== null ? {
-      pendingTurnKey: current.pendingTurnKey,
-      pendingTurnLaneKey: current.pendingTurnLaneKey,
-    } : {}),
-    ...(abortIssue ? { lastError: current.lastError, lastIssue: current.lastIssue, updatedAt: current.updatedAt } : {}),
-  };
-}
-
 export function patchSessionSnapshot(
   state: Pick<ChatStoreState, 'loadedSessions'>,
   sessionKey: string,
@@ -1160,7 +1156,7 @@ export function patchSessionSnapshot(
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
   const catalog = snapshot.catalog;
-  const nextItems = reconcileSessionItems(current.items, snapshot.items);
+  const nextItems = reconcileSessionItems(current.items, snapshot.items, getSessionTextModel(catalog.sessionIdentity).user);
   const hasManualLabel = current.meta.manualLabel === true;
   const nextLabel = hasManualLabel ? current.meta.label : catalog.label ?? null;
   const nextTitleSource = hasManualLabel ? current.meta.titleSource : catalog.titleSource ?? 'none';
@@ -1186,7 +1182,7 @@ export function patchSessionSnapshot(
     nextItems,
     current.runtime.imageGeneration,
   );
-  const nextRuntime = reconcileRuntimeProjection(current.runtime, {
+  const nextRuntime = {
     ...current.runtime,
     activeRunId: snapshot.runtime.activeRunId,
     runPhase: snapshot.runtime.runPhase,
@@ -1202,7 +1198,7 @@ export function patchSessionSnapshot(
     lastError: snapshot.runtime.lastError,
     lastIssue: snapshot.runtime.lastIssue,
     updatedAt: snapshot.runtime.updatedAt,
-  });
+  };
   const nextWindow = syncViewportState(current.window, {
     totalItemCount: snapshot.window.totalItemCount,
     windowStartOffset: snapshot.window.windowStartOffset,
@@ -1462,6 +1458,7 @@ export function projectSessionViewItems(view: SessionProjectionState): SessionRe
   }
   const tools = factValue(view.tools) ?? [];
   const runtimeAdapterId = view.identity.endpoint.runtimeAdapterId;
+  const text = getSessionTextModel(view.identity);
   const abortedRunIds = new Set<string>();
   const abortedToolIds = new Set<string>();
   const toolRunIds = new Map<string, string | null>();
@@ -1502,7 +1499,7 @@ export function projectSessionViewItems(view: SessionProjectionState): SessionRe
         kind: 'user-message',
         role: 'user',
         sessionKey: view.sessionKey,
-        text: sanitizeCanonicalUserText(largeText ? item.content.find((content) => content.kind === 'largeText')!.text : item.text),
+        text: text.user(largeText ? item.content.find((content) => content.kind === 'largeText')!.text : item.text),
         images: media.flatMap((entry) => entry.images),
         attachedFiles: media.flatMap((entry) => entry.attachedFiles),
         ...(largeText ? { largeText } : {}),
@@ -1579,15 +1576,12 @@ function projectionRuntime(
   fact: SessionFact<SessionWireRuntime>,
   items: SessionRenderItem[],
   runtimeNotice: ChatSessionRuntimeState['runtimeNotice'],
-  pendingTurnTerminated = false,
 ): ChatSessionRuntimeState {
   const runtime = factValue(fact);
   if (!runtime) return current;
-  if (!pendingTurnTerminated && !isRunActive({ ...current, runPhase: projectionRuntimePhase(runtime.phase) })
-    && isRunActive(current) && current.pendingTurnKey !== null && current.activeRunId === null) return current;
-  const issueMessage = runtime.issue === null ? null : `Session runtime ${runtime.issue}`;
   const imageGeneration = deriveSessionImageGenerationPendingStateFromItems(items, current.imageGeneration);
-  return reconcileRuntimeProjection(current, {
+  const issueMessage = runtime.issue === null ? null : `Session runtime ${runtime.issue}`;
+  return {
     ...current,
     activeRunId: runtime.activeRunId,
     runPhase: projectionRuntimePhase(runtime.phase),
@@ -1603,7 +1597,7 @@ function projectionRuntime(
     lastError: runtime.issue === 'rejected' ? issueMessage : null,
     lastIssue: issueMessage ? { message: issueMessage, source: 'runtime', at: Date.now(), retryable: runtime.issue !== 'rejected' } : null,
     updatedAt: Date.now(),
-  });
+  };
 }
 
 function projectionWindow(current: ChatSessionViewportState, fact: SessionFact<SessionWireWindow>): ChatSessionViewportState {
@@ -1701,7 +1695,9 @@ function applyDecodedSessionView(
   display: SessionProjectionState = view,
   traceId?: string | null,
   timing?: { projectionElapsedMs: number; reconcileElapsedMs: number; traceEmitElapsedMs: number },
-  pendingTurnTerminated = false,
+  terminalRunIds: readonly string[] = [],
+  terminatedRunIds: readonly string[] = [],
+  observedTerminalRunIds: readonly string[] = [],
 ): boolean {
   const state = input.get();
   const identity = sessionIdentityForProjection(state, view);
@@ -1725,11 +1721,12 @@ function applyDecodedSessionView(
     } : current.meta;
     const windows = windowStore(input.get);
     const displayKey = displayProjectionKey(nextState, view.identity);
+    const messageRecord = { ...current, meta: nextMeta };
+    const ownTerminatedRunIds = buildSessionIdentityKey(nextIdentity!) === buildSessionIdentityKey(view.identity)
+      ? terminatedRunIds : [];
     const projectionStartedAt = timing ? performance.now() : 0;
-    let projectedItems = factValue(display.items) ? projectSessionViewItems(display) : current.items;
-    if (pendingTurnTerminated) projectedItems = projectedItems.filter((item) => (
-      item.kind !== 'assistant-turn' || item.key !== current.runtime.pendingTurnKey
-    ));
+    let projectedItems = prepareSessionProjectionItems(messageRecord,
+      factValue(display.items) ? projectSessionViewItems(display) : current.items, ownTerminatedRunIds);
     if (buildSessionIdentityKey(nextIdentity!) !== buildSessionIdentityKey(view.identity)) {
       const incomingIds = new Set(projectedItems.map((item) => item.key));
       const retiredIds = display.retiredItemIds ?? new Set<string>();
@@ -1737,7 +1734,23 @@ function applyDecodedSessionView(
     }
     const reconcileStartedAt = timing ? performance.now() : 0;
     if (timing) timing.projectionElapsedMs += reconcileStartedAt - projectionStartedAt;
-    const nextItems = reconcileSessionItems(current.items, projectedItems);
+    const wireRuntime = factValue(view.runtime);
+    const terminals = sessionTerminalRunIds(messageRecord,
+      wireRuntime && isTerminalRunPhase(wireRuntime.phase) && wireRuntime.activeRunId !== null
+        ? [...terminalRunIds, wireRuntime.activeRunId] : terminalRunIds, observedTerminalRunIds);
+    const send = currentSessionSend(current);
+    const nextSend = send?.identityKey === buildSessionIdentityKey(view.identity) ? recordSendTerminals(send, terminals) : send;
+    const reconciledItems = reconcileSessionItems(current.items, projectedItems, getSessionTextModel(view.identity).user);
+    const messages = projectSessionMessages(messageRecord, reconciledItems, {
+      identityKey: buildSessionIdentityKey(view.identity),
+      runtime: wireRuntime ? projectionRuntime(current.runtime, view.runtime, reconciledItems, view.runtimeNotice ?? null) : null,
+      terminalRunIds: terminals,
+      terminatedRunIds: ownTerminatedRunIds,
+      retiredItemIds: new Set([...(view.retiredItemIds ?? []), ...(display.retiredItemIds ?? [])]),
+      send: nextSend,
+    });
+    const nextRuntime = messages.runtime;
+    const nextItems = messages.items;
     const traceStartedAt = timing ? performance.now() : 0;
     if (timing) timing.reconcileElapsedMs += traceStartedAt - reconcileStartedAt;
     if (traceId) logSessionTrace('session.assembly.reconcile', traceId, () => ({
@@ -1748,15 +1761,7 @@ function applyDecodedSessionView(
       reconciled: summarizeRenderAssistantTurns(nextItems),
     }));
     if (timing) timing.traceEmitElapsedMs += performance.now() - traceStartedAt;
-    const nextRuntime = projectionRuntime(current.runtime, view.runtime, nextItems, view.runtimeNotice ?? null, pendingTurnTerminated);
-    const pendingAssistant = current.items.find((item) => item.kind === 'assistant-turn' && item.key === current.runtime.pendingTurnKey);
-    if (pendingAssistant && isRunActive(nextRuntime)
-      && (pendingAssistant.status === 'streaming' || pendingAssistant.status === 'waiting_tool')
-      && !view.retiredItemIds?.has(pendingAssistant.key) && !display.retiredItemIds?.has(pendingAssistant.key)
-      && (pendingAssistant.runId ? pendingAssistant.runId === nextRuntime.activeRunId
-        : nextRuntime.activeRunId === null && nextRuntime.pendingTurnKey === pendingAssistant.key)
-      && !nextItems.some((item) => item.key === pendingAssistant.key
-        || item.kind === 'assistant-turn' && item.runId && item.runId === nextRuntime.activeRunId)) nextItems.push(pendingAssistant);
+    const pendingAssistant = nextItems.find((item) => item.kind === 'assistant-turn' && item.key.startsWith('renderer-assistant:'));
     const placeholderTraceStartedAt = timing ? performance.now() : 0;
     if (traceId) logSessionTrace('session.assembly.placeholder.after', traceId, () => ({
       identity: summarizeSessionIdentity(view.identity), epoch: view.epoch, seq: view.seq, cursor: view.cursor,
@@ -1770,6 +1775,8 @@ function applyDecodedSessionView(
       meta: nextMeta,
       items: nextItems,
       runtime: nextRuntime,
+      send: nextSend,
+      abort: messages.abort,
       window: nextWindow,
     });
     const nextApprovals = projectionApprovals(nextState, recordKey, view);
@@ -1857,7 +1864,7 @@ export function applySessionView(
       const projectedItems = projectSessionViewItems(display);
       const reconcileStartedAt = timing ? performance.now() : 0;
       if (timing) timing.projectionElapsedMs += reconcileStartedAt - projectionStartedAt;
-      const items = reconcileSessionItems(current.items, projectedItems);
+      const items = reconcileSessionItems(current.items, projectedItems, getSessionTextModel(display.identity).user);
       const traceStartedAt = timing ? performance.now() : 0;
       if (timing) timing.reconcileElapsedMs += traceStartedAt - reconcileStartedAt;
       if (traceId) logSessionTrace('session.view.window.assembly', traceId, () => ({
@@ -1935,8 +1942,13 @@ export function applySessionView(
       };
     }
   }
+  const runtime = factValue(projection.runtime);
+  const previousRuntime = previous?.epoch === projection.epoch ? factValue(previous.runtime) : null;
+  const observedTerminalRunId = runtime && isTerminalRunPhase(runtime.phase) && runtime.activeRunId === null
+    ? previousRuntime?.activeRunId : null;
   store.set(projectionKey, projection);
-  if (!applyDecodedSessionView(input, projection, modelState, display, traceId, timing)) {
+  if (!applyDecodedSessionView(input, projection, modelState, display, traceId, timing, [], [],
+    observedTerminalRunId ? [observedTerminalRunId] : [])) {
     return finish({ status: 'unavailable', sessionKey: view.sessionKey, reason: 'session identity unavailable' });
   }
   refreshSessionTasks(input, view, true);
@@ -2070,13 +2082,7 @@ function applyProjectionChange(view: SessionProjectionState, change: SessionDelt
     case 'messageReplaced':
       return { ...view, items: updateProjectionFact(view.items, () => [], (items) => {
         const next = [...items];
-        let index = next.findIndex((item) => item.itemId === change.item.itemId);
-        if (index < 0 && change.item.kind === 'assistantTurn' && change.item.runId !== null) {
-          const incoming = change.item;
-          index = next.findIndex((item) => item.kind === 'assistantTurn' && item.runId === incoming.runId
-            && item.messageId === null && item.text.length === 0 && item.segments.length > 0
-            && item.segments.every((segment) => segment.kind === 'toolUse' || segment.kind === 'toolResult'));
-        }
+        const index = getSessionMessageReplacementIndex(view.identity, next, change.item);
         if (index < 0) next.push(change.item);
         else next[index] = change.item;
         return next;
@@ -2259,8 +2265,19 @@ export function applySessionDelta(
     && !state.loadedSessions[recordKey]?.window.isAtLatest;
   let readingDisplay = loaded;
   let nextView: SessionProjectionState;
+  const terminalRunIds: string[] = [];
+  const observedTerminalRunIds: string[] = [];
   try {
     nextView = delta.changes.reduce((view, change) => {
+    if (change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase)) terminalRunIds.push(change.runId);
+    if (change.kind === 'runtimeChanged' && isTerminalRunPhase(change.runtime.phase)) {
+      const runId = change.runtime.activeRunId ?? delta.runId;
+      if (runId) terminalRunIds.push(runId);
+      else {
+        const observedRunId = epochChanged && view.runtime === previous.runtime ? null : factValue(view.runtime)?.activeRunId;
+        if (observedRunId) observedTerminalRunIds.push(observedRunId);
+      }
+    }
     if (change.kind === 'toolUpdated'
       && (change.tool.phase === 'completed' || change.tool.phase === 'failed')
       && (change.tool.name === null || TASK_SNAPSHOT_TOOLS.has(change.tool.name.trim().toLowerCase()))
@@ -2294,14 +2311,11 @@ export function applySessionDelta(
       return finish({ status: 'gap', sessionKey: recordKey, reason: error instanceof Error ? error.message : 'invalid replacement' });
     }
   }
-  const currentRecord = state.loadedSessions[recordKey];
-  const pendingTurnTerminated = currentRecord?.meta.sessionIdentity != null
-    && buildSessionIdentityKey(currentRecord.meta.sessionIdentity) === projectionKey
-    && delta.changes.some((change) => change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase)
-      && (currentRecord.runtime.activeRunId === null || currentRecord.runtime.activeRunId === change.runId)
-      && currentRecord.runtime.pendingTurnKey === `renderer-assistant:${change.runId}`);
   store.set(projectionKey, { ...projected, recordKey });
-  if (!applyDecodedSessionView(input, projected, undefined, display, traceId, undefined, pendingTurnTerminated)) {
+  const terminatedRunIds = delta.changes.flatMap((change) => change.kind === 'runPhaseChanged' && isTerminalRunPhase(change.phase)
+    ? [change.runId] : []);
+  if (!applyDecodedSessionView(input, projected, undefined, display, traceId, undefined,
+    terminalRunIds, terminatedRunIds, observedTerminalRunIds)) {
     return finish({ status: 'unavailable', sessionKey: delta.sessionKey, reason: 'session identity unavailable' });
   }
   if (traceRuntimeState) {

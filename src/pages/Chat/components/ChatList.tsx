@@ -19,10 +19,11 @@ import { ArrowDown } from 'lucide-react';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { sanitizeAssistantDisplayText } from '@/stores/chat/message-display';
+import { getSessionTextModel, type SessionTextModel } from '@/stores/chat/session-presentation';
 import { CHAT_LAYOUT_TOKENS } from '../chat-layout-tokens';
 import { createChatScrollChromeStore, type ChatScrollChromeStore } from '../chat-scroll-chrome-store';
 import type {
+  ChatAssistantPresentation,
   ChatAssistantTurnItem,
   ChatExecutionGraphItem,
   ChatRenderItem,
@@ -30,12 +31,18 @@ import type {
 } from '../chat-render-item-model';
 import { ChatMessage } from '../ChatMessage';
 import { ChatAssistantTurn } from '../ChatAssistantTurn';
-import type { MessageAvatarSlot } from '../chat-message-shell';
+import { useToolActivityDisclosure } from '../useToolActivityDisclosure';
+import { buildToolGroupPlan, isCoveredToolOnlyItem, selectLatestBrowserTools, type ToolGroupPlan, type ToolSlot } from '../chat-tool-groups';
+import type { SessionRenderToolCard } from '../../../types/session/tool-card';
+import type { ToolActivityDisclosure } from '../tool-renderers/types';
+import { MessageShell, type MessageAvatarSlot } from '../chat-message-shell';
 import { ExecutionGraphCard } from '../ExecutionGraphCard';
 import { useChatScroll } from '../useChatScroll';
 import { sampleViewportAnchor, type ViewportAnchor } from '../chat-scroll-model';
 import type { UseChatViewResult } from '../useChatView';
 import { FailureScreen } from './ChatStates';
+import { AssistantPendingIndicator } from './AssistantPendingIndicator';
+import type { ChatSessionPending } from '@/stores/chat/types';
 import type { ChatArtifactGroup } from '../artifacts';
 import type {
   AttachedFileMeta,
@@ -64,6 +71,8 @@ export interface ChatListProps {
   runtime: ChatSessionRuntimeState;
   viewport: ChatSessionViewportState;
   items: ChatRenderItem[];
+  activity?: Extract<ChatSessionPending, { kind: 'activity' }>['mode'] | null;
+  assistantPresentation?: ChatAssistantPresentation;
   liveView: UseChatViewResult;
   errorMessage: string | null;
   showThinking: boolean;
@@ -79,6 +88,8 @@ export interface ChatListProps {
   onOpenArtifactFile: (file: GeneratedFile) => void;
   onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
   onReuseMessage?: (text: string) => void;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }
 
 interface ChatListSurfaceProps {
@@ -94,6 +105,8 @@ interface ChatListSurfaceProps {
   onWheel: WheelEventHandler<HTMLDivElement>;
   onViewportClickCapture: MouseEventHandler<HTMLDivElement>;
   items: ChatRenderItem[];
+  activity?: Extract<ChatSessionPending, { kind: 'activity' }>['mode'] | null;
+  assistantPresentation?: ChatAssistantPresentation;
   showLoadOlder: boolean;
   isLoadingOlder: boolean;
   onLoadOlder: () => void;
@@ -109,6 +122,8 @@ interface ChatListSurfaceProps {
   onOpenArtifactFile: (file: GeneratedFile) => void;
   onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
   onReuseMessage?: (text: string) => void;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }
 
 type ChatListContentProps = Omit<
@@ -180,20 +195,26 @@ function hasVisibleUserOutput(item: ChatUserMessageItem): boolean {
     || item.attachedFiles.length > 0;
 }
 
-function hasAssistantMessageText(item: ChatAssistantTurnItem): boolean {
+function hasAssistantMessageText(item: ChatAssistantTurnItem, textModel: SessionTextModel): boolean {
   return item.segments.some((segment) => segment.kind === 'message' && (
-    !!segment.largeText || sanitizeAssistantDisplayText(segment.text).trim().length > 0
+    !!segment.largeText || textModel.assistant(segment.text).trim().length > 0
   ));
 }
 
-function hasVisibleAssistantOutput(item: ChatAssistantTurnItem, showThinking: boolean): boolean {
-  return hasAssistantMessageText(item)
+function hasVisibleAssistantOutput(
+  item: ChatAssistantTurnItem,
+  showThinking: boolean,
+  textModel: SessionTextModel,
+  toolSlots?: ReadonlyMap<string, ToolSlot>,
+): boolean {
+  if (isCoveredToolOnlyItem(item, toolSlots)) return false;
+  return hasAssistantMessageText(item, textModel)
     || item.segments.some((segment) => {
       if (segment.kind === 'thinking') {
         return showThinking && segment.text.trim().length > 0;
       }
       if (segment.kind === 'tool') {
-        return true;
+        return toolSlots?.get(segment.key)?.kind !== 'covered';
       }
       if (segment.kind === 'media') {
         return segment.images.length > 0 || segment.attachedFiles.length > 0;
@@ -206,9 +227,9 @@ function hasVisibleAssistantOutput(item: ChatAssistantTurnItem, showThinking: bo
     || item.status === 'waiting_tool';
 }
 
-function readVisualRole(item: ChatRenderItem, showThinking: boolean): ChatItemVisualRole {
+function readVisualRole(item: ChatRenderItem, showThinking: boolean, textModel: SessionTextModel, toolPlan: ToolGroupPlan): ChatItemVisualRole {
   if (item.kind === 'assistant-turn') {
-    return hasVisibleAssistantOutput(item, showThinking) ? 'assistant-output' : 'neutral';
+    return hasVisibleAssistantOutput(item, showThinking, textModel, toolPlan.get(item.key)) ? 'assistant-output' : 'neutral';
   }
   if (item.kind === 'user-message') {
     return hasVisibleUserOutput(item) ? 'boundary' : 'neutral';
@@ -222,12 +243,14 @@ function readVisualRole(item: ChatRenderItem, showThinking: boolean): ChatItemVi
 function buildAssistantAvatarSlots(
   items: ReadonlyArray<ChatRenderItem>,
   showThinking: boolean,
+  textModel: SessionTextModel,
+  toolPlan: ToolGroupPlan,
 ): Map<string, MessageAvatarSlot> {
   const slots = new Map<string, MessageAvatarSlot>();
   let inAssistantVisualGroup = false;
 
   for (const item of items) {
-    const visualRole = readVisualRole(item, showThinking);
+    const visualRole = readVisualRole(item, showThinking, textModel, toolPlan);
     if (visualRole === 'assistant-output') {
       slots.set(item.key, inAssistantVisualGroup ? 'placeholder' : 'visible');
       inAssistantVisualGroup = true;
@@ -257,6 +280,9 @@ function SystemInfoRow({ item }: { item: ChatRenderItem }) {
 
 function renderChatItem(input: {
   item: ChatRenderItem;
+  toolSlots?: ReadonlyMap<string, ToolSlot>;
+  latestBrowserTools: ReadonlySet<SessionRenderToolCard>;
+  disclosure: ToolActivityDisclosure;
   assistantAvatarSlot?: MessageAvatarSlot;
   replyStartedAtByAssistantKey: ReadonlyMap<string, number>;
   showThinking: boolean;
@@ -269,11 +295,16 @@ function renderChatItem(input: {
   onOpenArtifactFile: (file: GeneratedFile) => void;
   onOpenAttachedArtifact: (file: AttachedFileMeta) => void;
   onReuseMessage?: (text: string) => void;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }) {
   if (input.item.kind === 'assistant-turn') {
     return (
       <ChatAssistantTurn
         item={input.item}
+        toolSlots={input.toolSlots}
+        latestBrowserTools={input.latestBrowserTools}
+        disclosure={input.disclosure}
         showThinking={input.showThinking}
         replyStartedAt={input.replyStartedAtByAssistantKey.get(input.item.key)}
         assistantAvatarSlot={input.assistantAvatarSlot}
@@ -282,6 +313,8 @@ function renderChatItem(input: {
         endpointSessionId={input.endpointSessionId}
         workspaceContext={input.workspaceContext}
         onOpenAttachedArtifact={input.onOpenAttachedArtifact}
+        onRuntimeSendMessage={input.onRuntimeSendMessage}
+        onRuntimeOpenLink={input.onRuntimeOpenLink}
       />
     );
   }
@@ -344,6 +377,8 @@ const ChatListContent = memo(function ChatListContent({
   showBlockingError,
   errorMessage,
   items,
+  activity,
+  assistantPresentation,
   showLoadOlder,
   isLoadingOlder,
   onLoadOlder,
@@ -358,12 +393,23 @@ const ChatListContent = memo(function ChatListContent({
   onOpenArtifactFile = () => {},
   onOpenAttachedArtifact = () => {},
   onReuseMessage,
+  onRuntimeSendMessage,
+  onRuntimeOpenLink,
 }: ChatListContentProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
   const tracing = isSessionTraceEnabled();
   const metadataStartedAt = tracing ? performance.now() : 0;
+  const textModel = getSessionTextModel(sessionIdentity);
+  const disclosure = useToolActivityDisclosure(sessionIdentity);
+  const [toolPlanState, setToolPlanState] = useState(() => ({ items, plan: buildToolGroupPlan(items) }));
+  let toolPlan = toolPlanState.plan;
+  if (toolPlanState.items !== items) {
+    toolPlan = buildToolGroupPlan(items, toolPlanState.plan);
+    setToolPlanState({ items, plan: toolPlan });
+  }
+  const latestBrowserTools = useMemo(() => selectLatestBrowserTools(items, sessionIdentity), [items, sessionIdentity]);
   const replyStartedAtByAssistantKey = useMemo(() => buildReplyStartedAtByAssistantKey(items), [items]);
-  const assistantAvatarSlots = useMemo(() => buildAssistantAvatarSlots(items, showThinking), [items, showThinking]);
+  const assistantAvatarSlots = useMemo(() => buildAssistantAvatarSlots(items, showThinking, textModel, toolPlan), [items, showThinking, textModel, toolPlan]);
   const metadataBuildElapsedMs = tracing ? performance.now() - metadataStartedAt : null;
   let contentElementsBuildElapsedMs: number | null = null;
   useEffect(() => {
@@ -416,22 +462,18 @@ const ChatListContent = memo(function ChatListContent({
       {!isEmptyState ? (
         <>
           {items.map((item, index) => {
-            const assistantAvatarSlot = item.kind === 'assistant-turn'
-              ? assistantAvatarSlots.get(item.key)
-              : 'visible';
+            const toolSlots = toolPlan.get(item.key);
+            const coveredOnly = item.kind === 'assistant-turn' && isCoveredToolOnlyItem(item, toolSlots);
             return (
               <div key={item.key}>
-                <div
-                  data-index={index}
-                  className={CHAT_LAYOUT_TOKENS.threadMessageRowSpacing}
-                >
-                  <div
-                    {...getMessageDataAttributes(item)}
-                    className="w-full"
-                  >
+                <div data-index={index} className={coveredOnly ? 'w-full' : CHAT_LAYOUT_TOKENS.threadMessageRowSpacing}>
+                  <div {...getMessageDataAttributes(item)} className="w-full">
                     {renderChatItem({
                       item,
-                      assistantAvatarSlot,
+                      toolSlots,
+                      latestBrowserTools,
+                      disclosure,
+                      assistantAvatarSlot: item.kind === 'assistant-turn' ? assistantAvatarSlots.get(item.key) : 'visible',
                       replyStartedAtByAssistantKey,
                       showThinking,
                       userAvatarImageUrl,
@@ -443,6 +485,8 @@ const ChatListContent = memo(function ChatListContent({
                       onOpenArtifactFile,
                       onOpenAttachedArtifact,
                       onReuseMessage,
+                      onRuntimeSendMessage,
+                      onRuntimeOpenLink,
                     })}
                   </div>
                 </div>
@@ -450,6 +494,19 @@ const ChatListContent = memo(function ChatListContent({
             );
           })}
         </>
+      ) : null}
+      {activity ? (
+        <div role="status" aria-live="polite" className="pt-6 md:pt-7">
+          <MessageShell
+            isUser={false}
+            assistantAgentId={assistantPresentation?.agentId}
+            assistantAgentName={assistantPresentation?.agentName}
+            assistantAvatarSeed={assistantPresentation?.avatarSeed}
+            assistantAvatarStyle={assistantPresentation?.avatarStyle}
+          >
+            <AssistantPendingIndicator mode={activity} />
+          </MessageShell>
+        </div>
       ) : null}
     </>
   );
@@ -513,6 +570,8 @@ export const ChatListSurface = memo(function ChatListSurface({
   onWheel,
   onViewportClickCapture,
   items,
+  activity,
+  assistantPresentation,
   showLoadOlder,
   isLoadingOlder,
   onLoadOlder,
@@ -528,6 +587,8 @@ export const ChatListSurface = memo(function ChatListSurface({
   onOpenArtifactFile = () => {},
   onOpenAttachedArtifact = () => {},
   onReuseMessage,
+  onRuntimeSendMessage,
+  onRuntimeOpenLink,
 }: ChatListSurfaceProps) {
   const showLoadOlderButton = showLoadOlder || isLoadingOlder;
 
@@ -566,6 +627,8 @@ export const ChatListSurface = memo(function ChatListSurface({
               showBlockingError={showBlockingError}
               errorMessage={errorMessage}
               items={items}
+              activity={activity}
+              assistantPresentation={assistantPresentation}
               showLoadOlder={showLoadOlder}
               isLoadingOlder={isLoadingOlder}
               onLoadOlder={onLoadOlder}
@@ -580,6 +643,8 @@ export const ChatListSurface = memo(function ChatListSurface({
               onOpenArtifactFile={onOpenArtifactFile}
               onOpenAttachedArtifact={onOpenAttachedArtifact}
               onReuseMessage={onReuseMessage}
+              onRuntimeSendMessage={onRuntimeSendMessage}
+              onRuntimeOpenLink={onRuntimeOpenLink}
             />
           </div>
         </div>
@@ -598,6 +663,8 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     currentSessionKey,
     viewport,
     items,
+    activity,
+    assistantPresentation,
     liveView,
     errorMessage,
     showThinking,
@@ -613,6 +680,8 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     onOpenArtifactFile,
     onOpenAttachedArtifact,
     onReuseMessage,
+    onRuntimeSendMessage,
+    onRuntimeOpenLink,
   },
   ref,
 ) {
@@ -641,7 +710,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
   const lastItemSignal = lastItem
     ? `${lastItem.key}|${lastItem.renderSignature}`
     : '';
-  const contentSignal = `${items.length}|${lastItemSignal}|${viewport.windowEndOffset}|${viewport.totalItemCount}|${viewport.isAtLatest ? '1' : '0'}|${viewport.hasMore ? '1' : '0'}|${viewport.hasNewer ? '1' : '0'}`;
+  const contentSignal = `${items.length}|${lastItemSignal}|${viewport.windowEndOffset}|${viewport.totalItemCount}|${viewport.isAtLatest ? '1' : '0'}|${viewport.hasMore ? '1' : '0'}|${viewport.hasNewer ? '1' : '0'}|${activity ?? ''}`;
 
   useLayoutEffect(() => {
     if (!isTraceEnabled()
@@ -833,6 +902,8 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       onWheel={handleViewportWheel}
       onViewportClickCapture={handleViewportClickCapture}
       items={items}
+      activity={activity}
+      assistantPresentation={assistantPresentation}
       showLoadOlder={viewport.hasMore || viewport.isLoadingMore}
       isLoadingOlder={viewport.isLoadingMore}
       onLoadOlder={handleLoadOlder}
@@ -848,6 +919,8 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
       onOpenArtifactFile={onOpenArtifactFile}
       onOpenAttachedArtifact={onOpenAttachedArtifact}
       onReuseMessage={onReuseMessage}
+      onRuntimeSendMessage={onRuntimeSendMessage}
+      onRuntimeOpenLink={onRuntimeOpenLink}
     />
   );
 });

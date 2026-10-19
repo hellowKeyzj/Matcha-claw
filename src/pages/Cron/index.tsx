@@ -47,7 +47,6 @@ import {
   TaskCenterToolbar,
 } from '@/components/task-center/surface';
 import { useCronStore } from '@/stores/cron';
-import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
 import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { agentScope as createAgentScope, buildCapabilityScopeKey, buildRuntimeEndpointKey, runtimeInstanceScope, type RuntimeEndpointRef } from '@/types/desktop/runtime-address';
 import { useSkillsStore } from '@/stores/skills';
@@ -1409,10 +1408,7 @@ export function Cron({ embedded = false }: CronProps) {
   return (
     <div className="space-y-5">
       {!embedded && (
-        <header className="flex items-center justify-between">
-          <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
-          <RuntimeScopeSelector />
-        </header>
+        <TaskCenterPageTitle title={t('title')} subtitle={t('subtitle')} />
       )}
 
       <TaskCenterToolbar

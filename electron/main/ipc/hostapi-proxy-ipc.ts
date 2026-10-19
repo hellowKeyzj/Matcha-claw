@@ -1,10 +1,9 @@
-import { request as httpRequest } from 'node:http';
-import { Readable, addAbortSignal } from 'node:stream';
 import { HOST_API_STARTUP_PATHS, HOST_API_STARTUP_TRACE_HEADER, type HostApiProxyFailureCode } from '../../../src/lib/host-api-transport-contract';
 import { isTraceEnabled, startupTrace, traceDebug } from '../../utils/trace-logger';
 import { ipcMain } from 'electron';
 import { getHostApiRequestDependency } from '../../api/route-boundary';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
+import { fetchLoopbackHttp } from '../../utils/loopback-http';
 import { getHostApiBaseUrl, getHostApiToken, waitForHostApiReady } from '../../api/server';
 import { handleE2EHostApiFetch } from '@electron/e2e-fixture-loader';
 import {
@@ -147,41 +146,6 @@ async function waitForHostApiReadyOrAbort(signal: AbortSignal, runtimeReady?: Pr
   }
 }
 
-function fetchAdmission(
-  url: string,
-  headers: Record<string, string>,
-  body: string | undefined,
-  signal: AbortSignal,
-  uploadFinished: () => void,
-  responseStarted: () => void,
-): Promise<Response> {
-  return new Promise((resolve, reject) => {
-    let receivedResponse = false;
-    const request = httpRequest(url, { method: 'POST', headers, signal }, (incoming) => {
-      receivedResponse = true;
-      responseStarted();
-      addAbortSignal(signal, incoming);
-      const responseHeaders = new Headers();
-      for (const [name, value] of Object.entries(incoming.headers)) {
-        if (Array.isArray(value)) {
-          for (const item of value) responseHeaders.append(name, item);
-        } else if (value !== undefined) {
-          responseHeaders.set(name, value);
-        }
-      }
-      resolve(new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
-        status: incoming.statusCode,
-        headers: responseHeaders,
-      }));
-    });
-    request.once('finish', () => {
-      if (!receivedResponse) uploadFinished();
-    });
-    request.once('error', reject);
-    request.end(body);
-  });
-}
-
 export function registerHostApiProxyHandlers(
   runtimeReady: Promise<unknown>,
   sessionObservers?: RendererSessionObservationRegistry,
@@ -263,6 +227,8 @@ export function registerHostApiProxyHandlers(
         ? request.timeoutMs : undefined;
       const timeoutMs = explicitTimeout ?? DEFAULT_HOST_API_TIMEOUT_MS;
       const admission = explicitTimeout === undefined && method === 'POST' && ASYNC_ADMISSION_PATHS.has(routeUrl.pathname);
+      const slowSearch = (method === 'PUT' && routeUrl.pathname === '/api/search/config')
+        || (method === 'POST' && (routeUrl.pathname === '/api/search/prepare' || routeUrl.pathname === '/api/search/restart'));
 
       const controller = new AbortController();
       const pendingRequest: InflightHostApiRequest = { controller, failureCode: 'UNAVAILABLE' };
@@ -282,9 +248,9 @@ export function registerHostApiProxyHandlers(
         pendingRequest.failureCode = 'ABORTED';
         controller.abort();
       };
-      if (admission) event.sender.once('destroyed', senderClosed);
+      if (admission || slowSearch) event.sender.once('destroyed', senderClosed);
       try {
-        if (admission && event.sender.isDestroyed()) senderClosed();
+        if ((admission || slowSearch) && event.sender.isDestroyed()) senderClosed();
         trace('ready.start');
         startupStage = 'ready';
         traceStartup('ready.start');
@@ -330,17 +296,21 @@ export function registerHostApiProxyHandlers(
         startupStage = 'fetch';
         traceStartup('fetch.request');
         const url = `${getHostApiBaseUrl()}${normalizedPath}`;
-        const response = admission
-          ? await fetchAdmission(url, headers, body, controller.signal, () => {
-            // Only owner admission is outside the readiness/body I/O budget.
-            clearTimeout(timer);
-            remainingMs -= performance.now() - startedAt;
-            waitingForAdmission = true;
-            if (remainingMs <= 0) expire();
-          }, () => {
-            if (waitingForAdmission) timer = setTimeout(expire, Math.max(0, remainingMs));
-          })
-          : await proxyAwareFetch(url, { method, headers, body, signal: controller.signal });
+        const init = { method, headers, body, signal: controller.signal };
+        const response = admission || slowSearch
+          ? await fetchLoopbackHttp(url, init, admission ? {
+            uploadFinished: () => {
+              // Only owner admission is outside the readiness/body I/O budget.
+              clearTimeout(timer);
+              remainingMs -= performance.now() - startedAt;
+              waitingForAdmission = true;
+              if (remainingMs <= 0) expire();
+            },
+            responseStarted: () => {
+              if (waitingForAdmission) timer = setTimeout(expire, Math.max(0, remainingMs));
+            },
+          } : undefined)
+          : await proxyAwareFetch(url, init);
 
         trace('fetch.headers', () => ({ status: response.status }));
         startupStatus = response.status;
@@ -404,7 +374,7 @@ export function registerHostApiProxyHandlers(
         };
       } finally {
         clearTimeout(timer);
-        if (admission) event.sender.removeListener('destroyed', senderClosed);
+        if (admission || slowSearch) event.sender.removeListener('destroyed', senderClosed);
         if (requestId) {
           inflightRequests.delete(requestId);
         }

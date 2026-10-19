@@ -20,7 +20,7 @@ pub(crate) type PeerKey = platform::endpoint::runtime_address::RuntimeEndpoint;
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub(crate) enum PeerLaneKey {
     Lifecycle(PeerKey),
-    McpApp { session_key: String },
+    McpApp { identity: String },
     Question { identity: String, id: String },
 }
 

@@ -393,6 +393,8 @@ pub(crate) enum SafeEvent {
     OpenClawRuntime {},
     #[serde(rename = "openclaw.questions.changed")]
     OpenClawQuestionsChanged {},
+    #[serde(rename = "openclaw.progress.changed")]
+    OpenClawProgressChanged {},
     #[serde(rename = "matcha.lifecycle", rename_all = "camelCase")]
     MatchaLifecycle {
         lifecycle: SafeRuntimeLifecycle,
@@ -407,6 +409,20 @@ pub(crate) enum SafeEvent {
     },
     #[serde(rename = "calls.resync")]
     CallsResync {},
+    #[serde(rename = "board:changed")]
+    BoardChanged {
+        identity: board::BoardIdentity,
+        revision: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        widget: Option<String>,
+    },
+    #[serde(rename = "board:command")]
+    BoardCommand {
+        identity: board::BoardIdentity,
+        command: board::BoardCommand,
+    },
+    #[serde(rename = "board:resync")]
+    BoardResync {},
     #[serde(rename = "organization.changed")]
     OrganizationChanged {},
     #[serde(rename = "cron.changed")]

@@ -6,6 +6,7 @@ import type {
   ToolActivityContent,
 } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
+import type { ToolActivityDescriptor } from './types';
 
 const TITLE_TEXT_LIMIT = 72;
 const BODY_TEXT_LIMIT = 1200;
@@ -336,6 +337,14 @@ function buildTrailingLabels(
 
 export function isAgentToolActivityTool(tool: SessionRenderToolCard): boolean {
   return resolveAgentToolKind(tool.name) !== null;
+}
+
+export function describeAgentToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityDescriptor {
+  return {
+    kind: 'generic',
+    title: resolveTitle(resolveAgentToolKind(tool.name) ?? 'dispatch', readAgentToolInput(tool), {}, t),
+    label: tool.displayTitle?.trim() || tool.name,
+  };
 }
 
 export const agentToolActivityRenderer = (tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent => {

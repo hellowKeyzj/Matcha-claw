@@ -215,7 +215,7 @@ export function shouldRetainLocalSessionRecord(
   if (record.meta.ownership?.kind === 'team') {
     return true;
   }
-  const runtime = record.runtime;
+  const runtime = getSessionRuntime(state, sessionKey);
   return (
     getSessionItemCount(record) > 0
     || Boolean(record.meta.label)

@@ -1,12 +1,13 @@
 use crate::{driver::OpenClawDriver, surfaces::tasks as openclaw_tasks};
 use foundation::process::supervision::SupervisorPhase;
+use futures_util::FutureExt;
 use workspace_module::WorkspaceOps;
 
 impl ::task_manager::TaskOps for OpenClawDriver {
     fn task_manager<'a>(
         &'a self,
         command: ::task_manager::TaskCommand,
-    ) -> ::task_manager::TaskFuture<'a, ::task_manager::TaskOutcome> {
+    ) -> ::task_manager::TaskFuture<'a, ::task_manager::TaskExecution> {
         Box::pin(async move {
             match command {
                 ::task_manager::TaskCommand::List { target } => {
@@ -132,7 +133,7 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     ))
                 }
             }
-        })
+        }.map(::task_manager::TaskExecution::new))
     }
 
     fn task_runtime_ready(&self) -> bool {

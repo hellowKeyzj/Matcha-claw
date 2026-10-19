@@ -24,6 +24,7 @@ import {
   buildManagedOpenClawPlugins,
 } from './lib/openclaw-local-plugin-builder.mjs';
 import { safeRmSync } from './lib/safe-delete.mjs';
+import { patchSearxngPlugin } from './openclaw-search-patches.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -66,6 +67,7 @@ const PLUGINS = [
   { npmName: '@openclaw/kimi-provider', pluginId: 'kimi' },
   { npmName: '@openclaw/volcengine-provider', pluginId: 'volcengine' },
   { npmName: '@openclaw/opencode-provider', pluginId: 'opencode' },
+  { npmName: '@openclaw/searxng-plugin', pluginId: 'searxng' },
   ...LOCAL_OPENCLAW_PLUGIN_BUILD_TARGETS.map((target) => ({
     localPath: path.join(ROOT, target.packageDir),
     pluginId: target.pluginId,
@@ -381,6 +383,7 @@ fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
 for (const plugin of PLUGINS) {
   if (plugin.npmName) {
     bundleOnePlugin(plugin);
+    if (plugin.pluginId === 'searxng') patchSearxngPlugin(path.join(OUTPUT_ROOT, plugin.pluginId));
     continue;
   }
   if (plugin.localPath) {

@@ -15,6 +15,7 @@ import type {
   SessionRenderAttachedFile,
 } from '../../types/session/tool-card';
 import type {
+  SessionAssistantTurnItem,
   SessionRenderItem,
 } from '../../types/session/render-item';
 import type {
@@ -331,9 +332,43 @@ export interface ChatCurrentDraftConversation {
 
 export type ChatCurrentConversation = ChatCurrentSessionConversation | ChatCurrentDraftConversation;
 
+interface ChatSessionSendIdentity {
+  identityKey: string;
+  generation: number;
+  clientId: string;
+  startedAt: number;
+}
+
+export type ChatSessionSendAdmission = 'queued' | 'started' | 'in_flight' | 'ok';
+
+export type ChatSessionSendReceipt =
+  | { phase: 'awaiting-receipt'; terminalRunIds: readonly string[]; terminalOverflow: boolean }
+  | { phase: 'accepted'; admission: ChatSessionSendAdmission; runId: string }
+  | { phase: 'failed'; error: string }
+  | { phase: 'unknown'; runId: string | null; error: string; terminalRunIds: readonly string[]; terminalOverflow: boolean };
+
+export interface ChatSessionSendState extends ChatSessionSendIdentity {
+  receipt: ChatSessionSendReceipt;
+}
+
+export type ChatSessionPending =
+  | { kind: 'assistant'; item: SessionAssistantTurnItem }
+  | { kind: 'activity'; mode: 'typing' | 'activity' | 'compacting' };
+
+export interface ChatSessionAbortState {
+  identityKey: string;
+  sendGeneration: number;
+  runId: string | null;
+  startedAt: number;
+  phase: 'stopping' | 'failed';
+  issue: GatewayTransportIssue | null;
+}
+
 export interface ChatSessionRecord {
   meta: ChatSessionMetaState;
   runtime: ChatSessionRuntimeState;
+  send?: ChatSessionSendState | null;
+  abort?: ChatSessionAbortState | null;
   items: SessionRenderItem[];
   window: ChatSessionViewportState;
   contextTokens?: SessionContextTokenSnapshot;

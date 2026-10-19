@@ -16,10 +16,61 @@ pub struct OpenClawBrowserGatewayRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenClawMcpAppGatewayRequest {
-    pub operation_id: String,
-    pub session_key: String,
+    pub session_identity: sessions_module::state::SessionIdentity,
     pub view_id: String,
-    pub standalone: Option<bool>,
+    pub operation: OpenClawMcpAppOperation,
+}
+
+impl OpenClawMcpAppGatewayRequest {
+    pub fn operation_id(&self) -> &'static str {
+        self.operation.operation_id()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpenClawMcpAppOperation {
+    View,
+    CallTool { tool_name: String, arguments: Option<Value> },
+    ListTools { cursor: Option<String> },
+    ListResources { cursor: Option<String> },
+    ListResourceTemplates { cursor: Option<String> },
+    ReadResource { uri: String },
+    UpdateModelContext { content: Option<Vec<Value>> },
+}
+
+impl OpenClawMcpAppOperation {
+    pub fn operation_id(&self) -> &'static str {
+        match self {
+            Self::View => "mcp.app.view",
+            Self::CallTool { .. } => "mcp.app.callTool",
+            Self::ListTools { .. } => "mcp.app.listTools",
+            Self::ListResources { .. } => "mcp.app.listResources",
+            Self::ListResourceTemplates { .. } => "mcp.app.listResourceTemplates",
+            Self::ReadResource { .. } => "mcp.app.readResource",
+            Self::UpdateModelContext { .. } => "mcp.app.updateModelContext",
+        }
+    }
+
+    pub fn has_side_effects(&self) -> bool {
+        matches!(self, Self::CallTool { .. } | Self::UpdateModelContext { .. })
+    }
+}
+
+pub fn is_mcp_app_operation_id(value: &str) -> bool {
+    matches!(value, "mcp.app.view" | "mcp.app.callTool" | "mcp.app.listTools"
+        | "mcp.app.listResources" | "mcp.app.listResourceTemplates"
+        | "mcp.app.readResource" | "mcp.app.updateModelContext")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenClawCanvasGatewayRequest {
+    pub session_identity: sessions_module::state::SessionIdentity,
+    pub doc_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenClawProgressCardGatewayRequest {
+    pub session_identity: sessions_module::state::SessionIdentity,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +94,7 @@ pub enum OpenClawGatewayControlOutcome {
     Rejected,
     Unavailable,
     CapacityExhausted,
+    SurfaceRejected(Value),
 }
 
 pub fn project_gateway_request_outcome(
@@ -63,6 +115,9 @@ pub fn project_gateway_request_outcome(
         }
         crate::port::OpenClawGatewayRequestOutcome::OutcomeUnknown => {
             OpenClawGatewayControlOutcome::Unknown(json!({ "outcome": "unknown" }))
+        }
+        crate::port::OpenClawGatewayRequestOutcome::SurfaceRejected(failure) => {
+            OpenClawGatewayControlOutcome::SurfaceRejected(failure.public_error())
         }
     }
 }
@@ -127,30 +182,101 @@ pub fn decode_mcp_app_request(
     input: Value,
 ) -> Result<OpenClawMcpAppGatewayRequest, InvalidGatewayRequest> {
     let object = input.as_object().ok_or(InvalidGatewayRequest)?;
-    if !object.keys().all(|key| {
-        matches!(
-            key.as_str(),
-            "operationId" | "sessionKey" | "viewId" | "standalone"
-        )
-    }) || !object.contains_key("operationId")
-        || !object.contains_key("sessionKey")
-        || !object.contains_key("viewId")
-    {
+    let operation_id = object.get("operationId").and_then(Value::as_str).ok_or(InvalidGatewayRequest)?;
+    let extra: &[&str] = match operation_id {
+        "mcp.app.view" => &[],
+        "mcp.app.callTool" => &["toolName", "arguments"],
+        "mcp.app.listTools" | "mcp.app.listResources" | "mcp.app.listResourceTemplates" => &["cursor"],
+        "mcp.app.readResource" => &["uri"],
+        "mcp.app.updateModelContext" => &["content"],
+        _ => return Err(InvalidGatewayRequest),
+    };
+    if !object.keys().all(|key| matches!(key.as_str(), "operationId" | "sessionIdentity" | "viewId") || extra.contains(&key.as_str())) {
         return Err(InvalidGatewayRequest);
     }
-    let operation_id = bounded_gateway_text(object.get("operationId"))?;
-    if !operation_id.starts_with("mcp.app.") {
-        return Err(InvalidGatewayRequest);
-    }
+    let view_id = bounded_surface_text(object.get("viewId"))?;
+    if view_id.len() > 128 { return Err(InvalidGatewayRequest); }
+    let cursor = || object.get("cursor").map(|value| bounded_surface_text(Some(value))).transpose();
+    let operation = match operation_id {
+        "mcp.app.view" => OpenClawMcpAppOperation::View,
+        "mcp.app.callTool" => {
+            let arguments = object.get("arguments").cloned();
+            if arguments.as_ref().is_some_and(|arguments| !arguments.is_object()) { return Err(InvalidGatewayRequest); }
+            OpenClawMcpAppOperation::CallTool { tool_name: bounded_surface_text(object.get("toolName"))?, arguments }
+        }
+        "mcp.app.listTools" => OpenClawMcpAppOperation::ListTools { cursor: cursor()? },
+        "mcp.app.listResources" => OpenClawMcpAppOperation::ListResources { cursor: cursor()? },
+        "mcp.app.listResourceTemplates" => OpenClawMcpAppOperation::ListResourceTemplates { cursor: cursor()? },
+        "mcp.app.readResource" => OpenClawMcpAppOperation::ReadResource { uri: bounded_surface_text(object.get("uri"))? },
+        "mcp.app.updateModelContext" => {
+            let content = object.get("content").map(|value| value.as_array().cloned().ok_or(InvalidGatewayRequest)).transpose()?;
+            if let Some(content) = &content {
+                if content.len() > 1 || content.first().is_some_and(|block| !is_model_context_text(block)) {
+                    return Err(InvalidGatewayRequest);
+                }
+            }
+            OpenClawMcpAppOperation::UpdateModelContext { content }
+        }
+        _ => return Err(InvalidGatewayRequest),
+    };
     Ok(OpenClawMcpAppGatewayRequest {
-        operation_id,
-        session_key: bounded_gateway_text(object.get("sessionKey"))?,
-        view_id: bounded_gateway_text(object.get("viewId"))?,
-        standalone: match object.get("standalone") {
-            Some(value) => Some(value.as_bool().ok_or(InvalidGatewayRequest)?),
-            None => None,
-        },
+        session_identity: decode_question_session_identity(object.get("sessionIdentity"))?,
+        view_id,
+        operation,
     })
+}
+
+fn bounded_surface_text(value: Option<&Value>) -> Result<String, InvalidGatewayRequest> {
+    let value = bounded_gateway_text(value)?;
+    if value.trim() != value { return Err(InvalidGatewayRequest); }
+    Ok(value)
+}
+
+fn is_model_context_text(value: &Value) -> bool {
+    value.as_object().is_some_and(|block| block.len() == 2 && block.get("type").and_then(Value::as_str) == Some("text")
+        && block.get("text").and_then(Value::as_str).is_some_and(|text| text.len() <= 16 * 1024))
+}
+
+pub fn decode_canvas_request(input: Value) -> Result<OpenClawCanvasGatewayRequest, InvalidGatewayRequest> {
+    let object = input.as_object().ok_or(InvalidGatewayRequest)?;
+    if object.len() != 3 || object.get("operationId").and_then(Value::as_str) != Some("canvas.document.view") {
+        return Err(InvalidGatewayRequest);
+    }
+    let doc_id = bounded_gateway_text(object.get("docId"))?;
+    if !is_canvas_document_id(&doc_id) { return Err(InvalidGatewayRequest); }
+    Ok(OpenClawCanvasGatewayRequest {
+        session_identity: decode_question_session_identity(object.get("sessionIdentity"))?,
+        doc_id,
+    })
+}
+
+pub(crate) fn is_canvas_document_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && value != "." && value != ".."
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+pub fn decode_progress_card_request(input: Value) -> Result<OpenClawProgressCardGatewayRequest, InvalidGatewayRequest> {
+    let object = input.as_object().ok_or(InvalidGatewayRequest)?;
+    if object.len() != 2 || object.get("operationId").and_then(Value::as_str) != Some("progressCard.get") {
+        return Err(InvalidGatewayRequest);
+    }
+    let session_identity = serde_json::from_value(object.get("sessionIdentity").cloned().ok_or(InvalidGatewayRequest)?)
+        .map_err(|_| InvalidGatewayRequest)?;
+    validate_progress_card_identity(&session_identity)?;
+    Ok(OpenClawProgressCardGatewayRequest { session_identity })
+}
+
+pub(crate) fn validate_progress_card_identity(identity: &sessions_module::state::SessionIdentity) -> Result<(), InvalidGatewayRequest> {
+    if matches!(identity.session_key.as_str(), "global" | "unknown") {
+        identity.validate().map_err(|_| InvalidGatewayRequest)?;
+        if identity.endpoint != sessions_module::state::SessionEndpoint::local(sessions_module::state::SessionProvider::OpenClaw) {
+            return Err(InvalidGatewayRequest);
+        }
+        crate::session::protocol::AgentId::try_new(&identity.agent_id).map_err(|_| InvalidGatewayRequest)?;
+        Ok(())
+    } else {
+        crate::port::validate_observation_identity(identity).map_err(|_| InvalidGatewayRequest)
+    }
 }
 
 pub fn decode_question_list_request(

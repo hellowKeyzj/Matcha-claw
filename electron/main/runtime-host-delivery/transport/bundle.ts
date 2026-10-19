@@ -1,6 +1,7 @@
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
 import { createAgentsTransport } from '../products/agents';
 import { createSettingsDesiredTransport } from '../products/settings/desired';
+import { createBoardTransport } from './board';
 import { createCapabilityDirectoryTransport } from './capabilities';
 import { createCronTransport } from './cron';
 import { createCallLogTransport } from './call-log';
@@ -16,6 +17,8 @@ import { createProviderAccountsTransport } from './providers/accounts';
 import { createProviderModelsTransport } from './providers/models';
 import { createProviderRoutingTransport } from './providers/routing';
 import { createProviderRecoveryTransport } from './providers/recovery';
+import { createSearchTransport } from './search';
+import { fetchLoopbackHttp } from '../../../utils/loopback-http';
 import { createSecurityEmergencyTransport } from './security/emergency';
 import { createSecurityPolicyTransport } from './security/policy';
 import { createNativePolicyTransport } from './security/native-policy';
@@ -100,6 +103,7 @@ export function createRuntimeHostTransportBundle(
       });
 
   const hostApiTransports = {
+    boardTransport: createBoardTransport(issuer, runtimeHostTransportPort),
     sessionListTransport: createSessionListTransport(issuer, runtimeHostTransportPort),
     capabilityDirectoryTransport: createCapabilityDirectoryTransport(issuer, runtimeHostTransportPort),
     runtimeDirectoryTransport: createRuntimeEndpointDirectoryTransport(issuer, runtimeHostTransportPort),
@@ -163,6 +167,7 @@ export function createRuntimeHostTransportBundle(
     openClawPlatformTransport: createOpenClawPlatformTransport(issuer, runtimeHostTransportPort),
     providerRoutingTransport: createProviderRoutingTransport(issuer, runtimeHostTransportPort),
     providerRecoveryTransport: createProviderRecoveryTransport(issuer, runtimeHostTransportPort),
+    search: createSearchTransport(issuer, runtimeHostTransportPort, fetchLoopbackHttp),
     clawHubSkillInstallTransport: createClawHubSkillInstallTransport(issuer, runtimeHostTransportPort),
     clawHubSkillSearchTransport: createClawHubSkillSearchTransport(issuer, runtimeHostTransportPort),
     skillBundleTransport: createSkillBundleTransport(issuer, runtimeHostTransportPort),

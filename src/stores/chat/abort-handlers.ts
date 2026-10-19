@@ -6,11 +6,13 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
+import { buildSessionIdentityKey } from '../../types/desktop/runtime-address';
 import type { StoreSessionRunCache } from './session-run-cache';
 import { resolveSessionOperationTarget } from './session-identity';
+import { failSessionAbort, resolveSessionAbortRunId, startSessionAbort } from './session-presentation';
 import { getSessionRuntime, patchSessionRecord } from './store-state-helpers';
 import { clearErrorRecoveryTimer, clearHistoryPoll } from './timers';
-import { isRunActive, type ChatStoreState } from './types';
+import { isRunActive, type ChatSessionAbortState, type ChatStoreState } from './types';
 
 type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -39,33 +41,32 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
   const { set, get, sessionRunCache, onBeginMutating, onFinishMutating, onAbortedTelemetry } = params;
   const stateAtClick = get();
   const sessionKey = stateAtClick.currentSessionKey;
+  const record = stateAtClick.loadedSessions[sessionKey];
   const runtimeAtClick = getSessionRuntime(stateAtClick, sessionKey);
-  if (runtimeAtClick.runPhase === 'stopping' || !isRunActive(runtimeAtClick)) return;
+  if (!record?.meta.sessionIdentity || runtimeAtClick.runPhase === 'stopping' || !isRunActive(runtimeAtClick)) return;
 
-  const runId = runtimeAtClick.activeRunId ?? undefined;
+  const runId = resolveSessionAbortRunId(record);
+  const identityKey = buildSessionIdentityKey(record.meta.sessionIdentity);
   const sendGeneration = sessionRunCache.getSendGeneration(sessionKey);
   const approvalIds = (stateAtClick.pendingApprovalsBySession[sessionKey] ?? []).map((approval) => approval.id);
   const traceId = createSessionTraceId('abort-boundary');
   const startedAtMs = Date.now();
-  const stoppingUpdatedAt = Math.max(startedAtMs, (runtimeAtClick.updatedAt ?? 0) + 1);
+  const abort: ChatSessionAbortState = {
+    identityKey, sendGeneration, runId: runId ?? null,
+    startedAt: Math.max(startedAtMs, (runtimeAtClick.updatedAt ?? 0) + 1), phase: 'stopping', issue: null,
+  };
   const reportFailure = (message: string) => {
     set((state) => {
-      const runtime = getSessionRuntime(state, sessionKey);
-      if (runtime.runPhase !== 'stopping'
-        || runtime.updatedAt !== stoppingUpdatedAt
-        || sessionRunCache.getSendGeneration(sessionKey) !== sendGeneration
-        || (runId && runtime.activeRunId !== runId)) return state;
+      const current = state.loadedSessions[sessionKey];
+      if (!current?.meta.sessionIdentity || buildSessionIdentityKey(current.meta.sessionIdentity) !== identityKey
+        || current.abort !== abort || sessionRunCache.getSendGeneration(sessionKey) !== sendGeneration) return state;
       const at = Date.now();
-      return {
-        loadedSessions: patchSessionRecord(state, sessionKey, {
-          runtime: {
-            ...runtime,
-            runPhase: runtimeAtClick.runPhase,
-            lastError: message,
-            lastIssue: { message, code: message, source: 'rpc', at, retryable: true },
-            updatedAt: at,
-          },
-        }),
+      const failed: ChatSessionAbortState = {
+        ...abort, phase: 'failed', issue: { message, code: message, source: 'rpc', at, retryable: true },
+      };
+      const runtime = failSessionAbort(current, failed, runtimeAtClick);
+      return runtime === null ? state : {
+        loadedSessions: patchSessionRecord(state, sessionKey, { runtime, abort: failed }),
       };
     });
   };
@@ -78,11 +79,9 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
   }));
   clearHistoryPoll();
   clearErrorRecoveryTimer();
-  set((state) => ({
-    loadedSessions: patchSessionRecord(state, sessionKey, {
-      runtime: { ...runtimeAtClick, runPhase: 'stopping', lastError: null, lastIssue: null, updatedAt: stoppingUpdatedAt },
-    }),
-  }));
+  set((state) => ({ loadedSessions: patchSessionRecord(state, sessionKey, {
+    abort, runtime: startSessionAbort(record, abort),
+  }) }));
 
   onBeginMutating();
   try {
@@ -115,7 +114,7 @@ export async function executeStoreAbortRun(params: ExecuteStoreAbortRunParams): 
     setTimeout(() => {
       logSessionTrace('abort.terminal.deadline', traceId, () => ({
         phase: getSessionRuntime(get(), sessionKey).runPhase,
-        activeRunId: summarizeIdentifier(getSessionRuntime(get(), sessionKey).activeRunId),
+        activeRunId: summarizeIdentifier(get().loadedSessions[sessionKey]?.runtime.activeRunId),
         elapsedMs: Date.now() - startedAtMs,
       }));
       reportFailure(ABORT_STOPPING_TIMEOUT_ERROR);

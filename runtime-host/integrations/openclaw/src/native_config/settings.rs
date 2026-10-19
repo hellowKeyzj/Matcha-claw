@@ -190,12 +190,14 @@ impl SettingsProjection {
         let mut plugins = object(document.get("plugins"));
         let mut allow = strings(plugins.get("allow"));
         let relay = self.browser_mode == BrowserMode::Relay;
-        changed |= set_member(&mut allow, BROWSER_RELAY_PLUGIN, relay);
-        changed |= replace(
-            &mut plugins,
-            "allow",
-            Value::Array(allow.into_iter().map(Value::String).collect()),
-        );
+        if !allow.is_empty() {
+            changed |= set_member(&mut allow, BROWSER_RELAY_PLUGIN, relay);
+            changed |= replace(
+                &mut plugins,
+                "allow",
+                Value::Array(allow.into_iter().map(Value::String).collect()),
+            );
+        }
         let mut entries = object(plugins.get("entries"));
         let mut relay_entry = object(entries.get(BROWSER_RELAY_PLUGIN));
         changed |= replace(&mut relay_entry, "enabled", Value::Bool(relay));
@@ -228,7 +230,7 @@ impl SettingsProjection {
         let plugins = object(document.get("plugins"));
         let allow = strings(plugins.get("allow"));
         let relay = self.browser_mode == BrowserMode::Relay;
-        if allow.contains(&BROWSER_RELAY_PLUGIN.to_owned()) != relay {
+        if !allow.is_empty() && allow.contains(&BROWSER_RELAY_PLUGIN.to_owned()) != relay {
             return false;
         }
         let entries = object(plugins.get("entries"));
@@ -311,7 +313,7 @@ fn disable_native_proxy(document: &mut OpenClawConfigDocument) -> bool {
 
 fn apply_default_session_idle(document: &mut OpenClawConfigDocument) -> bool {
     let session = object(document.get("session"));
-    if ["idleMinutes", "reset", "resetByType", "resetByChannel"]
+    if ["reset", "resetByType", "resetByChannel"]
         .into_iter()
         .any(|key| session.contains_key(key))
     {
@@ -320,15 +322,15 @@ fn apply_default_session_idle(document: &mut OpenClawConfigDocument) -> bool {
 
     let mut session = session;
     session.insert(
-        "idleMinutes".into(),
-        Value::Number(DEFAULT_SESSION_IDLE_MINUTES.into()),
+        "reset".into(),
+        serde_json::json!({ "mode": "idle", "idleMinutes": DEFAULT_SESSION_IDLE_MINUTES }),
     );
     replace_document(document, "session", Value::Object(session))
 }
 
 fn session_idle_projection_is_ready(document: &OpenClawConfigDocument) -> bool {
     let session = object(document.get("session"));
-    ["idleMinutes", "reset", "resetByType", "resetByChannel"]
+    ["reset", "resetByType", "resetByChannel"]
         .into_iter()
         .any(|key| session.contains_key(key))
 }
@@ -492,19 +494,25 @@ mod tests {
     }
 
     #[test]
-    fn establishes_the_legacy_idle_default_without_overwriting_session_policy() {
+    fn establishes_the_idle_default_without_overwriting_session_policy() {
         let root = TestRoot::new();
         let state_dir = root.state_dir();
 
         assert!(ensure_default_session_idle(state_dir.clone()).unwrap());
         let document = OpenClawConfigStore::new(state_dir.clone()).read().unwrap();
-        assert_eq!(document.as_value()["session"]["idleMinutes"], 10_080);
+        assert_eq!(
+            document.as_value()["session"]["reset"],
+            serde_json::json!({ "mode": "idle", "idleMinutes": 10_080 })
+        );
         assert!(!ensure_default_session_idle(state_dir).unwrap());
 
         let protected = root.state_dir();
         OpenClawConfigStore::new(protected.clone())
             .update(|document| {
-                document.insert("session".into(), serde_json::json!({ "reset": "daily" }));
+                document.insert(
+                    "session".into(),
+                    serde_json::json!({ "reset": { "mode": "daily" } }),
+                );
                 OpenClawConfigMutation::changed()
             })
             .unwrap();
@@ -512,7 +520,7 @@ mod tests {
         let document = OpenClawConfigStore::new(protected).read().unwrap();
         assert_eq!(
             document.as_value()["session"],
-            serde_json::json!({ "reset": "daily" })
+            serde_json::json!({ "reset": { "mode": "daily" } })
         );
     }
 
@@ -525,7 +533,7 @@ mod tests {
             .update(|document| {
                 document.insert(
                     "session".into(),
-                    serde_json::json!({ "idleMinutes": DEFAULT_SESSION_IDLE_MINUTES }),
+                    serde_json::json!({ "reset": { "mode": "idle", "idleMinutes": DEFAULT_SESSION_IDLE_MINUTES } }),
                 );
                 OpenClawConfigMutation::changed()
             })
@@ -543,7 +551,7 @@ mod tests {
         assert_eq!(document["browser"]["enabled"], true);
         assert_eq!(document["browser"]["defaultProfile"], "openclaw");
         assert_eq!(
-            document["session"]["idleMinutes"],
+            document["session"]["reset"]["idleMinutes"],
             DEFAULT_SESSION_IDLE_MINUTES
         );
         assert_eq!(document["proxy"]["enabled"], true);

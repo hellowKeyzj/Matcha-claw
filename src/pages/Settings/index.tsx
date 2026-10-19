@@ -3,7 +3,7 @@ import { isTraceEnabled, traceLog } from '@/lib/trace-logger';
  * Settings Page
  * Application configuration
  */
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Sun,
@@ -93,6 +93,8 @@ type MatchaAgentAppServerStatus = {
   lastError: string | null;
   updatedAt: number | string;
 };
+
+const NetworkSearch = lazy(() => import('./NetworkSearch'));
 
 const STARTUP_TRACE_PREFIX = '[startup-trace]';
 
@@ -1384,6 +1386,7 @@ export function Settings() {
     { key: 'gateway', label: t('gateway.runtimeTitle') },
     { key: 'appearance', label: t('appearance.title') },
     { key: 'browser', label: t('gateway.browser.title') },
+    { key: 'search', label: t('networkSearch.title') },
     { key: 'updates', label: t('updates.title') },
     { key: 'advanced', label: t('advanced.title') },
     { key: 'license', label: t('license.title') },
@@ -1406,7 +1409,7 @@ export function Settings() {
   }, [licenseLocked, location.pathname, location.search, navigate]);
 
   return (
-    <div className="flex flex-col gap-6 text-foreground" data-testid="settings-page">
+    <div className={cn('flex flex-col gap-6 text-foreground', activeSection === 'search' && 'min-h-0 lg:h-full')} data-testid="settings-page">
       <ConfirmDialog
         open={!licenseLocked && showRepairConfirmation}
         title={t('gateway.repair.confirmTitle')}
@@ -1424,7 +1427,7 @@ export function Settings() {
         <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
+      <div className={cn('grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]', activeSection === 'search' && 'min-h-0 flex-1')}>
         <Card className="h-fit bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
           <CardContent className="p-2.5">
             <nav className="space-y-1" aria-label={t('title')}>
@@ -1454,8 +1457,13 @@ export function Settings() {
           </CardContent>
         </Card>
 
-        <div className="min-w-0 space-y-6">
+        <div className={activeSection === 'search' ? 'flex h-[640px] min-h-0 min-w-0 flex-col lg:h-auto' : 'min-w-0 space-y-6'}>
           {activeSection === 'license' && <LicenseSection />}
+          {activeSection === 'search' && (
+            <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">{t('networkSearch.loading')}</p>}>
+              <NetworkSearch />
+            </Suspense>
+          )}
           {activeSection === 'calls' && (
             <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">{commonT('calls.loading')}</p>}>
               <CallsRoute />

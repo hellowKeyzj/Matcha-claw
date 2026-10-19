@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { decodeBoardChangedEvent, decodeBoardCommandEvent, type BoardChangedEvent, type BoardCommandEvent } from '../../../src/types/board';
 import { isProductRuntimeEndpoint, type ProductRuntimeEndpoint } from './transport/runtime-scope';
 
 export const RUNTIME_HOST_CONTROL_VERSION = 1;
@@ -61,6 +62,10 @@ export type RuntimeHostControlOutcome =
   | { readonly kind: 'timed-out' };
 
 export type RuntimeHostSafeEvent =
+  | ({ readonly type: 'board:changed' } & BoardChangedEvent)
+  | ({ readonly type: 'board:command' } & BoardCommandEvent)
+  | { readonly type: 'board:resync' }
+  | { readonly type: 'openclaw.progress.changed' }
   | { readonly type: 'call.changed'; readonly callId: string; readonly revision: number }
   | { readonly type: 'calls.resync' }
   | { readonly type: 'organization.changed' }
@@ -496,6 +501,18 @@ function isMutatingCommand(_command: RuntimeHostControlCommand): boolean {
 function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
   if (!isRecord(value) || typeof value.type !== 'string') return false;
   switch (value.type) {
+    case 'board:changed':
+    case 'board:command': {
+      const { type, ...payload } = value;
+      try {
+        if (type === 'board:changed') decodeBoardChangedEvent(payload);
+        else decodeBoardCommandEvent(payload);
+        return true;
+      } catch { return false; }
+    }
+    case 'board:resync':
+    case 'openclaw.progress.changed':
+      return hasExactKeys(value, ['type']);
     case 'call.changed':
       return hasExactKeys(value, ['type', 'callId', 'revision'])
         && typeof value.callId === 'string'

@@ -6,6 +6,7 @@ import type {
   ToolActivityContent,
 } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
+import type { ToolActivityDescriptor } from './types';
 
 export const skillToolActivityToolNames = [
   'Skill',
@@ -325,6 +326,14 @@ export function isSkillToolActivity(tool: SessionRenderToolCard): boolean {
   return COVERED_TOOL_NAMES.has(normalizedName)
     || COMMAND_TOOL_NAMES.has(normalizedName)
     || SKILL_TOOL_NAMES.has(normalizedName);
+}
+
+export function describeSkillToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityDescriptor {
+  return {
+    kind: 'generic',
+    title: buildTitle(resolveRequest(tool), t),
+    label: tool.displayTitle?.trim() || tool.name,
+  };
 }
 
 export function skillToolActivityRenderer(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {

@@ -2,9 +2,11 @@ import { hostWorkspaceMediaThumbnail, type FileThumbnailResult } from '@/lib/hos
 import { throwIfHistoryLoadAborted } from './history-abort';
 import {
   getSessionItems,
+  getSessionMeta,
   patchSessionRecord,
   reconcileSessionItems,
 } from './store-state-helpers';
+import { getSessionTextModel, type SessionTextModel } from './session-presentation';
 import type { AttachedFileMeta, ChatSendAttachment, ChatStoreState, ChatSessionMetaState } from './types';
 import { buildSessionIdentityRecordIndex } from './session-identity';
 import type {
@@ -339,6 +341,7 @@ function mergeHydratedAttachmentItem(
 export function reconcileHydratedAttachmentItems(
   currentItems: SessionRenderItem[],
   hydratedItems: SessionRenderItem[],
+  normalizeUserText: SessionTextModel['user'] = getSessionTextModel().user,
 ): SessionRenderItem[] {
   if (currentItems === hydratedItems) {
     return currentItems;
@@ -364,7 +367,7 @@ export function reconcileHydratedAttachmentItems(
     return nextItem;
   });
 
-  return changed ? reconcileSessionItems(currentItems, nextItems) : currentItems;
+  return changed ? reconcileSessionItems(currentItems, nextItems, normalizeUserText) : currentItems;
 }
 
 export function buildHydratedAttachmentItemsPatch(
@@ -373,7 +376,11 @@ export function buildHydratedAttachmentItemsPatch(
   hydratedItems: SessionRenderItem[],
 ): Partial<ChatStoreState> | ChatStoreState {
   const currentItems = getSessionItems(state, sessionKey);
-  const nextItems = reconcileHydratedAttachmentItems(currentItems, hydratedItems);
+  const nextItems = reconcileHydratedAttachmentItems(
+    currentItems,
+    hydratedItems,
+    getSessionTextModel(getSessionMeta(state, sessionKey).sessionIdentity ?? undefined).user,
+  );
   if (currentItems === nextItems) {
     return state;
   }

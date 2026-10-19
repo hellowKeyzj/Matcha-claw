@@ -1,125 +1,126 @@
 import type { TFunction } from 'i18next';
-import type {
-  SessionRenderToolCard,
-  SessionRenderToolRuntimeAdapterId,
-} from '../../../types/session/tool-card';
-import type { ToolActivityViewModel } from '../tool-activity-view-model';
-import { agentToolActivityRenderer, isAgentToolActivityTool } from './agent';
-import { buildFileToolActivityContent, isFileToolActivityName } from './file';
-import { genericToolActivityRenderer } from './generic';
-import { canRenderSearchToolActivity, renderSearchToolActivity } from './search';
-import { isShellToolCard, shellToolActivityRenderer } from './shell';
-import { isSkillToolActivity, skillToolActivityRenderer } from './skill';
-import type { GenericToolActivityRenderer, ToolActivityRenderer, ToolRendererContext } from './types';
-import { createToolRendererContext, matchesKnownToolName } from './types';
-import { canRenderWebToolActivity, renderWebToolActivity } from './web';
-
-const FILE_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
-  name: 'file',
-  matches: (tool, context) => matchesKnownToolName(context, 'file')
-    || isFileToolActivityName(tool.name)
-    || isFileToolActivityName(tool.displayTitle),
-  buildContent: buildFileToolActivityContent,
-};
-
-const SHELL_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
-  name: 'shell',
-  matches: (tool, context) => matchesKnownToolName(context, 'shell') || isShellToolCard(tool),
-  buildContent: shellToolActivityRenderer,
-};
-
-const SEARCH_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
-  name: 'search',
-  matches: (tool, context) => matchesKnownToolName(context, 'search') || canRenderSearchToolActivity(tool),
-  buildContent: renderSearchToolActivity,
-};
-
-const SKILL_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
-  name: 'skill',
-  matches: (tool, context) => matchesKnownToolName(context, 'skill') || isSkillToolActivity(tool),
-  buildContent: skillToolActivityRenderer,
-};
-
-const AGENT_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
-  name: 'agent',
-  matches: (tool, context) => matchesKnownToolName(context, 'agent') || isAgentToolActivityTool(tool),
-  buildContent: agentToolActivityRenderer,
-};
-
-const WEB_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
-  name: 'web',
-  matches: (tool, context) => matchesKnownToolName(context, 'web') || canRenderWebToolActivity(tool),
-  buildContent: renderWebToolActivity,
-};
-
-const PROGRESS_CARD_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
-  name: 'progress_card',
-  matches: (_tool, context) => context.runtimeAdapterId === 'openclaw' && matchesKnownToolName(context, 'progress_card'),
-  buildContent: genericToolActivityRenderer,
-};
-
-const OPENCLAW_TOOL_ACTIVITY_RENDERERS = [
-  FILE_TOOL_ACTIVITY_RENDERER,
-  SHELL_TOOL_ACTIVITY_RENDERER,
-  WEB_TOOL_ACTIVITY_RENDERER,
-  SEARCH_TOOL_ACTIVITY_RENDERER,
-  PROGRESS_CARD_TOOL_ACTIVITY_RENDERER,
-  SKILL_TOOL_ACTIVITY_RENDERER,
-  AGENT_TOOL_ACTIVITY_RENDERER,
-] as const satisfies readonly ToolActivityRenderer[];
-
-const MATCHA_AGENT_TOOL_ACTIVITY_RENDERERS = [
-  FILE_TOOL_ACTIVITY_RENDERER,
-  SHELL_TOOL_ACTIVITY_RENDERER,
-  WEB_TOOL_ACTIVITY_RENDERER,
-  SEARCH_TOOL_ACTIVITY_RENDERER,
-  SKILL_TOOL_ACTIVITY_RENDERER,
-  AGENT_TOOL_ACTIVITY_RENDERER,
-] as const satisfies readonly ToolActivityRenderer[];
-
-const TOOL_ACTIVITY_RENDERERS_BY_RUNTIME: Readonly<Record<SessionRenderToolRuntimeAdapterId, readonly ToolActivityRenderer[]>> = {
-  openclaw: OPENCLAW_TOOL_ACTIVITY_RENDERERS,
-  'matcha-agent': MATCHA_AGENT_TOOL_ACTIVITY_RENDERERS,
-};
+import type { SessionRenderToolCard } from '../../../types/session/tool-card';
+import type { ToolActivityContent, ToolActivityViewModel } from '../tool-activity-view-model';
+import { describeGenericToolActivity, genericToolActivityRenderer } from './generic';
+import { resolveMatchaAgentToolActivityRenderer } from './matcha-agent';
+import { buildOpenClawToolActivityContent, describeOpenClawToolActivity } from './openclaw';
+import { resolveOpenClawToolStatus } from './openclaw/outcome';
+import { buildOpenClawToolActivityPreviewContent, mergeOpenClawDetails } from './openclaw-projection';
+import type { GenericToolActivityRenderer, ToolActivityDescriptor, ToolActivityRenderer } from './types';
+import { createToolRendererContext } from './types';
 
 const GENERIC_TOOL_ACTIVITY_RENDERER: GenericToolActivityRenderer = {
   name: 'generic',
   matches: () => true,
+  describe: describeGenericToolActivity,
   buildContent: genericToolActivityRenderer,
 };
 
-function toolActivityRenderersForContext(context: ToolRendererContext): readonly ToolActivityRenderer[] {
-  return context.runtimeAdapterId
-    ? TOOL_ACTIVITY_RENDERERS_BY_RUNTIME[context.runtimeAdapterId]
-    : MATCHA_AGENT_TOOL_ACTIVITY_RENDERERS;
-}
-
-function resolveToolActivityRendererForContext(
-  tool: SessionRenderToolCard,
-  context: ToolRendererContext,
-): ToolActivityRenderer {
-  return toolActivityRenderersForContext(context).find((renderer) => renderer.matches(tool, context))
-    ?? GENERIC_TOOL_ACTIVITY_RENDERER;
-}
+const OPENCLAW_TOOL_ACTIVITY_RENDERER: ToolActivityRenderer = {
+  name: 'generic',
+  matches: () => true,
+  describe: describeOpenClawToolActivity,
+  buildContent: (tool, t) => mergeOpenClawDetails(tool, buildOpenClawToolActivityContent(tool, t), t),
+};
 
 export function resolveToolActivityRenderer(tool: SessionRenderToolCard): ToolActivityRenderer {
-  return resolveToolActivityRendererForContext(tool, createToolRendererContext(tool));
+  switch (tool.runtimeAdapterId) {
+    case 'openclaw': return OPENCLAW_TOOL_ACTIVITY_RENDERER;
+    case 'matcha-agent': return resolveMatchaAgentToolActivityRenderer(tool, createToolRendererContext(tool)) ?? GENERIC_TOOL_ACTIVITY_RENDERER;
+    default: return GENERIC_TOOL_ACTIVITY_RENDERER;
+  }
 }
 
-export function buildToolActivityViewModelFromRegistry(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityViewModel {
-  const context = createToolRendererContext(tool);
-  const { hasOutputError, ...content } = resolveToolActivityRendererForContext(tool, context).buildContent(tool, t);
-  const isRunning = tool.status === 'running';
-  const isError = tool.status === 'error' || (tool.status === 'completed' && hasOutputError === true);
-  const status = isError ? 'error' : tool.status;
+export function describeToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityDescriptor {
+  return resolveToolActivityRenderer(tool).describe(tool, t);
+}
+
+export function summarizeToolActivities(tools: readonly SessionRenderToolCard[], t: TFunction<'chat'>): string {
+  const files = {
+    read: { calls: 0, paths: new Set<string>() },
+    edit: { calls: 0, paths: new Set<string>() },
+    write: { calls: 0, paths: new Set<string>() },
+    delete: { calls: 0, paths: new Set<string>() },
+  };
+  let commands = 0;
+  let searches = 0;
+  let fetches = 0;
+  let otherCalls = 0;
+  const labels = new Set<string>();
+  for (const tool of tools) {
+    const descriptor = describeToolActivity(tool, t);
+    if (descriptor.fileOperations?.length) {
+      const operations = new Set<keyof typeof files>();
+      for (const { kind, path } of descriptor.fileOperations) {
+        operations.add(kind);
+        if (path.trim()) files[kind].paths.add(path.trim());
+      }
+      for (const kind of operations) files[kind].calls += 1;
+    } else if (descriptor.kind === 'read' || descriptor.kind === 'edit' || descriptor.kind === 'write') {
+      const operation = files[descriptor.kind];
+      operation.calls += 1;
+      if (descriptor.target?.trim()) operation.paths.add(descriptor.target.trim());
+    } else if (descriptor.kind === 'command') {
+      commands += 1;
+    } else if (descriptor.kind === 'search') {
+      searches += 1;
+    } else if (descriptor.kind === 'fetch') {
+      fetches += 1;
+    } else {
+      otherCalls += 1;
+      labels.add(descriptor.label);
+    }
+  }
+  const parts: string[] = [];
+  if (commands > 0) parts.push(t('toolActivity.group.commands', { count: commands }));
+  const fileKeys = { read: 'read', edit: 'edited', write: 'wrote', delete: 'deleted' } as const;
+  for (const kind of ['read', 'edit', 'write', 'delete'] as const) {
+    const count = files[kind].paths.size || files[kind].calls;
+    if (count > 0) parts.push(t(`toolActivity.group.${fileKeys[kind]}`, { count }));
+  }
+  if (searches > 0) parts.push(t('toolActivity.group.searches', { count: searches }));
+  if (fetches > 0) parts.push(t('toolActivity.group.fetches', { count: fetches }));
+  if (labels.size > 2) {
+    parts.push(t('toolActivity.group.tools', { count: otherCalls }));
+  } else if (labels.size > 0) {
+    const name = [...labels].join(t('toolActivity.listSeparator'));
+    parts.push(otherCalls > labels.size
+      ? t('toolActivity.group.usedRepeated', { name, count: otherCalls })
+      : t('toolActivity.group.used', { name }));
+  }
+  return parts.join(t('toolActivity.listSeparator'));
+}
+
+export function getToolActivityStatus(tool: SessionRenderToolCard): SessionRenderToolCard['status'] {
+  return tool.runtimeAdapterId === 'openclaw' ? resolveOpenClawToolStatus(tool) : tool.status;
+}
+
+function withToolStatus(tool: SessionRenderToolCard, activity: ToolActivityContent, t: TFunction<'chat'>): ToolActivityViewModel {
+  const { hasOutputError, ...content } = activity;
+  const status = tool.runtimeAdapterId !== 'openclaw' && tool.status === 'completed' && hasOutputError === true
+    ? 'error'
+    : getToolActivityStatus(tool);
+  const isRunning = status === 'running';
+  const isError = status === 'error';
   const statusLabel = status === 'completed' ? '' : t(`toolStatus.${status}`);
   return {
     ...content,
-    tone: isError ? 'danger' : isRunning ? 'running' : tool.status === 'missing_result' || tool.status === 'unknown' ? 'muted' : 'neutral',
+    tone: isError ? 'danger' : isRunning ? 'running' : status === 'missing_result' || status === 'unknown' ? 'muted' : 'neutral',
     isRunning,
     isError,
     trailingLabels: statusLabel
       ? [{ text: statusLabel, tone: 'muted' }, ...content.trailingLabels]
       : content.trailingLabels,
   };
+}
+
+export function buildToolActivityViewModelFromRegistry(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityViewModel {
+  return withToolStatus(tool, resolveToolActivityRenderer(tool).buildContent(tool, t), t);
+}
+
+export function buildToolActivityPreview(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityViewModel | null {
+  if (tool.runtimeAdapterId !== 'openclaw') return null;
+  const content = buildOpenClawToolActivityPreviewContent(tool, tool.displayTitle || tool.name, t);
+  if (!content) return null;
+  return withToolStatus(tool, { ...content, title: content.progressReceipt ? content.title : describeToolActivity(tool, t).title }, t);
 }

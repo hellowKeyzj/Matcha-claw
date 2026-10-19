@@ -15,7 +15,6 @@ import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { useExternalConnectorsStore, type ExternalConnectorConnectionStatus, type ExternalConnectorKind, type ExternalConnectorSecretRef, type ExternalConnectorSpec, type ExternalConnectorSummary, type ExternalConnectorPatch, type ExternalMcpServerProgramDescriptor, type OpenClawMcpServerSummary } from '@/stores/external-connectors';
 import { cn } from '@/lib/utils';
-import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
 import { selectManagementEndpoint, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { buildCapabilityScopeKey, runtimeInstanceScope, runtimeEndpointsEqual, type RuntimeInstanceScope } from '@/types/desktop/runtime-address';
 
@@ -577,7 +576,7 @@ export function ExternalConnectorsPage() {
   const endpoint = useRuntimeEndpointsStore(selectManagementEndpoint);
   const scope = useMemo(() => endpoint?.kind === 'native-runtime' && ['openclaw', 'matcha-agent'].includes(endpoint.runtimeAdapterId) ? runtimeInstanceScope(endpoint) : null, [endpoint]);
   useEffect(() => { useExternalConnectorsStore.getState().selectScope(scope); }, [scope]);
-  if (!scope) return <AgentPage><RuntimeScopeSelector /><p className="text-sm text-muted-foreground">请选择运行时。</p></AgentPage>;
+  if (!scope) return <AgentPage><p className="text-sm text-muted-foreground">请选择运行时。</p></AgentPage>;
   return <ExternalConnectorsForRuntime key={buildCapabilityScopeKey(scope)} scope={scope} />;
 }
 
@@ -756,7 +755,6 @@ function ExternalConnectorsForRuntime({ scope }: { scope: RuntimeInstanceScope }
     <AgentPage>
       <AgentPageSection actions={(
         <>
-          <RuntimeScopeSelector />
           <Button variant="outline" size="icon" className="size-9 rounded-full" aria-label="刷新连接器" onClick={() => void refresh().catch(() => undefined)} disabled={loading}>
             <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
           </Button>

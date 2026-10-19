@@ -250,6 +250,7 @@ pub(in crate::composition::host) struct RuntimeOwners {
     pub(in crate::composition::host) provider_module: ProviderModule,
     pub(in crate::composition::host) settings: settings::SettingsModule,
     pub(in crate::composition::host) connector: ConnectorModule,
+    pub(in crate::composition::host) board: board::BoardModule,
     pub(in crate::composition::host) cron: CronModule,
     pub(in crate::composition::host) usage: UsageModule,
     pub(in crate::composition::host) diagnostics: DiagnosticsModule,
@@ -258,6 +259,7 @@ pub(in crate::composition::host) struct RuntimeOwners {
     pub(in crate::composition::host) workspace: WorkspaceModule,
     pub(in crate::composition::host) wiki: WikiModule,
     pub(in crate::composition::host) toolchain: ToolchainModule,
+    pub(in crate::composition::host) search: search::SearchModule,
     pub(in crate::composition::host) platform_tools: PlatformToolsModule,
     pub(in crate::composition::host) security: security::SecurityModule,
     pub(in crate::composition::host) channel: ChannelModule,
@@ -284,6 +286,7 @@ pub(in crate::composition::host) struct RuntimeOwnerInput {
     pub(in crate::composition::host) runtime_observation: ::diagnostics::RuntimeFlightRecorder,
     pub(in crate::composition::host) diagnostics: ::diagnostics::DiagnosticsArchiveProducer,
     pub(in crate::composition::host) toolchain: Arc<toolchain::NativeToolchain>,
+    pub(in crate::composition::host) search_service: Arc<searxng::Service>,
     pub(in crate::composition::host) open_claw: Arc<openclaw::driver::OpenClawDriver>,
     pub(in crate::composition::host) matcha_driver:
         Arc<matcha_agent::driver::MatchaRuntimeDriver>,
@@ -312,6 +315,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         runtime_observation,
         diagnostics,
         toolchain,
+        search_service,
         open_claw,
         matcha_driver,
         admission,
@@ -471,6 +475,33 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         session_handle.clone(),
     ));
 
+    let (board, mut board_task) = board::spawn_owner(
+        &owner_runtime_system,
+        board::BoardOwnerInput {
+            admission: admission.clone(),
+            runtime_directory: runtime_directory.clone(),
+        },
+    );
+    open_claw.gateway.set_board_event_sink(Some(board.event_sink()));
+    let mut board_scope = ModuleScope::new("board");
+    let board_shutdown = board.clone();
+    let board_failures = Arc::clone(&join_failures);
+    board_scope.register_effect_disposer(
+        ScopedEffectKind::OwnerTask,
+        "owner-task",
+        move || async move {
+            let closed = board_shutdown.close().await;
+            let joined = board_task.drain_and_join().await;
+            if closed.is_err() || joined.is_err() {
+                record_join_failure(&board_failures, "board");
+            }
+        },
+    );
+    let board_gateway = Arc::clone(&open_claw.gateway);
+    board_scope.register_event_subscription("openclaw-board-events", move || async move {
+        board_gateway.set_board_event_sink(None);
+    });
+
     let (cron, cron_task) = ::cron::spawn_owner(
         &owner_runtime_system,
         ::cron::CronOwnerInput {
@@ -497,6 +528,9 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         task_manager::TaskOwnerInput {
             admission: admission.clone(),
             runtime_directory: runtime_directory.clone(),
+            session_preparation: Arc::new(super::super::ports::tasks::TaskSessions::new(
+                session_handle.clone(),
+            )),
         },
     );
     let task_manager = task_manager.with_call_recorder(calls.clone());
@@ -563,6 +597,10 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         admission.subscribe(),
     );
 
+    let search_runtime = Arc::new(super::super::ports::search::NativeSearch::new(
+        Arc::clone(&open_claw),
+        Arc::clone(&matcha_driver),
+    ));
     let peer_startup = crate::composition::peer::PeerStartupState::new();
     let peer_owner = crate::composition::peer::PeerOwner::new(
         Arc::clone(&admission),
@@ -587,8 +625,37 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             crate::composition::peer::PeerOwner::lane_retention(),
         ),
     );
-    let peer_handle =
-        crate::composition::peer::PeerHandle::new(peer_owner_handle, Arc::clone(&admission), Arc::clone(&runtime_directory), Arc::clone(&open_claw));
+    let peer_handle = crate::composition::peer::PeerHandle::new(
+        peer_owner_handle,
+        Arc::clone(&admission),
+        Arc::clone(&runtime_directory),
+        Arc::clone(&open_claw),
+    );
+    let (search, search_task) = search::spawn_owner(
+        &owner_runtime_system,
+        search::SearchOwnerInput {
+            state_dir: runtime_state_dir.join("search"),
+            service: search_service,
+            runtime: search_runtime,
+            directory: Arc::new(peer_handle.clone()),
+        },
+    )
+    .map_err(|_| ConstructionError::Search)?;
+    let mut search_task = search_task;
+    let mut search_scope = ModuleScope::new("search");
+    let search_shutdown = search.clone();
+    let search_failures = Arc::clone(&join_failures);
+    search_scope.register_effect_disposer(
+        ScopedEffectKind::OwnerTask,
+        "owner-task",
+        move || async move {
+            let stopped = search_shutdown.shutdown().await;
+            let joined = search_task.drain_and_join().await;
+            if stopped.is_err() || joined.is_err() {
+                record_join_failure(&search_failures, "search");
+            }
+        },
+    );
     let (diagnostics, diagnostics_task) = ::diagnostics::spawn_owner(
         &owner_runtime_system,
         ::diagnostics::DiagnosticsOwnerInput {
@@ -615,6 +682,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
                 module_scope("channel", channel_task),
                 module_scope("connectors", connector_task),
                 module_scope("settings", settings_task),
+                board_scope,
                 module_scope("cron", cron_task),
                 module_scope("usage", usage_task),
                 module_scope("diagnostics", diagnostics_task),
@@ -628,6 +696,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
                 module_scope("workspace", workspace_task),
                 module_scope("wiki", wiki_task),
                 module_scope("toolchain", toolchain_task),
+                search_scope,
                 module_scope("platform-tools", platform_tools_task),
                 route_only_scope("plugins"),
                 route_only_scope("sealed-resource"),
@@ -650,6 +719,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         provider_module,
         settings,
         connector,
+        board,
         cron,
         usage,
         diagnostics,
@@ -658,6 +728,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         workspace,
         wiki,
         toolchain,
+        search,
         platform_tools,
         security,
         channel,

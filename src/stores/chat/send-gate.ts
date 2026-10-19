@@ -7,6 +7,8 @@ import type {
   ChatStoreState,
 } from './types';
 import { isRunActive } from './types';
+import { getSessionRuntime } from './store-state-helpers';
+import { hasPendingSessionSend } from './session-presentation';
 import type { RuntimeEndpointRef, SessionIdentity } from '../../types/desktop/runtime-address';
 
 export type { ChatSendGate } from './types';
@@ -25,6 +27,7 @@ export type CurrentChatSendGateSource =
     sessionIdentity: SessionIdentity | null;
     historyStatus: ChatSessionHistoryStatus | null;
     sessionKind: ChatSessionMetaState['kind'];
+    sendPending: boolean;
     runPhase: ChatRunPhase | null;
     activeRunId: string | null;
     pendingTurnKey: string | null;
@@ -54,6 +57,7 @@ export function readCurrentChatSendGateSource(state: ChatStoreState): CurrentCha
     currentSessionKey: state.currentSessionKey,
   });
   const record = sessionKey ? state.loadedSessions[sessionKey] : undefined;
+  const runtime = record ? getSessionRuntime(state, sessionKey) : null;
   return {
     kind: 'session',
     sessionKey,
@@ -61,10 +65,11 @@ export function readCurrentChatSendGateSource(state: ChatStoreState): CurrentCha
     sessionIdentity: record?.meta.sessionIdentity ?? null,
     historyStatus: record?.meta.historyStatus ?? null,
     sessionKind: record?.meta.kind ?? null,
-    runPhase: record?.runtime.runPhase ?? null,
-    activeRunId: record?.runtime.activeRunId ?? null,
-    pendingTurnKey: record?.runtime.pendingTurnKey ?? null,
-    activeTurnItemKey: record?.runtime.activeTurnItemKey ?? null,
+    sendPending: record ? hasPendingSessionSend(record) : false,
+    runPhase: runtime?.runPhase ?? null,
+    activeRunId: runtime?.activeRunId ?? null,
+    pendingTurnKey: runtime?.pendingTurnKey ?? null,
+    activeTurnItemKey: runtime?.activeTurnItemKey ?? null,
   };
 }
 
@@ -84,6 +89,7 @@ export function areCurrentChatSendGateSourcesEquivalent(
       && left.sessionIdentity === right.sessionIdentity
       && left.historyStatus === right.historyStatus
       && left.sessionKind === right.sessionKind
+      && left.sendPending === right.sendPending
       && left.runPhase === right.runPhase
       && left.activeRunId === right.activeRunId
       && left.pendingTurnKey === right.pendingTurnKey
@@ -116,7 +122,8 @@ export function deriveChatSendGate(source: CurrentChatSendGateSource): ChatSendG
     return { canSend: false, reason: 'automation-session', sessionKey: source.sessionKey };
   }
   if (
-    (source.runPhase != null && isRunActive({ runPhase: source.runPhase }))
+    source.sendPending
+    || (source.runPhase != null && isRunActive({ runPhase: source.runPhase }))
     || source.activeRunId != null
     || source.pendingTurnKey != null
     || source.activeTurnItemKey != null

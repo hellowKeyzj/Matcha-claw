@@ -3,8 +3,10 @@ import path from 'node:path';
 
 import { safeRmSync } from './lib/safe-delete.mjs';
 import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
+import { patchOpenClawSearch } from './openclaw-search-patches.mjs';
+import { patchOpenClawBoard } from './openclaw-board-patches.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export']);
+const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -2425,6 +2427,14 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'channel-pairing-approval-export',
     apply: patchChannelPairingApprovalExport,
+  },
+  {
+    id: 'native-searxng-search',
+    apply: patchOpenClawSearch,
+  },
+  {
+    id: 'native-board-view',
+    apply: patchOpenClawBoard,
   },
 ]);
 

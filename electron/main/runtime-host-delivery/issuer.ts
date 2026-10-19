@@ -47,7 +47,6 @@ function validateDecisionInput(input: RuntimeHostDeliveryDecisionInput): void {
     input.endpoint,
     input.scope,
     input.capability,
-    input.subject,
     input.revision,
     input.correlation,
   ];
@@ -57,6 +56,8 @@ function validateDecisionInput(input: RuntimeHostDeliveryDecisionInput): void {
         value !== undefined &&
         (typeof value !== 'string' || !value || value.length > 256 || value.includes('\0'))
     ) ||
+    typeof input.subject !== 'string' || !input.subject ||
+    Buffer.byteLength(input.subject, 'utf8') > 16 * 1024 || input.subject.includes('\0') ||
     !Number.isSafeInteger(input.expiresAt) ||
     input.expiresAt <= Date.now()
   ) {

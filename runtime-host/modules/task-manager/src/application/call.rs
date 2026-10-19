@@ -1,8 +1,11 @@
 use platform::call::{CallContext, CallDetail, CallLogError, CallStatus};
 use serde::Serialize;
 
-use crate::domain::model::{
-    TaskCommand, TaskMutationOutcome, TaskOutcome, TaskReadOutcome, TaskSnapshot, TaskStatus,
+use crate::{
+    TaskFailure,
+    domain::model::{
+        TaskCommand, TaskMutationOutcome, TaskOutcome, TaskReadOutcome, TaskSnapshot, TaskStatus,
+    },
 };
 
 #[derive(Clone, Serialize)]
@@ -19,6 +22,9 @@ pub(crate) struct TaskCallDetail {
     mutation: Option<MutationStatus>,
     read: Option<ReadStatus>,
     pub(crate) failure: Option<CallFailure>,
+    pub(crate) diagnostic: Option<TaskFailure>,
+    runtime_adapter_id: Option<String>,
+    runtime_instance_id: Option<String>,
 }
 
 impl CallDetail for TaskCallDetail {
@@ -86,6 +92,19 @@ impl TaskCallDetail {
             mutation: None,
             read: None,
             failure: None,
+            diagnostic: None,
+            runtime_adapter_id: match session.scope() {
+                platform::endpoint::runtime_address::RuntimeScope::Session(identity) => {
+                    safe_reference(identity.endpoint().runtime_adapter_id())
+                }
+                _ => None,
+            },
+            runtime_instance_id: match session.scope() {
+                platform::endpoint::runtime_address::RuntimeScope::Session(identity) => {
+                    safe_reference(identity.endpoint().runtime_instance_id())
+                }
+                _ => None,
+            },
         }
     }
 

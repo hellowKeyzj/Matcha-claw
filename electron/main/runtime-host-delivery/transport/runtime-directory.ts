@@ -325,13 +325,13 @@ function isCapabilities(value: unknown): boolean {
 }
 
 function isFixedCapabilityFamilies(value: unknown): boolean {
-  const expected = ['session', 'task', 'subagent', 'team', 'cron', 'workspace', 'skill', 'channel', 'lifecycle', 'usage'];
+  const expected = ['session', 'task', 'subagent', 'team', 'cron', 'workspace', 'skill', 'channel', 'lifecycle', 'usage', 'board'];
   return Array.isArray(value)
     && value.length === expected.length
     && expected.every((family, index) => isRecord(value[index])
       && hasExactKeys(value[index], ['family', 'availability'])
       && value[index].family === family
-      && value[index].availability === 'supported');
+      && (value[index].availability === 'supported' || value[index].availability === 'unsupported'));
 }
 
 function isControlState(value: unknown, lifecycle: unknown): boolean {

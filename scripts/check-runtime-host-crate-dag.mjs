@@ -36,6 +36,7 @@ const moduleDependencies = new Map([
   ['cron', ['runtime-directory']],
   ['organization', ['runtime-directory']],
   ['platform-tools', ['runtime-directory']],
+  ['search', ['runtime-directory']],
   ['plugins', ['runtime-directory']],
   ['skills', ['runtime-directory']],
   ['subagents', ['runtime-directory']],

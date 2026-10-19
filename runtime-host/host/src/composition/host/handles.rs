@@ -26,6 +26,7 @@ use super::super::{admission::HostAdmission, peer::PeerHandle};
 pub(crate) struct HostHandles {
     pub admission: Arc<HostAdmission>,
     pub calls: call_log::CallLogModule,
+    pub board: board::BoardModule,
     pub peer: PeerHandle,
     pub open_claw: Arc<OpenClawDriver>,
     pub matcha_agent: Arc<matcha_agent::driver::MatchaRuntimeDriver>,
@@ -41,6 +42,7 @@ pub(crate) struct HostHandles {
     pub organization_module: OrganizationModule,
     pub organization: organization::OrganizationHandle,
     pub toolchain: ToolchainModule,
+    pub search: search::SearchModule,
     pub platform_tools: PlatformToolsModule,
     pub plugins: plugins_module::PluginsModule,
     pub sealed_resource: sealed_resource::SealedResourceModule,

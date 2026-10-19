@@ -142,6 +142,13 @@ jobs:
         if: matrix.platform == 'win'
         run: pnpm run uv:download:win
 
+      - name: Build pinned SearXNG resources
+        env:
+          UV_PYTHON_INSTALL_DIR: ${{ github.workspace }}/build/searxng-toolchain/python
+          UV_CACHE_DIR: ${{ github.workspace }}/build/searxng-toolchain/cache
+        run: |
+          node -e "const cp = require('node:child_process'); const path = require('node:path'); const target = process.platform + '-' + process.arch; const uv = path.resolve('resources/bin', target, process.platform === 'win32' ? 'uv.exe' : 'uv'); cp.execFileSync(uv, ['python', 'install', '3.12'], {stdio: 'inherit'}); const targets = process.platform === 'win32' ? ['--target', 'win32-x64', '--target', 'win32-arm64'] : ['--target', 'darwin-arm64']; cp.execFileSync(process.execPath, ['scripts/bundle-searxng.mjs', ...targets], {stdio: 'inherit'});"
+
       # macOS specific steps
       - name: Free disk space (macOS)
         if: matrix.platform == 'mac'

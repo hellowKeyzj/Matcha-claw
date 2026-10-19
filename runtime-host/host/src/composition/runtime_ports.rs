@@ -17,6 +17,10 @@ pub(crate) use runtime_directory::{
 pub(crate) trait RuntimeDriver:
     sessions_module::RuntimeDriver + organization::OrganizationNativeRuntime + Send + Sync
 {
+    fn board_ops(&self) -> Option<&dyn board::BoardOps> {
+        None
+    }
+
     fn channel_ops(&self) -> Option<&dyn channels::ports::ChannelOps> {
         None
     }
@@ -108,6 +112,12 @@ impl sessions_module::SessionRuntimeDirectory for RuntimeDriverDirectory {
     ) -> Option<Arc<dyn sessions_module::RuntimeDriver>> {
         self.lookup(endpoint)
             .map(|driver| driver as Arc<dyn sessions_module::RuntimeDriver>)
+    }
+}
+
+impl board::BoardRuntimeDirectory for RuntimeDriverDirectory {
+    fn lookup(&self, endpoint: &RuntimeEndpoint) -> Option<&dyn board::BoardOps> {
+        self.driver_ref(endpoint)?.board_ops()
     }
 }
 
@@ -400,6 +410,10 @@ impl RuntimeDriverDirectory {
 }
 
 impl RuntimeDriver for MatchaRuntimeDriver {
+    fn board_ops(&self) -> Option<&dyn board::BoardOps> {
+        None
+    }
+
     fn task_ops(&self) -> Option<&dyn task_manager::TaskOps> {
         Some(self)
     }
@@ -462,6 +476,10 @@ impl RuntimeDriver for MatchaRuntimeDriver {
 }
 
 impl RuntimeDriver for OpenClawDriver {
+    fn board_ops(&self) -> Option<&dyn board::BoardOps> {
+        Some(self)
+    }
+
     fn channel_ops(&self) -> Option<&dyn channels::ports::ChannelOps> {
         Some(self)
     }

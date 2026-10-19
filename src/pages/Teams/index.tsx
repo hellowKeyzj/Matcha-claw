@@ -741,7 +741,6 @@ export function TeamsPage() {
                     runtimeAdapterId="openclaw"
                     collisionBoundary={createDialogElement}
                     className="h-11 rounded-[var(--radius-interactive)] border border-border bg-muted/40 px-3"
-                    triggerClassName="h-full min-w-0 flex-1 border-0 bg-transparent px-0 shadow-none"
                   />
                 </div>
               </fieldset>

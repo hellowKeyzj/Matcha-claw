@@ -157,6 +157,13 @@ async function setupTarget(id, { reuseFunctionalLocalCache = false } = {}) {
       await fs.chmod(destBin, 0o755);
     }
 
+    if (!existsSync(destBin)) {
+      throw new Error(`uv executable is missing after extraction: ${destBin}`);
+    }
+    if (id === `${os.platform()}-${os.arch()}` && !cachedUvMatchesTarget({ executablePath: destBin, targetId: id })) {
+      throw new Error(`Downloaded uv failed version/architecture validation for ${id}: ${destBin}`);
+    }
+
     echo(chalk.green`✅ Success: ${destBin}`);
   } finally {
     // Cleanup
@@ -166,7 +173,7 @@ async function setupTarget(id, { reuseFunctionalLocalCache = false } = {}) {
 }
 
 // Main logic
-if (process.argv.includes(scriptPath)) {
+if (process.argv.slice(1).some(arg => path.resolve(arg) === scriptPath)) {
 const downloadAll = argv.all;
 const platform = argv.platform;
 const target = argv.target;

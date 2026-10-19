@@ -67,6 +67,58 @@ impl Failure {
             _ => None,
         }
     }
+    pub(crate) fn trace_summary(&self) -> Value {
+        json!({
+            "failureKind": match self {
+                Self::Native(_) => "native",
+                Self::InvalidInput => "invalidInput",
+                Self::InvalidReadback => "invalidReadback",
+            },
+            "outcome": match self.kind() {
+                FailureKind::Rejected => "rejected",
+                FailureKind::Unavailable => "unavailable",
+                FailureKind::Unknown => "unknown",
+                FailureKind::Cancelled => "cancelled",
+            },
+            "code": self.code(),
+            "nativeKind": self.native_kind().map(|kind| match kind {
+                "history_locate_task" | "history_read_task"
+                | "history_projects_read" | "history_project_entry"
+                | "history_project_metadata" | "history_source_metadata"
+                | "history_source_ambiguous" | "history_chain_absent"
+                | "history_home_resolve" | "history_path_metadata"
+                | "history_path_resolve" | "history_workspace_resolve"
+                | "history_session_mismatch" | "history_source_open"
+                | "history_source_timestamp" | "history_source_read"
+                | "history_timestamp" | "history_source_changed"
+                | "history_jsonl_invalid" | "history_path_escape"
+                | "history_workspace_mismatch" | "history_native_schema"
+                | "history_parent_cycle"
+                | "cancelled" | "deadline" | "connect_failed" | "upgrade_failed"
+                | "protocol" | "events_sequence_gap" | "client_shutdown"
+                | "unsupported_protocol" | "connection_closed" | "transport"
+                | "connection_task_failed" | "http_rejected"
+                | "invalid_params" | "invalid_endpoint" | "invalid_token"
+                | "request_id_exhausted" => kind,
+                _ => "other",
+            }),
+            "delivery": self.delivery().map(|delivery| match delivery {
+                Delivery::NotSent => "notSent",
+                Delivery::Unknown => "unknown",
+                Delivery::ResponseReceived => "responseReceived",
+            }),
+        })
+    }
+    pub(crate) fn trace(&self, step: &'static str, method: Option<&'static str>, id: &str) {
+        platform::trace::runtime_trace("matcha.session.read.failed", || {
+            json!({
+                "step": step,
+                "method": method,
+                "sessionHash": platform::trace::identifier_hash(id),
+                "failure": self.trace_summary(),
+            })
+        });
+    }
 }
 impl std::fmt::Debug for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -144,9 +196,14 @@ pub async fn get(
     if !super::model::valid_uuid(id) {
         return Err(Failure::InvalidInput);
     }
-    let record: super::model::SessionRecord =
-        decode(call(client, "sessions.get", json!({"sessionId":id})).await?)?;
+    let record: super::model::SessionRecord = decode(
+        call(client, "sessions.get", json!({"sessionId":id}))
+            .await
+            .inspect_err(|error| error.trace("session.rpc", Some("sessions.get"), id))?,
+    )
+    .inspect_err(|error| error.trace("session.record_decode", Some("sessions.get"), id))?;
     if !record.validate(id, agent) {
+        Failure::InvalidReadback.trace("session.record_identity", Some("sessions.get"), id);
         return Err(Failure::InvalidReadback);
     }
     Ok(record)

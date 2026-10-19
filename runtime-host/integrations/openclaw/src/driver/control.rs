@@ -89,6 +89,20 @@ impl OpenClawDriver {
         self.gateway.mcp_app_request(request).await
     }
 
+    pub async fn canvas_request(
+        &self,
+        request: crate::gateway::request::OpenClawCanvasGatewayRequest,
+    ) -> crate::port::OpenClawGatewayRequestOutcome {
+        self.gateway.canvas_request(request).await
+    }
+
+    pub async fn progress_card_request(
+        &self,
+        request: crate::gateway::request::OpenClawProgressCardGatewayRequest,
+    ) -> crate::port::OpenClawGatewayRequestOutcome {
+        self.gateway.progress_card_request(request).await
+    }
+
     pub async fn question_list(
         &self,
         request: crate::gateway::request::OpenClawQuestionListGatewayRequest,

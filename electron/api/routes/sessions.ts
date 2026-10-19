@@ -19,9 +19,8 @@ import {
   type SessionPermissionOperationId,
   type SessionPermissionRequest,
 } from '../../main/runtime-host-delivery/transport/sessions/permission';
-import type { SessionGoalReceipt } from '../../../src/types/session-goal';
 import { decodeSessionGoalOutcome, decodeSessionGoalRequest, isGoalIdentifier, isGoalObjective, isSessionSendIntent } from '../../main/runtime-host-delivery/transport/sessions/goal';
-import { isSessionSendGoalResponse, type SessionSendRequest } from '../../main/runtime-host-delivery/transport/sessions/send';
+import type { SessionSendRequest } from '../../main/runtime-host-delivery/transport/sessions/send';
 import type { WorkspaceMediaTransport } from '../../main/runtime-host-delivery/transport/workspace/media';
 import {
   isSessionTraceEnabled,
@@ -29,8 +28,6 @@ import {
   summarizeIdentifier,
 } from '../../main/runtime-host-delivery/transport/sessions/trace';
 
-const SESSION_SEND_UNAVAILABLE = { success: false, error: 'Session send is unavailable' } as const;
-const SESSION_SEND_INVALID = { success: false, error: 'Session send request is invalid' } as const;
 const WORKSPACE_MEDIA_INVALID = { success: false, error: 'Workspace media request is invalid' } as const;
 const WORKSPACE_MEDIA_UNAVAILABLE = { success: false, error: 'Workspace media is unavailable' } as const;
 const MAX_ATTACHMENTS = 16;
@@ -323,122 +320,23 @@ async function dispatchSessionSend(
     const response = traceId === undefined
       ? await deps.runtimeHostTransports.sessionSendTransport.send(request)
       : await deps.runtimeHostTransports.sessionSendTransport.send(request, traceId);
-    const projected = projectSessionSendResponse(response, request);
-    if (projected && 'runId' in projected.body) {
-      if ('goal' in projected.body && projected.body.goal?.replayed) deps.sessionObservers.releaseSend(demand);
-      else deps.sessionObservers.bindSend(demand, projected.body.runId);
+    if ('runId' in response.body) {
+      if ('goal' in response.body && response.body.goal?.replayed) deps.sessionObservers.releaseSend(demand);
+      else deps.sessionObservers.bindSend(demand, response.body.runId);
     }
-    else if (projected && (projected.status === 400 || (request.input.intent === undefined && projected.status === 503) || ('outcome' in projected.body
-      && (projected.body.outcome === 'target_rejected' || projected.body.outcome === 'unavailable'
-        || projected.body.outcome === 'unsupported')))) {
+    else if (response.status === 400 || (request.input.intent === undefined && response.status === 503) || ('outcome' in response.body
+      && (response.body.outcome === 'target_rejected' || response.body.outcome === 'unavailable'
+        || response.body.outcome === 'unsupported'))) {
       deps.sessionObservers.releaseSend(demand);
     } else if (request.input.intent !== undefined) deps.sessionObservers.retainUnknownGoalSend(demand);
     logSessionTrace('capability.send.response', traceId, () => ({
       status: response.status,
-      projected: Boolean(projected),
     }));
-    return projected ?? { status: 200, body: { outcome: 'unknown' } };
+    return response;
   } catch {
     if (request.input.intent !== undefined) deps.sessionObservers.retainUnknownGoalSend(demand);
     return { status: 200, body: { outcome: 'unknown' } };
   }
-}
-
-type SessionSendResponse = Readonly<{
-  status: 200 | 202 | 400 | 503;
-  body: Readonly<{ outcome: 'queued'; runId: string }>
-    | Readonly<{
-      outcome: 'succeeded';
-      runId: string;
-      status: 'started' | 'in_flight' | 'ok';
-      goal?: SessionGoalReceipt;
-    }>
-    | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' | 'unsupported' }>
-    | typeof SESSION_SEND_INVALID
-    | typeof SESSION_SEND_UNAVAILABLE;
-}>;
-
-function projectSessionSendResponse(
-  response: PublicTransportResponse,
-  request: SessionSendRequest,
-): SessionSendResponse | null {
-  if (response.status === 202 && isQueuedSessionSendResponse(response.body, request)) {
-    return {
-      status: 202,
-      body: {
-        outcome: 'queued',
-        runId: response.body.runId,
-      },
-    };
-  }
-  if (response.status === 200 && isSucceededSessionSendResponse(response.body, request)) {
-    return {
-      status: 200,
-      body: {
-        outcome: 'succeeded',
-        runId: response.body.runId,
-        status: response.body.status,
-        ...(response.body.goal === undefined ? {} : { goal: response.body.goal }),
-      },
-    };
-  }
-  if (response.status === 200 && isTerminalSessionSendResponse(response.body, request)) {
-    return { status: 200, body: { outcome: response.body.outcome } };
-  }
-  if (response.status === 400 && isExactFailure(response.body, SESSION_SEND_INVALID)) {
-    return { status: 400, body: SESSION_SEND_INVALID };
-  }
-  if (response.status === 503 && isExactFailure(response.body, SESSION_SEND_UNAVAILABLE)) {
-    return { status: 503, body: SESSION_SEND_UNAVAILABLE };
-  }
-  return null;
-}
-
-function isQueuedSessionSendResponse(value: unknown, request: SessionSendRequest): value is Readonly<{
-  outcome: 'queued';
-  runId: string;
-}> {
-  return request.scope.identity.endpoint.runtimeAdapterId === 'openclaw'
-    && request.input.intent === undefined
-    && isRecord(value)
-    && hasExactKeys(value, ['outcome', 'runId'])
-    && value.outcome === 'queued'
-    && isIdentifier(value.runId);
-}
-
-function isSucceededSessionSendResponse(value: unknown, request: SessionSendRequest): value is Readonly<{
-  outcome: 'succeeded';
-  runId: string;
-  status: 'started' | 'in_flight' | 'ok';
-  goal?: SessionGoalReceipt;
-}> {
-  const expectedRunId = request.input.runId ?? request.input.idempotencyKey;
-  return isRecord(value)
-    && hasAllowedKeys(value, ['outcome', 'runId', 'status'], ['goal'])
-    && value.outcome === 'succeeded'
-    && isIdentifier(value.runId)
-    && (request.scope.identity.endpoint.runtimeAdapterId === 'openclaw' || value.runId === expectedRunId)
-    && (value.status === 'started' || value.status === 'in_flight' || value.status === 'ok')
-    && isSessionSendGoalResponse(value, request);
-}
-
-function isTerminalSessionSendResponse(value: unknown, request: SessionSendRequest): value is Readonly<{
-  outcome: 'target_rejected' | 'unavailable' | 'unknown' | 'unsupported';
-}> {
-  return isRecord(value)
-    && hasExactKeys(value, ['outcome'])
-    && (value.outcome === 'target_rejected' || value.outcome === 'unavailable' || value.outcome === 'unknown'
-      || (request.input.intent !== undefined && value.outcome === 'unsupported'));
-}
-
-function isExactFailure(
-  value: unknown,
-  expected: typeof SESSION_SEND_INVALID | typeof SESSION_SEND_UNAVAILABLE,
-): boolean {
-  return isRecord(value)
-    && hasExactKeys(value, ['success', 'error'])
-    && value.success === expected.success
-    && value.error === expected.error;
 }
 
 async function dispatchWorkspaceMedia(

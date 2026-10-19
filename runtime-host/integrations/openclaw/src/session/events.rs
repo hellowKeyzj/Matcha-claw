@@ -124,6 +124,7 @@ impl fmt::Debug for SessionEventProvenance {
 pub enum SessionEvent {
     Lifecycle(LifecycleEvent),
     QuestionsChanged,
+    ProgressChanged,
 }
 
 impl fmt::Debug for SessionEvent {
@@ -131,6 +132,7 @@ impl fmt::Debug for SessionEvent {
         match self {
             Self::Lifecycle(event) => formatter.debug_tuple("Lifecycle").field(event).finish(),
             Self::QuestionsChanged => formatter.write_str("QuestionsChanged"),
+            Self::ProgressChanged => formatter.write_str("ProgressChanged"),
         }
     }
 }
@@ -225,14 +227,14 @@ impl SessionEvent {
     pub fn provenance(&self) -> Option<&SessionEventProvenance> {
         match self {
             Self::Lifecycle(event) => event.provenance(),
-            Self::QuestionsChanged => None,
+            Self::QuestionsChanged | Self::ProgressChanged => None,
         }
     }
 
     pub fn lifecycle_event(&self) -> Option<LifecycleEvent> {
         match self {
             Self::Lifecycle(event) => Some(event.clone()),
-            Self::QuestionsChanged => None,
+            Self::QuestionsChanged | Self::ProgressChanged => None,
         }
     }
 }

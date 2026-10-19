@@ -90,6 +90,10 @@ pub trait SessionObservation: Send + Sync {
         epoch: u64,
     ) -> SessionFuture<'a, Result<SessionSync, RuntimeOperationFailure>>;
 
+    /// Confirms the owner committed this generation's synchronized state and snapshot.
+    /// This is not a receipt for individually consumed native events.
+    fn accept_sync(&self, _generation: u64, _source_epoch: Option<u64>, _cut: SessionSyncCut) {}
+
     /// Rebinds a failed receive resource while preserving Integration reconciliation facts.
     /// Native ingress for the new generation starts only after the owner's next sync.
     fn restart(&self, generation: u64) -> OwnedRuntimeFuture<Result<(), RuntimeOperationFailure>>;
@@ -102,9 +106,13 @@ pub trait SessionObservation: Send + Sync {
 pub enum SessionSyncCut {
     /// A history/snapshot read, not a consumed event frontier.
     Snapshot,
-    /// The Integration actually projected events through this source cursor.
+    /// Events through this source cursor were projected and accepted by Host.
     /// Gateway-global cursors are non-contiguous; opaque history cursors stay private.
     EventFrontier { cursor: u64, contiguous: bool },
+    /// The Integration restored a continuous source frontier into view internally.
+    /// Host takes view and cursor atomically; no per-event consumption is claimed.
+    /// Requires a source epoch, contiguous=true and no replay_baseline.
+    Restored { cursor: u64, contiguous: bool },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -219,22 +227,11 @@ pub trait SessionOps: Send + Sync {
         Box::pin(async { SessionDeleteOutcome::Unknown })
     }
 
-    fn send_model_runtime_command<'a>(
+    fn session_model_runtime_command_cancellable<'a>(
         &'a self,
-        command: &'a SessionSendCommand,
-    ) -> SessionFuture<
-        'a,
-        Result<
-            Option<crate::model_selection::MatchaSessionModelRuntimeCommand>,
-            SessionSendOutcome,
-        >,
-    > {
-        self.send_model_runtime_command_cancellable(command, CancellationToken::new())
-    }
-
-    fn send_model_runtime_command_cancellable<'a>(
-        &'a self,
-        _command: &'a SessionSendCommand,
+        _identity: &'a ViewIdentity,
+        _endpoint_session_id: Option<&'a str>,
+        _trace_id: Option<&'a str>,
         _cancellation: CancellationToken,
     ) -> SessionFuture<
         'a,
@@ -243,7 +240,7 @@ pub trait SessionOps: Send + Sync {
             SessionSendOutcome,
         >,
     > {
-        Box::pin(async { Ok(None) })
+        Box::pin(async { Err(SessionSendOutcome::Unsupported) })
     }
 
     fn load_session_timeline<'a>(

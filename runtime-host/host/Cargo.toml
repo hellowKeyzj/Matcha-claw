@@ -19,6 +19,7 @@ security = { version = "0.1.0", path = "../modules/security" }
 settings = { version = "0.1.0", path = "../modules/settings" }
 connectors = { version = "0.1.0", path = "../modules/connectors" }
 cron = { version = "0.1.0", path = "../modules/cron" }
+board = { version = "0.1.0", path = "../modules/board" }
 usage = { version = "0.1.0", path = "../modules/usage" }
 diagnostics = { version = "0.1.0", path = "../modules/diagnostics" }
 task-manager = { version = "0.1.0", path = "../modules/task-manager" }
@@ -33,6 +34,8 @@ sealed-resource = { version = "0.1.0", path = "../modules/sealed-resource" }
 sessions-module = { package = "sessions", version = "0.1.0", path = "../modules/sessions" }
 runtime-directory = { version = "0.1.0", path = "../modules/runtime-directory" }
 clawhub = { version = "0.1.0", path = "../external/clawhub" }
+searxng = { version = "0.1.0", path = "../external/searxng" }
+search = { version = "0.1.0", path = "../modules/search" }
 foundation = { version = "0.1.0", path = "../foundation" }
 futures-util.workspace = true
 toolchain = { version = "0.1.0", path = "../modules/toolchain" }

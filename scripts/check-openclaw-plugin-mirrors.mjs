@@ -11,7 +11,7 @@ const ROOT = process.cwd();
 const MIRROR_ROOT = path.join(ROOT, 'build', 'openclaw-plugins');
 
 const REQUIRED_PLUGIN_MIRRORS = [
-  ...['qianfan', 'stepfun', 'tencent', 'xiaomi', 'qwen', 'kimi', 'volcengine', 'opencode'].map((pluginId) => ({
+  ...['qianfan', 'stepfun', 'tencent', 'xiaomi', 'qwen', 'kimi', 'volcengine', 'opencode', 'searxng'].map((pluginId) => ({
     pluginId,
     dir: pluginId,
     requiredFiles: pluginId === 'tencent' ? ['dist/index.js', 'dist/setup-api.js'] : ['dist/index.js'],

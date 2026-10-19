@@ -3,7 +3,8 @@ import {
   validateRuntimeScope,
   type RuntimeScope,
 } from '../../../src/types/desktop/runtime-address';
-import type { RuntimeHostJsonValue } from '../../main/runtime-host-delivery/control';
+import { isBrowserRequestInput } from '../../../src/types/openclaw-browser';
+import { isOpenClawSurfaceCapabilityRequest } from '../../main/runtime-host-delivery/transport/openclaw-gateway';
 import type { RuntimeHostTransportContext } from '../context';
 import { dispatchSessionCapability, type SessionCapabilityRouteDeps } from './sessions';
 import { SESSION_PAGE_HEADER } from '../../main/renderer-event-routes';
@@ -16,6 +17,8 @@ import {
 import { isTeamRuntimeCapabilityRequest } from './team-runtime-capability';
 import { parseJsonBody, sendJson } from '../route-utils';
 import type { TaskManagerTransport } from '../../main/runtime-host-delivery/transport/task-manager';
+import { logger } from '../../utils/logger';
+import { decodeTaskFailure, decodeTaskFailureResponse, taskFailureResponse, type TaskFailure } from '../../../src/types/desktop/task-failure';
 import { decodeCallReceipt } from '../../../src/types/call-log/receipt';
 import {
   isOpenClawQuestionListInput,
@@ -62,10 +65,6 @@ const SUBAGENT_CONFIGURATION_UNAVAILABLE = {
   success: false,
   error: 'Subagent configuration is unavailable',
 } as const;
-const TASK_MANAGER_INVALID = {
-  success: false,
-  error: 'Task manager request is invalid',
-} as const;
 const TASK_MANAGER_UNAVAILABLE = {
   success: false,
   error: 'Task manager is unavailable',
@@ -86,13 +85,11 @@ const OPENCLAW_BROWSER_UNAVAILABLE = {
   success: false,
   error: 'OpenClaw browser request is unavailable',
 } as const;
-const OPENCLAW_MCP_APP_REQUEST_INVALID = {
-  success: false,
-  error: 'OpenClaw MCP app request is invalid',
+const OPENCLAW_SURFACE_REQUEST_INVALID = {
+  error: { code: 'SURFACE_INVALID_REQUEST', message: 'Runtime surface request is invalid' },
 } as const;
-const OPENCLAW_MCP_APP_UNAVAILABLE = {
-  success: false,
-  error: 'OpenClaw MCP app request is unavailable',
+const OPENCLAW_SURFACE_UNAVAILABLE = {
+  error: { code: 'SURFACE_UNAVAILABLE', message: 'Runtime surface is unavailable' },
 } as const;
 const OPENCLAW_QUESTION_REQUEST_INVALID = {
   success: false,
@@ -309,8 +306,8 @@ export async function handleCapabilityRoutes(
     return true;
   }
 
-  if (body.id === 'openclaw.mcpApp') {
-    const response = await executeOpenClawMcpAppCapability(body, deps);
+  if (body.id === 'openclaw.mcpApp' || body.id === 'openclaw.canvas' || body.id === 'openclaw.progress') {
+    const response = await executeOpenClawSurfaceCapability(body, deps);
     sendJson(res, response.status, response.body);
     return true;
   }
@@ -394,19 +391,23 @@ export async function handleCapabilityRoutes(
 
   if (body.id === 'task.management') {
     const operation = isTaskOperation(body.operationId) ? body.operationId : undefined;
+    const fail = (status: 400 | 503, failure: TaskFailure) => {
+      logger.warn('[TaskManager] Capability request failed', { operation, status, ...failure });
+      sendJson(res, status, taskFailureResponse(failure));
+    };
     if (!operation || !isTaskCapabilityRequest(body, operation)) {
-      sendJson(res, 400, TASK_MANAGER_INVALID);
+      fail(400, { stage: 'task_request', code: 'invalid_params', delivery: 'notSent' });
       return true;
     }
     try {
       const response = await deps.runtimeHostTransports.taskManagerTransport[taskDispatch[operation]](body);
-      if (!isTaskManagerResponse(response.body, operation)) {
-        sendJson(res, 503, TASK_MANAGER_UNAVAILABLE);
+      if (!isTaskManagerResponse(response.body, response.status, operation)) {
+        fail(503, { stage: 'response', code: 'protocol', delivery: 'responseReceived' });
       } else {
-        sendJson(res, response.status, response.body);
+        sendJson(res, response.status, decodeTaskFailureResponse(response.body) ?? response.body);
       }
     } catch {
-      sendJson(res, 503, TASK_MANAGER_UNAVAILABLE);
+      fail(503, { stage: 'transport', code: 'transport', delivery: 'unknown' });
     }
     return true;
   }
@@ -503,25 +504,26 @@ async function executeOpenClawBrowserCapability(
     return { status: 400, body: OPENCLAW_BROWSER_REQUEST_INVALID };
   }
   try {
-    const response = await deps.runtimeHostTransports.openClawGatewayTransport.execute(body);
-    return projectOpenClawGatewayResponse(response, OPENCLAW_BROWSER_REQUEST_INVALID, OPENCLAW_BROWSER_UNAVAILABLE);
+    return await deps.runtimeHostTransports.openClawGatewayTransport.execute(body);
   } catch {
-    return { status: 503, body: OPENCLAW_BROWSER_UNAVAILABLE };
+    return { status: 503, body: isRecord(body.input) && body.input.method !== 'GET'
+      ? { outcome: 'unknown' } : OPENCLAW_BROWSER_UNAVAILABLE };
   }
 }
 
-async function executeOpenClawMcpAppCapability(
+async function executeOpenClawSurfaceCapability(
   body: Record<string, unknown>,
   deps: CapabilityRouteContext,
 ): Promise<{ status: number; body: unknown }> {
-  if (!isOpenClawMcpAppRequest(body)) {
-    return { status: 400, body: OPENCLAW_MCP_APP_REQUEST_INVALID };
+  if (!isOpenClawSurfaceCapabilityRequest(body)) {
+    return { status: 400, body: OPENCLAW_SURFACE_REQUEST_INVALID };
   }
   try {
-    const response = await deps.runtimeHostTransports.openClawGatewayTransport.execute(body);
-    return projectOpenClawGatewayResponse(response, OPENCLAW_MCP_APP_REQUEST_INVALID, OPENCLAW_MCP_APP_UNAVAILABLE);
+    return await deps.runtimeHostTransports.openClawGatewayTransport.execute(body);
   } catch {
-    return { status: 503, body: OPENCLAW_MCP_APP_UNAVAILABLE };
+    return { status: 503, body: body.operationId === 'mcp.app.callTool' || body.operationId === 'mcp.app.updateModelContext'
+      ? { error: { code: 'SURFACE_OUTCOME_UNKNOWN', message: 'Runtime surface operation outcome is unknown' } }
+      : OPENCLAW_SURFACE_UNAVAILABLE };
   }
 }
 
@@ -614,40 +616,7 @@ function isOpenClawBrowserRequest(value: Record<string, unknown>): boolean {
     && value.operationId === 'browser.request'
     && isNativeRuntimeScope(value.scope)
     && value.target === null
-    && isOpenClawBrowserInput(value.input);
-}
-
-function isOpenClawBrowserInput(value: unknown): boolean {
-  return isRecord(value)
-    && hasOnlyKeys(value, ['method', 'path', 'query', 'body', 'timeoutMs', 'target', 'node'])
-    && Object.hasOwn(value, 'method')
-    && Object.hasOwn(value, 'path')
-    && isNonEmptyText(value.method)
-    && isNonEmptyText(value.path)
-    && (value.query === undefined || (isRecord(value.query) && isRuntimeJsonValue(value.query)))
-    && (value.body === undefined || isRuntimeJsonValue(value.body))
-    && (value.timeoutMs === undefined || isSafePositiveInteger(value.timeoutMs))
-    && (value.target === undefined || value.target === 'host' || value.target === 'node')
-    && (value.node === undefined || (value.target === 'node' && isNonEmptyText(value.node)));
-}
-
-function isOpenClawMcpAppRequest(value: Record<string, unknown>): boolean {
-  return hasExactKeys(value, ['id', 'operationId', 'scope', 'target', 'input'])
-    && value.id === 'openclaw.mcpApp'
-    && isMcpAppOperationId(value.operationId)
-    && isNativeRuntimeScope(value.scope)
-    && value.target === null
-    && isOpenClawMcpAppInput(value.input);
-}
-
-function isOpenClawMcpAppInput(value: unknown): boolean {
-  return isRecord(value)
-    && hasOnlyKeys(value, ['sessionKey', 'viewId', 'standalone'])
-    && Object.hasOwn(value, 'sessionKey')
-    && Object.hasOwn(value, 'viewId')
-    && isNonEmptyText(value.sessionKey)
-    && isNonEmptyText(value.viewId)
-    && (value.standalone === undefined || typeof value.standalone === 'boolean');
+    && isBrowserRequestInput(value.input);
 }
 
 function isOpenClawQuestionRequest(value: Record<string, unknown>): boolean {
@@ -657,23 +626,6 @@ function isOpenClawQuestionRequest(value: Record<string, unknown>): boolean {
     && value.target === null
     && ((value.operationId === 'question.list' && isOpenClawQuestionListInput(value.input))
       || (value.operationId === 'question.resolve' && isOpenClawQuestionResolveInput(value.input)));
-}
-
-function isMcpAppOperationId(value: unknown): value is string {
-  return isNonEmptyText(value) && value.startsWith('mcp.app.');
-}
-
-function isRuntimeJsonValue(value: unknown, seen = new Set<object>()): value is RuntimeHostJsonValue {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (typeof value !== 'object' || seen.has(value)) return false;
-
-  seen.add(value);
-  if (Array.isArray(value)) return value.every((entry) => isRuntimeJsonValue(entry, seen));
-  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
-    return false;
-  }
-  return Object.values(value).every((entry) => isRuntimeJsonValue(entry, seen));
 }
 
 function isNativeRuntimeScope(value: unknown): boolean {
@@ -914,14 +866,16 @@ function isTodos(value: unknown): boolean {
     && (todo.owner === undefined || isNonEmptyText(todo.owner)));
 }
 
-function isTaskManagerResponse(value: unknown, operation: TaskOperation): boolean {
+function isTaskManagerResponse(value: unknown, status: number, operation: TaskOperation): boolean {
   if (!isRecord(value)) return false;
-  if (hasExactKeys(value, ['success', 'error'])) {
-    return value.success === false
-      && (value.error === TASK_MANAGER_UNAVAILABLE.error || value.error === 'Task manager request was rejected');
+  if (status === 409 || status === 503) {
+    return decodeTaskFailureResponse(value) !== null || (hasExactKeys(value, ['success', 'error'])
+      && value.success === false
+      && (value.error === TASK_MANAGER_UNAVAILABLE.error || value.error === 'Task manager request was rejected'));
   }
+  if (status !== 200) return false;
   if (operation === 'tasks.list') return isTaskSnapshot(value);
-  if (operation === 'tasks.get') return hasExactKeys(value, ['task']) && isTask(value.task);
+  if (operation === 'tasks.get') return hasExactKeys(value, ['task']) && (value.task === null || isTask(value.task));
   if (operation === 'todos.get') return isTodoSnapshot(value);
   if (operation === 'todos.write') {
     return (hasExactKeys(value, ['outcome', 'snapshot'])
@@ -944,7 +898,8 @@ function isTaskManagerResponse(value: unknown, operation: TaskOperation): boolea
 }
 
 function isClosedTaskMutation(value: Record<string, unknown>): boolean {
-  return hasExactKeys(value, ['outcome']) && (value.outcome === 'rejected' || value.outcome === 'unknown');
+  return (hasExactKeys(value, ['outcome']) || (hasExactKeys(value, ['outcome', 'failure']) && decodeTaskFailure(value.failure) !== null))
+    && (value.outcome === 'rejected' || value.outcome === 'unknown');
 }
 
 function isTaskSnapshot(value: unknown): boolean {

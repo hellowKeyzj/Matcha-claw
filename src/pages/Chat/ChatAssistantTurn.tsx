@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, memo, useReducer } from 'react';
 import type { ChatAssistantTurnItem } from './chat-render-item-model';
+import { buildToolGroupPlan, isCoveredToolOnlyItem, type ToolSlot } from './chat-tool-groups';
+import type { ToolActivityDisclosure } from './tool-renderers/types';
+import { useToolActivityDisclosure } from './useToolActivityDisclosure';
 import type { AttachedFileMeta } from '@/stores/chat';
 import { AssistantMessageBody } from './assistant-message-body';
 import { MessageShell, type MessageAvatarSlot } from './chat-message-shell';
@@ -15,16 +18,16 @@ import {
   type MessageLightboxState,
 } from './chat-message-parts';
 import type { SessionRenderAssistantBubbleToolResult, SessionRenderToolCard } from '../../types/session/tool-card';
-import { isOpenClawTool, readBrowserTabPreview, readMcpAppPreview } from './tool-renderers/openclaw-details';
+import { isOpenClawTool, readBrowserTabPreview } from './tool-renderers/openclaw-details';
+import { buildToolRuntimeSurface } from './tool-activity-view-model';
+import { isOpenClawSurfaceSessionIdentity } from '../../types/openclaw-runtime-surface';
 import { openChatRuntimeSurface, type ChatRuntimeSurfaceDescriptor } from './useChatSidePanelController';
 import { extractArtifactRefsFromAssistantText } from './artifact-paths';
-import { sanitizeAssistantDisplayText } from '@/stores/chat/message-display';
+import { getSessionTextModel, type SessionTextModel } from '@/stores/chat/session-presentation';
 import { hostFileStat, hostWorkspaceMediaThumbnail, type WorkspaceFileContext } from '@/lib/host-api';
 import { DIRECTORY_MIME_TYPE, resolveWorkspaceRelativePath } from '@/components/file-preview/types';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeRenderItem, summarizeSessionIdentity, summarizeText } from '@/lib/session-trace';
-import type {
-  SessionIdentity,
-} from '../../types/desktop/runtime-address';
+import { validateSessionIdentity, type SessionIdentity } from '../../types/desktop/runtime-address';
 import {
   containsTodoToolDebugSignal,
   logRendererTodoToolDebug,
@@ -33,6 +36,9 @@ import {
 
 interface ChatAssistantTurnProps {
   item: ChatAssistantTurnItem;
+  toolSlots?: ReadonlyMap<string, ToolSlot>;
+  latestBrowserTools?: ReadonlySet<SessionRenderToolCard>;
+  disclosure?: ToolActivityDisclosure;
   showThinking: boolean;
   replyStartedAt?: number;
   assistantAvatarSlot?: MessageAvatarSlot;
@@ -41,6 +47,8 @@ interface ChatAssistantTurnProps {
   endpointSessionId?: string | null;
   workspaceContext?: WorkspaceFileContext;
   onOpenAttachedArtifact?: (file: AttachedFileMeta) => void;
+  onRuntimeSendMessage?: (text: string) => void | Promise<void>;
+  onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }
 
 type MarkdownFenceState = {
@@ -107,14 +115,14 @@ function removeLeadingFenceClose(text: string, state: MarkdownFenceState): strin
   return text.slice(match[0].length);
 }
 
-function buildMessageSegmentRenderTextByKey(item: ChatAssistantTurnItem): Map<string, string> {
+function buildMessageSegmentRenderTextByKey(item: ChatAssistantTurnItem, textModel: SessionTextModel): Map<string, string> {
   const renderTextByKey = new Map<string, string>();
   let fenceState: MarkdownFenceState = null;
   for (const segment of item.segments) {
     if (segment.kind !== 'message') {
       continue;
     }
-    const renderText = sanitizeAssistantDisplayText(removeLeadingFenceClose(segment.text, fenceState));
+    const renderText = textModel.assistant(removeLeadingFenceClose(segment.text, fenceState));
     renderTextByKey.set(segment.key, renderText);
     fenceState = advanceMarkdownFenceState(segment.text, fenceState);
   }
@@ -137,69 +145,16 @@ function toAssistantBubbleToolResult(segment: ChatAssistantTurnItem['segments'][
   };
 }
 
-function hasBrowserTabPreview(tool: SessionRenderToolCard): boolean {
-  return isOpenClawTool(tool) && readBrowserTabPreview(tool.details) != null;
+function buildRuntimeSurfaceDescriptor(tool: SessionRenderToolCard, sessionIdentity: SessionIdentity): ChatRuntimeSurfaceDescriptor | null {
+  if (!isOpenClawTool(tool) || !isOpenClawSurfaceSessionIdentity(sessionIdentity)) return null;
+  const browserTab = tool.name === 'browser' && tool.status === 'completed' ? readBrowserTabPreview(tool.details) : undefined;
+  if (browserTab) return { ...browserTab, sourceSessionIdentity: sessionIdentity };
+  return buildToolRuntimeSurface(tool, sessionIdentity) ?? null;
 }
 
-function buildRuntimeSurfaceDescriptor(tool: SessionRenderToolCard): ChatRuntimeSurfaceDescriptor | null {
-  if (!isOpenClawTool(tool)) {
-    return null;
-  }
-  const browserTab = readBrowserTabPreview(tool.details);
-  if (browserTab) {
-    return {
-      ...browserTab,
-      toolName: tool.name,
-      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
-    };
-  }
-  const mcpAppPreview = readMcpAppPreview(tool.details);
-  if (!mcpAppPreview) {
-    return null;
-  }
-  return {
-    kind: 'mcp-app',
-    toolName: tool.name,
-    ...(mcpAppPreview.surface ? { surface: mcpAppPreview.surface } : {}),
-    ...(mcpAppPreview.title ? { title: mcpAppPreview.title } : {}),
-    ...(mcpAppPreview.url ? { url: mcpAppPreview.url } : {}),
-    ...(mcpAppPreview.viewId ? { viewId: mcpAppPreview.viewId } : {}),
-    ...(mcpAppPreview.preferredHeight !== undefined ? { preferredHeight: mcpAppPreview.preferredHeight } : {}),
-    ...(mcpAppPreview.sandbox ? { sandbox: mcpAppPreview.sandbox } : {}),
-    ...(mcpAppPreview.boardWidgetName ? { boardWidgetName: mcpAppPreview.boardWidgetName } : {}),
-    ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
-    ...(mcpAppPreview.mcpApp ? { mcpApp: mcpAppPreview.mcpApp } : {}),
-  };
-}
-
-type AssistantTurnRenderPart =
-  | { kind: 'segment'; segment: ChatAssistantTurnItem['segments'][number] }
-  | { kind: 'tool-group'; key: string; tools: SessionRenderToolCard[] };
-
-function buildAssistantTurnRenderParts(item: ChatAssistantTurnItem): AssistantTurnRenderPart[] {
-  const parts: AssistantTurnRenderPart[] = [];
-  for (let index = 0; index < item.segments.length; index += 1) {
-    const segment = item.segments[index];
-    if (segment.kind !== 'tool' || toAssistantBubbleToolResult(segment) || !hasBrowserTabPreview(segment.tool)) {
-      parts.push({ kind: 'segment', segment });
-      continue;
-    }
-
-    const tools: SessionRenderToolCard[] = [segment.tool];
-    let endIndex = index;
-    while (endIndex + 1 < item.segments.length) {
-      const nextSegment = item.segments[endIndex + 1];
-      if (nextSegment.kind !== 'tool' || toAssistantBubbleToolResult(nextSegment) || !hasBrowserTabPreview(nextSegment.tool)) {
-        break;
-      }
-      tools.push(nextSegment.tool);
-      endIndex += 1;
-    }
-
-    parts.push({ kind: 'tool-group', key: segment.key, tools });
-    index = endIndex;
-  }
-  return parts;
+function openToolSurface(tool: SessionRenderToolCard, sessionIdentity: SessionIdentity): void {
+  const descriptor = buildRuntimeSurfaceDescriptor(tool, sessionIdentity);
+  if (descriptor) openChatRuntimeSurface(descriptor);
 }
 
 function isActiveReplyStatus(status: ChatAssistantTurnItem['status']): boolean {
@@ -248,6 +203,9 @@ function getReplyDurationLabel(input: {
 
 export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   item,
+  toolSlots,
+  latestBrowserTools,
+  disclosure: sharedDisclosure,
   showThinking,
   replyStartedAt,
   assistantAvatarSlot,
@@ -256,8 +214,17 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   endpointSessionId,
   workspaceContext,
   onOpenAttachedArtifact,
+  onRuntimeSendMessage,
+  onRuntimeOpenLink,
 }: ChatAssistantTurnProps) {
   const [collapseVersion, requestCollapse] = useReducer((value: number) => value + 1, 0);
+  const localDisclosure = useToolActivityDisclosure(sharedDisclosure ? undefined : sessionIdentity);
+  const disclosure = sharedDisclosure ?? localDisclosure;
+  const { collapse } = disclosure;
+  const handleBodyClick = useCallback(() => {
+    requestCollapse();
+    collapse();
+  }, [collapse]);
   const [lightboxImg, setLightboxImg] = useState<MessageLightboxState | null>(null);
   const [validatedDerivedPaths, setValidatedDerivedPaths] = useState<Record<string, boolean>>({});
   const [derivedGatewayPreviews, setDerivedGatewayPreviews] = useState<Record<string, DerivedGatewayPreview>>({});
@@ -288,8 +255,13 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     );
   }, [item]);
 
-  const messageRenderTextByKey = useMemo(() => buildMessageSegmentRenderTextByKey(item), [item]);
-  const renderParts = useMemo(() => buildAssistantTurnRenderParts(item), [item]);
+  const textModel = getSessionTextModel(sessionIdentity);
+  const messageRenderTextByKey = useMemo(() => buildMessageSegmentRenderTextByKey(item, textModel), [item, textModel]);
+  const resolvedToolSlots = useMemo(() => toolSlots ?? buildToolGroupPlan([item]).get(item.key), [item, toolSlots]);
+  const coveredOnly = isCoveredToolOnlyItem(item, resolvedToolSlots);
+  const toolSessionIdentity = sessionIdentity && !validateSessionIdentity(sessionIdentity)
+    && item.sessionKey === sessionIdentity.sessionKey
+    && (item.agentId === undefined || item.agentId === sessionIdentity.agentId) ? sessionIdentity : undefined;
 
   const hasContentSegments = item.segments.some((segment) => {
     if (segment.kind === 'thinking') {
@@ -299,15 +271,15 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
       return !!segment.largeText || (messageRenderTextByKey.get(segment.key) ?? segment.text).trim().length > 0;
     }
     if (segment.kind === 'tool') {
-      return true;
+      return resolvedToolSlots?.get(segment.key)?.kind !== 'covered';
     }
     return segment.images.length > 0 || segment.attachedFiles.length > 0;
   });
-  const pendingMode = !hasContentSegments && isStreaming
+  const pendingMode = !coveredOnly && !hasContentSegments && isStreaming
     ? (item.pendingState ?? (item.status === 'waiting_tool' ? 'activity' : 'typing'))
     : null;
   const rawPlainText = getAssistantTurnPlainText(item);
-  const plainText = sanitizeAssistantDisplayText(rawPlainText);
+  const plainText = textModel.assistant(rawPlainText);
   const attachedByRef = useMemo(() => {
     const next = new Set<string>();
     for (const segment of item.segments) {
@@ -459,23 +431,6 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
         };
       })
   ), [derivedAttachedFiles, derivedGatewayPreviews, validatedDerivedPaths]);
-  const renderToolCards = useCallback((tools: SessionRenderToolCard[], collapseKey: string) => {
-    const descriptors = tools
-      .map(buildRuntimeSurfaceDescriptor)
-      .filter((descriptor): descriptor is ChatRuntimeSurfaceDescriptor => descriptor != null);
-    if (descriptors.length === 0) {
-      return <ToolCardList tools={tools} collapseVersion={collapseVersion} sessionIdentity={sessionIdentity} />;
-    }
-    return (
-      <div
-        data-testid={`chat-runtime-surface-open-${collapseKey}`}
-        className="w-full cursor-pointer"
-        onClick={() => openChatRuntimeSurface(descriptors[descriptors.length - 1]!)}
-      >
-        <ToolCardList tools={tools} collapseVersion={collapseVersion} sessionIdentity={sessionIdentity} />
-      </div>
-    );
-  }, [collapseVersion, sessionIdentity]);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
     logSessionTrace('session.assistant-turn.committed', 'session-assistant-turn-boundary', () => ({
@@ -497,6 +452,81 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     return null;
   }
 
+  const renderedSegments = item.segments.map((segment) => {
+    if (segment.kind === 'thinking') {
+      if (!showThinking || !segment.text.trim()) {
+        return null;
+      }
+      return (
+        <div key={segment.key} className="flex w-full flex-col items-start gap-0.5 pt-0.5">
+          <ThinkingSection content={segment.text} collapseVersion={collapseVersion} />
+        </div>
+      );
+    }
+    if (segment.kind === 'tool') {
+      const embeddedToolResult = toAssistantBubbleToolResult(segment);
+      if (embeddedToolResult) {
+        return (
+          <div key={segment.key} className="flex w-full flex-col items-start gap-0 pt-0">
+            <AssistantEmbeddedToolResults
+              embeddedToolResults={[embeddedToolResult]}
+              sourceTool={segment.tool}
+              collapseVersion={collapseVersion}
+              sessionIdentity={toolSessionIdentity}
+              onOpenToolSurface={openToolSurface}
+              onRuntimeSendMessage={toolSessionIdentity ? onRuntimeSendMessage : undefined}
+              onRuntimeOpenLink={toolSessionIdentity ? onRuntimeOpenLink : undefined}
+            />
+          </div>
+        );
+      }
+      const slot = resolvedToolSlots?.get(segment.key);
+      if (slot?.kind !== 'head') return null;
+      return (
+        <div key={segment.key} className="flex w-full flex-col items-start gap-0 pt-0">
+          <ToolCardList
+            tools={slot.group.tools}
+            latestBrowserTools={latestBrowserTools}
+            collapseVersion={collapseVersion}
+            sessionIdentity={toolSessionIdentity}
+            groupKey={slot.group.key}
+            disclosure={disclosure}
+            onOpenToolSurface={openToolSurface}
+            onRuntimeSendMessage={toolSessionIdentity ? onRuntimeSendMessage : undefined}
+            onRuntimeOpenLink={toolSessionIdentity ? onRuntimeOpenLink : undefined}
+          />
+        </div>
+      );
+    }
+    if (segment.kind === 'message') {
+      const renderText = messageRenderTextByKey.get(segment.key) ?? segment.text;
+      if (!segment.largeText && !renderText.trim()) {
+        return null;
+      }
+      return (
+        <AssistantMessageBody
+          key={segment.key}
+          itemKey={`${item.key}:segment:${segment.key}`}
+          createdAt={item.createdAt}
+          text={renderText}
+          isStreaming={isStreaming}
+          largeText={segment.largeText}
+          sessionIdentity={sessionIdentity}
+          endpointSessionId={endpointSessionId}
+          onBodyClick={handleBodyClick}
+        />
+      );
+    }
+    return (
+      <AssistantMessageMedia
+        key={segment.key}
+        images={segment.images}
+        attachedFiles={segment.attachedFiles}
+        onPreview={setLightboxImg}
+        onOpenFile={onOpenAttachedArtifact}
+      />
+    );
+  });
   return (
     <>
       <MessageShell
@@ -508,72 +538,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
         assistantAvatarSlot={assistantAvatarSlot}
         userAvatarImageUrl={userAvatarImageUrl}
       >
-        {renderParts.map((part) => {
-          if (part.kind === 'tool-group') {
-            return (
-              <div key={part.key} className="flex w-full flex-col items-start gap-0 pt-0">
-                {renderToolCards(part.tools, part.key)}
-              </div>
-            );
-          }
-          const { segment } = part;
-          if (segment.kind === 'thinking') {
-            if (!showThinking || !segment.text.trim()) {
-              return null;
-            }
-            return (
-              <div key={segment.key} className="flex w-full flex-col items-start gap-0.5 pt-0.5">
-                <ThinkingSection content={segment.text} collapseVersion={collapseVersion} />
-              </div>
-            );
-          }
-          if (segment.kind === 'tool') {
-            const embeddedToolResult = toAssistantBubbleToolResult(segment);
-            if (embeddedToolResult) {
-              return (
-                <div key={segment.key} className="flex w-full flex-col items-start gap-0 pt-0">
-                  <AssistantEmbeddedToolResults
-                    embeddedToolResults={[embeddedToolResult]}
-                    collapseVersion={collapseVersion}
-                  />
-                </div>
-              );
-            }
-            return (
-              <div key={segment.key} className="flex w-full flex-col items-start gap-0 pt-0">
-                {renderToolCards([segment.tool], segment.key)}
-              </div>
-            );
-          }
-          if (segment.kind === 'message') {
-            const renderText = messageRenderTextByKey.get(segment.key) ?? segment.text;
-            if (!segment.largeText && !renderText.trim()) {
-              return null;
-            }
-            return (
-              <AssistantMessageBody
-                key={segment.key}
-                itemKey={`${item.key}:segment:${segment.key}`}
-                createdAt={item.createdAt}
-                text={renderText}
-                isStreaming={isStreaming}
-                largeText={segment.largeText}
-                sessionIdentity={sessionIdentity}
-                endpointSessionId={endpointSessionId}
-                onBodyClick={requestCollapse}
-              />
-            );
-          }
-          return (
-            <AssistantMessageMedia
-              key={segment.key}
-              images={segment.images}
-              attachedFiles={segment.attachedFiles}
-              onPreview={setLightboxImg}
-              onOpenFile={onOpenAttachedArtifact}
-            />
-          );
-        })}
+        {renderedSegments}
 
         {visibleDerivedAttachedFiles.length > 0 ? (
           <AssistantMessageMedia
@@ -590,7 +555,6 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           <AssistantMessageMetaBar text={plainText} timestamp={item.createdAt} statusLabel={replyDurationLabel} />
         ) : null}
       </MessageShell>
-
       {lightboxImg && (
         <ChatImageLightbox
           src={lightboxImg.src}

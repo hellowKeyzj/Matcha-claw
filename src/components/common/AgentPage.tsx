@@ -8,6 +8,7 @@ import { isGatewayOperational } from '@/lib/gateway-status';
 import { useGatewayStore } from '@/stores/gateway';
 import { useSkillsStore } from '@/stores/skills';
 import { prewarmPluginsData } from '@/stores/plugins-store';
+import { RuntimeScopeSelector } from './RuntimeScopeSelector';
 
 const modules = [
   { to: '/subagents', key: 'sidebar.subagents', icon: Bot },
@@ -66,25 +67,28 @@ export function AgentPage({ children }: { children: ReactNode }) {
 
   return (
     <div ref={pageRef} className="min-w-0 space-y-6 text-foreground">
-      <header className="flex flex-wrap items-center justify-between gap-4 pb-1">
-        <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t(currentModule.key)}</h1>
-        <nav aria-label={t('sidebar.subagents')} className="inline-flex max-w-full gap-1 overflow-x-auto rounded-full border bg-[hsl(var(--shell-surface-muted))] p-1 [border-color:hsl(var(--shell-border))]">
-          {modules.map(({ to, key, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to === pathname ? currentLocation : (moduleLocations.get(to) ?? to)}
-              onMouseEnter={() => prefetchModule(to)}
-              onFocus={() => prefetchModule(to)}
-              className={({ isActive }) => cn(
-                'inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-4 py-2 text-xs font-medium text-[hsl(var(--shell-text-muted))] transition-colors hover:bg-[hsl(var(--shell-surface-hover))] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none',
-                isActive && 'bg-[hsl(var(--shell-surface))] text-foreground',
-              )}
-            >
-              <Icon className="size-4" aria-hidden="true" />
-              {t(key)}
-            </NavLink>
-          ))}
-        </nav>
+      <header className="flex min-h-11 items-center justify-between gap-4">
+        <h1 className="shrink-0 text-2xl font-semibold tracking-[-0.035em] text-foreground">{t(currentModule.key)}</h1>
+        <div className="flex min-w-0 items-center gap-6">
+          <nav aria-label={t('sidebar.subagents')} className="inline-flex min-w-0 max-w-full gap-1 overflow-x-auto rounded-full border bg-[hsl(var(--shell-surface-muted))] p-1 [border-color:hsl(var(--shell-border))]">
+            {modules.map(({ to, key, icon: Icon }) => (
+              <NavLink
+                key={to}
+                to={to === pathname ? currentLocation : (moduleLocations.get(to) ?? to)}
+                onMouseEnter={() => prefetchModule(to)}
+                onFocus={() => prefetchModule(to)}
+                className={({ isActive }) => cn(
+                  'inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-4 py-2 text-xs font-medium text-[hsl(var(--shell-text-muted))] transition-colors hover:bg-[hsl(var(--shell-surface-hover))] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none',
+                  isActive && 'bg-[hsl(var(--shell-surface))] text-foreground',
+                )}
+              >
+                <Icon className="size-4" aria-hidden="true" />
+                {t(key)}
+              </NavLink>
+            ))}
+          </nav>
+          <RuntimeScopeSelector />
+        </div>
       </header>
       {children}
     </div>

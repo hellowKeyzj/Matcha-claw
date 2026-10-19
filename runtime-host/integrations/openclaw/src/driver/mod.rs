@@ -4,6 +4,7 @@ pub mod lifecycle;
 pub mod owner;
 pub mod runtime_control;
 pub mod runtime_control_route;
+pub mod search;
 
 mod instance;
 mod repair;

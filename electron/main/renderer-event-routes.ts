@@ -162,7 +162,7 @@ export class RendererSessionObservationRegistry {
       && sameSessionIdentity(lease.identity, entry.identity))) this.sends.delete(entry);
   }
 
-  publish(identity: SessionIdentity, eventName: 'session.delta' | 'session.resync', payload: unknown): void {
+  publish(identity: SessionIdentity, eventName: 'session.delta' | 'session.resync' | 'board:changed' | 'board:command', payload: unknown): void {
     let delivered = 0;
     for (const { page, identity: authorized } of this.active()) {
       const matches = sameSessionIdentity(identity, authorized);
@@ -190,6 +190,13 @@ export class RendererSessionObservationRegistry {
       identity: summarizeSessionIdentity(identity), eventName, delivered, reason: delivered ? null : 'no-authorized-receiver',
       ...sessionEventWatermark(payload),
     });
+  }
+
+  publishHint(eventName: 'board:resync' | 'openclaw:progress-changed'): void {
+    const pages = new Set(this.active().map(({ page }) => page));
+    for (const page of pages) {
+      if (this.isCurrent(page)) page.contents.send('host:event', { eventName, payload: {} });
+    }
   }
 
   terminal(delta: SessionDelta): void {

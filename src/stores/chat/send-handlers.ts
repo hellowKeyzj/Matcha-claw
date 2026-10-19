@@ -11,6 +11,8 @@ import {
 } from './send-transport';
 import { selectCurrentChatSendGate } from './selectors';
 import { resolveChatSendGateForPayload } from './send-gate';
+import { currentSessionSend, linkSessionSend, markSessionSendUnknown } from './send-state';
+import { startSessionSend, confirmSessionSend, removeSessionSend } from './session-presentation';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -36,12 +38,9 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
-import { CHAT_INLINE_ATTACHMENT_MAX_BYTES, type ChatSendAttachment, type ChatSendResult, type ChatSessionRuntimeState, type ChatStoreState } from './types';
+import { CHAT_INLINE_ATTACHMENT_MAX_BYTES, type ChatSendAttachment, type ChatSendResult, type ChatSessionSendState, type ChatStoreState } from './types';
 import { isRunActive, isWaitingTool } from './types';
-import type {
-  SessionAssistantTurnItem,
-  SessionRenderUserMessageItem,
-} from '../../types/session/render-item';
+import type { SessionRenderUserMessageItem } from '../../types/session/render-item';
 
 export type ChatStoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),
@@ -172,6 +171,8 @@ export function resumeActiveStoreSend(
 
 interface FinalizeStoreSendFailureParams {
   set: ChatStoreSetFn;
+  get: ChatStoreGetFn;
+  sessionKey: string;
   error: string;
 }
 
@@ -214,11 +215,13 @@ function appendOptimisticSendItems(params: {
   set: ChatStoreSetFn;
   sessionKey: string;
   clientId: string;
+  identityKey: string;
+  generation: number;
   text: string;
   attachments: ChatSendAttachment[] | undefined;
   createdAt: number;
 }): void {
-  const { set, sessionKey, clientId, text, attachments, createdAt } = params;
+  const { set, sessionKey, clientId, identityKey, generation, text, attachments, createdAt } = params;
   set((state) => {
     const current = state.loadedSessions[sessionKey];
     if (!current) return state;
@@ -235,41 +238,15 @@ function appendOptimisticSendItems(params: {
       images: cachedAttachmentReceiptImages(attachments ?? []),
       attachedFiles: cachedAttachmentReceiptFiles(attachments ?? []),
     };
-    const assistantItem: SessionAssistantTurnItem = {
-      key: `renderer-assistant:${clientId}`,
-      kind: 'assistant-turn',
-      role: 'assistant',
-      sessionKey,
-      identitySource: 'client',
-      identityMode: 'client',
-      identityConfidence: 'strong',
-      status: 'streaming',
-      segments: [],
-      thinking: null,
-      tools: [],
-      text: '',
-      images: [],
-      attachedFiles: [],
-      pendingState: 'typing',
-      createdAt,
-      updatedAt: createdAt,
+    const send: ChatSessionSendState = {
+      identityKey, generation, clientId, startedAt: createdAt,
+      receipt: { phase: 'awaiting-receipt', terminalRunIds: [], terminalOverflow: false },
     };
-    const assistantItemKey = `renderer-assistant:${clientId}`;
+    const messages = startSessionSend({ ...current, items: [...current.items, userItem] }, send, sessionKey);
     return {
       loadedSessions: patchSessionRecord(state, sessionKey, {
-        items: [...current.items, userItem, assistantItem],
-        runtime: {
-          ...current.runtime,
-          runPhase: 'submitted',
-          pendingTurnKey: assistantItemKey,
-          pendingTurnLaneKey: 'main',
-          runProgress: null,
-          imageGeneration: undefined,
-          lastUserMessageAt: createdAt,
-          lastError: null,
-          lastIssue: null,
-          updatedAt: createdAt,
-        },
+        ...messages,
+        send,
       }),
     };
   });
@@ -279,121 +256,58 @@ function confirmOptimisticSendItems(params: {
   set: ChatStoreSetFn;
   sessionKey: string;
   clientId: string;
+  generation: number;
+  identityKey: string;
   receipt: Extract<SendChatTransportResult, { ok: true }>;
   retainReceipt: boolean;
 }): void {
-  const { set, sessionKey, clientId, receipt, retainReceipt } = params;
+  const { set, sessionKey, generation, identityKey, receipt, retainReceipt } = params;
   const { runId } = receipt;
-  const canBindRun = receipt.outcome === 'queued' || receipt.status === 'started';
-  const clientAssistantKey = `renderer-assistant:${clientId}`;
-  const runAssistantKey = `renderer-assistant:${runId}`;
+  const admission = receipt.outcome === 'queued' ? 'queued' : receipt.status;
+  const canBindRun = admission === 'queued' || admission === 'started';
   set((state) => {
     const current = state.loadedSessions[sessionKey];
     if (!current) return state;
-    let changed = false;
-    let lastUserMessageAt = current.runtime.lastUserMessageAt;
-    const hasRunAssistant = current.items.some((item) => (
-      item.kind === 'assistant-turn'
-      && item.runId === runId
-      && item.key !== clientAssistantKey
-    ));
-    const ownsPendingTurn = current.runtime.pendingTurnKey === clientAssistantKey
-      && current.runtime.activeRunId === null && isRunActive(current.runtime);
-    const items = current.items.filter((item) => {
-      if ((!canBindRun || hasRunAssistant || !isRunActive(current.runtime)
-        || (current.runtime.activeRunId !== null ? current.runtime.activeRunId !== runId : !ownsPendingTurn))
-        && item.kind === 'assistant-turn' && item.key === clientAssistantKey) {
-        changed = true;
-        return false;
-      }
-      return true;
-    }).map((item) => {
-      if (item.kind === 'user-message' && item.clientId === clientId) {
-        changed = true;
-        lastUserMessageAt = item.createdAt ?? lastUserMessageAt;
-        return {
-          ...item,
-          key: retainReceipt ? `renderer-receipt:${runId}` : item.key,
-          runId,
-          ...(retainReceipt ? { rendererReceiptRunId: runId } : {}),
-        };
-      }
-      if (item.kind === 'assistant-turn' && item.key === clientAssistantKey) {
-        changed = true;
-        return {
-          ...item,
-          key: runAssistantKey,
-          runId,
-          identitySource: 'run' as const,
-          identityMode: 'run' as const,
-        };
-      }
-      return item;
-    });
-    // Admission is not transcript consumption; only Started/Queued can bind this local turn.
-    const runtime = !canBindRun
-      ? ownsPendingTurn ? clearOptimisticRuntimeState(current.runtime, clientAssistantKey) : current.runtime
-      : ownsPendingTurn ? {
-        ...current.runtime,
-        activeRunId: runId,
-        pendingTurnKey: hasRunAssistant ? null : runAssistantKey,
-        pendingTurnLaneKey: hasRunAssistant ? null : current.runtime.pendingTurnLaneKey,
-        lastUserMessageAt,
-        updatedAt: current.runtime.runPhase === 'stopping' || current.runtime.lastIssue ? current.runtime.updatedAt : Date.now(),
-      } : current.runtime;
-    return changed || runtime !== current.runtime ? {
-      loadedSessions: patchSessionRecord(state, sessionKey, { items, runtime }),
+    const send = currentSessionSend(current);
+    if (!send || send.generation !== generation || send.identityKey !== identityKey) return state;
+    const nextSend = canBindRun ? linkSessionSend(send, runId, admission) : null;
+    const messages = confirmSessionSend(current, send, runId, admission, retainReceipt, nextSend);
+    return messages.items !== current.items || messages.runtime !== current.runtime || messages.abort !== current.abort || nextSend !== send ? {
+      loadedSessions: patchSessionRecord(state, sessionKey, {
+        ...messages, send: nextSend,
+      }),
     } : state;
   });
-}
-
-function clearOptimisticRuntimeState(
-  runtime: ChatSessionRuntimeState,
-  optimisticAssistantItemKey: string,
-): ChatSessionRuntimeState {
-  // Send failure cannot settle a concurrent stop before its native terminal event.
-  if (runtime.runPhase === 'stopping') return runtime;
-  const ownsPendingTurn = runtime.pendingTurnKey === optimisticAssistantItemKey;
-  const ownsActiveTurn = runtime.activeTurnItemKey === optimisticAssistantItemKey;
-  const ownsSubmittedPhase = ownsPendingTurn && runtime.runPhase === 'submitted' && runtime.activeRunId == null;
-  if (!ownsPendingTurn && !ownsActiveTurn && !ownsSubmittedPhase) {
-    return runtime;
-  }
-  return {
-    ...runtime,
-    ...(ownsSubmittedPhase ? { activeRunId: null, runPhase: 'idle' as const, lastError: null, lastIssue: null } : {}),
-    activeTurnItemKey: ownsActiveTurn ? null : runtime.activeTurnItemKey,
-    pendingTurnKey: ownsPendingTurn ? null : runtime.pendingTurnKey,
-    pendingTurnLaneKey: ownsPendingTurn ? null : runtime.pendingTurnLaneKey,
-    runProgress: null,
-    imageGeneration: undefined,
-    updatedAt: Date.now(),
-  };
 }
 
 function removeOptimisticSendItems(params: {
   set: ChatStoreSetFn;
   sessionKey: string;
   clientId: string;
+  generation: number;
+  identityKey: string;
+  error?: string;
 }): void {
-  const { set, sessionKey, clientId } = params;
+  const { set, sessionKey, clientId, generation, identityKey, error } = params;
   set((state) => {
     const current = state.loadedSessions[sessionKey];
     if (!current) return state;
-    const assistantItemKey = `renderer-assistant:${clientId}`;
-    const items = current.items.filter((item) => !(
-      (item.kind === 'user-message' && item.clientId === clientId)
-      || (item.kind === 'assistant-turn' && item.key === assistantItemKey)
-    ));
-    const runtime = clearOptimisticRuntimeState(current.runtime, assistantItemKey);
-    return items.length === current.items.length && runtime === current.runtime ? state : {
-      loadedSessions: patchSessionRecord(state, sessionKey, { items, runtime }),
+    const send = currentSessionSend(current);
+    if (!current.meta.sessionIdentity || buildSessionIdentityKey(current.meta.sessionIdentity) !== identityKey
+      || send && (send.generation !== generation || send.identityKey !== identityKey)) return state;
+    const messages = removeSessionSend(current, clientId);
+    const nextSend: ChatSessionSendState | null = error && send ? {
+      identityKey, generation, clientId, startedAt: send.startedAt, receipt: { phase: 'failed', error },
+    } : null;
+    return messages.items === current.items && messages.runtime === current.runtime && nextSend === current.send ? state : {
+      loadedSessions: patchSessionRecord(state, sessionKey, { ...messages, send: nextSend }),
     };
   });
 }
 
 function finalizeStoreSendFailure(params: FinalizeStoreSendFailureParams): void {
-  const { set, error } = params;
+  const { set, get, sessionKey, error } = params;
+  if (get().currentSessionKey !== sessionKey) return;
   clearHistoryPoll();
   set({ error });
 }
@@ -473,6 +387,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   const nowMs = Date.now();
   const clientMessageId = params.operationId ?? crypto.randomUUID();
   const sendGeneration = sessionRunCache.nextSendGeneration(currentSessionKey);
+  const identityKey = buildSessionIdentityKey(sessionIdentity);
   applyStoreSendStart({
     set,
     sessionKey: currentSessionKey,
@@ -483,6 +398,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     set,
     sessionKey: currentSessionKey,
     clientId: clientMessageId,
+    identityKey,
+    generation: sendGeneration,
     text: transportPayload.message,
     attachments,
     createdAt: nowMs,
@@ -496,13 +413,22 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   });
 
   const recordIdentity = stateBeforeSend.loadedSessions[currentSessionKey]?.meta.sessionIdentity;
-  const identityKey = buildSessionIdentityKey(sessionIdentity);
-  const isCurrent = () => sendGeneration === sessionRunCache.getSendGeneration(currentSessionKey)
-    && get().loadedSessions[currentSessionKey]?.meta.sessionIdentity === recordIdentity;
+  const isCurrent = () => {
+    const record = get().loadedSessions[currentSessionKey];
+    return sendGeneration === sessionRunCache.getSendGeneration(currentSessionKey)
+      && record?.meta.sessionIdentity != null && buildSessionIdentityKey(record.meta.sessionIdentity) === identityKey
+      && record.send?.generation === sendGeneration && record.send.identityKey === identityKey;
+  };
   const reconcileUnknown = async (error: string): Promise<ChatSendResult> => {
+    set((state) => {
+      const record = state.loadedSessions[currentSessionKey];
+      const send = record && currentSessionSend(record);
+      if (!send || send.generation !== sendGeneration || send.identityKey !== identityKey || send.receipt.phase === 'failed') return state;
+      return { loadedSessions: patchSessionRecord(state, currentSessionKey, { send: markSessionSendUnknown(send, error) }) };
+    });
     await get().syncPendingApprovals(currentSessionKey);
     if (!isCurrent()) return { accepted: false, reason: 'error', error: 'Send result superseded', outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments) };
-    finalizeStoreSendFailure({ set, error });
+    finalizeStoreSendFailure({ set, get, sessionKey: currentSessionKey, error });
     return { accepted: false, reason: 'error', error, outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments) };
   };
   beginMutating();
@@ -527,6 +453,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         set,
         sessionKey: currentSessionKey,
         clientId: clientMessageId,
+        generation: sendGeneration,
+        identityKey,
       });
       return {
         accepted: false,
@@ -550,9 +478,14 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         set,
         sessionKey: currentSessionKey,
         clientId: clientMessageId,
+        generation: sendGeneration,
+        identityKey,
+        error: errorMsg,
       });
       finalizeStoreSendFailure({
         set,
+        get,
+        sessionKey: currentSessionKey,
         error: errorMsg,
       });
       return {
@@ -571,7 +504,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       hasProjection: Boolean(sendResult.projection),
     }));
     if (sendResult.replayed) {
-      removeOptimisticSendItems({ set, sessionKey: currentSessionKey, clientId: clientMessageId });
+      removeOptimisticSendItems({ set, sessionKey: currentSessionKey, clientId: clientMessageId, generation: sendGeneration, identityKey });
       void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: 'manual_refresh' });
       return { accepted: true };
     }
@@ -579,6 +512,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       set,
       sessionKey: currentSessionKey,
       clientId: clientMessageId,
+      generation: sendGeneration,
+      identityKey,
       receipt: sendResult,
       retainReceipt: (attachments?.length ?? 0) > 0,
     });
@@ -605,6 +540,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         set,
         sessionKey: currentSessionKey,
         clientId: clientMessageId,
+        generation: sendGeneration,
+        identityKey,
       });
       return {
         accepted: false,
@@ -625,9 +562,14 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       set,
       sessionKey: currentSessionKey,
       clientId: clientMessageId,
+      generation: sendGeneration,
+      identityKey,
+      error: errorMsg,
     });
     finalizeStoreSendFailure({
       set,
+      get,
+      sessionKey: currentSessionKey,
       error: errorMsg,
     });
     return {

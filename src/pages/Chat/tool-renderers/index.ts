@@ -1,10 +1,17 @@
 export {
+  buildToolActivityPreview,
   buildToolActivityViewModelFromRegistry,
+  describeToolActivity,
+  getToolActivityStatus,
   resolveToolActivityRenderer,
+  summarizeToolActivities,
 } from './registry';
 export type {
   GenericToolActivityRenderer,
   KnownToolName,
+  ToolActivityDescriptor,
+  ToolActivityDisclosure,
+  ToolActivityKind,
   ToolActivityRenderer,
   ToolRendererContext,
 } from './types';

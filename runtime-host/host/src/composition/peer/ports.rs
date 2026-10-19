@@ -36,6 +36,35 @@ impl openclaw::gateway::loopback::OpenClawGatewayCapabilityPort for PeerHandle {
         })
     }
 
+    fn canvas_request(
+        &self,
+        request: openclaw::gateway::request::OpenClawCanvasGatewayRequest,
+        call: Option<openclaw::gateway::loopback::GatewayCallContext>,
+    ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
+        Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
+    > {
+        let peer = self.clone();
+        Box::pin(async move {
+            peer.open_claw_canvas_request(request, call)
+                .await
+                .map_err(|_| ())
+        })
+    }
+
+    fn progress_card_request(
+        &self,
+        request: openclaw::gateway::request::OpenClawProgressCardGatewayRequest,
+    ) -> openclaw::gateway::loopback::OpenClawGatewayCapabilityFuture<
+        Result<openclaw::port::OpenClawGatewayRequestOutcome, ()>,
+    > {
+        let peer = self.clone();
+        Box::pin(async move {
+            peer.open_claw_progress_card_request(request)
+                .await
+                .map_err(|_| ())
+        })
+    }
+
     fn question_list(
         &self,
         request: openclaw::gateway::request::OpenClawQuestionListGatewayRequest,

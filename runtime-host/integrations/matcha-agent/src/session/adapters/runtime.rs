@@ -312,21 +312,18 @@ impl SessionOps for MatchaRuntimeDriver {
             }
         })
     }
-    fn send_model_runtime_command<'a>(
+    fn session_model_runtime_command_cancellable<'a>(
         &'a self,
-        command: &'a SessionSendCommand,
-    ) -> SessionFuture<'a, Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome>>
-    {
-        self.send_model_runtime_command_cancellable(command, CancellationToken::new())
-    }
-    fn send_model_runtime_command_cancellable<'a>(
-        &'a self,
-        command: &'a SessionSendCommand,
+        identity: &'a sessions_module::state::SessionIdentity,
+        endpoint_session_id: Option<&'a str>,
+        trace_id: Option<&'a str>,
         cancellation: CancellationToken,
     ) -> SessionFuture<'a, Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome>>
     {
         let client = self.native_client();
-        Box::pin(async move { model_selection::restore(&client, command, &cancellation).await })
+        Box::pin(async move {
+            model_selection::restore(&client, identity, endpoint_session_id, trace_id, &cancellation).await
+        })
     }
     fn select_session_model<'a>(
         &'a self,
@@ -445,40 +442,46 @@ async fn records(client: &Client) -> Result<Vec<SessionRecord>, Failure> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RunsPage {
-    runs: Vec<RunRecord>,
-    next_before_run_id: Option<String>,
+pub(super) struct RunsPage {
+    pub runs: Vec<RunRecord>,
+    pub current_run: Option<RunRecord>,
+    pub latest_seq: u64,
+    pub next_before_run_id: Option<String>,
 }
-pub(super) async fn runs(client: &Client, id: &str) -> Result<Vec<RunRecord>, Failure> {
-    let mut runs = Vec::new();
-    let mut before = None::<String>;
-    loop {
-        let mut params = json!({"sessionId":id,"limit":100});
-        if let Some(before) = &before {
-            params["beforeRunId"] = json!(before);
-        }
-        let page: RunsPage = rpc::decode(rpc::call(client, "runs.list", params).await?)?;
-        if page.runs.iter().any(|run| {
-            !run.validate(id)
-                || runs
-                    .iter()
-                    .any(|prior: &RunRecord| prior.run_id == run.run_id)
-        }) {
-            return Err(Failure::InvalidReadback);
-        }
-        let next = page.next_before_run_id;
-        if next.is_some()
-            && (page.runs.last().map(|run| run.run_id.as_str()) != next.as_deref()
-                || next == before)
-        {
-            return Err(Failure::InvalidReadback);
-        }
-        runs.extend(page.runs);
-        before = next;
-        if before.is_none() {
-            return Ok(runs);
-        }
+pub(super) async fn runs(
+    client: &Client,
+    id: &str,
+    before: Option<&str>,
+) -> Result<RunsPage, Failure> {
+    let mut params = json!({"sessionId":id,"limit":100});
+    if let Some(before) = before {
+        params["beforeRunId"] = json!(before);
     }
+    let value = rpc::call(client, "runs.list", params).await?;
+    if value.get("currentRun").is_none() {
+        return Err(Failure::InvalidReadback);
+    }
+    let page: RunsPage = rpc::decode(value)?;
+    if page.latest_seq > sessions_module::state::MAX_SAFE_INTEGER
+        || page.runs.len() > 100
+        || page
+            .current_run
+            .as_ref()
+            .is_some_and(|run| !run.validate(id))
+        || page.runs.iter().enumerate().any(|(index, run)| {
+            !run.validate(id)
+                || page.runs[..index]
+                    .iter()
+                    .any(|prior| prior.run_id == run.run_id)
+        })
+        || (page.next_before_run_id.is_some()
+            && (page.runs.last().map(|run| run.run_id.as_str())
+                != page.next_before_run_id.as_deref()
+                || page.next_before_run_id.as_deref() == before))
+    {
+        return Err(Failure::InvalidReadback);
+    }
+    Ok(page)
 }
 async fn abort(client: &Client, command: SessionAbortCommand) -> SessionAbortOutcome {
     let result = async {
@@ -500,7 +503,25 @@ async fn abort(client: &Client, command: SessionAbortCommand) -> SessionAbortOut
                 }
                 vec![run]
             }
-            None => runs(client, record.session_id.as_str()).await?,
+            None => {
+                let mut selected = Vec::new();
+                let mut before = None;
+                loop {
+                    let page = runs(client, record.session_id.as_str(), before.as_deref()).await?;
+                    if page.runs.iter().any(|run| {
+                        selected
+                            .iter()
+                            .any(|prior: &RunRecord| prior.run_id == run.run_id)
+                    }) {
+                        return Err(Failure::InvalidReadback);
+                    }
+                    selected.extend(page.runs);
+                    before = page.next_before_run_id;
+                    if before.is_none() {
+                        break selected;
+                    }
+                }
+            }
         };
         for run in selected.into_iter().filter(|run| !run.status.terminal()) {
             let returned: RunRecord =

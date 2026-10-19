@@ -1440,6 +1440,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "board"
+version = "0.1.0"
+dependencies = [
+ "foundation",
+ "platform",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bon"
 version = "3.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7227,6 +7238,7 @@ name = "openclaw"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "board",
  "channels",
  "chrono",
  "clawhub",
@@ -8772,6 +8784,7 @@ name = "runtime-host"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "board",
  "call-log",
  "channels",
  "clawhub",
@@ -8793,6 +8806,8 @@ dependencies = [
  "reqwest",
  "runtime-directory",
  "sealed-resource",
+ "search",
+ "searxng",
  "security",
  "serde",
  "serde_json",
@@ -9194,6 +9209,36 @@ dependencies = [
  "tempfile",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "search"
+version = "0.1.0"
+dependencies = [
+ "foundation",
+ "platform",
+ "reqwest",
+ "runtime-directory",
+ "searxng",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
+name = "searxng"
+version = "0.1.0"
+dependencies = [
+ "foundation",
+ "getrandom 0.3.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

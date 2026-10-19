@@ -7,6 +7,7 @@ pub mod agents;
 pub(crate) mod channel;
 pub(crate) mod cron;
 pub(crate) mod models;
+pub(crate) mod search;
 pub(crate) mod team;
 
 pub use cron::{
@@ -568,25 +569,68 @@ pub(crate) fn browser_request(
 
 pub(crate) fn mcp_app_request(
     request_id: String,
-    operation_id: String,
-    session_key: String,
-    view_id: String,
-    standalone: Option<bool>,
+    request: &super::request::OpenClawMcpAppGatewayRequest,
 ) -> Result<RpcRequest, WireError> {
-    if !operation_id.starts_with("mcp.app.")
-        || !valid_native_string(&operation_id, 4_096)
-        || !valid_native_string(&session_key, 4_096)
-        || !valid_native_string(&view_id, 4_096)
-    {
+    use super::request::OpenClawMcpAppOperation;
+
+    crate::port::validate_observation_identity(&request.session_identity)
+        .map_err(|_| WireError::InvalidRequest)?;
+    if !valid_native_string(&request.view_id, 128) {
         return Err(WireError::InvalidRequest);
     }
     let mut params = serde_json::Map::new();
-    params.insert("sessionKey".into(), Value::String(session_key));
-    params.insert("viewId".into(), Value::String(view_id));
-    if let Some(standalone) = standalone {
-        params.insert("standalone".into(), Value::Bool(standalone));
+    params.insert("sessionKey".into(), json!(request.session_identity.session_key));
+    params.insert("agentId".into(), json!(request.session_identity.agent_id));
+    params.insert("viewId".into(), json!(request.view_id));
+    match &request.operation {
+        OpenClawMcpAppOperation::View => {}
+        OpenClawMcpAppOperation::CallTool { tool_name, arguments } => {
+            params.insert("toolName".into(), json!(tool_name));
+            if let Some(arguments) = arguments {
+                params.insert("arguments".into(), arguments.clone());
+            }
+        }
+        OpenClawMcpAppOperation::ListTools { cursor }
+        | OpenClawMcpAppOperation::ListResources { cursor }
+        | OpenClawMcpAppOperation::ListResourceTemplates { cursor } => {
+            if let Some(cursor) = cursor {
+                params.insert("cursor".into(), json!(cursor));
+            }
+        }
+        OpenClawMcpAppOperation::ReadResource { uri } => {
+            params.insert("uri".into(), json!(uri));
+        }
+        OpenClawMcpAppOperation::UpdateModelContext { content } => {
+            if let Some(content) = content {
+                params.insert("content".into(), json!(content));
+            }
+        }
     }
-    rpc_request(request_id, operation_id, Some(Value::Object(params)))
+    rpc_request(request_id, request.operation_id(), Some(Value::Object(params)))
+}
+
+pub(crate) fn canvas_request(
+    request_id: String,
+    request: &super::request::OpenClawCanvasGatewayRequest,
+) -> Result<RpcRequest, WireError> {
+    crate::port::validate_observation_identity(&request.session_identity)
+        .map_err(|_| WireError::InvalidRequest)?;
+    if !super::request::is_canvas_document_id(&request.doc_id) {
+        return Err(WireError::InvalidRequest);
+    }
+    rpc_request(request_id, "canvas.document.view", Some(json!({ "docId": request.doc_id })))
+}
+
+pub(crate) fn progress_card_request(
+    request_id: String,
+    request: &super::request::OpenClawProgressCardGatewayRequest,
+) -> Result<RpcRequest, WireError> {
+    super::request::validate_progress_card_identity(&request.session_identity)
+        .map_err(|_| WireError::InvalidRequest)?;
+    rpc_request(request_id, "progressCard.get", Some(json!({
+        "sessionKey": request.session_identity.session_key,
+        "agentId": request.session_identity.agent_id,
+    })))
 }
 
 pub(crate) fn question_list_request(request_id: String) -> Result<RpcRequest, WireError> {
@@ -642,6 +686,9 @@ pub struct GatewayError {
     pub(crate) retryable: Option<bool>,
     pub(crate) startup_sidecars: bool,
     pub(crate) restart_required: bool,
+    pub(crate) mcp_app_view_expired: bool,
+    pub(crate) browser_act_code: Option<&'static str>,
+    pub(crate) board_error_reason: Option<&'static str>,
     pub(crate) code: String,
     pub(crate) message: String,
     #[cfg(test)]
@@ -661,6 +708,14 @@ impl GatewayError {
 
     pub(crate) fn restart_required(&self) -> bool {
         self.restart_required
+    }
+
+    pub(crate) fn browser_act_code(&self) -> Option<&'static str> {
+        self.browser_act_code
+    }
+
+    pub(crate) fn board_error_reason(&self) -> Option<&'static str> {
+        self.board_error_reason
     }
 
     pub(crate) const fn retryable(&self) -> Option<bool> {
@@ -1323,12 +1378,38 @@ impl ErrorWire {
                 .and_then(|details| details.get("restartRequired"))
                 .and_then(Value::as_bool)
                 == Some(true);
+        let mcp_app_view_expired = details.as_ref()
+            .and_then(|details| details.get("code"))
+            .and_then(Value::as_str) == Some("MCP_APP_VIEW_EXPIRED");
+        let browser_act_code = match details.as_ref().and_then(|details| details.get("code")).and_then(Value::as_str) {
+            Some("ACT_KIND_REQUIRED") => Some("ACT_KIND_REQUIRED"),
+            Some("ACT_INVALID_REQUEST") => Some("ACT_INVALID_REQUEST"),
+            Some("ACT_SELECTOR_UNSUPPORTED") => Some("ACT_SELECTOR_UNSUPPORTED"),
+            Some("ACT_EVALUATE_DISABLED") => Some("ACT_EVALUATE_DISABLED"),
+            Some("ACT_EXISTING_SESSION_UNSUPPORTED") => Some("ACT_EXISTING_SESSION_UNSUPPORTED"),
+            Some("ACT_TARGET_ID_MISMATCH") => Some("ACT_TARGET_ID_MISMATCH"),
+            _ => None,
+        };
+        let board_error_reason = match details.as_ref().and_then(|details| details.get("reason")).and_then(Value::as_str) {
+            Some("unsupported") => Some("unsupported"),
+            Some("invalid") => Some("invalid"),
+            Some("forbidden") => Some("forbidden"),
+            Some("stale") => Some("stale"),
+            Some("expired") => Some("expired"),
+            Some("missing-source") => Some("missing-source"),
+            Some("unavailable") => Some("unavailable"),
+            Some("unknown") => Some("unknown"),
+            _ => None,
+        };
         #[cfg(not(test))]
         let _ = (details, retry_after_ms);
         GatewayError {
             retryable,
             startup_sidecars,
             restart_required,
+            mcp_app_view_expired,
+            browser_act_code,
+            board_error_reason,
             code,
             message,
             #[cfg(test)]
@@ -2140,39 +2221,33 @@ mod tests {
             })
         );
 
-        let mcp = mcp_app_request(
-            "mcp-app-1".into(),
-            "mcp.app.open".into(),
-            "agent:main:session-1".into(),
-            "view-1".into(),
-            Some(true),
-        )
-        .unwrap();
-        assert_eq!(mcp.method(), "mcp.app.open");
+        let request = super::super::request::decode_mcp_app_request(json!({
+            "operationId": "mcp.app.view",
+            "sessionIdentity": {
+                "endpoint": { "kind": "native-runtime", "runtimeAdapterId": "openclaw", "runtimeInstanceId": "local" },
+                "agentId": "main", "sessionKey": "agent:main:session-1"
+            },
+            "viewId": "view-1"
+        })).unwrap();
+        let mcp = mcp_app_request("mcp-app-1".into(), &request).unwrap();
+        assert_eq!(mcp.method(), "mcp.app.view");
         assert_eq!(
             serde_json::from_str::<Value>(&mcp.encode().unwrap()).unwrap(),
             json!({
                 "type": "req",
                 "id": "mcp-app-1",
-                "method": "mcp.app.open",
+                "method": "mcp.app.view",
                 "params": {
                     "sessionKey": "agent:main:session-1",
-                    "viewId": "view-1",
-                    "standalone": true
+                    "agentId": "main",
+                    "viewId": "view-1"
                 }
             })
         );
 
-        assert!(
-            mcp_app_request(
-                "id".into(),
-                "mcp.other".into(),
-                "session".into(),
-                "view".into(),
-                None
-            )
-            .is_err()
-        );
+        let mut invalid = request;
+        invalid.view_id = "view\n".into();
+        assert!(mcp_app_request("id".into(), &invalid).is_err());
         assert!(
             browser_request(
                 "id".into(),

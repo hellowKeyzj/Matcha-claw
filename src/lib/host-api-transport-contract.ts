@@ -1,5 +1,6 @@
 import { AppError, normalizeAppError } from './error-model';
 import { decodeTeamCreationFailure } from '../types/call-log/organization';
+import { decodeTaskFailureResponse, TASK_FAILURE_MESSAGES, type TaskFailure } from '../types/desktop/task-failure';
 
 export type HostApiProxySuccessData = {
   status: number;
@@ -147,9 +148,15 @@ export function unwrapHostApiProxyEnvelope<T>(
   if (status >= 400 || ok === false) {
     const fallbackMessage = text || `Host API request failed: ${context.method} ${context.path} (HTTP ${status})`;
     const creationFailure = isRecord(json) ? decodeTeamCreationFailure(json.creationFailure) : null;
-    throw normalizeAppError(new Error(extractHostApiErrorMessage(json, fallbackMessage)), {
+    const taskFailure: TaskFailure | null = context.path === '/api/capabilities/execute'
+      && isRecord(json) && Object.hasOwn(json, 'failure')
+      ? decodeTaskFailureResponse(json)?.failure ?? { stage: 'response', code: 'protocol', delivery: 'responseReceived' }
+      : null;
+    const message = taskFailure ? TASK_FAILURE_MESSAGES[taskFailure.code] : extractHostApiErrorMessage(json, fallbackMessage);
+    throw normalizeAppError(new Error(message), {
       ...context, status,
       ...(creationFailure ? { creationFailure } : {}),
+      ...(taskFailure ? { taskFailure } : {}),
     });
   }
 

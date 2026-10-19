@@ -10,7 +10,6 @@ use crate::port::OpenClawGatewayRequestOutcome;
 use crate::{
     gateway::{
         client::{GatewayClient, GatewayClientError, GatewayControlReadiness},
-        request::{OpenClawBrowserGatewayRequest, OpenClawMcpAppGatewayRequest},
         wire,
     },
     lifecycle::{readiness::OpenClawReadiness, stop::OpenClawGracefulStop},
@@ -112,43 +111,6 @@ impl OpenClawGateway {
     ) -> Result<crate::gateway::wire::GatewayLogsTail, crate::gateway::client::GatewayClientError>
     {
         self.client.tail_logs(cursor, limit, max_bytes).await
-    }
-
-    pub async fn browser_request(
-        &self,
-        request: OpenClawBrowserGatewayRequest,
-    ) -> OpenClawGatewayRequestOutcome {
-        let request = match wire::browser_request(
-            next_request_id("browser-request"),
-            request.method,
-            request.path,
-            request.query,
-            request.body,
-            request.timeout_ms,
-            request.target,
-            request.node,
-        ) {
-            Ok(request) => request,
-            Err(_) => return OpenClawGatewayRequestOutcome::Rejected,
-        };
-        gateway_request_outcome(self.client.rpc_mutation(request).await)
-    }
-
-    pub async fn mcp_app_request(
-        &self,
-        request: OpenClawMcpAppGatewayRequest,
-    ) -> OpenClawGatewayRequestOutcome {
-        let request = match wire::mcp_app_request(
-            next_request_id("mcp-app-request"),
-            request.operation_id,
-            request.session_key,
-            request.view_id,
-            request.standalone,
-        ) {
-            Ok(request) => request,
-            Err(_) => return OpenClawGatewayRequestOutcome::Rejected,
-        };
-        gateway_request_outcome(self.client.rpc_mutation(request).await)
     }
 
     pub async fn question_list(

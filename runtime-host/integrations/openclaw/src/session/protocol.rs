@@ -4,7 +4,7 @@ use serde::{
     Deserialize, Deserializer, Serialize,
     de::{Error as _, IgnoredAny},
 };
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use std::fmt;
 
 pub const CHAT_SEND_METHOD: &str = "chat.send";
@@ -693,6 +693,18 @@ fn truncate_utf8(text: &mut String, limit: usize) {
 pub struct AgentScopedSessionKey(String);
 
 impl AgentScopedSessionKey {
+    pub fn try_parse(value: &str) -> Result<Self, ValidationError> {
+        let rest = value.strip_prefix("agent:")
+            .ok_or(ValidationError("agent-scoped session key is invalid"))?;
+        let (agent_id, endpoint_session_id) = rest.split_once(':')
+            .ok_or(ValidationError("agent-scoped session key is invalid"))?;
+        Self::try_new(AgentId::try_new(agent_id)?, EndpointSessionId::try_new(endpoint_session_id)?)
+    }
+
+    pub fn agent_id(&self) -> &str {
+        self.0["agent:".len()..].split(':').next().expect("validated agent-scoped session key")
+    }
+
     pub fn try_new(
         agent_id: AgentId,
         endpoint_session_id: EndpointSessionId,
@@ -2465,6 +2477,9 @@ fn tool_details_value(values: [Option<&Value>; 2]) -> Result<Option<Value>, Prot
         let Some(object) = value.as_object() else {
             continue;
         };
+        if let Some(preview) = project_mcp_app_preview_value(value) {
+            details.insert("mcpAppPreview".to_owned(), preview);
+        }
         for key in [
             "browserTab",
             "changed",
@@ -2502,50 +2517,77 @@ fn tool_details_value(values: [Option<&Value>; 2]) -> Result<Option<Value>, Prot
     Ok(Some(value))
 }
 
-fn project_mcp_app_preview_value(value: &Value) -> Option<Value> {
+pub(crate) fn project_mcp_app_preview_value(value: &Value) -> Option<Value> {
     let object = value.as_object()?;
-    let mut projected = Map::new();
-    for key in [
-        "kind",
-        "surface",
-        "render",
-        "title",
-        "preferredHeight",
-        "url",
-        "viewId",
-        "sandbox",
-        "boardWidgetName",
-    ] {
-        if let Some(value) = object.get(key).and_then(project_tool_detail_value) {
-            projected.insert(key.to_owned(), value);
+    if object.get("kind").and_then(Value::as_str) != Some("canvas") { return None; }
+    let view = object.get("view")?.as_object()?;
+    let id = view.get("id").or_else(|| view.get("docId"))?.as_str()?;
+    let mcp_app = match object.get("mcpApp") {
+        Some(value) => {
+            let descriptor = project_mcp_app_descriptor_value(value)?;
+            if descriptor.get("viewId").and_then(Value::as_str) != Some(id) { return None; }
+            Some(descriptor)
+        }
+        None if crate::gateway::request::is_canvas_document_id(id) => None,
+        None => return None,
+    };
+    let mut safe_view = Map::new();
+    safe_view.insert("id".into(), json!(id));
+    if let Some(title) = view.get("title").and_then(|value| preview_text(value, 4096)) {
+        safe_view.insert("title".into(), json!(title));
+    }
+    if mcp_app.is_none() {
+        if let Some(name) = view.get("boardWidgetName").and_then(|value| preview_text(value, 64)) {
+            if name.bytes().enumerate().all(|(index, byte)| byte.is_ascii_lowercase() || byte.is_ascii_digit()
+                || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))) {
+                safe_view.insert("boardWidgetName".into(), json!(name));
+            }
         }
     }
-    if let Some(value) = object
-        .get("mcpApp")
-        .and_then(project_mcp_app_descriptor_value)
-    {
-        projected.insert("mcpApp".to_owned(), value);
+    let mut projected = Map::new();
+    projected.insert("kind".into(), json!("canvas"));
+    projected.insert("view".into(), Value::Object(safe_view));
+    if let Some(presentation) = object.get("presentation").and_then(Value::as_object) {
+        let mut safe = Map::new();
+        if let Some(target @ ("assistant_message" | "node_panel")) = presentation.get("target").and_then(Value::as_str) {
+            safe.insert("target".into(), json!(target));
+        }
+        if let Some(title) = presentation.get("title").and_then(|value| preview_text(value, 4096)) {
+            safe.insert("title".into(), json!(title));
+        }
+        if let Some(height) = presentation.get("preferred_height").or_else(|| presentation.get("preferredHeight"))
+            .and_then(Value::as_f64).filter(|height| height.is_finite() && *height >= 160.0) {
+            safe.insert("preferred_height".into(), json!(height.trunc().min(1200.0) as u64));
+        }
+        if let Some(sandbox @ ("strict" | "scripts")) = presentation.get("sandbox").and_then(Value::as_str) {
+            safe.insert("sandbox".into(), json!(sandbox));
+        }
+        if !safe.is_empty() { projected.insert("presentation".into(), Value::Object(safe)); }
     }
-    (!projected.is_empty()).then_some(Value::Object(projected))
+    if let Some(descriptor) = mcp_app { projected.insert("mcpApp".into(), descriptor); }
+    Some(Value::Object(projected))
+}
+
+fn preview_text(value: &Value, max: usize) -> Option<&str> {
+    value.as_str().filter(|text| !text.is_empty() && text.len() <= max
+        && text.trim() == *text && !text.chars().any(char::is_control))
 }
 
 fn project_mcp_app_descriptor_value(value: &Value) -> Option<Value> {
     let object = value.as_object()?;
+    let view_id = preview_text(object.get("viewId")?, 128)?;
     let mut projected = Map::new();
-    for key in [
-        "viewId",
-        "serverName",
-        "toolName",
-        "uiResourceUri",
-        "toolCallId",
-        "originSessionKey",
-        "resultMetaState",
-    ] {
-        if let Some(value) = object.get(key).and_then(project_tool_detail_value) {
-            projected.insert(key.to_owned(), value);
+    projected.insert("viewId".into(), json!(view_id));
+    for (key, max) in [("serverName", 256), ("toolName", 256), ("uiResourceUri", 2048),
+        ("toolCallId", 512), ("originSessionKey", 4096)] {
+        if let Some(text) = object.get(key).and_then(|value| preview_text(value, max)) {
+            projected.insert(key.to_owned(), json!(text));
         }
     }
-    (!projected.is_empty()).then_some(Value::Object(projected))
+    if object.get("resultMetaState").and_then(Value::as_str) == Some("unavailable") {
+        projected.insert("resultMetaState".into(), json!("unavailable"));
+    }
+    Some(Value::Object(projected))
 }
 
 fn project_tool_detail_value(value: &Value) -> Option<Value> {
@@ -4542,7 +4584,7 @@ mod tests {
 
         let details = decode_session_event(event(
             "session.tool",
-            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"result","toolCallId":"tool-9","result":{"details":{"browserTab":{"title":"safe","rawAssistantText":"secret nested"},"changed":["a.txt"],"created":["b.txt"],"diff":{"path":"a.txt"},"approvalReviews":[{"status":"approved"}],"approvalReviewOutcome":"approved","mcpAppPreview":{"url":"https://preview.test","html":"secret html","toolResult":{"secret":"result"},"private":{"secret":true},"mcpApp":{"viewId":"view-1","toolResult":{"secret":"nested"}}},"truncation":{"truncated":true},"fullOutputPath":"C:/tmp/output.txt","exitCode":0,"rawAssistantText":"secret assistant","toolInput":{"secret":"input"},"toolOutput":"secret output","privatePayload":{"secret":true}}}}"#,
+            r#"{"sessionKey":"agent:main:session-1","runId":"run-7","phase":"result","toolCallId":"tool-9","result":{"details":{"browserTab":{"title":"safe","rawAssistantText":"secret nested"},"changed":["a.txt"],"created":["b.txt"],"diff":{"path":"a.txt"},"approvalReviews":[{"status":"approved"}],"approvalReviewOutcome":"approved","mcpAppPreview":{"kind":"canvas","view":{"id":"view-1","url":"https://preview.test"},"html":"secret html","toolResult":{"secret":"result"},"private":{"secret":true},"mcpApp":{"viewId":"view-1","toolResult":{"secret":"nested"}}},"truncation":{"truncated":true},"fullOutputPath":"C:/tmp/output.txt","exitCode":0,"rawAssistantText":"secret assistant","toolInput":{"secret":"input"},"toolOutput":"secret output","privatePayload":{"secret":true}}}}"#,
         ))
         .unwrap()
         .unwrap();
@@ -4557,7 +4599,7 @@ mod tests {
                 "diff":{"path":"a.txt"},
                 "approvalReviews":[{"status":"approved"}],
                 "approvalReviewOutcome":"approved",
-                "mcpAppPreview":{"url":"https://preview.test","mcpApp":{"viewId":"view-1"}},
+                "mcpAppPreview":{"kind":"canvas","view":{"id":"view-1"},"mcpApp":{"viewId":"view-1"}},
                 "truncation":{"truncated":true},
                 "fullOutputPath":"C:/tmp/output.txt",
                 "exitCode":0
@@ -4965,6 +5007,9 @@ mod tests {
                         retryable: None,
                         startup_sidecars: false,
                         restart_required: false,
+                        mcp_app_view_expired: false,
+                        browser_act_code: None,
+                        board_error_reason: None,
                         retry_after_ms: None,
                     },
                 },
@@ -5154,6 +5199,9 @@ mod tests {
                     retryable: None,
                     startup_sidecars: false,
                     restart_required: false,
+                    mcp_app_view_expired: false,
+                    browser_act_code: None,
+                    board_error_reason: None,
                     retry_after_ms: None,
                 },
             },

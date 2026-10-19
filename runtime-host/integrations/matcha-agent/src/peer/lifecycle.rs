@@ -21,6 +21,7 @@ pub struct MatchaPeer {
     handle: SupervisorHandle,
     supervisor: Supervisor,
     native: Client,
+    search: crate::search::OfflineControl,
     source_epoch: Arc<AtomicU64>,
 }
 
@@ -42,13 +43,19 @@ impl MatchaPeer {
         supervisor: Supervisor,
         _working_directory: PathBuf,
         native: Client,
+        search: crate::search::OfflineControl,
     ) -> Self {
         Self {
             handle,
             supervisor,
             native,
+            search,
             source_epoch: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    pub(crate) fn search_control(&self) -> crate::search::OfflineControl {
+        self.search.clone()
     }
 
     pub fn native_client(&self) -> Client {

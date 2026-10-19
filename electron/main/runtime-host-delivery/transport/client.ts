@@ -11,6 +11,7 @@ export type LoopbackDecision = Readonly<{
   scope: string;
   capability: string;
   subject: string;
+  revision?: string;
 }>;
 
 export type LoopbackJsonRequest = Readonly<{
@@ -18,7 +19,7 @@ export type LoopbackJsonRequest = Readonly<{
   path: string;
   issuer: RuntimeHostDeliveryIssuer;
   decision: LoopbackDecision;
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PUT';
   fetcher: typeof fetch;
   body?: unknown;
   query?: URLSearchParams;
@@ -58,7 +59,7 @@ export function decisionHeaders(
       capability: decision.capability,
       subject: decision.subject,
       expiresAt: Date.now() + DECISION_TTL_MS,
-      revision: DECISION_REVISION,
+      revision: decision.revision ?? DECISION_REVISION,
     })}`,
   };
 }
@@ -88,7 +89,7 @@ export async function sendLoopbackJsonDelivery(
       method: request.method,
       headers: {
         ...decisionHeaders(request.issuer, request.decision),
-        ...(request.method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
+        ...(request.method !== 'GET' ? { 'Content-Type': 'application/json' } : {}),
         ...(request.emptyContentLength ? { 'Content-Length': '0' } : {}),
         ...request.headers,
       },

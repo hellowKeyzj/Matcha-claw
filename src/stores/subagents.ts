@@ -56,15 +56,51 @@ const SUBAGENT_MANAGEMENT_CAPABILITY_ID = 'subagent.management';
 const SUBAGENT_CONFIG_PACKAGE_SCHEMA = 'matchaclaw.agent-config' as const;
 const SUBAGENT_CONFIG_PACKAGE_VERSION = 1 as const;
 type SubagentWorkspaceInitialization = 'mainAgentTemplate' | 'emptyWorkspace';
-let configDisplayCache:
-  | { snapshot: ConfigDisplaySnapshot; cachedAt: number; requestSeq: number }
-  | null = null;
-let configDisplayReadTask: Promise<ConfigDisplaySnapshot> | null = null;
-let configDisplayReadTaskSeq = 0;
-let configDisplayReadSeq = 0;
-let configDisplayGeneration = 0;
-let queuedLoadAgentsTask: Promise<void> | null = null;
-let agentsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
+interface RuntimeAgentReads {
+  generation: number;
+  loadTask: Promise<void> | null;
+  configCache: { snapshot: ConfigDisplaySnapshot; cachedAt: number } | null;
+  configTask: Promise<ConfigDisplaySnapshot> | null;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+  pendingDeletedAgentIds: Set<string>;
+  unconfirmedDeletedAgentIds: Set<string>;
+}
+const agentReadsByRuntime = new Map<string, RuntimeAgentReads>();
+const EMPTY_AGENTS_RESOURCE = createIdleResourceState<SubagentSummary[]>([]);
+
+function agentRuntimeKey(endpoint: RuntimeEndpointRef): string {
+  return buildCapabilityScopeKey(runtimeInstanceScope(endpoint));
+}
+
+export function selectAgentsResource(
+  state: Pick<SubagentsState, 'agentsByRuntime'>,
+  endpoint: RuntimeEndpointRef | null,
+): ResourceStateMeta<SubagentSummary[]> {
+  return endpoint ? state.agentsByRuntime[agentRuntimeKey(endpoint)] ?? EMPTY_AGENTS_RESOURCE : EMPTY_AGENTS_RESOURCE;
+}
+
+function runtimeAgentReads(endpoint: RuntimeEndpointRef): RuntimeAgentReads {
+  const key = agentRuntimeKey(endpoint);
+  let reads = agentReadsByRuntime.get(key);
+  if (!reads) {
+    reads = { generation: 0, loadTask: null, configCache: null, configTask: null, retryTimer: null, pendingDeletedAgentIds: new Set(), unconfirmedDeletedAgentIds: new Set() };
+    agentReadsByRuntime.set(key, reads);
+  }
+  return reads;
+}
+
+function publishAgentsResource(
+  endpoint: RuntimeEndpointRef,
+  resource: ResourceStateMeta<SubagentSummary[]>,
+  managementPatch: Partial<SubagentsState> = {},
+): void {
+  useSubagentsStore.setState((state) => ({
+    agentsByRuntime: { ...state.agentsByRuntime, [agentRuntimeKey(endpoint)]: resource },
+    ...(state.managementScope && runtimeEndpointsEqual(state.managementScope.endpoint, endpoint)
+      ? { ...managementPatch, agentsResource: resource }
+      : {}),
+  }));
+}
 let availableModelsLoaded = false;
 let inflightAvailableModelsTask: Promise<void> | null = null;
 let latestAvailableModelsRequestId = 0;
@@ -148,11 +184,6 @@ interface SubagentDisplayConfigResult {
   error?: string | null;
 }
 
-interface ReadConfigForDisplayOptions {
-  scope?: SubagentManagementScope;
-  forceRefresh?: boolean;
-}
-
 interface LoadAgentsOptions {
   silent?: boolean;
   scope?: SubagentManagementScope;
@@ -177,7 +208,8 @@ function activateManagementScope(scope: SubagentManagementScope | null): void {
   activeManagementKey = key;
   activeManagementScope = scope ? { ...scope } : null;
   resetManagementCaches();
-  useSubagentsStore.setState({ managementScope: activeManagementScope, agentsResource: createIdleResourceState<SubagentSummary[]>([]), managedAgentId: null, selectedAgentId: null, persistedFilesByAgent: {}, mutating: false, error: null });
+  const resource = selectAgentsResource(useSubagentsStore.getState(), scope?.endpoint ?? null);
+  useSubagentsStore.setState({ managementScope: activeManagementScope, agentsResource: resource, managedAgentId: null, selectedAgentId: null, persistedFilesByAgent: {}, mutating: false, error: resource.error });
 }
 
 interface SubagentRpcOptions {
@@ -217,6 +249,7 @@ function buildSubagentTarget(_scope: SubagentManagementScope, subagentId: string
 interface SubagentsState {
   agents: SubagentSummary[];
   agentsResource: ResourceStateMeta<SubagentSummary[]>;
+  agentsByRuntime: Record<string, ResourceStateMeta<SubagentSummary[]>>;
   managementScope: SubagentManagementScope | null;
   cloudPackages: SubagentCloudPackage[];
   installedCloudPackages: InstalledCloudPackage[];
@@ -293,8 +326,8 @@ async function rpc<T>(method: string, params?: unknown, options?: SubagentRpcOpt
         options?.timeoutMs,
       );
     } finally {
-      if (isCurrentScope(managementScope) && isSubagentMutation(capabilityOperationId) && capabilityOperationId !== 'subagents.package.export') {
-        invalidateAgentsSnapshot();
+      if (isSubagentMutation(capabilityOperationId) && capabilityOperationId !== 'subagents.package.export') {
+        invalidateAgentsSnapshot(managementScope.endpoint);
       }
     }
   }
@@ -371,6 +404,13 @@ function buildSubagentCapabilityTarget(operationId: string, scope: SubagentManag
   }
   const agentId = getOptionalString(input.agentId);
   return agentId ? { kind: 'subagent', subagentId: agentId } : { kind: 'subagent' };
+}
+
+function queryAgents<TResult>(operationId: 'subagents.list' | 'subagents.displayConfig.get', scope: SubagentManagementScope): Promise<TResult> {
+  const input = buildSubagentCapabilityInput(operationId, scope, {});
+  return subagentManagementCapabilityExecute<TResult>(
+    operationId, scope, input, buildSubagentCapabilityTarget(operationId, scope, input),
+  );
 }
 
 function resolveSubagentCapabilityOperation(method: string): string | null {
@@ -630,102 +670,61 @@ function isSnapshotReady(result: { ready?: boolean } | undefined): boolean {
   return result?.ready !== false;
 }
 
-function scheduleAgentsSnapshotRetry(loadAgents: () => Promise<void>): void {
-  if (agentsSnapshotRetryTimer) {
-    return;
-  }
-  agentsSnapshotRetryTimer = setTimeout(() => {
-    agentsSnapshotRetryTimer = null;
-    void loadAgents();
+function scheduleAgentsSnapshotRetry(scope: SubagentManagementScope, reads: RuntimeAgentReads): void {
+  if (reads.retryTimer) return;
+  reads.retryTimer = setTimeout(() => {
+    reads.retryTimer = null;
+    void useSubagentsStore.getState().loadAgents({ silent: true, scope });
   }, SUBAGENT_SNAPSHOT_NOT_READY_RETRY_MS);
 }
 
 function createEmptyConfigDisplaySnapshot(): ConfigDisplaySnapshot {
-  return {
-    byAgentId: new Map(),
-  };
+  return { byAgentId: new Map() };
 }
 
-function isConfigDisplayCacheFresh(nowMs: number): boolean {
-  if (!configDisplayCache) {
-    return false;
-  }
-  return (nowMs - configDisplayCache.cachedAt) <= CONFIG_DISPLAY_CACHE_TTL_MS;
+function invalidateAgentsSnapshot(endpoint: RuntimeEndpointRef): void {
+  const reads = runtimeAgentReads(endpoint);
+  reads.generation += 1;
+  reads.configCache = null;
+  reads.configTask = null;
+  reads.loadTask = null;
+  if (reads.retryTimer) clearTimeout(reads.retryTimer);
+  reads.retryTimer = null;
+  const current = selectAgentsResource(useSubagentsStore.getState(), endpoint);
+  publishAgentsResource(endpoint, {
+    ...current,
+    status: current.status === 'loading' ? (current.hasLoadedOnce ? 'ready' : 'idle') : current.status,
+    lastLoadedAt: null,
+  });
 }
 
-function invalidateAgentsSnapshot(): void {
-  latestLoadAgentsRequestId += 1;
-  configDisplayGeneration += 1;
-  configDisplayCache = null;
-  configDisplayReadTask = null;
-  configDisplayReadTaskSeq = 0;
-  if (agentsSnapshotRetryTimer) {
-    clearTimeout(agentsSnapshotRetryTimer);
-    agentsSnapshotRetryTimer = null;
+async function readConfigForDisplay(scope: SubagentManagementScope, reads: RuntimeAgentReads): Promise<ConfigDisplaySnapshot> {
+  if (reads.configCache && Date.now() - reads.configCache.cachedAt <= CONFIG_DISPLAY_CACHE_TTL_MS) {
+    return reads.configCache.snapshot;
   }
-  const current = useSubagentsStore.getState().agentsResource;
-  if (current.status === 'loading') {
-    useSubagentsStore.setState({
-      agentsResource: {
-        ...current,
-        status: current.hasLoadedOnce ? 'ready' : 'idle',
-      },
-    });
-  }
-}
+  if (reads.configTask) return reads.configTask;
 
-async function readConfigForDisplay(options?: ReadConfigForDisplayOptions): Promise<ConfigDisplaySnapshot> {
-  const scope = options?.scope ?? await resolveSubagentManagementScope();
-  if (!isCurrentScope(scope)) return createEmptyConfigDisplaySnapshot();
-  const forceRefresh = options?.forceRefresh === true;
-  const nowMs = Date.now();
-
-  if (!forceRefresh && isConfigDisplayCacheFresh(nowMs) && configDisplayCache) {
-    return configDisplayCache.snapshot;
-  }
-  if (!forceRefresh && configDisplayReadTask) {
-    return configDisplayReadTask;
-  }
-
-  const requestSeq = ++configDisplayReadSeq;
-  const generation = configDisplayGeneration;
+  const generation = reads.generation;
   const task = (async () => {
     try {
-      const configGetResult = await rpc<SubagentDisplayConfigResult>('displayConfig.get', {}, { scope });
-      if (generation !== configDisplayGeneration || !isCurrentScope(scope)) {
-        return createEmptyConfigDisplaySnapshot();
+      const result = await queryAgents<SubagentDisplayConfigResult>('subagents.displayConfig.get', scope);
+      if (generation !== reads.generation) return createEmptyConfigDisplaySnapshot();
+      if (!isSnapshotReady(result)) {
+        scheduleAgentsSnapshotRetry(scope, reads);
+        return reads.configCache?.snapshot ?? createEmptyConfigDisplaySnapshot();
       }
-      if (!isSnapshotReady(configGetResult)) {
-        scheduleAgentsSnapshotRetry(() => useSubagentsStore.getState().loadAgents({ silent: true, scope }));
-        if (configDisplayCache) {
-          return configDisplayCache.snapshot;
-        }
-        return createEmptyConfigDisplaySnapshot();
-      }
-      const snapshot = buildConfigDisplaySnapshot(configGetResult);
-      if (!configDisplayCache || requestSeq >= configDisplayCache.requestSeq) {
-        configDisplayCache = {
-          snapshot,
-          cachedAt: Date.now(),
-          requestSeq,
-        };
-      }
+      const snapshot = buildConfigDisplaySnapshot(result);
+      reads.configCache = { snapshot, cachedAt: Date.now() };
       return snapshot;
     } catch {
-      if (!isCurrentScope(scope)) return createEmptyConfigDisplaySnapshot();
-      if (configDisplayCache) {
-        return configDisplayCache.snapshot;
-      }
-      return createEmptyConfigDisplaySnapshot();
+      return generation === reads.generation && reads.configCache
+        ? reads.configCache.snapshot
+        : createEmptyConfigDisplaySnapshot();
     } finally {
-      if (generation === configDisplayGeneration && configDisplayReadTaskSeq === requestSeq) {
-        configDisplayReadTask = null;
-      }
+      if (generation === reads.generation) reads.configTask = null;
     }
   })();
-
-  configDisplayReadTask = task;
-  configDisplayReadTaskSeq = requestSeq;
+  reads.configTask = task;
   return task;
 }
 
@@ -749,14 +748,14 @@ function normalizeAvatarPresentation(
   };
 }
 
-function avatarStorageKey(): string { return `${SUBAGENT_AVATAR_STORAGE_KEY}:${activeManagementKey ?? 'unselected'}`; }
+function avatarStorageKey(scope: SubagentManagementScope | null = activeManagementScope): string { return `${SUBAGENT_AVATAR_STORAGE_KEY}:${scope ? scopeKey(scope) : 'unselected'}`; }
 
-function readStoredAvatarPresentations(): Record<string, SubagentAvatarPresentation> {
+function readStoredAvatarPresentations(scope: SubagentManagementScope | null = activeManagementScope): Record<string, SubagentAvatarPresentation> {
   if (typeof window === 'undefined') {
     return {};
   }
   try {
-    const raw = window.localStorage.getItem(avatarStorageKey());
+    const raw = window.localStorage.getItem(avatarStorageKey(scope));
     if (!raw) {
       return {};
     }
@@ -816,7 +815,7 @@ function persistAvatarPresentation(
   try {
     writeStoredAvatarPresentations(nextPresentations);
   } finally {
-    invalidateAgentsSnapshot();
+    if (activeManagementScope) invalidateAgentsSnapshot(activeManagementScope.endpoint);
   }
 }
 
@@ -1014,31 +1013,22 @@ async function fetchPersistedFilesForAgent(agentId: string, sourceScope?: Subage
 }
 
 const persistedFilesLoadTasks = new Map<string, Promise<Partial<Record<SubagentTargetFile, string>>>>();
-let latestLoadAgentsRequestId = 0;
 let agentMutationChain: Promise<void> = Promise.resolve();
 const agentMutationTails = new Map<string, Promise<void>>();
 let activeMutatingOperationCount = 0;
-const pendingDeletedAgentIds = new Set<string>();
-const unconfirmedDeletedAgentIds = new Set<string>();
-let inflightLoadAgentsTask: Promise<void> | null = null;
 
 function resetManagementCaches(): void {
-  configDisplayCache = null;
-  configDisplayReadTask = null;
-  configDisplayGeneration += 1;
   persistedFilesLoadTasks.clear();
-  pendingDeletedAgentIds.clear();
-  unconfirmedDeletedAgentIds.clear();
-  latestLoadAgentsRequestId += 1;
   activeMutatingOperationCount = 0;
-  inflightLoadAgentsTask = null;
-  queuedLoadAgentsTask = null;
-  if (agentsSnapshotRetryTimer) clearTimeout(agentsSnapshotRetryTimer);
-  agentsSnapshotRetryTimer = null;
 }
 
 export function __resetSubagentsStoreInternalCachesForTest(): void {
   resetManagementCaches();
+  for (const reads of agentReadsByRuntime.values()) {
+    reads.generation += 1;
+    if (reads.retryTimer) clearTimeout(reads.retryTimer);
+  }
+  agentReadsByRuntime.clear();
   agentMutationChain = Promise.resolve();
   agentMutationTails.clear();
   activeManagementScope = null;
@@ -1052,9 +1042,9 @@ function normalizeAgentIdForComparison(agentId: string): string {
   return normalizeSubagentNameToSlug(agentId).trim().toLowerCase();
 }
 
-function isAgentPendingDeletion(agentId: string): boolean {
+function isAgentPendingDeletion(agentId: string, reads: RuntimeAgentReads): boolean {
   const normalized = normalizeAgentIdForComparison(agentId);
-  return normalized !== '' && pendingDeletedAgentIds.has(normalized);
+  return normalized !== '' && reads.pendingDeletedAgentIds.has(normalized);
 }
 
 function collectRuntimeAgentIdSet(result: AgentsListResult): Set<string> {
@@ -1072,16 +1062,16 @@ function collectRuntimeAgentIdSet(result: AgentsListResult): Set<string> {
   return runtimeAgentIds;
 }
 
-function settlePendingDeletedAgentIds(runtimeAgentIds: Set<string>): void {
-  for (const pendingId of [...pendingDeletedAgentIds]) {
+function settlePendingDeletedAgentIds(runtimeAgentIds: Set<string>, reads: RuntimeAgentReads): void {
+  for (const pendingId of [...reads.pendingDeletedAgentIds]) {
     if (!runtimeAgentIds.has(pendingId)) {
-      pendingDeletedAgentIds.delete(pendingId);
+      reads.pendingDeletedAgentIds.delete(pendingId);
     }
   }
 }
 
-function filterOutPendingDeletedAgents(agents: SubagentSummary[]): SubagentSummary[] {
-  return agents.filter((agent) => !isAgentPendingDeletion(agent.id));
+function filterOutPendingDeletedAgents(agents: SubagentSummary[], reads: RuntimeAgentReads): SubagentSummary[] {
+  return agents.filter((agent) => !isAgentPendingDeletion(agent.id, reads));
 }
 
 function trackAgentMutation(agentId: string, task: Promise<unknown>): void {
@@ -1196,7 +1186,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   get agents(): SubagentSummary[] {
     return readAgentsFromState(this);
   },
-  agentsResource: createIdleResourceState<SubagentSummary[]>([]),
+  agentsResource: EMPTY_AGENTS_RESOURCE,
+  agentsByRuntime: {},
   managementScope: null,
   cloudPackages: [],
   installedCloudPackages: [],
@@ -1260,150 +1251,90 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
   loadAgents: async (options) => {
     const scope = options?.scope ?? await resolveSubagentManagementScope();
-    if (!isCurrentScope(scope)) return;
-    const silent = options?.silent === true;
-    if (inflightLoadAgentsTask) {
-      if (!queuedLoadAgentsTask) {
-        queuedLoadAgentsTask = inflightLoadAgentsTask.finally(async () => {
-          if (!isCurrentScope(scope)) return;
-          queuedLoadAgentsTask = null;
-          await get().loadAgents({ ...options, scope });
-        });
-      }
-      await queuedLoadAgentsTask;
-      return;
-    }
-
-    const requestId = ++latestLoadAgentsRequestId;
+    const reads = runtimeAgentReads(scope.endpoint);
+    if (reads.loadTask) return reads.loadTask;
+    const generation = reads.generation;
     const task = Promise.resolve().then(async () => {
       try {
         const [result, configSnapshot] = await Promise.all([
-          rpc<AgentsListResult>('agents.list', {}, { scope }),
-          readConfigForDisplay({ scope }),
+          queryAgents<AgentsListResult>('subagents.list', scope),
+          readConfigForDisplay(scope, reads),
         ]);
-        if (requestId !== latestLoadAgentsRequestId || !isCurrentScope(scope)) {
-          return;
-        }
+        if (generation !== reads.generation) return;
+        const current = selectAgentsResource(get(), scope.endpoint);
         if (!isSnapshotReady(result)) {
-          const current = get().agentsResource;
           const hasUsableSnapshot = current.hasLoadedOnce || current.data.length > 0;
           const message = getOptionalString(result.error);
           if (hasUsableSnapshot) {
-            set({
-              agentsResource: {
-                ...current,
-                status: 'ready',
-                error: null,
-                hasLoadedOnce: true,
-              },
-              error: message ?? null,
-            });
-            scheduleAgentsSnapshotRetry(() => get().loadAgents({ silent: true, scope }));
-            return;
+            publishAgentsResource(scope.endpoint, {
+              ...current, status: 'ready', error: null, hasLoadedOnce: true,
+            }, { error: message ?? null });
+            scheduleAgentsSnapshotRetry(scope, reads);
+          } else if (message) {
+            publishAgentsResource(scope.endpoint, createErrorResourceState({
+              ...current, hasLoadedOnce: false,
+            }, message), { error: message });
+          } else {
+            publishAgentsResource(scope.endpoint, createLoadingResourceState({
+              ...current, hasLoadedOnce: false,
+            }), { error: null });
+            scheduleAgentsSnapshotRetry(scope, reads);
           }
-          if (message) {
-            set({
-              agentsResource: createErrorResourceState({
-                ...current,
-                hasLoadedOnce: false,
-              }, message),
-              error: message,
-            });
-            return;
-          }
-          set({
-            agentsResource: createLoadingResourceState({
-              ...current,
-              hasLoadedOnce: false,
-            }),
-            error: null,
-          });
-          scheduleAgentsSnapshotRetry(() => get().loadAgents({ silent: true, scope }));
           return;
         }
-        settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result));
-        const retainedAgentIds = [...result.agents.map((agent) => agent.id), ...unconfirmedDeletedAgentIds];
+        settlePendingDeletedAgentIds(collectRuntimeAgentIdSet(result), reads);
+        const retainedAgentIds = [...result.agents.map((agent) => agent.id), ...reads.unconfirmedDeletedAgentIds];
         useChatStore.getState().reconcileAgentSessionTombstones(
-          retainedAgentIds.filter((agentId) => !isAgentPendingDeletion(agentId)),
+          retainedAgentIds.filter((agentId) => !isAgentPendingDeletion(agentId, reads)),
           scope.endpoint,
         );
-        try {
-          pruneStoredAvatarPresentations(retainedAgentIds);
-        } catch {
-          // Ignore local presentation cleanup failures during refresh.
+        const stateSnapshot = get();
+        const managementScope = stateSnapshot.managementScope;
+        if (managementScope && runtimeEndpointsEqual(managementScope.endpoint, scope.endpoint)) {
+          try {
+            pruneStoredAvatarPresentations(retainedAgentIds);
+          } catch {
+            // Ignore local presentation cleanup failures during refresh.
+          }
         }
         const normalizedAgents = filterOutPendingDeletedAgents(normalizeAgents(
           result,
           configSnapshot,
-          readStoredAvatarPresentations(),
-        ));
-        const stateSnapshot = get();
-        const currentAgents = readAgentsFromState(stateSnapshot);
+          readStoredAvatarPresentations(getSubagentManagementScope(scope.endpoint) ?? scope),
+        ), reads);
         const selectedAgentId = stateSnapshot.selectedAgentId;
         const hasSelected = selectedAgentId && normalizedAgents.some((agent) => agent.id === selectedAgentId);
         const managedAgentId = stateSnapshot.managedAgentId;
         const hasManaged = managedAgentId && normalizedAgents.some((agent) => agent.id === managedAgentId);
         const defaultAgentId = normalizedAgents.find((agent) => agent.isDefault)?.id ?? null;
-        const nextSelectedAgentId = hasSelected
-          ? selectedAgentId
-          : result.selectionRequired === true
-            ? null
-            : defaultAgentId;
-        const nextManagedAgentId = hasManaged ? managedAgentId : null;
-        const shouldPatchAgents = (
-          !areAgentListsEquivalent(currentAgents, normalizedAgents)
-          || stateSnapshot.selectedAgentId !== nextSelectedAgentId
-          || stateSnapshot.managedAgentId !== nextManagedAgentId
-          || stateSnapshot.error !== null
-          || stateSnapshot.agentsResource.status !== 'ready'
-          || stateSnapshot.agentsResource.error !== null
-        );
-        const loadedAt = Date.now();
-
-        if (shouldPatchAgents) {
-          set({
-            selectedAgentId: nextSelectedAgentId,
-            managedAgentId: nextManagedAgentId,
-            agentsResource: createReadyResourceState(normalizedAgents, loadedAt),
-            error: null,
-          });
-        } else {
-          set({
-            agentsResource: createReadyResourceState(stateSnapshot.agentsResource.data, loadedAt),
-            error: null,
-          });
-        }
-      } catch (error) {
-        if (requestId !== latestLoadAgentsRequestId || !isCurrentScope(scope)) {
-          return;
-        }
-        const stateSnapshot = get();
-        const message = error instanceof Error ? error.message : 'Failed to load subagents';
-        set({
-          agentsResource: createErrorResourceState({
-            ...stateSnapshot.agentsResource,
-            hasLoadedOnce: stateSnapshot.agentsResource.hasLoadedOnce || stateSnapshot.agentsResource.data.length > 0,
-          }, message),
-          error: message,
+        publishAgentsResource(scope.endpoint, createReadyResourceState(
+          areAgentListsEquivalent(current.data, normalizedAgents) ? current.data : normalizedAgents,
+        ), {
+          selectedAgentId: hasSelected ? selectedAgentId : result.selectionRequired === true ? null : defaultAgentId,
+          managedAgentId: hasManaged ? managedAgentId : null,
+          error: null,
         });
+      } catch (error) {
+        if (generation !== reads.generation) return;
+        const current = selectAgentsResource(get(), scope.endpoint);
+        const message = error instanceof Error ? error.message : 'Failed to load subagents';
+        publishAgentsResource(scope.endpoint, createErrorResourceState({
+          ...current,
+          hasLoadedOnce: current.hasLoadedOnce || current.data.length > 0,
+        }, message), { error: message });
       } finally {
-        if (inflightLoadAgentsTask === task) {
-          inflightLoadAgentsTask = null;
-        }
+        if (reads.loadTask === task) reads.loadTask = null;
       }
     });
 
-    inflightLoadAgentsTask = task;
-    const previousResource = get().agentsResource;
-    set({
-      agentsResource: silent && previousResource.hasLoadedOnce
-        ? previousResource
-        : createLoadingResourceState({
-          ...previousResource,
-          hasLoadedOnce: previousResource.hasLoadedOnce || previousResource.data.length > 0,
-        }),
-      error: null,
-    });
+    reads.loadTask = task;
+    const previousResource = selectAgentsResource(get(), scope.endpoint);
+    publishAgentsResource(scope.endpoint, options?.silent && previousResource.hasLoadedOnce
+      ? previousResource
+      : createLoadingResourceState({
+        ...previousResource,
+        hasLoadedOnce: previousResource.hasLoadedOnce || previousResource.data.length > 0,
+      }), { error: null });
     await task;
   },
 
@@ -1550,7 +1481,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         });
         const predictedAgentId = normalizeAgentIdForComparison(trimmedName);
         if (predictedAgentId) {
-          pendingDeletedAgentIds.delete(predictedAgentId);
+          runtimeAgentReads(managementScope.endpoint).pendingDeletedAgentIds.delete(predictedAgentId);
         }
         const agents = readAgentsFromState(get());
         if (hasSubagentNameConflict(trimmedName, agents)) {
@@ -1580,10 +1511,11 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         }
         if (!isCurrentScope(managementScope)) return { agentId: createdAgentId };
         trackAgentMutation(createdAgentId, creation);
-        unconfirmedDeletedAgentIds.delete(createdAgentId);
+        const reads = runtimeAgentReads(managementScope.endpoint);
+        reads.unconfirmedDeletedAgentIds.delete(createdAgentId);
         const normalizedCreatedAgentId = normalizeAgentIdForComparison(createdAgentId);
         if (normalizedCreatedAgentId) {
-          pendingDeletedAgentIds.delete(normalizedCreatedAgentId);
+          reads.pendingDeletedAgentIds.delete(normalizedCreatedAgentId);
         }
         const warnings: string[] = createResult.success ? [] : [buildCreateWarning(createdAgentId, createResult.error || 'Subagent workspace initialization failed')];
         const nextDescription = getOptionalString(description);
@@ -1779,7 +1711,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
         const receipt = decodeCallReceipt(admitted.install);
         const terminal = await waitForSubagentResult(receipt, 'subagents.package.install', {
           kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local',
-        }).finally(() => { if (isCurrentScope(managementScope)) invalidateAgentsSnapshot(); });
+        }).finally(() => invalidateAgentsSnapshot(managementScope.endpoint));
         const confirmed = await hostApiFetch<typeof result>('/api/packages/install/confirm', {
           method: 'POST', body: JSON.stringify({ callId: receipt.callId }),
         });
@@ -1995,34 +1927,27 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
 
     beginGlobalMutating(set);
     const agentsSnapshot = readAgentsFromState(get());
-    unconfirmedDeletedAgentIds.add(agentId);
+    const reads = runtimeAgentReads(managementScope.endpoint);
+    reads.unconfirmedDeletedAgentIds.add(agentId);
     try {
       await rpc('agents.delete', { agentId, deleteFiles }, {
         scope: managementScope,
         target: buildSubagentTarget(managementScope, agentId),
       });
-      if (!isCurrentScope(managementScope)) { useChatStore.getState().forgetAgentSessions(agentId, managementScope.endpoint); return; }
-      unconfirmedDeletedAgentIds.delete(agentId);
+      reads.unconfirmedDeletedAgentIds.delete(agentId);
       const normalizedAgentId = normalizeAgentIdForComparison(agentId);
-      if (normalizedAgentId) pendingDeletedAgentIds.add(normalizedAgentId);
-      set((state) => {
-        const nextAgents = state.agentsResource.data.filter((entry) => entry.id !== agentId);
-        const selectedAgentId = state.selectedAgentId === agentId
+      if (normalizedAgentId) reads.pendingDeletedAgentIds.add(normalizedAgentId);
+      const state = get();
+      const resource = selectAgentsResource(state, managementScope.endpoint);
+      const nextAgents = resource.data.filter((entry) => entry.id !== agentId);
+      publishAgentsResource(managementScope.endpoint, { ...resource, data: nextAgents }, isCurrentScope(managementScope) ? {
+        selectedAgentId: state.selectedAgentId === agentId
           ? (managementScope.endpoint.kind === 'native-runtime' && managementScope.endpoint.runtimeAdapterId === 'matcha-agent' ? null : (nextAgents[0]?.id ?? null))
-          : state.selectedAgentId;
-        const managedAgentId = state.managedAgentId === agentId
-          ? null
-          : state.managedAgentId;
-        return {
-          agentsResource: {
-            ...state.agentsResource,
-            data: nextAgents,
-          },
-          selectedAgentId,
-          managedAgentId,
-        };
-      });
+          : state.selectedAgentId,
+        managedAgentId: state.managedAgentId === agentId ? null : state.managedAgentId,
+      } : {});
       useChatStore.getState().forgetAgentSessions(agentId, managementScope.endpoint);
+      if (!isCurrentScope(managementScope)) return;
       if (agentsSnapshot.find((agent) => agent.id === agentId)?.sealed) await get().loadCloudPackages();
       if (!isCurrentScope(managementScope)) return;
       try {

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "upstreamSha": "2a6fc07be3760543c7b6d1d1bfe62f5765d5d9d6",
+  "url": "https://codeload.github.com/searxng/searxng/tar.gz/2a6fc07be3760543c7b6d1d1bfe62f5765d5d9d6",
+  "sha256": "4fc0ac02c9ce11de1f828f5918e29d885ee62c6ad6280559957cfc22794b60dd",
+  "version": "2026.10.17+2a6fc07be",
+  "pythonVersion": "3.12",
+  "waitressVersion": "3.0.2",
+  "tzdataVersion": "2026.2",
+  "excludeNewer": "2026-10-18T00:00:00Z"
+}

@@ -13,6 +13,7 @@ pub struct RuntimeCapabilitySurface {
     lifecycle: RuntimeFamilyAvailability,
     usage: RuntimeFamilyAvailability,
     platform: RuntimeFamilyAvailability,
+    board: RuntimeFamilyAvailability,
 }
 
 impl RuntimeCapabilitySurface {
@@ -37,6 +38,7 @@ impl RuntimeCapabilitySurface {
             lifecycle: RuntimeFamilyAvailability::Supported,
             usage: RuntimeFamilyAvailability::Supported,
             platform: RuntimeFamilyAvailability::Supported,
+            board: RuntimeFamilyAvailability::Supported,
         }
     }
 
@@ -53,6 +55,7 @@ impl RuntimeCapabilitySurface {
             lifecycle: RuntimeFamilyAvailability::Supported,
             usage: RuntimeFamilyAvailability::Supported,
             platform: RuntimeFamilyAvailability::Unsupported,
+            board: RuntimeFamilyAvailability::Unsupported,
         }
     }
 
@@ -69,6 +72,7 @@ impl RuntimeCapabilitySurface {
             RuntimeCapabilityFamily::Lifecycle => self.lifecycle,
             RuntimeCapabilityFamily::Usage => self.usage,
             RuntimeCapabilityFamily::Platform => self.platform,
+            RuntimeCapabilityFamily::Board => self.board,
         }
     }
 
@@ -135,6 +139,7 @@ pub enum RuntimeCapabilityFamily {
     Lifecycle,
     Usage,
     Platform,
+    Board,
 }
 
 impl RuntimeCapabilityFamily {
@@ -147,6 +152,7 @@ impl RuntimeCapabilityFamily {
             | "session.modelSelection"
             | "session.goal"
             | "tool.invoke" => Some(Self::Session),
+            "board.runtime" => Some(Self::Board),
             "task.management" => Some(Self::Task),
             "subagent.management" | "subagent.skills" | "subagent.tools" => Some(Self::Subagent),
             "team.runtime" => Some(Self::Team),

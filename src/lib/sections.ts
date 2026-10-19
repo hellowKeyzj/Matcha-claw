@@ -2,6 +2,7 @@ export const SETTINGS_SECTIONS = [
   'gateway',
   'appearance',
   'browser',
+  'search',
   'updates',
   'advanced',
   'license',

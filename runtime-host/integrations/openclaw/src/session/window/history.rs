@@ -1939,6 +1939,9 @@ fn project_tool_details(values: [Option<&Value>; 3]) -> Option<Value> {
         let Some(object) = value.as_object() else {
             continue;
         };
+        if let Some(preview) = crate::session::protocol::project_mcp_app_preview_value(value) {
+            details.insert("mcpAppPreview".to_owned(), preview);
+        }
         for key in [
             "browserTab",
             "changed",
@@ -1953,7 +1956,7 @@ fn project_tool_details(values: [Option<&Value>; 3]) -> Option<Value> {
             "exitCode",
         ] {
             let projected = if key == "mcpAppPreview" {
-                object.get(key).and_then(project_mcp_app_preview_value)
+                object.get(key).and_then(crate::session::protocol::project_mcp_app_preview_value)
             } else {
                 object.get(key).and_then(project_tool_detail_value)
             };
@@ -1971,52 +1974,6 @@ fn project_tool_details(values: [Option<&Value>; 3]) -> Option<Value> {
     }
     let text = serde_json::to_string(&value).ok()?;
     (text.len() <= MAX_TOOL_PAYLOAD_BYTES).then_some(value)
-}
-
-fn project_mcp_app_preview_value(value: &Value) -> Option<Value> {
-    let object = value.as_object()?;
-    let mut projected = Map::new();
-    for key in [
-        "kind",
-        "surface",
-        "render",
-        "title",
-        "preferredHeight",
-        "url",
-        "viewId",
-        "sandbox",
-        "boardWidgetName",
-    ] {
-        if let Some(value) = object.get(key).and_then(project_tool_detail_value) {
-            projected.insert(key.to_owned(), value);
-        }
-    }
-    if let Some(value) = object
-        .get("mcpApp")
-        .and_then(project_mcp_app_descriptor_value)
-    {
-        projected.insert("mcpApp".to_owned(), value);
-    }
-    (!projected.is_empty()).then_some(Value::Object(projected))
-}
-
-fn project_mcp_app_descriptor_value(value: &Value) -> Option<Value> {
-    let object = value.as_object()?;
-    let mut projected = Map::new();
-    for key in [
-        "viewId",
-        "serverName",
-        "toolName",
-        "uiResourceUri",
-        "toolCallId",
-        "originSessionKey",
-        "resultMetaState",
-    ] {
-        if let Some(value) = object.get(key).and_then(project_tool_detail_value) {
-            projected.insert(key.to_owned(), value);
-        }
-    }
-    (!projected.is_empty()).then_some(Value::Object(projected))
 }
 
 fn project_tool_detail_value(value: &Value) -> Option<Value> {

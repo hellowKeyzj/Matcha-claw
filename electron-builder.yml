@@ -30,6 +30,11 @@ extraResources:
   # because electron-builder respects .gitignore which excludes node_modules/)
   - from: build/openclaw/
     to: openclaw/
+  - from: build/searxng/
+    to: searxng/
+    filter:
+      - "**/*"
+      - "!wheels/**"
   # Pre-bundled third-party skills (full directories, not only SKILL.md)
   - from: build/preinstalled-skills/
     to: resources/preinstalled-skills/
@@ -62,6 +67,8 @@ publish:
 # macOS Configuration
 mac:
   extraResources:
+    - from: build/searxng/wheels/darwin-${arch}
+      to: searxng/wheels/darwin-${arch}
     - from: resources/bin/darwin-${arch}
       to: bin
     - from: runtime-host/dist/darwin-${arch}
@@ -113,6 +120,8 @@ dmg:
 
 linux:
   extraResources:
+    - from: build/searxng/wheels/linux-${arch}
+      to: searxng/wheels/linux-${arch}
     - from: resources/bin/linux-${arch}
       to: bin
     - from: runtime-host/dist/linux-${arch}
@@ -130,6 +139,8 @@ win:
   # certificate, so verifying would always fail on the updater.
   verifyUpdateCodeSignature: false
   extraResources:
+    - from: build/searxng/wheels/win32-${arch}
+      to: searxng/wheels/win32-${arch}
     - from: resources/bin/win32-${arch}
       to: bin
     - from: runtime-host/dist/win32-${arch}

@@ -2,6 +2,7 @@ import type { TFunction } from 'i18next';
 import type { SessionRenderToolCard } from '../../../types/session/tool-card';
 import type { ToolActivityTextBlock, ToolActivityTrailingLabel, ToolActivityContent } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
+import type { ToolActivityDescriptor } from './types';
 
 const NON_ACTIVITY_TITLE_TEXT = new Set([
   '失败',
@@ -331,14 +332,21 @@ function buildTextBlocks(tool: SessionRenderToolCard, hasAssistantCanvas: boolea
   return blocks;
 }
 
+export function describeGenericToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityDescriptor {
+  return {
+    kind: 'generic',
+    title: resolveActivityTitle(tool, t),
+    label: tool.displayTitle?.trim() || tool.name.trim() || t('toolActivity.generic.toolCall'),
+  };
+}
+
 export function genericToolActivityRenderer(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {
   const title = resolveActivityTitle(tool, t);
   const result = tool.result;
-  const hasAssistantCanvas = result.kind === 'canvas' && result.preview.kind === 'canvas' && !!result.preview.url;
+  const hasAssistantCanvas = result.kind === 'canvas' && result.preview.kind === 'canvas';
   const canvasPreview = hasAssistantCanvas
     ? {
       title: result.preview.title?.trim() || tool.name || title,
-      url: result.preview.url,
       preferredHeight: result.preview.preferredHeight,
       rawText: result.rawText?.trim() ? truncateText(result.rawText, BLOCK_TEXT_LIMIT, t) : undefined,
     }

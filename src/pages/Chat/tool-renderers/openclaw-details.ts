@@ -10,28 +10,28 @@ export type OpenClawPublicDetailValue =
 
 export type OpenClawPublicDetailObject = { [key: string]: OpenClawPublicDetailValue };
 
-export interface OpenClawMcpAppPreview {
-  readonly kind: 'canvas';
+export interface OpenClawMcpAppMetadata {
+  readonly viewId: string;
+  readonly serverName?: string;
+  readonly toolName?: string;
+  readonly uiResourceUri?: string;
+  readonly toolCallId?: string;
+  readonly originSessionKey?: string;
+  readonly resultMetaState?: 'unavailable';
+  readonly expiresAtMs?: number;
+  readonly readOnly?: boolean;
+}
+
+export type OpenClawMcpAppPreview = {
   readonly surface: 'assistant_message' | 'node_panel';
-  readonly render: 'url';
   readonly title?: string;
   readonly preferredHeight?: number;
-  readonly url?: string;
-  readonly viewId?: string;
-  readonly className?: string;
-  readonly style?: string;
   readonly sandbox?: 'strict' | 'scripts';
   readonly boardWidgetName?: string;
-  readonly mcpApp?: {
-    readonly viewId: string;
-    readonly serverName?: string;
-    readonly toolName?: string;
-    readonly uiResourceUri?: string;
-    readonly toolCallId?: string;
-    readonly originSessionKey?: string;
-    readonly resultMetaState?: 'unavailable';
-  };
-}
+} & (
+  | { readonly kind: 'canvas'; readonly documentId: string }
+  | { readonly kind: 'mcp-app'; readonly viewId: string; readonly mcpApp: OpenClawMcpAppMetadata }
+);
 
 export interface OpenClawBrowserTabPreview {
   readonly kind: 'browser-tab';
@@ -81,8 +81,6 @@ const URL_STRING_CHARS = 2048;
 const TITLE_STRING_CHARS = 512;
 const ID_STRING_CHARS = 256;
 const VIEW_ID_STRING_CHARS = 128;
-const CLASS_NAME_STRING_CHARS = 256;
-const STYLE_STRING_CHARS = 1024;
 const LABEL_STRING_CHARS = 80;
 const RATIONALE_STRING_CHARS = 2000;
 const MARKDOWN_STRING_CHARS = 4000;
@@ -203,65 +201,35 @@ export function readMcpAppPreview(details: unknown): OpenClawMcpAppPreview | und
     return undefined;
   }
 
-  const kind = readBoundedString(preview.kind, 32)?.toLowerCase();
-  if (kind && kind !== 'canvas') {
+  if (preview.kind !== 'canvas') {
     return undefined;
   }
-  const render = readBoundedString(preview.render, 32)?.toLowerCase();
-  if (render && render !== 'url') {
-    return undefined;
-  }
-
   const presentation = readRecordField(preview, 'presentation');
   const view = readRecordField(preview, 'view');
-  const source = readRecordField(preview, 'source');
-  const surface = readCanvasSurface(preview, presentation);
+  const surface = readCanvasSurface(presentation);
   if (!surface) {
     return undefined;
   }
 
   const mcpApp = readMcpAppDescriptor(readRecordField(preview, 'mcpApp'));
-  const title = readStringFromFields([preview, presentation, view], ['title'], TITLE_STRING_CHARS);
-  const preferredHeight = readPreferredHeight(
-    preview.preferredHeight,
-    preview.preferred_height,
-    presentation?.preferred_height,
-    presentation?.preferredHeight,
-    view?.preferred_height,
-    view?.preferredHeight,
-  );
-  const url = readUrlLike(preview.url)
-    ?? readUrlLike(view?.url)
-    ?? readUrlLike(view?.entryUrl)
-    ?? (readBoundedString(source?.type, 32)?.toLowerCase() === 'url' ? readUrlLike(source?.url) : undefined);
-  const viewId = readIdentifier(preview.viewId, VIEW_ID_STRING_CHARS)
-    ?? readIdentifier(view?.id, VIEW_ID_STRING_CHARS)
-    ?? readIdentifier(view?.docId, VIEW_ID_STRING_CHARS)
-    ?? mcpApp?.viewId;
-
-  if (!url && !viewId) {
-    return undefined;
-  }
-
-  const className = readStringFromFields([preview, presentation], ['className', 'class_name'], CLASS_NAME_STRING_CHARS);
-  const style = readStringFromFields([preview, presentation], ['style'], STYLE_STRING_CHARS);
-  const sandbox = readCanvasSandbox(preview.sandbox) ?? readCanvasSandbox(presentation?.sandbox);
-  const boardWidgetName = readBoardWidgetName(preview.boardWidgetName) ?? readBoardWidgetName(view?.boardWidgetName);
-
-  return {
-    kind: 'canvas',
+  const title = readBoundedString(presentation?.title, TITLE_STRING_CHARS) ?? readBoundedString(view?.title, TITLE_STRING_CHARS);
+  const preferredHeight = readPreferredHeight(presentation?.preferred_height);
+  const sandbox = readCanvasSandbox(presentation?.sandbox);
+  const boardWidgetName = preview.mcpApp === undefined ? readBoardWidgetName(view?.boardWidgetName) : undefined;
+  const display = {
     surface,
-    render: 'url',
     ...(title ? { title } : {}),
     ...(preferredHeight !== undefined ? { preferredHeight } : {}),
-    ...(url ? { url } : {}),
-    ...(viewId ? { viewId } : {}),
-    ...(className ? { className } : {}),
-    ...(style ? { style } : {}),
     ...(sandbox ? { sandbox } : {}),
     ...(boardWidgetName ? { boardWidgetName } : {}),
-    ...(mcpApp ? { mcpApp } : {}),
   };
+  if (preview.mcpApp !== undefined) {
+    if (!mcpApp || mcpApp.viewId !== readIdentifier(view?.id, VIEW_ID_STRING_CHARS)) return undefined;
+    return { ...display, kind: 'mcp-app', viewId: mcpApp.viewId, mcpApp };
+  }
+  const documentId = readIdentifier(view?.id, ID_STRING_CHARS);
+  if (!documentId || documentId === '.' || documentId === '..' || !/^[A-Za-z0-9._-]+$/u.test(documentId)) return undefined;
+  return { ...display, kind: 'canvas', documentId };
 }
 
 export function readBrowserTabPreview(details: unknown): OpenClawBrowserTabPreview | undefined {
@@ -370,33 +338,8 @@ function readRecordField(record: Record<string, unknown>, key: string): Record<s
   return isRecord(value) ? value : undefined;
 }
 
-function readStringFromFields(
-  records: ReadonlyArray<Record<string, unknown> | undefined>,
-  keys: readonly string[],
-  maxChars: number,
-): string | undefined {
-  for (const record of records) {
-    if (!record) {
-      continue;
-    }
-    for (const key of keys) {
-      const value = readBoundedString(record[key], maxChars);
-      if (value) {
-        return value;
-      }
-    }
-  }
-  return undefined;
-}
-
-function readCanvasSurface(
-  preview: Record<string, unknown>,
-  presentation: Record<string, unknown> | undefined,
-): OpenClawMcpAppPreview['surface'] | undefined {
-  const surface = readBoundedString(preview.surface, 64)
-    ?? readBoundedString(presentation?.target, 64)
-    ?? readBoundedString(preview.target, 64)
-    ?? 'assistant_message';
+function readCanvasSurface(presentation: Record<string, unknown> | undefined): OpenClawMcpAppPreview['surface'] | undefined {
+  const surface = presentation?.target ?? 'assistant_message';
   return surface === 'assistant_message' || surface === 'node_panel' ? surface : undefined;
 }
 
@@ -417,7 +360,7 @@ function readPreferredHeight(...values: unknown[]): number | undefined {
 
 function readMcpAppDescriptor(
   record: Record<string, unknown> | undefined,
-): OpenClawMcpAppPreview['mcpApp'] | undefined {
+): OpenClawMcpAppMetadata | undefined {
   const viewId = readIdentifier(record?.viewId, VIEW_ID_STRING_CHARS);
   if (!record || !viewId) {
     return undefined;
@@ -425,9 +368,13 @@ function readMcpAppDescriptor(
   const serverName = readBoundedString(record.serverName, ID_STRING_CHARS);
   const toolName = readBoundedString(record.toolName, ID_STRING_CHARS);
   const uiResourceUri = readUiResourceUri(record.uiResourceUri);
-  const toolCallId = readBoundedString(record.toolCallId, ID_STRING_CHARS);
-  const originSessionKey = readBoundedString(record.originSessionKey, ID_STRING_CHARS);
+  const toolCallId = readIdentifier(record.toolCallId, 512);
+  const originSessionKey = readIdentifier(record.originSessionKey, 4096);
+  if ((record.toolCallId !== undefined && !toolCallId) || (record.originSessionKey !== undefined && !originSessionKey)) return undefined;
   const resultMetaState = record.resultMetaState === 'unavailable' ? record.resultMetaState : undefined;
+  const expiresAtMs = typeof record.expiresAtMs === 'number' && Number.isSafeInteger(record.expiresAtMs) && record.expiresAtMs >= 0
+    ? record.expiresAtMs : undefined;
+  const readOnly = typeof record.readOnly === 'boolean' ? record.readOnly : undefined;
   return {
     viewId,
     ...(serverName ? { serverName } : {}),
@@ -436,6 +383,8 @@ function readMcpAppDescriptor(
     ...(toolCallId ? { toolCallId } : {}),
     ...(originSessionKey ? { originSessionKey } : {}),
     ...(resultMetaState ? { resultMetaState } : {}),
+    ...(expiresAtMs !== undefined ? { expiresAtMs } : {}),
+    ...(readOnly !== undefined ? { readOnly } : {}),
   };
 }
 

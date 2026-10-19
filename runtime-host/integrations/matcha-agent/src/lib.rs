@@ -12,6 +12,7 @@ pub mod policy;
 pub mod provider;
 pub(crate) mod protocol;
 pub mod sealed;
+pub mod search;
 pub mod session;
 pub mod skills;
 pub mod tasks;

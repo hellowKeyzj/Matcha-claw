@@ -1,17 +1,13 @@
-import { memo, useMemo, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
-import { ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, Maximize2, Minimize2, PanelRight, SquareActivity } from 'lucide-react';
+import { lazy, memo, Suspense, useMemo, type CSSProperties, type ReactNode } from 'react';
+import { ArrowLeft, Copy, Eye, FileCode2, FolderOpen, FolderTree, GitCompare, LayoutDashboard, Maximize2, Minimize2, PanelRight, SquareActivity } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { ChatSidePanelMode } from '@/components/layout/chat-workspace-layout';
-import {
-  getChatRuntimeSurfaceSnapshot,
-  subscribeChatRuntimeSurface,
-  type ChatSidePanelTab,
-  type ChatRuntimeSurfaceDescriptor,
-} from '../useChatSidePanelController';
+import type { ChatSidePanelTab, ChatRuntimeSurfaceDescriptor } from '../useChatSidePanelController';
+import type { BoardChatDock, BoardIdentity } from '@/types/board';
 import { ChatRuntimeSurfacePanel } from './ChatRuntimeSurfacePanel';
 import { supportsInlineDiff, type GeneratedFile } from '@/lib/generated-files';
 import { invokeIpc } from '@/lib/api-client';
@@ -23,6 +19,8 @@ import {
   buildCapabilityScopeKey,
   type SessionIdentity,
 } from '../../../types/desktop/runtime-address';
+
+const BoardPanel = lazy(() => import('@/features/board/BoardPanel').then((module) => ({ default: module.BoardPanel })));
 
 interface ChatSidePanelProps {
   mode: ChatSidePanelMode;
@@ -54,7 +52,11 @@ interface ChatSidePanelProps {
   onArtifactViewModeChange: (mode: FilePreviewMode) => void;
   onArtifactRevealInFileManager: (filePath: string) => void;
   sessionIdentity?: SessionIdentity;
-  teamGraphSurface?: Extract<ChatRuntimeSurfaceDescriptor, { kind: 'team-graph' }> | null;
+  runtimeSurface?: ChatRuntimeSurfaceDescriptor | null;
+  onBoardChatDockChange?: (dock: BoardChatDock) => void;
+  onBoardFullscreenChange?: (fullscreen: boolean) => void;
+  onSendMessage?: (text: string) => void | Promise<void>;
+  onOpenLink?: (url: string) => void | Promise<void>;
 }
 
 const ARTIFACT_GROUP_RAIL_MIN_WIDTH = 240;
@@ -90,14 +92,16 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   onArtifactViewModeChange,
   onArtifactRevealInFileManager,
   sessionIdentity,
-  teamGraphSurface = null,
+  runtimeSurface = null,
+  onBoardChatDockChange,
+  onBoardFullscreenChange,
+  onSendMessage,
+  onOpenLink,
 }: ChatSidePanelProps) {
   const { t } = useTranslation('chat');
-  const runtimeSurface = useSyncExternalStore(
-    subscribeChatRuntimeSurface,
-    getChatRuntimeSurfaceSnapshot,
-    getChatRuntimeSurfaceSnapshot,
-  );
+  const boardIdentity: BoardIdentity | null = sessionIdentity?.endpoint.kind === 'native-runtime'
+    && sessionIdentity.endpoint.runtimeAdapterId === 'openclaw'
+    ? { ...sessionIdentity, endpoint: sessionIdentity.endpoint } : null;
   const panelStyle = {
     ['--chat-side-panel-width' as string]: `${width}px`,
   } as CSSProperties;
@@ -113,7 +117,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
     ? artifactFiles[artifactFocusedGeneratedIndex]
     : null;
   const topTabsAvailableWidth = Math.max(0, width - 24 - 8 - 32);
-  const topTabsPerItemWidth = topTabsAvailableWidth / 2;
+  const topTabsPerItemWidth = topTabsAvailableWidth / 3;
   const sectionTabsAvailableWidth = Math.max(0, width - 32 - 8);
   const sectionTabsPerItemWidth = sectionTabsAvailableWidth / 3;
   const compactTopTabs = topTabsPerItemWidth < SIDE_PANEL_TOP_TAB_MIN_ITEM_WIDTH;
@@ -399,7 +403,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
             <TabsList
               data-compact={compactTopTabs ? 'true' : 'false'}
               className={cn(
-                'grid h-8 min-h-0 flex-1 grid-cols-2 gap-1 overflow-visible rounded-none border-0 bg-transparent p-0 text-foreground shadow-none',
+                'grid h-8 min-h-0 flex-1 grid-cols-3 gap-1 overflow-visible rounded-none border-0 bg-transparent p-0 text-foreground shadow-none',
               )}
             >
               <TabsTrigger
@@ -418,15 +422,25 @@ export const ChatSidePanel = memo(function ChatSidePanel({
               <TabsTrigger
                 value="runtime"
                 data-testid="chat-side-panel-tab-runtime"
-                title="运行面"
-                aria-label="运行面"
+                title={t('board.runtimeTab', { defaultValue: 'Runtime' })}
+                aria-label={t('board.runtimeTab', { defaultValue: 'Runtime' })}
                 className={cn(
                   `h-8 ${SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME}`,
                   compactTopTabs ? 'justify-center gap-0 px-0' : 'justify-center gap-1.5 px-2.5',
                 )}
               >
                 <SquareActivity className="h-3.5 w-3.5" />
-                {!compactTopTabs ? <span className="truncate">运行面</span> : null}
+                {!compactTopTabs ? <span className="truncate">{t('board.runtimeTab', { defaultValue: 'Runtime' })}</span> : null}
+              </TabsTrigger>
+              <TabsTrigger
+                value="board"
+                data-testid="chat-side-panel-tab-board"
+                title={t('board.title', { defaultValue: 'Board' })}
+                aria-label={t('board.title', { defaultValue: 'Board' })}
+                className={cn(`h-8 ${SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME}`, compactTopTabs ? 'justify-center gap-0 px-0' : 'justify-center gap-1.5 px-2.5')}
+              >
+                <LayoutDashboard className="h-3.5 w-3.5" />
+                {!compactTopTabs ? <span className="truncate">{t('board.title', { defaultValue: 'Board' })}</span> : null}
               </TabsTrigger>
             </TabsList>
             <Button
@@ -558,7 +572,16 @@ export const ChatSidePanel = memo(function ChatSidePanel({
         </TabsContent>
 
         <TabsContent value="runtime" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
-          <ChatRuntimeSurfacePanel surface={teamGraphSurface ?? runtimeSurface} sessionIdentity={sessionIdentity} />
+          <ChatRuntimeSurfacePanel surface={runtimeSurface} sessionIdentity={sessionIdentity} onSendMessage={onSendMessage} onOpenLink={onOpenLink} />
+        </TabsContent>
+        <TabsContent value="board" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
+          {boardIdentity ? (
+            <Suspense fallback={<p role="status" className="p-6 text-sm text-muted-foreground">{t('board.loading', { defaultValue: 'Loading native board…' })}</p>}>
+              <BoardPanel identity={boardIdentity} onChatDockChange={onBoardChatDockChange} onFullscreenChange={onBoardFullscreenChange} onSendMessage={onSendMessage} onOpenLink={onOpenLink} />
+            </Suspense>
+          ) : <p role="status" className="p-6 text-sm text-muted-foreground">{sessionIdentity
+            ? t('board.failure.unsupported', { defaultValue: 'This runtime does not support Board.' })
+            : t('board.requiresSession', { defaultValue: 'Send a message to create a session before opening Board.' })}</p>}
         </TabsContent>
       </Tabs>
     </aside>

@@ -1,8 +1,11 @@
+mod board;
+mod browser;
 mod capability;
 mod control;
 mod cron;
 mod outcome;
 mod session;
+mod surface;
 mod team;
 
 use std::{fmt, sync::Arc};
@@ -29,7 +32,7 @@ pub use control::{OpenClawControlReadiness, OpenClawGatewayControl};
 pub use cron::await_cron_execution;
 pub use outcome::{
     OpenClawGatewayRequestOutcome, OpenClawPeerRejection, OpenClawSessionError,
-    OpenClawSessionMutationFailure, SessionModelPatchFailure,
+    OpenClawSessionMutationFailure, OpenClawSurfaceFailure, SessionModelPatchFailure,
 };
 pub use session::OpenClawSessionGateway;
 pub(crate) use session::validate_observation_identity;
@@ -125,6 +128,10 @@ impl OpenClawGateway {
             pairing: None,
             credentials: None,
         }
+    }
+
+    pub fn set_board_event_sink(&self, sink: Option<::board::BoardEventSink>) {
+        self.client.set_board_event_sink(sink);
     }
 
     pub(crate) fn client(&self) -> Arc<GatewayClient> {

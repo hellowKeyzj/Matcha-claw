@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ApprovalItem, type ChatSessionRuntimeState, type ChatStoreState } from '@/stores/chat';
 import { selectCurrentChatSendGate, selectRuntimeAgentScope } from '@/stores/chat/selectors';
+import { createSessionPending, deriveSessionRecord, hasPendingSessionSend } from '@/stores/chat/session-presentation';
 import {
   ABORT_STOPPING_TIMEOUT_ERROR,
   ABORT_UNKNOWN_ERROR,
@@ -19,7 +20,7 @@ import { isRunActive } from '@/stores/chat/types';
 import { buildCurrentConversationFromSessionRecord, resolveCurrentConversationRuntimeState } from '@/stores/chat/session-runtime-graph';
 import { isRuntimeEndpointReady, supportsSessionGoal, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { useGatewayStore } from '@/stores/gateway';
-import { useSubagentsStore } from '@/stores/subagents';
+import { selectAgentsResource, useSubagentsStore } from '@/stores/subagents';
 import { useSettingsStore } from '@/stores/settings';
 import { resolveTeamRuntimeScope, useTeamsStore } from '@/stores/teams';
 import type { TeamDesignTarget } from '@/types/team-design';
@@ -80,6 +81,7 @@ import { ChatQuestionDock } from './components/ChatQuestionDock';
 import {
   applyAssistantPresentationToItems,
   type ChatAssistantCatalogAgent,
+  type ChatAssistantPresentation,
   type ChatRenderItem,
 } from './chat-render-item-model';
 import {
@@ -288,9 +290,9 @@ function selectChatPageState(state: ChatStoreState) {
   const currentConversation = state.currentConversation;
   const currentSessionRecordKey = state.currentSessionKey
     || (currentConversation?.kind === 'session' ? currentConversation.sessionRecordKey : '');
-  const currentSession = currentSessionRecordKey
+  const currentSession = deriveSessionRecord(currentSessionRecordKey
     ? state.loadedSessions[currentSessionRecordKey] ?? EMPTY_CHAT_PAGE_SESSION
-    : EMPTY_CHAT_PAGE_SESSION;
+    : EMPTY_CHAT_PAGE_SESSION);
   return {
     currentConversation,
     currentSessionRecordKey,
@@ -341,53 +343,6 @@ function buildRunProgressPendingLabel(
     });
   }
   return t(`pending.startup.${runProgress.phase}`);
-}
-
-function buildRuntimeAssistantPlaceholder(input: {
-  sessionKey: string;
-  runtime: ChatSessionRuntimeState;
-  items: ReadonlyArray<SessionRenderItem>;
-  imageGenerationActive: boolean;
-  imageGenerationLabel: string;
-  pendingLabel: string | null;
-}): SessionRenderItem | null {
-  const activeRunId = input.runtime.activeRunId;
-  const placeholderRunId = activeRunId || (input.imageGenerationActive ? 'image-generation' : '');
-  if (!placeholderRunId || (!isRunActive(input.runtime) && !input.imageGenerationActive)) {
-    return null;
-  }
-  if (input.items.some((item) => item.kind === 'assistant-turn' && item.runId === placeholderRunId)) {
-    return null;
-  }
-
-  const isWaitingForTool = input.runtime.runPhase === 'waiting_tool';
-  const isCompacting = input.runtime.runtimeActivity === 'compacting';
-  const pendingState = isCompacting ? 'compacting' : (isWaitingForTool ? 'activity' : 'typing');
-  return {
-    key: `runtime-pending:${input.sessionKey}:${placeholderRunId}`,
-    kind: 'assistant-turn',
-    role: 'assistant',
-    sessionKey: input.sessionKey,
-    runId: placeholderRunId,
-    identitySource: 'run',
-    identityMode: 'run',
-    identityConfidence: 'strong',
-    status: isWaitingForTool ? 'waiting_tool' : 'streaming',
-    segments: input.imageGenerationActive ? [{
-      kind: 'message',
-      key: `runtime-pending:${input.sessionKey}:${placeholderRunId}:image-generation`,
-      text: input.imageGenerationLabel,
-    }] : [],
-    thinking: null,
-    tools: [],
-    pendingLabel: input.pendingLabel,
-    text: input.imageGenerationActive ? input.imageGenerationLabel : '',
-    images: [],
-    attachedFiles: [],
-    pendingState,
-    ...(input.runtime.lastUserMessageAt != null ? { createdAt: input.runtime.lastUserMessageAt } : {}),
-    ...(input.runtime.updatedAt != null ? { updatedAt: input.runtime.updatedAt } : {}),
-  } as SessionRenderItem;
 }
 
 async function fetchChatMarkdownExportWindow(input: {
@@ -526,9 +481,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const currentAgentId = currentConversation?.agentId ?? currentSession.meta.agentId ?? '';
   const connectorSessionIdentity = currentSession.meta.sessionIdentity;
   const connectorEndpointSessionId = currentSession.meta.endpointSessionId;
-  const agents = useSubagentsStore((state) => (
-    Array.isArray(state.agentsResource.data) ? state.agentsResource.data : EMPTY_AGENTS
-  ));
+  const agents = useSubagentsStore((state) => selectAgentsResource(state, currentConversation?.endpoint ?? null).data);
   const providerModels = useSubagentsStore((state) => state.availableModels);
   const providerModelsLoading = useSubagentsStore((state) => state.modelsLoading);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
@@ -599,6 +552,9 @@ export function Chat({ isActive = true }: ChatProps) {
     ? runtimeInstanceScope(currentConversationEndpoint) : isMatchaModelSession ? currentConfigurationScope : null,
   [currentConfigurationScope, currentConversationEndpoint, isMatchaModelSession, isOpenClawModelSession]);
   const currentDraftScope = currentConversation?.kind === 'draft' ? currentConfigurationScope : null;
+  const draftAgentModel = currentDraftScope ? agents.find((agent) => agent.id === currentAgentId)?.model ?? null : null;
+  const draftModelEntry = useMemo(() => resolveModelCatalogEntry(availableModels, draftAgentModel),
+    [availableModels, draftAgentModel]);
   const draftConfigurationScopeKey = currentDraftScope ? buildCapabilityScopeKey(currentDraftScope) : '';
   const draftConfigurationOwner = useMemo(() => ({ scope: currentDraftScope, ready: currentChatRuntimeAvailable, scopeKey: draftConfigurationScopeKey }), [currentDraftScope, currentChatRuntimeAvailable, draftConfigurationScopeKey]);
   const [draftConfigurationCapability, setDraftConfigurationCapability] = useState<{
@@ -608,8 +564,9 @@ export function Chat({ isActive = true }: ChatProps) {
     && draftConfigurationCapability?.owner === draftConfigurationOwner;
   const composerInitializationBusy = composerInitialization?.kind === 'creating' || composerInitialization?.kind === 'createUnknown'
     || composerInitialization?.kind === 'pending' && !composerInitialization.outcome;
-  const composerConfigurationStatus = composerInitialization?.kind === 'createUnknown' ? t('input.configurationCreateUnknown')
-    : composerInitialization?.kind === 'creating' ? t('input.configurationCreating')
+  const [dismissedComposerInitialization, setDismissedComposerInitialization] = useState<typeof composerInitialization>();
+  const composerConfigurationError = composerInitialization === dismissedComposerInitialization ? null
+    : composerInitialization?.kind === 'createUnknown' ? t('input.configurationCreateUnknown')
       : composerInitialization?.kind === 'pending' && composerInitialization.outcome
         ? t(`input.configurationOutcome.${composerInitialization.outcome}`) : null;
   const sessionRuntimeInitializing = currentSession.items.length === 0 && (
@@ -798,7 +755,12 @@ export function Chat({ isActive = true }: ChatProps) {
     closeSidePanel: closeSidePanelDomain,
     setSidePanelWidth,
     toggleArtifactWorkbenchFullscreen,
-    teamGraphSurface,
+    runtimeSurface,
+    sidePanelInline,
+    boardChatDock,
+    boardFullscreen,
+    setBoardChatDock,
+    setBoardFullscreen,
   } = useChatSidePanelController(chatSideEffectsActive, chatLayoutRef, currentWorkspaceIdentity ?? undefined);
   useEffect(() => {
     if (!chatSideEffectsActive || !designRuntimeAvailable || !designTeamKnown || !designTeamId || !designRunId) return;
@@ -837,8 +799,9 @@ export function Chat({ isActive = true }: ChatProps) {
     }
   };
   const chatWindowDock = useChatWindowDockController({
-    enabled: workspaceActive && currentChatRuntimeAvailable,
+    enabled: chatSideEffectsActive,
     panelOpen: sidePanelIntentOpen,
+    inline: sidePanelInline,
     preferredWidth: sidePanelPreferredWidth,
     renderWidth: sidePanelRenderWidth,
     artifactWorkbenchFullscreen,
@@ -955,33 +918,35 @@ export function Chat({ isActive = true }: ChatProps) {
         })) : [],
     [agents, currentConversationEndpoint, managementScope],
   );
+  const assistantPresentation = useMemo<ChatAssistantPresentation>(() => ({
+    agentId: currentAgentId,
+    agentName: currentAgent?.name || currentAgentId,
+    avatarSeed: currentAgent?.avatarSeed,
+    avatarStyle: currentAgent?.avatarStyle,
+  }), [currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId]);
   const imageGenerationActive = isImageGenerationActive(currentSession.runtime);
   const imageGenerationLabel = t('input.imageGenerationActive');
   const pendingRunProgressLabel = buildRunProgressPendingLabel(currentSession.runtime.runProgress, t);
+  const sessionPending = useMemo(() => createSessionPending(currentSession, currentSessionRecordKey), [currentSession, currentSessionRecordKey]);
   const renderItems = useMemo(() => {
-    const runtimePlaceholder = buildRuntimeAssistantPlaceholder({
-      sessionKey: currentSessionRecordKey,
-      runtime: currentSession.runtime,
-      items: viewportItems,
-      imageGenerationActive,
-      imageGenerationLabel,
+    const runtimePlaceholder = sessionPending?.kind === 'assistant' ? {
+      ...sessionPending.item,
       pendingLabel: pendingRunProgressLabel,
-    });
+      ...(imageGenerationActive ? {
+        text: imageGenerationLabel,
+        segments: [{ kind: 'message' as const, key: `${sessionPending.item.key}:image-generation`, text: imageGenerationLabel }],
+      } : {}),
+    } : null;
     const protocolItems = runtimePlaceholder ? [...viewportItems, runtimePlaceholder] : viewportItems;
     const nextItems = applyAssistantPresentationToItems({
       items: [...protocolItems],
       agents: assistantCatalogAgents,
-      defaultAssistant: {
-        agentId: currentAgentId,
-        agentName: currentAgent?.name || currentAgentId,
-        avatarSeed: currentAgent?.avatarSeed,
-        avatarStyle: currentAgent?.avatarStyle,
-      },
+      defaultAssistant: assistantPresentation,
       previousItems: previousRenderedItemsRef.current ?? undefined,
     });
     previousRenderedItemsRef.current = nextItems;
     return nextItems;
-  }, [assistantCatalogAgents, currentAgent?.avatarSeed, currentAgent?.avatarStyle, currentAgent?.name, currentAgentId, currentSession.runtime, currentSessionRecordKey, imageGenerationActive, imageGenerationLabel, pendingRunProgressLabel, viewportItems]);
+  }, [assistantCatalogAgents, assistantPresentation, imageGenerationActive, imageGenerationLabel, pendingRunProgressLabel, sessionPending, viewportItems]);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
     logSessionTrace('session.presentation.committed', 'session-presentation-boundary', () => ({
@@ -1269,6 +1234,16 @@ export function Chat({ isActive = true }: ChatProps) {
       setWorkspaceRecoveryPending(false);
     }
   }, [canChooseWorkspaceForCurrentAgent, currentAgent, currentAgentId, currentWorkspacePath, newSession, t, updateAgent, workspaceRecoveryPending]);
+  const bannerError = composerConfigurationError ?? visibleRuntimeError;
+  const errorBanner = bannerError ? (
+    <ChatErrorBanner
+      error={bannerError}
+      dismissLabel={t('common:actions.dismiss')}
+      onDismiss={composerConfigurationError
+        ? () => setDismissedComposerInitialization(composerInitialization)
+        : clearError}
+    />
+  ) : null;
   const runtimeStatusDock = currentSession.runtime.runtimeActivity === 'compacting' || currentSession.runtime.errorDetail || currentSession.runtime.runtimeNotice ? (
     <ChatRuntimeStatusDock
       compacting={currentSession.runtime.runtimeActivity === 'compacting'}
@@ -1294,6 +1269,7 @@ export function Chat({ isActive = true }: ChatProps) {
   ) : null;
   const activeRun = isRunActive(currentSession.runtime)
     || currentSession.runtime.activeRunId != null;
+  const sessionSendPending = hasPendingSessionSend(currentSession);
   const permissionPicker = useChatPermissions({
     scope: currentConfigurationScope,
     identity: currentSessionConversation?.sessionIdentity ?? null,
@@ -1302,15 +1278,15 @@ export function Chat({ isActive = true }: ChatProps) {
     draft: currentConversation?.kind === 'draft',
     draftAvailable: draftConfigurationReady && draftConfigurationCapability?.permission === true,
     draftLoading: Boolean(currentDraftScope) && currentChatRuntimeAvailable && !draftConfigurationReady,
-    initializationBusy: composerInitializationBusy,
+    initializationBusy: composerInitializationBusy || sessionSendPending,
     pendingSelection: composerConfiguration?.permissionSelection,
     pendingConfiguration: composerInitialization?.kind === 'pending',
     onSelectIntent: (selection) => setPermissionSelection(currentComposerDraftKey, selection),
   });
   const modelPicker = useMemo(() => {
     const intendedModelId = composerConfiguration?.modelSelectionId;
-    const currentModelId = intendedModelId ?? currentSessionModelId;
-    if (!currentModelId && availableModels.length === 0 && !modelsLoading
+    const currentModelId = intendedModelId ?? (currentDraftScope ? '' : currentSessionModelId);
+    if (!currentModelId && !draftAgentModel && availableModels.length === 0 && !modelsLoading
       && !(isMatchaModelSession && (currentSession.meta.modelState?.selected || currentSession.meta.modelState?.active))) {
       return null;
     }
@@ -1322,19 +1298,20 @@ export function Chat({ isActive = true }: ChatProps) {
       id: model.id,
       label: model.displayLabel,
     }));
+    const defaultModelLabel = draftModelEntry?.modelLabel ?? draftAgentModel;
     const selectedLabel = currentModelId
       ? triggerLabels.get(currentModelId) ?? resolveModelTriggerLabel(currentModelId)
-      : currentSession.meta.modelState?.selected?.model ?? t('input.pickModel');
+      : (currentDraftScope ? defaultModelLabel : currentSession.meta.modelState?.selected?.model) ?? t('input.pickModel');
     return {
       currentModelId,
       currentLabel: selectedLabel,
       options,
       loading: modelsLoading,
       switching: modelSwitching,
-      disabled: activeRun || modelSwitching || !currentChatRuntimeAvailable || composerInitializationBusy || (currentDraftScope
+      disabled: activeRun || sessionSendPending || modelSwitching || !currentChatRuntimeAvailable || composerInitializationBusy || (currentDraftScope
         ? !draftConfigurationReady || draftConfigurationCapability?.modelSelection !== true : !modelSelectionAvailable),
     };
-  }, [activeRun, availableModels, composerConfiguration?.modelSelectionId, composerInitializationBusy, currentChatRuntimeAvailable, currentDraftScope, currentSession.meta.modelState, currentSessionModelId, draftConfigurationCapability, draftConfigurationReady, isMatchaModelSession, modelSelectionAvailable, modelSwitching, modelsLoading, t]);
+  }, [activeRun, availableModels, composerConfiguration?.modelSelectionId, composerInitializationBusy, currentChatRuntimeAvailable, currentDraftScope, currentSession.meta.modelState, currentSessionModelId, draftAgentModel, draftModelEntry, draftConfigurationCapability, draftConfigurationReady, isMatchaModelSession, modelSelectionAvailable, modelSwitching, modelsLoading, sessionSendPending, t]);
   const composerContextTraceRef = useRef<string | null>(null);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
@@ -1367,6 +1344,37 @@ export function Chat({ isActive = true }: ChatProps) {
     viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
     return sendMessage(text, attachments);
   }, [sendMessage]);
+  const runtimeActionOwner = useMemo(() => ({ identity: currentWorkspaceIdentity, enabled: chatSideEffectsActive, recoveryKey: questionRecoveryKey, active: false }), [currentWorkspaceIdentity, chatSideEffectsActive, questionRecoveryKey]);
+  const runtimeActionsMatchRenderedSession = !!currentWorkspaceIdentity && !!currentSession.meta.sessionIdentity
+    && sessionIdentitiesEqual(currentWorkspaceIdentity, currentSession.meta.sessionIdentity);
+  const runtimeActionOwnerRef = useRef(runtimeActionOwner);
+  useLayoutEffect(() => {
+    runtimeActionOwnerRef.current = runtimeActionOwner;
+    runtimeActionOwner.active = runtimeActionOwner.enabled;
+    const retireOnSelectionChange = (state: ChatStoreState) => {
+      const conversation = state.currentConversation;
+      const identity = conversation?.kind === 'session' ? conversation.sessionIdentity
+        : conversation?.kind === 'draft' ? null : state.loadedSessions[state.currentSessionKey]?.meta.sessionIdentity;
+      if (!runtimeActionOwner.identity || !identity || !sessionIdentitiesEqual(runtimeActionOwner.identity, identity)) runtimeActionOwner.active = false;
+    };
+    retireOnSelectionChange(useChatStore.getState());
+    const unsubscribe = useChatStore.subscribe(retireOnSelectionChange);
+    return () => { runtimeActionOwner.active = false; unsubscribe(); };
+  }, [runtimeActionOwner]);
+  const handleRuntimeSendMessage = useCallback(async (text: string) => {
+    const gate = selectCurrentChatSendGate(useChatStore.getState());
+    if (!runtimeActionOwner.active || runtimeActionOwnerRef.current !== runtimeActionOwner
+      || !runtimeActionOwner.identity || !gate.canSend || gate.kind !== 'session'
+      || !sessionIdentitiesEqual(runtimeActionOwner.identity, gate.sessionIdentity)) {
+      throw new Error(t('board.sendUnavailable', { defaultValue: 'This session changed or cannot receive a message right now.' }));
+    }
+    const result = await handleSendMessage(text);
+    if (!result.accepted) throw new Error(result.error || t('board.sendUnavailable', { defaultValue: 'This session changed or cannot receive a message right now.' }));
+  }, [handleSendMessage, runtimeActionOwner, t]);
+  const handleRuntimeOpenLink = useCallback(async (url: string) => {
+    if (!runtimeActionOwner.active || runtimeActionOwnerRef.current !== runtimeActionOwner) return;
+    await invokeIpc('shell:openExternal', url);
+  }, [runtimeActionOwner]);
   const handleExportMarkdown = useCallback(() => {
     if (exportingMarkdown || !currentSessionRecordKey || !currentSessionConversation) {
       return;
@@ -1569,7 +1577,6 @@ export function Chat({ isActive = true }: ChatProps) {
         },
       } : null}
       permissionPicker={permissionPicker}
-      configurationStatus={composerConfigurationStatus}
       contextUsage={contextUsage}
       onOpenTeamGraph={teamGraphTeamId && teamGraphRunId && currentWorkspaceIdentity ? () => {
         openChatRuntimeSurface({ kind: 'team-graph', sourceSessionIdentity: currentWorkspaceIdentity, teamId: teamGraphTeamId, runId: teamGraphRunId });
@@ -1647,19 +1654,25 @@ export function Chat({ isActive = true }: ChatProps) {
         sidePanelMainWidth={chatWindowDock.sidePanelMainWidth}
         sidePanelVisible={chatWindowDock.sidePanelVisible}
         artifactWorkbenchFullscreen={artifactWorkbenchFullscreen}
+        boardChatDock={boardChatDock}
+        boardFullscreen={boardFullscreen}
         onSidePanelResize={chatWindowDock.resizeSidePanelWidth}
         onSidePanelResizeCommit={chatWindowDock.commitSidePanelWidth}
         onComposerWheel={handleComposerWheel}
         onComposerGeometryChange={handleComposerGeometryChange}
         isEmptyState={liveView.isEmptyState && chatQuestions.questions.length === 0 && !chatQuestions.error && sessionQuestions.questions.length === 0 && !sessionQuestions.error}
-        emptyState={<WelcomeScreen input={inputNode} />}
+        emptyState={<WelcomeScreen input={<div className="flex flex-col gap-2">{errorBanner}{inputNode}</div>} />}
         sidePanel={(
           <ChatSidePanel
-            key={currentComposerDraftKey}
+            key={currentWorkspaceIdentity ? buildSessionIdentityKey(currentWorkspaceIdentity) : currentComposerDraftKey}
             mode={sidePanelMode}
             width={sidePanelWidth}
             activeTab={activeSidePanelTab}
-            teamGraphSurface={teamGraphSurface}
+            runtimeSurface={runtimeSurface}
+            onBoardChatDockChange={setBoardChatDock}
+            onBoardFullscreenChange={setBoardFullscreen}
+            onSendMessage={handleRuntimeSendMessage}
+            onOpenLink={handleRuntimeOpenLink}
             artifactWorkbenchFullscreen={artifactWorkbenchFullscreen}
             onTabChange={setActiveSidePanelTab}
             onClose={chatWindowDock.closeSidePanel}
@@ -1678,7 +1691,7 @@ export function Chat({ isActive = true }: ChatProps) {
             onOpenArtifactGroup={handleOpenArtifactGroup}
             onArtifactSectionChange={setArtifactActiveSection}
             onArtifactViewModeChange={setArtifactViewMode}
-            sessionIdentity={currentSession.meta.sessionIdentity ?? undefined}
+            sessionIdentity={currentWorkspaceIdentity ?? undefined}
             onArtifactRevealInFileManager={(filePath) => {
               void invokeIpc('shell:showItemInFolder', filePath).then((result) => {
                 if (result && typeof result === 'object' && 'success' in result && (result as { success?: boolean }).success === false) {
@@ -1709,7 +1722,11 @@ export function Chat({ isActive = true }: ChatProps) {
             runtime={currentSession.runtime}
             viewport={currentSession.window}
             items={renderItems}
+            activity={sessionPending?.kind === 'activity' ? sessionPending.mode : null}
+            assistantPresentation={assistantPresentation}
             onReuseMessage={handleReuseMessage}
+            onRuntimeSendMessage={runtimeActionsMatchRenderedSession ? handleRuntimeSendMessage : undefined}
+            onRuntimeOpenLink={runtimeActionsMatchRenderedSession ? handleRuntimeOpenLink : undefined}
             liveView={liveView}
             errorMessage={localizedRuntimeError}
             showThinking={showThinking}
@@ -1742,13 +1759,7 @@ export function Chat({ isActive = true }: ChatProps) {
             jumpToBottomLabel={t('liveThread.jumpToBottom')}
           />
         )}
-        errorBanner={visibleRuntimeError ? (
-          <ChatErrorBanner
-            error={visibleRuntimeError}
-            dismissLabel={t('common:actions.dismiss')}
-            onDismiss={clearError}
-          />
-        ) : runtimeStatusDock}
+        errorBanner={errorBanner ?? runtimeStatusDock}
         approvalDock={approvalStatus === 'awaiting_approval' || chatQuestions.questions.length > 0 || chatQuestions.error || sessionQuestions.questions.length > 0 || sessionQuestions.error ? (
           <>
             {approvalStatus === 'awaiting_approval' ? (

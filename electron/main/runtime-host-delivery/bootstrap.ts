@@ -32,6 +32,7 @@ interface RuntimeHostBootstrapBaseInput {
   readonly appLogDir: string;
   /** MatchaClaw Host-owned durable state root. */
   readonly runtimeHostStateDir: string;
+  readonly searxngResourcesDir: string;
   /** Runtime-host executable started in Matcha MCP stdio mode by peer runtimes. */
   readonly runtimeHostMcpExecutable: string;
   /** Sealed Main-only provider credential resolver. */
@@ -90,6 +91,7 @@ export function buildRuntimeHostBootstrap(input: RuntimeHostBootstrapInput): Uin
     appVersion: input.appVersion,
     appLogDir: input.appLogDir,
     runtimeHostStateDir: input.runtimeHostStateDir,
+    searxngResourcesDir: input.searxngResourcesDir,
     runtimeHostMcpExecutable: input.runtimeHostMcpExecutable,
     ...(input.providerCredentialResolver
       ? {
@@ -131,6 +133,7 @@ function validateBootstrapInput(input: RuntimeHostBootstrapInput): void {
   validateAbsolutePath(input.appLogDir, 'appLogDir', input.platform);
   validateDeliveryVerificationKey(input.deliveryVerificationKey);
   validateAbsolutePath(input.runtimeHostStateDir, 'runtimeHostStateDir', input.platform);
+  validateAbsolutePath(input.searxngResourcesDir, 'searxngResourcesDir', input.platform);
   validateAbsolutePath(input.runtimeHostMcpExecutable, 'runtimeHostMcpExecutable', input.platform);
   validateParentCallbackBaseUrl(input.parentCallbackBaseUrl);
   validateParentCallbackDispatchToken(input.parentCallbackDispatchToken);

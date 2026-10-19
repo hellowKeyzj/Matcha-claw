@@ -13,14 +13,16 @@ use sessions_module::{
         MatchaSessionModelRuntimeCommand, ResolvedSessionModelSelection,
         SessionModelSelectionBinding, SessionModelSelectionOutcome, SessionModelSelectionRejection,
     },
-    send::{NativeEndpoint, SessionSendCommand, SessionSendOutcome},
-    state::SessionModelState,
+    send::{NativeEndpoint, SessionSendOutcome},
+    state::{SessionIdentity, SessionModelState},
 };
 use tokio_util::sync::CancellationToken;
 
 pub(super) async fn restore(
     client: &Client,
-    command: &SessionSendCommand,
+    identity: &SessionIdentity,
+    endpoint_session_id: Option<&str>,
+    trace_id: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<Option<MatchaSessionModelRuntimeCommand>, SessionSendOutcome> {
     if cancel.is_cancelled() {
@@ -28,8 +30,8 @@ pub(super) async fn restore(
     }
     let record = rpc::bound(
         client,
-        &command.identity,
-        command.endpoint_session_id.as_deref(),
+        identity,
+        endpoint_session_id,
     )
     .await
     .map_err(super::model::send_failure)?;
@@ -59,14 +61,14 @@ pub(super) async fn restore(
     }
     let model = record.model.ok_or(SessionSendOutcome::Rejected)?;
     let command = MatchaSessionModelRuntimeCommand::try_new(
-        command.identity.session_key.clone(),
+        identity.session_key.clone(),
         Some(record.session_id.as_str().to_owned()),
         model,
         record.model_selection_id,
         record.provider_fingerprint,
     )
     .map_err(|_| SessionSendOutcome::Rejected)?
-    .with_trace_id(command.trace_id().map(str::to_owned));
+    .with_trace_id(trace_id.map(str::to_owned));
     Ok(Some(command))
 }
 

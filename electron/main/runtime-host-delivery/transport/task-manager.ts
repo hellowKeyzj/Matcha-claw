@@ -1,6 +1,7 @@
 import type { RuntimeHostDeliveryIssuer } from '../issuer';
-import { hasExactKeys, isJsonValue, isNonEmptyBoundedText as isString, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJson } from './client';
-const UNAVAILABLE = { success: false, error: 'Task manager is unavailable' } as const;
+import { logger } from '../../../utils/logger';
+import { decodeTaskFailure, decodeTaskFailureResponse, taskFailureResponse, type TaskFailure } from '../../../../src/types/desktop/task-failure';
+import { hasExactKeys, isJsonValue, isNonEmptyBoundedText as isString, isRecord, isSafeNonNegativeInteger as isTimestamp, sendLoopbackJsonDelivery } from './client';
 
 type Operation =
   | 'tasks.list' | 'tasks.get' | 'tasks.create' | 'tasks.update'
@@ -41,9 +42,13 @@ export function createTaskManagerTransport(
   fetcher: typeof fetch = fetch,
 ): TaskManagerTransport {
   const send = async (operation: Operation, request: unknown): Promise<TaskManagerTransportResponse> => {
-    if (!isRequest(request, operation)) return { status: 503, body: UNAVAILABLE };
+    const fail = (failure: TaskFailure, status: 409 | 503 = 503, reason?: string): TaskManagerTransportResponse => {
+      logger.warn('[TaskManager] Delivery failed', { operation, status, ...failure, ...(reason ? { reason } : {}) });
+      return { status, body: taskFailureResponse(failure) };
+    };
+    if (!isRequest(request, operation)) return fail({ stage: 'task_request', code: 'invalid_params', delivery: 'notSent' });
     const detail = details[operation];
-    const response = await sendLoopbackJson({
+    const delivery = await sendLoopbackJsonDelivery({
       port: runtimeHostTransportPort,
       path: detail.path,
       issuer,
@@ -57,10 +62,39 @@ export function createTaskManagerTransport(
       fetcher,
       body: request,
     });
-    if (response?.status === 200 && isSuccess(response.body, operation)) return { status: 200, body: response.body };
-    if (response?.status === 409 && isPublicFailure(response.body)) return { status: 409, body: response.body };
-    if (response?.status === 503 && isUnavailable(response.body)) return { status: 503, body: UNAVAILABLE };
-    return { status: 503, body: UNAVAILABLE };
+    if (delivery.outcome !== 'response') {
+      return fail({
+        stage: delivery.reason === 'invalid_response' ? 'response' : 'transport',
+        code: delivery.reason === 'invalid_response' ? 'protocol' : 'transport',
+        delivery: delivery.outcome === 'not-attempted' ? 'notSent' : 'unknown',
+      }, 503, delivery.reason);
+    }
+    const response = delivery.response;
+    if (response.status === 200) {
+      if (!isSuccess(response.body, operation)) return fail({ stage: 'response', code: 'protocol', delivery: 'responseReceived' });
+      if (response.body.outcome === 'rejected' || response.body.outcome === 'unknown') {
+        const failure = decodeTaskFailure(response.body.failure);
+        logger.warn('[TaskManager] Mutation not applied', { operation, outcome: response.body.outcome, diagnosticPresent: failure !== null, ...failure });
+      }
+      return { status: 200, body: response.body };
+    }
+    if (response.status === 409 || response.status === 503) {
+      const failure = decodeTaskFailureResponse(response.body);
+      if (failure) return fail(failure.failure, response.status);
+      if (isPublicFailure(response.body)) {
+        logger.warn('[TaskManager] Runtime request failed without diagnostics', { operation, status: response.status });
+        return { status: response.status, body: response.body };
+      }
+      return fail({ stage: 'response', code: 'protocol', delivery: 'responseReceived' });
+    }
+    return fail({
+      stage: 'response',
+      code: response.status === 400 ? 'invalid_params'
+        : response.status === 401 || response.status === 403 ? 'authentication_failed'
+          : response.status === 404 ? 'method_not_found'
+            : response.status >= 400 ? 'remote_error' : 'protocol',
+      delivery: 'responseReceived',
+    });
   };
   return {
     list: (request) => send('tasks.list', request), get: (request) => send('tasks.get', request),
@@ -110,10 +144,10 @@ function isTodos(value: unknown): boolean {
     && isString(todo.content) && ['pending', 'in_progress', 'completed', 'deleted'].includes(todo.status as string)
     && (todo.id === undefined || isString(todo.id)) && (todo.activeForm === undefined || isString(todo.activeForm)) && (todo.owner === undefined || isString(todo.owner)));
 }
-function isSuccess(value: unknown, operation: Operation): boolean {
+function isSuccess(value: unknown, operation: Operation): value is Record<string, unknown> {
   if (!isRecord(value)) return false;
   if (operation === 'tasks.list') return isSnapshot(value);
-  if (operation === 'tasks.get') return hasExactKeys(value, ['task']) && isTask(value.task);
+  if (operation === 'tasks.get') return hasExactKeys(value, ['task']) && (value.task === null || isTask(value.task));
   if (operation === 'todos.get') return isTodoSnapshot(value);
   if (operation === 'todos.write') return (hasExactKeys(value, ['outcome', 'snapshot']) && value.outcome === 'applied' && isTodoSnapshot(value.snapshot) && isTimestamp(value.snapshot.updatedAt))
     || isClosedMutation(value);
@@ -126,7 +160,8 @@ function isSuccess(value: unknown, operation: Operation): boolean {
     || isClosedMutation(value);
 }
 function isClosedMutation(value: Record<string, unknown>): boolean {
-  return hasExactKeys(value, ['outcome']) && (value.outcome === 'rejected' || value.outcome === 'unknown');
+  return (hasExactKeys(value, ['outcome']) || (hasExactKeys(value, ['outcome', 'failure']) && decodeTaskFailure(value.failure) !== null))
+    && (value.outcome === 'rejected' || value.outcome === 'unknown');
 }
 function isSnapshot(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['tasks', 'todos']) && Array.isArray(value.tasks) && value.tasks.every(isTask)
@@ -163,6 +198,8 @@ function isEndpoint(value: unknown): value is Endpoint {
     && value.kind === 'native-runtime' && (value.runtimeAdapterId === 'openclaw' || value.runtimeAdapterId === 'matcha-agent') && value.runtimeInstanceId === 'local';
 }
 function sameIdentity(left: Identity, right: Identity): boolean { return left.agentId === right.agentId && left.sessionKey === right.sessionKey && left.endpoint.runtimeAdapterId === right.endpoint.runtimeAdapterId && left.endpoint.runtimeInstanceId === right.endpoint.runtimeInstanceId; }
-function isUnavailable(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['success', 'error']) && value.success === false && value.error === UNAVAILABLE.error; }
-function isPublicFailure(value: unknown): boolean { return isRecord(value) && hasExactKeys(value, ['success', 'error']) && value.success === false && typeof value.error === 'string'; }
-function isStringArray(value: unknown): boolean { return Array.isArray(value) && value.every(isString); }
+function isPublicFailure(value: unknown): boolean {
+  return isRecord(value) && hasExactKeys(value, ['success', 'error']) && value.success === false
+    && (value.error === 'Task manager is unavailable' || value.error === 'Task manager request was rejected');
+}
+function isStringArray(value: unknown): boolean { return Array.isArray(value) && value.every((item) => isString(item)); }

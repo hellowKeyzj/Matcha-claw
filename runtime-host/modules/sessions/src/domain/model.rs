@@ -1552,6 +1552,18 @@ impl SessionState {
         self.cursor
     }
 
+    pub fn items(&self) -> &SessionFact<Vec<SessionItem>> {
+        &self.items
+    }
+
+    pub fn tools(&self) -> &SessionFact<Vec<ToolView>> {
+        &self.tools
+    }
+
+    pub fn runtime(&self) -> &SessionFact<RuntimeView> {
+        &self.runtime
+    }
+
     pub fn view(&self) -> SessionView {
         SessionView {
             session_key: self.identity.session_key.clone(),
@@ -1768,7 +1780,17 @@ impl SessionState {
                 .terminal_runs
                 .iter()
                 .any(|run| !valid_id(&run.run_id) || !terminal_run_phase(run.phase))
-            || matches!(sync.cut, SessionSyncCut::EventFrontier { cursor, .. } if cursor > MAX_SAFE_INTEGER)
+            || matches!(sync.cut, SessionSyncCut::EventFrontier { cursor, .. }
+                | SessionSyncCut::Restored { cursor, .. } if cursor > MAX_SAFE_INTEGER)
+        {
+            return Err(SessionStateError::InvalidFacts);
+        }
+        if let SessionSyncCut::Restored { cursor, contiguous } = sync.cut
+            && (sync.source_epoch.is_none()
+                || !contiguous
+                || sync.replay_baseline.is_some()
+                || (baseline.native_source_epoch == sync.source_epoch
+                    && baseline.native_cursor.is_some_and(|previous| cursor < previous)))
         {
             return Err(SessionStateError::InvalidFacts);
         }
@@ -1947,12 +1969,14 @@ impl SessionState {
                         .retain(|id| id.source != AcceptedEventSource::Native);
                 }
             }
-            SessionSyncCut::EventFrontier { cursor, .. } => {
+            SessionSyncCut::EventFrontier { cursor, .. }
+            | SessionSyncCut::Restored { cursor, .. } => {
                 if crate::trace::enabled() {
+                    let restored = matches!(sync.cut, SessionSyncCut::Restored { .. });
                     crate::trace::log_unscoped("sessions.reconcile_sync.cut", || serde_json::json!({
-                        "cut": "event_frontier", "sourceEpochChanged": next.native_source_epoch != sync.source_epoch,
+                        "cut": if restored { "restored" } else { "event_frontier" }, "sourceEpochChanged": next.native_source_epoch != sync.source_epoch,
                         "decision": if next.native_source_epoch != sync.source_epoch { "replace_frontier" } else { "advance_frontier" },
-                        "reason": "consumed_frontier", "nativeCursorBefore": next.native_cursor, "incomingCursor": cursor,
+                        "reason": if restored { "restored_view_frontier" } else { "consumed_frontier" }, "nativeCursorBefore": next.native_cursor, "incomingCursor": cursor,
                     }));
                 }
                 if next.native_source_epoch != sync.source_epoch {

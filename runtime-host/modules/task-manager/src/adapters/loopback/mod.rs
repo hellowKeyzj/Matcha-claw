@@ -12,6 +12,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::{
+    TaskExecution, TaskFailure, TaskFailureCode, TaskFailureStage,
     api::TaskHandle,
     domain::model::{
         Task, TaskCommand, TaskCreate, TaskCreateReceipt, TaskMetadata, TaskMutationOutcome,
@@ -113,8 +114,13 @@ async fn handle(request: Request, dependencies: Dependencies) -> Response {
         .task_manager(request.into_command())
         .await
     {
-        Ok(outcome) => Delivery::from_outcome(outcome).into_response(),
-        Err(_) => Delivery::unavailable().into_response(),
+        Ok(execution) => Delivery::from_execution(execution).into_response(),
+        Err(_) => Delivery::unavailable()
+            .with_failure(TaskFailure::new(
+                TaskFailureStage::Admission,
+                TaskFailureCode::OwnerUnavailable,
+            ))
+            .into_response(),
     }
 }
 
@@ -570,6 +576,29 @@ impl Delivery {
         Self::fixed(503, "Task manager is unavailable")
     }
 
+    fn from_execution(execution: TaskExecution) -> Self {
+        let delivery = Self::from_outcome(execution.outcome);
+        let failed = delivery.status >= 400
+            || matches!(delivery.body["outcome"].as_str(), Some("rejected" | "unknown"));
+        match execution.failure {
+            Some(failure) if failed => delivery.with_failure(failure),
+            _ => delivery,
+        }
+    }
+
+    fn with_failure(mut self, failure: TaskFailure) -> Self {
+        let failure = serde_json::to_value(failure).expect("task failure is serializable");
+        if self.status >= 400 {
+            self.body["error"] = Value::String(format!(
+                "Task request failed: {} ({})",
+                failure["code"].as_str().expect("task failure code"),
+                failure["stage"].as_str().expect("task failure stage"),
+            ));
+        }
+        self.body["failure"] = failure;
+        self
+    }
+
     fn from_outcome(outcome: TaskOutcome) -> Self {
         match outcome {
             TaskOutcome::List(outcome) => read_snapshot(outcome),
@@ -818,10 +847,9 @@ fn body_policy_for_method(method: &str, max_bytes: usize) -> BodyPolicy {
 }
 
 fn timeout_response() -> Response {
-    Response::json(
-        503,
-        serde_json::json!({ "success": false, "error": "Runtime Host request deadline exceeded" }),
-    )
+    Delivery::unavailable()
+        .with_failure(TaskFailure::new(TaskFailureStage::Runtime, TaskFailureCode::Deadline))
+        .into_response()
 }
 
 fn is_task_manager_route(path: &str) -> bool {

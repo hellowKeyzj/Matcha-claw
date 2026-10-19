@@ -1,7 +1,7 @@
 use crate::{
     client::Client,
     session::{
-        history, projection,
+        history, normalization, projection,
         rpc::{self, Failure, FailureKind},
     },
 };
@@ -23,8 +23,14 @@ pub(super) async fn read(
     command: &timeline::Command,
     epoch: u64,
 ) -> Result<SessionView, Failure> {
-    let record = rpc::bound(client, command.identity(), command.endpoint_session_id()).await?;
-    let (page, window) = history::window(
+    let record = rpc::bound(client, command.identity(), command.endpoint_session_id())
+        .await
+        .inspect_err(|error| {
+            if let Some((_, id)) = projection::parse_session_key(&command.identity().session_key) {
+                error.trace("timeline.bound", Some("sessions.get"), id);
+            }
+        })?;
+    let (page, mut window) = history::window(
         client,
         record.session_id.as_str(),
         &record.agent_id,
@@ -33,24 +39,80 @@ pub(super) async fn read(
         command.offset(),
     )
     .await?;
-    let mut items = Vec::new();
-    let mut tools = Vec::<ToolView>::new();
-    for row in &page.messages {
-        if let Some(message) = projection::message(row, ItemStatus::Final)? {
-            if items
+    let mut groups = Vec::new();
+    let mut item_count = 0;
+    let reverse = !matches!(command.direction(), timeline::Direction::Newer);
+    for position in 0..page.messages.len() {
+        let index = if reverse {
+            page.messages.len() - 1 - position
+        } else {
+            position
+        };
+        let raw = &page.messages[index];
+        let managed_input = raw.get("uuid").and_then(Value::as_str).is_some_and(|uuid| {
+            page.managed_input_message_ids
                 .iter()
-                .any(|item: &SessionItem| item.item_id() == message.item.item_id())
+                .any(|input| input == uuid)
+        });
+        let mut group = Vec::new();
+        for message in normalization::messages(raw, managed_input).inspect_err(|error| {
+            error.trace("timeline.normalize", None, record.session_id.as_str());
+        })? {
+            if let Some(message) = projection::message(&message.row, ItemStatus::Final)
+                .inspect_err(|error| {
+                    error.trace(
+                        "timeline.message_projection",
+                        None,
+                        record.session_id.as_str(),
+                    );
+                })?
             {
-                return Err(Failure::InvalidReadback);
+                group.push(message);
             }
-            items.push(message.item);
-            for tool in message.tools {
-                projection::merge_tool(&mut tools, tool)?;
+        }
+        // Never split a raw row at the display budget: native offsets cannot
+        // resume in the middle of its normalized SDK messages.
+        if item_count + group.len() > sessions_module::state::MAX_ITEMS {
+            if reverse {
+                window.window_start_offset += index as u64 + 1;
+                window.has_more = true;
+            } else {
+                window.window_end_offset = window.window_start_offset + index as u64;
+                window.has_newer = window.window_end_offset < window.total_item_count;
+                window.is_at_latest = !window.has_newer;
             }
+            break;
+        }
+        item_count += group.len();
+        groups.push(group);
+    }
+    if reverse {
+        groups.reverse();
+    }
+    let mut items = Vec::with_capacity(item_count);
+    let mut tools = Vec::<ToolView>::new();
+    for message in groups.into_iter().flatten() {
+        if items
+            .iter()
+            .any(|item: &SessionItem| item.item_id() == message.item.item_id())
+        {
+            Failure::InvalidReadback.trace(
+                "timeline.duplicate_item",
+                None,
+                record.session_id.as_str(),
+            );
+            return Err(Failure::InvalidReadback);
+        }
+        items.push(message.item);
+        for tool in message.tools {
+            projection::merge_tool(&mut tools, tool).inspect_err(|error| {
+                error.trace("timeline.merge_tool", None, record.session_id.as_str());
+            })?;
         }
     }
     let mut view = sessions_module::state::SessionState::new(command.identity().clone(), epoch)
-        .map_err(|_| Failure::InvalidInput)?
+        .map_err(|_| Failure::InvalidInput)
+        .inspect_err(|error| error.trace("timeline.state", None, record.session_id.as_str()))?
         .view();
     view.endpoint_session_id = Some(record.session_id.as_str().to_owned());
     view.goal = sessions_module::goal::SessionGoalView::Unsupported;
@@ -82,7 +144,11 @@ pub(super) async fn read(
             MissingFact::EventOnly,
         ],
     };
-    view.validate().map_err(|_| Failure::InvalidReadback)?;
+    view.validate()
+        .map_err(|_| Failure::InvalidReadback)
+        .inspect_err(|error| {
+            error.trace("timeline.view_validate", None, record.session_id.as_str())
+        })?;
     Ok(view)
 }
 pub(super) async fn load(
@@ -182,28 +248,14 @@ pub(super) async fn content(
             .and_then(|value| value.rsplit_once(':'))
             .ok_or(Failure::InvalidInput)?;
         let index = index.parse::<usize>().map_err(|_| Failure::InvalidInput)?;
-        let row =
-            history::message(client, record.session_id.as_str(), &record.agent_id, uuid).await?;
-        let body = row
-            .pointer("/message/content")
-            .or_else(|| row.get("content"))
-            .ok_or(Failure::InvalidReadback)?;
-        let block = if let Some(blocks) = body.as_array() {
-            blocks.get(index).ok_or(Failure::InvalidInput)?
-        } else if index == 0 {
-            body
-        } else {
-            return Err(Failure::InvalidInput);
-        };
-        let text = if let Some(text) = block.as_str() {
-            text
-        } else {
-            block
-                .get("text")
-                .or_else(|| block.get("thinking"))
-                .and_then(Value::as_str)
-                .ok_or(Failure::InvalidInput)?
-        };
+        let text = history::message(
+            client,
+            record.session_id.as_str(),
+            &record.agent_id,
+            uuid,
+            index,
+        )
+        .await?;
         let start = usize::try_from(command.offset()).map_err(|_| Failure::InvalidInput)?;
         if start > text.len() || !text.is_char_boundary(start) {
             return Err(Failure::InvalidInput);

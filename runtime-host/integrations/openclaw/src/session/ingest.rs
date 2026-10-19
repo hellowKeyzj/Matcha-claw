@@ -199,11 +199,12 @@ pub(crate) struct SessionEventIngest {
     sender: mpsc::Sender<IngestFrame>,
     next_epoch: AtomicU64,
     task: Mutex<Option<foundation::execution::OwnedTask<()>>>,
+    board_events: Arc<std::sync::RwLock<Option<board::BoardEventSink>>>,
     session_events: mpsc::Sender<SessionIngressEvent>,
 }
 
 pub(crate) enum IngestFrame {
-    Socket { epoch: GatewayEpoch, frame: crate::gateway::connection::GatewayFrame, observations: Arc<crate::gateway::observation::Observations> },
+    Socket { epoch: GatewayEpoch, frame: crate::gateway::connection::GatewayFrame, observations: Arc<crate::gateway::observation::Observations>, failure: tokio::sync::watch::Receiver<Option<crate::gateway::delivery::DispatcherError>> },
     HistoryContent { identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: GatewayEpoch, window: super::window::SessionWindow, page: super::window::PageRequest, host_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Option<sessions_module::ports::SessionSync>, sessions_module::ports::RuntimeOperationFailure>> },
     HistoryStarted { identity: sessions_module::state::SessionIdentity, generation: u64, page: super::window::PageRequest, reply: tokio::sync::oneshot::Sender<u64> },
     HistoryFinished { identity: sessions_module::state::SessionIdentity, generation: u64, read: u64, reply: tokio::sync::oneshot::Sender<bool> },
@@ -218,30 +219,59 @@ impl SessionEventIngest {
     ) -> Self {
         let (sender, receiver) = mpsc::channel(INGRESS_CAPACITY);
         let session_sink = session_events.clone();
+        let board_events = Arc::new(std::sync::RwLock::new(None));
+        let board_ingress = Arc::clone(&board_events);
         let (task, _) = foundation::execution::OwnedTask::spawn(|cancel| async move {
             tokio::select! {
                 _ = cancel.cancelled() => {},
-                _ = project_ingress(receiver, events, session_events) => {},
+                _ = project_ingress(receiver, events, session_events, board_ingress) => {},
             }
         });
-        Self { sender, next_epoch: AtomicU64::new(0), task: Mutex::new(Some(task)), session_events: session_sink }
+        Self { sender, next_epoch: AtomicU64::new(0), task: Mutex::new(Some(task)), board_events, session_events: session_sink }
+    }
+
+    pub(crate) fn set_board_event_sink(&self, sink: Option<board::BoardEventSink>) {
+        *self.board_events.write().expect("Board ingress sink lock poisoned") = sink;
+    }
+
+    pub(crate) fn control_ready(&self, observations: &crate::gateway::observation::Observations, epoch: GatewayEpoch) {
+        let sink = self.board_events.write().expect("Board ingress sink lock poisoned");
+        if observations.is_source_active(epoch.as_u64()) {
+            if let Some(sink) = sink.as_ref() { sink.invalidate(); }
+        }
     }
 
     pub(crate) fn forward(self: &Arc<Self>, mut events: mpsc::Receiver<crate::gateway::connection::GatewayFrame>, observations: Arc<crate::gateway::observation::Observations>, failure: tokio::sync::watch::Receiver<Option<crate::gateway::delivery::DispatcherError>>) -> (GatewayEpoch, foundation::execution::OwnedTask<()>) {
         let value = self.next_epoch.fetch_add(1, Ordering::Relaxed).checked_add(1).expect("gateway epoch exhausted");
         let epoch = GatewayEpoch::try_new(value).expect("gateway epoch never zero");
-        observations.activate(value);
+        {
+            let _source = self.board_events.write().expect("Board ingress sink lock poisoned");
+            observations.activate(value);
+        }
         let sender = self.sender.clone();
         let session_events = self.session_events.clone();
+        let board_events = Arc::clone(&self.board_events);
+        let mut board_failure = failure.clone();
         let (task, _) = foundation::execution::OwnedTask::spawn(move |cancel| async move {
             tokio::select! {
                 biased;
-                _ = cancel.cancelled() => { observations.deactivate(value); },
+                _ = cancel.cancelled() => { deactivate_source(&board_events, &observations, value); },
+                // Invalidate Board immediately even if ingress is full; keep draining session frames.
+                _ = async {
+                    let _ = board_failure.wait_for(|failure| failure.is_some()).await;
+                    {
+                        let sink = board_events.write().expect("Board ingress sink lock poisoned");
+                        if observations.is_source_active(value) {
+                            if let Some(sink) = sink.as_ref() { sink.invalidate(); }
+                        }
+                    }
+                    std::future::pending::<()>().await;
+                } => {},
                 _ = async {
                     while let Some(frame) = events.recv().await {
-                        if sender.send(IngestFrame::Socket { epoch, frame, observations: Arc::clone(&observations) }).await.is_err() { break; }
+                        if sender.send(IngestFrame::Socket { epoch, frame, observations: Arc::clone(&observations), failure: failure.clone() }).await.is_err() { break; }
                     }
-                    observations.deactivate(value);
+                    deactivate_source(&board_events, &observations, value);
                     let reason = match *failure.borrow() {
                         Some(crate::gateway::delivery::DispatcherError::EventBackpressure) => sessions_module::state::RecoveryReason::EventOverflow,
                         Some(crate::gateway::delivery::DispatcherError::Protocol) => sessions_module::state::RecoveryReason::NativeUnknown,
@@ -292,7 +322,14 @@ impl SessionEventIngest {
     }
 }
 
-async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc::Sender<SessionEvent>, session_events: mpsc::Sender<SessionIngressEvent>) {
+fn deactivate_source(board_events: &std::sync::RwLock<Option<board::BoardEventSink>>, observations: &crate::gateway::observation::Observations, epoch: u64) {
+    let sink = board_events.write().expect("Board ingress sink lock poisoned");
+    let active = observations.is_source_active(epoch);
+    observations.deactivate(epoch);
+    if active { if let Some(sink) = sink.as_ref() { sink.invalidate(); } }
+}
+
+async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc::Sender<SessionEvent>, session_events: mpsc::Sender<SessionIngressEvent>, board_events: Arc<std::sync::RwLock<Option<board::BoardEventSink>>>) {
     use crate::gateway::{connection::GatewayFrame, observation::{OrderedContext, identity_key}};
     use sessions_module::ports::RuntimeOperationFailure;
     let mut router = EventRouter::new(session_events);
@@ -307,7 +344,7 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                 continue;
             }
         };
-        let (epoch, frame, observations) = match frame {
+        let (epoch, frame, observations, failure) = match frame {
             IngestFrame::HistoryStarted { identity, generation, page, reply } => {
                 let _ = reply.send(router.history_started(&identity, generation, page));
                 continue;
@@ -316,7 +353,7 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                 let _ = reply.send(router.history_finished(&identity, generation, read));
                 continue;
             }
-            IngestFrame::Socket { epoch, frame, observations } => (epoch, frame, observations),
+            IngestFrame::Socket { epoch, frame, observations, failure } => (epoch, frame, observations, failure),
             IngestFrame::HistoryContent { identity, generation, source_epoch, window, page, host_epoch, observations, reply } => {
                 let result = if source_epoch.as_u64() != active_epoch || !observations.contains(&identity, generation, Some(active_epoch)) {
                     Err(RuntimeOperationFailure::Unavailable)
@@ -362,12 +399,18 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                 }
                 let monotonic = event.sequence.is_none_or(|seq| last_sequence.is_none_or(|last| seq > last));
                 if !monotonic {
+                    if let Some(sink) = board_events.read().expect("Board ingress sink lock poisoned").as_ref() {
+                        if observations.is_source_active(epoch.as_u64()) && failure.borrow().is_none() { sink.invalidate(); }
+                    }
                     trace_gateway_drop("runtime.openclaw.ingress.dropped", trace_payload, "non_monotonic_gateway_sequence");
                     let targets = observation_targets(&observations, active_epoch, None);
                     for (identity, generation) in targets { router.recover(identity, generation, epoch, CanonicalRecoveryReason::CursorStale, &observations).await; }
                     continue;
                 }
                 if event.sequence.zip(last_sequence).is_some_and(|(seq, last)| seq > last + 1) {
+                    if let Some(sink) = board_events.read().expect("Board ingress sink lock poisoned").as_ref() {
+                        if observations.is_source_active(epoch.as_u64()) && failure.borrow().is_none() { sink.invalidate(); }
+                    }
                     trace_gateway_drop("runtime.openclaw.ingress.dropped", trace_payload, "gateway_sequence_gap");
                     let targets: Vec<_> = {
                         let mut entries = observations.entries.lock().expect("observation registry lock poisoned");
@@ -379,6 +422,27 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                     continue;
                 }
                 if event.sequence.is_some() { last_sequence = event.sequence; }
+                if matches!(event.name.as_str(), "board.changed" | "board.command") {
+                    if let Some(sink) = board_events.read().expect("Board ingress sink lock poisoned").as_ref() {
+                        if !observations.is_source_active(epoch.as_u64()) || failure.borrow().is_some() { continue; }
+                        let endpoint = runtime_directory::RuntimeDriverIdentity::open_claw().endpoint();
+                        match crate::surfaces::board::decode_event(&endpoint, &event) {
+                            Ok(Some(event)) => { let _ = sink.publish(event); },
+                            Ok(None) | Err(_) => sink.invalidate(),
+                        }
+                    }
+                    continue;
+                }
+                if event.name == "progressCard.changed" {
+                    if !observations.is_source_active(epoch.as_u64()) || failure.borrow().is_some() { continue; }
+                    if let Ok(permit) = events.reserve().await {
+                        let _source = board_events.read().expect("Board ingress sink lock poisoned");
+                        if observations.is_source_active(epoch.as_u64()) && failure.borrow().is_none() {
+                            permit.send(SessionEvent::ProgressChanged);
+                        }
+                    }
+                    continue;
+                }
                 if matches!(event.name.as_str(), "question.requested" | "question.resolved") {
                     let _ = events.send(SessionEvent::QuestionsChanged).await;
                     continue;
@@ -768,11 +832,13 @@ mod tests {
             .unwrap();
         drop(gateway_tx);
 
-        let (_, delta) = session_rx
+        let (_, sessions_module::command::SessionIngress::Event(delta)) = session_rx
             .recv()
             .await
             .expect("delta session event")
-            .into_parts();
+            .into_parts() else {
+                panic!("expected delta session event");
+            };
         assert_eq!(delta.binding.route_key(), Some("renderer-route:session"));
         assert_eq!(delta.run_id.as_deref(), Some("native-run"));
         assert!(matches!(
@@ -780,11 +846,13 @@ mod tests {
             [SessionChange::MessageDelta { text, .. }] if text == "hello"
         ));
 
-        let (_, terminal) = session_rx
+        let (_, sessions_module::command::SessionIngress::Event(terminal)) = session_rx
             .recv()
             .await
             .expect("terminal session event")
-            .into_parts();
+            .into_parts() else {
+                panic!("expected terminal session event");
+            };
         assert_eq!(terminal.binding.route_key(), Some("renderer-route:session"));
         assert!(matches!(
             terminal.changes.as_slice(),

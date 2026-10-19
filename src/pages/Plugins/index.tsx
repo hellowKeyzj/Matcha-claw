@@ -10,7 +10,6 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { usePluginsStore } from '@/stores/plugins-store';
-import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
 import { selectManagementEndpoint, selectManagementAgentScope, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { buildCapabilityScopeKey, runtimeInstanceScope } from '@/types/desktop/runtime-address';
 import { isPluginScope } from '@/types/plugins';
@@ -93,7 +92,7 @@ export function PluginsPage() {
 
   return (
     <AgentPage>
-      <AgentPageSection actions={<RuntimeScopeSelector />}>
+      <AgentPageSection>
         <h2 className="flex min-h-12 items-center gap-2 border-b-2 border-foreground pb-3 text-sm font-medium">
           {t('plugins:catalog.title')}
           {activeScope && catalogReady && <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">{catalog.length}</Badge>}

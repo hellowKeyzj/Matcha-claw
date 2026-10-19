@@ -18,6 +18,22 @@ export const KNOWN_TOOL_NAMES = [
 
 export type KnownToolName = (typeof KNOWN_TOOL_NAMES)[number];
 
+export type ToolActivityKind = 'command' | 'read' | 'edit' | 'write' | 'search' | 'fetch' | 'generic';
+
+export interface ToolActivityDescriptor {
+  readonly kind: ToolActivityKind;
+  readonly title: string;
+  readonly label: string;
+  readonly target?: string;
+  readonly fileOperations?: readonly { kind: 'read' | 'edit' | 'write' | 'delete'; path: string }[];
+}
+
+export interface ToolActivityDisclosure {
+  readonly expandedKeys: ReadonlySet<string>;
+  readonly toggle: (key: string) => void;
+  readonly collapse: () => void;
+}
+
 export interface ToolRendererContext {
   readonly normalizedName: string;
   readonly knownName: KnownToolName | null;
@@ -27,6 +43,7 @@ export interface ToolRendererContext {
 export interface ToolActivityRenderer {
   readonly name: KnownToolName;
   readonly matches: (tool: SessionRenderToolCard, context: ToolRendererContext) => boolean;
+  readonly describe: (tool: SessionRenderToolCard, t: TFunction<'chat'>) => ToolActivityDescriptor;
   readonly buildContent: (tool: SessionRenderToolCard, t: TFunction<'chat'>) => ToolActivityContent;
 }
 
@@ -45,8 +62,7 @@ const KNOWN_TOOL_NAME_MATCHERS: Readonly<Record<Exclude<KnownToolName, 'generic'
 };
 
 export function normalizeToolName(toolName: string): string {
-  // MCP names are server__tool (OpenClaw) or mcp__server__tool (Matcha).
-  return toolName.trim().replace(/^(?:mcp__)?[a-z0-9_-]+?__/i, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return toolName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
 export function matchKnownToolName(normalizedName: string): KnownToolName | null {

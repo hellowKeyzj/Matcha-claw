@@ -108,6 +108,9 @@ importers:
       '@openclaw/qwen-provider':
         specifier: 2026.9.3
         version: 2026.9.3(openclaw@2026.9.3(@aws-sdk/credential-provider-node@3.972.51)(@smithy/signature-v4@5.4.6)(encoding@0.1.13))
+      '@openclaw/searxng-plugin':
+        specifier: 2026.9.3
+        version: 2026.9.3(openclaw@2026.9.3(@aws-sdk/credential-provider-node@3.972.51)(@smithy/signature-v4@5.4.6)(encoding@0.1.13))
       '@openclaw/stepfun-provider':
         specifier: 2026.9.3
         version: 2026.9.3(openclaw@2026.9.3(@aws-sdk/credential-provider-node@3.972.51)(@smithy/signature-v4@5.4.6)(encoding@0.1.13))
@@ -2342,6 +2345,15 @@ packages:
 
   '@openclaw/qwen-provider@2026.9.3':
     resolution: {integrity: sha512-V79njmBtJhj8QwmNxpSiwN/K0TP+yf0zEn2Uk67LcmtVVc7cnhkMfVARMQ8SS23SuDly0whnz5xEad1QiJaNGQ==}
+    peerDependencies:
+      openclaw: '>=2026.9.3'
+    peerDependenciesMeta:
+      openclaw:
+        optional: true
+    bundledDependencies: []
+
+  '@openclaw/searxng-plugin@2026.9.3':
+    resolution: {integrity: sha512-GKIJNhz/3XKsiCIN3r0jlFPqBNRn0wyYWMfbEY4EKf1HAcZ3hPBwuLMvFcX4h8yyXFlEm3Rcjp5CNH/K5kY7Pg==}
     peerDependencies:
       openclaw: '>=2026.9.3'
     peerDependenciesMeta:
@@ -10074,6 +10086,10 @@ snapshots:
       openclaw: 2026.9.3(@aws-sdk/credential-provider-node@3.972.51)(@smithy/signature-v4@5.4.6)(encoding@0.1.13)
 
   '@openclaw/qwen-provider@2026.9.3(openclaw@2026.9.3(@aws-sdk/credential-provider-node@3.972.51)(@smithy/signature-v4@5.4.6)(encoding@0.1.13))':
+    optionalDependencies:
+      openclaw: 2026.9.3(@aws-sdk/credential-provider-node@3.972.51)(@smithy/signature-v4@5.4.6)(encoding@0.1.13)
+
+  '@openclaw/searxng-plugin@2026.9.3(openclaw@2026.9.3(@aws-sdk/credential-provider-node@3.972.51)(@smithy/signature-v4@5.4.6)(encoding@0.1.13))':
     optionalDependencies:
       openclaw: 2026.9.3(@aws-sdk/credential-provider-node@3.972.51)(@smithy/signature-v4@5.4.6)(encoding@0.1.13)
 

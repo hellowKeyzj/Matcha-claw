@@ -2,7 +2,8 @@ use foundation::process::supervision::SupervisorPhase;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use task_manager::{
-    SessionTarget, Task, TaskCommand, TaskCreateReceipt, TaskFuture, TaskMetadata,
+    SessionTarget, Task, TaskCommand, TaskCreateReceipt, TaskDelivery, TaskExecution,
+    TaskFailure, TaskFailureCode, TaskFailureStage, TaskFuture, TaskMetadata,
     TaskMutationOutcome, TaskOps, TaskOutcome, TaskReadOutcome, TaskSnapshot,
     TaskStatus, Todo, TodoSnapshot, TodoStatus,
 };
@@ -10,7 +11,7 @@ use task_manager::{
 use crate::{client::{Client, Delivery, Error}, driver::MatchaRuntimeDriver};
 
 impl TaskOps for MatchaRuntimeDriver {
-    fn task_manager<'a>(&'a self, command: TaskCommand) -> TaskFuture<'a, TaskOutcome> {
+    fn task_manager<'a>(&'a self, command: TaskCommand) -> TaskFuture<'a, TaskExecution> {
         Box::pin(async move {
             let client = self.native_client();
             let target = match &command {
@@ -20,7 +21,7 @@ impl TaskOps for MatchaRuntimeDriver {
             };
             let (agent_id, session_id) = match address(&client, target).await {
                 Ok(address) => address,
-                Err(failure) => return failed_before_write(command, failure),
+                Err((failure, diagnostic)) => return failed_before_write(command, failure, diagnostic),
             };
             let mut params = json!({"agentId": agent_id, "sessionId": session_id});
             let method = match &command {
@@ -37,18 +38,18 @@ impl TaskOps for MatchaRuntimeDriver {
                 }
                 TaskCommand::Create { target, input } => {
                     list_id(&mut params, target.team_key());
-                    params["input"] = match serde_json::to_value(input) { Ok(input) => input, Err(_) => return failed(command, Failure::Rejected) };
+                    params["input"] = match serde_json::to_value(input) { Ok(input) => input, Err(_) => return failed(command, Failure::Rejected, TaskFailure::new(TaskFailureStage::TaskRequest, TaskFailureCode::InvalidParams)) };
                     "tasks.create"
                 }
                 TaskCommand::Update { target, input } => {
                     list_id(&mut params, target.team_key());
-                    params["input"] = match serde_json::to_value(input) { Ok(input) => input, Err(_) => return failed(command, Failure::Rejected) };
+                    params["input"] = match serde_json::to_value(input) { Ok(input) => input, Err(_) => return failed(command, Failure::Rejected, TaskFailure::new(TaskFailureStage::TaskRequest, TaskFailureCode::InvalidParams)) };
                     "tasks.update"
                 }
                 TaskCommand::TodoGet { .. } => "todos.get",
                 TaskCommand::TodoWrite { old_todos, new_todos, .. } => {
                     let (Some(old), Some(new)) = (native_todos(old_todos), native_todos(new_todos)) else {
-                        return failed(command, Failure::Rejected);
+                        return failed(command, Failure::Rejected, TaskFailure::new(TaskFailureStage::TaskRequest, TaskFailureCode::InvalidParams));
                     };
                     params["oldTodos"] = Value::Array(old);
                     params["newTodos"] = Value::Array(new);
@@ -56,11 +57,21 @@ impl TaskOps for MatchaRuntimeDriver {
                 }
             };
             let receipt = match client.call(method, params).await {
-                Ok(value) if value["agentId"] == agent_id && value["sessionId"] == session_id && value["instanceId"].is_string() => value["receipt"].clone(),
-                Ok(_) => return failed(command, Failure::Protocol),
-                Err(error) => return failed(command, failure(&error)),
+                Ok(value) if value["agentId"] != agent_id || value["sessionId"] != session_id => {
+                    return failed(command, Failure::Protocol, response_failure(TaskFailureCode::OwnershipMismatch));
+                }
+                Ok(value) if match &command {
+                    TaskCommand::List { .. } | TaskCommand::Get { .. } | TaskCommand::TodoGet { .. } => {
+                        value.get("instanceId") == Some(&Value::Null)
+                    }
+                    TaskCommand::Create { .. } | TaskCommand::Update { .. } | TaskCommand::TodoWrite { .. } => {
+                        value["instanceId"].as_str().is_some_and(|id| !id.is_empty())
+                    }
+                } => value["receipt"].clone(),
+                Ok(_) => return failed(command, Failure::Protocol, response_failure(TaskFailureCode::ReceiptInvalid)),
+                Err(error) => return failed(command, failure(&error), diagnostic(&error, TaskFailureStage::TaskRequest)),
             };
-            match command {
+            let outcome = match command {
                 TaskCommand::List { .. } => TaskOutcome::List(read(snapshot(&receipt))),
                 TaskCommand::Get { task_id, .. } => TaskOutcome::Get(read(task(&receipt["task"]).filter(|task| task.id() == task_id))),
                 TaskCommand::Create { .. } => {
@@ -84,6 +95,15 @@ impl TaskOps for MatchaRuntimeDriver {
                         && receipt["transcriptMessageId"].as_str().is_some_and(|id| !id.is_empty());
                     TaskOutcome::TodoWrite(mutation(todo_snapshot(&receipt).filter(|snapshot| applied && snapshot.updated_at().is_some())))
                 }
+            };
+            if matches!(&outcome,
+                TaskOutcome::List(TaskReadOutcome::Protocol) | TaskOutcome::Get(TaskReadOutcome::Protocol)
+                | TaskOutcome::TodoGet(TaskReadOutcome::Protocol) | TaskOutcome::Create(TaskMutationOutcome::OutcomeUnknown)
+                | TaskOutcome::Update(TaskMutationOutcome::OutcomeUnknown) | TaskOutcome::TodoWrite(TaskMutationOutcome::OutcomeUnknown)
+            ) {
+                TaskExecution::failed(outcome, response_failure(TaskFailureCode::ReceiptInvalid))
+            } else {
+                TaskExecution::new(outcome)
             }
         })
     }
@@ -93,13 +113,17 @@ impl TaskOps for MatchaRuntimeDriver {
     }
 }
 
-async fn address(client: &Client, target: &SessionTarget) -> Result<(String, String), Failure> {
-    let platform::endpoint::runtime_address::RuntimeScope::Session(identity) = target.scope() else { return Err(Failure::Rejected); };
-    if identity.endpoint() != &runtime_directory::RuntimeDriverIdentity::matcha_agent().endpoint() { return Err(Failure::Rejected); }
-    let (agent_id, session_id) = crate::session::projection::parse_session_key(target.session_key()).ok_or(Failure::Rejected)?;
-    if agent_id != target.agent_id() { return Err(Failure::Rejected); }
-    let session = client.call("sessions.get", json!({"sessionId": session_id})).await.map_err(|error| failure(&error))?;
-    if session["sessionId"] != session_id || session["agentId"] != agent_id { return Err(Failure::Rejected); }
+async fn address(client: &Client, target: &SessionTarget) -> Result<(String, String), (Failure, TaskFailure)> {
+    let rejected = |code| (Failure::Rejected, TaskFailure::new(TaskFailureStage::SessionLookup, code));
+    let platform::endpoint::runtime_address::RuntimeScope::Session(identity) = target.scope() else { return Err(rejected(TaskFailureCode::InvalidIdentity)); };
+    if identity.endpoint() != &runtime_directory::RuntimeDriverIdentity::matcha_agent().endpoint() { return Err(rejected(TaskFailureCode::InvalidIdentity)); }
+    let (agent_id, session_id) = crate::session::projection::parse_session_key(target.session_key()).ok_or_else(|| rejected(TaskFailureCode::InvalidIdentity))?;
+    if agent_id != target.agent_id() { return Err(rejected(TaskFailureCode::OwnershipMismatch)); }
+    let session = client.call("sessions.get", json!({"sessionId": session_id})).await
+        .map_err(|error| (failure(&error), diagnostic(&error, TaskFailureStage::SessionLookup)))?;
+    if session["sessionId"] != session_id || session["agentId"] != agent_id {
+        return Err((Failure::Rejected, response_failure(TaskFailureCode::OwnershipMismatch)));
+    }
     Ok((agent_id.to_owned(), session_id.to_owned()))
 }
 
@@ -156,11 +180,11 @@ fn mutation<T>(value: Option<T>) -> TaskMutationOutcome<T> {
 #[derive(Clone, Copy)]
 enum Failure { NotFound, Rejected, NotSent, Unavailable, Protocol, Unknown }
 
-fn failed_before_write(command: TaskCommand, failure: Failure) -> TaskOutcome {
+fn failed_before_write(command: TaskCommand, failure: Failure, diagnostic: TaskFailure) -> TaskExecution {
     if matches!(command, TaskCommand::Create { .. } | TaskCommand::Update { .. } | TaskCommand::TodoWrite { .. }) {
-        failed(command, Failure::Rejected)
+        failed(command, Failure::Rejected, diagnostic)
     } else {
-        failed(command, failure)
+        failed(command, failure, diagnostic)
     }
 }
 fn failure(error: &Error) -> Failure {
@@ -176,7 +200,92 @@ fn failure(error: &Error) -> Failure {
     if error.delivery() == Delivery::NotSent { return Failure::NotSent; }
     Failure::Unavailable
 }
-fn failed(command: TaskCommand, failure: Failure) -> TaskOutcome {
+fn response_failure(code: TaskFailureCode) -> TaskFailure {
+    TaskFailure { delivery: Some(TaskDelivery::ResponseReceived), ..TaskFailure::new(TaskFailureStage::Response, code) }
+}
+
+fn diagnostic(error: &Error, request_stage: TaskFailureStage) -> TaskFailure {
+    let data = error.data();
+    let native_stage = data.and_then(|data| data["stage"].as_str());
+    let code = match error.kind() {
+        "not_found" => TaskFailureCode::NotFound,
+        "invalid_params" => TaskFailureCode::InvalidParams,
+        "invalid_endpoint" => TaskFailureCode::InvalidIdentity,
+        "connect_failed" => TaskFailureCode::ConnectFailed,
+        "connection_closed" | "client_shutdown" | "native_instance_closed" => TaskFailureCode::ConnectionClosed,
+        "upgrade_failed" => TaskFailureCode::UpgradeFailed,
+        "deadline" => TaskFailureCode::Deadline,
+        "cancelled" => TaskFailureCode::Cancelled,
+        "unauthorized" | "not_initialized" | "invalid_token" => TaskFailureCode::AuthenticationFailed,
+        "unsupported_protocol" => TaskFailureCode::UnsupportedProtocol,
+        "method_not_found" => TaskFailureCode::MethodNotFound,
+        "native_start_failed" | "native_start_unknown" => TaskFailureCode::NativeStartFailed,
+        "native_instance_absent" => TaskFailureCode::NativeInstanceAbsent,
+        "native_instance_changed" => TaskFailureCode::NativeInstanceChanged,
+        "native_cleanup_unconfirmed" => TaskFailureCode::NativeCleanupUnconfirmed,
+        "session_closed" => TaskFailureCode::SessionClosed,
+        "native_control_error" | "native_instance_handoff" | "native_instance_sealed" => TaskFailureCode::NativeControlError,
+        "native_response_lost" => TaskFailureCode::NativeResponseLost,
+        "task_io" => TaskFailureCode::TaskIo,
+        "todo_io" => TaskFailureCode::TodoIo,
+        "task_native_schema" => TaskFailureCode::TaskNativeSchema,
+        "task_lock_conflict" => TaskFailureCode::TaskLockConflict,
+        "todo_conflict" => TaskFailureCode::TodoConflict,
+        "todo_session_busy" => TaskFailureCode::TodoSessionBusy,
+        "task_dependency_missing" => TaskFailureCode::TaskDependencyMissing,
+        "todo_owner_inactive" => TaskFailureCode::TodoOwnerInactive,
+        "todo_persistence_disabled" => TaskFailureCode::TodoPersistenceDisabled,
+        "task_receipt_unknown" => TaskFailureCode::ReceiptInvalid,
+        "protocol" => TaskFailureCode::Protocol,
+        "transport" | "close_failed" | "connection_task_failed" | "request_id_exhausted" => TaskFailureCode::Transport,
+        _ => match error.code() {
+            Some(-32001) => TaskFailureCode::NotFound,
+            Some(-32601) => TaskFailureCode::MethodNotFound,
+            Some(-32602) => TaskFailureCode::InvalidParams,
+            Some(-32007) => TaskFailureCode::AuthenticationFailed,
+            _ if native_stage == Some("ensure_native") => TaskFailureCode::NativeStartFailed,
+            _ if data.and_then(|data| data["outcome"].as_str()) == Some("rejected") => TaskFailureCode::RequestRejected,
+            Some(_) => TaskFailureCode::RemoteError,
+            None => TaskFailureCode::Transport,
+        },
+    };
+    let stage = match native_stage {
+        Some("observe") => TaskFailureStage::SessionLookup,
+        Some("ensure_native") => TaskFailureStage::NativeStart,
+        Some("control") => TaskFailureStage::NativeControl,
+        Some("native_read") => TaskFailureStage::NativeRead,
+        Some("receipt") | None if matches!(code,
+            TaskFailureCode::TaskIo | TaskFailureCode::TodoIo | TaskFailureCode::TaskNativeSchema
+            | TaskFailureCode::TaskLockConflict | TaskFailureCode::TodoConflict | TaskFailureCode::TodoSessionBusy
+            | TaskFailureCode::TaskDependencyMissing | TaskFailureCode::TodoOwnerInactive | TaskFailureCode::TodoPersistenceDisabled
+        ) => TaskFailureStage::NativeRead,
+        Some("receipt") => TaskFailureStage::Response,
+        _ => match code {
+            TaskFailureCode::NativeStartFailed => TaskFailureStage::NativeStart,
+            TaskFailureCode::NativeControlError | TaskFailureCode::NativeResponseLost => TaskFailureStage::NativeControl,
+            TaskFailureCode::ReceiptInvalid => TaskFailureStage::Response,
+            _ if error.kind() == "native_instance_closed" => TaskFailureStage::NativeControl,
+            _ => request_stage,
+        },
+    };
+    let delivery = match error.delivery() {
+        Delivery::NotSent => TaskDelivery::NotSent,
+        Delivery::Unknown => TaskDelivery::Unknown,
+        Delivery::ResponseReceived => match data.and_then(|data| data["delivery"].as_str()) {
+            Some("notSent") => TaskDelivery::NotSent,
+            Some("sent") => TaskDelivery::Sent,
+            Some("unknown") => TaskDelivery::Unknown,
+            _ => TaskDelivery::ResponseReceived,
+        },
+    };
+    TaskFailure {
+        stage, code,
+        rpc_code: error.code().filter(|code| (-9_007_199_254_740_991..=9_007_199_254_740_991).contains(code)),
+        delivery: Some(delivery),
+    }
+}
+
+fn failed(command: TaskCommand, failure: Failure, diagnostic: TaskFailure) -> TaskExecution {
     fn read_failure<T>(failure: Failure) -> TaskReadOutcome<T> {
         match failure {
             Failure::NotFound => TaskReadOutcome::NotFound,
@@ -188,12 +297,13 @@ fn failed(command: TaskCommand, failure: Failure) -> TaskOutcome {
     fn mutation_failure<T>(failure: Failure) -> TaskMutationOutcome<T> {
         match failure { Failure::NotFound | Failure::Rejected | Failure::NotSent => TaskMutationOutcome::Rejected, Failure::Unavailable | Failure::Protocol | Failure::Unknown => TaskMutationOutcome::OutcomeUnknown }
     }
-    match command {
+    let outcome = match command {
         TaskCommand::List { .. } => TaskOutcome::List(read_failure(failure)),
         TaskCommand::Get { .. } => TaskOutcome::Get(read_failure(failure)),
         TaskCommand::Create { .. } => TaskOutcome::Create(mutation_failure(failure)),
         TaskCommand::Update { .. } => TaskOutcome::Update(mutation_failure(failure)),
         TaskCommand::TodoGet { .. } => TaskOutcome::TodoGet(read_failure(failure)),
         TaskCommand::TodoWrite { .. } => TaskOutcome::TodoWrite(mutation_failure(failure)),
-    }
+    };
+    TaskExecution::failed(outcome, diagnostic)
 }

@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet, VecDeque}, sync::Arc};
 
 use tokio::time::{Duration, Instant};
 
-use sessions_module::{command::SessionIngressEvent, ports::{RuntimeOperationFailure, SessionSync, SessionSyncCut}, state::{SessionEventBinding, SessionIdentity}};
+use sessions_module::{command::{SessionIngress, SessionIngressEvent}, ports::{RuntimeOperationFailure, SessionSync, SessionSyncCut}, state::{SessionEventBinding, SessionIdentity}};
 use tokio::sync::mpsc;
 
 use crate::{driver::projection::openclaw_session_event, gateway::{ingress::GatewayEpoch, observation::identity_key}};
@@ -108,9 +108,11 @@ impl EventRouter {
         }
         let binding = SessionEventBinding::observed(identity.clone(), generation, Some(epoch.as_u64()), false).expect("validated observation binding");
         if let Some(event) = result.as_ref().and_then(|result| openclaw_session_event(result, binding.clone())) {
-            let (event_identity, mut change) = event.into_parts();
-            change.history_refresh = history_refresh;
-            let event = SessionIngressEvent::new(event_identity, change);
+            let (event_identity, mut ingress) = event.into_parts();
+            if let SessionIngress::Event(change) = &mut ingress {
+                change.history_refresh = history_refresh;
+            }
+            let event = SessionIngressEvent::from_ingress(event_identity, ingress);
             if super::trace::enabled() {
                 super::trace::log_unscoped("runtime.openclaw.router.forward", || serde_json::json!({
                     "identity": sessions_module::trace::identity_shape(&identity), "generation": generation,
@@ -408,7 +410,9 @@ mod tests {
             .await;
         assert_eq!(router.actors.len(), 2);
 
-        let (identity, first) = received_events.recv().await.unwrap().into_parts();
+        let (identity, SessionIngress::Event(first)) = received_events.recv().await.unwrap().into_parts() else {
+            panic!("expected session event");
+        };
         assert_eq!(identity.session_key, "agent:main:session-1");
         assert_eq!(first.binding.route_key(), Some("renderer-route:1"));
         assert!(matches!(
@@ -417,7 +421,9 @@ mod tests {
                 if run_id == "run-1" && text == "one"
         ));
 
-        let (identity, second) = received_events.recv().await.unwrap().into_parts();
+        let (identity, SessionIngress::Event(second)) = received_events.recv().await.unwrap().into_parts() else {
+            panic!("expected session event");
+        };
         assert_eq!(identity.session_key, "agent:main:session-2");
         assert_eq!(second.binding.route_key(), Some("renderer-route:2"));
         assert!(matches!(

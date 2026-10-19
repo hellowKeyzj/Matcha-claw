@@ -82,6 +82,7 @@ pub(crate) fn runtime_module_install_plan(
             ),
         ],
         vec![
+            handles.board.descriptor(Arc::clone(&verifier)),
             handles.session_module.descriptor(
                 Arc::clone(&verifier),
                 send_hooks,
@@ -102,6 +103,7 @@ pub(crate) fn runtime_module_install_plan(
             handles.wiki.descriptor(Arc::clone(&verifier)),
             handles.platform_tools.descriptor(Arc::clone(&verifier)),
             handles.toolchain.descriptor(Arc::clone(&verifier)),
+            handles.search.descriptor(Arc::clone(&verifier)),
         ],
         Host::runtime_process_descriptors(),
     )

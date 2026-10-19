@@ -24,6 +24,7 @@ pub(crate) struct Bootstrap {
     app_version: String,
     app_log_dir: PathBuf,
     runtime_host_state_dir: PathBuf,
+    searxng_resources_dir: PathBuf,
     runtime_host_mcp_executable: PathBuf,
     parent_callback_base_url: String,
     parent_callback_dispatch_token: String,
@@ -103,6 +104,7 @@ impl Bootstrap {
                 open_claw_secret,
                 organization_store,
                 runtime_state_dir: runtime_host_state_dir,
+                searxng_resources_dir: self.searxng_resources_dir,
                 app_log_dir: self.app_log_dir,
                 parent_callback_base_url: self.parent_callback_base_url,
                 parent_callback_dispatch_token: self.parent_callback_dispatch_token,
@@ -126,6 +128,7 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
 
     let app_version = non_empty(wire.app_version)?;
     let runtime_host_state_dir = absolute(wire.runtime_host_state_dir)?;
+    let searxng_resources_dir = absolute(wire.searxng_resources_dir)?;
     let runtime_host_mcp_executable = absolute(wire.runtime_host_mcp_executable)?;
     let parent_callback_base_url = non_empty(wire.parent_callback_base_url)?;
     let parent_callback_dispatch_token = non_empty(wire.parent_callback_dispatch_token)?;
@@ -173,6 +176,7 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         app_version,
         app_log_dir: absolute(wire.app_log_dir)?,
         runtime_host_state_dir,
+        searxng_resources_dir,
         runtime_host_mcp_executable,
         parent_callback_base_url,
         parent_callback_dispatch_token,
@@ -217,6 +221,7 @@ struct Wire {
     app_version: String,
     app_log_dir: String,
     runtime_host_state_dir: String,
+    searxng_resources_dir: PathBuf,
     runtime_host_mcp_executable: String,
     parent_callback_base_url: String,
     parent_callback_dispatch_token: String,
@@ -329,12 +334,12 @@ fn provision_runtime_host_state_dir(path: &Path) -> Result<PathBuf, BootstrapErr
     Ok(path.to_path_buf())
 }
 
-fn absolute(value: String) -> Result<PathBuf, BootstrapError> {
-    if value.contains('\0') {
+fn absolute(value: impl Into<PathBuf>) -> Result<PathBuf, BootstrapError> {
+    let path = value.into();
+    if path.as_os_str().as_encoded_bytes().contains(&0) {
         return Err(BootstrapError);
     }
 
-    let path = PathBuf::from(value);
     path.is_absolute().then_some(path).ok_or(BootstrapError)
 }
 

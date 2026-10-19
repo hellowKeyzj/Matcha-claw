@@ -277,6 +277,7 @@ impl SessionCommand {
             ),
             Ensure { .. } | Ingest { .. } | TerminalIngest { .. } | SyncTerminals { .. } | TerminalDelivered { .. }
             | SendCompleted { .. } | GoalCompleted { .. } | SyncCompleted { .. } | ObservationClosed { .. }
+            | ObservationFailed { .. } | ObserveReplyCompleted { .. }
             | ConfigurePrivateResolver { .. } | Audited { .. } | Producing { .. } => {
                 return None;
             }

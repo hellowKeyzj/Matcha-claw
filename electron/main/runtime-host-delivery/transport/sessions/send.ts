@@ -41,11 +41,6 @@ export type SessionSendRequest = Readonly<{
   }>;
 }>;
 
-type RustSessionSendResponse =
-  | Readonly<{ outcome: 'queued'; runId: string }>
-  | Readonly<{ outcome: 'succeeded'; runId: string; status: 'started' | 'in_flight' | 'ok'; goal?: SessionGoalReceipt }>
-  | Readonly<{ outcome: 'target_rejected' | 'unavailable' | 'unknown' | 'unsupported' }>;
-
 type SessionSendResponse =
   | Readonly<{ outcome: 'queued'; runId: string }>
   | Readonly<{
@@ -119,10 +114,11 @@ function publishE2ESessionSendBoundary(
   });
 }
 
-export type SessionSendTransportResponse = Readonly<{
-  status: 200 | 202 | 400 | 503;
-  body: SessionSendResponse | SessionSendInvalidRequest | typeof UNAVAILABLE;
-}>;
+export type SessionSendTransportResponse =
+  | Readonly<{ status: 202; body: Extract<SessionSendResponse, { outcome: 'queued' }> }>
+  | Readonly<{ status: 200; body: Exclude<SessionSendResponse, { outcome: 'queued' }> }>
+  | Readonly<{ status: 400; body: SessionSendInvalidRequest }>
+  | Readonly<{ status: 503; body: typeof UNAVAILABLE }>;
 
 export interface SessionSendTransport {
   send(request: unknown, traceId?: string | null): Promise<SessionSendTransportResponse>;
@@ -174,73 +170,63 @@ export function createSessionSendTransport(
           : { status: 200, body: { outcome: 'unknown' } };
       }
       const response = delivery.response;
-      const body = response.body;
+      const decoded = decodeSessionSendResponse(response.status, response.body, request);
       publishE2ESessionSendBoundary(() => ({
         stage: 'http-response',
         status: response.status,
         elapsedMs: Date.now() - startedAt,
-        contract: isRustSessionSendResponse(body, request) ? 'valid' : 'invalid',
+        contract: decoded ? 'valid' : 'invalid',
         attachmentShape: e2eAttachmentShape(request),
       }));
       logSessionTrace('electron.send.response', traceId, () => ({
         status: response.status,
-        contract: isRustSessionSendResponse(body, request) ? 'valid' : 'invalid',
-        outcome: isRustSessionSendResponse(body, request) ? body.outcome : null,
+        contract: decoded ? 'valid' : 'invalid',
+        outcome: decoded && 'outcome' in decoded.body ? decoded.body.outcome : null,
         elapsedMs: Date.now() - startedAt,
       }));
-      if (response.status === 202
-        && request.scope.identity.endpoint.runtimeAdapterId === 'openclaw'
-        && isRustSessionSendResponse(body, request)
-        && body.outcome === 'queued') {
-        return {
-          status: 202,
-          body: { outcome: 'queued', runId: body.runId },
-        };
-      }
-      if (response.status === 200 && isRustSessionSendResponse(body, request)) {
-        if (body.outcome === 'succeeded') {
-          return {
-            status: 200,
-            body: {
-              outcome: 'succeeded',
-              runId: body.runId,
-              status: body.status,
-              ...(body.goal === undefined ? {} : { goal: body.goal }),
-            },
-          };
-        }
-        if (body.outcome === 'target_rejected' || body.outcome === 'unavailable' || body.outcome === 'unknown'
-          || body.outcome === 'unsupported') {
-          return { status: 200, body };
-        }
-      }
-      if (response.status === 400 && (request.input.intent !== undefined || (isRecord(body)
-        && hasExactKeys(body, ['success', 'error'])
-        && body.success === false && body.error === INVALID_REQUEST.error))) {
-        return { status: 400, body: INVALID_REQUEST };
-      }
-      if (isRecord(body) && hasExactKeys(body, ['success', 'error']) && body.success === false
-        && ((response.status === 401 && body.error === 'Session send authorization is invalid')
-          || (response.status === 422 && body.error === 'Session send endpoint is unsupported'))) {
-        return {
-          status: 200,
-          body: { outcome: response.status === 422 && request.input.intent !== undefined ? 'unsupported' : 'target_rejected' },
-        };
-      }
-      return { status: 200, body: { outcome: 'unknown' } };
+      return decoded ?? { status: 200, body: { outcome: 'unknown' } };
     },
   };
 }
 
-function isRustSessionSendResponse(value: unknown, request: SessionSendRequest): value is RustSessionSendResponse {
+function decodeSessionSendResponse(
+  status: number,
+  body: unknown,
+  request: SessionSendRequest,
+): SessionSendTransportResponse | null {
+  if (isSessionSendResponse(body, request)) {
+    if (status === 202 && body.outcome === 'queued') {
+      return { status: 202, body: { outcome: 'queued', runId: body.runId } };
+    }
+    if (status === 200 && body.outcome !== 'queued') {
+      return { status: 200, body };
+    }
+  }
+  if (status === 400 && (request.input.intent !== undefined || (isRecord(body)
+    && hasExactKeys(body, ['success', 'error'])
+    && body.success === false && body.error === INVALID_REQUEST.error))) {
+    return { status: 400, body: INVALID_REQUEST };
+  }
+  if (isRecord(body) && hasExactKeys(body, ['success', 'error']) && body.success === false
+    && ((status === 401 && body.error === 'Session send authorization is invalid')
+      || (status === 422 && body.error === 'Session send endpoint is unsupported'))) {
+    return {
+      status: 200,
+      body: { outcome: status === 422 && request.input.intent !== undefined ? 'unsupported' : 'target_rejected' },
+    };
+  }
+  return null;
+}
+
+function isSessionSendResponse(value: unknown, request: SessionSendRequest): value is SessionSendResponse {
   if (!isRecord(value) || typeof value.outcome !== 'string') return false;
   if (value.outcome === 'queued') {
     return request.input.intent === undefined
-      && hasExactKeys(value, ['outcome', 'runId']) && typeof value.runId === 'string';
+      && hasExactKeys(value, ['outcome', 'runId']) && isSessionSendRunId(value.runId);
   }
   if (value.outcome === 'succeeded') {
     return hasAllowedKeys(value, ['outcome', 'runId', 'status'], ['goal'])
-      && typeof value.runId === 'string'
+      && isSessionSendRunId(value.runId)
       && (value.status === 'started' || value.status === 'in_flight' || value.status === 'ok')
       && isSessionSendGoalResponse(value, request);
   }
@@ -249,7 +235,12 @@ function isRustSessionSendResponse(value: unknown, request: SessionSendRequest):
       || (request.input.intent !== undefined && value.outcome === 'unsupported'));
 }
 
-export function isSessionSendGoalResponse(value: Record<string, unknown>, request: SessionSendRequest): boolean {
+function isSessionSendRunId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+    && Buffer.byteLength(value, 'utf8') <= 4096 && !value.includes('\0');
+}
+
+function isSessionSendGoalResponse(value: Record<string, unknown>, request: SessionSendRequest): boolean {
   if (request.input.intent === undefined) return !Object.hasOwn(value, 'goal');
   const receipt = decodeSessionGoalReceipt(value.goal);
   return receipt !== null && value.status === 'started'

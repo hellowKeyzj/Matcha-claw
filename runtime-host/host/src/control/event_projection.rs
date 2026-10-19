@@ -34,6 +34,26 @@ pub(crate) fn project_observed(
         HostEvent::CallsResync => {
             project_accepted(observation, "calls.resync", SafeEvent::CallsResync {})
         }
+        HostEvent::Board(board::BoardEvent::Changed(event)) => project_accepted(
+            observation,
+            "board:changed",
+            SafeEvent::BoardChanged {
+                identity: event.identity,
+                revision: event.revision,
+                widget: event.widget,
+            },
+        ),
+        HostEvent::Board(board::BoardEvent::Command(event)) => project_accepted(
+            observation,
+            "board:command",
+            SafeEvent::BoardCommand {
+                identity: event.identity,
+                command: event.command,
+            },
+        ),
+        HostEvent::BoardResync => {
+            project_accepted(observation, "board:resync", SafeEvent::BoardResync {})
+        }
         HostEvent::OrganizationChanged => project_accepted(
             observation,
             "organization.changed",
@@ -61,6 +81,13 @@ fn project_openclaw_observed(
     event: SessionEvent,
     observation: &ObservationSink,
 ) -> Option<SafeEvent> {
+    if matches!(event, SessionEvent::ProgressChanged) {
+        return project_accepted(
+            observation,
+            "openclaw.progress.changed",
+            SafeEvent::OpenClawProgressChanged {},
+        );
+    }
     if matches!(event, SessionEvent::QuestionsChanged) {
         return project_accepted(
             observation,

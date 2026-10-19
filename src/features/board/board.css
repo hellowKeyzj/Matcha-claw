@@ -1,0 +1,10 @@
+.matcha-board-grid {
+  container-type: inline-size;
+}
+
+@container (max-width: 560px) {
+  .matcha-board-widget {
+    grid-area: auto / 1 / span var(--board-widget-rows) / -1 !important;
+    order: var(--board-widget-order);
+  }
+}

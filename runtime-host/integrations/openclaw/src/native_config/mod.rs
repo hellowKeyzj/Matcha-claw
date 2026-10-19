@@ -20,6 +20,7 @@ pub mod provider_models;
 pub mod routing;
 pub mod runtime_paths;
 pub mod security;
+pub(crate) mod search;
 pub mod settings;
 pub mod subagent_templates;
 pub mod tool_permission;

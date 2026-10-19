@@ -10,7 +10,8 @@ import type { ChatStoreGetFn, ChatStoreSetFn } from './send-handlers';
 import { selectCurrentChatSendGate } from './selectors';
 import { resolveChatSendGateForPayload } from './send-gate';
 import { resolveSessionOperationTarget } from './session-identity';
-import { patchSessionMeta } from './store-state-helpers';
+import { hasPendingSessionSend } from './session-presentation';
+import { getSessionRuntime, patchSessionMeta } from './store-state-helpers';
 import { CHAT_INLINE_ATTACHMENT_MAX_BYTES, type ChatSendAttachment, type ChatSendResult, type ChatStoreState } from './types';
 
 interface SessionInput {
@@ -29,9 +30,11 @@ const modelSelections = new Map<string, symbol>();
 
 export async function executeSessionModelSelection(input: SessionInput, key: string, selectionId: string): Promise<HostSessionModelSelectionResult> {
   const normalized = selectionId.trim();
-  const record = input.get().loadedSessions[key];
-  if (!normalized || !record?.meta.sessionIdentity || record.runtime.activeRunId || record.runtime.pendingTurnKey
-    || record.runtime.activeTurnItemKey || ['submitted', 'streaming', 'waiting_tool', 'finalizing', 'stopping'].includes(record.runtime.runPhase)) {
+  const state = input.get();
+  const record = state.loadedSessions[key];
+  const runtime = getSessionRuntime(state, key);
+  if (!normalized || !record?.meta.sessionIdentity || hasPendingSessionSend(record) || runtime.activeRunId || runtime.pendingTurnKey
+    || runtime.activeTurnItemKey || ['submitted', 'streaming', 'waiting_tool', 'finalizing', 'stopping'].includes(runtime.runPhase)) {
     return { outcome: 'target_rejected' };
   }
   const identity = record.meta.sessionIdentity;

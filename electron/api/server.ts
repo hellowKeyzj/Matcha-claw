@@ -10,6 +10,7 @@ import { HOST_API_STARTUP_PATHS, HOST_API_STARTUP_TRACE_HEADER } from '../../src
 import type { HostApiContext, HostApiServerContext, MainHostApiContext } from './context';
 import { handleAccountRoutes } from './routes/account';
 import { handleBillingRoutes } from './routes/billing';
+import { handleBoardRoutes } from './routes/board';
 import { handleCapabilityRoutes } from './routes/capabilities';
 import { handleCallRoutes } from './routes/calls';
 import { handleAgentsRoutes } from './routes/agents';
@@ -47,6 +48,7 @@ import { handleProviderRecoveryRoutes } from './routes/provider-recovery';
 import { handleRuntimeHostProcessRoutes } from './routes/runtime-host-process';
 import { handleRuntimeHostUsageRoutes } from './routes/runtime-host-usage';
 import { handleRuntimeDirectoryRoutes } from './routes/runtime-directory';
+import { handleSearchRoutes } from './routes/search';
 import { handleSecurityEmergencyRoutes } from './routes/security-emergency';
 import { handleSecurityPolicyRoutes } from './routes/security-policy';
 import { handleSecurityRoutes } from './routes/security';
@@ -98,6 +100,7 @@ const mainRouteHandlers: readonly RouteHandler<MainHostApiContext>[] = [
 const runtimeRouteHandlers: readonly RouteHandler<HostApiContext>[] = [
   handleAppRoutes,
   (req, res, url, deps) => handleAgentsRoutes(req, res, url, deps.runtimeHostTransports.agentsTransport),
+  (req, res, url, deps) => handleBoardRoutes(req, res, url, deps.runtimeHostTransports.boardTransport),
   (req, res, url, deps) => handleCapabilityRoutes(req, res, url, deps),
   (req, res, url, deps) => handleCallRoutes(req, res, url, deps.runtimeHostTransports.callLogTransport),
   (req, res, url, deps) => handleChannelAuthorizationRoutes(req, res, url, deps.runtimeHostTransports.channelAuthorizationTransport),
@@ -150,6 +153,7 @@ const runtimeRouteHandlers: readonly RouteHandler<HostApiContext>[] = [
   (req, res, url, deps) => handleRuntimeHostProcessRoutes(req, res, url, deps),
   (req, res, url, deps) => handleRuntimeHostUsageRoutes(req, res, url, deps.runtimeHostTransports.usageTransport),
   (req, res, url, deps) => handleRuntimeDirectoryRoutes(req, res, url, deps.runtimeHostTransports.runtimeDirectoryTransport),
+  (req, res, url, deps) => handleSearchRoutes(req, res, url, deps.runtimeHostTransports.search),
   (req, res, url, deps) => handleSecurityEmergencyRoutes(req, res, url, deps.runtimeHostTransports.securityEmergencyTransport),
   (req, res, url, deps) => handleSecurityPolicyRoutes(req, res, url, deps.runtimeHostTransports.securityPolicyTransport),
   (req, res, url, deps) => handleSecurityRoutes(

@@ -112,10 +112,19 @@ function channelConnectionLabelKey(connectionType: ChannelMeta['connectionType']
 }
 
 export function Channels() {
+  const { t } = useTranslation('channels');
   const endpoint = useRuntimeEndpointsStore(selectManagementEndpoint);
   const scope = useMemo(() => endpoint?.kind === 'native-runtime' && ['openclaw', 'matcha-agent'].includes(endpoint.runtimeAdapterId) ? runtimeInstanceScope(endpoint) : null, [endpoint]);
   useEffect(() => { useChannelsStore.getState().selectScope(scope); }, [scope]);
-  if (!scope) return <div className="space-y-4"><RuntimeScopeSelector /><p className="text-sm text-muted-foreground">请选择运行时。</p></div>;
+  if (!scope) return (
+    <div className="space-y-4">
+      <div className="flex min-h-11 items-center justify-between gap-4">
+        <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
+        <RuntimeScopeSelector />
+      </div>
+      <p className="text-sm text-muted-foreground">请选择运行时。</p>
+    </div>
+  );
   return <ChannelsForRuntime key={buildCapabilityScopeKey(scope)} scope={scope} />;
 }
 
@@ -227,14 +236,15 @@ function ChannelsForRuntime({ scope }: { scope: RuntimeInstanceScope }) {
   return (
     <div className="space-y-6 text-foreground">
       {/* Header */}
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-3">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
-            <p className="mt-1 max-w-2xl text-sm text-[hsl(var(--shell-text-muted))]">
-              {t('subtitle')}
-            </p>
-          </div>
+      <div className="space-y-3">
+        <div className="flex min-h-11 items-center justify-between gap-4">
+          <h1 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">{t('title')}</h1>
+          <RuntimeScopeSelector />
+        </div>
+        <p className="mt-1 max-w-2xl text-sm text-[hsl(var(--shell-text-muted))]">
+          {t('subtitle')}
+        </p>
+        <div className="flex flex-wrap items-center justify-between gap-4">
           {!showInitialLoading && (
             <div className="flex flex-wrap gap-2">
               <span className="inline-flex h-8 items-center gap-2 rounded-full border bg-[hsl(var(--shell-surface-muted))] px-3 text-xs text-[hsl(var(--shell-text-muted))] [border-color:hsl(var(--shell-border))]">
@@ -253,23 +263,22 @@ function ChannelsForRuntime({ scope }: { scope: RuntimeInstanceScope }) {
               </span>
             </div>
           )}
-        </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
-          <RuntimeScopeSelector />
-          <Button
-            variant="outline"
-            onClick={() => {
-              void probeChannels();
-            }}
-            disabled={manualRefreshBusy || !gatewayOperational}
-          >
-            <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
-            {t('refresh')}
-          </Button>
-          <Button onClick={() => setDialogTarget({ kind: 'catalog' })}>
-            <Plus className="h-4 w-4 mr-2" />
-            {t('addChannel')}
-          </Button>
+          <div className="ml-auto flex shrink-0 flex-wrap gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                void probeChannels();
+              }}
+              disabled={manualRefreshBusy || !gatewayOperational}
+            >
+              <RefreshCw className={cn('h-4 w-4 mr-2', refreshing && 'animate-spin')} />
+              {t('refresh')}
+            </Button>
+            <Button onClick={() => setDialogTarget({ kind: 'catalog' })}>
+              <Plus className="h-4 w-4 mr-2" />
+              {t('addChannel')}
+            </Button>
+          </div>
         </div>
       </div>
 

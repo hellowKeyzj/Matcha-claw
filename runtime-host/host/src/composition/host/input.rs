@@ -9,6 +9,7 @@ pub struct HostInput {
     pub open_claw_secret: GatewaySecret,
     pub organization_store: OrganizationStore,
     pub runtime_state_dir: std::path::PathBuf,
+    pub searxng_resources_dir: std::path::PathBuf,
     /// The desktop shell's own log directory, collected by the diagnostics archive.
     pub app_log_dir: std::path::PathBuf,
     pub parent_callback_base_url: String,

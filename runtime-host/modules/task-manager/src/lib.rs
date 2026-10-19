@@ -26,6 +26,7 @@ const ROUTES: &[&str] = &["task-manager.loopback"];
 const EVENTS: &[&str] = &[];
 const EFFECTS: &[EffectKind] = &[EffectKind::OwnerTask, EffectKind::Route];
 
+pub use domain::failure::{TaskDelivery, TaskExecution, TaskFailure, TaskFailureCode, TaskFailureStage};
 pub use domain::model::{
     CreateOutcome, GetOutcome, ListOutcome, SessionTarget, Task, TaskCommand, TaskCreate,
     TaskCreateReceipt, TaskInputError, TaskMetadata, TaskMutationOutcome, TaskOutcome,
@@ -35,6 +36,7 @@ pub use domain::model::{
 pub use owner::actor::TaskOwnerInput;
 pub use ports::{
     TaskFuture, TaskOps, TaskRequestAdmission, TaskRequestAdmissionClosed, TaskRuntimeDirectory,
+    TaskSessionPreparation,
 };
 
 #[derive(Clone)]
@@ -53,7 +55,10 @@ impl TaskModule {
     }
 
     pub async fn task_manager(&self, command: TaskCommand) -> Result<TaskOutcome, ()> {
-        self.handle.task_manager(command).await
+        self.handle
+            .task_manager(command)
+            .await
+            .map(|execution| execution.outcome)
     }
 
     pub fn descriptor(&self, verifier: Arc<Mutex<CapabilityDecisionVerifier>>) -> ModuleDescriptor {

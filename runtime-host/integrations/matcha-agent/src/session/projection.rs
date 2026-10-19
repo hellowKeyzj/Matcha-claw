@@ -8,7 +8,8 @@ use sessions_module::state::{
     ItemStatus, MAX_ID_BYTES, MAX_SEGMENTS, MAX_TEXT_BYTES, MAX_TOOLS, OmissionReason,
     SessionContent, SessionItem, ToolPhase, ToolView,
 };
-use std::collections::HashMap;
+mod stream;
+pub(crate) use stream::Streaming;
 
 /// The address identifies a candidate; callers must verify Server agent ownership.
 pub fn parse_session_key(key: &str) -> Option<(&str, &str)> {
@@ -24,6 +25,7 @@ pub fn session_ownership_key(
     (endpoint, None, endpoint_session_id.to_owned())
 }
 
+#[derive(Clone)]
 pub(crate) struct Message {
     pub item: SessionItem,
     pub tools: Vec<ToolView>,
@@ -80,11 +82,63 @@ fn payload(value: &Value) -> Option<Value> {
         .map(|_| value.clone())
 }
 
+pub(crate) fn trace_shape(row: &Value) -> Value {
+    fn label(value: Option<&Value>, allowed: &[&'static str]) -> &'static str {
+        match value.and_then(Value::as_str) {
+            Some(value) => allowed
+                .iter()
+                .copied()
+                .find(|label| *label == value)
+                .unwrap_or("other"),
+            None => "absent_or_invalid",
+        }
+    }
+    fn hash(value: Option<&Value>) -> Option<String> {
+        value
+            .and_then(Value::as_str)
+            .map(platform::trace::identifier_hash)
+    }
+    let event = row.get("event");
+    let content = row
+        .pointer("/message/content")
+        .or_else(|| row.get("content"));
+    json!({
+        "rowType": label(row.get("type"), &["stream_event", "assistant", "user", "system", "attachment"]),
+        "eventType": label(event.and_then(|event| event.get("type")), &["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop", "ping", "error"]),
+        "blockType": label(event.and_then(|event| event.pointer("/content_block/type")), &["text", "thinking", "redacted_thinking", "tool_use", "server_tool_use", "tool_result", "image", "document"]),
+        "deltaType": label(event.and_then(|event| event.pointer("/delta/type")), &["text_delta", "thinking_delta", "signature_delta", "input_json_delta"]),
+        "index": event.and_then(|event| event.get("index")).and_then(Value::as_u64),
+        "rowHash": hash(row.get("uuid")),
+        "parentHash": hash(row.get("parent_tool_use_id")),
+        "providerMessageHash": hash(row.pointer("/message/id").or_else(|| row.pointer("/event/message/id"))),
+        "contentBlockCount": content.and_then(Value::as_array).map(Vec::len),
+    })
+}
+fn rejected(row: &Value, reason: &'static str, event: Option<&crate::client::Event>) -> Failure {
+    platform::trace::runtime_trace("matcha.session.projection.rejected", || {
+        json!({
+            "reason": reason,
+            "row": trace_shape(row),
+            "sessionHash": event.map(|event| platform::trace::identifier_hash(&event.session_id)),
+            "nativeSeq": event.map(|event| event.seq),
+        })
+    });
+    Failure::InvalidReadback
+}
+
 pub(crate) fn message(row: &Value, status: ItemStatus) -> Result<Option<Message>, Failure> {
+    message_with_event(row, status, None)
+}
+fn message_with_event(
+    row: &Value,
+    status: ItemStatus,
+    event: Option<&crate::client::Event>,
+) -> Result<Option<Message>, Failure> {
+    let rejected = |row: &Value, reason| rejected(row, reason, event);
     let kind = row
         .get("type")
         .and_then(Value::as_str)
-        .ok_or(Failure::InvalidReadback)?;
+        .ok_or_else(|| rejected(row, "message.type_invalid"))?;
     if !matches!(kind, "user" | "assistant" | "system" | "attachment") {
         return Ok(None);
     }
@@ -95,7 +149,8 @@ pub(crate) fn message(row: &Value, status: ItemStatus) -> Result<Option<Message>
     let uuid = id(row
         .get("uuid")
         .and_then(Value::as_str)
-        .ok_or(Failure::InvalidReadback)?)?;
+        .ok_or_else(|| rejected(row, "message.uuid_missing"))?)
+    .map_err(|_| rejected(row, "message.uuid_invalid"))?;
     let body = row
         .pointer("/message/content")
         .or_else(|| row.get("content"))
@@ -104,10 +159,10 @@ pub(crate) fn message(row: &Value, status: ItemStatus) -> Result<Option<Message>
         Value::Array(blocks) => blocks.clone(),
         Value::String(text) => vec![json!({"type":"text","text":text})],
         Value::Null => Vec::new(),
-        _ => return Err(Failure::InvalidReadback),
+        _ => return Err(rejected(row, "message.content_invalid")),
     };
     if blocks.len() > MAX_SEGMENTS {
-        return Err(Failure::InvalidReadback);
+        return Err(rejected(row, "message.segment_limit"));
     }
     let mut content = Vec::new();
     let mut tools = Vec::new();
@@ -118,7 +173,7 @@ pub(crate) fn message(row: &Value, status: ItemStatus) -> Result<Option<Message>
                 let value = block
                     .get("text")
                     .and_then(Value::as_str)
-                    .ok_or(Failure::InvalidReadback)?;
+                    .ok_or_else(|| rejected(row, "message.text_invalid"))?;
                 text.push_str(prefix(value, MAX_TEXT_BYTES.saturating_sub(text.len())));
                 content.push(text_content(value, uuid, index, false));
             }
@@ -126,7 +181,7 @@ pub(crate) fn message(row: &Value, status: ItemStatus) -> Result<Option<Message>
                 let value = block
                     .get("thinking")
                     .and_then(Value::as_str)
-                    .ok_or(Failure::InvalidReadback)?;
+                    .ok_or_else(|| rejected(row, "message.thinking_invalid"))?;
                 content.push(text_content(value, uuid, index, true));
             }
             Some("redacted_thinking") => content.push(SessionContent::Omitted {
@@ -136,12 +191,14 @@ pub(crate) fn message(row: &Value, status: ItemStatus) -> Result<Option<Message>
                 let tool = id(block
                     .get("id")
                     .and_then(Value::as_str)
-                    .ok_or(Failure::InvalidReadback)?)?
+                    .ok_or_else(|| rejected(row, "message.tool_id_missing"))?)
+                .map_err(|_| rejected(row, "message.tool_id_invalid"))?
                 .to_owned();
                 let name = id(block
                     .get("name")
                     .and_then(Value::as_str)
-                    .ok_or(Failure::InvalidReadback)?)?
+                    .ok_or_else(|| rejected(row, "message.tool_name_missing"))?)
+                .map_err(|_| rejected(row, "message.tool_name_invalid"))?
                 .to_owned();
                 let input = block.get("input").and_then(payload);
                 content.push(SessionContent::ToolUse {
@@ -165,7 +222,8 @@ pub(crate) fn message(row: &Value, status: ItemStatus) -> Result<Option<Message>
                 let tool = id(block
                     .get("tool_use_id")
                     .and_then(Value::as_str)
-                    .ok_or(Failure::InvalidReadback)?)?
+                    .ok_or_else(|| rejected(row, "message.tool_result_id_missing"))?)
+                .map_err(|_| rejected(row, "message.tool_result_id_invalid"))?
                 .to_owned();
                 let output = block.get("content").unwrap_or(&Value::Null);
                 let summary = block_text(output);
@@ -239,6 +297,9 @@ pub(crate) fn merge_tool(tools: &mut Vec<ToolView>, incoming: ToolView) -> Resul
         if incoming.input.is_some() {
             tool.input = incoming.input;
         }
+        if incoming.input_text.is_some() {
+            tool.input_text = incoming.input_text;
+        }
         if incoming.summary.is_some() {
             tool.summary = incoming.summary;
         }
@@ -260,143 +321,4 @@ pub(crate) fn merge_tool(tools: &mut Vec<ToolView>, incoming: ToolView) -> Resul
         tools.push(incoming);
     }
     Ok(())
-}
-
-struct Stream {
-    provider_id: String,
-    blocks: HashMap<usize, Value>,
-    active: Option<usize>,
-}
-#[derive(Default)]
-pub(crate) struct Streaming {
-    streams: HashMap<String, Stream>,
-}
-pub(crate) struct StreamMessage {
-    pub message: Message,
-    pub retired: Vec<String>,
-}
-impl Streaming {
-    pub fn observe(&mut self, row: &Value) -> Result<Option<StreamMessage>, Failure> {
-        let parent = row
-            .get("parent_tool_use_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        if row.get("type").and_then(Value::as_str) != Some("stream_event") {
-            let Some(message) = message(row, ItemStatus::Final)? else {
-                return Ok(None);
-            };
-            let mut retired = Vec::new();
-            if row["type"] == "assistant"
-                && let Some(stream) = self.streams.get_mut(&parent)
-                && row.pointer("/message/id").and_then(Value::as_str)
-                    == Some(stream.provider_id.as_str())
-                && let Some(index) = stream.active.take()
-            {
-                retired.push(format!("stream:{}:{index}", stream.provider_id));
-                stream.blocks.remove(&index);
-            }
-            return Ok(Some(StreamMessage { message, retired }));
-        }
-        let event = row.get("event").ok_or(Failure::InvalidReadback)?;
-        match event.get("type").and_then(Value::as_str) {
-            Some("message_start") => {
-                if self.streams.contains_key(&parent) {
-                    return Err(Failure::InvalidReadback);
-                }
-                let provider = id(event
-                    .pointer("/message/id")
-                    .and_then(Value::as_str)
-                    .ok_or(Failure::InvalidReadback)?)?;
-                if provider.len() + 24 > MAX_ID_BYTES
-                    || (!self.streams.contains_key(&parent) && self.streams.len() >= MAX_TOOLS)
-                {
-                    return Err(Failure::InvalidReadback);
-                }
-                self.streams.insert(
-                    parent,
-                    Stream {
-                        provider_id: provider.to_owned(),
-                        blocks: HashMap::new(),
-                        active: None,
-                    },
-                );
-                Ok(None)
-            }
-            Some("content_block_start" | "content_block_delta") => {
-                let index = event
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .and_then(|v| usize::try_from(v).ok())
-                    .filter(|index| *index < MAX_SEGMENTS)
-                    .ok_or(Failure::InvalidReadback)?;
-                let stream = self
-                    .streams
-                    .get_mut(&parent)
-                    .ok_or(Failure::InvalidReadback)?;
-                if event["type"] == "content_block_start" {
-                    if stream.active.is_some() || stream.blocks.contains_key(&index) {
-                        return Err(Failure::InvalidReadback);
-                    }
-                    stream.blocks.insert(
-                        index,
-                        event
-                            .get("content_block")
-                            .cloned()
-                            .ok_or(Failure::InvalidReadback)?,
-                    );
-                    stream.active = Some(index);
-                } else {
-                    let block = stream
-                        .blocks
-                        .get_mut(&index)
-                        .ok_or(Failure::InvalidReadback)?;
-                    let delta = event.get("delta").ok_or(Failure::InvalidReadback)?;
-                    let (field, value) = match delta.get("type").and_then(Value::as_str) {
-                        Some("text_delta") => ("text", delta.get("text")),
-                        Some("thinking_delta") => ("thinking", delta.get("thinking")),
-                        Some("input_json_delta") => return Ok(None),
-                        _ => return Ok(None),
-                    };
-                    let value = value
-                        .and_then(Value::as_str)
-                        .ok_or(Failure::InvalidReadback)?;
-                    let current = block.get(field).and_then(Value::as_str).unwrap_or("");
-                    // The temporary row is explicitly Streaming. Keep a bounded preview;
-                    // the following native UUID row carries the full recoverable body.
-                    let suffix = prefix(value, MAX_TEXT_BYTES.saturating_sub(current.len()));
-                    block[field] = json!(format!("{current}{suffix}"));
-                }
-                let block = stream.blocks.get(&index).ok_or(Failure::InvalidReadback)?;
-                let uuid = format!("stream:{}:{index}", stream.provider_id);
-                let row = json!({"type":"assistant","uuid":uuid,"message":{"content":[block]}});
-                Ok(
-                    message(&row, ItemStatus::Streaming)?.map(|message| StreamMessage {
-                        message,
-                        retired: Vec::new(),
-                    }),
-                )
-            }
-            Some("content_block_stop") => {
-                // CLI emits the native assistant row for this block before its stop
-                // event (services/api/claude.ts). Only that row retires the display ID.
-                let stream = self.streams.get(&parent).ok_or(Failure::InvalidReadback)?;
-                if stream.active.is_some() {
-                    return Err(Failure::InvalidReadback);
-                }
-                Ok(None)
-            }
-            Some("message_stop") => {
-                let stream = self
-                    .streams
-                    .remove(&parent)
-                    .ok_or(Failure::InvalidReadback)?;
-                if !stream.blocks.is_empty() {
-                    return Err(Failure::InvalidReadback);
-                }
-                Ok(None)
-            }
-            _ => Ok(None),
-        }
-    }
 }

@@ -21,6 +21,7 @@ ed25519-dalek.workspace = true
 foundation = { version = "0.1.0", path = "../../foundation" }
 organization = { version = "0.1.0", path = "../../modules/organization" }
 cron = { version = "0.1.0", path = "../../modules/cron" }
+board = { version = "0.1.0", path = "../../modules/board" }
 platform-tools = { version = "0.1.0", path = "../../modules/platform-tools" }
 sessions-module = { package = "sessions", version = "0.1.0", path = "../../modules/sessions" }
 subagents = { version = "0.1.0", path = "../../modules/subagents" }

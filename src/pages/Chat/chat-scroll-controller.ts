@@ -329,6 +329,7 @@ export function createChatScrollController(): ChatScrollController {
       anchorElement,
       offsetWithinViewport: anchorRect.top - viewportRect.top,
     };
+    setPhase('detached');
     return true;
   };
 
@@ -337,7 +338,9 @@ export function createChatScrollController(): ChatScrollController {
     if (!(target instanceof Element)) {
       return;
     }
-    const anchorElement = target.closest<HTMLElement>('[data-chat-local-geometry-anchor="true"]');
+    const anchorElement = target.closest<HTMLElement>(
+      '[data-chat-local-geometry-anchor="true"],.chat-markdown details > summary',
+    );
     if (anchorElement) {
       prepareElementAnchorRestore(anchorElement);
     }
@@ -358,8 +361,7 @@ export function createChatScrollController(): ChatScrollController {
     if (!metrics) {
       return;
     }
-    if (isAtBottom(metrics)) {
-      state.pendingElementAnchorRestore = null;
+    if (isAtBottom(metrics) && !state.pendingElementAnchorRestore) {
       setPhase('follow');
     } else if (state.userLeavingBottom) {
       setPhase('detached');

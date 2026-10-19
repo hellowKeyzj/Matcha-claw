@@ -15,7 +15,6 @@ import {
   getSubagentTemplateById,
   getSubagentTemplateCatalog,
 } from '@/services/openclaw/subagent-template-catalog';
-import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
 import { useChatStore } from '@/stores/chat';
 import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { agentScope, buildCapabilityScopeKey } from '@/types/desktop/runtime-address';
@@ -469,7 +468,6 @@ export function SubAgents() {
       <Tabs value={activeTab} onValueChange={(value) => updateAgentQuery('tab', value, 'agents')} className="space-y-6">
         <AgentPageSection actions={
           <>
-            <RuntimeScopeSelector />
             {(showRefreshingHint || mutating) && (
               <span role="status" className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
                 <span className="size-2 animate-pulse rounded-full bg-primary motion-reduce:animate-none" />

@@ -5,6 +5,7 @@ import type {
   ToolActivityContent,
 } from '../tool-activity-view-model';
 import { extractToolResultContentBlockText, parseToolResultJson } from './result-content';
+import type { ToolActivityDescriptor } from './types';
 
 type SearchToolKind = 'read' | 'grep' | 'glob' | 'list' | 'search' | 'find' | 'ripgrep';
 
@@ -586,6 +587,18 @@ function appendOutputBlocks(blocks: ToolActivityContent['textBlocks'], kind: Sea
       copyable: false,
     });
   }
+}
+
+export function describeSearchToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityDescriptor {
+  const kind = resolveToolKind(tool);
+  const query = readSearchToolQuery(tool);
+  const target = query.file ?? query.path;
+  return {
+    kind: kind === 'read' ? 'read' : 'search',
+    title: buildTitle(kind, query, t),
+    label: tool.displayTitle?.trim() || tool.name,
+    ...(target ? { target } : {}),
+  };
 }
 
 export function renderSearchToolActivity(tool: SessionRenderToolCard, t: TFunction<'chat'>): ToolActivityContent {

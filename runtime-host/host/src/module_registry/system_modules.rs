@@ -14,6 +14,7 @@ const INSTALL_PLAN_HOST_CAPABILITIES: &[CapabilityKey] = &[
     CapabilityKey::new("runtime.skills"),
     CapabilityKey::new("external.clawhub"),
     CapabilityKey::new("runtime.cron"),
+    CapabilityKey::new("runtime.board"),
     CapabilityKey::new("runtime.usage"),
     CapabilityKey::new("runtime.diagnostics"),
     CapabilityKey::new("runtime.task-manager"),

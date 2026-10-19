@@ -5,7 +5,8 @@ import { isSessionRuntimeEndpointReady, useRuntimeEndpointsStore } from '@/store
 import { hasSessionCatalogLoaded } from '@/stores/chat/session-helpers';
 import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
 import { getSessionItemCount } from '@/stores/chat/store-state-helpers';
-import { useSubagentsStore } from '@/stores/subagents';
+import { getSubagentManagementScope, selectAgentsResource, useSubagentsStore, type SubagentManagementScope } from '@/stores/subagents';
+import { buildCapabilityScopeKey } from '@/types/desktop/runtime-address';
 import type { ChatHistoryLoadRequest } from '@/stores/chat/types';
 import { createSessionTraceId, logSessionTrace, summarizeEndpoint, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
 
@@ -75,22 +76,22 @@ function shouldRefreshSessionRuntimeCatalog(): boolean {
   );
 }
 
-function shouldLoadSubagentsSnapshot(): boolean {
-  const { agentsResource } = useSubagentsStore.getState();
-  return !agentsResource.hasLoadedOnce
-    || agentsResource.data.length === 0
-    || !agentsResource.lastLoadedAt
-    || (Date.now() - agentsResource.lastLoadedAt) > SUBAGENTS_SNAPSHOT_TTL_MS;
+function selectedAgentsScope(): SubagentManagementScope | null {
+  const state = useChatStore.getState();
+  const endpoint = state.currentConversation?.endpoint ?? state.sessionRuntimeCatalog.selectedEndpoint;
+  const target = state.sessionRuntimeCatalog.endpoints.find((entry) => endpoint
+    && buildRuntimeScopeKey(entry.endpoint) === buildRuntimeScopeKey(endpoint));
+  return state.sessionRuntimeCatalog.status === 'ready' && target?.agentCatalog.source === 'subagent-management'
+    ? getSubagentManagementScope(target.endpoint) : null;
 }
 
-function shouldLoadSidebarAgentCatalog(): boolean {
-  const catalog = useChatStore.getState().sessionRuntimeCatalog;
-  return catalog.status === 'ready'
-    && catalog.endpoints.some((endpoint) => endpoint.agentCatalog.source === 'subagent-management');
-}
-
-function shouldLoadSidebarAgents(): boolean {
-  return shouldLoadSubagentsSnapshot() && shouldLoadSidebarAgentCatalog();
+function shouldLoadSidebarAgents(scope: SubagentManagementScope | null): scope is SubagentManagementScope {
+  if (!scope) return false;
+  const resource = selectAgentsResource(useSubagentsStore.getState(), scope.endpoint);
+  return !resource.hasLoadedOnce
+    || resource.data.length === 0
+    || !resource.lastLoadedAt
+    || (Date.now() - resource.lastLoadedAt) > SUBAGENTS_SNAPSHOT_TTL_MS;
 }
 
 function shouldLoadSelectedSessionCatalog(): boolean {
@@ -137,7 +138,7 @@ interface UseChatInitInput {
   switchSession: (sessionKey: string) => void;
   openAgentConversation: (agentId: string) => void;
   bootstrapSessionRuntime: () => Promise<void>;
-  loadAgents: () => Promise<void>;
+  loadAgents: (options: { scope: SubagentManagementScope }) => Promise<void>;
   loadSessions: () => Promise<void>;
   loadHistory: (request: ChatHistoryLoadRequest) => Promise<void>;
   cleanupEmptySession: () => void;
@@ -169,25 +170,25 @@ export function useChatInit(input: UseChatInitInput): void {
     let cancelled = false;
     let sessionRuntimeLoadInFlight = false;
     let sessionRuntimeNextEventRefreshAt = 0;
-    const shouldRetryAgentsAfterLoad = () => {
-      const { agentsResource } = useSubagentsStore.getState();
-      return !agentsResource.hasLoadedOnce;
+    const shouldRetryAgentsAfterLoad = (scope: SubagentManagementScope) => {
+      return !selectAgentsResource(useSubagentsStore.getState(), scope.endpoint).hasLoadedOnce;
     };
     const shouldRetrySessionsAfterLoad = () => {
       return shouldLoadSelectedSessionCatalog();
     };
-    const scheduleAgentsRetry = (attempt = 1) => {
+    const scheduleAgentsRetry = (scope: SubagentManagementScope, attempt = 1) => {
       if (cancelled || attempt > RESOURCE_RETRY_MAX_ATTEMPTS || agentsRetryTimerRef.current) {
         return;
       }
       agentsRetryTimerRef.current = setTimeout(() => {
         agentsRetryTimerRef.current = null;
-        if (cancelled) {
+        const selected = selectedAgentsScope();
+        if (cancelled || !selected || buildCapabilityScopeKey(selected) !== buildCapabilityScopeKey(scope)) {
           return;
         }
-        void loadAgents().finally(() => {
-          if (shouldRetryAgentsAfterLoad()) {
-            scheduleAgentsRetry(attempt + 1);
+        void loadAgents({ scope }).finally(() => {
+          if (shouldRetryAgentsAfterLoad(scope)) {
+            scheduleAgentsRetry(scope, attempt + 1);
           }
         });
       }, RESOURCE_RETRY_DELAY_MS);
@@ -243,9 +244,10 @@ export function useChatInit(input: UseChatInitInput): void {
           }, RESOURCE_RETRY_DELAY_MS);
           return;
         }
-        const shouldLoadAgents = shouldLoadSidebarAgents();
+        const agentsScope = selectedAgentsScope();
+        const shouldLoadAgents = shouldLoadSidebarAgents(agentsScope);
         const resourcesStartedAt = traceId ? performance.now() : 0;
-        const agentsLoadTask = shouldLoadAgents ? loadAgents() : Promise.resolve();
+        const agentsLoadTask = shouldLoadAgents ? loadAgents({ scope: agentsScope }) : Promise.resolve();
         const shouldLoadSessions = shouldLoadSelectedSessionCatalog();
         const catalogStartedAt = traceId ? performance.now() : 0;
         const sessionsLoadTask = shouldLoadSessions ? loadSessions() : Promise.resolve();
@@ -256,8 +258,8 @@ export function useChatInit(input: UseChatInitInput): void {
         await Promise.all([
           traceId ? agentsLoadTask.finally(() => logSessionTrace('chat.init.agents.response', traceId, () => ({
             requested: shouldLoadAgents, elapsedMs: performance.now() - resourcesStartedAt,
-            status: useSubagentsStore.getState().agentsResource.status,
-            count: useSubagentsStore.getState().agentsResource.data.length,
+            status: selectAgentsResource(useSubagentsStore.getState(), agentsScope?.endpoint ?? null).status,
+            count: selectAgentsResource(useSubagentsStore.getState(), agentsScope?.endpoint ?? null).data.length,
           }))) : agentsLoadTask,
           traceId ? sessionsLoadTask.finally(() => logSessionTrace('chat.init.catalog.response', traceId, () => ({
             requested: shouldLoadSessions, elapsedMs: performance.now() - catalogStartedAt,
@@ -282,8 +284,8 @@ export function useChatInit(input: UseChatInitInput): void {
           navigate('/', { replace: true });
           switchedViaQueryParam = true;
         }
-        if (shouldLoadAgents && shouldRetryAgentsAfterLoad()) {
-          scheduleAgentsRetry();
+        if (shouldLoadAgents && shouldRetryAgentsAfterLoad(agentsScope)) {
+          scheduleAgentsRetry(agentsScope);
         }
         if (shouldLoadSessions && shouldRetrySessionsAfterLoad()) {
           scheduleSessionsRetry();
@@ -342,17 +344,22 @@ export function useChatInit(input: UseChatInitInput): void {
         });
       } finally {
         sessionRuntimeLoadInFlight = false;
+        if (!cancelled && sidebarResourceEnsureScheduledRef.current) {
+          sidebarResourceEnsureScheduledRef.current = false;
+          scheduleSidebarResourceEnsure();
+        }
       }
     };
 
     const ensureSidebarResources = async (): Promise<void> => {
-      const shouldLoadAgents = shouldLoadSidebarAgents();
-      const agentsLoadTask = shouldLoadAgents ? loadAgents() : Promise.resolve();
+      const agentsScope = selectedAgentsScope();
+      const shouldLoadAgents = shouldLoadSidebarAgents(agentsScope);
+      const agentsLoadTask = shouldLoadAgents ? loadAgents({ scope: agentsScope }) : Promise.resolve();
       const shouldLoadSessions = shouldLoadSelectedSessionCatalog();
       const sessionsLoadTask = shouldLoadSessions ? loadSessions() : Promise.resolve();
       await Promise.all([agentsLoadTask, sessionsLoadTask]);
-      if (!cancelled && shouldLoadAgents && shouldRetryAgentsAfterLoad()) {
-        scheduleAgentsRetry();
+      if (!cancelled && shouldLoadAgents && shouldRetryAgentsAfterLoad(agentsScope)) {
+        scheduleAgentsRetry(agentsScope);
       }
       if (!cancelled && shouldLoadSessions && shouldRetrySessionsAfterLoad()) {
         scheduleSessionsRetry();
@@ -376,6 +383,10 @@ export function useChatInit(input: UseChatInitInput): void {
         await ensureSidebarResources();
       } finally {
         sessionRuntimeLoadInFlight = false;
+        if (!cancelled && sidebarResourceEnsureScheduledRef.current) {
+          sidebarResourceEnsureScheduledRef.current = false;
+          scheduleSidebarResourceEnsure();
+        }
       }
     };
 
@@ -385,10 +396,10 @@ export function useChatInit(input: UseChatInitInput): void {
       }
       sidebarResourceEnsureScheduledRef.current = true;
       queueMicrotask(() => {
-        sidebarResourceEnsureScheduledRef.current = false;
         if (cancelled || sessionRuntimeLoadInFlight) {
           return;
         }
+        sidebarResourceEnsureScheduledRef.current = false;
         void ensureSidebarResources();
       });
     };
@@ -424,6 +435,8 @@ export function useChatInit(input: UseChatInitInput): void {
       const endpoint = state.currentConversation?.endpoint ?? state.sessionRuntimeCatalog.selectedEndpoint;
       const previousEndpoint = previousState.currentConversation?.endpoint ?? previousState.sessionRuntimeCatalog.selectedEndpoint;
       if ((endpoint ? buildRuntimeScopeKey(endpoint) : null) !== (previousEndpoint ? buildRuntimeScopeKey(previousEndpoint) : null)) {
+        if (agentsRetryTimerRef.current) clearTimeout(agentsRetryTimerRef.current);
+        agentsRetryTimerRef.current = null;
         scheduleSidebarResourceEnsure();
       }
     });

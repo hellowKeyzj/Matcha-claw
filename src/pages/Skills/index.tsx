@@ -56,7 +56,6 @@ import { LoadingState } from '@/components/common/LoadingSpinner';
 import { useIdleReady } from '@/lib/idle-ready';
 import { waitForSkillsMutation, requireSkillsScope, selectedSkillsScope, hostImportSkillArchive } from '@/lib/skills';
 import { useRuntimeEndpointsStore, selectManagementEndpoint, selectManagementAgentScope } from '@/stores/runtime-endpoints';
-import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
 import { buildCapabilityScopeKey, runtimeInstanceScope } from '@/types/desktop/runtime-address';
 import { sealedSkillErrorMessage } from '@/lib/sealed-skills-error';
 import { AppError } from '@/lib/error-model';
@@ -2058,7 +2057,6 @@ export function Skills() {
       <Tabs value={activeTab} onValueChange={setActiveTab} className="group/skills space-y-6" data-view={view}>
         <AgentPageSection actions={(
           <>
-            <RuntimeScopeSelector />
             <Button variant="outline" size="icon" className="size-9 rounded-full" aria-label={t('refresh')} title={t('refresh')} onClick={handleRefresh} disabled={isSealedTabActive ? packagePanelLoading || (packageTab === 'installed' && manualRefreshBusy) : (!gatewayProcessRunning || manualRefreshBusy)}>
               <RefreshCw className={cn('size-4', (isSealedTabActive ? packagePanelLoading || (packageTab === 'installed' && refreshing) : refreshing) && 'animate-spin motion-reduce:animate-none')} />
             </Button>

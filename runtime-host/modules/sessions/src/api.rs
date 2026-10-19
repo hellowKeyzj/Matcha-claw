@@ -13,7 +13,7 @@ use super::{
     },
     command::{
         SessionCommand, SessionEnsureOutcome, SessionEvent,
-        SessionEvictOutcome, SessionIngestOutcome, SessionIngressEvent, SessionSendRequest,
+        SessionEvictOutcome, SessionIngestOutcome, SessionIngress, SessionIngressEvent, SessionSendRequest,
     },
     create::{
         InvalidSessionCreate, SessionCreateAdmissionInput, SessionCreateCommand,
@@ -54,7 +54,7 @@ impl SessionIngressProducer {
 
     pub async fn ingest_ingress_event(&self, event: SessionIngressEvent) -> Result<SessionIngestOutcome, ()> {
         let (identity, event) = event.into_parts();
-        self.sessions.ingest_event_inner(self.producer.inherited(), identity, event).await
+        self.sessions.ingest_ingress_inner(self.producer.inherited(), identity, event).await
     }
 }
 
@@ -154,12 +154,57 @@ impl SessionHandle {
         }).await
     }
 
+    async fn ingest_ingress_inner(
+        &self,
+        producer: crate::owner::terminal::Producer,
+        identity: SessionIdentity,
+        ingress: SessionIngress,
+    ) -> Result<SessionIngestOutcome, ()> {
+        match ingress {
+            SessionIngress::Event(event) => self.ingest_event_inner(producer, identity, event).await,
+            SessionIngress::RestoredTerminal { binding, terminal, assistant_texts } => {
+                let generation = binding.generation();
+                if binding.identity() != &identity
+                    || binding.source_epoch().is_none()
+                    || generation.is_none()
+                    || self.shared.observation_generation(&identity) != generation
+                    || !self.shared.terminal_sync_pending(&identity)
+                    || !crate::state::terminal_run_phase(terminal.phase)
+                    || terminal.run_id.is_empty()
+                    || terminal.run_id.len() > crate::state::MAX_ID_BYTES
+                    || terminal.run_id.trim() != terminal.run_id
+                    || terminal.run_id.chars().any(char::is_control)
+                    || assistant_texts.len() > crate::state::MAX_ITEMS
+                    || assistant_texts.iter().any(|text| text.len() > crate::state::MAX_TEXT_BYTES || text.contains('\0'))
+                {
+                    return Ok(SessionIngestOutcome::Rejected { reason: "Invalid restored terminal".to_owned() });
+                }
+                let permit = self.shared.terminal_permit().await;
+                let accepted = self.request_command_inner(producer, |reply| SessionCommand::SyncTerminals {
+                    identity, generation: generation.expect("validated observation generation"),
+                    terminals: vec![(terminal, assistant_texts)], publish: false, permit, reply,
+                }).await?;
+                Ok(if accepted.is_some() { SessionIngestOutcome::TerminalRestored } else {
+                    SessionIngestOutcome::Rejected { reason: "Observation is stale".to_owned() }
+                })
+            }
+            SessionIngress::ObservationFailed { binding, failure } => {
+                let accepted = self.request_command_inner(producer, |reply| {
+                    SessionCommand::ObservationFailed { identity, binding, failure, reply }
+                }).await?;
+                Ok(SessionIngestOutcome::Rejected {
+                    reason: if accepted { "Observation readback is invalid" } else { "Observation is stale" }.to_owned(),
+                })
+            }
+        }
+    }
+
     pub async fn ingest_ingress_event(
         &self,
         event: SessionIngressEvent,
     ) -> Result<SessionIngestOutcome, ()> {
-        let (identity, event) = event.into_parts();
-        self.ingest_event(identity, event).await
+        let (identity, ingress) = event.into_parts();
+        self.ingest_ingress_inner(self.shared.producer()?, identity, ingress).await
     }
 
     pub async fn evict_session(&self, session_key: String) -> Result<SessionEvictOutcome, ()> {
@@ -218,6 +263,16 @@ impl SessionHandle {
             request: SessionSendRequest::Session { command, cancellation, reply },
         })
         .await
+    }
+
+    pub async fn prepare_session_model_runtime(
+        &self,
+        identity: &SessionIdentity,
+    ) -> Result<(), SessionSendOutcome> {
+        let _producer = self.shared.producer().map_err(|_| SessionSendOutcome::Unavailable)?;
+        self.shared.prepare_matcha_session_model_runtime(
+            identity, None, None, &CancellationToken::new(),
+        ).await
     }
 
     pub async fn close_terminal_delivery(&self) -> Result<(), crate::SessionTerminalCloseError> {

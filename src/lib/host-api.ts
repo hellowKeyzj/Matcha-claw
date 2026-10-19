@@ -29,7 +29,24 @@ import type {
 } from '@/types/wiki-capabilities';
 import { trackUiEvent } from './telemetry';
 import { isTraceEnabled, startupTrace } from './trace-logger';
-import { mapBackendErrorCode, normalizeAppError } from './error-model';
+import { AppError, mapBackendErrorCode, normalizeAppError } from './error-model';
+import { decodeBrowserRequestInput, type BrowserRequestInput } from '@/types/openclaw-browser';
+import {
+  decodeOpenClawCanvasViewResult,
+  decodeOpenClawMcpAppResult,
+  decodeOpenClawProgressCardResult,
+  decodeOpenClawSurfaceError,
+  isOpenClawCanvasRequest,
+  isOpenClawMcpAppRequest,
+  isOpenClawProgressCardRequest,
+  type OpenClawCanvasRequest,
+  type OpenClawCanvasViewResult,
+  type OpenClawMcpAppOperationId,
+  type OpenClawMcpAppRequest,
+  type OpenClawMcpAppResults,
+  type OpenClawProgressCardRequest,
+  type OpenClawProgressCardResult,
+} from '@/types/openclaw-runtime-surface';
 import {
   decodeHostApiProxyEnvelope,
   HOST_API_STARTUP_PATHS,
@@ -42,6 +59,7 @@ import {
   agentScope,
   runtimeInstanceScope,
   sessionScope,
+  sessionIdentitiesEqual,
   type AgentScope,
   type RuntimeEndpointRef,
   type RuntimeScope,
@@ -95,6 +113,8 @@ const SESSION_APPROVAL_CAPABILITY_ID = 'session.approval';
 const SESSION_MODEL_SELECTION_CAPABILITY_ID = 'session.modelSelection';
 const OPENCLAW_BROWSER_CAPABILITY_ID = 'openclaw.browser';
 const OPENCLAW_MCP_APP_CAPABILITY_ID = 'openclaw.mcpApp';
+const OPENCLAW_CANVAS_CAPABILITY_ID = 'openclaw.canvas';
+const OPENCLAW_PROGRESS_CAPABILITY_ID = 'openclaw.progress';
 const OPENCLAW_QUESTION_CAPABILITY_ID = 'openclaw.question';
 const OPENCLAW_LOCAL_ENDPOINT = { kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' } as const;
 const CAPABILITY_SCOPE_CACHE_TTL_MS = 5_000;
@@ -328,7 +348,7 @@ export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): 
   return hostApiFetchWithFailure<T>(path, init);
 }
 
-async function hostApiFetchWithFailure<T>(path: string, init?: HostApiRequestInit, decodeFailure?: HttpFailureDecoder<T>): Promise<T> {
+export async function hostApiFetchWithFailure<T>(path: string, init?: HostApiRequestInit, decodeFailure?: HttpFailureDecoder<T>): Promise<T> {
   const startedAt = Date.now();
   const method = init?.method || 'GET';
   const signal = init?.signal ?? null;
@@ -1628,17 +1648,10 @@ async function hostCapabilityExecute<TResult = unknown>(
 }
 
 export async function hostOpenClawBrowserRequest<TResult = unknown>(
-  input: {
-    method: string;
-    path: string;
-    query?: Record<string, unknown>;
-    body?: unknown;
-    timeoutMs?: number;
-    target?: 'host' | 'node';
-    node?: string;
-  },
+  input: BrowserRequestInput,
   options?: SessionCapabilityOptions,
 ): Promise<TResult> {
+  if (!decodeBrowserRequestInput(input)) throw new AppError('CONFIG', 'Invalid Browser request');
   return hostCapabilityExecute<TResult>({
     id: OPENCLAW_BROWSER_CAPABILITY_ID,
     operationId: 'browser.request',
@@ -1648,18 +1661,70 @@ export async function hostOpenClawBrowserRequest<TResult = unknown>(
   }, options);
 }
 
-export async function hostOpenClawMcpAppRequest<TResult = unknown>(
-  input: { operationId: `mcp.app.${string}`; sessionKey: string; viewId: string; standalone?: boolean },
+function rejectOpenClawSurfaceFailure(_status: number, payload: unknown): null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+    || Object.keys(payload).length !== 1 || !('error' in payload)) return null;
+  const failure = decodeOpenClawSurfaceError(payload.error);
+  if (!failure) return null;
+  throw new AppError('GATEWAY', failure.message, undefined, { surfaceFailure: failure });
+}
+
+export async function hostOpenClawMcpAppRequest<T extends OpenClawMcpAppOperationId>(
+  input: OpenClawMcpAppRequest & { operationId: T },
   options?: SessionCapabilityOptions,
-): Promise<TResult> {
-  const { operationId, ...requestInput } = input;
-  return hostCapabilityExecute<TResult>({
+): Promise<OpenClawMcpAppResults[T]> {
+  if (!isOpenClawMcpAppRequest(input)) throw new AppError('CONFIG', 'Invalid MCP App request');
+  const { operationId } = input;
+  const result = decodeOpenClawMcpAppResult(operationId, await hostCapabilityExecute({
     id: OPENCLAW_MCP_APP_CAPABILITY_ID,
     operationId,
-    scope: runtimeInstanceScope(OPENCLAW_LOCAL_ENDPOINT),
+    scope: runtimeInstanceScope(input.sessionIdentity.endpoint),
     target: null,
-    input: requestInput,
-  }, options);
+    input,
+  }, { ...options, decodeFailure: rejectOpenClawSurfaceFailure }));
+  if (!result) throw new AppError('INVALID_RESPONSE', 'Invalid MCP App response');
+  if (operationId === 'mcp.app.view' && ('sessionIdentity' in result)
+    && (!sessionIdentitiesEqual(result.sessionIdentity, input.sessionIdentity) || result.viewId !== input.viewId)) {
+    throw new AppError('INVALID_RESPONSE', 'MCP App response identity does not match');
+  }
+  return result;
+}
+
+export async function hostOpenClawCanvasRequest(
+  input: OpenClawCanvasRequest,
+  options?: SessionCapabilityOptions,
+): Promise<OpenClawCanvasViewResult> {
+  if (!isOpenClawCanvasRequest(input)) throw new AppError('CONFIG', 'Invalid Canvas request');
+  const { operationId } = input;
+  const result = decodeOpenClawCanvasViewResult(await hostCapabilityExecute({
+    id: OPENCLAW_CANVAS_CAPABILITY_ID,
+    operationId,
+    scope: runtimeInstanceScope(input.sessionIdentity.endpoint),
+    target: null,
+    input,
+  }, { ...options, decodeFailure: rejectOpenClawSurfaceFailure }));
+  if (!result || !sessionIdentitiesEqual(result.sessionIdentity, input.sessionIdentity) || result.documentId !== input.docId) {
+    throw new AppError('INVALID_RESPONSE', 'Invalid Canvas response');
+  }
+  return result;
+}
+
+export async function hostOpenClawProgressCardRequest(
+  input: OpenClawProgressCardRequest,
+  options?: SessionCapabilityOptions,
+): Promise<OpenClawProgressCardResult> {
+  if (!isOpenClawProgressCardRequest(input)) throw new AppError('CONFIG', 'Invalid progress card request');
+  const result = decodeOpenClawProgressCardResult(await hostCapabilityExecute({
+    id: OPENCLAW_PROGRESS_CAPABILITY_ID,
+    operationId: input.operationId,
+    scope: runtimeInstanceScope(input.sessionIdentity.endpoint),
+    target: null,
+    input,
+  }, { ...options, decodeFailure: rejectOpenClawSurfaceFailure }));
+  if (!result || !sessionIdentitiesEqual(result.sessionIdentity, input.sessionIdentity)) {
+    throw new AppError('INVALID_RESPONSE', 'Invalid progress card response');
+  }
+  return result;
 }
 
 export async function hostOpenClawQuestionList(

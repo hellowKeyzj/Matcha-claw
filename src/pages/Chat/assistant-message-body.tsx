@@ -54,6 +54,7 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
       attachedFiles: [],
     } as never)?.fullHtml ?? null;
   }, [createdAt, itemKey, largeTextContent.text]);
+  const html = useMemo(() => ({ __html: markdownHtml ?? '' }), [markdownHtml]);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
     logSessionTrace('session.assistant-markdown.committed', 'session-assistant-markdown-boundary', () => ({
@@ -101,7 +102,7 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
     if (!target) {
       return;
     }
-    if (target.closest('a,button,[role="button"]')) {
+    if (target.closest('a,button,summary,[role="button"]')) {
       return;
     }
     onBodyClick?.();
@@ -135,7 +136,7 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
           <div
             className="chat-markdown max-w-none break-words"
             onClick={handleMarkdownBodyClick}
-            dangerouslySetInnerHTML={{ __html: markdownHtml }}
+            dangerouslySetInnerHTML={html}
           />
         ) : null}
         {largeTextContent.loadMoreButton}

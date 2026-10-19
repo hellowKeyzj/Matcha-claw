@@ -3,7 +3,7 @@ import { isNativeExecutable } from './native-artifact.mjs';
 import { posix, win32 } from 'node:path';
 import { app } from 'electron';
 import { getPort } from '../../utils/config';
-import { getOpenClawConfigDir, getRuntimeHostStateDir } from '../../utils/paths';
+import { getMatchaAgentHome, getOpenClawConfigDir, getRuntimeHostStateDir } from '../../utils/paths';
 import {
   resolveRuntimeHostBinary,
   type ResolveRuntimeHostBinaryOptions,
@@ -56,6 +56,7 @@ export class RuntimeHostBootstrapResolutionError extends Error {
 export interface RuntimeHostBootstrapResolverDependencies {
   readonly app?: RuntimeHostApp;
   readonly process?: RuntimeHostProcess;
+  readonly getMatchaAgentHome?: () => string;
   readonly getOpenClawConfigDir?: () => string;
   readonly getRuntimeHostStateDir?: () => string;
   readonly getPort?: (
@@ -105,6 +106,7 @@ export function resolveRuntimeHostBootstrap(
     projectRoot,
     resourcesPath,
     target,
+    getMatchaAgentHome: dependencies.getMatchaAgentHome ?? getMatchaAgentHome,
     getOpenClawConfigDir: dependencies.getOpenClawConfigDir ?? getOpenClawConfigDir,
     getRuntimeHostStateDir: dependencies.getRuntimeHostStateDir ?? getRuntimeHostStateDir,
     getPort: dependencies.getPort ?? getRuntimeHostBootstrapPort,
@@ -139,6 +141,7 @@ export function resolveRuntimeHostBootstrap(
       appVersion: application.getVersion(),
       appLogDir: layout.appLogDir,
       runtimeHostStateDir: layout.runtimeHostStateDir,
+      searxngResourcesDir: layout.searxngResourcesDir,
       runtimeHostMcpExecutable: layout.runtimeHostMcpExecutable,
       runtimeHostTransportPort: layout.runtimeHostTransportPort,
       matcha: layout.matcha,
@@ -152,6 +155,7 @@ export function resolveRuntimeHostBootstrap(
     appVersion: application.getVersion(),
     appLogDir: layout.appLogDir,
     runtimeHostStateDir: layout.runtimeHostStateDir,
+    searxngResourcesDir: layout.searxngResourcesDir,
     runtimeHostMcpExecutable: layout.runtimeHostMcpExecutable,
     runtimeHostTransportPort: layout.runtimeHostTransportPort,
     matcha: { ...layout.matcha, gitBash: layout.gitBash },
@@ -169,6 +173,7 @@ type RuntimeLayoutInput = {
   readonly resourcesPath: string | undefined;
   readonly target: string;
   readonly runtimeHostBinary: string;
+  readonly getMatchaAgentHome: () => string;
   readonly getOpenClawConfigDir: () => string;
   readonly getRuntimeHostStateDir: () => string;
   readonly getPort: (
@@ -182,6 +187,7 @@ type RuntimeLayoutInput = {
 type RuntimeLayout = {
   readonly appLogDir: string;
   readonly runtimeHostStateDir: string;
+  readonly searxngResourcesDir: string;
   readonly runtimeHostMcpExecutable: string;
   readonly runtimeHostTransportPort: number;
   readonly matcha: RuntimeHostBootstrapInput['matcha'];
@@ -192,7 +198,7 @@ type RuntimeLayout = {
 
 function resolveRuntimeLayout(input: RuntimeLayoutInput): RuntimeLayout {
   const userData = input.app.getPath('userData');
-  const storageRoot = input.path.join(userData, 'matcha-agent', 'app-server');
+  const storageRoot = input.getMatchaAgentHome();
   const resourcesRoot =
     input.mode === 'packaged' ? requireResourcesRoot(input.resourcesPath, input.path) : undefined;
   const projectRoot =
@@ -234,6 +240,9 @@ function resolveRuntimeLayout(input: RuntimeLayoutInput): RuntimeLayout {
   return {
     appLogDir: input.path.join(userData, 'logs'),
     runtimeHostStateDir: input.getRuntimeHostStateDir(),
+    searxngResourcesDir: input.mode === 'packaged'
+      ? input.path.join(resourcesRoot!, 'searxng')
+      : input.path.join(projectRoot!, 'build', 'searxng'),
     runtimeHostMcpExecutable: input.runtimeHostBinary,
     runtimeHostTransportPort: input.getPort('MATCHACLAW_RUNTIME_HOST'),
     matcha: {

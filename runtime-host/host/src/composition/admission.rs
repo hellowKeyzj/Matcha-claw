@@ -175,6 +175,13 @@ impl HostAdmission {
     }
 }
 
+impl board::BoardRequestAdmission for HostAdmission {
+    fn admit_board_request(&self) -> Result<(), board::BoardRequestAdmissionClosed> {
+        self.admit_request()
+            .map_err(|_| board::BoardRequestAdmissionClosed)
+    }
+}
+
 impl ::cron::CronRequestAdmission for HostAdmission {
     fn admit_cron_request(&self) -> Result<(), ::cron::CronRequestAdmissionClosed> {
         self.admit_request()
