@@ -428,22 +428,36 @@ function trackMarkdownProcessCost(markdown: string, durationMs: number): void {
   });
 }
 
+function buildMarkdownBody(markdown: string, cacheKey?: string): MarkdownBodyRenderResult {
+  const startedAt = nowMonotonicMs();
+  const next = {
+    fullHtml: renderMarkdownHtml(markdown),
+  } satisfies MarkdownBodyRenderResult;
+  if (cacheKey !== undefined) rememberRenderedMarkdown(cacheKey, next);
+  trackMarkdownProcessCost(markdown, Math.max(0, nowMonotonicMs() - startedAt));
+  return next;
+}
+
+// Streaming callers retain the current result in their component memo, not every prefix in the LRU.
+export function renderStreamingMarkdownBody(markdown: string): MarkdownBodyRenderResult {
+  return buildMarkdownBody(markdown);
+}
+
 export function getOrBuildMarkdownBody(
   cacheKey: string,
   input: { markdown: string },
 ): MarkdownBodyRenderResult {
-  const cached = getRenderedMarkdownFromCache(cacheKey);
-  if (cached) {
-    return cached;
-  }
+  return getRenderedMarkdownFromCache(cacheKey) ?? buildMarkdownBody(input.markdown, cacheKey);
+}
 
-  const startedAt = nowMonotonicMs();
-  const next = {
-    fullHtml: renderMarkdownHtml(input.markdown),
-  } satisfies MarkdownBodyRenderResult;
-  rememberRenderedMarkdown(cacheKey, next);
-  trackMarkdownProcessCost(input.markdown, Math.max(0, nowMonotonicMs() - startedAt));
-  return next;
+export function getOrPrepareMarkdownBody(
+  cacheKey: string,
+  prepareMarkdown: () => string,
+): MarkdownBodyRenderResult | undefined {
+  const cached = getRenderedMarkdownFromCache(cacheKey);
+  if (cached) return cached;
+  const markdown = prepareMarkdown();
+  return markdown.trim() ? buildMarkdownBody(markdown, cacheKey) : undefined;
 }
 
 export function prewarmMarkdownBody(

@@ -9,7 +9,7 @@ import type { SessionRenderItem } from '../types/session/render-item';
 import { getMarkdownRenderCacheStats } from '@/pages/Chat/md-pipeline';
 import { getStaticRenderItemsCacheStats } from '@/pages/Chat/chat-render-items-cache';
 import { hostApiFetch } from './host-api';
-import { getChatViewportCacheStats } from '@/stores/chat/viewport-state';
+import { getSessionWindowCacheStats } from '@/stores/chat/session-projection-state';
 
 interface RendererHeapMemoryStats {
   usedJsHeapSize: number;
@@ -44,7 +44,7 @@ export interface ChatStoreMemorySummary {
 
 export interface ChatRendererCacheSummary {
   markdownRender: ReturnType<typeof getMarkdownRenderCacheStats>;
-  viewportWindow: ReturnType<typeof getChatViewportCacheStats>;
+  viewportWindow: ReturnType<typeof getSessionWindowCacheStats>;
   staticItems: ReturnType<typeof getStaticRenderItemsCacheStats>;
   attachmentImage: ReturnType<typeof getAttachmentImageCacheStats>;
 }
@@ -295,7 +295,7 @@ export function collectRendererChatMemoryDiagnostics(): {
     chatStore: summarizeChatStoreMemory(state),
     caches: {
       markdownRender: getMarkdownRenderCacheStats(),
-      viewportWindow: getChatViewportCacheStats(),
+      viewportWindow: getSessionWindowCacheStats(useChatStore.getState),
       staticItems: getStaticRenderItemsCacheStats(),
       attachmentImage: getAttachmentImageCacheStats(),
     },

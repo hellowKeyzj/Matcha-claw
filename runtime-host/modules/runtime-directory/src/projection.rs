@@ -142,9 +142,9 @@ mod tests {
                         "location": { "kind": "local" },
                         "lifecycle": { "phase": "ready", "connected": true, "ready": true, "updatedAt": null },
                         "displayName": "OpenClaw",
-                        "agentIds": ["main"],
-                        "defaultAgentId": "main",
-                        "agents": [{ "agentId": "main", "source": "discovered", "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true, "supportsGoal": false } }],
+                        "agentIds": [],
+                        "defaultAgentId": "",
+                        "agents": [],
                         "acceptsDynamicAgents": true,
                         "capabilities": { "chat": true, "streaming": true, "tools": true, "approvals": true, "replay": true, "modelSelection": true, "supportsGoal": false },
                         "capabilityFamilies": [

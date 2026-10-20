@@ -18,6 +18,8 @@ type SessionSummary = Readonly<{
   sessionIdentity: SessionIdentity;
   ownership: SessionOwnership | null;
   kind: 'main' | 'session' | 'automation';
+  label?: string;
+  displayName?: string;
   preferred?: boolean;
   endpointSessionId?: string;
   modelState?: SessionModelState;
@@ -107,6 +109,8 @@ function isSessionSummary(value: unknown): value is SessionSummary {
       'sessionIdentity',
       'ownership',
       'kind',
+      'label',
+      'displayName',
       'preferred',
       'endpointSessionId',
       'modelState',
@@ -122,7 +126,9 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     || !['main', 'session', 'automation'].includes(value.kind)) {
     return false;
   }
-  return (value.preferred === undefined || typeof value.preferred === 'boolean')
+  return (value.label === undefined || typeof value.label === 'string')
+    && (value.displayName === undefined || typeof value.displayName === 'string')
+    && (value.preferred === undefined || typeof value.preferred === 'boolean')
     && (value.endpointSessionId === undefined || typeof value.endpointSessionId === 'string')
     && (value.modelState === undefined || isSessionModelState(value.modelState))
     && (value.protocolId === undefined || typeof value.protocolId === 'string')

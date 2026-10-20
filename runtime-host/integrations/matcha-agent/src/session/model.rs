@@ -72,6 +72,7 @@ pub struct SessionRecord {
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub title: Option<String>,
+    pub display_name: Option<String>,
     pub model: Option<String>,
     pub mode: Option<String>,
     pub provider_id: Option<String>,

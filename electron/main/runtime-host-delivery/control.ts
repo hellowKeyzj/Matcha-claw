@@ -69,6 +69,7 @@ export type RuntimeHostSafeEvent =
   | { readonly type: 'call.changed'; readonly callId: string; readonly revision: number }
   | { readonly type: 'calls.resync' }
   | { readonly type: 'organization.changed' }
+  | { readonly type: 'sessions.catalogChanged'; readonly endpoint: ProductRuntimeEndpoint }
   | { readonly type: 'cron.changed'; readonly endpoint: ProductRuntimeEndpoint }
   | {
       readonly type: 'openclaw.lifecycle';
@@ -535,6 +536,7 @@ function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
         && isRuntimeHostPeerLifecycle(value.lifecycle)
         && typeof value.ready === 'boolean'
         && isNonNegativeSafeInteger(value.observedAtMs);
+    case 'sessions.catalogChanged':
     case 'cron.changed':
       return hasExactKeys(value, ['type', 'endpoint'])
         && isProductRuntimeEndpoint(value.endpoint)

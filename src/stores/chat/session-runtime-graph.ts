@@ -1,6 +1,7 @@
-import type {
-  AgentScope,
-  RuntimeEndpointRef,
+import {
+  assertSessionIdentity,
+  type AgentScope,
+  type RuntimeEndpointRef,
 } from '../../types/desktop/runtime-address';
 import {
   isSessionRuntimeEndpointReady,
@@ -43,8 +44,44 @@ type RuntimeAgentAccumulator = {
   catalogEntry: ChatSessionRuntimeAgentCatalogEntry | null;
   sessionPromptScope: AgentScope | null;
   sessions: ChatSessionRuntimeSessionNode[];
-  order: number;
 };
+
+type SessionNodeIdentityInputs = {
+  agentId: string;
+  sessionKey: string;
+  endpointKind: RuntimeEndpointRef['kind'];
+  endpointIdentity: string[];
+};
+
+// Weak node keys bound these memo inputs to graph lifetime; caller identities stay mutable.
+const sessionNodeIdentityInputs = new WeakMap<ChatSessionRuntimeSessionNode, SessionNodeIdentityInputs>();
+
+function readSessionNodeIdentityInputs(
+  identity: ChatSessionRuntimeSessionNode['sessionIdentity'],
+): SessionNodeIdentityInputs {
+  const endpoint = identity.endpoint;
+  return {
+    agentId: identity.agentId,
+    sessionKey: identity.sessionKey,
+    endpointKind: endpoint.kind,
+    endpointIdentity: endpoint.kind === 'native-runtime'
+      ? [endpoint.runtimeAdapterId, endpoint.runtimeInstanceId]
+      : [endpoint.protocolId, endpoint.connectorId, endpoint.endpointId],
+  };
+}
+
+function sameSessionNodeIdentityInputs(
+  before: SessionNodeIdentityInputs | undefined,
+  identity: ChatSessionRuntimeSessionNode['sessionIdentity'],
+): boolean {
+  const endpoint = identity.endpoint;
+  return !!before && before.agentId === identity.agentId && before.sessionKey === identity.sessionKey
+    && before.endpointKind === endpoint.kind
+    && (endpoint.kind === 'native-runtime'
+      ? before.endpointIdentity[0] === endpoint.runtimeAdapterId && before.endpointIdentity[1] === endpoint.runtimeInstanceId
+      : before.endpointIdentity[0] === endpoint.protocolId && before.endpointIdentity[1] === endpoint.connectorId
+        && before.endpointIdentity[2] === endpoint.endpointId);
+}
 
 function readAgentCatalogEntries(
   catalog: ChatSessionRuntimeAgentCatalog,
@@ -54,53 +91,12 @@ function readAgentCatalogEntries(
     : catalog.seedAgents;
 }
 
-function findAgentCatalogEntry(
-  target: ChatSessionRuntimeEndpointTarget,
-  agentId: string,
-): ChatSessionRuntimeAgentCatalogEntry | null {
-  return readAgentCatalogEntries(target.agentCatalog).find((entry) => entry.id === agentId) ?? null;
-}
-
-function findSessionPromptScope(
-  target: ChatSessionRuntimeEndpointTarget,
-  agentId: string,
-): AgentScope | null {
-  const scopes = target.sessionPromptScopes;
-  return scopes.find((scope) => (
-    scope.agentId === agentId
-    && sameRuntimeEndpointScope(scope.endpoint, target.endpoint)
-  )) ?? null;
-}
-
-function addAgentId(agentIds: Set<string>, agentId: string): void {
-  if (agentId) {
-    agentIds.add(agentId);
-  }
-}
-
-function collectTargetAgentIds(target: ChatSessionRuntimeEndpointTarget): string[] {
-  const agentIds = new Set<string>();
-  for (const agentId of target.agentIds) {
-    addAgentId(agentIds, agentId);
-  }
-  for (const entry of readAgentCatalogEntries(target.agentCatalog)) {
-    addAgentId(agentIds, entry.id);
-  }
-  if (target.defaultSessionPromptScope) addAgentId(agentIds, target.defaultSessionPromptScope.agentId);
-  for (const scope of target.sessionPromptScopes) {
-    if (sameRuntimeEndpointScope(scope.endpoint, target.endpoint)) {
-      addAgentId(agentIds, scope.agentId);
-    }
-  }
-  return Array.from(agentIds);
-}
-
 function ensureEndpointAccumulator(
   endpointsByRuntimeScopeKey: Map<string, RuntimeEndpointAccumulator>,
   endpoint: RuntimeEndpointRef,
   target: ChatSessionRuntimeEndpointTarget | null,
+  runtimeScopeKey = buildRuntimeScopeKey(endpoint),
 ): RuntimeEndpointAccumulator {
-  const runtimeScopeKey = buildRuntimeScopeKey(endpoint);
   const existing = endpointsByRuntimeScopeKey.get(runtimeScopeKey);
   if (existing) {
     if (target && !existing.target) {
@@ -124,35 +120,39 @@ function ensureAgentAccumulator(
   agentId: string,
 ): RuntimeAgentAccumulator {
   const existing = endpoint.agentsById.get(agentId);
-  const catalogEntry = endpoint.target ? findAgentCatalogEntry(endpoint.target, agentId) : null;
-  const sessionPromptScope = endpoint.target ? findSessionPromptScope(endpoint.target, agentId) : null;
-  if (existing) {
-    if (!existing.catalogEntry && catalogEntry) {
-      existing.catalogEntry = catalogEntry;
-    }
-    if (!existing.sessionPromptScope && sessionPromptScope) {
-      existing.sessionPromptScope = sessionPromptScope;
-    }
-    return existing;
-  }
-  const created = {
+  if (existing) return existing;
+  const created: RuntimeAgentAccumulator = {
     agentId,
-    catalogEntry,
-    sessionPromptScope,
+    catalogEntry: null,
+    sessionPromptScope: null,
     sessions: [],
-    order: endpoint.agentsById.size,
   };
   endpoint.agentsById.set(agentId, created);
   return created;
 }
 
-function buildSessionNode(record: ChatSessionRecord): ChatSessionRuntimeSessionNode | null {
+function buildSessionNode(
+  record: ChatSessionRecord,
+  previous?: ChatSessionRuntimeSessionNode,
+): ChatSessionRuntimeSessionNode | null {
   const identity = record.meta.sessionIdentity;
   if (!identity) {
     return null;
   }
-  return {
-    sessionRecordKey: buildSessionRecordKey(identity),
+  if (previous
+    && previous.endpointSessionId === record.meta.endpointSessionId
+    && previous.ownership === record.meta.ownership
+    && previous.kind === record.meta.kind
+    && previous.preferred === record.meta.preferred
+    && previous.label === record.meta.label
+    && previous.titleSource === record.meta.titleSource
+    && previous.displayName === (record.meta.displayName ?? null)
+    && previous.modelState === record.meta.modelState
+    && previous.thinkingLevel === record.meta.thinkingLevel
+    && previous.contextTokens === record.contextTokens
+    && previous.updatedAt === record.meta.lastActivityAt) return previous;
+  const node = {
+    sessionRecordKey: previous?.sessionRecordKey ?? buildSessionRecordKey(identity),
     endpointSessionId: record.meta.endpointSessionId,
     sessionIdentity: identity,
     ownership: record.meta.ownership,
@@ -166,6 +166,8 @@ function buildSessionNode(record: ChatSessionRecord): ChatSessionRuntimeSessionN
     ...(record.contextTokens ? { contextTokens: record.contextTokens } : {}),
     updatedAt: record.meta.lastActivityAt,
   };
+  sessionNodeIdentityInputs.set(node, readSessionNodeIdentityInputs(identity));
+  return node;
 }
 
 function compareSessionNodes(
@@ -183,6 +185,34 @@ function compareSessionNodes(
   return left.sessionRecordKey.localeCompare(right.sessionRecordKey);
 }
 
+function orderSessionNodes(
+  sessions: ChatSessionRuntimeSessionNode[],
+  previous?: ChatSessionRuntimeSessionNode[],
+): ChatSessionRuntimeSessionNode[] {
+  if (!previous || previous.length !== sessions.length) return sessions.sort(compareSessionNodes);
+  const positions = new Map(sessions.map((session, index) => [session.sessionRecordKey, index]));
+  if (positions.size !== sessions.length) return sessions.sort(compareSessionNodes);
+  const ordered: ChatSessionRuntimeSessionNode[] = [];
+  let previousPosition = -1;
+  for (const before of previous) {
+    const position = positions.get(before.sessionRecordKey);
+    if (position === undefined) return sessions.sort(compareSessionNodes);
+    const session = sessions[position];
+    if (session.preferred !== before.preferred || (session.updatedAt ?? 0) !== (before.updatedAt ?? 0)) {
+      return sessions.sort(compareSessionNodes);
+    }
+    const last = ordered[ordered.length - 1];
+    // localeCompare can tie distinct keys; preserve the sort's current-input tie order.
+    if (last && position < previousPosition && compareSessionNodes(last, session) === 0) {
+      return sessions.sort(compareSessionNodes);
+    }
+    ordered.push(session);
+    positions.delete(before.sessionRecordKey);
+    previousPosition = position;
+  }
+  return ordered;
+}
+
 function resolveEndpointDisplayName(endpoint: RuntimeEndpointAccumulator): string {
   return endpoint.target?.displayName ?? endpoint.runtimeScopeKey;
 }
@@ -198,18 +228,55 @@ function resolvePreferredSessionKey(sessions: ChatSessionRuntimeSessionNode[]): 
 export function buildSessionRuntimeGraph(
   catalog: Pick<ChatSessionRuntimeCatalogState, 'endpoints'>,
   loadedSessions: ChatStoreState['loadedSessions'],
+  previous?: ChatSessionRuntimeGraph,
 ): ChatSessionRuntimeGraph {
   const endpointsByRuntimeScopeKey = new Map<string, RuntimeEndpointAccumulator>();
+  const previousAgentsByRuntimeScopeKey = new Map(previous?.endpoints.map((endpoint) => [
+    endpoint.runtimeScopeKey,
+    new Map(endpoint.agents.map((agent) => [agent.agentId, agent.sessions])),
+  ]));
+  // Candidate lookup only; saved primitive inputs validate reuse on each build.
+  const previousSessionsByIdentity = new Map<ChatSessionRuntimeSessionNode['sessionIdentity'], {
+    node: ChatSessionRuntimeSessionNode;
+    runtimeScopeKey: string;
+  }>();
+  for (const endpoint of previous?.endpoints ?? []) {
+    for (const agent of endpoint.agents) {
+      for (const node of agent.sessions) {
+        previousSessionsByIdentity.set(node.sessionIdentity, { node, runtimeScopeKey: endpoint.runtimeScopeKey });
+      }
+    }
+  }
 
   for (const target of catalog.endpoints) {
     const endpoint = ensureEndpointAccumulator(endpointsByRuntimeScopeKey, target.endpoint, target);
-    for (const agentId of collectTargetAgentIds(target)) {
-      ensureAgentAccumulator(endpoint, agentId);
+    for (const agentId of target.agentIds) {
+      if (agentId) ensureAgentAccumulator(endpoint, agentId);
+    }
+    for (const entry of readAgentCatalogEntries(target.agentCatalog)) {
+      if (!entry.id) continue;
+      const agent = ensureAgentAccumulator(endpoint, entry.id);
+      if (endpoint.target === target) agent.catalogEntry ??= entry;
+    }
+    const defaultAgentId = target.defaultSessionPromptScope?.agentId;
+    if (defaultAgentId) ensureAgentAccumulator(endpoint, defaultAgentId);
+    for (const scope of target.sessionPromptScopes) {
+      if (buildRuntimeScopeKey(scope.endpoint) !== endpoint.runtimeScopeKey || !scope.agentId) continue;
+      const agent = ensureAgentAccumulator(endpoint, scope.agentId);
+      if (endpoint.target === target) agent.sessionPromptScope ??= scope;
     }
   }
 
   for (const record of Object.values(loadedSessions)) {
-    const sessionNode = buildSessionNode(record);
+    const identity = record.meta.sessionIdentity;
+    let prior = identity ? previousSessionsByIdentity.get(identity) : undefined;
+    if (prior && identity) {
+      assertSessionIdentity(identity);
+      if (!sameSessionNodeIdentityInputs(sessionNodeIdentityInputs.get(prior.node), identity)) {
+        prior = undefined;
+      }
+    }
+    const sessionNode = buildSessionNode(record, prior?.node);
     if (!sessionNode) {
       continue;
     }
@@ -217,6 +284,7 @@ export function buildSessionRuntimeGraph(
       endpointsByRuntimeScopeKey,
       sessionNode.sessionIdentity.endpoint,
       null,
+      prior?.runtimeScopeKey,
     );
     ensureAgentAccumulator(endpoint, sessionNode.sessionIdentity.agentId).sessions.push(sessionNode);
   }
@@ -228,18 +296,19 @@ export function buildSessionRuntimeGraph(
       target: endpoint.target,
       displayName: resolveEndpointDisplayName(endpoint),
       defaultAgentId: resolveEndpointDefaultAgentId(endpoint),
-      agents: Array.from(endpoint.agentsById.values())
-        .sort((left, right) => left.order - right.order)
-        .map((agent) => {
-          const sessions = [...agent.sessions].sort(compareSessionNodes);
-          return {
-            agentId: agent.agentId,
-            catalogEntry: agent.catalogEntry,
-            sessionPromptScope: agent.sessionPromptScope,
-            sessions,
-            preferredSessionKey: resolvePreferredSessionKey(sessions),
-          };
-        }),
+      agents: Array.from(endpoint.agentsById.values()).map((agent) => {
+        const sessions = orderSessionNodes(
+          agent.sessions,
+          previousAgentsByRuntimeScopeKey.get(endpoint.runtimeScopeKey)?.get(agent.agentId),
+        );
+        return {
+          agentId: agent.agentId,
+          catalogEntry: agent.catalogEntry,
+          sessionPromptScope: agent.sessionPromptScope,
+          sessions,
+          preferredSessionKey: resolvePreferredSessionKey(sessions),
+        };
+      }),
     })),
   };
 }

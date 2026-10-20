@@ -212,11 +212,12 @@ export function SubAgents() {
   }, [resourceScope, resourceMatches, managementReady, nativeManaged, loadAgents, loadAvailableModels]);
 
   useEffect(() => {
-    if (!managedAgentId || !resourceScope || !resourceMatches || !managementReady) {
+    if (!resourceScope || !resourceMatches || !managementReady) {
       return;
     }
-    void loadPersistedFilesForAgent(managedAgentId, resourceScope).catch(() => {});
-  }, [managedAgentId, resourceScope, resourceMatches, managementReady, loadPersistedFilesForAgent]);
+    const agentId = useSubagentsStore.getState().managedAgentId;
+    if (agentId) void loadPersistedFilesForAgent(agentId, resourceScope).catch(() => {});
+  }, [resourceScope, resourceMatches, managementReady, loadPersistedFilesForAgent]);
 
   useEffect(() => {
     if (!managedAgentId || !managementReady || dialogOpen || editingAgentId) {
@@ -307,7 +308,8 @@ export function SubAgents() {
     setEditingAgentId(agentId);
     setManagedAgentId(agentId);
     setDialogOpen(true);
-  }, [agents, isCurrentPage, setManagedAgentId, t]);
+    if (resourceScope) void loadPersistedFilesForAgent(agentId, resourceScope).catch(() => {});
+  }, [agents, isCurrentPage, loadPersistedFilesForAgent, resourceScope, setManagedAgentId, t]);
 
   const handleDeleteAgent = useCallback((agentId: string) => {
     if (!isCurrentPage()) return;
@@ -451,7 +453,6 @@ export function SubAgents() {
       if (!resourceScope || !isCurrentPage()) return;
       const importResult = await importAgentConfig(JSON.parse(result.content) as unknown, resourceScope);
       if (!isCurrentPage()) return;
-      void loadPersistedFilesForAgent(importResult.agentId, resourceScope).catch(() => {});
       setManagedAgentId(importResult.agentId);
       if (importResult.warning) {
         toast.warning(importResult.warning);
@@ -461,7 +462,7 @@ export function SubAgents() {
     } catch (error) {
       toast.error(t('transfer.importFailed', { message: error instanceof Error ? error.message : String(error) }));
     }
-  }, [importAgentConfig, isCurrentPage, loadPersistedFilesForAgent, resourceScope, setManagedAgentId, t]);
+  }, [importAgentConfig, isCurrentPage, resourceScope, setManagedAgentId, t]);
 
   return (
     <AgentPage>
@@ -772,7 +773,6 @@ export function SubAgents() {
             }, resourceScope);
             if (!isCurrentPage()) return;
             setManagedAgentId(createResult.agentId);
-            if (resourceScope) void loadPersistedFilesForAgent(createResult.agentId, resourceScope).catch(() => {});
             setTemplateDialogOpen(false);
             if (createResult.warning) {
               toast.warning(createResult.warning);

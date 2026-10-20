@@ -9,10 +9,12 @@ import type { NewSessionResult } from './session-actions';
 import type { ChatStoreGetFn, ChatStoreSetFn } from './send-handlers';
 import { selectCurrentChatSendGate } from './selectors';
 import { resolveChatSendGateForPayload } from './send-gate';
+import { isReadableChatAttachment, isUnsupportedGoalStartAttachment } from './send-transport';
 import { resolveSessionOperationTarget } from './session-identity';
+import { reconcileSessionDirectory } from './session-directory';
 import { hasPendingSessionSend } from './session-presentation';
 import { getSessionRuntime, patchSessionMeta } from './store-state-helpers';
-import { CHAT_INLINE_ATTACHMENT_MAX_BYTES, type ChatSendAttachment, type ChatSendResult, type ChatStoreState } from './types';
+import type { ChatSendAttachment, ChatSendResult, ChatStoreState } from './types';
 
 interface SessionInput {
   set: ChatStoreSetFn;
@@ -56,8 +58,11 @@ export async function executeSessionModelSelection(input: SessionInput, key: str
       || input.get().loadedSessions[key]?.meta.sessionIdentity !== identity) return { outcome: 'outcome_unknown' };
     if (result.outcome === 'succeeded') {
       if (result.modelState.selectionId !== normalized) return { outcome: 'outcome_unknown' };
-      input.set((state) => state.loadedSessions[key]?.meta.sessionIdentity === identity
-        ? { loadedSessions: patchSessionMeta(state, key, { modelState: result.modelState }) } : state);
+      input.set((state) => {
+        if (state.loadedSessions[key]?.meta.sessionIdentity !== identity) return state;
+        const loadedSessions = patchSessionMeta(state, key, { modelState: result.modelState });
+        return { loadedSessions, ...reconcileSessionDirectory(state, loadedSessions, [key]) };
+      });
     }
     return result;
   } finally {
@@ -77,13 +82,11 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
   text: string; attachments?: ChatSendAttachment[]; intent?: SessionSendIntent; operationId?: string;
 }): Promise<ChatSendResult> {
   const { text, attachments, intent } = payload;
-  const directory = (attachment: ChatSendAttachment) => attachment.entryKind === 'directory' || attachment.mimeType === 'application/x-directory';
   if (intent && !text.trim()) return { accepted: false, reason: 'empty' };
-  if (intent && attachments?.some((attachment) => directory(attachment) || attachment.fileSize > CHAT_INLINE_ATTACHMENT_MAX_BYTES)) {
+  if (intent && attachments?.some(isUnsupportedGoalStartAttachment)) {
     return { accepted: false, reason: 'goal-attachments' };
   }
-  const attachmentCount = attachments?.filter((attachment) => !directory(attachment)
-    && (attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES || Boolean(attachment.sourcePath))).length ?? 0;
+  const attachmentCount = attachments?.filter(isReadableChatAttachment).length ?? 0;
   const gate = resolveChatSendGateForPayload(selectCurrentChatSendGate(input.get()), { text, attachmentCount });
   if (!gate.canSend) return { accepted: false, reason: gate.reason, error: gate.error };
   let conversation = input.get().currentConversation;
@@ -182,7 +185,10 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
         if (!sessionIdentitiesEqual(view.identity, identity)) return fail('Session model confirmation target changed');
         if (!isCurrent() || !sameRevision()) return fail('Composer changed during model confirmation', 'unavailable');
         confirmed = view.modelState?.selectionId === modelSelectionId;
-        if (confirmed) input.set((state) => ({ loadedSessions: patchSessionMeta(state, key, { modelState: view.modelState! }) }));
+        if (confirmed) input.set((state) => {
+          const loadedSessions = patchSessionMeta(state, key, { modelState: view.modelState! });
+          return { loadedSessions, ...reconcileSessionDirectory(state, loadedSessions, [key]) };
+        });
       }
       if (!confirmed) {
         const result = await input.get().selectSessionModel(key, modelSelectionId);

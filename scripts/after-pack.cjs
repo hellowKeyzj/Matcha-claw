@@ -486,6 +486,10 @@ exports.default = async function afterPack(context) {
   cleanupMatchaAgentVendor(join(matchaAgentDest, 'vendor'), platform, arch);
   console.log('[after-pack] Matcha native Server and CLI execution assets verified and copied.');
 
+  if (platform === 'darwin') {
+    await require('./sign-searxng.cjs')(context.packager, join(resourcesDir, 'searxng'));
+  }
+
   if (!existsSync(src)) {
     console.warn('[after-pack] ⚠️  build/openclaw/node_modules not found. Run bundle-openclaw first.');
     return;

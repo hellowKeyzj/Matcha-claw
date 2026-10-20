@@ -23,8 +23,8 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
-import { useChatStore, type ApprovalItem } from '@/stores/chat';
-import { selectSidebarNewSessionAction, selectSidebarPendingBlockersState } from '@/stores/chat/selectors';
+import { useChatStore, type ApprovalItem, type ChatStoreState } from '@/stores/chat';
+import { selectSidebarNewSessionAction } from '@/stores/chat/selectors';
 import { readSessionsFromState, resolveSessionListLabel } from '@/stores/chat/session-helpers';
 import { getSessionItemCount } from '@/stores/chat/store-state-helpers';
 import { useTeamsStore } from '@/stores/teams';
@@ -576,28 +576,10 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   const teams = useTeamsStore((state) => state.teams);
   const approvalsByTeamId = useTeamsStore((state) => state.approvalsByTeamId);
   const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
-  const { pendingApprovalsBySession, loadedSessions, chatSessions } = useChatStore(useShallow(selectSidebarPendingBlockersState));
+  const pendingApprovalsBySession = useChatStore((state) => state.pendingApprovalsBySession);
   const deferredTeams = useDeferredValue(teams);
   const deferredApprovalsByTeamId = useDeferredValue(approvalsByTeamId);
   const deferredPendingApprovalsBySession = useDeferredValue(pendingApprovalsBySession);
-  const deferredloadedSessions = useDeferredValue(loadedSessions);
-  const deferredChatSessions = useDeferredValue(chatSessions);
-  const deferredSessionTitles = useMemo(() => {
-    const next: Record<string, string> = {};
-    const sessionByKey = new Map(
-      deferredChatSessions.map((session) => [session.key, session] as const),
-    );
-    for (const sessionKey of Object.keys(deferredloadedSessions)) {
-      const label = resolveSessionListLabel({ loadedSessions: deferredloadedSessions }, sessionKey, sessionByKey.get(sessionKey)?.label ?? null);
-      if (label) {
-        next[sessionKey] = label;
-        continue;
-      }
-      const session = sessionByKey.get(sessionKey);
-      next[sessionKey] = session ? inferUntitledSessionLabel(session, t) : t('sidebar.untitledSession');
-    }
-    return next;
-  }, [deferredChatSessions, deferredloadedSessions, t]);
 
   const teamApprovalCards = useMemo(() => {
     if (!TEAMS_FEATURE_ENABLED) {
@@ -643,8 +625,7 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
         break;
       }
       const approvals = approvalItems ?? EMPTY_APPROVAL_ITEMS;
-      const sessionLabel = deferredSessionTitles[sessionKey]
-        || sessionKey;
+      const sessionLabel = sessionKey;
       let variants = approvalCardsCacheByApprovalsRef.get(approvals);
       if (!variants) {
         variants = new Map<string, PendingBlockerCard[]>();
@@ -677,16 +658,50 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
     return cards;
   }, [
     deferredPendingApprovalsBySession,
-    deferredSessionTitles,
     i18n.language,
     t,
   ]);
 
-  const pendingBlockers = useMemo<PendingBlockerCard[]>(() => {
+  const visibleBlockers = useMemo<PendingBlockerCard[]>(() => {
     return [...teamApprovalCards, ...approvalCards]
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, SIDEBAR_BLOCKER_RENDER_LIMIT);
   }, [approvalCards, teamApprovalCards]);
+
+  const selectSessionTitles = useCallback((state: ChatStoreState) => {
+    const titles: Record<string, string> = {};
+    for (const card of visibleBlockers) {
+      const sessionKey = card.sessionKey;
+      if (card.source !== 'chat_approval' || !sessionKey || titles[sessionKey] !== undefined) {
+        continue;
+      }
+      const record = state.loadedSessions[sessionKey];
+      if (!record) {
+        titles[sessionKey] = sessionKey;
+        continue;
+      }
+      const label = resolveSessionListLabel(state, sessionKey);
+      const { sessionIdentity, ownership, kind, endpointSessionId } = record.meta;
+      titles[sessionKey] = label || (sessionIdentity
+        ? inferUntitledSessionLabel({
+            key: sessionKey,
+            agentId: record.meta.agentId ?? sessionIdentity.agentId,
+            sessionIdentity,
+            ownership,
+            kind: kind ?? undefined,
+            endpointSessionId: endpointSessionId ?? undefined,
+          }, t)
+        : t('sidebar.untitledSession'));
+    }
+    return titles;
+  }, [visibleBlockers, t]);
+  const sessionTitles = useChatStore(useShallow(selectSessionTitles));
+
+  const pendingBlockers = useMemo(() => visibleBlockers.map((card) => (
+    card.source === 'chat_approval' && card.sessionKey
+      ? { ...card, teamName: sessionTitles[card.sessionKey] || card.sessionKey }
+      : card
+  )), [sessionTitles, visibleBlockers]);
 
   if (pendingBlockers.length === 0) {
     return null;

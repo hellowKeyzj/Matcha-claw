@@ -1,4 +1,6 @@
-import type { ChatSession, ChatStoreState, TaskChatBridgeState } from './types';
+import type { SessionIdentity } from '../../types/desktop/runtime-address';
+import type { ChatSession, ChatSessionMetaState, ChatSessionRecord, ChatStoreState, TaskChatBridgeState } from './types';
+import { isControlledSessionRenderItem } from './session-render-projection';
 import { isOrdinarySessionCandidate, isRunActive } from './types';
 import {
   getSessionMeta,
@@ -14,9 +16,27 @@ import {
 const EMPTY_CHAT_SESSIONS: ChatSession[] = [];
 const WORKING_DIRECTORY_TITLE_PREFIX = '[Working directory:';
 
-let cachedReadSessionsLoadedSessions: ChatStoreState['loadedSessions'] | null = null;
 let cachedReadSessionsResult: ChatSession[] = EMPTY_CHAT_SESSIONS;
-let cachedReadSessionsByKey = new Map<string, ChatSession>();
+type SessionInput = {
+  identityValues: string[];
+  values: unknown[];
+  label: string | null;
+  explicit: boolean;
+  displayName: string | null | undefined;
+  session: ChatSession;
+  activity: number;
+};
+let cachedSessionInputs = new Map<string, SessionInput>();
+let cachedSessionKeys: string[] = [];
+const automaticTitleByItem = new WeakMap<object, string | null>();
+let cachedSessionTitles: Record<string, string | null> = {};
+let cachedTitleInputs = new Map<string, {
+  label: string | null | undefined;
+  explicit: boolean;
+  displayName: string | null | undefined;
+  normalizedLabel: string | null;
+  normalizedDisplayName: string | null;
+}>();
 
 function normalizeSessionLabel(value: string | null | undefined): string | null {
   if (typeof value !== 'string') {
@@ -92,75 +112,111 @@ export function resolveSessionListLabel(
   if (displayName && displayName !== sessionKey && displayName !== meta.sessionIdentity?.sessionKey) {
     return displayName;
   }
-  const items = getSessionItems(state, sessionKey);
+  return resolveLatestUserTitle(getSessionItems(state, sessionKey));
+}
+
+function resolveLatestUserTitle(items: ChatSessionRecord['items']): string | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
-    const title = item?.kind === 'user-message' ? normalizeAutomaticSessionTitle(item.text) : null;
-    if (title) {
-      return title;
+    if (item?.kind !== 'user-message') continue;
+    // Only the existing owner-certified immutable items may be cached by reference.
+    let title = isControlledSessionRenderItem(item) ? automaticTitleByItem.get(item) : undefined;
+    if (title === undefined) {
+      title = normalizeAutomaticSessionTitle(item.text);
+      if (isControlledSessionRenderItem(item)) automaticTitleByItem.set(item, title);
     }
+    if (title) return title;
   }
   return null;
 }
 
-function areChatSessionsEqual(left: ChatSession | undefined, right: ChatSession): boolean {
-  if (!left) {
-    return false;
+/** Current directory titles only; values are re-read on every call, not trusted by container identity. */
+export function readSessionTitlesFromState(state: Pick<ChatStoreState, 'loadedSessions'>): Record<string, string | null> {
+  const keys = Object.keys(state.loadedSessions);
+  const nextInputs = new Map<string, NonNullable<ReturnType<typeof cachedTitleInputs.get>>>();
+  let titles = cachedSessionTitles;
+  for (const key of keys) {
+    const record = state.loadedSessions[key];
+    const meta = record.meta;
+    const label = meta.label;
+    const explicit = meta.manualLabel === true || meta.titleSource === 'user';
+    const displayName = meta.displayName;
+    const previous = cachedTitleInputs.get(key);
+    const normalizedLabel = previous && previous.label === label && previous.explicit === explicit
+      ? previous.normalizedLabel : explicit ? normalizeSessionLabel(label) : normalizeAutomaticSessionTitle(label);
+    const normalizedDisplayName = previous && previous.displayName === displayName
+      ? previous.normalizedDisplayName : normalizeAutomaticSessionTitle(displayName);
+    const title = normalizedLabel || (normalizedDisplayName && normalizedDisplayName !== key
+      && normalizedDisplayName !== meta.sessionIdentity?.sessionKey ? normalizedDisplayName : null)
+      || resolveLatestUserTitle(record.items);
+    nextInputs.set(key, previous && previous.label === label && previous.explicit === explicit && previous.displayName === displayName
+      ? previous : { label, explicit, displayName, normalizedLabel, normalizedDisplayName });
+    if (!Object.hasOwn(titles, key) || titles[key] !== title) {
+      if (titles === cachedSessionTitles) titles = { ...titles };
+      titles[key] = title;
+    }
   }
-  return (
-    left.key === right.key
-    && (left.endpointSessionId ?? null) === (right.endpointSessionId ?? null)
-    && (left.agentId ?? null) === (right.agentId ?? null)
-    && (left.protocolId ?? null) === (right.protocolId ?? null)
-    && (left.runtimeEndpointId ?? null) === (right.runtimeEndpointId ?? null)
-    && JSON.stringify(left.sessionIdentity ?? null) === JSON.stringify(right.sessionIdentity ?? null)
-    && areSessionOwnershipsEquivalent(left.ownership, right.ownership)
-    && (left.kind ?? null) === (right.kind ?? null)
-    && (left.preferred ?? false) === (right.preferred ?? false)
-    && (left.label ?? null) === (right.label ?? null)
-    && (left.titleSource ?? null) === (right.titleSource ?? null)
-    && (left.displayName ?? null) === (right.displayName ?? null)
-    && (left.thinkingLevel ?? null) === (right.thinkingLevel ?? null)
-    && areSessionModelStatesEquivalent(left.modelState, right.modelState)
-    && (left.contextTokens?.totalTokens ?? null) === (right.contextTokens?.totalTokens ?? null)
-    && (left.contextTokens?.totalTokensFresh ?? null) === (right.contextTokens?.totalTokensFresh ?? null)
-    && (left.contextTokens?.contextTokens ?? null) === (right.contextTokens?.contextTokens ?? null)
-    && (left.updatedAt ?? null) === (right.updatedAt ?? null)
-  );
+  for (const key of Object.keys(titles)) {
+    if (Object.hasOwn(state.loadedSessions, key)) continue;
+    if (titles === cachedSessionTitles) titles = { ...titles };
+    delete titles[key];
+  }
+  cachedTitleInputs = nextInputs;
+  cachedSessionTitles = titles;
+  return titles;
 }
 
-function reuseChatSession(previous: ChatSession | undefined, next: ChatSession): ChatSession {
-  if (areChatSessionsEqual(previous, next)) {
-    return previous!;
-  }
-  return next;
+function sessionIdentityValues(identity: SessionIdentity): string[] {
+  const endpoint = identity.endpoint;
+  return [identity.agentId, identity.sessionKey, endpoint.kind,
+    ...(endpoint.kind === 'native-runtime' ? [endpoint.runtimeAdapterId, endpoint.runtimeInstanceId]
+      : [endpoint.protocolId, endpoint.connectorId, endpoint.endpointId])];
 }
 
-export function readSessionsFromState(
-  state: Pick<ChatStoreState, 'loadedSessions'>,
-): ChatSession[] {
-  if (cachedReadSessionsLoadedSessions === state.loadedSessions) {
-    return cachedReadSessionsResult;
-  }
+function sessionInputValues(meta: ChatSessionMetaState, context: ChatSessionRecord['contextTokens']): unknown[] {
+  const ownership = meta.ownership;
+  const model = meta.modelState;
+  return [
+    meta.endpointSessionId ?? null, meta.agentId ?? meta.sessionIdentity!.agentId, meta.protocolId ?? null, meta.runtimeEndpointId ?? null,
+    ownership?.kind ?? null, ...(ownership?.kind === 'team' ? [ownership.teamId, ownership.teamRunId, ownership.roleId, ownership.sessionRef] : []),
+    meta.kind ?? null, meta.preferred ?? false, meta.titleSource ?? null, meta.thinkingLevel ?? null,
+    model?.overrideSource ?? null, model?.selectionId ?? null,
+    model?.selected?.provider ?? null, model?.selected?.model ?? null, model?.selected?.ref ?? null,
+    model?.active?.provider ?? null, model?.active?.model ?? null, model?.active?.ref ?? null,
+    context?.totalTokens ?? null, context?.totalTokensFresh ?? null, context?.contextTokens ?? null, meta.lastActivityAt ?? null,
+  ];
+}
 
-  const mergedSessionsByKey = new Map<string, ChatSession>();
-
-  for (const sessionKey of Object.keys(state.loadedSessions)) {
-    if (!sessionKey) {
+/** One current directory result. Read primitive dependencies each time; only changed rows materialize.
+ * Ordering depends on membership/activity/key, never label or transcript container identity. */
+export function readSessionsFromState(state: Pick<ChatStoreState, 'loadedSessions'>): ChatSession[] {
+  const nextInputs = new Map<string, SessionInput>();
+  const keys = Object.keys(state.loadedSessions).filter((key) => key && state.loadedSessions[key].meta.sessionIdentity);
+  let orderChanged = keys.length !== cachedSessionKeys.length || keys.some((key, index) => key !== cachedSessionKeys[index]);
+  let changed = orderChanged;
+  for (const sessionKey of keys) {
+    if (!sessionKey) continue;
+    const record = state.loadedSessions[sessionKey];
+    const meta = record.meta;
+    if (!meta.sessionIdentity) continue;
+    const identityValues = sessionIdentityValues(meta.sessionIdentity);
+    const values = sessionInputValues(meta, record.contextTokens);
+    const previous = cachedSessionInputs.get(sessionKey);
+    const sameIdentity = previous && identityValues.length === previous.identityValues.length
+      && identityValues.every((value, index) => value === previous.identityValues[index]);
+    const rawLabel = meta.label;
+    const explicit = meta.manualLabel === true || meta.titleSource === 'user';
+    const displayName = meta.displayName;
+    const sameValues = previous && values.length === previous.values.length && values.every((value, index) => Object.is(value, previous.values[index]));
+    if (sameIdentity && sameValues && previous.label === rawLabel && previous.explicit === explicit && previous.displayName === displayName) {
+      nextInputs.set(sessionKey, previous);
       continue;
     }
-    const meta = getSessionMeta(state, sessionKey);
-    if (!meta.sessionIdentity) {
-      continue;
-    }
-    const agentId = meta.agentId ?? meta.sessionIdentity.agentId;
-    const label = meta.manualLabel === true || meta.titleSource === 'user'
-      ? normalizeSessionLabel(meta.label)
-      : normalizeAutomaticSessionTitle(meta.label);
-    const nextSession = {
+    const label = explicit ? normalizeSessionLabel(rawLabel) : normalizeAutomaticSessionTitle(rawLabel);
+    const session: ChatSession = {
       key: sessionKey,
       ...(meta.endpointSessionId ? { endpointSessionId: meta.endpointSessionId } : {}),
-      agentId,
+      agentId: meta.agentId ?? meta.sessionIdentity.agentId,
       protocolId: meta.protocolId ?? undefined,
       runtimeEndpointId: meta.runtimeEndpointId ?? undefined,
       sessionIdentity: meta.sessionIdentity,
@@ -172,32 +228,41 @@ export function readSessionsFromState(
       displayName: normalizeAutomaticSessionTitle(meta.displayName) ?? sessionKey,
       thinkingLevel: meta.thinkingLevel ?? undefined,
       modelState: meta.modelState ?? undefined,
-      contextTokens: state.loadedSessions[sessionKey]?.contextTokens,
+      contextTokens: record.contextTokens,
       updatedAt: typeof meta.lastActivityAt === 'number' ? meta.lastActivityAt : undefined,
-    } satisfies ChatSession;
-    mergedSessionsByKey.set(sessionKey, reuseChatSession(cachedReadSessionsByKey.get(sessionKey), nextSession));
+    };
+    const activity = resolveSessionActivityMs(session, state.loadedSessions);
+    const sameSession = sameIdentity && previous.session.endpointSessionId === session.endpointSessionId
+      && previous.session.agentId === session.agentId && previous.session.protocolId === session.protocolId
+      && previous.session.runtimeEndpointId === session.runtimeEndpointId
+      && areSessionOwnershipsEquivalent(previous.session.ownership, session.ownership)
+      && previous.session.kind === session.kind && (previous.session.preferred ?? false) === (session.preferred ?? false)
+      && previous.session.label === session.label && (previous.session.titleSource ?? null) === (session.titleSource ?? null)
+      && previous.session.displayName === session.displayName && previous.session.thinkingLevel === session.thinkingLevel
+      && areSessionModelStatesEquivalent(previous.session.modelState, session.modelState)
+      && (previous.session.contextTokens?.totalTokens ?? null) === (session.contextTokens?.totalTokens ?? null)
+      && (previous.session.contextTokens?.totalTokensFresh ?? null) === (session.contextTokens?.totalTokensFresh ?? null)
+      && (previous.session.contextTokens?.contextTokens ?? null) === (session.contextTokens?.contextTokens ?? null)
+      && (previous.session.updatedAt ?? null) === (session.updatedAt ?? null);
+    nextInputs.set(sessionKey, { identityValues, values, label: rawLabel, explicit, displayName, session: sameSession ? previous.session : session, activity });
+    if (!sameSession) changed = true;
+    if (!previous || previous.activity !== activity) orderChanged = true;
   }
-
-  const nextSessions = Array.from(mergedSessionsByKey.values()).sort((left, right) => {
-    const leftActivity = resolveSessionActivityMs(left, state.loadedSessions);
-    const rightActivity = resolveSessionActivityMs(right, state.loadedSessions);
-    if (leftActivity !== rightActivity) {
-      return rightActivity - leftActivity;
+  if (nextInputs.size !== cachedSessionInputs.size) {
+    changed = true;
+    orderChanged = true;
+  }
+  if (changed) {
+    const sessions = orderChanged ? Array.from(nextInputs.values(), (entry) => entry.session).sort((left, right) => (
+      nextInputs.get(right.key)!.activity - nextInputs.get(left.key)!.activity || left.key.localeCompare(right.key)
+    )) : cachedReadSessionsResult.map((session) => nextInputs.get(session.key)!.session);
+    if (sessions.length !== cachedReadSessionsResult.length
+      || sessions.some((session, index) => session !== cachedReadSessionsResult[index])) {
+      cachedReadSessionsResult = sessions.length ? sessions : EMPTY_CHAT_SESSIONS;
     }
-    return left.key.localeCompare(right.key);
-  });
-
-  let nextResult = nextSessions;
-  if (
-    cachedReadSessionsResult.length === nextSessions.length
-    && nextSessions.every((session, index) => cachedReadSessionsResult[index] === session)
-  ) {
-    nextResult = cachedReadSessionsResult;
   }
-
-  cachedReadSessionsLoadedSessions = state.loadedSessions;
-  cachedReadSessionsResult = nextResult.length > 0 ? nextResult : EMPTY_CHAT_SESSIONS;
-  cachedReadSessionsByKey = mergedSessionsByKey;
+  cachedSessionInputs = nextInputs;
+  cachedSessionKeys = keys;
   return cachedReadSessionsResult;
 }
 

@@ -28,6 +28,7 @@ function run(command, args, options = {}) {
   }
 }
 
+run('node', ['scripts/download-matcha-ripgrep.mjs']);
 run('node', ['scripts/build-matcha-agent.mjs', '--if-needed']);
 run('node', ['scripts/build-runtime-host-native.mjs', '--platform', process.platform, '--arch', process.arch, '--profile', 'dev']);
 run('node', ['scripts/patch-dev-electron-icon.mjs']);

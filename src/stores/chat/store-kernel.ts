@@ -1,4 +1,4 @@
-import type { StoreHistoryCache } from './history-cache';
+import { createStoreHistoryCache, type StoreHistoryCache } from './history-cache';
 import { createStoreSessionRunCache, type StoreSessionRunCache } from './session-run-cache';
 import type { ChatStoreState } from './types';
 
@@ -15,13 +15,8 @@ export interface ChatStoreKernel {
 }
 
 export function createChatStoreKernel(set: ChatStoreSetFn): ChatStoreKernel {
-  let historyLoadRunId = 0;
   let mutatingCounter = 0;
-
-  const historyFingerprintBySession = new Map<string, string>();
-  const historyRenderFingerprintBySession = new Map<string, string>();
-  const historyLoadAbortControllerBySession = new Map<string, AbortController>();
-  const historyLoadInFlightBySession = new Map<string, Promise<void>>();
+  const historyRuntime = createStoreHistoryCache();
   const sessionRunCache = createStoreSessionRunCache();
 
   const beginMutating = (): void => {
@@ -39,35 +34,6 @@ export function createChatStoreKernel(set: ChatStoreSetFn): ChatStoreKernel {
     if (mutatingCounter === 0) {
       set({ mutating: false });
     }
-  };
-
-  const historyRuntime: StoreHistoryCache = {
-    getHistoryLoadRunId: () => historyLoadRunId,
-    nextHistoryLoadRunId: () => {
-      historyLoadRunId += 1;
-      return historyLoadRunId;
-    },
-    replaceHistoryLoadAbortController: (sessionKey, controller) => {
-      const previous = historyLoadAbortControllerBySession.get(sessionKey) ?? null;
-      historyLoadAbortControllerBySession.set(sessionKey, controller);
-      return previous;
-    },
-    clearHistoryLoadAbortController: (sessionKey, controller) => {
-      const current = historyLoadAbortControllerBySession.get(sessionKey);
-      if (current === controller) {
-        historyLoadAbortControllerBySession.delete(sessionKey);
-      }
-    },
-    setHistoryLoadInFlight: (sessionKey, task) => {
-      historyLoadInFlightBySession.set(sessionKey, task);
-    },
-    clearHistoryLoadInFlight: (sessionKey, task) => {
-      if (historyLoadInFlightBySession.get(sessionKey) === task) {
-        historyLoadInFlightBySession.delete(sessionKey);
-      }
-    },
-    historyFingerprintBySession,
-    historyRenderFingerprintBySession,
   };
 
   return {

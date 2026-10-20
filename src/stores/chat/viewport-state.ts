@@ -2,11 +2,6 @@ import type { ChatSessionViewportState } from './types';
 
 export type ChatViewportWindow = ChatSessionViewportState;
 
-export interface ChatViewportCacheStats {
-  cachedSessionCount: number;
-  cachedItemCount: number;
-}
-
 export function createViewportWindowState(
   partial: Partial<ChatSessionViewportState> = {},
 ): ChatViewportWindow {
@@ -40,11 +35,4 @@ export function syncViewportState(
     ...viewport,
     ...next,
   });
-}
-
-export function getChatViewportCacheStats(): ChatViewportCacheStats {
-  return {
-    cachedSessionCount: 0,
-    cachedItemCount: 0,
-  };
 }

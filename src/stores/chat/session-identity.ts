@@ -1,7 +1,6 @@
 import {
   buildRuntimeEndpointKey,
   buildSessionIdentityKey,
-  sessionIdentitiesEqual,
   sessionScope,
   type AgentScope,
   type RuntimeEndpointRef,
@@ -9,7 +8,6 @@ import {
   type SessionIdentity,
 } from '../../types/desktop/runtime-address';
 import type { ChatStoreState } from './types';
-import { getSessionMeta } from './store-state-helpers';
 import {
   buildSessionOperationTarget,
   type SessionOperationTarget,
@@ -53,10 +51,9 @@ export function buildSessionIdentityRecordIndex(
   loadedSessions: ChatStoreState['loadedSessions'],
 ): Record<string, string> {
   const index: Record<string, string> = {};
-  for (const [recordKey, record] of Object.entries(loadedSessions)) {
-    if (record.meta.sessionIdentity) {
-      index[buildSessionIdentityKey(record.meta.sessionIdentity)] = recordKey;
-    }
+  for (const recordKey of Object.keys(loadedSessions)) {
+    const identity = loadedSessions[recordKey].meta.sessionIdentity;
+    if (identity) index[buildSessionIdentityKey(identity)] = recordKey;
   }
   return index;
 }
@@ -68,11 +65,12 @@ export function findSessionRecordKey(
   const identityKey = buildSessionIdentityKey(identity);
   const indexedRecordKey = state.sessionRecordKeyByIdentityKey?.[identityKey];
   const indexedIdentity = indexedRecordKey && state.loadedSessions[indexedRecordKey]?.meta.sessionIdentity;
-  if (indexedRecordKey && indexedIdentity && sessionIdentitiesEqual(indexedIdentity, identity)) {
+  if (indexedRecordKey && indexedIdentity && buildSessionIdentityKey(indexedIdentity) === identityKey) {
     return indexedRecordKey;
   }
-  for (const [recordKey, record] of Object.entries(state.loadedSessions)) {
-    if (record.meta.sessionIdentity && sessionIdentitiesEqual(record.meta.sessionIdentity, identity)) {
+  for (const recordKey of Object.keys(state.loadedSessions)) {
+    const recordIdentity = state.loadedSessions[recordKey].meta.sessionIdentity;
+    if (recordIdentity && buildSessionIdentityKey(recordIdentity) === identityKey) {
       return recordKey;
     }
   }
@@ -80,8 +78,8 @@ export function findSessionRecordKey(
 }
 
 export function resolveSessionOperationTarget(state: ChatStoreState, recordKey: string): SessionOperationTarget {
-  const meta = getSessionMeta(state, recordKey);
-  if (!meta.sessionIdentity) {
+  const meta = state.loadedSessions[recordKey]?.meta;
+  if (!meta?.sessionIdentity) {
     throw new Error(`SessionIdentity is required: ${recordKey}`);
   }
   return buildSessionOperationTarget(meta.sessionIdentity, meta.endpointSessionId);

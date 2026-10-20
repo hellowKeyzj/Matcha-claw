@@ -10,7 +10,7 @@
  *     c. 显式 jumpToBottom / 切 scope 强制贴底     → follow
  * - 流式追加、布局重排、程序写 scrollTop 等被动几何变化不能把 follow 反推成 detached。
  *
- * 几何工具是纯函数；reducer 也是纯函数。所有 DOM 副作用都在 controller。
+ * 几何快照只在一次同步处理内共享；真实滚动写入后失效，不跨事件缓存。
  */
 
 export interface ChatViewportMetrics {
@@ -76,90 +76,100 @@ export function readViewportMetrics(
   };
 }
 
-/**
- * 从视口 DOM 抽取一个跨刷新可恢复的阅读锚点：
- * 取首条与视口相交的消息，记下它的位置偏移。
- */
-export function sampleViewportAnchor(viewport: HTMLElement | null): ViewportAnchor | null {
-  if (!viewport) {
+export class ChatViewportGeometry {
+  private metricsSnapshot: ChatViewportMetrics | null = null;
+  private viewportRect: DOMRect | null = null;
+  private itemsSnapshot: NodeListOf<HTMLElement> | null = null;
+  private hasItems: boolean | undefined;
+
+  constructor(readonly viewport: HTMLElement | null) {}
+
+  get metrics(): ChatViewportMetrics | null {
+    return this.metricsSnapshot ??= readViewportMetrics(this.viewport);
+  }
+
+  hasRenderableItems(): boolean {
+    return this.hasItems ??= this.viewport?.querySelector('[data-chat-item-key]') != null;
+  }
+
+  private get items(): NodeListOf<HTMLElement> | undefined {
+    if (!this.viewport) return undefined;
+    this.itemsSnapshot ??= this.viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]');
+    this.hasItems = this.itemsSnapshot.length > 0;
+    return this.itemsSnapshot;
+  }
+
+  scrollTo(scrollTop: number): void {
+    if (!this.viewport || (this.metricsSnapshot?.scrollTop ?? this.viewport.scrollTop) === scrollTop) return;
+    this.writeScrollTop(scrollTop);
+  }
+
+  private writeScrollTop(scrollTop: number): void {
+    this.viewport!.scrollTop = scrollTop;
+    // 浏览器可能 clamp；后续消费者必须读取实际落位，不能预测写后的 metrics。
+    this.metricsSnapshot = null;
+    this.viewportRect = null;
+  }
+
+  sampleAnchor(): ViewportAnchor | null {
+    if (!this.viewport) return null;
+    const viewportRect = this.viewportRect ??= this.viewport.getBoundingClientRect();
+    const items = this.items!;
+    for (const [index, item] of items.entries()) {
+      const rect = item.getBoundingClientRect();
+      if (rect.bottom <= viewportRect.top || rect.top >= viewportRect.bottom) continue;
+      const itemKey = item.dataset.chatItemKey?.trim() || undefined;
+      const timestampText = item.dataset.chatMessageTimestamp;
+      const timestamp = timestampText && timestampText.trim() ? Number(timestampText) : undefined;
+      return {
+        itemKey,
+        timestamp: Number.isFinite(timestamp) ? timestamp : undefined,
+        followingItemKey: items[index + 1]?.dataset.chatItemKey,
+        offsetWithinViewport: rect.top - viewportRect.top,
+      };
+    }
     return null;
   }
-  const viewportRect = viewport.getBoundingClientRect();
-  const items = Array.from(viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]'));
-  for (const [index, item] of items.entries()) {
-    const rect = item.getBoundingClientRect();
-    if (rect.bottom <= viewportRect.top || rect.top >= viewportRect.bottom) {
-      continue;
-    }
-    const itemKey = item.dataset.chatItemKey?.trim() || undefined;
-    const timestampText = item.dataset.chatMessageTimestamp;
-    const timestamp = timestampText && timestampText.trim() ? Number(timestampText) : undefined;
-    return {
-      itemKey,
-      timestamp: Number.isFinite(timestamp) ? timestamp : undefined,
-      followingItemKey: items[index + 1]?.dataset.chatItemKey,
-      offsetWithinViewport: rect.top - viewportRect.top,
-    };
-  }
-  return null;
-}
 
-/**
- * 把视口滚回 anchor 当时的位置。返回是否真正落位。
- */
-export function restoreElementOffsetWithinViewport(
-  viewport: HTMLElement | null,
-  element: HTMLElement,
-  offsetWithinViewport: number,
-): boolean {
-  if (!viewport || !element.isConnected || !viewport.contains(element)) {
-    return false;
+  restoreElement(element: HTMLElement, offsetWithinViewport: number): boolean {
+    if (!this.viewport || !element.isConnected || !this.viewport.contains(element)) return false;
+    const viewportRect = this.viewportRect ??= this.viewport.getBoundingClientRect();
+    const delta = element.getBoundingClientRect().top - viewportRect.top - offsetWithinViewport;
+    if (delta !== 0) this.writeScrollTop((this.metricsSnapshot?.scrollTop ?? this.viewport.scrollTop) + delta);
+    return true;
   }
-  const viewportRect = viewport.getBoundingClientRect();
-  const elementRect = element.getBoundingClientRect();
-  viewport.scrollTop += (elementRect.top - viewportRect.top) - offsetWithinViewport;
-  return true;
-}
 
-export function restoreViewportAnchor(
-  viewport: HTMLElement | null,
-  anchor: ViewportAnchor,
-): boolean {
-  if (!viewport) {
-    return false;
-  }
-  const items = Array.from(viewport.querySelectorAll<HTMLElement>('[data-chat-item-key]'));
-  let target: HTMLElement | undefined;
-  if (anchor.itemKey) {
-    target = items.find((element) => element.dataset.chatItemKey === anchor.itemKey);
-    if (target && anchor.followingItemKey) {
-      const nextItem = items[items.indexOf(target) + 1];
-      if (nextItem?.dataset.chatItemKey !== anchor.followingItemKey) {
-        target = undefined;
+  restoreAnchor(anchor: ViewportAnchor): boolean {
+    const items = this.items;
+    if (!items) return false;
+    let target: HTMLElement | undefined;
+    if (anchor.itemKey) {
+      for (const [index, item] of items.entries()) {
+        if (item.dataset.chatItemKey !== anchor.itemKey) continue;
+        if (!anchor.followingItemKey || items[index + 1]?.dataset.chatItemKey === anchor.followingItemKey) {
+          target = item;
+        }
+        break;
       }
     }
-  }
-  if (!target && typeof anchor.timestamp === 'number') {
-    let nearestDistance = Number.POSITIVE_INFINITY;
-    for (const element of items) {
-      const tsText = element.dataset.chatMessageTimestamp;
-      const ts = tsText && tsText.trim() ? Number(tsText) : NaN;
-      if (!Number.isFinite(ts)) {
-        continue;
-      }
-      const distance = Math.abs(ts - anchor.timestamp);
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        target = element;
+    if (!target && typeof anchor.timestamp === 'number') {
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      for (const element of items) {
+        const tsText = element.dataset.chatMessageTimestamp;
+        const ts = tsText && tsText.trim() ? Number(tsText) : NaN;
+        if (!Number.isFinite(ts)) continue;
+        const distance = Math.abs(ts - anchor.timestamp);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          target = element;
+        }
       }
     }
+    return target ? this.restoreElement(target, anchor.offsetWithinViewport) : false;
   }
-  if (!target) {
-    return false;
-  }
-  return restoreElementOffsetWithinViewport(viewport, target, anchor.offsetWithinViewport);
 }
 
-export function viewportHasRenderableItems(viewport: HTMLElement | null): boolean {
-  return viewport?.querySelector('[data-chat-item-key]') != null;
+/** 取首条与视口相交的消息及其偏移，供替页到位后恢复。 */
+export function sampleViewportAnchor(viewport: HTMLElement | null): ViewportAnchor | null {
+  return new ChatViewportGeometry(viewport).sampleAnchor();
 }

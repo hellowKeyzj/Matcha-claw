@@ -376,16 +376,14 @@ export async function hostApiFetchWithFailure<T>(path: string, init?: HostApiReq
   let startupFailureCode = 'IPC_FAILED';
   let startupStatus: number | null = null;
   traceStartup('start');
-  let abortListener: (() => void) | null = null;
-  if (signal) {
-    abortListener = () => {
-      // 通过独立 IPC 通道告诉 main 取消正在进行的 upstream fetch；这里不 await，
-      // 上层 Promise.race 由 signal.addEventListener('abort') 立即 reject 主流程。
-      void invokeIpc<unknown>('hostapi:abort', { requestId }).catch(() => undefined);
-    };
-    signal.addEventListener('abort', abortListener, { once: true });
-  }
+  let rejectOnAbort: ((reason: DOMException) => void) | null = null;
+  const abortListener = () => {
+    // main 取消是 best-effort；本地 reject 不等待 IPC 结果。
+    void invokeIpc<unknown>('hostapi:abort', { requestId }).catch(() => undefined);
+    rejectOnAbort?.(new DOMException('Aborted', 'AbortError'));
+  };
   try {
+    signal?.addEventListener('abort', abortListener, { once: true });
     if (tracing) logSessionTrace('hostapi.ipc.invoke', init?.traceId, () => ({
       requestIdHash, method, elapsedMs: Date.now() - startedAt,
     }));
@@ -401,10 +399,8 @@ export async function hostApiFetchWithFailure<T>(path: string, init?: HostApiReq
     const response = signal
       ? await Promise.race<unknown>([
         responsePromise,
-        new Promise((_resolve, reject) => {
-          signal.addEventListener('abort', () => {
-            reject(new DOMException('Aborted', 'AbortError'));
-          }, { once: true });
+        new Promise<never>((_resolve, reject) => {
+          rejectOnAbort = reject;
         }),
       ])
       : await responsePromise;
@@ -449,9 +445,7 @@ export async function hostApiFetchWithFailure<T>(path: string, init?: HostApiReq
     });
     throw normalized;
   } finally {
-    if (signal && abortListener) {
-      signal.removeEventListener('abort', abortListener);
-    }
+    signal?.removeEventListener('abort', abortListener);
   }
 }
 

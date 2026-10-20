@@ -18,7 +18,6 @@ import {
   type SessionWireItem,
 } from '../types/session/snapshot';
 import type { GatewayStatus } from '../types/gateway';
-import { applySessionDelta } from './chat/store-state-helpers';
 import { useChatStore } from './chat';
 import { useTaskSnapshotStore } from './chat/task-snapshot-store';
 import { useChannelsStore } from './channels';
@@ -395,21 +394,11 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               return;
             }
             traceSessionDeltaBoundary('session.delta.decode', traceId, delta);
-            const applyResult = applySessionDelta({
-              set: useChatStore.setState,
-              get: useChatStore.getState,
-            }, delta);
+            const applyResult = useChatStore.getState().applySessionDelta(delta);
             if (isSessionTraceEnabled()) traceSessionDeltaBoundary('session.delta.apply', traceId, delta, {
               status: applyResult.status,
               reason: 'reason' in applyResult ? summarizeIdentifier(applyResult.reason) : null,
             });
-            if (applyResult.status === 'gap' || applyResult.status === 'epoch-mismatch') {
-              void useChatStore.getState().resyncSession({ identity: delta.identity, epoch: delta.epoch, seq: delta.seq })
-                .catch((error) => {
-                  console.warn('[session.resync]', summarizeError(error));
-                  logSessionTrace('session.resync.failed', 'session-resync-boundary', () => summarizeError(error));
-                });
-            }
           }));
           unsubscribers.push(subscribeHostEvent<TaskSnapshotEvent>(
             'task:snapshot',

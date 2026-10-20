@@ -5,11 +5,7 @@ import {
   bottomScrollTop,
   hasScrollableOverflow,
   isAtBottom,
-  readViewportMetrics,
-  restoreElementOffsetWithinViewport,
-  restoreViewportAnchor,
-  sampleViewportAnchor,
-  viewportHasRenderableItems,
+  ChatViewportGeometry,
   type ChatScrollPhase,
   type ChatScrollScopeState,
   type ViewportAnchor,
@@ -174,40 +170,38 @@ export function createChatScrollController(): ChatScrollController {
   /**
    * 不写 phase。仅"该贴底就贴底"，目标位置由纯函数算出。
    */
-  const stickToBottom = () => {
-    const config = getConfig();
-    const viewport = config.viewportRef.current;
-    if (!viewport || !viewportHasRenderableItems(viewport)) {
+  const stickToBottom = (geometry: ChatViewportGeometry) => {
+    if (!geometry.hasRenderableItems()) {
       return false;
     }
-    const metrics = readViewportMetrics(viewport);
+    const metrics = geometry.metrics;
     if (!metrics) {
       return false;
     }
-    viewport.scrollTop = bottomScrollTop(metrics);
+    geometry.scrollTo(bottomScrollTop(metrics));
     getScope(config.scrollScopeKey).hasInitialAligned = true;
     return true;
   };
 
-  const syncSyncContainerDataset = () => {
-    const config = getConfig();
-    const viewport = config.viewportRef.current;
-    const sync = viewport?.closest<HTMLElement>('.chat-scroll-sync');
+  const syncSyncContainerDataset = (geometry: ChatViewportGeometry) => {
+    const sync = geometry.viewport?.closest<HTMLElement>('.chat-scroll-sync');
     if (!sync) {
       return;
     }
-    const metrics = readViewportMetrics(viewport);
+    const metrics = geometry.metrics;
     const scope = getScope(config.scrollScopeKey);
-    sync.dataset.chatScrollPhase = scope.phase;
-    sync.dataset.chatScrollLocked = scope.phase === 'follow' ? 'true' : 'false';
-    sync.dataset.chatScrollOverflow = metrics != null && hasScrollableOverflow(metrics) ? 'true' : 'false';
-    sync.dataset.chatScrollScope = config.scrollScopeKey;
+    const locked = scope.phase === 'follow' ? 'true' : 'false';
+    const overflow = metrics != null && hasScrollableOverflow(metrics) ? 'true' : 'false';
+    if (sync.dataset.chatScrollPhase !== scope.phase) sync.dataset.chatScrollPhase = scope.phase;
+    if (sync.dataset.chatScrollLocked !== locked) sync.dataset.chatScrollLocked = locked;
+    if (sync.dataset.chatScrollOverflow !== overflow) sync.dataset.chatScrollOverflow = overflow;
+    if (sync.dataset.chatScrollScope !== config.scrollScopeKey) sync.dataset.chatScrollScope = config.scrollScopeKey;
   };
 
   /**
    * 用户点击展开/收起会触发局部高度变化；保持触发控件在视口内的位置不变。
    */
-  const applyPendingElementAnchorRestore = () => {
+  const applyPendingElementAnchorRestore = (geometry: ChatViewportGeometry) => {
     const pending = state.pendingElementAnchorRestore;
     if (!pending) {
       return false;
@@ -218,32 +212,28 @@ export function createChatScrollController(): ChatScrollController {
       return false;
     }
     state.pendingElementAnchorRestore = null;
-    return restoreElementOffsetWithinViewport(
-      config.viewportRef.current,
-      pending.anchorElement,
-      pending.offsetWithinViewport,
-    );
+    return geometry.restoreElement(pending.anchorElement, pending.offsetWithinViewport);
   };
 
   /**
    * 切 scope 后的过渡：恢复阅读锚点 / 强制贴底。
    */
-  const applyPendingTransition = () => {
+  const applyPendingTransition = (geometry: ChatViewportGeometry) => {
     const config = getConfig();
     const pending = state.pendingTransition;
     if (!pending || pending.scopeKey !== config.scrollScopeKey) {
       return false;
     }
-    if (!viewportHasRenderableItems(config.viewportRef.current)) {
+    if (!geometry.hasRenderableItems()) {
       return false;
     }
     if (pending.mode === 'force-follow') {
       state.pendingTransition = null;
       setPhase('follow');
-      stickToBottom();
+      stickToBottom(geometry);
       return true;
     }
-    if (pending.anchor && restoreViewportAnchor(config.viewportRef.current, pending.anchor)) {
+    if (pending.anchor && geometry.restoreAnchor(pending.anchor)) {
       state.pendingTransition = null;
       setPhase('detached');
       const scope = getScope(config.scrollScopeKey);
@@ -357,7 +347,8 @@ export function createChatScrollController(): ChatScrollController {
     if (!config.enabled) {
       return;
     }
-    const metrics = readViewportMetrics(config.viewportRef.current);
+    const geometry = new ChatViewportGeometry(config.viewportRef.current);
+    const metrics = geometry.metrics;
     if (!metrics) {
       return;
     }
@@ -366,7 +357,7 @@ export function createChatScrollController(): ChatScrollController {
     } else if (state.userLeavingBottom) {
       setPhase('detached');
     }
-    syncSyncContainerDataset();
+    syncSyncContainerDataset(geometry);
   };
 
   // ──────────────── 内容/几何被动变化：只读 phase ────────────────
@@ -376,25 +367,26 @@ export function createChatScrollController(): ChatScrollController {
     if (!config.enabled) {
       return;
     }
-    if (applyPendingTransition()) {
-      syncSyncContainerDataset();
+    const geometry = new ChatViewportGeometry(config.viewportRef.current);
+    if (applyPendingTransition(geometry)) {
+      syncSyncContainerDataset(geometry);
       return;
     }
-    if (applyPendingElementAnchorRestore()) {
-      syncSyncContainerDataset();
+    if (applyPendingElementAnchorRestore(geometry)) {
+      syncSyncContainerDataset(geometry);
       return;
     }
     const scope = getScope(config.scrollScopeKey);
-    if (!scope.hasInitialAligned && viewportHasRenderableItems(config.viewportRef.current)) {
-      stickToBottom();
-      syncSyncContainerDataset();
+    if (!scope.hasInitialAligned && geometry.hasRenderableItems()) {
+      stickToBottom(geometry);
+      syncSyncContainerDataset(geometry);
       return;
     }
     if (scope.phase === 'follow') {
-      stickToBottom();
+      stickToBottom(geometry);
     }
     // phase === 'detached'：保持 scrollTop 不变（append 不会让用户位置漂走）。
-    syncSyncContainerDataset();
+    syncSyncContainerDataset(geometry);
   };
 
   const onScopeChanged = () => {
@@ -402,6 +394,7 @@ export function createChatScrollController(): ChatScrollController {
     if (!config.enabled) {
       return;
     }
+    const geometry = new ChatViewportGeometry(config.viewportRef.current);
     const previousScopeKey = state.lastScopeKey;
     state.lastScopeKey = config.scrollScopeKey;
     if (previousScopeKey !== null && previousScopeKey !== config.scrollScopeKey) {
@@ -410,8 +403,8 @@ export function createChatScrollController(): ChatScrollController {
     const scope = getScope(config.scrollScopeKey);
     config.setChromePhase(scope.phase);
 
-    if (applyPendingTransition()) {
-      syncSyncContainerDataset();
+    if (applyPendingTransition(geometry)) {
+      syncSyncContainerDataset(geometry);
       return;
     }
 
@@ -421,16 +414,16 @@ export function createChatScrollController(): ChatScrollController {
       || !scope.hasInitialAligned;
 
     if (!isFirstEnable) {
-      syncSyncContainerDataset();
+      syncSyncContainerDataset(geometry);
       return;
     }
 
     if (scope.phase === 'follow') {
-      stickToBottom();
+      stickToBottom(geometry);
     } else if (scope.anchor) {
-      restoreViewportAnchor(config.viewportRef.current, scope.anchor);
+      geometry.restoreAnchor(scope.anchor);
     }
-    syncSyncContainerDataset();
+    syncSyncContainerDataset(geometry);
   };
 
   // ──────────────── 显式过渡命令 ────────────────
@@ -444,6 +437,7 @@ export function createChatScrollController(): ChatScrollController {
     if (!viewport) {
       return;
     }
+    const geometry = new ChatViewportGeometry(viewport);
     const scope = getScope(config.scrollScopeKey);
     state.pendingElementAnchorRestore = null;
     if (nextScopeKey === config.scrollScopeKey) {
@@ -451,17 +445,19 @@ export function createChatScrollController(): ChatScrollController {
       const exactAnchor = anchor?.itemKey
         ? { itemKey: anchor.itemKey, offsetWithinViewport: anchor.offsetWithinViewport }
         : null;
-      if (exactAnchor && restoreViewportAnchor(viewport, exactAnchor)) {
+      if (exactAnchor && geometry.restoreAnchor(exactAnchor)) {
         setPhase('detached');
         scope.hasInitialAligned = true;
         scope.anchor = exactAnchor;
-        syncSyncContainerDataset();
+        syncSyncContainerDataset(geometry);
       } else {
-        prepareScopeBottomAlign(nextScopeKey);
+        setPhase('follow');
+        stickToBottom(geometry);
+        syncSyncContainerDataset(geometry);
       }
       return;
     }
-    scope.anchor = sampleViewportAnchor(viewport);
+    scope.anchor = geometry.sampleAnchor();
     state.pendingTransition = {
       scopeKey: nextScopeKey,
       mode: 'restore-anchor',
@@ -475,10 +471,11 @@ export function createChatScrollController(): ChatScrollController {
     }
     const config = getConfig();
     if (nextScopeKey === config.scrollScopeKey) {
+      const geometry = new ChatViewportGeometry(config.viewportRef.current);
       state.pendingElementAnchorRestore = null;
       setPhase('follow');
-      stickToBottom();
-      syncSyncContainerDataset();
+      stickToBottom(geometry);
+      syncSyncContainerDataset(geometry);
       return;
     }
     state.pendingElementAnchorRestore = null;
@@ -490,10 +487,11 @@ export function createChatScrollController(): ChatScrollController {
     if (!config.enabled) {
       return;
     }
+    const geometry = new ChatViewportGeometry(config.viewportRef.current);
     state.pendingElementAnchorRestore = null;
     setPhase('follow');
-    stickToBottom();
-    syncSyncContainerDataset();
+    stickToBottom(geometry);
+    syncSyncContainerDataset(geometry);
   };
 
   const cleanup = () => {

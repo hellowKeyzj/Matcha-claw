@@ -67,7 +67,7 @@ pub(super) fn write_at(directory: &File, name: &OsStr, bytes: &[u8]) -> Result<(
             directory_fd,
             temporary.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0o600 as libc::mode_t,
+            0o600 as libc::c_uint,
         )
     };
     if descriptor == -1 {

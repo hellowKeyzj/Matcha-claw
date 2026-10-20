@@ -329,6 +329,9 @@ async function rpc<T>(method: string, params?: unknown, options?: SubagentRpcOpt
       if (isSubagentMutation(capabilityOperationId) && capabilityOperationId !== 'subagents.package.export') {
         invalidateAgentsSnapshot(managementScope.endpoint);
       }
+      if (capabilityOperationId === 'subagents.files.set') {
+        persistedFilesLoadTasks.delete(JSON.stringify([scopeKey(managementScope), rpcParams.agentId]));
+      }
     }
   }
   throw new Error(`Unsupported subagent runtime method: ${method}`);
@@ -1131,6 +1134,19 @@ async function resolvePersistedFilesForAgent(agentId: string, scope: SubagentMan
     return activeTask;
   }
   const task = fetchPersistedFilesForAgent(agentId, scope)
+    .then((files) => {
+      if (persistedFilesLoadTasks.get(key) === task && isCurrentScope(scope)) {
+        useSubagentsStore.setState((state) => ({
+          persistedFilesByAgent: { ...state.persistedFilesByAgent, [agentId]: files },
+        }));
+      }
+      return files;
+    }, (error) => {
+      if (persistedFilesLoadTasks.get(key) === task && isCurrentScope(scope)) {
+        useSubagentsStore.setState({ error: getErrorMessage(error) || 'Failed to load agent files' });
+      }
+      throw error;
+    })
     .finally(() => {
       if (persistedFilesLoadTasks.get(key) === task) persistedFilesLoadTasks.delete(key);
     });
@@ -1437,25 +1453,7 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
   setManagementScope: activateManagementScope,
   loadPersistedFilesForAgent: async (agentId, capturedScope) => {
     const scope = await resolveSubagentManagementScope(capturedScope);
-    if (!agentId) {
-      return {};
-    }
-    try {
-      const files = await resolvePersistedFilesForAgent(agentId, scope);
-      if (!isCurrentScope(scope)) return files;
-      set((state) => ({
-        persistedFilesByAgent: {
-          ...state.persistedFilesByAgent,
-          [agentId]: files,
-        },
-      }));
-      return files;
-    } catch (error) {
-      if (isCurrentScope(scope)) set({
-        error: getErrorMessage(error) || 'Failed to load agent files',
-      });
-      throw error;
-    }
+    return agentId ? resolvePersistedFilesForAgent(agentId, scope) : {};
   },
   createAgent: async ({
     name,
@@ -1603,25 +1601,27 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       })
       .filter((entry): entry is readonly [SubagentTargetFile, string] => Boolean(entry));
 
-    if (fileEntries.length === 0) {
-      return toSubagentCreateResult(createdAgentId, warnings);
-    }
-
     if (isCurrentScope(managementScope)) beginGlobalMutating(set);
     try {
-      for (const [name, content] of fileEntries) {
-        await rpc('agents.files.set', {
-          agentId: createdAgentId,
-          name,
-          content,
-        }, {
-          scope: managementScope,
-          target: buildSubagentTarget(managementScope, createdAgentId),
-        });
+      try {
+        for (const [name, content] of fileEntries) {
+          await rpc('agents.files.set', {
+            agentId: createdAgentId,
+            name,
+            content,
+          }, {
+            scope: managementScope,
+            target: buildSubagentTarget(managementScope, createdAgentId),
+          });
+        }
+      } catch (error) {
+        warnings.push(buildTemplateFilesWarning(createdAgentId, error));
       }
-      await fetchPersistedFilesForAgent(createdAgentId, managementScope);
-    } catch (error) {
-      warnings.push(buildTemplateFilesWarning(createdAgentId, error));
+      try {
+        await get().loadPersistedFilesForAgent(createdAgentId, managementScope);
+      } catch (error) {
+        warnings.push(buildTemplateFilesWarning(createdAgentId, error));
+      }
     } finally {
       if (isCurrentScope(managementScope)) finishGlobalMutating(set);
     }
@@ -1779,8 +1779,8 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
       }
     }
 
-    if (fileEntries.length > 0) {
-      if (isCurrentScope(managementScope)) beginGlobalMutating(set);
+    if (isCurrentScope(managementScope)) beginGlobalMutating(set);
+    try {
       try {
         for (const [name, content] of fileEntries) {
           await rpc('agents.files.set', {
@@ -1792,12 +1792,16 @@ export const useSubagentsStore = create<SubagentsState>((set, get) => ({
             target: buildSubagentTarget(managementScope, createdAgentId),
           });
         }
-        await fetchPersistedFilesForAgent(createdAgentId, managementScope);
       } catch (error) {
         warnings.push(buildCreateWarning(createdAgentId, `人设文件写入失败：${getErrorMessage(error)}`));
-      } finally {
-        if (isCurrentScope(managementScope)) finishGlobalMutating(set);
       }
+      try {
+        await get().loadPersistedFilesForAgent(createdAgentId, managementScope);
+      } catch (error) {
+        warnings.push(buildCreateWarning(createdAgentId, `人设文件写入失败：${getErrorMessage(error)}`));
+      }
+    } finally {
+      if (isCurrentScope(managementScope)) finishGlobalMutating(set);
     }
 
     try {

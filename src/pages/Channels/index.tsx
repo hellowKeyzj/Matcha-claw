@@ -410,7 +410,7 @@ function ChannelsForRuntime({ scope }: { scope: RuntimeInstanceScope }) {
       {/* Add Channel Dialog */}
       {dialogTarget && nativeMatcha ? (
         <NativeWeixinDialog key={dialogTarget.kind === 'configured' ? dialogTarget.channel.id : 'new'} scope={scope} channel={dialogTarget.kind === 'configured' ? dialogTarget.channel : null}
-          onClose={() => setDialogTarget(null)} onSaved={() => { void fetchChannels(); setDialogTarget(null); }} />
+          onClose={() => setDialogTarget(null)} onSaved={() => setDialogTarget(null)} />
       ) : dialogTarget && (
         <AddChannelDialog
           key={dialogTarget.kind === 'catalog' ? 'catalog' : dialogTarget.kind === 'new' ? dialogTarget.type : dialogTarget.channel.id}
@@ -418,10 +418,7 @@ function ChannelsForRuntime({ scope }: { scope: RuntimeInstanceScope }) {
           target={dialogTarget}
           onTargetChange={setDialogTarget}
           onClose={() => setDialogTarget((current) => current === dialogTarget ? null : current)}
-          onChannelAdded={() => {
-            void fetchChannels();
-            setDialogTarget((current) => current === dialogTarget ? null : current);
-          }}
+          onChannelAdded={() => setDialogTarget((current) => current === dialogTarget ? null : current)}
         />
       )}
 
@@ -436,9 +433,6 @@ function ChannelsForRuntime({ scope }: { scope: RuntimeInstanceScope }) {
           if (channelToDelete) {
             logChannelTrace('delete.submit', channelToDelete.traceId);
             const deleted = await deleteChannel(channelToDelete.id, { traceId: channelToDelete.traceId });
-            if (deleted) {
-              await fetchChannels({ silent: true });
-            }
             logChannelTrace('delete.final', channelToDelete.traceId, () => ({ outcome: deleted ? 'confirmed' : 'unconfirmed', durationMs: Date.now() - channelToDelete.startedAt }));
             setChannelToDelete(null);
           }
@@ -631,6 +625,7 @@ function NativeWeixinDialog({ scope, channel, onClose, onSaved }: {
       }
       if (!current(id)) return;
       toast.success(action === 'login' ? '原生账号已保存，不代表消费会话在线或连接健康。' : action === 'save' ? '绑定已保存，下次原生会话启动时生效。' : '操作已确认');
+      void useChannelsStore.getState().refreshAfterConfirmedMutation(scope);
       onSaved();
     } catch (reason) {
       if (current(id)) setError(reason instanceof Error ? reason.message : String(reason));
@@ -1058,6 +1053,10 @@ function AddChannelDialog({ scope, target, onTargetChange, onClose, onChannelAdd
     const traceId = isTraceEnabled() ? crypto.randomUUID() : undefined;
     const startedAt = isTraceEnabled() ? Date.now() : 0;
     let outcome = 'unconfirmed';
+    const confirmMutation = () => {
+      outcome = 'confirmed';
+      void useChannelsStore.getState().refreshAfterConfirmedMutation(scope);
+    };
     let activePhase: 'login.start' | 'validation' | 'config' | null = null;
     let phaseStartedAt = startedAt;
     logChannelTrace('create.click', traceId);
@@ -1105,7 +1104,7 @@ function AddChannelDialog({ scope, target, onTargetChange, onClose, onChannelAdd
           clearQrGenerateTimeout();
           qrAccountIdRef.current = null;
           setConnecting(false);
-          outcome = 'confirmed';
+          confirmMutation();
           logChannelTrace('login.confirmed', traceId);
           onChannelAdded();
           return;
@@ -1147,7 +1146,7 @@ function AddChannelDialog({ scope, target, onTargetChange, onClose, onChannelAdd
             qrAccountIdRef.current = null;
             qrWaitAbortControllerRef.current = null;
             setConnecting(false);
-            outcome = 'confirmed';
+            confirmMutation();
             logChannelTrace('login.confirmed', traceId);
             onChannelAdded();
             return;
@@ -1195,7 +1194,7 @@ function AddChannelDialog({ scope, target, onTargetChange, onClose, onChannelAdd
           authSessionKeyRef.current = null;
           qrWaitAbortControllerRef.current = null;
           setConnecting(false);
-          outcome = 'confirmed';
+          confirmMutation();
           logChannelTrace('login.confirmed', traceId);
           onChannelAdded();
           return;
@@ -1241,7 +1240,7 @@ function AddChannelDialog({ scope, target, onTargetChange, onClose, onChannelAdd
             authSessionKeyRef.current = null;
             qrWaitAbortControllerRef.current = null;
             setConnecting(false);
-            outcome = 'confirmed';
+            confirmMutation();
             logChannelTrace('login.confirmed', traceId);
             onChannelAdded();
             return;
@@ -1321,7 +1320,7 @@ function AddChannelDialog({ scope, target, onTargetChange, onClose, onChannelAdd
         toast.warning(saveResult.warning);
       }
 
-      outcome = 'confirmed';
+      confirmMutation();
       toast.success(t('toast.channelSaved', { name: meta.name }));
 
       // Brief delay so user can see the success state before dialog closes

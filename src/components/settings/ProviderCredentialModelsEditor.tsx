@@ -102,6 +102,22 @@ function draftRowToModel(credential: ProviderCredential, row: ModelDraftRow): Om
   };
 }
 
+function collectDraftModels(credential: ProviderCredential, rows: readonly ModelDraftRow[]):
+  | { models: Omit<ProviderModel, 'accountId'>[] }
+  | { error: 'invalidEntry' | 'duplicate'; modelId: string } {
+  const models: Omit<ProviderModel, 'accountId'>[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (!row.modelId.trim()) continue;
+    const model = draftRowToModel(credential, row);
+    if (!model) return { error: 'invalidEntry', modelId: row.modelId };
+    if (seen.has(model.modelId)) return { error: 'duplicate', modelId: model.modelId };
+    seen.add(model.modelId);
+    models.push(model);
+  }
+  return { models };
+}
+
 function draftRowSignature(row: ModelDraftRow): string {
   return JSON.stringify({
     modelId: row.modelId.trim(),
@@ -303,14 +319,21 @@ function ProviderCredentialModelsEditorInner(props: {
     });
   };
 
+  const replaceDraftModels = async (nextRows: readonly ModelDraftRow[]) => {
+    setLocalError(null);
+    const result = collectDraftModels(credential, nextRows);
+    if ('error' in result) {
+      setLocalError(t(`providerModels.errors.${result.error}`, { id: result.modelId }));
+      return;
+    }
+    await onReplace(result.models);
+  };
+
   const handleAddCodePlanModel = async () => {
     if (!codePlanModelId || codePlanRegistered) return;
-    const existing = rows
-      .map((row) => draftRowToModel(credential, row))
-      .filter((model): model is Omit<ProviderModel, 'accountId'> => model !== null);
-    await onReplace([
-      ...existing,
-      { modelId: codePlanModelId, capabilities: ['chat'] },
+    await replaceDraftModels([
+      ...rows,
+      { ...EMPTY_MODEL_DRAFT, modelId: codePlanModelId, capabilities: ['chat'] },
     ]);
   };
 
@@ -369,26 +392,7 @@ function ProviderCredentialModelsEditorInner(props: {
       .map((idx) => (idx > index ? idx - 1 : idx))));
   };
 
-  const handleSave = async () => {
-    setLocalError(null);
-    const collected: Omit<ProviderModel, 'accountId'>[] = [];
-    const seen = new Set<string>();
-    for (const row of rows) {
-      if (!row.modelId.trim()) continue;
-      const model = draftRowToModel(credential, row);
-      if (!model) {
-        setLocalError(t('providerModels.errors.invalidEntry', { id: row.modelId }));
-        return;
-      }
-      if (seen.has(model.modelId)) {
-        setLocalError(t('providerModels.errors.duplicate', { id: model.modelId }));
-        return;
-      }
-      seen.add(model.modelId);
-      collected.push(model);
-    }
-    await onReplace(collected);
-  };
+  const handleSave = () => replaceDraftModels(rows);
 
   return (
     <section className="overflow-hidden rounded-[1rem] border bg-[hsl(var(--shell-surface))] [border-color:hsl(var(--shell-border))]">

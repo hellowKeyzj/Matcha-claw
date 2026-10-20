@@ -290,7 +290,7 @@ export default function WikiPage() {
   const snapshotRequestRef = useRef(0);
   const sourceWatchRevisionRef = useRef(new Map<string, number>());
   const reviewsRevisionRef = useRef(new Map<string, number>());
-  const treeRequestRef = useRef({ projectId, files: [] as readonly WikiFileItem[], loaded: new Set<string>(), loading: new Set<string>() });
+  const treeRequestRef = useRef({ projectId, files: [] as readonly WikiFileItem[], loaded: new Set<string>(), loading: new Set<string>(), reload: new Set<string>() });
   const projectGenerationRef = useRef(0);
   const navigationRequestRef = useRef(0);
   const mountedRef = useRef(true);
@@ -387,6 +387,7 @@ export default function WikiPage() {
     try {
       const children = visibleFileItems(await hostWikiFiles({ projectId: tree.projectId, directory }));
       if (tree !== treeRequestRef.current || projectIdRef.current !== tree.projectId) return;
+      tree.reload.delete(directory);
       const previousRoots = new Set(tree.files.filter((item) => item.isDirectory && !item.path.includes('/')).map((item) => item.path));
       tree.files = replaceDirectoryItems(tree.files, directory, children);
       tree.loaded.add(directory);
@@ -403,6 +404,7 @@ export default function WikiPage() {
       }
     } catch (cause) {
       if (tree === treeRequestRef.current && projectIdRef.current === tree.projectId) {
+        tree.reload.delete(directory);
         tree.files = tree.files.filter((item) => directory !== '' && !item.path.startsWith(`${directory}/`));
         tree.loaded = new Set([...tree.loaded].filter((path) => directory !== '' && path !== directory && !path.startsWith(`${directory}/`)));
         setFiles(tree.files);
@@ -413,6 +415,16 @@ export default function WikiPage() {
       if (tree === treeRequestRef.current) {
         tree.loading.delete(directory);
         setLoadingDirectories(new Set(tree.loading));
+      }
+    }
+    if (directory === '' && tree.reload.size && tree === treeRequestRef.current && projectIdRef.current === tree.projectId) {
+      // Root reads already settled their top-level directories, including failures.
+      const remainingDirectories = [...tree.reload];
+      for (const path of remainingDirectories) tree.loaded.delete(path);
+      setLoadedDirectories(new Set(tree.loaded));
+      const depths = new Set(remainingDirectories.map((path) => path.split('/').length));
+      for (const depth of [...depths].sort((left, right) => left - right)) {
+        await Promise.all(remainingDirectories.filter((path) => path.split('/').length === depth).map((path) => loadDirectory(path, tree)));
       }
     }
   }, [t]);
@@ -440,13 +452,14 @@ export default function WikiPage() {
     setNavigationLoading(false);
   }, [t]);
 
-  const loadWikiSnapshot = useCallback(async (expectedProjectId?: string) => {
+  const loadWikiSnapshot = useCallback(async (expectedProjectId?: string, reloadDirectories: readonly string[] = []) => {
     if (expectedProjectId && projectIdRef.current !== expectedProjectId) return;
     const request = ++snapshotRequestRef.current;
     const generation = projectGenerationRef.current;
     navigationRequestRef.current++;
     const previousTree = treeRequestRef.current;
-    treeRequestRef.current = { ...previousTree, loaded: new Set(previousTree.loaded), loading: new Set() };
+    const reload = new Set([...previousTree.reload, ...reloadDirectories]);
+    treeRequestRef.current = { ...previousTree, loaded: new Set(previousTree.loaded), loading: new Set(), reload: new Set(reload) };
     setLoadingDirectories(new Set(['']));
     setDirectoryErrors({});
     setNavigationPages([]);
@@ -483,6 +496,7 @@ export default function WikiPage() {
       files: projectChanged ? [] : previousTree.files,
       loaded: projectChanged ? new Set<string>() : new Set(previousTree.loaded),
       loading: new Set<string>(),
+      reload: projectChanged ? new Set<string>() : reload,
     };
     tree.loaded.delete('');
     treeRequestRef.current = tree;
@@ -683,15 +697,10 @@ export default function WikiPage() {
     setFiles(tree.files);
     const changedDirectories = new Set([...writtenPages, ...deletedPages].map((page) => page.slice(0, page.lastIndexOf('/') + 1).replace(/\/$/, '')));
     const reload = [...changedDirectories].filter((directory) => tree.loaded.has(directory));
-    await loadWikiSnapshot(changedProjectId);
-    if (projectIdRef.current !== changedProjectId || projectGeneration !== projectGenerationRef.current) return;
-    const refreshedTree = treeRequestRef.current;
-    for (const directory of reload) refreshedTree.loaded.delete(directory);
-    setLoadedDirectories(new Set(refreshedTree.loaded));
-    await Promise.all(reload.map((directory) => loadDirectory(directory, refreshedTree)));
+    await loadWikiSnapshot(changedProjectId, reload);
     if (projectIdRef.current !== changedProjectId || projectGeneration !== projectGenerationRef.current || request !== fileRequestRef.current || path !== selectedPathRef.current) return;
     if (clean && editorRevision === editorRevisionRef.current && writtenPages.includes(path)) await readProjectFile(changedProjectId, path, false);
-  }, [loadDirectory, loadWikiSnapshot, projectGeneration, readProjectFile]);
+  }, [loadWikiSnapshot, projectGeneration, readProjectFile]);
 
   const onMaintenanceChanged = useCallback(async () => {
     if (!projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
@@ -700,31 +709,23 @@ export default function WikiPage() {
     const editorRevision = editorRevisionRef.current;
     const clean = previewRef.current.kind !== 'text' || editorTextRef.current === previewRef.current.content;
     const reload = [...treeRequestRef.current.loaded].filter(Boolean);
-    await loadWikiSnapshot(projectId);
-    if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
-    const tree = treeRequestRef.current;
-    for (const directory of reload) tree.loaded.delete(directory);
-    await Promise.all(reload.map((directory) => loadDirectory(directory, tree)));
+    await loadWikiSnapshot(projectId, reload);
     if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     setGraph(null);
     if (path && path === selectedPathRef.current && request === fileRequestRef.current
       && clean && editorRevision === editorRevisionRef.current) await readProjectFile(projectId, path, false);
-  }, [loadDirectory, loadWikiSnapshot, projectGeneration, projectId, readProjectFile]);
+  }, [loadWikiSnapshot, projectGeneration, projectId, readProjectFile]);
 
   const onMissingPageCreated = useCallback(async (createdProjectId: string, path: string) => {
     if (createdProjectId !== projectId || projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     const request = fileRequestRef.current;
     const editorRevision = editorRevisionRef.current;
     const clean = previewRef.current.kind !== 'text' || editorTextRef.current === previewRef.current.content;
-    await loadWikiSnapshot(createdProjectId);
-    if (projectIdRef.current !== createdProjectId || projectGeneration !== projectGenerationRef.current) return;
     const directory = path.slice(0, path.lastIndexOf('/') + 1).replace(/\/$/, '');
-    const tree = treeRequestRef.current;
-    tree.loaded.delete(directory);
-    await loadDirectory(directory, tree);
+    await loadWikiSnapshot(createdProjectId, [directory]);
     if (projectIdRef.current === createdProjectId && projectGeneration === projectGenerationRef.current
       && request === fileRequestRef.current && clean && editorRevision === editorRevisionRef.current) await readProjectFile(createdProjectId, path);
-  }, [loadDirectory, loadWikiSnapshot, projectGeneration, projectId, readProjectFile]);
+  }, [loadWikiSnapshot, projectGeneration, projectId, readProjectFile]);
 
   const onQuestionSaveStarted = useCallback(() => {
     const generation = projectGenerationRef.current;
@@ -862,13 +863,9 @@ export default function WikiPage() {
       setPreview((current) => current.kind === 'text' && current.path === receipt.relativePath ? { ...current, content: receipt.content } : current);
     }
     setGraph(null);
-    await loadWikiSnapshot(receipt.projectId);
-    if (projectIdRef.current !== projectId || projectGeneration !== projectGenerationRef.current) return;
     const directory = receipt.relativePath.slice(0, receipt.relativePath.lastIndexOf('/') + 1).replace(/\/$/, '');
-    const tree = treeRequestRef.current;
-    tree.loaded.delete(directory);
-    await loadDirectory(directory, tree);
-  }, [changeEditorText, loadDirectory, loadWikiSnapshot, preview, projectGeneration, projectId]);
+    await loadWikiSnapshot(receipt.projectId, [directory]);
+  }, [changeEditorText, loadWikiSnapshot, preview, projectGeneration, projectId]);
 
   const rescan = useCallback(async () => {
     await run('rescan', async () => {

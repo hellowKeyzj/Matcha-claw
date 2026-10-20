@@ -7,7 +7,7 @@ use openclaw::gateway::request::{
     OpenClawQuestionResolveGatewayRequest,
 };
 use platform::call::CallReceipt;
-use runtime_directory::{RuntimeControlLifecycleError, call::RuntimeControlCallContext};
+use runtime_directory::{RuntimeControlLifecycleError, RuntimeDriverIdentity, call::RuntimeControlCallContext};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -75,23 +75,39 @@ impl PeerHandle {
             runtime_lifecycle(state.matcha().lifecycle()),
             runtime_lifecycle(state.open_claw().lifecycle()),
         ).with_goal_support(|identity| self.runtime_directory.supports_goal(&identity.endpoint()));
-        let identity = runtime_directory::RuntimeDriverIdentity::matcha_agent();
-        if directory.endpoints()[1].lifecycle().is_ready() {
+        let read_agents = |identity: RuntimeDriverIdentity, endpoint, ready: bool| async move {
+            if !ready {
+                return Ok(None);
+            }
             let driver = self.runtime_directory.lookup(&identity.endpoint()).ok_or(())?;
             let ops = driver.subagent_ops().ok_or(())?;
             let subagents::Outcome::Agents { default_id, agents, .. } = ops
-                .subagents(subagents::Command::List {
-                    endpoint: subagents::NativeEndpoint::MatchaAgentLocal,
-                })
+                .subagents(subagents::Command::List { endpoint })
                 .await
             else {
                 return Err(());
             };
-            directory = directory.with_agent_catalog(
-                identity,
-                default_id,
-                agents.into_iter().map(|agent| agent.id).collect(),
-            );
+            Ok(Some((default_id, agents.into_iter().map(|agent| agent.id).collect())))
+        };
+        let (open_claw, matcha) = tokio::try_join!(
+            read_agents(
+                RuntimeDriverIdentity::open_claw(),
+                subagents::NativeEndpoint::OpenClawLocal,
+                directory.endpoints()[0].lifecycle().is_ready(),
+            ),
+            read_agents(
+                RuntimeDriverIdentity::matcha_agent(),
+                subagents::NativeEndpoint::MatchaAgentLocal,
+                directory.endpoints()[1].lifecycle().is_ready(),
+            ),
+        )?;
+        for (identity, catalog) in [
+            (RuntimeDriverIdentity::open_claw(), open_claw),
+            (RuntimeDriverIdentity::matcha_agent(), matcha),
+        ] {
+            if let Some((default_id, agent_ids)) = catalog {
+                directory = directory.with_agent_catalog(identity, default_id, agent_ids);
+            }
         }
         Ok(directory)
     }

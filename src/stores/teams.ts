@@ -9,7 +9,7 @@ import type { CallRecord } from '@/types/call-log';
 import type { WaitForCallOptions } from '@/types/call-log/wait';
 import type { ManualTeamCreation, TeamCreationObserver } from '@/types/team-creation';
 import { useChatStore } from '@/stores/chat';
-import { buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
+import { reconcileSessionDirectory } from '@/stores/chat/session-directory';
 import { DEFAULT_SESSION_KEY, type ChatSessionRecord } from '@/stores/chat/types';
 import { agentScope, buildSessionIdentityKey, runtimeEndpointsEqual, runtimeInstanceScope, validateRuntimeScope, type AgentScope, type RuntimeInstanceScope, type SessionIdentity } from '../types/desktop/runtime-address';
 import {
@@ -773,7 +773,7 @@ function removeTeamRunRoleSessions(bindings: readonly TeamRoleBindingRecord[]): 
       ...state,
       currentSessionKey,
       loadedSessions,
-      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+      ...reconcileSessionDirectory(state, loadedSessions, sessionKeysToDelete),
       pendingApprovalsBySession: Object.fromEntries(
         Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => !deleteSet.has(sessionKey)),
       ),

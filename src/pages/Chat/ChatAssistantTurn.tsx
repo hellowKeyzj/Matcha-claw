@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, memo, useReducer } from 'react';
+import { useCallback, useEffect, useMemo, useState, memo, useReducer, type ReactNode } from 'react';
 import type { ChatAssistantTurnItem } from './chat-render-item-model';
 import { buildToolGroupPlan, isCoveredToolOnlyItem, type ToolSlot } from './chat-tool-groups';
 import type { ToolActivityDisclosure } from './tool-renderers/types';
@@ -201,6 +201,56 @@ function getReplyDurationLabel(input: {
   return isActiveReplyStatus(input.item.status) ? `等待响应… ${durationLabel}` : `已完成，耗时 ${durationLabel}`;
 }
 
+function AssistantTurnShell({
+  item,
+  replyStartedAt,
+  assistantAvatarSlot,
+  userAvatarImageUrl,
+  plainText,
+  visible,
+  children,
+}: Pick<ChatAssistantTurnProps, 'item' | 'replyStartedAt' | 'assistantAvatarSlot' | 'userAvatarImageUrl'> & {
+  plainText: string;
+  visible: boolean;
+  children?: ReactNode;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  const isStreaming = isActiveReplyStatus(item.status);
+  const replyDurationLabel = getReplyDurationLabel({ item, replyStartedAt, now });
+
+  useEffect(() => {
+    if (!isStreaming || typeof replyStartedAt !== 'number') {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isStreaming, replyStartedAt]);
+
+  // Keep the clock mounted while the turn has no visible content.
+  if (!visible) return null;
+
+  return (
+    <MessageShell
+      isUser={false}
+      assistantAgentId={item.assistantPresentation?.agentId}
+      assistantAgentName={item.assistantPresentation?.agentName}
+      assistantAvatarSeed={item.assistantPresentation?.avatarSeed}
+      assistantAvatarStyle={item.assistantPresentation?.avatarStyle}
+      assistantAvatarSlot={assistantAvatarSlot}
+      userAvatarImageUrl={userAvatarImageUrl}
+    >
+      {children}
+      {(plainText || replyDurationLabel) ? (
+        <AssistantMessageMetaBar text={plainText} timestamp={item.createdAt} statusLabel={replyDurationLabel} />
+      ) : null}
+    </MessageShell>
+  );
+}
+
 export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   item,
   toolSlots,
@@ -228,22 +278,8 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
   const [lightboxImg, setLightboxImg] = useState<MessageLightboxState | null>(null);
   const [validatedDerivedPaths, setValidatedDerivedPaths] = useState<Record<string, boolean>>({});
   const [derivedGatewayPreviews, setDerivedGatewayPreviews] = useState<Record<string, DerivedGatewayPreview>>({});
-  const [now, setNow] = useState(() => Date.now());
 
   const isStreaming = isActiveReplyStatus(item.status);
-  const replyDurationLabel = getReplyDurationLabel({ item, replyStartedAt, now });
-
-  useEffect(() => {
-    if (!isStreaming || typeof replyStartedAt !== 'number') {
-      return;
-    }
-    const intervalId = window.setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [isStreaming, replyStartedAt]);
 
   useEffect(() => {
     if (!containsTodoToolDebugSignal(item)) {
@@ -448,11 +484,9 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
       }),
     }));
   }, [hasContentSegments, item, messageRenderTextByKey, pendingMode, plainText, rawPlainText, sessionIdentity, visibleDerivedAttachedFiles.length]);
-  if (!hasContentSegments && visibleDerivedAttachedFiles.length === 0 && !pendingMode) {
-    return null;
-  }
+  const visible = hasContentSegments || visibleDerivedAttachedFiles.length > 0 || !!pendingMode;
 
-  const renderedSegments = item.segments.map((segment) => {
+  const renderedSegments = visible ? item.segments.map((segment) => {
     if (segment.kind === 'thinking') {
       if (!showThinking || !segment.text.trim()) {
         return null;
@@ -526,17 +560,16 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
         onOpenFile={onOpenAttachedArtifact}
       />
     );
-  });
+  }) : null;
   return (
     <>
-      <MessageShell
-        isUser={false}
-        assistantAgentId={item.assistantPresentation?.agentId}
-        assistantAgentName={item.assistantPresentation?.agentName}
-        assistantAvatarSeed={item.assistantPresentation?.avatarSeed}
-        assistantAvatarStyle={item.assistantPresentation?.avatarStyle}
+      <AssistantTurnShell
+        item={item}
+        replyStartedAt={replyStartedAt}
         assistantAvatarSlot={assistantAvatarSlot}
         userAvatarImageUrl={userAvatarImageUrl}
+        plainText={plainText}
+        visible={visible}
       >
         {renderedSegments}
 
@@ -550,12 +583,8 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
         ) : null}
 
         {pendingMode ? <AssistantPendingIndicator mode={pendingMode} /> : null}
-
-        {(plainText || replyDurationLabel) ? (
-          <AssistantMessageMetaBar text={plainText} timestamp={item.createdAt} statusLabel={replyDurationLabel} />
-        ) : null}
-      </MessageShell>
-      {lightboxImg && (
+      </AssistantTurnShell>
+      {visible && lightboxImg && (
         <ChatImageLightbox
           src={lightboxImg.src}
           fileName={lightboxImg.fileName}

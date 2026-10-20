@@ -15,8 +15,17 @@ export const CHAT_SEND_RPC_TIMEOUT_MS = 120_000;
 const CHAT_SEND_WITH_MEDIA_FALLBACK_PROMPT = 'Process the attached file(s).';
 const CHAT_SEND_DEFAULT_ERROR = 'Failed to send message';
 
-function isDirectoryAttachment(attachment: Pick<ChatSendAttachment, 'entryKind' | 'mimeType'>): boolean {
+export function isDirectoryAttachment(attachment: Pick<ChatSendAttachment, 'entryKind' | 'mimeType'>): boolean {
   return attachment.entryKind === 'directory' || attachment.mimeType === 'application/x-directory';
+}
+
+export function isReadableChatAttachment(attachment: Pick<ChatSendAttachment, 'entryKind' | 'mimeType' | 'fileSize' | 'sourcePath'>): boolean {
+  return !isDirectoryAttachment(attachment)
+    && (attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES || Boolean(attachment.sourcePath));
+}
+
+export function isUnsupportedGoalStartAttachment(attachment: Pick<ChatSendAttachment, 'entryKind' | 'mimeType' | 'fileSize'>): boolean {
+  return isDirectoryAttachment(attachment) || attachment.fileSize > CHAT_INLINE_ATTACHMENT_MAX_BYTES;
 }
 
 function localPathAttachments(attachments: readonly ChatSendAttachment[]): ChatSendAttachment[] {
@@ -72,13 +81,11 @@ export type SendChatTransportResult =
   ))
   | { ok: false; error: string; outcome?: Exclude<SessionGoalOutcome['outcome'], 'succeeded'> };
 
+/** Consumes the prepared payload from resolveChatSendTransportPayload. */
 export async function sendChatTransport(
   params: SendChatTransportParams,
 ): Promise<SendChatTransportResult> {
-  const attachments = params.attachments ?? [];
-  const payloadInput = resolveChatSendTransportPayload(params.message, attachments);
-  const message = payloadInput.message;
-  const attachmentsToInline = payloadInput.attachments;
+  const { message, attachments: attachmentsToInline = [] } = params;
   logSessionTrace('send.transport.request', params.traceId, () => ({
     sessionKey: summarizeIdentifier(params.sessionIdentity.sessionKey),
     endpointSessionId: summarizeIdentifier(params.endpointSessionId),

@@ -297,24 +297,6 @@ function parseCronExpr(cron: string, t: TFunction<'cron'>): string {
   if (cron === '0 18 * * *') return t('presets.daily6pm');
   if (cron === '0 9 1 * *') return t('presets.monthly1st');
 
-  const parts = cron.split(' ');
-  if (parts.length !== 5) return cron;
-
-  const [minute, hour, dayOfMonth, , dayOfWeek] = parts;
-
-  if (minute === '*' && hour === '*') return t('presets.everyMinute');
-  if (minute.startsWith('*/')) return t('schedule.everyMinutes', { count: Number(minute.slice(2)) });
-  if (hour === '*' && minute === '0') return t('presets.everyHour');
-  if (dayOfWeek !== '*' && dayOfMonth === '*') {
-    return t('schedule.weeklyAt', { day: dayOfWeek, time: `${hour}:${minute.padStart(2, '0')}` });
-  }
-  if (dayOfMonth !== '*') {
-    return t('schedule.monthlyAtDay', { day: dayOfMonth, time: `${hour}:${minute.padStart(2, '0')}` });
-  }
-  if (hour !== '*') {
-    return t('schedule.dailyAt', { time: `${hour}:${minute.padStart(2, '0')}` });
-  }
-
   return cron;
 }
 

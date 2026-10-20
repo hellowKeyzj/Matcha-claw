@@ -3,7 +3,8 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseArgs } from 'node:util';
 
 const VERSION = '15.1.0';
 const TARGETS = {
@@ -65,10 +66,28 @@ export async function prepareMatchaRipgrep(platform, arch) {
     const binary = platform === 'win32' ? 'rg.exe' : 'rg';
     const destination = join(rootDir, 'matcha-agent', 'src', 'utils', 'vendor', 'ripgrep', `${arch}-${platform}`, binary);
     mkdirSync(dirname(destination), { recursive: true });
-    copyFileSync(join(extracted, directory, binary), destination);
+    const source = join(extracted, directory, binary);
+    if (!existsSync(destination) || !readFileSync(source).equals(readFileSync(destination))) {
+      copyFileSync(source, destination);
+    }
     if (platform !== 'win32') chmodSync(destination, 0o755);
     console.log(`[build-matcha-agent] ripgrep ${version} (${triple}) prepared for ${platform}-${arch}`);
   } finally {
     rmSync(extracted, { recursive: true, force: true });
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  if (process.env.SKIP_MATCHA_AGENT_BUILD === '1') {
+    console.log('[build-matcha-agent] SKIP_MATCHA_AGENT_BUILD=1 set; skipping ripgrep preparation.');
+  } else {
+    const { values } = parseArgs({ options: { arch: { type: 'string', multiple: true } } });
+    const architectures = [...new Set(values.arch ?? [process.arch])].sort();
+    for (const arch of architectures) {
+      if (!['x64', 'arm64'].includes(arch)) {
+        throw new Error(`[build-matcha-agent] unsupported architecture: ${arch}`);
+      }
+    }
+    for (const arch of architectures) await prepareMatchaRipgrep(process.platform, arch);
   }
 }

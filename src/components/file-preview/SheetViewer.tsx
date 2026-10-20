@@ -168,14 +168,12 @@ export function SheetViewer({
   const activeSheet = state.status === 'ready' ? state.sheets[sheetIndex] ?? null : null;
   const totalRows = activeSheet?.rowCount ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalRows / ROWS_PER_PAGE));
+  // Keep off-page formatting errors on sheet activation, not later pagination.
+  const rows = useMemo(() => activeSheet?.readRows() ?? [], [activeSheet]);
   const visibleRows = useMemo(() => {
-    if (!activeSheet) {
-      return [];
-    }
-    const rows = activeSheet.readRows();
     const start = page * ROWS_PER_PAGE;
     return rows.slice(start, start + ROWS_PER_PAGE);
-  }, [activeSheet, page]);
+  }, [rows, page]);
 
   if (state.status === 'loading') {
     return (

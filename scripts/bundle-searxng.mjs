@@ -5,6 +5,7 @@ import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } fr
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { patchSource } from './searxng-source-patches.mjs';
+import { treeDigest } from './searxng-integrity.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BUILD = path.join(ROOT, 'build');
@@ -118,26 +119,6 @@ function requirements(lock) {
     return `${name}${marker} \\\n${[...entry.hashes].sort().map(digest => `    --hash=sha256:${digest}`).join(' \\\n')}`;
   }).join('\n') + '\n';
 }
-async function treeDigest(directory) {
-  const digest = createHash('sha256');
-  let bytes = 0;
-  let files = 0;
-  async function visit(current, prefix) {
-    for (const entry of (await readdir(current, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
-      const relative = `${prefix}${entry.name}`;
-      if (entry.isDirectory()) await visit(path.join(current, entry.name), `${relative}/`);
-      else if (entry.isFile()) {
-        const content = await readFile(path.join(current, entry.name));
-        digest.update(`${relative}\0${hash(content)}\n`);
-        bytes += content.length;
-        files++;
-      } else throw new Error('SearXNG artifact may contain only regular files and directories');
-    }
-  }
-  await visit(directory, '');
-  return { sha256: digest.digest('hex'), bytes, files };
-}
-
 try {
   const source = path.join(work, 'source');
   await mkdir(source);
@@ -150,7 +131,7 @@ try {
   const changes = await patchSource(source, PIN.upstreamSha, PIN.version);
   const buildScripts = path.join(source, 'matchaclaw-build', 'scripts');
   await mkdir(buildScripts, { recursive: true });
-  for (const filename of ['bundle-searxng.mjs', 'searxng-source.json', 'searxng-wheels.json', 'searxng-source-patches.mjs', 'searxng-prepare.py', 'searxng-serve.py']) {
+  for (const filename of ['bundle-searxng.mjs', 'searxng-integrity.mjs', 'searxng-source.json', 'searxng-wheels.json', 'searxng-source-patches.mjs', 'searxng-prepare.py', 'searxng-serve.py']) {
     await cp(path.join(SCRIPTS, filename), path.join(buildScripts, filename));
   }
   await writeFile(path.join(source, 'MATCHACLAW-MODIFICATIONS.json'), `${JSON.stringify({

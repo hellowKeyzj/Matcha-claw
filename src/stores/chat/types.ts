@@ -9,6 +9,7 @@ import type {
 } from '../../types/desktop/runtime-address';
 import type {
   SessionContextTokenSnapshot,
+  SessionDelta,
   SessionModelState,
 } from '../../types/session/snapshot';
 import type {
@@ -478,7 +479,13 @@ export interface ChatHistoryLoadRequest {
   traceId?: string | null;
 }
 
+export type SessionProjectionApplyResult =
+  | { status: 'applied'; sessionKey: string; epoch: number; seq: number; cursor: number }
+  | { status: 'duplicate' | 'stale'; sessionKey: string; epoch: number; seq: number; cursor: number }
+  | { status: 'gap' | 'epoch-mismatch' | 'unavailable'; sessionKey: string; reason: string };
+
 export interface ChatStoreActions {
+  applySessionDelta: (delta: SessionDelta) => SessionProjectionApplyResult;
   observeSession: (identity: SessionIdentity, leaseId?: string) => { leaseId: string; ready: Promise<void> };
   releaseSession: (identity: SessionIdentity, leaseId: string) => Promise<void>;
   resyncSession: (event: unknown) => Promise<void>;

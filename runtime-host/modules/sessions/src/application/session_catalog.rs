@@ -27,6 +27,8 @@ pub struct SessionCatalogEntry {
     pub agent_id: String,
     pub endpoint_session_id: String,
     pub ownership: Option<crate::state::SessionSourceBinding>,
+    pub label: Option<String>,
+    pub display_name: Option<String>,
     pub model_state: Option<crate::state::SessionModelState>,
     pub updated_at: Option<u64>,
     pub preferred: Option<bool>,

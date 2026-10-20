@@ -33,6 +33,7 @@ use sessions_module::{
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
     timeline,
 };
+use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 
 impl SessionOps for MatchaRuntimeDriver {
@@ -118,6 +119,8 @@ impl SessionOps for MatchaRuntimeDriver {
                             agent_id: record.agent_id,
                             endpoint_session_id: record.session_id.as_str().to_owned(),
                             ownership: None,
+                            label: record.title,
+                            display_name: record.display_name,
                             model_state: record.model.as_deref().and_then(|model| {
                                 sessions_module::state::SessionModelState::selected_from_ref(model)
                                     .ok()
@@ -406,6 +409,7 @@ struct CatalogPage {
 }
 async fn records(client: &Client) -> Result<Vec<SessionRecord>, Failure> {
     let mut records = Vec::new();
+    let mut prior_page_ids = HashSet::new();
     let mut before = None::<String>;
     loop {
         let mut params = json!({"limit":100});
@@ -415,9 +419,7 @@ async fn records(client: &Client) -> Result<Vec<SessionRecord>, Failure> {
         let page: CatalogPage = rpc::decode(rpc::call(client, "sessions.list", params).await?)?;
         if page.sessions.iter().any(|record| {
             !record.validate(record.session_id.as_str(), None)
-                || records
-                    .iter()
-                    .any(|prior: &SessionRecord| prior.session_id == record.session_id)
+                || prior_page_ids.contains(&record.session_id)
         }) {
             return Err(Failure::InvalidReadback);
         }
@@ -432,6 +434,8 @@ async fn records(client: &Client) -> Result<Vec<SessionRecord>, Failure> {
         {
             return Err(Failure::InvalidReadback);
         }
+        // Only earlier pages participate in duplicate checks; same-page duplicates remain accepted.
+        prior_page_ids.extend(page.sessions.iter().map(|record| record.session_id.clone()));
         records.extend(page.sessions);
         before = next;
         if before.is_none() {

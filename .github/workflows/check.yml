@@ -135,12 +135,25 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install matcha-agent dependencies
+        if: env.SKIP_MATCHA_AGENT_BUILD != '1'
+        working-directory: matcha-agent
+        run: bun install --frozen-lockfile
+
+      - name: Download matcha-agent build Bun
+        if: env.SKIP_MATCHA_AGENT_BUILD != '1'
+        run: pnpm run bun:download:win:x64
+
+      - name: Prepare matcha-agent ripgrep
+        if: env.SKIP_MATCHA_AGENT_BUILD != '1'
+        run: node scripts/download-matcha-ripgrep.mjs --arch x64
+
       - name: Validate OpenClaw plugin source inputs
         run: pnpm run check:openclaw-plugin-inputs
 
       - name: Build matcha-agent
         if: env.SKIP_MATCHA_AGENT_BUILD != '1'
-        run: pnpm run build:matcha-agent
+        run: pnpm run build:matcha-agent --arch x64
 
       - name: Build Windows x64 native runtime host
         run: node scripts/build-runtime-host-native.mjs --platform win32 --arch x64

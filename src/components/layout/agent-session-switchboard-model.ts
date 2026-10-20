@@ -5,7 +5,7 @@ import type {
   ChatSession,
   ChatSessionRuntimeEndpointNode,
 } from '@/stores/chat/types';
-import { buildSessionIdentityKey, type SessionIdentity } from '../../types/desktop/runtime-address';
+import { buildRuntimeEndpointKey, buildSessionIdentityKey, type SessionIdentity } from '../../types/desktop/runtime-address';
 
 export type AgentSessionSwitchboardSessionBucketId = 'today' | 'within_7_days' | 'within_30_days' | 'older';
 export type AgentSessionSwitchboardIdentityKind = 'agent' | 'team' | 'empty';
@@ -108,14 +108,8 @@ export type AgentSessionSwitchboardSessionSource =
 export interface AgentSessionSwitchboardSessionResult {
   entry: AgentSessionsPaneSessionEntry;
   session: ChatSession;
-  title: string;
-  meta: string;
   source: AgentSessionSwitchboardSessionSource;
   identityLabel: string;
-  deleteLabel: string;
-  renameLabel: string;
-  saveRenameLabel: string;
-  cancelRenameLabel: string;
   readOnly: boolean;
 }
 
@@ -164,33 +158,11 @@ export interface AgentSessionSwitchboardSessionBucketInput {
   id: AgentSessionSwitchboardSessionBucketId;
   label: string;
   defaultCollapsed: boolean;
-  sessions: readonly AgentSessionsPaneSessionEntry[];
-}
-
-export interface AgentSessionSwitchboardAgentSessionSourceInput {
-  runtimeScopeKey: string;
-  runtimeLabel: string;
-  agentId: string;
-  agentName: string;
-  avatarSeed?: string;
-  avatarStyle?: AgentAvatarStyle;
+  sessions: AgentSessionsPaneSessionEntry[];
 }
 
 interface AgentSessionSwitchboardSessionInput {
   buckets: readonly AgentSessionSwitchboardSessionBucketInput[];
-  viewModelByKey: ReadonlyMap<string, {
-    title: string;
-    meta: string;
-    agentId: string;
-    agentName: string;
-    avatarSeed?: string;
-    avatarStyle?: AgentAvatarStyle;
-    deleteLabel: string;
-    renameLabel: string;
-    saveRenameLabel: string;
-    cancelRenameLabel: string;
-  }>;
-  agentSourceByKey: ReadonlyMap<string, AgentSessionSwitchboardAgentSessionSourceInput>;
 }
 
 export interface BuildAgentSessionSwitchboardModelInput {
@@ -326,7 +298,16 @@ function buildTeamResults(teams: readonly AgentSessionSwitchboardTeamInput[]): A
 function buildAgentResults(
   runtimes: readonly AgentSessionSwitchboardRuntimeInput[],
   currentConversation: ChatCurrentConversation | null,
+  buckets: readonly AgentSessionSwitchboardSessionBucketInput[],
 ): AgentSessionSwitchboardRuntimeResult[] {
+  const counts = new Map<string, number>();
+  for (const bucket of buckets) {
+    for (const { session } of bucket.sessions) {
+      if (isAgentSessionSwitchboardAutomationSession(session)) continue;
+      const key = JSON.stringify([buildRuntimeEndpointKey(session.sessionIdentity.endpoint), session.agentId]);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
   return runtimes.map((runtime) => ({
     runtimeScopeKey: runtime.runtimeScopeKey,
     runtimeLabel: runtime.runtimeLabel,
@@ -338,7 +319,7 @@ function buildAgentResults(
       agentName: agent.agentName,
       avatarSeed: agent.avatarSeed,
       avatarStyle: agent.avatarStyle,
-      sessionCount: agent.sessionCount,
+      sessionCount: counts.get(JSON.stringify([runtime.runtimeScopeKey, agent.agentId])) ?? 0,
       isCurrent: currentConversation?.runtimeScopeKey === runtime.runtimeScopeKey
         && currentConversation.agentId === agent.agentId,
       identityLabel: formatIdentityLabel([runtime.runtimeLabel, agent.agentName]),
@@ -347,24 +328,21 @@ function buildAgentResults(
 }
 
 function buildAgentSessionSource(
-  viewModel: AgentSessionSwitchboardSessionInput['viewModelByKey'] extends ReadonlyMap<string, infer TValue> ? TValue : never,
-  agentSource: AgentSessionSwitchboardAgentSessionSourceInput | null,
-  selectedRuntimeEndpoint: ChatSessionRuntimeEndpointNode | null,
+  runtimes: readonly AgentSessionSwitchboardRuntimeResult[],
   session: ChatSession,
 ): AgentSessionSwitchboardSessionSource {
-  const runtimeScopeKey = agentSource?.runtimeScopeKey ?? selectedRuntimeEndpoint?.runtimeScopeKey ?? '';
-  const runtimeLabel = agentSource?.runtimeLabel ?? selectedRuntimeEndpoint?.displayName ?? session.runtimeEndpointId ?? '';
-  const agentId = agentSource?.agentId ?? viewModel.agentId;
-  const agentName = agentSource?.agentName ?? viewModel.agentName;
+  const runtimeScopeKey = buildRuntimeEndpointKey(session.sessionIdentity.endpoint);
+  const runtime = runtimes.find((candidate) => candidate.runtimeScopeKey === runtimeScopeKey)!;
+  const agent = runtime.agents.find((candidate) => candidate.agentId === session.agentId)!;
   return {
     kind: 'agent',
     runtimeScopeKey,
-    runtimeLabel,
-    agentId,
-    agentName,
-    avatarSeed: agentSource?.avatarSeed ?? viewModel.avatarSeed,
-    avatarStyle: agentSource?.avatarStyle ?? viewModel.avatarStyle,
-    label: formatIdentityLabel([runtimeLabel, agentName]) || agentName,
+    runtimeLabel: runtime.runtimeLabel,
+    agentId: agent.agentId,
+    agentName: agent.agentName,
+    avatarSeed: agent.avatarSeed,
+    avatarStyle: agent.avatarStyle,
+    label: formatIdentityLabel([runtime.runtimeLabel, agent.agentName]) || agent.agentName,
   };
 }
 
@@ -390,45 +368,19 @@ export function isAgentSessionSwitchboardAutomationSession(session: ChatSession)
 
 function buildSessionResults(
   input: AgentSessionSwitchboardSessionInput,
-  selectedRuntimeEndpoint: ChatSessionRuntimeEndpointNode | null,
+  runtimes: readonly AgentSessionSwitchboardRuntimeResult[],
   teamSourceIndex: ReadonlyMap<string, TeamRoleSource>,
-  predicate: (session: ChatSession) => boolean,
+  automation: boolean,
 ): AgentSessionSwitchboardSessionBucket[] {
   return input.buckets.map((bucket) => ({
     id: bucket.id,
     label: bucket.label,
     defaultCollapsed: bucket.defaultCollapsed,
-    sessions: bucket.sessions.filter((entry) => predicate(entry.session)).map((entry) => {
+    sessions: bucket.sessions.filter((entry) => isAgentSessionSwitchboardAutomationSession(entry.session) === automation).map((entry) => {
       const session = entry.session;
-      const viewModel = input.viewModelByKey.get(session.key);
       const teamSource = resolveTeamRoleSource(teamSourceIndex, session);
-      const agentSource = input.agentSourceByKey.get(session.key) ?? null;
-      const source = teamSource
-        ? buildTeamSessionSource(teamSource)
-        : buildAgentSessionSource(viewModel ?? {
-          title: session.displayName ?? session.label ?? session.key,
-          meta: session.key,
-          agentId: session.agentId,
-          agentName: session.agentId,
-          deleteLabel: session.key,
-          renameLabel: session.key,
-          saveRenameLabel: session.key,
-          cancelRenameLabel: session.key,
-        }, agentSource, selectedRuntimeEndpoint, session);
-      const title = viewModel?.title ?? session.displayName ?? session.label ?? session.key;
-      return {
-        entry,
-        session,
-        title,
-        meta: teamSource ? source.label : viewModel?.meta ?? session.key,
-        source,
-        identityLabel: source.label,
-        deleteLabel: viewModel?.deleteLabel ?? title,
-        renameLabel: viewModel?.renameLabel ?? title,
-        saveRenameLabel: viewModel?.saveRenameLabel ?? title,
-        cancelRenameLabel: viewModel?.cancelRenameLabel ?? title,
-        readOnly: isAgentSessionSwitchboardAutomationSession(session),
-      };
+      const source = teamSource ? buildTeamSessionSource(teamSource) : buildAgentSessionSource(runtimes, session);
+      return { entry, session, source, identityLabel: source.label, readOnly: automation };
     }),
   })).filter((bucket) => bucket.sessions.length > 0);
 }
@@ -486,7 +438,7 @@ function resolveCurrentIdentity(input: {
 
 export function buildAgentSessionSwitchboardModel(input: BuildAgentSessionSwitchboardModelInput): AgentSessionSwitchboardModel {
   const teamSourceIndex = buildTeamRoleSourceIndex(input.teamResults);
-  const agentResults = buildAgentResults(input.runtimeResults, input.currentConversation);
+  const agentResults = buildAgentResults(input.runtimeResults, input.currentConversation, input.sessionResults.buckets);
   const teamResults = buildTeamResults(input.teamResults);
   const currentIdentity = resolveCurrentIdentity({
     currentConversation: input.currentConversation,
@@ -501,15 +453,15 @@ export function buildAgentSessionSwitchboardModel(input: BuildAgentSessionSwitch
     teamResults,
     sessionResults: buildSessionResults(
       input.sessionResults,
-      input.selectedRuntimeEndpoint,
+      agentResults,
       teamSourceIndex,
-      (session) => !isAgentSessionSwitchboardAutomationSession(session),
+      false,
     ),
     automationSessionResults: buildSessionResults(
       input.sessionResults,
-      input.selectedRuntimeEndpoint,
+      agentResults,
       teamSourceIndex,
-      isAgentSessionSwitchboardAutomationSession,
+      true,
     ),
     hideLegacyListsByDefault: true,
   };

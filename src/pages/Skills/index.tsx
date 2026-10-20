@@ -1329,9 +1329,11 @@ export function Skills() {
   const disableSkill = useSkillsStore((state) => state.disableSkill);
   const batchSetSkillsEnabled = useSkillsStore((state) => state.batchSetSkillsEnabled);
   const searchResults = useSkillsStore((state) => state.searchResults);
+  const setSearchQuery = useSkillsStore((state) => state.setSearchQuery);
   const searchSkills = useSkillsStore((state) => state.searchSkills);
   const installSkill = useSkillsStore((state) => state.installSkill);
   const importLocalSkill = useSkillsStore((state) => state.importLocalSkill);
+  const finishSkillInstallation = useSkillsStore((state) => state.finishSkillInstallation);
   const uninstallSkill = useSkillsStore((state) => state.uninstallSkill);
   const searching = useSkillsStore((state) => state.searching);
   const searchError = useSkillsStore((state) => state.searchError);
@@ -1373,6 +1375,7 @@ export function Skills() {
   const gatewayStatus = useGatewayStore((state) => state.status);
   const [searchParams, setSearchParams] = useSearchParams();
   const updateQuery = (key: string, value: string) => {
+    if (key === 'marketSearch') setSearchQuery(value);
     setSearchParams((params) => {
       const next = new URLSearchParams(params);
       if (value) next.set(key, value);
@@ -1834,16 +1837,15 @@ export function Skills() {
 
       let enableError: unknown = null;
       try {
-        await enableSkill(skillKey, operationScope);
+        await finishSkillInstallation(skillKey, operationScope, selectionCurrent);
       } catch (error) {
         enableError = error;
-      }
-
-      if (!selectionCurrent()) return;
-      try {
-        await fetchSkills({ force: true, fresh: true, scope: operationScope });
-      } catch (error) {
-        console.error('Failed to refresh skills after local import:', error);
+        if (!selectionCurrent()) return;
+        try {
+          await fetchSkills({ force: true, fresh: true, scope: operationScope });
+        } catch (refreshError) {
+          console.error('Failed to refresh skills after local import:', refreshError);
+        }
       }
       if (!selectionCurrent()) return;
 
@@ -1861,7 +1863,7 @@ export function Skills() {
     } finally {
       if (useSkillsStore.getState().scopeGeneration === generation) setLocalSkillImporting(false);
     }
-  }, [enableSkill, fetchSkills, importLocalSkill, localSkillArchive, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, selectionCurrent, t]);
+  }, [fetchSkills, finishSkillInstallation, importLocalSkill, localSkillArchive, localSkillImporting, localSkillSourcePath, resetLocalSkillDialog, selectionCurrent, t]);
 
   const handleInstallLocalSkillPackage = useCallback(async () => {
     if (localPackageInstalling) {
@@ -1952,6 +1954,7 @@ export function Skills() {
 
   // Marketplace query debounce（仅对非空关键词生效）
   useEffect(() => {
+    setSearchQuery(marketplaceQuery);
     if (activeTab !== 'marketplace') {
       return;
     }
@@ -1968,7 +1971,7 @@ export function Skills() {
     return () => {
       clearTimeout(timer);
     };
-  }, [marketplaceQuery, activeTab, searchSkills]);
+  }, [marketplaceQuery, activeTab, searchSkills, setSearchQuery]);
 
   // Handle install
   const handleInstall = useCallback(async (slug: string) => {

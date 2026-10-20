@@ -1254,6 +1254,10 @@ impl SessionsListParams {
         self.configured_agents_only = Some(true);
         self
     }
+    pub fn include_derived_titles(mut self) -> Self {
+        self.include_derived_titles = Some(true);
+        self
+    }
     pub fn include_titles_and_last_message(mut self) -> Self {
         self.include_derived_titles = Some(true);
         self.include_last_message = Some(true);

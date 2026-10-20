@@ -95,7 +95,11 @@ const REQUIRES: &[CapabilityKey] = &[
     CapabilityKey::new("providers"),
 ];
 const ROUTES: &[&str] = &["sessions.loopback", "sessions.events"];
-const EVENTS: &[&str] = &["openclaw-session-ingress", "matcha-session-ingress"];
+const EVENTS: &[&str] = &[
+    "openclaw-session-ingress",
+    "matcha-session-ingress",
+    "matcha-session-catalog",
+];
 const EFFECTS: &[EffectKind] = &[
     EffectKind::OwnerTask,
     EffectKind::Route,

@@ -411,6 +411,8 @@ struct Session {
     kind: PublicSessionKind,
     endpoint_session_id: String,
     ownership: Option<SessionSourceBinding>,
+    label: Option<String>,
+    display_name: Option<String>,
     model_state: Option<SessionModelState>,
     updated_at: Option<u64>,
     preferred: Option<bool>,
@@ -427,6 +429,12 @@ fn session_value(session: &Session) -> Value {
         "endpointSessionId": &session.endpoint_session_id,
         "ownership": &session.ownership,
     });
+    if let Some(label) = &session.label {
+        value["label"] = serde_json::json!(label);
+    }
+    if let Some(display_name) = &session.display_name {
+        value["displayName"] = serde_json::json!(display_name);
+    }
     if let Some(model_state) = &session.model_state {
         value["modelState"] = serde_json::json!(model_state);
     }
@@ -493,6 +501,8 @@ fn project_session(session: SessionCatalogEntry) -> Option<Session> {
         kind,
         endpoint_session_id: session.endpoint_session_id,
         ownership: session.ownership,
+        label: session.label,
+        display_name: session.display_name,
         model_state: session.model_state,
         updated_at: session.updated_at,
         preferred: session.preferred,

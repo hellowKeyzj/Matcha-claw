@@ -66,6 +66,11 @@ pub(crate) fn project_observed(
             "cron.changed",
             SafeEvent::CronChanged { endpoint },
         ),
+        HostEvent::SessionCatalogChanged { endpoint } => project_accepted(
+            observation,
+            "sessions.catalogChanged",
+            SafeEvent::SessionCatalogChanged { endpoint },
+        ),
         HostEvent::OpenClawRuntime => project_accepted(
             observation,
             OPENCLAW_RUNTIME_EVENT,

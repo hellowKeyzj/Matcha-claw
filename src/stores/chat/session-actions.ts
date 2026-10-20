@@ -31,7 +31,8 @@ import {
   resolveSessionRuntime,
   getSessionViewportState,
   patchSessionMeta,
-  patchSessionRecord,
+  patchSessionMetaValue,
+  patchSessionRecordValue,
   patchSessionViewportState,
   removeSessionRecord,
   resetSessionProjection,
@@ -39,7 +40,6 @@ import {
 } from './store-state-helpers';
 import {
   buildRuntimeScopeKey,
-  buildSessionIdentityRecordIndex,
   buildSessionRecordKey,
   findAgentScope,
   findSessionRecordKey,
@@ -47,11 +47,18 @@ import {
   sameRuntimeEndpointScope,
 } from './session-identity';
 import {
-  buildCurrentConversationFromSessionRecord,
-  buildSessionRuntimeGraph,
   createDraftCurrentConversation,
   findPreferredSessionForAgent,
 } from './session-runtime-graph';
+import {
+  buildCurrentConversationForSessionKey,
+  buildSessionSelectionPatch,
+  findExistingSessionKeyForRuntimeEndpoint,
+  isCurrentConversationSelection,
+  reconcileSessionSelectionAfterCatalogRefresh,
+  reconcileSessionSelectionAfterRemoval,
+} from './session-selection';
+export { resolveCurrentConversationAfterCatalogRefresh } from './session-selection';
 import {
   decodeHistorySessionView,
   resolveSessionViewError,
@@ -75,13 +82,12 @@ import {
   type SessionIdentity,
 } from '../../types/desktop/runtime-address';
 import type {
-  ChatCurrentConversation,
   ChatSession,
   ChatSessionRuntimeEndpointTarget,
-  ChatSessionRuntimeGraph,
   ChatStoreState,
 } from './types';
 import { isOrdinarySessionCandidate, isRunActive } from './types';
+import { reconcileSessionDirectory } from './session-directory';
 
 const SESSION_CATALOG_NOT_READY_RETRY_MS = 1200;
 const SESSION_CATALOG_ENDPOINT_TIMEOUT_MS = 30000;
@@ -330,156 +336,11 @@ function findRuntimeTargetForEndpoint(
   return targets.find((target) => sameRuntimeEndpointScope(target.endpoint, endpoint)) ?? null;
 }
 
-function findRuntimeEndpointNode(
-  graph: ChatSessionRuntimeGraph,
-  endpoint: RuntimeEndpointRef,
-) {
-  return graph.endpoints.find((candidate) => sameRuntimeEndpointScope(candidate.endpoint, endpoint)) ?? null;
-}
-
-function buildCurrentConversationForSessionKey(
-  loadedSessions: ChatStoreState['loadedSessions'],
-  sessionKey: string,
-  previous?: ChatCurrentConversation | null,
-): ReturnType<typeof buildCurrentConversationFromSessionRecord> {
-  const record = loadedSessions[sessionKey];
-  return record ? buildCurrentConversationFromSessionRecord(record, previous) : null;
-}
-
-function buildRuntimeCatalogContextPatch(
-  state: ChatStoreState,
-  target: ChatSessionRuntimeEndpointTarget,
-): Pick<ChatStoreState, 'sessionRuntimeCatalog'> {
-  return {
-    sessionRuntimeCatalog: state.sessionRuntimeCatalog.defaultSessionPromptScope === target.defaultSessionPromptScope
-      && state.sessionRuntimeCatalog.selectedEndpoint
-      && sameRuntimeEndpointScope(state.sessionRuntimeCatalog.selectedEndpoint, target.endpoint)
-      ? state.sessionRuntimeCatalog
-      : {
-          ...state.sessionRuntimeCatalog,
-          selectedEndpoint: target.endpoint,
-          defaultSessionPromptScope: target.defaultSessionPromptScope,
-        },
-  };
-}
-
-function buildRuntimeCatalogContextPatchForEndpoint(
-  state: ChatStoreState,
-  endpoint: RuntimeEndpointRef,
-): Pick<ChatStoreState, 'sessionRuntimeCatalog'> {
-  const target = findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), endpoint);
-  return target ? buildRuntimeCatalogContextPatch(state, target) : {
-    sessionRuntimeCatalog: { ...state.sessionRuntimeCatalog, selectedEndpoint: endpoint, defaultSessionPromptScope: null },
-  };
-}
-
-function buildLastSelectedSessionPatchForEndpoint(
-  state: ChatStoreState,
-  endpoint: RuntimeEndpointRef,
-  sessionKey: string,
-): Pick<ChatStoreState, 'lastSelectedSessionKeyByRuntimeScopeKey'> {
-  const runtimeScopeKey = buildRuntimeScopeKey(endpoint);
-  if (state.lastSelectedSessionKeyByRuntimeScopeKey[runtimeScopeKey] === sessionKey) {
-    return { lastSelectedSessionKeyByRuntimeScopeKey: state.lastSelectedSessionKeyByRuntimeScopeKey };
-  }
-  return {
-    lastSelectedSessionKeyByRuntimeScopeKey: {
-      ...state.lastSelectedSessionKeyByRuntimeScopeKey,
-      [runtimeScopeKey]: sessionKey,
-    },
-  };
-}
-
-function buildLastSelectedSessionPatchAfterRemoval(
-  state: ChatStoreState,
-  removedSessionKey: string,
-  replacement?: { endpoint: RuntimeEndpointRef; sessionKey: string | null },
-): Pick<ChatStoreState, 'lastSelectedSessionKeyByRuntimeScopeKey'> {
-  let lastSelectedSessionKeyByRuntimeScopeKey = state.lastSelectedSessionKeyByRuntimeScopeKey;
-  for (const [runtimeScopeKey, sessionKey] of Object.entries(lastSelectedSessionKeyByRuntimeScopeKey)) {
-    if (sessionKey !== removedSessionKey) {
-      continue;
-    }
-    lastSelectedSessionKeyByRuntimeScopeKey = { ...lastSelectedSessionKeyByRuntimeScopeKey };
-    delete lastSelectedSessionKeyByRuntimeScopeKey[runtimeScopeKey];
-    break;
-  }
-  if (replacement?.sessionKey) {
-    const runtimeScopeKey = buildRuntimeScopeKey(replacement.endpoint);
-    if (lastSelectedSessionKeyByRuntimeScopeKey[runtimeScopeKey] !== replacement.sessionKey) {
-      lastSelectedSessionKeyByRuntimeScopeKey = {
-        ...lastSelectedSessionKeyByRuntimeScopeKey,
-        [runtimeScopeKey]: replacement.sessionKey,
-      };
-    }
-  }
-  return { lastSelectedSessionKeyByRuntimeScopeKey };
-}
-
-function findRememberedSessionKeyForRuntimeEndpoint(
-  state: Pick<ChatStoreState, 'lastSelectedSessionKeyByRuntimeScopeKey' | 'loadedSessions'>,
-  endpoint: RuntimeEndpointRef,
-): string | null {
-  const sessionKey = state.lastSelectedSessionKeyByRuntimeScopeKey[buildRuntimeScopeKey(endpoint)];
-  const meta = sessionKey ? state.loadedSessions[sessionKey]?.meta : null;
-  return meta?.sessionIdentity && isOrdinarySessionCandidate(meta)
-    && sameRuntimeEndpointScope(meta.sessionIdentity.endpoint, endpoint) ? sessionKey : null;
-}
-
-function findPreferredSessionKeyForRuntimeEndpoint(
-  graph: ChatSessionRuntimeGraph,
-  endpoint: RuntimeEndpointRef,
-  currentSessionKey = '',
-): string | null {
-  const endpointNode = findRuntimeEndpointNode(graph, endpoint);
-  if (!endpointNode) {
-    return null;
-  }
-  if (currentSessionKey) {
-    for (const agent of endpointNode.agents) {
-      const currentSession = agent.sessions.find((session) => session.sessionRecordKey === currentSessionKey);
-      if (currentSession && isOrdinarySessionCandidate(currentSession)) {
-        return currentSession.sessionRecordKey;
-      }
-    }
-  }
-  for (const agent of endpointNode.agents) {
-    if (agent.preferredSessionKey) {
-      return agent.preferredSessionKey;
-    }
-  }
-  return null;
-}
-
-function findExistingSessionKeyForRuntimeEndpoint(
-  state: ChatStoreState,
-  endpoint: RuntimeEndpointRef,
-): string | null {
-  if (state.currentConversation?.kind === 'session'
-    && sameRuntimeEndpointScope(state.currentConversation.endpoint, endpoint)) {
-    return state.currentConversation.sessionRecordKey;
-  }
-  return findRememberedSessionKeyForRuntimeEndpoint(state, endpoint)
-    ?? findPreferredSessionKeyForRuntimeEndpoint(state.sessionRuntimeGraph, endpoint, state.currentSessionKey)
-    ?? readSessionsFromState(state).find((session) => isOrdinarySessionCandidate(session)
-      && sameRuntimeEndpointScope(session.sessionIdentity.endpoint, endpoint))?.key
-    ?? null;
-}
-
 function findRuntimeTargetForConversationContext(state: ChatStoreState): ChatSessionRuntimeEndpointTarget | null {
   const endpoint = state.currentConversation?.endpoint
     ?? getSessionMeta(state, state.currentSessionKey).sessionIdentity?.endpoint
     ?? state.sessionRuntimeCatalog.selectedEndpoint;
   return endpoint ? findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), endpoint) : null;
-}
-
-function isCurrentConversationSelection(
-  state: ChatStoreState,
-  previous: Pick<ChatStoreState, 'currentSessionKey' | 'currentConversation' | 'sessionRuntimeCatalog'>,
-): boolean {
-  return state.currentSessionKey === previous.currentSessionKey
-    && state.currentConversation === previous.currentConversation
-    && (state.currentConversation !== null || state.sessionRuntimeCatalog === previous.sessionRuntimeCatalog);
 }
 
 function resolveScopeForAgent(target: ChatSessionRuntimeEndpointTarget, agentId: string): AgentScope {
@@ -531,47 +392,15 @@ function resolveNewSessionAgentScope(state: ChatStoreState, agentId?: string): A
   return resolveScopeForAgent(target, targetAgentId);
 }
 
-export function resolveCurrentConversationAfterCatalogRefresh(input: {
-  previousConversation: ChatCurrentConversation | null;
-  currentSessionKey: string;
-  contextTarget: ChatSessionRuntimeEndpointTarget | null;
-  graph: ChatSessionRuntimeGraph;
-  loadedSessions: ChatStoreState['loadedSessions'];
-  lastSelectedSessionKeyByRuntimeScopeKey: ChatStoreState['lastSelectedSessionKeyByRuntimeScopeKey'];
-}): ChatCurrentConversation | null {
-  const previousConversation = input.previousConversation;
-  const currentSessionConversation = buildCurrentConversationForSessionKey(input.loadedSessions, input.currentSessionKey, previousConversation);
-  if (currentSessionConversation) {
-    return currentSessionConversation;
-  }
-  if (previousConversation?.kind === 'draft') return previousConversation;
-  const endpoint = previousConversation?.endpoint ?? input.contextTarget?.endpoint ?? null;
-  if (!endpoint) {
-    return null;
-  }
-  const rememberedSessionKey = findRememberedSessionKeyForRuntimeEndpoint(input, endpoint);
-  const sessionKey = rememberedSessionKey
-    ?? findPreferredSessionKeyForRuntimeEndpoint(input.graph, endpoint, input.currentSessionKey);
-  const agentId = previousConversation?.agentId ?? input.contextTarget?.defaultSessionPromptScope?.agentId ?? null;
-  return sessionKey
-    ? buildCurrentConversationForSessionKey(input.loadedSessions, sessionKey)
-    : agentId ? createDraftCurrentConversation(endpoint, agentId) : null;
-}
-
 function buildSessionRuntimeProjectionPatch(input: {
   state: ChatStoreState;
   loadedSessions: ChatStoreState['loadedSessions'];
-  currentSessionKey?: string;
-  currentConversation?: ChatCurrentConversation | null;
-}): Pick<ChatStoreState, 'sessionRuntimeGraph' | 'currentConversation'> {
-  const graph = buildSessionRuntimeGraph(input.state.sessionRuntimeCatalog, input.loadedSessions);
-  const currentSessionKey = input.currentSessionKey ?? input.state.currentSessionKey;
-  const currentConversation = input.currentConversation === undefined
-    ? buildCurrentConversationForSessionKey(input.loadedSessions, currentSessionKey, input.state.currentConversation) ?? input.state.currentConversation
-    : input.currentConversation;
+  changedRecordKeys: readonly string[];
+}): Pick<ChatStoreState, 'sessionRuntimeGraph' | 'sessionRecordKeyByIdentityKey' | 'currentConversation'> {
   return {
-    sessionRuntimeGraph: graph,
-    currentConversation,
+    ...reconcileSessionDirectory(input.state, input.loadedSessions, input.changedRecordKeys),
+    currentConversation: buildCurrentConversationForSessionKey(input.loadedSessions, input.state.currentSessionKey, input.state.currentConversation)
+      ?? input.state.currentConversation,
   };
 }
 
@@ -621,7 +450,7 @@ function applyBackendSessionView(
   input.set((state) => {
     const loadedSessions = patchSessionMeta(state, input.sessionKey, { historyStatus: 'ready' });
     return {
-      ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
+      ...buildSessionRuntimeProjectionPatch({ state, loadedSessions, changedRecordKeys: [input.sessionKey] }),
       loadedSessions,
     };
   });
@@ -753,7 +582,7 @@ async function executeLoadSessionsNow(
     return;
   }
   if (results.some((result) => !result.ready)) {
-    scheduleSessionCatalogRetry(() => executeLoadSessions(input));
+    scheduleSessionCatalogRetry(() => get().loadSessions());
   } else {
     clearSessionCatalogRetry();
   }
@@ -807,7 +636,7 @@ async function executeLoadSessionsNow(
     const ownsCurrentSessionSelection = isCurrentConversationSelection(state, stateBeforeLoad);
     const ownedNextSessionKey = ownsCurrentSessionSelection ? nextSessionKey : state.currentSessionKey;
     const sessionRecordKeys = new Set(sessions.map((session) => session.key));
-    let loadedSessions = Object.fromEntries(
+    const loadedSessions = Object.fromEntries(
       Object.entries(state.loadedSessions).filter(([sessionKey, record]) => {
         const runtimeScope = record.meta.runtimeScopeKey;
         if (sessionRecordKeys.has(sessionKey) || useComposerDraftStore.getState().initializations[sessionKey]) {
@@ -825,10 +654,11 @@ async function executeLoadSessionsNow(
     );
 
     for (const session of sessions) {
-      loadedSessions = ensureSessionRecordMap(loadedSessions, session.key);
-      const currentMeta = getSessionMeta({ loadedSessions }, session.key);
-      const explicitLabel = normalizeCatalogString(session.label);
-      loadedSessions = patchSessionMeta({ loadedSessions }, session.key, {
+      const currentRecord = loadedSessions[session.key] ?? createEmptySessionRecord();
+      const currentMeta = currentRecord.meta;
+      const label = normalizeCatalogString(session.label);
+      const explicitLabel = label !== session.key && label !== session.sessionIdentity.sessionKey ? label : null;
+      const nextRecord = patchSessionMetaValue(currentRecord, {
         endpointSessionId: session.endpointSessionId ?? currentMeta.endpointSessionId,
         runtimeScopeKey: buildRuntimeScopeKey(session.sessionIdentity.endpoint),
         agentId: normalizeCatalogString(session.agentId) ?? currentMeta.agentId,
@@ -839,8 +669,8 @@ async function executeLoadSessionsNow(
         ownership: session.ownership,
         kind: session.kind ?? currentMeta.kind,
         preferred: session.preferred ?? currentMeta.preferred,
-        label: explicitLabel && explicitLabel !== session.key && explicitLabel !== session.sessionIdentity.sessionKey ? explicitLabel : currentMeta.label,
-        titleSource: session.titleSource ?? currentMeta.titleSource,
+        label: currentMeta.manualLabel === true ? currentMeta.label : explicitLabel,
+        titleSource: currentMeta.manualLabel === true ? currentMeta.titleSource : explicitLabel ? 'user' : session.titleSource ?? 'none',
         displayName: normalizeCatalogString(session.displayName) ?? currentMeta.displayName ?? null,
         thinkingLevel: normalizeCatalogString(session.thinkingLevel) ?? currentMeta.thinkingLevel,
         modelState: session.modelState ?? currentMeta.modelState,
@@ -848,38 +678,22 @@ async function executeLoadSessionsNow(
           ? session.updatedAt
           : currentMeta.lastActivityAt,
       });
-      loadedSessions = patchSessionRecord({ loadedSessions }, session.key, {
+      loadedSessions[session.key] = patchSessionRecordValue(nextRecord, {
         contextTokens: session.contextTokens,
       });
     }
 
-    let lastSelectedSessionKeyByRuntimeScopeKey = state.lastSelectedSessionKeyByRuntimeScopeKey;
-    for (const [runtimeScopeKey, sessionKey] of Object.entries(lastSelectedSessionKeyByRuntimeScopeKey)) {
-      if (loadedSessions[sessionKey]) {
-        continue;
-      }
-      if (lastSelectedSessionKeyByRuntimeScopeKey === state.lastSelectedSessionKeyByRuntimeScopeKey) {
-        lastSelectedSessionKeyByRuntimeScopeKey = { ...lastSelectedSessionKeyByRuntimeScopeKey };
-      }
-      delete lastSelectedSessionKeyByRuntimeScopeKey[runtimeScopeKey];
-    }
-
     if (ownsCurrentSessionSelection && shouldMarkCurrentAsReadyEmpty) {
-      loadedSessions = ensureSessionRecordMap(loadedSessions, nextSessionKey);
-      loadedSessions = patchSessionMeta({ loadedSessions }, nextSessionKey, { historyStatus: 'ready' });
+      loadedSessions[nextSessionKey] = patchSessionMetaValue(
+        loadedSessions[nextSessionKey] ?? createEmptySessionRecord(),
+        { historyStatus: 'ready' },
+      );
     }
 
-    const sessionRuntimeGraph = buildSessionRuntimeGraph(state.sessionRuntimeCatalog, loadedSessions);
-    const ownedCurrentConversation = ownsCurrentSessionSelection
-      ? resolveCurrentConversationAfterCatalogRefresh({
-          previousConversation: state.currentConversation,
-          currentSessionKey: ownedNextSessionKey,
-          contextTarget,
-          graph: sessionRuntimeGraph,
-          loadedSessions,
-          lastSelectedSessionKeyByRuntimeScopeKey,
-        })
-      : state.currentConversation;
+    const directory = reconcileSessionDirectory(state, loadedSessions);
+    const selection = reconcileSessionSelectionAfterCatalogRefresh(
+      { ...state, ...directory, loadedSessions }, ownedNextSessionKey, contextTarget, ownsCurrentSessionSelection,
+    );
     const retainedSessionKeys = new Set(Object.keys(loadedSessions));
     const sessionCatalogLoadedAtByRuntimeScopeKey = {
       ...state.sessionCatalogLoadedAtByRuntimeScopeKey,
@@ -891,29 +705,13 @@ async function executeLoadSessionsNow(
       sessionCatalogLoadedAtByRuntimeScopeKey[runtimeScopeKey] = loadedAt;
       sessionCatalogLoadedRevisionByRuntimeScopeKey[runtimeScopeKey] = endpointRevisionByRuntimeScopeKey[runtimeScopeKey] ?? 0;
     }
-    let lastSelectedSessionPatch: Pick<ChatStoreState, 'lastSelectedSessionKeyByRuntimeScopeKey'> = {
-      lastSelectedSessionKeyByRuntimeScopeKey,
-    };
-    if (ownsCurrentSessionSelection && ownedCurrentConversation?.kind === 'session') {
-      lastSelectedSessionPatch = buildLastSelectedSessionPatchForEndpoint(
-        { ...state, lastSelectedSessionKeyByRuntimeScopeKey },
-        ownedCurrentConversation.endpoint,
-        ownedCurrentConversation.sessionRecordKey,
-      );
-    }
     return {
-      ...(ownsCurrentSessionSelection && contextTarget ? buildRuntimeCatalogContextPatch(state, contextTarget) : {}),
+      ...selection,
       sessionCatalogStatus: createReadyResourceStatusState(loadedAt),
       sessionCatalogLoadedAtByRuntimeScopeKey,
       sessionCatalogLoadedRevisionByRuntimeScopeKey,
-      ...lastSelectedSessionPatch,
-      currentSessionKey: ownsCurrentSessionSelection
-        ? ownedCurrentConversation?.kind === 'session' ? ownedCurrentConversation.sessionRecordKey : ''
-        : state.currentSessionKey,
-      currentConversation: ownedCurrentConversation,
-      sessionRuntimeGraph,
+      ...directory,
       loadedSessions,
-      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       pendingApprovalsBySession: Object.fromEntries(
         Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => retainedSessionKeys.has(sessionKey)),
       ),
@@ -961,9 +759,7 @@ export function executeOpenAgentConversation(
     || directoryEndpoint?.agentIds.includes(normalized);
   if (!declaredAgent && !target?.acceptsDynamicAgents) return;
   set((stateValue) => ({
-    ...buildRuntimeCatalogContextPatchForEndpoint(stateValue, contextEndpoint),
-    currentSessionKey: '',
-    currentConversation: createDraftCurrentConversation(contextEndpoint, normalized),
+    ...buildSessionSelectionPatch(stateValue, createDraftCurrentConversation(contextEndpoint, normalized)),
     error: null,
   }));
 }
@@ -998,27 +794,15 @@ export function executeOpenSessionIdentity(
       preferred: currentMeta.preferred,
       historyStatus: existing ? currentMeta.historyStatus : 'loading',
     });
-    const currentSessionKey = existing ? state.currentSessionKey : recordKey;
-    const currentConversation = existing
-      ? state.currentConversation
-      : buildCurrentConversationForSessionKey(loadedSessions, recordKey);
     return {
-      ...(existing ? {} : buildRuntimeCatalogContextPatchForEndpoint(state, identity.endpoint)),
-      ...(existing ? {} : buildLastSelectedSessionPatchForEndpoint(state, identity.endpoint, recordKey)),
-      ...buildSessionRuntimeProjectionPatch({
-        state,
-        loadedSessions,
-        currentSessionKey,
-        currentConversation,
-      }),
+      ...reconcileSessionDirectory(state, loadedSessions, [recordKey]),
+      ...(existing ? {} : buildSessionSelectionPatch({ ...state, loadedSessions }, { kind: 'record', sessionKey: recordKey })),
       loadedSessions,
-      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
-      currentSessionKey,
       error: null,
     };
   });
   if (existing) {
-    set((state) => buildRuntimeCatalogContextPatchForEndpoint(state, identity.endpoint));
+    set((state) => buildSessionSelectionPatch(state, { kind: 'context', endpoint: identity.endpoint }));
     get().switchSession(recordKey, traceId);
     return;
   }
@@ -1048,10 +832,7 @@ export function executeSelectSessionRuntimeEndpoint(
   }
   if (existingSessionKey) {
     set((stateValue) => ({
-      ...buildRuntimeCatalogContextPatchForEndpoint(stateValue, endpoint),
-      ...buildLastSelectedSessionPatchForEndpoint(stateValue, endpoint, existingSessionKey),
-      currentSessionKey: existingSessionKey,
-      currentConversation: buildCurrentConversationForSessionKey(stateValue.loadedSessions, existingSessionKey),
+      ...buildSessionSelectionPatch(stateValue, { kind: 'record', sessionKey: existingSessionKey }),
       error: null,
     }));
     return;
@@ -1067,20 +848,9 @@ export function executeSelectSessionRuntimeEndpoint(
     loadedSessions = removeSessionRecord(state, currentSessionKey);
   }
   set((stateValue) => ({
-    ...(target ? buildRuntimeCatalogContextPatch(stateValue, target) : {
-      sessionRuntimeCatalog: { ...stateValue.sessionRuntimeCatalog, selectedEndpoint: endpoint, defaultSessionPromptScope: null },
-    }),
-    ...buildSessionRuntimeProjectionPatch({
-      state: stateValue,
-      loadedSessions,
-      currentSessionKey: '',
-      currentConversation: target?.defaultSessionPromptScope
-        ? createDraftCurrentConversation(target.endpoint, target.defaultSessionPromptScope.agentId)
-        : null,
-    }),
-    currentSessionKey: '',
+    ...reconcileSessionDirectory(stateValue, loadedSessions, leavingEmpty ? [currentSessionKey] : []),
+    ...buildSessionSelectionPatch({ ...stateValue, loadedSessions }, { kind: 'endpoint', endpoint }),
     loadedSessions,
-    sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
     foregroundHistorySessionKey: null,
     pendingApprovalsBySession: leavingEmpty
       ? Object.fromEntries(
@@ -1114,9 +884,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
     const targetEndpoint = getSessionMeta(currentState, key).sessionIdentity?.endpoint;
     if (targetEndpoint) {
       set((stateValue) => ({
-        ...buildRuntimeCatalogContextPatchForEndpoint(stateValue, targetEndpoint),
-        ...buildLastSelectedSessionPatchForEndpoint(stateValue, targetEndpoint, key),
-        currentConversation: selectedConversation,
+        ...buildSessionSelectionPatch(stateValue, { kind: 'record', sessionKey: key, conversation: selectedConversation }),
       }));
     }
     if (requestedIdentity?.endpoint.kind === 'native-runtime' && requestedIdentity.endpoint.runtimeAdapterId === 'openclaw') {
@@ -1160,7 +928,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
         set((state) => {
           const loadedSessions = patchSessionMeta(state, key, { historyStatus: starting ? 'loading' : 'ready' });
           return {
-            ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
+            ...buildSessionRuntimeProjectionPatch({ state, loadedSessions, changedRecordKeys: [key] }),
             error: starting ? null : resolveSessionViewError(error).message,
             loadedSessions,
           };
@@ -1175,19 +943,16 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   const { currentSessionKey } = state;
   const leavingEmpty = isTrulyEmptyNonMainSession(currentSessionKey, state)
     && !useComposerDraftStore.getState().initializations[currentSessionKey];
-  let nextloadedSessions = { ...state.loadedSessions };
+  const nextloadedSessions = { ...state.loadedSessions };
   if (leavingEmpty) {
     clearSessionHistoryFingerprints(historyRuntime, currentSessionKey);
-    nextloadedSessions = removeSessionRecord({ loadedSessions: nextloadedSessions }, currentSessionKey);
+    delete nextloadedSessions[currentSessionKey];
   }
-  nextloadedSessions = ensureSessionRecordMap(nextloadedSessions, key);
-  let targetRecord = resolveSessionRecord(nextloadedSessions[key]);
+  let targetRecord = nextloadedSessions[key] ?? createEmptySessionRecord();
   if (shouldMarkSessionLoadingOnSwitch(key, targetRecord)) {
-    nextloadedSessions = patchSessionMeta({ loadedSessions: nextloadedSessions }, key, {
-      historyStatus: 'loading',
-    });
-    targetRecord = resolveSessionRecord(nextloadedSessions[key]);
+    targetRecord = patchSessionMetaValue(targetRecord, { historyStatus: 'loading' });
   }
+  if (key) nextloadedSessions[key] = targetRecord;
   const targetSessionReady = targetRecord.meta.historyStatus === 'ready' || getSessionItemCount(targetRecord) > 0;
   logSessionTrace('switch-session.branch', traceId, () => ({
     branch: 'different-current',
@@ -1197,22 +962,12 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
   }));
 
   set((stateValue) => {
-    const targetMeta = getSessionMeta({ loadedSessions: nextloadedSessions }, key);
-    const targetEndpoint = targetMeta.sessionIdentity?.endpoint;
     return {
-      ...(targetEndpoint ? buildRuntimeCatalogContextPatchForEndpoint(stateValue, targetEndpoint) : {}),
-      ...(targetEndpoint ? buildLastSelectedSessionPatchForEndpoint(stateValue, targetEndpoint, key) : {}),
-      ...buildSessionRuntimeProjectionPatch({
-        state: stateValue,
-        loadedSessions: nextloadedSessions,
-        currentSessionKey: key,
-        currentConversation: selectedConversation,
-      }),
+      ...reconcileSessionDirectory(stateValue, nextloadedSessions, leavingEmpty ? [currentSessionKey, key] : [key]),
+      ...buildSessionSelectionPatch({ ...stateValue, loadedSessions: nextloadedSessions }, { kind: 'record', sessionKey: key, conversation: selectedConversation }),
       sessionCatalogStatus: stateValue.sessionCatalogStatus,
-      currentSessionKey: key,
       error: null,
       loadedSessions: nextloadedSessions,
-      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(nextloadedSessions),
       ...(leavingEmpty ? {
         pendingApprovalsBySession: Object.fromEntries(
           Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
@@ -1276,7 +1031,7 @@ export function executeSwitchSession(input: CreateStoreSessionActionsInput, key:
           historyStatus: starting ? 'loading' : targetSessionReady ? 'ready' : 'error',
         });
         return {
-          ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
+          ...buildSessionRuntimeProjectionPatch({ state, loadedSessions, changedRecordKeys: [key] }),
           error: starting ? null : resolveSessionViewError(error).message,
           loadedSessions,
         };
@@ -1314,12 +1069,16 @@ export function executeSetViewportAnchorItemKey(
 ): void {
   const { set, get } = input;
   const sessionKey = sessionKeyHint?.trim() || get().currentSessionKey;
-  set((state) => ({
-    loadedSessions: patchSessionViewportState(state, sessionKey, {
+  set((state) => {
+    const loadedSessions = patchSessionViewportState(state, sessionKey, {
       ...getSessionViewportState(state, sessionKey),
       anchorItemKey: itemKey,
-    }),
-  }));
+    });
+    return {
+      loadedSessions,
+      ...reconcileSessionDirectory(state, loadedSessions, [sessionKey]),
+    };
+  });
 }
 
 export function executeForgetAgentSessions(input: CreateStoreSessionActionsInput, agentId: string, endpoint: RuntimeEndpointRef): void {
@@ -1344,7 +1103,7 @@ export function executeForgetAgentSessions(input: CreateStoreSessionActionsInput
   }
   for (const sessionKey of removedSessionKeys) {
     clearSessionHistoryFingerprints(historyRuntime, sessionKey);
-    resetSessionProjection(sessionKey);
+    resetSessionProjection(get, sessionKey);
     useComposerDraftStore.getState().clearDraft(sessionKey);
   }
   const removedCurrentRecord = removedSessionKeys.has(state.currentSessionKey)
@@ -1362,25 +1121,11 @@ export function executeForgetAgentSessions(input: CreateStoreSessionActionsInput
       Object.entries(stateValue.loadedSessions).filter(([sessionKey]) => !removedSessionKeys.has(sessionKey)),
     );
     const retainedSessionKeys = new Set(Object.keys(loadedSessions));
-    let lastSelectedSessionKeyByRuntimeScopeKey = stateValue.lastSelectedSessionKeyByRuntimeScopeKey;
-    for (const [runtimeScopeKey, sessionKey] of Object.entries(lastSelectedSessionKeyByRuntimeScopeKey)) {
-      if (!removedSessionKeys.has(sessionKey)) {
-        continue;
-      }
-      if (lastSelectedSessionKeyByRuntimeScopeKey === stateValue.lastSelectedSessionKeyByRuntimeScopeKey) {
-        lastSelectedSessionKeyByRuntimeScopeKey = { ...lastSelectedSessionKeyByRuntimeScopeKey };
-      }
-      delete lastSelectedSessionKeyByRuntimeScopeKey[runtimeScopeKey];
-    }
     const currentWasRemoved = removedSessionKeys.has(stateValue.currentSessionKey);
     const currentConversationWasRemoved = normalizeAgentSessionTombstoneId(stateValue.currentConversation?.agentId) === normalizedAgentId
       && Boolean(stateValue.currentConversation && sameRuntimeEndpointScope(stateValue.currentConversation.endpoint, endpoint));
-    const sessionRuntimeGraph = buildSessionRuntimeGraph(stateValue.sessionRuntimeCatalog, loadedSessions);
-    let nextSessionKey = stateValue.currentSessionKey;
-    let currentConversation = stateValue.currentConversation;
-    let runtimeCatalogPatch: Pick<ChatStoreState, 'sessionRuntimeCatalog'> = {
-      sessionRuntimeCatalog: stateValue.sessionRuntimeCatalog,
-    };
+    const directory = reconcileSessionDirectory(stateValue, loadedSessions, Array.from(removedSessionKeys));
+    let selection: ReturnType<typeof reconcileSessionSelectionAfterRemoval>;
     if (currentWasRemoved || currentConversationWasRemoved) {
       const endpoint = removedCurrentEndpoint;
       const next = endpoint
@@ -1388,38 +1133,25 @@ export function executeForgetAgentSessions(input: CreateStoreSessionActionsInput
           && sameRuntimeEndpointScope(session.sessionIdentity.endpoint, endpoint))
         : null;
       const targetRuntime = endpoint ? findRuntimeTargetForEndpoint(readSessionRuntimeTargets(stateValue), endpoint) : null;
-      nextSessionKey = next?.key ?? '';
-      currentConversation = next
-        ? buildCurrentConversationForSessionKey(loadedSessions, next.key)
-        : targetRuntime?.defaultSessionPromptScope
-          ? createDraftCurrentConversation(
-              targetRuntime.endpoint,
-              targetRuntime.defaultSessionPromptScope.agentId,
-            )
-          : null;
-      runtimeCatalogPatch = targetRuntime ? buildRuntimeCatalogContextPatch(stateValue, targetRuntime) : runtimeCatalogPatch;
-      if (next && endpoint) {
-        const runtimeScopeKey = buildRuntimeScopeKey(endpoint);
-        lastSelectedSessionKeyByRuntimeScopeKey = {
-          ...lastSelectedSessionKeyByRuntimeScopeKey,
-          [runtimeScopeKey]: next.key,
-        };
-      }
+      selection = reconcileSessionSelectionAfterRemoval(
+        { ...stateValue, loadedSessions }, removedSessionKeys,
+        next ? { kind: 'record', sessionKey: next.key } : targetRuntime?.defaultSessionPromptScope
+          ? createDraftCurrentConversation(targetRuntime.endpoint, targetRuntime.defaultSessionPromptScope.agentId) : null,
+        targetRuntime,
+      );
+    } else {
+      selection = reconcileSessionSelectionAfterRemoval(stateValue, removedSessionKeys);
     }
     return {
-      ...runtimeCatalogPatch,
-      sessionRuntimeGraph,
-      currentSessionKey: nextSessionKey,
-      currentConversation,
+      ...selection,
+      ...directory,
       loadedSessions,
-      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       pendingApprovalsBySession: Object.fromEntries(
         Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => retainedSessionKeys.has(sessionKey)),
       ),
       dismissedRuntimeErrorBySession: Object.fromEntries(
         Object.entries(stateValue.dismissedRuntimeErrorBySession).filter(([sessionKey]) => retainedSessionKeys.has(sessionKey)),
       ),
-      lastSelectedSessionKeyByRuntimeScopeKey,
       foregroundHistorySessionKey: removedSessionKeys.has(stateValue.foregroundHistorySessionKey ?? '')
         ? null
         : stateValue.foregroundHistorySessionKey,
@@ -1465,32 +1197,22 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
       set((state) => {
         const loadedSessions = removeSessionRecord(state, key);
         const targetRuntime = findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), target.sessionIdentity.endpoint);
-        const currentConversation = next
-          ? buildCurrentConversationForSessionKey(loadedSessions, next.key)
-          : createDraftCurrentConversation(
+        return {
+          ...reconcileSessionSelectionAfterRemoval(
+            { ...state, loadedSessions }, key,
+            next ? { kind: 'record', sessionKey: next.key } : createDraftCurrentConversation(
               targetRuntime?.endpoint ?? target.sessionIdentity.endpoint,
               targetRuntime?.defaultSessionPromptScope?.agentId ?? target.sessionIdentity.agentId,
-            );
-        return {
-          ...(targetRuntime ? buildRuntimeCatalogContextPatch(state, targetRuntime) : {}),
-          ...buildLastSelectedSessionPatchAfterRemoval(state, key, {
-            endpoint: target.sessionIdentity.endpoint,
-            sessionKey: next?.key ?? null,
-          }),
-          ...buildSessionRuntimeProjectionPatch({
-            state,
-            loadedSessions,
-            currentSessionKey: next?.key ?? '',
-            currentConversation,
-          }),
+            ),
+            targetRuntime,
+          ),
+          ...reconcileSessionDirectory(state, loadedSessions, [key]),
           loadedSessions,
-          sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
           sessionCatalogStatus: state.sessionCatalogStatus,
           pendingApprovalsBySession: Object.fromEntries(
             Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
           ),
           error: null,
-          currentSessionKey: next?.key ?? '',
         };
       });
       if (next) {
@@ -1516,7 +1238,7 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
                 historyStatus: 'error',
               });
               return {
-                ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
+                ...buildSessionRuntimeProjectionPatch({ state, loadedSessions, changedRecordKeys: [next.key] }),
                 error: resolveSessionViewError(error).message,
                 loadedSessions,
               };
@@ -1531,10 +1253,9 @@ export async function executeDeleteSession(input: CreateStoreSessionActionsInput
     set((state) => {
       const loadedSessions = removeSessionRecord(state, key);
       return {
-        ...buildLastSelectedSessionPatchAfterRemoval(state, key),
-        ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
+        ...reconcileSessionSelectionAfterRemoval(state, key),
+        ...buildSessionRuntimeProjectionPatch({ state, loadedSessions, changedRecordKeys: [key] }),
         loadedSessions,
-        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
         sessionCatalogStatus: state.sessionCatalogStatus,
         pendingApprovalsBySession: Object.fromEntries(
           Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
@@ -1577,9 +1298,8 @@ export async function executeRenameSession(
         manualLabel: true,
       });
       return {
-        ...buildSessionRuntimeProjectionPatch({ state, loadedSessions }),
+        ...buildSessionRuntimeProjectionPatch({ state, loadedSessions, changedRecordKeys: [key] }),
         loadedSessions,
-        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       };
     });
   } finally {
@@ -1683,16 +1403,15 @@ async function executeNewSessionWithScopeResolver(
       kind: 'pending', operationId: composerDraft.operationId, sessionRecordKey: newKey, sessionIdentity: created.identity,
     });
     const stateBeforeProjection = get();
-    const baseLoadedSessions = ownsSelection && leavingEmpty
-      ? removeSessionRecord(stateBeforeProjection, currentSessionKey)
-      : stateBeforeProjection.loadedSessions;
+    const baseLoadedSessions = { ...stateBeforeProjection.loadedSessions };
+    if (ownsSelection && leavingEmpty) delete baseLoadedSessions[currentSessionKey];
+    baseLoadedSessions[newKey] = patchSessionMetaValue(baseLoadedSessions[newKey] ?? createEmptySessionRecord(), {
+      sessionIdentity: created.identity, endpointSessionId: created.endpointSessionId ?? null,
+      agentId: created.identity.agentId, runtimeScopeKey: buildRuntimeScopeKey(created.identity.endpoint),
+    });
     set({
-      loadedSessions: patchSessionMeta({ loadedSessions: baseLoadedSessions[newKey]
-        ? baseLoadedSessions
-        : { ...baseLoadedSessions, [newKey]: createEmptySessionRecord() } }, newKey, {
-        sessionIdentity: created.identity, endpointSessionId: created.endpointSessionId ?? null,
-        agentId: created.identity.agentId, runtimeScopeKey: buildRuntimeScopeKey(created.identity.endpoint),
-      }),
+      loadedSessions: baseLoadedSessions,
+      ...reconcileSessionDirectory(stateBeforeProjection, baseLoadedSessions, ownsSelection && leavingEmpty ? [currentSessionKey, newKey] : [newKey]),
     });
     let projectionError: string | undefined;
     try {
@@ -1707,22 +1426,11 @@ async function executeNewSessionWithScopeResolver(
         newKey,
         { historyStatus: projectionError ? 'error' : 'ready' },
       );
-      const selectedSessionKey = ownsSelection ? newKey : stateValue.currentSessionKey;
       return {
-        ...(ownsSelection ? buildRuntimeCatalogContextPatchForEndpoint(stateValue, createdEndpoint) : {}),
-        ...(ownsSelection ? buildLastSelectedSessionPatchForEndpoint(stateValue, createdEndpoint, newKey) : {}),
-        ...buildSessionRuntimeProjectionPatch({
-          state: stateValue,
-          loadedSessions,
-          currentSessionKey: selectedSessionKey,
-          currentConversation: ownsSelection
-            ? buildCurrentConversationForSessionKey(loadedSessions, newKey)
-            : stateValue.currentConversation,
-        }),
+        ...reconcileSessionDirectory(stateValue, loadedSessions, [newKey]),
+        ...(ownsSelection ? buildSessionSelectionPatch({ ...stateValue, loadedSessions }, { kind: 'record', sessionKey: newKey }) : {}),
         loadedSessions,
-        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
         sessionCatalogStatus: stateValue.sessionCatalogStatus,
-        currentSessionKey: selectedSessionKey,
         pendingApprovalsBySession: ownsSelection && leavingEmpty
           ? Object.fromEntries(
               Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),
@@ -1782,9 +1490,7 @@ function selectNewSessionDraft(input: CreateStoreSessionActionsInput, scope: Age
   clearHistoryPoll();
   clearErrorRecoveryTimer();
   input.set((state) => ({
-    ...buildRuntimeCatalogContextPatchForEndpoint(state, scope.endpoint),
-    currentSessionKey: '',
-    currentConversation: { ...conversation, sessionPromptScope: scope },
+    ...buildSessionSelectionPatch(state, { ...conversation, sessionPromptScope: scope }),
     foregroundHistorySessionKey: null,
     error: null,
   }));
@@ -1808,9 +1514,8 @@ export function executeCleanupEmptySession(input: CreateStoreSessionActionsInput
   set((stateValue) => {
     const loadedSessions = removeSessionRecord(stateValue, currentSessionKey);
     return {
-      ...buildSessionRuntimeProjectionPatch({ state: stateValue, loadedSessions }),
+      ...buildSessionRuntimeProjectionPatch({ state: stateValue, loadedSessions, changedRecordKeys: [currentSessionKey] }),
       loadedSessions,
-      sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
       sessionCatalogStatus: stateValue.sessionCatalogStatus,
       pendingApprovalsBySession: Object.fromEntries(
         Object.entries(stateValue.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== currentSessionKey),

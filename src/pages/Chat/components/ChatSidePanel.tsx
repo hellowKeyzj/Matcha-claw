@@ -22,7 +22,7 @@ import {
 
 const BoardPanel = lazy(() => import('@/features/board/BoardPanel').then((module) => ({ default: module.BoardPanel })));
 
-interface ChatSidePanelProps {
+export interface ChatSidePanelPresentation {
   mode: ChatSidePanelMode;
   width: number;
   activeTab: ChatSidePanelTab;
@@ -30,6 +30,14 @@ interface ChatSidePanelProps {
   onTabChange: (tab: ChatSidePanelTab) => void;
   onClose: () => void;
   onToggleArtifactWorkbenchFullscreen: () => void;
+  runtimeSurface?: ChatRuntimeSurfaceDescriptor | null;
+  onBoardChatDockChange?: (dock: BoardChatDock) => void;
+  onBoardFullscreenChange?: (fullscreen: boolean) => void;
+  onSendMessage?: (text: string) => void | Promise<void>;
+  onOpenLink?: (url: string) => void | Promise<void>;
+}
+
+interface ChatSidePanelProps extends ChatSidePanelPresentation {
   artifactGroups: Array<{
     graphItemKey: string;
     anchorItemKey?: string;
@@ -52,11 +60,6 @@ interface ChatSidePanelProps {
   onArtifactViewModeChange: (mode: FilePreviewMode) => void;
   onArtifactRevealInFileManager: (filePath: string) => void;
   sessionIdentity?: SessionIdentity;
-  runtimeSurface?: ChatRuntimeSurfaceDescriptor | null;
-  onBoardChatDockChange?: (dock: BoardChatDock) => void;
-  onBoardFullscreenChange?: (fullscreen: boolean) => void;
-  onSendMessage?: (text: string) => void | Promise<void>;
-  onOpenLink?: (url: string) => void | Promise<void>;
 }
 
 const ARTIFACT_GROUP_RAIL_MIN_WIDTH = 240;
@@ -76,6 +79,11 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   onTabChange,
   onClose,
   onToggleArtifactWorkbenchFullscreen,
+  runtimeSurface = null,
+  onBoardChatDockChange,
+  onBoardFullscreenChange,
+  onSendMessage,
+  onOpenLink,
   artifactGroups,
   artifactFocusedGroupKey,
   artifactFocusedGroupFiles,
@@ -92,11 +100,6 @@ export const ChatSidePanel = memo(function ChatSidePanel({
   onArtifactViewModeChange,
   onArtifactRevealInFileManager,
   sessionIdentity,
-  runtimeSurface = null,
-  onBoardChatDockChange,
-  onBoardFullscreenChange,
-  onSendMessage,
-  onOpenLink,
 }: ChatSidePanelProps) {
   const { t } = useTranslation('chat');
   const boardIdentity: BoardIdentity | null = sessionIdentity?.endpoint.kind === 'native-runtime'
@@ -342,10 +345,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
                   variant={artifactActiveSection === 'changes' ? 'secondary' : 'ghost'}
                   size="icon"
                   className="h-7 w-7 rounded-md"
-                  onClick={() => {
-                    onArtifactSectionChange('changes');
-                    onArtifactViewModeChange('diff');
-                  }}
+                  onClick={() => onArtifactSectionChange('changes')}
                   title={t('artifacts.changesTab')}
                   aria-label={t('artifacts.changesTab')}
                 >
@@ -464,13 +464,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
                 data-testid="chat-artifact-section-changes"
                 data-state={artifactActiveSection === 'changes' ? 'active' : 'inactive'}
                 disabled={!artifactCanShowChanges}
-                onClick={() => {
-                  if (!artifactCanShowChanges) {
-                    return;
-                  }
-                  onArtifactSectionChange('changes');
-                  onArtifactViewModeChange('diff');
-                }}
+                onClick={() => onArtifactSectionChange('changes')}
                 className={cn(
                   `inline-flex ${SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME} items-center py-1.5`,
                   compactArtifactSections ? 'justify-center gap-0 px-0' : 'justify-center gap-1.5 px-2',
@@ -486,10 +480,7 @@ export const ChatSidePanel = memo(function ChatSidePanel({
                 type="button"
                 data-testid="chat-artifact-section-preview"
                 data-state={artifactActiveSection === 'preview' ? 'active' : 'inactive'}
-                onClick={() => {
-                  onArtifactSectionChange('preview');
-                  onArtifactViewModeChange('preview');
-                }}
+                onClick={() => onArtifactSectionChange('preview')}
                 className={cn(
                   `inline-flex ${SIDE_PANEL_SEGMENT_TRIGGER_CLASSNAME} items-center py-1.5`,
                   compactArtifactSections ? 'justify-center gap-0 px-0' : 'justify-center gap-1.5 px-2',

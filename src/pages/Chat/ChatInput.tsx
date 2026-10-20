@@ -9,7 +9,7 @@
 import { memo, useState, useRef, useEffect, useLayoutEffect, useImperativeHandle, useCallback, useMemo, type ReactNode, type Ref, type SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
 import * as SelectPrimitive from '@radix-ui/react-select';
-import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck, Settings2, GitBranch, ArrowUpRight, Play, Target } from 'lucide-react';
+import { Send, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Check, ChevronDown, MessageSquare, ShieldCheck, Settings2, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -24,7 +24,6 @@ import { useSkillsStore } from '@/stores/skills';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
-import { DIRECTORY_MIME_TYPE } from '@/components/file-preview/types';
 import { ChatImageLightbox } from './components/ChatImageLightbox';
 import { ChatSessionConnectorStatus } from './components/ChatSessionConnectorStatus';
 import { ChatWikiProjectPicker } from './components/ChatWikiProjectPicker';
@@ -34,11 +33,11 @@ import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import type { ChatSendAttachment, ChatSendResult } from '@/stores/chat';
 import { CHAT_INLINE_ATTACHMENT_MAX_BYTES } from '@/stores/chat/types';
 import { resolveChatSendGateForPayload, type ChatSendGate } from '@/stores/chat/send-gate';
+import { isDirectoryAttachment, isReadableChatAttachment, isUnsupportedGoalStartAttachment } from '@/stores/chat/send-transport';
 import type { ChatContextUsageViewModel } from './context-usage';
 import type { PermissionPickerState } from './useChatPermissions';
-import { useComposerDraftStore, type ComposerMode, type ComposerDraftSelection } from '@/stores/composer-drafts';
+import { useComposerDraftStore, clampComposerDraftSelection, type ComposerMode, type ComposerDraftSelection } from '@/stores/composer-drafts';
 import type { SessionRunPhase } from '@/types/session/runtime-state';
-import type { TeamStartGateStatus } from '@/types/team-design';
 import { createSessionTraceId, isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -156,8 +155,7 @@ interface ChatInputProps {
   modelPicker?: ModelPickerState | null;
   permissionPicker?: PermissionPickerState | null;
   contextUsage?: ChatContextUsageViewModel | null;
-  onOpenTeamGraph?: () => void;
-  teamDesign?: { status: TeamStartGateStatus | null; disabled: boolean; starting: boolean; exiting: boolean; error: string | null; onStart: () => void; onExit: () => void; onRun: () => void } | null;
+  teamActions?: ReactNode;
   disabled?: boolean;
   reconnecting?: boolean;
   sending?: boolean;
@@ -374,10 +372,6 @@ function buildStagingAttachment(
   };
 }
 
-function isDirectoryAttachment(attachment: Pick<FileAttachment, 'entryKind' | 'mimeType'>): boolean {
-  return attachment.entryKind === 'directory' || attachment.mimeType === DIRECTORY_MIME_TYPE;
-}
-
 function isPreviewableImageAttachment(attachment: FileAttachment): boolean {
   return attachment.status === 'ready'
     && !isDirectoryAttachment(attachment)
@@ -389,6 +383,349 @@ function isPreviewableImageAttachment(attachment: FileAttachment): boolean {
 function waitForAttachmentPlaceholderFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
+
+interface ChatInputToolbarProps {
+  sessionIdentity: SessionIdentity | null;
+  activeRunId: string | null;
+  runPhase: SessionRunPhase | null;
+  disabled: boolean;
+  sending: boolean;
+  imageGenerationActive: boolean;
+  approvalWaiting: boolean;
+  permissionPicker: PermissionPickerState | null;
+  permissionPickerOpen: boolean;
+  permissionPickerDisabled: boolean;
+  permissionPickerRef: Ref<HTMLDivElement>;
+  onTogglePermissionPicker: () => void;
+  onPermissionPickerOpenChange: (open: boolean) => void;
+  goalSupported: boolean;
+  goalDisabled: boolean;
+  onStartGoal: () => void;
+  contextUsage: ChatContextUsageViewModel | null;
+  skillManagerLabel: string | undefined;
+  skillManagerOpen: boolean;
+  onOpenSkillManager: () => void;
+  modelPicker: ModelPickerState | null;
+  modelPickerOpen: boolean;
+  modelPickerDisabled: boolean;
+  onModelPickerOpenChange: (open: boolean) => void;
+  quickPhraseOpen: boolean;
+  onToggleQuickPhrase: () => void;
+  onAttachFiles: () => Promise<void>;
+}
+
+const ChatInputToolbar = memo(function ChatInputToolbar({
+  sessionIdentity,
+  activeRunId,
+  runPhase,
+  disabled,
+  sending,
+  imageGenerationActive,
+  approvalWaiting,
+  permissionPicker,
+  permissionPickerOpen,
+  permissionPickerDisabled,
+  permissionPickerRef,
+  onTogglePermissionPicker,
+  onPermissionPickerOpenChange,
+  goalSupported,
+  goalDisabled,
+  onStartGoal,
+  contextUsage,
+  skillManagerLabel,
+  skillManagerOpen,
+  onOpenSkillManager,
+  modelPicker,
+  modelPickerOpen,
+  modelPickerDisabled,
+  onModelPickerOpenChange,
+  quickPhraseOpen,
+  onToggleQuickPhrase,
+  onAttachFiles,
+}: ChatInputToolbarProps) {
+  const { t } = useTranslation('chat');
+
+  return (
+    <>
+      <ChatSessionConnectorStatus
+        sessionIdentity={sessionIdentity}
+        disabled={disabled}
+        activeRunId={activeRunId}
+        runPhase={runPhase}
+      />
+      {!sending && imageGenerationActive ? (
+        <div
+          data-testid="chat-composer-image-generation-indicator"
+          role="status"
+          aria-live="polite"
+          aria-label={t('input.imageGenerationActive', { defaultValue: '正在生成图片' })}
+          className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-border/45 bg-background/74 px-3 text-[12px] font-medium text-muted-foreground shadow-sm"
+        >
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span className="max-sm:hidden">{t('input.imageGenerationActive', { defaultValue: '正在生成图片' })}</span>
+        </div>
+      ) : null}
+      {permissionPicker ? (
+        <div ref={permissionPickerRef} className="relative shrink-0">
+          <Button
+            type="button"
+            variant="ghost"
+            size={permissionPicker.options.length > 0 || permissionPicker.busy ? 'icon' : 'sm'}
+            aria-label={t('input.pickPermissionMode')}
+            aria-haspopup="listbox"
+            aria-expanded={permissionPickerOpen}
+            title={[t('input.permissionPickerTitle'), permissionPicker.label, permissionPicker.status].filter(Boolean).join(' · ')}
+            data-testid="chat-permission-picker"
+            data-chat-control="permission"
+            data-state={permissionPickerOpen ? 'open' : 'closed'}
+            disabled={permissionPickerDisabled}
+            className={cn(
+              permissionPicker.options.length > 0 || permissionPicker.busy ? CHAT_LAYOUT_TOKENS.inputAttachButton : 'h-9 max-w-[11rem] rounded-full px-3 text-[12px] font-medium',
+              'border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
+              permissionPicker.tone === 'positive' && 'text-emerald-700 dark:text-emerald-300',
+              permissionPicker.tone === 'warning' && 'text-amber-700 dark:text-amber-300',
+              permissionPickerOpen && 'bg-background/90 text-foreground',
+              permissionPickerDisabled && 'cursor-not-allowed opacity-55',
+            )}
+            onClick={onTogglePermissionPicker}
+          >
+            {permissionPicker.busy ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <ShieldCheck className="h-4 w-4 shrink-0" />
+            )}
+            {permissionPicker.options.length === 0 && !permissionPicker.busy ? (
+              <span className="truncate">{permissionPicker.status ?? permissionPicker.label}</span>
+            ) : null}
+          </Button>
+          {permissionPickerOpen ? (
+            <div
+              role="listbox"
+              aria-label={t('input.pickPermissionMode')}
+              className="absolute bottom-full left-0 z-50 mb-2 w-64 translate-x-0 overflow-hidden rounded-[1rem] border border-border/60 bg-popover/95 p-1.5 text-sm text-popover-foreground shadow-[0_18px_50px_rgba(0,0,0,0.20)] backdrop-blur-xl"
+            >
+              {permissionPicker.status ? <p role="status" className="px-2 py-1.5 text-[11px] text-muted-foreground">{permissionPicker.status}</p> : null}
+              {permissionPicker.options.map((option) => {
+                const selected = option.id === permissionPicker.currentId;
+                const optionDisabled = permissionPickerDisabled || option.disabled === true;
+                const label = option.label;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    disabled={optionDisabled}
+                    title={optionDisabled ? option.disabledReason ?? label : label}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-[0.75rem] px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45',
+                      selected
+                        ? 'bg-secondary text-foreground'
+                        : 'text-foreground/88 hover:bg-muted/70',
+                    )}
+                    onClick={() => {
+                      if (optionDisabled) {
+                        return;
+                      }
+                      onPermissionPickerOpenChange(false);
+                      if (!selected) {
+                        permissionPicker.onSelect(option.id);
+                      }
+                    }}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[12px] font-medium leading-5">{label}</div>
+                      <div className="line-clamp-2 text-[11px] leading-4 text-muted-foreground">{option.description}</div>
+                    </div>
+                    <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                      {selected ? <Check className="h-3.5 w-3.5" /> : null}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {goalSupported ? (
+        <Button type="button" variant="ghost" size="icon" data-chat-control="goal" className={CHAT_LAYOUT_TOKENS.inputAttachButton} disabled={goalDisabled} onClick={onStartGoal} title={t('goal.set')} aria-label={t('goal.set')}>
+          <Target aria-hidden="true" className="h-4 w-4" />
+        </Button>
+      ) : null}
+      <ChatWikiProjectPicker />
+      <div className="min-w-0 flex-1" />
+      {contextUsage && (
+        <div className="group relative shrink-0" role="status" aria-label={t('input.contextUsageTitle', { detail: contextUsage.detail, pct: contextUsage.pct })}>
+          <div
+            className={cn(
+              'flex h-8 w-8 items-center justify-center',
+              contextUsage.level === 'danger'
+                ? 'text-destructive'
+                : contextUsage.level === 'warning'
+                  ? 'text-amber-700 dark:text-amber-300'
+                  : 'text-muted-foreground',
+            )}
+          >
+            <svg className="h-4 w-4 -rotate-90" viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.18" />
+              <circle
+                cx="8"
+                cy="8"
+                r="6"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                pathLength="100"
+                strokeDasharray={`${contextUsage.pct} 100`}
+              />
+            </svg>
+          </div>
+          <div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 -translate-x-1/2 whitespace-nowrap rounded-xl border border-border/60 bg-popover px-3 py-2 text-xs font-medium text-popover-foreground opacity-0 shadow-[0_12px_36px_rgba(0,0,0,0.28)] transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+            <span>{t('input.contextUsageLabel', { pct: contextUsage.pct })}</span>
+            <span className="mx-1.5 text-muted-foreground">·</span>
+            <span className="text-muted-foreground">{contextUsage.detail}</span>
+          </div>
+        </div>
+      )}
+      {skillManagerLabel !== undefined ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className={cn(
+            CHAT_LAYOUT_TOKENS.inputAttachButton,
+            'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
+            skillManagerOpen && 'bg-background/90 text-foreground',
+          )}
+          onClick={onOpenSkillManager}
+          disabled={disabled || sending || approvalWaiting}
+          aria-label={skillManagerLabel}
+          title={skillManagerLabel}
+          aria-haspopup="dialog"
+          aria-expanded={skillManagerOpen}
+          data-testid="chat-skill-manager-button"
+          data-chat-control="skills"
+        >
+          <Settings2 className="h-4 w-4" />
+        </Button>
+      ) : null}
+      {modelPicker ? (
+        <div className="relative min-w-0 flex-none w-[clamp(0px,calc(100%-16rem),148px)] max-sm:w-[clamp(0px,calc(100%-14.75rem),132px)]">
+          <SelectPrimitive.Root
+            open={modelPickerOpen}
+            onOpenChange={onModelPickerOpenChange}
+            value={modelPicker.currentModelId}
+            onValueChange={modelPicker.onSelect}
+            disabled={modelPickerDisabled}
+          >
+            <SelectPrimitive.Trigger
+              aria-label={t('input.pickModel')}
+              title={t('input.modelPickerTitle')}
+              data-testid="chat-model-picker"
+              data-chat-control="model"
+              data-state={modelPickerOpen ? 'open' : 'closed'}
+              disabled={modelPickerDisabled}
+              className={cn(
+                CHAT_LAYOUT_TOKENS.inputModelPickerTrigger,
+                'min-w-0',
+                modelPickerDisabled && 'cursor-not-allowed opacity-55',
+              )}
+            >
+              <span className="truncate leading-[1.35] [padding-block:1px]">{modelPicker.currentLabel}</span>
+              {modelPicker.switching ? (
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+              ) : (
+                <ChevronDown
+                  className={cn(
+                    'mt-px h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180',
+                    modelPickerOpen && 'rotate-180',
+                  )}
+                />
+              )}
+            </SelectPrimitive.Trigger>
+            <SelectPrimitive.Portal>
+              <SelectPrimitive.Content
+                position="popper"
+                side="top"
+                align="end"
+                sideOffset={8}
+                collisionPadding={12}
+                aria-label={t('input.pickModel')}
+                className={CHAT_LAYOUT_TOKENS.inputModelPickerMenu}
+              >
+                <SelectPrimitive.Viewport
+                  data-chat-model-picker-viewport="true"
+                  className="select-scroll-viewport max-h-[inherit] overflow-y-auto overscroll-contain p-1.5"
+                >
+                  {modelPicker.options.map((option) => {
+                    const selected = option.id === modelPicker.currentModelId;
+                    return (
+                      <SelectPrimitive.Item
+                        key={option.id}
+                        value={option.id}
+                        disabled={option.disabled}
+                        className={cn(
+                          'flex w-full cursor-default items-center gap-2.5 rounded-[0.85rem] px-2.5 py-2 text-left outline-none transition-colors data-[highlighted]:bg-muted/70',
+                          selected
+                            ? 'bg-secondary text-foreground'
+                            : 'text-foreground/88 hover:bg-muted/70',
+                        )}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <SelectPrimitive.ItemText>
+                            <span className="block truncate text-[12px] font-medium leading-5">{option.label}</span>
+                          </SelectPrimitive.ItemText>
+                        </div>
+                        <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                          {selected ? <Check className="h-3.5 w-3.5" /> : null}
+                        </span>
+                      </SelectPrimitive.Item>
+                    );
+                  })}
+                </SelectPrimitive.Viewport>
+              </SelectPrimitive.Content>
+            </SelectPrimitive.Portal>
+          </SelectPrimitive.Root>
+        </div>
+      ) : null}
+      <Button
+        variant="ghost"
+        size="icon"
+        className={cn(
+          CHAT_LAYOUT_TOKENS.inputAttachButton,
+          'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
+          quickPhraseOpen && 'bg-background/90 text-foreground',
+        )}
+        onClick={onToggleQuickPhrase}
+        data-chat-control="quick-phrase"
+        disabled={disabled || sending || approvalWaiting}
+        aria-label="快捷短语"
+        title="快捷短语"
+        aria-haspopup="dialog"
+        aria-expanded={quickPhraseOpen}
+      >
+        <MessageSquare className="h-4 w-4" />
+      </Button>
+
+      <Button
+        variant="ghost"
+        size="icon"
+        className={cn(
+          CHAT_LAYOUT_TOKENS.inputAttachButton,
+          'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
+        )}
+        onClick={onAttachFiles}
+        data-chat-control="attach"
+        disabled={disabled || sending || approvalWaiting}
+        aria-label="Attach files"
+        title="Attach files"
+      >
+        <Paperclip className="h-4 w-4" />
+      </Button>
+    </>
+  );
+});
 
 // ── Component ────────────────────────────────────────────────────
 
@@ -409,8 +746,7 @@ export const ChatInput = memo(function ChatInput({
   modelPicker = null,
   permissionPicker = null,
   contextUsage = null,
-  onOpenTeamGraph,
-  teamDesign = null,
+  teamActions,
   disabled = false,
   reconnecting = false,
   sending = false,
@@ -424,6 +760,21 @@ export const ChatInput = memo(function ChatInput({
   runPhase = null,
 }: ChatInputProps) {
   const { t } = useTranslation('chat');
+  const usesStoredDraft = Boolean(draftKey && !onDraftChange);
+  const storedDraft = useComposerDraftStore((state) => draftKey && usesStoredDraft ? state.drafts[draftKey] ?? '' : '');
+  const storedSelection = useComposerDraftStore((state) => draftKey && usesStoredDraft ? state.selections[draftKey] ?? null : null);
+  const storedDraftChange = useCallback((update: SetStateAction<string>) => {
+    if (draftKey) useComposerDraftStore.getState().setDraft(draftKey, update);
+  }, [draftKey]);
+  const storedSelectionChange = useCallback((selection: ComposerDraftSelection) => {
+    if (draftKey) useComposerDraftStore.getState().setSelection(draftKey, selection);
+  }, [draftKey]);
+  if (draftKey && !onDraftChange) {
+    draft = storedDraft;
+    draftSelection = clampComposerDraftSelection(storedSelection, storedDraft);
+    onDraftChange = storedDraftChange;
+    onDraftSelectionChange = storedSelectionChange;
+  }
   const [uncontrolledInput, setUncontrolledInput] = useState('');
   const input = onDraftChange ? (draft ?? '') : uncontrolledInput;
   const inputRevisionRef = useRef(0);
@@ -677,6 +1028,12 @@ export const ChatInput = memo(function ChatInput({
     setModelPickerOpen(false);
     setPermissionPickerOpen(false);
   }, [closeMention, closeQuickPhrase, closeSlash]);
+
+  const startGoal = useCallback(() => {
+    closeComposerPopovers();
+    goal?.onStart();
+    textareaRef.current?.focus();
+  }, [closeComposerPopovers, goal]);
 
   useImperativeHandle(ref, () => ({
     focus: () => textareaRef.current?.focus({ preventScroll: true }),
@@ -1153,14 +1510,13 @@ export const ChatInput = memo(function ChatInput({
 
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
   const hasFailedAttachments = attachments.some((a) => a.status === 'error');
-  const readableAttachmentCount = attachments.filter((attachment) => !isDirectoryAttachment(attachment)
-    && (attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES || Boolean(attachment.sourcePath))).length;
+  const readableAttachmentCount = attachments.filter(isReadableChatAttachment).length;
   const payloadGate = resolveChatSendGateForPayload(sendGate, {
     text: input,
     attachmentCount: readableAttachmentCount,
     selectedSkillCount: selectedSkills.length,
   });
-  const invalidGoalAttachments = Boolean(goal?.mode) && attachments.some((attachment) => isDirectoryAttachment(attachment) || attachment.fileSize > CHAT_INLINE_ATTACHMENT_MAX_BYTES || Boolean(goal?.mode?.goalId));
+  const invalidGoalAttachments = Boolean(goal?.mode) && attachments.some((attachment) => isUnsupportedGoalStartAttachment(attachment) || Boolean(goal?.mode?.goalId));
   const editingGoal = Boolean(goal?.mode?.goalId);
   const effectiveSending = sending && !editingGoal;
   const sendPending = pendingSend?.scope === composerScope
@@ -1183,6 +1539,24 @@ export const ChatInput = memo(function ChatInput({
     || permissionPicker.busy
     || permissionPicker.options.length === 0;
   const composerTraceRef = useRef<{ signature: string; state: Record<string, unknown> } | null>(null);
+  const handleModelPickerOpenChange = useCallback((open: boolean) => {
+    logSessionTrace('session.composer.model-open', 'session-composer-boundary', () => ({
+      ...composerTraceRef.current?.state, requestedOpen: open, disabled: modelPickerDisabled,
+    }));
+    if (open) {
+      setPermissionPickerOpen(false);
+      setSkillManagerOpen(false);
+    }
+    setModelPickerOpen(open);
+  }, [modelPickerDisabled]);
+  const togglePermissionPicker = useCallback(() => {
+    if (permissionPickerDisabled) {
+      return;
+    }
+    setModelPickerOpen(false);
+    setSkillManagerOpen(false);
+    setPermissionPickerOpen((open) => !open);
+  }, [permissionPickerDisabled]);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;
     const state = {
@@ -1483,7 +1857,6 @@ export const ChatInput = memo(function ChatInput({
     [stageBufferFiles, stageDroppedPathFiles],
   );
 
-  const canOpenTeamGraph = !teamDesign || teamDesign.status === 'designing' || teamDesign.status === 'started';
   const placeholderText = reconnecting ? t('input.gatewayRecoveringNotice')
     : goal?.mode && !disabled && !approvalWaiting ? t('goal.placeholder') : resolveInputPlaceholder(disabled, approvalWaiting, t);
 
@@ -1498,57 +1871,7 @@ export const ChatInput = memo(function ChatInput({
     >
       <div className={`${CHAT_LAYOUT_TOKENS.inputRail} chat-scroll-sync-input-inner`}>
         {goalDock}
-        {onOpenTeamGraph ? (
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 px-3 max-md:px-2.5 max-sm:px-2">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-8 gap-1.5 rounded-md px-2 text-foreground"
-              disabled={!canOpenTeamGraph && (disabled || sending || approvalWaiting || teamDesign?.disabled || !sendGate.canSend)}
-              onClick={canOpenTeamGraph ? onOpenTeamGraph : teamDesign?.onStart}
-            >
-              <GitBranch aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-              <span role={teamDesign?.status === 'designing' ? 'status' : undefined} className="truncate">{t(!teamDesign || teamDesign.status === 'started' ? 'input.teamRunGraphView' : teamDesign.status === 'designing' ? 'input.teamDesignInProgress' : 'input.teamDesignStart')}</span>
-              {canOpenTeamGraph ? <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : null}
-            </Button>
-            {teamDesign && teamDesign.status !== 'started' ? (
-              <div className="ml-auto flex shrink-0 items-center gap-2">
-                {teamDesign.status === 'designing' ? (
-                  <span title={t(sending || approvalWaiting || !sendGate.canSend ? 'input.teamDesignExitWaiting' : 'input.teamDesignExit')}>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 rounded-md px-2.5 text-foreground"
-                      disabled={disabled || sending || approvalWaiting || teamDesign.disabled || !sendGate.canSend}
-                      onClick={teamDesign.onExit}
-                      aria-busy={teamDesign.exiting}
-                    >
-                      {teamDesign.exiting ? <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : null}
-                      {t(teamDesign.exiting ? 'input.teamDesignExiting' : 'teams:design.discuss')}
-                    </Button>
-                  </span>
-                ) : null}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-8 gap-1.5 rounded-md px-3"
-                  disabled={disabled || sending || approvalWaiting || teamDesign.disabled || !sendGate.canSend}
-                  onClick={teamDesign.onRun}
-                  aria-busy={teamDesign.starting}
-                >
-                  {teamDesign.starting
-                    ? <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
-                    : <Play aria-hidden="true" className="h-3.5 w-3.5" />}
-                  {t(teamDesign.starting ? 'teams:design.starting' : 'teams:design.run')}
-                </Button>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-        {teamDesign?.error ? <p role="alert" className="mb-2 text-xs text-destructive">{teamDesign.error}</p> : null}
+        {teamActions}
         {/* Input Row */}
         <div
           className={cn(
@@ -1735,298 +2058,35 @@ export const ChatInput = memo(function ChatInput({
               'flex w-full min-w-0 items-end gap-1.5',
               'justify-end',
             )}>
-              <ChatSessionConnectorStatus
+              <ChatInputToolbar
                 sessionIdentity={sessionIdentity}
-                disabled={disabled}
                 activeRunId={activeRunId}
                 runPhase={runPhase}
+                disabled={disabled}
+                sending={sending}
+                imageGenerationActive={imageGenerationActive}
+                approvalWaiting={approvalWaiting}
+                permissionPicker={permissionPicker}
+                permissionPickerOpen={permissionPickerOpen}
+                permissionPickerDisabled={permissionPickerDisabled}
+                permissionPickerRef={permissionPickerRef}
+                onTogglePermissionPicker={togglePermissionPicker}
+                onPermissionPickerOpenChange={setPermissionPickerOpen}
+                goalSupported={goal?.supported === true}
+                goalDisabled={disabled || sending || Boolean(goal?.busy || goal?.mode)}
+                onStartGoal={startGoal}
+                contextUsage={contextUsage}
+                skillManagerLabel={skillManager?.label}
+                skillManagerOpen={skillManagerOpen}
+                onOpenSkillManager={openSkillManager}
+                modelPicker={modelPicker}
+                modelPickerOpen={modelPickerOpen}
+                modelPickerDisabled={modelPickerDisabled}
+                onModelPickerOpenChange={handleModelPickerOpenChange}
+                quickPhraseOpen={quickPhraseOpen}
+                onToggleQuickPhrase={toggleQuickPhrase}
+                onAttachFiles={stageSelectedDialogAttachments}
               />
-              {!sending && imageGenerationActive ? (
-                <div
-                  data-testid="chat-composer-image-generation-indicator"
-                  role="status"
-                  aria-live="polite"
-                  aria-label={t('input.imageGenerationActive', { defaultValue: '正在生成图片' })}
-                  className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-border/45 bg-background/74 px-3 text-[12px] font-medium text-muted-foreground shadow-sm"
-                >
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span className="max-sm:hidden">{t('input.imageGenerationActive', { defaultValue: '正在生成图片' })}</span>
-                </div>
-              ) : null}
-              {permissionPicker ? (
-                <div ref={permissionPickerRef} className="relative shrink-0">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size={permissionPicker.options.length > 0 || permissionPicker.busy ? 'icon' : 'sm'}
-                    aria-label={t('input.pickPermissionMode')}
-                    aria-haspopup="listbox"
-                    aria-expanded={permissionPickerOpen}
-                    title={[t('input.permissionPickerTitle'), permissionPicker.label, permissionPicker.status].filter(Boolean).join(' · ')}
-                    data-testid="chat-permission-picker"
-                    data-chat-control="permission"
-                    data-state={permissionPickerOpen ? 'open' : 'closed'}
-                    disabled={permissionPickerDisabled}
-                    className={cn(
-                      permissionPicker.options.length > 0 || permissionPicker.busy ? CHAT_LAYOUT_TOKENS.inputAttachButton : 'h-9 max-w-[11rem] rounded-full px-3 text-[12px] font-medium',
-                      'border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
-                      permissionPicker.tone === 'positive' && 'text-emerald-700 dark:text-emerald-300',
-                      permissionPicker.tone === 'warning' && 'text-amber-700 dark:text-amber-300',
-                      permissionPickerOpen && 'bg-background/90 text-foreground',
-                      permissionPickerDisabled && 'cursor-not-allowed opacity-55',
-                    )}
-                    onClick={() => {
-                      if (permissionPickerDisabled) {
-                        return;
-                      }
-                      setModelPickerOpen(false);
-                      setSkillManagerOpen(false);
-                      setPermissionPickerOpen((open) => !open);
-                    }}
-                  >
-                    {permissionPicker.busy ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <ShieldCheck className="h-4 w-4 shrink-0" />
-                    )}
-                    {permissionPicker.options.length === 0 && !permissionPicker.busy ? (
-                      <span className="truncate">{permissionPicker.status ?? permissionPicker.label}</span>
-                    ) : null}
-                  </Button>
-                  {permissionPickerOpen ? (
-                    <div
-                      role="listbox"
-                      aria-label={t('input.pickPermissionMode')}
-                      className="absolute bottom-full left-0 z-50 mb-2 w-64 translate-x-0 overflow-hidden rounded-[1rem] border border-border/60 bg-popover/95 p-1.5 text-sm text-popover-foreground shadow-[0_18px_50px_rgba(0,0,0,0.20)] backdrop-blur-xl"
-                    >
-                      {permissionPicker.status ? <p role="status" className="px-2 py-1.5 text-[11px] text-muted-foreground">{permissionPicker.status}</p> : null}
-                      {permissionPicker.options.map((option) => {
-                        const selected = option.id === permissionPicker.currentId;
-                        const optionDisabled = permissionPickerDisabled || option.disabled === true;
-                        const label = option.label;
-                        return (
-                          <button
-                            key={option.id}
-                            type="button"
-                            role="option"
-                            aria-selected={selected}
-                            disabled={optionDisabled}
-                            title={optionDisabled ? option.disabledReason ?? label : label}
-                            className={cn(
-                              'flex w-full items-center gap-2 rounded-[0.75rem] px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45',
-                              selected
-                                ? 'bg-secondary text-foreground'
-                                : 'text-foreground/88 hover:bg-muted/70',
-                            )}
-                            onClick={() => {
-                              if (optionDisabled) {
-                                return;
-                              }
-                              setPermissionPickerOpen(false);
-                              if (!selected) {
-                                permissionPicker.onSelect(option.id);
-                              }
-                            }}
-                          >
-                            <div className="min-w-0 flex-1">
-                              <div className="truncate text-[12px] font-medium leading-5">{label}</div>
-                              <div className="line-clamp-2 text-[11px] leading-4 text-muted-foreground">{option.description}</div>
-                            </div>
-                            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                              {selected ? <Check className="h-3.5 w-3.5" /> : null}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              {goal?.supported ? (
-                <Button type="button" variant="ghost" size="icon" data-chat-control="goal" className={CHAT_LAYOUT_TOKENS.inputAttachButton} disabled={disabled || sending || goal.busy || Boolean(goal.mode)} onClick={() => { closeComposerPopovers(); goal.onStart(); textareaRef.current?.focus(); }} title={t('goal.set')} aria-label={t('goal.set')}>
-                  <Target aria-hidden="true" className="h-4 w-4" />
-                </Button>
-              ) : null}
-              <ChatWikiProjectPicker />
-              <div className="min-w-0 flex-1" />
-              {contextUsage && (
-                <div className="group relative shrink-0" role="status" aria-label={t('input.contextUsageTitle', { detail: contextUsage.detail, pct: contextUsage.pct })}>
-                  <div
-                    className={cn(
-                      'flex h-8 w-8 items-center justify-center',
-                      contextUsage.level === 'danger'
-                        ? 'text-destructive'
-                        : contextUsage.level === 'warning'
-                          ? 'text-amber-700 dark:text-amber-300'
-                          : 'text-muted-foreground',
-                    )}
-                  >
-                    <svg className="h-4 w-4 -rotate-90" viewBox="0 0 16 16" aria-hidden="true">
-                      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.18" />
-                      <circle
-                        cx="8"
-                        cy="8"
-                        r="6"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        pathLength="100"
-                        strokeDasharray={`${contextUsage.pct} 100`}
-                      />
-                    </svg>
-                  </div>
-                  <div className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 -translate-x-1/2 whitespace-nowrap rounded-xl border border-border/60 bg-popover px-3 py-2 text-xs font-medium text-popover-foreground opacity-0 shadow-[0_12px_36px_rgba(0,0,0,0.28)] transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
-                    <span>{t('input.contextUsageLabel', { pct: contextUsage.pct })}</span>
-                    <span className="mx-1.5 text-muted-foreground">·</span>
-                    <span className="text-muted-foreground">{contextUsage.detail}</span>
-                  </div>
-                </div>
-              )}
-              {skillManager ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className={cn(
-                    CHAT_LAYOUT_TOKENS.inputAttachButton,
-                    'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
-                    skillManagerOpen && 'bg-background/90 text-foreground',
-                  )}
-                  onClick={openSkillManager}
-                  disabled={disabled || sending || approvalWaiting}
-                  aria-label={skillManager.label}
-                  title={skillManager.label}
-                  aria-haspopup="dialog"
-                  aria-expanded={skillManagerOpen}
-                  data-testid="chat-skill-manager-button"
-                  data-chat-control="skills"
-                >
-                  <Settings2 className="h-4 w-4" />
-                </Button>
-              ) : null}
-              {modelPicker ? (
-                <div className="relative min-w-0 flex-none w-[clamp(0px,calc(100%-16rem),148px)] max-sm:w-[clamp(0px,calc(100%-14.75rem),132px)]">
-                  <SelectPrimitive.Root
-                    open={modelPickerOpen}
-                    onOpenChange={(open) => {
-                      logSessionTrace('session.composer.model-open', 'session-composer-boundary', () => ({
-                        ...composerTraceRef.current?.state, requestedOpen: open, disabled: modelPickerDisabled,
-                      }));
-                      if (open) {
-                        setPermissionPickerOpen(false);
-                        setSkillManagerOpen(false);
-                      }
-                      setModelPickerOpen(open);
-                    }}
-                    value={modelPicker.currentModelId}
-                    onValueChange={modelPicker.onSelect}
-                    disabled={modelPickerDisabled}
-                  >
-                    <SelectPrimitive.Trigger
-                      aria-label={t('input.pickModel')}
-                      title={t('input.modelPickerTitle')}
-                      data-testid="chat-model-picker"
-                      data-chat-control="model"
-                      data-state={modelPickerOpen ? 'open' : 'closed'}
-                      disabled={modelPickerDisabled}
-                      className={cn(
-                        CHAT_LAYOUT_TOKENS.inputModelPickerTrigger,
-                        'min-w-0',
-                        modelPickerDisabled && 'cursor-not-allowed opacity-55',
-                      )}
-                    >
-                      <span className="truncate leading-[1.35] [padding-block:1px]">{modelPicker.currentLabel}</span>
-                      {modelPicker.switching ? (
-                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
-                      ) : (
-                        <ChevronDown
-                          className={cn(
-                            'mt-px h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180',
-                            modelPickerOpen && 'rotate-180',
-                          )}
-                        />
-                      )}
-                    </SelectPrimitive.Trigger>
-                    <SelectPrimitive.Portal>
-                      <SelectPrimitive.Content
-                        position="popper"
-                        side="top"
-                        align="end"
-                        sideOffset={8}
-                        collisionPadding={12}
-                        aria-label={t('input.pickModel')}
-                        className={CHAT_LAYOUT_TOKENS.inputModelPickerMenu}
-                      >
-                        <SelectPrimitive.Viewport
-                          data-chat-model-picker-viewport="true"
-                          className="select-scroll-viewport max-h-[inherit] overflow-y-auto overscroll-contain p-1.5"
-                        >
-                          {modelPicker.options.map((option) => {
-                            const selected = option.id === modelPicker.currentModelId;
-                            return (
-                              <SelectPrimitive.Item
-                                key={option.id}
-                                value={option.id}
-                                disabled={option.disabled}
-                                className={cn(
-                                  'flex w-full cursor-default items-center gap-2.5 rounded-[0.85rem] px-2.5 py-2 text-left outline-none transition-colors data-[highlighted]:bg-muted/70',
-                                  selected
-                                    ? 'bg-secondary text-foreground'
-                                    : 'text-foreground/88 hover:bg-muted/70',
-                                )}
-                              >
-                                <div className="min-w-0 flex-1">
-                                  <SelectPrimitive.ItemText>
-                                    <span className="block truncate text-[12px] font-medium leading-5">{option.label}</span>
-                                  </SelectPrimitive.ItemText>
-                                </div>
-                                <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                                  {selected ? <Check className="h-3.5 w-3.5" /> : null}
-                                </span>
-                              </SelectPrimitive.Item>
-                            );
-                          })}
-                        </SelectPrimitive.Viewport>
-                      </SelectPrimitive.Content>
-                    </SelectPrimitive.Portal>
-                  </SelectPrimitive.Root>
-                </div>
-              ) : null}
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn(
-                  CHAT_LAYOUT_TOKENS.inputAttachButton,
-                  'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
-                  quickPhraseOpen && 'bg-background/90 text-foreground',
-                )}
-                onClick={toggleQuickPhrase}
-                data-chat-control="quick-phrase"
-                disabled={disabled || sending || approvalWaiting}
-                aria-label="快捷短语"
-                title="快捷短语"
-                aria-haspopup="dialog"
-                aria-expanded={quickPhraseOpen}
-              >
-                <MessageSquare className="h-4 w-4" />
-              </Button>
-
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn(
-                  CHAT_LAYOUT_TOKENS.inputAttachButton,
-                  'rounded-full border border-border/45 bg-background/74 text-muted-foreground shadow-sm hover:bg-background/88 hover:text-foreground',
-                )}
-                onClick={stageSelectedDialogAttachments}
-                data-chat-control="attach"
-                disabled={disabled || sending || approvalWaiting}
-                aria-label="Attach files"
-                title="Attach files"
-              >
-                <Paperclip className="h-4 w-4" />
-              </Button>
 
               <Button
                 onClick={effectiveSending ? handleStop : handleSend}

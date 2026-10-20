@@ -2,6 +2,7 @@ mod connection;
 mod error;
 mod http;
 mod schedule_receipts;
+mod session_catalog;
 mod subscription;
 mod websocket;
 
@@ -24,6 +25,7 @@ use crate::{lifecycle::secret::Secret, protocol::wire::APP_SERVER_PROTOCOL_VERSI
 use connection::Connection;
 pub use error::{Delivery, Error};
 pub use schedule_receipts::{ScheduleReceiptChange, ScheduleReceiptSubscription};
+pub use session_catalog::SessionCatalogSubscription;
 pub use subscription::{Event, Subscription};
 
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
@@ -90,6 +92,10 @@ impl Client {
         after_seq: u64,
     ) -> Result<ScheduleReceiptSubscription, Error> {
         schedule_receipts::open(self, after_seq).await
+    }
+
+    pub async fn subscribe_session_catalog(&self) -> Result<SessionCatalogSubscription, Error> {
+        session_catalog::open(self).await
     }
 
     pub fn is_connected(&self) -> bool {

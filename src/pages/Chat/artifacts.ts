@@ -18,11 +18,11 @@ function isAssistantTurnItem(item: ChatRenderItem): item is ChatAssistantTurnIte
 }
 
 function findReplyTurnForGraph(
-  items: ReadonlyArray<ChatRenderItem>,
+  itemsByKey: ReadonlyMap<string, ChatRenderItem>,
   graph: ChatExecutionGraphItem,
 ): ChatAssistantTurnItem | null {
   if (graph.replyItemKey) {
-    const matched = items.find((item) => item.key === graph.replyItemKey);
+    const matched = itemsByKey.get(graph.replyItemKey);
     if (matched && isAssistantTurnItem(matched)) {
       return matched;
     }
@@ -35,12 +35,16 @@ export function collectChatArtifactGroups(
 ): ChatArtifactGroup[] {
   const groups: ChatArtifactGroup[] = [];
   const groupedReplyItemKeys = new Set<string>();
+  const itemsByKey = new Map<string, ChatRenderItem>();
+  for (const item of items) {
+    if (!itemsByKey.has(item.key)) itemsByKey.set(item.key, item);
+  }
 
   for (const item of items) {
     if (!isExecutionGraphItem(item)) {
       continue;
     }
-    const replyTurn = findReplyTurnForGraph(items, item);
+    const replyTurn = findReplyTurnForGraph(itemsByKey, item);
     if (!replyTurn) {
       continue;
     }

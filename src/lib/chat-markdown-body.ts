@@ -2,9 +2,9 @@ import type { AttachedFileMeta } from '@/stores/chat';
 import type { SessionAssistantTurnItem, SessionTimelineAssistantTurnEntry } from '../types/session/render-item';
 import {
   buildMarkdownCacheKey,
-  getOrBuildMarkdownBody,
+  getOrPrepareMarkdownBody,
+  renderStreamingMarkdownBody,
   peekRenderedMarkdownBody,
-  prewarmMarkdownBody,
   type MarkdownBodyRenderResult,
 } from '@/pages/Chat/md-pipeline';
 import {
@@ -12,11 +12,6 @@ import {
   linkifyFileHintsInMarkdown,
   migrateLegacyMarkdownFileLinks,
 } from '@/pages/Chat/md-link';
-
-interface PreparedAssistantMarkdownBodyInput {
-  cacheKey: string;
-  markdown: string;
-}
 
 type AssistantMarkdownSource = Pick<
   SessionTimelineAssistantTurnEntry,
@@ -42,17 +37,12 @@ export function buildAssistantMarkdownCacheKey(source: AssistantMarkdownSource):
   });
 }
 
-function buildAssistantMarkdownBodyInput(source: AssistantMarkdownSource): PreparedAssistantMarkdownBodyInput {
-  const attachedFiles = getAssistantMarkdownSourceAttachedFiles(source);
-  const resolveFileHintPath = createFileHintPathResolver(attachedFiles);
-  const markdown = linkifyFileHintsInMarkdown(
+function prepareAssistantMarkdown(source: AssistantMarkdownSource): string {
+  const resolveFileHintPath = createFileHintPathResolver(getAssistantMarkdownSourceAttachedFiles(source));
+  return linkifyFileHintsInMarkdown(
     migrateLegacyMarkdownFileLinks(source.text, resolveFileHintPath),
     resolveFileHintPath,
   );
-  return {
-    cacheKey: buildAssistantMarkdownCacheKey(source),
-    markdown,
-  };
 }
 
 export function peekAssistantMarkdownBody(source: AssistantMarkdownSource): MarkdownBodyRenderResult | undefined {
@@ -60,17 +50,7 @@ export function peekAssistantMarkdownBody(source: AssistantMarkdownSource): Mark
 }
 
 export function prewarmAssistantMarkdownBody(source: AssistantMarkdownSource): MarkdownBodyRenderResult | undefined {
-  const cached = peekAssistantMarkdownBody(source);
-  if (cached) {
-    return cached;
-  }
-  const input = buildAssistantMarkdownBodyInput(source);
-  if (!input.markdown.trim()) {
-    return undefined;
-  }
-  return prewarmMarkdownBody(input.cacheKey, {
-    markdown: input.markdown,
-  });
+  return getOrBuildAssistantMarkdownBody(source);
 }
 
 export function prewarmAssistantMarkdownBodies(entries: SessionTimelineAssistantTurnEntry[]): void {
@@ -83,15 +63,11 @@ export function prewarmAssistantMarkdownBodies(entries: SessionTimelineAssistant
 }
 
 export function getOrBuildAssistantMarkdownBody(source: AssistantMarkdownSource): MarkdownBodyRenderResult | undefined {
-  const cached = peekAssistantMarkdownBody(source);
-  if (cached) {
-    return cached;
-  }
-  const input = buildAssistantMarkdownBodyInput(source);
-  if (!input.markdown.trim()) {
-    return undefined;
-  }
-  return getOrBuildMarkdownBody(input.cacheKey, {
-    markdown: input.markdown,
-  });
+  const cacheKey = buildAssistantMarkdownCacheKey(source);
+  return getOrPrepareMarkdownBody(cacheKey, () => prepareAssistantMarkdown(source));
+}
+
+export function renderStreamingAssistantMarkdownBody(source: AssistantMarkdownSource): MarkdownBodyRenderResult | undefined {
+  const markdown = prepareAssistantMarkdown(source);
+  return markdown.trim() ? renderStreamingMarkdownBody(markdown) : undefined;
 }

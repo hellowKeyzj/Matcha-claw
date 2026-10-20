@@ -26,6 +26,7 @@ pub(crate) mod ports;
 mod provisioning;
 mod resources;
 mod search_lifecycle;
+mod session_catalog;
 mod session_ingress;
 #[allow(dead_code)]
 mod session_shutdown;
@@ -348,6 +349,33 @@ fn wire_cron_receipts(owners: &mut owners::RuntimeOwners, runtime: &PeerRuntimeA
         });
 }
 
+fn wire_session_catalog(owners: &mut owners::RuntimeOwners, runtime: &PeerRuntimeArtifacts) {
+    let changed = runtime
+        .event_sinks
+        .session_catalog_changed()
+        .expect("Session catalog change sink must be available during construction");
+    let client = runtime.matcha_runtime_driver.native_client();
+    let lifecycle = runtime.matcha_runtime_driver.lifecycle_handle();
+    let failures = owners.tasks.join_failures();
+    let (mut task, _) = foundation::execution::OwnedTask::spawn(|cancellation| async move {
+        if let Err(error) = session_catalog::observe(client, changed, cancellation, lifecycle).await {
+            eprintln!("[matcha-session-catalog] observation stopped: {error}");
+        }
+    });
+    owners
+        .tasks
+        .module_scope_mut("sessions")
+        .expect("Sessions module scope must exist")
+        .register_event_subscription("matcha-session-catalog", move || async move {
+            if task.cancel_and_join().await.is_err() {
+                failures
+                    .lock()
+                    .expect("owner join failure state lock poisoned")
+                    .push("matcha-session-catalog");
+            }
+        });
+}
+
 fn wire_diagnostics_forwarders(owners: &mut owners::RuntimeOwners, runtime: &PeerRuntimeArtifacts) {
     let open_claw_runtime_sink = runtime
         .event_sinks
@@ -468,6 +496,7 @@ impl Host {
         let admission = Arc::new(HostAdmission::new());
         let (mut owners, artifacts) = spawn_owner_runtime_stage(provisioned, &runtime, &admission)?;
         wire_session_ingress(&mut owners, &mut runtime);
+        wire_session_catalog(&mut owners, &runtime);
         wire_cron_receipts(&mut owners, &runtime);
         wire_diagnostics_forwarders(&mut owners, &runtime);
         search_lifecycle::observe_runtime_changes(

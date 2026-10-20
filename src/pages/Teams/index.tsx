@@ -166,8 +166,7 @@ export function TeamsPage() {
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
   const installSkill = useSkillsStore((state) => state.installSkill);
   const importLocalSkill = useSkillsStore((state) => state.importLocalSkill);
-  const enableSkill = useSkillsStore((state) => state.enableSkill);
-  const fetchSkills = useSkillsStore((state) => state.fetchSkills);
+  const finishSkillInstallation = useSkillsStore((state) => state.finishSkillInstallation);
   const agentsResource = useSubagentsStore((state) => state.agentsResource);
   const loadAgents = useSubagentsStore((state) => state.loadAgents);
   const setManagementScope = useSubagentsStore((state) => state.setManagementScope);
@@ -419,8 +418,6 @@ export function TeamsPage() {
 
   const refreshDependencyPlanAfterSkillChange = async (currentReview: TeamSkillReview) => {
     if (currentReview.revision !== packageReviewRevisionRef.current) return;
-    await fetchSkills({ force: true, fresh: true, scope: currentReview.candidate.runtimeScope });
-    if (currentReview.revision !== packageReviewRevisionRef.current) return;
     restorePackageReview(await refreshDependencyPlan(currentReview));
   };
 
@@ -451,9 +448,8 @@ export function TeamsPage() {
         throw new Error('Local skill import was canceled');
       }
       await importLocalSkill(importedSkill, review.candidate.runtimeScope);
-      if (review.candidate.runtimeScope?.endpoint.kind === 'native-runtime' && review.candidate.runtimeScope.endpoint.runtimeAdapterId === 'openclaw') {
-        await enableSkill(importedSkill.skillKey, review.candidate.runtimeScope);
-      }
+      await finishSkillInstallation(importedSkill.skillKey, review.candidate.runtimeScope,
+        () => review.revision === packageReviewRevisionRef.current);
       await refreshDependencyPlanAfterSkillChange(review);
     } catch (error) {
       restorePackageReview(review, error instanceof Error ? error.message : String(error));
@@ -483,9 +479,8 @@ export function TeamsPage() {
         return;
       }
       await importLocalSkill(importedSkill, review.candidate.runtimeScope);
-      if (review.candidate.runtimeScope?.endpoint.kind === 'native-runtime' && review.candidate.runtimeScope.endpoint.runtimeAdapterId === 'openclaw') {
-        await enableSkill(importedSkill.skillKey, review.candidate.runtimeScope);
-      }
+      await finishSkillInstallation(importedSkill.skillKey, review.candidate.runtimeScope,
+        () => review.revision === packageReviewRevisionRef.current);
       await refreshDependencyPlanAfterSkillChange(review);
     } catch (error) {
       restorePackageReview(review, error instanceof Error ? error.message : String(error));

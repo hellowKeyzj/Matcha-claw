@@ -5,6 +5,7 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from '
 import { delimiter, dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import { isNativeExecutable } from '../electron/main/runtime-host-delivery/native-artifact.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -61,6 +62,20 @@ function run(command, args, options = {}) {
   }
 }
 
+const { values } = parseArgs({
+  options: {
+    arch: { type: 'string', multiple: true },
+    'if-needed': { type: 'boolean' },
+  },
+});
+const architectures = [...new Set(values.arch ?? [process.arch])].sort();
+for (const arch of architectures) {
+  if (!['x64', 'arm64'].includes(arch)) {
+    throw new Error(`[build-matcha-agent] unsupported architecture: ${arch}`);
+  }
+}
+const ifNeeded = values['if-needed'];
+
 requirePath(resolve(matchaAgentDir, 'package.json'), 'matcha-agent/package.json');
 requirePath(resolve(matchaAgentDir, 'bun.lock'), 'matcha-agent/bun.lock');
 
@@ -68,8 +83,6 @@ requirePath(resolve(matchaAgentDir, 'node_modules', 'vite', 'bin', 'vite.js'), '
 if (!isNativeExecutable(bundledBunPath, process.platform, process.arch)) {
   throw new Error('[build-matcha-agent] target-matched bundled Bun executable is required.');
 }
-const ifNeeded = process.argv.includes('--if-needed');
-const architectures = ifNeeded ? [process.arch] : ['x64', 'arm64'];
 for (const arch of architectures) {
   const target = `${arch}-${process.platform}`;
   const ripgrep = resolve(matchaAgentDir, 'src', 'utils', 'vendor', 'ripgrep', target, isWindows ? 'rg.exe' : 'rg');
@@ -113,7 +126,7 @@ function runtimeArtifactsReady() {
 
 function buildInputFingerprint() {
   const hash = createHash('sha256');
-  hash.update(JSON.stringify([process.platform, process.arch,
+  hash.update(JSON.stringify([process.platform, process.arch, architectures,
     Object.keys(process.env).filter(key => key.startsWith('FEATURE_')).sort()]));
   function add(path) {
     const stat = statSync(path);

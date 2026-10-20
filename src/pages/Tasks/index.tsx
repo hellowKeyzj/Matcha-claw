@@ -24,7 +24,7 @@ import { LoadingState } from '@/components/common/LoadingSpinner';
 import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
 import { buildRuntimeEndpointKey, buildSessionIdentityKey, runtimeEndpointsEqual, type RuntimeEndpointRef, type SessionIdentity } from '@/types/desktop/runtime-address';
 import { buildSessionRecordKey } from '@/stores/chat/session-identity';
-import { useTaskCenterStore } from '@/stores/task-center-store';
+import { readTaskSnapshot, useTaskCenterStore } from '@/stores/task-center-store';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useIdleReady } from '@/lib/idle-ready';
 import { createErrorResourceState, createIdleResourceState, createLoadingResourceState, createReadyResourceState } from '@/lib/resource-state';
@@ -32,7 +32,7 @@ import { cn } from '@/lib/utils';
 import { AppError } from '@/lib/error-model';
 import { decodeTaskFailure } from '@/types/desktop/task-failure';
 import { Cron } from '@/pages/Cron';
-import { listTaskSnapshot, type Task } from '@/services/openclaw/task-manager-client';
+import { TaskManagementUnavailableError, type Task } from '@/services/openclaw/task-manager-client';
 import { useChatStore } from '@/stores/chat';
 import { readSessionsFromState } from '@/stores/chat/session-helpers';
 import { useTeamsStore } from '@/stores/teams';
@@ -304,7 +304,8 @@ export function TasksPage() {
       if (scopeFilter.type === 'team') {
         const activeSession = scopedSessions[0];
         if (!activeSession) throw new Error('The selected Team has no session identity in this runtime; team tasks cannot be queried');
-        const snapshot = await listTaskSnapshot({ sessionKey: activeSession.sessionIdentity.sessionKey, sessionIdentity: activeSession.sessionIdentity, teamKey: scopeFilter.teamId });
+        const snapshot = await readTaskSnapshot({ sessionIdentity: activeSession.sessionIdentity, teamKey: scopeFilter.teamId });
+        if (!snapshot) throw new TaskManagementUnavailableError();
         if (!isCurrentRequest()) return;
         setScopedTasks((previous) => isCurrentRequest() ? createReadyResourceState(snapshot.tasks.map((task) => ({
           ...task,
@@ -321,11 +322,11 @@ export function TasksPage() {
         || chatState.sessionCatalogLoadedAtByRuntimeScopeKey[endpointKey] === undefined)) {
         throw new Error('Session catalog is not available for the selected runtime');
       }
-      const results = await Promise.allSettled(scopedSessions.map(async (session) => ({
-        sessionKey: session.key,
-        sessionIdentity: session.sessionIdentity,
-        snapshot: await listTaskSnapshot({ sessionKey: session.sessionIdentity.sessionKey, sessionIdentity: session.sessionIdentity, teamKey: '' }),
-      })));
+      const results = await Promise.allSettled(scopedSessions.map(async (session) => {
+        const snapshot = await readTaskSnapshot({ sessionIdentity: session.sessionIdentity });
+        if (!snapshot) throw new TaskManagementUnavailableError();
+        return { sessionKey: session.key, sessionIdentity: session.sessionIdentity, snapshot };
+      }));
       if (!isCurrentRequest()) return;
       const failedSessionKeys = new Set<string>();
       const failures: string[] = [];

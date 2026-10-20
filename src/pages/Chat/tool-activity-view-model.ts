@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import { isControlledSessionRenderTool } from '@/stores/chat/session-render-projection';
 import type {
   SessionRenderAssistantBubbleToolResult,
   SessionRenderToolCard,
@@ -145,7 +146,9 @@ export function buildCanvasActivityViewModel(item: SessionRenderAssistantBubbleT
 
   const rawText = item.rawText?.trim() ?? '';
   const preview = tool && isOpenClawTool(tool) ? readMcpAppPreview(tool.details) : undefined;
-  const runtimeSurface = tool ? buildToolRuntimeSurface(tool, sessionIdentity) : undefined;
+  const runtimeSurface = tool && isControlledSessionRenderTool(tool)
+    ? preview && isOpenClawSurfaceSessionIdentity(sessionIdentity) ? bindRuntimeSurface(preview, sessionIdentity, tool.toolCallId) : undefined
+    : tool ? buildToolRuntimeSurface(tool, sessionIdentity) : undefined;
   const title = preview?.title ?? (item.preview.title?.trim() || item.toolName);
   return {
     title,

@@ -194,7 +194,7 @@ type ExternalConnectorsState = {
   probe: (connectorId: string) => Promise<ExternalConnectorConnectionStatus>;
   upsert: (connector: ExternalConnectorSpec) => Promise<ExternalConnectorMutationPayload>;
   update: (connectorId: string, patch: ExternalConnectorPatch) => Promise<ExternalConnectorMutationPayload>;
-  remove: (connectorId: string) => Promise<void>;
+  remove: (connectorId: string) => Promise<ExternalConnectorRemoveMutationReceipt>;
   clearError: () => void;
 };
 
@@ -252,6 +252,21 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, 
     set({ mutatingId: [...pendingOperations.values()].at(-1) ?? null });
   }
 
+  async function refreshMutationMcpServers(scope: RuntimeInstanceScope, revision: number, mcpServersReadId: number): Promise<void> {
+    const canPublish = () => current(scope, revision)
+      && mcpServersReadId === latestMutationMcpServersReadId && mcpServersReadId > latestMcpServersCommitId;
+    try {
+      const mcpServers = await readOpenClawMcpServers(scope);
+      if (!canPublish()) return;
+      latestMcpServersCommitId = mcpServersReadId;
+      set({ mcpServers });
+    } catch (error) {
+      if (canPublish()) set({
+        error: `连接器变更已确认，但 MCP 清单刷新失败：${error instanceof Error ? error.message : '读取失败'}。请点击刷新读取最新清单，勿重复提交变更。`,
+      });
+    }
+  }
+
   async function saveConnector(connectorId: string, save: () => Promise<ExternalConnectorMutationPayload>): Promise<ExternalConnectorMutationPayload> {
     const scope = get().scope;
     const revision = scopeRevision;
@@ -280,11 +295,7 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, 
           },
         }));
       }
-      const mcpServers = await readOpenClawMcpServers(scope);
-      if (current(scope, revision) && mcpServersReadId === latestMutationMcpServersReadId && mcpServersReadId > latestMcpServersCommitId) {
-        latestMcpServersCommitId = mcpServersReadId;
-        set({ mcpServers });
-      }
+      await refreshMutationMcpServers(scope, revision, mcpServersReadId);
       return result;
     } catch (error) {
       if (current(scope, revision)) set({ error: error instanceof Error ? error.message : '保存连接器失败' });
@@ -411,7 +422,7 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, 
     const operation = beginOperation(connectorId);
     try {
       const result = await removeConnector(connectorId);
-      if (!current(scope, revision)) return;
+      if (!current(scope, revision)) return result;
       const mcpServersReadId = ++latestMcpServersReadId;
       latestMutationMcpServersReadId = mcpServersReadId;
       invalidateRefreshError();
@@ -427,11 +438,8 @@ export const useExternalConnectorsStore = create<ExternalConnectorsState>((set, 
           };
         });
       }
-      const mcpServers = await readOpenClawMcpServers(scope);
-      if (current(scope, revision) && mcpServersReadId === latestMutationMcpServersReadId && mcpServersReadId > latestMcpServersCommitId) {
-        latestMcpServersCommitId = mcpServersReadId;
-        set({ mcpServers });
-      }
+      await refreshMutationMcpServers(scope, revision, mcpServersReadId);
+      return result;
     } catch (error) {
       if (current(scope, revision)) set({ error: error instanceof Error ? error.message : '删除连接器失败' });
       throw error;

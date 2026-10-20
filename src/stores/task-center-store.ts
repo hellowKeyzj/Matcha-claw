@@ -31,13 +31,58 @@ interface TaskCenterState {
 
 let activeTaskCenterMutation: symbol | null = null;
 const taskCenterInitPromises = new Map<string, Promise<void>>();
-const taskCenterRefreshPromises = new Map<string, {
+const taskSnapshotReads = new Map<string, {
   promise: Promise<TaskListSnapshot | null>;
   dirty: boolean;
 }>();
 
 function logTaskPipeline(event: string, payload: () => Record<string, unknown>): void {
   logRendererDebug(`[task-pipeline] task-center.${event}`, payload);
+}
+
+export function readTaskSnapshot(options: { sessionIdentity: SessionIdentity; teamKey?: string; invalidate?: boolean }): Promise<TaskListSnapshot | null> {
+  const { sessionIdentity } = options;
+  const teamKey = options.teamKey?.trim() || undefined;
+  const identityKey = buildSessionIdentityKey(sessionIdentity);
+  const requestKey = JSON.stringify([identityKey, teamKey ?? null]);
+  const pending = taskSnapshotReads.get(requestKey);
+  if (pending) {
+    // A mutation/recovery during a read needs one more read, not a lost invalidation.
+    if (options.invalidate) pending.dirty = true;
+    return pending.promise;
+  }
+  const refresh = { promise: Promise.resolve<TaskListSnapshot | null>(null), dirty: false };
+  refresh.promise = Promise.resolve().then(async () => {
+    try {
+      do {
+        refresh.dirty = false;
+        try {
+          logTaskPipeline('refresh.start', () => ({ sessionKey: sessionIdentity.sessionKey, identityKey, teamKey: teamKey ?? null }));
+          const available = await isTaskManagementAvailable(sessionIdentity);
+          const snapshot = available
+            ? await listTaskSnapshot({ sessionKey: sessionIdentity.sessionKey, sessionIdentity, ...(teamKey ? { teamKey } : {}) })
+            : null;
+          // Discard results superseded by a terminal tool change or a new epoch.
+          if (refresh.dirty) continue;
+          logTaskPipeline(snapshot ? 'refresh.result' : 'refresh.unsupported', () => ({
+            sessionKey: sessionIdentity.sessionKey,
+            identityKey,
+            tasksCount: snapshot?.tasks.length,
+            todosCount: snapshot?.todos.length,
+          }));
+          return snapshot;
+        } catch (error) {
+          logTaskPipeline('refresh.failed', () => ({ sessionKey: sessionIdentity.sessionKey, identityKey, error: error instanceof Error ? error.message : String(error) }));
+          if (!refresh.dirty) throw error;
+        }
+      } while (refresh.dirty);
+      return null;
+    } finally {
+      taskSnapshotReads.delete(requestKey);
+    }
+  });
+  taskSnapshotReads.set(requestKey, refresh);
+  return refresh.promise;
 }
 
 function scopeKeyForSession(sessionKey: string): string {
@@ -134,7 +179,6 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
     const teamKey = options?.teamKey?.trim() || undefined;
     const requestedScopeKey = scopeKeyForOptions(resolvedSessionKey, teamKey);
     const identityKey = buildSessionIdentityKey(sessionIdentity);
-    const requestKey = JSON.stringify([identityKey, teamKey ?? null]);
     const ownsSelection = () => !background
       && get().sessionKey === resolvedSessionKey
       && get().selectedScopeKey === requestedScopeKey
@@ -152,46 +196,8 @@ export const useTaskCenterStore = create<TaskCenterState>((set, get) => ({
         ...(!options?.silent ? { refreshing: true, error: null } : {}),
       });
     }
-    let pending = taskCenterRefreshPromises.get(requestKey);
-    if (pending) {
-      // A mutation/recovery during a read needs one more read, not a lost invalidation.
-      if (options?.invalidate) pending.dirty = true;
-    } else {
-      const refresh = { promise: Promise.resolve<TaskListSnapshot | null>(null), dirty: false };
-      refresh.promise = Promise.resolve().then(async () => {
-        try {
-          do {
-            refresh.dirty = false;
-            try {
-              logTaskPipeline('refresh.start', () => ({ sessionKey: resolvedSessionKey, identityKey, teamKey: teamKey ?? null, background }));
-              const available = await isTaskManagementAvailable(sessionIdentity);
-              const snapshot = available
-                ? await listTaskSnapshot({ sessionKey: sessionIdentity.sessionKey, sessionIdentity, ...(teamKey ? { teamKey } : {}) })
-                : null;
-              // Discard results superseded by a terminal tool change or a new epoch.
-              if (refresh.dirty) continue;
-              logTaskPipeline(snapshot ? 'refresh.result' : 'refresh.unsupported', () => ({
-                sessionKey: resolvedSessionKey,
-                identityKey,
-                tasksCount: snapshot?.tasks.length,
-                todosCount: snapshot?.todos.length,
-              }));
-              return snapshot;
-            } catch (error) {
-              logTaskPipeline('refresh.failed', () => ({ sessionKey: resolvedSessionKey, identityKey, error: error instanceof Error ? error.message : String(error) }));
-              if (!refresh.dirty) throw error;
-            }
-          } while (refresh.dirty);
-          return null;
-        } finally {
-          taskCenterRefreshPromises.delete(requestKey);
-        }
-      });
-      taskCenterRefreshPromises.set(requestKey, refresh);
-      pending = refresh;
-    }
     try {
-      const snapshot = await pending.promise;
+      const snapshot = await readTaskSnapshot({ sessionIdentity, teamKey, invalidate: options?.invalidate });
       if (!snapshot) {
         if (background) return;
         if (ownsSelection()) set({ refreshing: false, error: 'Task management is not available for this session', initialized: true });

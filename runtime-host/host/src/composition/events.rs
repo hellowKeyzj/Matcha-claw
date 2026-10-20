@@ -12,6 +12,9 @@ pub enum HostEvent {
     CronChanged {
         endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
     },
+    SessionCatalogChanged {
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    },
     OpenClawRuntime,
     MatchaLifecycle(SupervisorSnapshot),
     CallChanged(platform::call::CallChanged),
@@ -25,6 +28,7 @@ pub struct HostEvents {
     open_claw: mpsc::Receiver<OpenClawEvent>,
     cron: mpsc::Receiver<CronExecutionTerminalEvent>,
     cron_changed: Option<watch::Receiver<()>>,
+    session_catalog_changed: Option<watch::Receiver<()>>,
     open_claw_runtime: mpsc::Receiver<()>,
     matcha_lifecycle: mpsc::Receiver<SupervisorSnapshot>,
     calls: Option<broadcast::Receiver<platform::call::CallChanged>>,
@@ -61,6 +65,7 @@ impl HostEvents {
             if !self.open_claw_open
                 && !self.cron_open
                 && self.cron_changed.is_none()
+                && self.session_catalog_changed.is_none()
                 && !self.open_claw_runtime_open
                 && !self.matcha_lifecycle_open
                 && self.calls.is_none()
@@ -93,6 +98,20 @@ impl HostEvents {
                         });
                     }
                     Err(_) => self.cron_changed = None,
+                },
+                changed = async {
+                    match self.session_catalog_changed.as_mut() {
+                        Some(changes) => changes.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => match changed {
+                    Ok(()) => {
+                        self.session_catalog_changed.as_mut().expect("Session catalog changes receiver exists").borrow_and_update();
+                        return Some(HostEvent::SessionCatalogChanged {
+                            endpoint: runtime_directory::RuntimeDriverIdentity::matcha_agent().endpoint(),
+                        });
+                    }
+                    Err(_) => self.session_catalog_changed = None,
                 },
                 changed = async {
                     match self.organization.as_mut() {
@@ -138,6 +157,7 @@ pub(super) struct EventSinks {
     open_claw: Option<mpsc::Sender<OpenClawEvent>>,
     cron: Option<mpsc::Sender<CronExecutionTerminalEvent>>,
     cron_changed: Option<watch::Sender<()>>,
+    session_catalog_changed: Option<watch::Sender<()>>,
     open_claw_runtime: Option<mpsc::Sender<()>>,
     matcha_lifecycle: Option<mpsc::Sender<SupervisorSnapshot>>,
 }
@@ -153,6 +173,10 @@ impl EventSinks {
 
     pub(super) fn cron_changed(&self) -> Option<watch::Sender<()>> {
         self.cron_changed.clone()
+    }
+
+    pub(super) fn session_catalog_changed(&self) -> Option<watch::Sender<()>> {
+        self.session_catalog_changed.clone()
     }
 
     pub(super) fn open_claw_runtime(&self) -> Option<mpsc::Sender<()>> {
@@ -175,6 +199,7 @@ impl EventSinks {
 
     pub(super) fn close_matcha(&mut self) {
         self.matcha_lifecycle = None;
+        self.session_catalog_changed = None;
     }
 }
 
@@ -182,6 +207,7 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
     let (open_claw, open_claw_events) = mpsc::channel(EVENT_CAPACITY);
     let (cron, cron_events) = mpsc::channel(EVENT_CAPACITY);
     let (cron_changed, cron_changes) = watch::channel(());
+    let (session_catalog_changed, session_catalog_changes) = watch::channel(());
     let (open_claw_runtime, open_claw_runtime_events) = mpsc::channel(1);
     let (matcha_lifecycle, matcha_lifecycle_events) = mpsc::channel(1);
     (
@@ -189,6 +215,7 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
             open_claw: Some(open_claw),
             cron: Some(cron),
             cron_changed: Some(cron_changed),
+            session_catalog_changed: Some(session_catalog_changed),
             open_claw_runtime: Some(open_claw_runtime),
             matcha_lifecycle: Some(matcha_lifecycle),
         },
@@ -196,6 +223,7 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
             open_claw: open_claw_events,
             cron: cron_events,
             cron_changed: Some(cron_changes),
+            session_catalog_changed: Some(session_catalog_changes),
             open_claw_runtime: open_claw_runtime_events,
             matcha_lifecycle: matcha_lifecycle_events,
             calls: None,

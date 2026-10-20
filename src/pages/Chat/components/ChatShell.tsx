@@ -137,13 +137,25 @@ export function ChatShell({
       return;
     }
 
+    // 只记录本次 effect 已提交的 CSS 高度，每次同步仍读取真实布局。
+    let appliedHeaderHeight: number | undefined;
+    let appliedComposerHeight: number | undefined;
     const syncOverlayOffsets = () => {
       const headerHeight = Math.ceil(headerNode.getBoundingClientRect().height);
       const composerHeight = Math.ceil(composerNode.getBoundingClientRect().height);
-      stageNode.style.setProperty('--chat-header-safe-offset', `${headerHeight}px`);
-      stageNode.style.setProperty('--chat-thread-top-padding', `${headerHeight + CHAT_THREAD_TOP_GAP_PX}px`);
-      stageNode.style.setProperty('--chat-composer-safe-offset', `${composerHeight}px`);
-      stageNode.style.setProperty('--chat-thread-bottom-padding', `${composerHeight + CHAT_THREAD_BOTTOM_GAP_PX}px`);
+      if (headerHeight === appliedHeaderHeight && composerHeight === appliedComposerHeight) {
+        return;
+      }
+      if (headerHeight !== appliedHeaderHeight) {
+        stageNode.style.setProperty('--chat-header-safe-offset', `${headerHeight}px`);
+        stageNode.style.setProperty('--chat-thread-top-padding', `${headerHeight + CHAT_THREAD_TOP_GAP_PX}px`);
+        appliedHeaderHeight = headerHeight;
+      }
+      if (composerHeight !== appliedComposerHeight) {
+        stageNode.style.setProperty('--chat-composer-safe-offset', `${composerHeight}px`);
+        stageNode.style.setProperty('--chat-thread-bottom-padding', `${composerHeight + CHAT_THREAD_BOTTOM_GAP_PX}px`);
+        appliedComposerHeight = composerHeight;
+      }
       onComposerGeometryChange?.();
     };
 

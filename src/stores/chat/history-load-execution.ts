@@ -37,7 +37,8 @@ import {
   summarizeIdentifier,
   summarizeSessionIdentity,
 } from '@/lib/session-trace';
-import { buildSessionIdentityRecordIndex, resolveSessionOperationTarget, sameRuntimeEndpointScope } from './session-identity';
+import { resolveSessionOperationTarget, sameRuntimeEndpointScope } from './session-identity';
+import { reconcileSessionDirectory } from './session-directory';
 import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '../runtime-endpoints';
 import { createHistoryLoadAbortError, isHistoryLoadAbortError, throwIfHistoryLoadAborted } from './history-abort';
 import { sessionIdentitiesEqual, type SessionIdentity } from '../../types/desktop/runtime-address';
@@ -490,7 +491,7 @@ export function createApplyLoadedMessagesPipeline(
       });
       return {
         loadedSessions,
-        sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+        ...reconcileSessionDirectory(state, loadedSessions, [requestedSessionKey]),
       };
     });
     if (!isCurrent(get())) return 'ignored';
@@ -669,7 +670,7 @@ export async function executeHistoryLoad(
             });
             return {
               loadedSessions,
-              sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+              ...reconcileSessionDirectory(state, loadedSessions, [requestedSessionKey]),
               error: null,
             };
           });
@@ -683,7 +684,7 @@ export async function executeHistoryLoad(
           });
           return {
             loadedSessions,
-            sessionRecordKeyByIdentityKey: buildSessionIdentityRecordIndex(loadedSessions),
+            ...reconcileSessionDirectory(state, loadedSessions, [requestedSessionKey]),
             error: switching ? resolveSessionViewError(err).message : resolveHistoryLoadErrorMessage(err),
           };
         });

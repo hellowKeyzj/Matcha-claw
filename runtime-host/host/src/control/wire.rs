@@ -54,7 +54,7 @@ where
 }
 
 #[cfg(test)]
-fn deserialize_cron_endpoint<'de, D>(
+fn deserialize_matcha_endpoint<'de, D>(
     deserializer: D,
 ) -> Result<platform::endpoint::runtime_address::RuntimeEndpoint, D::Error>
 where
@@ -64,7 +64,7 @@ where
     let endpoint = runtime_directory::RuntimeDriverIdentity::matcha_agent().endpoint();
     (value == serde_json::to_value(&endpoint).map_err(D::Error::custom)?)
         .then_some(endpoint)
-        .ok_or_else(|| D::Error::custom("invalid Cron endpoint"))
+        .ok_or_else(|| D::Error::custom("invalid Matcha endpoint"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -427,7 +427,12 @@ pub(crate) enum SafeEvent {
     OrganizationChanged {},
     #[serde(rename = "cron.changed")]
     CronChanged {
-        #[serde(deserialize_with = "deserialize_cron_endpoint")]
+        #[serde(deserialize_with = "deserialize_matcha_endpoint")]
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+    },
+    #[serde(rename = "sessions.catalogChanged")]
+    SessionCatalogChanged {
+        #[serde(deserialize_with = "deserialize_matcha_endpoint")]
         endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
     },
     #[serde(rename = "openclaw.cron.execution", rename_all = "camelCase")]

@@ -17,7 +17,7 @@ export function useLargeTextContent(input: {
   const contentRef = largeText?.contentRef ?? null;
   const loadedBytes = largeText?.loadedBytes ?? 0;
   const totalBytes = largeText?.totalBytes ?? 0;
-  const identityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
+  const identityKey = useMemo(() => sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null, [sessionIdentity]);
   const source = useMemo(() => ({ contentRef, loadedBytes, totalBytes, initialText, itemKey, identityKey, endpointSessionId }),
     [contentRef, loadedBytes, totalBytes, initialText, itemKey, identityKey, endpointSessionId]);
   const [state, setState] = useState(() => ({
@@ -41,12 +41,13 @@ export function useLargeTextContent(input: {
     loading: false,
     failed: false,
   }, [loadedBytes, source, state]);
+  const text = useMemo(() => `${initialText}${activeState.appendedText}`, [initialText, activeState.appendedText]);
   const complete = !largeText || activeState.offset === totalBytes;
 
   const loadContent = useCallback(async (all: boolean, onLoaded?: (text: string) => void) => {
     if (!largeText || requestRef.current) return;
     if (complete) {
-      onLoaded?.(`${initialText}${activeState.appendedText}`);
+      onLoaded?.(text);
       return;
     }
     if (!sessionIdentity) {
@@ -87,10 +88,10 @@ export function useLargeTextContent(input: {
     const appendedText = parts.join('');
     setState({ ...activeState, offset, appendedText, loading: false, failed: false });
     onLoaded?.(`${initialText}${appendedText}`);
-  }, [activeState, complete, endpointSessionId, initialText, largeText, sessionIdentity, totalBytes]);
+  }, [activeState, complete, endpointSessionId, initialText, largeText, sessionIdentity, text, totalBytes]);
 
   return {
-    text: `${initialText}${activeState.appendedText}`,
+    text,
     loading: activeState.loading,
     loadAll: (onLoaded: (text: string) => void) => { void loadContent(true, onLoaded); },
     loadMoreButton: (largeText && !complete && sessionIdentity) || activeState.failed ? (

@@ -198,7 +198,6 @@ function adapterInstancesFromEndpoints(endpoints: readonly RuntimeEndpointSummar
 type FixedEndpointIdentity = Readonly<{
   protocolId: string;
   runtimeAdapterId: string;
-  agentId: string;
   displayName: string;
 }>;
 
@@ -216,11 +215,7 @@ function isEndpoint(value: unknown): value is RuntimeEndpointSummary {
     && value.displayName === identity.displayName
     && isLocation(value.location)
     && isLifecycle(value.lifecycle)
-    && (identity.runtimeAdapterId === 'matcha-agent'
-      ? isMatchaAgents(value.agentIds, value.defaultAgentId, value.agents)
-      : isFixedAgentIds(value.agentIds, identity.agentId)
-        && value.defaultAgentId === identity.agentId
-        && isFixedAgents(value.agents, identity, value.lifecycle))
+    && isAgents(value, identity.runtimeAdapterId === 'matcha-agent' ? isCapabilities : isSupportedCapabilities)
     && value.acceptsDynamicAgents === true
     && (identity.runtimeAdapterId === 'matcha-agent' ? isCapabilities(value.capabilities) : isSupportedCapabilities(value.capabilities))
     && isFixedCapabilityFamilies(value.capabilityFamilies)
@@ -232,7 +227,6 @@ function fixedEndpointIdentity(value: Record<string, unknown>): FixedEndpointIde
     return {
       protocolId: 'openclaw-v4',
       runtimeAdapterId: 'openclaw',
-      agentId: 'main',
       displayName: 'OpenClaw',
     };
   }
@@ -240,7 +234,6 @@ function fixedEndpointIdentity(value: Record<string, unknown>): FixedEndpointIde
     return {
       protocolId: 'matcha-agent-app-server',
       runtimeAdapterId: 'matcha-agent',
-      agentId: 'matcha',
       displayName: 'Matcha Agent',
     };
   }
@@ -288,27 +281,15 @@ function isLifecycle(value: unknown): boolean {
     && value.ready === false;
 }
 
-function isMatchaAgents(ids: unknown, defaultId: unknown, agents: unknown): boolean {
+function isAgents(endpoint: Record<string, unknown>, isAgentCapabilities: (value: unknown) => boolean): boolean {
+  const { agentIds: ids, defaultAgentId: defaultId, agents, lifecycle } = endpoint;
   return Array.isArray(ids) && ids.every((id) => typeof id === 'string' && /^[A-Za-z0-9_-]+$/.test(id))
     && new Set(ids).size === ids.length
+    && isRecord(lifecycle) && (lifecycle.ready === true || ids.length === 0)
     && typeof defaultId === 'string' && (defaultId === '' || ids.includes(defaultId))
     && Array.isArray(agents) && agents.length === ids.length
     && agents.every((agent, index) => isRecord(agent) && hasExactKeys(agent, ['agentId', 'source', 'capabilities'])
-      && agent.agentId === ids[index] && agent.source === 'discovered' && isCapabilities(agent.capabilities));
-}
-
-function isFixedAgentIds(value: unknown, agentId: string): boolean {
-  return Array.isArray(value) && value.length === 1 && value[0] === agentId;
-}
-
-function isFixedAgents(value: unknown, identity: FixedEndpointIdentity, lifecycle: unknown): boolean {
-  if (!Array.isArray(value) || value.length !== 1 || !isRecord(value[0])) return false;
-  const agent = value[0];
-  const source = isRecord(lifecycle) && lifecycle.phase === 'ready' ? 'discovered' : 'declared';
-  return hasExactKeys(agent, ['agentId', 'source', 'capabilities'])
-    && agent.agentId === identity.agentId
-    && agent.source === source
-    && isSupportedCapabilities(agent.capabilities);
+      && agent.agentId === ids[index] && agent.source === 'discovered' && isAgentCapabilities(agent.capabilities));
 }
 
 function isSupportedCapabilities(value: unknown): boolean {

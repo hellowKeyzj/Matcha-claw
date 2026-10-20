@@ -1,10 +1,13 @@
 import type { SessionSendIntent } from '@/types/session-goal';
 import { buildSessionIdentityKey } from '../../types/desktop/runtime-address';
 import { cacheSendAttachments } from './attachment-helpers';
+import { reconcileSessionDirectory } from './session-directory';
 import { hasActiveStreamingRun } from './runtime-stream-state';
 import type { StoreSessionRunCache } from './session-run-cache';
 import {
   CHAT_SEND_RPC_TIMEOUT_MS,
+  isReadableChatAttachment,
+  isUnsupportedGoalStartAttachment,
   resolveChatSendTransportPayload,
   sendChatTransport,
   type SendChatTransportResult,
@@ -22,9 +25,7 @@ import {
   setSendSafetyTimer,
 } from './timers';
 import {
-  applySessionDelta,
   applySessionView,
-  getSessionMeta,
   getSessionRuntime,
   patchSessionMeta,
   hasTimeoutSignal,
@@ -65,26 +66,18 @@ function hasAssistantProgress(items: ReturnType<typeof getSessionItems>): boolea
 interface ApplyStoreSendStartParams {
   set: ChatStoreSetFn;
   sessionKey: string;
-  text: string;
   nowMs: number;
 }
 
 export function applyStoreSendStart(params: ApplyStoreSendStartParams): void {
-  const { set, sessionKey, text, nowMs } = params;
+  const { set, sessionKey, nowMs } = params;
   set((state) => {
-    const sessionMeta = getSessionMeta(state, sessionKey);
-    const nextSessionLabel = sessionMeta.kind === 'main' || sessionMeta.preferred
-      ? null
-      : text;
+    const loadedSessions = patchSessionMeta(state, sessionKey, {
+      lastActivityAt: nowMs,
+    });
     return {
-      loadedSessions: patchSessionMeta(
-        state,
-        sessionKey,
-        {
-          label: nextSessionLabel ?? state.loadedSessions[sessionKey]?.meta.label ?? null,
-          lastActivityAt: nowMs,
-        },
-      ),
+      loadedSessions,
+      ...reconcileSessionDirectory(state, loadedSessions, [sessionKey]),
     };
   });
 }
@@ -176,13 +169,8 @@ interface FinalizeStoreSendFailureParams {
   error: string;
 }
 
-function isDirectoryAttachment(attachment: ChatSendAttachment): boolean {
-  return attachment.entryKind === 'directory' || attachment.mimeType === 'application/x-directory';
-}
-
 function readableAttachments(attachments: ChatSendAttachment[] | undefined): ChatSendAttachment[] | undefined {
-  const readable = attachments?.filter((attachment) => !isDirectoryAttachment(attachment)
-    && (attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES || Boolean(attachment.sourcePath)));
+  const readable = attachments?.filter(isReadableChatAttachment);
   return readable && readable.length > 0 ? readable : undefined;
 }
 
@@ -336,7 +324,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   } = params;
   const trimmed = params.intent ? text : text.trim();
   if (params.intent && !text.trim()) return { accepted: false, reason: 'empty' };
-  if (params.intent && attachments?.some((attachment) => isDirectoryAttachment(attachment) || attachment.fileSize > CHAT_INLINE_ATTACHMENT_MAX_BYTES)) {
+  if (params.intent && attachments?.some(isUnsupportedGoalStartAttachment)) {
     return { accepted: false, reason: 'goal-attachments' };
   }
   const traceId = createSessionTraceId('send-boundary');
@@ -391,7 +379,6 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
   applyStoreSendStart({
     set,
     sessionKey: currentSessionKey,
-    text: trimmed,
     nowMs,
   });
   appendOptimisticSendItems({
@@ -440,10 +427,9 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     const sendResult = await sendChatTransport({
       endpointSessionId,
       sessionIdentity,
-      message: transportPayload.message,
+      ...transportPayload,
       intent: params.intent,
       idempotencyKey: clientMessageId,
-      attachments: transportPayload.attachments,
       timeoutMs: CHAT_SEND_RPC_TIMEOUT_MS,
       traceId,
     });
@@ -522,12 +508,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       if (sendResult.projection.kind === 'view') {
         applySessionView({ set, get }, sendResult.projection.view);
       } else {
-        const delta = sendResult.projection.delta;
-        const result = applySessionDelta({ set, get }, delta);
-        if (result.status === 'gap' || result.status === 'epoch-mismatch') {
-          void get().resyncSession({ identity: delta.identity, epoch: delta.epoch, seq: delta.seq })
-            .catch((error) => console.warn('[session.resync]', error));
-        }
+        get().applySessionDelta(sendResult.projection.delta);
       }
     }
     if (params.intent || sendResult.outcome === 'succeeded' && sendResult.status !== 'started') {

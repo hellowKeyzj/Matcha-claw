@@ -277,25 +277,9 @@ impl Endpoint {
             location: Location { kind: "local" },
             lifecycle: lifecycle.clone(),
             display_name: identity.display_name(),
-            agent_ids: if identity == RuntimeDriverIdentity::matcha_agent() {
-                Vec::new()
-            } else {
-                vec![identity.default_agent_id().to_owned()]
-            },
-            default_agent_id: if identity == RuntimeDriverIdentity::matcha_agent() {
-                String::new()
-            } else {
-                identity.default_agent_id().to_owned()
-            },
-            agents: if identity == RuntimeDriverIdentity::matcha_agent() {
-                Vec::new()
-            } else {
-                vec![Agent {
-                    agent_id: identity.default_agent_id().to_owned(),
-                    source: if lifecycle.ready { "discovered" } else { "declared" },
-                    capabilities: capabilities.clone(),
-                }]
-            },
+            agent_ids: Vec::new(),
+            default_agent_id: String::new(),
+            agents: Vec::new(),
             accepts_dynamic_agents: true,
             capabilities,
             capability_families: CapabilityFamily::from_surface(surface),
@@ -655,8 +639,8 @@ mod tests {
         assert_eq!(open_claw.runtime_adapter_id(), "openclaw");
         assert_eq!(open_claw.runtime_instance_id(), "local");
         assert_eq!(open_claw.display_name(), "OpenClaw");
-        assert_eq!(open_claw.default_agent_id(), "main");
-        assert_eq!(open_claw.agent_ids(), &["main"]);
+        assert!(open_claw.default_agent_id().is_empty());
+        assert!(open_claw.agent_ids().is_empty());
         assert!(open_claw.accepts_dynamic_agents());
         assert!(open_claw.capabilities().chat());
         assert!(open_claw.capabilities().tools());

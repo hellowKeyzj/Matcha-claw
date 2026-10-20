@@ -111,6 +111,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install matcha-agent dependencies
+        if: env.SKIP_MATCHA_AGENT_BUILD != '1'
+        working-directory: matcha-agent
+        run: bun install --frozen-lockfile
+
+      - name: Prepare matcha-agent ripgrep
+        if: env.SKIP_MATCHA_AGENT_BUILD != '1'
+        run: node scripts/download-matcha-ripgrep.mjs ${{ matrix.platform == 'mac' && '--arch arm64' || '--arch x64 --arch arm64' }}
+
       - name: Download bundled protoc
         run: pnpm run protoc:download
 
@@ -190,6 +199,7 @@ jobs:
       - name: Build macOS
         if: matrix.platform == 'mac'
         env:
+          UV_PYTHON_INSTALL_DIR: ${{ github.workspace }}/build/searxng-toolchain/python
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.MAC_CERTS }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
@@ -204,7 +214,7 @@ jobs:
 
           node scripts/build-runtime-host-native.mjs --platform darwin --arch arm64
           pnpm run build:vite
-          pnpm run build:matcha-agent
+          pnpm run build:matcha-agent --arch arm64
           pnpm exec zx scripts/bundle-openclaw.mjs
           pnpm exec zx scripts/bundle-openclaw-plugins.mjs
           pnpm run check:openclaw-plugin-mirrors
@@ -383,7 +393,7 @@ jobs:
             done
           }
 
-          pnpm exec electron-builder --mac dir --arm64 --publish never -c.mac.notarize=false
+          pnpm exec electron-builder --mac dir --arm64 --publish never -c.mac.notarize=false -c.forceCodeSigning=true
 
           submit_notary arm64 "release/mac-arm64/MatchaClaw.app"
 
@@ -526,7 +536,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          pnpm run build:vite && pnpm run build:matcha-agent && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs
+          pnpm run build:vite && pnpm run build:matcha-agent --arch x64 --arch arm64 && pnpm exec zx scripts/bundle-openclaw.mjs && pnpm exec zx scripts/bundle-openclaw-plugins.mjs && pnpm run check:openclaw-plugin-mirrors && pnpm exec zx scripts/bundle-preinstalled-skills.mjs
           pnpm exec electron-builder --win --x64 --arm64 --publish never
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE

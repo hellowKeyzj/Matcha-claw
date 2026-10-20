@@ -39,6 +39,7 @@ interface ChannelsState {
 
   // Actions
   fetchChannels: (options?: FetchChannelsOptions) => Promise<void>;
+  refreshAfterConfirmedMutation: (scope: RuntimeInstanceScope) => Promise<void>;
   probeChannels: () => Promise<void>;
   deleteChannel: (channelId: string, options?: { traceId?: string }) => Promise<boolean>;
   connectChannel: (channelId: string) => Promise<void>;
@@ -167,13 +168,14 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
       return;
     }
 
+    const requestRevision = ++channelsSnapshotRevision;
+    clearChannelsSnapshotRetry();
     if (!hasSnapshot) {
       set({ initialLoading: true, refreshing: false, error: null });
     } else if (!silent) {
       set({ refreshing: true, initialLoading: false, error: null });
     }
 
-    const requestRevision = channelsSnapshotRevision;
     const runFetch = (async () => {
       try {
         const result = await hostChannelsFetchSnapshot(scope);
@@ -208,7 +210,7 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
             error: null,
           }));
           scheduleChannelsSnapshotRetry(async () => {
-            if (scopeRevision === channelsScopeRevision && isSelectedScope(scope)) await get().fetchChannels({ silent: true });
+            if (requestRevision === channelsSnapshotRevision && scopeRevision === channelsScopeRevision && isSelectedScope(scope)) await get().fetchChannels({ silent: true });
           });
           return;
         }
@@ -323,6 +325,17 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
     }
   },
 
+  refreshAfterConfirmedMutation: async (scope) => {
+    const selectedScope = get().scope;
+    if (!selectedScope || buildCapabilityScopeKey(selectedScope) !== buildCapabilityScopeKey(scope) || !isSelectedScope(scope)) return;
+    // Confirmed mutations retire reads started before the effect, including their retry.
+    channelsSnapshotRevision += 1;
+    inflightChannelsFetchPromise = null;
+    channelsLastFetchAtMs = 0;
+    clearChannelsSnapshotRetry();
+    await get().fetchChannels();
+  },
+
   probeChannels: async () => { await get().fetchChannels(); },
 
   deleteChannel: async (channelId, options) => {
@@ -370,14 +383,10 @@ export const useChannelsStore = create<ChannelsState>((set, get) => ({
         }));
         return false;
       }
-      channelsSnapshotRevision += 1;
-      inflightChannelsFetchPromise = null;
-      channelsLastFetchAtMs = 0;
-      clearChannelsSnapshotRetry();
       set((state) => ({
         channels: state.channels.filter((item) => item.id !== channelId),
       }));
-      await get().fetchChannels();
+      await get().refreshAfterConfirmedMutation(scope);
       return true;
     } catch (error) {
       if (!current()) return false;

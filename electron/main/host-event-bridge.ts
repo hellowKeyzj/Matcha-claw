@@ -23,6 +23,7 @@ type HostEventName =
   | 'gateway:notification'
   | 'session.delta'
   | 'session.resync'
+  | 'sessions:catalog-changed'
   | 'task:snapshot'
   | 'gateway:channel-status'
   | 'gateway:exit'
@@ -172,6 +173,9 @@ export function registerHostEventBridge(deps: {
         return;
       case 'organization.changed':
         emit('team:changed', {});
+        return;
+      case 'sessions.catalogChanged':
+        emit('sessions:catalog-changed', { endpoint: event.endpoint });
         return;
       case 'openclaw.lifecycle':
         emit('openclaw:lifecycle', {

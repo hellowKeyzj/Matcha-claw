@@ -108,10 +108,6 @@ function AuthPageContent({ forcedMode, onLocalEntry }: AuthPageContentProps) {
   ), [email, emailVerifyEnabled, isRegister, loading, sendingVerifyCode, submitting, verifyCodeCooldown]);
 
   useEffect(() => {
-    void init();
-  }, [init]);
-
-  useEffect(() => {
     setFormError(null);
     setVerifyCodeNotice(null);
     setVerifyCodeCooldown(0);

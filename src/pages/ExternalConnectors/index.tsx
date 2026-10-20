@@ -726,12 +726,13 @@ function ExternalConnectorsForRuntime({ scope }: { scope: RuntimeInstanceScope }
   const removeConnector = useCallback(async (connectorId: string) => {
     const request = ++sequence.current;
     try {
-      await remove(connectorId);
+      const result = await remove(connectorId);
       if (!current(request)) return;
       if (editingId === connectorId) {
         closeFormDialog();
       }
-      toast.success('连接器已删除');
+      if (result.applied.status !== 'written') toast.warning('连接器已删除，原生投影未确认；不代表原生会话已断开。');
+      else toast.success('连接器已删除');
     } catch (deleteError) {
       if (!current(request)) return;
       toast.error(deleteError instanceof Error ? deleteError.message : '删除连接器失败');

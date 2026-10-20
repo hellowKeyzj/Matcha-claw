@@ -692,6 +692,11 @@ fn project_openclaw_session_catalog_entry(
         endpoint_session_id: entry.native_session_id.as_str().to_owned(),
         ownership: None,
         model_state: session.model_state(),
+        label: session.label,
+        display_name: session
+            .display_name
+            .filter(|name| !name.trim().is_empty() && name.as_str() != session.key.as_str())
+            .or(session.derived_title),
         updated_at: session.updated_at,
         preferred: None,
         protocol_id: None,
@@ -923,7 +928,9 @@ impl SessionOps for OpenClawDriver {
                 return SessionCatalogOutcome::Unavailable;
             }
             match self
-                .list_sessions(crate::session::protocol::SessionsListParams::default())
+                .list_sessions(
+                    crate::session::protocol::SessionsListParams::default().include_derived_titles(),
+                )
                 .await
             {
                 Ok(result) => {

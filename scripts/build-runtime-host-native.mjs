@@ -74,7 +74,6 @@ export function createRuntimeHostNativeBuildPlan({ rootDir: projectRootDir, plat
     'build',
     ...(profile === 'release' ? ['--release'] : []),
     '--locked',
-    '--offline',
     '--manifest-path',
     manifestPath,
     '--target',
@@ -96,7 +95,7 @@ export function createRuntimeHostNativeBuildPlan({ rootDir: projectRootDir, plat
     artifactBinaryPath: resolve(appServerDir, 'dist', targetKey, appServerBinary),
     sourceBinaryPath: resolve(appServerTargetDir, cargoTarget, cargoOutputDir, appServerBinary),
     cargoArgs: [
-      'build', ...(profile === 'release' ? ['--release'] : []), '--locked', '--offline',
+      'build', ...(profile === 'release' ? ['--release'] : []), '--locked',
       '--manifest-path', resolve(appServerDir, 'Cargo.toml'),
       '--target', cargoTarget, '--target-dir', appServerTargetDir,
       '--bin', 'matcha-app-server',

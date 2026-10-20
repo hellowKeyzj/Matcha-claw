@@ -49,8 +49,9 @@ import type {
   ChatSessionRuntimeState,
   ChatSessionViewportState,
 } from '@/stores/chat';
-import type {
-  SessionIdentity,
+import {
+  buildSessionIdentityKey,
+  type SessionIdentity,
 } from '../../../types/desktop/runtime-address';
 import type { WorkspaceFileContext } from '@/lib/host-api';
 import type { GeneratedFile } from '@/lib/generated-files';
@@ -149,56 +150,11 @@ function replyTimerKey(runId?: string, laneKey?: string): string | null {
   return `${runId}::${laneKey || 'main'}`;
 }
 
-function buildReplyStartedAtByAssistantKey(items: ReadonlyArray<ChatRenderItem>): Map<string, number> {
-  const startedAtByTimerKey = new Map<string, number>();
-  const startedAtByAssistantKey = new Map<string, number>();
-  let latestUserMessageCreatedAt: number | undefined;
-
-  for (const item of items) {
-    if (item.kind === 'user-message') {
-      if (typeof item.createdAt !== 'number') {
-        continue;
-      }
-      latestUserMessageCreatedAt = item.createdAt;
-      const key = replyTimerKey(item.runId, item.laneKey);
-      if (key) {
-        startedAtByTimerKey.set(key, item.createdAt);
-      }
-      continue;
-    }
-
-    if (item.kind !== 'assistant-turn') {
-      continue;
-    }
-
-    const timerKey = replyTimerKey(item.runId, item.laneKey);
-    const exactStartedAt = timerKey ? startedAtByTimerKey.get(timerKey) : undefined;
-    if (typeof exactStartedAt === 'number') {
-      startedAtByAssistantKey.set(item.key, exactStartedAt);
-      continue;
-    }
-
-    if (typeof latestUserMessageCreatedAt === 'number') {
-      startedAtByAssistantKey.set(item.key, latestUserMessageCreatedAt);
-    }
-  }
-
-  return startedAtByAssistantKey;
-}
-
-type ChatItemVisualRole = 'assistant-output' | 'boundary' | 'neutral';
-
 function hasVisibleUserOutput(item: ChatUserMessageItem): boolean {
   return !!item.largeText
     || item.text.trim().length > 0
     || item.images.length > 0
     || item.attachedFiles.length > 0;
-}
-
-function hasAssistantMessageText(item: ChatAssistantTurnItem, textModel: SessionTextModel): boolean {
-  return item.segments.some((segment) => segment.kind === 'message' && (
-    !!segment.largeText || textModel.assistant(segment.text).trim().length > 0
-  ));
 }
 
 function hasVisibleAssistantOutput(
@@ -207,61 +163,62 @@ function hasVisibleAssistantOutput(
   textModel: SessionTextModel,
   toolSlots?: ReadonlyMap<string, ToolSlot>,
 ): boolean {
-  if (isCoveredToolOnlyItem(item, toolSlots)) return false;
-  return hasAssistantMessageText(item, textModel)
-    || item.segments.some((segment) => {
-      if (segment.kind === 'thinking') {
-        return showThinking && segment.text.trim().length > 0;
-      }
-      if (segment.kind === 'tool') {
-        return toolSlots?.get(segment.key)?.kind !== 'covered';
-      }
-      if (segment.kind === 'media') {
-        return segment.images.length > 0 || segment.attachedFiles.length > 0;
-      }
-      return false;
-    })
+  return item.segments.some((segment) => {
+    if (segment.kind === 'message') {
+      return !!segment.largeText || textModel.assistant(segment.text).trim().length > 0;
+    }
+    if (segment.kind === 'thinking') {
+      return showThinking && segment.text.trim().length > 0;
+    }
+    if (segment.kind === 'tool') {
+      return toolSlots?.get(segment.key)?.kind !== 'covered';
+    }
+    if (segment.kind === 'media') {
+      return segment.images.length > 0 || segment.attachedFiles.length > 0;
+    }
+    return false;
+  })
     || item.images.length > 0
     || item.attachedFiles.length > 0
     || item.status === 'streaming'
     || item.status === 'waiting_tool';
 }
 
-function readVisualRole(item: ChatRenderItem, showThinking: boolean, textModel: SessionTextModel, toolPlan: ToolGroupPlan): ChatItemVisualRole {
-  if (item.kind === 'assistant-turn') {
-    return hasVisibleAssistantOutput(item, showThinking, textModel, toolPlan.get(item.key)) ? 'assistant-output' : 'neutral';
-  }
-  if (item.kind === 'user-message') {
-    return hasVisibleUserOutput(item) ? 'boundary' : 'neutral';
-  }
-  if (item.kind === 'system') {
-    return item.text.trim() ? 'boundary' : 'neutral';
-  }
-  return 'neutral';
-}
-
-function buildAssistantAvatarSlots(
+function buildItemPresentation(
   items: ReadonlyArray<ChatRenderItem>,
   showThinking: boolean,
   textModel: SessionTextModel,
   toolPlan: ToolGroupPlan,
-): Map<string, MessageAvatarSlot> {
-  const slots = new Map<string, MessageAvatarSlot>();
+) {
+  const startedAtByTimerKey = new Map<string, number>();
+  let latestUserMessageCreatedAt: number | undefined;
   let inAssistantVisualGroup = false;
 
-  for (const item of items) {
-    const visualRole = readVisualRole(item, showThinking, textModel, toolPlan);
-    if (visualRole === 'assistant-output') {
-      slots.set(item.key, inAssistantVisualGroup ? 'placeholder' : 'visible');
-      inAssistantVisualGroup = true;
-      continue;
-    }
-    if (visualRole === 'boundary') {
+  return items.map((item) => {
+    const toolSlots = toolPlan.get(item.key);
+    let coveredOnly = false;
+    let assistantAvatarSlot: MessageAvatarSlot | undefined;
+    let replyStartedAt: number | undefined;
+    if (item.kind === 'assistant-turn') {
+      coveredOnly = isCoveredToolOnlyItem(item, toolSlots);
+      if (!coveredOnly && hasVisibleAssistantOutput(item, showThinking, textModel, toolSlots)) {
+        assistantAvatarSlot = inAssistantVisualGroup ? 'placeholder' : 'visible';
+        inAssistantVisualGroup = true;
+      }
+      const timerKey = replyTimerKey(item.runId, item.laneKey);
+      replyStartedAt = (timerKey ? startedAtByTimerKey.get(timerKey) : undefined) ?? latestUserMessageCreatedAt;
+    } else if (item.kind === 'user-message') {
+      if (hasVisibleUserOutput(item)) inAssistantVisualGroup = false;
+      if (typeof item.createdAt === 'number') {
+        latestUserMessageCreatedAt = item.createdAt;
+        const timerKey = replyTimerKey(item.runId, item.laneKey);
+        if (timerKey) startedAtByTimerKey.set(timerKey, item.createdAt);
+      }
+    } else if (item.kind === 'system' && item.text.trim()) {
       inAssistantVisualGroup = false;
     }
-  }
-
-  return slots;
+    return { item, toolSlots, coveredOnly, assistantAvatarSlot, replyStartedAt };
+  });
 }
 
 function SystemInfoRow({ item }: { item: ChatRenderItem }) {
@@ -284,7 +241,7 @@ function renderChatItem(input: {
   latestBrowserTools: ReadonlySet<SessionRenderToolCard>;
   disclosure: ToolActivityDisclosure;
   assistantAvatarSlot?: MessageAvatarSlot;
-  replyStartedAtByAssistantKey: ReadonlyMap<string, number>;
+  replyStartedAt?: number;
   showThinking: boolean;
   userAvatarImageUrl: string | null;
   sessionIdentity?: SessionIdentity;
@@ -306,7 +263,7 @@ function renderChatItem(input: {
         latestBrowserTools={input.latestBrowserTools}
         disclosure={input.disclosure}
         showThinking={input.showThinking}
-        replyStartedAt={input.replyStartedAtByAssistantKey.get(input.item.key)}
+        replyStartedAt={input.replyStartedAt}
         assistantAvatarSlot={input.assistantAvatarSlot}
         userAvatarImageUrl={input.userAvatarImageUrl}
         sessionIdentity={input.sessionIdentity}
@@ -401,15 +358,32 @@ const ChatListContent = memo(function ChatListContent({
   const metadataStartedAt = tracing ? performance.now() : 0;
   const textModel = getSessionTextModel(sessionIdentity);
   const disclosure = useToolActivityDisclosure(sessionIdentity);
-  const [toolPlanState, setToolPlanState] = useState(() => ({ items, plan: buildToolGroupPlan(items) }));
-  let toolPlan = toolPlanState.plan;
-  if (toolPlanState.items !== items) {
-    toolPlan = buildToolGroupPlan(items, toolPlanState.plan);
-    setToolPlanState({ items, plan: toolPlan });
-  }
-  const latestBrowserTools = useMemo(() => selectLatestBrowserTools(items, sessionIdentity), [items, sessionIdentity]);
-  const replyStartedAtByAssistantKey = useMemo(() => buildReplyStartedAtByAssistantKey(items), [items]);
-  const assistantAvatarSlots = useMemo(() => buildAssistantAvatarSlots(items, showThinking, textModel, toolPlan), [items, showThinking, textModel, toolPlan]);
+  const identityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
+  const committedTools = useRef<{
+    identityKey: string | null;
+    plan: ToolGroupPlan;
+    latestBrowserTools: ReadonlySet<SessionRenderToolCard>;
+  } | null>(null);
+  const { toolPlan, latestBrowserTools } = useMemo(() => {
+    const previous = committedTools.current?.identityKey === identityKey ? committedTools.current : null;
+    const toolPlan = buildToolGroupPlan(items, previous?.plan);
+    const selected = selectLatestBrowserTools(items, sessionIdentity);
+    const previousLatest = previous?.latestBrowserTools;
+    let latestBrowserTools = previousLatest?.size === selected.size ? previousLatest : selected;
+    if (latestBrowserTools === previousLatest) {
+      for (const tool of selected) {
+        if (!previousLatest.has(tool)) {
+          latestBrowserTools = selected;
+          break;
+        }
+      }
+    }
+    return { toolPlan, latestBrowserTools };
+  }, [identityKey, items, sessionIdentity]);
+  useLayoutEffect(() => {
+    committedTools.current = { identityKey, plan: toolPlan, latestBrowserTools };
+  }, [identityKey, latestBrowserTools, toolPlan]);
+  const itemPresentation = useMemo(() => buildItemPresentation(items, showThinking, textModel, toolPlan), [items, showThinking, textModel, toolPlan]);
   const metadataBuildElapsedMs = tracing ? performance.now() - metadataStartedAt : null;
   let contentElementsBuildElapsedMs: number | null = null;
   useEffect(() => {
@@ -461,9 +435,7 @@ const ChatListContent = memo(function ChatListContent({
 
       {!isEmptyState ? (
         <>
-          {items.map((item, index) => {
-            const toolSlots = toolPlan.get(item.key);
-            const coveredOnly = item.kind === 'assistant-turn' && isCoveredToolOnlyItem(item, toolSlots);
+          {itemPresentation.map(({ item, toolSlots, coveredOnly, assistantAvatarSlot, replyStartedAt }, index) => {
             return (
               <div key={item.key}>
                 <div data-index={index} className={coveredOnly ? 'w-full' : CHAT_LAYOUT_TOKENS.threadMessageRowSpacing}>
@@ -473,8 +445,8 @@ const ChatListContent = memo(function ChatListContent({
                       toolSlots,
                       latestBrowserTools,
                       disclosure,
-                      assistantAvatarSlot: item.kind === 'assistant-turn' ? assistantAvatarSlots.get(item.key) : 'visible',
-                      replyStartedAtByAssistantKey,
+                      assistantAvatarSlot,
+                      replyStartedAt,
                       showThinking,
                       userAvatarImageUrl,
                       sessionIdentity,
@@ -687,9 +659,10 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
 ) {
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messageContentRef = useRef<HTMLDivElement>(null);
+  const identityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
   const olderPageAnchorRef = useRef<{
     sessionKey: string;
-    sessionIdentity: SessionIdentity | undefined;
+    identityKey: string;
     windowStartOffset: number;
     anchor: ViewportAnchor | null;
   } | null>(null);
@@ -793,7 +766,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     if (!pending) {
       return;
     }
-    if (!isActive || pending.sessionKey !== currentSessionKey || pending.sessionIdentity !== sessionIdentity
+    if (!isActive || pending.sessionKey !== currentSessionKey || pending.identityKey !== identityKey
       || viewport.isLoadingNewer) {
       olderPageAnchorRef.current = null;
       return;
@@ -804,20 +777,20 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     } else if (!viewport.isLoadingMore || viewport.windowStartOffset !== pending.windowStartOffset) {
       olderPageAnchorRef.current = null;
     }
-  }, [currentSessionKey, isActive, prepareScopeAnchorRestore, sessionIdentity, viewport]);
+  }, [currentSessionKey, identityKey, isActive, prepareScopeAnchorRestore, viewport]);
 
   const handleLoadOlder = useCallback(() => {
-    if (!currentSessionKey || !sessionIdentity || !viewport.hasMore || viewport.isLoadingMore) {
+    if (!currentSessionKey || !identityKey || !viewport.hasMore || viewport.isLoadingMore) {
       return;
     }
     olderPageAnchorRef.current = {
       sessionKey: currentSessionKey,
-      sessionIdentity,
+      identityKey,
       windowStartOffset: viewport.windowStartOffset,
       anchor: sampleViewportAnchor(messagesViewportRef.current),
     };
     onLoadOlder();
-  }, [currentSessionKey, onLoadOlder, sessionIdentity, viewport.hasMore,
+  }, [currentSessionKey, identityKey, onLoadOlder, viewport.hasMore,
     viewport.isLoadingMore, viewport.windowStartOffset]);
 
   const handleJumpToItemKey = useCallback((itemKey?: string) => {
@@ -828,8 +801,7 @@ export const ChatList = forwardRef<ChatListHandle, ChatListProps>(function ChatL
     if (!viewportNode) {
       return;
     }
-    const target = Array.from(viewportNode.querySelectorAll<HTMLElement>('[data-chat-item-key]'))
-      .find((element) => element.dataset.chatItemKey === itemKey);
+    const target = viewportNode.querySelector<HTMLElement>(`[data-chat-item-key="${CSS.escape(itemKey)}"]`);
     if (!target) {
       return;
     }

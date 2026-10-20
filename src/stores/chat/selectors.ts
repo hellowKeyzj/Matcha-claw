@@ -21,7 +21,7 @@ import {
 import {
   readSessionCatalogStatusShell,
   readSessionsFromState,
-  resolveSessionListLabel,
+  readSessionTitlesFromState,
 } from './session-helpers';
 import {
   getSessionMeta,
@@ -52,14 +52,6 @@ let cachedAgentSessionsPaneState: ReturnType<typeof buildAgentSessionsPaneState>
 let cachedCurrentSendGateSource: CurrentChatSendGateSource | null = null;
 let cachedCurrentSendGate: ReturnType<typeof deriveChatSendGate> | null = null;
 
-function normalizeAgentPaneSessionLabel(value: string | null | undefined): string | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
 function resolveCurrentSessionRecordKey(state: ChatStoreState): string {
   return state.currentConversation?.kind === 'session'
     ? state.currentConversation.sessionRecordKey
@@ -85,6 +77,7 @@ export function deriveSessionImageGenerationRuntime(record: ChatSessionRecord | 
 
 function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneSessionEntry[] {
   const sessions = readSessionsFromState(state);
+  const titles = readSessionTitlesFromState(state);
   if (sessions.length === 0) {
     cachedAgentPaneSessionEntries = EMPTY_AGENT_PANE_SESSION_ENTRIES;
     cachedAgentPaneSessionEntryByKey = new Map();
@@ -97,7 +90,7 @@ function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneS
   for (const session of sessions) {
     const record = state.loadedSessions[session.key];
     const meta = record?.meta;
-    const title = normalizeAgentPaneSessionLabel(resolveSessionListLabel(state, session.key, session.label ?? null));
+    const title = titles[session.key] ?? null;
     if (!record || !hasSessionPaneActivity(record)) {
       continue;
     }

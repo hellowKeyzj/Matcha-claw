@@ -15,14 +15,15 @@ import {
 import { useChatStore, type ChatSession } from '@/stores/chat';
 import { selectAgentSessionsPaneState } from '@/stores/chat/selectors';
 import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
-import { isOrdinarySessionCandidate, type ChatSessionRuntimeEndpointNode } from '@/stores/chat/types';
+import type { ChatSessionRuntimeEndpointNode } from '@/stores/chat/types';
+import type { AgentSessionsPaneSessionEntry } from '@/stores/chat/selectors';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useShallow } from 'zustand/react/shallow';
 import {
-  inferUntitledSessionLabel,
-  readSessionSuffix,
+  formatSessionMeta,
+  resolveSessionTitle,
   resolveAgentScopeForRuntimeEndpoint,
   type SessionBucketId,
   useAgentSessionsPaneViewModel,
@@ -33,6 +34,7 @@ import {
   type AgentSessionSwitchboardRuntimeResult,
   type AgentSessionSwitchboardSessionBucket,
   type AgentSessionSwitchboardSessionResult,
+  buildAgentSessionSwitchboardModel,
   type AgentSessionSwitchboardTeamInput,
   type AgentSessionSwitchboardTeamResult,
   type AgentSessionSwitchboardTeamRoleResult,
@@ -100,9 +102,9 @@ function loadCollapsedSessionBucketMap(): Record<string, boolean> {
 }
 
 interface SessionListItemProps {
-  session: ChatSession;
-  sessionTitle: string;
-  sessionMeta: string;
+  entry: AgentSessionsPaneSessionEntry;
+  formatter: Intl.DateTimeFormat;
+  teamMeta?: string;
   agentId: string;
   agentName: string;
   avatarSeed?: string;
@@ -112,24 +114,20 @@ interface SessionListItemProps {
   renaming: boolean;
   editing: boolean;
   editingTitle: string;
-  deleteLabel: string;
-  renameLabel: string;
-  saveRenameLabel: string;
-  cancelRenameLabel: string;
   readOnly: boolean;
   onSwitchSession: (sessionKey: string) => void;
   onStartRename: (session: ChatSession, title: string) => void;
   onRenameTitleChange: (title: string) => void;
-  onSubmitRename: () => void;
-  onCancelRename: () => void;
-  onRequestDelete: (session: ChatSession) => void;
+  onSubmitRename?: () => void;
+  onCancelRename?: () => void;
+  onRequestDelete: (session: ChatSession, title: string) => void;
   onPick?: () => void;
 }
 
 const SessionListItem = memo(function SessionListItem({
-  session,
-  sessionTitle,
-  sessionMeta,
+  entry,
+  formatter,
+  teamMeta,
   agentId,
   agentName,
   avatarSeed,
@@ -139,10 +137,6 @@ const SessionListItem = memo(function SessionListItem({
   renaming,
   editing,
   editingTitle,
-  deleteLabel,
-  renameLabel,
-  saveRenameLabel,
-  cancelRenameLabel,
   readOnly,
   onSwitchSession,
   onStartRename,
@@ -152,6 +146,14 @@ const SessionListItem = memo(function SessionListItem({
   onRequestDelete,
   onPick,
 }: SessionListItemProps) {
+  const { t } = useTranslation();
+  const session = entry.session;
+  const sessionTitle = resolveSessionTitle(entry, t);
+  const sessionMeta = teamMeta ?? `${agentName} / ${formatSessionMeta(entry, formatter)}`;
+  const deleteLabel = t('sidebar.deleteSessionAria', { title: sessionTitle });
+  const renameLabel = t('sidebar.renameSessionAria', { title: sessionTitle });
+  const saveRenameLabel = t('sidebar.saveSessionRenameAria', { title: sessionTitle });
+  const cancelRenameLabel = t('sidebar.cancelSessionRenameAria', { title: sessionTitle });
   if (editing) {
     return (
       <div className="flex items-center gap-1 rounded-[calc(var(--radius-interactive)+2px)] bg-secondary px-1.5 py-1">
@@ -165,12 +167,12 @@ const SessionListItem = memo(function SessionListItem({
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               event.preventDefault();
-              onSubmitRename();
+              onSubmitRename?.();
               return;
             }
             if (event.key === 'Escape') {
               event.preventDefault();
-              onCancelRename();
+              onCancelRename?.();
             }
           }}
         />
@@ -182,7 +184,7 @@ const SessionListItem = memo(function SessionListItem({
           disabled={renaming}
           onMouseDown={(event) => {
             event.preventDefault();
-            onSubmitRename();
+            onSubmitRename?.();
           }}
         >
           <Check className="h-3.5 w-3.5" />
@@ -195,7 +197,7 @@ const SessionListItem = memo(function SessionListItem({
           disabled={renaming}
           onMouseDown={(event) => {
             event.preventDefault();
-            onCancelRename();
+            onCancelRename?.();
           }}
         >
           <X className="h-3.5 w-3.5" />
@@ -259,7 +261,7 @@ const SessionListItem = memo(function SessionListItem({
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              onRequestDelete(session);
+              onRequestDelete(session, sessionTitle);
             }}
           >
             <Trash2 className="h-3.5 w-3.5" />
@@ -596,16 +598,14 @@ interface SessionListSectionProps {
   automationLabel: string;
   loadingLabel: string;
   fallbackErrorLabel: string;
-  fallbackDeleteLabel: (sessionKey: string) => string;
-  fallbackRenameLabel: (sessionKey: string) => string;
-  fallbackUntitledLabel: (session: ChatSession) => string;
+  formatter: Intl.DateTimeFormat;
   onToggleBucket: (bucketId: SessionBucketId, defaultCollapsed: boolean, scope: SessionBucketScope) => void;
   onSwitchSession: (sessionKey: string) => void;
   onStartRename: (session: ChatSession, title: string) => void;
   onRenameTitleChange: (title: string) => void;
   onSubmitRename: () => void;
   onCancelRename: () => void;
-  onRequestDelete: (session: ChatSession) => void;
+  onRequestDelete: (session: ChatSession, title: string) => void;
   onPick?: () => void;
 }
 
@@ -624,9 +624,7 @@ const SessionListSection = memo(function SessionListSection({
   automationLabel,
   loadingLabel,
   fallbackErrorLabel,
-  fallbackDeleteLabel,
-  fallbackRenameLabel,
-  fallbackUntitledLabel,
+  formatter,
   onToggleBucket,
   onSwitchSession,
   onStartRename,
@@ -702,37 +700,30 @@ const SessionListSection = memo(function SessionListSection({
 
         {!bucketCollapsed && (
           <div className="space-y-1">
-            {bucket.sessions.map((entry) => {
-              const result = entry as AgentSessionSwitchboardSessionResult;
+            {bucket.sessions.map((result) => {
               const session = result.session;
-              const viewModel = result;
-              const deleting = Boolean(deletingSessionKeys[session.key]);
               const editing = editingSession?.key === session.key;
               return (
                 <SessionListItem
                   key={session.key}
-                  session={session}
-                  sessionTitle={viewModel?.title ?? fallbackUntitledLabel(session)}
-                  sessionMeta={viewModel?.meta ?? readSessionSuffix(session)}
+                  entry={result.entry}
+                  formatter={formatter}
+                  teamMeta={result.source.kind === 'team' ? result.source.label : undefined}
                   agentId={result.source.agentId}
                   agentName={result.source.kind === 'team' ? result.source.label : result.source.agentName}
                   avatarSeed={result.source.kind === 'agent' ? result.source.avatarSeed : undefined}
                   avatarStyle={result.source.kind === 'agent' ? result.source.avatarStyle : undefined}
                   isCurrent={currentSessionKey === session.key}
-                  deleting={deleting}
+                  deleting={Boolean(deletingSessionKeys[session.key])}
                   renaming={Boolean(renamingSessionKeys[session.key])}
                   editing={editing}
                   editingTitle={editing ? editingSession.title : ''}
-                  deleteLabel={viewModel?.deleteLabel ?? fallbackDeleteLabel(session.key)}
-                  renameLabel={viewModel?.renameLabel ?? fallbackRenameLabel(session.key)}
-                  saveRenameLabel={viewModel?.saveRenameLabel ?? fallbackRenameLabel(session.key)}
-                  cancelRenameLabel={viewModel?.cancelRenameLabel ?? fallbackRenameLabel(session.key)}
                   readOnly={result.readOnly}
                   onSwitchSession={onSwitchSession}
                   onStartRename={onStartRename}
                   onRenameTitleChange={onRenameTitleChange}
-                  onSubmitRename={onSubmitRename}
-                  onCancelRename={onCancelRename}
+                  onSubmitRename={editing ? onSubmitRename : undefined}
+                  onCancelRename={editing ? onCancelRename : undefined}
                   onRequestDelete={onRequestDelete}
                   onPick={onPick}
                 />
@@ -858,23 +849,46 @@ interface HoverPeekProps {
   currentIdentityLabel: string;
   agents: AgentSessionSwitchboardAgentResult[];
   sessions: AgentSessionSwitchboardSessionBucket[];
+  formatter: Intl.DateTimeFormat;
   onOpenAgent: (agent: AgentSessionSwitchboardAgentResult) => void;
   onSwitchSession: (sessionKey: string) => void;
 }
 
-function compactHoverPeekMeta(result: AgentSessionSwitchboardSessionResult): string {
-  if (result.source.kind === 'team') {
-    return result.source.label;
-  }
-  const prefix = `${result.source.agentName} / `;
-  return result.meta.startsWith(prefix) ? result.meta.slice(prefix.length) : result.meta;
-}
+const HoverSessionItem = memo(function HoverSessionItem({ result, formatter, onSwitchSession }: {
+  result: AgentSessionSwitchboardSessionResult;
+  formatter: Intl.DateTimeFormat;
+  onSwitchSession: (sessionKey: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      className="flex w-full items-center gap-2 rounded-[calc(var(--radius-interactive)+2px)] px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+      onClick={() => onSwitchSession(result.session.key)}
+    >
+      <AgentAvatar
+        agentId={result.source.agentId}
+        agentName={result.source.label}
+        avatarSeed={result.source.kind === 'agent' ? result.source.avatarSeed : undefined}
+        avatarStyle={result.source.kind === 'agent' ? result.source.avatarStyle : undefined}
+        className="h-5 w-5"
+      />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate">{resolveSessionTitle(result.entry, t)}</span>
+        <span className="mt-0.5 block truncate text-xs text-muted-foreground/80">
+          {result.source.kind === 'team' ? result.source.label : formatSessionMeta(result.entry, formatter)}
+        </span>
+      </span>
+    </button>
+  );
+});
 
 const HoverPeek = memo(function HoverPeek({
   open,
   currentIdentityLabel,
   agents,
   sessions,
+  formatter,
   onOpenAgent,
   onSwitchSession,
 }: HoverPeekProps) {
@@ -910,24 +924,7 @@ const HoverPeek = memo(function HoverPeek({
           </button>
         ))}
         {quickSessions.map((result) => (
-          <button
-            key={`session:${result.session.key}`}
-            type="button"
-            className="flex w-full items-center gap-2 rounded-[calc(var(--radius-interactive)+2px)] px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-            onClick={() => onSwitchSession(result.session.key)}
-          >
-            <AgentAvatar
-              agentId={result.source.agentId}
-              agentName={result.source.label}
-              avatarSeed={result.source.kind === 'agent' ? result.source.avatarSeed : undefined}
-              avatarStyle={result.source.kind === 'agent' ? result.source.avatarStyle : undefined}
-              className="h-5 w-5"
-            />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate">{result.title}</span>
-              <span className="mt-0.5 block truncate text-xs text-muted-foreground/80">{compactHoverPeekMeta(result)}</span>
-            </span>
-          </button>
+          <HoverSessionItem key={result.session.key} result={result} formatter={formatter} onSwitchSession={onSwitchSession} />
         ))}
         </div>
       ) : null}
@@ -935,36 +932,181 @@ const HoverPeek = memo(function HoverPeek({
   );
 });
 
-export const AgentSessionsPane = memo(function AgentSessionsPane() {
+type DirectoryContentsProps =
+  | { mode: 'agent'; onPick: () => void }
+  | { mode: 'hover'; currentIdentityLabel: string; onPick: () => void }
+  | ({ mode: 'session' } & Pick<SessionListSectionProps,
+    'deletingSessionKeys' | 'renamingSessionKeys' | 'editingSession' | 'collapsedSessionBuckets'
+    | 'onToggleBucket' | 'onStartRename' | 'onRenameTitleChange' | 'onSubmitRename' | 'onCancelRename' | 'onRequestDelete' | 'onPick'>);
+
+const DirectoryContents = memo(function DirectoryContents(props: DirectoryContentsProps) {
   const { t, i18n } = useTranslation();
-  const navigate = useNavigate();
-  const subagentManagementAgentsResource = useSubagentsStore((state) => state.agentsResource);
-  const managementScope = useSubagentsStore((state) => state.managementScope);
-  const subagentManagementAgents = Array.isArray(subagentManagementAgentsResource.data) ? subagentManagementAgentsResource.data : [];
-  const {
-    sessionEntries,
-    sessionsLoading,
-    sessionsLoadedOnce,
-    sessionsError,
-    currentConversation,
-    sessionRuntimeGraph,
-    currentSessionKey,
-    switchSession,
-    openAgentConversation,
-    openSessionIdentity,
-    newSessionForScope,
-    deleteSession,
-    renameSession,
-  } = useChatStore(useShallow(selectAgentSessionsPaneState));
+  const { sessionEntries, sessionsLoadedOnce, sessionsError, currentConversation, sessionRuntimeGraph, currentSessionKey,
+    switchSession, openAgentConversation, newSessionForScope } = useChatStore(useShallow(selectAgentSessionsPaneState));
   const selectedEndpoint = useChatStore((state) => state.sessionRuntimeCatalog.selectedEndpoint);
+  const managementScope = useSubagentsStore((state) => state.managementScope);
+  const resource = useSubagentsStore((state) => state.agentsResource);
+  const managementRuntimeScopeKey = managementScope ? buildRuntimeScopeKey(managementScope.endpoint) : null;
+  const runtimeEndpoints = sessionRuntimeGraph.endpoints;
+  const availableEndpoints = useMemo(() => runtimeEndpoints.filter((endpoint) => endpoint.target != null), [runtimeEndpoints]);
+  const selectedRuntimeEndpoint = resolveSelectedRuntimeEndpoint({
+    endpoints: availableEndpoints,
+    runtimeScopeKey: currentConversation?.runtimeScopeKey ?? (selectedEndpoint ? buildRuntimeScopeKey(selectedEndpoint) : null),
+  });
+  const pane = useAgentSessionsPaneViewModel({
+    subagentManagementAgents: Array.isArray(resource.data) ? resource.data : EMPTY_AGENTS,
+    subagentManagementAgentsResource: resource,
+    subagentManagementRuntimeScopeKey: managementRuntimeScopeKey,
+    sessionEntries, sessionsLoadedOnce, sessionsError, currentConversation, selectedRuntimeEndpoint, runtimeEndpoints, t,
+  });
+  const formatter = useMemo(() => new Intl.DateTimeFormat(i18n.language, {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  }), [i18n.language]);
+  const endpointByRuntimeScopeKey = useMemo(() => new Map(availableEndpoints.map((endpoint) => [endpoint.runtimeScopeKey, endpoint])), [availableEndpoints]);
+  const agentResults = pane.switchboard.agentResults.filter((runtime) => endpointByRuntimeScopeKey.has(runtime.runtimeScopeKey));
+  const onPick = props.onPick;
+  const openAgent = useCallback((agent: AgentSessionSwitchboardAgentResult) => {
+    const endpoint = endpointByRuntimeScopeKey.get(agent.runtimeScopeKey);
+    if (endpoint) openAgentConversation(agent.agentId, endpoint.endpoint);
+  }, [endpointByRuntimeScopeKey, openAgentConversation]);
+  const createSession = useCallback((agent: AgentSessionSwitchboardAgentResult) => {
+    const target = endpointByRuntimeScopeKey.get(agent.runtimeScopeKey)?.target;
+    if (!target) return;
+    const scope = resolveAgentScopeForRuntimeEndpoint(target, agent.agentId);
+    if (scope) void newSessionForScope(scope);
+  }, [endpointByRuntimeScopeKey, newSessionForScope]);
+  const hoverOpenAgent = useCallback((agent: AgentSessionSwitchboardAgentResult) => {
+    openAgent(agent);
+    onPick?.();
+  }, [onPick, openAgent]);
+  const hoverSwitchSession = useCallback((sessionKey: string) => {
+    switchSession(sessionKey);
+    onPick?.();
+  }, [onPick, switchSession]);
+  if (props.mode === 'hover') return (
+    <HoverPeek open currentIdentityLabel={props.currentIdentityLabel} agents={agentResults.flatMap((runtime) => runtime.agents)}
+      sessions={pane.switchboard.sessionResults} formatter={formatter} onOpenAgent={hoverOpenAgent} onSwitchSession={hoverSwitchSession} />
+  );
+  if (props.mode === 'agent') return (
+    <AgentSwitchboardSection runtimes={agentResults} endpointByRuntimeScopeKey={endpointByRuntimeScopeKey}
+      managementRuntimeScopeKey={managementRuntimeScopeKey} newSessionLabel={t('sidebar.newSession')}
+      state={pane.agentListState} errorMessage={pane.agentErrorMessage} emptyLabel={t('sidebar.noSubagents')}
+      loadingLabel={t('status.loading')} fallbackErrorLabel={t('status.error')} onOpenAgent={openAgent}
+      onCreateSessionForAgent={createSession} onPick={props.onPick} />
+  );
+  return (
+    <SessionListSection {...props} buckets={pane.switchboard.sessionResults} automationBuckets={pane.switchboard.automationSessionResults}
+      currentSessionKey={currentSessionKey} formatter={formatter} state={pane.sessionListState} errorMessage={pane.sessionErrorMessage}
+      emptyLabel={t('sidebar.noAgentSessions')} sessionLabel={t('switchboard.normalSessions', { defaultValue: 'Normal' })}
+      automationLabel={t('switchboard.automationSessions', { defaultValue: 'Automation' })} loadingLabel={t('status.loading')}
+      fallbackErrorLabel={t('status.error')} onSwitchSession={switchSession} />
+  );
+});
+
+const EMPTY_AGENTS: [] = [];
+
+const TeamContents = memo(function TeamContents(props: Pick<TeamListSectionProps,
+  'expandedTeamIds' | 'expandedTeamRunIds' | 'onToggleTeam' | 'onToggleRun' | 'onPick'>) {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
   const teams = useTeamsStore((state) => state.teams);
   const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
   const runLabels = useTeamRunLabels();
-  const teamRoleChatTargetIndex = useTeamsStore(selectTeamRoleChatTargetIndex);
+  const index = useTeamsStore(selectTeamRoleChatTargetIndex);
   const createRun = useTeamsStore((state) => state.createRun);
   const setActiveRun = useTeamsStore((state) => state.setActiveRun);
   const syncRunList = useTeamsStore((state) => state.syncRunList);
   const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
+  const openSessionIdentity = useChatStore((state) => state.openSessionIdentity);
+  const teamInputs = useMemo<AgentSessionSwitchboardTeamInput[]>(() => teams.map((team) => ({
+    teamId: team.id, teamName: team.name, activeRunId: team.activeRunId,
+    runs: (runListByTeamId[team.id] ?? []).map((run) => {
+      const sessions = run.sessions ?? [];
+      const toRole = (role: (typeof sessions)[number]) => ({
+        roleId: role.roleId, agentId: role.agentId, sessionIdentity: role.sessionIdentity, localSessionId: role.localSessionId,
+        endpointSessionId: resolveTeamRoleChatTargetFromProbe(index, {
+          sessionIdentity: role.sessionIdentity, sessionKey: role.localSessionId, endpointSessionId: role.endpointSessionId,
+        })?.endpointSessionId ?? role.endpointSessionId,
+      });
+      const leader = sessions.find((role) => role.roleId === 'leader');
+      return { runId: run.runId, label: runLabels[run.runId] ?? t('teams:run.unnamed'), createdAt: run.createdAt, updatedAt: run.updatedAt,
+        leader: leader ? toRole(leader) : null, roles: sessions.filter((role) => role.roleId !== 'leader').map(toRole) };
+    }),
+  })), [index, runLabels, runListByTeamId, t, teams]);
+  const nodes = useMemo(() => buildAgentSessionSwitchboardModel({
+    currentConversation: null, selectedRuntimeEndpoint: null, runtimeResults: [], teamResults: teamInputs, sessionResults: { buckets: [] },
+  }).teamResults, [teamInputs]);
+  const teamSyncKey = teams.map((team) => team.id).join('\n');
+  useEffect(() => {
+    for (const teamId of teamSyncKey ? teamSyncKey.split('\n') : []) void syncRunList(teamId);
+  }, [syncRunList, teamSyncKey]);
+  const selectRole = useCallback((teamId: string, runId: string, role: AgentSessionSwitchboardTeamRoleResult) => {
+    setActiveRun(teamId, runId);
+    openSessionIdentity({ sessionIdentity: role.sessionIdentity });
+    navigate('/', { state: { teamDesignSurface: { kind: 'team-graph', sourceSessionIdentity: role.sessionIdentity, teamId, runId } } });
+    void refreshSnapshot(teamId, { force: true });
+  }, [navigate, openSessionIdentity, refreshSnapshot, setActiveRun]);
+  const selectRun = useCallback((teamId: string, run: AgentSessionSwitchboardTeamRunResult) => {
+    setActiveRun(teamId, run.runId);
+    if (run.leader) {
+      openSessionIdentity({ sessionIdentity: run.leader.sessionIdentity });
+      navigate('/', { state: { teamDesignSurface: { kind: 'team-graph', sourceSessionIdentity: run.leader.sessionIdentity, teamId, runId: run.runId } } });
+    }
+    void refreshSnapshot(teamId, { force: true });
+  }, [navigate, openSessionIdentity, refreshSnapshot, setActiveRun]);
+  const newRun = useCallback((teamId: string) => { void createRun(teamId); }, [createRun]);
+  return <TeamListSection {...props} nodes={nodes} emptyLabel={t('sidebar.noTeams')} leaderLabel={t('sidebar.teamLeader')}
+    newRunLabel={t('teams:run.create')} onSelectRun={selectRun} onCreateRun={newRun} onSelectRole={selectRole} />;
+});
+
+export const AgentSessionsPane = memo(function AgentSessionsPane() {
+  const { t } = useTranslation();
+  const currentConversation = useChatStore((state) => state.currentConversation);
+  const currentSessionKey = currentConversation?.kind === 'session' ? currentConversation.sessionRecordKey : '';
+  const beacon = useChatStore(useShallow((state) => {
+    const candidate = resolveSelectedRuntimeEndpoint({
+      endpoints: state.sessionRuntimeGraph.endpoints,
+      runtimeScopeKey: state.currentConversation?.runtimeScopeKey
+        ?? (state.sessionRuntimeCatalog.selectedEndpoint ? buildRuntimeScopeKey(state.sessionRuntimeCatalog.selectedEndpoint) : null),
+    });
+    const endpoint = candidate?.target ? candidate : null;
+    const agentId = state.currentConversation?.agentId ?? endpoint?.defaultAgentId ?? '';
+    return {
+      runtimeScopeKey: endpoint?.runtimeScopeKey,
+      runtimeLabel: endpoint?.displayName,
+      target: endpoint?.target,
+      agentId,
+      catalogName: endpoint?.agents.find((agent) => agent.agentId === agentId)?.catalogEntry?.name,
+    };
+  }));
+  const activeAgent = useSubagentsStore(useShallow((state) => {
+    const agents = Array.isArray(state.agentsResource.data) ? state.agentsResource.data : EMPTY_AGENTS;
+    const agentId = currentConversation || agents.length > 0 ? beacon.agentId : '';
+    const managementRuntimeScopeKey = state.managementScope ? buildRuntimeScopeKey(state.managementScope.endpoint) : null;
+    const metadata = beacon.runtimeScopeKey === managementRuntimeScopeKey ? agents.find((agent) => agent.id === agentId) : undefined;
+    const seed = beacon.target?.agentCatalog.source === 'subagent-management'
+      ? beacon.target.agentCatalog.seedAgents.find((agent) => agent.id === agentId) : undefined;
+    const managementCatalog = beacon.target?.agentCatalog.source === 'subagent-management';
+    return {
+      id: agentId,
+      name: managementCatalog ? metadata?.name?.trim() || seed?.name?.trim() || agentId : beacon.catalogName?.trim() || agentId,
+      avatarSeed: managementCatalog ? metadata?.avatarSeed : undefined,
+      avatarStyle: managementCatalog ? metadata?.avatarStyle : undefined,
+    };
+  }));
+  const teamIdentityLabel = useTeamsStore((state) => {
+    if (currentConversation?.kind !== 'session') return '';
+    const target = resolveTeamRoleChatTargetFromProbe(selectTeamRoleChatTargetIndex(state), {
+      sessionIdentity: currentConversation.sessionIdentity, sessionKey: currentSessionKey,
+      endpointSessionId: currentConversation.endpointSessionId,
+    });
+    if (!target) return '';
+    const team = state.teams.find((candidate) => candidate.id === target.teamId);
+    return team ? [team.name, target.roleId].map((part) => part.trim()).filter(Boolean).join(' / ') : '';
+  });
+  const newSessionForScope = useChatStore((state) => state.newSessionForScope);
+  const deleteSession = useChatStore((state) => state.deleteSession);
+  const renameSession = useChatStore((state) => state.renameSession);
   const [activeTab, setActiveTab] = useState<SessionPaneTab>('agent');
   const [expandedTeamIds, setExpandedTeamIds] = useState<Record<string, boolean>>({});
   const [expandedTeamRunIds, setExpandedTeamRunIds] = useState<Record<string, boolean>>({});
@@ -997,99 +1139,11 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
     logSessionTrace('switchboard.state', createSessionTraceId('switchboard'), () => detail);
   }, [activeTab, currentConversation, currentSessionKey, hoverPeekOpen, switchboardOpen]);
 
-  const runtimeEndpoints = useMemo(
-    () => sessionRuntimeGraph.endpoints.filter((endpoint) => endpoint.target != null),
-    [sessionRuntimeGraph],
-  );
-  const selectedRuntimeEndpoint = useMemo(
-    () => resolveSelectedRuntimeEndpoint({
-      endpoints: runtimeEndpoints,
-      runtimeScopeKey: currentConversation?.runtimeScopeKey ?? (selectedEndpoint ? buildRuntimeScopeKey(selectedEndpoint) : null),
-    }),
-    [currentConversation?.runtimeScopeKey, runtimeEndpoints, selectedEndpoint],
-  );
-
-  const filteredSessionEntries = useMemo(() => {
-    const agentPaneSessionEntries: typeof sessionEntries = [];
-    const switchboardSessionEntries: typeof sessionEntries = [];
-    for (const entry of sessionEntries) {
-      if (entry.session.ownership?.kind !== 'ordinary') {
-        continue;
-      }
-      if (isOrdinarySessionCandidate(entry.session)) {
-        agentPaneSessionEntries.push(entry);
-      }
-      switchboardSessionEntries.push(entry);
-    }
-    return { agentPaneSessionEntries, switchboardSessionEntries };
-  }, [sessionEntries]);
-  const switchboardTeams = useMemo<AgentSessionSwitchboardTeamInput[]>(() => teams.map((team) => ({
-    teamId: team.id,
-    teamName: team.name,
-    activeRunId: team.activeRunId,
-    runs: (runListByTeamId[team.id] ?? []).map((run) => {
-      const sessions = run.sessions ?? [];
-      const toRoleInput = (role: (typeof sessions)[number]) => ({
-        roleId: role.roleId,
-        agentId: role.agentId,
-        sessionIdentity: role.sessionIdentity,
-        localSessionId: role.localSessionId,
-        endpointSessionId: resolveTeamRoleChatTargetFromProbe(teamRoleChatTargetIndex, {
-          sessionIdentity: role.sessionIdentity,
-          sessionKey: role.localSessionId,
-          endpointSessionId: role.endpointSessionId,
-        })?.endpointSessionId ?? role.endpointSessionId,
-      });
-      const leader = sessions.find((role) => role.roleId === 'leader');
-      return {
-        runId: run.runId,
-        label: runLabels[run.runId] ?? t('teams:run.unnamed'),
-        createdAt: run.createdAt,
-        updatedAt: run.updatedAt,
-        leader: leader ? toRoleInput(leader) : null,
-        roles: sessions
-          .filter((role) => role.roleId !== 'leader')
-          .map(toRoleInput),
-      };
-    }),
-  })), [runLabels, runListByTeamId, t, teamRoleChatTargetIndex, teams]);
-  const endpointByRuntimeScopeKey = useMemo(
-    () => new Map(runtimeEndpoints.map((endpoint) => [endpoint.runtimeScopeKey, endpoint] as const)),
-    [runtimeEndpoints],
-  );
-  const paneViewModel = useAgentSessionsPaneViewModel({
-    subagentManagementAgents,
-    subagentManagementAgentsResource,
-    subagentManagementRuntimeScopeKey: managementScope ? buildRuntimeScopeKey(managementScope.endpoint) : null,
-    sessionEntries: filteredSessionEntries.agentPaneSessionEntries,
-    switchboardSessionEntries: filteredSessionEntries.switchboardSessionEntries,
-    sessionsLoading,
-    sessionsLoadedOnce,
-    sessionsError,
-    currentConversation,
-    selectedRuntimeEndpoint,
-    runtimeEndpoints,
-    teams: switchboardTeams,
-    locale: i18n.language,
-    t,
-  });
-  const switchboard = paneViewModel.switchboard;
-  const activeAgentNode = paneViewModel.agentNodes.find((node) => node.agentId === paneViewModel.activeAgentId);
-  const defaultAgentId = subagentManagementAgents.length > 0 ? selectedRuntimeEndpoint?.defaultAgentId : null;
-  const activeAgentId = switchboard.currentIdentity.agentId ?? activeAgentNode?.agentId ?? (paneViewModel.activeAgentId || defaultAgentId || '');
-  const activeAgentName = switchboard.currentIdentityLabel || activeAgentNode?.agentName || (activeAgentId || t('sidebar.agentSessions'));
-  const activeRuntimeLabel = selectedRuntimeEndpoint?.displayName ?? t('switchboard.runtime');
-  const teamSyncKey = teams.map((team) => team.id).join('\n');
-
-  useEffect(() => {
-    if (activeTab !== 'team' || !switchboardOpen) {
-      return;
-    }
-    const teamIds = teamSyncKey ? teamSyncKey.split('\n') : [];
-    for (const teamId of teamIds) {
-      void syncRunList(teamId);
-    }
-  }, [activeTab, switchboardOpen, syncRunList, teamSyncKey]);
+  const activeAgentId = activeAgent.id;
+  const activeRuntimeLabel = beacon.runtimeLabel ?? t('switchboard.runtime');
+  const activeAgentName = currentConversation
+    ? teamIdentityLabel || `${beacon.runtimeLabel ?? currentConversation.runtimeScopeKey} / ${activeAgent.name || activeAgentId}`
+    : activeAgentId || t('sidebar.agentSessions');
 
   useEffect(() => {
     return () => {
@@ -1135,57 +1189,17 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
     }, 120);
   }, []);
 
-  const handleSwitchSession = useCallback((sessionKey: string) => {
-    switchSession(sessionKey);
-  }, [switchSession]);
-
-  const handleOpenRuntimeAgent = useCallback((agent: AgentSessionSwitchboardAgentResult) => {
-    const endpoint = endpointByRuntimeScopeKey.get(agent.runtimeScopeKey);
-    if (endpoint) {
-      openAgentConversation(agent.agentId, endpoint.endpoint);
-    }
-  }, [endpointByRuntimeScopeKey, openAgentConversation]);
-
-  const handleCreateSessionForDefaultScope = useCallback(() => {
-    const target = selectedRuntimeEndpoint?.target;
-    if (!target?.defaultSessionPromptScope) {
-      return;
-    }
-    void newSessionForScope(target.defaultSessionPromptScope);
-  }, [newSessionForScope, selectedRuntimeEndpoint]);
-
-  const handleCreateSessionForAgent = useCallback((agentId: string) => {
-    const target = selectedRuntimeEndpoint?.target;
-    if (!target) {
-      return;
-    }
-    const scope = resolveAgentScopeForRuntimeEndpoint(target, agentId);
-    if (!scope) {
-      return;
-    }
-    void newSessionForScope(scope);
-  }, [newSessionForScope, selectedRuntimeEndpoint]);
-
-  const handleCreateSessionForRuntimeAgent = useCallback((agent: AgentSessionSwitchboardAgentResult) => {
-    const target = endpointByRuntimeScopeKey.get(agent.runtimeScopeKey)?.target;
-    if (!target) {
-      return;
-    }
-    const scope = resolveAgentScopeForRuntimeEndpoint(target, agent.agentId);
-    if (!scope) {
-      return;
-    }
-    void newSessionForScope(scope);
-  }, [endpointByRuntimeScopeKey, newSessionForScope]);
-
-  const selectTeamRole = useCallback((teamId: string, runId: string, role: AgentSessionSwitchboardTeamRoleResult) => {
-    setActiveRun(teamId, runId);
-    openSessionIdentity({ sessionIdentity: role.sessionIdentity });
-    navigate('/', { state: { teamDesignSurface: {
-      kind: 'team-graph', sourceSessionIdentity: role.sessionIdentity, teamId, runId,
-    } } });
-    void refreshSnapshot(teamId, { force: true });
-  }, [navigate, openSessionIdentity, refreshSnapshot, setActiveRun]);
+  const handleNewSession = useCallback(() => {
+    const target = beacon.target;
+    if (!target) return;
+    const scope = currentConversation ? resolveAgentScopeForRuntimeEndpoint(target, currentConversation.agentId) : target.defaultSessionPromptScope;
+    if (scope) void newSessionForScope(scope);
+  }, [beacon.target, currentConversation, newSessionForScope]);
+  const toggleSwitchboard = useCallback(() => {
+    setHoverPeekOpen(false);
+    setSwitchboardOpen((open) => !open);
+  }, []);
+  const closeHoverPeek = useCallback(() => setHoverPeekOpen(false), []);
 
   const toggleTeam = useCallback((teamId: string) => {
     setExpandedTeamIds((current) => ({ ...current, [teamId]: current[teamId] !== true }));
@@ -1194,21 +1208,6 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
   const toggleRun = useCallback((runId: string) => {
     setExpandedTeamRunIds((current) => ({ ...current, [runId]: current[runId] !== true }));
   }, []);
-
-  const selectTeamRun = useCallback((teamId: string, run: AgentSessionSwitchboardTeamRunResult) => {
-    setActiveRun(teamId, run.runId);
-    if (run.leader) {
-      openSessionIdentity({ sessionIdentity: run.leader.sessionIdentity });
-      navigate('/', { state: { teamDesignSurface: {
-        kind: 'team-graph', sourceSessionIdentity: run.leader.sessionIdentity, teamId, runId: run.runId,
-      } } });
-    }
-    void refreshSnapshot(teamId, { force: true });
-  }, [navigate, openSessionIdentity, refreshSnapshot, setActiveRun]);
-
-  const handleCreateRunForTeam = useCallback((teamId: string) => {
-    void createRun(teamId);
-  }, [createRun]);
 
   const toggleSessionBucket = useCallback((bucketId: SessionBucketId, defaultCollapsed: boolean, scope: SessionBucketScope) => {
     const stateKey = createSessionBucketStateKey(bucketId, scope);
@@ -1220,20 +1219,16 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
     });
   }, []);
 
-  const requestDeleteSession = useCallback((session: ChatSession) => {
+  const requestDeleteSession = useCallback((session: ChatSession, title: string) => {
     if (isAgentSessionSwitchboardAutomationSession(session) || session.kind === 'main' || session.preferred) {
       return;
     }
-    const title = switchboard.sessionResults
-      .flatMap((bucket) => bucket.sessions)
-      .find((candidate) => candidate.session.key === session.key)?.title
-      ?? paneViewModel.sessionViewModelByKey.get(session.key)?.title
-      ?? inferUntitledSessionLabel(session, t);
-    setPendingDeleteSession({
-      key: session.key,
-      title,
-    });
-  }, [paneViewModel.sessionViewModelByKey, switchboard.sessionResults, t]);
+    setPendingDeleteSession({ key: session.key, title });
+  }, []);
+
+  const changeRenameTitle = useCallback((title: string) => {
+    setEditingSession((current) => current ? { ...current, title } : current);
+  }, []);
 
   const startRenameSession = useCallback((session: ChatSession, title: string) => {
     if (isAgentSessionSwitchboardAutomationSession(session) || session.kind === 'main' || session.preferred) {
@@ -1319,39 +1314,19 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
         <IdentityBeacon
           activeAgentId={activeAgentId}
           activeAgentName={activeAgentName}
-          activeAvatarSeed={switchboard.currentIdentity.kind === 'empty' ? undefined : activeAgentNode?.avatarSeed}
-          activeAvatarStyle={switchboard.currentIdentity.kind === 'empty' ? undefined : activeAgentNode?.avatarStyle}
+          activeAvatarSeed={currentConversation ? activeAgent.avatarSeed : undefined}
+          activeAvatarStyle={currentConversation ? activeAgent.avatarStyle : undefined}
           identityLabel={activeAgentName}
           runtimeLabel={activeRuntimeLabel}
           newSessionLabel={t('sidebar.newSession')}
-          disabledNewSession={!selectedRuntimeEndpoint?.target}
+          disabledNewSession={!beacon.target}
           switchboardOpen={switchboardOpen}
-          onNewSession={() => {
-            if (paneViewModel.activeAgentId) {
-              handleCreateSessionForAgent(paneViewModel.activeAgentId);
-              return;
-            }
-            handleCreateSessionForDefaultScope();
-          }}
-          onOpenSwitchboard={() => {
-            setHoverPeekOpen(false);
-            setSwitchboardOpen((open) => !open);
-          }}
+          onNewSession={handleNewSession}
+          onOpenSwitchboard={toggleSwitchboard}
         />
-        <HoverPeek
-          open={hoverPeekOpen && !switchboardOpen}
-          currentIdentityLabel={activeAgentName}
-          agents={switchboard.agentResults.flatMap((runtime) => runtime.agents)}
-          sessions={switchboard.sessionResults}
-          onOpenAgent={(agent) => {
-            handleOpenRuntimeAgent(agent);
-            setHoverPeekOpen(false);
-          }}
-          onSwitchSession={(sessionKey) => {
-            handleSwitchSession(sessionKey);
-            setHoverPeekOpen(false);
-          }}
-        />
+        {hoverPeekOpen && !switchboardOpen ? (
+          <DirectoryContents mode="hover" currentIdentityLabel={activeAgentName} onPick={closeHoverPeek} />
+        ) : null}
       </div>
 
       {switchboardOpen ? (
@@ -1408,61 +1383,26 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
             className="min-h-0 flex-1 overflow-y-auto p-2.5 pr-2"
           >
             {activeTab === 'agent' ? (
-              <AgentSwitchboardSection
-                runtimes={switchboard.agentResults}
-                endpointByRuntimeScopeKey={endpointByRuntimeScopeKey}
-                managementRuntimeScopeKey={managementScope ? buildRuntimeScopeKey(managementScope.endpoint) : null}
-                newSessionLabel={t('sidebar.newSession')}
-                state={paneViewModel.agentListState}
-                errorMessage={paneViewModel.agentErrorMessage}
-                emptyLabel={t('sidebar.noSubagents')}
-                loadingLabel={t('status.loading')}
-                fallbackErrorLabel={t('status.error')}
-                onOpenAgent={handleOpenRuntimeAgent}
-                onCreateSessionForAgent={handleCreateSessionForRuntimeAgent}
-                onPick={closeSwitchboard}
-              />
+              <DirectoryContents mode="agent" onPick={closeSwitchboard} />
             ) : activeTab === 'team' ? (
-              <TeamListSection
-                nodes={switchboard.teamResults}
+              <TeamContents
                 expandedTeamIds={expandedTeamIds}
                 expandedTeamRunIds={expandedTeamRunIds}
-                emptyLabel={t('sidebar.noTeams')}
-                leaderLabel={t('sidebar.teamLeader')}
-                newRunLabel={t('teams:run.create')}
                 onToggleTeam={toggleTeam}
                 onToggleRun={toggleRun}
-                onSelectRun={selectTeamRun}
-                onCreateRun={handleCreateRunForTeam}
-                onSelectRole={selectTeamRole}
                 onPick={closeSwitchboard}
               />
             ) : (
-              <SessionListSection
-                buckets={switchboard.sessionResults}
-                automationBuckets={switchboard.automationSessionResults}
-                currentSessionKey={currentSessionKey}
+              <DirectoryContents
+                mode="session"
                 deletingSessionKeys={deletingSessionKeys}
                 renamingSessionKeys={renamingSessionKeys}
                 editingSession={editingSession}
                 collapsedSessionBuckets={collapsedSessionBuckets}
-                state={paneViewModel.sessionListState}
-                errorMessage={paneViewModel.sessionErrorMessage}
-                emptyLabel={t('sidebar.noAgentSessions')}
-                sessionLabel={t('switchboard.normalSessions', { defaultValue: 'Normal' })}
-                automationLabel={t('switchboard.automationSessions', { defaultValue: 'Automation' })}
-                loadingLabel={t('status.loading')}
-                fallbackErrorLabel={t('status.error')}
-                fallbackDeleteLabel={(sessionKey) => t('sidebar.deleteSessionAria', { title: sessionKey })}
-                fallbackRenameLabel={(sessionKey) => t('sidebar.renameSessionAria', { title: sessionKey })}
-                fallbackUntitledLabel={(session) => inferUntitledSessionLabel(session, t)}
                 onToggleBucket={toggleSessionBucket}
-                onSwitchSession={handleSwitchSession}
                 onStartRename={startRenameSession}
-                onRenameTitleChange={(title) => {
-                  setEditingSession((current) => current ? { ...current, title } : current);
-                }}
-                onSubmitRename={() => void submitRenameSession()}
+                onRenameTitleChange={changeRenameTitle}
+                onSubmitRename={submitRenameSession}
                 onCancelRename={cancelRenameSession}
                 onRequestDelete={requestDeleteSession}
                 onPick={closeSwitchboard}

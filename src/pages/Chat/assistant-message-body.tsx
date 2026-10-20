@@ -1,6 +1,6 @@
 import { useCallback, useEffect, memo, useMemo } from 'react';
 import { invokeIpc } from '@/lib/api-client';
-import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
+import { getOrBuildAssistantMarkdownBody, renderStreamingAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity, summarizeText } from '@/lib/session-trace';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from './chat-layout-tokens';
@@ -46,14 +46,15 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
     if (!largeTextContent.text.trim()) {
       return null;
     }
-    return getOrBuildAssistantMarkdownBody({
+    const renderBody = isStreaming ? renderStreamingAssistantMarkdownBody : getOrBuildAssistantMarkdownBody;
+    return renderBody({
       key: itemKey,
       role: 'assistant',
       createdAt,
       text: largeTextContent.text,
       attachedFiles: [],
-    } as never)?.fullHtml ?? null;
-  }, [createdAt, itemKey, largeTextContent.text]);
+    })?.fullHtml ?? null;
+  }, [createdAt, isStreaming, itemKey, largeTextContent.text]);
   const html = useMemo(() => ({ __html: markdownHtml ?? '' }), [markdownHtml]);
   useEffect(() => {
     if (!isSessionTraceEnabled()) return;

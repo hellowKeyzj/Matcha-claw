@@ -1,4 +1,5 @@
 import type { ChatAssistantTurnItem, ChatRenderItem } from './chat-render-item-model';
+import { isControlledSessionRenderTool } from '@/stores/chat/session-render-projection';
 import type { SessionRenderToolCard } from '../../types/session/tool-card';
 import type { SessionIdentity } from '../../types/desktop/runtime-address';
 import { isOpenClawSurfaceSessionIdentity } from '../../types/openclaw-runtime-surface';
@@ -23,11 +24,23 @@ export type ToolSlot =
 export type ToolGroupPlan = ReadonlyMap<string, ReadonlyMap<string, ToolSlot>>;
 
 type ToolGroupBuilder = {
-  group: { key: string; tools: SessionRenderToolCard[]; sources: ToolRef[] };
+  key: string;
   scopeKey: string;
   canCrossItems: boolean;
-  toolIndexByCallId: Map<string, number>;
+  previous?: ToolGroup;
+  previousCallIds?: ReadonlyArray<string | undefined>;
+  sourceCount: number;
+  sources?: ToolRef[];
+  callIds?: (string | undefined)[];
+  group?: ToolGroup;
 };
+type ToolItemSlots = {
+  itemKey: string;
+  entries: { segmentKey: string; builder: ToolGroupBuilder; head: boolean }[];
+};
+
+// Only scalar grouping inputs are retained. Mutable payloads are never cached here.
+const groupCallIds = new WeakMap<ToolGroup, ReadonlyArray<string | undefined>>();
 
 export function getToolDisclosureKey(tool: SessionRenderToolCard): string {
   return `tool:${tool.runtimeAdapterId ?? ''}:${tool.runId ?? ''}:${tool.toolCallId || tool.id}`;
@@ -90,51 +103,87 @@ export function isCoveredToolOnlyItem(
     && item.segments.every((segment) => segment.kind === 'tool' && toolSlots?.get(segment.key)?.kind === 'covered');
 }
 
-function appendTool(builder: ToolGroupBuilder, source: ToolRef): void {
-  const callId = source.tool.toolCallId;
-  const previousIndex = callId?.trim() ? builder.toolIndexByCallId.get(callId) : undefined;
-  if (previousIndex !== undefined) {
-    builder.group.tools[previousIndex] = source.tool;
-  } else {
-    if (callId?.trim()) builder.toolIndexByCallId.set(callId, builder.group.tools.length);
-    builder.group.tools.push(source.tool);
+function appendTool(builder: ToolGroupBuilder, item: ChatAssistantTurnItem, segmentKey: string, tool: SessionRenderToolCard): void {
+  const index = builder.sourceCount++;
+  const previousSource = builder.previous?.sources[index];
+  if (isControlledSessionRenderTool(tool) && !builder.sources && previousSource
+    && previousSource.itemKey === item.key && previousSource.segmentKey === segmentKey && previousSource.tool === tool
+    && builder.previousCallIds?.[index] === tool.toolCallId) return;
+  if (!builder.sources) {
+    builder.sources = builder.previous?.sources.slice(0, index) ?? [];
+    builder.callIds = builder.previousCallIds?.slice(0, index) ?? [];
   }
-  builder.group.sources.push(source);
+  builder.sources.push({ itemKey: item.key, segmentKey, tool });
+  builder.callIds!.push(tool.toolCallId);
 }
 
-function isSameToolGroup(left: ToolGroup, right: ToolGroup): boolean {
-  return left.key === right.key
-    && left.tools.length === right.tools.length
-    && left.tools.every((tool, index) => tool === right.tools[index])
-    && left.sources.length === right.sources.length
-    && left.sources.every((source, index) => {
-      const other = right.sources[index];
-      return source.itemKey === other.itemKey && source.segmentKey === other.segmentKey && source.tool === other.tool;
-    });
+function finishToolGroup(builder: ToolGroupBuilder | undefined): void {
+  if (!builder || builder.group) return;
+  if (!builder.sources && builder.sourceCount === builder.previous?.sources.length) {
+    builder.group = builder.previous;
+    return;
+  }
+  const sources = builder.sources ?? builder.previous!.sources.slice(0, builder.sourceCount);
+  const callIds = builder.callIds ?? builder.previousCallIds!.slice(0, builder.sourceCount);
+  const tools: SessionRenderToolCard[] = [];
+  const toolIndexByCallId = new Map<string, number>();
+  for (const source of sources) {
+    const callId = source.tool.toolCallId;
+    const previousIndex = callId?.trim() ? toolIndexByCallId.get(callId) : undefined;
+    if (previousIndex !== undefined) tools[previousIndex] = source.tool;
+    else {
+      if (callId?.trim()) toolIndexByCallId.set(callId, tools.length);
+      tools.push(source.tool);
+    }
+  }
+  builder.group = { key: builder.key, tools, sources };
+  groupCallIds.set(builder.group, callIds);
+}
+
+function resolveItemSlots(item: ToolItemSlots, previousSlots: ReadonlyMap<string, ToolSlot> | undefined): ReadonlyMap<string, ToolSlot> {
+  let slots = item.entries.length === previousSlots?.size ? undefined : new Map<string, ToolSlot>();
+  for (let index = 0; index < item.entries.length; index += 1) {
+    const { segmentKey, builder, head } = item.entries[index];
+    const previousSlot = previousSlots?.get(segmentKey);
+    const sameSlot = head
+      ? previousSlot?.kind === 'head' && previousSlot.group === builder.group
+      : previousSlot?.kind === 'covered' && previousSlot.groupKey === builder.key;
+    if (!sameSlot && !slots) {
+      slots = new Map(item.entries.slice(0, index).map((entry) => [entry.segmentKey, previousSlots!.get(entry.segmentKey)!]));
+    }
+    slots?.set(segmentKey, sameSlot ? previousSlot! : head
+      ? { kind: 'head', group: builder.group! }
+      : { kind: 'covered', groupKey: builder.key });
+  }
+  return slots ?? previousSlots!;
 }
 
 export function buildToolGroupPlan(items: ReadonlyArray<ChatRenderItem>, previousPlan?: ToolGroupPlan): ToolGroupPlan {
-  const plan = new Map<string, ReadonlyMap<string, ToolSlot>>();
+  const itemSlots: ToolItemSlots[] = [];
   let previousTail: ToolGroupBuilder | undefined;
 
   for (const item of items) {
     if (item.kind !== 'assistant-turn') {
+      finishToolGroup(previousTail);
       previousTail = undefined;
       continue;
     }
-
-    const slots = new Map<string, ToolSlot>();
-    const groups: ToolGroupBuilder[] = [];
-    let current: ToolGroupBuilder | undefined;
-    let toolOnly = hasOnlyToolItemContent(item) && item.segments.length > 0;
+    const slots: ToolItemSlots = { itemKey: item.key, entries: [] };
+    const toolOnly = hasOnlyToolItemContent(item) && item.segments.length > 0
+      && item.segments.every((segment) => segment.kind === 'tool'
+        && !(segment.tool.result.kind === 'canvas' && segment.tool.result.surface === 'assistant-bubble'));
+    if (!toolOnly || !previousTail?.canCrossItems) {
+      finishToolGroup(previousTail);
+      previousTail = undefined;
+    }
+    let current = previousTail;
     for (const segment of item.segments) {
       if (segment.kind !== 'tool'
         || (segment.tool.result.kind === 'canvas' && segment.tool.result.surface === 'assistant-bubble')) {
+        finishToolGroup(current);
         current = undefined;
-        toolOnly = false;
         continue;
       }
-
       const tool = segment.tool;
       const toolRunId = tool.runId?.trim() ? tool.runId : undefined;
       const itemRunId = item.runId?.trim() ? item.runId : undefined;
@@ -142,48 +191,30 @@ export function buildToolGroupPlan(items: ReadonlyArray<ChatRenderItem>, previou
       const resolvedRunId = toolRunId ?? itemRunId ?? '';
       const scopeKey = JSON.stringify([item.sessionKey, tool.runtimeAdapterId ?? '', resolvedRunId, item.laneKey ?? '', item.agentId ?? '']);
       if (!current || current.scopeKey !== scopeKey || runConflict) {
+        finishToolGroup(current);
+        const key = JSON.stringify([scopeKey, tool.toolCallId || tool.id]);
+        const previousSlot = previousPlan?.get(item.key)?.get(segment.key);
+        const previous = previousSlot?.kind === 'head' && previousSlot.group.key === key ? previousSlot.group : undefined;
+        const previousCallIds = previous && groupCallIds.get(previous);
         current = {
-          group: { key: JSON.stringify([scopeKey, tool.toolCallId || tool.id]), tools: [], sources: [] },
-          scopeKey,
-          canCrossItems: !runConflict && !!resolvedRunId && !!tool.runtimeAdapterId,
-          toolIndexByCallId: new Map(),
+          key, scopeKey, canCrossItems: !runConflict && !!resolvedRunId && !!tool.runtimeAdapterId,
+          previous: previousCallIds ? previous : undefined, previousCallIds, sourceCount: 0,
         };
-        groups.push(current);
       }
-      appendTool(current, { itemKey: item.key, segmentKey: segment.key, tool });
-      if (runConflict) current = undefined;
-    }
-
-    let tail: ToolGroupBuilder | undefined;
-    for (const [index, builder] of groups.entries()) {
-      const joined = index === 0 && toolOnly && previousTail?.canCrossItems && builder.canCrossItems
-        && previousTail.scopeKey === builder.scopeKey ? previousTail : undefined;
-      for (const [sourceIndex, source] of builder.group.sources.entries()) {
-        slots.set(source.segmentKey, joined || sourceIndex > 0
-          ? { kind: 'covered', groupKey: (joined ?? builder).group.key }
-          : { kind: 'head', group: builder.group });
-        if (joined) appendTool(joined, source);
+      slots.entries.push({ segmentKey: segment.key, builder: current, head: current.sourceCount === 0 });
+      appendTool(current, item, segment.key, tool);
+      if (runConflict) {
+        finishToolGroup(current);
+        current = undefined;
       }
-      tail = joined ?? builder;
     }
-    if (slots.size > 0) plan.set(item.key, slots);
-    previousTail = toolOnly ? tail : undefined;
+    if (slots.entries.length > 0) itemSlots.push(slots);
+    if (!toolOnly) finishToolGroup(current);
+    previousTail = toolOnly ? current : undefined;
   }
+  finishToolGroup(previousTail);
 
-  for (const [itemKey, slots] of plan) {
-    const previousSlots = previousPlan?.get(itemKey);
-    if (!previousSlots) continue;
-    const sharedSlots = new Map<string, ToolSlot>();
-    let unchanged = slots.size === previousSlots.size;
-    for (const [segmentKey, slot] of slots) {
-      const previousSlot = previousSlots.get(segmentKey);
-      const sameSlot = slot.kind === 'head'
-        ? previousSlot?.kind === 'head' && isSameToolGroup(slot.group, previousSlot.group)
-        : previousSlot?.kind === 'covered' && slot.groupKey === previousSlot.groupKey;
-      sharedSlots.set(segmentKey, sameSlot && previousSlot ? previousSlot : slot);
-      if (!sameSlot) unchanged = false;
-    }
-    plan.set(itemKey, unchanged ? previousSlots : sharedSlots);
-  }
+  const plan = new Map<string, ReadonlyMap<string, ToolSlot>>();
+  for (const slots of itemSlots) plan.set(slots.itemKey, resolveItemSlots(slots, previousPlan?.get(slots.itemKey)));
   return plan;
 }

@@ -67,6 +67,7 @@ const marketplaceSearchCache = new Map<string, {
   results: MarketplaceSkill[];
 }>();
 const inflightMarketplaceSearch = new Map<string, Promise<MarketplaceSearchResult>>();
+let currentMarketplaceQuery = { key: '' };
 let inflightSkillsFetch: Promise<void> | null = null;
 let lastSkillsFetchAt = 0;
 let skillsSnapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -190,6 +191,20 @@ function scopedState(scope: RuntimeScope, followSelection = true) {
   return { set, current };
 }
 
+async function enableSkillConfig(skillId: string, scope: RuntimeScope, current: () => boolean): Promise<void> {
+  const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled: true, scope }, 'skills.config');
+  if (result.outcome !== 'accepted') throw new Error('Failed to enable skill');
+  if (!current()) return;
+  const state = useSkillsStore.getState();
+  const skill = state.skills.find((entry) => entry.id === skillId);
+  if (skill) {
+    state.updateSkill(skillId, {
+      enabled: true,
+      ...(skill.unavailableReason === 'disabled' ? { unavailableReason: null } : {}),
+    });
+  }
+}
+
 interface SkillsState {
   scopeKey: string | null;
   scopeGeneration: number;
@@ -208,9 +223,11 @@ interface SkillsState {
 
   // Actions
   fetchSkills: (options?: { force?: boolean; silent?: boolean; fresh?: boolean; scope?: RuntimeScope }) => Promise<void>;
+  setSearchQuery: (query: string) => void;
   searchSkills: (query: string) => Promise<void>;
   installSkill: (slug: string, version?: string, scope?: RuntimeScope) => Promise<void>;
   importLocalSkill: (payload: LocalSkillImportPayload, scope?: RuntimeScope) => Promise<string>;
+  finishSkillInstallation: (skillId: string, scope: RuntimeScope, current: () => boolean) => Promise<void>;
   uninstallSkill: (skillKey: string, slug?: string) => Promise<void>;
   enableSkill: (skillId: string, scope?: RuntimeScope) => Promise<void>;
   disableSkill: (skillId: string) => Promise<void>;
@@ -379,17 +396,29 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     await inflightSkillsFetch;
   },
 
+  setSearchQuery: (query) => {
+    const key = query.trim().toLowerCase();
+    if (currentMarketplaceQuery.key === key) return;
+    currentMarketplaceQuery = { key };
+    set({ searching: false, searchError: null });
+  },
+
   searchSkills: async (query: string) => {
     const normalizedQuery = query.trim();
     const cacheKey = normalizedQuery.toLowerCase();
+    const request = { key: cacheKey };
+    currentMarketplaceQuery = request;
+    const setSearch = (state: Partial<SkillsState>) => {
+      if (currentMarketplaceQuery === request) set(state);
+    };
     const now = Date.now();
     const cached = marketplaceSearchCache.get(cacheKey);
     if (cached && now - cached.timestamp < MARKETPLACE_SEARCH_CACHE_TTL_MS) {
-      set({ searchResults: cached.results, searching: false, searchError: null });
+      setSearch({ searchResults: cached.results, searching: false, searchError: null });
       return;
     }
 
-    set({ searching: true, searchError: null });
+    setSearch({ searching: true, searchError: null });
     let pending = inflightMarketplaceSearch.get(cacheKey);
     if (!pending) {
       pending = hostApiFetch<MarketplaceSearchResult>('/api/clawhub/search', {
@@ -404,7 +433,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       if (result.success) {
         const results = result.results || [];
         marketplaceSearchCache.set(cacheKey, { timestamp: Date.now(), results });
-        set({ searchResults: results });
+        setSearch({ searchResults: results });
       } else {
         throw normalizeAppError(new Error(result.error || 'Search failed'), {
           module: 'skills',
@@ -414,12 +443,12 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     } catch (error) {
       const appError = normalizeAppError(error, { module: 'skills', operation: 'search' });
       const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'search');
-      set({ searchError: errorKey ?? appError.message });
+      setSearch({ searchError: errorKey ?? appError.message });
     } finally {
       if (inflightMarketplaceSearch.get(cacheKey) === pending) {
         inflightMarketplaceSearch.delete(cacheKey);
       }
-      set({ searching: false });
+      setSearch({ searching: false });
     }
   },
 
@@ -449,9 +478,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         throw new Error(errorKey ?? appError.message);
       }
       if (!current()) return;
-      if (scope.kind === 'runtime-instance') await get().enableSkill(slug, scope);
-      if (!current()) return;
-      await get().fetchSkills({ force: true, fresh: true, scope });
+      await get().finishSkillInstallation(slug, scope, current);
     } catch (error) {
       console.error('Install error:', error);
       throw error;
@@ -513,6 +540,26 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     }
   },
 
+  finishSkillInstallation: async (skillId, scope, installationCurrent) => {
+    const { set, current } = scopedState(scope, false);
+    if (scope.kind === 'runtime-instance' && scope.endpoint.kind === 'native-runtime'
+      && scope.endpoint.runtimeAdapterId === 'openclaw') {
+      set((state) => ({
+        mutatingBySkillId: incrementMutatingSkill(state.mutatingBySkillId, skillId),
+        mutating: true,
+      }));
+      try {
+        await enableSkillConfig(skillId, scope, current);
+      } finally {
+        set((state) => {
+          const nextMutating = decrementMutatingSkill(state.mutatingBySkillId, skillId);
+          return { mutatingBySkillId: nextMutating, mutating: hasMutatingSkills(nextMutating) };
+        });
+      }
+    }
+    if (installationCurrent()) await get().fetchSkills({ force: true, fresh: true, scope });
+  },
+
   uninstallSkill: async (skillKey: string, slug?: string) => {
     const scope = requireSkillsScope();
     const { set, current } = scopedState(scope);
@@ -556,7 +603,6 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     const scope = sourceScope ?? requireSkillsScope();
     if (scope.kind !== 'runtime-instance') throw new Error('This runtime has no per-skill enable switch');
     const { set, current } = scopedState(scope, !sourceScope);
-    const { updateSkill } = get();
     set((state) => {
       const nextMutating = incrementMutatingSkill(state.mutatingBySkillId, skillId);
       return {
@@ -566,18 +612,8 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     });
 
     try {
-      const result = await hostSkillsMutation('/api/skills/config', { skillKey: skillId, enabled: true, scope }, 'skills.config');
-      if (result.outcome !== 'accepted') {
-        throw new Error('Failed to enable skill');
-      }
-      if (!current()) return;
-      const currentSkill = get().skills.find((skill) => skill.id === skillId);
-      if (currentSkill) {
-        updateSkill(skillId, {
-          enabled: true,
-          ...(currentSkill.unavailableReason === 'disabled' ? { unavailableReason: null } : {}),
-        });
-      } else {
+      await enableSkillConfig(skillId, scope, current);
+      if (current() && !get().skills.some((skill) => skill.id === skillId)) {
         await get().fetchSkills({ force: true, silent: true, fresh: true, scope });
       }
     } catch (error) {
