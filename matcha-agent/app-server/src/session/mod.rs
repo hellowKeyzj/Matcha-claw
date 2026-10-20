@@ -1,3 +1,4 @@
+mod catalog;
 mod deletion;
 mod dispatch;
 mod execution;
@@ -9,6 +10,7 @@ mod observation;
 mod record;
 mod retirement;
 mod run;
+mod title;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -51,10 +53,11 @@ struct Inner {
     interactions: Interactions,
     diagnostics: Diagnostics,
     media: crate::workspace::Media,
-    sessions: RwLock<BTreeMap<String, Arc<Session>>>,
+    sessions: RwLock<catalog::Catalog>,
     agent_guards: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     search_guard: Mutex<()>,
     history_reads: Arc<tokio::sync::Semaphore>,
+    catalog_changes: tokio::sync::watch::Sender<()>,
     shutdown: AtomicBool,
     shutdown_guard: Mutex<()>,
 }
@@ -122,15 +125,18 @@ impl Sessions {
             interactions,
             diagnostics,
             media,
-            sessions: RwLock::new(BTreeMap::new()),
+            sessions: RwLock::new(catalog::Catalog::default()),
             agent_guards: Mutex::new(BTreeMap::new()),
             search_guard: Mutex::new(()),
             history_reads: Arc::new(tokio::sync::Semaphore::new(8)),
+            catalog_changes: tokio::sync::watch::channel(()).0,
             shutdown: AtomicBool::new(false),
             shutdown_guard: Mutex::new(()),
         }));
         for record in records {
             let session_id = record.session_id.clone();
+            let created_at_ms = record.created_at_ms;
+            let agent_id = record.agent_id.clone();
             let pending_runs = if record.status == record::Status::Deleting {
                 Vec::new()
             } else {
@@ -164,15 +170,19 @@ impl Sessions {
                 close_guard: Mutex::new(()),
                 stopped: tokio_util::sync::CancellationToken::new(),
             });
-            owner
-                .0
-                .sessions
-                .write()
-                .await
-                .insert(session_id, session.clone());
+            owner.0.sessions.write().await.insert(
+                session_id,
+                created_at_ms,
+                agent_id,
+                session.clone(),
+            );
             owner.start_executor(session).await;
         }
         Ok(owner)
+    }
+
+    pub fn catalog_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.0.catalog_changes.subscribe()
     }
 
     pub async fn agent_guard(&self, agent_id: &str) -> OwnedMutexGuard<()> {

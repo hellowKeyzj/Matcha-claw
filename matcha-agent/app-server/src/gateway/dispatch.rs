@@ -118,6 +118,7 @@ const METHODS: &[&str] = &[
     "channels.delete",
     "sessions.create",
     "sessions.list",
+    "sessions.subscribeCatalog",
     "sessions.get",
     "sessions.rename",
     "sessions.delete",
@@ -156,7 +157,7 @@ pub(super) fn capabilities() -> Value {
         "protocolVersion": super::PROTOCOL_VERSION,
         "serverVersion": env!("CARGO_PKG_VERSION"),
         "methods": METHODS,
-        "notifications": ["session.event", "events.subscriptionError", "schedules.receipt", "schedules.subscriptionError"],
+        "notifications": ["session.event", "sessions.catalogChanged", "events.subscriptionError", "schedules.receipt", "schedules.subscriptionError"],
         "transport": {
             "jsonRpc": "2.0",
             "batch": true,

@@ -16,6 +16,7 @@ const REPLAY_PAGE: usize = 128;
 pub(super) struct Subscriptions {
     sessions: Mutex<HashMap<String, CancellationToken>>,
     schedules: Mutex<Option<CancellationToken>>,
+    catalog: Mutex<Option<CancellationToken>>,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +114,68 @@ pub(super) async fn subscribe(
         "latestSeq": latest,
         "delivery": "durable_replay_then_live",
     }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Catalog {}
+
+pub(super) async fn subscribe_catalog(
+    connection: &Arc<Connection>,
+    params: Value,
+    after_send: &mut Vec<oneshot::Sender<()>>,
+) -> rpc::Result {
+    let _: Catalog = rpc::params(params)?;
+    let mut changes = connection.gateway.sessions.catalog_changes();
+    let stopped = connection.closed.child_token();
+    {
+        let mut subscription = connection
+            .subscriptions
+            .catalog
+            .lock()
+            .map_err(|_| rpc::Error::internal("subscriptions_lock"))?;
+        if let Some(previous) = subscription.replace(stopped.clone()) {
+            previous.cancel();
+        }
+    }
+    let (ready, sent) = oneshot::channel();
+    after_send.push(ready);
+    let connection = connection.clone();
+    let streams = connection.streams.clone();
+    streams.spawn(async move {
+        let start = tokio::select! {
+            biased;
+            _ = stopped.cancelled() => false,
+            sent = sent => sent.is_ok(),
+        };
+        if start {
+            loop {
+                changes.borrow_and_update();
+                let sent = tokio::select! {
+                    biased;
+                    _ = stopped.cancelled() => break,
+                    sent = connection.notify("sessions.catalogChanged", json!({})) => sent,
+                };
+                if sent.is_err() {
+                    break;
+                }
+                let changed = tokio::select! {
+                    biased;
+                    _ = stopped.cancelled() => break,
+                    changed = changes.changed() => changed,
+                };
+                if changed.is_err() {
+                    break;
+                }
+            }
+        }
+        if let Ok(mut subscription) = connection.subscriptions.catalog.lock()
+            && !stopped.is_cancelled()
+        {
+            subscription.take();
+        }
+    });
+    Ok(json!({ "delivery": "live_invalidation" }))
 }
 
 #[derive(Deserialize)]

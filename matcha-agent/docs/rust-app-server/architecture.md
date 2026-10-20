@@ -86,6 +86,7 @@ App Server
 | CLI 句柄、stdio、退出事实及实际启动输入风险 | cli 的执行实例 | Session 消费实例启动快照，不从 Agent 配置重复推断；运行期歧义继续由原生观察累积 |
 | 连续空闲 5 分钟的实例休眠 | Session executor + CLI 原生握手 | CLI 原子封输入并检查 busy/resident/持久恢复条件，flush 后复查才返回 ready；Session 再 close、consumer join 并确认 graceful exit 才安全回收；不调用取消队列的 close_execution，不关闭逻辑 Session，新消息仍从原 durable 队列按同 UUID resume。 [VERIFY: matcha-agent/app-server/src/session/idle.rs] [VERIFY: matcha-agent/app-server/src/session/execution.rs] [VERIFY: matcha-agent/app-server/src/cli/idle.rs] [VERIFY: matcha-agent/src/cli/print.ts] |
 | 工具执行、上下文、压缩、原生 transcript | CLI 原生引擎 | Rust 不双写、不用展示消息重建 |
+| 新会话标题 | CLI 生成／写 native metadata；Session 私有 title 模块持一次尝试与目录 projection | 首条有效真人 UUID ACK 后锁内保存 attempt／文本兜底，锁外后台调用同 CLI；保留 native best-effort 保存 catch，响应 `{title}` 不当持久化回执，读回已落盘 `ai-title` 才投影。后续 ACK 不刷新标题，失败不重试；旧记录 attempt 缺省 true，不补 AI 生成，读取已有标题见下。 [VERIFY: matcha-agent/app-server/src/session/observation.rs:213-236] [VERIFY: matcha-agent/app-server/src/session/title.rs:18-128] [VERIFY: matcha-agent/src/cli/print.ts:4332-4369] |
 | TaskList / Todo 写入 | CLI 原生 owner | Rust 只转发原生 mutation，保留 persisted/applied/unknown 回执 |
 | TaskList / Todo 已落盘读取 | task 模块 | 始终读原生事项文件/会话 transcript 主链，不启动 CLI；TaskList 复用原生锁协议，Todo 不冒充实时 AppState；Session 只提供 native_files / persisted_history 窄接口。 [VERIFY: matcha-agent/app-server/src/task.rs] [VERIFY: matcha-agent/app-server/src/task/lock.rs] [VERIFY: matcha-agent/app-server/src/task/todos.rs] [VERIFY: matcha-agent/app-server/src/session/mod.rs] |
 | 原生子 Agent/Team roster、邮箱和任务领取 | CLI 原生实现 | Rust 不直接改原生状态文件假装完成操作 |
@@ -96,6 +97,14 @@ App Server
 | 存储访问、原子文件/提交机制 | persistence | 不升级为全局业务状态容器 |
 
 独立启动第二个 CLI 的服务端编排，不等于 CLI 内部 AgentTool 的原生子任务。两者可以关联，不混用身份或宣称等价。
+
+`sessions.list` 仍以原 managed Session 为目录事实源。同一 `sessions` RwLock 内的私有 `Catalog` 保存 ID lookup、全局／按 Agent 的 `(created_at_ms, session_id)` 有序索引，只存不可变键与原 Session 的 Arc，不复制可变 Record；open／create 注册、删除统一移除索引。list 从索引倒序取 `limit+1` 个 Arc，出目录锁后截断，只锁选中页并 clone Record，再 hydrate／view，不再每页 clone／sort 全体记录。排序仍为创建时间、同时间 session ID 均降序；cursor 仍从全体 managed Session 解析，即使读取按 Agent 过滤。[VERIFY: matcha-agent/app-server/src/session/catalog.rs:7-100] [VERIFY: matcha-agent/app-server/src/session/mod.rs:136-179] [VERIFY: matcha-agent/app-server/src/session/dispatch.rs:286-335] [VERIFY: matcha-agent/app-server/src/session/deletion.rs:258-262]
+
+标题 projection 保存在原 managed Record：view 的 `title` 为 managed 显式名／native custom，`displayName` 为 AI／文本兜底，已有 projection 由目录／重启直接复用。[VERIFY: matcha-agent/app-server/src/session/record.rs:60-69] [VERIFY: matcha-agent/app-server/src/session/title.rs:180-206]
+
+旧目录已有标题由 Session-owned `hydrate_titles(records)` 读取：只补 `native_title=None` 且非 Deleting 的 managed 记录，list 先分页后补选中页，get 复用；按 runtime/workspace 分组 `history::metadata_batch`，每组单次 project 目录枚举、每文件头尾各64KiB，不扫全文、不启动 CLI。有效已有 custom／AI／文本 projection 成功保存原 Record 后复用，空／缺文件不保存空 projection；metadata 读取或辅助 projection 保存失败均记安全 diagnostic、保留原记录／名称，目录保持可用，未保存者下次仍可重读。不另建 store／迁移 job／前端标题逻辑；新 create/fork 的 `Some(empty)`／attempt=false 不受影响，旧记录仍不补 AI。metadata 文本支持原生 bash 文字与 command 末级兜底，不扩大 AI 的真人 prose 资格。[VERIFY: matcha-agent/app-server/src/session/title.rs:131-216] [VERIFY: matcha-agent/app-server/src/session/title.rs:239-383] [VERIFY: matcha-agent/app-server/src/session/dispatch.rs:308-357] [VERIFY: matcha-agent/app-server/src/session/history.rs:127-261]
+
+目录另提供 `sessions.subscribeCatalog {}` → `{delivery:"live_invalidation"}`，ACK 后发送初始及 watch 合并的 `sessions.catalogChanged`（`params:{}`），仅要求消费者回读目录，不复用聊天 replay／UI lease。Host 映射 title→label、displayName→display_name，沿中性 catalog 交付，公共 RPC／title／displayName／Host／Renderer 链不变。[VERIFY: matcha-agent/app-server/src/gateway/subscriptions.rs:119-178] [VERIFY: matcha-agent/app-server/src/gateway/socket.rs:79-91] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/runtime.rs:111-122]
 
 ## 4. 模块化的实现原则
 

@@ -27,6 +27,10 @@ pub(super) struct Record {
     pub mode: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default = "already_attempted")]
+    pub title_attempted: bool,
+    #[serde(default)]
+    pub native_title: Option<super::title::Projection>,
     #[serde(default)]
     pub provider_id: Option<String>,
     #[serde(default)]
@@ -58,10 +62,16 @@ impl Record {
             "sessionId": self.session_id, "agentId": self.agent_id, "status": self.status,
             "createdAtMs": self.created_at_ms, "updatedAtMs": self.updated_at_ms,
             "model": self.model, "mode": self.mode, "forkedFrom": self.forked_from,
-            "title": self.title, "providerId": self.provider_id,
+            "title": self.title.as_ref().or_else(|| self.native_title.as_ref().and_then(|title| title.custom.as_ref())),
+            "displayName": self.native_title.as_ref().and_then(|title| title.ai.as_ref().or(title.fallback.as_ref())),
+            "providerId": self.provider_id,
             "modelSelectionId": self.model_selection_id, "providerFingerprint": self.provider_fingerprint,
         })
     }
+}
+
+fn already_attempted() -> bool {
+    true
 }
 
 fn storage(kind: &str) -> rpc::Error {

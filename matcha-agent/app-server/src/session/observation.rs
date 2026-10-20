@@ -18,7 +18,20 @@ impl Sessions {
         let mut closer = None;
         let mut exited = false;
         let cli = session.data.lock().await.cli.clone();
-        while let Some(first) = receiver.recv().await {
+        let mut titles = tokio::task::JoinSet::new();
+        loop {
+            let first = tokio::select! {
+                event = receiver.recv() => match event {
+                    Some(event) => event,
+                    None => break,
+                },
+                result = titles.join_next(), if !titles.is_empty() => {
+                    if result.is_some_and(|result| result.is_err()) {
+                        eprintln!("session title task failed");
+                    }
+                    continue;
+                }
+            };
             let mut batch = vec![first];
             // Coalesce an available stdio burst, without a per-token Run write.
             while batch.len() < 256 {
@@ -28,7 +41,7 @@ impl Sessions {
                 }
             }
             if let Err(error) = self
-                .observe_batch(&session, &instance_id, batch, &mut exited)
+                .observe_batch(&session, &instance_id, batch, &mut exited, &mut titles)
                 .await
             {
                 if failure.is_none() {
@@ -68,6 +81,11 @@ impl Sessions {
                 failure = Some(primary.with_data(json!({ "cleanupFailure": error })));
             } else {
                 failure = Some(error.clone());
+            }
+        }
+        while let Some(result) = titles.join_next().await {
+            if result.is_err() {
+                eprintln!("session title task failed");
             }
         }
         let session_id;
@@ -122,10 +140,11 @@ impl Sessions {
 
     async fn observe_batch(
         &self,
-        session: &Session,
+        session: &Arc<Session>,
         instance_id: &str,
         batch: Vec<CliEvent>,
         exited: &mut bool,
+        titles: &mut tokio::task::JoinSet<()>,
     ) -> rpc::Result<()> {
         let mut execution = session.data.lock().await;
         if !execution
@@ -189,6 +208,30 @@ impl Sessions {
                             let (status, reason) = active.outcome();
                             let result = active.owned_result();
                             terminal = Some((status, reason, result));
+                        }
+                    }
+                    if !execution.closing
+                        && execution.active.as_ref().is_some_and(|active| {
+                            active.input_started
+                                && message["type"] == "user"
+                                && message["uuid"].as_str()
+                                    == Some(active.record.run.message_id.as_str())
+                        })
+                    {
+                        match self.accept_title_locked(&mut execution, &message).await {
+                            Ok(Some(description)) => {
+                                let owner = self.clone();
+                                let session = session.clone();
+                                let instance = instance_id.to_owned();
+                                titles.spawn(async move {
+                                    owner.generate_title(session, instance, description).await;
+                                });
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                self.title_failure(&execution.record, instance_id, &error)
+                                    .await;
+                            }
                         }
                     }
                     items.push(("native.message".to_owned(), message));

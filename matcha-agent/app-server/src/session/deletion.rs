@@ -30,11 +30,15 @@ impl Sessions {
             owner.accepting()?;
             let mut execution = session.data.lock().await;
             execution.record.mutable()?;
+            let changed = execution.record.title.as_ref() != Some(&input.title);
             let mut renamed = execution.record.clone();
             renamed.title = Some(input.title);
             renamed.updated_at_ms = rpc::now_ms();
             record::save_session(&owner.0.database, &renamed).await?;
             execution.record = renamed;
+            if changed {
+                owner.0.catalog_changes.send_replace(());
+            }
             Ok(execution.record.view())
         })
         .await

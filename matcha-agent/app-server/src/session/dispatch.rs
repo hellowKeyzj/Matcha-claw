@@ -239,6 +239,8 @@ impl Sessions {
                 model: input.model,
                 mode: input.mode,
                 title: None,
+                title_attempted: false,
+                native_title: Some(super::title::Projection::default()),
                 provider_id: source
                     .as_ref()
                     .and_then(|record| record.provider_id.clone()),
@@ -282,13 +284,13 @@ impl Sessions {
                 stopped: tokio_util::sync::CancellationToken::new(),
             });
             let mut sessions = owner.0.sessions.write().await;
-            if sessions.contains_key(&session_id) {
+            if sessions.get(&session_id).is_some() {
                 return Err(rpc::Error::conflict(
                     "session_identity_in_use",
                     "This session identity was created concurrently",
                 ));
             }
-            sessions.insert(session_id, session.clone());
+            sessions.insert(session_id, now, input.agent_id, session.clone());
             drop(sessions);
             owner.start_executor(session).await;
             Ok(result)
@@ -307,40 +309,22 @@ impl Sessions {
         if let Some(agent_id) = &input.agent_id {
             config::validate_id(agent_id)?;
         }
-        let sessions: Vec<_> = self.0.sessions.read().await.values().cloned().collect();
-        let mut records = Vec::new();
-        for session in sessions {
-            records.push(session.data.lock().await.record.clone());
-        }
-        records.sort_by(|left, right| {
-            (right.created_at_ms, &right.session_id).cmp(&(left.created_at_ms, &left.session_id))
-        });
-        let cursor = if let Some(id) = &input.before_session_id {
+        if let Some(id) = &input.before_session_id {
             validate_uuid(id)?;
-            let record = records
-                .iter()
-                .find(|record| record.session_id == *id)
-                .ok_or_else(|| rpc::Error::not_found("Session cursor"))?;
-            Some((record.created_at_ms, record.session_id.clone()))
-        } else {
-            None
-        };
+        }
         let limit = input.limit.unwrap_or(100);
-        let mut selected: Vec<_> = records
-            .into_iter()
-            .filter(|record| {
-                input
-                    .agent_id
-                    .as_ref()
-                    .is_none_or(|agent| *agent == record.agent_id)
-                    && cursor.as_ref().is_none_or(|(at, id)| {
-                        (record.created_at_ms, &record.session_id) < (*at, id)
-                    })
-            })
-            .take(limit.saturating_add(1))
-            .collect();
-        let more = selected.len() > limit;
-        selected.truncate(limit);
+        let mut sessions = self.0.sessions.read().await.page(
+            input.agent_id.as_deref(),
+            input.before_session_id.as_deref(),
+            limit.saturating_add(1),
+        )?;
+        let more = sessions.len() > limit;
+        sessions.truncate(limit);
+        let mut selected = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            selected.push(session.data.lock().await.record.clone());
+        }
+        self.hydrate_titles(&mut selected).await;
         let next = if more {
             selected.last().map(|record| record.session_id.clone())
         } else {
@@ -353,6 +337,8 @@ impl Sessions {
 
     async fn get(&self, input: Get) -> rpc::Result<Value> {
         let session = self.session(&input.session_id).await?;
+        let mut record = session.data.lock().await.record.clone();
+        self.hydrate_titles(std::slice::from_mut(&mut record)).await;
         let execution = session.data.lock().await;
         execution.record.mutable()?;
         let record = &execution.record;

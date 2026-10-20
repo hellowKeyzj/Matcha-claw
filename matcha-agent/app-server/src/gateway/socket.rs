@@ -224,6 +224,9 @@ impl Connection {
                 "server.shutdown" => self.shutdown(params, &mut after_send),
                 "events.replay" => subscriptions::replay(self, params).await,
                 "events.subscribe" => subscriptions::subscribe(self, params, &mut after_send).await,
+                "sessions.subscribeCatalog" => {
+                    subscriptions::subscribe_catalog(self, params, &mut after_send).await
+                }
                 "schedules.subscribe" => {
                     subscriptions::subscribe_schedules(self, params, &mut after_send).await
                 }

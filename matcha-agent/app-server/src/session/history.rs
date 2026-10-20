@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, Metadata},
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
 };
 
@@ -99,6 +99,35 @@ fn locate_sync(
     workspace: &Path,
     session_id: &str,
 ) -> rpc::Result<Option<(PathBuf, Transcript, Vec<usize>)>> {
+    let Some((path, workspace)) = locate_path(runtime, workspace, session_id)? else {
+        return Ok(None);
+    };
+    let transcript = load(&path)?;
+    let chain = transcript.chain(session_id, &workspace)?;
+    if chain.is_empty() {
+        return Err(rpc::Error::unavailable(
+            "history_chain_absent",
+            "The native transcript has no conversation chain",
+        ));
+    }
+    Ok(Some((path, transcript, chain)))
+}
+
+fn locate_path(
+    runtime: &Path,
+    workspace: &Path,
+    session_id: &str,
+) -> rpc::Result<Option<(PathBuf, PathBuf)>> {
+    let Some((projects, workspace)) = project_paths(runtime, workspace)? else {
+        return Ok(None);
+    };
+    Ok(locate_in_projects(&projects, session_id)?.map(|path| (path, workspace)))
+}
+
+fn project_paths(
+    runtime: &Path,
+    workspace: &Path,
+) -> rpc::Result<Option<(Vec<PathBuf>, PathBuf)>> {
     let Some((runtime, workspace)) = locations(runtime, workspace)? else {
         return Ok(None);
     };
@@ -107,18 +136,26 @@ fn locate_sync(
     };
     let entries =
         fs::read_dir(&projects).map_err(|error| io_error("history_projects_read", error))?;
-    let mut found = None;
+    let mut paths = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| io_error("history_project_entry", error))?;
         let Some(project) = checked(&projects, Path::new(&entry.file_name()))? else {
             continue;
         };
-        let metadata =
-            fs::metadata(&project).map_err(|error| io_error("history_project_metadata", error))?;
-        if !metadata.is_dir() {
-            continue;
+        if fs::metadata(&project)
+            .map_err(|error| io_error("history_project_metadata", error))?
+            .is_dir()
+        {
+            paths.push(project);
         }
-        let Some(path) = checked(&project, Path::new(&format!("{session_id}.jsonl")))? else {
+    }
+    Ok(Some((paths, workspace)))
+}
+
+fn locate_in_projects(projects: &[PathBuf], session_id: &str) -> rpc::Result<Option<PathBuf>> {
+    let mut found = None;
+    for project in projects {
+        let Some(path) = checked(project, Path::new(&format!("{session_id}.jsonl")))? else {
             continue;
         };
         let metadata =
@@ -136,18 +173,91 @@ fn locate_sync(
             ));
         }
     }
-    let Some(path) = found else {
-        return Ok(None);
-    };
-    let transcript = load(&path)?;
-    let chain = transcript.chain(session_id, &workspace)?;
-    if chain.is_empty() {
-        return Err(rpc::Error::unavailable(
-            "history_chain_absent",
-            "The native transcript has no conversation chain",
-        ));
+    Ok(found)
+}
+
+pub(super) async fn metadata(
+    runtime: &Path,
+    workspace: &Path,
+    session_id: &str,
+) -> rpc::Result<super::title::Projection> {
+    metadata_batch(runtime, workspace, vec![session_id.to_owned()])
+        .await?
+        .pop()
+        .expect("one session metadata result")
+}
+
+pub(super) async fn metadata_batch(
+    runtime: &Path,
+    workspace: &Path,
+    session_ids: Vec<String>,
+) -> rpc::Result<Vec<rpc::Result<super::title::Projection>>> {
+    for session_id in &session_ids {
+        super::validate_uuid(session_id)?;
     }
-    Ok(Some((path, transcript, chain)))
+    let runtime = runtime.to_owned();
+    let workspace = workspace.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let locations = project_paths(&runtime, &workspace)?;
+        Ok(session_ids
+            .iter()
+            .map(|session_id| {
+                let Some((projects, workspace)) = &locations else {
+                    return Ok(super::title::Projection::default());
+                };
+                let Some(path) = locate_in_projects(projects, session_id)? else {
+                    return Ok(super::title::Projection::default());
+                };
+                read_metadata(&path, workspace, session_id)
+            })
+            .collect())
+    })
+    .await
+    .map_err(|error| rpc::Error::internal("session_metadata_task").with_source(error))?
+}
+
+fn read_metadata(
+    path: &Path,
+    workspace: &Path,
+    session_id: &str,
+) -> rpc::Result<super::title::Projection> {
+    let mut file = File::open(path).map_err(|error| io_error("history_source_open", error))?;
+    let size = file
+        .metadata()
+        .map_err(|error| io_error("history_source_metadata", error))?
+        .len();
+    let mut head = Vec::with_capacity(65536);
+    (&mut file)
+        .take(65536)
+        .read_to_end(&mut head)
+        .map_err(|error| io_error("history_source_read", error))?;
+    let mut tail = Vec::new();
+    if size > 65536 {
+        file.seek(SeekFrom::Start(size - 65536))
+            .map_err(|error| io_error("history_source_read", error))?;
+        (&mut file)
+            .take(65536)
+            .read_to_end(&mut tail)
+            .map_err(|error| io_error("history_source_read", error))?;
+    }
+    // Fork roots can retain the source sessionId; cwd still belongs to this Agent.
+    for bytes in head.split(|byte| *byte == b'\n') {
+        let Ok(entry) = serde_json::from_slice::<Value>(bytes) else {
+            continue;
+        };
+        if matches!(entry["type"].as_str(), Some("user" | "assistant"))
+            && entry["isSidechain"] != true
+            && let Some(cwd) = entry["cwd"].as_str()
+        {
+            validate_cwd(cwd, workspace)?;
+            break;
+        }
+    }
+    Ok(super::title::metadata(
+        &head,
+        if tail.is_empty() { &head } else { &tail },
+        session_id,
+    ))
 }
 
 pub(super) async fn delete(runtime: &Path, workspace: &Path, session_id: &str) -> rpc::Result<()> {
