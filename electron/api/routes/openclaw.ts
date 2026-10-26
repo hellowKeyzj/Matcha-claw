@@ -62,7 +62,6 @@ type ControlPhase = 'ready' | 'starting' | 'unavailable';
 type EnvironmentStatus = Readonly<{
   packageExists: boolean;
   isBuilt: boolean;
-  dir: string;
   version?: string;
 }>;
 
@@ -505,10 +504,9 @@ async function readEnvironmentStatus(ctx: OpenClawApiContext): Promise<Environme
 
 function decodeEnvironmentStatus(result: unknown): EnvironmentStatus | null {
   if (!isRecord(result)
-    || !hasExpectedKeys(result, ['packageExists', 'isBuilt', 'dir'], ['version'])
+    || !hasExpectedKeys(result, ['packageExists', 'isBuilt'], ['version'])
     || typeof result.packageExists !== 'boolean'
-    || typeof result.isBuilt !== 'boolean'
-    || !isDirectory(result.dir)) {
+    || typeof result.isBuilt !== 'boolean') {
     return null;
   }
   const version = readOptional(result, 'version', isVersion);
@@ -516,7 +514,6 @@ function decodeEnvironmentStatus(result: unknown): EnvironmentStatus | null {
   return {
     packageExists: result.packageExists,
     isBuilt: result.isBuilt,
-    dir: result.dir,
     ...(version === undefined ? {} : { version }),
   };
 }

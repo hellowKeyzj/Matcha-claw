@@ -56,6 +56,7 @@ const MANAGED_SOURCES: &[(&str, &[&str])] = &[
     ("security-core", &["security-core"]),
     ("browser-relay", &["browser-relay"]),
     ("matchaclaw-media", &["matchaclaw-media"]),
+    ("world-tools", &["world-tools"]),
 ];
 
 pub(crate) fn reconcile(

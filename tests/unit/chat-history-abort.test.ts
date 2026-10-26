@@ -3,7 +3,7 @@ import {
   createHistoryLoadAbortError,
   isHistoryLoadAbortError,
   throwIfHistoryLoadAborted,
-} from '@/stores/chat/history-abort';
+} from '@/plugins/chat/store/history-abort';
 
 describe('chat history abort helpers', () => {
   it('creates abort-shaped error', () => {

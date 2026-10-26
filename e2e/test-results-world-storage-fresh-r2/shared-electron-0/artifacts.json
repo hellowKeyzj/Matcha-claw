@@ -1,0 +1,21 @@
+{
+  "appProjectRoot": "E:\\code\\Matcha-claw",
+  "artifacts": {
+    "main": {
+      "path": "E:\\code\\Matcha-claw\\e2e\\.cache\\app\\dist-electron\\main\\index.js",
+      "sha256": "d86afb6be6b8f6fd7546de9de2ad5c05d9f6df3f7ebe47e031cc04b92f4b14a5"
+    },
+    "preload": {
+      "path": "E:\\code\\Matcha-claw\\e2e\\.cache\\app\\dist-electron\\preload\\index.js",
+      "sha256": "b6a1a194633e7660b3aa785a67fee8b8f699b573bbc76a6ceb44b9ee29734145"
+    },
+    "renderer": {
+      "path": "E:\\code\\Matcha-claw\\e2e\\.cache\\app\\dist\\index.html",
+      "sha256": "c212c3ede206ef58e07e57654b3eaed70b07f9d0410f0f2fc2f4b0116c023d9e"
+    },
+    "runtimeHost": {
+      "path": "E:\\code\\Matcha-claw\\runtime-host\\dist\\win32-x64\\runtime-host.exe",
+      "sha256": "d2aae453e1a083f0b613396557c7af2d11a5bf61110012c2b4cf0a0cd69a56b9"
+    }
+  }
+}

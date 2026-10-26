@@ -3,7 +3,13 @@ pub(crate) mod queries;
 pub(crate) mod receipts;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ConnectorOwnerKey {}
+pub(crate) enum ConnectorOwnerKey {
+    OAuth {
+        endpoint: platform::endpoint::runtime_address::RuntimeEndpoint,
+        connector_id: String,
+        agent_id: Option<String>,
+    },
+}
 
 pub(crate) use self::commands::ConnectorCommand;
 pub(crate) use self::queries::ConnectorQuery;

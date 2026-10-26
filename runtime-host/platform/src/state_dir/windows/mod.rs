@@ -8,7 +8,7 @@ use std::{
         ffi::{OsStrExt, OsStringExt},
         io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
     },
-    path::{Component, Path, PathBuf},
+    path::{Component, Path, PathBuf, Prefix},
     ptr::{null, null_mut},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -111,6 +111,47 @@ impl StateDirHandle {
         Ok(file)
     }
 
+    /// Retains a read-only, no-reparse file handle that denies concurrent writes and deletion.
+    pub fn open_regular_file_readonly(
+        &self,
+        name: &str,
+    ) -> Result<Option<std::fs::File>, StateDirError> {
+        if name.contains(['\0', ':']) {
+            return Err(StateDirError);
+        }
+        let name = relative_name(name)?;
+        let Some(handle) = open_relative(
+            self.raw_handle(),
+            &name,
+            FS::FILE_GENERIC_READ | FS::SYNCHRONIZE,
+            NFS::FILE_NON_DIRECTORY_FILE
+                | NFS::FILE_OPEN_REPARSE_POINT
+                | NFS::FILE_SYNCHRONOUS_IO_NONALERT,
+            FS::FILE_SHARE_READ,
+        )?
+        else {
+            return Ok(None);
+        };
+        let raw = handle.as_raw_handle() as F::HANDLE;
+        verify_regular_file(raw)?;
+        let mut information = FS::FILE_STANDARD_INFO::default();
+        if unsafe {
+            FS::GetFileInformationByHandleEx(
+                raw,
+                FS::FileStandardInfo,
+                (&mut information as *mut FS::FILE_STANDARD_INFO).cast(),
+                size_of::<FS::FILE_STANDARD_INFO>() as u32,
+            )
+        } == 0
+            || information.NumberOfLinks != 1
+            || information.DeletePending
+        {
+            return Err(StateDirError);
+        }
+        verify_owner_only(raw)?;
+        Ok(Some(std::fs::File::from(handle)))
+    }
+
     pub fn replace_regular_file_bounded(
         &self,
         name: &str,
@@ -195,6 +236,7 @@ fn open_directory_relative(
         name,
         FS::FILE_LIST_DIRECTORY | FS::FILE_READ_ATTRIBUTES | FS::SYNCHRONIZE,
         NFS::FILE_DIRECTORY_FILE | NFS::FILE_OPEN_REPARSE_POINT | NFS::FILE_SYNCHRONOUS_IO_NONALERT,
+        FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE | FS::FILE_SHARE_DELETE,
     )?
     else {
         return Ok(None);
@@ -214,6 +256,7 @@ fn open_file_relative(
         NFS::FILE_NON_DIRECTORY_FILE
             | NFS::FILE_OPEN_REPARSE_POINT
             | NFS::FILE_SYNCHRONOUS_IO_NONALERT,
+        FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE | FS::FILE_SHARE_DELETE,
     )?
     else {
         return Ok(None);
@@ -227,6 +270,7 @@ fn open_relative(
     name: &[u16],
     access: u32,
     options: u32,
+    share: u32,
 ) -> Result<Option<OwnedHandle>, StateDirError> {
     let mut object_name = unicode_string(name);
     let attributes = OBJECT_ATTRIBUTES {
@@ -247,7 +291,7 @@ fn open_relative(
             &mut status,
             null(),
             0,
-            FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE | FS::FILE_SHARE_DELETE,
+            share,
             NFS::FILE_OPEN,
             options,
             null(),
@@ -464,7 +508,7 @@ pub(super) fn provision(path: &Path) -> Result<(PathBuf, StateDirIdentity), Stat
 
     let descriptor = SecurityDescriptor::owner_only()?;
     let attributes = descriptor.attributes();
-    let path_name = wide(path.as_os_str())?;
+    let path_name = wide_path(path).map_err(|_| StateDirError)?;
     let created = if unsafe { FS::CreateDirectoryW(path_name.as_ptr(), &attributes) } != 0 {
         true
     } else {
@@ -582,6 +626,39 @@ fn provision_directory_relative(
     Ok((directory, status.Information == 2))
 }
 
+pub(super) fn open_existing(path: &Path) -> Result<(PathBuf, StateDirIdentity), StateDirError> {
+    validate_components(path)?;
+    let mut root = PathBuf::new();
+    let mut custody: Vec<OwnedHandle> = Vec::new();
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            root.push(component.as_os_str());
+            continue;
+        };
+        if custody.is_empty() {
+            let directory = open_handle(&root, FS::FILE_TRAVERSE)?;
+            verify_attributes(directory.as_raw_handle() as F::HANDLE)?;
+            custody.push(directory);
+        }
+        let name: Vec<u16> = name.encode_wide().collect();
+        let directory = open_relative(
+            custody.last().ok_or(StateDirError)?.as_raw_handle() as F::HANDLE,
+            &name,
+            FS::FILE_TRAVERSE | FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | FS::SYNCHRONIZE,
+            NFS::FILE_DIRECTORY_FILE
+                | NFS::FILE_OPEN_REPARSE_POINT
+                | NFS::FILE_SYNCHRONOUS_IO_NONALERT,
+            FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE,
+        )?
+        .ok_or(StateDirError)?;
+        verify_attributes(directory.as_raw_handle() as F::HANDLE)?;
+        custody.push(directory);
+    }
+    let directory = custody.last().ok_or(StateDirError)?.as_raw_handle() as F::HANDLE;
+    verify_owner_only(directory)?;
+    Ok((canonical_path(directory)?, identity(directory)?))
+}
+
 pub(super) fn open(
     path: &Path,
     expected: &StateDirIdentity,
@@ -662,7 +739,7 @@ fn open_directory(path: &Path) -> Result<OwnedHandle, StateDirError> {
 }
 
 fn open_handle(path: &Path, additional_access: u32) -> Result<OwnedHandle, StateDirError> {
-    let name = wide(path.as_os_str())?;
+    let name = wide_path(path).map_err(|_| StateDirError)?;
     let raw = unsafe {
         FS::CreateFileW(
             name.as_ptr(),
@@ -773,16 +850,64 @@ fn external_path(path: Vec<u16>) -> Result<Vec<u16>, StateDirError> {
     Err(StateDirError)
 }
 
-fn wide(value: &OsStr) -> Result<Vec<u16>, StateDirError> {
-    if value.encode_wide().any(|unit| unit == 0) {
-        return Err(StateDirError);
+pub(super) fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    if path.as_os_str().encode_wide().any(|unit| unit == 0) {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
-    Ok(value.encode_wide().chain([0]).collect())
+    let path = std::path::absolute(path)?;
+    let raw = path.as_os_str().encode_wide();
+    let mut value: Vec<u16> = match path.components().next() {
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => {
+            r"\\?\".encode_utf16().chain(raw).collect()
+        }
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::UNC(_, _)) => {
+            r"\\?\UNC\".encode_utf16().chain(raw.skip(2)).collect()
+        }
+        _ => raw.collect(),
+    };
+    value.push(0);
+    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_directory_round_trips_beyond_max_path() {
+        let root = std::env::temp_dir().join(format!(
+            "matcha-state-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let mut path = root.clone();
+        while path.as_os_str().encode_wide().count() < 342 {
+            path.push("long-path-component-0123456789");
+        }
+        let result = (|| -> Result<(), StateDirError> {
+            let directory = super::super::CanonicalStateDir::provision_private(&path)?;
+            directory.replace_regular_file_bounded("value", b"original", 32)?;
+            let reopened = super::super::CanonicalStateDir::open_existing(&path)?;
+            if directory != reopened
+                || reopened.read_regular_file_bounded("value", 32)? != Some(b"original".to_vec())
+            {
+                return Err(StateDirError);
+            }
+            let child = super::super::CanonicalStateDir::provision(path.join("child"))?;
+            child.replace_regular_file_bounded("value", b"child", 32)?;
+            Ok(())
+        })();
+        let cleanup = std::fs::remove_dir_all(&root);
+        assert!(
+            result.is_ok(),
+            "verified private directory rejected a long path"
+        );
+        cleanup.unwrap();
+    }
 
     #[test]
     fn external_path_removes_extended_dos_and_unc_prefixes() {

@@ -359,6 +359,10 @@ pnpm package:linux        # Linux向けにパッケージ化
 
 リリース用の GitHub Actions では、同梱する MiniLM モデルを自動でダウンロードしてからパッケージします。ローカルで `pnpm build` や `pnpm package*` を実行し、`memory-lancedb-pro` のオフライン `local-minilm` 資産もインストーラに含めたい場合は、先に `pnpm run download:minilm-model` を実行してください。
 
+### Electron E2E
+
+`pnpm run check:e2e` で Screenplay の依存ルールを検証し、`pnpm run test:e2e` で実際のアプリをビルドしてテストします。1回の実行で専用テストプロファイルと単一の Electron インスタンスを共有します。ネイティブ成果物の準備、レポート、テスト追加のルールは [E2E ガイド](e2e/README.md) を参照してください。
+
 ### 技術スタック
 
 | レイヤー | 技術 |

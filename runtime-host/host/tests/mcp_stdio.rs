@@ -130,31 +130,51 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
     assert_eq!(
         patch["required"],
         json!([
-            "teamId", "runId", "expectedGraphVersion", "commandId", "idempotencyKey", "operations"
+            "teamId",
+            "runId",
+            "expectedGraphVersion",
+            "commandId",
+            "idempotencyKey",
+            "operations"
         ])
     );
-    assert_eq!(patch["if"], json!({
-        "properties": { "operations": { "contains": {
-            "type": "object", "properties": { "op": { "const": "set_node_prompt" } }, "required": ["op"]
-        } } },
-        "required": ["operations"]
-    }));
-    assert_eq!(patch["then"], json!({
-        "required": ["nodeId", "nodeExecutionId"],
-        "properties": {
-            "designEpoch": false, "promptGeneration": false,
-            "baseGraphId": false, "baseWorkflowPlanId": false,
-            "operations": { "items": { "properties": { "op": { "const": "set_node_prompt" } } } }
-        }
-    }));
-    assert_eq!(patch["else"], json!({
-        "required": ["designEpoch", "promptGeneration", "baseGraphId", "baseWorkflowPlanId"],
-        "properties": { "nodeId": false, "nodeExecutionId": false }
-    }));
-    assert_eq!(operations[5]["properties"]["op"]["const"], "set_node_prompt");
+    assert_eq!(
+        patch["if"],
+        json!({
+            "properties": { "operations": { "contains": {
+                "type": "object", "properties": { "op": { "const": "set_node_prompt" } }, "required": ["op"]
+            } } },
+            "required": ["operations"]
+        })
+    );
+    assert_eq!(
+        patch["then"],
+        json!({
+            "required": ["nodeId", "nodeExecutionId"],
+            "properties": {
+                "designEpoch": false, "promptGeneration": false,
+                "baseGraphId": false, "baseWorkflowPlanId": false,
+                "operations": { "items": { "properties": { "op": { "const": "set_node_prompt" } } } }
+            }
+        })
+    );
+    assert_eq!(
+        patch["else"],
+        json!({
+            "required": ["designEpoch", "promptGeneration", "baseGraphId", "baseWorkflowPlanId"],
+            "properties": { "nodeId": false, "nodeExecutionId": false }
+        })
+    );
+    assert_eq!(
+        operations[5]["properties"]["op"]["const"],
+        "set_node_prompt"
+    );
     assert_eq!(operations[5]["required"], json!(["op", "nodeId", "prompt"]));
     let edge = &patch["properties"]["operations"]["items"]["oneOf"][2]["properties"]["edge"];
-    assert_eq!(edge["required"], json!(["edgeId", "sourceNodeId", "targetNodeId"]));
+    assert_eq!(
+        edge["required"],
+        json!(["edgeId", "sourceNodeId", "targetNodeId"])
+    );
     let node = &patch["properties"]["operations"]["items"]["oneOf"][0]["properties"]["node"];
     assert_eq!(node["properties"]["config"]["type"], "object");
     assert!(node.get("allOf").is_none());
@@ -163,16 +183,33 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
     assert!(node["properties"].get("groupId").is_none());
     for (branch, kind, fields) in [
         (&kinds[0], json!({ "const": "start" }), vec!["trigger"]),
-        (&kinds[1], json!({ "const": "work" }), vec!["outputArtifactKind", "prompt", "sessionRef"]),
-        (&kinds[2], json!({ "const": "review" }), vec!["prompt", "sessionRef"]),
+        (
+            &kinds[1],
+            json!({ "const": "work" }),
+            vec!["outputArtifactKind", "prompt", "sessionRef"],
+        ),
+        (
+            &kinds[2],
+            json!({ "const": "review" }),
+            vec!["prompt", "sessionRef"],
+        ),
         (&kinds[3], json!({ "const": "script_review" }), vec!["rule"]),
-        (&kinds[4], json!({ "enum": ["human_decision", "join", "end"] }), vec![]),
+        (
+            &kinds[4],
+            json!({ "enum": ["human_decision", "join", "end"] }),
+            vec![],
+        ),
     ] {
         assert_eq!(branch["properties"]["kind"], kind);
         let config = &branch["properties"]["config"];
         assert_eq!(config["type"], "object");
         assert_eq!(config["additionalProperties"], false);
-        let mut keys = config["properties"].as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
+        let mut keys = config["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         keys.sort_unstable();
         assert_eq!(keys, fields);
     }
@@ -184,10 +221,19 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
         assert_eq!(config["properties"]["sessionRef"]["pattern"], "^rs[0-9]+$");
     }
     assert_eq!(kinds[3]["required"], json!(["config"]));
-    assert_eq!(kinds[3]["properties"]["config"]["required"], json!(["rule"]));
-    assert_eq!(kinds[3]["properties"]["config"]["properties"]["rule"]["enum"], json!([
-        "pass_through", "assert_all_upstream_completed", "assert_no_blocking_gate", "assert_artifact_exists"
-    ]));
+    assert_eq!(
+        kinds[3]["properties"]["config"]["required"],
+        json!(["rule"])
+    );
+    assert_eq!(
+        kinds[3]["properties"]["config"]["properties"]["rule"]["enum"],
+        json!([
+            "pass_through",
+            "assert_all_upstream_completed",
+            "assert_no_blocking_gate",
+            "assert_artifact_exists"
+        ])
+    );
     for index in [0, 4] {
         assert_eq!(kinds[index]["properties"]["config"]["required"], json!([]));
     }
@@ -199,32 +245,44 @@ fn serves_initialize_and_the_fixed_tool_list_over_both_framings() {
         context["properties"]["view"]["enum"],
         json!(["current_node", "graph_summary", "run_prompts"])
     );
-    assert_eq!(context["if"], json!({
-        "properties": { "view": { "const": "run_prompts" } }, "required": ["view"]
-    }));
-    assert_eq!(context["then"], json!({
-        "required": ["nodeId", "nodeExecutionId"],
-        "properties": {
-            "nodeExecutionId": { "type": "string", "minLength": 1 },
-            "designEpoch": false, "promptGeneration": false
-        }
-    }));
-    assert_eq!(context["properties"]["nodeExecutionId"]["type"], json!(["string", "null"]));
-    assert_eq!(context["else"], json!({
-        "properties": { "nodeId": false },
-        "if": { "anyOf": [
-            { "required": ["designEpoch"] },
-            { "required": ["promptGeneration"] }
-        ] },
-        "then": { "required": ["designEpoch", "promptGeneration"] },
-        "else": {
-            "if": { "properties": { "view": { "const": "current_node" } }, "required": ["view"] },
-            "then": {
-                "required": ["nodeExecutionId"],
-                "properties": { "nodeExecutionId": { "type": "string", "minLength": 1 } }
+    assert_eq!(
+        context["if"],
+        json!({
+            "properties": { "view": { "const": "run_prompts" } }, "required": ["view"]
+        })
+    );
+    assert_eq!(
+        context["then"],
+        json!({
+            "required": ["nodeId", "nodeExecutionId"],
+            "properties": {
+                "nodeExecutionId": { "type": "string", "minLength": 1 },
+                "designEpoch": false, "promptGeneration": false
             }
-        }
-    }));
+        })
+    );
+    assert_eq!(
+        context["properties"]["nodeExecutionId"]["type"],
+        json!(["string", "null"])
+    );
+    assert_eq!(
+        context["else"],
+        json!({
+            "properties": { "nodeId": false },
+            "if": { "anyOf": [
+                { "required": ["designEpoch"] },
+                { "required": ["promptGeneration"] }
+            ] },
+            "then": { "required": ["designEpoch", "promptGeneration"] },
+            "else": {
+                "if": { "properties": { "view": { "const": "current_node" } }, "required": ["view"] },
+                "then": {
+                    "required": ["nodeExecutionId"],
+                    "properties": { "nodeExecutionId": { "type": "string", "minLength": 1 } }
+                }
+            }
+        })
+    );
     for branch in [patch, context].into_iter().chain(operations) {
         assert_eq!(branch["additionalProperties"], false);
     }
@@ -419,7 +477,8 @@ fn rejects_malformed_framing_and_unknown_tool_arguments_without_leaking_input() 
     assert_eq!(response["id"], "invalid-tool");
     assert!(response.get("error").is_none());
     assert_eq!(response["result"]["isError"], true);
-    let result: Value = serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let result: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(
         result,
         json!({
@@ -477,13 +536,17 @@ fn rejects_terminal_event_without_resolution_fields() {
     let response = decode_responses(&output.stdout).remove(0);
     assert!(response.get("error").is_none());
     assert_eq!(response["result"]["isError"], true);
-    let result: Value = serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(result, json!({
-        "success": false,
-        "errorCode": "invalid_params",
-        "fieldPath": "event",
-        "error": "Use progress, request_input, or request_approval; terminal results use runtime receipts."
-    }));
+    let result: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        result,
+        json!({
+            "success": false,
+            "errorCode": "invalid_params",
+            "fieldPath": "event",
+            "error": "Use progress, request_input, or request_approval; terminal results use runtime receipts."
+        })
+    );
 }
 
 #[test]
@@ -517,13 +580,17 @@ fn rejects_removed_terminal_node_event_even_with_legacy_resolution_fields() {
     let response = decode_responses(&output.stdout).remove(0);
     assert!(response.get("error").is_none());
     assert_eq!(response["result"]["isError"], true);
-    let result: Value = serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(result, json!({
-        "success": false,
-        "errorCode": "invalid_params",
-        "fieldPath": "arguments",
-        "error": "Remove unsupported fields; use only fields listed in this tool's input schema."
-    }));
+    let result: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        result,
+        json!({
+            "success": false,
+            "errorCode": "invalid_params",
+            "fieldPath": "arguments",
+            "error": "Remove unsupported fields; use only fields listed in this tool's input schema."
+        })
+    );
 }
 
 struct Home(PathBuf);
@@ -589,11 +656,18 @@ fn run_with_host(home: &Home, input: &[u8]) -> std::process::Output {
     let host = runtime_host::HostInput {
         // Deliberately absent artifacts keep peer runtimes and model calls out of this fixture.
         matcha: runtime_host::MatchaAgentInput {
-            bun_executable: home.0.join("missing-bun"),
-            entry: home.0.join("missing-matcha-entry"),
+            server_executable: home.0.join("missing-matcha-app-server"),
+            cli_executable: home.0.join("missing-bun"),
+            cli_args: vec![
+                home.0
+                    .join("missing-matcha-entry")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
             working_directory: home.0.clone(),
             storage_root: home.0.join("matcha-storage"),
             port: matcha_port,
+            world_runtime_host: None,
             #[cfg(windows)]
             git_bash: home.0.join("missing-git-bash"),
             #[cfg(unix)]
@@ -617,6 +691,7 @@ fn run_with_host(home: &Home, input: &[u8]) -> std::process::Output {
             port: openclaw_port,
             sealed_endpoint: None,
             sealed_token: None,
+            world_runtime_host: None,
             client_metadata: openclaw::gateway::client::GatewayClientMetadata::try_new(
                 "test".into(),
                 std::env::consts::OS.into(),
@@ -632,6 +707,11 @@ fn run_with_host(home: &Home, input: &[u8]) -> std::process::Output {
         .unwrap(),
         organization_store: organization::open_organization_store(&home.0.join("state")).unwrap(),
         runtime_state_dir: home.0.join("state"),
+        world_postgres: None,
+        world_storage_targets: Vec::new(),
+        world_source_access: None,
+        initial_world: None,
+        world_peer_endpoint: None,
         searxng_resources_dir: home.0.join("searxng"),
         app_log_dir: home.0.join("logs"),
         parent_callback_base_url: "http://127.0.0.1:1".into(),
@@ -793,13 +873,15 @@ fn prepare_evidence_run(home: &Home) {
                             .runtime_endpoint_reference(),
                     )
                     .unwrap(),
-                    vec![organization::ManualTeamRoleBinding::try_new(
-                        RoleId::try_new("leader").unwrap(),
-                        "Leader",
-                        organization::ManagedAgentReference::try_new("leader").unwrap(),
-                        true,
-                    )
-                    .unwrap()],
+                    vec![
+                        organization::ManualTeamRoleBinding::try_new(
+                            RoleId::try_new("leader").unwrap(),
+                            "Leader",
+                            organization::ManagedAgentReference::try_new("leader").unwrap(),
+                            true,
+                        )
+                        .unwrap(),
+                    ],
                     organization::IdempotencyKey::try_new("materialize:evidence").unwrap(),
                 )
                 .await
@@ -869,7 +951,10 @@ fn prepare_evidence_run(home: &Home) {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(matches!(saved, organization::TeamRunCommandOutcome::OutcomeUnknown));
+            assert!(matches!(
+                saved,
+                organization::TeamRunCommandOutcome::OutcomeUnknown
+            ));
             owner.drain_and_join().await.unwrap();
             system.drain_and_join().await.unwrap();
         });

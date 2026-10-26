@@ -1,10 +1,10 @@
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
-import { useChatStore, type ChatStoreState } from '@/stores/chat';
-import { findSessionRecordKey } from '@/stores/chat/session-identity';
-import { readSessionsFromState, readSessionTitlesFromState, resolveSessionListLabel } from '@/stores/chat/session-helpers';
-import { useTeamsStore } from '@/stores/teams';
+import { useChatStore, type ChatStoreState } from '@/plugins/chat/store';
+import { findSessionRecordKey } from '@/plugins/chat/store/session-identity';
+import { readSessionsFromState, readSessionTitlesFromState, resolveSessionListLabel } from '@/plugins/chat/store/session-helpers';
+import { useTeamsStore } from '@/plugins/teams/store';
 import type { TeamRunListItem } from '@/services/openclaw/team-runtime-client';
 import type { SessionIdentity } from '@/types/desktop/runtime-address';
 

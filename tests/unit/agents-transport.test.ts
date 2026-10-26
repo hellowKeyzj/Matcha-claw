@@ -25,6 +25,18 @@ const created = { callId: 'a'.repeat(32), accepted: true };
 const resultRequest = (operationId: string, agentId?: string) => ({
   callId: created.callId, operationId, endpoint, ...(agentId === undefined ? {} : { agentId }),
 });
+const displayConfigurationRequest = {
+  id: 'subagent.management',
+  operationId: 'subagents.displayConfig.get',
+  scope: { kind: 'agent', endpoint, agentId: 'main' },
+  target: { kind: 'agent', agentId: 'main' },
+  input: { kind: 'displayConfiguration', endpoint },
+} as const;
+const displayConfiguration = {
+  success: true,
+  defaults: { model: null, skills: ['research'] },
+  agents: [{ id: 'writer', description: 'Writes copy', model: { primary: 'provider/one', fallbacks: [] } }],
+};
 
 describe('Electron Main agents transport', () => {
   it('signs and sends only the fixed agents create DTO', async () => {
@@ -342,18 +354,14 @@ describe('Electron Main agents transport', () => {
     });
   });
 
-  it('delivers the global configuration display without private workspace data', async () => {
-    const request = {
-      id: 'subagent.management',
-      operationId: 'subagents.displayConfig.get',
-      scope: { kind: 'agent', endpoint, agentId: 'main' },
-      target: { kind: 'agent', agentId: 'main' },
-      input: { kind: 'displayConfiguration', endpoint },
-    } as const;
+  it.each([
+    {},
+    { skills: [] },
+    { skills: ['research'] },
+  ])('delivers configuration agent skills without normalization: %j', async (selection) => {
     const body = {
-      success: true,
-      defaults: { model: null, skills: ['research'] },
-      agents: [{ id: 'writer', description: 'Writes copy', model: { primary: 'provider/one', fallbacks: [] }, skills: ['research'] }],
+      ...displayConfiguration,
+      agents: displayConfiguration.agents.map((agent) => ({ ...agent, ...selection })),
     };
     const fetcher = vi.fn().mockResolvedValue({ status: 200, json: async () => body });
     const transport = createAgentsTransport(
@@ -362,18 +370,36 @@ describe('Electron Main agents transport', () => {
       fetcher,
     );
 
-    await expect(transport.execute(request)).resolves.toEqual({ status: 200, body });
+    await expect(transport.execute(displayConfigurationRequest)).resolves.toStrictEqual({ status: 200, body: structuredClone(body) });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    { skills: undefined },
+    { skills: null },
+    { skills: 'research' },
+    { skills: ['research', 1] },
+    { workspace: 'C:/private' },
+    { description: undefined },
+    { model: 'provider/one' },
+  ])('rejects invalid or private configuration agent fields: %j', async (invalid) => {
+    const body = {
+      ...displayConfiguration,
+      agents: displayConfiguration.agents.map((agent) => ({ ...agent, ...invalid })),
+    };
+    const transport = createAgentsTransport(
+      { verificationKey: 'public', signDecision: () => 'signed-decision' },
+      34_225,
+      vi.fn().mockResolvedValue({ status: 200, json: async () => body }),
+    );
+
+    await expect(transport.execute(displayConfigurationRequest)).resolves.toEqual({
+      status: 503,
+      body: { success: false, error: 'Subagent management is unavailable' },
+    });
+  });
+
   it('rejects configuration responses that expose private workspace data', async () => {
-    const request = {
-      id: 'subagent.management',
-      operationId: 'subagents.displayConfig.get',
-      scope: { kind: 'agent', endpoint, agentId: 'main' },
-      target: { kind: 'agent', agentId: 'main' },
-      input: { kind: 'displayConfiguration', endpoint },
-    } as const;
     const transport = createAgentsTransport(
       { verificationKey: 'public', signDecision: () => 'signed-decision' },
       34_225,
@@ -387,7 +413,7 @@ describe('Electron Main agents transport', () => {
       }),
     );
 
-    await expect(transport.execute(request)).resolves.toEqual({
+    await expect(transport.execute(displayConfigurationRequest)).resolves.toEqual({
       status: 503,
       body: { success: false, error: 'Subagent management is unavailable' },
     });

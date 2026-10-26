@@ -1,4 +1,5 @@
 pub(crate) mod adapters;
+pub(crate) mod oauth;
 
 use connectors::{Connector, ConnectorCatalog, ports};
 use platform::state_dir::CanonicalStateDir;
@@ -27,6 +28,13 @@ pub async fn apply_runtime_mcp_projection(
 }
 
 pub async fn probe_external_connector(connector: &Connector) -> ports::ConnectorObservation {
+    if connector.auth() == Some(connectors::McpAuth::OAuth) {
+        return if connector.enabled() {
+            ports::ConnectorObservation::Unknown
+        } else {
+            ports::ConnectorObservation::Disabled
+        };
+    }
     map_observation(external::probe_external_connector(connector).await)
 }
 

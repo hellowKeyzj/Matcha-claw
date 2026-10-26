@@ -1,4 +1,5 @@
 import type { BrowserWindow } from 'electron';
+import type { WorldHint } from '../../src/types/world';
 import { decodeBoardChangedEvent, decodeBoardCommandEvent } from '../../src/types/board';
 import type { HostEventBus } from '../api/event-bus';
 import type { DirectRuntimeHostExit } from './runtime-host-delivery/direct-host';
@@ -32,6 +33,7 @@ type HostEventName =
   | 'runtime-host:restart'
   | 'runtime-host:disconnected'
   | 'package:changed'
+  | 'app-plugins:changed'
   | 'license:gate-changed'
   | 'team:event'
   | 'team:changed'
@@ -46,7 +48,9 @@ type HostEventName =
   | 'openclaw:cron'
   | 'cron:changed'
   | 'call:changed'
-  | 'calls:resync';
+  | 'calls:resync'
+  | 'world:changed'
+  | 'world:resync-required';
 
 type EmitHostEvent = (eventName: HostEventName, payload: unknown) => void;
 
@@ -77,7 +81,7 @@ export function registerMainEventBridge(deps: {
   hostEventBus: HostEventBus;
   getMainWindow: () => BrowserWindow | null;
 }): () => void {
-  const unsubscribers = (['package:changed', 'license:gate-changed'] as const).map((eventName) =>
+  const unsubscribers = (['package:changed', 'app-plugins:changed', 'license:gate-changed'] as const).map((eventName) =>
     deps.hostEventBus.on(eventName, (payload) => {
       sendRendererHostEvent(deps.getMainWindow(), eventName, payload);
     }),
@@ -148,6 +152,17 @@ export function registerHostEventBridge(deps: {
 
   unsubscribers.push(deps.runtimeHost.onSafeEvent((event) => {
     switch (event.type) {
+      case 'world.changed': {
+        const payload = { kind: 'changed', world: event.world, incarnation: event.incarnation,
+          resource: event.resource, revision: event.revision } satisfies WorldHint;
+        emit('world:changed', payload);
+        return;
+      }
+      case 'world.resync-required': {
+        const payload = { kind: 'resync_required', world: event.world, incarnation: event.incarnation } satisfies WorldHint;
+        emit('world:resync-required', payload);
+        return;
+      }
       case 'board:changed': {
         const payload = decodeBoardChangedEvent({ identity: event.identity, revision: event.revision,
           ...(event.widget === undefined ? {} : { widget: event.widget }) });

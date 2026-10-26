@@ -16,6 +16,7 @@ describe('provider accounts helper', () => {
           id: 'zai', provider: 'zai-global', label: 'Z.AI Global', enabled: true, kind: 'chat',
           authMode: 'apiKey', revision: 2,
         }],
+        reports: [],
       })
       .mockResolvedValueOnce({ hasKey: true })
       .mockResolvedValueOnce({ hasKey: true });
@@ -62,6 +63,7 @@ describe('provider accounts helper', () => {
         }),
       ]),
       revisions: { 'acc-1': 1, zai: 2 },
+      reports: [],
     });
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(1, '/api/provider-accounts', undefined);
     expect(hostApiFetchMock).toHaveBeenNthCalledWith(2, '/api/provider-accounts/acc-1/has-api-key', undefined);
@@ -99,6 +101,7 @@ describe('provider accounts helper', () => {
         { ...validVendor, defaultAuthMode: 'local' },
         { ...validVendor, modelCapabilities: ['not-a-capability'] },
       ],
+      reports: [],
     }).vendors).toEqual([validVendor]);
   });
 

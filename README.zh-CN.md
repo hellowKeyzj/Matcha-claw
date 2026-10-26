@@ -363,6 +363,10 @@ pnpm package:linux        # 为 Linux 打包
 
 发布流程里，GitHub Actions 会自动下载并打包 MiniLM 本地模型。如果你在本地执行 `pnpm build` 或 `pnpm package*`，又希望安装包里包含 `memory-lancedb-pro` 的离线 `local-minilm` 资源，请先运行 `pnpm run download:minilm-model`。
 
+### Electron E2E
+
+运行 `pnpm run check:e2e` 检查 Screenplay 分层，再运行 `pnpm run test:e2e` 构建并验证真实应用。一次运行共享专用测试 Profile 和单个 Electron 实例。原生工件前提、报告和新增测试规则见 [E2E 指南](e2e/README.md)。
+
 ### 技术栈
 
 | 层级 | 技术 |

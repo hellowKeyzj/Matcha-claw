@@ -87,7 +87,7 @@ import {
   saveGlobalConfig,
 } from './utils/config.js';
 import { seedEarlyInput, stopCapturingEarlyInput } from './utils/earlyInput.js';
-import { getInitialEffortSetting, parseEffortValue } from './utils/effort.js';
+import { EFFORT_LEVELS, getInitialEffortSetting, getModelEffortCapabilities, isEffortLevel, parseEffortValue } from './utils/effort.js';
 import {
   getInitialFastModeSetting,
   isFastModeEnabled,
@@ -1372,12 +1372,11 @@ async function run(): Promise<CommanderCommand> {
       `Model for the current session. Provide an alias for the latest model (e.g. 'sonnet' or 'opus') or a model's full name (e.g. 'claude-sonnet-4-6').`,
     )
     .addOption(
-      new Option('--effort <level>', `Effort level for the current session (low, medium, high, max)`).argParser(
+      new Option('--effort <level>', `Effort level for the current session (${EFFORT_LEVELS.join(', ')})`).argParser(
         (rawValue: string) => {
           const value = rawValue.toLowerCase();
-          const allowed = ['low', 'medium', 'high', 'max'];
-          if (!allowed.includes(value)) {
-            throw new InvalidArgumentError(`It must be one of: ${allowed.join(', ')}`);
+          if (!isEffortLevel(value)) {
+            throw new InvalidArgumentError(`It must be one of: ${EFFORT_LEVELS.join(', ')}`);
           }
           return value;
         },
@@ -2618,6 +2617,10 @@ async function run(): Promise<CommanderCommand> {
       setInitialMainLoopModel(getUserSpecifiedModelSetting() || null);
       const initialMainLoopModel = getInitialMainLoopModel();
       const resolvedInitialModel = parseUserSpecifiedModel(initialMainLoopModel ?? getDefaultMainLoopModel());
+      if (options.effort && !getModelEffortCapabilities(resolvedInitialModel).supportedEffortLevels.includes(options.effort)) {
+        process.stderr.write(`Error: Effort "${options.effort}" is not supported by model "${resolvedInitialModel}" on the active provider route.\n`);
+        process.exit(1);
+      }
 
       let advisorModel: string | undefined;
       if (isAdvisorEnabled()) {

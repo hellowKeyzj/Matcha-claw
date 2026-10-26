@@ -49,6 +49,7 @@ pub struct OpenClawInput {
     pub port: u16,
     pub sealed_endpoint: Option<String>,
     pub sealed_token: Option<String>,
+    pub world_runtime_host: Option<crate::world::WorldRuntimeHost>,
     pub client_metadata: GatewayClientMetadata,
     pub report_diagnostic: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
     #[cfg(unix)]
@@ -61,6 +62,7 @@ pub struct OpenClawDriver {
     pub(crate) repair_state: StdMutex<runtime_directory::RuntimeRepairSnapshot>,
     pub(crate) doctor_repair: OpenClawDoctorRepair,
     pub(crate) clawhub_containment: OneShotContainment,
+    pub(crate) mcp_oauth: Arc<crate::surfaces::connectors::oauth::McpOAuth>,
     pub(crate) diagnostic_state: LifecycleDiagnosticState,
     pub(crate) runtime_host_mcp_executable: PathBuf,
     pub(crate) runtime_host_mcp_state_dir: PathBuf,
@@ -264,6 +266,7 @@ impl OpenClawDriver {
             state_dir: state_dir.clone(),
             port: input.port,
             secret: Arc::clone(&secret),
+            world_runtime_host: input.world_runtime_host,
         };
         let launch = launch_input
             .clone()
@@ -370,7 +373,7 @@ impl PreparedOpenClaw {
         let control_readiness = gateway.control_readiness();
         let gateway_control = gateway.control();
         let readiness = gateway.readiness_policy();
-        let graceful_stop = gateway.graceful_stop_policy();
+        let graceful_stop = crate::lifecycle::stop::OpenClawGracefulStop::new();
         let session_gateway = gateway.session_gateway();
         let usage = gateway.usage_projection();
         let gateway = Arc::new(gateway);
@@ -387,6 +390,7 @@ impl PreparedOpenClaw {
         let stdio_activation = OpenClawStdioActivation::with_log_buffer(
             diagnostic_reporter.clone(),
             lifecycle_logs.clone(),
+            graceful_stop.clone(),
         );
 
         #[cfg(windows)]
@@ -395,6 +399,14 @@ impl PreparedOpenClaw {
         let containment = ProcessContainment::guardian(self.guardian_executable)
             .expect("prepared OpenClaw guardian executable must be absolute");
         let clawhub_containment = OneShotContainment::from_process_containment(containment.clone());
+        let mcp_oauth = Arc::new(crate::surfaces::connectors::oauth::McpOAuth::new(
+            self.electron_image.clone(),
+            self.entry.clone(),
+            self.openclaw_dir.clone(),
+            self.working_directory.clone(),
+            self.state_dir.clone(),
+            containment.clone(),
+        ));
         let supervisor = supervise(
             containment,
             self.launch,
@@ -412,7 +424,7 @@ impl PreparedOpenClaw {
         );
         let control_ui_url = self.control_ui_url;
         Ok(OpenClawDriver {
-            owner: StdMutex::new(Some(SupervisorOwner::new(supervisor))),
+            owner: StdMutex::new(Some(SupervisorOwner::new(supervisor, mcp_oauth.clone()))),
             lifecycle_gate: Arc::new(Mutex::new(())),
             repair_state: StdMutex::new(runtime_directory::RuntimeRepairSnapshot {
                 phase: runtime_directory::RuntimeRepairPhase::Idle,
@@ -421,6 +433,7 @@ impl PreparedOpenClaw {
             }),
             doctor_repair: self.doctor_repair,
             clawhub_containment,
+            mcp_oauth,
             diagnostic_state,
             runtime_host_mcp_executable: self.runtime_host_mcp_executable,
             runtime_host_mcp_state_dir: self.runtime_host_mcp_state_dir,

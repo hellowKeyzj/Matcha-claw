@@ -2,15 +2,57 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import i18n from '@/i18n';
+import { runtimeInstanceScope, runtimeScopeQuery } from '@/types/desktop/runtime-address';
+import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 
 const hostApiFetchMock = vi.fn();
+const scope = runtimeInstanceScope({ kind: 'native-runtime', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' });
+const catalogPath = `/api/plugins/catalog?${runtimeScopeQuery(scope)}`;
+const receipt = { callId: 'a'.repeat(32), accepted: true } as const;
+const endpoint: RuntimeEndpointSummary = {
+  id: 'openclaw-local',
+  protocolId: 'openclaw',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+  endpointRef: scope.endpoint,
+  source: { kind: 'runtime-adapter', runtimeAdapterId: 'openclaw', runtimeInstanceId: 'local' },
+  location: { kind: 'local' },
+  lifecycle: { phase: 'ready', connected: true, ready: true, updatedAt: null },
+  displayName: 'OpenClaw',
+  agentIds: ['main'],
+  defaultAgentId: 'main',
+  agents: [],
+  acceptsDynamicAgents: false,
+  capabilities: { chat: true, streaming: true, tools: true, approvals: true, replay: true, modelSelection: true, supportsGoal: false },
+  capabilityFamilies: [{ family: 'session', availability: 'supported' }],
+  controlState: { connection: null, readiness: { ready: true, phase: 'ready' }, capabilities: null, updatedAt: null },
+};
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
+  hostApiFetchDecoded: async (path: string, decode: (value: unknown) => unknown, options: unknown) => (
+    decode(await hostApiFetchMock(path, options))
+  ),
+  hostRuntimeEndpointsList: async () => ({ endpoints: [endpoint] }),
 }));
+
+async function mountPage() {
+  const [{ createPluginHost }, { PluginHostProvider }, { applicationShellPlugin }, { agentsPlugin }, { nativePluginsPlugin }, { PluginsPage }] = await Promise.all([
+    import('@/plugin-host/core'),
+    import('@/plugin-host/react'),
+    import('@/app/extensions'),
+    import('@/plugins/agents/plugin'),
+    import('@/plugins/native-plugins/plugin'),
+    import('@/plugins/native-plugins/page'),
+  ]);
+  const host = createPluginHost([applicationShellPlugin, agentsPlugin, nativePluginsPlugin]);
+  return render(<PluginHostProvider host={host}><MemoryRouter initialEntries={['/plugins']}><PluginsPage /></MemoryRouter></PluginHostProvider>);
+}
 
 function buildCatalogPayload() {
   return {
+    success: true,
+    execution: { enabledPluginIds: ['plugin-a'] },
     plugins: [{
       runtime: 'openclaw',
       id: 'plugin-a',
@@ -19,6 +61,9 @@ function buildCatalogPayload() {
       kind: 'builtin',
       platform: 'openclaw',
       enabled: true,
+      installed: true,
+      updateAvailable: false,
+      companionSkillReady: true,
       description: 'Plugin description',
       companionSkillSlugs: ['skill-a', 'skill-b'],
     }],
@@ -53,25 +98,30 @@ describe('plugins page', () => {
     await i18n.changeLanguage('en');
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/plugins/runtime') return buildRuntimePayload();
-      if (path === '/api/plugins/catalog') return buildCatalogPayload();
-      if (path === '/api/plugins/configuration') return { outcome: 'configured' };
-      if (path === '/api/plugins/operation') return { outcome: 'configured' };
+      if (path === catalogPath) return buildCatalogPayload();
+      if (path === '/api/plugins/configuration') return receipt;
+      if (path === '/api/calls/get') return {
+        callId: receipt.callId, module: 'plugins', command: 'plugins.configuration', status: 'succeeded',
+        start: 1, end: 2, revision: 1,
+        detail: { kind: 'configuration', pluginId: 'plugin-a', enabled: false, outcome: 'configured' },
+      };
       throw new Error(`Unexpected path: ${path}`);
     });
+    const { useRuntimeEndpointsStore } = await import('@/stores/runtime-endpoints');
+    await useRuntimeEndpointsStore.getState().refresh();
   });
 
   it('renders the catalog table with metadata after its independent load', async () => {
-    const { PluginsPage } = await import('@/pages/Plugins');
     let resolveCatalog: ((value: ReturnType<typeof buildCatalogPayload>) => void) | undefined;
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path === '/api/plugins/runtime') return buildRuntimePayload();
-      if (path === '/api/plugins/catalog') {
+      if (path === catalogPath) {
         return await new Promise((resolve) => { resolveCatalog = resolve; });
       }
       throw new Error(`Unexpected path: ${path}`);
     });
 
-    render(<MemoryRouter><PluginsPage /></MemoryRouter>);
+    await mountPage();
 
     expect(screen.queryByText('Runtime Status')).not.toBeInTheDocument();
     expect(screen.queryByText('Plugin A')).not.toBeInTheDocument();
@@ -89,8 +139,7 @@ describe('plugins page', () => {
   });
 
   it('renders the catalog enable switch without exposing plugin operations', async () => {
-    const { PluginsPage } = await import('@/pages/Plugins');
-    render(<MemoryRouter><PluginsPage /></MemoryRouter>);
+    await mountPage();
 
     const pluginSwitch = await screen.findByRole('switch');
     expect(pluginSwitch).toBeInTheDocument();
@@ -100,8 +149,7 @@ describe('plugins page', () => {
   });
 
   it('configures a plugin through the fixed endpoint', async () => {
-    const { PluginsPage } = await import('@/pages/Plugins');
-    render(<MemoryRouter><PluginsPage /></MemoryRouter>);
+    await mountPage();
 
     const pluginSwitch = await screen.findByRole('switch');
     fireEvent.click(pluginSwitch);

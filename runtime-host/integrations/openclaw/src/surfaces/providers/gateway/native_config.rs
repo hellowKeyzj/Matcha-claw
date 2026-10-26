@@ -179,6 +179,7 @@ impl ProviderNativeConfigurationOperation {
         routing: Option<&ProviderRouting>,
         retired: &[ProviderAccount],
         required_auth_accounts: &BTreeSet<::provider::ProviderAccountId>,
+        account_failures: &mut Vec<::provider::ProviderAccountExecution>,
         auth_state_refresh_required: bool,
         now_millis: u64,
     ) -> ProviderNativeConfigurationEvidence {
@@ -245,6 +246,7 @@ impl ProviderNativeConfigurationOperation {
             routing,
             retired,
             required_auth_accounts,
+            account_failures,
             now_millis,
         ) {
             Ok(changed) => changed,
@@ -820,6 +822,7 @@ fn apply_provider_projection(
     routing: Option<&ProviderRouting>,
     retired: &[ProviderAccount],
     required_auth_accounts: &BTreeSet<::provider::ProviderAccountId>,
+    account_failures: &mut Vec<::provider::ProviderAccountExecution>,
     now_millis: u64,
 ) -> Result<bool, ProviderProjectionBuildFailure> {
     let models_changed = ProviderModelProjection::apply_to_document(
@@ -829,13 +832,21 @@ fn apply_provider_projection(
         models,
         retired,
         required_auth_accounts,
+        account_failures,
+        routing.is_some(),
         now_millis,
     )
     .map_err(ProviderProjectionBuildFailure::provider_models)?;
     let routing_changed = routing
         .map(|routing| {
             ProviderRoutingProjection::apply_to_document(
-                state_dir, document, accounts, models, routing, now_millis,
+                state_dir,
+                document,
+                accounts,
+                models,
+                routing,
+                account_failures,
+                now_millis,
             )
             .map_err(ProviderProjectionBuildFailure::routing)
         })
@@ -1331,6 +1342,7 @@ mod tests {
                 None,
                 &[],
                 &BTreeSet::from([account.id().clone()]),
+                &mut Vec::new(),
                 false,
                 1_800_000_000_000,
             )
@@ -1375,6 +1387,7 @@ mod tests {
                 None,
                 &[],
                 &BTreeSet::from([account.id().clone()]),
+                &mut Vec::new(),
                 false,
                 1_800_000_000_000,
             )
@@ -1450,6 +1463,7 @@ mod tests {
                 None,
                 &[],
                 &BTreeSet::from([account.id().clone()]),
+                &mut Vec::new(),
                 false,
                 1_800_000_000_000,
             )
@@ -1557,6 +1571,7 @@ mod tests {
                 None,
                 &[],
                 &BTreeSet::from([account.id().clone()]),
+                &mut Vec::new(),
                 false,
                 1_800_000_000_000,
             )
@@ -1650,6 +1665,7 @@ mod tests {
                 None,
                 std::slice::from_ref(&retired),
                 &BTreeSet::new(),
+                &mut Vec::new(),
                 false,
                 1_800_000_000_000,
             )
@@ -1742,6 +1758,7 @@ mod tests {
                 None,
                 &[],
                 &BTreeSet::new(),
+                &mut Vec::new(),
                 false,
                 1_800_000_000_000,
             )
@@ -1833,6 +1850,7 @@ mod tests {
                 None,
                 &[],
                 &BTreeSet::new(),
+                &mut Vec::new(),
                 false,
                 1_800_000_000_000,
             )

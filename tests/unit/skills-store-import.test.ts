@@ -19,7 +19,7 @@ describe('skills store local import', () => {
 
   it('sends markdown content to the fixed import endpoint without a native path', async () => {
     terminalMock.mockResolvedValue({ callId: 'a'.repeat(32), module: 'skills', command: 'skills.import.markdown', status: 'succeeded', detail: { access: 'write', outcome: 'accepted' } });
-    const { useSkillsStore } = await import('@/stores/skills');
+    const { useSkillsStore } = await import('@/plugins/skills/stores/skills');
     const content = '---\nname: Web Search\ndescription: Search the web\n---\n';
 
     await expect(useSkillsStore.getState().importLocalSkill({
@@ -42,7 +42,7 @@ describe('skills store local import', () => {
 
   it('sends bundle content and its derived key to the fixed bundle endpoint', async () => {
     terminalMock.mockResolvedValue({ callId: 'a'.repeat(32), module: 'skills', command: 'skills.import.bundle', status: 'succeeded', detail: { access: 'write', skillKey: 'web-search', outcome: 'accepted' } });
-    const { useSkillsStore } = await import('@/stores/skills');
+    const { useSkillsStore } = await import('@/plugins/skills/stores/skills');
     const files = [{ path: 'SKILL.md', content: '---\nname: Web Search\ndescription: Search the web\n---\n' }];
 
     await expect(useSkillsStore.getState().importLocalSkill({
@@ -60,7 +60,7 @@ describe('skills store local import', () => {
 
   it.each(['rejected', 'unknown'] as const)('does not mutate an existing projection when import is %s', async (outcome) => {
     terminalMock.mockResolvedValue({ callId: 'a'.repeat(32), module: 'skills', command: 'skills.import.markdown', status: outcome, detail: { access: 'write', outcome } });
-    const { useSkillsStore } = await import('@/stores/skills');
+    const { useSkillsStore } = await import('@/plugins/skills/stores/skills');
     const existingSkill = {
       id: 'calendar',
       name: 'Calendar',

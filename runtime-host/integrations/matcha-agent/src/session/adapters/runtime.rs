@@ -1,4 +1,4 @@
-use super::{interaction, model::send_failure, model_selection, permission};
+use super::{interaction, model::send_failure, model_selection, permission, thinking};
 use crate::{
     client::Client,
     driver::MatchaRuntimeDriver,
@@ -31,6 +31,7 @@ use sessions_module::{
     },
     session_history::{SessionHistoryCommand, SessionHistoryOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
+    thinking::{SessionThinkingCommand, SessionThinkingOutcome},
     timeline,
 };
 use std::collections::HashSet;
@@ -275,6 +276,14 @@ impl SessionOps for MatchaRuntimeDriver {
             if cancellation.is_cancelled() {
                 return SessionSendOutcome::Unavailable;
             }
+            if let Some(context) = &command.execution_context {
+                if !super::model::unsupported_budget(&context.budget).is_empty() {
+                    return SessionSendOutcome::Unsupported;
+                }
+                if command.request_run_identity().is_none() {
+                    return SessionSendOutcome::Rejected;
+                }
+            }
             let record = match rpc::bound(
                 &client,
                 &command.identity,
@@ -289,14 +298,45 @@ impl SessionOps for MatchaRuntimeDriver {
                 Ok(content) => content,
                 Err(outcome) => return outcome,
             };
-            let result = rpc::call_cancellable(
-                &client,
-                "runs.submit",
-                json!({"sessionId":record.session_id.as_str(),"content":content}),
-                &cancellation,
-            )
-            .await;
+            let mut params = json!({"sessionId":record.session_id.as_str(),"content":content});
+            if let Some(context) = &command.execution_context {
+                params["requestId"] = json!(command.request_run_identity());
+                params["budget"] = super::model::native_budget(&context.budget);
+            }
+            let result = rpc::call_cancellable(&client, "runs.submit", params, &cancellation).await;
             match result {
+                Ok(receipt) if command.execution_context.is_some() => {
+                    let native: RunRecord = match rpc::decode(receipt) {
+                        Ok(native) => native,
+                        Err(_) => return SessionSendOutcome::Unknown,
+                    };
+                    if !native.validate(record.session_id.as_str())
+                        || native.request_id.as_deref() != command.request_run_identity()
+                        || native
+                            .content_budget_digest
+                            .as_deref()
+                            .is_none_or(|digest| {
+                                digest.len() != 64
+                                    || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                    {
+                        return SessionSendOutcome::Unknown;
+                    }
+                    match native.status {
+                        RunStatus::Queued => SessionSendOutcome::Queued {
+                            run_id: native.run_id,
+                        },
+                        _ => SessionSendOutcome::Succeeded {
+                            run_id: native.run_id,
+                            status: if native.status.terminal() {
+                                sessions_module::send::SessionSendStatus::Ok
+                            } else {
+                                sessions_module::send::SessionSendStatus::InFlight
+                            },
+                            goal: None,
+                        },
+                    }
+                }
                 Ok(receipt) => match (
                     receipt.get("sessionId").and_then(|v| v.as_str()),
                     receipt.get("runId").and_then(|v| v.as_str()),
@@ -315,6 +355,113 @@ impl SessionOps for MatchaRuntimeDriver {
             }
         })
     }
+    fn unsupported_task_budget(
+        &self,
+        budget: &organization::TaskExecutionBudget,
+    ) -> Vec<organization::TaskBudgetDimension> {
+        super::model::unsupported_budget(budget)
+    }
+    fn read_session_run<'a>(
+        &'a self,
+        command: sessions_module::execution::SessionRunReadCommand,
+    ) -> SessionFuture<'a, sessions_module::execution::SessionRunReadOutcome> {
+        let client = self.native_client();
+        Box::pin(async move {
+            use sessions_module::execution::{
+                SessionRunMeasurement, SessionRunReadOutcome as Outcome, SessionRunRecord,
+                SessionRunSelector,
+            };
+            let record = match rpc::bound(
+                &client,
+                &command.identity,
+                command.endpoint_session_id.as_deref(),
+            )
+            .await
+            {
+                Ok(record) => record,
+                Err(error) => {
+                    return match error.kind() {
+                        FailureKind::Rejected => Outcome::Rejected,
+                        FailureKind::Unknown => Outcome::Unknown,
+                        _ => Outcome::Unavailable,
+                    };
+                }
+            };
+            let (method, params) = match &command.selector {
+                SessionRunSelector::RequestId(id) => (
+                    "runs.getByRequest",
+                    json!({"sessionId":record.session_id.as_str(),"requestId":id}),
+                ),
+                SessionRunSelector::RunId(id) if valid_uuid(id) => {
+                    ("runs.get", json!({"runId":id}))
+                }
+                _ => return Outcome::Rejected,
+            };
+            let value = match rpc::call(&client, method, params).await {
+                Ok(value) if value.is_null() => return Outcome::NotFound,
+                Ok(value) => value,
+                Err(error) if error.is_not_found() => return Outcome::NotFound,
+                Err(error) => {
+                    return match error.kind() {
+                        FailureKind::Rejected => Outcome::Rejected,
+                        FailureKind::Unknown => Outcome::Unknown,
+                        _ => Outcome::Unavailable,
+                    };
+                }
+            };
+            let native: RunRecord = match rpc::decode(value) {
+                Ok(native) => native,
+                Err(_) => return Outcome::Unknown,
+            };
+            if !native.validate(record.session_id.as_str())
+                || match &command.selector {
+                    SessionRunSelector::RequestId(id) => native.request_id.as_ref() != Some(id),
+                    SessionRunSelector::RunId(id) => &native.run_id != id,
+                }
+            {
+                return Outcome::Unknown;
+            }
+            let measurement = if native.status.terminal() {
+                native
+                    .result
+                    .as_ref()
+                    .filter(|result| {
+                        result["session_id"].as_str() == Some(record.session_id.as_str())
+                            && result["input_message_id"].as_str()
+                                == Some(native.message_id.as_str())
+                    })
+                    .and_then(|result| result.get("native_measurement"))
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .map(SessionRunMeasurement::Available)
+                    .unwrap_or_default()
+            } else {
+                SessionRunMeasurement::Unavailable
+            };
+            let assistant_texts = native
+                .result
+                .as_ref()
+                .filter(|result| {
+                    native.status == RunStatus::Succeeded
+                        && result["subtype"] == "success"
+                        && result["is_error"] == false
+                        && result["session_id"].as_str() == Some(record.session_id.as_str())
+                        && result["input_message_id"].as_str() == Some(native.message_id.as_str())
+                })
+                .and_then(|result| result["result"].as_str())
+                .filter(|text| !text.is_empty())
+                .map(|text| vec![text.to_owned()])
+                .unwrap_or_default();
+            Outcome::Found(SessionRunRecord {
+                run_id: native.run_id,
+                message_id: native.message_id,
+                request_id: native.request_id,
+                phase: native.status.phase(),
+                measurement,
+                assistant_texts,
+            })
+        })
+    }
     fn session_model_runtime_command_cancellable<'a>(
         &'a self,
         identity: &'a sessions_module::state::SessionIdentity,
@@ -325,7 +472,14 @@ impl SessionOps for MatchaRuntimeDriver {
     {
         let client = self.native_client();
         Box::pin(async move {
-            model_selection::restore(&client, identity, endpoint_session_id, trace_id, &cancellation).await
+            model_selection::restore(
+                &client,
+                identity,
+                endpoint_session_id,
+                trace_id,
+                &cancellation,
+            )
+            .await
         })
     }
     fn select_session_model<'a>(
@@ -398,6 +552,13 @@ impl SessionOps for MatchaRuntimeDriver {
     ) -> SessionFuture<'a, SessionPermissionOutcome> {
         let client = self.native_client();
         Box::pin(async move { permission::apply(&client, command).await })
+    }
+    fn session_thinking<'a>(
+        &'a self,
+        command: SessionThinkingCommand,
+    ) -> SessionFuture<'a, SessionThinkingOutcome> {
+        let client = self.native_client();
+        Box::pin(async move { thinking::apply(&client, command).await })
     }
 }
 

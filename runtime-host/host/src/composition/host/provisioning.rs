@@ -11,6 +11,11 @@ pub(super) struct PrepareHostInput {
     pub(super) open_claw_secret: openclaw::gateway::auth::GatewaySecret,
     pub(super) organization_store: organization::OrganizationStore,
     pub(super) runtime_state_dir: PathBuf,
+    pub(super) world_postgres: Option<super::WorldPostgresConfig>,
+    pub(super) world_storage_targets: Vec<super::WorldPostgresConfig>,
+    pub(super) world_source_access: Option<super::WorldSourceAccessConfig>,
+    pub(super) initial_world: Option<world::Provision>,
+    pub(super) world_peer_endpoint: Option<String>,
     pub(super) searxng_resources_dir: PathBuf,
     pub(super) app_log_dir: PathBuf,
     pub(super) runtime_observation: ::diagnostics::RuntimeObservationConfig,
@@ -23,6 +28,12 @@ pub(super) struct PreparedHost {
     pub(super) openclaw_secret: openclaw::gateway::auth::GatewaySecret,
     pub(super) organization_store: organization::OrganizationStore,
     pub(super) runtime_state_dir: PathBuf,
+    pub(super) world_postgres: Option<super::WorldPostgresConfig>,
+    pub(super) world_storage_targets: Vec<super::WorldPostgresConfig>,
+    pub(super) world_source_access: Option<super::WorldSourceAccessConfig>,
+    pub(super) initial_world: Option<world::Provision>,
+    pub(super) world_authority: Arc<world::AuthorityRoot>,
+    pub(super) world_native: super::ports::world_native::Verifiers,
     pub(super) app_log_dir: PathBuf,
     pub(super) diagnostics_state_root: CanonicalStateDir,
     pub(super) runtime_observation: ::diagnostics::RuntimeFlightRecorder,
@@ -37,8 +48,16 @@ pub(super) struct PreparedHost {
 }
 
 pub(super) struct ProvisionedHost {
+    #[cfg(unix)]
+    pub(super) world_guardian: PathBuf,
     pub(super) organization: OrganizationOwnerProvision,
     pub(super) runtime_state_dir: PathBuf,
+    pub(super) world_postgres: Option<super::WorldPostgresConfig>,
+    pub(super) world_storage_targets: Vec<super::WorldPostgresConfig>,
+    pub(super) world_source_access: Option<super::WorldSourceAccessConfig>,
+    pub(super) initial_world: Option<world::Provision>,
+    pub(super) world_authority: Arc<world::AuthorityRoot>,
+    pub(super) world_native: super::ports::world_native::Verifiers,
     pub(super) diagnostics_state_root: CanonicalStateDir,
     pub(super) runtime_observation: ::diagnostics::RuntimeFlightRecorder,
     pub(super) matcha_startup_diagnostics: ::diagnostics::RuntimeStartupDiagnostics,
@@ -56,16 +75,29 @@ pub(super) struct ProvisionedHost {
 
 pub(super) fn prepare_host(input: PrepareHostInput) -> PreparedHost {
     let PrepareHostInput {
-        matcha,
+        mut matcha,
         matcha_secret,
-        open_claw,
+        mut open_claw,
         open_claw_secret,
         organization_store,
         runtime_state_dir,
+        world_postgres,
+        world_storage_targets,
+        world_source_access,
+        initial_world,
+        world_peer_endpoint,
         searxng_resources_dir,
         app_log_dir,
         runtime_observation,
     } = input;
+    let world_authority = Arc::new(world::AuthorityRoot::new());
+    let world_native = super::ports::world_native::prepare(
+        &runtime_state_dir,
+        world_peer_endpoint,
+        &world_authority,
+        &mut open_claw,
+        &mut matcha,
+    );
     let diagnostics = super::resources::prepare_runtime_diagnostics(runtime_observation);
     let diagnostics_state_root = open_claw.state_dir.clone();
     let clawhub_registry =
@@ -93,6 +125,12 @@ pub(super) fn prepare_host(input: PrepareHostInput) -> PreparedHost {
         openclaw_secret: open_claw_secret,
         organization_store,
         runtime_state_dir,
+        world_postgres,
+        world_storage_targets,
+        world_source_access,
+        initial_world,
+        world_authority,
+        world_native,
         app_log_dir,
         diagnostics_state_root,
         runtime_observation: diagnostics.observation,

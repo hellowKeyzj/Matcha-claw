@@ -3,12 +3,14 @@ mod client;
 mod error;
 mod openai_chat;
 mod openai_responses;
+pub(crate) mod observation;
 mod types;
 
 async fn consume_sse(
     mut response: reqwest::Response,
     sink: &mut dyn types::LlmStreamSink,
     parse: fn(&str) -> Vec<types::LlmStreamEvent>,
+    mut observation: Option<(&mut observation::Observation, crate::ProviderApiProtocol)>,
 ) -> Result<(), error::LlmClientError> {
     const MAX_FRAME_BYTES: usize = 1024 * 1024;
     let mut buffer = Vec::new();
@@ -23,7 +25,7 @@ async fn consume_sse(
             let frame = std::str::from_utf8(&buffer[..end]).map_err(|_| {
                 error::LlmClientError::Protocol("invalid provider stream UTF-8".into())
             })?;
-            if emit_sse_frame(frame, sink, parse).await? {
+            if emit_sse_frame(frame, sink, parse, observation.as_mut()).await? {
                 return Ok(());
             }
             buffer.drain(..end + separator);
@@ -37,7 +39,7 @@ async fn consume_sse(
     if !buffer.is_empty() {
         let frame = std::str::from_utf8(&buffer)
             .map_err(|_| error::LlmClientError::Protocol("invalid provider stream UTF-8".into()))?;
-        if emit_sse_frame(frame, sink, parse).await? {
+        if emit_sse_frame(frame, sink, parse, observation.as_mut()).await? {
             return Ok(());
         }
     }
@@ -65,7 +67,15 @@ async fn emit_sse_frame(
     frame: &str,
     sink: &mut dyn types::LlmStreamSink,
     parse: fn(&str) -> Vec<types::LlmStreamEvent>,
+    observation: Option<&mut (&mut observation::Observation, crate::ProviderApiProtocol)>,
 ) -> Result<bool, error::LlmClientError> {
+    if let Some((observation, protocol)) = observation {
+        let data = frame.lines().filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim).collect::<Vec<_>>().join("\n");
+        if let Ok(payload) = serde_json::from_str(&data) {
+            observation.payload(*protocol, &payload);
+        }
+    }
     if frame.lines().any(|line| {
         line.strip_prefix("data:")
             .is_some_and(|data| data.trim() == "[DONE]")

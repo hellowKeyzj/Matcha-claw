@@ -1,12 +1,24 @@
 import { act, renderHook } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useChatSidePanelController } from '@/pages/Chat/useChatSidePanelController';
-import { useRuntimeHostStore } from '@/stores/gateway';
+import { useChatSidePanelController } from '@/plugins/chat/useChatSidePanelController';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
 import { useLayoutStore } from '@/stores/layout';
-import { useChatStore } from '@/stores/chat';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { useChatStore } from '@/plugins/chat/store';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import { createReadyResourceStatusState } from '@/lib/resource-state';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { chatPlugin } from '@/plugins/chat/plugin';
+import { filesPlugin } from '@/plugins/files/plugin';
+
+const pluginHost = createPluginHost([applicationShellPlugin, filesPlugin, chatPlugin]);
+
+function PluginWrapper({ children }: { children: ReactNode }) {
+  return <PluginHostProvider host={pluginHost}>{children}</PluginHostProvider>;
+}
 
 describe('chat side panel controller', () => {
   beforeEach(() => {
@@ -64,7 +76,7 @@ describe('chat side panel controller', () => {
       value: 900,
     });
 
-    renderHook(() => useChatSidePanelController(true, { current: layoutNode }));
+    renderHook(() => useChatSidePanelController(true, { current: layoutNode }), { wrapper: PluginWrapper });
 
     await Promise.resolve();
 
@@ -83,7 +95,7 @@ describe('chat side panel controller', () => {
       value: 900,
     });
 
-    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }));
+    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }), { wrapper: PluginWrapper });
 
     expect(result.current.sidePanelOpen).toBe(false);
     expect(result.current.activeSidePanelTab).toBe('artifacts');
@@ -109,7 +121,7 @@ describe('chat side panel controller', () => {
       value: 1200,
     });
 
-    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }));
+    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }), { wrapper: PluginWrapper });
 
     expect(result.current.activeSidePanelTab).toBe('runtime');
     expect(result.current.sidePanelWidth).toBe(360);
@@ -140,7 +152,7 @@ describe('chat side panel controller', () => {
       value: 1200,
     });
 
-    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }));
+    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }), { wrapper: PluginWrapper });
 
     expect(result.current.activeSidePanelTab).toBe('artifacts');
     expect(result.current.sidePanelWidth).toBe(640);
@@ -157,7 +169,7 @@ describe('chat side panel controller', () => {
       value: 1200,
     });
 
-    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }));
+    const { result } = renderHook(() => useChatSidePanelController(false, { current: layoutNode }), { wrapper: PluginWrapper });
 
     await act(async () => {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));

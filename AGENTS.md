@@ -46,6 +46,12 @@ Standard dev commands are in `package.json` scripts and `README.md`. Key ones:
   - Transport policy is Main-owned and fixed as `runtime-host -> IPC fallback`; renderer should not implement protocol switching UI/business logic.
 - **Doc sync rule**: After any functional or architecture change, review `README.md`, `README.zh-CN.md`, and `README.ja-JP.md` for required updates; if behavior/flows/interfaces changed, update docs in the same PR/commit.
 
+## Electron E2E
+
+新增或修改 Electron E2E 时，先读 `e2e/AGENTS.md` 和 `e2e/docs/ARCHITECTURE.md`，复用已有 Task、Question、Interaction、Page 与 Ability。新场景只放 `e2e/src/scenarios/`；禁止在 Scenario 直接操作 UI、定位元素、调用 IPC 或控制 Electron。一次运行共享专用测试 Profile 和单个 Electron 实例，场景串行；不得使用真实用户目录、逐场景重启或清空 Profile。
+
+提交前运行 `pnpm run check:e2e`，并对实际构建运行相关 `pnpm --dir e2e test`；架构违规要修测试结构，不能关闭检查或修改规则绕过。新入口为 `pnpm run test:e2e`。旧 5 例已迁入新框架，但当前真实验收被 Host 启动栈溢出阻塞；旧 spec、fixture 与根配置保留至验收后精确删除，结构门禁不为此放行。最新状态见 `e2e/docs/VALIDATION.md`；不向旧 `tests/e2e` 新增用例。
+
 ## 全局开发策略
 
 - **重构兼容性策略**：当前项目尚未发布正式版本，任何重构默认不要求保持历史版本兼容性；优先保证结构清晰与长期可维护性。

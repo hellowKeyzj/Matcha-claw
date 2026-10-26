@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fmt};
 
+use provider_module::ProviderApiProtocol;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sessions_module::model_selection::{
@@ -209,20 +210,33 @@ pub async fn project_session_runtime(
             ProjectionFailureKind::InvalidBinding,
         ))?;
     let id = format!("host-session-{digest}");
-    let (kind, target, base_url, secret) = match provider_runtime {
-        MatchaProviderRuntimeConfig::AnthropicMessages { base_url, api_key } => {
-            ("firstParty", "ANTHROPIC_API_KEY", base_url, api_key)
-        }
-        MatchaProviderRuntimeConfig::GoogleGenerativeAi { base_url, api_key } => {
-            ("gemini", "GEMINI_API_KEY", base_url, api_key)
-        }
-        MatchaProviderRuntimeConfig::OpenAiChatCompletions { base_url, api_key } => {
-            ("openai", "OPENAI_API_KEY", base_url, api_key)
-        }
-        MatchaProviderRuntimeConfig::OpenAiResponses { base_url, api_key } => {
-            ("openaiResponses", "OPENAI_API_KEY", base_url, api_key)
-        }
+    let (protocol, target, base_url, secret) = match provider_runtime {
+        MatchaProviderRuntimeConfig::AnthropicMessages { base_url, api_key } => (
+            ProviderApiProtocol::AnthropicMessages,
+            "ANTHROPIC_API_KEY",
+            base_url,
+            api_key,
+        ),
+        MatchaProviderRuntimeConfig::GoogleGenerativeAi { base_url, api_key } => (
+            ProviderApiProtocol::GoogleGenerativeAi,
+            "GEMINI_API_KEY",
+            base_url,
+            api_key,
+        ),
+        MatchaProviderRuntimeConfig::OpenAiChatCompletions { base_url, api_key } => (
+            ProviderApiProtocol::OpenAiCompletions,
+            "OPENAI_API_KEY",
+            base_url,
+            api_key,
+        ),
+        MatchaProviderRuntimeConfig::OpenAiResponses { base_url, api_key } => (
+            ProviderApiProtocol::OpenAiResponses,
+            "OPENAI_API_KEY",
+            base_url,
+            api_key,
+        ),
     };
+    let kind = super::native_protocol(protocol);
     let source = format!("MATCHA_PROVIDER_SESSION_{}", digest.to_ascii_uppercase());
     let mut sources = BTreeMap::new();
     let mut env = BTreeMap::new();

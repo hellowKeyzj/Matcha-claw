@@ -43,6 +43,13 @@ pub(crate) enum OrganizationQuery {
         team_id: TeamId,
         reply: crate::call::CallReply<Result<Vec<crate::TeamRunListEntry>, crate::StoreFault>>,
     },
+    TaskInspect {
+        identity: crate::task_execution::TaskExecutionIdentity,
+        reply: crate::call::CallReply<(
+            crate::task_execution::TaskExecutionReceipt,
+            Vec<crate::ActivityExecutionRequest>,
+        )>,
+    },
     RunSnapshot {
         query: TeamRunQuery,
         reply: crate::call::CallReply<TeamRunQueryOutcome>,
@@ -160,6 +167,7 @@ impl OrganizationQuery {
             Self::TeamSkillSelectionDependencyPlan { reply, .. } => reply.running().await,
             Self::RunList { reply, .. } => reply.running().await,
             Self::RunSnapshot { reply, .. } => reply.running().await,
+            Self::TaskInspect { reply, .. } => reply.running().await,
             Self::TeamRunPublicProjection { reply, .. } => reply.running().await,
             Self::TeamRunPublicSnapshot { reply, .. } => reply.running().await,
             Self::TeamRunDiagnostics { reply, .. } => reply.running().await,

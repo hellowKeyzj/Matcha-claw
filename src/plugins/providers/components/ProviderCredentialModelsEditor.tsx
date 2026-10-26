@@ -1,0 +1,795 @@
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ChevronDown, ChevronRight, Loader2, Plus, Sparkles, Trash2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import { StableScrollArea } from '@/components/scroll';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
+import type { ProviderCredential } from '@/plugins/providers/stores/providers';
+import type { ProviderVendorInfo } from '@/lib/providers';
+import {
+  type ModelCapability,
+  type ProviderModel,
+  type ProviderModelDraft,
+} from '@/lib/provider-model-catalog';
+import {
+  filterAllowedModelCapabilities,
+  MODEL_CAPABILITIES,
+  resolveProviderModelCapabilities,
+} from '@/lib/provider-model-capabilities';
+import { cn } from '@/lib/utils';
+import { useContributions } from '@/plugin-host/react';
+import { providerModelSources, type ProviderModelSourceContribution } from '../extensions';
+import styles from '@/plugins/providers/components/ProviderCredentialModelsEditor.module.css';
+
+interface ModelDraftRow {
+  modelId: string;
+  capabilities: ModelCapability[];
+  contextWindow: string;
+  maxTokens: string;
+  timeoutMs: string;
+  aspectRatio: string;
+  resolution: string;
+  quality: string;
+}
+
+const EMPTY_MODEL_DRAFT: ModelDraftRow = {
+  modelId: '',
+  capabilities: ['chat'],
+  contextWindow: '',
+  maxTokens: '',
+  timeoutMs: '',
+  aspectRatio: '',
+  resolution: '',
+  quality: '',
+};
+
+const OPENCLAW_DEFAULT_CONTEXT_WINDOW = '128000';
+const OPENCLAW_DEFAULT_MAX_TOKENS = '8192';
+const IMAGE_ASPECT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '4:5', '5:4', '21:9'] as const;
+const IMAGE_RESOLUTIONS = ['1K', '2K', '4K'] as const;
+const IMAGE_QUALITIES = ['low', 'medium', 'high', 'auto'] as const;
+const TEXT_TUNING_CAPABILITIES = ['chat', 'imageUnderstand'] as const satisfies readonly ModelCapability[];
+
+function modelToDraftRow(model: ProviderModelDraft): ModelDraftRow {
+  return {
+    modelId: model.modelId,
+    capabilities: [...model.capabilities],
+    contextWindow: model.contextWindow ? String(model.contextWindow) : '',
+    maxTokens: model.maxTokens ? String(model.maxTokens) : '',
+    timeoutMs: model.timeoutMs ? String(model.timeoutMs) : '',
+    aspectRatio: model.aspectRatio ?? '',
+    resolution: model.resolution ?? '',
+    quality: model.quality ?? '',
+  };
+}
+
+function parsePositiveInteger(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function hasTextTuningFields(credential: ProviderCredential, row: Pick<ModelDraftRow, 'capabilities'>): boolean {
+  if (credential.providerKind === 'media') return false;
+  return row.capabilities.some((capability) => TEXT_TUNING_CAPABILITIES.includes(capability as typeof TEXT_TUNING_CAPABILITIES[number]));
+}
+
+function hasImageGenerationFields(row: Pick<ModelDraftRow, 'capabilities'>): boolean {
+  return row.capabilities.includes('imageGenerate');
+}
+
+function draftRowToModel(credential: ProviderCredential, row: ModelDraftRow): Omit<ProviderModel, 'accountId'> | null {
+  const modelId = row.modelId.trim();
+  if (!modelId || row.capabilities.length === 0) return null;
+  const includeTextTuning = hasTextTuningFields(credential, row);
+  const includeImageGeneration = hasImageGenerationFields(row);
+  const contextWindow = includeTextTuning ? parsePositiveInteger(row.contextWindow) : undefined;
+  const maxTokens = includeTextTuning ? parsePositiveInteger(row.maxTokens) : undefined;
+  const timeoutMs = includeImageGeneration ? parsePositiveInteger(row.timeoutMs) : undefined;
+  const aspectRatio = includeImageGeneration ? row.aspectRatio.trim() : '';
+  const resolution = includeImageGeneration ? row.resolution.trim() : '';
+  const quality = includeImageGeneration ? row.quality.trim() : '';
+  return {
+    modelId,
+    capabilities: row.capabilities,
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(aspectRatio ? { aspectRatio } : {}),
+    ...(resolution ? { resolution } : {}),
+    ...(quality ? { quality } : {}),
+  };
+}
+
+function collectDraftModels(credential: ProviderCredential, rows: readonly ModelDraftRow[]):
+  | { models: Omit<ProviderModel, 'accountId'>[] }
+  | { error: 'invalidEntry' | 'duplicate'; modelId: string } {
+  const models: Omit<ProviderModel, 'accountId'>[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (!row.modelId.trim()) continue;
+    const model = draftRowToModel(credential, row);
+    if (!model) return { error: 'invalidEntry', modelId: row.modelId };
+    if (seen.has(model.modelId)) return { error: 'duplicate', modelId: model.modelId };
+    seen.add(model.modelId);
+    models.push(model);
+  }
+  return { models };
+}
+
+function draftRowSignature(row: ModelDraftRow): string {
+  return JSON.stringify({
+    modelId: row.modelId.trim(),
+    capabilities: row.capabilities,
+    contextWindow: row.contextWindow.trim(),
+    maxTokens: row.maxTokens.trim(),
+    timeoutMs: row.timeoutMs.trim(),
+    aspectRatio: row.aspectRatio.trim(),
+    resolution: row.resolution.trim(),
+    quality: row.quality.trim(),
+  });
+}
+
+function countPendingChanges(rows: readonly ModelDraftRow[], baseline: readonly ModelDraftRow[]): number {
+  const baselineById = new Map<string, string>();
+  for (const row of baseline) {
+    const modelId = row.modelId.trim();
+    if (modelId) baselineById.set(modelId, draftRowSignature(row));
+  }
+
+  let count = 0;
+  const seen = new Set<string>();
+  rows.forEach((row, index) => {
+    const modelId = row.modelId.trim();
+    const signature = draftRowSignature(row);
+    if (modelId) {
+      if (seen.has(modelId) || baselineById.get(modelId) !== signature) count += 1;
+      seen.add(modelId);
+      return;
+    }
+    if (draftRowSignature(baseline[index] ?? EMPTY_MODEL_DRAFT) !== signature) count += 1;
+  });
+  for (const modelId of baselineById.keys()) {
+    if (!seen.has(modelId)) count += 1;
+  }
+  return count;
+}
+
+export function ProviderCredentialModelsEditor(props: {
+  credential: ProviderCredential;
+  vendor?: ProviderVendorInfo;
+  models: ProviderModel[];
+  ready: boolean;
+  loading: boolean;
+  saving: boolean;
+  error: string | null;
+  onReplace: (next: Omit<ProviderModel, 'accountId'>[]) => Promise<void>;
+}) {
+  const { t } = useTranslation('settings');
+  const { credential, vendor, models, ready, loading, saving, error, onReplace } = props;
+  const allowedCapabilities = useMemo(() => resolveProviderModelCapabilities(credential, vendor), [credential, vendor]);
+  const baseline = useMemo(() => models.map((model) => ({
+    ...modelToDraftRow(model),
+    capabilities: filterAllowedModelCapabilities(credential, model.capabilities, vendor),
+  })).filter((model) => model.capabilities.length > 0), [credential, models, vendor]);
+  const baselineKey = JSON.stringify(baseline);
+  const [discoveredModels, setDiscoveredModels] = useState<ProviderModelDraft[]>([]);
+  const [selectedDiscoveredModelIds, setSelectedDiscoveredModelIds] = useState<string[]>([]);
+  const [discoveryAttempted, setDiscoveryAttempted] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [discoveryCollapsed, setDiscoveryCollapsed] = useState(false);
+  const discoveryObservation = useRef<AbortController | null>(null);
+  useEffect(() => () => discoveryObservation.current?.abort(), []);
+
+  const handleDiscover = async (source: Extract<ProviderModelSourceContribution, { kind: 'discovery' }>) => {
+    if (discoveryObservation.current) return;
+    const observation = new AbortController();
+    discoveryObservation.current = observation;
+    setDiscoveryCollapsed(false);
+    setDiscovering(true);
+    setDiscoveryError(null);
+    try {
+      const models = await source.discover(credential.id, observation.signal);
+      if (observation.signal.aborted) return;
+      setDiscoveredModels(models);
+      setSelectedDiscoveredModelIds(models.map((model) => model.modelId));
+      setDiscoveryAttempted(true);
+    } catch (discoverError) {
+      if (observation.signal.aborted) return;
+      setDiscoveredModels([]);
+      setSelectedDiscoveredModelIds([]);
+      setDiscoveryError(discoverError instanceof Error ? discoverError.message : String(discoverError));
+      setDiscoveryAttempted(true);
+    } finally {
+      discoveryObservation.current = null;
+      if (!observation.signal.aborted) setDiscovering(false);
+    }
+  };
+
+  const handleToggleDiscoveredModel = (modelId: string, checked: boolean) => {
+    setSelectedDiscoveredModelIds((prev) => {
+      if (checked) return prev.includes(modelId) ? prev : [...prev, modelId];
+      return prev.filter((item) => item !== modelId);
+    });
+  };
+
+  const handleImportedDiscoveredModels = (modelIds: readonly string[]) => {
+    setSelectedDiscoveredModelIds((prev) => prev.filter((modelId) => !modelIds.includes(modelId)));
+    if (modelIds.length > 0) setDiscoveryCollapsed(true);
+  };
+
+  return (
+    <ProviderCredentialModelsEditorInner
+      key={baselineKey}
+      credential={credential}
+      vendor={vendor}
+      allowedCapabilities={allowedCapabilities}
+      baseline={baseline}
+      ready={ready}
+      loading={loading}
+      saving={saving}
+      error={error}
+      discoveredModels={discoveredModels}
+      selectedDiscoveredModelIds={selectedDiscoveredModelIds}
+      discoveryAttempted={discoveryAttempted}
+      discovering={discovering}
+      discoveryError={discoveryError}
+      discoveryCollapsed={discoveryCollapsed}
+      onDiscoveryCollapsedChange={setDiscoveryCollapsed}
+      onDiscover={(source) => void handleDiscover(source)}
+      onToggleDiscoveredModel={handleToggleDiscoveredModel}
+      onImportedDiscoveredModels={handleImportedDiscoveredModels}
+      onReplace={onReplace}
+      t={t}
+    />
+  );
+}
+
+function ProviderCredentialModelsEditorInner(props: {
+  credential: ProviderCredential;
+  vendor?: ProviderVendorInfo;
+  allowedCapabilities: readonly ModelCapability[];
+  baseline: ModelDraftRow[];
+  ready: boolean;
+  loading: boolean;
+  saving: boolean;
+  error: string | null;
+  discoveredModels: ProviderModelDraft[];
+  selectedDiscoveredModelIds: readonly string[];
+  discoveryAttempted: boolean;
+  discovering: boolean;
+  discoveryError: string | null;
+  discoveryCollapsed: boolean;
+  onDiscoveryCollapsedChange: (collapsed: boolean) => void;
+  onDiscover: (source: Extract<ProviderModelSourceContribution, { kind: 'discovery' }>) => void;
+  onToggleDiscoveredModel: (modelId: string, checked: boolean) => void;
+  onImportedDiscoveredModels: (modelIds: readonly string[]) => void;
+  onReplace: (next: Omit<ProviderModel, 'accountId'>[]) => Promise<void>;
+  t: ReturnType<typeof useTranslation>[0];
+}) {
+  const {
+    credential,
+    vendor,
+    allowedCapabilities,
+    baseline,
+    ready,
+    loading,
+    saving,
+    error,
+    discoveredModels,
+    selectedDiscoveredModelIds,
+    discoveryAttempted,
+    discovering,
+    discoveryError,
+    discoveryCollapsed,
+    onDiscoveryCollapsedChange,
+    onDiscover,
+    onToggleDiscoveredModel,
+    onImportedDiscoveredModels,
+    onReplace,
+    t,
+  } = props;
+  const [rows, setRows] = useState<ModelDraftRow[]>(baseline);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [open, setOpen] = useState(true);
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(() => new Set());
+  const pendingChangeCount = useMemo(() => countPendingChanges(rows, baseline), [baseline, rows]);
+  const dirty = pendingChangeCount > 0;
+  const currentModelIds = useMemo(() => new Set(rows.map((row) => row.modelId.trim()).filter(Boolean)), [rows]);
+  const selectedDiscoveredModelIdSet = useMemo(() => new Set(selectedDiscoveredModelIds), [selectedDiscoveredModelIds]);
+  const importableDiscoveredModels = useMemo(() => discoveredModels.filter((model) => (
+    selectedDiscoveredModelIdSet.has(model.modelId)
+    && !currentModelIds.has(model.modelId)
+    && filterAllowedModelCapabilities(credential, model.capabilities, vendor).length > 0
+  )), [credential, currentModelIds, discoveredModels, selectedDiscoveredModelIdSet, vendor]);
+  const modelSources = useContributions(providerModelSources);
+
+  const handleAdd = () => {
+    const defaultCapabilities = allowedCapabilities.includes('chat') ? ['chat' as const] : allowedCapabilities.slice(0, 1);
+    setRows((prev) => {
+      setExpandedRows((expanded) => new Set([...expanded, prev.length]));
+      return [...prev, { ...EMPTY_MODEL_DRAFT, capabilities: [...defaultCapabilities] }];
+    });
+  };
+
+  const replaceDraftModels = async (nextRows: readonly ModelDraftRow[]) => {
+    setLocalError(null);
+    const result = collectDraftModels(credential, nextRows);
+    if ('error' in result) {
+      setLocalError(t(`providerModels.errors.${result.error}`, { id: result.modelId }));
+      return;
+    }
+    await onReplace(result.models);
+  };
+
+  const handleQuickAddModel = async (model: ProviderModelDraft) => {
+    if (currentModelIds.has(model.modelId)) return;
+    await replaceDraftModels([...rows, modelToDraftRow(model)]);
+  };
+
+  const handleImportDiscoveredModels = () => {
+    if (importableDiscoveredModels.length === 0) return;
+    setLocalError(null);
+    setRows((prev) => {
+      const existingModelIds = new Set(prev.map((row) => row.modelId.trim()).filter(Boolean));
+      const importedRows: ModelDraftRow[] = [];
+      for (const model of importableDiscoveredModels) {
+        if (existingModelIds.has(model.modelId)) continue;
+        existingModelIds.add(model.modelId);
+        importedRows.push({
+          ...modelToDraftRow(model),
+          capabilities: filterAllowedModelCapabilities(credential, model.capabilities, vendor),
+        });
+      }
+      return importedRows.length > 0 ? [...prev, ...importedRows] : prev;
+    });
+    onImportedDiscoveredModels(importableDiscoveredModels.map((model) => model.modelId));
+  };
+
+  const handleReset = () => {
+    setLocalError(null);
+    setRows(baseline);
+    setExpandedRows(new Set());
+  };
+
+  const handleToggleAdvanced = (index: number) => {
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  };
+
+  const handleChange = (index: number, patch: Partial<ModelDraftRow>) => {
+    setRows((prev) => prev.map((row, idx) => (idx === index ? { ...row, ...patch } : row)));
+  };
+
+  const handleToggleCapability = (index: number, capability: ModelCapability) => {
+    setRows((prev) => prev.map((row, idx) => {
+      if (idx !== index) return row;
+      const capabilities = row.capabilities.includes(capability)
+        ? row.capabilities.filter((item) => item !== capability)
+        : [...row.capabilities, capability];
+      return { ...row, capabilities };
+    }));
+  };
+
+  const handleRemove = (index: number) => {
+    setRows((prev) => prev.filter((_, idx) => idx !== index));
+    setExpandedRows((prev) => new Set([...prev]
+      .filter((idx) => idx !== index)
+      .map((idx) => (idx > index ? idx - 1 : idx))));
+  };
+
+  const handleSave = () => replaceDraftModels(rows);
+
+  return (
+    <section className="overflow-hidden rounded-[1rem] border bg-[hsl(var(--shell-surface))] [border-color:hsl(var(--shell-border))]">
+      <div className={cn('flex flex-wrap items-center justify-between gap-2 bg-[hsl(var(--shell-surface-muted))] px-3 py-2.5', open && 'border-b [border-color:hsl(var(--shell-border))]')}>
+        <button
+          type="button"
+          className="flex items-center gap-2 text-left"
+          onClick={() => setOpen((value) => !value)}
+          aria-expanded={open}
+        >
+          {open ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+          <p className="text-sm font-medium">{t('providerModels.title')}</p>
+        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {modelSources.map((source) => {
+            if (source.kind === 'discovery') {
+              return (
+                <Button key={source.id} variant="outline" size="sm" onClick={() => onDiscover(source)} disabled={saving || discovering} className="h-8">
+                  {discovering ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-2 h-3.5 w-3.5" />}
+                  {t(source.label)}
+                </Button>
+              );
+            }
+            const model = source.model(vendor);
+            if (!model) return null;
+            const registered = currentModelIds.has(model.modelId);
+            return (
+              <Button
+                key={source.id}
+                variant="outline"
+                size="sm"
+                onClick={() => void handleQuickAddModel(model)}
+                disabled={saving || registered}
+                className="h-8"
+              >
+                <Sparkles className="mr-2 h-3.5 w-3.5" />
+                {t(registered ? source.addedLabel : source.label, { model: model.modelId })}
+              </Button>
+            );
+          })}
+          <Button variant="outline" size="sm" onClick={handleAdd} disabled={saving} className="h-8">
+            <Plus className="mr-2 h-3.5 w-3.5" />
+            {t('providerModels.actions.add')}
+          </Button>
+        </div>
+      </div>
+
+      {open ? (
+        <>
+          <ProviderDiscoveredModelsPanel
+            credential={credential}
+            vendor={vendor}
+            models={discoveredModels}
+            selectedModelIds={selectedDiscoveredModelIdSet}
+            existingModelIds={currentModelIds}
+            discoveryAttempted={discoveryAttempted}
+            discovering={discovering}
+            collapsed={discoveryCollapsed}
+            error={discoveryError}
+            importableCount={importableDiscoveredModels.length}
+            disabled={saving}
+            onToggle={onToggleDiscoveredModel}
+            onImport={handleImportDiscoveredModels}
+            onCollapsedChange={onDiscoveryCollapsedChange}
+            t={t}
+          />
+          {loading && !ready ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader2 className="h-5 w-5 animate-spin" />
+            </div>
+          ) : rows.length === 0 ? (
+            <p className="px-3 py-4 text-xs text-muted-foreground">{t('providerModels.group.empty')}</p>
+          ) : (
+            <StableScrollArea className={cn(styles.list, 'max-h-[360px] overflow-y-auto overscroll-contain bg-[hsl(var(--shell-surface))] [scrollbar-gutter:stable]')}>
+              {rows.map((row, index) => (
+                <ProviderModelDraftRow
+                  key={`${credential.id}-${index}`}
+                  credential={credential}
+                  row={row}
+                  allowedCapabilities={allowedCapabilities}
+                  disabled={saving}
+                  advancedOpen={expandedRows.has(index)}
+                  onAdvancedToggle={() => handleToggleAdvanced(index)}
+                  onChange={(patch) => handleChange(index, patch)}
+                  onToggleCapability={(capability) => handleToggleCapability(index, capability)}
+                  onRemove={() => handleRemove(index)}
+                  t={t}
+                />
+              ))}
+            </StableScrollArea>
+          )}
+
+          {(localError || error) ? (
+            <p className="border-t border-border/70 px-3 py-2 text-xs text-destructive">{localError || error}</p>
+          ) : null}
+          {dirty ? (
+            <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-2 border-t bg-[hsl(var(--shell-surface))] px-3 py-2 [border-color:hsl(var(--shell-border))]">
+              <span className="text-xs font-medium text-muted-foreground">
+                {t('providerModels.pending.summary', { count: pendingChangeCount })}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={handleReset} disabled={saving} className="h-8">
+                  {t('providerModels.actions.reset')}
+                </Button>
+                <Button size="sm" onClick={handleSave} disabled={saving} className="h-8">
+                  {saving ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}
+                  {t('providerModels.actions.save')}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function ProviderDiscoveredModelsPanel(props: {
+  credential: ProviderCredential;
+  vendor?: ProviderVendorInfo;
+  models: ProviderModelDraft[];
+  selectedModelIds: ReadonlySet<string>;
+  existingModelIds: ReadonlySet<string>;
+  discoveryAttempted: boolean;
+  discovering: boolean;
+  collapsed: boolean;
+  error: string | null;
+  importableCount: number;
+  disabled: boolean;
+  onToggle: (modelId: string, checked: boolean) => void;
+  onImport: () => void;
+  onCollapsedChange: (collapsed: boolean) => void;
+  t: ReturnType<typeof useTranslation>[0];
+}) {
+  const {
+    credential,
+    vendor,
+    models,
+    selectedModelIds,
+    existingModelIds,
+    discoveryAttempted,
+    discovering,
+    collapsed,
+    error,
+    importableCount,
+    disabled,
+    onToggle,
+    onImport,
+    onCollapsedChange,
+    t,
+  } = props;
+  if (!discoveryAttempted && !discovering && !error) return null;
+  return (
+    <div className="border-b border-border/70 px-3 py-2.5">
+      <div className={cn('flex items-center justify-between gap-2', !collapsed && 'mb-2')}>
+        <button
+          type="button"
+          className="flex min-w-0 items-center gap-1.5 text-left text-xs font-medium text-muted-foreground"
+          onClick={() => onCollapsedChange(!collapsed)}
+          aria-expanded={!collapsed}
+        >
+          {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+          <span className="truncate">{t('providerModels.discovery.title')}</span>
+          {!discovering && models.length > 0 ? (
+            <span className="shrink-0 font-normal">{t('providerModels.discovery.count', { count: models.length })}</span>
+          ) : null}
+        </button>
+        {!collapsed && !discovering && !error && models.length > 0 ? (
+          <Button variant="outline" size="sm" onClick={onImport} disabled={disabled || importableCount === 0} className="h-7">
+            {t('providerModels.discovery.importSelected')}
+          </Button>
+        ) : null}
+      </div>
+      {collapsed ? null : discovering ? (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>{t('providerModels.discovery.loading')}</span>
+        </div>
+      ) : error ? (
+        <p className="text-xs text-destructive">
+          {t(error === 'Provider model request was rejected' ? 'providerModels.discovery.rejected' : 'providerModels.discovery.error', { error })}
+        </p>
+      ) : models.length === 0 ? (
+        <p className="text-xs text-muted-foreground">{t('providerModels.discovery.empty')}</p>
+      ) : (
+        <StableScrollArea className="max-h-[240px] space-y-1 overflow-y-auto overscroll-contain bg-background pr-1 [scrollbar-gutter:stable]">
+          {models.map((model) => {
+            const capabilities = filterAllowedModelCapabilities(credential, model.capabilities, vendor);
+            const duplicate = existingModelIds.has(model.modelId);
+            const selectable = !duplicate && capabilities.length > 0;
+            return (
+              <label
+                key={model.modelId}
+                className={cn(
+                  'flex items-start gap-2 rounded-md border border-border/70 bg-background px-2 py-1.5 text-xs',
+                  !selectable && 'opacity-60',
+                )}
+              >
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={selectable && selectedModelIds.has(model.modelId)}
+                  disabled={disabled || !selectable}
+                  onChange={(event) => onToggle(model.modelId, event.target.checked)}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-mono text-foreground">{model.modelId}</span>
+                  <span className="mt-1 flex flex-wrap gap-1">
+                    {capabilities.map((capability) => (
+                      <span key={capability} className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                        {t(`providerModels.capabilities.${capability}`, capability)}
+                      </span>
+                    ))}
+                    {duplicate ? (
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                        {t('providerModels.discovery.duplicate')}
+                      </span>
+                    ) : null}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </StableScrollArea>
+      )}
+    </div>
+  );
+}
+
+function ProviderModelDraftRow(props: {
+  credential: ProviderCredential;
+  row: ModelDraftRow;
+  allowedCapabilities: readonly ModelCapability[];
+  disabled: boolean;
+  advancedOpen: boolean;
+  onAdvancedToggle: () => void;
+  onChange: (patch: Partial<ModelDraftRow>) => void;
+  onToggleCapability: (capability: ModelCapability) => void;
+  onRemove: () => void;
+  t: ReturnType<typeof useTranslation>[0];
+}) {
+  const { credential, row, allowedCapabilities, disabled, advancedOpen, onAdvancedToggle, onChange, onToggleCapability, onRemove, t } = props;
+  const showTextTuning = hasTextTuningFields(credential, row);
+  const showImageGeneration = hasImageGenerationFields(row);
+  const hasTuningFields = showTextTuning || showImageGeneration;
+  return (
+    <div className={cn(styles.row, 'gap-2 border-b border-border/60 px-3 py-2.5 last:border-b-0')}>
+      <div className={cn(styles.model, 'min-w-0')}>
+        <label className={cn(styles.label, 'mb-1 text-[11px] font-medium text-muted-foreground')}>
+          {t('providerModels.row.modelIdLabel')}
+        </label>
+        <Input
+          aria-label={t('providerModels.row.modelIdLabel')}
+          value={row.modelId}
+          onChange={(event) => onChange({ modelId: event.target.value })}
+          disabled={disabled}
+          spellCheck={false}
+          placeholder="gpt-5.5"
+          className="h-9 rounded-md bg-background px-3 text-sm"
+        />
+      </div>
+      <div className="min-w-0">
+        <label className={cn(styles.label, 'mb-1 text-[11px] font-medium text-muted-foreground')}>
+          {t('providerModels.row.capabilitiesLabel', 'Capabilities')}
+        </label>
+        <div className="flex flex-wrap gap-1">
+          {MODEL_CAPABILITIES.filter((capability) => allowedCapabilities.includes(capability)).map((capability) => (
+            <button
+              key={capability}
+              type="button"
+              disabled={disabled}
+              onClick={() => onToggleCapability(capability)}
+              className={cn(
+                'rounded-md border px-1.5 py-0.5 text-xs transition-colors',
+                row.capabilities.includes(capability)
+                  ? 'border-foreground/20 bg-foreground text-background'
+                  : 'border-border bg-muted/50 text-muted-foreground hover:bg-muted',
+              )}
+            >
+              {t(`providerModels.capabilities.${capability}`, capability)}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="flex items-center gap-1 justify-self-end">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 shrink-0 px-2 text-xs text-muted-foreground"
+          onClick={onAdvancedToggle}
+          disabled={disabled || !hasTuningFields}
+          aria-expanded={advancedOpen}
+        >
+          {t('providerModels.row.advanced')}
+          {advancedOpen ? <ChevronDown className="ml-1 h-3.5 w-3.5" /> : <ChevronRight className="ml-1 h-3.5 w-3.5" />}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+          onClick={onRemove}
+          disabled={disabled}
+          aria-label={t('providerModels.row.remove')}
+          title={t('providerModels.row.remove')}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </div>
+      {hasTuningFields && advancedOpen ? (
+        <div className="col-span-full grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-2 rounded-md bg-muted/30 p-2">
+          {showTextTuning ? (
+            <>
+              <LabeledModelField label={t('providerModels.row.contextWindowLabel')}>
+                <Input
+                  aria-label={t('providerModels.row.contextWindowLabel')}
+                  value={row.contextWindow}
+                  onChange={(event) => onChange({ contextWindow: event.target.value })}
+                  disabled={disabled}
+                  spellCheck={false}
+                  placeholder={OPENCLAW_DEFAULT_CONTEXT_WINDOW}
+                  className="h-9 rounded-md bg-background px-2 text-sm"
+                />
+              </LabeledModelField>
+              <LabeledModelField label={t('providerModels.row.maxTokensLabel')}>
+                <Input
+                  aria-label={t('providerModels.row.maxTokensLabel')}
+                  value={row.maxTokens}
+                  onChange={(event) => onChange({ maxTokens: event.target.value })}
+                  disabled={disabled}
+                  spellCheck={false}
+                  placeholder={OPENCLAW_DEFAULT_MAX_TOKENS}
+                  className="h-9 rounded-md bg-background px-2 text-sm"
+                />
+              </LabeledModelField>
+            </>
+          ) : null}
+          {showImageGeneration ? (
+            <>
+              <LabeledModelField label={t('providerModels.row.timeoutMsLabel')}>
+                <Input
+                  aria-label={t('providerModels.row.timeoutMsLabel')}
+                  value={row.timeoutMs}
+                  onChange={(event) => onChange({ timeoutMs: event.target.value })}
+                  disabled={disabled}
+                  spellCheck={false}
+                  placeholder="60000"
+                  className="h-9 rounded-md bg-background px-2 text-sm"
+                />
+              </LabeledModelField>
+              <LabeledModelField label={t('providerModels.row.aspectRatioLabel')}>
+                <Select
+                  aria-label={t('providerModels.row.aspectRatioLabel')}
+                  value={row.aspectRatio}
+                  onChange={(event) => onChange({ aspectRatio: event.target.value })}
+                  disabled={disabled}
+                  className="h-9 rounded-md bg-background px-2 pr-7 text-sm"
+                >
+                  <option value="">{t('providerModels.row.defaultOption')}</option>
+                  {IMAGE_ASPECT_RATIOS.map((value) => (
+                    <option key={value} value={value}>{value}</option>
+                  ))}
+                </Select>
+              </LabeledModelField>
+              <LabeledModelField label={t('providerModels.row.resolutionLabel')}>
+                <Select
+                  aria-label={t('providerModels.row.resolutionLabel')}
+                  value={row.resolution}
+                  onChange={(event) => onChange({ resolution: event.target.value })}
+                  disabled={disabled}
+                  className="h-9 rounded-md bg-background px-2 pr-7 text-sm"
+                >
+                  <option value="">{t('providerModels.row.defaultOption')}</option>
+                  {IMAGE_RESOLUTIONS.map((value) => (
+                    <option key={value} value={value}>{value}</option>
+                  ))}
+                </Select>
+              </LabeledModelField>
+              <LabeledModelField label={t('providerModels.row.qualityLabel')}>
+                <Select
+                  aria-label={t('providerModels.row.qualityLabel')}
+                  value={row.quality}
+                  onChange={(event) => onChange({ quality: event.target.value })}
+                  disabled={disabled}
+                  className="h-9 rounded-md bg-background px-2 pr-7 text-sm"
+                >
+                  <option value="">{t('providerModels.row.defaultOption')}</option>
+                  {IMAGE_QUALITIES.map((value) => (
+                    <option key={value} value={value}>{t(`providerModels.qualities.${value}`, value)}</option>
+                  ))}
+                </Select>
+              </LabeledModelField>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function LabeledModelField(props: { label: string; children: ReactNode }) {
+  return (
+    <label className="min-w-0">
+      <span className="mb-1 block text-[11px] font-medium text-muted-foreground">{props.label}</span>
+      {props.children}
+    </label>
+  );
+}

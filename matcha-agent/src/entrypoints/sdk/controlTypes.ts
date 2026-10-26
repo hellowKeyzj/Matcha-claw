@@ -9,6 +9,8 @@ import type {
   SDKControlRequestSchema,
   SDKControlPrepareToSleepRequestSchema,
   SDKControlPrepareToSleepResponseSchema,
+  SDKControlSetEffortRequestSchema,
+  SDKControlSetEffortResponseSchema,
   SDKControlResponseSchema,
   SDKControlInitializeRequestSchema,
   SDKControlInitializeResponseSchema,
@@ -27,6 +29,12 @@ export type SDKControlPrepareToSleepRequest = z.infer<
 >
 export type SDKControlPrepareToSleepResponse = z.infer<
   ReturnType<typeof SDKControlPrepareToSleepResponseSchema>
+>
+export type SDKControlSetEffortRequest = z.infer<
+  ReturnType<typeof SDKControlSetEffortRequestSchema>
+>
+export type SDKControlSetEffortResponse = z.infer<
+  ReturnType<typeof SDKControlSetEffortResponseSchema>
 >
 export type SDKControlRequest = z.infer<
   ReturnType<typeof SDKControlRequestSchema>

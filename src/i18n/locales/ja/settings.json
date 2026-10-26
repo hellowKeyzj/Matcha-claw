@@ -208,6 +208,10 @@
       "retry": "再試行"
     },
     "custom": "カスタム",
+    "execution": {
+      "blocked": "利用不可",
+      "unsupported": "このランタイムでは未対応"
+    },
     "notRequired": "不要",
     "empty": {
       "title": "プロバイダーが構成されていません",
@@ -253,6 +257,7 @@
     "card": {
       "configured": "構成済み",
       "noKey": "API キー未設定",
+      "credentialUnknown": "認証情報の状態は未確認",
       "none": "なし",
       "editKey": "API キーを編集",
       "delete": "プロバイダーを削除"
@@ -292,17 +297,26 @@
       "submitCode": "コードを送信"
     },
     "projectionErrors": {
-      "diagnostic": "OpenClaw 設定の同期に失敗しました: {{reason}}",
-      "readbackMismatch": "OpenClaw 設定の読み戻し結果が保存内容と一致しません。",
-      "readbackUnavailable": "OpenClaw 設定を書き込みましたが、確認のために読み戻せませんでした。",
-      "outcomeUnknown": "OpenClaw 設定同期の結果が不明です。",
-      "providerAccountConfigurationInvalid": "OpenClaw プロバイダーアカウント設定が無効です。プロバイダー、エンドポイント、プロトコルを確認してください。",
+      "providerProjectionPartial": "このランタイムでは一部のアカウントを利用できません。以下のアカウント状態を確認してください。",
+      "providerAuthUnsupported": "このランタイムは、このアカウントの認証方式に対応していません。",
+      "providerRestartRequired": "設定は保存済みです。反映するには、このランタイムを再起動してください。",
+      "providerCleanupPartial": "このランタイムでは一部のアカウントの削除処理が完了していません。",
+      "providerProjectionNotSent": "設定は保存済みですが、このランタイムにはまだ送信されていません。",
+      "providerProjectionOutcomeUnknown": "設定は保存済みですが、このランタイムへの反映結果は未確認です。",
+      "providerCleanupBlocked": "このランタイムでのアカウント削除処理が阻まれています。",
+      "providerProjectionRejected": "このランタイムがアカウント設定を拒否しました。設定を確認してください。",
+      "privateResolverUnavailable": "ローカルの認証情報サービスを利用できません。復旧後に再試行してください。",
+      "diagnostic": "ランタイム設定の同期に失敗しました: {{reason}}",
+      "readbackMismatch": "ランタイム設定の読み戻し結果が保存内容と一致しません。",
+      "readbackUnavailable": "確認のためにランタイム設定を読み戻せませんでした。",
+      "outcomeUnknown": "ランタイム設定同期の結果が不明です。",
+      "providerAccountConfigurationInvalid": "プロバイダーアカウント設定が無効です。プロバイダー、エンドポイント、プロトコルを確認してください。",
       "providerCascadeUnavailable": "プロバイダー設定の状態を利用できません。更新してから再試行してください。",
       "providerCredentialUnavailable": "現在のプロバイダー認証情報を利用できません。再入力して保存してください。",
-      "providerKeyDuplicate": "OpenClaw プロバイダー識別子が衝突しています。重複アカウントを削除するかカスタム設定を使ってください。",
+      "providerKeyDuplicate": "プロバイダー識別子が衝突しています。重複アカウントを削除するかカスタム設定を使ってください。",
       "providerModelCapabilityInvalid": "モデル能力設定が無効です。モデル種別を確認して保存してください。",
       "providerModelIdentifierInvalid": "モデル ID が無効です。確認して保存してください。",
-      "providerModelPersistenceFailed": "OpenClaw モデル設定を書き込めません。ファイル権限を確認してください。",
+      "providerModelPersistenceFailed": "モデル設定を保存できません。ファイル権限を確認してください。",
       "providerModelTokenLimitInvalid": "モデル Token 制限が無効です。最大出力 Token がコンテキストウィンドウを超えないようにしてください。",
       "providerOwnerResponseUnavailable": "プロバイダー設定の書き込み結果が返りませんでした。更新して再試行してください。",
       "providerOwnerUnavailable": "プロバイダー設定サービスを利用できません。アプリを再起動して再試行してください。",
@@ -311,17 +325,17 @@
       "providerRoutingInvalid": "モデル割り当てルールが無効です。確認して保存してください。",
       "providerRoutingModelCapabilityUnavailable": "モデル割り当て先のモデルはこの能力をサポートしていません。別のモデルを選択してください。",
       "providerRoutingModelUnavailable": "モデル割り当てが存在しないモデルを参照しています。モデルを選び直してください。",
-      "providerRoutingPersistenceFailed": "OpenClaw モデル割り当て設定を書き込めません。ファイル権限を確認してください。",
+      "providerRoutingPersistenceFailed": "モデル割り当て設定を保存できません。ファイル権限を確認してください。",
       "privateResolver": {
         "credentialMissing": "このアカウントに保存された API キーがありません。再入力して保存してください。",
         "credentialDecryptFailed": "保存済み API キーをこの端末で復号できません。再入力して保存してください。",
         "credentialProviderMismatch": "保存済み API キーは別のプロバイダーのものです。このプロバイダーの API キーを再入力してください。",
         "credentialInvalid": "このアカウントの認証情報が無効です。再入力して保存してください。",
-        "authProfileReadInvalid": "OpenClaw の認証設定ファイルが無効です。修復または削除してから再保存してください。",
-        "authProfileWriteFailed": "OpenClaw の認証設定ファイルを書き込めません。ファイル権限を確認してください。",
+        "authProfileReadInvalid": "ランタイムの認証設定ファイルが無効です。修復または削除してから再保存してください。",
+        "authProfileWriteFailed": "ランタイムの認証設定ファイルを書き込めません。ファイル権限を確認してください。",
         "credentialStoreUnavailable": "ローカルのプロバイダー認証情報を読み取れません。API キーを再入力して保存してください。",
         "invalidRequest": "内部認証同期リクエストが無効です。再試行してください。",
-        "unknown": "OpenClaw の認証同期に失敗しました。API キーを再入力して保存してください。"
+        "unknown": "ランタイムの認証状態を確認できませんでした。更新して再試行してください。"
       }
     }
   },

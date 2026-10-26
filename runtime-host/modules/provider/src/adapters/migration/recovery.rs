@@ -169,6 +169,16 @@ impl ProviderRecoveryStore {
             }
             sync_parent(target).map_err(unknown_fault)?;
         }
+        if record.reset && record.generation_bindings_exists {
+            let removed = directory.join("generation-bindings.removed");
+            if fs::symlink_metadata(&removed).is_ok() {
+                let target = generation_bindings_path(&self.root);
+                if fs::symlink_metadata(&target).is_ok() { return Err(ProviderMigrationFault::Recovery); }
+                fs::rename(&removed, &target).map_err(unknown_fault)?;
+                sync_parent(&target).map_err(unknown_fault)?;
+                sync_parent(&removed).map_err(unknown_fault)?;
+            }
+        }
         if record.reset && record.cascade_exists {
             let target = self.root.join(CASCADE_FILE);
             let temporary = temporary_path(&target);
@@ -192,6 +202,8 @@ pub(super) struct RecoveryRecord {
     target_exists: [bool; 3],
     sources: [Option<PathBuf>; 3],
     cascade_exists: bool,
+    #[serde(default)]
+    generation_bindings_exists: bool,
     reset: bool,
 }
 
@@ -230,6 +242,7 @@ pub(super) fn backup_sources(
         target_exists: std::array::from_fn(|index| selected[index].target_exists),
         sources: std::array::from_fn(|index| selected[index].path.clone()),
         cascade_exists: false,
+        generation_bindings_exists: false,
         reset: false,
     };
     for index in 0..3 {
@@ -263,6 +276,10 @@ pub(super) fn backup_sources(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(backup_fault(error)),
     }
+    record.generation_bindings_exists = crate::adapters::generation_bindings::GenerationBindings::new(
+        generation_bindings_path(&store.root),
+    ).backup_to(&directory.join("generation-bindings.original"))
+        .map_err(|_| ProviderMigrationFault::Recovery)?;
     let bytes = serde_json::to_vec(&record).map_err(|_| ProviderMigrationFault::Encode)?;
     write_private(&directory.join("backup.json"), &bytes)?;
     sync_parent(&directory.join("backup.json")).map_err(backup_fault)?;
@@ -329,6 +346,14 @@ pub(super) fn commit(
             )?;
             sync_parent(&cascade).map_err(unknown_fault)?;
         }
+        if reset && record.generation_bindings_exists {
+            let target = generation_bindings_path(&store.root);
+            platform::state_dir::CanonicalStateDir::provision_private(&target)
+                .map_err(|_| ProviderMigrationFault::Permission)?;
+            fs::rename(&target, directory.join("generation-bindings.removed")).map_err(unknown_fault)?;
+            sync_parent(&target).map_err(unknown_fault)?;
+            sync_parent(&directory.join("generation-bindings.removed")).map_err(unknown_fault)?;
+        }
         Ok(())
     })();
     if let Err(error) = outcome {
@@ -343,6 +368,10 @@ pub(super) fn commit(
         store.clear_record()?;
     }
     Ok(())
+}
+
+fn generation_bindings_path(root: &Path) -> PathBuf {
+    crate::adapters::generation_bindings::GenerationBindings::path_for_journal(&root.join(CASCADE_FILE))
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), ProviderMigrationFault> {

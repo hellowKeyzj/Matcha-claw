@@ -326,7 +326,8 @@ export function startLLMRequestSpan(
   }
 
   // Add experimental attributes (system prompt, new_context)
-  if (!sealedModelContext()) addBetaLLMRequestAttributes(span, newContext, messagesForAPI)
+  if (!sealedModelContext())
+    addBetaLLMRequestAttributes(span, newContext, messagesForAPI)
 
   const spanId = getSpanId(span)
   const spanContextObj: SpanContext = {
@@ -415,7 +416,10 @@ export function endLLMRequestSpan(
       cacheReadTokens: metadata?.cacheReadTokens,
       cacheCreationTokens: metadata?.cacheCreationTokens,
       success: metadata?.success,
-      error: sealedModelContext() && metadata?.error ? SEALED_REDACTION : metadata?.error,
+      error:
+        sealedModelContext() && metadata?.error
+          ? SEALED_REDACTION
+          : metadata?.error,
       requestSetupMs: metadata?.requestSetupMs,
       attemptStartTimes: metadata?.attemptStartTimes,
     })
@@ -445,7 +449,10 @@ export function endLLMRequestSpan(
       endAttributes['success'] = metadata.success
     if (metadata.statusCode !== undefined)
       endAttributes['status_code'] = metadata.statusCode
-    if (metadata.error !== undefined) endAttributes['error'] = sealedModelContext() ? SEALED_REDACTION : metadata.error
+    if (metadata.error !== undefined)
+      endAttributes['error'] = sealedModelContext()
+        ? SEALED_REDACTION
+        : metadata.error
     if (metadata.attempt !== undefined)
       endAttributes['attempt'] = metadata.attempt
     if (metadata.hasToolCall !== undefined)
@@ -454,7 +461,8 @@ export function endLLMRequestSpan(
       endAttributes['ttft_ms'] = metadata.ttftMs
 
     // Add experimental response attributes (model_output, thinking_output)
-    if (!sealedModelContext()) addBetaLLMResponseAttributes(endAttributes, metadata)
+    if (!sealedModelContext())
+      addBetaLLMResponseAttributes(endAttributes, metadata)
   }
 
   llmSpanContext.span.setAttributes(endAttributes)

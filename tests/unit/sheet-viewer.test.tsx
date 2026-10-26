@@ -1,21 +1,35 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { SheetViewer } from '@/components/file-preview/SheetViewer';
+import type { ReactNode } from 'react';
+import { FilePreviewBody } from '@/plugins/files/FilePreviewBody';
+import { buildArtifactPreviewTargetFromPath } from '@/plugins/files/types';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { applicationShellPlugin } from '@/app/extensions';
+import { filesPlugin } from '@/plugins/files/plugin';
 
 const hostFileReadBinaryMock = vi.fn();
-const sessionIdentity = {
+const agentScope = {
   endpoint: {
     kind: 'native-runtime' as const,
     runtimeAdapterId: 'openclaw',
     runtimeInstanceId: 'openclaw:default',
   },
   agentId: 'files',
-  sessionKey: 'files:test',
 };
+const workspaceContext = { agentScope, workspaceRoot: '/workspace' };
+const file = buildArtifactPreviewTargetFromPath('/workspace/docs/demo.xlsx');
+const pluginHost = createPluginHost([applicationShellPlugin, filesPlugin]);
+
+function FilesPlugins({ children }: { children: ReactNode }) {
+  return <PluginHostProvider host={pluginHost}>{children}</PluginHostProvider>;
+}
+
 const xlsxReadMock = vi.fn();
 const xlsxSheetToJsonMock = vi.fn();
 
-vi.mock('react-i18next', () => ({
+vi.mock('react-i18next', async (importOriginal) => ({
+  ...await importOriginal<typeof import('react-i18next')>(),
   useTranslation: () => ({
     t: (key: string, options?: Record<string, unknown>) => {
       if (key === 'artifacts.previewUnnamedSheet') {
@@ -30,6 +44,7 @@ vi.mock('react-i18next', () => ({
 }));
 
 vi.mock('@/lib/host-api', () => ({
+  hostFileReadText: vi.fn(),
   hostFileReadBinary: (...args: unknown[]) => hostFileReadBinaryMock(...args),
 }));
 
@@ -67,12 +82,12 @@ describe('sheet viewer', () => {
         ['A'],
       ]);
 
-    render(<SheetViewer relativePath="docs/demo.xlsx" sessionIdentity={sessionIdentity} />);
+    render(<FilePreviewBody file={file} mode="preview" workspaceContext={workspaceContext} />, { wrapper: FilesPlugins });
 
     await waitFor(() => {
       expect(hostFileReadBinaryMock).toHaveBeenCalledWith({
-        endpoint: sessionIdentity.endpoint,
-        sessionKey: sessionIdentity.sessionKey,
+        endpoint: agentScope.endpoint,
+        agentId: agentScope.agentId,
         relativePath: 'docs/demo.xlsx',
         maxBytes: 50 * 1024 * 1024,
       });
@@ -96,7 +111,7 @@ describe('sheet viewer', () => {
       error: 'tooLarge',
     });
 
-    render(<SheetViewer relativePath="docs/demo.xlsx" sessionIdentity={sessionIdentity} />);
+    render(<FilePreviewBody file={file} mode="preview" workspaceContext={workspaceContext} />, { wrapper: FilesPlugins });
 
     expect(await screen.findByText('artifacts.previewTooLarge')).toBeInTheDocument();
   });

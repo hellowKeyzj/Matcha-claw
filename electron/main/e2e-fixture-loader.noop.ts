@@ -1,3 +1,5 @@
+export async function configureE2EWorldBootstrap(_defaultUserDataDir: string): Promise<void> {}
+
 type HostApiFetchRequest = {
   path?: string;
   method?: string;

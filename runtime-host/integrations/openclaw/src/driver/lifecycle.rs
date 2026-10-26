@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use foundation::process::supervision::{
-    CommandReceipt, CompletionError, RestartOutcome, StartOutcome, SupervisorHandle,
-    SupervisorPhase, SupervisorSnapshot, TerminationCompletion,
+    CommandReceipt, CompletionError, RestartOutcome, StartOutcome, SupervisorPhase,
+    SupervisorSnapshot, TerminationCompletion,
 };
 use runtime_directory::{
     LifecycleOps, OwnedRuntimeFuture, RuntimeLifecycleFailure, RuntimeStartFailure,
@@ -10,7 +10,7 @@ use runtime_directory::{
 use tokio::sync::watch;
 
 use crate::{
-    driver::OpenClawDriver,
+    driver::{OpenClawDriver, SupervisorLifecycleHandle},
     lifecycle::logs::{LifecycleDiagnostic, LifecycleDiagnosticCategory, LogStream},
 };
 
@@ -71,18 +71,13 @@ impl LifecycleOps for OpenClawDriver {
 }
 
 impl OpenClawDriver {
-    pub fn supervisor_handle(&self) -> SupervisorHandle {
-        self.owner
-            .lock()
-            .expect("OpenClaw supervisor owner lock must not be poisoned")
-            .as_ref()
-            .expect("OpenClaw supervisor owner must be present")
-            .handle()
+    pub fn supervisor_handle(&self) -> SupervisorLifecycleHandle {
+        self.owner()
     }
 }
 
 pub async fn prepare_openclaw_lifecycle(
-    supervisor: &SupervisorHandle,
+    supervisor: &SupervisorLifecycleHandle,
     gateway_port: u16,
     plugins: crate::native_config::plugins::PluginProjection,
     diagnostic_reporter: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
@@ -154,9 +149,9 @@ fn report_openclaw_configuration_rejected(
 }
 
 async fn start_supervisor(
-    supervisor: SupervisorHandle,
+    supervisor: SupervisorLifecycleHandle,
 ) -> Result<StartOutcome, RuntimeStartFailure> {
-    match supervisor.start().await {
+    match supervisor.enqueue_start().await {
         CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => {
             completion.wait().await.map_err(map_start_completion_error)
         }
@@ -168,9 +163,9 @@ async fn start_supervisor(
 }
 
 async fn stop_supervisor(
-    supervisor: SupervisorHandle,
+    supervisor: SupervisorLifecycleHandle,
 ) -> Result<TerminationCompletion, RuntimeLifecycleFailure> {
-    match supervisor.stop().await {
+    match supervisor.enqueue_stop().await {
         CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => completion
             .wait()
             .await
@@ -183,9 +178,9 @@ async fn stop_supervisor(
 }
 
 pub async fn restart_supervisor(
-    supervisor: SupervisorHandle,
+    supervisor: SupervisorLifecycleHandle,
 ) -> Result<RestartOutcome, RuntimeLifecycleFailure> {
-    match supervisor.restart().await {
+    match supervisor.enqueue_restart().await {
         CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => completion
             .wait()
             .await

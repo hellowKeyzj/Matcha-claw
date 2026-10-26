@@ -666,7 +666,7 @@ pub(crate) fn question_resolve_request(
     rpc_request(request_id, QUESTION_RESOLVE_METHOD, Some(Value::Object(params)))
 }
 
-fn rpc_request(
+pub(crate) fn rpc_request(
     request_id: String,
     method: impl Into<String>,
     params: Option<Value>,

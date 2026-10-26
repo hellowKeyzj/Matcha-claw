@@ -79,6 +79,7 @@ import { getAssistantMessageContentLength } from '../tokens.js';
 import { createAgentId } from '../uuid.js';
 import { finalizeAutonomyRunCompleted, finalizeAutonomyRunFailed } from '../autonomyRuns.js';
 import { getWorkload } from '../workloadContext.js';
+import { rethrowInvestigationAdmission } from '../../world/investigation.js';
 import type { ProcessUserInputBaseResult, ProcessUserInputContext } from './processUserInput.js';
 
 type SlashCommandResult = ProcessUserInputBaseResult & {
@@ -862,6 +863,7 @@ async function getMessagesForSlashCommand(
             inputString: formatCommandInput(command, displayArgs),
             precedingInputBlocks,
           }),
+          uuid,
         });
 
         try {
@@ -925,6 +927,7 @@ async function getMessagesForSlashCommand(
             resultText: result.value,
           };
         } catch (e) {
+          rethrowInvestigationAdmission(e);
           logError(e);
           return {
             messages: [
@@ -1153,8 +1156,15 @@ async function getMessagesForPromptSlashCommand(
     .filter((b): b is TextBlockParam => b.type === 'text')
     .map(b => b.text)
     .join('\n\n');
-  const sealedReferences = result.filter((b): b is TextBlockParam => b.type === 'text' && parseSealedSkillReference(b.text) !== undefined);
-  addInvokedSkill(command.name, skillPath, sealedReferences.length ? sealedReferences[0]!.text : skillContent, getAgentContext()?.agentId ?? null);
+  const sealedReferences = result.filter(
+    (b): b is TextBlockParam => b.type === 'text' && parseSealedSkillReference(b.text) !== undefined,
+  );
+  addInvokedSkill(
+    command.name,
+    skillPath,
+    sealedReferences.length ? sealedReferences[0]!.text : skillContent,
+    getAgentContext()?.agentId ?? null,
+  );
 
   const metadata = formatCommandLoadingMetadata(command, args);
 

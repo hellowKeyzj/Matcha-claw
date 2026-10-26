@@ -1,7 +1,11 @@
 import * as fs from 'fs'
 import {
   mkdir as mkdirPromise,
+  lstat as lstatPromise,
   open,
+  opendir,
+  realpath as realpathPromise,
+  readlink as readlinkPromise,
   readdir as readdirPromise,
   readFile as readFilePromise,
   rename as renamePromise,
@@ -14,6 +18,178 @@ import { homedir } from 'os'
 import * as nodePath from 'path'
 import { getErrnoCode } from './errors.js'
 import { slowLogging } from './slowOperations.js'
+import { readSourceBytes, SOURCE_STAT_MAX_BYTES, sourceStatBytes, sourceCleanupFailure } from './readFileInRange.js'
+import {
+  InvestigationAdmissionError, admitInvestigationIo, currentInvestigationScope,
+  investigationDigest, investigationSignal, investigationUsage,
+  observeInvestigationIo, requireInvestigationEffects, rethrowInvestigationAdmission, trackInvestigationOperation,
+  type InvestigationPermit,
+} from '../world/investigation.js'
+
+type SourceStatOptions = { bigint?: false; followSymlinks?: boolean; signal?: AbortSignal }
+type SourceBigIntStatOptions = { bigint: true; followSymlinks?: boolean; signal?: AbortSignal }
+
+function checkSourceLive(signal?: AbortSignal): void {
+  signal?.throwIfAborted()
+  requireInvestigationEffects(['source_read'])
+  investigationSignal()?.throwIfAborted()
+}
+
+function sourcePathUnits(): number {
+  // Native dirent/pathname storage bounds, not an assumed filesystem NAME_MAX.
+  // Linux d_reclen is uint16; Darwin d_name is 1024 bytes; NT UNICODE_STRING
+  // holds at most 32767 UTF-16 units. Unknown backends cannot prove a bound.
+  switch (process.platform) {
+    case 'linux': return 65535
+    case 'darwin': return 1024
+    case 'win32': return 32767
+    default: throw new InvestigationAdmissionError('investigation_source_path_bound_unavailable')
+  }
+}
+
+function sourceRecordBytes(record: object): number {
+  return Buffer.byteLength(JSON.stringify(record), 'utf8')
+}
+
+async function readSourceRecord<T>(
+  path: string, operation: 'stat' | 'lstat' | 'realpath' | 'readlink', byteCap: number,
+  read: () => Promise<T>, measure: (value: T) => number, signal?: AbortSignal,
+): Promise<T> {
+  checkSourceLive(signal)
+  const permit = await admitInvestigationIo({ kind: 'source',
+    preparedRequestDigest: investigationDigest({ path, operation, byteCap }),
+    reservation: investigationUsage({ sourceReads: '1', rows: '1', bytes: String(byteCap) }),
+    proof: { producer: 'matcha_local_source', operation, effect: 'source_read',
+      record: operation === 'realpath' ? 'fs_realpath_v1' : operation === 'readlink' ? 'fs_readlink_v1' : 'fs_stat_v1',
+      byteCap: String(byteCap), rowCap: '1' },
+  })
+  let attempted = false
+  let bytes = 0
+  let rows = 0
+  let failure: unknown
+  try {
+    checkSourceLive(signal)
+    attempted = true
+    const value = await read()
+    bytes = measure(value)
+    rows = 1
+    checkSourceLive(signal)
+    return value
+  } catch (error) {
+    failure = error
+    throw error
+  } finally {
+    try {
+      await observeInvestigationIo(permit, { status: 'complete',
+        usage: investigationUsage({ sourceReads: attempted ? '1' : '0', rows: String(rows), bytes: String(bytes) }),
+        ...(failure === undefined ? {} : { reason: failure instanceof Error ? failure.message : 'investigation_source_failed' }),
+      })
+    } catch (error) {
+      failure = sourceCleanupFailure(failure, error)
+    }
+    if (failure !== undefined) throw failure
+  }
+}
+
+export function statSourcePath(filePath: string, options: SourceBigIntStatOptions): Promise<fs.BigIntStats>
+export function statSourcePath(filePath: string, options?: SourceStatOptions): Promise<fs.Stats>
+export function statSourcePath(
+  filePath: string, options?: SourceStatOptions | SourceBigIntStatOptions,
+): Promise<fs.Stats | fs.BigIntStats> {
+  const read = () => (options?.followSymlinks === false ? lstatPromise : statPromise)(filePath, { bigint: options?.bigint ?? false })
+  if (!currentInvestigationScope()) return read()
+  return trackInvestigationOperation(readSourceRecord(filePath,
+    options?.followSymlinks === false ? 'lstat' : 'stat', SOURCE_STAT_MAX_BYTES, read, sourceStatBytes, options?.signal))
+}
+
+export function realSourcePath(path: string, signal?: AbortSignal): Promise<string> {
+  if (!currentInvestigationScope()) return realpathPromise(path)
+  // glibc realpath(NULL) can return a canonical path longer than PATH_MAX;
+  // the Linux dirent bound does not bound this dynamically allocated result.
+  if (process.platform === 'linux') throw new InvestigationAdmissionError('investigation_source_path_bound_unavailable')
+  return trackInvestigationOperation(readSourceRecord(path, 'realpath', sourcePathUnits() * 6 + 128,
+    () => realpathPromise(path), value => sourceRecordBytes({ type: 'fs_realpath_v1', path: value }), signal))
+}
+
+export function readSourceDirectory(directoryPath: string, signal?: AbortSignal): Promise<fs.Dirent[]> {
+  if (!currentInvestigationScope()) return readdirPromise(directoryPath, { withFileTypes: true })
+  return trackInvestigationOperation(readBoundedDirectory(directoryPath, signal))
+}
+
+async function readBoundedDirectory(directoryPath: string, signal?: AbortSignal): Promise<fs.Dirent[]> {
+  checkSourceLive(signal)
+  const batchSize = 8
+  // JSON may escape every native name unit as six ASCII bytes. parentPath is
+  // repeated because each returned Dirent carries that real application field.
+  const recordCap = sourcePathUnits() * 6 + sourceRecordBytes({ parentPath: directoryPath }) + 256
+  const batches: { permit: InvestigationPermit | undefined; bytes: number; rows: number }[] = []
+  const admitBatch = async () => {
+    const first = batches.length === 0
+    const permit = await admitInvestigationIo({ kind: 'source',
+      preparedRequestDigest: investigationDigest({ directoryPath, batch: batches.length, batchSize, recordCap }),
+      reservation: investigationUsage({ sourceReads: first ? '1' : '0', rows: String(batchSize), bytes: String(recordCap * batchSize) }),
+      proof: { producer: 'matcha_local_source', operation: 'directory_read', effect: 'source_read',
+        record: 'fs_dirent_v1', recordMaxBytes: String(recordCap), batchSize,
+        byteCap: String(recordCap * batchSize), rowCap: String(batchSize) },
+    })
+    const batch = { permit, bytes: 0, rows: 0 }
+    batches.push(batch)
+    return batch
+  }
+  let batch = await admitBatch()
+  let dir: Awaited<ReturnType<typeof opendir>> | undefined
+  let attempted = false
+  let failure: unknown
+  let closed = false
+  try {
+    checkSourceLive(signal)
+    attempted = true
+    dir = await opendir(directoryPath, { bufferSize: batchSize })
+    const entries: fs.Dirent[] = []
+    while (true) {
+      checkSourceLive(signal)
+      let ended = false
+      // Drain the complete native batch before checking cancellation again;
+      // this accounts for every prefetched entry, including later filters.
+      for (let index = 0; index < batchSize; index++) {
+        const entry = await dir.read()
+        if (!entry) { ended = true; break }
+        const kind = entry.isFile() ? 'file' : entry.isDirectory() ? 'directory'
+          : entry.isSymbolicLink() ? 'symlink' : entry.isBlockDevice() ? 'block'
+            : entry.isCharacterDevice() ? 'character' : entry.isFIFO() ? 'fifo'
+              : entry.isSocket() ? 'socket' : 'unknown'
+        const parentPath = 'parentPath' in entry ? entry.parentPath : directoryPath
+        batch.bytes += sourceRecordBytes({ type: 'fs_dirent_v1', name: entry.name, kind, parentPath })
+        batch.rows++
+        entries.push(entry)
+      }
+      checkSourceLive(signal)
+      if (ended) return entries
+      batch = await admitBatch()
+    }
+  } catch (error) {
+    failure = error
+    throw error
+  } finally {
+    try {
+      await dir?.close()
+      closed = true
+    } catch (error) {
+      failure = sourceCleanupFailure(failure, error)
+    }
+    for (const [index, batch] of batches.entries()) {
+      try {
+        await observeInvestigationIo(batch.permit, { status: closed ? 'complete' : attempted ? 'unknown' : 'not_sent',
+          usage: investigationUsage({ sourceReads: index === 0 && attempted ? '1' : '0', rows: String(batch.rows), bytes: String(batch.bytes) }),
+          ...(failure === undefined ? {} : { reason: failure instanceof Error ? failure.message : 'investigation_source_directory_failed' }),
+        })
+      } catch (error) {
+        failure = sourceCleanupFailure(failure, error)
+      }
+    }
+    if (failure !== undefined) throw failure
+  }
+}
 
 /**
  * Simplified filesystem operations interface based on Node.js fs module.
@@ -173,6 +349,28 @@ export function safeResolvePath(
     // If lstat/realpath fails for any reason (ENOENT, broken symlink,
     // EACCES, ELOOP, etc.), return the original path to allow operations
     // to proceed
+    return { resolvedPath: filePath, isSymlink: false, isCanonical: false }
+  }
+}
+
+export async function safeResolveSourcePath(
+  filePath: string, signal?: AbortSignal,
+): Promise<{ resolvedPath: string; isSymlink: boolean; isCanonical: boolean }> {
+  if (!currentInvestigationScope()) return safeResolvePath(getFsImplementation(), filePath)
+  if (filePath.startsWith('//') || filePath.startsWith('\\\\')) {
+    return { resolvedPath: filePath, isSymlink: false, isCanonical: false }
+  }
+  try {
+    const stats = await statSourcePath(filePath, { followSymlinks: false, signal })
+    if (stats.isFIFO() || stats.isSocket() || stats.isCharacterDevice() || stats.isBlockDevice()) {
+      return { resolvedPath: filePath, isSymlink: false, isCanonical: false }
+    }
+    const resolvedPath = (await realSourcePath(filePath, signal)).normalize('NFC')
+    return { resolvedPath, isSymlink: resolvedPath !== filePath, isCanonical: true }
+  } catch (error) {
+    rethrowInvestigationAdmission(error)
+    if (error instanceof Error && error.cause !== undefined) throw error
+    checkSourceLive(signal)
     return { resolvedPath: filePath, isSymlink: false, isCanonical: false }
   }
 }
@@ -381,6 +579,106 @@ export function getPathsForPermissionCheck(inputPath: string): string[] {
   return Array.from(pathSet)
 }
 
+function rethrowSourcePreparationFailure(error: unknown, signal?: AbortSignal): void {
+  rethrowInvestigationAdmission(error)
+  if (error instanceof Error && error.cause !== undefined) throw error
+  checkSourceLive(signal)
+}
+
+function readSourceLink(path: string, signal?: AbortSignal): Promise<string> {
+  // The NT reparse target is bounded by UNICODE_STRING. A POSIX magic-link
+  // target need not share the directory-entry name bound.
+  if (process.platform !== 'win32') throw new InvestigationAdmissionError('investigation_source_link_bound_unavailable')
+  return trackInvestigationOperation(readSourceRecord(path, 'readlink', sourcePathUnits() * 6 + 128,
+    () => readlinkPromise(path), value => sourceRecordBytes({ type: 'fs_readlink_v1', path: value }), signal))
+}
+
+async function resolveDeepestExistingSourceAncestor(
+  absolutePath: string, signal?: AbortSignal,
+): Promise<string | undefined> {
+  let dir = absolutePath
+  const segments: string[] = []
+  while (dir !== nodePath.dirname(dir)) {
+    let stats: fs.Stats
+    try {
+      stats = await statSourcePath(dir, { followSymlinks: false, signal })
+    } catch (error) {
+      rethrowSourcePreparationFailure(error, signal)
+      segments.unshift(nodePath.basename(dir))
+      dir = nodePath.dirname(dir)
+      continue
+    }
+    if (stats.isSymbolicLink()) {
+      let resolved: string
+      try {
+        resolved = (await realSourcePath(dir, signal)).normalize('NFC')
+      } catch (error) {
+        rethrowSourcePreparationFailure(error, signal)
+        const target = await readSourceLink(dir, signal)
+        resolved = nodePath.isAbsolute(target) ? target : nodePath.resolve(nodePath.dirname(dir), target)
+      }
+      return segments.length === 0 ? resolved : nodePath.join(resolved, ...segments)
+    }
+    try {
+      const resolved = (await realSourcePath(dir, signal)).normalize('NFC')
+      if (resolved !== dir) return segments.length === 0 ? resolved : nodePath.join(resolved, ...segments)
+    } catch (error) {
+      rethrowSourcePreparationFailure(error, signal)
+    }
+    return undefined
+  }
+  return undefined
+}
+
+export function getSourcePathsForPermissionCheck(inputPath: string, signal?: AbortSignal): Promise<string[]> {
+  if (!currentInvestigationScope()) return Promise.resolve(getPathsForPermissionCheck(inputPath))
+  return trackInvestigationOperation(collectSourcePermissionPaths(inputPath, signal))
+}
+
+async function collectSourcePermissionPaths(inputPath: string, signal?: AbortSignal): Promise<string[]> {
+  signal?.throwIfAborted()
+  requireInvestigationEffects([])
+  let path = inputPath
+  if (path === '~') path = homedir().normalize('NFC')
+  else if (path.startsWith('~/')) path = nodePath.join(homedir().normalize('NFC'), path.slice(2))
+  const paths = new Set([path])
+  if (path.startsWith('//') || path.startsWith('\\\\')) return [...paths]
+  try {
+    let currentPath = path
+    const visited = new Set<string>()
+    for (let depth = 0; depth < 40; depth++) {
+      if (visited.has(currentPath)) break
+      visited.add(currentPath)
+      let exists = true
+      try {
+        await statSourcePath(currentPath, { signal })
+      } catch (error) {
+        rethrowSourcePreparationFailure(error, signal)
+        exists = false
+      }
+      if (!exists) {
+        if (currentPath === path) {
+          const resolved = await resolveDeepestExistingSourceAncestor(path, signal)
+          if (resolved !== undefined) paths.add(resolved)
+        }
+        break
+      }
+      const stats = await statSourcePath(currentPath, { followSymlinks: false, signal })
+      if (stats.isFIFO() || stats.isSocket() || stats.isCharacterDevice() || stats.isBlockDevice()) break
+      if (!stats.isSymbolicLink()) break
+      const target = await readSourceLink(currentPath, signal)
+      const absoluteTarget = nodePath.isAbsolute(target) ? target : nodePath.resolve(nodePath.dirname(currentPath), target)
+      paths.add(absoluteTarget)
+      currentPath = absoluteTarget
+    }
+  } catch (error) {
+    rethrowSourcePreparationFailure(error, signal)
+  }
+  const { resolvedPath, isSymlink } = await safeResolveSourcePath(path, signal)
+  if (isSymlink && resolvedPath !== path) paths.add(resolvedPath)
+  return [...paths]
+}
+
 export const NodeFsOperations: FsOperations = {
   cwd() {
     return process.cwd()
@@ -392,11 +690,11 @@ export const NodeFsOperations: FsOperations = {
   },
 
   async stat(fsPath) {
-    return statPromise(fsPath)
+    return statSourcePath(fsPath)
   },
 
   async readdir(fsPath) {
-    return readdirPromise(fsPath, { withFileTypes: true })
+    return readSourceDirectory(fsPath)
   },
 
   async unlink(fsPath) {
@@ -425,7 +723,8 @@ export const NodeFsOperations: FsOperations = {
   },
 
   async readFile(fsPath, options) {
-    return readFilePromise(fsPath, { encoding: options.encoding })
+    if (!currentInvestigationScope()) return readFilePromise(fsPath, { encoding: options.encoding })
+    return (await readSourceBytes(fsPath)).toString(options.encoding)
   },
 
   async rename(oldPath, newPath) {
@@ -576,29 +875,7 @@ export const NodeFsOperations: FsOperations = {
   },
 
   async readFileBytes(fsPath: string, maxBytes?: number) {
-    if (maxBytes === undefined) {
-      return readFilePromise(fsPath)
-    }
-    const handle = await open(fsPath, 'r')
-    try {
-      const { size } = await handle.stat()
-      const readSize = Math.min(size, maxBytes)
-      const buffer = Buffer.allocUnsafe(readSize)
-      let offset = 0
-      while (offset < readSize) {
-        const { bytesRead } = await handle.read(
-          buffer,
-          offset,
-          readSize - offset,
-          offset,
-        )
-        if (bytesRead === 0) break
-        offset += bytesRead
-      }
-      return offset < readSize ? buffer.subarray(0, offset) : buffer
-    } finally {
-      await handle.close()
-    }
+    return readSourceBytes(fsPath, { maxBytes })
   },
 }
 

@@ -1,0 +1,38 @@
+import type { ChatSessionViewportState } from '@/plugins/chat/store/types';
+
+export type ChatViewportWindow = ChatSessionViewportState;
+
+export function createViewportWindowState(
+  partial: Partial<ChatSessionViewportState> = {},
+): ChatViewportWindow {
+  const totalItemCount = typeof partial.totalItemCount === 'number'
+    ? partial.totalItemCount
+    : (typeof partial.windowEndOffset === 'number' ? partial.windowEndOffset : 0);
+  const windowStartOffset = typeof partial.windowStartOffset === 'number'
+    ? partial.windowStartOffset
+    : 0;
+  const windowEndOffset = typeof partial.windowEndOffset === 'number'
+    ? partial.windowEndOffset
+    : totalItemCount;
+  return {
+    totalItemCount,
+    windowStartOffset,
+    windowEndOffset,
+    hasMore: Boolean(partial.hasMore),
+    hasNewer: Boolean(partial.hasNewer),
+    isLoadingMore: Boolean(partial.isLoadingMore),
+    isLoadingNewer: Boolean(partial.isLoadingNewer),
+    isAtLatest: partial.isAtLatest ?? (windowEndOffset >= totalItemCount),
+    anchorItemKey: partial.anchorItemKey ?? null,
+  };
+}
+
+export function syncViewportState(
+  viewport: ChatSessionViewportState,
+  next: ChatSessionViewportState,
+): ChatViewportWindow {
+  return createViewportWindowState({
+    ...viewport,
+    ...next,
+  });
+}

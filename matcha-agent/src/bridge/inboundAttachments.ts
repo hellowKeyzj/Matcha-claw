@@ -21,6 +21,9 @@ import { logForDebugging } from '../utils/debug.js'
 import { getClaudeConfigHomeDir } from '../utils/envUtils.js'
 import { lazySchema } from '../utils/lazySchema.js'
 import { getBridgeAccessToken, getBridgeBaseUrl } from './bridgeConfig.js'
+import { requestInvestigationFile, stageInvestigationFile } from '../services/api/fileInvestigation.js'
+import { rethrowInvestigationAdmission } from '../services/api/investigation.js'
+import { currentInvestigationScope } from '../world/investigation.js'
 
 const DOWNLOAD_TIMEOUT_MS = 30_000
 
@@ -79,18 +82,23 @@ async function resolveOne(att: InboundAttachment): Promise<string | undefined> {
     // FedStart URL degrades to "no @path" instead of crashing print.ts's
     // reader loop (which has no catch around the await).
     const url = `${getBridgeBaseUrl()}/api/oauth/files/${encodeURIComponent(att.file_uuid)}/content`
-    const response = await axios.get(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      responseType: 'arraybuffer',
-      timeout: DOWNLOAD_TIMEOUT_MS,
-      validateStatus: () => true,
-    })
+    const response = currentInvestigationScope()
+      ? await requestInvestigationFile({ producer: 'matcha_inbound_attachment', operation: 'attachment_download',
+          url, method: 'GET', headers: { Authorization: `Bearer ${token}` }, timeoutMs: DOWNLOAD_TIMEOUT_MS,
+          records: (_body, status) => status === 200 ? 1n : 0n })
+      : await axios.get(url, {
+          headers: { Authorization: `Bearer ${token}` },
+          responseType: 'arraybuffer',
+          timeout: DOWNLOAD_TIMEOUT_MS,
+          validateStatus: () => true,
+        })
     if (response.status !== 200) {
       debug(`fetch ${att.file_uuid} failed: status=${response.status}`)
       return undefined
     }
     data = Buffer.from(response.data)
   } catch (e) {
+    rethrowInvestigationAdmission(e)
     debug(`fetch ${att.file_uuid} threw: ${e}`)
     return undefined
   }
@@ -105,9 +113,15 @@ async function resolveOne(att: InboundAttachment): Promise<string | undefined> {
   const outPath = join(dir, `${prefix}-${safeName}`)
 
   try {
-    await mkdir(dir, { recursive: true })
-    await writeFile(outPath, data)
+    if (currentInvestigationScope()) {
+      await stageInvestigationFile({ producer: 'matcha_inbound_attachment', operation: 'attachment_stage',
+        root: dir, target: outPath, data })
+    } else {
+      await mkdir(dir, { recursive: true })
+      await writeFile(outPath, data)
+    }
   } catch (e) {
+    rethrowInvestigationAdmission(e)
     debug(`write ${outPath} failed: ${e}`)
     return undefined
   }
@@ -125,7 +139,12 @@ export async function resolveInboundAttachments(
 ): Promise<string> {
   if (attachments.length === 0) return ''
   debug(`resolving ${attachments.length} attachment(s)`)
-  const paths = await Promise.all(attachments.map(resolveOne))
+  const paths: Array<string | undefined> = []
+  if (currentInvestigationScope()) {
+    for (const attachment of attachments) paths.push(await resolveOne(attachment))
+  } else {
+    paths.push(...await Promise.all(attachments.map(resolveOne)))
+  }
   const ok = paths.filter((p): p is string => p !== undefined)
   if (ok.length === 0) return ''
   // Quoted form — extractAtMentionedFiles truncates unquoted @refs at the

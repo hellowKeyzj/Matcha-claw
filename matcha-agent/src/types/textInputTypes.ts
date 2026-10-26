@@ -328,6 +328,10 @@ export type QueuedCommand = {
    * the queue instead of calling `onQuery` directly.
    */
   isMeta?: boolean
+  nativeBudget?: { maxTurns?: number }
+  nativeExecution?: import('../world/investigation.js').AcceptedInputScope
+  /** Raw SDK input retained only until its IO runs in the accepted-input scope. */
+  nativeInputMessage?: import('../entrypoints/agentSdkTypes.js').SDKUserMessage
   /**
    * Provenance of this command. Stamped onto the resulting UserMessage so the
    * transcript records origin structurally (not just via XML tags in content).

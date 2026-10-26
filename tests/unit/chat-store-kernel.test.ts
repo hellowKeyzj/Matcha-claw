@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createChatStoreKernel } from '@/stores/chat/store-kernel';
-import type { ChatStoreState } from '@/stores/chat/types';
+import { createChatStoreKernel } from '@/plugins/chat/store/store-kernel';
+import type { ChatStoreState } from '@/plugins/chat/store/types';
 
 type StoreSetFn = (
   partial: Partial<ChatStoreState> | ((state: ChatStoreState) => Partial<ChatStoreState> | ChatStoreState),

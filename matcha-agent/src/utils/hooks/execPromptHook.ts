@@ -2,6 +2,12 @@ import { randomUUID } from 'crypto'
 import type { HookEvent } from 'src/entrypoints/agentSdkTypes.js'
 import { queryModelWithoutStreaming } from '../../services/api/claude.js'
 import type { ToolUseContext } from '../../Tool.js'
+import {
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+  investigationSignal,
+  requireInvestigationEffects,
+} from '../../world/investigation.js'
 import type { Message } from '../../types/message.js'
 import { createAttachmentMessage } from '../attachments.js'
 import { createCombinedAbortSignal } from '../combinedAbortSignal.js'
@@ -28,6 +34,8 @@ export async function execPromptHook(
   messages?: Message[],
   toolUseID?: string,
 ): Promise<HookResult> {
+  requireInvestigationEffects(['probabilistic'])
+
   // Use provided toolUseID or generate a new one
   const effectiveToolUseID = toolUseID || `hook-${randomUUID()}`
   try {
@@ -52,11 +60,18 @@ export async function execPromptHook(
     )
 
     // Query the model with Haiku
-    const hookTimeoutMs = hook.timeout ? hook.timeout * 1000 : 30000
+    const scope = currentInvestigationScope()
+    const hookTimeoutMs = Math.min(
+      hook.timeout ? hook.timeout * 1000 : 30000,
+      scope ? Math.max(1, scope.deadlineMs - Date.now()) : Infinity,
+    )
 
     // Combined signal: aborts if either the hook signal or timeout triggers
     const { signal: combinedSignal, cleanup: cleanupSignal } =
-      createCombinedAbortSignal(signal, { timeoutMs: hookTimeoutMs })
+      createCombinedAbortSignal(signal, {
+        signalB: investigationSignal(),
+        timeoutMs: hookTimeoutMs,
+      })
 
     try {
       const response = await queryModelWithoutStreaming({
@@ -185,6 +200,7 @@ Your response must be a JSON object matching one of the following schemas:
       }
     } catch (error) {
       cleanupSignal()
+      if (error instanceof InvestigationAdmissionError) throw error
 
       if (combinedSignal.aborted) {
         return {
@@ -195,6 +211,7 @@ Your response must be a JSON object matching one of the following schemas:
       throw error
     }
   } catch (error) {
+    if (error instanceof InvestigationAdmissionError) throw error
     const errorMsg = errorMessage(error)
     logForDebugging(`Hooks: Prompt hook error: ${errorMsg}`)
     return {

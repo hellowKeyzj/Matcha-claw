@@ -1,0 +1,30 @@
+[package]
+name = "document-parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anydoc = "=0.1.9"
+calamine.workspace = true
+csv = "1.4"
+docx-rs.workspace = true
+epub.workspace = true
+html2text.workspace = true
+image = { workspace = true, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
+mobi.workspace = true
+office_oxide.workspace = true
+pdfium-render.workspace = true
+quick-xml = "0.41"
+schemars.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["arbitrary_precision", "raw_value"] }
+sha2.workspace = true
+zip.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

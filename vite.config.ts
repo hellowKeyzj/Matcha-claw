@@ -4,7 +4,7 @@ import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import { resolve } from 'path';
 
-const nativeAddonExternal = ['node-llama-cpp', /^@node-llama-cpp\//, '@lydell/node-pty'];
+const nativeAddonExternal = ['node-llama-cpp', /^@node-llama-cpp\//, '@lydell/node-pty', 'koffi'];
 const qrTerminalExternal = ['qrcode-terminal', /^qrcode-terminal\//];
 const rendererRoot = normalizePath(__dirname);
 const rendererSourceRoots = ['src', 'public'].map((dir) => `${rendererRoot}/${dir}`);
@@ -115,7 +115,7 @@ export default defineConfig(({ command, mode }) => ({
             },
           },
           build: {
-            outDir: 'dist-electron/main',
+            outDir: mode === 'e2e' ? 'e2e/.cache/app/dist-electron/main' : 'dist-electron/main',
             watch: command === 'serve' ? {} : undefined,
             rollupOptions: {
               external: [
@@ -137,7 +137,7 @@ export default defineConfig(({ command, mode }) => ({
         },
         vite: {
           build: {
-            outDir: 'dist-electron/preload',
+            outDir: mode === 'e2e' ? 'e2e/.cache/app/dist-electron/preload' : 'dist-electron/preload',
             watch: command === 'serve' ? {} : undefined,
             rollupOptions: {
               external: ['electron'],
@@ -166,7 +166,7 @@ export default defineConfig(({ command, mode }) => ({
     },
   },
   build: {
-    outDir: 'dist',
+    outDir: mode === 'e2e' ? 'e2e/.cache/app/dist' : 'dist',
     emptyOutDir: true,
     rollupOptions: {
       output: {

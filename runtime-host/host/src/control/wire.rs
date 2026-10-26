@@ -425,6 +425,18 @@ pub(crate) enum SafeEvent {
     BoardResync {},
     #[serde(rename = "organization.changed")]
     OrganizationChanged {},
+    #[serde(rename = "world.changed")]
+    WorldChanged {
+        world: world_protocol::ids::WorldRef,
+        incarnation: world_protocol::ids::Generation,
+        resource: world_protocol::ids::ResourceRef,
+        revision: world_protocol::ids::Revision,
+    },
+    #[serde(rename = "world.resync-required")]
+    WorldResyncRequired {
+        world: world_protocol::ids::WorldRef,
+        incarnation: world_protocol::ids::Generation,
+    },
     #[serde(rename = "cron.changed")]
     CronChanged {
         #[serde(deserialize_with = "deserialize_matcha_endpoint")]

@@ -728,7 +728,8 @@ impl OrganizationStore {
                 return Ok(false);
             }
             let expected = crate::ActivityExecutionRequest::agent_task(run.team(), activity.facts(), binding.clone())
-                .map_err(|_| StoreFault::InvalidFacts)?;
+                .map_err(|_| StoreFault::InvalidFacts)?
+                .with_execution_context(run.task_execution_context().cloned());
             Ok(&expected == request)
         })
     }
@@ -1094,6 +1095,15 @@ impl OrganizationStore {
             })
         });
         result
+    }
+
+    pub(crate) fn record_task_native_execution(
+        &mut self,
+        delivery_id: &DeliveryId,
+        native: crate::TaskNativeExecution,
+    ) -> Result<(), StoreFault> {
+        self.transact(|facts| facts.record_task_native_execution(delivery_id, native)
+            .map_err(|_| StoreFault::InvalidFacts))
     }
 
     pub(crate) fn native_terminal_target(

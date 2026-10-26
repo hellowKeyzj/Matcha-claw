@@ -1,5 +1,6 @@
 pub(crate) mod account_store;
 pub(crate) mod cascade;
+pub(crate) mod generation_bindings;
 pub(crate) mod loopback;
 pub(crate) mod migration;
 pub(crate) mod model_store;

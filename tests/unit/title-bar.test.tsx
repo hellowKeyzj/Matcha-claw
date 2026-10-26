@@ -2,6 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { TitleBar } from '@/components/layout/TitleBar';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { applicationShellPlugin } from '@/app/extensions';
+import { settingsPlugin } from '@/plugins/settings/plugin';
+import { useAccountStore } from '@/plugins/account/stores/account';
+import i18n from '@/i18n';
+
+const host = createPluginHost([applicationShellPlugin, settingsPlugin]);
 
 const invokeIpcMock = vi.hoisted(() => vi.fn());
 
@@ -18,18 +26,22 @@ describe('TitleBar platform behavior', () => {
   beforeEach(() => {
     invokeIpcMock.mockReset();
     invokeIpcMock.mockResolvedValue(false);
+    useAccountStore.setState({ status: 'signedIn' });
+    i18n.changeLanguage('en');
   });
 
   it('renders macOS drag region with a settings button', () => {
     window.electron.platform = 'darwin';
     const { container } = render(
       <MemoryRouter>
-        <TitleBar />
+        <PluginHostProvider host={host}>
+          <TitleBar />
+        </PluginHostProvider>
         <CurrentPath />
       </MemoryRouter>,
     );
     expect(container.querySelector('.drag-region')).toBeInTheDocument();
-    const settingsButton = container.querySelector('.no-drag button');
+    const settingsButton = screen.getByTitle('Settings');
     expect(settingsButton).toBeInTheDocument();
     fireEvent.click(settingsButton!);
     expect(screen.getByTestId('current-path')).toHaveTextContent('/settings');
@@ -41,7 +53,9 @@ describe('TitleBar platform behavior', () => {
     window.electron.platform = 'win32';
     render(
       <MemoryRouter>
-        <TitleBar />
+        <PluginHostProvider host={host}>
+          <TitleBar />
+        </PluginHostProvider>
       </MemoryRouter>,
     );
 
@@ -57,7 +71,9 @@ describe('TitleBar platform behavior', () => {
     window.electron.platform = 'linux';
     const { container } = render(
       <MemoryRouter>
-        <TitleBar />
+        <PluginHostProvider host={host}>
+          <TitleBar />
+        </PluginHostProvider>
       </MemoryRouter>,
     );
     expect(container.firstChild).toBeNull();

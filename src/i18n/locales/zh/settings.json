@@ -474,6 +474,10 @@
       "retry": "重试刷新"
     },
     "custom": "自定义",
+    "execution": {
+      "blocked": "暂不可用",
+      "unsupported": "此运行时不支持"
+    },
     "notRequired": "非必填",
     "empty": {
       "title": "未配置提供商",
@@ -519,6 +523,7 @@
     "card": {
       "configured": "已配置",
       "noKey": "未设置 API 密钥",
+      "credentialUnknown": "凭据状态未确认",
       "none": "无",
       "editKey": "编辑 API 密钥",
       "delete": "删除提供商"
@@ -559,17 +564,26 @@
       "submitCode": "提交授权码"
     },
     "projectionErrors": {
-      "diagnostic": "OpenClaw 配置同步失败：{{reason}}",
-      "readbackMismatch": "OpenClaw 配置写入后读回内容不一致。",
-      "readbackUnavailable": "OpenClaw 配置写入后无法读回验证。",
-      "outcomeUnknown": "OpenClaw 配置同步结果未知。",
-      "providerAccountConfigurationInvalid": "OpenClaw provider 账号配置无效，请检查提供商、端点和协议后重试。",
+      "providerProjectionPartial": "此运行时中部分账号暂不可用，请查看下方对应账号的状态。",
+      "providerAuthUnsupported": "此运行时不支持该账号的认证方式。",
+      "providerRestartRequired": "配置已保存，需重启此运行时后生效。",
+      "providerCleanupPartial": "此运行时中部分账号的清理尚未完成。",
+      "providerProjectionNotSent": "配置已保存，但尚未发送到此运行时。",
+      "providerProjectionOutcomeUnknown": "配置已保存，此运行时的应用结果尚未确认。",
+      "providerCleanupBlocked": "此运行时的账号清理受阻。",
+      "providerProjectionRejected": "此运行时拒绝了账号配置，请检查账号设置。",
+      "privateResolverUnavailable": "本机凭据服务暂不可用，请待服务恢复后重试。",
+      "diagnostic": "运行时配置同步失败：{{reason}}",
+      "readbackMismatch": "运行时读回配置与已保存的配置不一致。",
+      "readbackUnavailable": "无法读回运行时配置进行验证。",
+      "outcomeUnknown": "运行时配置同步结果未知。",
+      "providerAccountConfigurationInvalid": "Provider 账号配置无效，请检查提供商、端点和协议后重试。",
       "providerCascadeUnavailable": "Provider 配置状态不可用，请刷新后重试。",
       "providerCredentialUnavailable": "当前 provider 凭据不可用，请重新填写并保存。",
-      "providerKeyDuplicate": "OpenClaw provider 标识冲突，请删除重复账号或改用自定义配置。",
+      "providerKeyDuplicate": "Provider 标识冲突，请删除重复账号或改用自定义配置。",
       "providerModelCapabilityInvalid": "模型能力配置无效，请检查模型类型后保存。",
       "providerModelIdentifierInvalid": "模型 ID 无效，请检查后保存。",
-      "providerModelPersistenceFailed": "无法写入 OpenClaw 模型配置，请检查文件权限后重试。",
+      "providerModelPersistenceFailed": "无法保存模型配置，请检查文件权限后重试。",
       "providerModelTokenLimitInvalid": "模型 Token 参数无效，请确保最大输出 Token 不大于上下文窗口。",
       "providerOwnerResponseUnavailable": "Provider 配置写入没有返回结果，请刷新后重试。",
       "providerOwnerUnavailable": "Provider 配置服务不可用，请重启应用后重试。",
@@ -578,17 +592,17 @@
       "providerRoutingInvalid": "模型分配规则无效，请检查后保存。",
       "providerRoutingModelCapabilityUnavailable": "模型分配引用的模型不支持该能力，请重新选择。",
       "providerRoutingModelUnavailable": "模型分配引用的模型不存在，请重新选择。",
-      "providerRoutingPersistenceFailed": "无法写入 OpenClaw 模型分配配置，请检查文件权限后重试。",
+      "providerRoutingPersistenceFailed": "无法保存模型分配配置，请检查文件权限后重试。",
       "privateResolver": {
         "credentialMissing": "当前账号没有可用的 API Key，请重新填写并保存。",
         "credentialDecryptFailed": "本机保存的 API Key 无法解密，请重新填写并保存。",
         "credentialProviderMismatch": "当前账号保存的 API Key 属于另一个提供商，请重新填写并保存。",
         "credentialInvalid": "当前账号保存的认证信息格式无效，请重新填写并保存。",
-        "authProfileReadInvalid": "OpenClaw 认证配置文件已损坏，请修复或删除后重新保存。",
-        "authProfileWriteFailed": "无法写入 OpenClaw 认证配置文件，请检查文件权限后重试。",
+        "authProfileReadInvalid": "运行时认证配置文件已损坏，请修复或删除后重新保存。",
+        "authProfileWriteFailed": "无法写入运行时认证配置文件，请检查文件权限后重试。",
         "credentialStoreUnavailable": "无法读取本机保存的 provider 凭据，请重新填写并保存。",
         "invalidRequest": "内部认证同步请求无效，请重试。",
-        "unknown": "OpenClaw 认证同步失败，请重新填写 API Key 后保存。"
+        "unknown": "无法确认运行时的认证状态，请刷新后重试。"
       }
     }
   },

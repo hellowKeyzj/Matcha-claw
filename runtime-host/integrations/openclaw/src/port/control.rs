@@ -12,7 +12,7 @@ use crate::{
         client::{GatewayClient, GatewayClientError, GatewayControlReadiness},
         wire,
     },
-    lifecycle::{readiness::OpenClawReadiness, stop::OpenClawGracefulStop},
+    lifecycle::readiness::OpenClawReadiness,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,10 +50,6 @@ impl OpenClawGatewayControl {
 impl OpenClawGateway {
     pub fn readiness_policy(&self) -> OpenClawReadiness {
         OpenClawReadiness::new(Arc::clone(&self.client))
-    }
-
-    pub fn graceful_stop_policy(&self) -> OpenClawGracefulStop {
-        OpenClawGracefulStop::new(Arc::clone(&self.client))
     }
 
     pub async fn observe_control(&self) -> OpenClawControlReadiness {

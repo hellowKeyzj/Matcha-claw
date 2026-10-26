@@ -33,6 +33,10 @@ pub(crate) struct HostHandles {
     pub session_module: SessionModule,
     pub session: SessionHandle,
     pub provider: ProviderModule,
+    pub world: world::WorldHandle,
+    pub world_authority: Arc<world::AuthorityRoot>,
+    pub world_storage:
+        Result<Arc<super::ports::world_storage::DurableWorldStorage>, world::StoreError>,
     pub settings: SettingsModule,
     pub connector: ConnectorModule,
     pub security: SecurityModule,

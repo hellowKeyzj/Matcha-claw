@@ -166,6 +166,7 @@ const MANAGED_PLUGIN_IDS: &[&str] = &[
     "browser-relay",
     "memory-lancedb-pro",
     "matchaclaw-media",
+    "world-tools",
 ];
 
 const MANUALLY_CONFIGURABLE_PLUGIN_IDS: &[&str] = &[
@@ -174,6 +175,7 @@ const MANUALLY_CONFIGURABLE_PLUGIN_IDS: &[&str] = &[
     "browser-relay",
     "memory-lancedb-pro",
     "matchaclaw-media",
+    "world-tools",
 ];
 
 pub struct PluginProjection {

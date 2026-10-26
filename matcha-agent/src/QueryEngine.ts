@@ -48,6 +48,7 @@ import type {
 } from './types/message.js'
 import type { OrphanedPermission } from './types/textInputTypes.js'
 import { createAbortController } from './utils/abortController.js'
+import { currentInvestigation } from './world/investigation.js'
 import type { AttributionState } from './utils/commitAttribution.js'
 import { getGlobalConfig } from './utils/config.js'
 import { getCwd } from './utils/cwd.js'
@@ -74,6 +75,7 @@ import {
   getMainLoopModel,
   parseUserSpecifiedModel,
 } from './utils/model/model.js'
+import { getAPIProvider } from './utils/model/providers.js'
 import { loadAllPluginsCacheOnly } from './utils/plugins/pluginLoader.js'
 import {
   type ProcessUserInputContext,
@@ -256,6 +258,79 @@ export class QueryEngine {
     setCwd(cwd)
     const persistSession = !isSessionPersistenceDisabled()
     const startTime = Date.now()
+    const nativeStartedAt = performance.now()
+    const inputMessageId = options?.uuid ?? randomUUID()
+    const nativeInvestigation = currentInvestigation() !== undefined
+    const tokenFields = [
+      'input_tokens',
+      'output_tokens',
+      'cache_read_input_tokens',
+      'cache_creation_input_tokens',
+    ] as const
+    type TokenField = (typeof tokenFields)[number]
+    const nativeTotals: Partial<Record<TokenField, number>> = {}
+    const nativeMissing = new Set<TokenField>()
+    const nativeResponses = new Map<string, Record<string, unknown>>()
+    const nativeSettled = new Set<string>()
+    const rawAnthropic = [
+      'firstParty',
+      'bedrock',
+      'vertex',
+      'foundry',
+    ].includes(getAPIProvider())
+    let nativeIncomplete = false
+    let nativePending = false
+    const nativeResult = (complete = false) => ({
+      input_message_id: inputMessageId,
+      native_measurement: {
+        scope: 'native_query' as const,
+        coverage: 'foreground_query_responses' as const,
+        complete:
+          complete &&
+          !nativeIncomplete &&
+          !nativePending &&
+          !this.abortController.signal.aborted &&
+          [...nativeResponses.keys()].every(id => nativeSettled.has(id)),
+        elapsed_ms: {
+          availability: 'available' as const,
+          value: Math.max(0, Math.floor(performance.now() - nativeStartedAt)),
+          provenance: 'query_monotonic_clock',
+        },
+        ...Object.fromEntries(
+          tokenFields.map(field => [
+            field,
+            nativeTotals[field] !== undefined &&
+            !nativeMissing.has(field) &&
+            !nativeIncomplete &&
+            !nativePending &&
+            !this.abortController.signal.aborted &&
+            [...nativeResponses.keys()].every(id => nativeSettled.has(id))
+              ? {
+                  availability: 'available',
+                  value: nativeTotals[field],
+                  provenance: 'native_response_usage',
+                }
+              : {
+                  availability: 'unavailable',
+                  provenance: 'native_response_usage',
+                  reason: 'raw_usage_missing_or_incomplete',
+                },
+          ]),
+        ),
+        ...Object.fromEntries(
+          ['cost', 'model_calls', 'steps', 'source_reads', 'rows', 'bytes'].map(
+            field => [
+              field,
+              {
+                availability: 'unavailable',
+                provenance: 'native_query',
+                reason: 'not_measured',
+              },
+            ],
+          ),
+        ),
+      },
+    })
 
     // Wrap canUseTool to track permission denials
     const wrappedCanUseTool: CanUseToolFn = async (
@@ -440,7 +515,7 @@ export class QueryEngine {
         messages: this.mutableMessages,
       },
       messages: this.mutableMessages,
-      uuid: options?.uuid,
+      uuid: inputMessageId,
       isMeta: options?.isMeta,
       querySource: 'sdk',
     })
@@ -467,11 +542,12 @@ export class QueryEngine {
     // Transcript is still written (for post-hoc debugging); just not blocking.
     if (persistSession && messagesFromUserInput.length > 0) {
       const transcriptPromise = recordTranscript(messages)
-      if (isBareMode()) {
+      if (isBareMode() && !nativeInvestigation) {
         void transcriptPromise
       } else {
         await transcriptPromise
         if (
+          nativeInvestigation ||
           isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
           isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
         ) {
@@ -491,6 +567,25 @@ export class QueryEngine {
         (msg.type === 'system' && msg.subtype === 'compact_boundary'), // Always ack compact boundaries
     )
     const messagesToAck = replayUserMessages ? replayableMessages : []
+    let hasAcknowledgedInitialMessages = false
+    function* acknowledgeInitialMessages(): Generator<SDKUserMessageReplay> {
+      if (hasAcknowledgedInitialMessages || messagesToAck.length === 0) return
+      hasAcknowledgedInitialMessages = true
+      for (const msgToAck of messagesToAck) {
+        if (msgToAck.type === 'user') {
+          yield {
+            type: 'user',
+            message: msgToAck.message,
+            session_id: getSessionId(),
+            parent_tool_use_id: null,
+            uuid: msgToAck.uuid,
+            timestamp: msgToAck.timestamp,
+            isReplay: true,
+          } as unknown as SDKUserMessageReplay
+        }
+      }
+    }
+    if (nativeInvestigation) yield* acknowledgeInitialMessages()
 
     // Update the ToolPermissionContext based on user input processing (as necessary)
     setAppState(prev => ({
@@ -637,6 +732,7 @@ export class QueryEngine {
 
       yield {
         type: 'result',
+        ...nativeResult(true),
         subtype: 'success',
         is_error: false,
         duration_ms: Date.now() - startTime,
@@ -712,12 +808,36 @@ export class QueryEngine {
             : completeUsage.inference_geo,
       })
       settledMessageIds.add(id)
+      const raw = nativeResponses.get(id) ?? {}
+      nativeResponses.set(id, raw)
+      nativeSettled.add(id)
+      nativePending = false
+      for (const field of tokenFields) {
+        const value = raw[field]
+        const total = (nativeTotals[field] ?? 0) + Number(value)
+        if (
+          typeof value !== 'number' ||
+          !Number.isSafeInteger(value) ||
+          value < 0 ||
+          !Number.isSafeInteger(total)
+        ) {
+          nativeMissing.add(field)
+        } else {
+          nativeTotals[field] = total
+        }
+      }
     }
     const settleAssistantUsage = (msg: Message | undefined) => {
       if (
         msg?.message?.model !== SYNTHETIC_MODEL &&
         msg?.message?.stop_reason != null
       ) {
+        if (msg.message.id && !nativeResponses.has(msg.message.id)) {
+          nativeResponses.set(
+            msg.message.id,
+            rawAnthropic ? { ...msg.message.usage } : {},
+          )
+        }
         settleUsage(msg.message.id, msg.message.usage)
       }
     }
@@ -729,7 +849,6 @@ export class QueryEngine {
       settleAssistantUsage(currentAssistantMessage)
     }
     let turnCount = 1
-    let hasAcknowledgedInitialMessages = false
     // Track structured output from StructuredOutput tool calls
     let structuredOutputFromTool: unknown
     // Track the last stop_reason from assistant messages
@@ -814,23 +933,8 @@ export class QueryEngine {
           }
         }
 
-        // Acknowledge initial user messages after first transcript recording
-        if (!hasAcknowledgedInitialMessages && messagesToAck.length > 0) {
-          hasAcknowledgedInitialMessages = true
-          for (const msgToAck of messagesToAck) {
-            if (msgToAck.type === 'user') {
-              yield {
-                type: 'user',
-                message: msgToAck.message,
-                session_id: getSessionId(),
-                parent_tool_use_id: null,
-                uuid: msgToAck.uuid,
-                timestamp: msgToAck.timestamp,
-                isReplay: true,
-              } as unknown as SDKUserMessageReplay
-            }
-          }
-        }
+        // Non-investigation inputs retain the original first-message ACK timing.
+        yield* acknowledgeInitialMessages()
       }
 
       if (message.type === 'user') {
@@ -894,6 +998,11 @@ export class QueryEngine {
               usage?: BetaMessageDeltaUsage
             }
             currentMessageId = eventMessage.id
+            if (currentMessageId) {
+              const raw = rawAnthropic ? { ...eventMessage.usage } : {}
+              delete raw.output_tokens
+              nativeResponses.set(currentMessageId, raw)
+            }
             currentMessageStopReason = null
             currentAssistantMessage = undefined
             hasInputUsage = typeof eventMessage.usage?.input_tokens === 'number'
@@ -902,6 +1011,18 @@ export class QueryEngine {
           }
           if (event.type === 'message_delta') {
             const usage = event.usage as BetaMessageDeltaUsage | undefined
+            if (rawAnthropic && currentMessageId && usage) {
+              const raw = nativeResponses.get(currentMessageId) ?? {}
+              for (const field of tokenFields) {
+                if (
+                  usage[field] !== undefined &&
+                  (field === 'output_tokens' || raw[field] === undefined)
+                ) {
+                  raw[field] = usage[field]
+                }
+              }
+              nativeResponses.set(currentMessageId, raw)
+            }
             hasInputUsage ||= typeof usage?.input_tokens === 'number'
             hasOutputUsage ||= typeof usage?.output_tokens === 'number'
             currentMessageUsage = updateUsage(currentMessageUsage, usage)
@@ -916,6 +1037,15 @@ export class QueryEngine {
             }
           }
           if (event.type === 'message_stop') {
+            nativeIncomplete ||=
+              (message as StreamEvent).nativeComplete === false
+            const rawSnapshot = (message as StreamEvent).nativeUsageSnapshot
+            if (currentMessageId && rawSnapshot) {
+              nativeResponses.set(
+                currentMessageId,
+                rawSnapshot as Record<string, unknown>,
+              )
+            }
             const snapshot = (message as StreamEvent).usageSnapshot
             if (snapshot) {
               currentMessageUsage = { ...currentMessageUsage, ...snapshot }
@@ -929,9 +1059,12 @@ export class QueryEngine {
           }
 
           if (includePartialMessages) {
+            const publicEvent = { ...event }
+            delete publicEvent.native_usage
+            delete publicEvent.native_complete
             yield {
               type: 'stream_event' as const,
-              event,
+              event: publicEvent,
               session_id: getSessionId(),
               parent_tool_use_id: null,
               uuid: randomUUID(),
@@ -976,6 +1109,7 @@ export class QueryEngine {
             }
             yield {
               type: 'result',
+              ...nativeResult(),
               subtype: 'error_max_turns',
               duration_ms: Date.now() - startTime,
               duration_api_ms: getTotalAPIDuration(),
@@ -1016,6 +1150,7 @@ export class QueryEngine {
           break
         }
         case 'stream_request_start':
+          nativePending = true
           // Don't yield stream request start messages
           break
         case 'system': {
@@ -1114,6 +1249,7 @@ export class QueryEngine {
         }
         yield {
           type: 'result',
+          ...nativeResult(),
           subtype: 'error_max_budget_usd',
           duration_ms: Date.now() - startTime,
           duration_api_ms: getTotalAPIDuration(),
@@ -1160,6 +1296,7 @@ export class QueryEngine {
           }
           yield {
             type: 'result',
+            ...nativeResult(),
             subtype: 'error_max_structured_output_retries',
             duration_ms: Date.now() - startTime,
             duration_api_ms: getTotalAPIDuration(),
@@ -1222,6 +1359,7 @@ export class QueryEngine {
     if (!isResultSuccessful(result, lastStopReason)) {
       yield {
         type: 'result',
+        ...nativeResult(),
         subtype: 'error_during_execution',
         duration_ms: Date.now() - startTime,
         duration_api_ms: getTotalAPIDuration(),
@@ -1277,6 +1415,7 @@ export class QueryEngine {
 
     yield {
       type: 'result',
+      ...nativeResult(!isApiError),
       subtype: 'success',
       is_error: isApiError,
       duration_ms: Date.now() - startTime,

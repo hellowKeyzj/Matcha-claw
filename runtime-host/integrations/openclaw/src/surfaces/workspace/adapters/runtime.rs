@@ -144,6 +144,18 @@ impl workspace_module::WorkspaceOps for OpenClawDriver {
         })
     }
 
+    fn thumbnail_media_reference<'a>(
+        &'a self,
+        session_key: &'a str,
+        reference: &'a str,
+    ) -> WorkspaceFuture<'a, WorkspaceMediaThumbnail, DriverWorkspaceMediaFailure> {
+        Box::pin(async move {
+            crate::session::operation::SessionOperation::new(self.gateway.client())
+                .thumbnail_media_reference(session_key, reference)
+                .await
+        })
+    }
+
     fn thumbnail_media_gateway<'a>(
         &'a self,
         session_key: &'a str,

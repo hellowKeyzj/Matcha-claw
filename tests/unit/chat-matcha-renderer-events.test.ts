@@ -3,9 +3,9 @@ import {
   handleStoreMatchaSessionActivity,
   handleStoreOpenClawSessionActivity,
   handleStoreOpenClawSessionUpdate,
-} from '@/stores/chat/event-actions';
-import type { ChatStoreState } from '@/stores/chat/types';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
+} from '@/plugins/chat/store/event-actions';
+import type { ChatStoreState } from '@/plugins/chat/store/types';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
 
 const openClawTestRuntimeEndpoint = {
   kind: 'native-runtime',

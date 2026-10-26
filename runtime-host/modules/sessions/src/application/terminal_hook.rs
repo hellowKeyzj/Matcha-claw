@@ -10,6 +10,10 @@ pub struct SessionRunTerminalSnapshot {
     pub source_binding: SessionSourceBinding,
     pub native_run_id: String,
     pub delivery_context: Option<super::state::SessionDeliveryContext>,
+    pub execution_context: Option<crate::execution::SessionExecutionContext>,
+    pub native_request_id: Option<String>,
+    pub native_message_id: Option<String>,
+    pub measurement: crate::execution::SessionRunMeasurement,
     pub phase: RunPhase,
     pub assistant_texts: Vec<String>,
 }

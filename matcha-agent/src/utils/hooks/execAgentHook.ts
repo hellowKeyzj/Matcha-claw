@@ -4,6 +4,12 @@ import { query } from '../../query.js'
 import { logEvent } from '../../services/analytics/index.js'
 import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from '../../services/analytics/metadata.js'
 import type { ToolUseContext } from '../../Tool.js'
+import {
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+  investigationSignal,
+  requireInvestigationEffects,
+} from '../../world/investigation.js'
 import { type Tool, toolMatchesName } from '../../Tool.js'
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/SyntheticOutputTool/SyntheticOutputTool.js'
 import { ALL_AGENT_DISALLOWED_TOOLS } from '../../tools.js'
@@ -71,6 +77,8 @@ export async function execAgentHook(
   _messages: Message[],
   agentName?: string,
 ): Promise<HookResult> {
+  requireInvestigationEffects(['probabilistic'])
+  const scope = currentInvestigationScope()
   const effectiveToolUseID = toolUseID || `hook-${randomUUID()}`
 
   // Get transcript path from context
@@ -95,17 +103,25 @@ export async function execAgentHook(
     )
 
     // Setup timeout and combine with parent signal
-    const hookTimeoutMs = hook.timeout ? hook.timeout * 1000 : 60000
+    const hookTimeoutMs = Math.min(
+      hook.timeout ? hook.timeout * 1000 : 60000,
+      scope ? Math.max(1, scope.deadlineMs - Date.now()) : Infinity,
+    )
     const hookAbortController = createAbortController()
 
     // Combine parent signal with timeout, and have it abort our controller
     const { signal: parentTimeoutSignal, cleanup: cleanupCombinedSignal } =
-      createCombinedAbortSignal(signal, { timeoutMs: hookTimeoutMs })
-    const onParentTimeout = () => hookAbortController.abort()
+      createCombinedAbortSignal(signal, {
+        signalB: investigationSignal(),
+        timeoutMs: hookTimeoutMs,
+      })
+    const onParentTimeout = () => hookAbortController.abort(parentTimeoutSignal.reason)
     parentTimeoutSignal.addEventListener('abort', onParentTimeout)
+    if (scope && parentTimeoutSignal.aborted) onParentTimeout()
 
     // Combined signal is just our controller's signal now
     const combinedSignal = hookAbortController.signal
+    let hookAgentId: ReturnType<typeof asAgentId> | undefined
 
     try {
       // Create StructuredOutput tool with our schema
@@ -142,7 +158,7 @@ When done, return your result using the ${SYNTHETIC_OUTPUT_TOOL_NAME} tool with:
       const MAX_AGENT_TURNS = 50
 
       // Create unique agentId for this hook agent
-      const hookAgentId = asAgentId(`hook-agent-${randomUUID()}`)
+      hookAgentId = asAgentId(`hook-agent-${randomUUID()}`)
 
       // Create a modified toolUseContext for the agent
       const agentToolUseContext: ToolUseContext = {
@@ -227,7 +243,7 @@ When done, return your result using the ${SYNTHETIC_OUTPUT_TOOL_NAME} tool with:
               `Hooks: Agent turn ${turnCount} hit max turns, aborting`,
             )
             hookAbortController.abort()
-            break
+            if (!scope) break
           }
         }
 
@@ -241,7 +257,7 @@ When done, return your result using the ${SYNTHETIC_OUTPUT_TOOL_NAME} tool with:
             )
             // Got structured output, abort and exit
             hookAbortController.abort()
-            break
+            if (!scope) break
           }
         }
       }
@@ -250,7 +266,7 @@ When done, return your result using the ${SYNTHETIC_OUTPUT_TOOL_NAME} tool with:
       cleanupCombinedSignal()
 
       // Clean up the session hook we registered for this agent
-      clearSessionHooks(toolUseContext.setAppState, hookAgentId)
+      if (!scope) clearSessionHooks(toolUseContext.setAppState, hookAgentId)
 
       // Check if we got a result
       if (!structuredOutputResult) {
@@ -324,6 +340,7 @@ When done, return your result using the ${SYNTHETIC_OUTPUT_TOOL_NAME} tool with:
     } catch (error) {
       parentTimeoutSignal.removeEventListener('abort', onParentTimeout)
       cleanupCombinedSignal()
+      if (error instanceof InvestigationAdmissionError) throw error
 
       if (combinedSignal.aborted) {
         return {
@@ -332,8 +349,13 @@ When done, return your result using the ${SYNTHETIC_OUTPUT_TOOL_NAME} tool with:
         }
       }
       throw error
+    } finally {
+      if (scope && hookAgentId) {
+        clearSessionHooks(toolUseContext.setAppState, hookAgentId)
+      }
     }
   } catch (error) {
+    if (error instanceof InvestigationAdmissionError) throw error
     const errorMsg = errorMessage(error)
     logForDebugging(`Hooks: Agent hook error: ${errorMsg}`)
     logEvent('tengu_agent_stop_hook_error', {

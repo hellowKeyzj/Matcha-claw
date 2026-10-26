@@ -60,7 +60,7 @@ describe('channels store', () => {
       { wecom: 'main', feishu: 'default' },
     ));
 
-    const { useChannelsStore } = await import('../../src/stores/channels');
+    const { useChannelsStore } = await import('../../src/plugins/channels/store');
     await useChannelsStore.getState().fetchChannels();
 
     expect(hostChannelsFetchSnapshotMock).toHaveBeenCalledTimes(1);
@@ -88,7 +88,7 @@ describe('channels store', () => {
       { wecom: 'main' },
     ));
 
-    const { useChannelsStore } = await import('../../src/stores/channels');
+    const { useChannelsStore } = await import('../../src/plugins/channels/store');
     await useChannelsStore.getState().fetchChannels();
 
     expect(useChannelsStore.getState().channels).toEqual([]);
@@ -97,7 +97,7 @@ describe('channels store', () => {
   it('removes a channel only after Host confirms delete-config', async () => {
     hostChannelsDeleteConfigMock.mockResolvedValue({ outcome: 'confirmed' });
 
-    const { useChannelsStore } = await import('../../src/stores/channels');
+    const { useChannelsStore } = await import('../../src/plugins/channels/store');
     useChannelsStore.getState().setChannels([
       { id: 'wecom-main', type: 'wecom', name: 'WeCom', status: 'connected', accountId: 'main' },
     ]);
@@ -113,7 +113,7 @@ describe('channels store', () => {
   ] as const)('retains the channel and surfaces an item error when delete-config is %s', async (outcome) => {
     hostChannelsDeleteConfigMock.mockResolvedValue({ outcome });
 
-    const { useChannelsStore } = await import('../../src/stores/channels');
+    const { useChannelsStore } = await import('../../src/plugins/channels/store');
     useChannelsStore.getState().setChannels([
       { id: 'wecom-main', type: 'wecom', name: 'WeCom', status: 'connected', accountId: 'main' },
     ]);

@@ -40,9 +40,10 @@ pub struct AnthropicMessagesHttpRequest {
 pub async fn generate(
     http: &reqwest::Client,
     request: LlmRequest,
+    observation: Option<&mut super::observation::Observation>,
 ) -> Result<LlmResponse, LlmClientError> {
     let http_request = build_anthropic_messages_http_request(&anthropic_request(request, false));
-    let payload = send_json(http, &http_request).await?;
+    let payload = send_json(http, &http_request, observation).await?;
     Ok(parse_anthropic_messages_text_response(&payload))
 }
 
@@ -50,6 +51,7 @@ pub async fn stream_generate(
     http: &reqwest::Client,
     request: LlmRequest,
     sink: &mut dyn LlmStreamSink,
+    mut observation: Option<&mut super::observation::Observation>,
 ) -> Result<(), LlmClientError> {
     let http_request = build_anthropic_messages_http_request(&anthropic_request(request, true));
     let mut builder = http
@@ -60,17 +62,26 @@ pub async fn stream_generate(
     }
     let started = platform::trace::enabled().then(Instant::now);
     let response = builder.send().await?;
+    if let Some(observation) = observation.as_deref_mut() { observation.headers(&response); }
     session_trace("runtime.team.provider.http.response", || json!({
         "protocol": "anthropic_messages", "statusCode": response.status().as_u16(),
         "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
     }));
     if !response.status().is_success() {
+        let status = response.status();
+        if let Some(observation) = observation.as_deref_mut() {
+            let text = response.text().await?;
+            if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+                observation.payload(crate::ProviderApiProtocol::AnthropicMessages, &payload);
+            }
+        }
         return Err(LlmClientError::HttpStatus {
-            status: response.status().as_u16(),
-            message: format!("Anthropic Messages stream failed with HTTP {}", response.status()),
+            status: status.as_u16(),
+            message: format!("Anthropic Messages stream failed with HTTP {status}"),
         });
     }
-    super::consume_sse(response, sink, parse_anthropic_messages_sse_chunk).await
+    super::consume_sse(response, sink, parse_anthropic_messages_sse_chunk,
+        observation.map(|observation| (observation, crate::ProviderApiProtocol::AnthropicMessages))).await
 }
 
 pub fn build_anthropic_messages_http_request(
@@ -160,17 +171,21 @@ pub fn parse_anthropic_messages_error(payload: &Value) -> Option<String> {
 async fn send_json(
     http: &reqwest::Client,
     request: &AnthropicMessagesHttpRequest,
+    mut observation: Option<&mut super::observation::Observation>,
 ) -> Result<Value, LlmClientError> {
-    let text = send_text(http, request).await?;
-    serde_json::from_str(&text).map_err(|error| {
+    let text = send_text(http, request, observation.as_deref_mut()).await?;
+    let payload = serde_json::from_str(&text).map_err(|error| {
         eprintln!("[provider] phase=runtime.team.provider.http.parse-failed protocol=anthropic_messages class=JsonDecode");
         LlmClientError::Protocol(format!("invalid Anthropic Messages JSON response: {error}"))
-    })
+    })?;
+    if let Some(observation) = observation { observation.payload(crate::ProviderApiProtocol::AnthropicMessages, &payload); }
+    Ok(payload)
 }
 
 async fn send_text(
     http: &reqwest::Client,
     request: &AnthropicMessagesHttpRequest,
+    mut observation: Option<&mut super::observation::Observation>,
 ) -> Result<String, LlmClientError> {
     let mut builder = http.post(&request.endpoint).body(request.body.to_string());
     for (name, value) in &request.headers {
@@ -179,6 +194,7 @@ async fn send_text(
 
     let started = platform::trace::enabled().then(Instant::now);
     let response = builder.send().await?;
+    if let Some(observation) = observation.as_deref_mut() { observation.headers(&response); }
     session_trace("runtime.team.provider.http.response", || json!({
         "protocol": "anthropic_messages", "statusCode": response.status().as_u16(),
         "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
@@ -187,6 +203,11 @@ async fn send_text(
     let text = response.text().await?;
     if status.is_success() {
         return Ok(text);
+    }
+    if let Some(observation) = observation {
+        if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+            observation.payload(crate::ProviderApiProtocol::AnthropicMessages, &payload);
+        }
     }
 
     let message = serde_json::from_str::<Value>(&text)
@@ -328,7 +349,7 @@ fn number_to_u32(value: &Value) -> Option<u32> {
     value.as_u64().and_then(|value| u32::try_from(value).ok())
 }
 
-fn map_stop_reason(reason: &str) -> LlmFinishReason {
+pub(super) fn map_stop_reason(reason: &str) -> LlmFinishReason {
     match reason {
         "end_turn" | "stop_sequence" => LlmFinishReason::Stop,
         "max_tokens" => LlmFinishReason::Length,

@@ -53,6 +53,7 @@ pub struct OrganizationHandle {
     inner: OwnerRuntimeHandle<OrganizationCommand, OrganizationQuery>,
     schedule_changes: tokio::sync::watch::Sender<TeamRunWake>,
     terminal_recovery: tokio::sync::watch::Sender<()>,
+    activity_executor: Arc<std::sync::OnceLock<Arc<dyn crate::TeamActivityExecutor>>>,
     call: Option<crate::call::CallScope>,
     cancellation: tokio_util::sync::CancellationToken,
 }
@@ -66,9 +67,14 @@ impl OrganizationHandle {
             inner,
             schedule_changes,
             terminal_recovery,
+            activity_executor: Arc::new(std::sync::OnceLock::new()),
             call: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    pub(crate) fn bind_activity_executor(&self, executor: Arc<dyn crate::TeamActivityExecutor>) {
+        let _ = self.activity_executor.set(executor);
     }
 
     pub(crate) fn with_call(mut self, call: crate::call::CallScope) -> Self {
@@ -481,6 +487,139 @@ impl OrganizationHandle {
             self.publish_team_run_wake(TeamRunWakeReason::RunStarted, Some(wake_run_id));
         }
         Ok(outcome)
+    }
+
+    pub async fn execute_task(
+        &self,
+        request: crate::task_execution::TaskExecutionRequest,
+    ) -> Result<crate::task_execution::TaskExecutionReceipt, RequestAdmissionClosed> {
+        use crate::task_execution::{TaskExecutionReceipt, TaskExecutionRejection, TaskExecutionState};
+        let identity = request.identity.clone();
+        if let Some(call) = &self.call {
+            call.references(Some(identity.selection.team_id.as_str()), Some(identity.run_id.as_str()), None).await;
+        }
+        let (reply, receiver) = self.reply_channel();
+        self.inner.send_command(OrganizationCommand::TaskCreate { request, reply }).await.map_err(closed)?;
+        self.call_admitted().await;
+        let version = match receiver.await.map_err(|_| closed_error())? {
+            Ok(version) => version,
+            Err(receipt) => return Ok(receipt),
+        };
+        let started = self.execute_team_runtime(TeamRuntimeCommand::RunStart {
+            team_id: identity.selection.team_id.clone(), run_id: identity.run_id.clone(), epoch: None, version,
+        }).await?;
+        match started {
+            TeamRuntimeCommandOutcome::RunStart(Ok(())) => self.inspect_task(identity).await,
+            TeamRuntimeCommandOutcome::RunStart(Err(StoreFault::InvalidFacts | StoreFault::Design(_))) =>
+                Ok(TaskExecutionReceipt::new(identity, TaskExecutionState::Rejected(TaskExecutionRejection::StartRejected))),
+            TeamRuntimeCommandOutcome::RunStart(Err(error)) => Ok(crate::task_execution::store_failure(identity, &error)),
+            _ => Ok(TaskExecutionReceipt::new(identity,
+                TaskExecutionState::Rejected(TaskExecutionRejection::StartRejected))),
+        }
+    }
+
+    pub async fn inspect_task(
+        &self,
+        identity: crate::task_execution::TaskExecutionIdentity,
+    ) -> Result<crate::task_execution::TaskExecutionReceipt, RequestAdmissionClosed> {
+        use crate::task_execution::{TaskActivityInspection, TaskExecutionState, TaskNativePhase};
+        let (mut receipt, requests) = self.task_inspection_snapshot(identity.clone()).await?;
+        if requests.is_empty() { return Ok(receipt); }
+        let Some(executor) = self.activity_executor.get() else {
+            receipt.state = TaskExecutionState::Unavailable;
+            return Ok(receipt);
+        };
+        let mut read_failure = None;
+        for request in requests {
+            let inspected = tokio::select! {
+                _ = self.cancellation.cancelled() => {
+                    read_failure = Some(TaskExecutionState::Unknown);
+                    break;
+                }
+                inspected = executor.inspect_cancellable(request.clone(), self.cancellation.clone()) => inspected,
+            };
+            match inspected {
+                TaskActivityInspection::Found { mut execution, phase, .. } => {
+                    // Live counters are not an immutable terminal measurement.
+                    if !matches!(phase, TaskNativePhase::Cancelled | TaskNativePhase::Completed
+                        | TaskNativePhase::Failed | TaskNativePhase::Interrupted) {
+                        execution.measurement = crate::TaskRunMeasurement::Unavailable;
+                    }
+                    let (reply, receiver) = tokio::sync::oneshot::channel();
+                    self.inner.send_command(OrganizationCommand::TaskNativeExecutionObserved {
+                        identity: identity.clone(), request, execution, reply,
+                    }).await.map_err(closed)?;
+                    if receiver.await.map_err(|_| closed_error())?.is_err() {
+                        read_failure = Some(TaskExecutionState::Unknown);
+                    }
+                }
+                TaskActivityInspection::Unknown => read_failure = Some(TaskExecutionState::Unknown),
+                TaskActivityInspection::Unavailable => {
+                    if read_failure.is_none() { read_failure = Some(TaskExecutionState::Unavailable); }
+                }
+            }
+        }
+        receipt = self.task_inspection_snapshot(identity).await?.0;
+        if !matches!(receipt.state, TaskExecutionState::Terminal | TaskExecutionState::Rejected(_)) {
+            if let Some(state) = read_failure { receipt.state = state; }
+        }
+        Ok(receipt)
+    }
+
+    async fn task_inspection_snapshot(
+        &self,
+        identity: crate::task_execution::TaskExecutionIdentity,
+    ) -> Result<(crate::task_execution::TaskExecutionReceipt, Vec<crate::ActivityExecutionRequest>), RequestAdmissionClosed> {
+        let (reply, receiver) = self.reply_channel();
+        self.inner.send_query(OrganizationQuery::TaskInspect { identity, reply }).await.map_err(closed)?;
+        self.call_admitted().await;
+        receiver.await.map_err(|_| closed_error())
+    }
+
+    /// Observes the original run through the existing durable-fact wake stream; never sends.
+    pub async fn wait_task(
+        &self,
+        identity: crate::task_execution::TaskExecutionIdentity,
+    ) -> Result<crate::task_execution::TaskExecutionReceipt, RequestAdmissionClosed> {
+        use crate::task_execution::TaskExecutionState;
+        // Subscribe before reading so a commit between the read and await cannot be lost.
+        let mut changes = self.subscribe_schedule_changes();
+        loop {
+            let mut receipt = self.inspect_task(identity.clone()).await?;
+            if !matches!(receipt.state, TaskExecutionState::Pending | TaskExecutionState::Accepted) {
+                return Ok(receipt);
+            }
+            tokio::select! {
+                _ = self.cancellation.cancelled() => {
+                    receipt.state = TaskExecutionState::Unknown;
+                    return Ok(receipt);
+                }
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        receipt.state = TaskExecutionState::Unavailable;
+                        return Ok(receipt);
+                    }
+                    // watch coalesces changes: the last run id may hide this run's prior change.
+                }
+            }
+        }
+    }
+
+    pub async fn cancel_task(
+        &self,
+        identity: crate::task_execution::TaskExecutionIdentity,
+        idempotency_key: IdempotencyKey,
+        requested_at: u64,
+    ) -> Result<crate::task_execution::TaskExecutionReceipt, RequestAdmissionClosed> {
+        let run_id = identity.run_id.clone();
+        let (reply, receiver) = self.reply_channel();
+        self.inner.send_command(OrganizationCommand::TaskCancel {
+            identity, idempotency_key, requested_at, reply,
+        }).await.map_err(closed)?;
+        self.call_admitted().await;
+        let receipt = receiver.await.map_err(|_| closed_error())?;
+        self.publish_team_run_wake(TeamRunWakeReason::GraphChanged, Some(run_id));
+        Ok(receipt)
     }
 
     pub async fn run_create_from_team_template(
@@ -1253,6 +1392,7 @@ impl OrganizationHandle {
         claim: ActivityClaim,
         outcome: ActivityExecutionOutcome,
     ) -> Result<Result<TeamRunActivityOutcome, TeamRunActivityError>, RequestAdmissionClosed> {
+        let wake_run_id = run_id.clone();
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::SettleActivity {
@@ -1263,7 +1403,11 @@ impl OrganizationHandle {
             })
             .await
             .map_err(closed)?;
-        reply_rx.await.map_err(|_| closed_error())
+        let outcome = reply_rx.await.map_err(|_| closed_error())?;
+        if outcome.is_ok() {
+            self.publish_team_run_wake(TeamRunWakeReason::SchedulerObservationChanged, Some(wake_run_id));
+        }
+        Ok(outcome)
     }
 
     pub(crate) async fn team_message_terminal_observed(
@@ -1273,6 +1417,7 @@ impl OrganizationHandle {
         status: organization::NativeTerminalStatus,
         assistant_texts: Vec<String>,
         settled_at: u64,
+        task_observation: crate::task_execution::TaskNativeObservation,
     ) -> Result<
         Result<organization::TeamMessageTerminalObservation, StoreFault>,
         RequestAdmissionClosed,
@@ -1281,6 +1426,7 @@ impl OrganizationHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.inner
             .send_command(OrganizationCommand::TeamMessageTerminalObserved {
+                task_observation,
                 native_run_id,
                 delivery_context,
                 status,

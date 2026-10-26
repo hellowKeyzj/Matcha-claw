@@ -1,5 +1,5 @@
 import i18n from '@/i18n';
-import type { ProviderCallDetail } from '@/types/call-log/provider';
+import type { ProviderDiagnostic } from '@/types/provider-runtime-report';
 
 const PRIVATE_RESOLVER_ERROR_KEYS: Record<string, string> = {
   'credential-missing': 'credentialMissing',
@@ -30,27 +30,30 @@ const PROJECTION_ERROR_REASON_KEYS: Record<string, string> = {
   'provider-routing-model-capability-unavailable': 'providerRoutingModelCapabilityUnavailable',
   'provider-routing-model-unavailable': 'providerRoutingModelUnavailable',
   'provider-routing-persistence-failed': 'providerRoutingPersistenceFailed',
+  'provider-projection-partial': 'providerProjectionPartial',
+  'provider-auth-unsupported': 'providerAuthUnsupported',
+  'provider-restart-required': 'providerRestartRequired',
+  'provider-cleanup-partial': 'providerCleanupPartial',
+  'provider-projection-not-sent': 'providerProjectionNotSent',
+  'provider-projection-outcome-unknown': 'providerProjectionOutcomeUnknown',
+  'provider-cleanup-blocked': 'providerCleanupBlocked',
+  'provider-projection-rejected': 'providerProjectionRejected',
+  'private-resolver-unavailable': 'privateResolverUnavailable',
+  'config-readback-mismatch': 'readbackMismatch',
+  'config-readback-unavailable': 'readbackUnavailable',
 };
 
-export function nativeProjectionError(receipt: ProviderCallDetail): string | undefined {
-  const diagnostic = receipt.diagnostic;
+export function providerDiagnosticError(diagnostic: ProviderDiagnostic | null): string | undefined {
   if (diagnostic?.privateResolverCode) {
     const key = PRIVATE_RESOLVER_ERROR_KEYS[diagnostic.privateResolverCode];
     return i18n.t(`settings:aiProviders.projectionErrors.privateResolver.${key}`);
   }
+  if (diagnostic?.reason === 'private-profile-credential-missing') {
+    return i18n.t('settings:aiProviders.projectionErrors.privateResolver.credentialMissing');
+  }
   if (diagnostic?.reason) {
     const key = PROJECTION_ERROR_REASON_KEYS[diagnostic.reason];
-    if (key) return i18n.t(`settings:aiProviders.projectionErrors.${key}`);
+    return i18n.t(`settings:aiProviders.projectionErrors.${key ?? 'outcomeUnknown'}`);
   }
-  if (receipt.native?.observed === 'mismatch') {
-    return i18n.t('settings:aiProviders.projectionErrors.readbackMismatch');
-  }
-  if (receipt.native?.applied === 'unknown') {
-    return i18n.t('settings:aiProviders.projectionErrors.outcomeUnknown');
-  }
-  if (receipt.native?.observed === 'unavailable') {
-    return i18n.t('settings:aiProviders.projectionErrors.readbackUnavailable');
-  }
-  if (diagnostic) return i18n.t('settings:aiProviders.projectionErrors.outcomeUnknown');
   return undefined;
 }

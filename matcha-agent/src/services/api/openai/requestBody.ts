@@ -5,6 +5,7 @@
  */
 import type { ChatCompletionCreateParamsStreaming } from 'openai/resources/chat/completions/completions.mjs'
 import { isEnvTruthy, isEnvDefinedFalsy } from '../../../utils/envUtils.js'
+import type { EffortLevel } from '../../../utils/effort.js'
 
 /**
  * Detect whether thinking mode should be enabled for this model.
@@ -74,10 +75,12 @@ export function buildOpenAIRequestBody(params: {
   toolChoice: any
   enableThinking: boolean
   maxTokens: number
+  reasoningEffort?: EffortLevel
   temperatureOverride?: number
   /** Session-scoped routing key for official OpenAI requests. */
   promptCacheKey?: string
 }): ChatCompletionCreateParamsStreaming & {
+  reasoning_effort?: EffortLevel
   thinking?: { type: string }
   enable_thinking?: boolean
   chat_template_kwargs?: { thinking: boolean; enable_thinking: boolean }
@@ -91,6 +94,7 @@ export function buildOpenAIRequestBody(params: {
     toolChoice,
     enableThinking,
     maxTokens,
+    reasoningEffort,
     temperatureOverride,
     promptCacheKey,
   } = params
@@ -98,6 +102,7 @@ export function buildOpenAIRequestBody(params: {
     model,
     messages,
     max_tokens: maxTokens,
+    ...(reasoningEffort !== undefined && { reasoning_effort: reasoningEffort }),
     ...(promptCacheKey && { prompt_cache_key: promptCacheKey }),
     ...(tools.length > 0 && {
       tools,

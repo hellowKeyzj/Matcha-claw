@@ -8,6 +8,7 @@ import { HostEventBus } from '../api/event-bus';
 import { bootstrapMainApplication, type MainApplication } from './app-bootstrap';
 import { DirectRuntimeHostDeliveryError } from './runtime-host-delivery/direct-host';
 import { createMainWindow, loadMainWindowContent } from './main-window';
+import { destroyTray } from './tray';
 import {
   clearPendingSecondInstanceFocus,
   consumeMainWindowReady,
@@ -16,11 +17,13 @@ import {
 } from './main-window-focus';
 import {
   createQuitLifecycleState,
+  completeQuitCleanup,
   markQuitCleanupCompleted,
   requestQuitLifecycleAction,
 } from './quit-lifecycle';
 import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
+import { configureE2EWorldBootstrap } from '@electron/e2e-fixture-loader';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.MatchaClaw.desktop';
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
@@ -54,6 +57,7 @@ if (process.platform === 'linux') {
   app.setDesktopName('matchaclaw.desktop');
 }
 
+const defaultUserDataDir = app.getPath('userData');
 if (isE2EMode && requestedUserDataDir) {
   app.setPath('userData', requestedUserDataDir);
 }
@@ -200,7 +204,9 @@ if (gotTheLock) {
   hostEventBus = new HostEventBus();
 
   // Application lifecycle
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    if (isQuitting()) return;
+    if (isE2EMode) await configureE2EWorldBootstrap(defaultUserDataDir);
     if (isQuitting()) return;
     application = bootstrapMainApplication({
       hostEventBus,
@@ -254,14 +260,19 @@ if (gotTheLock) {
     }
 
     hostEventBus.closeAll();
-
-    try {
-      await application?.close();
-    } catch (error) {
-      logger.warn('Failed to close main application during quit:', error);
+    destroyTray();
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.destroy();
     }
+
+    const result = await completeQuitCleanup(
+      () => application?.close() ?? Promise.resolve(),
+      () => application?.forceClose() ?? Promise.resolve(),
+      () => application?.readShutdownStage() ?? 'bootstrap',
+    );
     markQuitCleanupCompleted(quitLifecycleState);
-    app.quit();
+    if (result.outcome === 'graceful') app.quit();
+    else app.exit(result.outcome === 'forced' ? 1 : 2);
   });
 }
 

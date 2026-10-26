@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import { ChatListSurface } from '@/pages/Chat/components/ChatList';
-import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item-model';
-import { createChatScrollChromeStore } from '@/pages/Chat/chat-scroll-chrome-store';
+import { ChatListSurface } from '@/plugins/chat/components/ChatList';
+import { applyAssistantPresentationToItems } from '@/plugins/message-rendering/chat-render-item-model';
+import { createChatScrollChromeStore } from '@/plugins/chat/chat-scroll-chrome-store';
 import type { SessionRenderItem } from '../../src/types/session/render-item';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import type { GeneratedFile } from '@/lib/generated-files';
+import type { GeneratedFile } from '@/plugins/files/generated-files';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({

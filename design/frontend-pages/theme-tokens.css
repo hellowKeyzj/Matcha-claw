@@ -1,0 +1,687 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --scrollbar-size: 8px;
+    --chat-scrollbar-gutter: calc(var(--scrollbar-size) + 6px);
+    --background: 240 11% 95%;
+    --foreground: 220 12% 13%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 12% 13%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 12% 13%;
+    --primary: 0 0% 0%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 18% 96%;
+    --secondary-foreground: 220 12% 13%;
+    --muted: 220 18% 94%;
+    --muted-foreground: 220 6% 40%;
+    --accent: 228 15% 92%;
+    --accent-foreground: 220 12% 13%;
+    --destructive: 359 70% 74%;
+    --destructive-foreground: 220 12% 13%;
+    --border: 225 12% 89%;
+    --input: 240 12% 86%;
+    --ring: 208 88% 43%;
+    --radius: 1rem;
+    --radius-interactive: 0.875rem;
+    --radius-card: 1.5rem;
+    --radius-panel: 2rem;
+    --radius-pill: 9999px;
+    --shadow-whisper: 0 3px 6px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.07);
+    --shadow-elevated: 0 10px 20px rgba(0, 0, 0, 0.1), 0 3px 6px rgba(0, 0, 0, 0.05);
+    --shadow-focus: 0 0 0 3px rgba(13, 116, 206, 0.18);
+    --shell-window: 220 18% 96%;
+    --shell-surface: 0 0% 100%;
+    --shell-surface-muted: 220 20% 98%;
+    --shell-surface-hover: 220 17% 95%;
+    --shell-surface-active: 220 14% 92%;
+    --shell-border: 220 13% 88%;
+    --shell-border-strong: 220 10% 78%;
+    --shell-icon: 220 7% 42%;
+    --shell-icon-active: 220 13% 15%;
+    --shell-text-muted: 220 7% 38%;
+    --shell-shadow-overlay: 0 22px 60px rgb(15 23 42 / 0.18), 0 8px 22px rgb(15 23 42 / 0.10);
+    --shell-scrim: 220 13% 15% / 0.42;
+    --divider-line: rgb(218 220 226 / 0.48);
+    --divider-line-strong: rgb(218 220 226 / 0.68);
+    --divider-line-hover: rgb(28 32 36 / 0.22);
+    --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  .dark {
+    --background: 0 0% 10%;
+    --foreground: 220 18% 94%;
+    --card: 220 3% 12%;
+    --card-foreground: 220 18% 94%;
+    --popover: 220 3% 12%;
+    --popover-foreground: 220 18% 94%;
+    --primary: 0 0% 100%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 220 5% 16%;
+    --secondary-foreground: 220 18% 94%;
+    --muted: 220 5% 15%;
+    --muted-foreground: 216 7% 71%;
+    --accent: 220 6% 19%;
+    --accent-foreground: 220 18% 94%;
+    --destructive: 359 70% 74%;
+    --destructive-foreground: 220 12% 13%;
+    --border: 215 8% 23%;
+    --input: 0 0% 20%;
+    --ring: 225 69% 48%;
+    --shadow-whisper: 0 12px 24px rgba(0, 0, 0, 0.28), 0 3px 8px rgba(0, 0, 0, 0.22);
+    --shadow-elevated: 0 18px 34px rgba(0, 0, 0, 0.32), 0 8px 16px rgba(0, 0, 0, 0.2);
+    --shadow-focus: 0 0 0 3px rgba(71, 108, 255, 0.2);
+    --shell-window: 220 5% 10%;
+    --shell-surface: 220 4% 12%;
+    --shell-surface-muted: 220 5% 14%;
+    --shell-surface-hover: 220 5% 17%;
+    --shell-surface-active: 220 6% 20%;
+    --shell-border: 220 6% 22%;
+    --shell-border-strong: 220 6% 28%;
+    --shell-icon: 220 6% 70%;
+    --shell-icon-active: 220 18% 94%;
+    --shell-text-muted: 220 7% 70%;
+    --shell-shadow-overlay: 0 24px 70px rgb(0 0 0 / 0.44), 0 10px 30px rgb(0 0 0 / 0.30);
+    --shell-scrim: 0 0% 0% / 0.58;
+    --divider-line: rgb(58 61 67 / 0.62);
+    --divider-line-strong: rgb(68 72 79 / 0.78);
+    --divider-line-hover: rgb(240 240 243 / 0.18);
+    color-scheme: dark;
+  }
+
+  .light {
+    color-scheme: light;
+  }
+  * {
+    @apply border-border;
+  }
+  html {
+    background-color: hsl(var(--background));
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    font-family: var(--font-sans);
+    line-height: 1.4;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  #root {
+    min-height: 100vh;
+    background-color: hsl(var(--card));
+  }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+  code,
+  pre,
+  kbd,
+  samp {
+    font-family: var(--font-mono);
+  }
+  select {
+    color: hsl(var(--foreground));
+    background-color: hsl(var(--card));
+  }
+  select option {
+    color: hsl(var(--foreground));
+    background-color: hsl(var(--card));
+  }
+  ::selection {
+    background-color: hsl(var(--accent));
+    color: hsl(var(--foreground));
+  }
+}
+
+/* Keep scrollbars stable and lightweight without hover-driven global restyles. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--border)) transparent;
+}
+
+::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-border;
+}
+
+/* Radix Select hides native scrollbars; these viewports opt into the app style. */
+.select-scroll-viewport {
+  scrollbar-width: thin !important;
+  scrollbar-color: hsl(var(--border)) transparent !important;
+}
+
+.select-scroll-viewport::-webkit-scrollbar {
+  display: block !important;
+  width: var(--scrollbar-size);
+}
+
+.select-scroll-viewport::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-border;
+}
+
+.select-scroll-viewport::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/30;
+}
+
+:root:not(.dark) .matchaclaw-diff-editor .monaco-diff-editor,
+:root:not(.dark) .matchaclaw-diff-editor .monaco-editor,
+:root:not(.dark) .matchaclaw-diff-editor .monaco-editor-background,
+:root:not(.dark) .matchaclaw-diff-editor .monaco-editor .margin,
+:root:not(.dark) .matchaclaw-diff-editor .monaco-editor .gutter,
+:root:not(.dark) .matchaclaw-diff-editor .diffOverview {
+  background-color: hsl(var(--background)) !important;
+}
+
+/* macOS traffic light spacing */
+.drag-region {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Smooth transitions */
+.transition-theme {
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    box-shadow 180ms ease,
+    opacity 180ms ease;
+}
+
+/* Focus ring */
+.focus-ring {
+  @apply focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2;
+  box-shadow: var(--shadow-focus);
+}
+
+/* Prose styling for markdown */
+.prose,
+.chat-markdown {
+  --chat-markdown-color: hsl(var(--foreground));
+  --chat-markdown-font-size: 0.875rem;
+  --chat-markdown-line-height: 1.62;
+  color: var(--chat-markdown-color);
+  font-size: var(--chat-markdown-font-size);
+  line-height: var(--chat-markdown-line-height);
+}
+
+.chat-markdown-sm {
+  --chat-markdown-font-size: 0.75rem;
+  --chat-markdown-line-height: 1.48;
+}
+
+.chat-markdown-muted {
+  --chat-markdown-color: hsl(var(--muted-foreground));
+}
+
+.prose > :first-child,
+.chat-markdown > :first-child {
+  margin-top: 0;
+}
+
+.prose > :last-child,
+.chat-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.prose p,
+.chat-markdown p {
+  margin: 0.5em 0;
+  text-wrap: pretty;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6,
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3,
+.chat-markdown h4,
+.chat-markdown h5,
+.chat-markdown h6 {
+  margin: 1.45em 0 0.48em;
+  color: hsl(var(--foreground));
+  font-weight: 760;
+  letter-spacing: -0.02em;
+  line-height: 1.18;
+  text-wrap: balance;
+}
+
+.prose h1,
+.chat-markdown h1 {
+  font-size: 1.42rem;
+}
+
+.prose h2,
+.chat-markdown h2 {
+  font-size: 1.24rem;
+}
+
+.prose h3,
+.chat-markdown h3 {
+  font-size: 1.1rem;
+}
+
+.prose h4,
+.chat-markdown h4 {
+  font-size: 1rem;
+}
+
+.prose h5,
+.prose h6,
+.chat-markdown h5,
+.chat-markdown h6 {
+  font-size: 0.94rem;
+  font-weight: 680;
+}
+
+.chat-markdown-sm h1 {
+  font-size: 1rem;
+}
+
+.chat-markdown-sm h2 {
+  font-size: 0.92rem;
+}
+
+.chat-markdown-sm h3,
+.chat-markdown-sm h4,
+.chat-markdown-sm h5,
+.chat-markdown-sm h6 {
+  font-size: 0.84rem;
+}
+
+.prose strong,
+.prose b,
+.chat-markdown strong,
+.chat-markdown b {
+  color: inherit;
+  font-weight: 600;
+}
+
+.prose a,
+.chat-markdown a {
+  color: hsl(var(--ring));
+  font-weight: 500;
+  text-decoration-color: hsl(var(--ring) / 0.28);
+  text-underline-offset: 0.18em;
+}
+
+.prose a:hover,
+.chat-markdown a:hover {
+  text-decoration-color: hsl(var(--ring) / 0.68);
+}
+
+.prose ul,
+.chat-markdown ul {
+  list-style: disc outside;
+}
+
+.prose ul ul,
+.chat-markdown ul ul {
+  list-style-type: circle;
+}
+
+.prose ul ul ul,
+.chat-markdown ul ul ul {
+  list-style-type: square;
+}
+
+.prose ol,
+.chat-markdown ol {
+  list-style: decimal outside;
+}
+
+.prose ol ol,
+.chat-markdown ol ol {
+  list-style-type: lower-alpha;
+}
+
+.prose ol ol ol,
+.chat-markdown ol ol ol {
+  list-style-type: lower-roman;
+}
+
+.prose ul,
+.prose ol,
+.chat-markdown ul,
+.chat-markdown ol {
+  margin: 0.45em 0 0.65em;
+  padding-left: 1.28em;
+}
+
+.prose li,
+.chat-markdown li {
+  margin: 0.18em 0;
+  padding-left: 0.08em;
+}
+
+.prose li::marker,
+.chat-markdown li::marker {
+  color: hsl(var(--muted-foreground));
+}
+
+.prose li > p,
+.chat-markdown li > p {
+  margin: 0.18em 0;
+}
+
+.prose li > ul,
+.prose li > ol,
+.chat-markdown li > ul,
+.chat-markdown li > ol {
+  margin: 0.22em 0 0.34em;
+}
+
+.prose code,
+.chat-markdown code {
+  border: 1px solid hsl(var(--border) / 0.52);
+  border-radius: 0.42rem;
+  background: hsl(var(--muted) / 0.58);
+  padding: 0.08rem 0.32rem;
+  color: hsl(var(--foreground));
+  font-size: 0.92em;
+}
+
+.prose pre,
+.chat-markdown pre {
+  margin: 0.8em 0;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid hsl(var(--border) / 0.58);
+  border-radius: 0.95rem;
+  background: hsl(var(--muted) / 0.38);
+  padding: 0.85rem 1rem;
+  color: hsl(var(--foreground) / 0.92);
+  font-size: 0.82rem;
+  line-height: 1.56;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.prose pre code,
+.chat-markdown pre code {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+  white-space: inherit;
+  overflow-wrap: inherit;
+  word-break: inherit;
+}
+
+.prose .chat-code-block,
+.chat-markdown .chat-code-block {
+  margin: 0.82em 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border) / 0.68);
+  border-radius: 0.95rem;
+  background: hsl(var(--muted) / 0.32);
+}
+
+.prose .chat-code-header,
+.chat-markdown .chat-code-header {
+  display: flex;
+  min-height: 2.08rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid hsl(var(--border) / 0.56);
+  background: hsl(var(--muted) / 0.5);
+  padding: 0.36rem 0.42rem 0.36rem 0.78rem;
+}
+
+.prose .chat-code-language,
+.chat-markdown .chat-code-language {
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prose .chat-code-copy,
+.chat-markdown .chat-code-copy {
+  display: inline-flex;
+  min-height: 1.42rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 0.52rem;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 500;
+  line-height: 1;
+  padding: 0.28rem 0.48rem;
+}
+
+.prose .chat-code-copy:hover,
+.chat-markdown .chat-code-copy:hover {
+  border-color: hsl(var(--border) / 0.72);
+  background: hsl(var(--accent) / 0.58);
+  color: hsl(var(--foreground));
+}
+
+.prose .chat-code-copy:focus-visible,
+.chat-markdown .chat-code-copy:focus-visible {
+  outline: 2px solid hsl(var(--ring) / 0.7);
+  outline-offset: 2px;
+}
+
+.prose .chat-code-copy-default,
+.prose .chat-code-copy-done,
+.chat-markdown .chat-code-copy-default,
+.chat-markdown .chat-code-copy-done {
+  pointer-events: none;
+}
+
+.prose .chat-code-copy-done,
+.chat-markdown .chat-code-copy-done {
+  display: none;
+  color: hsl(var(--ring));
+}
+
+.prose .chat-code-copy[data-copied="true"] .chat-code-copy-default,
+.prose .chat-code-copy[aria-pressed="true"] .chat-code-copy-default,
+.chat-markdown .chat-code-copy[data-copied="true"] .chat-code-copy-default,
+.chat-markdown .chat-code-copy[aria-pressed="true"] .chat-code-copy-default {
+  display: none;
+}
+
+.prose .chat-code-copy[data-copied="true"] .chat-code-copy-done,
+.prose .chat-code-copy[aria-pressed="true"] .chat-code-copy-done,
+.chat-markdown .chat-code-copy[data-copied="true"] .chat-code-copy-done,
+.chat-markdown .chat-code-copy[aria-pressed="true"] .chat-code-copy-done {
+  display: inline;
+}
+
+.prose .chat-code-block pre,
+.chat-markdown .chat-code-block pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.88rem 1rem 0.95rem;
+}
+
+.prose .chat-code-block pre code,
+.chat-markdown .chat-code-block pre code {
+  display: block;
+  min-width: 100%;
+}
+
+.prose blockquote,
+.chat-markdown blockquote {
+  margin: 0.78em 0;
+  border: 1px solid hsl(var(--border) / 0.58);
+  border-radius: 0.9rem;
+  background: hsl(var(--muted) / 0.26);
+  padding: 0.66rem 0.85rem;
+  color: hsl(var(--foreground) / 0.82);
+}
+
+.prose blockquote > :first-child,
+.chat-markdown blockquote > :first-child {
+  margin-top: 0;
+}
+
+.prose blockquote > :last-child,
+.chat-markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.chat-markdown details {
+  width: 100%;
+  padding: 1rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-interactive);
+  background: transparent;
+}
+
+.chat-markdown details details {
+  width: calc(100% - 0.75rem);
+  margin-top: 0.75rem;
+  margin-inline-start: 0.75rem;
+}
+
+.chat-markdown details > summary {
+  position: relative;
+  min-height: 1.25rem;
+  padding-inline-start: 1.5rem;
+  list-style: none;
+  cursor: pointer;
+}
+
+.chat-markdown details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-markdown details > summary::before {
+  position: absolute;
+  content: "";
+  inset-block-start: calc((1lh - 0.5rem) / 2);
+  inset-inline-start: 0.125rem;
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  border-right: 1.5px solid hsl(var(--muted-foreground));
+  border-bottom: 1.5px solid hsl(var(--muted-foreground));
+  transform: rotate(-45deg);
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.chat-markdown details[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.chat-markdown details[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
+.chat-markdown details > summary:focus-visible {
+  outline: 2px solid hsl(var(--ring) / 0.7);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-markdown details > summary::before {
+    transition: none;
+  }
+}
+
+.prose table,
+.chat-markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 0.78em 0;
+  border: 1px solid hsl(var(--border) / 0.64);
+  border-radius: 0.9rem;
+}
+
+.prose th,
+.prose td,
+.chat-markdown th,
+.chat-markdown td {
+  border-right: 1px solid hsl(var(--border) / 0.54);
+  border-bottom: 1px solid hsl(var(--border) / 0.54);
+  padding: 0.5rem 0.68rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose th:last-child,
+.prose td:last-child,
+.chat-markdown th:last-child,
+.chat-markdown td:last-child {
+  border-right: 0;
+}
+
+.prose tr:last-child td,
+.chat-markdown tr:last-child td {
+  border-bottom: 0;
+}
+
+.prose th,
+.chat-markdown th {
+  background: hsl(var(--muted) / 0.42);
+  font-weight: 650;
+}
+
+.prose hr,
+.chat-markdown hr {
+  margin: 0.95rem 0;
+  border: 0;
+  border-top: 1px solid hsl(var(--border) / 0.64);
+}
+
+.prose .katex-display,
+.chat-markdown .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2rem 0;
+}
+
+/* Chat pending indicator animation */
+@keyframes chat-pending-dot {
+  0%, 60%, 100% {
+    opacity: 0.32;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}

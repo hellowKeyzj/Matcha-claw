@@ -1,5 +1,11 @@
 import { createHash } from 'crypto'
 import { getSessionId } from '../../bootstrap/state.js'
+import { requestInvestigationFile } from '../../services/api/fileInvestigation.js'
+import { rethrowInvestigationAdmission } from '../../services/api/investigation.js'
+import {
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+} from '../../world/investigation.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { Command } from '../../types/command.js'
 import { sealedReadTokenBudget } from './budget.js'
@@ -49,53 +55,99 @@ function source(): { origin: string; token: string } | undefined {
       throw new Error()
     if (!/^[\x21-\x7e]+$/u.test(token)) throw new Error()
     return { origin: url.origin, token }
-  } catch {
+  } catch (error) {
+    rethrowInvestigationAdmission(error)
     throw new SealedSkillError('sealed_source_invalid')
   }
 }
 
-async function request(
+async function request<T>(
   path: string,
+  parse: (body: unknown) => T,
+  records: (value: T) => bigint,
   signal?: AbortSignal,
   expectedSha?: string,
-): Promise<unknown> {
+): Promise<T> {
   const reader = source()
   if (!reader) throw new SealedSkillError('sealed_source_unavailable')
   try {
-    const response = await fetch(
-      `${reader.origin}/sealed-skills/${encodeURIComponent(getSessionId())}/${path}`,
-      {
+    const url = `${reader.origin}/sealed-skills/${encodeURIComponent(getSessionId())}/${path}`
+    const headers = {
+      Authorization: `Bearer ${reader.token}`,
+      ...(expectedSha && { 'x-matcha-sealed-package-sha256': expectedSha }),
+    }
+    let body: unknown
+    const scope = currentInvestigationScope()
+    if (scope) {
+      let parsed!: T
+      const response = await requestInvestigationFile({
+        producer: 'matcha_sealed_skill',
+        operation: path === 'catalog' ? 'catalog_read' : 'content_read',
+        url,
+        method: 'GET',
+        headers,
+        timeoutMs: Math.max(1, scope.deadlineMs - Date.now()),
+        signal,
+        axiosConfig: { proxy: false },
+        records: (data, status) => {
+          try {
+            if (status < 200 || status >= 300) {
+              try {
+                body = JSON.parse(data.toString('utf8'))
+              } catch (error) {
+                rethrowInvestigationAdmission(error)
+              }
+              return 0n
+            }
+            parsed = parse(JSON.parse(data.toString('utf8')))
+            return records(parsed)
+          } catch (error) {
+            rethrowInvestigationAdmission(error)
+            const failure = error instanceof SealedSkillError
+              ? error
+              : new SealedSkillError(path === 'catalog'
+                  ? 'sealed_catalog_invalid'
+                  : 'sealed_read_invalid')
+            throw Object.assign(new InvestigationAdmissionError(failure.kind), {
+              cause: failure,
+            })
+          } finally {
+            data.fill(0)
+          }
+        },
+      })
+      if (response.status >= 200 && response.status < 300) return parsed
+    } else {
+      const response = await fetch(url, {
         method: 'GET',
         redirect: 'error',
         signal,
-        headers: {
-          Authorization: `Bearer ${reader.token}`,
-          ...(expectedSha && { 'x-matcha-sealed-package-sha256': expectedSha }),
-        },
-      },
-    )
-    if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as {
-        error?: { data?: { kind?: unknown } }
-      } | null
-      const kind = body?.error?.data?.kind
-      const safeKinds = [
-        'sealed_invalid_request',
-        'sealed_unauthorized',
-        'sealed_unknown',
-        'sealed_disabled',
-        'sealed_package_changed',
-        'sealed_unavailable',
-        'sealed_source_unavailable',
-      ]
-      throw new SealedSkillError(
-        typeof kind === 'string' && safeKinds.includes(kind)
-          ? kind
-          : 'sealed_read_failed',
-      )
+        headers,
+      })
+      if (response.ok) return parse(await response.json())
+      body = await response.json().catch(error => {
+        rethrowInvestigationAdmission(error)
+        return null
+      })
     }
-    return await response.json()
+    const kind = (body as { error?: { data?: { kind?: unknown } } } | null)
+      ?.error?.data?.kind
+    const safeKinds = [
+      'sealed_invalid_request',
+      'sealed_unauthorized',
+      'sealed_unknown',
+      'sealed_disabled',
+      'sealed_package_changed',
+      'sealed_unavailable',
+      'sealed_source_unavailable',
+    ]
+    throw new SealedSkillError(
+      typeof kind === 'string' && safeKinds.includes(kind)
+        ? kind
+        : 'sealed_read_failed',
+    )
   } catch (error) {
+    rethrowInvestigationAdmission(error)
     if (signal?.aborted)
       throw signal.reason ?? new SealedSkillError('cancelled')
     if (error instanceof SealedSkillError) throw error
@@ -107,14 +159,8 @@ function hash(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value)
 }
 
-export async function readSealedCatalog(
-  signal?: AbortSignal,
-): Promise<SealedSkill[]> {
-  if (!source()) return []
-  const body = (await request('catalog', signal)) as {
-    agentId?: unknown
-    skills?: unknown
-  }
+function parseCatalog(value: unknown): SealedSkill[] {
+  const body = value as { agentId?: unknown; skills?: unknown }
   if (
     !body ||
     typeof body.agentId !== 'string' ||
@@ -162,24 +208,26 @@ export async function readSealedCatalog(
       keys.add(skill.skillKey)
       names.add(skill.descriptor.name)
       return skill
-    } catch {
+    } catch (error) {
+      rethrowInvestigationAdmission(error)
       throw new SealedSkillError('sealed_catalog_invalid')
     }
   })
 }
 
-export async function readSealedContent(
-  skill: SealedSkill,
-  path: string,
+export async function readSealedCatalog(
   signal?: AbortSignal,
-): Promise<{ text: string; contentBytes: number; contentTokens: number }> {
-  const file = skill.files.find(file => file.path === path)
-  if (!file) throw new SealedSkillError('sealed_unknown')
-  const body = (await request(
-    `read/${encodeURIComponent(skill.skillKey)}/${path.split('/').map(encodeURIComponent).join('/')}`,
-    signal,
-    skill.packageSha256,
-  )) as { contentBase64?: unknown; packageSha256?: unknown }
+): Promise<SealedSkill[]> {
+  if (!source()) return []
+  return request('catalog', parseCatalog, skills => BigInt(skills.length), signal)
+}
+
+function parseContent(
+  value: unknown,
+  skill: SealedSkill,
+  file: SealedSkill['files'][number],
+): { text: string; contentBytes: number; contentTokens: number } {
+  const body = value as { contentBase64?: unknown; packageSha256?: unknown }
   if (
     !body ||
     typeof body.contentBase64 !== 'string' ||
@@ -202,11 +250,28 @@ export async function readSealedContent(
       contentBytes: bytes.length,
       contentTokens: Math.ceil(text.length / 2),
     }
-  } catch {
+  } catch (error) {
+    rethrowInvestigationAdmission(error)
     throw new SealedSkillError('sealed_read_invalid')
   } finally {
     bytes.fill(0)
   }
+}
+
+export async function readSealedContent(
+  skill: SealedSkill,
+  path: string,
+  signal?: AbortSignal,
+): Promise<{ text: string; contentBytes: number; contentTokens: number }> {
+  const file = skill.files.find(file => file.path === path)
+  if (!file) throw new SealedSkillError('sealed_unknown')
+  return request(
+    `read/${encodeURIComponent(skill.skillKey)}/${path.split('/').map(encodeURIComponent).join('/')}`,
+    body => parseContent(body, skill, file),
+    () => 1n,
+    signal,
+    skill.packageSha256,
+  )
 }
 
 export async function readSealedReference(

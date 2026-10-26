@@ -1,4 +1,6 @@
 import { parseSSEFrames } from 'src/cli/transports/SSETransport.js'
+import { investigationFetch } from '../investigation.js'
+import { currentInvestigationScope } from '../../../world/investigation.js'
 import { errorMessage } from 'src/utils/errors.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
 import type {
@@ -29,7 +31,7 @@ export async function* streamGeminiGenerateContent(params: {
   signal: AbortSignal
   fetchOverride?: typeof fetch
 }): AsyncGenerator<GeminiStreamChunk, void> {
-  const fetchImpl = params.fetchOverride ?? fetch
+  const fetchImpl = investigationFetch(params.fetchOverride ?? fetch, 'gemini')
   const url = `${getGeminiBaseUrl()}/${getGeminiModelPath(params.model)}:streamGenerateContent?alt=sse`
 
   const response = await fetchImpl(url, {
@@ -92,6 +94,10 @@ export async function* streamGeminiGenerateContent(params: {
       }
     }
   } finally {
-    reader.releaseLock()
+    try {
+      if (currentInvestigationScope()) await reader.cancel()
+    } finally {
+      reader.releaseLock()
+    }
   }
 }

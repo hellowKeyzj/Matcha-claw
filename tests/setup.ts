@@ -49,8 +49,8 @@ afterEach(async () => {
     subagentsStore,
     subagentTemplateCatalog,
   ] = await Promise.all([
-    import('@/stores/subagents'),
-    import('@/services/openclaw/subagent-template-catalog'),
+    import('@/plugins/agents/stores/subagents'),
+    import('@/plugins/agents/services/subagent-template-catalog'),
   ]);
   if ('__resetSubagentsStoreInternalCachesForTest' in subagentsStore) {
     subagentsStore.__resetSubagentsStoreInternalCachesForTest();

@@ -241,7 +241,7 @@ impl OpenClawDriver {
         restart_prepare_span.finish("prepared");
         drop(restart_prepare_span);
         let mut restart_span = ChannelTraceSpan::begin("host.composition.restart_receipt");
-        let receipt = supervisor.restart().await;
+        let receipt = supervisor.enqueue_restart().await;
         restart_span.finish(match &receipt {
             CommandReceipt::Accepted(_) => "accepted",
             CommandReceipt::Shared(_) => "shared",

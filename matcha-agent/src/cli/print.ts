@@ -8,6 +8,7 @@ import {
 } from 'src/services/settingsSync/index.js'
 import { waitForRemoteManagedSettingsToLoad } from 'src/services/remoteManagedSettings/index.js'
 import { StructuredIO } from 'src/cli/structuredIO.js'
+import { AcceptedInputScopeSchema, InvestigationAdmissionError, investigationAbortController, investigationInputReceipt, investigationSignal, requireInvestigationEffects, rethrowInvestigationAdmission, trackInvestigationOperation, withInvestigation } from '../world/investigation.js'
 import { RemoteIO } from 'src/cli/remoteIO.js'
 import {
   type Command,
@@ -89,6 +90,7 @@ import { parsePluginIdentifier } from 'src/utils/plugins/pluginIdentifier.js'
 import { validateUuid } from 'src/utils/uuid.js'
 import { fromArray } from 'src/utils/generators.js'
 import { ask } from 'src/QueryEngine.js'
+import { NativeMeasurementSchema, SDKResultErrorSchema, SDKResultMessageSchema } from 'src/entrypoints/sdk/coreSchemas.js'
 import type { PermissionPromptTool } from 'src/utils/queryHelpers.js'
 import {
   createFileStateCacheWithSizeLimit,
@@ -150,7 +152,7 @@ import {
   outputSchema as permissionToolOutputSchema,
   permissionPromptToolResultToPermissionDecision,
 } from 'src/utils/permissions/PermissionPromptToolResultSchema.js'
-import { createAbortController } from 'src/utils/abortController.js'
+import { createAbortController, createChildAbortController } from 'src/utils/abortController.js'
 import { createCombinedAbortSignal } from 'src/utils/combinedAbortSignal.js'
 import { generateSessionTitle } from 'src/utils/sessionTitle.js'
 import { buildSideQuestionFallbackParams } from 'src/utils/queryContext.js'
@@ -268,7 +270,11 @@ import {
   toInternalMessages,
   toSDKRateLimitInfo,
 } from 'src/utils/messages/mappers.js'
-import { createModelSwitchBreadcrumbs, createAssistantMessage, createUserMessage } from 'src/utils/messages.js'
+import {
+  createModelSwitchBreadcrumbs,
+  createAssistantMessage,
+  createUserMessage,
+} from 'src/utils/messages.js'
 import { TodoListSchema } from 'src/utils/todo/types.js'
 import { activeTodos, writeTodos } from 'src/utils/todo/state.js'
 import {
@@ -290,6 +296,7 @@ import {
   SDKControlWriteTodosRequestSchema,
   SDKControlTaskRequestSchema,
   SDKControlPrepareToSleepRequestSchema,
+  SDKControlSetEffortRequestSchema,
 } from 'src/entrypoints/sdk/controlSchemas.js'
 import { collectContextData } from 'src/commands/context/context-noninteractive.js'
 import { LOCAL_COMMAND_STDOUT_TAG } from 'src/constants/xml.js'
@@ -305,10 +312,10 @@ import {
 } from 'src/utils/model/model.js'
 import { getModelOptions } from 'src/utils/model/modelOptions.js'
 import {
-  modelSupportsEffort,
-  modelSupportsMaxEffort,
-  EFFORT_LEVELS,
-  resolveAppliedEffort,
+  getInitialEffortSetting,
+  getModelEffortCapabilities,
+  resolveAdapterEffort,
+  traceEffort,
 } from 'src/utils/effort.js'
 import { modelSupportsAdaptiveThinking } from 'src/utils/thinking.js'
 import { modelSupportsAutoMode } from 'src/utils/betas.js'
@@ -1079,7 +1086,7 @@ function runHeadlessStreaming(
   let pendingBackgroundOperations = 0
   function trackBackgroundOperation<T>(operation: Promise<T>): Promise<T> {
     pendingBackgroundOperations++
-    return operation.finally(() => {
+    return trackInvestigationOperation(operation).finally(() => {
       pendingBackgroundOperations--
     })
   }
@@ -1095,6 +1102,39 @@ function runHeadlessStreaming(
   let abortController: AbortController | undefined
   // Same queue sendRequest() enqueues to — one FIFO for everything.
   const output = structuredIO.outbound
+
+  function acknowledgeDuplicateUserMessage(userMsg: SDKUserMessage, historical: boolean) {
+    logForDebugging(`Skipping duplicate user message: ${userMsg.uuid}`)
+    if (options.replayUserMessages) {
+      logForDebugging(`Sending acknowledgment for duplicate user message: ${userMsg.uuid}`)
+      output.enqueue({
+        type: 'user',
+        content: (userMsg.message as { content?: string })?.content ?? '',
+        message: userMsg.message as unknown,
+        session_id: getSessionId(),
+        parent_tool_use_id: null,
+        uuid: userMsg.uuid as string,
+        timestamp: (userMsg as { timestamp?: string }).timestamp,
+        isReplay: true,
+      } as unknown as StdoutMessage)
+    }
+    if (historical) notifyCommandLifecycle(userMsg.uuid as string, 'completed')
+  }
+
+  function recordInputAttribution(): Promise<void> | undefined {
+    if (!feature('COMMIT_ATTRIBUTION')) return
+    let write: Promise<void> | undefined
+    setAppState(prev => ({
+      ...prev,
+      attribution: incrementPromptCount(prev.attribution, snapshot => {
+        write = trackInvestigationOperation(recordAttributionSnapshot(snapshot)).catch(error => {
+          rethrowInvestigationAdmission(error)
+          logForDebugging(`Attribution: Failed to save snapshot: ${error}`)
+        })
+      }),
+    }))
+    return write
+  }
 
   // Ctrl+C in -p mode: abort the in-flight query, then shut down gracefully.
   // gracefulShutdown persists session state and flushes analytics, with a
@@ -1181,6 +1221,20 @@ function runHeadlessStreaming(
     lastEmitted: null,
     pendingSuggestion: null,
     pendingLastEmittedEntry: null,
+  }
+
+  function emitPendingSuggestion() {
+    if (!suggestionState.pendingSuggestion) return
+    output.enqueue(suggestionState.pendingSuggestion)
+    // Now that the suggestion is actually delivered, record it for acceptance tracking
+    if (suggestionState.pendingLastEmittedEntry) {
+      suggestionState.lastEmitted = {
+        ...suggestionState.pendingLastEmittedEntry,
+        emittedAt: Date.now(),
+      }
+      suggestionState.pendingLastEmittedEntry = null
+    }
+    suggestionState.pendingSuggestion = null
   }
 
   // Set up AWS auth status listener if enabled
@@ -1276,7 +1330,7 @@ function runHeadlessStreaming(
       modelId === 'default'
         ? getDefaultMainLoopModel()
         : parseUserSpecifiedModel(modelId)
-    const hasEffort = modelSupportsEffort(resolvedModel)
+    const effortCapabilities = getModelEffortCapabilities(resolvedModel)
     const hasAdaptiveThinking = modelSupportsAdaptiveThinking(resolvedModel)
     const hasFastMode = isFastModeSupportedByModel(option.value)
     const hasAutoMode = modelSupportsAutoMode(resolvedModel)
@@ -1285,12 +1339,7 @@ function runHeadlessStreaming(
       value: modelId,
       displayName: option.label,
       description: option.description,
-      ...(hasEffort && {
-        supportsEffort: true,
-        supportedEffortLevels: modelSupportsMaxEffort(resolvedModel)
-          ? [...EFFORT_LEVELS]
-          : EFFORT_LEVELS.filter(l => l !== 'max'),
-      }),
+      ...effortCapabilities,
       ...(hasAdaptiveThinking && { supportsAdaptiveThinking: true }),
       ...(hasFastMode && { supportsFastMode: true }),
       ...(hasAutoMode && { supportsAutoMode: true }),
@@ -1588,6 +1637,8 @@ function runHeadlessStreaming(
   // Mirrors the REPL's useReplBridge hook: the handle is created when
   // `remote_control` is enabled and torn down when disabled.
   let bridgeHandle: ReplBridgeHandle | null = null
+  let bridgeInitializing = false
+  let nativeInputActive = false
   // Cursor into mutableMessages — tracks how far we've forwarded.
   // Same index-based diff as useReplBridge's lastWrittenIndexRef.
   let bridgeLastForwardedIndex = 0
@@ -2048,6 +2099,105 @@ function runHeadlessStreaming(
     // Defined outside the try block so it's accessible in the post-finally
     // queue re-checks at the bottom of run().
     const isMainThread = (cmd: QueuedCommand) => cmd.agentId === undefined
+    let activeInputMessageId: string | undefined
+    let activeInputReceipt: Record<string, unknown> | undefined
+    let acceptedResult: StdoutMessage | undefined
+    let acceptedResultEmitted = false
+
+    function executionErrorResult(error: unknown, previousResult?: StdoutMessage) {
+      const previous = previousResult === undefined ? undefined : SDKResultMessageSchema().parse(previousResult)
+      return SDKResultErrorSchema().parse({
+        duration_ms: 0,
+        duration_api_ms: 0,
+        num_turns: 0,
+        stop_reason: null,
+        session_id: getSessionId(),
+        total_cost_usd: 0,
+        native_measurement: NativeMeasurementSchema().parse({
+          scope: 'native_query',
+          coverage: 'foreground_query_responses',
+          complete: false,
+          ...Object.fromEntries(
+            [
+              'elapsed_ms',
+              'input_tokens',
+              'output_tokens',
+              'cache_read_input_tokens',
+              'cache_creation_input_tokens',
+              'cost',
+              'model_calls',
+              'steps',
+              'source_reads',
+              'rows',
+              'bytes',
+            ].map(field => [field, {
+              availability: 'unavailable',
+              provenance: 'native_query',
+              reason: 'query_result_not_observed',
+            }]),
+          ),
+        }),
+        usage: EMPTY_USAGE,
+        modelUsage: {},
+        permission_denials: [],
+        uuid: randomUUID(),
+        ...previous,
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        input_message_id: activeInputMessageId,
+        ...(activeInputReceipt ? { native_input_receipt: activeInputReceipt } : {}),
+        errors: [
+          ...(previous && 'errors' in previous ? previous.errors : []),
+          errorMessage(error),
+          ...getInMemoryErrors().map(_ => _.error),
+        ],
+      })
+    }
+
+    function emitResult(message: StdoutMessage) {
+      // Flush pending SDK events so they appear before result on the stream.
+      for (const event of drainSdkEvents()) {
+        output.enqueue(event)
+      }
+
+      // Hold-back: don't emit result while background agents are running.
+      if (
+        getRunningTasks(getAppState()).some(
+          t =>
+            (t.type === 'local_agent' || t.type === 'local_workflow') &&
+            isBackgroundTask(t),
+        )
+      ) {
+        heldBackResult = message
+      } else {
+        heldBackResult = null
+        output.enqueue(message)
+      }
+    }
+
+    function hasDrainedInputReceipt(): boolean {
+      return activeInputReceipt?.childrenJoined === true && activeInputReceipt.pendingIo === '0'
+        && Array.isArray(activeInputReceipt.unavailable) && activeInputReceipt.unavailable.length === 0
+    }
+
+    function emitAcceptedResult() {
+      if (!acceptedResult) return
+      if (activeInputReceipt) Object.assign(acceptedResult, { native_input_receipt: activeInputReceipt })
+      emitResult(acceptedResult)
+      if (!heldBackResult) {
+        acceptedResultEmitted = true
+        emitPendingSuggestion()
+      }
+    }
+
+    function releaseHeldBackResult() {
+      if (!heldBackResult) return
+      output.enqueue(heldBackResult)
+      if (heldBackResult === acceptedResult) acceptedResultEmitted = true
+      heldBackResult = null
+      emitPendingSuggestion()
+    }
 
     try {
       let command: QueuedCommand | undefined
@@ -2058,31 +2208,34 @@ function runHeadlessStreaming(
       // ask() call so messages that queued up during a long turn coalesce
       // into a single follow-up turn instead of N separate turns.
       const drainCommandQueue = async () => {
-        while ((command = dequeue(isMainThread))) {
-          if (
-            command.mode !== 'prompt' &&
-            command.mode !== 'orphaned-permission' &&
-            command.mode !== 'task-notification'
-          ) {
-            throw new Error(
-              'only prompt commands are supported in streaming mode',
-            )
-          }
-
-          // Non-prompt commands (task-notification, orphaned-permission) carry
-          // side effects or orphanedPermission state, so they process singly.
-          // Prompt commands greedily collect followers with matching workload.
-          let batch: QueuedCommand[] = [command]
-          if (command.mode === 'prompt') {
-            while (canBatchWith(command, peek(isMainThread))) {
-              batch.push(dequeue(isMainThread)!)
+        if (heldBackResult && heldBackResult === acceptedResult) return
+        const processCommand = async (
+          command: QueuedCommand,
+          batch: QueuedCommand[],
+          inputAbortController: AbortController,
+        ) => {
+          if (command.nativeInputMessage) {
+            const userMsg = command.nativeInputMessage
+            const existsInSession = userMsg.uuid
+              ? await trackInvestigationOperation(doesMessageExistInSession(getSessionId() as UUID, userMsg.uuid as UUID))
+              : false
+            if (existsInSession) {
+              acknowledgeDuplicateUserMessage(userMsg, true)
+              return
             }
+            command = {
+              ...command,
+              value: await trackInvestigationOperation(resolveAndPrepend(userMsg, command.value)),
+              nativeInputMessage: undefined,
+            }
+            batch = [command]
+            await recordInputAttribution()
           }
           const queuedAutonomyClaim =
             await claimConsumableQueuedAutonomyCommands(batch)
           batch = queuedAutonomyClaim.attachmentCommands
           if (batch.length === 0) {
-            continue
+            return
           }
           command = batch[0]!
           if (command.mode === 'prompt' && batch.length > 1) {
@@ -2265,7 +2418,6 @@ function runHeadlessStreaming(
             }
           }
 
-          abortController = createAbortController()
           const turnStartTime = feature('FILE_PERSISTENCE')
             ? Date.now()
             : undefined
@@ -2278,7 +2430,82 @@ function runHeadlessStreaming(
           // const-capture: TS loses `while ((command = dequeue()))` narrowing
           // inside the closure.
           const cmd = command
+          activeInputMessageId = cmd.uuid
           let lastResultIsError = false
+
+          function startPromptSuggestion(): Promise<void> | undefined {
+            if (
+              !options.promptSuggestions ||
+              isEnvDefinedFalsy(process.env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION)
+            ) return
+
+            suggestionState.abortController?.abort()
+            const parentAbort = investigationAbortController()
+            const localAbort = parentAbort
+              ? createChildAbortController(parentAbort)
+              : new AbortController()
+            suggestionState.abortController = localAbort
+            const cacheSafeParams = getLastCacheSafeParams()
+            if (!cacheSafeParams) {
+              logSuggestionSuppressed('sdk_no_params', undefined, undefined, 'sdk')
+              return
+            }
+
+            // Keep the original operation in custody through generation and emission.
+            const ref: { promise: Promise<void> | null } = { promise: null }
+            ref.promise = (async () => {
+              try {
+                const result = await tryGenerateSuggestion(
+                  localAbort,
+                  mutableMessages,
+                  getAppState,
+                  cacheSafeParams,
+                  'sdk',
+                )
+                if (!result || localAbort.signal.aborted) return
+                const suggestionMsg = {
+                  type: 'prompt_suggestion' as const,
+                  suggestion: result.suggestion,
+                  uuid: randomUUID(),
+                  session_id: getSessionId(),
+                }
+                const lastEmittedEntry = {
+                  text: result.suggestion,
+                  emittedAt: Date.now(),
+                  promptId: result.promptId,
+                  generationRequestId: result.generationRequestId,
+                }
+                // An accepted-input result remains withheld until this operation joins.
+                if (cmd.nativeExecution || heldBackResult) {
+                  suggestionState.pendingSuggestion = suggestionMsg
+                  suggestionState.pendingLastEmittedEntry = {
+                    text: lastEmittedEntry.text,
+                    promptId: lastEmittedEntry.promptId,
+                    generationRequestId: lastEmittedEntry.generationRequestId,
+                  }
+                } else {
+                  suggestionState.lastEmitted = lastEmittedEntry
+                  output.enqueue(suggestionMsg)
+                }
+              } catch (error) {
+                rethrowInvestigationAdmission(error)
+                if (
+                  error instanceof Error &&
+                  (error.name === 'AbortError' || error.name === 'APIUserAbortError')
+                ) {
+                  logSuggestionSuppressed('aborted', undefined, undefined, 'sdk')
+                  return
+                }
+                logError(toError(error))
+              } finally {
+                if (suggestionState.inflightPromise === ref.promise) {
+                  suggestionState.inflightPromise = null
+                }
+              }
+            })()
+            suggestionState.inflightPromise = ref.promise
+            return ref.promise
+          }
           try {
             await runWithWorkload(
               cmd.workload ?? options.workload,
@@ -2296,7 +2523,13 @@ function runHeadlessStreaming(
                   verbose: options.verbose,
                   mcpClients: allMcpClients,
                   thinkingConfig: options.thinkingConfig,
-                  maxTurns: options.maxTurns,
+                  maxTurns:
+                    cmd.nativeBudget?.maxTurns === undefined
+                      ? options.maxTurns
+                      : Math.min(
+                          cmd.nativeBudget.maxTurns,
+                          options.maxTurns ?? Infinity,
+                        ),
                   maxBudgetUsd: options.maxBudgetUsd,
                   taskBudget: options.taskBudget,
                   canUseTool,
@@ -2322,7 +2555,7 @@ function runHeadlessStreaming(
                   appendSystemPrompt: options.appendSystemPrompt,
                   getAppState,
                   setAppState,
-                  abortController,
+                  abortController: investigationAbortController() ?? inputAbortController,
                   replayUserMessages: options.replayUserMessages,
                   includePartialMessages: options.includePartialMessages,
                   handleElicitation: (serverName, params, elicitSignal) =>
@@ -2357,25 +2590,10 @@ function runHeadlessStreaming(
                   if (message.type === 'result') {
                     lastResultIsError = !!(message as Record<string, unknown>)
                       .is_error
-                    // Flush pending SDK events so they appear before result on the stream.
-                    for (const event of drainSdkEvents()) {
-                      output.enqueue(event)
-                    }
-
-                    // Hold-back: don't emit result while background agents are running
-                    const currentState = getAppState()
-                    if (
-                      getRunningTasks(currentState).some(
-                        t =>
-                          (t.type === 'local_agent' ||
-                            t.type === 'local_workflow') &&
-                          isBackgroundTask(t),
-                      )
-                    ) {
-                      heldBackResult = message as StdoutMessage
+                    if (cmd.nativeExecution) {
+                      acceptedResult = message as StdoutMessage
                     } else {
-                      heldBackResult = null
-                      output.enqueue(message as StdoutMessage)
+                      emitResult(message as StdoutMessage)
                     }
                   } else {
                     // Flush SDK events (task_started, task_progress) so background
@@ -2387,7 +2605,7 @@ function runHeadlessStreaming(
                   }
                 }
               },
-            ) // end runWithWorkload
+            ) // end workload
             if (lastResultIsError) {
               await finalizeAutonomyCommandsForTurn({
                 commands: claimedAutonomyCommands,
@@ -2415,13 +2633,20 @@ function runHeadlessStreaming(
               }
             }
           } catch (error) {
-            await finalizeAutonomyCommandsForTurn({
-              commands: claimedAutonomyCommands,
-              outcome: { type: 'failed', error },
-              currentDir: cwd(),
-              priority: 'later',
-              workload: cmd.workload ?? options.workload,
-            })
+            try {
+              await finalizeAutonomyCommandsForTurn({
+                commands: claimedAutonomyCommands,
+                outcome: { type: 'failed', error },
+                currentDir: cwd(),
+                priority: 'later',
+                workload: cmd.workload ?? options.workload,
+              })
+            } catch (cleanupError) {
+              if (cmd.nativeExecution) {
+                throw new AggregateError([error, cleanupError], errorMessage(error), { cause: error })
+              }
+              throw cleanupError
+            }
             throw error
           }
 
@@ -2434,12 +2659,12 @@ function runHeadlessStreaming(
           bridgeHandle?.sendResult()
 
           if (feature('FILE_PERSISTENCE') && turnStartTime !== undefined) {
-            void trackBackgroundOperation(
+            const persistence = trackBackgroundOperation(
               executeFilePersistence(
                 {
                   turnStartTime,
                 } as import('src/utils/filePersistence/types.js').TurnStartTime,
-                abortController.signal,
+                investigationSignal() ?? inputAbortController.signal,
                 result => {
                   const filesResult = result as unknown as {
                     persistedFiles: { filename: string; file_id: string }[]
@@ -2457,99 +2682,76 @@ function runHeadlessStreaming(
                 },
               ),
             )
+            if (cmd.nativeExecution) await persistence
           }
 
-          // Generate and emit prompt suggestion for SDK consumers
-          if (
-            options.promptSuggestions &&
-            !isEnvDefinedFalsy(process.env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION)
-          ) {
-            // TS narrows suggestionState to never in the while loop body;
-            // cast via unknown to reset narrowing.
-            const state = suggestionState as unknown as typeof suggestionState
-            state.abortController?.abort()
-            const localAbort = new AbortController()
-            suggestionState.abortController = localAbort
-
-            const cacheSafeParams = getLastCacheSafeParams()
-            if (!cacheSafeParams) {
-              logSuggestionSuppressed(
-                'sdk_no_params',
-                undefined,
-                undefined,
-                'sdk',
-              )
-            } else {
-              // Use a ref object so the IIFE's finally can compare against its own
-              // promise without a self-reference (which upsets TypeScript's flow analysis).
-              const ref: { promise: Promise<void> | null } = { promise: null }
-              ref.promise = (async () => {
-                try {
-                  const result = await tryGenerateSuggestion(
-                    localAbort,
-                    mutableMessages,
-                    getAppState,
-                    cacheSafeParams,
-                    'sdk',
-                  )
-                  if (!result || localAbort.signal.aborted) return
-                  const suggestionMsg = {
-                    type: 'prompt_suggestion' as const,
-                    suggestion: result.suggestion,
-                    uuid: randomUUID(),
-                    session_id: getSessionId(),
-                  }
-                  const lastEmittedEntry = {
-                    text: result.suggestion,
-                    emittedAt: Date.now(),
-                    promptId: result.promptId,
-                    generationRequestId: result.generationRequestId,
-                  }
-                  // Defer emission if the result is being held for background agents,
-                  // so that prompt_suggestion always arrives after result.
-                  // Only set lastEmitted when the suggestion is actually delivered
-                  // to the consumer; deferred suggestions may be discarded before
-                  // delivery if a new command arrives first.
-                  if (heldBackResult) {
-                    suggestionState.pendingSuggestion = suggestionMsg
-                    suggestionState.pendingLastEmittedEntry = {
-                      text: lastEmittedEntry.text,
-                      promptId: lastEmittedEntry.promptId,
-                      generationRequestId: lastEmittedEntry.generationRequestId,
-                    }
-                  } else {
-                    suggestionState.lastEmitted = lastEmittedEntry
-                    output.enqueue(suggestionMsg)
-                  }
-                } catch (error) {
-                  if (
-                    error instanceof Error &&
-                    (error.name === 'AbortError' ||
-                      error.name === 'APIUserAbortError')
-                  ) {
-                    logSuggestionSuppressed(
-                      'aborted',
-                      undefined,
-                      undefined,
-                      'sdk',
-                    )
-                    return
-                  }
-                  logError(toError(error))
-                } finally {
-                  if (suggestionState.inflightPromise === ref.promise) {
-                    suggestionState.inflightPromise = null
-                  }
-                }
-              })()
-              suggestionState.inflightPromise = ref.promise
-            }
-          }
+          const suggestion = startPromptSuggestion()
+          if (cmd.nativeExecution && suggestion) await trackInvestigationOperation(suggestion)
 
           // Log headless profiler metrics for this turn and start next turn
           logHeadlessProfilerTurn()
           logQueryProfileReport()
           headlessProfilerStartTurn()
+        }
+        while ((command = dequeue(isMainThread))) {
+          if (
+            command.mode !== 'prompt' &&
+            command.mode !== 'orphaned-permission' &&
+            command.mode !== 'task-notification'
+          ) {
+            throw new Error(
+              'only prompt commands are supported in streaming mode',
+            )
+          }
+
+          // Non-prompt commands (task-notification, orphaned-permission) carry
+          // side effects or orphanedPermission state, so they process singly.
+          // Prompt commands greedily collect followers with matching workload.
+          const batch: QueuedCommand[] = [command]
+          if (command.mode === 'prompt') {
+            while (
+              !command.nativeBudget &&
+              !command.nativeExecution &&
+              !peek(isMainThread)?.nativeBudget &&
+              !peek(isMainThread)?.nativeExecution &&
+              canBatchWith(command, peek(isMainThread))
+            ) {
+              batch.push(dequeue(isMainThread)!)
+            }
+          }
+          const queuedCommand = command
+          activeInputMessageId = queuedCommand.uuid
+          activeInputReceipt = undefined
+          acceptedResult = undefined
+          acceptedResultEmitted = false
+          const inputAbortController = createAbortController()
+          abortController = inputAbortController
+          nativeInputActive = queuedCommand.nativeExecution !== undefined
+          try {
+            await withInvestigation(queuedCommand.nativeExecution, {
+              request: (request, signal) => structuredIO.requestInvestigation(request, signal),
+              signal: inputAbortController.signal,
+            }, async () => {
+              try {
+                requireInvestigationEffects([])
+                if (queuedCommand.nativeExecution && (bridgeHandle || bridgeInitializing)) {
+                  throw new InvestigationAdmissionError('investigation_bridge_active_or_initializing')
+                }
+                await processCommand(queuedCommand, batch, inputAbortController)
+              } finally {
+                activeInputReceipt = await investigationInputReceipt()
+              }
+            })
+          } catch (error) {
+            if (!queuedCommand.nativeExecution || !(error instanceof InvestigationAdmissionError) || !hasDrainedInputReceipt()) throw error
+            acceptedResult = executionErrorResult(error, acceptedResult)
+          } finally {
+            nativeInputActive = false
+          }
+          if (queuedCommand.nativeExecution) {
+            emitAcceptedResult()
+            if (heldBackResult) return
+          }
         }
       }
 
@@ -2580,10 +2782,13 @@ function runHeadlessStreaming(
           const hasRunningBg = getRunningTasks(state).some(
             t => isBackgroundTask(t) && t.type !== 'in_process_teammate',
           )
+          if (heldBackResult && heldBackResult === acceptedResult && !hasRunningBg) {
+            releaseHeldBackResult()
+          }
           const hasMainThreadQueued = peek(isMainThread) !== undefined
           if (hasRunningBg || hasMainThreadQueued) {
             waitingForAgents = true
-            if (!hasMainThreadQueued) {
+            if (!hasMainThreadQueued || (heldBackResult && heldBackResult === acceptedResult)) {
               runPhase = 'waiting_for_agents'
               // No commands ready yet, wait for tasks to complete
               await sleep(100)
@@ -2593,45 +2798,18 @@ function runHeadlessStreaming(
         }
       } while (waitingForAgents)
 
-      if (heldBackResult) {
-        output.enqueue(heldBackResult)
-        heldBackResult = null
-        if (suggestionState.pendingSuggestion) {
-          output.enqueue(suggestionState.pendingSuggestion)
-          // Now that the suggestion is actually delivered, record it for acceptance tracking
-          if (suggestionState.pendingLastEmittedEntry) {
-            suggestionState.lastEmitted = {
-              ...suggestionState.pendingLastEmittedEntry,
-              emittedAt: Date.now(),
-            }
-            suggestionState.pendingLastEmittedEntry = null
-          }
-          suggestionState.pendingSuggestion = null
-        }
-      }
+      releaseHeldBackResult()
     } catch (error) {
       // Emit error result message before shutting down
       // Write directly to structuredIO to ensure immediate delivery
       try {
-        await structuredIO.write({
-          type: 'result',
-          subtype: 'error_during_execution',
-          duration_ms: 0,
-          duration_api_ms: 0,
-          is_error: true,
-          num_turns: 0,
-          stop_reason: null,
-          session_id: getSessionId(),
-          total_cost_usd: 0,
-          usage: EMPTY_USAGE,
-          modelUsage: {},
-          permission_denials: [],
-          uuid: randomUUID(),
-          errors: [
-            errorMessage(error),
-            ...getInMemoryErrors().map(_ => _.error),
-          ],
-        })
+        if (!acceptedResultEmitted) {
+          if (heldBackResult && heldBackResult === acceptedResult) heldBackResult = null
+          await structuredIO.write(executionErrorResult(error, acceptedResult))
+        } else {
+          logError(new Error(error instanceof InvestigationAdmissionError
+            ? error.reason : 'Accepted input failed after result emission'))
+        }
       } catch {
         // If we can't emit the error result, continue with shutdown anyway
       }
@@ -3095,11 +3273,11 @@ function runHeadlessStreaming(
           (registeredHooks?.[event]?.length ?? 0) > 0 ||
           !!state.sessionHooks.get(getSessionId())?.hooks[event],
       )
-    const udsActive =
-      feature('UDS_INBOX') &&
-      (
-        require('../utils/udsMessaging.js') as typeof import('../utils/udsMessaging.js')
-      ).getUdsMessagingSocketPath() !== undefined
+    const udsActive = feature('UDS_INBOX')
+      ? (
+          require('../utils/udsMessaging.js') as typeof import('../utils/udsMessaging.js')
+        ).getUdsMessagingSocketPath() !== undefined
+      : false
     if (
       state.teamContext ||
       isTeammate() ||
@@ -3360,6 +3538,31 @@ function runHeadlessStreaming(
           injectModelSwitchBreadcrumbs(requestedModel, model)
 
           sendControlResponseSuccess(msg)
+        } else if (msg.request.subtype === 'set_effort') {
+          const parsed = SDKControlSetEffortRequestSchema().safeParse(req)
+          if (!parsed.success) {
+            traceEffort('control_invalid', getMainLoopModel(), undefined, { requestId: msg.request_id, applied: false, persisted: false })
+            sendControlResponseError(msg, 'Invalid effort; use low, medium, high, xhigh, max, or null')
+            continue
+          }
+          const { effort } = parsed.data
+          const model = getMainLoopModel()
+          const capabilities = getModelEffortCapabilities(model)
+          if (effort !== null && !capabilities.supportedEffortLevels.includes(effort)) {
+            traceEffort('control_unsupported', model, effort, { requestId: msg.request_id, applied: false, persisted: false })
+            sendControlResponseError(msg, `Effort "${effort}" is not supported by model "${model}" on the active provider route`)
+            continue
+          }
+          const effortValue = effort ?? getInitialEffortSetting()
+          setAppState(prev => ({ ...prev, effortValue }))
+          const appliedEffort = resolveAdapterEffort(model, effortValue)
+          traceEffort('control_applied', model, effortValue, { requestId: msg.request_id, level: effort, actual: appliedEffort, applied: true, persisted: false })
+          sendControlResponseSuccess(msg, {
+            effort,
+            appliedEffort: typeof appliedEffort === 'string' ? appliedEffort : null,
+            model,
+            ...capabilities,
+          })
         } else if (msg.request.subtype === 'set_max_thinking_tokens') {
           hasSessionOnlyControlState = true
           if (msg.request.max_thinking_tokens === null) {
@@ -3373,116 +3576,277 @@ function runHeadlessStreaming(
             }
           }
           sendControlResponseSuccess(msg)
-        } else if (typeof req.subtype === 'string' && ['task_list', 'task_get', 'task_create', 'task_update'].includes(req.subtype)) {
+        } else if (
+          typeof req.subtype === 'string' &&
+          ['task_list', 'task_get', 'task_create', 'task_update'].includes(
+            req.subtype,
+          )
+        ) {
           const parsed = SDKControlTaskRequestSchema().safeParse(req)
           if (!parsed.success) {
-            sendControlResponseSuccess(msg, { error: { kind: 'invalid_params', outcome: 'rejected' } })
+            sendControlResponseSuccess(msg, {
+              error: { kind: 'invalid_params', outcome: 'rejected' },
+            })
           } else {
             const request = parsed.data
             const listId = request.list_id ?? getTaskListId()
             if (!listId || listId.length > 256 || listId.includes('\0')) {
-              sendControlResponseSuccess(msg, { error: { kind: 'invalid_params', outcome: 'rejected' } })
+              sendControlResponseSuccess(msg, {
+                error: { kind: 'invalid_params', outcome: 'rejected' },
+              })
             } else {
               let mutationStarted = false
               try {
                 const response = await withTaskListLock(listId, async () => {
-                  const taskViews = async () => Promise.all((await readTasks(listId)).map(task => readTaskView(listId, task)))
-                  if (request.subtype === 'task_list') return { tasks: await taskViews() }
+                  const taskViews = async () =>
+                    Promise.all(
+                      (await readTasks(listId)).map(task =>
+                        readTaskView(listId, task),
+                      ),
+                    )
+                  if (request.subtype === 'task_list')
+                    return { tasks: await taskViews() }
                   if (request.subtype === 'task_get') {
                     const task = await readTask(listId, request.task_id)
-                    return task ? { task: await readTaskView(listId, task) } : { error: { kind: 'not_found', outcome: 'rejected' } }
+                    return task
+                      ? { task: await readTaskView(listId, task) }
+                      : { error: { kind: 'not_found', outcome: 'rejected' } }
                   }
                   // Read the complete list before mutating so malformed/IO failures are not missing items.
                   await readTasks(listId)
                   if (request.subtype === 'task_create') {
                     mutationStarted = true
-                    const id = await createTask(listId, { ...request.input, status: 'pending', blocks: [], blockedBy: [] })
+                    const id = await createTask(listId, {
+                      ...request.input,
+                      status: 'pending',
+                      blocks: [],
+                      blockedBy: [],
+                    })
                     const task = await readTask(listId, id)
                     if (!task) throw new Error('task_readback_missing')
-                    return { task: await readTaskView(listId, task), tasks: await taskViews(), persisted: true, outcome: 'applied' }
+                    return {
+                      task: await readTaskView(listId, task),
+                      tasks: await taskViews(),
+                      persisted: true,
+                      outcome: 'applied',
+                    }
                   }
                   const { taskId, status, ...patch } = request.input
-                  if (!await readTask(listId, taskId)) return { error: { kind: 'not_found', outcome: 'rejected' } }
-                  for (const id of [...(patch.addBlocks ?? []), ...(patch.addBlockedBy ?? [])]) {
-                    if (!await readTask(listId, id)) return { error: { kind: 'task_dependency_missing', outcome: 'rejected' } }
+                  if (!(await readTask(listId, taskId)))
+                    return { error: { kind: 'not_found', outcome: 'rejected' } }
+                  for (const id of [
+                    ...(patch.addBlocks ?? []),
+                    ...(patch.addBlockedBy ?? []),
+                  ]) {
+                    if (!(await readTask(listId, id)))
+                      return {
+                        error: {
+                          kind: 'task_dependency_missing',
+                          outcome: 'rejected',
+                        },
+                      }
                   }
                   mutationStarted = true
                   if (status === 'deleted') {
-                    if (!await deleteTaskStrict(listId, taskId)) throw new Error('task_delete_unconfirmed')
+                    if (!(await deleteTaskStrict(listId, taskId)))
+                      throw new Error('task_delete_unconfirmed')
                     const tasks = await readTasks(listId)
-                    if (tasks.some(task => task.id === taskId || task.blocks.includes(taskId) || task.blockedBy.includes(taskId))) throw new Error('task_delete_unconfirmed')
-                    return { tasks: await taskViews(), deletedId: taskId, persisted: true, outcome: 'applied' }
+                    if (
+                      tasks.some(
+                        task =>
+                          task.id === taskId ||
+                          task.blocks.includes(taskId) ||
+                          task.blockedBy.includes(taskId),
+                      )
+                    )
+                      throw new Error('task_delete_unconfirmed')
+                    return {
+                      tasks: await taskViews(),
+                      deletedId: taskId,
+                      persisted: true,
+                      outcome: 'applied',
+                    }
                   }
-                  const task = await patchTask(listId, taskId, { ...patch, ...(status ? { status } : {}) })
+                  const task = await patchTask(listId, taskId, {
+                    ...patch,
+                    ...(status ? { status } : {}),
+                  })
                   if (!task) throw new Error('task_readback_missing')
-                  return { task: await readTaskView(listId, task), tasks: await taskViews(), persisted: true, outcome: 'applied' }
+                  return {
+                    task: await readTaskView(listId, task),
+                    tasks: await taskViews(),
+                    persisted: true,
+                    outcome: 'applied',
+                  }
                 })
                 sendControlResponseSuccess(msg, {
                   listId: sanitizePathComponent(listId),
-                  todos: isTodoV2Enabled() ? [] : getAppState().todos[getSessionId()] ?? [],
+                  todos: isTodoV2Enabled()
+                    ? []
+                    : (getAppState().todos[getSessionId()] ?? []),
                   ...response,
                 })
               } catch (error) {
                 const code = getErrnoCode(error)
-                const kind = code === 'ELOCKED' || code === 'ECOMPROMISED' ? 'task_lock_conflict' : error instanceof Error && error.message === 'task_native_schema' ? 'task_native_schema' : 'task_io'
-                sendControlResponseSuccess(msg, { error: { kind, outcome: mutationStarted ? 'unknown' : 'rejected' } })
+                const kind =
+                  code === 'ELOCKED' || code === 'ECOMPROMISED'
+                    ? 'task_lock_conflict'
+                    : error instanceof Error &&
+                        error.message === 'task_native_schema'
+                      ? 'task_native_schema'
+                      : 'task_io'
+                sendControlResponseSuccess(msg, {
+                  error: {
+                    kind,
+                    outcome: mutationStarted ? 'unknown' : 'rejected',
+                  },
+                })
               }
             }
           }
-        } else if (msg.request.subtype === 'get_todos' || msg.request.subtype === 'write_todos') {
+        } else if (
+          msg.request.subtype === 'get_todos' ||
+          msg.request.subtype === 'write_todos'
+        ) {
           const write = msg.request.subtype === 'write_todos'
-          const parsed = (write ? SDKControlWriteTodosRequestSchema() : SDKControlGetTodosRequestSchema()).safeParse(req)
+          const parsed = (
+            write
+              ? SDKControlWriteTodosRequestSchema()
+              : SDKControlGetTodosRequestSchema()
+          ).safeParse(req)
           if (!parsed.success) {
-            sendControlResponseSuccess(msg, { error: { kind: 'invalid_params', outcome: 'rejected' } })
+            sendControlResponseSuccess(msg, {
+              error: { kind: 'invalid_params', outcome: 'rejected' },
+            })
           } else if (isTodoV2Enabled()) {
-            sendControlResponseSuccess(msg, { error: { kind: 'todo_owner_inactive', outcome: 'rejected' } })
+            sendControlResponseSuccess(msg, {
+              error: { kind: 'todo_owner_inactive', outcome: 'rejected' },
+            })
           } else if (!write) {
-            sendControlResponseSuccess(msg, { todos: getAppState().todos[getSessionId()] ?? [], source: 'appState' })
+            sendControlResponseSuccess(msg, {
+              todos: getAppState().todos[getSessionId()] ?? [],
+              source: 'appState',
+            })
           } else if (running || todoControlInFlight) {
-            sendControlResponseSuccess(msg, { error: { kind: 'todo_session_busy', outcome: 'rejected' } })
+            sendControlResponseSuccess(msg, {
+              error: { kind: 'todo_session_busy', outcome: 'rejected' },
+            })
           } else if (isSessionPersistenceDisabled()) {
-            sendControlResponseSuccess(msg, { error: { kind: 'todo_persistence_disabled', outcome: 'rejected' } })
+            sendControlResponseSuccess(msg, {
+              error: { kind: 'todo_persistence_disabled', outcome: 'rejected' },
+            })
           } else if (parsed.data.subtype === 'write_todos') {
             const { old_todos, new_todos } = parsed.data
             const current = getAppState().todos[getSessionId()] ?? []
             const expected = activeTodos(old_todos)
-            if (current.length !== expected.length || current.some((todo, index) => {
-              const old = expected[index]
-              return !old || todo.content !== old.content || todo.status !== old.status || todo.activeForm !== old.activeForm
-            })) {
-              sendControlResponseSuccess(msg, { error: { kind: 'todo_conflict', outcome: 'rejected' } })
+            if (
+              current.length !== expected.length ||
+              current.some((todo, index) => {
+                const old = expected[index]
+                return (
+                  !old ||
+                  todo.content !== old.content ||
+                  todo.status !== old.status ||
+                  todo.activeForm !== old.activeForm
+                )
+              })
+            ) {
+              sendControlResponseSuccess(msg, {
+                error: { kind: 'todo_conflict', outcome: 'rejected' },
+              })
             } else {
               const operation = async () => {
                 const toolUseId = `todo-control-${randomUUID()}`
-                const assistant = createAssistantMessage({ content: [{ type: 'tool_use', id: toolUseId, name: TODO_WRITE_TOOL_NAME, input: { todos: new_todos } }] })
+                const assistant = createAssistantMessage({
+                  content: [
+                    {
+                      type: 'tool_use',
+                      id: toolUseId,
+                      name: TODO_WRITE_TOOL_NAME,
+                      input: { todos: new_todos },
+                    },
+                  ],
+                })
                 const result = createUserMessage({
-                  content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'Todos have been modified successfully.' }],
+                  content: [
+                    {
+                      type: 'tool_result',
+                      tool_use_id: toolUseId,
+                      content: 'Todos have been modified successfully.',
+                    },
+                  ],
                   toolUseResult: { oldTodos: current, newTodos: new_todos },
                   sourceToolAssistantUUID: assistant.uuid,
                 })
-                writeTodos({ getAppState, setAppState }, getSessionId(), new_todos)
+                writeTodos(
+                  { getAppState, setAppState },
+                  getSessionId(),
+                  new_todos,
+                )
                 mutableMessages.push(assistant, result)
                 try {
                   await recordTranscript(mutableMessages)
                   await flushSessionStorage()
                   // Flush is only a drain; observe the native transcript before claiming persistence.
-                  const transcript = await readFile(getTranscriptPathForSession(getSessionId()), 'utf-8')
-                  const entries = transcript.split('\n').filter(Boolean).map(line => JSON.parse(line) as { uuid?: string; timestamp?: unknown; message?: { content?: unknown } })
-                  const saved = entries.find(entry => entry.uuid === assistant.uuid)
-                  const persisted = jsonStringify(saved?.message?.content) === jsonStringify(assistant.message.content) && entries.some(entry => entry.uuid === result.uuid)
-                  const updatedAt = typeof saved?.timestamp === 'string' ? Date.parse(saved.timestamp) : NaN
-                  const todos = TodoListSchema().parse(getAppState().todos[getSessionId()] ?? [])
+                  const transcript = await readFile(
+                    getTranscriptPathForSession(getSessionId()),
+                    'utf-8',
+                  )
+                  const entries = transcript
+                    .split('\n')
+                    .filter(Boolean)
+                    .map(
+                      line =>
+                        JSON.parse(line) as {
+                          uuid?: string
+                          timestamp?: unknown
+                          message?: { content?: unknown }
+                        },
+                    )
+                  const saved = entries.find(
+                    entry => entry.uuid === assistant.uuid,
+                  )
+                  const persisted =
+                    jsonStringify(saved?.message?.content) ===
+                      jsonStringify(assistant.message.content) &&
+                    entries.some(entry => entry.uuid === result.uuid)
+                  const updatedAt =
+                    typeof saved?.timestamp === 'string'
+                      ? Date.parse(saved.timestamp)
+                      : NaN
+                  const todos = TodoListSchema().parse(
+                    getAppState().todos[getSessionId()] ?? [],
+                  )
                   sendControlResponseSuccess(msg, {
-                    todos, stateApplied: true, transcriptPersisted: persisted,
+                    todos,
+                    stateApplied: true,
+                    transcriptPersisted: persisted,
                     transcriptMessageId: assistant.uuid,
-                    ...(persisted && Number.isSafeInteger(updatedAt) && updatedAt >= 0 ? { updatedAt } : { error: { kind: 'todo_persistence_unconfirmed', outcome: 'unknown' } }),
+                    ...(persisted &&
+                    Number.isSafeInteger(updatedAt) &&
+                    updatedAt >= 0
+                      ? { updatedAt }
+                      : {
+                          error: {
+                            kind: 'todo_persistence_unconfirmed',
+                            outcome: 'unknown',
+                          },
+                        }),
                   })
                 } catch {
-                  sendControlResponseSuccess(msg, { error: { kind: 'todo_io', outcome: 'unknown' }, stateApplied: true, transcriptPersisted: false })
+                  sendControlResponseSuccess(msg, {
+                    error: { kind: 'todo_io', outcome: 'unknown' },
+                    stateApplied: true,
+                    transcriptPersisted: false,
+                  })
                 }
               }
               todoControlInFlight = operation()
-              try { await todoControlInFlight } finally { todoControlInFlight = undefined }
+              try {
+                await todoControlInFlight
+              } finally {
+                todoControlInFlight = undefined
+              }
             }
           }
         } else if (msg.request.subtype === 'mcp_status') {
@@ -4302,19 +4666,19 @@ function runHeadlessStreaming(
           const { getSearchAdapterKey } = await import(
             '@claude-code-best/builtin-tools/tools/WebSearchTool/adapters/index.js'
           )
+          const settings = getSettingsWithSources()
           const currentAppState = getAppState()
           const model = getMainLoopModel()
-          // modelSupportsEffort gate matches claude.ts — applied.effort must
-          // mirror what actually goes to the API, not just what's configured.
-          const effort = modelSupportsEffort(model)
-            ? resolveAppliedEffort(model, currentAppState.effortValue)
-            : undefined
+          const effort = resolveAdapterEffort(model, currentAppState.effortValue)
+          const capabilities = getModelEffortCapabilities(model)
+          traceEffort('settings_read', model, currentAppState.effortValue, { requestId: msg.request_id, actual: effort })
           sendControlResponseSuccess(msg, {
-            ...getSettingsWithSources(),
+            ...settings,
             applied: {
               model,
               // Numeric effort (ant-only) → null; SDK schema is string-level only.
               effort: typeof effort === 'string' ? effort : null,
+              ...capabilities,
               webSearchAdapter: getSearchAdapterKey(),
             },
           })
@@ -4335,20 +4699,27 @@ function runHeadlessStreaming(
           // interrupts for the duration of the API roundtrip).
           const description = req.description as string
           const persist = req.persist as boolean
-          // Reuse the live controller only if it has not already been aborted
-          // (e.g. by interrupt()); an aborted signal would cause queryHaiku to
-          // immediately throw APIUserAbortError → {title: null}.
+          // An investigation title must retain its original input's cancellation,
+          // even if the interrupt arrived before this control request.
+          // Ordinary title generation may still start after an earlier interrupt.
           const titleSignal = (
-            abortController && !abortController.signal.aborted
+            abortController && (req.native_execution != null || !abortController.signal.aborted)
               ? abortController
               : createAbortController()
           ).signal
           void trackBackgroundOperation(
             (async () => {
               try {
-                const title = await generateSessionTitle(
-                  description,
-                  titleSignal,
+                const title = await withInvestigation(
+                  req.native_execution == null ? undefined : AcceptedInputScopeSchema.parse(req.native_execution),
+                  {
+                    request: (request, signal) => structuredIO.requestInvestigation(request, signal),
+                    signal: titleSignal,
+                  },
+                  () => {
+                    requireInvestigationEffects([])
+                    return generateSessionTitle(description, investigationSignal() ?? titleSignal)
+                  },
                 )
                 if (title && persist) {
                   try {
@@ -4448,6 +4819,10 @@ function runHeadlessStreaming(
           sendControlResponseSuccess(msg)
         } else if (req.subtype === 'remote_control') {
           if (req.enabled as boolean) {
+            if (nativeInputActive) {
+              sendControlResponseError(msg, 'investigation_input_active')
+              continue
+            }
             if (bridgeHandle) {
               // Already connected
               sendControlResponseSuccess(msg, {
@@ -4468,6 +4843,7 @@ function runHeadlessStreaming(
               // ("/login", "disabled by your organization's policy", etc.)
               // instead of a generic "initialization failed".
               let bridgeFailureDetail: string | undefined
+              bridgeInitializing = true
               try {
                 const { initReplBridge } = await import(
                   'src/bridge/initReplBridge.js'
@@ -4563,6 +4939,8 @@ function runHeadlessStreaming(
                 }
               } catch (err) {
                 sendControlResponseError(msg, errorMessage(err))
+              } finally {
+                bridgeInitializing = false
               }
             }
           } else {
@@ -4615,6 +4993,25 @@ function runHeadlessStreaming(
       // Type assertion: after the type guard, message is a user message.
       // The union with SDKMessage (any) prevents proper narrowing.
       const userMsg = message as SDKUserMessage
+      const nativeExecution = userMsg.native_execution === undefined
+        ? undefined : AcceptedInputScopeSchema.parse(userMsg.native_execution)
+      if (nativeExecution && nativeExecution.correlation.acceptedInputId !== userMsg.uuid) {
+        throw new Error('Native investigation input identity mismatch')
+      }
+      const nativeBudget = (
+        userMsg as { native_budget?: { maxTurns?: number } }
+      ).native_budget
+      if (
+        nativeBudget !== undefined &&
+        (!nativeBudget ||
+          typeof nativeBudget !== 'object' ||
+          Object.keys(nativeBudget).some(key => key !== 'maxTurns') ||
+          (nativeBudget.maxTurns !== undefined &&
+            (!Number.isSafeInteger(nativeBudget.maxTurns) ||
+              nativeBudget.maxTurns <= 0)))
+      ) {
+        throw new Error('Invalid native query budget')
+      }
 
       // First prompt message implicitly initializes if not already done.
       initialized = true
@@ -4622,36 +5019,14 @@ function runHeadlessStreaming(
       // Check for duplicate user message - skip if already processed
       if (userMsg.uuid) {
         const sessionId = getSessionId() as UUID
-        const existsInSession = await doesMessageExistInSession(
+        const existsInSession = !nativeExecution && await doesMessageExistInSession(
           sessionId,
           userMsg.uuid as UUID,
         )
 
-        // Check both historical duplicates (from file) and runtime duplicates (this session)
+        // Accepted-input historical IO runs after dequeue in its one scope.
         if (existsInSession || receivedMessageUuids.has(userMsg.uuid as UUID)) {
-          logForDebugging(`Skipping duplicate user message: ${userMsg.uuid}`)
-          // Send acknowledgment for duplicate message if replay mode is enabled
-          if (options.replayUserMessages) {
-            logForDebugging(
-              `Sending acknowledgment for duplicate user message: ${userMsg.uuid}`,
-            )
-            output.enqueue({
-              type: 'user',
-              content: (userMsg.message as { content?: string })?.content ?? '',
-              message: userMsg.message as unknown,
-              session_id: sessionId,
-              parent_tool_use_id: null,
-              uuid: userMsg.uuid as string,
-              timestamp: (userMsg as { timestamp?: string }).timestamp,
-              isReplay: true,
-            } as unknown as StdoutMessage)
-          }
-          // Historical dup = transcript already has this turn's output, so it
-          // ran but its lifecycle was never closed (interrupted before ack).
-          // Runtime dups don't need this — the original enqueue path closes them.
-          if (existsInSession) {
-            notifyCommandLifecycle(userMsg.uuid as string, 'completed')
-          }
+          acknowledgeDuplicateUserMessage(userMsg, existsInSession)
           // Don't enqueue duplicate messages for execution
           continue
         }
@@ -4664,26 +5039,22 @@ function runHeadlessStreaming(
         mode: 'prompt' as const,
         // file_attachments rides the protobuf catchall from the web composer.
         // Same-ref no-op when absent (no 'file_attachments' key).
-        value: await resolveAndPrepend(
-          userMsg,
-          (userMsg.message as { content: ContentBlockParam[] }).content,
-        ),
+        value: nativeExecution
+          ? (userMsg.message as { content: ContentBlockParam[] }).content
+          : await resolveAndPrepend(
+              userMsg,
+              (userMsg.message as { content: ContentBlockParam[] }).content,
+            ),
         uuid: userMsg.uuid as `${string}-${string}-${string}-${string}-${string}`,
+        nativeBudget,
+        nativeExecution,
+        nativeInputMessage: nativeExecution ? userMsg : undefined,
         priority: (userMsg as { priority?: string })
           .priority as import('src/types/textInputTypes.js').QueuePriority,
       })
       // Increment prompt count for attribution tracking and save snapshot
       // The snapshot persists promptCount so it survives compaction
-      if (feature('COMMIT_ATTRIBUTION')) {
-        setAppState(prev => ({
-          ...prev,
-          attribution: incrementPromptCount(prev.attribution, snapshot => {
-            void recordAttributionSnapshot(snapshot).catch(error => {
-              logForDebugging(`Attribution: Failed to save snapshot: ${error}`)
-            })
-          }),
-        }))
-      }
+      if (!nativeExecution) void recordInputAttribution()
       void run()
     }
     inputClosed = true

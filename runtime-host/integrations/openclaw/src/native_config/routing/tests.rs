@@ -201,6 +201,7 @@ fn local_account_routing_projects_without_a_private_auth_profile() {
         &[account],
         &catalog,
         &routing,
+        &mut Vec::new(),
         1_800_000_000_000,
     )
     .expect("local routing must not require private auth");
@@ -234,6 +235,7 @@ fn non_local_account_routing_requires_a_private_auth_profile() {
             &[account],
             &catalog,
             &routing,
+            &mut Vec::new(),
             1_800_000_000_000,
         ),
         Err(ProviderRoutingProjectionError::CredentialUnavailable)
@@ -270,6 +272,7 @@ fn routing_credential_check_uses_projected_provider_key() {
             std::slice::from_ref(&account),
             &catalog,
             &routing,
+            &mut Vec::new(),
             1_800_000_000_000,
         ),
         Err(ProviderRoutingProjectionError::CredentialUnavailable)
@@ -293,6 +296,7 @@ fn routing_credential_check_uses_projected_provider_key() {
         std::slice::from_ref(&account),
         &catalog,
         &routing,
+        &mut Vec::new(),
         1_800_000_000_000,
     )
     .expect("project routing with canonical provider profile");
@@ -345,6 +349,7 @@ fn projects_each_capability_to_its_openclaw_field_and_preserves_siblings() {
         video_generate: None,
         music_generate: None,
         tts_provider: Some(provider("elevenlabs")),
+        preserved: BTreeSet::new(),
     };
 
     let update = routing.apply(&root.store()).expect("apply routing");

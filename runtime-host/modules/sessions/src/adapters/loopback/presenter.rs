@@ -365,7 +365,7 @@ mod tests {
             identity: SessionIdentity::new(
                 "agent:main:demo",
                 SessionProvider::OpenClaw,
-                Some("main".to_owned()),
+                "main".to_owned(),
             )
             .expect("valid identity"),
             epoch: 1,

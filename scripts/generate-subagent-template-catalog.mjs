@@ -89,7 +89,7 @@ function listTemplateIds(templateRoot) {
 function main() {
   const matchaRoot = resolve(process.cwd());
   const agencyRoot = resolve(matchaRoot, '../agency-agents');
-  const templateRoot = resolve(matchaRoot, 'src/features/subagents/templates');
+  const templateRoot = resolve(matchaRoot, 'src/plugins/agents/templates');
   const outputPath = resolve(templateRoot, 'catalog.json');
 
   const sourceMap = collectSourceTemplateIndex(agencyRoot);

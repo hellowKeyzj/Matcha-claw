@@ -4,6 +4,7 @@ use std::{
 };
 
 use platform::trace::{enabled, identifier_hash, runtime_trace};
+use serde::Serialize;
 
 use connectors::{
     ConnectorSecretAuthorityPortError, ConnectorSecretRef, ConnectorSecretResolution,
@@ -12,8 +13,9 @@ use connectors::{
 };
 
 use crate::{
-    ProviderAccount, ProviderAccountAuthMode, ProviderAccountId, ProviderModelCatalog,
-    ProviderRouting,
+    ProviderAccount, ProviderAccountAuthMode, ProviderAccountExecution, ProviderAccountId,
+    ProviderCallDiagnostic, ProviderModelCatalog, ProviderRouting, ProviderRuntimeReport,
+    ProviderSessionEndpoint,
 };
 
 pub type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -32,6 +34,8 @@ pub trait ProviderRuntimeDirectory: Send + Sync {
 }
 
 pub trait ProviderConfigOps: Send + Sync {
+    fn endpoint(&self) -> ProviderSessionEndpoint;
+
     fn reconcile_provider_native_configuration<'a>(
         &'a self,
         command: ProviderNativeConfigurationCommand<'a>,
@@ -72,6 +76,7 @@ pub trait ProviderPrivateProjectionOps: Send + Sync {
 pub struct ProviderNativeConfigurationCommand<'a> {
     pub resolver: &'a Resolver,
     pub accounts: &'a [ProviderAccount],
+    pub account_failures: &'a [ProviderAccountExecution],
     pub models: &'a ProviderModelCatalog,
     pub routing: Option<&'a ProviderRouting>,
     pub retired: &'a [ProviderAccount],
@@ -92,6 +97,7 @@ pub struct ProviderNativeConfigurationEvidence {
     applied: ProviderAppliedStatus,
     observed: ProviderObservedStatus,
     diagnostic: Option<ProviderNativeConfigurationDiagnostic>,
+    reports: Vec<ProviderRuntimeReport>,
 }
 
 impl ProviderNativeConfigurationEvidence {
@@ -105,6 +111,7 @@ impl ProviderNativeConfigurationEvidence {
             applied,
             observed,
             diagnostic: None,
+            reports: Vec::new(),
         }
     }
 
@@ -119,7 +126,30 @@ impl ProviderNativeConfigurationEvidence {
             applied,
             observed,
             diagnostic: Some(diagnostic),
+            reports: Vec::new(),
         }
+    }
+
+    pub fn with_report(
+        mut self,
+        endpoint: ProviderSessionEndpoint,
+        accounts: Vec<ProviderAccountExecution>,
+    ) -> Self {
+        self.reports.push(ProviderRuntimeReport {
+            endpoint,
+            changed: self.changed,
+            applied: self.applied,
+            observed: self.observed,
+            diagnostic: self.diagnostic.as_ref().map(|diagnostic| {
+                ProviderCallDiagnostic::from_native_reason(diagnostic.reason())
+            }),
+            accounts,
+        });
+        self
+    }
+
+    pub fn reports(&self) -> &[ProviderRuntimeReport] {
+        &self.reports
     }
 
     pub const fn changed(&self) -> bool {
@@ -140,6 +170,29 @@ impl ProviderNativeConfigurationEvidence {
 }
 
 impl ProviderNativeConfigurationEffect {
+    pub fn with_report(
+        self,
+        endpoint: ProviderSessionEndpoint,
+        accounts: Vec<ProviderAccountExecution>,
+    ) -> Self {
+        let evidence = match self {
+            Self::Evidence(evidence) => evidence,
+            Self::Unavailable => ProviderNativeConfigurationEvidence::new(
+                false,
+                ProviderAppliedStatus::Unknown,
+                ProviderObservedStatus::Unavailable,
+            ),
+        };
+        Self::Evidence(evidence.with_report(endpoint, accounts))
+    }
+
+    pub fn reports(&self) -> &[ProviderRuntimeReport] {
+        match self {
+            Self::Evidence(evidence) => evidence.reports(),
+            Self::Unavailable => &[],
+        }
+    }
+
     pub fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Evidence(left), Self::Evidence(right)) => Self::Evidence(left.merge(right)),
@@ -157,7 +210,7 @@ impl ProviderNativeConfigurationEffect {
 }
 
 impl ProviderNativeConfigurationEvidence {
-    fn merge(self, other: Self) -> Self {
+    fn merge(mut self, other: Self) -> Self {
         use ProviderObservedStatus::{Mismatch, Unavailable};
         let prefer_other_diagnostic = match (self.observed, other.observed) {
             (Mismatch, _) => false,
@@ -167,6 +220,7 @@ impl ProviderNativeConfigurationEvidence {
             _ => self.applied == ProviderAppliedStatus::Confirmed
                 && other.applied == ProviderAppliedStatus::Unknown,
         };
+        self.reports.extend(other.reports);
         Self {
             changed: self.changed || other.changed,
             applied: self.applied.merge(other.applied),
@@ -176,11 +230,13 @@ impl ProviderNativeConfigurationEvidence {
             } else {
                 self.diagnostic.or(other.diagnostic)
             },
+            reports: self.reports,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ProviderAppliedStatus {
     Confirmed,
     Unknown,
@@ -195,7 +251,8 @@ impl ProviderAppliedStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ProviderObservedStatus {
     Matches,
     Mismatch,
@@ -306,6 +363,7 @@ impl ProviderRuntimeIdentity {
 pub struct ProviderPrivateProjectionCommand<'a> {
     pub resolver: &'a Resolver,
     pub accounts: &'a [ProviderAccount],
+    pub account_failures: &'a [ProviderAccountExecution],
     pub models: &'a ProviderModelCatalog,
     pub routing: Option<&'a ProviderRouting>,
     pub now_millis: u64,
@@ -315,6 +373,7 @@ pub struct ProviderPrivateProjectionCommand<'a> {
 pub struct ProviderPrivateProjectionEffect {
     pub providers: ProviderConfigWriteEffect,
     pub restart: ProviderRestartPreparation,
+    pub reports: Vec<ProviderRuntimeReport>,
 }
 
 impl ProviderPrivateProjectionEffect {
@@ -326,6 +385,7 @@ impl ProviderPrivateProjectionEffect {
                 detail,
             )),
             restart: ProviderRestartPreparation::Unknown,
+            reports: Vec::new(),
         }
     }
 }

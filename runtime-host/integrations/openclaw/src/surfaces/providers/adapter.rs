@@ -18,6 +18,10 @@ impl OpenClawDriver {
 }
 
 impl provider_module::ProviderConfigOps for OpenClawDriver {
+    fn endpoint(&self) -> provider_module::ProviderSessionEndpoint {
+        provider_module::ProviderSessionEndpoint::OpenClawLocal
+    }
+
     fn reconcile_provider_native_configuration<'a>(
         &'a self,
         command: provider_module::ProviderNativeConfigurationCommand<'a>,

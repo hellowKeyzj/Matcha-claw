@@ -1,6 +1,5 @@
 use crate::{driver::OpenClawDriver, surfaces::tasks as openclaw_tasks};
 use foundation::process::supervision::SupervisorPhase;
-use futures_util::FutureExt;
 use workspace_module::WorkspaceOps;
 
 impl ::task_manager::TaskOps for OpenClawDriver {
@@ -9,49 +8,47 @@ impl ::task_manager::TaskOps for OpenClawDriver {
         command: ::task_manager::TaskCommand,
     ) -> ::task_manager::TaskFuture<'a, ::task_manager::TaskExecution> {
         Box::pin(async move {
-            match command {
+            let outcome = match command {
                 ::task_manager::TaskCommand::List { target } => {
-                    let scope = match task_scope(self, &target).await {
-                        Ok(scope) => scope,
-                        Err(()) => {
-                            return ::task_manager::TaskOutcome::List(
-                                ::task_manager::TaskReadOutcome::Unavailable,
-                            );
-                        }
+                    let result = match task_scope(self, &target).await {
+                        Ok(scope) => self.gateway.list_tasks(scope).await,
+                        Err(()) => Err(scope_read_failure()),
                     };
-                    ::task_manager::TaskOutcome::List(project_read(
-                        self.gateway.list_tasks(scope).await,
+                    return project_read(
+                        result,
                         project_snapshot,
-                    ))
+                        ::task_manager::TaskOutcome::List,
+                    );
                 }
                 ::task_manager::TaskCommand::Get { target, task_id } => {
-                    let scope = match task_scope(self, &target).await {
-                        Ok(scope) => scope,
-                        Err(()) => {
-                            return ::task_manager::TaskOutcome::Get(
-                                ::task_manager::TaskReadOutcome::Unavailable,
-                            );
-                        }
+                    let result = match task_scope(self, &target).await {
+                        Ok(scope) => self.gateway.get_task(scope, task_id).await,
+                        Err(()) => Err(scope_read_failure()),
                     };
-                    ::task_manager::TaskOutcome::Get(project_read(
-                        self.gateway.get_task(scope, task_id).await,
+                    return project_read(
+                        result,
                         |task| Ok(project_task(&task)),
-                    ))
+                        ::task_manager::TaskOutcome::Get,
+                    );
                 }
                 ::task_manager::TaskCommand::Create { target, input } => {
                     let scope = match task_scope(self, &target).await {
                         Ok(scope) => scope,
                         Err(()) => {
-                            return ::task_manager::TaskOutcome::Create(
-                                ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                            return ::task_manager::TaskExecution::new(
+                                ::task_manager::TaskOutcome::Create(
+                                    ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                                ),
                             );
                         }
                     };
                     let input = match project_create(input) {
                         Ok(input) => input,
                         Err(()) => {
-                            return ::task_manager::TaskOutcome::Create(
-                                ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                            return ::task_manager::TaskExecution::new(
+                                ::task_manager::TaskOutcome::Create(
+                                    ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                                ),
                             );
                         }
                     };
@@ -64,16 +61,20 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     let scope = match task_scope(self, &target).await {
                         Ok(scope) => scope,
                         Err(()) => {
-                            return ::task_manager::TaskOutcome::Update(
-                                ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                            return ::task_manager::TaskExecution::new(
+                                ::task_manager::TaskOutcome::Update(
+                                    ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                                ),
                             );
                         }
                     };
                     let input = match project_update(input) {
                         Ok(input) => input,
                         Err(()) => {
-                            return ::task_manager::TaskOutcome::Update(
-                                ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                            return ::task_manager::TaskExecution::new(
+                                ::task_manager::TaskOutcome::Update(
+                                    ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                                ),
                             );
                         }
                     };
@@ -90,24 +91,30 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     let scope = match task_scope(self, &target).await {
                         Ok(scope) => scope,
                         Err(()) => {
-                            return ::task_manager::TaskOutcome::TodoWrite(
-                                ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                            return ::task_manager::TaskExecution::new(
+                                ::task_manager::TaskOutcome::TodoWrite(
+                                    ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                                ),
                             );
                         }
                     };
                     let old_todos = match project_todo_input_list(old_todos) {
                         Ok(todos) => todos,
                         Err(()) => {
-                            return ::task_manager::TaskOutcome::TodoWrite(
-                                ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                            return ::task_manager::TaskExecution::new(
+                                ::task_manager::TaskOutcome::TodoWrite(
+                                    ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                                ),
                             );
                         }
                     };
                     let new_todos = match project_todo_input_list(new_todos) {
                         Ok(todos) => todos,
                         Err(()) => {
-                            return ::task_manager::TaskOutcome::TodoWrite(
-                                ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                            return ::task_manager::TaskExecution::new(
+                                ::task_manager::TaskOutcome::TodoWrite(
+                                    ::task_manager::TaskMutationOutcome::OutcomeUnknown,
+                                ),
                             );
                         }
                     };
@@ -119,21 +126,19 @@ impl ::task_manager::TaskOps for OpenClawDriver {
                     ))
                 }
                 ::task_manager::TaskCommand::TodoGet { target } => {
-                    let scope = match task_scope(self, &target).await {
-                        Ok(scope) => scope,
-                        Err(()) => {
-                            return ::task_manager::TaskOutcome::TodoGet(
-                                ::task_manager::TaskReadOutcome::Unavailable,
-                            );
-                        }
+                    let result = match task_scope(self, &target).await {
+                        Ok(scope) => self.gateway.get_todos(scope).await,
+                        Err(()) => Err(scope_read_failure()),
                     };
-                    ::task_manager::TaskOutcome::TodoGet(project_read(
-                        self.gateway.get_todos(scope).await,
+                    return project_read(
+                        result,
                         project_todo_snapshot,
-                    ))
+                        ::task_manager::TaskOutcome::TodoGet,
+                    );
                 }
-            }
-        }.map(::task_manager::TaskExecution::new))
+            };
+            ::task_manager::TaskExecution::new(outcome)
+        })
     }
 
     fn task_runtime_ready(&self) -> bool {
@@ -228,22 +233,37 @@ fn project_metadata(value: &::task_manager::TaskMetadata) -> openclaw_tasks::Tas
     openclaw_tasks::TaskMetadata::new(value.as_object().clone())
 }
 
+fn scope_read_failure() -> openclaw_tasks::TaskReadFailure {
+    openclaw_tasks::TaskReadFailure::new(
+        ::task_manager::TaskReadFailure::Unavailable,
+        ::task_manager::TaskFailureStage::SessionLookup,
+        ::task_manager::TaskFailureCode::OwnerUnavailable,
+        ::task_manager::TaskDelivery::NotSent,
+    )
+}
+
 fn project_read<T, U>(
     result: Result<T, openclaw_tasks::TaskReadFailure>,
     project: impl FnOnce(T) -> Result<U, ()>,
-) -> ::task_manager::TaskReadOutcome<U> {
-    match result {
+    outcome: impl FnOnce(::task_manager::TaskReadOutcome<U>) -> ::task_manager::TaskOutcome,
+) -> ::task_manager::TaskExecution {
+    let failure = match result {
         Ok(value) => match project(value) {
-            Ok(value) => ::task_manager::TaskReadOutcome::Found(value),
-            Err(()) => ::task_manager::TaskReadOutcome::Protocol,
+            Ok(value) => {
+                return ::task_manager::TaskExecution::new(outcome(
+                    ::task_manager::TaskReadOutcome::Found(value),
+                ));
+            }
+            Err(()) => openclaw_tasks::TaskReadFailure::new(
+                ::task_manager::TaskReadFailure::Protocol,
+                ::task_manager::TaskFailureStage::Response,
+                ::task_manager::TaskFailureCode::Protocol,
+                ::task_manager::TaskDelivery::ResponseReceived,
+            ),
         },
-        Err(openclaw_tasks::TaskReadFailure::NotFound) => ::task_manager::TaskReadOutcome::NotFound,
-        Err(openclaw_tasks::TaskReadFailure::Unavailable) => {
-            ::task_manager::TaskReadOutcome::Unavailable
-        }
-        Err(openclaw_tasks::TaskReadFailure::Rejected) => ::task_manager::TaskReadOutcome::Rejected,
-        Err(openclaw_tasks::TaskReadFailure::Protocol) => ::task_manager::TaskReadOutcome::Protocol,
-    }
+        Err(failure) => failure,
+    };
+    ::task_manager::TaskExecution::failed(outcome(failure.outcome.into()), failure.diagnostic)
 }
 
 fn project_mutation<T, U>(

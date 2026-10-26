@@ -27,7 +27,7 @@ vi.mock('@/lib/telemetry', () => ({
   startUiTiming: (...args: unknown[]) => startUiTimingMock(...args),
 }));
 
-import { useProviderStore } from '@/stores/providers';
+import { useProviderStore } from '@/plugins/providers/stores/providers';
 
 describe('useProviderStore.init', () => {
   beforeEach(() => {
@@ -41,6 +41,7 @@ describe('useProviderStore.init', () => {
         statuses: [],
         credentials: [],
         vendors: [],
+        reports: [],
       },
       snapshotReady: false,
       initialLoading: false,
@@ -56,6 +57,7 @@ describe('useProviderStore.init', () => {
       statuses: [{ id: 'openai-main', name: 'OpenAI', hasKey: true, keyMasked: 'sk-****' }],
       credentials: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }],
       vendors: [{ id: 'openai', name: 'OpenAI' }],
+      reports: [],
     });
 
     await act(async () => {
@@ -83,6 +85,7 @@ describe('useProviderStore.init', () => {
       credentials: [{ id: 'ollama-local', vendorId: 'ollama', label: 'Ollama', authMode: 'local' }],
       vendors: [],
       revisions: { 'ollama-local': 1 },
+      reports: [],
     };
     fetchProviderSnapshotMock.mockResolvedValueOnce(snapshot);
 
@@ -122,6 +125,7 @@ describe('useProviderStore.init', () => {
       statuses: [],
       credentials: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }],
       vendors: [{ id: 'openai', name: 'OpenAI' }],
+      reports: [],
     });
 
     await act(async () => {
@@ -191,6 +195,7 @@ describe('useProviderStore.init', () => {
           defaultAuthMode: 'api_key',
           supportsMultipleAccounts: false,
         }],
+        reports: [],
       },
       snapshotReady: true,
       initialLoading: false,
@@ -206,6 +211,7 @@ describe('useProviderStore.init', () => {
       statuses: [{ id: 'openai-main', hasKey: true }],
       credentials: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI' }],
       vendors: [{ id: 'openai', name: 'OpenAI' }],
+      reports: [],
     });
 
     await act(async () => {
@@ -221,6 +227,7 @@ describe('useProviderStore.init', () => {
       statuses: [],
       credentials: [],
       vendors: [],
+      reports: [],
     });
 
     await act(async () => {
@@ -242,6 +249,7 @@ describe('useProviderStore.init', () => {
       statuses: [],
       credentials: [],
       vendors: [],
+      reports: [],
     });
 
     await act(async () => {
@@ -257,6 +265,7 @@ describe('useProviderStore.init', () => {
       statuses: [],
       credentials: [],
       vendors: [],
+      reports: [],
     });
 
     await act(async () => {

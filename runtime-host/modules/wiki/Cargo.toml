@@ -9,22 +9,15 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-anydoc.workspace = true
+document-parser = { version = "0.1.0", path = "../../external/document-parser" }
 base64.workspace = true
-calamine.workspace = true
 chrono.workspace = true
-docx-rs.workspace = true
-epub.workspace = true
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 foundation = { version = "0.1.0", path = "../../foundation" }
 futures-util.workspace = true
-html2text.workspace = true
 image = { workspace = true, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
-mobi.workspace = true
 notify.workspace = true
-office_oxide.workspace = true
 ort = { workspace = true, default-features = false, features = ["std", "load-dynamic", "api-24"] }
-pdfium-render.workspace = true
 platform = { version = "0.1.0", path = "../../platform" }
 reqwest = { workspace = true, features = ["json", "multipart"] }
 regex = "1"

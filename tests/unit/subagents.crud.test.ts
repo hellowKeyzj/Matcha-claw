@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { gatewayClientRpcMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
 
-import { useSubagentsStore } from '@/stores/subagents';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 
 const AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
 

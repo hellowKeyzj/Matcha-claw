@@ -26,6 +26,8 @@ pub(super) struct Record {
     pub model: Option<String>,
     pub mode: Option<String>,
     #[serde(default)]
+    pub effort: Option<crate::cli::effort::Level>,
+    #[serde(default)]
     pub title: Option<String>,
     #[serde(default = "already_attempted")]
     pub title_attempted: bool,
@@ -110,6 +112,7 @@ pub(super) async fn prepare_database(database: &Database) -> rpc::Result<()> {
              );
              CREATE INDEX IF NOT EXISTS managed_runs_session ON managed_runs(session_id,created_at_ms,run_id);
              CREATE INDEX IF NOT EXISTS managed_runs_by_status ON managed_runs(session_id,status,created_at_ms,run_id);
+             CREATE UNIQUE INDEX IF NOT EXISTS managed_runs_request ON managed_runs(session_id,json_extract(record,'$.run.requestId')) WHERE json_extract(record,'$.run.requestId') IS NOT NULL;
              CREATE TABLE IF NOT EXISTS managed_input_messages (
                 message_id TEXT PRIMARY KEY NOT NULL,
                 agent_id TEXT NOT NULL, source_session_id TEXT NOT NULL
@@ -300,6 +303,24 @@ pub(super) async fn save_session(database: &Database, record: &Record) -> rpc::R
     }).await
 }
 
+fn assert_investigations_settled(connection: &rusqlite::Connection, session_id: &str) -> rpc::Result<()> {
+    let unsettled: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM managed_runs WHERE session_id=?1
+         AND json_type(record,'$.run.worldInvestigation')='object'
+         AND json_extract(record,'$.run.worldInvestigation.settledAtMs') IS NULL)",
+        [session_id], |row| row.get(0),
+    ).map_err(|error| sqlite_error("investigation_retention_read", error))?;
+    if unsettled {
+        return Err(rpc::Error::conflict("investigation_unsettled", "World accepted Run facts must be settled before session deletion"));
+    }
+    Ok(())
+}
+
+pub(super) async fn ensure_investigations_settled(database: &Database, session_id: &str) -> rpc::Result<()> {
+    let session_id = session_id.to_owned();
+    database.call(move |connection| assert_investigations_settled(connection, &session_id)).await
+}
+
 pub(super) async fn begin_delete(database: &Database, record: &Record) -> rpc::Result<()> {
     begin_retirement(database, &record.session_id, &record.agent_id, Some(record)).await?;
     Ok(())
@@ -316,6 +337,7 @@ pub(super) async fn begin_retirement(
     let encoded = record.map(encode).transpose()?;
     database.call(move |connection| {
         let transaction = connection.transaction().map_err(|error| sqlite_error("session_delete_begin", error))?;
+        assert_investigations_settled(&transaction, &session_id)?;
         let live_agent = session_agent(&transaction, &session_id)?;
         if live_agent.as_ref().is_some_and(|agent| agent != &expected_agent_id) {
             return Err(rpc::Error::conflict("session_agent_mismatch", "This session identity belongs to another Agent"));
@@ -357,6 +379,7 @@ pub(super) async fn delete(database: &Database, session_id: &str) -> rpc::Result
             let transaction = connection
                 .transaction()
                 .map_err(|error| sqlite_error("session_delete_begin", error))?;
+            assert_investigations_settled(&transaction, &session_id)?;
             if !deleted(&transaction, &session_id)? {
                 return Err(rpc::Error::conflict(
                     "session_delete_intent_missing",
@@ -469,6 +492,24 @@ pub(super) async fn get_run(database: &Database, run_id: &str) -> rpc::Result<ru
             Ok(record)
         })
         .await
+}
+
+pub(super) async fn get_run_by_request(
+    database: &Database,
+    session_id: &str,
+    request_id: &str,
+) -> rpc::Result<Option<run::Record>> {
+    let session_id = session_id.to_owned();
+    let request_id = request_id.to_owned();
+    database.call(move |connection| {
+        assert_live_session(connection, &session_id)?;
+        let encoded: Option<String> = connection.query_row(
+            "SELECT record FROM managed_runs WHERE session_id=?1 AND json_extract(record,'$.run.requestId')=?2",
+            params![session_id, request_id], |row| row.get(0),
+        ).optional().map_err(|error| sqlite_error("run_request_read", error))?;
+        encoded.map(|encoded| serde_json::from_str(&encoded)
+            .map_err(|error| storage("run_record_decode").with_source(error))).transpose()
+    }).await
 }
 
 pub(super) async fn pending_runs(

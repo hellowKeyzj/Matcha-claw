@@ -1,9 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { MemoryRouter } from 'react-router-dom';
-import { ChatInput } from '@/pages/Chat/ChatInput';
+import { ChatInput } from '@/plugins/chat/ChatInput';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { chatPlugin } from '@/plugins/chat/plugin';
 
-vi.mock('react-i18next', () => ({
+const pluginHost = createPluginHost([applicationShellPlugin, chatPlugin]);
+
+async function renderWithPlugins(ui: ReactElement) {
+  const view = render(<PluginHostProvider host={pluginHost}>{ui}</PluginHostProvider>);
+  await act(async () => { await vi.dynamicImportSettled(); });
+  return view;
+}
+
+vi.mock('react-i18next', async (importOriginal) => ({
+  ...await importOriginal<typeof import('react-i18next')>(),
   useTranslation: () => ({
     t: (key: string, options?: Record<string, unknown>) => {
       if (typeof options?.count === 'number') {
@@ -44,7 +58,8 @@ const readyNotesDialogAttachment = {
 };
 
 
-vi.mock('@/lib/api-client', () => ({
+vi.mock('@/lib/api-client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/lib/api-client')>(),
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
 
@@ -55,8 +70,8 @@ describe('chat input attachments', () => {
     vi.stubGlobal('atob', (value: string) => Buffer.from(value, 'base64').toString('binary'));
   });
 
-  it('reconnecting 时在输入框上方显示轻量恢复提示并禁用输入', () => {
-    render(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} disabled reconnecting /></MemoryRouter>);
+  it('reconnecting 时在输入框上方显示轻量恢复提示并禁用输入', async () => {
+    await renderWithPlugins(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} disabled reconnecting /></MemoryRouter>);
 
     expect(screen.getByText('input.gatewayRecoveringNotice')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('input.gatewayDisconnectedPlaceholder')).toBeDisabled();
@@ -81,7 +96,7 @@ describe('chat input attachments', () => {
       return null;
     });
 
-    render(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    await renderWithPlugins(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
 
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 
@@ -102,7 +117,7 @@ describe('chat input attachments', () => {
 
   it('paste/drag buffer attachments reject oversized files before reading base64', async () => {
     const onSend = vi.fn();
-    render(<MemoryRouter><ChatInput onSend={onSend} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    await renderWithPlugins(<MemoryRouter><ChatInput onSend={onSend} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
     const input = screen.getByPlaceholderText('input.messagePlaceholder');
     const file = new File(['small'], 'huge.bin', { type: 'application/octet-stream' });
     Object.defineProperty(file, 'size', { value: 5 * 1024 * 1024 + 1 });
@@ -138,7 +153,7 @@ describe('chat input attachments', () => {
       return null;
     });
 
-    render(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    await renderWithPlugins(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
     const file = new File(['external-content'], 'external.txt', { type: 'text/plain' });
 
     fireEvent.drop(screen.getByPlaceholderText('input.messagePlaceholder').closest('.w-full')!, {
@@ -176,7 +191,7 @@ describe('chat input attachments', () => {
       return null;
     });
 
-    render(<MemoryRouter><ChatInput onSend={onSend} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    await renderWithPlugins(<MemoryRouter><ChatInput onSend={onSend} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
 
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 
@@ -212,7 +227,7 @@ describe('chat input attachments', () => {
       return payload ?? null;
     });
 
-    render(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    await renderWithPlugins(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
 
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 
@@ -242,7 +257,7 @@ describe('chat input attachments', () => {
       return null;
     });
 
-    render(<MemoryRouter><ChatInput onSend={onSend} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    await renderWithPlugins(<MemoryRouter><ChatInput onSend={onSend} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
 
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 
@@ -287,7 +302,7 @@ describe('chat input attachments', () => {
       return null;
     });
 
-    render(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    await renderWithPlugins(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());
@@ -306,7 +321,7 @@ describe('chat input attachments', () => {
         : null
     ));
 
-    const view = render(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
+    const view = await renderWithPlugins(<MemoryRouter><ChatInput onSend={vi.fn()} sendGate={readySendGate} sessionIdentity={testSessionIdentity} /></MemoryRouter>);
     fireEvent.click(screen.getByRole('button', { name: /attach files/i }));
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled());

@@ -1,0 +1,44 @@
+[package]
+name = "world-plugin-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+guest-projection = ["dep:wit-bindgen"]
+guest-reconcile = ["dep:wit-bindgen"]
+guest-oracle = ["dep:wit-bindgen"]
+guest-policy = ["dep:wit-bindgen"]
+packaging = ["dep:zip", "dep:semver", "dep:schemars", "dep:wit-component", "dep:serde", "dep:serde_json", "dep:ed25519-dalek"]
+
+[dependencies]
+world-protocol = { path = "../protocol" }
+ed25519-dalek = { workspace = true, optional = true }
+wit-bindgen = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+semver = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+wit-component = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio.workspace = true
+
+[[bin]]
+name = "world-source-process"
+path = "src/bin/source_process.rs"
+
+[[bin]]
+name = "world-pack"
+path = "src/bin/pack.rs"
+required-features = ["packaging"]
+
+[[bin]]
+name = "world-oracle-process"
+path = "src/bin/oracle_process.rs"

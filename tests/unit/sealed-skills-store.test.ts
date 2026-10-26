@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
 
@@ -14,9 +14,23 @@ const terminal = (command: string, outcome = 'accepted') => ({
 });
 
 describe('sealed skills store cloud packages', () => {
-  beforeEach(() => {
+  let stopPlugins: (() => void) | undefined;
+
+  beforeEach(async () => {
     vi.resetModules();
     hostApiFetchMock.mockReset();
+    const [{ createPluginHost }, { applicationShellPlugin }, { agentsPlugin }, { skillsPlugin }] = await Promise.all([
+      import('@/plugin-host/core'),
+      import('@/app/extensions'),
+      import('@/plugins/agents/plugin'),
+      import('@/plugins/skills/plugin'),
+    ]);
+    stopPlugins = createPluginHost([applicationShellPlugin, agentsPlugin, skillsPlugin]).start();
+  });
+
+  afterEach(() => {
+    stopPlugins?.();
+    stopPlugins = undefined;
   });
 
   it('lists cloud skill packages through the package registry endpoint', async () => {
@@ -37,7 +51,7 @@ describe('sealed skills store cloud packages', () => {
       pageSize: 20,
       pages: 1,
     });
-    const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
+    const { useSealedSkillsStore } = await import('@/plugins/skills/stores/sealed-skills');
 
     await useSealedSkillsStore.getState().fetchCloudSkillPackages();
 
@@ -49,7 +63,7 @@ describe('sealed skills store cloud packages', () => {
 
   it('shows cloud package list failures as unavailable state', async () => {
     hostApiFetchMock.mockRejectedValue(new Error('Not Found'));
-    const { SEALED_SKILL_CLOUD_UNAVAILABLE_ERROR, useSealedSkillsStore } = await import('@/stores/sealed-skills');
+    const { SEALED_SKILL_CLOUD_UNAVAILABLE_ERROR, useSealedSkillsStore } = await import('@/plugins/skills/stores/sealed-skills');
 
     useSealedSkillsStore.setState({
       cloudPackages: [{ packageId: 'stale', packageVersionId: 'stale', skillKey: 'stale' }],
@@ -73,7 +87,7 @@ describe('sealed skills store cloud packages', () => {
         packagePath: 'C:/Users/Mr.Key/.openclaw/skills/calendar.matcha-skillpkg',
       }],
     });
-    const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
+    const { useSealedSkillsStore } = await import('@/plugins/skills/stores/sealed-skills');
 
     await useSealedSkillsStore.getState().fetchSealedSkills();
 
@@ -92,7 +106,7 @@ describe('sealed skills store cloud packages', () => {
         result: { packageId: 'pkg-calendar', packageVersionId: 'version-calendar', name: 'skill:openclaw:calendar', packageType: 'skill', version: 'v1', status: 'draft', downloadable: false },
       })
       .mockResolvedValueOnce({ items: [] });
-    const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
+    const { useSealedSkillsStore } = await import('@/plugins/skills/stores/sealed-skills');
 
     await useSealedSkillsStore.getState().uploadInstalledSkillPackageToCloud('skill:openclaw:calendar');
 
@@ -113,7 +127,7 @@ describe('sealed skills store cloud packages', () => {
       if (path === '/api/packages/installed') return { packages: [] };
       return { items: [] };
     });
-    const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
+    const { useSealedSkillsStore } = await import('@/plugins/skills/stores/sealed-skills');
     await useSealedSkillsStore.getState().fetchMyCloudSkillPackages();
     expect(useSealedSkillsStore.getState().myCloudPackages).toEqual([draft]);
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
@@ -128,7 +142,7 @@ describe('sealed skills store cloud packages', () => {
       .mockResolvedValueOnce(receipt)
       .mockResolvedValueOnce(terminal('sealedSkills.install'))
       .mockResolvedValueOnce({ skills: [] });
-    const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
+    const { useSealedSkillsStore } = await import('@/plugins/skills/stores/sealed-skills');
 
     await useSealedSkillsStore.getState().installLocalSkillPackage();
 
@@ -152,7 +166,7 @@ describe('sealed skills store cloud packages', () => {
       .mockResolvedValueOnce({ skills: [] })
       .mockResolvedValueOnce({ items: [] })
       .mockResolvedValueOnce({ packages: [] });
-    const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
+    const { useSealedSkillsStore } = await import('@/plugins/skills/stores/sealed-skills');
 
     await useSealedSkillsStore.getState().downloadAndInstallCloudSkillPackage({
       packageId: 'pkg-calendar',
@@ -176,7 +190,7 @@ describe('sealed skills store cloud packages', () => {
       .mockResolvedValueOnce({ skills: [] })
       .mockResolvedValueOnce({ items: [] })
       .mockResolvedValueOnce({ packages: [] });
-    const { useSealedSkillsStore } = await import('@/stores/sealed-skills');
+    const { useSealedSkillsStore } = await import('@/plugins/skills/stores/sealed-skills');
 
     await useSealedSkillsStore.getState().uninstallSealedSkill('skill:openclaw:calendar');
 

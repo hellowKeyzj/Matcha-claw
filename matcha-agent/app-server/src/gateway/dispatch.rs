@@ -1,7 +1,7 @@
 use super::Gateway;
 use crate::{
     agent, channel, config, mcp, memory, plugin, policy, prompt, provider, retention, rpc,
-    schedule, search, sealed, skill, task, team, tool, usage, workflow, workspace,
+    schedule, sealed, search, skill, task, team, tool, usage, workflow, workspace,
 };
 use serde_json::{Value, json};
 
@@ -66,6 +66,9 @@ const METHODS: &[&str] = &[
     "mcp.reconnect",
     "mcp.toggle",
     "mcp.authenticate",
+    "mcp.oauth.start",
+    "mcp.oauth.status",
+    "mcp.oauth.logout",
     "mcp.config.get",
     "mcp.config.set",
     "providers.list",
@@ -74,6 +77,7 @@ const METHODS: &[&str] = &[
     "providers.remove",
     "providers.project",
     "models.list",
+    "models.thinking",
     "auth.status",
     "auth.login",
     "auth.logout",
@@ -128,11 +132,16 @@ const METHODS: &[&str] = &[
     "sessions.fork",
     "sessions.setModel",
     "sessions.setMode",
+    "sessions.thinking.get",
+    "sessions.thinking.set",
     "sessions.setProactive",
     "sessions.native",
     "runs.submit",
+    "runs.releaseInvestigation",
+    "runs.settleInvestigation",
     "runs.list",
     "runs.get",
+    "runs.getByRequest",
     "runs.cancel",
     "approvals.list",
     "approvals.respond",
@@ -210,7 +219,9 @@ pub(super) async fn dispatch(gateway: &Gateway, method: &str, params: Value) -> 
             policy::dispatch(method, params, config, sessions).await
         }
         Some("tools") => tool::dispatch(method, params, config, sessions).await,
-        Some("tasks" | "todos") => task::dispatch(method, params, config, sessions, &gateway.diagnostics).await,
+        Some("tasks" | "todos") => {
+            task::dispatch(method, params, config, sessions, &gateway.diagnostics).await
+        }
         Some("teams") => team::dispatch(method, params, config, sessions).await,
         Some("workflows") => workflow::dispatch(method, params, config, sessions).await,
         Some("schedules") => schedule::dispatch(method, params, config, sessions).await,

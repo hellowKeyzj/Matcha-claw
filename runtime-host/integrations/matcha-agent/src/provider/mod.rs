@@ -7,11 +7,21 @@ pub use projection::{
 
 use crate::driver::MatchaRuntimeDriver;
 use provider_module::{
-    ProviderAccount, ProviderAccountKind, ProviderConfigOps, ProviderFuture,
+    ProviderAccount, ProviderAccountKind, ProviderApiProtocol, ProviderConfigOps, ProviderFuture,
     ProviderNativeConfigurationCommand, ProviderNativeConfigurationEffect,
     ProviderPrivateProjectionCommand, ProviderPrivateProjectionEffect,
     ProviderPrivateProjectionOps, ProviderRuntimeIdentity, ProviderRuntimeIdentityOps,
+    ProviderSessionEndpoint,
 };
+
+pub(crate) fn native_protocol(protocol: ProviderApiProtocol) -> &'static str {
+    match protocol {
+        ProviderApiProtocol::AnthropicMessages => "firstParty",
+        ProviderApiProtocol::GoogleGenerativeAi => "gemini",
+        ProviderApiProtocol::OpenAiCompletions => "openai",
+        ProviderApiProtocol::OpenAiResponses => "openaiResponses",
+    }
+}
 
 /// Server provider IDs are account identities, not OpenClaw provider/plugin keys.
 pub fn account_provider_id(account_id: &str) -> String {
@@ -24,6 +34,10 @@ pub fn account_provider_id(account_id: &str) -> String {
 }
 
 impl ProviderConfigOps for MatchaRuntimeDriver {
+    fn endpoint(&self) -> ProviderSessionEndpoint {
+        ProviderSessionEndpoint::MatchaAgentLocal
+    }
+
     fn reconcile_provider_native_configuration<'a>(
         &'a self,
         command: ProviderNativeConfigurationCommand<'a>,

@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useChatStore } from '@/stores/chat';
+import { useChatStore } from '@/plugins/chat/store';
 import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
-import { createEmptySessionRecord, getSessionItems } from '@/stores/chat/store-state-helpers';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph, createDraftCurrentConversation } from '@/stores/chat/session-runtime-graph';
-import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/stores/chat/session-identity';
-import type { ChatCurrentConversation } from '@/stores/chat/types';
+import { createEmptySessionRecord, getSessionItems } from '@/plugins/chat/store/store-state-helpers';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
+import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph, createDraftCurrentConversation } from '@/plugins/chat/store/session-runtime-graph';
+import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
+import type { ChatCurrentConversation } from '@/plugins/chat/store/types';
 import type { AgentScope, RuntimeEndpointRef, SessionIdentity } from '../../src/types/desktop/runtime-address';
 import { completeFact, sessionView, windowView } from './helpers/session-fixtures';
 

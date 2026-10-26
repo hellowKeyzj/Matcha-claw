@@ -19,6 +19,7 @@ use crate::{
     session_history::{SessionHistoryFailure, SessionHistoryOutcome},
     session_permission::{SessionPermissionAction, SessionPermissionOutcome},
     state::{SessionProvider, SessionView},
+    thinking::{SessionThinkingAction, SessionThinkingOutcome},
     timeline::{self, ContentOutcome},
 };
 
@@ -271,6 +272,16 @@ impl SessionCommand {
                     None,
                 ),
             ),
+            Thinking { command, .. } => (
+                match command.action {
+                    SessionThinkingAction::Get => "sessions.thinking.get",
+                    SessionThinkingAction::Set { .. } => "sessions.thinking.set",
+                },
+                command.scope.identity().map_or_else(
+                    || SessionsCallDetail { provider: Some(command.scope.endpoint().provider()), ..SessionsCallDetail::default() },
+                    |identity| SessionsCallDetail::session(identity.provider(), identity.session_key(), None),
+                ),
+            ),
             Release { identity, .. } => (
                 "sessions.release",
                 SessionsCallDetail::session(identity.provider(), identity.session_key(), None),
@@ -306,6 +317,15 @@ impl SessionQuery {
                 "sessions.observe",
                 SessionsCallDetail::session(command.identity.provider(), command.identity.session_key(), None),
             ),
+            ReadRun { command, .. } => {
+                let mut detail = SessionsCallDetail::session(
+                    command.identity.provider(), command.identity.session_key(), command.endpoint_session_id.as_deref(),
+                );
+                detail.run_ref = Some(reference(match &command.selector {
+                    crate::execution::SessionRunSelector::RequestId(id) | crate::execution::SessionRunSelector::RunId(id) => id,
+                }));
+                ("sessions.run.read", detail)
+            }
             Abort { command, .. } => {
                 let mut detail = SessionsCallDetail::session(
                     command.identity.provider(),
@@ -405,6 +425,13 @@ simple_outcome!(SessionAbortOutcome,
     SessionAbortOutcome::Succeeded => Succeeded, SessionAbortOutcome::Rejected => Rejected,
     SessionAbortOutcome::Unknown => Unknown, SessionAbortOutcome::Unsupported => Unsupported,
     SessionAbortOutcome::Unavailable => Unavailable);
+simple_outcome!(crate::execution::SessionRunReadOutcome,
+    crate::execution::SessionRunReadOutcome::Found(_) => Complete,
+    crate::execution::SessionRunReadOutcome::NotFound => NotFound,
+    crate::execution::SessionRunReadOutcome::Rejected => Rejected,
+    crate::execution::SessionRunReadOutcome::Unknown => Unknown,
+    crate::execution::SessionRunReadOutcome::Unsupported => Unsupported,
+    crate::execution::SessionRunReadOutcome::Unavailable => Unavailable);
 simple_outcome!(SessionApprovalOutcome,
     SessionApprovalOutcome::Responded => Responded, SessionApprovalOutcome::Rejected => Rejected,
     SessionApprovalOutcome::Unknown => Unknown, SessionApprovalOutcome::Unsupported => Unsupported,
@@ -424,6 +451,14 @@ simple_outcome!(SessionModelSelectionOutcome,
     SessionModelSelectionOutcome::OutcomeUnknown => Unknown,
     SessionModelSelectionOutcome::Unsupported => Unsupported,
     SessionModelSelectionOutcome::Unavailable => Unavailable);
+
+simple_outcome!(SessionThinkingOutcome,
+    SessionThinkingOutcome::Available(_) => Complete,
+    SessionThinkingOutcome::Confirmed { .. } => Succeeded,
+    SessionThinkingOutcome::Unsupported(_) => Unsupported,
+    SessionThinkingOutcome::Unavailable(_) => Unavailable,
+    SessionThinkingOutcome::Rejected(_) => Rejected,
+    SessionThinkingOutcome::Unknown(_) => Unknown);
 
 simple_outcome!(SessionReleaseOutcome,
     SessionReleaseOutcome::Released => Succeeded,

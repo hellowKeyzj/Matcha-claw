@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   buildSyncPendingApprovalsPatch,
   groupApprovalsBySession,
-} from '@/stores/chat/approval-handlers';
-import type { ApprovalItem } from '@/stores/chat/types';
+} from '@/plugins/chat/store/approval-handlers';
+import type { ApprovalItem } from '@/plugins/chat/store/types';
 
 function approval(approvalId: string, sessionKey: string, optionIds: string[] = ['option-1']): ApprovalItem {
   return { approvalId, optionIds, sessionKey };

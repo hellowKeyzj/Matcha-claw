@@ -26,6 +26,9 @@ pub mod delete {
 pub mod endpoint {
     pub use crate::domain::endpoint::*;
 }
+pub mod execution {
+    pub use crate::application::execution::*;
+}
 pub mod goal {
     pub use crate::domain::goal::*;
 }
@@ -65,6 +68,9 @@ pub mod state {
 pub mod terminal_hook {
     pub use crate::application::terminal_hook::*;
 }
+pub mod thinking {
+    pub use crate::application::thinking::*;
+}
 pub mod timeline {
     pub use crate::application::timeline::*;
 }
@@ -89,6 +95,7 @@ const PROVIDES: &[CapabilityKey] = &[
     CapabilityKey::new("session.approval"),
     CapabilityKey::new("session.question"),
     CapabilityKey::new("session.modelSelection"),
+    CapabilityKey::new("session.thinking"),
 ];
 const REQUIRES: &[CapabilityKey] = &[
     CapabilityKey::new("runtime.sessions"),

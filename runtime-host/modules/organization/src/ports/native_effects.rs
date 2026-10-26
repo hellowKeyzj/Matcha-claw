@@ -35,6 +35,14 @@ pub enum RoleSessionRetirementOutcome {
 }
 
 pub trait OrganizationNativeRuntime: Send + Sync {
+    /// Pure projection of the peer's budget support. No request is submitted here.
+    fn unsupported_task_budget(
+        &self,
+        budget: &crate::task_execution::TaskExecutionBudget,
+    ) -> Vec<crate::task_execution::TaskBudgetDimension> {
+        budget.required_dimensions()
+    }
+
     /// Reads native description, AGENTS.md and SOUL.md without modifying agents or files.
     /// A successful result contains one profile per input agent, in the same order.
     fn read_team_member_profiles(
@@ -188,6 +196,15 @@ pub trait OrganizationRuntimeDirectory: Send + Sync {
 }
 
 pub trait TeamActivityExecutor: Send + Sync {
+    /// Reads only the original delivery request. A missing result never authorizes resubmission.
+    fn inspect_cancellable(
+        &self,
+        _request: ActivityExecutionRequest,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> OwnedRuntimeFuture<crate::task_execution::TaskActivityInspection> {
+        Box::pin(async { crate::task_execution::TaskActivityInspection::Unavailable })
+    }
+
     /// Prepares the session without sending. Organization admits dispatch after this completes.
     fn prepare_cancellable(
         &self,

@@ -4,10 +4,15 @@
  * the API-client chain (which closed a cycle through memdir.ts — #25372).
  */
 
-import { readdir } from 'fs/promises'
-import { basename, join } from 'path'
+import { join } from 'path'
 import { parseFrontmatter } from '../utils/frontmatterParser.js'
+import { readSourceDirectory } from '../utils/fsOperations.js'
 import { readFileInRange } from '../utils/readFileInRange.js'
+import {
+  currentInvestigationScope,
+  requireInvestigationEffects,
+  rethrowInvestigationAdmission,
+} from '../world/investigation.js'
 import { type MemoryType, parseMemoryType } from './memoryTypes.js'
 
 export type MemoryHeader = {
@@ -37,10 +42,22 @@ export async function scanMemoryFiles(
   signal: AbortSignal,
 ): Promise<MemoryHeader[]> {
   try {
-    const entries = await readdir(memoryDir, { recursive: true })
-    const mdFiles = entries.filter(
-      f => f.endsWith('.md') && basename(f) !== 'MEMORY.md',
-    )
+    const mdFiles: string[] = []
+    const directories = ['']
+    for (const relativeDir of directories) {
+      if (currentInvestigationScope()) signal.throwIfAborted()
+      requireInvestigationEffects([])
+      const entries = await readSourceDirectory(join(memoryDir, relativeDir), signal)
+      for (const entry of entries) {
+        const relativePath = join(relativeDir, entry.name)
+        if (entry.isDirectory()) {
+          directories.push(relativePath)
+        }
+        if (entry.name.endsWith('.md') && entry.name !== 'MEMORY.md') {
+          mdFiles.push(relativePath)
+        }
+      }
+    }
 
     const headerResults = await Promise.allSettled(
       mdFiles.map(async (relativePath): Promise<MemoryHeader> => {
@@ -63,6 +80,17 @@ export async function scanMemoryFiles(
       }),
     )
 
+    if (currentInvestigationScope()) signal.throwIfAborted()
+    requireInvestigationEffects([])
+    for (const result of headerResults) {
+      if (result.status === 'rejected') {
+        rethrowInvestigationAdmission(result.reason)
+        if (currentInvestigationScope() && result.reason instanceof Error && result.reason.cause !== undefined) {
+          throw result.reason
+        }
+      }
+    }
+
     return headerResults
       .filter(
         (r): r is PromiseFulfilledResult<MemoryHeader> =>
@@ -71,7 +99,12 @@ export async function scanMemoryFiles(
       .map(r => r.value)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
       .slice(0, MAX_MEMORY_FILES)
-  } catch {
+  } catch (error) {
+    rethrowInvestigationAdmission(error)
+    if (currentInvestigationScope()) {
+      if (error instanceof Error && error.cause !== undefined) throw error
+      signal.throwIfAborted()
+    }
     return []
   }
 }

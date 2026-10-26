@@ -60,7 +60,7 @@ describe('security policy store', () => {
       securityPolicyVersion: 2,
       runtime: buildRuntimePolicy(),
     });
-    const { useSecurityPolicyStore } = await import('@/stores/security-policy-store');
+    const { useSecurityPolicyStore } = await import('@/plugins/security/security-policy-store');
 
     expect(useSecurityPolicyStore.getState().policyReady).toBe(false);
     expect(useSecurityPolicyStore.getState().initialLoading).toBe(true);
@@ -82,7 +82,7 @@ describe('security policy store', () => {
       securityPolicyVersion: 1,
       runtime: buildRuntimePolicy(),
     });
-    const { useSecurityPolicyStore } = await import('@/stores/security-policy-store');
+    const { useSecurityPolicyStore } = await import('@/plugins/security/security-policy-store');
     await useSecurityPolicyStore.getState().loadPolicy();
 
     hostSecurityReadPolicyMock.mockRejectedValue(new Error('network down'));
@@ -105,7 +105,7 @@ describe('security policy store', () => {
     hostSecurityWritePolicyMock.mockResolvedValue({
       desired: { revision: 2, outcome: 'confirmed' },
     });
-    const { useSecurityPolicyStore } = await import('@/stores/security-policy-store');
+    const { useSecurityPolicyStore } = await import('@/plugins/security/security-policy-store');
     await useSecurityPolicyStore.getState().loadPolicy();
 
     useSecurityPolicyStore.getState().applyPresetTemplate('relaxed');
@@ -127,7 +127,7 @@ describe('security policy store', () => {
     hostSecurityWritePolicyMock.mockResolvedValue({
       desired: { revision: 2, outcome: 'outcome_unknown' },
     });
-    const { useSecurityPolicyStore } = await import('@/stores/security-policy-store');
+    const { useSecurityPolicyStore } = await import('@/plugins/security/security-policy-store');
     await useSecurityPolicyStore.getState().loadPolicy();
 
     useSecurityPolicyStore.getState().applyPresetTemplate('relaxed');

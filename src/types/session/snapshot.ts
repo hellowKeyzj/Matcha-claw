@@ -603,7 +603,7 @@ function decodeContent(value: unknown): SessionWireContent | null {
     case 'media':
       return hasExactKeys(value, ['kind', 'mediaType', 'reference'])
         && (value.mediaType === null || isNonEmptyIdentifier(value.mediaType))
-        && isNonEmptyIdentifier(value.reference)
+        && isNonEmptyIdentifier(value.reference, MAX_CONTENT_REF_BYTES)
         ? { kind: 'media', mediaType: value.mediaType, reference: value.reference }
         : null;
     case 'omitted':

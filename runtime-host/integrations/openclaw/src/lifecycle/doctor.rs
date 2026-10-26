@@ -265,6 +265,7 @@ mod tests {
                 state_dir: self.state_dir.clone(),
                 port: 18_789,
                 secret: Arc::new(GatewaySecret::new(SECRET_CANARY.into()).unwrap()),
+                world_runtime_host: None,
             }
         }
     }

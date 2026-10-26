@@ -1,14 +1,14 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { TasksPage } from '@/pages/Tasks';
-import { useRuntimeHostStore } from '@/stores/gateway';
-import { useTaskCenterStore } from '@/stores/task-center-store';
-import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
-import { useChatStore } from '@/stores/chat';
+import { TasksPage } from '@/plugins/tasks/pages/Tasks';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
+import { useTaskCenterStore } from '@/plugins/tasks/stores/task-center-store';
+import { useTaskSnapshotStore } from '@/plugins/chat/store/task-snapshot-store';
+import { useChatStore } from '@/plugins/chat/store';
 import { createReadyResourceStatusState } from '@/lib/resource-state';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
+import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 import i18n from '@/i18n';
 

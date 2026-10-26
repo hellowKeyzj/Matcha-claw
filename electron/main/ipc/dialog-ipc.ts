@@ -1,4 +1,4 @@
-import { dialog, ipcMain } from 'electron';
+import { BrowserWindow, dialog, ipcMain } from 'electron';
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { extname, relative, sep } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -13,12 +13,16 @@ import {
 } from './dialog-attachment-staging';
 
 export function registerDialogHandlers(): void {
-  ipcMain.handle('dialog:open', async (_, options: Electron.OpenDialogOptions) => {
+  ipcMain.handle('dialog:open', async (event, options: Electron.OpenDialogOptions) => {
     const e2eResult = await getE2EDialogOpenResult();
     if (e2eResult) {
       return e2eResult;
     }
-    return await dialog.showOpenDialog(options);
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || owner.isDestroyed()) {
+      throw new Error('Dialog owner is not available');
+    }
+    return await dialog.showOpenDialog(owner, options);
   });
 
   ipcMain.handle('dialog:save', async (_, options: Electron.SaveDialogOptions) => {

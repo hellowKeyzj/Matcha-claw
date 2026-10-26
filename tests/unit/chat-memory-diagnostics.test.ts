@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { summarizeChatStoreMemory } from '@/lib/chat-memory-diagnostics';
-import { useChatStore, type ChatStoreState } from '@/stores/chat';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { useChatStore, type ChatStoreState } from '@/plugins/chat/store';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 function createStateWithSessions(

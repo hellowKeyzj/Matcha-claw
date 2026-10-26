@@ -31,18 +31,46 @@ pub struct OpenAiResponsesHttpRequest {
 pub async fn generate(
     http: &reqwest::Client,
     request: LlmRequest,
+    observation: Option<&mut super::observation::Observation>,
 ) -> Result<LlmResponse, LlmClientError> {
     let http_request =
         build_openai_responses_http_request(&openai_responses_request(request, false));
-    let payload = send_json(http, &http_request).await?;
+    let payload = send_json(http, &http_request, observation).await?;
 
     Ok(parse_openai_responses_text_response(&payload))
+}
+
+pub(super) async fn count_input_tokens(
+    http: &reqwest::Client,
+    request: LlmRequest,
+    observation: &mut super::observation::Observation,
+) -> Result<u64, LlmClientError> {
+    // Reuse the generation builder's exact model/input representation, not another serializer.
+    let mut request =
+        build_openai_responses_http_request(&openai_responses_request(request, false));
+    request.endpoint.push_str("/input_tokens");
+    request
+        .body
+        .as_object_mut()
+        .expect("Responses request object")
+        .retain(|key, _| matches!(key.as_str(), "model" | "input"));
+    let payload = send_json(http, &request, Some(observation)).await?;
+    if payload.get("object").and_then(Value::as_str) != Some("response.input_tokens") {
+        return Err(LlmClientError::Protocol(
+            "invalid Responses token count object".into(),
+        ));
+    }
+    payload
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| LlmClientError::Protocol("missing Responses input token count".into()))
 }
 
 pub async fn stream_generate(
     http: &reqwest::Client,
     request: LlmRequest,
     sink: &mut dyn LlmStreamSink,
+    mut observation: Option<&mut super::observation::Observation>,
 ) -> Result<(), LlmClientError> {
     let http_request =
         build_openai_responses_http_request(&openai_responses_request(request, true));
@@ -54,17 +82,35 @@ pub async fn stream_generate(
     }
     let started = platform::trace::enabled().then(Instant::now);
     let response = builder.send().await?;
-    session_trace("runtime.team.provider.http.response", || json!({
-        "protocol": "open_ai_responses", "statusCode": response.status().as_u16(),
-        "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
-    }));
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.headers(&response);
+    }
+    session_trace("runtime.team.provider.http.response", || {
+        json!({
+            "protocol": "open_ai_responses", "statusCode": response.status().as_u16(),
+            "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
+        })
+    });
     if !response.status().is_success() {
+        let status = response.status();
+        if let Some(observation) = observation.as_deref_mut() {
+            let text = response.text().await?;
+            if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+                observation.payload(crate::ProviderApiProtocol::OpenAiResponses, &payload);
+            }
+        }
         return Err(LlmClientError::HttpStatus {
-            status: response.status().as_u16(),
-            message: format!("OpenAI Responses stream failed with HTTP {}", response.status()),
+            status: status.as_u16(),
+            message: format!("OpenAI Responses stream failed with HTTP {status}"),
         });
     }
-    super::consume_sse(response, sink, parse_openai_responses_sse_chunk).await
+    super::consume_sse(
+        response,
+        sink,
+        parse_openai_responses_sse_chunk,
+        observation.map(|observation| (observation, crate::ProviderApiProtocol::OpenAiResponses)),
+    )
+    .await
 }
 
 pub fn build_openai_responses_http_request(
@@ -150,17 +196,23 @@ pub fn parse_openai_responses_error(payload: &Value) -> Option<String> {
 async fn send_json(
     http: &reqwest::Client,
     request: &OpenAiResponsesHttpRequest,
+    mut observation: Option<&mut super::observation::Observation>,
 ) -> Result<Value, LlmClientError> {
-    let text = send_text(http, request).await?;
-    serde_json::from_str(&text).map_err(|error| {
+    let text = send_text(http, request, observation.as_deref_mut()).await?;
+    let payload = serde_json::from_str(&text).map_err(|error| {
         eprintln!("[provider] phase=runtime.team.provider.http.parse-failed protocol=open_ai_responses class=JsonDecode");
         LlmClientError::Protocol(format!("invalid OpenAI Responses JSON response: {error}"))
-    })
+    })?;
+    if let Some(observation) = observation {
+        observation.payload(crate::ProviderApiProtocol::OpenAiResponses, &payload);
+    }
+    Ok(payload)
 }
 
 async fn send_text(
     http: &reqwest::Client,
     request: &OpenAiResponsesHttpRequest,
+    mut observation: Option<&mut super::observation::Observation>,
 ) -> Result<String, LlmClientError> {
     let mut builder = http.post(&request.endpoint).body(request.body.to_string());
     for (name, value) in &request.headers {
@@ -169,15 +221,24 @@ async fn send_text(
 
     let started = platform::trace::enabled().then(Instant::now);
     let response = builder.send().await?;
-    session_trace("runtime.team.provider.http.response", || json!({
-        "protocol": "open_ai_responses", "statusCode": response.status().as_u16(),
-        "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
-    }));
+    if let Some(observation) = observation.as_deref_mut() {
+        observation.headers(&response);
+    }
+    session_trace("runtime.team.provider.http.response", || {
+        json!({
+            "protocol": "open_ai_responses", "statusCode": response.status().as_u16(),
+            "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
+        })
+    });
     let status = response.status();
     let text = response.text().await?;
-
     if status.is_success() {
         return Ok(text);
+    }
+    if let Some(observation) = observation {
+        if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+            observation.payload(crate::ProviderApiProtocol::OpenAiResponses, &payload);
+        }
     }
 
     let message = serde_json::from_str::<Value>(&text)
@@ -293,7 +354,7 @@ fn extract_output_text(payload: &Value) -> String {
         .join("")
 }
 
-fn extract_finish_reason(payload: &Value) -> Option<LlmFinishReason> {
+pub(super) fn extract_finish_reason(payload: &Value) -> Option<LlmFinishReason> {
     match payload.get("status").and_then(Value::as_str) {
         Some("completed") => return Some(LlmFinishReason::Stop),
         Some("failed") => return Some(LlmFinishReason::Other("failed".to_string())),

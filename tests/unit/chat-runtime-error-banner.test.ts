@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   isTransientRuntimeErrorBanner,
   shouldShowRuntimeErrorBannerImmediately,
-} from '@/pages/Chat/runtime-error-banner';
-import type { ChatSessionRuntimeState } from '@/stores/chat';
+} from '@/plugins/chat/runtime-error-banner';
+import type { ChatSessionRuntimeState } from '@/plugins/chat/store';
 import type { GatewayTransportIssue } from '../../src/types/session/runtime-state';
 
 function runtime(patch: Partial<ChatSessionRuntimeState> = {}): ChatSessionRuntimeState {

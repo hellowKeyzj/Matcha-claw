@@ -1,17 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { createApplyLoadedMessagesPipeline } from '@/stores/chat/history-load-execution';
+import { createApplyLoadedMessagesPipeline } from '@/plugins/chat/store/history-load-execution';
 import {
   createEmptySessionRecord,
   getSessionItems,
   projectSessionViewItems,
   reconcileSessionItems,
-} from '@/stores/chat/store-state-helpers';
+} from '@/plugins/chat/store/store-state-helpers';
 import { buildSessionIdentityKey } from '../../src/types/desktop/runtime-address';
 import type { SessionWireItem } from '@/types/session/snapshot';
 import type { SessionRenderItem } from '@/types/session/render-item';
-import type { StoreHistoryCache } from '@/stores/chat/history-cache';
-import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
-import type { ChatStoreState } from '@/stores/chat/types';
+import type { StoreHistoryCache } from '@/plugins/chat/store/history-cache';
+import type { HistoryWindowResult } from '@/plugins/chat/store/history-fetch-helpers';
+import type { ChatStoreState } from '@/plugins/chat/store/types';
 import {
   assistantItem,
   completeFact,

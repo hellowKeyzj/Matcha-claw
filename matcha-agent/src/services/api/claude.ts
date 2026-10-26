@@ -69,7 +69,7 @@ import {
   getModelMaxOutputTokens,
   getSonnet1mExpTreatmentEnabled,
 } from '../../utils/context.js'
-import { resolveAppliedEffort } from '../../utils/effort.js'
+import { isEffortLevel, resolveAnthropicEffort, resolveAppliedEffort, traceEffort } from '../../utils/effort.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { errorMessage } from '../../utils/errors.js'
 import { captureAPIRequest, logError } from '../../utils/log.js'
@@ -166,10 +166,13 @@ import {
 } from 'src/utils/betas.js'
 import { CLAUDE_IN_CHROME_MCP_SERVER_NAME } from 'src/utils/claudeInChrome/common.js'
 import { CHROME_SEARCH_EXTRA_TOOLS_INSTRUCTIONS } from 'src/utils/claudeInChrome/prompt.js'
-import { getContextWindowForModel, getMaxThinkingTokensForModel } from 'src/utils/context.js'
+import {
+  getContextWindowForModel,
+  getMaxThinkingTokensForModel,
+} from 'src/utils/context.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { logForDiagnosticsNoPII } from 'src/utils/diagLogs.js'
-import { type EffortValue, modelSupportsEffort } from 'src/utils/effort.js'
+import type { EffortValue } from 'src/utils/effort.js'
 import {
   isFastModeAvailable,
   isFastModeCooldown,
@@ -237,8 +240,15 @@ import {
   convertToolsToLangfuse,
 } from '../langfuse/convert.js'
 import { withStreamingVCR, withVCR } from '../vcr.js'
-import { hydrateSealedModelMessages, protectSealedModelStream, sealedExecutionQuery } from '../../skills/sealed/model.js'
-import { collectSealedMessageReferences, hasSealedSkillReferences } from '../../skills/sealed/reference.js'
+import {
+  hydrateSealedModelMessages,
+  protectSealedModelStream,
+  sealedExecutionQuery,
+} from '../../skills/sealed/model.js'
+import {
+  collectSealedMessageReferences,
+  hasSealedSkillReferences,
+} from '../../skills/sealed/reference.js'
 import { markSealedTelemetry } from '../../skills/sealed/privacy.js'
 import { CLIENT_REQUEST_ID_HEADER, getAnthropicClient } from './client.js'
 import {
@@ -266,6 +276,8 @@ import {
   type RetryContext,
   withRetry,
 } from './withRetry.js'
+
+import { rethrowInvestigationAdmission } from './investigation.js'
 
 // Define a type that represents valid JSON values
 type JsonValue = string | number | boolean | null | JsonObject | JsonArray
@@ -430,38 +442,6 @@ function should1hCacheTTL(querySource?: QuerySource): boolean {
   )
 }
 
-/**
- * Configure effort parameters for API request.
- *
- */
-function configureEffortParams(
-  effortValue: EffortValue | undefined,
-  outputConfig: BetaOutputConfig,
-  extraBodyParams: Record<string, unknown>,
-  betas: string[],
-  model: string,
-): void {
-  if (!modelSupportsEffort(model) || 'effort' in outputConfig) {
-    return
-  }
-
-  if (effortValue === undefined) {
-    betas.push(EFFORT_BETA_HEADER)
-  } else if (typeof effortValue === 'string') {
-    // Send string effort level as is
-    outputConfig.effort = effortValue as 'high' | 'medium' | 'low' | 'max'
-    betas.push(EFFORT_BETA_HEADER)
-  } else if (process.env.USER_TYPE === 'ant') {
-    // Numeric effort override - ant-only (uses anthropic_internal)
-    const existingInternal =
-      (extraBodyParams.anthropic_internal as Record<string, unknown>) || {}
-    extraBodyParams.anthropic_internal = {
-      ...existingInternal,
-      effort_override: effortValue,
-    }
-  }
-}
-
 // output_config.task_budget — API-side token budget awareness for the model.
 // Stainless SDK types don't yet include task_budget on BetaOutputConfig, so we
 // define the wire shape locally and cast. The API validates on receipt; see
@@ -563,6 +543,7 @@ export async function verifyApiKey(
       ),
     )
   } catch (errorFromRetry) {
+    rethrowInvestigationAdmission(errorFromRetry)
     let error = errorFromRetry
     if (errorFromRetry instanceof CannotRetryError) {
       error = errorFromRetry.originalError
@@ -835,6 +816,18 @@ function getNonstreamingFallbackTimeoutMs(): number {
   return isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) ? 120_000 : 300_000
 }
 
+function traceAnthropicEffort(params: BetaMessageStreamParams, requested?: EffortValue, requestId?: string): void {
+  if (process.env.MATCHACLAW_TRACE !== '1') return
+  const internal = 'anthropic_internal' in params ? params.anthropic_internal : undefined
+  const override = internal && typeof internal === 'object' && 'effort_override' in internal ? internal.effort_override : undefined
+  const effort: unknown = params.output_config?.effort ?? override
+  traceEffort('sender_request', params.model, requested, {
+    requestId,
+    actual: (typeof effort === 'number' && Number.isInteger(effort)) || (typeof effort === 'string' && isEffortLevel(effort)) ? effort : null,
+    senderField: params.output_config?.effort !== undefined ? 'output_config.effort' : 'anthropic_internal.effort_override',
+  })
+}
+
 /**
  * Helper generator for non-streaming API requests.
  * Encapsulates the common pattern of creating a withRetry generator,
@@ -845,6 +838,7 @@ export async function* executeNonStreamingRequest(
     model: string
     fetchOverride?: Options['fetchOverride']
     source: string
+    effortValue?: EffortValue
   },
   retryOptions: {
     model: string
@@ -885,6 +879,7 @@ export async function* executeNonStreamingRequest(
       )
 
       try {
+        traceAnthropicEffort(adjustedParams, clientOptions.effortValue)
         return await anthropic.beta.messages.create(
           {
             ...adjustedParams,
@@ -1055,8 +1050,20 @@ async function* queryModel(
   tools: Tools,
   signal: AbortSignal,
   options: Options,
-): AsyncGenerator<StreamEvent | AssistantMessage | SystemAPIErrorMessage, void> {
-  yield* protectSealedModelStream(messages, () => queryModelRequest(messages, systemPrompt, thinkingConfig, tools, signal, options))
+): AsyncGenerator<
+  StreamEvent | AssistantMessage | SystemAPIErrorMessage,
+  void
+> {
+  yield* protectSealedModelStream(messages, () =>
+    queryModelRequest(
+      messages,
+      systemPrompt,
+      thinkingConfig,
+      tools,
+      signal,
+      options,
+    ),
+  )
 }
 
 async function* queryModelRequest(
@@ -1353,27 +1360,39 @@ async function* queryModelRequest(
 
   // Only the request-local copy is hydrated. Durable helper queries (compact,
   // hooks, memory) retain reference facts, never protected source text.
-  if (hasSealedSkillReferences(messagesForAPI) && sealedExecutionQuery(options.querySource)) {
+  if (
+    hasSealedSkillReferences(messagesForAPI) &&
+    sealedExecutionQuery(options.querySource)
+  ) {
     const trusted = collectSealedMessageReferences(messages)
     const { roughTokenCountEstimation } = await import('../tokenEstimation.js')
-    const outputTokens = getAPIProvider() === 'openai' || getAPIProvider() === 'openaiResponses'
-      ? (await import('./openai/requestBody.js')).resolveOpenAIMaxTokens(
-          getModelMaxOutputTokens(options.model).upperLimit, options.maxOutputTokensOverride,
-        )
-      : options.maxOutputTokensOverride || getMaxOutputTokensForModel(options.model)
-    const overhead = Math.ceil(roughTokenCountEstimation(jsonStringify({
-      systemPrompt,
-      tools: [...toolSchemas, ...(options.extraToolSchemas ?? [])],
-    })) * 4 / 3)
+    const outputTokens =
+      getAPIProvider() === 'openai' || getAPIProvider() === 'openaiResponses'
+        ? (await import('./openai/requestBody.js')).resolveOpenAIMaxTokens(
+            getModelMaxOutputTokens(options.model).upperLimit,
+            options.maxOutputTokensOverride,
+          )
+        : options.maxOutputTokensOverride ||
+          getMaxOutputTokensForModel(options.model)
+    const overhead = Math.ceil(
+      (roughTokenCountEstimation(
+        jsonStringify({
+          systemPrompt,
+          tools: [...toolSchemas, ...(options.extraToolSchemas ?? [])],
+        }),
+      ) *
+        4) /
+        3,
+    )
     messagesForAPI = await hydrateSealedModelMessages(
       messagesForAPI,
       signal,
       await options.getToolPermissionContext(),
-      getContextWindowForModel(options.model) - overhead
-        - outputTokens,
+      getContextWindowForModel(options.model) - overhead - outputTokens,
       trusted,
     )
-    if (trusted.length > 0 && options.langfuseTrace) markSealedTelemetry(options.langfuseTrace)
+    if (trusted.length > 0 && options.langfuseTrace)
+      markSealedTelemetry(options.langfuseTrace)
   }
 
   // OpenAI-compatible provider: delegate to the OpenAI adapter layer
@@ -1533,13 +1552,25 @@ async function* queryModelRequest(
     } as unknown as BetaToolUnion)
   }
   const allTools = [...toolSchemas, ...extraToolSchemas]
-  if (hasSealedSkillReferences(messages) && sealedExecutionQuery(options.querySource)) {
-    const { roughTokenCountEstimation, roughTokenCountEstimationForMessages } = await import('../tokenEstimation.js')
-    const pressure = roughTokenCountEstimationForMessages(messagesForAPI.map(({ type, message }) => ({ type, message })))
-      + roughTokenCountEstimation(jsonStringify({ system, tools: allTools }))
-    if (Math.ceil(pressure * 4 / 3) + (options.maxOutputTokensOverride || getMaxOutputTokensForModel(options.model))
-      > getContextWindowForModel(options.model)) {
-      throw new Error('Sealed skill is unavailable (sealed_whole_document_budget)')
+  if (
+    hasSealedSkillReferences(messages) &&
+    sealedExecutionQuery(options.querySource)
+  ) {
+    const { roughTokenCountEstimation, roughTokenCountEstimationForMessages } =
+      await import('../tokenEstimation.js')
+    const pressure =
+      roughTokenCountEstimationForMessages(
+        messagesForAPI.map(({ type, message }) => ({ type, message })),
+      ) + roughTokenCountEstimation(jsonStringify({ system, tools: allTools }))
+    if (
+      Math.ceil((pressure * 4) / 3) +
+        (options.maxOutputTokensOverride ||
+          getMaxOutputTokensForModel(options.model)) >
+      getContextWindowForModel(options.model)
+    ) {
+      throw new Error(
+        'Sealed skill is unavailable (sealed_whole_document_budget)',
+      )
     }
   }
 
@@ -1687,17 +1718,20 @@ async function* queryModelRequest(
         : []
     const extraBodyParams = getExtraBodyParams(bedrockBetas)
 
-    const outputConfig: BetaOutputConfig = {
-      ...((extraBodyParams.output_config as BetaOutputConfig) ?? {}),
-    }
-
-    configureEffortParams(
-      effort,
-      outputConfig,
-      extraBodyParams,
-      betasParams,
+    const { outputConfig, includeBeta, effortOverride } = resolveAnthropicEffort(
       options.model,
+      effort,
+      extraBodyParams,
     )
+    if (includeBeta) betasParams.push(EFFORT_BETA_HEADER)
+    if (effortOverride !== undefined) {
+      const existingInternal =
+        (extraBodyParams.anthropic_internal as Record<string, unknown>) || {}
+      extraBodyParams.anthropic_internal = {
+        ...existingInternal,
+        effort_override: effortOverride,
+      }
+    }
 
     configureTaskBudgetParams(
       options.taskBudget,
@@ -1962,6 +1996,7 @@ async function* queryModelRequest(
         // Use raw stream instead of BetaMessageStream to avoid O(n²) partial JSON parsing
         // BetaMessageStream calls partialParse() on every input_json_delta, which we don't need
         // since we handle tool input accumulation ourselves
+        traceAnthropicEffort(params, options.effortValue, clientRequestId)
         const result = await anthropic.beta.messages
           .create(
             { ...params, stream: true },
@@ -2571,6 +2606,7 @@ async function* queryModelRequest(
     } catch (streamingError) {
       // Clear the idle timeout watchdog on error path too
       clearStreamIdleTimers()
+      rethrowInvestigationAdmission(streamingError)
 
       // Instrumentation: if the watchdog had already fired and the for-await
       // threw (rather than exiting cleanly), record that the loop DID exit and
@@ -2722,7 +2758,7 @@ async function* queryModelRequest(
           : 'other') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
       const result = yield* executeNonStreamingRequest(
-        { model: options.model, source: options.querySource },
+        { model: options.model, source: options.querySource, effortValue: options.effortValue },
         {
           model: options.model,
           fallbackModel: options.fallbackModel,
@@ -2769,6 +2805,7 @@ async function* queryModelRequest(
       clearStreamIdleTimers()
     }
   } catch (errorFromRetry) {
+    rethrowInvestigationAdmission(errorFromRetry)
     // FallbackTriggeredError must propagate to query.ts, which performs the
     // actual model switch. Swallowing it here would turn the fallback into a
     // no-op — the user would just see "Model fallback triggered: X -> Y" as
@@ -2824,7 +2861,7 @@ async function* queryModelRequest(
       try {
         // Fall back to non-streaming mode
         const result = yield* executeNonStreamingRequest(
-          { model: options.model, source: options.querySource },
+          { model: options.model, source: options.querySource, effortValue: options.effortValue },
           {
             model: options.model,
             fallbackModel: options.fallbackModel,
@@ -2864,6 +2901,7 @@ async function* queryModelRequest(
 
         // Continue to success logging below
       } catch (fallbackError) {
+        rethrowInvestigationAdmission(fallbackError)
         // Propagate model-fallback signal to query.ts (see comment above).
         if (fallbackError instanceof FallbackTriggeredError) {
           throw fallbackError

@@ -47,7 +47,8 @@ where
         &input.open_claw.runtime_host_mcp_state_dir,
     )
     .map_err(|_| ControlError::Transport("Matcha MCP projection"))?;
-    let mut runtime = match runtime::start(input).await {
+    let verifier = Arc::new(tokio::sync::Mutex::new(verifier));
+    let mut runtime = match runtime::start(input, Arc::clone(&verifier)).await {
         Ok(runtime) => runtime,
         Err(error) => {
             if matches!(
@@ -107,7 +108,6 @@ where
         .recover_pending()
         .await
         .map_err(|_| ControlError::Transport("security emergency recovery"))?;
-    let verifier = Arc::new(tokio::sync::Mutex::new(verifier));
     let install_plan = prepare_module_install(InstallModulesInput {
         handles: &runtime.handles,
         verifier: Arc::clone(&verifier),
@@ -135,7 +135,12 @@ where
                 return Err(ControlError::ModuleInstall(error));
             }
         };
-    let private_control = PrivateControlRegistry::from_snapshot(private_control_catalog);
+    let private_control = PrivateControlRegistry::from_snapshot(
+        private_control_catalog,
+        runtime.handles.world.clone(),
+        runtime.handles.world_authority.clone(),
+        runtime.handles.world_storage.clone(),
+    );
     let http_server = match crate::http::Server::bind(runtime_host_transport_port, router).await {
         Ok(transport) => transport,
         Err(_) => {
@@ -174,6 +179,7 @@ where
     let result =
         runtime::run_private_control(&mut runtime, private_control, control_input, control_output)
             .await;
+    trace_service_result("control", &result);
     http_server.dispose_all_lifo().await;
     let http_result = match runtime.http_completion.take() {
         Some(completion) => match completion.await {
@@ -182,8 +188,33 @@ where
         },
         None => Ok(()),
     };
+    trace_service_result("http", &http_result);
     let shutdown = shutdown_runtime(&mut runtime).await;
+    trace_service_result("shutdown", &shutdown);
     result.and(http_result).and(shutdown)
+}
+
+fn trace_service_result(source: &'static str, result: &Result<(), ControlError>) {
+    platform::trace::runtime_trace("host.service.result", || {
+        let outcome = match result {
+            Ok(()) => "ok",
+            Err(error) => match error {
+                ControlError::Construction(_) => "construction",
+                ControlError::ModuleInstall(_) => "module_install",
+                ControlError::Start(_) => "start",
+                ControlError::Input => "input",
+                ControlError::InvalidCommand => "invalid_command",
+                ControlError::Output => "output",
+                ControlError::OutputEncoding => "output_encoding",
+                ControlError::OutputClosed => "output_closed",
+                ControlError::Owner => "owner",
+                ControlError::CommandTask => "command_task",
+                ControlError::Shutdown => "shutdown",
+                ControlError::Transport(_) => "transport",
+            },
+        };
+        serde_json::json!({ "resultSource": source, "outcome": outcome })
+    });
 }
 
 async fn shutdown_runtime(runtime: &mut runtime::RuntimeService) -> Result<(), ControlError> {

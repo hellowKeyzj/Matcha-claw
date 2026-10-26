@@ -407,7 +407,7 @@ function isContent(value: unknown): boolean {
     case 'media':
       return hasExactKeys(value, ['kind', 'mediaType', 'reference'])
         && isNullableId(value.mediaType)
-        && isId(value.reference);
+        && isContentRef(value.reference);
     case 'omitted':
       return hasExactKeys(value, ['kind', 'reason']) && isOmissionReason(value.reason);
     default:

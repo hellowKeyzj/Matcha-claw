@@ -117,6 +117,10 @@ impl SessionTerminalHook for OrganizationSessionTerminal {
                     delivery_context: snapshot.delivery_context.map(|(delivery_id, endpoint_session_id)| {
                         SessionDeliveryContext { delivery_id, endpoint_session_id }
                     }),
+                    execution_context: snapshot.execution_context,
+                    native_request_id: snapshot.native_request_id,
+                    native_message_id: snapshot.native_message_id,
+                    measurement: snapshot.measurement,
                     phase,
                     assistant_texts: snapshot.assistant_texts,
                 })
@@ -150,6 +154,10 @@ fn organization_terminal_snapshot(
         delivery_context: snapshot
             .delivery_context
             .map(|context| (context.delivery_id, context.endpoint_session_id)),
+        execution_context: snapshot.execution_context,
+        native_request_id: snapshot.native_request_id,
+        native_message_id: snapshot.native_message_id,
+        measurement: snapshot.measurement,
         phase: run_phase(snapshot.phase),
         assistant_texts: snapshot.assistant_texts,
     }
@@ -410,6 +418,66 @@ fn session_provider_from_identity(identity: RuntimeDriverIdentity) -> SessionPro
 }
 
 impl organization::TeamActivityExecutor for TeamSessionExecutor {
+    fn inspect_cancellable(
+        &self,
+        request: ActivityExecutionRequest,
+        cancellation: CancellationToken,
+    ) -> runtime_directory::OwnedRuntimeFuture<organization::task_execution::TaskActivityInspection> {
+        let executor = self.clone();
+        Box::pin(async move {
+            use organization::task_execution::{TaskActivityInspection, TaskNativeExecution, TaskNativePhase};
+            use sessions_module::execution::{SessionRunReadCommand, SessionRunReadOutcome, SessionRunSelector};
+            let Some((identity, _)) = executor.activity_session_identity(&request) else {
+                return TaskActivityInspection::Unknown;
+            };
+            let request_id = request.delivery_request().idempotency_key.clone();
+            let endpoint_session_id = request.binding().endpoint_session_id().as_str().to_owned();
+            let Ok(command) = SessionRunReadCommand::try_new(
+                identity,
+                Some(endpoint_session_id.clone()),
+                SessionRunSelector::RequestId(request_id.clone()),
+            ) else {
+                return TaskActivityInspection::Unknown;
+            };
+            let result = tokio::select! {
+                _ = cancellation.cancelled() => return TaskActivityInspection::Unknown,
+                result = executor.session.read_session_run(command) => result,
+            };
+            match result {
+                Ok(SessionRunReadOutcome::Found(record)) => {
+                    if record.request_id.as_deref() != Some(request_id.as_str()) {
+                        return TaskActivityInspection::Unknown;
+                    }
+                    TaskActivityInspection::Found {
+                        execution: TaskNativeExecution {
+                            endpoint_session_id,
+                            native_run_id: record.run_id,
+                            native_request_id: record.request_id,
+                            native_message_id: Some(record.message_id),
+                            measurement: record.measurement,
+                        },
+                        phase: match record.phase {
+                            RunPhase::Queued => TaskNativePhase::Queued,
+                            RunPhase::Started => TaskNativePhase::Started,
+                            RunPhase::WaitingForApproval => TaskNativePhase::WaitingForApproval,
+                            RunPhase::CancellationRequested => TaskNativePhase::CancellationRequested,
+                            RunPhase::Cancelled => TaskNativePhase::Cancelled,
+                            RunPhase::Completed => TaskNativePhase::Completed,
+                            RunPhase::Failed => TaskNativePhase::Failed,
+                            RunPhase::Interrupted => TaskNativePhase::Interrupted,
+                        },
+                        assistant_texts: record.assistant_texts,
+                    }
+                }
+                Ok(SessionRunReadOutcome::Unavailable | SessionRunReadOutcome::Unsupported) => {
+                    TaskActivityInspection::Unavailable
+                }
+                Ok(SessionRunReadOutcome::NotFound | SessionRunReadOutcome::Rejected | SessionRunReadOutcome::Unknown)
+                | Err(_) => TaskActivityInspection::Unknown,
+            }
+        })
+    }
+
     fn prepare_cancellable(
         &self,
         request: ActivityExecutionRequest,
@@ -519,6 +587,10 @@ impl organization::TeamActivityExecutor for TeamSessionExecutor {
                     trace("runtime.team_run.activity.send", "error", "invalid_send_command");
                     return ActivityExecutionOutcome::Unknown;
                 }
+            };
+            let command = match request.execution_context() {
+                Some(context) => command.with_execution_context(context.clone()),
+                None => command,
             };
             trace("runtime.team_run.activity.send", "begin", "send");
             let result = session.send_session_cancellable(command, cancellation).await;

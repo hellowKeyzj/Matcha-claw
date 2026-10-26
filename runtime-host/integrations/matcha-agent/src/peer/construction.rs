@@ -32,6 +32,7 @@ pub struct MatchaPeerInput {
     pub working_directory: PathBuf,
     pub storage_root: PathBuf,
     pub port: u16,
+    pub world_runtime_host: Option<crate::world::WorldRuntimeHost>,
     pub toolchain: Arc<NativeToolchain>,
     pub report_diagnostic: Arc<dyn Fn(StartupDiagnosticCategory) + Send + Sync>,
     #[cfg(windows)]
@@ -78,6 +79,7 @@ impl MatchaPeerFactory {
             working_directory: input.working_directory,
             storage_root: input.storage_root,
             port: input.port,
+            world_runtime_host: input.world_runtime_host,
             secret: Arc::clone(&secret),
             toolchain: input.toolchain,
             #[cfg(windows)]
@@ -128,7 +130,13 @@ impl MatchaPeerFactory {
         );
         let handle = supervisor.handle();
 
-        MatchaPeer::new(handle, supervisor, self.working_directory, native, self.search)
+        MatchaPeer::new(
+            handle,
+            supervisor,
+            self.working_directory,
+            native,
+            self.search,
+        )
     }
 }
 

@@ -34,6 +34,12 @@ pub enum McpTransport {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpAuth {
+    OAuth,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum McpProgramSource {
     SystemRuntime,
@@ -130,6 +136,7 @@ pub struct ConnectorPublicInput {
     env: Option<BTreeMap<String, String>>,
     url: Option<String>,
     transport: Option<McpTransport>,
+    auth: Option<McpAuth>,
     headers: Option<BTreeMap<String, String>>,
     connection_timeout_ms: Option<u64>,
     base_url: Option<String>,
@@ -156,6 +163,7 @@ impl ConnectorPublicInput {
         input.env = self.env;
         input.url = self.url;
         input.transport = self.transport;
+        input.auth = self.auth;
         input.headers = self.headers;
         input.connection_timeout_ms = self.connection_timeout_ms;
         input.base_url = self.base_url;
@@ -191,6 +199,7 @@ pub struct ConnectorInput {
     pub env: Option<BTreeMap<String, String>>,
     pub url: Option<String>,
     pub transport: Option<McpTransport>,
+    pub auth: Option<McpAuth>,
     pub headers: Option<BTreeMap<String, String>>,
     pub connection_timeout_ms: Option<u64>,
     pub base_url: Option<String>,
@@ -217,6 +226,7 @@ impl ConnectorInput {
             env: None,
             url: None,
             transport: None,
+            auth: None,
             headers: None,
             connection_timeout_ms: None,
             base_url: None,
@@ -319,6 +329,7 @@ pub struct Connector {
     pub(crate) env: Option<BTreeMap<String, String>>,
     pub(crate) url: Option<String>,
     pub(crate) transport: Option<McpTransport>,
+    pub(crate) auth: Option<McpAuth>,
     pub(crate) headers: Option<BTreeMap<String, String>>,
     pub(crate) connection_timeout_ms: Option<u64>,
     pub(crate) base_url: Option<String>,
@@ -349,6 +360,7 @@ impl Connector {
             env: None,
             url: None,
             transport: None,
+            auth: None,
             headers: None,
             connection_timeout_ms: None,
             base_url: None,
@@ -376,6 +388,7 @@ impl Connector {
             env: input.env,
             url: input.url,
             transport: input.transport,
+            auth: input.auth,
             headers: input.headers,
             connection_timeout_ms: input.connection_timeout_ms,
             base_url: input.base_url,
@@ -403,6 +416,9 @@ impl Connector {
 
     pub fn validate(&self) -> Result<(), ConnectorError> {
         if !valid_id(&self.id) {
+            return Err(ConnectorError::Invalid);
+        }
+        if self.auth.is_some() && self.kind != ConnectorKind::McpHttp {
             return Err(ConnectorError::Invalid);
         }
         if self.mcp_server_program.is_some()
@@ -510,6 +526,10 @@ impl Connector {
 
     pub const fn transport(&self) -> Option<McpTransport> {
         self.transport
+    }
+
+    pub const fn auth(&self) -> Option<McpAuth> {
+        self.auth
     }
 
     pub fn headers(&self) -> Option<&BTreeMap<String, String>> {

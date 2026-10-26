@@ -6,7 +6,7 @@ describe('task snapshot store', () => {
   });
 
   it('derives plan status from one session task snapshot', async () => {
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
     store.reportTaskCenterData('agent:main:main', [
@@ -19,7 +19,7 @@ describe('task snapshot store', () => {
   });
 
   it('keeps todo plan items out of the persistent task view', async () => {
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
     store.reportTodos('agent:main:main', [
@@ -41,7 +41,7 @@ describe('task snapshot store', () => {
   });
 
   it('empty replay clears stale todo snapshot data', async () => {
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
     store.reportTaskCenterSnapshot({
@@ -62,7 +62,7 @@ describe('task snapshot store', () => {
   });
 
   it('empty task center snapshot clears stale persistent tasks from the task inbox', async () => {
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
     store.reportTaskCenterData('agent:main:main', [
@@ -82,7 +82,7 @@ describe('task snapshot store', () => {
   });
 
   it('task:snapshot 收到的全量列表完全替换当前 session 任务集合', async () => {
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
     store.reportTaskCenterData('agent:main:main', [
@@ -103,7 +103,7 @@ describe('task snapshot store', () => {
   });
 
   it('does not map an empty session task scope to the default main session', async () => {
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
     expect(store.getSessionTaskScopeKey('')).toBe('');
@@ -111,7 +111,7 @@ describe('task snapshot store', () => {
   });
 
   it('returns stable derived task references for React selectors', async () => {
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     const store = useTaskSnapshotStore.getState();
 
     store.reportTodos('agent:main:main', []);

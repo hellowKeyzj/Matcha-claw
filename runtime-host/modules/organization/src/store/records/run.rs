@@ -150,6 +150,8 @@ pub(crate) fn restore_runs(records: &[StoredRecord], contents: &ContentStore) ->
         .map_err(|_| StoreFault::InvalidFacts)?;
         run.restore_retired_executions(header.retired_executions)
             .map_err(|_| StoreFault::InvalidFacts)?;
+        run.restore_task_execution_context(header.task_execution_context)
+            .map_err(|_| StoreFault::InvalidFacts)?;
         Ok(run)
     }).collect()
 }
@@ -167,6 +169,9 @@ pub(crate) fn apply_changes(run: &mut GraphRunFacts, changes: &[RecordChange], c
                     RecordKind::RunHeader => {
                         let header = decode_header(row)?;
                         retired_executions = Some(header.retired_executions);
+                        if run.task_execution_context() != header.task_execution_context.as_ref() {
+                            return Err(StoreFault::InvalidFacts);
+                        }
                         run.replace_header(header.team, header.revision, header.runtime, header.lifecycle, header.gate);
                     }
                     RecordKind::GraphDefinition => {

@@ -190,6 +190,23 @@ impl WorkspaceHandle {
         .await
     }
 
+    pub(crate) async fn thumbnail_media_reference(
+        &self,
+        endpoint: RuntimeEndpoint,
+        session_key: String,
+        reference: String,
+    ) -> Result<Result<WorkspaceMediaThumbnail, WorkspaceMediaFailure>, ()> {
+        self.request_command(Operation::ThumbnailMedia, 1, |reply| {
+            WorkspaceOperation::ThumbnailMediaReference {
+                endpoint,
+                session_key,
+                reference,
+                reply,
+            }
+        })
+        .await
+    }
+
     pub(crate) async fn thumbnail_media_gateway(
         &self,
         endpoint: RuntimeEndpoint,

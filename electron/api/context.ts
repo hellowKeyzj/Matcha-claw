@@ -5,6 +5,8 @@ import type { ProviderCredentialStatusTransport } from '../main/ipc/provider-pri
 import type { RemoteFleetCredentialWriteAdapter } from '../main/ipc/fleet-private';
 import type { CloudAccountService } from '../main/cloud-account/service';
 import type { LicenseService } from '../main/license/service';
+import type { ApplicationPluginOwner } from '../main/app-plugins/owner';
+import type { AppPluginAgentGateway } from '../main/app-plugins/agent-gateway';
 
 export type { RuntimeHostLifecycle } from '../main/runtime-host-delivery/lifecycle-owner';
 import type { RuntimeHostLifecycle } from '../main/runtime-host-delivery/lifecycle-owner';
@@ -16,6 +18,8 @@ export type RuntimeHostTransportContext<K extends keyof RuntimeHostTransports> =
 export interface HostApiContext {
   licenseService: LicenseService;
   cloudAccountService?: CloudAccountService;
+  appPlugins: ApplicationPluginOwner;
+  appPluginAgentGateway: Promise<AppPluginAgentGateway>;
   eventBus: HostEventBus;
   runtimeHost: RuntimeHostLifecycle;
   sessionObservers: RendererSessionObservationRegistry;
@@ -25,7 +29,7 @@ export interface HostApiContext {
 }
 
 export type MainHostApiContext = Pick<HostApiContext,
-  'licenseService' | 'cloudAccountService' | 'eventBus' | 'sessionObservers'
+  'licenseService' | 'cloudAccountService' | 'appPlugins' | 'appPluginAgentGateway' | 'eventBus' | 'sessionObservers'
 >;
 
 export type RuntimeHostApiDependencies = Omit<HostApiContext, keyof MainHostApiContext> & Readonly<{

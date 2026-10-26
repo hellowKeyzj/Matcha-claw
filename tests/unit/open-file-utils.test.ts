@@ -12,7 +12,7 @@ describe('open file utils', () => {
   });
 
   it('detects direct-open fallback only for large pdf/excel files', async () => {
-    const { shouldOfferDirectOpenFallback } = await import('@/components/file-preview/open-file-utils');
+    const { shouldOfferDirectOpenFallback } = await import('@/plugins/files/open-file-utils');
 
     expect(shouldOfferDirectOpenFallback('.pdf', 3 * 1024 * 1024)).toBe(true);
     expect(shouldOfferDirectOpenFallback('.xlsx', 3 * 1024 * 1024)).toBe(true);
@@ -24,7 +24,7 @@ describe('open file utils', () => {
   it('opens paths externally and normalizes empty shell result to null', async () => {
     invokeIpcMock.mockResolvedValueOnce('');
 
-    const { openArtifactPathExternally } = await import('@/components/file-preview/open-file-utils');
+    const { openArtifactPathExternally } = await import('@/plugins/files/open-file-utils');
     const result = await openArtifactPathExternally('/workspace/report.pdf');
 
     expect(result).toBeNull();
@@ -34,7 +34,7 @@ describe('open file utils', () => {
   it('reveals paths in file manager from structured shell result', async () => {
     invokeIpcMock.mockResolvedValueOnce({ success: true });
 
-    const { revealArtifactPathInFileManager } = await import('@/components/file-preview/open-file-utils');
+    const { revealArtifactPathInFileManager } = await import('@/plugins/files/open-file-utils');
     const result = await revealArtifactPathInFileManager('/workspace/report.pdf');
 
     expect(result).toBe(true);
@@ -46,7 +46,7 @@ describe('open file utils', () => {
       .mockResolvedValueOnce({ response: 1 })
       .mockResolvedValueOnce('');
 
-    const { confirmAndOpenArtifactPath } = await import('@/components/file-preview/open-file-utils');
+    const { confirmAndOpenArtifactPath } = await import('@/plugins/files/open-file-utils');
     const opened = await confirmAndOpenArtifactPath({
       filePath: '/workspace/report.pdf',
       fileName: 'report.pdf',

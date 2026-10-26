@@ -66,7 +66,7 @@ describe('cloud provider sync', () => {
         kind: 'replaceModels', phase: 'terminal', outcome: 'stored', count: null,
         acceptedCount: null, persisted: 'confirmed', commit: 'committed',
         accountId: 'matcha-cloud', accountRevision: null, diagnostic: null,
-        native: { changed: true, applied: 'confirmed', observed: 'matches' },
+        native: { changed: true, applied: 'confirmed', observed: 'matches', reports: [] },
       },
     });
   });
@@ -146,6 +146,7 @@ describe('cloud provider sync', () => {
             authMode: 'apiKey',
             revision: 3,
           },
+          reports: [],
         },
       }),
     };
@@ -185,6 +186,7 @@ describe('cloud provider sync', () => {
             authMode: 'apiKey',
             revision: 3,
           },
+          reports: [],
         },
       }),
     };

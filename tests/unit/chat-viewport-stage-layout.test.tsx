@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { ChatShell } from '@/pages/Chat/components/ChatShell';
+import { ChatShell } from '@/plugins/chat/components/ChatShell';
 
 describe('chat shell stage layout', () => {
   it('owns the header, viewport panel, runtime dock, and floating composer as one stage', () => {
@@ -10,14 +10,21 @@ describe('chat shell stage layout', () => {
         sidePanelPhase="closed"
         sidePanelMode="docked"
         sidePanelWidth={360}
+        panelLayout={{ position: 'right', fullscreen: false }}
         isEmptyState={false}
         emptyState={null}
         sidePanel={null}
         header={<div data-testid="chat-header"><div data-testid="chat-todo-panel" /></div>}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={<div data-testid="chat-error-banner" />}
-        approvalDock={<div data-testid="chat-approval-dock" />}
-        input={<div data-testid="chat-input" />}
+        input={(
+          <div>
+            <div>
+              <div data-testid="chat-error-banner" />
+              <div data-testid="chat-approval-dock" />
+              <div data-testid="chat-input" />
+            </div>
+          </div>
+        )}
       />,
     );
 

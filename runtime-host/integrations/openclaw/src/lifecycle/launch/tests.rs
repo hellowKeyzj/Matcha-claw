@@ -70,6 +70,7 @@ fn input(root: &TestRoot) -> OpenClawLaunchInput {
         state_dir: root.state_dir.clone(),
         port: 18_789,
         secret: Arc::new(GatewaySecret::new(SECRET_CANARY.into()).unwrap()),
+        world_runtime_host: None,
     }
 }
 
@@ -507,6 +508,7 @@ fn launch_environment_strips_legacy_systemd_and_non_legacy_material() {
         ("OPENCLAW_CONFIG_DIR".into(), "non-legacy-config-dir".into()),
         ("MATCHACLAW_OPENCLAW_TLS_CERT_FD".into(), "11".into()),
         (OPENCLAW_EXEC_SHELL_SNAPSHOT.into(), "1".into()),
+        (MATCHACLAW_OPENCLAW_OWNED_STDIN.into(), "0".into()),
         (
             MATCHA_SEALED_ENDPOINT.into(),
             "stale-sealed-endpoint".into(),
@@ -556,6 +558,7 @@ fn assert_exact_spec(spec: &LaunchSpec, root: &TestRoot, skip_channels: bool) {
             SECRET_CANARY.into(),
         ),
         (OPENCLAW_NO_RESPAWN.into(), "1".into()),
+        (MATCHACLAW_OPENCLAW_OWNED_STDIN.into(), "1".into()),
         (OPENCLAW_DISABLE_BONJOUR.into(), "1".into()),
     ]);
     if skip_channels {
@@ -563,7 +566,10 @@ fn assert_exact_spec(spec: &LaunchSpec, root: &TestRoot, skip_channels: bool) {
         expected_environment.push((CLAWDBOT_SKIP_CHANNELS.into(), "1".into()));
     }
     assert_eq!(spec.public_environment(), expected_environment);
-    assert_eq!(spec.stdio(), OPENCLAW_STDIO);
+    assert_eq!(
+        spec.stdio(),
+        StdioSpec::new(StdioMode::Piped, StdioMode::Piped, StdioMode::Piped)
+    );
 
     for required in [
         (UV_PYTHON_INSTALL_MIRROR, UV_PYTHON_INSTALL_MIRROR_URL),

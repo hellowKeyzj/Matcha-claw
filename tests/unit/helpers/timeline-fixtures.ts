@@ -1,9 +1,9 @@
-import { extractMessageText } from '../../../src/stores/chat/message-content';
+import { extractMessageText } from '../../../src/plugins/chat/store/message-content';
 import {
   sanitizeAssistantDisplayText,
   sanitizeCanonicalUserText,
-} from '../../../src/stores/chat/message-display';
-import { isInternalRuntimeDisplayMessage } from '../../../src/stores/chat/message-filter';
+} from '../../../src/plugins/chat/store/message-display';
+import { isInternalRuntimeDisplayMessage } from '../../../src/plugins/chat/store/message-filter';
 import type {
   SessionMessageRole,
   SessionRenderAttachedFile,

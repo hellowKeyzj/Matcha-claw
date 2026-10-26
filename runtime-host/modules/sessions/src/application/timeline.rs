@@ -503,9 +503,8 @@ mod tests {
     fn rejects_endpoint_session_id_that_cannot_be_bound() {
         let command = Command::new(
             Operation::Load,
-            Provider::OpenClaw,
-            "session-1".to_owned(),
-            None,
+            SessionIdentity::new("agent:main:session-1", SessionProvider::OpenClaw, "main".into())
+                .unwrap(),
             WindowRequest::latest(),
             Some(
                 "endpoint
@@ -521,9 +520,12 @@ mod tests {
     fn keeps_canonical_request_controls_on_the_command() {
         let command = Command::new(
             Operation::Load,
-            Provider::Matcha,
-            "session-1".to_owned(),
-            Some("agent-1".to_owned()),
+            SessionIdentity::new(
+                "matcha-agent:agent-1:session-1",
+                SessionProvider::MatchaAgent,
+                "agent-1".into(),
+            )
+            .unwrap(),
             WindowRequest::new(Direction::Older, 20, Some(3)).unwrap(),
             Some("endpoint-session-1".to_owned()),
             false,

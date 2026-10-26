@@ -36,7 +36,32 @@ describe('Settings private proxy IPC', () => {
 
     await expect(splitSettingsProxyIntent({
       enabled: false,
-      server: 'ignored.example.test:8080',
+      server: 'proxy.example.test:8080',
+      bypassRules: '<local>',
+    })).resolves.toEqual({
+      enabled: false,
+      server: 'http://proxy.example.test:8080',
+      bypassRules: '<local>',
+      credentialReference: null,
+    });
+    await expect(splitSettingsProxyIntent({
+      enabled: true,
+      server: 'http://user:password@proxy.example.test:8080',
+      bypassRules: '',
+    })).rejects.toThrow('Settings proxy credentials are not supported');
+    await expect(splitSettingsProxyIntent({
+      enabled: false,
+      server: 'http://user:password@proxy.example.test:8080',
+      bypassRules: '',
+    })).rejects.toThrow('Settings proxy credentials are not supported');
+  });
+
+  it('allows an empty proxy endpoint only when disabled', async () => {
+    const { splitSettingsProxyIntent } = await import('../../electron/main/ipc/settings-private-proxy');
+
+    await expect(splitSettingsProxyIntent({
+      enabled: false,
+      server: '',
       bypassRules: '<local>',
     })).resolves.toEqual({
       enabled: false,
@@ -46,9 +71,9 @@ describe('Settings private proxy IPC', () => {
     });
     await expect(splitSettingsProxyIntent({
       enabled: true,
-      server: 'http://user:password@proxy.example.test:8080',
-      bypassRules: '',
-    })).rejects.toThrow('Settings proxy credentials are not supported');
+      server: '',
+      bypassRules: '<local>',
+    })).rejects.toThrow('Settings proxy request is invalid');
   });
 
   it('rejects malformed and control-character input', async () => {

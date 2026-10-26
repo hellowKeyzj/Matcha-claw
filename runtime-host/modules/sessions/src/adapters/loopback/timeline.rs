@@ -367,7 +367,7 @@ mod tests {
             identity: SessionIdentity::new(
                 "session-1",
                 SessionProvider::OpenClaw,
-                Some("agent-1".to_owned()),
+                "agent-1".to_owned(),
             )
             .unwrap(),
             epoch: 1,

@@ -2,7 +2,7 @@
 
 mod bootstrap;
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{io::Write, path::PathBuf, process::ExitCode};
 
 use runtime_host::{AppInput, run_app_service};
 use tokio::io::{stdin, stdout};
@@ -29,6 +29,17 @@ async fn host_main() -> ExitCode {
 }
 
 async fn run() -> Result<(), Error> {
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().is_some_and(|command| command == "world-materials") {
+        return match (arguments.next(), arguments.next()) {
+            (None, None) => world::serve_materials().await.map_err(Error::Materials),
+            (Some(command), None) if command == "schema" => {
+                let schema = world::export_material_schema().map_err(Error::MaterialsSchema)?;
+                std::io::stdout().lock().write_all(&schema).map_err(Error::Materials)
+            }
+            _ => Err(Error::Arguments),
+        };
+    }
     if let Some((source, target)) = migration_arguments()? {
         let report = organization::migrate_legacy_log(&source, &target).map_err(Error::Migration)?;
         println!(
@@ -93,6 +104,8 @@ enum Error {
     Arguments,
     Migration(organization::MigrationError),
     MigrationReport,
+    Materials(std::io::Error),
+    MaterialsSchema(world_protocol::schema::SchemaFailure),
     Bootstrap(bootstrap::BootstrapError),
     Control(runtime_host::ControlError),
 }
@@ -101,10 +114,12 @@ impl std::fmt::Display for Error {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Arguments => formatter.write_str(
-                "expected no arguments, mcp --state-dir <absolute directory>, or migrate-organization --source-log <absolute offline log> --target-db <absolute new offline database>; no automatic cutover",
+                "expected no arguments, world-materials [schema], mcp --state-dir <absolute directory>, or migrate-organization --source-log <absolute offline log> --target-db <absolute new offline database>; no automatic cutover",
             ),
             Self::Migration(error) => error.fmt(formatter),
             Self::MigrationReport => formatter.write_str("organization migration report could not be encoded"),
+            Self::Materials(error) => write!(formatter, "world materials worker: {error}"),
+            Self::MaterialsSchema(error) => error.fmt(formatter),
             Self::Bootstrap(error) => error.fmt(formatter),
             Self::Control(error) => error.fmt(formatter),
         }

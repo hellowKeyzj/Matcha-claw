@@ -2,7 +2,6 @@ import { invokeIpc } from '@/lib/api-client';
 import { isTraceEnabled } from '@/lib/trace-logger';
 import { isProviderMutationCommitted, waitForProviderMutation } from '@/lib/provider-call';
 import type { ProviderCallDetail } from '@/types/call-log/provider';
-import { nativeProjectionError } from '@/lib/provider-projection-errors';
 import { PROVIDER_TYPE_INFO, type ProviderCredential, type ProviderOAuthMode, type ProviderType } from '@/lib/providers';
 import { summarizeIdentifier } from '@/lib/session-trace';
 
@@ -26,7 +25,6 @@ type AccountIntent = Readonly<{
 type ProjectionResult = Readonly<{
   success: boolean;
   error?: string;
-  warning?: string;
   receipt?: ProviderCallDetail;
 }>;
 
@@ -217,8 +215,7 @@ async function mutate(
       ...providerProjectionTrace(receipt),
     });
     if (isProviderMutationCommitted(receipt, success)) {
-      const warning = nativeProjectionError(receipt);
-      return { success: true, receipt, ...(warning ? { warning } : {}) };
+      return { success: true, receipt };
     }
     return { success: false, error: outcomeError(receipt, success), receipt };
   } catch {

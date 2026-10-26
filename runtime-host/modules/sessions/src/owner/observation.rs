@@ -153,6 +153,15 @@ pub(super) fn valid_lease_id(value: &str) -> bool {
 }
 
 impl SessionShared {
+    pub(super) fn session_execution_pending(&self, identity: &SessionIdentity) -> bool {
+        self.observations.lock().expect("session observation lock")
+            .get(&session_identity_lane_key(identity))
+            .is_some_and(|entry| {
+                !entry.runs.is_empty() || entry.pending_sends > 0 || entry.unknown_send
+                    || entry.waiters.iter().any(|waiter| matches!(&waiter.reply, WaiterReply::Send { .. }))
+            })
+    }
+
     pub(crate) fn terminal_sync_pending(&self, identity: &SessionIdentity) -> bool {
         self.observations.lock().expect("session observation lock")
             .get(&session_identity_lane_key(identity))

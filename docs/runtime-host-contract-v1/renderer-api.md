@@ -71,7 +71,7 @@ POST /api/capabilities/execute
 | capability ID | Renderer operation / 用途 | 关键 wrapper / evidence |
 | --- | --- | --- |
 | `workspace.file` | AgentScope；`files.readText/writeText/readBinary/stat/listDir`，仍经 `/api/files/*` | [host-api.ts](../../src/lib/host-api.ts#L964-L995)、[workspace capability](../../runtime-host/modules/workspace/src/capability.rs#L7-L48) |
-| `workspace.media` | 保留 session key wire；`media.prepare/resolve/thumbnail/thumbnails/stagePaths/stageBuffer` | [host-api.ts](../../src/lib/host-api.ts#L1170-L1193)、[media transport](../../electron/main/runtime-host-delivery/transport/workspace/media.ts#L14-L20) |
+| `workspace.media` | 保留 session key wire；`media.prepare/resolve/thumbnail/thumbnails/stagePaths/stageBuffer`；thumbnail 另接受独占的 `{endpoint,sessionKey,reference}`（opaque，≤512 字节），输出仍为 `{preview,fileSize}`，resolve 仍只消费暂存 handle | [host-api.ts](../../src/lib/host-api.ts#L1170-L1193)、[media transport](../../electron/main/runtime-host-delivery/transport/workspace/media.ts#L14-L20) |
 | `session.management` | `sessions.list`、`window`、`delete`、`rename`、`archive`、`unarchive`、`updateStatus`、`switch`、`resume`、`state`、`sessions.permission.get/set` | [host-api.ts](../../src/lib/host-api.ts#L546-L555)、[host-api.ts](../../src/lib/host-api.ts#L822-L1168) |
 | `session.prompt` | `sessions.create`、`load`、`abort`、`prompt`、`sendWithMedia` | [host-api.ts](../../src/lib/host-api.ts#L840-L855)、[host-api.ts](../../src/lib/host-api.ts#L924-L1065) |
 | `session.approval` | `approvals.list`、`approvals.resolve` | [host-api.ts](../../src/lib/host-api.ts#L1000-L1025) |
@@ -121,7 +121,15 @@ Chat 首次 draft 的右侧 WorkspaceBrowser 直接消费当前 AgentScope，挂
 
 两套 mode 不映射。decoder 绑定原请求，拒绝错误 runtime、未知/额外字段及 SET mode 回读不匹配；权限业务失败保留 `unsupported / rejected / unavailable / unknown`（Matcha 分别为 501 / 422 / 503 / 503，OpenClaw 保留旧 unsupported 200 与 unavailable 503 wire）。Electron 未投递为 unavailable，已尝试后失联或畸形响应为 unknown，不 fallback 或自动重试。[VERIFY: src/types/session-permission.ts:4-46] [VERIFY: src/types/session-permission.ts:111-156] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/permission/mod.rs:247-303] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/permission.ts:72-93]
 
-Draft 仅调用 `describe('session.prompt', AgentScope)` 读取现有可执行 `sessions.create` descriptor 的 `sessionConfiguration:{permission:boolean,modelSelection:boolean}`；该字段只允许出现在含 create 的 AgentScope prompt descriptor，不伪造 SessionIdentity，也不代表原生已配置。真实 SessionScope 的 management descriptor 提供权限 get/set，模型仍走原 `sessions.patchModel`，不新增 draft operation。[VERIFY: runtime-host/modules/sessions/src/capability.rs:16-38] [VERIFY: runtime-host/modules/sessions/src/capability.rs:43-51] [VERIFY: runtime-host/modules/sessions/src/capability.rs:87-108] [VERIFY: runtime-host/modules/sessions/src/capability.rs:124-134] [VERIFY: src/types/desktop/capability-descriptor.ts:29] [VERIFY: electron/main/runtime-host-delivery/transport/capabilities.ts:185-190]
+Draft 的权限／模型启动能力仅调用 `describe('session.prompt', AgentScope)` 读取现有可执行 `sessions.create` descriptor 的 `sessionConfiguration:{permission:boolean,modelSelection:boolean}`；该字段只允许出现在含 create 的 AgentScope prompt descriptor，不伪造 SessionIdentity，也不代表原生已配置。真实 SessionScope 的 management descriptor 提供权限 get/set，模型仍走原 `sessions.patchModel`，不新增 draft operation。[VERIFY: runtime-host/modules/sessions/src/capability.rs:16-38] [VERIFY: runtime-host/modules/sessions/src/capability.rs:43-51] [VERIFY: runtime-host/modules/sessions/src/capability.rs:87-108] [VERIFY: runtime-host/modules/sessions/src/capability.rs:124-134] [VERIFY: src/types/desktop/capability-descriptor.ts:29] [VERIFY: electron/main/runtime-host-delivery/transport/capabilities.ts:185-190]
+
+### Session 思考强度（本轮显式合同）
+
+沿用 `/api/capabilities/execute`，新增 id=`session.thinking`；scope 与 target 为相同 AgentScope 或完整 SessionScope。AgentScope／draft 仅提供 `sessions.thinking.get`，SessionScope 提供 get／set；GET input 为 `{modelSelectionId?:string}`，SET 为 `{level:string|null}`。不重复权限合同的 input.sessionIdentity／sessionKey 字段，也不为 draft 虚构 Session。无模型提示的 Session GET 读取当前原生配置；指定模型的 GET 返回候选模型完整 profile（level 为 null、effectiveLevel 为候选默认、options 为候选档位），不混入当前会话 override，也不执行模型选择。[VERIFY: src/types/session-thinking.ts:3-23] [VERIFY: src/types/session-thinking.ts:53-73] [VERIFY: runtime-host/modules/sessions/src/capability.rs:35-44]
+
+`hostSessionThinkingGet/Set` → Electron session adapter／transport → signed POST `/api/sessions/thinking` → 原 Sessions owner lane → 对应 SessionOps；decision 分别绑定 `sessions:read|write`、capability `session.thinking`、subject `session-thinking`。公共结果为 `{runtime,outcome:'available',level,effectiveLevel,options}`，或 SET 的 `outcome:'confirmed'` 加 `persisted:true,applied:boolean`；失败仅 `{runtime,outcome:'unsupported'|'unavailable'|'rejected'|'unknown'}`。严格 decoder 核 runtime、operation 与 SET level，不接额外字段或不匹配回执，不自动重试未知提交。[VERIFY: src/lib/host-api.ts:1864-1888] [VERIFY: electron/api/routes/sessions.ts:121-127] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/thinking.ts] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/thinking.rs]
+
+`level:null` 恢复原生默认而非 off；`options` 保留 OpenClaw thinkingLevel／Matcha effort 的 runtime-specific 值，effectiveLevel 不要求属于 options。已有 override 且 options 为空仍允许 available 与 SET null，不能以无可选档位封死恢复默认。confirmed 不等于模型已执行，Sessions 不持久化思考事实。公开合同、两 peer adapter 与 Renderer 首次发送接线均已落盘，不代表 Cargo 编译或真实 UI／RPC／模型已验收，状态见 [Session dev](../architecture-knowledge/modules/session-chat/dev.md#2026-10-25-聊天框与真实-thinking)。
 
 ### Cron 系统管理投影
 
@@ -197,6 +205,14 @@ HTTP status、success DTO、202 receipt、原 throw、执行/rollback/cleanup �
 
 `team.dependencyPlan` 保持原 packagePath 请求与 Rust 响应：`{status:'available',plan:{selectionId,packageName,packageVersion,items,canProceed}} | {status:'invalid'} | {status:'unavailable'}`。available 的 item 为 `{kind,name,required,purpose,status,severity,installable}`；Renderer 必须先判 status 再读取 `.plan`，不能当旧平铺 plan 使用，也不要求未返回的 sourcePath/missing* 数组。这里只适配现有服务契约，不重裁协议或 owner。[VERIFY: runtime-host/modules/organization/src/application/team_runtime_control.rs:696-745] [VERIFY: src/services/openclaw/team-runtime-client.ts:142-152] [VERIFY: src/services/openclaw/team-runtime-client.ts:801-808] [VERIFY: src/services/openclaw/team-runtime-client.ts:1283-1306] [VERIFY: src/pages/Teams/index.tsx:314-348]
 
+### Provider 当前运行报告
+
+Accounts LIST 返回 `{accounts,reports}`，GET operation 返回 `{account,reports}`，reports 必填；GET 指 `providerAccounts.get`，不新增 Renderer `/api/provider-accounts/:id` 路由。四项 mutation 接单仍为 strict 202 `{callId,accepted:true}`；安全 CallLog detail 中非 null 的 `native` 必含 `{changed,applied,observed,reports}`，不以 reports 替代原 summary。[VERIFY: runtime-host/modules/provider/src/projection/accounts.rs:26-36] [VERIFY: electron/main/runtime-host-delivery/transport/providers/accounts.ts:58-84,162-188] [VERIFY: src/types/call-log/provider.ts:25-30,68-73]
+
+Report 为 `{endpoint,changed,applied,observed,diagnostic,accounts}`：endpoint 固定本地 native OpenClaw / Matcha（`kind:'native-runtime'`、`runtimeAdapterId:'openclaw'|'matcha-agent'`、`runtimeInstanceId:'local'`）；summary 的 applied 为 `confirmed|unknown`、observed 为 `matches|mismatch|unavailable`。每账号为 `{accountId,accountRevision,execution,diagnostic}`，execution 为 `ready|blocked|unknown|unsupported`。两级 diagnostic 必填且可为 null，否则只含闭合的 `reason/privateResolverCode`，不带 raw message、path、secret。strict decoder 拒绝缺/额外字段、未知枚举与重复 endpoint/账号。[VERIFY: runtime-host/modules/provider/src/application/receipts.rs:11-38,432-454] [VERIFY: src/types/provider-runtime-report.ts:30-93]
+
+当前 reports 唯一来自 ProviderOwner ArcSwap snapshot；Renderer 按 endpoint/accountId/当前 revision 消费，历史 mutation receipt 不回写当前报告，GET 不推断恢复。ready 只确认原生配置/私密凭据观察适用，不证明网络 Key 有效；当前 blocked/unsupported 只提示对应账号并在模型菜单禁对应新选择，unknown 或无报告不显示默认异常提示且不伪装 ready；账号 partial 不重复作为全页告警。报告不阻止已有选择的新发送或 Goal 启动／恢复，不增加逐次发送预检。保持 desired IDs、路由、当前选择与旧 session/Key，补 Key 沿原 mutation/reconcile/readback 刷新，不增 health API/store/queue/poll。共享契约已落盘，owner/integration/UI 与运行验收状态见 [Provider dev](../architecture-knowledge/modules/provider-model-secret/dev.md#2026-10-26-单账号故障隔离验证-open)。
+
 ### Provider account 认证契约
 
 `ProviderAccountAuthMode` 新增 `Token`、`CliReuse`，wire 分别为 `token`、`cliReuse`；其余值仍为 `apiKey`、`oauthBrowser`、`oauthDevice`、`local`。登录交互方式不等于返回的凭据类型：
@@ -251,6 +267,22 @@ Chat transport 进一步固定：调用会传 `deliver: false`、保持 idempote
 | `GET` | `/api/runtime-{adapters,connectors,endpoints}/...` | [host-api.ts](../../src/lib/host-api.ts#L558-L608) | child topology projection |
 | `POST` | `/api/runtime-connectors/{connect,disconnect}` | [host-api.ts](../../src/lib/host-api.ts#L578-L598) | `LEGACY-REJECTED` by child; Renderer wrapper exists, so replacement must preserve observed rejection unless API migration is separately approved. |
 | `POST` | `/api/gateway/stop` | [gateway.ts](../../src/stores/gateway.ts#L355) | Electron main-owned, not child |
+
+### Existing World 独立评测身份配置
+
+公开 DTO 独立于完整安装配置：意图只有所选 `world`，提交意图为 `{world,ticket,accept}`。安全摘要只有 `world / commitId`、四类 seed 计数与 `caseAccess / caseRetention` 引用，不含 execution/oracle 的 issuer、subject 或 actor。[VERIFY: src/types/world-evaluation.ts:4-24]
+
+| 阶段 | 公开结果 |
+| --- | --- |
+| prepare | `prepared {ticket,summary}`／`cancel`／`not-attempted {error}` |
+| commit | `cancel`／`not-attempted {error}`／`confirmed {world,commitId,receipt}`／`rejected\|unknown {world,commitId,error}` |
+| status | `available {world,configured,commitId:string\|null}`／`unavailable {error}` |
+
+Renderer client `prepareWorldEvaluation / commitWorldEvaluation / worldEvaluationStatus` 分别调用 `world:prepareEvaluation / world:commitEvaluation / world:evaluationStatus`，均为 Main 私有 IPC，不是 `hostapi:fetch` 路由。完整配置只留 Main／Host，Main-held opaque ticket 有效期 5 分钟，绑定原 window／frame／document／World／配置；提交前重新核 caller admission。[VERIFY: src/stores/world/client.ts:104-106] [VERIFY: electron/preload/ipc-contract.ts:52-62] [VERIFY: electron/main/world/private-ipc.ts:32-54] [VERIFY: electron/main/world/evaluation-import.ts:29-33,60-105,124-155,251-276]
+
+UI 在 `AccessSettings` 后复用原 WorldConfirmation，确认后重核 World／incarnation／revision 与 busy/pending；unknown 保原提交身份、只读 status 核对，不自动重新提交。[VERIFY: src/pages/World/StorageSettings.tsx:141-144] [VERIFY: src/pages/World/EvaluationSettings.tsx:35-85,110-145,158-181] [VERIFY: src/pages/World/WorldConfirmation.tsx:9-42]
+
+`configured` 只表达 canonical 配置持久保存，不承诺当前权限可用；status 不读 Main 原请求 custody，也不据此推断 rollback。安全 issue 沿原 WorldAccessIssue 字段，Main 另有 `configuration-conflict / ticket-invalid / ticket-expired`。[VERIFY: runtime-host/modules/world/src/owner/runtime.rs:598-603,693-699] [VERIFY: electron/main/world/evaluation-import.ts:170-194] [VERIFY: src/types/world-evaluation.ts:15-32] [VERIFY: src/types/world-access.ts:10-14]
 
 The Electron public allowlist is authoritative for which Renderer `hostapi:fetch` requests are accepted: [route-boundary.ts](../../electron/api/route-boundary.ts#L190-L217)。
 

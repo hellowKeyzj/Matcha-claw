@@ -144,6 +144,20 @@ pub fn decode(bytes: &[u8]) -> rpc::Result<NativeMessage> {
                 "result_permission_denials",
                 Value::is_array,
             )?;
+            if message.get("input_message_id").is_some() {
+                let id = text(&message, "input_message_id", "result_input_message_id")?;
+                if uuid::Uuid::parse_str(id).is_err() {
+                    return Err(field_error("result_input_message_id", "invalid"));
+                }
+            }
+            if message.get("native_measurement").is_some() {
+                check(
+                    &message,
+                    "native_measurement",
+                    "result_native_measurement",
+                    valid_measurement,
+                )?;
+            }
             // A result is a turn observation, not an OS exit; success may still have is_error=true.
             Ok(NativeMessage::Result(message))
         }
@@ -179,14 +193,27 @@ pub fn decode(bytes: &[u8]) -> rpc::Result<NativeMessage> {
 }
 
 /// Content is a native string or content-block array, never a prompt control request.
-pub fn user_message(session_id: &str, message_id: &str, content: Value) -> Value {
-    json!({
+pub fn user_message(
+    session_id: &str,
+    message_id: &str,
+    content: Value,
+    max_turns: Option<u64>,
+    native_execution: Option<Value>,
+) -> Value {
+    let mut message = json!({
         "type": "user",
         "session_id": session_id,
         "uuid": message_id,
         "message": { "role": "user", "content": content },
         "parent_tool_use_id": null,
-    })
+    });
+    if let Some(max_turns) = max_turns {
+        message["native_budget"] = json!({"maxTurns": max_turns});
+    }
+    if let Some(native_execution) = native_execution {
+        message["native_execution"] = native_execution;
+    }
+    message
 }
 
 pub fn control_request(request_id: &str, request: Value) -> Value {
@@ -197,6 +224,44 @@ pub fn control_request(request_id: &str, request: Value) -> Value {
 pub fn control_response(request_id: &str, mut response: Value) -> Value {
     response["request_id"] = Value::String(request_id.to_owned());
     json!({ "type": "control_response", "response": response })
+}
+
+fn valid_measurement(value: &Value) -> bool {
+    value["scope"] == "native_query"
+        && value["coverage"] == "foreground_query_responses"
+        && value["complete"].is_boolean()
+        && [
+            "elapsed_ms",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "cost",
+            "model_calls",
+            "steps",
+            "source_reads",
+            "rows",
+            "bytes",
+        ]
+        .iter()
+        .all(|field| {
+            let metric = &value[*field];
+            metric["provenance"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+                && match metric["availability"].as_str() {
+                    Some("available") if *field != "cost" => metric["value"]
+                        .as_u64()
+                        .is_some_and(|value| value <= 9_007_199_254_740_991),
+                    Some("unavailable") => {
+                        metric.get("value").is_none()
+                            && metric["reason"]
+                                .as_str()
+                                .is_some_and(|value| !value.is_empty())
+                    }
+                    _ => false,
+                }
+        })
 }
 
 fn required<'a>(value: &'a Value, name: &str, field: &str) -> rpc::Result<&'a Value> {

@@ -1,9 +1,9 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { Dashboard } from '@/pages/Dashboard';
-import { useDashboardUiStore } from '@/stores/dashboard-ui';
-import { useDashboardUsageStore } from '@/stores/dashboard-usage';
+import { Dashboard } from '@/plugins/dashboard/pages';
+import { useDashboardUiStore } from '@/plugins/dashboard/stores/dashboard-ui';
+import { useDashboardUsageStore } from '@/plugins/dashboard/stores/dashboard-usage';
 
 const hostApiFetchMock = vi.fn(async (path: string) => {
   if (path === '/api/runtime-host/usage/recent') {
@@ -38,7 +38,7 @@ const gatewayState = {
   isInitialized: true,
 };
 
-vi.mock('@/stores/gateway', () => ({
+vi.mock('@/plugins/runtime/store', () => ({
   useGatewayStore: (selector: (state: typeof gatewayState) => unknown) => selector(gatewayState),
   useRuntimeHostStore: (selector: (state: typeof gatewayState) => unknown) => selector(gatewayState),
 }));

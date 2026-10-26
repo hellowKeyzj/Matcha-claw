@@ -482,6 +482,15 @@ impl OpenClawSessionGateway {
             .map_err(Into::into)
     }
 
+    pub(crate) async fn session_thinking(
+        &self,
+        command: sessions_module::thinking::SessionThinkingCommand,
+    ) -> sessions_module::thinking::SessionThinkingOutcome {
+        SessionOperation::new(Arc::clone(&self.client))
+            .session_thinking(command)
+            .await
+    }
+
     pub async fn history(
         &self,
         params: ChatHistoryParams,
@@ -689,13 +698,15 @@ impl OpenClawSessionGateway {
     pub async fn create_session(
         &self,
         params: SessionCreateParams,
-    ) -> Result<InvocationOutcome<SessionCreateResult, OpenClawSessionError>, OpenClawSessionError>
-    {
-        SessionOperation::new(Arc::clone(&self.client))
+    ) -> Result<
+        InvocationOutcome<SessionCreateResult, OpenClawSessionMutationFailure>,
+        OpenClawSessionError,
+    > {
+        let outcome = SessionOperation::new(Arc::clone(&self.client))
             .create_session(params)
             .await
-            .map(port_outcome)
-            .map_err(Into::into)
+            .map_err(OpenClawSessionError::from)?;
+        Ok(session_mutation_outcome(outcome))
     }
 
     pub async fn delete_session(

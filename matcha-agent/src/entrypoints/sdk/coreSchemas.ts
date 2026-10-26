@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod/v4'
+import { AcceptedInputScopeSchema } from '../../world/investigation.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 
 // ============================================================================
@@ -1301,6 +1302,18 @@ export const SDKUserMessageSchema = lazySchema(() =>
   SDKUserMessageContentSchema().extend({
     uuid: UUIDPlaceholder().optional(),
     session_id: z.string().optional(),
+    native_execution: AcceptedInputScopeSchema.optional(),
+    native_budget: z
+      .object({
+        maxTurns: z
+          .number()
+          .int()
+          .positive()
+          .max(Number.MAX_SAFE_INTEGER)
+          .optional(),
+      })
+      .strict()
+      .optional(),
   }),
 )
 
@@ -1414,6 +1427,40 @@ export const SDKPermissionDenialSchema = lazySchema(() =>
   }),
 )
 
+const NativeMetricSchema = lazySchema(() =>
+  z.discriminatedUnion('availability', [
+    z.object({
+      availability: z.literal('available'),
+      value: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      provenance: z.string(),
+    }),
+    z.object({
+      availability: z.literal('unavailable'),
+      provenance: z.string(),
+      reason: z.string(),
+    }),
+  ]),
+)
+
+export const NativeMeasurementSchema = lazySchema(() =>
+  z.object({
+    scope: z.literal('native_query'),
+    coverage: z.literal('foreground_query_responses'),
+    complete: z.boolean(),
+    elapsed_ms: NativeMetricSchema(),
+    input_tokens: NativeMetricSchema(),
+    output_tokens: NativeMetricSchema(),
+    cache_read_input_tokens: NativeMetricSchema(),
+    cache_creation_input_tokens: NativeMetricSchema(),
+    cost: NativeMetricSchema(),
+    model_calls: NativeMetricSchema(),
+    steps: NativeMetricSchema(),
+    source_reads: NativeMetricSchema(),
+    rows: NativeMetricSchema(),
+    bytes: NativeMetricSchema(),
+  }),
+)
+
 export const SDKResultSuccessSchema = lazySchema(() =>
   z.object({
     type: z.literal('result'),
@@ -1425,6 +1472,9 @@ export const SDKResultSuccessSchema = lazySchema(() =>
     result: z.string(),
     stop_reason: z.string().nullable(),
     total_cost_usd: z.number(),
+    input_message_id: UUIDPlaceholder().optional(),
+    native_measurement: NativeMeasurementSchema().optional(),
+    native_input_receipt: z.record(z.string(), z.unknown()).optional(),
     usage: NonNullableUsagePlaceholder(),
     modelUsage: z.record(z.string(), ModelUsageSchema()),
     permission_denials: z.array(SDKPermissionDenialSchema()),
@@ -1450,6 +1500,9 @@ export const SDKResultErrorSchema = lazySchema(() =>
     num_turns: z.number(),
     stop_reason: z.string().nullable(),
     total_cost_usd: z.number(),
+    input_message_id: UUIDPlaceholder().optional(),
+    native_measurement: NativeMeasurementSchema().optional(),
+    native_input_receipt: z.record(z.string(), z.unknown()).optional(),
     usage: NonNullableUsagePlaceholder(),
     modelUsage: z.record(z.string(), ModelUsageSchema()),
     permission_denials: z.array(SDKPermissionDenialSchema()),

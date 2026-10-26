@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { selectViewportItems } from '@/stores/chat/store-state-helpers';
-import { createViewportWindowState, syncViewportState } from '@/stores/chat/viewport-state';
+import { selectViewportItems } from '@/plugins/chat/store/store-state-helpers';
+import { createViewportWindowState, syncViewportState } from '@/plugins/chat/store/viewport-state';
 import { buildRenderItemsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
 
 function buildMessages(count: number): RawMessage[] {

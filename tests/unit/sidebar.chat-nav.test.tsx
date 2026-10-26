@@ -1,16 +1,30 @@
-import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { Sidebar } from '@/components/layout/Sidebar';
-import { useChatStore } from '@/stores/chat';
-import { useRuntimeHostStore } from '@/stores/gateway';
+import { useChatStore } from '@/plugins/chat/store';
+import { createPluginHost, type PreloadableComponent } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { applicationShellPlugin, sidebarActions, sidebarFooter, sidebarPanels } from '@/app/extensions';
+import { agentsPlugin } from '@/plugins/agents/plugin';
+import { navigationPlugin } from '@/plugins/navigation/plugin';
+import { useAccountStore } from '@/plugins/account/stores/account';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
 import { useLayoutStore } from '@/stores/layout';
-import { useSettingsStore } from '@/stores/settings';
-import { useSubagentsStore } from '@/stores/subagents';
-import { useTeamsStore } from '@/stores/teams';
-import { useTaskCenterStore } from '@/stores/task-center-store';
+import { useSettingsStore } from '@/plugins/settings/store';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
+import { useTeamsStore } from '@/plugins/teams/store';
+import { useTaskCenterStore } from '@/plugins/tasks/stores/task-center-store';
 import i18n from '@/i18n';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
+
+const host = createPluginHost([applicationShellPlugin, agentsPlugin, navigationPlugin]);
+
+beforeAll(async () => {
+  await Promise.all([sidebarActions, sidebarPanels, sidebarFooter].flatMap((point) => (
+    host.get(point).map(({ component }) => (component as PreloadableComponent<object>).preload())
+  )));
+});
 
 const endpoint = {
   kind: 'native-runtime' as const,
@@ -18,7 +32,7 @@ const endpoint = {
   runtimeInstanceId: 'local',
 };
 
-vi.mock('@/features/teams/feature-flag', () => ({
+vi.mock('@/plugins/teams/feature-flag', () => ({
   TEAMS_FEATURE_ENABLED: true,
 }));
 
@@ -27,22 +41,26 @@ function LocationEcho() {
   return <div data-testid="location-echo">{`${location.pathname}${location.search}`}</div>;
 }
 
-function mountSidebar(initialPath: string) {
-  render(
-    <MemoryRouter initialEntries={[initialPath]}>
-      <Routes>
-        <Route
-          path="*"
-          element={(
-            <>
-              <Sidebar />
-              <LocationEcho />
-            </>
-          )}
-        />
-      </Routes>
-    </MemoryRouter>,
-  );
+async function mountSidebar(initialPath: string) {
+  await act(async () => {
+    render(
+      <PluginHostProvider host={host}>
+        <MemoryRouter initialEntries={[initialPath]}>
+          <Routes>
+            <Route
+              path="*"
+              element={(
+                <>
+                  <Sidebar />
+                  <LocationEcho />
+                </>
+              )}
+            />
+          </Routes>
+        </MemoryRouter>
+      </PluginHostProvider>,
+    );
+  });
 }
 
 function createSessionRecord(input?: {
@@ -88,6 +106,7 @@ function createSessionRecord(input?: {
 }
 
 function setupSidebarState() {
+  useAccountStore.setState({ status: 'signedIn' });
   useSettingsStore.setState({
     language: 'en',
     devModeUnlocked: false,
@@ -159,19 +178,19 @@ function setupSidebarState() {
 }
 
 describe('sidebar chat nav', () => {
-  it('renders nav labels in the sidebar drawer', () => {
+  it('renders nav labels in the sidebar drawer', async () => {
     setupSidebarState();
 
-    mountSidebar('/dashboard');
+    await mountSidebar('/dashboard');
 
     expect(screen.getByText('New Chat')).toBeInTheDocument();
     expect(screen.getByText('Subagents')).toBeInTheDocument();
   });
 
-  it('does not animate sidebar width changes on the outer shell', () => {
+  it('does not animate sidebar width changes on the outer shell', async () => {
     setupSidebarState();
 
-    mountSidebar('/dashboard');
+    await mountSidebar('/dashboard');
 
     const sidebar = screen.getByRole('complementary');
     expect(sidebar.className).not.toContain('transition-[width]');
@@ -199,7 +218,7 @@ describe('sidebar chat nav', () => {
       deleteSession: vi.fn(),
     } as never);
 
-    mountSidebar('/tasks');
+    await mountSidebar('/tasks');
 
     fireEvent.click(screen.getByRole('button', { name: 'New Chat' }));
 
@@ -209,7 +228,7 @@ describe('sidebar chat nav', () => {
     });
   });
 
-  it('on chat route, clicking chat creates new session when current session has messages', () => {
+  it('on chat route, clicking chat creates new session when current session has messages', async () => {
     setupSidebarState();
     const newSession = vi.fn();
     useChatStore.setState({
@@ -231,7 +250,7 @@ describe('sidebar chat nav', () => {
       deleteSession: vi.fn(),
     } as never);
 
-    mountSidebar('/');
+    await mountSidebar('/');
 
     fireEvent.click(screen.getByRole('button', { name: 'New Chat' }));
 
@@ -267,7 +286,7 @@ describe('sidebar chat nav', () => {
       },
     } as never);
 
-    mountSidebar('/dashboard');
+    await mountSidebar('/dashboard');
 
     expect(screen.getByText('Session Blockers')).toBeInTheDocument();
     expect(screen.getByText('Stage stage-123')).toBeInTheDocument();
@@ -277,7 +296,7 @@ describe('sidebar chat nav', () => {
     });
   });
 
-  it('hides Team approval blockers when the sealed pending query is empty', () => {
+  it('hides Team approval blockers when the sealed pending query is empty', async () => {
     setupSidebarState();
     useTeamsStore.setState({
       teams: [
@@ -292,7 +311,7 @@ describe('sidebar chat nav', () => {
       approvalsByTeamId: { 'team-1': [] },
     } as never);
 
-    mountSidebar('/dashboard');
+    await mountSidebar('/dashboard');
 
     expect(screen.queryByText('Stage stage-456')).not.toBeInTheDocument();
   });
@@ -329,7 +348,7 @@ describe('sidebar chat nav', () => {
       },
     } as never);
 
-    mountSidebar('/dashboard');
+    await mountSidebar('/dashboard');
 
     const approvalCard = await screen.findByRole('button', { name: /approval-chat-1/i });
     expect(approvalCard).toBeInTheDocument();
@@ -370,7 +389,7 @@ describe('sidebar chat nav', () => {
       },
     } as never);
 
-    mountSidebar('/dashboard');
+    await mountSidebar('/dashboard');
 
     expect(screen.queryByText('MatchaClaw Runtime Host')).not.toBeInTheDocument();
     expect(await screen.findByRole('button', { name: /approval-chat-1/i })).toBeInTheDocument();

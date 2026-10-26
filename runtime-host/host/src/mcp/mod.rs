@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod app_plugins;
 mod client;
 mod discovery;
 pub(crate) mod route;

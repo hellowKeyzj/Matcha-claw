@@ -332,6 +332,7 @@ async fn delete_guarded(
                 "The deletion used a different data deletion intent",
             ));
         }
+        crate::mcp::stop_agent_oauth(&params.agent_id).await?;
         return finish_deletion(receipt.clone(), config).await;
     }
     let agent = snapshot
@@ -364,6 +365,7 @@ async fn delete_guarded(
         )
         .await?;
     }
+    crate::mcp::stop_agent_oauth(&params.agent_id).await?;
     let removed_sessions = sessions
         .delete_agent_sessions_guarded(&params.agent_id)
         .await?;

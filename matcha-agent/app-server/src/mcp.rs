@@ -1,8 +1,10 @@
 //! Native configuration commands and instance-bound MCP controls are separate surfaces.
 //! Configuration queries run the CLI's temporary health probe; they are not session status.
 
+mod oauth;
 mod projection;
 pub use projection::{project, validate_config};
+pub(crate) use oauth::{shutdown as shutdown_oauth, stop_agent as stop_agent_oauth};
 
 use std::{
     collections::BTreeMap,
@@ -159,7 +161,10 @@ pub async fn dispatch(
 ) -> rpc::Result<Value> {
     match method {
         "mcp.config.get" => projection::get(params, config).await,
-        "mcp.config.set" => projection::replace(params, config).await,
+        "mcp.config.set" => oauth::replace(params, config).await,
+        "mcp.oauth.start" | "mcp.oauth.status" | "mcp.oauth.logout" => {
+            oauth::dispatch(method, params, config, sessions).await
+        }
         "mcp.list" => {
             let input: AgentInput = rpc::params(params)?;
             let stdout = run(config, &input.agent_id, vec!["mcp".into(), "list".into()]).await?;
@@ -399,6 +404,17 @@ fn http_uri(value: &str) -> Option<Uri> {
     .then_some(uri)
 }
 
+fn authorization_uri(value: &str) -> Option<Uri> {
+    let uri = http_uri(value)?;
+    let Query(query) = Query::<BTreeMap<String, String>>::try_from_uri(&uri).ok()?;
+    if query.keys().any(|key| {
+        let key = key.to_ascii_lowercase().replace(['-', '_'], "");
+        key.contains("token") || key.contains("secret") || key.contains("password")
+            || key.contains("apikey") || key == "code" || key == "authorization"
+    }) { return None; }
+    Some(uri)
+}
+
 fn endpoint(value: &str) -> rpc::Result<Uri> {
     http_uri(value).filter(|uri| uri.query().is_none()).ok_or_else(|| {
         Error::invalid("MCP endpoint must be an absolute HTTP(S) URL without userinfo, query credentials, or fragment; use native OAuth or environment-reference headers")
@@ -574,21 +590,8 @@ async fn authenticate(input: AuthenticateInput, sessions: &Sessions) -> rpc::Res
             .get("authUrl")
             .and_then(Value::as_str)
             .ok_or_else(control_format)?;
-        let uri = http_uri(url).ok_or_else(auth_url_unavailable)?;
-        let Query(query) = Query::<BTreeMap<String, String>>::try_from_uri(&uri)
-            .map_err(|_| auth_url_unavailable())?;
         // This URL is an intentional, transient browser handoff, never config or diagnostics.
-        if query.keys().any(|key| {
-            let key = key.to_ascii_lowercase().replace(['-', '_'], "");
-            key.contains("token")
-                || key.contains("secret")
-                || key.contains("password")
-                || key.contains("apikey")
-                || key == "code"
-                || key == "authorization"
-        }) {
-            return Err(auth_url_unavailable());
-        }
+        authorization_uri(url).ok_or_else(auth_url_unavailable)?;
         Some(url.to_owned())
     } else {
         None

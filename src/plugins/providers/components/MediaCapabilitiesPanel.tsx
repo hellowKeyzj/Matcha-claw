@@ -1,0 +1,517 @@
+/**
+ * MediaCapabilitiesPanel
+ *
+ * 把 OpenClaw 的 6 项能力路由（chat / imageUnderstand / imageGenerate /
+ * videoGenerate / musicGenerate / tts）以 6 行表单的形式呈现，每一行只让
+ * 用户设置"用什么 credential/model"，进阶选项（fallbacks / timeoutMs）放在
+ * 每行的折叠区。
+ *
+ * 候选模型来源：模型清单。能力路由只引用已登记的 credential/model，
+ * 不直接创建模型，也不写 provider 凭证。
+ */
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Loader2, Plus, RefreshCw, Save, Settings2, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
+import {
+  CAPABILITY_KEYS,
+  modelRouteRefToString,
+  parseModelRouteRefString,
+  type CapabilityKey,
+  type ModelRoute,
+  type ModelRouteRef,
+} from '@/lib/capability-routing';
+import { useCapabilityRoutingStore } from '@/plugins/providers/stores/capability-routing';
+import { useProviderModelCatalogStore } from '@/plugins/providers/stores/provider-model-catalog';
+import type { ProviderModel } from '@/lib/provider-model-catalog';
+import { getProviderAccountRuntimeReport, useProviderStore, type ProviderSnapshot } from '@/plugins/providers/stores/providers';
+import { providerDiagnosticError } from '@/lib/provider-projection-errors';
+import { cn } from '@/lib/utils';
+import { useTranslation } from 'react-i18next';
+
+interface CapabilityRowState {
+  primary: string;
+  fallbacks: string[];
+  timeoutMs: string;
+}
+
+const EMPTY_ROW: CapabilityRowState = {
+  primary: '',
+  fallbacks: [],
+  timeoutMs: '',
+};
+
+const MEDIA_RUNTIME_ENDPOINT = {
+  kind: 'native-runtime',
+  runtimeAdapterId: 'openclaw',
+  runtimeInstanceId: 'local',
+} as const;
+
+interface ModelOption {
+  value: string;
+  label: string;
+  disabled: boolean;
+  detail?: string;
+}
+
+function buildModelOptions(
+  models: readonly ProviderModel[],
+  capability: CapabilityKey,
+  credentialLabels: ReadonlyMap<string, string>,
+  snapshot: ProviderSnapshot,
+  t: ReturnType<typeof useTranslation>[0],
+): ModelOption[] {
+  return models
+    .filter((model) => model.capabilities.includes(capability))
+    .map((model) => {
+      const value = `${model.accountId}/${model.modelId}`;
+      const label = `${model.label ?? credentialLabels.get(model.accountId) ?? model.accountId} / ${model.modelId}`;
+      const report = getProviderAccountRuntimeReport(snapshot, model.accountId, MEDIA_RUNTIME_ENDPOINT);
+      const execution = report?.execution ?? 'unknown';
+      const diagnostic = providerDiagnosticError(report?.diagnostic ?? null);
+      const detail = execution === 'blocked' || execution === 'unsupported'
+        ? `OpenClaw: ${t(`aiProviders.execution.${execution}`)}${diagnostic ? ` — ${diagnostic}` : ''}` : undefined;
+      return { value, label, disabled: execution === 'blocked' || execution === 'unsupported', detail };
+    })
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function uniqueRegisteredRefs(refs: readonly string[], available: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    if (!available.has(ref) || seen.has(ref)) continue;
+    seen.add(ref);
+    out.push(ref);
+  }
+  return out;
+}
+
+function routeToRowState(route: ModelRoute | undefined, available: ReadonlySet<string>): CapabilityRowState {
+  if (!route) return EMPTY_ROW;
+  const primary = modelRouteRefToString(route.primary);
+  return {
+    primary: available.has(primary) ? primary : '',
+    fallbacks: uniqueRegisteredRefs(route.fallbacks.map((ref) => modelRouteRefToString(ref)), available),
+    timeoutMs: route.timeoutMs ? String(route.timeoutMs) : '',
+  };
+}
+
+function rowsEqual(a: CapabilityRowState, b: CapabilityRowState): boolean {
+  return a.primary === b.primary
+    && a.timeoutMs === b.timeoutMs
+    && a.fallbacks.length === b.fallbacks.length
+    && a.fallbacks.every((value, index) => value === b.fallbacks[index]);
+}
+
+function CapabilityRow(props: {
+  capability: CapabilityKey;
+  title: string;
+  initial: ModelRoute | undefined;
+  modelOptions: readonly ModelOption[];
+  saving: boolean;
+  disabled: boolean;
+  onSave: (route: ModelRoute | undefined) => Promise<void>;
+}): ReactNode {
+  const { t } = useTranslation('settings');
+  const { capability, title, initial, modelOptions, saving, disabled, onSave } = props;
+  const availableRefs = useMemo(() => new Set(modelOptions.map((option) => option.value)), [modelOptions]);
+  const baseline = useMemo(() => routeToRowState(initial, availableRefs), [initial, availableRefs]);
+  const baselineKey = `${baseline.primary}|${baseline.fallbacks.join('\n')}|${baseline.timeoutMs}`;
+  return (
+    <CapabilityRowEditor
+      key={baselineKey}
+      capability={capability}
+      title={title}
+      baseline={baseline}
+      hasInitial={Boolean(initial?.fallbacks.length || initial?.timeoutMs)}
+      modelOptions={modelOptions}
+      saving={saving}
+      disabled={disabled}
+      onSave={onSave}
+      t={t}
+    />
+  );
+}
+
+interface CapabilityRowEditorProps {
+  capability: CapabilityKey;
+  title: string;
+  baseline: CapabilityRowState;
+  hasInitial: boolean;
+  modelOptions: readonly ModelOption[];
+  saving: boolean;
+  disabled: boolean;
+  onSave: (route: ModelRoute | undefined) => Promise<void>;
+  t: ReturnType<typeof useTranslation>[0];
+}
+
+function CapabilityRowEditor(props: CapabilityRowEditorProps): ReactNode {
+  const { capability, title, baseline, hasInitial, modelOptions, saving, disabled, onSave, t } = props;
+  const [row, setRow] = useState<CapabilityRowState>(baseline);
+  const [advancedOpen, setAdvancedOpen] = useState<boolean>(hasInitial);
+  const [fallbackCandidate, setFallbackCandidate] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const dirty = !rowsEqual(row, baseline);
+  const trimmedPrimary = row.primary.trim();
+  const availableFallbackOptions = modelOptions.filter((option) => (
+    option.value !== row.primary && !row.fallbacks.includes(option.value)
+  ));
+
+  const canAddFallback = availableFallbackOptions.some((option) => (
+    option.value === fallbackCandidate && !option.disabled
+  ));
+
+  const handleAddFallback = () => {
+    if (!canAddFallback) return;
+    setRow((prev) => ({
+      ...prev,
+      fallbacks: prev.fallbacks.includes(fallbackCandidate)
+        ? prev.fallbacks
+        : [...prev.fallbacks, fallbackCandidate],
+    }));
+    setFallbackCandidate('');
+  };
+
+  const handleMoveFallback = (index: number, direction: -1 | 1) => {
+    setRow((prev) => {
+      const target = index + direction;
+      if (target < 0 || target >= prev.fallbacks.length) return prev;
+      const next = [...prev.fallbacks];
+      const current = next[index];
+      if (!current) return prev;
+      next[index] = next[target] ?? current;
+      next[target] = current;
+      return { ...prev, fallbacks: next };
+    });
+  };
+
+  const handleRemoveFallback = (index: number) => {
+    setRow((prev) => ({
+      ...prev,
+      fallbacks: prev.fallbacks.filter((_, idx) => idx !== index),
+    }));
+  };
+
+  const handleSave = async () => {
+    setError(null);
+    if (!trimmedPrimary) {
+      await onSave(undefined);
+      return;
+    }
+    const primary = parseModelRouteRefString(trimmedPrimary);
+    if (!primary) {
+      setError(t('capabilityRouting.errors.invalidPrimary'));
+      return;
+    }
+    const timeoutMs = row.timeoutMs.trim();
+    let timeoutValue: number | undefined;
+    if (timeoutMs) {
+      const parsed = Number.parseInt(timeoutMs, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        setError(t('capabilityRouting.errors.invalidTimeout'));
+        return;
+      }
+      timeoutValue = parsed;
+    }
+    const route: ModelRoute = {
+      primary,
+      fallbacks: row.fallbacks
+        .map((value) => parseModelRouteRefString(value))
+        .filter((ref): ref is ModelRouteRef => ref !== null),
+      ...(timeoutValue !== undefined ? { timeoutMs: timeoutValue } : {}),
+    };
+    await onSave(route);
+  };
+
+  const handleClear = async () => {
+    setError(null);
+    await onSave(undefined);
+  };
+
+  return (
+    <div className="border-t first:border-t-0 [border-color:hsl(var(--shell-border))]">
+      <div className="grid gap-3 px-4 py-3 md:grid-cols-[11rem_minmax(0,1fr)_8.75rem] md:items-center">
+        <div className="min-w-0 space-y-0.5">
+          <p className="truncate text-sm font-medium">{title}</p>
+        </div>
+        <div className="min-w-0 space-y-1">
+          <Label htmlFor={`capability-${capability}-primary`} className="sr-only">
+            {t('capabilityRouting.primaryLabel')}
+          </Label>
+          <Select
+            id={`capability-${capability}-primary`}
+            value={row.primary}
+            onChange={(event) => {
+              const primary = event.target.value;
+              setRow((prev) => ({
+                ...prev,
+                primary,
+                fallbacks: prev.fallbacks.filter((fallback) => fallback !== primary),
+              }));
+            }}
+            disabled={saving || disabled || modelOptions.length === 0}
+            className="h-9 rounded-md bg-background text-sm"
+          >
+            <option value="">{t('capabilityRouting.noModelOption')}</option>
+            {modelOptions.map((option) => (
+              <option key={`${capability}-${option.value}`} value={option.value} disabled={option.disabled}>
+                {option.detail ? `${option.label} — ${option.detail}` : option.label}
+              </option>
+            ))}
+          </Select>
+          {modelOptions.length === 0 && (
+            <p className="text-xs text-muted-foreground">{t('capabilityRouting.noRegisteredModels')}</p>
+          )}
+        </div>
+        <div className="grid grid-cols-[3.25rem_2rem_2rem] items-center justify-end gap-1.5">
+          {baseline.primary ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleClear}
+              disabled={saving || disabled}
+              className="h-8 px-2.5"
+            >
+              {t('capabilityRouting.clear')}
+            </Button>
+          ) : (
+            <span aria-hidden="true" />
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setAdvancedOpen((open) => !open)}
+            className={cn('h-8 w-8', advancedOpen && 'bg-[hsl(var(--shell-surface-active))] text-foreground')}
+            aria-label={advancedOpen ? t('capabilityRouting.advanced.collapse') : t('capabilityRouting.advanced.expand')}
+            title={advancedOpen ? t('capabilityRouting.advanced.collapse') : t('capabilityRouting.advanced.expand')}
+          >
+            <Settings2 className="h-4 w-4" />
+          </Button>
+          <Button
+            size="icon"
+            onClick={handleSave}
+            disabled={saving || disabled || !dirty}
+            className="h-8 w-8"
+            aria-label={t('capabilityRouting.save')}
+            title={t('capabilityRouting.save')}
+          >
+            <Save className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+
+      {advancedOpen ? (
+        <div className="space-y-3 border-t bg-[hsl(var(--shell-surface))] px-4 py-3 [border-color:hsl(var(--shell-border))]">
+          <div className="space-y-1.5">
+            <Label htmlFor={`capability-${capability}-fallback-add`} className="text-xs">
+              {t('capabilityRouting.fallbacksLabel')}
+            </Label>
+            <div className="flex flex-wrap gap-2">
+              <Select
+                id={`capability-${capability}-fallback-add`}
+                value={fallbackCandidate}
+                onChange={(event) => setFallbackCandidate(event.target.value)}
+                disabled={saving || disabled || availableFallbackOptions.length === 0}
+                className="h-9 min-w-64 flex-1 rounded-md bg-background text-sm"
+              >
+                <option value="">{t('capabilityRouting.fallbackSelectPlaceholder')}</option>
+                {availableFallbackOptions.map((option) => (
+                  <option key={`${capability}-fallback-${option.value}`} value={option.value} disabled={option.disabled}>
+                    {option.detail ? `${option.label} — ${option.detail}` : option.label}
+                  </option>
+                ))}
+              </Select>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleAddFallback}
+                disabled={saving || disabled || !canAddFallback}
+                className="h-9"
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                {t('capabilityRouting.addFallback')}
+              </Button>
+            </div>
+            {row.fallbacks.length > 0 && (
+              <div className="space-y-2">
+                {row.fallbacks.map((fallback, index) => (
+                  <div key={`${capability}-${fallback}`} className="flex items-center gap-2 rounded-md border bg-background px-3 py-1.5">
+                    <span className="min-w-0 flex-1 truncate text-sm">{fallback}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => handleMoveFallback(index, -1)}
+                      disabled={saving || disabled || index === 0}
+                      aria-label={t('capabilityRouting.moveFallbackUp')}
+                      title={t('capabilityRouting.moveFallbackUp')}
+                    >
+                      <ArrowUp className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => handleMoveFallback(index, 1)}
+                      disabled={saving || disabled || index === row.fallbacks.length - 1}
+                      aria-label={t('capabilityRouting.moveFallbackDown')}
+                      title={t('capabilityRouting.moveFallbackDown')}
+                    >
+                      <ArrowDown className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                      onClick={() => handleRemoveFallback(index)}
+                      disabled={saving || disabled}
+                      aria-label={t('capabilityRouting.removeFallback')}
+                      title={t('capabilityRouting.removeFallback')}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor={`capability-${capability}-timeout`} className="text-xs">
+              {t('capabilityRouting.timeoutLabel')}
+            </Label>
+            <Input
+              id={`capability-${capability}-timeout`}
+              value={row.timeoutMs}
+              onChange={(event) => setRow((prev) => ({ ...prev, timeoutMs: event.target.value }))}
+              placeholder="180000"
+              spellCheck={false}
+              disabled={saving || disabled}
+              className="h-9 rounded-md bg-background text-sm"
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {error ? <p className="px-4 pb-3 text-xs text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+export function MediaCapabilitiesPanel() {
+  const { t } = useTranslation('settings');
+  const [open, setOpen] = useState(false);
+  const routing = useCapabilityRoutingStore((state) => state.routing);
+  const ready = useCapabilityRoutingStore((state) => state.ready);
+  const loading = useCapabilityRoutingStore((state) => state.loading);
+  const saving = useCapabilityRoutingStore((state) => state.saving);
+  const error = useCapabilityRoutingStore((state) => state.error);
+  const refresh = useCapabilityRoutingStore((state) => state.refresh);
+  const setRoute = useCapabilityRoutingStore((state) => state.setRoute);
+  const models = useProviderModelCatalogStore((state) => state.models);
+  const modelCatalogReady = useProviderModelCatalogStore((state) => state.ready);
+  const modelCatalogLoading = useProviderModelCatalogStore((state) => state.loading);
+  const refreshModelCatalog = useProviderModelCatalogStore((state) => state.refresh);
+  const providerSnapshot = useProviderStore((state) => state.providerSnapshot);
+  const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
+  const { credentials } = providerSnapshot;
+  const credentialLabels = useMemo(() => new Map(
+    credentials.map((credential) => [credential.id, credential.label || credential.vendorId]),
+  ), [credentials]);
+  const runtimeReport = providerSnapshot.reports.find((report) => (
+    report.endpoint.runtimeAdapterId === MEDIA_RUNTIME_ENDPOINT.runtimeAdapterId
+    && report.endpoint.runtimeInstanceId === MEDIA_RUNTIME_ENDPOINT.runtimeInstanceId
+    && report.accounts.every((account) => account.accountRevision === providerSnapshot.revisions[account.accountId])
+  ));
+  const runtimeDiagnostic = (runtimeReport?.observed === 'mismatch' || runtimeReport?.diagnostic?.reason === 'provider-restart-required')
+    && runtimeReport?.diagnostic?.reason !== 'provider-projection-partial'
+    ? providerDiagnosticError(runtimeReport?.diagnostic ?? null) : undefined;
+
+  useEffect(() => {
+    void refresh();
+    void refreshModelCatalog();
+    void refreshProviderSnapshot({ trigger: 'background', reason: 'media_capabilities_mount' });
+  }, [refresh, refreshModelCatalog, refreshProviderSnapshot]);
+
+  const initialLoading = (loading && !ready) || (modelCatalogLoading && !modelCatalogReady);
+
+  return (
+    <Card className="overflow-hidden rounded-[1.25rem] bg-[hsl(var(--shell-surface-muted))] [border-color:hsl(var(--shell-border))]">
+      <CardHeader className={cn('pb-4', open && 'border-b [border-color:hsl(var(--shell-border))]')}>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <button
+            type="button"
+            className="flex min-w-0 items-center gap-2 text-left"
+            onClick={() => setOpen((value) => !value)}
+            aria-expanded={open}
+          >
+            {open ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />}
+            <CardTitle>{t('capabilityRouting.title')}</CardTitle>
+          </button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void refresh();
+              void refreshModelCatalog();
+              void refreshProviderSnapshot({ trigger: 'manual', reason: 'media_capabilities_refresh' });
+            }}
+            disabled={loading || modelCatalogLoading}
+          >
+            <RefreshCw className={cn('h-4 w-4 mr-2', (loading || modelCatalogLoading) && 'animate-spin')} />
+            {t('capabilityRouting.refresh')}
+          </Button>
+        </div>
+      </CardHeader>
+      {open ? <CardContent className="p-0">
+        {initialLoading ? (
+          <div className="flex items-center justify-center py-10">
+            <Loader2 className="h-6 w-6 animate-spin" />
+          </div>
+        ) : (
+          <div>
+            {error && (
+              <div className="m-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                {error}
+              </div>
+            )}
+            {runtimeDiagnostic && (
+              <div className="m-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                OpenClaw: {runtimeDiagnostic}
+              </div>
+            )}
+            {CAPABILITY_KEYS.map((capability) => (
+              <CapabilityRow
+                key={capability}
+                capability={capability}
+                title={t(`capabilityRouting.capabilities.${capability}.title`)}
+                initial={routing[capability]}
+                modelOptions={buildModelOptions(models, capability, credentialLabels, providerSnapshot, t)}
+                saving={saving}
+                disabled={false}
+                onSave={(route) => setRoute(capability, route)}
+              />
+            ))}
+            <CapabilityRow
+              capability="tts"
+              title={t('capabilityRouting.tts.title')}
+              initial={routing.tts}
+              modelOptions={buildModelOptions(models, 'tts', credentialLabels, providerSnapshot, t)}
+              saving={saving}
+              disabled={false}
+              onSave={(route) => setRoute('tts', route)}
+            />
+          </div>
+        )}
+      </CardContent> : null}
+    </Card>
+  );
+}

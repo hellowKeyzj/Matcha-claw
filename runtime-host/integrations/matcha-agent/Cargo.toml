@@ -11,6 +11,10 @@ path = "src/lib.rs"
 [dependencies]
 diagnostics-module = { package = "diagnostics", version = "0.1.0", path = "../../modules/diagnostics" }
 base64.workspace = true
+hmac.workspace = true
+reqwest.workspace = true
+world = { version = "0.1.0", path = "../../modules/world" }
+world-protocol = { version = "0.1.0", path = "../../modules/world/protocol" }
 chrono.workspace = true
 foundation = { version = "0.1.0", path = "../../foundation" }
 organization = { version = "0.1.0", path = "../../modules/organization" }

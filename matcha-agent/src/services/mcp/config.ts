@@ -553,7 +553,7 @@ export function filterMcpServersByPolicy<T>(configs: Record<string, T>): {
 /**
  * Internal utility: Expands environment variables in an MCP server config
  */
-function expandEnvVars(config: McpServerConfig): {
+export function expandEnvVars(config: McpServerConfig): {
   expanded: McpServerConfig
   missingVars: string[]
 } {

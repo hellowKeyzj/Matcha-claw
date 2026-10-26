@@ -26,17 +26,17 @@ export async function splitSettingsProxyIntent(input: ProxyIntent): Promise<Sani
   if (!isText(input.server, MAX_INPUT_BYTES) || !isText(input.bypassRules, MAX_BYPASS_BYTES)) {
     throw new Error('Settings proxy request is invalid');
   }
-  if (!input.enabled) {
+  const raw = input.server.trim();
+  if (!raw) {
+    if (input.enabled) throw new Error('Settings proxy request is invalid');
     return { enabled: false, server: '', bypassRules: input.bypassRules, credentialReference: null };
   }
-  const raw = input.server.trim();
-  if (!raw) throw new Error('Settings proxy request is invalid');
   const url = parseProxyEndpoint(raw);
   if (url.username || url.password) {
     throw new Error('Settings proxy credentials are not supported');
   }
   return {
-    enabled: true,
+    enabled: input.enabled,
     server: url.toString().replace(/\/$/, ''),
     bypassRules: input.bypassRules,
     credentialReference: null,

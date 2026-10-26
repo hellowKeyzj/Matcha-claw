@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HostSessionTimelineMessage } from '@/lib/host-api';
-import type { HistoryWindowResult } from '@/stores/chat/history-fetch-helpers';
-import type { StoreHistoryCache } from '@/stores/chat/history-cache';
-import type { ChatStoreState } from '@/stores/chat/types';
+import type { HistoryWindowResult } from '@/plugins/chat/store/history-fetch-helpers';
+import type { StoreHistoryCache } from '@/plugins/chat/store/history-cache';
+import type { ChatStoreState } from '@/plugins/chat/store/types';
 import type { SessionRenderItem } from '../../src/types/session/render-item';
 import {
   createEmptySessionRecord,
   getSessionItems,
   projectSessionViewItems,
   resetSessionProjection,
-} from '@/stores/chat/store-state-helpers';
+} from '@/plugins/chat/store/store-state-helpers';
 import {
   assistantItem,
   completeFact,
@@ -17,12 +17,12 @@ import {
   userItem,
   windowView,
 } from './helpers/session-fixtures';
-import { buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/stores/chat/session-identity';
+import { buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const fetchHistoryWindowMock = vi.fn();
 
-vi.mock('@/stores/chat/history-fetch-helpers', () => ({
+vi.mock('@/plugins/chat/store/history-fetch-helpers', () => ({
   fetchHistoryWindow: (...args: unknown[]) => fetchHistoryWindowMock(...args),
 }));
 
@@ -183,7 +183,7 @@ describe('chat history load execution', () => {
   });
 
   it('active foreground load applies authoritative snapshot and clears loading ui', async () => {
-    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+    const { executeHistoryLoad } = await import('@/plugins/chat/store/history-load-execution');
     const sessionKey = 'agent:main:main';
     const requestedSessionKey = testRecordKey(sessionKey);
     const resultMessages: HistoryMessage[] = [
@@ -228,7 +228,7 @@ describe('chat history load execution', () => {
   });
 
   it('foreground refresh clears items when the canonical SessionView is empty', async () => {
-    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+    const { executeHistoryLoad } = await import('@/plugins/chat/store/history-load-execution');
     const sessionKey = 'agent:main:main';
     const requestedSessionKey = testRecordKey(sessionKey);
     const currentMessages: HistoryMessage[] = [
@@ -262,7 +262,7 @@ describe('chat history load execution', () => {
   });
 
   it('background load updates the target session without touching foreground loading ui', async () => {
-    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+    const { executeHistoryLoad } = await import('@/plugins/chat/store/history-load-execution');
     const sessionKey = 'agent:worker:main';
     const requestedSessionKey = testRecordKey(sessionKey);
     const loadedMessages: HistoryMessage[] = [
@@ -302,7 +302,7 @@ describe('chat history load execution', () => {
   });
 
   it('active foreground load marks error when authoritative snapshot fetch fails', async () => {
-    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+    const { executeHistoryLoad } = await import('@/plugins/chat/store/history-load-execution');
     const sessionKey = 'agent:main:main';
     const requestedSessionKey = testRecordKey(sessionKey);
     const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
@@ -327,7 +327,7 @@ describe('chat history load execution', () => {
   });
 
   it('aborts before apply when foreground session already changed', async () => {
-    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+    const { executeHistoryLoad } = await import('@/plugins/chat/store/history-load-execution');
     const requestedSessionKey = testRecordKey('agent:main:main');
     const { set, get } = createStateHarness({ currentSessionKey: testRecordKey('agent:main:other'), error: null });
     const historyRuntime = createHistoryRuntimeHarness();
@@ -350,7 +350,7 @@ describe('chat history load execution', () => {
   it('chat_init_cold_start 首次前台加载遇到超时后会按启动期预算重试并恢复', async () => {
     vi.useFakeTimers();
     try {
-      const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+      const { executeHistoryLoad } = await import('@/plugins/chat/store/history-load-execution');
       const sessionKey = 'agent:main:main';
       const requestedSessionKey = testRecordKey(sessionKey);
       const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
@@ -398,7 +398,7 @@ describe('chat history load execution', () => {
   it('chat_init_cold_start 首次前台加载失败耗尽预算后才进入 error', async () => {
     vi.useFakeTimers();
     try {
-      const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+      const { executeHistoryLoad } = await import('@/plugins/chat/store/history-load-execution');
       const sessionKey = 'agent:main:main';
       const requestedSessionKey = testRecordKey(sessionKey);
       const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
@@ -430,7 +430,7 @@ describe('chat history load execution', () => {
   it('chat_init_cold_start 遇到 runtime startup 特殊错误时会扩大重试预算并在耗尽后保持非失败态', async () => {
     vi.useFakeTimers();
     try {
-      const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+      const { executeHistoryLoad } = await import('@/plugins/chat/store/history-load-execution');
       const sessionKey = 'agent:main:main';
       const requestedSessionKey = testRecordKey(sessionKey);
       const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });
@@ -462,7 +462,7 @@ describe('chat history load execution', () => {
   });
 
   it('非冷启动前台加载不会吃启动期重试预算', async () => {
-    const { executeHistoryLoad } = await import('@/stores/chat/history-load-execution');
+    const { executeHistoryLoad } = await import('@/plugins/chat/store/history-load-execution');
     const sessionKey = 'agent:main:main';
     const requestedSessionKey = testRecordKey(sessionKey);
     const { set, get } = createStateHarness({ currentSessionKey: requestedSessionKey });

@@ -1,0 +1,21 @@
+# Require code-owner approval in branch protection for these rules to be enforced.
+/e2e/AGENTS.md @hellowKeyzj
+/e2e/docs/ @hellowKeyzj
+/e2e/eslint.config.mjs @hellowKeyzj
+/e2e/scripts/ @hellowKeyzj
+/e2e/playwright.config.ts @hellowKeyzj
+/e2e/tsconfig.json @hellowKeyzj
+/e2e/package.json @hellowKeyzj
+/e2e/src/fixtures/ @hellowKeyzj
+/e2e/src/config/ @hellowKeyzj
+/e2e/src/abilities/ @hellowKeyzj
+/AGENTS.md @hellowKeyzj
+/CLAUDE.md @hellowKeyzj
+/package.json @hellowKeyzj
+/pnpm-workspace.yaml @hellowKeyzj
+/pnpm-lock.yaml @hellowKeyzj
+/playwright.config.ts @hellowKeyzj
+/tests/e2e/ @hellowKeyzj
+/vite.config.ts @hellowKeyzj
+/.github/workflows/electron-e2e.yml @hellowKeyzj
+/.github/CODEOWNERS @hellowKeyzj

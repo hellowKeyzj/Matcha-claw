@@ -1,4 +1,5 @@
 import { validateSessionIdentity, type SessionIdentity } from './desktop/runtime-address';
+import { isConnectorOAuthObservation, type ConnectorOAuthObservation } from './connectors-oauth';
 
 export type ExternalConnectorConnectionStatusResultType = 'connected' | 'disconnected' | 'unsupported' | 'disabled' | 'unknown';
 
@@ -34,6 +35,7 @@ export interface ExternalConnectorConnectionStatus {
 }
 
 export type ConnectorObservationResult =
+  | ConnectorOAuthObservation
   | { callId: string; kind: 'status'; statuses: ExternalConnectorConnectionStatus[] }
   | { callId: string; kind: 'probe'; status: ExternalConnectorConnectionStatus }
   | { callId: string; kind: 'sessionStatus'; sessionIdentity: SessionIdentity; statuses: SessionConnectorStatus[] };
@@ -79,6 +81,7 @@ function optionalText(value: unknown): boolean {
 }
 
 export function isConnectorObservationResult(value: unknown): value is ConnectorObservationResult {
+  if (isConnectorOAuthObservation(value)) return true;
   return record(value) && typeof value.callId === 'string' && /^[a-f0-9]{32}$/.test(value.callId)
     && ((value.kind === 'status' && keys(value, ['callId', 'kind', 'statuses'])
       && Array.isArray(value.statuses) && value.statuses.every(isStatus))

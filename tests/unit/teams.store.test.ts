@@ -20,9 +20,9 @@ vi.mock('@/services/openclaw/team-runtime-client', () => ({
 vi.mock('@/lib/call-log-await', () => ({ waitForCall: vi.fn() }));
 
 import { waitForCall } from '@/lib/call-log-await';
-import { useChatStore } from '@/stores/chat';
-import { buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/stores/chat/session-identity';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { useChatStore } from '@/plugins/chat/store';
+import { buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import {
   buildTeamRoleChatTargetByIdentityKey,
   buildTeamRoleChatTargetIndex,
@@ -34,7 +34,7 @@ import {
   type TeamMeta,
   type TeamSkillCandidate,
   type TeamSkillPackage,
-} from '@/stores/teams';
+} from '@/plugins/teams/store';
 import {
   cancelTeamRun as beginTeamRunCancellation,
   createTeamRun as createTeamRunLifecycle,

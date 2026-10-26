@@ -34,7 +34,12 @@ pub(in crate::composition::host) fn forward(
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled(), if receiving => receiving = false,
-                _ = producer.stopped(), if receiving => receiving = false,
+                _ = producer.stopped(), if receiving => {
+                    sessions_module::trace::log_unscoped("host.ingress.stopping", || serde_json::json!({
+                        "ingress": effect_id, "resident": resident, "running": running.len(),
+                    }));
+                    receiving = false;
+                },
                 Some((key, available)) = running.next(), if !running.is_empty() => {
                     resident -= 1;
                     receiving &= available;
@@ -66,6 +71,11 @@ pub(in crate::composition::host) fn forward(
                 }
             }
         }
+        drop(running);
+        drop(producer);
+        sessions_module::trace::log_unscoped("host.ingress.stopped", || serde_json::json!({
+            "ingress": effect_id, "resident": resident,
+        }));
         // Keep the receiver until the source/consumer shutdown barriers have joined.
         events
     });

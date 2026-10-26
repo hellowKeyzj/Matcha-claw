@@ -3,62 +3,89 @@ name: Electron E2E
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - 'electron/**'
-      - 'src/**'
-      - 'runtime-host/**'
-      - 'tests/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/electron-e2e.yml'
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: electron-e2e-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  electron-e2e:
-    name: Electron E2E (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-
-    runs-on: ${{ matrix.os }}
-
+  architecture:
+    name: E2E architecture
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
         with:
           run_install: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: '24'
-          cache: 'pnpm'
+          node-version: '24.16.0'
+          cache: pnpm
+      - name: Install locked E2E dependencies
+        run: pnpm --filter @matchaclaw/e2e install --frozen-lockfile --ignore-scripts
+      - name: Check structure, architecture, types and enforcement
+        run: pnpm run check:e2e
 
-      - name: Prefer HTTPS for public GitHub git dependencies
+  electron-e2e:
+    name: Electron E2E (Windows)
+    needs: architecture
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.16.0'
+          cache: pnpm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Prefer HTTPS for public GitHub dependencies
         run: |
           git config --global "url.https://github.com/.insteadOf" "git@github.com:"
           git config --global --add "url.https://github.com/.insteadOf" "ssh://git@github.com/"
-
-      - name: Install dependencies
+      - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Run Electron E2E on Linux
-        if: matrix.os == 'ubuntu-latest'
-        run: xvfb-run -a pnpm run test:e2e
-
-      - name: Run Electron E2E on macOS/Windows
-        if: matrix.os != 'ubuntu-latest'
+      - name: Install Matcha CLI build dependencies
+        working-directory: matcha-agent
+        run: bun install --frozen-lockfile
+      - name: Prepare Windows runtime tools
+        run: |
+          pnpm run protoc:download
+          pnpm run prep:win-x64-binaries
+          node scripts/download-matcha-ripgrep.mjs --arch x64
+      - name: Build native Host and App Server
+        run: node scripts/build-runtime-host-native.mjs --platform win32 --arch x64 --profile dev
+      - name: Build Matcha CLI
+        run: pnpm run build:matcha-agent --arch x64
+      - name: Verify and run shared-instance Electron E2E
         run: pnpm run test:e2e
-
-      - name: Upload Playwright artifacts
+      - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-artifacts-${{ matrix.os }}
+          name: electron-e2e-windows
           path: |
-            playwright-report
-            test-results
-          if-no-files-found: ignore
+            e2e/playwright-report
+            e2e/serenity-report
+            e2e/test-results
+          if-no-files-found: warn
+          retention-days: 7

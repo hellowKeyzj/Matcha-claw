@@ -45,8 +45,8 @@ const GENERATION_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(crate) struct ProviderModelOwner {
-    private_resolver: Resolver,
-    llm_client: Option<LlmClient>,
+    pub(super) private_resolver: Resolver,
+    pub(super) llm_client: Option<LlmClient>,
 }
 
 impl ProviderModelOwner {
@@ -366,7 +366,7 @@ impl ProviderModelOwner {
         }
     }
 
-    fn resolve_text_generation_candidates<'a>(
+    pub(super) fn resolve_text_generation_candidates<'a>(
         &self,
         runtime: &dyn ProviderRuntimeDirectory,
         accounts: &'a [ProviderAccount],
@@ -466,10 +466,7 @@ impl ProviderModelOwner {
                     .configuration()
                     .credential()
                     .map(|credential| credential.as_str().to_owned()),
-                protocol: account
-                    .configuration()
-                    .protocol()
-                    .map(provider_api_protocol_label),
+                protocol: provider_execution_protocol(account).map(provider_api_protocol_label),
                 auth_mode: provider_auth_mode_label(account.configuration().auth_mode()),
             }));
         }
@@ -1208,7 +1205,7 @@ fn normalized_base_url(base_url: &str) -> Result<String, ProviderModelDiscoveryE
     Ok(base.to_owned())
 }
 
-fn text_generation_model_limits(
+pub(super) fn text_generation_model_limits(
     model: &ProviderModel,
     timeout_ms: Option<u64>,
 ) -> ProviderTextGenerationModelLimits {
@@ -1258,7 +1255,7 @@ pub fn provider_execution_protocol(account: &ProviderAccount) -> Option<Provider
         .or_else(|| default_discovery_protocol(account.provider().as_str()))
 }
 
-async fn provider_generation_credential(
+pub(super) async fn provider_generation_credential(
     account: &ProviderAccount,
     private_resolver: &Resolver,
 ) -> Result<Option<LlmCredential>, ProviderTextGenerationUnavailableReason> {

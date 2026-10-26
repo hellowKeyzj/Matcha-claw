@@ -3,6 +3,7 @@
     "account.ts",
     "agents.ts",
     "app.ts",
+    "app-plugins.ts",
     "billing.ts",
     "board.ts",
     "capabilities.ts",
@@ -80,6 +81,16 @@
     "/api/account/refresh",
     "/api/account/logout",
     "/api/app/browser-relay-info",
+    "/api/app-plugins",
+    "/api/app-plugins/inspect",
+    "/api/app-plugins/import",
+    "/api/app-plugins/enabled",
+    "/api/app-plugins/uninstall",
+    "/api/app-plugins/rollback",
+    "/api/app-plugins/bundle",
+    "/api/app-plugins/build",
+    "/api/app-plugins/development",
+    "/api/app-plugins/runtime-status",
     "/api/billing/checkout-info",
     "/api/billing/plans",
     "/api/billing/orders",
@@ -393,6 +404,46 @@
     [
       "GET",
       "/api/app/browser-relay-info"
+    ],
+    [
+      "GET",
+      "/api/app-plugins"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/inspect"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/import"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/enabled"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/uninstall"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/rollback"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/bundle"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/build"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/development"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/runtime-status"
     ],
     [
       "GET",

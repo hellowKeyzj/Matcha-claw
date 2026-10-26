@@ -5,11 +5,11 @@ import {
   selectSidebarPendingBlockersState,
   selectSnapshotLayerState,
   selectViewLayerState,
-} from '@/stores/chat/selectors';
-import { resolveChatSendGateForPayload, type ChatSessionRuntimeState } from '@/stores/chat';
+} from '@/plugins/chat/store/selectors';
+import { resolveChatSendGateForPayload, type ChatSessionRuntimeState } from '@/plugins/chat/store';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 function createSessionRecord(input?: {

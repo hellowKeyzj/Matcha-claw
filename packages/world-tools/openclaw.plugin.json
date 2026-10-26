@@ -1,0 +1,15 @@
+{
+  "id": "world-tools",
+  "name": "World Tools",
+  "version": "0.1.0",
+  "description": "Discover, query, explain and propose World operations through native execution admission.",
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": ["tool", "hook"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

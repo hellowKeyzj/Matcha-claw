@@ -64,6 +64,14 @@ import type {
   UserMessage,
 } from '../types/message.js'
 import type { QueueOperationMessage } from '../types/messageQueueTypes.js'
+import {
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+  investigationSignal,
+  requireInvestigationEffects,
+  rethrowInvestigationAdmission,
+  trackInvestigationOperation,
+} from '../world/investigation.js'
 import { uniq } from './array.js'
 import { registerCleanup } from './cleanupRegistry.js'
 import { updateSessionName } from './concurrentSessions.js'
@@ -71,7 +79,7 @@ import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
-import { isFsInaccessible } from './errors.js'
+import { isENOENT, isFsInaccessible } from './errors.js'
 import type { FileHistorySnapshot } from './fileHistory.js'
 import { formatFileSize } from './format.js'
 import { getFsImplementation } from './fsOperations.js'
@@ -82,11 +90,13 @@ import { parseJSONL } from './json.js'
 import { logError } from './log.js'
 import { extractTag, isCompactBoundaryMessage } from './messages.js'
 import { sanitizePath } from './path.js'
+import { readSourceBytes } from './readFileInRange.js'
 import {
   extractJsonStringField,
   extractLastJsonStringField,
   LITE_READ_BUF_SIZE,
   readHeadAndTail,
+  readTranscriptBufferForLoad,
   readTranscriptForLoad,
   SKIP_PRECOMPACT_THRESHOLD,
 } from './sessionStoragePortable.js'
@@ -3251,11 +3261,18 @@ function resolveMetadataBuf(
 async function scanPreBoundaryMetadata(
   filePath: string,
   endOffset: number,
+  source?: Buffer,
 ): Promise<string[]> {
   const { createReadStream } = await import('fs')
   const NEWLINE = 0x0a
 
-  const stream = createReadStream(filePath, { end: endOffset - 1 })
+  const stream = source === undefined
+    ? createReadStream(filePath, { end: endOffset - 1 })
+    : (function* () {
+        for (let offset = 0; offset < endOffset; offset += 64 * 1024) {
+          yield source.subarray(offset, Math.min(offset + 64 * 1024, endOffset))
+        }
+      })()
   const metadataLines: string[] = []
   let carry: Buffer | null = null
 
@@ -3612,6 +3629,7 @@ export async function loadTranscriptFile(
   const contextCollapseCommits: ContextCollapseCommitEntry[] = []
   // Last-wins — later entries supersede.
   let contextCollapseSnapshot: ContextCollapseSnapshotEntry | undefined
+  const scope = currentInvestigationScope()
 
   try {
     // For large transcripts, avoid materializing megabytes of stale content.
@@ -3626,13 +3644,20 @@ export async function loadTranscriptFile(
     //
     // Pre-boundary metadata (agent-setting, mode, pr-link, etc.) is recovered
     // via a cheap byte-level forward scan of [0, boundary).
+    const source = scope
+      ? await readSourceBytes(filePath, { signal: investigationSignal() })
+      : undefined
     let buf: Buffer | null = null
     let metadataLines: string[] | null = null
     let hasPreservedSegment = false
     if (!isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_PRECOMPACT_SKIP)) {
-      const { size } = await stat(filePath)
+      const size = source === undefined
+        ? (await stat(filePath)).size
+        : source.length
       if (size > SKIP_PRECOMPACT_THRESHOLD) {
-        const scan = await readTranscriptForLoad(filePath, size)
+        const scan = source === undefined
+          ? await readTranscriptForLoad(filePath, size)
+          : readTranscriptBufferForLoad(source)
         buf = scan.postBoundaryBuf
         hasPreservedSegment = scan.hasPreservedSegment
         // >0 means we truncated pre-boundary bytes and must recover
@@ -3646,11 +3671,12 @@ export async function loadTranscriptFile(
           metadataLines = await scanPreBoundaryMetadata(
             filePath,
             scan.boundaryStartOffset,
+            source,
           )
         }
       }
     }
-    buf ??= await readFile(filePath)
+    buf ??= source ?? await readFile(filePath)
     // For large buffers (which here means readTranscriptForLoad output with
     // attr-snaps already stripped at the fd level — the <5MB readFile path
     // falls through the size gate below), the dominant cost is parsing dead
@@ -3801,7 +3827,16 @@ export async function loadTranscriptFile(
         contextCollapseSnapshot = entry
       }
     }
-  } catch {
+  } catch (error) {
+    if (scope) {
+      rethrowInvestigationAdmission(error)
+      investigationSignal()?.throwIfAborted()
+      requireInvestigationEffects([])
+      if (
+        !isENOENT(error) ||
+        (error instanceof Error && error.cause !== undefined)
+      ) throw error
+    }
     // File doesn't exist or can't be read
   }
 
@@ -3950,6 +3985,11 @@ async function loadSessionFile(sessionId: UUID): Promise<{
  * order via `Map` insertion order.
  */
 const sessionMessagesCache = new Map<UUID, Promise<Set<UUID>>>()
+const sessionMessageLoadScopes = new WeakMap<
+  Promise<Set<UUID>>,
+  ReturnType<typeof currentInvestigationScope>
+>()
+const settledSessionMessageLoads = new WeakSet<Promise<Set<UUID>>>()
 
 /**
  * Gets message UUIDs for a specific session without loading all sessions.
@@ -3961,9 +4001,20 @@ const sessionMessagesCache = new Map<UUID, Promise<Set<UUID>>>()
  * intended as a public API — prefer {@link doesMessageExistInSession}.
  */
 export async function getSessionMessages(sessionId: UUID): Promise<Set<UUID>> {
+  const scope = currentInvestigationScope()
+  if (scope) requireInvestigationEffects([])
   const existing = sessionMessagesCache.get(sessionId)
   if (existing !== undefined) {
-    return existing
+    if (!scope) return existing
+    if (
+      !settledSessionMessageLoads.has(existing) &&
+      sessionMessageLoadScopes.get(existing) !== scope
+    ) {
+      throw new InvestigationAdmissionError('investigation_session_load_scope_mismatch')
+    }
+    const messages = await trackInvestigationOperation(existing)
+    requireInvestigationEffects([])
+    return messages
   }
   // Evict oldest entry when at capacity so the Map stays bounded.
   if (sessionMessagesCache.size >= MAX_CACHED_SESSION_FILES) {
@@ -3974,10 +4025,20 @@ export async function getSessionMessages(sessionId: UUID): Promise<Set<UUID>> {
   }
   const promise = (async () => {
     const { messages } = await loadSessionFile(sessionId)
+    if (scope) requireInvestigationEffects([])
     return new Set(messages.keys())
   })()
   sessionMessagesCache.set(sessionId, promise)
-  return promise
+  sessionMessageLoadScopes.set(promise, scope)
+  void promise.then(
+    () => settledSessionMessageLoads.add(promise),
+    () => {
+      if (scope && sessionMessagesCache.get(sessionId) === promise) {
+        sessionMessagesCache.delete(sessionId)
+      }
+    },
+  )
+  return scope ? trackInvestigationOperation(promise) : promise
 }
 
 /** Underlying cache for direct manipulation (priming, clearing, tests). */
@@ -4031,7 +4092,9 @@ export async function getLastSessionLog(
   // with a stale disk snapshot would lose unflushed UUIDs and break dedup.
   const messagesCache = getSessionMessagesCache()
   if (!messagesCache.has(sessionId)) {
-    messagesCache.set(sessionId, Promise.resolve(new Set(messages.keys())))
+    const promise = Promise.resolve(new Set(messages.keys()))
+    settledSessionMessageLoads.add(promise)
+    messagesCache.set(sessionId, promise)
   }
 
   // Find the most recent non-sidechain leaf, not an ancestor with the same timestamp.

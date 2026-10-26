@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { extractArtifactRefsFromAssistantText } from '@/pages/Chat/artifact-paths';
-import { applyAssistantPresentationToItems, type ChatRenderItem } from '@/pages/Chat/chat-render-item-model';
-import { extractGeneratedFilesFromToolCards } from '@/lib/generated-files';
-import { collectChatArtifactGroups } from '@/pages/Chat/artifacts';
+import { extractArtifactRefsFromAssistantText } from '@/plugins/chat/artifact-paths';
+import { applyAssistantPresentationToItems, type ChatRenderItem } from '@/plugins/message-rendering/chat-render-item-model';
+import { extractGeneratedFilesFromToolCards } from '@/plugins/files/generated-files';
+import { collectChatArtifactGroups } from '@/plugins/chat/artifacts';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { SessionRenderExecutionGraphItem } from '../../src/types/session/render-item';
 import type { SessionRenderToolCard } from '../../src/types/session/tool-card';

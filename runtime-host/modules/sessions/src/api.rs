@@ -28,6 +28,7 @@ use super::{
     session_catalog::{SessionCatalogCommand, SessionCatalogOutcome},
     session_history::{SessionHistoryCommand, SessionHistoryOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
+    thinking::{SessionThinkingCommand, SessionThinkingOutcome},
     state::{SessionIdentity, SessionSourceBinding, SessionView},
     timeline::{
         Command as SessionTimelineCommand, ContentCommand as SessionContentCommand,
@@ -98,6 +99,14 @@ impl SessionHandle {
 
     pub(crate) async fn record_events_subscription(&self) -> Result<(), ()> {
         self.request_query(|reply| SessionQuery::EventsSubscribed { reply }).await
+    }
+
+    pub async fn session_thinking(
+        &self,
+        command: SessionThinkingCommand,
+    ) -> Result<SessionThinkingOutcome, ()> {
+        self.request_command(|reply| SessionCommand::Thinking { command, reply })
+            .await
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionView>, ()> {
@@ -263,6 +272,25 @@ impl SessionHandle {
             request: SessionSendRequest::Session { command, cancellation, reply },
         })
         .await
+    }
+
+    pub fn unsupported_task_budget(
+        &self,
+        endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
+        budget: &organization::TaskExecutionBudget,
+    ) -> Result<Vec<organization::TaskBudgetDimension>, crate::ports::RuntimeOperationFailure> {
+        let driver = self.runtime_directory.lookup(endpoint)
+            .ok_or(crate::ports::RuntimeOperationFailure::Unsupported)?;
+        let ops = driver.session_ops().ok_or(crate::ports::RuntimeOperationFailure::Unsupported)?;
+        Ok(ops.unsupported_task_budget(budget))
+    }
+
+    /// Read back the original native identity without retrying a send.
+    pub async fn read_session_run(
+        &self,
+        command: crate::execution::SessionRunReadCommand,
+    ) -> Result<crate::execution::SessionRunReadOutcome, ()> {
+        self.request_query(|reply| SessionQuery::ReadRun { command, reply }).await
     }
 
     pub async fn prepare_session_model_runtime(

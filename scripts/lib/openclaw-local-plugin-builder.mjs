@@ -36,6 +36,12 @@ const BUILD_TARGETS = [
     compileDirs: ['src'],
     runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist'],
   },
+  {
+    pluginId: 'world-tools',
+    packageDir: 'packages/world-tools',
+    compileDirs: ['src'],
+    runtimeFiles: ['package.json', 'openclaw.plugin.json', 'dist', 'metadata'],
+  },
 ]
 
 function replaceJsonImportSpecifiers(source) {
@@ -358,6 +364,11 @@ export async function buildManagedOpenClawPlugins({
 
   for (const target of selectedTargets) {
     const packageDir = path.join(resolvedRootDir, target.packageDir)
+    if (target.pluginId === 'world-tools') {
+      const schemaPath = path.join(packageDir, 'metadata', 'schema.json')
+      await ensureParentDir(schemaPath)
+      await fs.copyFile(path.join(resolvedRootDir, 'runtime-host', 'modules', 'world', 'protocol', 'world-api.schema.json'), schemaPath)
+    }
     if (target.build === 'tsdown') {
       const tsdownDir = path.join(packageDir, 'node_modules', 'tsdown')
       const { bin } = readJson(path.join(tsdownDir, 'package.json'))

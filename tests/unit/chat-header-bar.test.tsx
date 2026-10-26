@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { ChatHeaderBar } from '@/pages/Chat/components/ChatHeaderBar';
+import { ChatHeaderBar } from '@/plugins/chat/components/ChatHeaderBar';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({

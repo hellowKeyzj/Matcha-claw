@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildChatContextUsageViewModel, formatTokensCompact } from '../../src/pages/Chat/context-usage';
+import { buildChatContextUsageViewModel, formatTokensCompact } from '../../src/plugins/chat/context-usage';
 import type { ModelCatalogEntry } from '../../src/types/subagent';
 
 const models: ModelCatalogEntry[] = [

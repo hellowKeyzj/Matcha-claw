@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { runInNewContext } from 'node:vm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { applyOpenClawBundlePatches } from '../../scripts/openclaw-bundle-patches.mjs';
 
@@ -435,6 +438,33 @@ function createTempOpenClawPackage(): string {
   return root;
 }
 
+function seedChatDiagnosticsBundle(openclawDir: string) {
+  const distDir = path.join(process.cwd(), 'node_modules', 'openclaw', 'dist');
+  const copy = (prefix: string, marker: string) => {
+    const names = fs.readdirSync(distDir).filter((name) => name.startsWith(prefix) && name.endsWith('.mjs') && fs.readFileSync(path.join(distDir, name), 'utf8').includes(marker));
+    expect(names).toHaveLength(1);
+    const destination = path.join(openclawDir, 'dist', names[0]);
+    fs.copyFileSync(path.join(distDir, names[0]), destination);
+    return destination;
+  };
+  return {
+    gateway: copy('chat-send-handler-', 'function startChatDispatch(params)'),
+    agent: copy('agent-runner.runtime-', 'async function runEmbeddedFallbackCandidate(params)'),
+    dispatch: copy('dispatch-from-config-', 'async function gatherDispatchRequest(params, messageAuditTerminal'),
+    resolver: copy('get-reply-', 'async function getReplyFromConfig(ctx, opts, configOverride)'),
+    publication: copy('prepared-model-runtime-', 'var PreparedReplyDispatchPublicationOwner = class'),
+    hash: copy('node-crypto-', 'function redactIdentifier(value, opts)'),
+    strings: copy('string-coerce-', 'function normalizeOptionalString(value)'),
+  };
+}
+
+function applyChatDiagnostics(openclawDir: string) {
+  return applyOpenClawBundlePatches(openclawDir, {
+    log: () => undefined,
+    patchIds: ['chat-dispatch-diagnostics'],
+  });
+}
+
 function seedExtension(openclawDir: string, pluginId: string): string {
   const pluginDir = path.join(openclawDir, 'dist', 'extensions', pluginId);
   fs.mkdirSync(pluginDir, { recursive: true });
@@ -688,7 +718,7 @@ describe('openclaw bundle patches', () => {
       workspaceFile,
       fs.readFileSync(workspaceFile, 'utf8')
         .replace(
-          /let matchaSealedAgentFilenameSet;\nfunction matchaSealedAgentFilenames\(\) \{\n  return matchaSealedAgentFilenameSet \?\?= \/\* @__PURE__ \*\/ new Set\(\[DEFAULT_AGENTS_FILENAME, DEFAULT_SOUL_FILENAME, DEFAULT_USER_FILENAME, DEFAULT_MEMORY_FILENAME\]\);\n\}/,
+          /let matchaSealedAgentFilenameSet;\nfunction matchaSealedAgentFilenames\(\) \{\n {2}return matchaSealedAgentFilenameSet \?\?= \/\* @__PURE__ \*\/ new Set\(\[DEFAULT_AGENTS_FILENAME, DEFAULT_SOUL_FILENAME, DEFAULT_USER_FILENAME, DEFAULT_MEMORY_FILENAME\]\);\n\}/,
           'const MATCHA_SEALED_AGENT_FILENAMES = /* @__PURE__ */ new Set([DEFAULT_AGENTS_FILENAME, DEFAULT_SOUL_FILENAME, DEFAULT_USER_FILENAME, DEFAULT_MEMORY_FILENAME]);',
         )
         .replaceAll('matchaSealedAgentFilenames().has(', 'MATCHA_SEALED_AGENT_FILENAMES.has('),
@@ -789,6 +819,180 @@ describe('openclaw bundle patches', () => {
       id: 'explicit-session-model-patch',
       status: 'clean',
     })]);
+  });
+
+  it('patches only the five loaded chat owners, checks syntax, and stays byte-idempotent', () => {
+    const openclawDir = createTempOpenClawPackage();
+    const files = seedChatDiagnosticsBundle(openclawDir);
+    const before = Object.values(files).map((file) => fs.readFileSync(file, 'utf8'));
+    const first = applyChatDiagnostics(openclawDir);
+    const after = Object.values(files).map((file) => fs.readFileSync(file, 'utf8'));
+
+    expect(first).toEqual([expect.objectContaining({
+      id: 'chat-dispatch-diagnostics',
+      status: 'applied',
+      detail: [files.gateway, files.agent, files.dispatch, files.resolver, files.publication].map((file) => path.basename(file)).join(', '),
+    })]);
+    expect(after.map((source, index) => source !== before[index])).toEqual([true, true, true, true, true, false, false]);
+    for (const file of [files.gateway, files.agent, files.dispatch, files.resolver, files.publication]) {
+      expect(() => execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' })).not.toThrow();
+    }
+    expect(after[0]).toContain('onAgentRunTerminalOutcome: (outcome) => matchaChatStage("agent_terminal", outcome)');
+    expect(after[0]).toContain('params.matchaChatStage("dispatch_failed", failureDisposition);');
+    expect(after[0]).toContain('matchaChatStage("finalize_entered");\n\t\t\tawait dispatchErrorLifecycle.finalize();\n\t\t\tmatchaChatStage("finalize_completed");');
+    expect(after[1]).toContain('if (info.phase === "model_call_started") matchaChatStage("model_call_started");');
+    expect(after[1]).toContain('matchaChatStage(waiting ? "lane_wait" : "lane_admitted");');
+    for (let index = 0; index < 5; index += 1) {
+      const observed = after[index].replace(/function createMatchaChatStageTrace\([\s\S]*?\n\}\n/g, '');
+      for (const token of [/catch\s*\(/g, /\bawait\b/g, /\breturn\b/g]) {
+        expect(observed.match(token) ?? []).toHaveLength((before[index].match(token) ?? []).length);
+      }
+    }
+    expect(after[0]).toContain('matchaChatStage,\n\t\t\t\t\tprepareAssistantTranscriptMessage:');
+    expect(after[2]).toContain('matchaChatStage: params.replyOptions?.matchaChatStage,');
+    expect(after[3]).toContain('opts?.matchaChatStage?.("workspace_entered");');
+    expect(after[3]).toContain('opts?.matchaChatStage?.("baseline_entered");\n\t\tconst baselineEntry = await traceGetReplyPhase("reply.capture_session_diff_baseline",');
+    expect(after[3]).toContain('opts?.matchaChatStage?.("baseline_returned");\n\t\tsessionState.sessionEntry = baselineEntry;');
+    expect(after[4]).toContain('this.load = async ({ agentId, abortSignal, matchaChatStage }) => {');
+    expect(after[1]).toContain('turn.opts?.matchaChatStage ?? createMatchaChatStageTrace(agentTurnTimingLog, params.runId, turn.sessionKey)');
+    const stripDiagnostics = (source: string) => source
+      .replace(/^import \{[^\n]* as matchaChatRedactIdentifier \}[^\n]*\n/gm, '')
+      .replace(/function createMatchaChatStageTrace\([\s\S]*?\n\}\n/g, '')
+      .replace(/^\t*(?:const matchaChatStage = [^\n]*|(?:(?:params|state\.params)\.replyOptions\?\.|params\.opts\?\.|params\.|opts\?\.)?matchaChatStage(?:\?\.)?\([^\n]*\);|matchaChatStage,?|matchaChatStage: params\.replyOptions\?\.matchaChatStage,)\n/gm, '')
+      .replace(/^\t*onAgentRunTerminalOutcome: \(outcome\) => matchaChatStage\("agent_terminal", outcome\),\n/gm, '')
+      .replace(/^\t*if \((?:info\.phase === "model_call_started"|runtimeClassification)\) matchaChatStage\([^\n]*\);\n/gm, '')
+      .replace('retainWorkAdmission: retainGatewayWorkAdmission,', 'retainWorkAdmission: retainGatewayWorkAdmission')
+      .replace('onAdopted: async () => { params.matchaChatStage("followup_adopted"); },', 'onAdopted: async () => {},')
+      .replace('abortSignal, matchaChatStage) {', 'abortSignal) {')
+      .replace('activeRunAbort.controller.signal, matchaChatStage)', 'activeRunAbort.controller.signal)')
+      .replace('agentId, abortSignal, matchaChatStage })', 'agentId, abortSignal })');
+    for (let index = 0; index < 5; index += 1) {
+      expect(stripDiagnostics(after[index])).toBe(before[index]);
+    }
+    expect(applyChatDiagnostics(openclawDir)[0].status).toBe('clean');
+    expect(Object.values(files).map((file) => fs.readFileSync(file, 'utf8'))).toEqual(after);
+
+    const installer = fs.readFileSync(path.join(process.cwd(), 'scripts', 'openclaw-bundle-patches.mjs'), 'utf8');
+    const defaults = installer.match(/const DEFAULT_PATCH_IDS = Object\.freeze\(\[([^\n]*)\]\);/)![1];
+    expect(defaults).not.toContain('chat-dispatch-diagnostics');
+    expect(after[0]).not.toContain('beginMatchaWorldDispatch');
+    expect(fs.existsSync(path.join(openclawDir, 'dist', 'matcha-world-investigation.mjs'))).toBe(false);
+  });
+
+  it.each(['missing', 'duplicate', 'partial', 'changed', 'mixed', 'observer', 'dispatch', 'resolver', 'publication'] as const)('rejects %s diagnostics anchors before writing any bundle', (mode) => {
+    const openclawDir = createTempOpenClawPackage();
+    const files = seedChatDiagnosticsBundle(openclawDir);
+    if (mode === 'changed' || mode === 'mixed') applyChatDiagnostics(openclawDir);
+    let agent = fs.readFileSync(files.agent, 'utf8');
+    if (mode === 'missing') agent = agent.replace('\t\t\t\tonLaneWait: ({ waiting }) => {', '\t\t\t\tonLaneWait: ({ waiting: busy }) => {');
+    if (mode === 'duplicate') agent += '\nasync function runEmbeddedFallbackCandidate(params) {\n\tconst turn = params.turn;\n}\n';
+    if (mode === 'partial') agent += '\n// matchaChatStage\n';
+    if (mode === 'changed') agent = agent.replace('matchaChatStage(waiting ? "lane_wait" : "lane_admitted");', 'matchaChatStage("lane_wait");');
+    if (mode === 'mixed') {
+      const pristineAgent = path.join(process.cwd(), 'node_modules', 'openclaw', 'dist', path.basename(files.agent));
+      agent = fs.readFileSync(pristineAgent, 'utf8');
+    }
+    fs.writeFileSync(files.agent, agent);
+    if (mode === 'observer') {
+      const gateway = fs.readFileSync(files.gateway, 'utf8').replace('replyOptions: {', 'replyOptions: {\n\t\t\t\t\tonAgentRunTerminalOutcome: existingObserver,');
+      fs.writeFileSync(files.gateway, gateway);
+    }
+    if (mode === 'dispatch') fs.writeFileSync(files.dispatch, fs.readFileSync(files.dispatch, 'utf8').replace('const admissionTicket = params.replyOptions?.[REPLY_ADMISSION_TICKET];', 'const admissionTicket = changedTicket;'));
+    if (mode === 'resolver') fs.writeFileSync(files.resolver, fs.readFileSync(files.resolver, 'utf8').replace('const workspaceDir = (await traceGetReplyPhase("reply.ensure_workspace",', 'const workspaceDir = (await changedWorkspace('));
+    if (mode === 'publication') fs.writeFileSync(files.publication, fs.readFileSync(files.publication, 'utf8').replace('await racePromiseWithAbortSignal(pendingOwner, abortSignal);', 'await changedPublication(pendingOwner, abortSignal);'));
+    const before = Object.values(files).map((file) => fs.readFileSync(file, 'utf8'));
+    expect(() => applyChatDiagnostics(openclawDir)).toThrow('chat-dispatch-diagnostics:');
+    expect(Object.values(files).map((file) => fs.readFileSync(file, 'utf8'))).toEqual(before);
+  });
+
+  it('keeps the loaded terminal-outcome observer independent of persistence and result handling', () => {
+    const openclawDir = createTempOpenClawPackage();
+    const files = seedChatDiagnosticsBundle(openclawDir);
+    const original = fs.readFileSync(files.agent, 'utf8');
+    applyChatDiagnostics(openclawDir);
+    const patched = fs.readFileSync(files.agent, 'utf8');
+    const extractOutcome = (source: string) => source.slice(source.indexOf('function recordAgentTurnExecutionOutcome('), source.indexOf('\n//#endregion', source.indexOf('function recordAgentTurnExecutionOutcome(')));
+    expect(extractOutcome(patched)).toBe(extractOutcome(original));
+    const routeFile = fs.readdirSync(path.join(process.cwd(), 'node_modules', 'openclaw', 'dist')).find((name) => name.startsWith('effective-reply-route-') && name.endsWith('.mjs'))!;
+    const routeSource = fs.readFileSync(path.join(process.cwd(), 'node_modules', 'openclaw', 'dist', routeFile), 'utf8');
+    const resolver = routeSource.slice(routeSource.indexOf('function resolveAgentTurnExecutionStatus('), routeSource.indexOf('\n//#endregion', routeSource.indexOf('function resolveAgentTurnExecutionStatus(')));
+    const record = runInNewContext(`${resolver}\n${extractOutcome(patched)}\nrecordAgentTurnExecutionOutcome`);
+    const outcomes: string[] = [];
+    for (const [outcome, expected] of [
+      [{ kind: 'settled', status: 'ok' }, 'completed'],
+      [{ kind: 'settled', status: 'failed' }, 'failed'],
+      [{ kind: 'aborted' }, undefined],
+      [{ kind: 'rejected' }, 'failed'],
+    ] as const) {
+      const result = { outcome };
+      const before = JSON.stringify(result);
+      expect(record({ followupRun: { run: {} } }, result)).toBeUndefined();
+      expect(record({ followupRun: { run: {} }, opts: { onAgentRunTerminalOutcome: (value: string) => { outcomes.push(value); return { mustNotAffectControlFlow: true }; } } }, result)).toBeUndefined();
+      expect(JSON.stringify(result)).toBe(before);
+      expect(expected === undefined ? outcomes.length === 2 : outcomes.at(-1) === expected).toBe(true);
+    }
+    expect(outcomes).toEqual(['completed', 'failed', 'failed']);
+    const failure = new Error('observer failure');
+    expect(() => record({ followupRun: { run: {} }, opts: { onAgentRunTerminalOutcome: () => { throw failure; } } }, { outcome: { kind: 'settled', status: 'ok' } })).toThrow(failure);
+  });
+
+  it('emits only bounded fixed-schema hashes and enumerations, lazily gated by the existing trace switch', () => {
+    const openclawDir = createTempOpenClawPackage();
+    const files = seedChatDiagnosticsBundle(openclawDir);
+    applyChatDiagnostics(openclawDir);
+    const gateway = fs.readFileSync(files.gateway, 'utf8');
+    const helper = gateway.slice(gateway.indexOf('function createMatchaChatStageTrace('), gateway.indexOf('\nfunction startChatDispatch(params)'));
+    const hashSource = fs.readFileSync(files.hash, 'utf8');
+    const hashFunctions = hashSource.slice(hashSource.indexOf('function sha256Hex('), hashSource.indexOf('//#endregion'));
+    const stringSource = fs.readFileSync(files.strings, 'utf8');
+    const stringFunctions = stringSource.slice(stringSource.indexOf('function normalizeNullableString('), stringSource.indexOf('/** Trims bounded string input'));
+    const lines: string[] = [];
+    const context = {
+      createHash,
+      process: { env: { MATCHACLAW_TRACE: '0' } },
+      performance: { now: () => 25 },
+      log: { info: (line: string) => lines.push(line) },
+    };
+    const factory = runInNewContext(`${stringFunctions}\n${hashFunctions}\nconst matchaChatRedactIdentifier = redactIdentifier;\n${helper}\ncreateMatchaChatStageTrace`, context);
+    const raw = ' private-body-error-account-tool-path-secret ';
+    const disabledId = { toString: () => { throw new Error('must not stringify'); } };
+    factory(context.log, disabledId, disabledId)('ack_sent');
+    expect(lines).toEqual([]);
+    context.process.env.MATCHACLAW_TRACE = 'true';
+    factory(context.log, disabledId, disabledId)('ack_sent');
+    expect(lines).toEqual([]);
+    context.process.env.MATCHACLAW_TRACE = '1';
+    const trace = factory(context.log, raw, ` ${raw.trim()} `);
+    trace('ack_sent');
+    trace('ack_sent');
+    trace('model_call_started', disabledId, raw);
+    trace(raw, raw, raw);
+    factory(context.log, ' ', undefined)('agent_terminal', 'cancelled');
+    expect(lines).toHaveLength(3);
+    const hash = `sha256:${createHash('sha256').update(raw.trim()).digest('hex').slice(0, 12)}`;
+    expect(lines[0]).toBe(`[matcha-chat-stage] runHash=${hash} sessionHash=${hash} stage=ack_sent elapsedMs=0 state=none agentRunHash=-`);
+    expect(lines[1]).toContain('stage=model_call_started elapsedMs=0 state=unknown agentRunHash=' + hash);
+    expect(lines[2]).toContain('runHash=- sessionHash=- stage=agent_terminal elapsedMs=0 state=cancelled agentRunHash=-');
+    const stages = `ack_sent dispatch_entered inbound_entered followup_deferred followup_adopted embedded_entered lane_wait lane_admitted
+      model_call_started agent_started agent_terminal dispatch_returned dispatch_failed post_dispatch_completed finalize_entered finalize_completed
+      publication_import_entered publication_import_returned publication_entered publication_replacement_wait publication_owner_wait publication_returned
+      admission_entered admission_ticket_returned admission_returned inbound_claim_entered inbound_claim_returned before_dispatch_entered before_dispatch_returned
+      reply_dispatch_entered reply_dispatch_returned resolver_import_entered resolver_import_returned workspace_entered workspace_returned remote_media_entered remote_media_returned
+      media_understanding_entered media_understanding_returned session_init_entered session_init_returned prepared_reply_entered prepared_reply_returned
+      agent_preflight_entered compaction_entered compaction_returned user_commit_entered user_commit_returned projection_retry_entered projection_retry_returned
+      baseline_entered baseline_returned`.split(/\s+/);
+    expect(stages).toHaveLength(52);
+    const allStagesTrace = factory(context.log, raw, raw);
+    for (const stage of stages) {
+      allStagesTrace(stage);
+      allStagesTrace(stage, 'completed');
+    }
+    expect(lines.slice(3).map((line) => line.match(/ stage=([a-z_]+)/)![1])).toEqual(stages);
+    for (const line of lines) {
+      expect(line).toMatch(/^\[matcha-chat-stage\] runHash=(sha256:[0-9a-f]{12}|-) sessionHash=(sha256:[0-9a-f]{12}|-) stage=[a-z_]+ elapsedMs=\d+ state=[a-z-]+ agentRunHash=(sha256:[0-9a-f]{12}|-)$/);
+      expect(line.length).toBeLessThan(256);
+      expect(line).not.toContain(raw.trim());
+    }
   });
 
   it('does not allow retired OpenClaw logic patches to be requested', () => {

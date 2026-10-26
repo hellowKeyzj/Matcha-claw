@@ -55,6 +55,36 @@ struct Fork {
 struct Submit {
     session_id: String,
     content: Value,
+    request_id: Option<String>,
+    budget: Option<run::Budget>,
+    world_investigation: Option<super::investigation::Envelope>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RequestKey {
+    session_id: String,
+    request_id: String,
+    expected_digest: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReleaseInvestigation {
+    run_id: String,
+    request_id: String,
+    request_digest: String,
+    correlation: super::investigation::Correlation,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SettleInvestigation {
+    run_id: String,
+    request_id: String,
+    request_digest: String,
+    correlation: Option<super::investigation::Correlation>,
+    settled_at_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +126,83 @@ struct Proactive {
 }
 
 impl Sessions {
+    async fn release_investigation(&self, input: ReleaseInvestigation) -> rpc::Result<Value> {
+        let stored = record::get_run(&self.0.database, &input.run_id).await?;
+        let world = stored.run.world_investigation.as_ref()
+            .ok_or_else(|| super::investigation::denied("investigation_not_found"))?;
+        if stored.run.request_id.as_deref() != Some(input.request_id.as_str())
+            || world.request_digest != input.request_digest
+            || world.correlation(&stored.run).as_ref() != Some(&input.correlation)
+        {
+            return Err(super::investigation::denied("investigation_release_identity_mismatch"));
+        }
+        if world.dispatch_state == "released" { return rpc::value(stored.run); }
+        if stored.run.status.terminal() || stored.run.cancel_requested_at_ms.is_some()
+            || rpc::now_ms() >= world.deadline_ms
+        {
+            return Err(super::investigation::denied("investigation_release_inactive"));
+        }
+        let session = self.session(&stored.run.session_id).await?;
+        let mut execution = session.data.lock().await;
+        let active = execution.active.as_ref().filter(|active| active.record.run.run_id == input.run_id)
+            .ok_or_else(|| super::investigation::denied("investigation_not_prepared"))?;
+        if execution.closing || active.record.run.cancel_requested_at_ms.is_some()
+            || execution.storage_fault.is_some()
+        {
+            return Err(super::investigation::denied("investigation_release_inactive"));
+        }
+        let mut updated = active.record.clone();
+        let world = updated.run.world_investigation.as_mut().ok_or_else(|| super::investigation::denied("investigation_not_found"))?;
+        if rpc::now_ms() >= world.deadline_ms || world.request_digest != input.request_digest
+            || world.native_attempt_id.as_deref() != Some(input.correlation.native_attempt_id.as_str())
+            || world.native_instance_id.as_deref() != Some(input.correlation.native_instance_id.as_str())
+        { return Err(super::investigation::denied("investigation_release_inactive")); }
+        if world.dispatch_state != "released" {
+            if world.dispatch_state != "held" { return Err(super::investigation::denied("investigation_release_state_invalid")); }
+            world.dispatch_state = "released".into();
+            self.save_run_locked(&mut execution, &updated).await?;
+            execution.active.as_mut().expect("locked active Run").record = updated.clone();
+        }
+        session.changed.notify_waiters();
+        session.wake.notify_one();
+        rpc::value(updated.run)
+    }
+
+    async fn settle_investigation(&self, input: SettleInvestigation) -> rpc::Result<Value> {
+        let stored = record::get_run(&self.0.database, &input.run_id).await?;
+        let session = self.stored_session(&stored.run.session_id).await?;
+        let mut execution = session.data.lock().await;
+        let mut stored = record::get_run(&self.0.database, &input.run_id).await?;
+        let world = stored.run.world_investigation.as_ref()
+            .ok_or_else(|| super::investigation::denied("investigation_not_found"))?;
+        if stored.run.request_id.as_deref() != Some(input.request_id.as_str())
+            || world.request_digest != input.request_digest
+            || super::investigation::request_digest(&world.accepted_params)? != input.request_digest
+            || world.accepted_params["sessionId"].as_str() != Some(stored.run.session_id.as_str())
+            || world.accepted_params["requestId"].as_str() != Some(input.request_id.as_str())
+            || stored.run.content_budget_digest.as_deref() != Some(run::content_budget_digest(&world.accepted_params["content"], &None)?.as_str())
+            || match input.correlation.as_ref() {
+                Some(correlation) => world.correlation(&stored.run).as_ref() != Some(correlation),
+                None => world.input_delivery != "not_started" || !world.io.is_empty() || world.correlation(&stored.run).is_some(),
+            }
+        {
+            return Err(super::investigation::denied("investigation_settle_identity_mismatch"));
+        }
+        if world.settled_at_ms.is_some() { return rpc::value(stored.run); }
+        let receipt = world.receipt.as_ref().ok_or_else(|| super::investigation::denied("investigation_terminal_unconfirmed"))?;
+        if !stored.run.status.terminal() || receipt["childrenJoined"] != true || receipt["pendingIo"] != "0"
+            || receipt["nativeStopped"] != true || receipt["ownershipConfirmed"] != true
+            || input.settled_at_ms < stored.run.finished_at_ms.unwrap_or(u64::MAX)
+            || input.settled_at_ms > rpc::now_ms()
+        {
+            return Err(super::investigation::denied("investigation_terminal_unconfirmed"));
+        }
+        stored.run.world_investigation.as_mut().expect("World Run checked").settled_at_ms = Some(input.settled_at_ms);
+        self.save_run_locked(&mut execution, &stored).await?;
+        session.changed.notify_waiters();
+        rpc::value(stored.run)
+    }
+
     pub async fn dispatch(&self, method: &str, params: Value) -> rpc::Result<Value> {
         match method {
             "sessions.create" => self.create(rpc::params(params)?, None).await,
@@ -140,6 +247,11 @@ impl Sessions {
                 self.set_selection(&input.session_id, &input.mode, false, None)
                     .await
             }
+            "sessions.thinking.get" => {
+                let input: SessionKey = rpc::params(params)?;
+                self.get_thinking(&input.session_id).await
+            }
+            "sessions.thinking.set" => self.set_thinking(rpc::params(params)?).await,
             "sessions.setProactive" => {
                 let input: Proactive = rpc::params(params)?;
                 let owner = self.clone();
@@ -155,9 +267,62 @@ impl Sessions {
                     })?
             }
             "runs.submit" => {
+                let world_request_digest = if params.get("worldInvestigation").is_some_and(|value| !value.is_null()) {
+                    Some(super::investigation::request_digest(&params)?)
+                } else {
+                    None
+                };
+                let original_params = world_request_digest.as_ref().map(|_| params.clone());
                 let input: Submit = rpc::params(params)?;
-                let run_id = self.submit(&input.session_id, input.content).await?;
-                Ok(json!({ "sessionId": input.session_id, "runId": run_id, "status": "queued" }))
+                let exact = input.request_id.is_some() || input.budget.is_some() || input.world_investigation.is_some();
+                let run = self
+                    .submit_run(
+                        &input.session_id,
+                        input.content,
+                        input.request_id,
+                        input.budget,
+                        input.world_investigation,
+                        world_request_digest,
+                        original_params,
+                    )
+                    .await?;
+                let run = self.prepared_investigation(run).await?;
+                if exact {
+                    rpc::value(run)
+                } else {
+                    Ok(
+                        json!({ "sessionId": input.session_id, "runId": run.run_id, "status": run.status }),
+                    )
+                }
+            }
+            "runs.releaseInvestigation" => {
+                let input: ReleaseInvestigation = rpc::params(params)?;
+                let owner = self.clone();
+                tokio::spawn(async move { owner.release_investigation(input).await })
+                    .await.map_err(|_| rpc::Error::new(-32006, "investigation_release_unknown", "World release could not be confirmed"))?
+            }
+            "runs.settleInvestigation" => {
+                let input: SettleInvestigation = rpc::params(params)?;
+                let owner = self.clone();
+                tokio::spawn(async move { owner.settle_investigation(input).await })
+                    .await.map_err(|_| rpc::Error::new(-32006, "investigation_settle_unknown", "World settlement could not be confirmed"))?
+            }
+            "runs.getByRequest" => {
+                let input: RequestKey = rpc::params(params)?;
+                validate_uuid(&input.session_id)?;
+                run::validate_request_id(&input.request_id)?;
+                let existing = record::get_run_by_request(
+                    &self.0.database,
+                    &input.session_id,
+                    &input.request_id,
+                )
+                .await?;
+                if let (Some(expected), Some(existing)) = (&input.expected_digest, &existing) {
+                    if existing.run.world_investigation.as_ref().map(|world| world.request_digest.as_str()) != Some(expected.as_str()) {
+                        return Err(super::investigation::denied("investigation_request_digest_mismatch"));
+                    }
+                }
+                rpc::value(existing.map(|record| record.run))
             }
             "runs.get" => {
                 let input: RunKey = rpc::params(params)?;
@@ -238,6 +403,7 @@ impl Sessions {
                 updated_at_ms: now,
                 model: input.model,
                 mode: input.mode,
+                effort: source.as_ref().and_then(|record| record.effort),
                 title: None,
                 title_attempted: false,
                 native_title: Some(super::title::Projection::default()),
@@ -602,6 +768,15 @@ impl Sessions {
                     "Wait for session startup or cleanup",
                 )));
             }
+            if model {
+                self.validate_model_thinking(
+                    snapshot.clone(),
+                    &execution,
+                    selected,
+                    binding.and_then(|binding| binding.provider_id.as_deref()),
+                )
+                .await?;
+            }
             execution.idle.activity();
             session.wake.notify_one();
             (
@@ -716,6 +891,7 @@ impl Sessions {
             cancelled.finish(run::Status::Cancelled, "cancelled_before_send", None);
             self.save_run_locked(&mut execution, &cancelled).await?;
             execution.queue.remove(index);
+            session.changed.notify_waiters();
             return rpc::value(cancelled.run);
         }
         let cli = execution.cli.clone();
@@ -743,6 +919,7 @@ impl Sessions {
         active.record = requested;
         let result = rpc::value(&active.record.run)?;
         if !active.input_started {
+            session.changed.notify_waiters();
             return Ok(result);
         }
         let Some(cli) = cli else {

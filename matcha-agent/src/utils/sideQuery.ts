@@ -15,6 +15,7 @@ import { logEvent } from '../services/analytics/index.js'
 import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from '../services/analytics/metadata.js'
 import { getAPIMetadata } from '../services/api/claude.js'
 import { getAnthropicClient } from '../services/api/client.js'
+import { investigationFetch, rethrowInvestigationAdmission } from '../services/api/investigation.js'
 import {
   createTrace,
   createChildSpan,
@@ -311,6 +312,7 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
       { signal },
     )
   } catch (error) {
+    rethrowInvestigationAdmission(error)
     endTrace(
       langfuseTrace,
       { error: errorMessage(error) },
@@ -918,7 +920,7 @@ async function sideQueryViaGemini(
 
   const start = Date.now()
 
-  const res = await fetch(url, {
+  const res = await investigationFetch(fetch, 'gemini')(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
-import { TeamsPage } from '@/pages/Teams';
-import { TeamChat } from '@/pages/Teams/TeamChat';
-import { useRuntimeHostStore } from '@/stores/gateway';
-import { useTeamsStore, type TeamMeta } from '@/stores/teams';
-import { useSubagentsStore } from '@/stores/subagents';
+import { TeamsPage } from '@/plugins/teams/pages';
+import { TeamChat } from '@/plugins/teams/pages/TeamChat';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
+import { useTeamsStore, type TeamMeta } from '@/plugins/teams/store';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { capabilityExecuteMock, hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
 import i18n from '@/i18n';
 

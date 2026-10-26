@@ -22,6 +22,8 @@ export type LoopbackJsonRequest = Readonly<{
   method: 'GET' | 'POST' | 'PUT';
   fetcher: typeof fetch;
   body?: unknown;
+  /** Exact bytes decoded as UTF-8 by a strict route; never reserialize this payload. */
+  serializedBody?: string;
   query?: URLSearchParams;
   headers?: Readonly<Record<string, string>>;
   signal?: AbortSignal;
@@ -93,7 +95,8 @@ export async function sendLoopbackJsonDelivery(
         ...(request.emptyContentLength ? { 'Content-Length': '0' } : {}),
         ...request.headers,
       },
-      ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+      ...(request.serializedBody !== undefined ? { body: request.serializedBody }
+        : request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
       signal: timeout?.signal ?? request.signal,
     };
     attempted = true;

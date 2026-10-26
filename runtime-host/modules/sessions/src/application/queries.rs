@@ -44,6 +44,10 @@ pub enum SessionQuery {
         command: SessionObserveCommand,
         reply: oneshot::Sender<SessionObserveOutcome>,
     },
+    ReadRun {
+        command: crate::execution::SessionRunReadCommand,
+        reply: oneshot::Sender<crate::execution::SessionRunReadOutcome>,
+    },
     /// Native cancellation control; never queued behind a session send.
     Abort {
         command: SessionAbortCommand,
@@ -94,6 +98,9 @@ impl SessionQuery {
             Self::Observe { reply, .. } => {
                 let _ = reply.send(SessionObserveOutcome::Unavailable);
             }
+            Self::ReadRun { reply, .. } => {
+                let _ = reply.send(crate::execution::SessionRunReadOutcome::Unavailable);
+            }
             Self::Abort { reply, .. } => {
                 let _ = reply.send(SessionAbortOutcome::Unavailable);
             }
@@ -129,7 +136,8 @@ impl SessionQuery {
     pub fn route(&self) -> QueryRoute<String> {
         match self {
             Self::Audited { query, .. } | Self::Producing { query, .. } => query.route(),
-            Self::Abort { .. }
+            Self::ReadRun { .. }
+            | Self::Abort { .. }
             | Self::BoundaryOutcome { .. }
             | Self::EventsSubscribed { .. }
             | Self::ListSessions { .. }

@@ -11,11 +11,11 @@ import {
   hydrateAttachedFilesFromItems,
   loadMissingItemPreviews,
   reconcileHydratedAttachmentItems,
-} from '@/stores/chat/attachment-helpers';
+} from '@/plugins/chat/store/attachment-helpers';
 import {
   buildItemRenderFingerprint,
   reconcileSessionItems,
-} from '@/stores/chat/store-state-helpers';
+} from '@/plugins/chat/store/store-state-helpers';
 import type { SessionRenderItem } from '../../src/types/session/render-item';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 

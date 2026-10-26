@@ -422,6 +422,10 @@ pub(crate) enum WikiQuery {
         input: WikiReadBinaryInput,
         reply: CallReply<WikiReadBinaryReceipt>,
     },
+    ExportVersion {
+        input: crate::history::WikiVersionInput,
+        reply: CallReply<crate::history::WikiVersionExport>,
+    },
     ReadSourcePreview {
         input: WikiReadInput,
         reply: CallReply<WikiReadReceipt>,
@@ -1112,6 +1116,9 @@ impl WikiQuery {
             Self::ReadBinaryFile { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
+            Self::ExportVersion { reply, .. } => {
+                let _ = reply.send(Err(error)).await;
+            }
             Self::ReadSourcePreview { reply, .. } => {
                 let _ = reply.send(Err(error)).await;
             }
@@ -1167,6 +1174,7 @@ impl WikiQuery {
             Self::Files { reply, .. } => reply.call.as_ref(),
             Self::ReadFile { reply, .. } => reply.call.as_ref(),
             Self::ReadBinaryFile { reply, .. } => reply.call.as_ref(),
+            Self::ExportVersion { reply, .. } => reply.call.as_ref(),
             Self::ReadSourcePreview { reply, .. } => reply.call.as_ref(),
             Self::Search { reply, .. } => reply.call.as_ref(),
             Self::Navigation { reply, .. } => reply.call.as_ref(),
@@ -1204,6 +1212,7 @@ impl WikiQuery {
             Self::Files { reply, .. } => reply.call = call,
             Self::ReadFile { reply, .. } => reply.call = call,
             Self::ReadBinaryFile { reply, .. } => reply.call = call,
+            Self::ExportVersion { reply, .. } => reply.call = call,
             Self::ReadSourcePreview { reply, .. } => reply.call = call,
             Self::Search { reply, .. } => reply.call = call,
             Self::Navigation { reply, .. } => reply.call = call,

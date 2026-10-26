@@ -1,4 +1,6 @@
 import OpenAI from 'openai'
+import { investigationFetch } from '../investigation.js'
+import { currentInvestigationScope } from '../../../world/investigation.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
 
 /**
@@ -17,7 +19,7 @@ export function getGrokClient(options?: {
   fetchOverride?: typeof fetch
   source?: string
 }): OpenAI {
-  if (cachedClient) return cachedClient
+  if (cachedClient && !currentInvestigationScope()) return cachedClient
 
   const apiKey = process.env.GROK_API_KEY || process.env.XAI_API_KEY || ''
   const baseURL = process.env.GROK_BASE_URL || DEFAULT_BASE_URL
@@ -25,14 +27,14 @@ export function getGrokClient(options?: {
   const client = new OpenAI({
     apiKey,
     baseURL,
-    maxRetries: options?.maxRetries ?? 0,
+    maxRetries: currentInvestigationScope() ? 0 : options?.maxRetries ?? 0,
     timeout: parseInt(process.env.API_TIMEOUT_MS || String(600 * 1000), 10),
     dangerouslyAllowBrowser: true,
     fetchOptions: getProxyFetchOptions({ forAnthropicAPI: false }),
-    ...(options?.fetchOverride && { fetch: options.fetchOverride }),
+    fetch: investigationFetch(options?.fetchOverride ?? globalThis.fetch, 'grok'),
   })
 
-  if (!options?.fetchOverride) {
+  if (!options?.fetchOverride && !currentInvestigationScope()) {
     cachedClient = client
   }
 

@@ -133,15 +133,17 @@ impl ProviderAccountsOwner {
     pub(super) async fn replace(
         &mut self,
         cascade: &mut ProviderCascade,
-        identity_ops: &dyn ProviderRuntimeIdentityOps,
+        identity_ops: Option<&dyn ProviderRuntimeIdentityOps>,
         draft: ProviderAccountDraft,
         transaction: Option<&crate::api::ProviderAccountPrivateTransaction>,
+        publish: impl Fn(&ProviderCascade),
     ) -> ProviderAccountsMutation {
         if cascade.reload().is_err() {
             return ProviderAccountsMutation::completed(
                 ProviderAccountsDesiredOutcome::Unavailable,
             );
         }
+        publish(cascade);
         let existing = match draft.existing_account(cascade.accounts()) {
             Ok(existing) => existing.cloned(),
             Err(_) => {
@@ -165,9 +167,13 @@ impl ProviderAccountsOwner {
             .as_ref()
             .filter(|previous| previous.configuration().enabled())
             .and_then(|previous| {
-                provider_key_for_account(identity_ops, cascade.accounts(), previous.id())
+                identity_ops.and_then(|identity_ops| {
+                    provider_key_for_account(identity_ops, cascade.accounts(), previous.id())
+                })
             });
-        if cascade.persist_account(account.clone()).is_err() {
+        let persisted = cascade.persist_account(account.clone()).map(|_| ());
+        publish(cascade);
+        if persisted.is_err() {
             return ProviderAccountsMutation::unknown(ProviderAccountMutationKind::Stored);
         }
         let retired = existing
@@ -211,10 +217,14 @@ impl ProviderAccountsOwner {
             | ProviderAccountAuthMode::OAuthBrowser
             | ProviderAccountAuthMode::OAuthDevice => {
                 if account.configuration().enabled() {
-                    let identities = provider_runtime_identities(identity_ops, cascade.accounts())
-                        .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey);
+                    let identities = identity_ops
+                        .ok_or(PrivateProfileProjectionError::InvalidProviderKey)
+                        .and_then(|identity_ops| {
+                            provider_runtime_identities(identity_ops, cascade.accounts())
+                                .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey)
+                        });
                     let private = match identities {
-                        Ok(identities) => self.apply_private_profile(identity_ops, &identities, &account, transaction.map(|transaction| transaction.id.as_str())).await,
+                        Ok(identities) => self.apply_private_profile(&identities, &account, transaction.map(|transaction| transaction.id.as_str())).await,
                         Err(error) => Err(error),
                     };
                     (private, true)
@@ -257,23 +267,27 @@ impl ProviderAccountsOwner {
     pub(super) async fn delete(
         &mut self,
         cascade: &mut ProviderCascade,
-        identity_ops: &dyn ProviderRuntimeIdentityOps,
+        identity_ops: Option<&dyn ProviderRuntimeIdentityOps>,
         id: ProviderAccountId,
         revision: ProviderAccountRevision,
         transaction: Option<&crate::api::ProviderAccountPrivateTransaction>,
+        publish: impl Fn(&ProviderCascade),
     ) -> ProviderAccountsMutation {
         if cascade.reload().is_err() {
             return ProviderAccountsMutation::completed(
                 ProviderAccountsDesiredOutcome::Unavailable,
             );
         }
+        publish(cascade);
         let Some(account) = cascade.account(&id).cloned() else {
             return ProviderAccountsMutation::unknown(ProviderAccountMutationKind::Deleted);
         };
         if account.revision() != revision {
             return ProviderAccountsMutation::completed(ProviderAccountsDesiredOutcome::Rejected);
         }
-        if cascade.delete_account(&id, revision).is_err() {
+        let deleted = cascade.delete_account(&id, revision);
+        publish(cascade);
+        if deleted.is_err() {
             return ProviderAccountsMutation::unknown(ProviderAccountMutationKind::Deleted);
         }
         let private = match account.configuration().credential() {
@@ -310,16 +324,18 @@ impl ProviderAccountsOwner {
 
     pub(super) async fn apply_private_profiles_for_provider_config(
         &self,
-        identity_ops: &dyn ProviderRuntimeIdentityOps,
+        identity_ops: Option<&dyn ProviderRuntimeIdentityOps>,
         accounts: &[ProviderAccount],
         required_account_ids: &BTreeSet<ProviderAccountId>,
+        mut failures: Vec<crate::ProviderAccountExecution>,
         deadline: Instant,
-    ) -> Result<bool, PrivateProfileProjectionError> {
+    ) -> (bool, Vec<crate::ProviderAccountExecution>) {
         if required_account_ids.is_empty() {
-            return Ok(false);
+            return (false, failures);
         }
-        let identities = provider_runtime_identities(identity_ops, accounts)
-            .map_err(|_| PrivateProfileProjectionError::InvalidProviderKey)?;
+        let identities = identity_ops
+            .ok_or(())
+            .and_then(|identity_ops| provider_runtime_identities(identity_ops, accounts));
         let mut applied = false;
         for account in accounts
             .iter()
@@ -327,20 +343,30 @@ impl ProviderAccountsOwner {
             .filter(|account| account.configuration().enabled())
             .filter(|account| account_uses_private_auth_mode(account))
         {
-            tokio::time::timeout_at(
-                deadline,
-                self.apply_private_profile(identity_ops, &identities, account, None),
-            )
-            .await
-            .map_err(|_| PrivateProfileProjectionError::Deadline)??;
-            applied = true;
+            // An earlier mutation effect may have reached Main; do not retry it in this call.
+            if failures.iter().any(|failure| failure.account_id == account.id().as_str()) {
+                continue;
+            }
+            let result = match &identities {
+                Ok(identities) if Instant::now() < deadline => tokio::time::timeout_at(
+                    deadline,
+                    self.apply_private_profile(identities, account, None),
+                )
+                .await
+                .unwrap_or(Err(PrivateProfileProjectionError::Deadline)),
+                Ok(_) => Err(PrivateProfileProjectionError::Deadline),
+                Err(()) => Err(PrivateProfileProjectionError::InvalidProviderKey),
+            };
+            match result {
+                Ok(()) => applied = true,
+                Err(error) => failures.push(error.account_execution(account)),
+            }
         }
-        Ok(applied)
+        (applied, failures)
     }
 
     async fn apply_private_profile(
         &self,
-        _identity_ops: &dyn ProviderRuntimeIdentityOps,
         identities: &BTreeMap<String, String>,
         account: &ProviderAccount,
         transaction_id: Option<&str>,
@@ -386,6 +412,25 @@ pub(super) enum PrivateProfileProjectionError {
 impl PrivateProfileProjectionError {
     fn resolver(error: crate::ResolverFailure) -> Self {
         Self::Resolver(error)
+    }
+
+    pub(super) fn account_execution(&self, account: &ProviderAccount) -> crate::ProviderAccountExecution {
+        let (reason, private_resolver_code) = self.diagnostic();
+        let missing = matches!(self, Self::CredentialMissing)
+            || private_resolver_code == Some(crate::ProviderCallPrivateResolverCode::CredentialMissing);
+        crate::ProviderAccountExecution {
+            account_id: account.id().as_str().to_owned(),
+            account_revision: account.revision().get(),
+            execution: if missing {
+                crate::ProviderAccountExecutionStatus::Blocked
+            } else {
+                crate::ProviderAccountExecutionStatus::Unknown
+            },
+            diagnostic: Some(crate::ProviderCallDiagnostic {
+                reason: Some(reason),
+                private_resolver_code,
+            }),
+        }
     }
 
     pub(super) fn diagnostic(
@@ -440,7 +485,7 @@ fn required_auth_accounts_after_account_replace(
 }
 
 fn account_replace_retires_existing_projection(
-    identity_ops: &dyn ProviderRuntimeIdentityOps,
+    identity_ops: Option<&dyn ProviderRuntimeIdentityOps>,
     previous: &ProviderAccount,
     account: &ProviderAccount,
     previous_provider_key: Option<&str>,
@@ -455,8 +500,10 @@ fn account_replace_retires_existing_projection(
     if previous.configuration().kind() != account.configuration().kind() {
         return true;
     }
-    provider_key_for_account(identity_ops, accounts, account.id()).as_deref()
-        != previous_provider_key
+    identity_ops.is_some_and(|identity_ops| {
+        provider_key_for_account(identity_ops, accounts, account.id()).as_deref()
+            != previous_provider_key
+    })
 }
 
 fn provider_key_for_account(
@@ -484,10 +531,11 @@ fn account_uses_private_auth_mode(account: &ProviderAccount) -> bool {
 }
 
 fn private_profile_provider_key_for_account(
-    identity_ops: &dyn ProviderRuntimeIdentityOps,
+    identity_ops: Option<&dyn ProviderRuntimeIdentityOps>,
     account: &ProviderAccount,
 ) -> Result<String, ()> {
     identity_ops
+        .ok_or(())?
         .runtime_identity(account)
         .map(|identity| identity.provider_key().to_owned())
 }

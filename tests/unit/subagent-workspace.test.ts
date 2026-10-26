@@ -4,7 +4,7 @@ import {
   hasSubagentNameConflict,
   normalizeSubagentNameToSlug,
   resolveSubagentWorkspaceRoot,
-} from '@/features/subagents/domain/workspace';
+} from '@/plugins/agents/domain/workspace';
 
 describe('subagent workspace path', () => {
   it('resolves root from main workspace using unix separator', () => {

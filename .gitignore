@@ -103,6 +103,8 @@ clawsuite-main/
 !.claude/commands/*.md
 .tmp/
 identity/
+!runtime-host/modules/world/src/identity/
+!runtime-host/modules/world/src/identity/**
 matcha-agent/spec
 third_party/
 软件著作权申请资料/
@@ -119,3 +121,4 @@ patches/
 .target-runtime-host-timeline/
 runtime-host_bak/
 src-tauri/
+/openclaw/

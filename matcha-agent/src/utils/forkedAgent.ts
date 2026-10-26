@@ -217,7 +217,12 @@ export async function prepareForkedCommandContext(
   }
 
   // Prepare prompt messages
-  const promptMessages = [createUserMessage({ content: skillPrompt, isMeta: hasSealedSkillReferences(skillPrompt) ? true : undefined })]
+  const promptMessages = [
+    createUserMessage({
+      content: skillPrompt,
+      isMeta: hasSealedSkillReferences(skillPrompt) ? true : undefined,
+    }),
+  ]
 
   return {
     skillContent,

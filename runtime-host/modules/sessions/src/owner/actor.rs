@@ -81,7 +81,7 @@ pub struct SessionOwnerInput {
 pub struct SessionShared {
     runtime_directory: Arc<dyn SessionRuntimeDirectory>,
     pub(super) ownership_reader: Arc<dyn SessionOwnershipReader>,
-    provider_handle: ProviderHandle,
+    pub(super) provider_handle: ProviderHandle,
     private_resolver: Arc<StdMutex<Arc<dyn ConnectorSecretResolverPort>>>,
     pub(super) snapshot: Arc<ArcSwap<SessionSnapshot>>,
     snapshot_writer: Arc<Mutex<()>>,
@@ -233,6 +233,10 @@ impl SessionShared {
                     source_binding: state.source_binding().clone(),
                     native_run_id: run_id.clone(),
                     delivery_context: state.run_delivery_contexts.get(run_id).cloned(),
+                    execution_context: state.run_execution_contexts.get(run_id).map(|(_, context)| context.clone()),
+                    native_request_id: state.run_execution_contexts.get(run_id).map(|(request, _)| request.clone()),
+                    native_message_id: None,
+                    measurement: crate::execution::SessionRunMeasurement::Unavailable,
                     phase: *phase,
                     assistant_texts: assistant_texts(run_id),
                 };
@@ -333,6 +337,45 @@ impl SessionShared {
         } else {
             Err(RuntimeOperationFailure::Unsupported)
         }
+    }
+
+    pub(super) async fn handle_read_run(
+        &self,
+        mut command: crate::execution::SessionRunReadCommand,
+    ) -> crate::execution::SessionRunReadOutcome {
+        use crate::execution::{SessionRunReadOutcome, SessionRunSelector};
+        if !command.valid() { return SessionRunReadOutcome::Rejected; }
+        let bound = self.snapshot.load().states.get(&session_identity_lane_key(&command.identity))
+            .and_then(SessionState::native_session_id).map(str::to_owned);
+        if let Some(bound) = bound {
+            if command.endpoint_session_id.as_ref().is_some_and(|value| value != &bound) {
+                return SessionRunReadOutcome::Rejected;
+            }
+            command.endpoint_session_id = Some(bound);
+        }
+        let driver = match self.running_session_driver(identity_endpoint(&command.identity)) {
+            Ok(driver) => driver,
+            Err(RuntimeOperationFailure::Unsupported) => return SessionRunReadOutcome::Unsupported,
+            Err(RuntimeOperationFailure::Unavailable | RuntimeOperationFailure::HistoryRetryPending) => return SessionRunReadOutcome::Unavailable,
+            Err(RuntimeOperationFailure::TargetRejected) => return SessionRunReadOutcome::Rejected,
+            Err(RuntimeOperationFailure::Unknown) => return SessionRunReadOutcome::Unknown,
+        };
+        let Some(ops) = driver.session_ops() else { return SessionRunReadOutcome::Unsupported; };
+        let outcome = ops.read_session_run(command.clone()).await;
+        if let SessionRunReadOutcome::Found(record) = &outcome {
+            let valid_id = |value: &str| !value.is_empty() && value.len() <= 4096
+                && value.trim() == value && !value.chars().any(char::is_control);
+            let exact = match &command.selector {
+                SessionRunSelector::RequestId(id) => record.request_id.as_ref() == Some(id),
+                SessionRunSelector::RunId(id) => &record.run_id == id,
+            };
+            if !exact || !valid_id(&record.run_id) || !valid_id(&record.message_id)
+                || record.request_id.as_deref().is_some_and(|id| !valid_id(id) || id.len() > 256)
+                || record.assistant_texts.len() > crate::state::MAX_ITEMS
+                || record.assistant_texts.iter().any(|text| text.len() > crate::state::MAX_TEXT_BYTES || text.contains('\0'))
+            { return SessionRunReadOutcome::Unknown; }
+        }
+        outcome
     }
 
     async fn handle_pending_approvals(
@@ -704,8 +747,8 @@ impl SessionLane {
                 self.terminal_permit.take();
                 let _ = reply.send(accepted);
             }
-            TerminalDelivered { identity, run_id, reply } => {
-                let delivered = self.terminal_delivered(shared, identity, run_id).await;
+            TerminalDelivered { identity, run_id, request_id, reply } => {
+                let delivered = self.terminal_delivered(shared, identity, run_id, request_id).await;
                 let _ = reply.send(delivered);
             }
             Goal { command, reply } => self.start_goal(shared, command, reply, call).await,
@@ -761,6 +804,10 @@ impl SessionLane {
             }
             Permission { command, reply } => {
                 let outcome = self.handle_permission(shared, command).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
+            Thinking { command, reply } => {
+                let outcome = self.handle_thinking(shared, command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             ConfigurePrivateResolver { reply, .. } => {
@@ -1327,6 +1374,15 @@ impl SessionLane {
             crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unavailable).await;
             return;
         }
+        if command.execution_context.as_ref().is_some_and(|context| {
+            !context.valid() || command.intent.is_some()
+                || !command.idempotency_key.as_deref().is_some_and(|key| !key.is_empty() && key.len() <= 256
+                    && key.trim() == key && !key.chars().any(char::is_control))
+                || command.run_id.is_some()
+        }) {
+            crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
+            return;
+        }
         if let Some(intent) = &command.intent {
             if command.clone().with_intent(intent.clone()).is_err() {
                 crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
@@ -1334,6 +1390,13 @@ impl SessionLane {
             }
             match shared.running_session_driver(identity_endpoint(&command.identity)) {
                 Ok(driver) if driver.session_ops().is_some_and(|ops| ops.supports_goal()) => {},
+                Ok(_) => { crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unsupported).await; return; },
+                Err(failure) => { crate::call::reply(call.as_ref(), reply, send_driver_failure(failure)).await; return; },
+            }
+        }
+        if let Some(context) = &command.execution_context {
+            match shared.running_session_driver(identity_endpoint(&command.identity)) {
+                Ok(driver) if driver.session_ops().is_some_and(|ops| ops.unsupported_task_budget(&context.budget).is_empty()) => {},
                 Ok(_) => { crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Unsupported).await; return; },
                 Err(failure) => { crate::call::reply(call.as_ref(), reply, send_driver_failure(failure)).await; return; },
             }
@@ -1413,6 +1476,17 @@ impl SessionLane {
                 next.run_delivery_contexts.entry(run_id.clone()).or_insert_with(|| context.clone());
             }
         }
+        if let (Some(request_id), Some(context)) = (&requested_run_id, &command.execution_context) {
+            if !next.has_terminal_run(request_id) {
+                if next.run_execution_contexts.get(request_id).is_some_and(|(_, existing)| existing != context) {
+                    self.send_receive_outcome(shared, &receive_identity, Some(request_id), receive_demand_added, &SessionSendOutcome::Rejected);
+                    self.close_if_idle(shared, &receive_identity);
+                    crate::call::reply(call.as_ref(), reply, SessionSendOutcome::Rejected).await;
+                    return;
+                }
+                next.run_execution_contexts.insert(request_id.clone(), (request_id.clone(), context.clone()));
+            }
+        }
         self.state = Some(next.clone());
         shared.store_snapshot_state(next).await;
         let producer = match self.completion_producer(shared) {
@@ -1467,6 +1541,22 @@ impl SessionLane {
     async fn complete_send(&mut self, shared: &SessionShared, command: SessionSendCommand, goal_demand: Option<(String, Option<String>)>, receive_demand_added: bool, outcome: &SessionSendOutcome) {
         let identity = command.identity.clone();
         let requested = command.request_run_identity().map(str::to_owned);
+        if let (Some(context), SessionSendOutcome::Queued { run_id } | SessionSendOutcome::Succeeded { run_id, .. }) = (&command.execution_context, outcome) {
+            if let Some(state) = &mut self.state {
+                if !state.has_terminal_run(run_id) || state.pending_terminals.iter().any(|snapshot| &snapshot.native_run_id == run_id) {
+                    if let Some(requested) = &requested {
+                        state.run_execution_contexts.insert(run_id.clone(), (requested.clone(), context.clone()));
+                    }
+                    for snapshot in &mut state.pending_terminals {
+                        if &snapshot.native_run_id == run_id {
+                            snapshot.execution_context = Some(context.clone());
+                            snapshot.native_request_id = requested.clone();
+                        }
+                    }
+                    shared.store_snapshot_state(state.clone()).await;
+                }
+            }
+        }
         if let Some(requested) = &requested {
             let remove = receive_demand_added
                 && !self.state.as_ref().is_some_and(|state| state.pending_terminals.iter().any(|snapshot| snapshot.native_run_id == *requested))
@@ -1474,7 +1564,9 @@ impl SessionLane {
                 && self.send_receive_run(&identity, outcome) != Some(requested.as_str())
                 && self.state.as_ref().and_then(SessionState::active_run_id) != Some(requested.as_str());
             if remove && let Some(state) = &mut self.state {
-                if state.run_delivery_contexts.remove(requested).is_some() {
+                let delivery_removed = state.run_delivery_contexts.remove(requested).is_some();
+                let execution_removed = state.run_execution_contexts.remove(requested).is_some();
+                if delivery_removed || execution_removed {
                     shared.store_snapshot_state(state.clone()).await;
                 }
             }
@@ -1848,7 +1940,7 @@ impl SessionLane {
                 let outcome = shared.handle_session_catalog(command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
-            query @ (SessionQuery::Abort { .. } | SessionQuery::Audited { .. } | SessionQuery::Producing { .. }) => query.send_unavailable(),
+            query @ (SessionQuery::ReadRun { .. } | SessionQuery::Abort { .. } | SessionQuery::Audited { .. } | SessionQuery::Producing { .. }) => query.send_unavailable(),
         }
     }
 }
@@ -1936,6 +2028,10 @@ impl OwnerSpec for SessionOwner {
             }
             SessionQuery::GetSession { session_key, reply } => {
                 crate::call::reply(call.as_ref(), reply, shared.get_session_view(&session_key).await).await;
+            }
+            SessionQuery::ReadRun { command, reply } => {
+                let outcome = shared.handle_read_run(command).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             SessionQuery::Abort { command, reply } => {
                 let outcome: SessionAbortOutcome = shared.handle_abort(command).await;

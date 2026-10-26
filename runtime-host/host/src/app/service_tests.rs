@@ -71,7 +71,7 @@ impl Drop for TestRoot {
 async fn control_service_emits_bounded_host_health_and_shuts_down_on_eof() {
     let root = TestRoot::new();
     let mut input = host_input(&root);
-    input.matcha.bun_executable = root.base.join("missing-matcha-bun");
+    input.matcha.server_executable = root.base.join("missing-matcha-app-server");
     input.open_claw.electron_image = root.base.join("missing-openclaw-image");
     input.open_claw.port = free_local_port();
     disable_openclaw_autostart(&input);
@@ -349,10 +349,15 @@ fn host_input(root: &TestRoot) -> HostInput {
         matcha: MatchaAgentInput {
             server_executable: absolute_path("bin/matcha-app-server"),
             cli_executable: absolute_path("bin/bun"),
-            cli_args: vec![absolute_path("matcha-agent/dist/cli-bun.js").to_string_lossy().into_owned()],
+            cli_args: vec![
+                absolute_path("matcha-agent/dist/cli-bun.js")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
             working_directory: absolute_path("runtime"),
             storage_root: root.matcha_storage_parent.join("app-server"),
             port: 18_790,
+            world_runtime_host: None,
             #[cfg(windows)]
             git_bash: absolute_path("bin/bash.exe"),
             #[cfg(unix)]
@@ -377,6 +382,7 @@ fn host_input(root: &TestRoot) -> HostInput {
             port: 18_789,
             sealed_endpoint: None,
             sealed_token: None,
+            world_runtime_host: None,
             client_metadata: GatewayClientMetadata::try_new(
                 "test".into(),
                 std::env::consts::OS.into(),
@@ -389,6 +395,11 @@ fn host_input(root: &TestRoot) -> HostInput {
         open_claw_secret: GatewaySecret::new(entropy()).unwrap(),
         organization_store: organization::open_organization_store(&root.state_parent).unwrap(),
         runtime_state_dir: root.state_parent.join("runtime-host"),
+        world_postgres: None,
+        world_storage_targets: Vec::new(),
+        world_source_access: None,
+        initial_world: None,
+        world_peer_endpoint: None,
         searxng_resources_dir: root.state_parent.join("searxng"),
         app_log_dir: root.state_parent.join("userdata-logs"),
         parent_callback_base_url: "http://127.0.0.1:34100".into(),

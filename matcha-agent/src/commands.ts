@@ -206,6 +206,7 @@ import advisor from './commands/advisor.js'
 import autonomy from './commands/autonomy.js'
 import provider from './commands/provider.js'
 import { logError } from './utils/log.js'
+import { rethrowInvestigationAdmission } from './services/api/investigation.js'
 import { toError } from './utils/errors.js'
 import { logForDebugging } from './utils/debug.js'
 import {
@@ -450,6 +451,7 @@ async function getSkills(cwd: string): Promise<{
   try {
     const [skillDirCommands, pluginSkills] = await Promise.all([
       getSkillDirCommands(cwd).catch(err => {
+        rethrowInvestigationAdmission(err)
         logError(toError(err))
         logForDebugging(
           'Skill directory commands failed to load, continuing without them',
@@ -457,6 +459,7 @@ async function getSkills(cwd: string): Promise<{
         return []
       }),
       getPluginSkills().catch(err => {
+        rethrowInvestigationAdmission(err)
         logError(toError(err))
         logForDebugging('Plugin skills failed to load, continuing without them')
         return []
@@ -476,6 +479,7 @@ async function getSkills(cwd: string): Promise<{
       builtinPluginSkills,
     }
   } catch (err) {
+    rethrowInvestigationAdmission(err)
     // This should never happen since we catch at the Promise level, but defensive
     logError(toError(err))
     logForDebugging('Unexpected error in getSkills, returning empty')
@@ -546,7 +550,15 @@ const loadAllCommands = memoize(async (cwd: string): Promise<Command[]> => {
     getSkills(cwd),
     getPluginCommands(),
     getWorkflowCommands ? getWorkflowCommands(cwd) : Promise.resolve([]),
-  ])
+  ]).catch(error => {
+    try {
+      rethrowInvestigationAdmission(error)
+    } catch (admissionError) {
+      loadAllCommands.cache?.delete?.(cwd)
+      throw admissionError
+    }
+    throw error
+  })
 
   return [
     ...bundledSkills,
@@ -653,7 +665,15 @@ export function getMcpSkillCommands(
 // This includes both skills (from /skills/) and commands (from /commands/)
 export const getSkillToolCommands = memoize(
   async (cwd: string): Promise<Command[]> => {
-    const allCommands = await getCommands(cwd)
+    const allCommands = await getCommands(cwd).catch(error => {
+      try {
+        rethrowInvestigationAdmission(error)
+      } catch (admissionError) {
+        getSkillToolCommands.cache?.delete?.(cwd)
+        throw admissionError
+      }
+      throw error
+    })
     return allCommands.filter(
       cmd =>
         cmd.type === 'prompt' &&
@@ -689,6 +709,12 @@ export const getSlashCommandToolSkills = memoize(
             cmd.disableModelInvocation),
       )
     } catch (error) {
+      try {
+        rethrowInvestigationAdmission(error)
+      } catch (admissionError) {
+        getSlashCommandToolSkills.cache?.delete?.(cwd)
+        throw admissionError
+      }
       logError(toError(error))
       // Return empty array rather than throwing - skills are non-critical
       // This prevents skill loading failures from breaking the entire system

@@ -7,6 +7,7 @@ import {
 import { substituteArguments } from '../argumentSubstitution.js'
 import { lazySchema } from '../lazySchema.js'
 import type { SetAppState } from '../messageQueueManager.js'
+import type { Message } from '../../types/message.js'
 import { hasSuccessfulToolCall } from '../messages.js'
 import { addFunctionHook } from './sessionHooks.js'
 
@@ -63,6 +64,10 @@ export function createStructuredOutputTool(): Tool {
   }
 }
 
+export function hasStructuredOutput(messages: Message[]): boolean {
+  return hasSuccessfulToolCall(messages, SYNTHETIC_OUTPUT_TOOL_NAME)
+}
+
 /**
  * Register a function hook that enforces structured output via SyntheticOutputTool.
  * Used by ask.tsx, execAgentHook.ts, and background verification.
@@ -76,7 +81,7 @@ export function registerStructuredOutputEnforcement(
     sessionId,
     'Stop',
     '', // No matcher - applies to all stops
-    messages => hasSuccessfulToolCall(messages, SYNTHETIC_OUTPUT_TOOL_NAME),
+    hasStructuredOutput,
     `You MUST call the ${SYNTHETIC_OUTPUT_TOOL_NAME} tool to complete this request. Call this tool now.`,
     { timeout: 5000 },
   )

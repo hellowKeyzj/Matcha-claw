@@ -1,14 +1,14 @@
 import { act, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { ChatInput } from '@/pages/Chat/ChatInput';
-import { ChatList, ChatListSurface } from '@/pages/Chat/components/ChatList';
-import { createChatScrollChromeStore } from '@/pages/Chat/chat-scroll-chrome-store';
-import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
+import { ChatInput } from '@/plugins/chat/ChatInput';
+import { ChatList, ChatListSurface } from '@/plugins/chat/components/ChatList';
+import { createChatScrollChromeStore } from '@/plugins/chat/chat-scroll-chrome-store';
+import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
 import {
   applyAssistantPresentationToItems,
   type ChatRenderItem,
-} from '@/pages/Chat/chat-render-item-model';
+} from '@/plugins/message-rendering/chat-render-item-model';
 import type { SessionRenderItem } from '../../src/types/session/render-item';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
@@ -23,7 +23,7 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/ChatMessage', async () => {
+vi.mock('@/plugins/message-rendering/ChatMessage', async () => {
   const React = await import('react');
   return {
     ChatMessage: React.memo(function MockChatMessage(props: unknown) {
@@ -34,7 +34,7 @@ vi.mock('@/pages/Chat/ChatMessage', async () => {
   };
 });
 
-vi.mock('@/pages/Chat/ChatAssistantTurn', async () => {
+vi.mock('@/plugins/message-rendering/ChatAssistantTurn', async () => {
   const React = await import('react');
   return {
     ChatAssistantTurn: React.memo(function MockChatAssistantTurn(props: unknown) {
@@ -45,7 +45,7 @@ vi.mock('@/pages/Chat/ChatAssistantTurn', async () => {
   };
 });
 
-vi.mock('@/pages/Chat/components/ChatStates', () => ({
+vi.mock('@/plugins/chat/components/ChatStates', () => ({
   FailureScreen: () => <div data-testid="chat-failure-screen" />,
 }));
 

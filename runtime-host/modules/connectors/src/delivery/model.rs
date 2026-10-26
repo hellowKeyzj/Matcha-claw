@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::McpAuth;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConnectorKind {
@@ -83,6 +85,8 @@ pub struct ConnectorReadModel {
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<McpTransport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<McpAuth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

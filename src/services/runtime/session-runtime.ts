@@ -18,10 +18,10 @@ import {
 import { buildSessionOperationTarget, type SessionOperationTarget } from './session-operation-target';
 export type { SessionOperationTarget } from './session-operation-target';
 import type { SessionRenderItem } from '../../types/session/render-item';
-import { decodeHistorySessionView, resolveSessionViewError } from '@/stores/chat/history-fetch-helpers';
-import { projectSessionViewItems } from '@/stores/chat/store-state-helpers';
-import type { ChatSession } from '@/stores/chat/types';
-import { findLatestAssistantTextFromItems } from '@/stores/chat/timeline-message';
+import { decodeHistorySessionView, resolveSessionViewError } from '@/plugins/chat/store/history-fetch-helpers';
+import { projectSessionViewItems } from '@/plugins/chat/store/store-state-helpers';
+import type { ChatSession } from '@/plugins/chat/store/types';
+import { findLatestAssistantTextFromItems } from '@/plugins/chat/store/timeline-message';
 
 export interface FetchChatHistoryInput extends SessionOperationTarget {
   limit?: number;

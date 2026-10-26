@@ -3,6 +3,7 @@ import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
 import type { CallReceipt } from '../../../../../src/types/call-log';
 import { decodeCallReceipt } from '../../../../../src/types/call-log/receipt';
+import { decodeProviderRuntimeReports, type ProviderRuntimeReport } from '../../../../../src/types/provider-runtime-report';
 
 const PROVIDER_ACCOUNTS_PATH = '/api/provider-accounts';
 const NOT_ADMITTED = { success: false, error: 'Provider account mutation was not admitted', code: 'not-admitted' } as const;
@@ -78,8 +79,8 @@ type Request =
     input: Readonly<{ kind: 'delete'; accountId: string; revision: number; privateTransactionId?: string }>;
   }>;
 
-export type ProviderAccountsListResponse = Readonly<{ accounts: ProviderAccount[] }>;
-type AccountResponse = Readonly<{ account: ProviderAccount }>;
+export type ProviderAccountsListResponse = Readonly<{ accounts: ProviderAccount[]; reports: ProviderRuntimeReport[] }>;
+type AccountResponse = Readonly<{ account: ProviderAccount; reports: ProviderRuntimeReport[] }>;
 export type ProviderAccountsMutationResponse = CallReceipt;
 
 const PROVIDER_ACCOUNT_KEYS: readonly string[] = [
@@ -248,11 +249,14 @@ function validTransactionId(value: unknown): boolean {
 }
 
 function isListResponse(value: unknown): value is ProviderAccountsListResponse {
-  return isRecord(value) && hasExactKeys(value, ['accounts']) && Array.isArray(value.accounts) && value.accounts.every(isProviderAccount);
+  return isRecord(value) && hasExactKeys(value, ['accounts', 'reports'])
+    && Array.isArray(value.accounts) && value.accounts.every(isProviderAccount)
+    && decodeProviderRuntimeReports(value.reports) !== undefined;
 }
 
 function isAccountResponse(value: unknown): value is AccountResponse {
-  return isRecord(value) && hasExactKeys(value, ['account']) && isProviderAccount(value.account);
+  return isRecord(value) && hasExactKeys(value, ['account', 'reports']) && isProviderAccount(value.account)
+    && decodeProviderRuntimeReports(value.reports) !== undefined;
 }
 
 function isProviderAccount(value: unknown): value is ProviderAccount {

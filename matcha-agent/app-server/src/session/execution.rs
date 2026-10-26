@@ -10,37 +10,82 @@ impl Sessions {
         let owner = self.clone();
         let executing = session.clone();
         let task = tokio::spawn(async move {
-            loop {
-                let (deadline, activity) = {
-                    let mut execution = executing.data.lock().await;
-                    let activity = execution.cli.as_ref().map(Cli::activity);
-                    (execution.idle_deadline(), activity)
-                };
-                let sleep = tokio::select! {
-                    _ = executing.stopped.cancelled() => break,
-                    _ = executing.wake.notified() => false,
-                    _ = async {
-                        match activity {
-                            Some(mut activity) => { let _ = activity.changed().await; }
-                            None => std::future::pending::<()>().await,
-                        }
-                    } => false,
-                    _ = async {
-                        match deadline {
-                            Some(deadline) => tokio::time::sleep_until(deadline).await,
-                            None => std::future::pending::<()>().await,
-                        }
-                    } => true,
-                };
-                if owner.0.shutdown.load(Ordering::Acquire) {
-                    break;
+            let budget_owner = owner.clone();
+            let budget_session = executing.clone();
+            let budget_stop = tokio_util::sync::CancellationToken::new();
+            let stopping_budget = budget_stop.clone();
+            let budget = async move {
+                loop {
+                    let changed = budget_session.changed.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    let deadline = {
+                        let execution = budget_session.data.lock().await;
+                        let active = execution.active.as_ref().filter(|active| !active.budget_expired)
+                            .and_then(|active| active.deadline);
+                        execution.queue.iter().filter_map(|queued| queued.run.world_investigation.as_ref()
+                            .map(|world| tokio::time::Instant::now() + std::time::Duration::from_millis(
+                                world.deadline_ms.saturating_sub(rpc::now_ms()))))
+                            .chain(active).min()
+                    };
+                    tokio::select! {
+                        _ = budget_session.stopped.cancelled() => break,
+                        _ = stopping_budget.cancelled() => break,
+                        _ = changed => continue,
+                        _ = async {
+                            match deadline {
+                                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => {}
+                    }
+                    if let Err(error) = budget_owner
+                        .expire_budget(&budget_session, &stopping_budget)
+                        .await
+                    {
+                        budget_owner.execution_fault(&budget_session, error).await;
+                    }
                 }
-                if sleep {
-                    owner.sleep_instance(executing.clone()).await;
+            };
+            let executor = async {
+                loop {
+                    let (deadline, activity) = {
+                        let mut execution = executing.data.lock().await;
+                        let activity = execution.cli.as_ref().map(Cli::activity);
+                        (execution.idle_deadline(), activity)
+                    };
+                    let sleep = tokio::select! {
+                        _ = executing.stopped.cancelled() => break,
+                        _ = executing.wake.notified() => false,
+                        _ = async {
+                            match activity {
+                                Some(mut activity) => { let _ = activity.changed().await; }
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => false,
+                        _ = async {
+                            match deadline {
+                                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => true,
+                    };
+                    if owner.0.shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if sleep {
+                        owner.sleep_instance(executing.clone()).await;
+                    }
+                    if let Err(error) = owner.advance(executing.clone()).await {
+                        owner.execution_fault(&executing, error).await;
+                    }
                 }
-                if let Err(error) = owner.advance(executing.clone()).await {
-                    owner.execution_fault(&executing, error).await;
-                }
+            };
+            tokio::pin!(executor);
+            tokio::pin!(budget);
+            tokio::select! {
+                _ = &mut executor => { budget_stop.cancel(); budget.await; },
+                _ = &mut budget => executor.await,
             }
         });
         *session.executor.lock().await = Some(task);
@@ -74,16 +119,33 @@ impl Sessions {
             .front()
             .expect("nonempty session queue")
             .clone();
+        if pending.run.world_investigation.as_ref().is_some_and(|world| rpc::now_ms() >= world.deadline_ms) {
+            pending.finish(run::Status::Failed, "investigation_deadline_before_dispatch", None);
+            self.save_run_locked(&mut execution, &pending).await?;
+            execution.queue.pop_front();
+            session.changed.notify_waiters();
+            session.wake.notify_one();
+            return Ok(());
+        }
         pending.run.status = run::Status::Starting;
         pending.run.started_at_ms = Some(rpc::now_ms());
         self.save_run_locked(&mut execution, &pending).await?;
         execution.queue.pop_front();
         let run_id = pending.run.run_id.clone();
+        let deadline = if let Some(world) = &pending.run.world_investigation {
+            Some(tokio::time::Instant::now() + std::time::Duration::from_millis(
+                world.deadline_ms.saturating_sub(rpc::now_ms()),
+            ))
+        } else {
+            pending.run.budget.as_ref().and_then(|budget| budget.max_wall_time_ms)
+                .map(|milliseconds| tokio::time::Instant::now() + std::time::Duration::from_millis(milliseconds))
+        };
         execution.active = Some(run::Active {
             record: pending,
             acknowledged: false,
             input_started: false,
             native_cycle_observed: false,
+            idle_observed: false,
             interrupt_observed: false,
             ownership_ambiguous: execution
                 .cli
@@ -95,8 +157,12 @@ impl Sessions {
                 ),
             result_count: 0,
             result: None,
+            deadline,
+            budget_expired: false,
+            auxiliary_pending: 0,
         });
         execution.sending = true;
+        session.changed.notify_waiters();
         let existing = execution.cli.clone();
         let launch = if existing.is_none() {
             execution.launching = true;
@@ -132,6 +198,40 @@ impl Sessions {
             None => existing.expect("existing CLI or launch specification"),
         };
         let mut execution = session.data.lock().await;
+        if let Some(active) = execution.active.as_ref().filter(|active| active.record.run.run_id == run_id
+            && active.record.run.world_investigation.is_some())
+        {
+            let mut prepared = active.record.clone();
+            let world = prepared.run.world_investigation.as_mut().expect("World Run checked");
+            world.native_attempt_id = Some(uuid::Uuid::new_v4().to_string());
+            world.native_instance_id = Some(cli.instance_id().to_owned());
+            self.save_run_locked(&mut execution, &prepared).await?;
+            execution.active.as_mut().expect("locked active Run").record = prepared;
+            session.changed.notify_waiters();
+            loop {
+                let changed = session.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                let Some(active) = execution.active.as_ref().filter(|active| active.record.run.run_id == run_id) else { break; };
+                if active.record.run.cancel_requested_at_ms.is_some() || execution.closing
+                    || self.0.shutdown.load(Ordering::Acquire)
+                    || active.record.run.world_investigation.as_ref().is_some_and(|world|
+                        world.dispatch_state == "released" || rpc::now_ms() >= world.deadline_ms)
+                {
+                    break;
+                }
+                let deadline = active.deadline;
+                drop(execution);
+                tokio::select! {
+                    _ = changed => {},
+                    _ = async { match deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }} => {},
+                }
+                execution = session.data.lock().await;
+            }
+        }
         if execution.closing
             || self.0.shutdown.load(Ordering::Acquire)
             || execution
@@ -157,21 +257,41 @@ impl Sessions {
             session.wake.notify_one();
             return Ok(());
         }
+        if active.record.run.world_investigation.as_ref().is_some_and(|world| rpc::now_ms() >= world.deadline_ms) {
+            self.finish_locked(&mut execution, run::Status::Failed, "investigation_deadline_before_send", None).await?;
+            execution.sending = false;
+            session.changed.notify_waiters();
+            session.wake.notify_one();
+            return Ok(());
+        }
         let mut running = active.record.clone();
         running.run.status = run::Status::Running;
+        if let Some(world) = running.run.world_investigation.as_mut() {
+            world.input_delivery = "may_have_sent".into();
+        }
         self.save_run_locked(&mut execution, &running).await?;
         let active = execution.active.as_mut().expect("active run checked");
         active.record = running;
         active.input_started = true;
         let message_id = active.record.run.message_id.clone();
+        let max_turns = active
+            .record
+            .run
+            .budget
+            .as_ref()
+            .and_then(|budget| budget.max_turns);
         let content = active
             .record
             .content
             .clone()
             .expect("nonterminal run retains submitted content");
+        let native_execution = active.record.run.world_investigation.as_ref()
+            .map(|world| world.frame(&active.record.run)).transpose()?;
         let session_id = execution.record.session_id.clone();
         drop(execution);
-        let sent = cli.send_user(&session_id, &message_id, content).await;
+        let sent = cli
+            .send_user(&session_id, &message_id, content, max_turns, native_execution)
+            .await;
         let mut execution = session.data.lock().await;
         execution.sending = false;
         session.changed.notify_waiters();
@@ -193,11 +313,9 @@ impl Sessions {
                 }
             }
             Err(error) => {
-                if execution
-                    .active
-                    .as_ref()
-                    .is_some_and(|active| active.record.run.run_id == run_id)
-                {
+                if execution.active.as_ref().is_some_and(|active| {
+                    active.record.run.run_id == run_id && !active.budget_expired
+                }) {
                     let status = if error
                         .data
                         .as_ref()
@@ -239,6 +357,115 @@ impl Sessions {
         Ok(())
     }
 
+    async fn expire_budget(
+        &self,
+        session: &Arc<Session>,
+        stopping: &tokio_util::sync::CancellationToken,
+    ) -> rpc::Result<()> {
+        let _closing = tokio::select! {
+            _ = stopping.cancelled() => return Ok(()),
+            _ = session.stopped.cancelled() => return Ok(()),
+            closing = session.close_guard.lock() => closing,
+        };
+        let mut execution = session.data.lock().await;
+        let now = rpc::now_ms();
+        let mut index = 0;
+        while let Some(queued) = execution.queue.get(index) {
+            if queued.run.world_investigation.as_ref().is_some_and(|world| now >= world.deadline_ms) {
+                let mut terminal = queued.clone();
+                terminal.finish(run::Status::Failed, "investigation_deadline_before_dispatch", None);
+                self.save_run_locked(&mut execution, &terminal).await?;
+                execution.queue.remove(index);
+                session.changed.notify_waiters();
+            } else { index += 1; }
+        }
+        let Some(active) = execution.active.as_ref().filter(|active| {
+            !active.budget_expired
+                && active
+                    .deadline
+                    .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+        }) else {
+            return Ok(());
+        };
+        let run_id = active.record.run.run_id.clone();
+        let mut requested = active.record.clone();
+        requested.run.status = run::Status::CancelRequested;
+        requested
+            .run
+            .cancel_requested_at_ms
+            .get_or_insert_with(rpc::now_ms);
+        self.save_run_locked(&mut execution, &requested).await?;
+        let active = execution.active.as_mut().expect("budget run checked");
+        active.record = requested;
+        active.budget_expired = true;
+        execution.closing = true;
+        session.changed.notify_waiters();
+        drop(execution);
+        let mut interrupted = false;
+        let mut failures = Vec::new();
+        loop {
+            let changed = session.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let execution = session.data.lock().await;
+            let cli = execution.cli.clone();
+            let pending = execution.sending || execution.launching;
+            drop(execution);
+            if let Some(cli) = cli {
+                if !interrupted {
+                    interrupted = true;
+                    // The interrupt is advisory; checked process close enforces the deadline.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(250),
+                        cli.request(json!({"subtype":"interrupt"})),
+                    )
+                    .await;
+                }
+                let closed = cli.close().await;
+                self.cleanup_result(session, cli.instance_id(), &closed)
+                    .await;
+                if let Err(error) = closed {
+                    failures.push(error);
+                }
+            }
+            if !pending {
+                break;
+            }
+            changed.await;
+        }
+        if let Some(consumer) = session.consumer.lock().await.take() {
+            if let Err(error) = consumer.await {
+                failures.push(rpc::Error::internal("session_consumer_task").with_source(error));
+            }
+        }
+        let mut execution = session.data.lock().await;
+        if let Some(active) = execution
+            .active
+            .as_ref()
+            .filter(|active| active.record.run.run_id == run_id)
+        {
+            let result = active.owned_result();
+            let status =
+                if failures.is_empty() && execution.storage_fault.is_none() && result.is_some() {
+                    run::Status::Failed
+                } else {
+                    run::Status::OutcomeUnknown
+                };
+            self.finish_locked(&mut execution, status, "native_wall_time_exceeded", result)
+                .await?;
+        }
+        execution.cli = None;
+        execution.native.busy = false;
+        execution.native.proactive = native::Proactive::Unobserved;
+        execution.consuming = false;
+        execution.closing = false;
+        execution.idle = super::idle::Idle::Dormant;
+        drop(execution);
+        session.changed.notify_waiters();
+        session.wake.notify_one();
+        combined(failures)
+    }
+
     async fn fail_before_send(
         &self,
         session: &Session,
@@ -249,8 +476,14 @@ impl Sessions {
         execution.launching = false;
         execution.launch_error = Some(error.clone());
         execution.sending = false;
-        self.finish_locked(&mut execution, run::Status::Failed, reason, None)
-            .await?;
+        if execution
+            .active
+            .as_ref()
+            .is_none_or(|active| !active.budget_expired)
+        {
+            self.finish_locked(&mut execution, run::Status::Failed, reason, None)
+                .await?;
+        }
         session.changed.notify_waiters();
         session.wake.notify_one();
         let context = failure_context(&execution, error);
@@ -304,9 +537,35 @@ impl Sessions {
             return Ok(());
         };
         let mut terminal = active.record.clone();
+        let ownership_confirmed = active.owned_result().is_some();
+        let children_joined = active.auxiliary_pending == 0;
+        let native_stopped = active.idle_observed && ownership_confirmed && children_joined;
         terminal.finish(status, reason, result);
+        let correlation = terminal.run.world_investigation.as_ref().and_then(|world| world.correlation(&terminal.run));
+        let elapsed = terminal.run.finished_at_ms.and_then(|finished| finished.checked_sub(terminal.run.created_at_ms));
+        if let Some(world) = terminal.run.world_investigation.as_mut() {
+            if let Some(receipt) = world.receipt.as_mut() {
+                let not_started = world.input_delivery == "not_started" && world.io.is_empty() && !active.input_started;
+                receipt["ownershipConfirmed"] = json!(ownership_confirmed || not_started);
+                receipt["nativeStopped"] = json!(native_stopped || not_started);
+                receipt["childrenJoined"] = json!(children_joined && receipt["childrenJoined"] == true);
+            }
+            let actual = elapsed.filter(|_| active.input_started && matches!(status,
+                run::Status::Succeeded | run::Status::Failed | run::Status::Cancelled))
+                .and_then(|elapsed| world.free_usage(correlation.as_ref(), terminal.run.result.as_ref(), elapsed));
+            if let Some(receipt) = world.receipt.as_mut() {
+                if let Some(actual) = actual {
+                    receipt["usage"] = json!({"coverage":"complete","actual":actual});
+                }
+                receipt.as_object_mut().expect("native receipt object").remove("receiptDigest");
+                let receipt_digest = super::investigation::digest(receipt)?;
+                receipt["receiptDigest"] = json!(receipt_digest);
+            }
+        }
         self.save_run_locked(execution, &terminal).await?;
         execution.active = None;
+        // Prepared-submit and held-dispatch waiters observe only committed facts.
+
         Ok(())
     }
 
@@ -393,6 +652,7 @@ impl Sessions {
                 );
             }
             execution.closing = true;
+            session.changed.notify_waiters();
             if permanent {
                 let mut closed = execution.record.clone();
                 closed.status = record::Status::Closed;
@@ -494,6 +754,7 @@ impl Sessions {
                 );
             }
         }
+        session.changed.notify_waiters();
         session.wake.notify_one();
         if self.0.shutdown.load(Ordering::Acquire)
             && let Some(task) = session.executor.lock().await.take()

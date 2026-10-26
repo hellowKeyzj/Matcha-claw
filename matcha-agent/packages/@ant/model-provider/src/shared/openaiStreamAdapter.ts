@@ -62,6 +62,7 @@ export async function* adaptOpenAIStreamToAnthropic(
   let rawCacheReadTokens = 0
   let rawCacheWriteTokens = 0
   let usage = normalizeOpenAIUsage({ totalInputTokens: 0, outputTokens: 0 })
+  const nativeUsage: Record<string, number> = {}
 
   // Track all open content block indices (for cleanup)
   const openBlockIndices = new Set<number>()
@@ -103,6 +104,25 @@ export async function* adaptOpenAIStreamToAnthropic(
         cacheReadTokens: rawCacheReadTokens,
         cacheWriteTokens: rawCacheWriteTokens,
       })
+      if (typeof chunk.usage.completion_tokens === 'number') {
+        nativeUsage.output_tokens = chunk.usage.completion_tokens
+      }
+      if (typeof details?.cached_tokens === 'number') {
+        nativeUsage.cache_read_input_tokens = details.cached_tokens
+      }
+      if (typeof details?.cache_write_tokens === 'number') {
+        nativeUsage.cache_creation_input_tokens = details.cache_write_tokens
+      }
+      if (
+        typeof chunk.usage.prompt_tokens === 'number' &&
+        nativeUsage.cache_read_input_tokens !== undefined &&
+        nativeUsage.cache_creation_input_tokens !== undefined
+      ) {
+        nativeUsage.input_tokens =
+          chunk.usage.prompt_tokens -
+          nativeUsage.cache_read_input_tokens -
+          nativeUsage.cache_creation_input_tokens
+      }
     }
 
     // Emit message_start on first chunk
@@ -329,7 +349,9 @@ export async function* adaptOpenAIStreamToAnthropic(
         stop_sequence: null,
       },
       usage,
-    } as BetaRawMessageStreamEvent
+      native_usage: nativeUsage,
+      native_complete: pendingFinishReason !== null,
+    } as unknown as BetaRawMessageStreamEvent
 
     yield {
       type: 'message_stop',

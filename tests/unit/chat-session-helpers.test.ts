@@ -11,13 +11,13 @@ import {
   shouldKeepMissingCurrentSession,
   shouldRetainLocalSessionRecord,
   stripAutomaticWorkingDirectoryTitlePrefix,
-} from '@/stores/chat/session-helpers';
+} from '@/plugins/chat/store/session-helpers';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import type { ChatSession } from '@/stores/chat';
-import { areSessionsEquivalent } from '@/stores/chat/store-state-helpers';
-import { buildRuntimeScopeKey } from '@/stores/chat/session-identity';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
+import type { ChatSession } from '@/plugins/chat/store';
+import { areSessionsEquivalent } from '@/plugins/chat/store/store-state-helpers';
+import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 function createChatSession(input: Partial<ChatSession> & Pick<ChatSession, 'key' | 'agentId'>): ChatSession {

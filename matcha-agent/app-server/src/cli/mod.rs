@@ -1,4 +1,5 @@
 pub mod command;
+pub(crate) mod effort;
 pub(crate) mod idle;
 pub mod process;
 pub mod projection;
@@ -35,6 +36,7 @@ pub struct LaunchSpec {
     pub paths: Paths,
     pub resume: bool,
     pub fork_from: Option<String>,
+    pub(crate) effort: Option<effort::Level>,
 }
 
 pub enum CliEvent {
@@ -142,6 +144,9 @@ impl Cli {
         if let Some(model) = projection::model(&spec.config, &spec.agent)? {
             args.extend(["--model".into(), model]);
         }
+        if let Some(effort) = spec.effort {
+            args.extend(["--effort".into(), effort.as_str().into()]);
+        }
         if let Some(tools) = &spec.agent.tools {
             args.push("--tools".into());
             if tools.is_empty() {
@@ -190,6 +195,7 @@ impl Cli {
         let mut launch =
             projection::launch(&execution_config, &spec.paths, &spec.agent_id, args).await?;
         let instance_id = Uuid::new_v4().to_string();
+        crate::world::inject(&mut launch, &spec, &instance_id)?;
         let sealed = spec.config.private_sealed.acquire(
             &spec.config,
             &spec.agent_id,
@@ -321,6 +327,8 @@ impl Cli {
         session_id: &str,
         message_id: &str,
         content: Value,
+        max_turns: Option<u64>,
+        native_execution: Option<Value>,
     ) -> rpc::Result<()> {
         if session_id != self.0.instance.session_id {
             return Err(not_sent(Error::invalid(
@@ -339,7 +347,7 @@ impl Cli {
             .instance
             .process
             .send(encode(protocol::user_message(
-                session_id, message_id, content,
+                session_id, message_id, content, max_turns, native_execution,
             ))?)
             .await
     }

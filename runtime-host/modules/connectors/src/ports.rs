@@ -258,6 +258,12 @@ pub trait ConnectorOps: Send + Sync {
         connector: Connector,
     ) -> ConnectorFuture<'a, ConnectorObservation>;
 
+    fn mcp_oauth<'a>(
+        &'a self,
+        connector: Connector,
+        request: McpOAuthRequest,
+    ) -> ConnectorFuture<'a, Result<McpOAuthReceipt, ConnectorOperationFailure>>;
+
     fn list_mcp_servers<'a>(
         &'a self,
     ) -> ConnectorFuture<'a, Result<Vec<McpServerConfig>, ConnectorOperationFailure>>;
@@ -275,6 +281,44 @@ pub trait ConnectorOps: Send + Sync {
         server_name: String,
         enabled: bool,
     ) -> ConnectorFuture<'a, Result<(), ConnectorOperationFailure>>;
+}
+
+#[derive(Clone, Copy, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpOAuthAction {
+    Start,
+    Status,
+    Logout,
+}
+
+pub struct McpOAuthRequest {
+    pub action: McpOAuthAction,
+    pub agent_id: Option<String>,
+    pub flow_id: Option<String>,
+}
+
+#[derive(Clone, Copy, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpOAuthState {
+    AuthorizationRequired,
+    Authorizing,
+    Authorized,
+    Unauthenticated,
+    Connected,
+    Failed,
+    Unavailable,
+    Unknown,
+}
+
+// Transient browser handoff only; never include this receipt in audit/log storage.
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct McpOAuthReceipt {
+    pub state: McpOAuthState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
 }
 
 #[derive(Clone, Copy)]

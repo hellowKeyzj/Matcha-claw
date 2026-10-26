@@ -141,6 +141,14 @@ impl Diagnostics {
         result
     }
 
+    /// Opt-in safe thinking evidence uses the existing diagnostic store.
+    pub(crate) async fn trace(&self, owner: &str, operation: &str, reason: &str, context: Value) {
+        if std::env::var("MATCHACLAW_TRACE").as_deref() == Ok("1") {
+            // record() reports its own persistence failure without changing the action's result.
+            let _ = self.record(owner, operation, reason, context).await;
+        }
+    }
+
     pub async fn prune(&self, before_ms: u64) -> rpc::Result<Value> {
         let before_ms = i64::try_from(before_ms)
             .map_err(|_| rpc::Error::invalid("beforeMs exceeds SQLite's integer range"))?;
@@ -351,6 +359,9 @@ fn project_context(context: Value) -> Value {
     let mut truncated = false;
     for (field, value) in input {
         if value.is_null() {
+            if matches!(field.as_str(), "level" | "effective") {
+                output.insert(field, Value::Null);
+            }
             continue;
         }
         let projected = match field.as_str() {
@@ -384,6 +395,49 @@ fn project_context(context: Value) -> Value {
                         .map(Value::String)
                 }
             }
+            "sessionHash" | "modelHash" | "requestHash" => value
+                .as_str()
+                .filter(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .map(|hash| Value::String(hash.to_owned())),
+            "provider" => value
+                .as_str()
+                .filter(|provider| {
+                    matches!(
+                        *provider,
+                        "firstParty"
+                            | "bedrock"
+                            | "vertex"
+                            | "foundry"
+                            | "openai"
+                            | "openaiResponses"
+                            | "gemini"
+                            | "grok"
+                            | "unknown"
+                    )
+                })
+                .map(|provider| Value::String(provider.to_owned())),
+            "protocol" => value
+                .as_str()
+                .filter(|protocol| {
+                    matches!(
+                        *protocol,
+                        "anthropic"
+                            | "chat_completions"
+                            | "responses"
+                            | "gemini"
+                            | "grok"
+                            | "unknown"
+                    )
+                })
+                .map(|protocol| Value::String(protocol.to_owned())),
+            "level" | "effective" => effort_level(&value).then_some(value),
+            "options" => value
+                .as_array()
+                .filter(|levels| levels.len() <= 5 && levels.iter().all(effort_level))
+                .map(|levels| Value::Array(levels.clone())),
+            "persisted" | "supportsEffort" => value.as_bool().map(Value::Bool),
             "causeKind" | "stage" => value
                 .as_str()
                 .filter(|label| valid_label(label))
@@ -512,6 +566,12 @@ fn project_context(context: Value) -> Value {
         output.insert("truncated".into(), true.into());
     }
     Value::Object(output)
+}
+
+fn effort_level(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|level| matches!(level, "low" | "medium" | "high" | "xhigh" | "max"))
 }
 
 fn limit_context(context: Value) -> Value {

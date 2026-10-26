@@ -7,27 +7,36 @@ use foundation::process::{
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
-use super::logs::{LifecycleDiagnostic, LifecycleLogBuffer, LifecycleLogClassifier, LogStream};
+use super::{
+    logs::{LifecycleDiagnostic, LifecycleLogBuffer, LifecycleLogClassifier, LogStream},
+    stop::OpenClawGracefulStop,
+};
 
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 
 pub struct OpenClawStdioActivation {
     report_diagnostic: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
     log_buffer: LifecycleLogBuffer,
+    graceful_stop: OpenClawGracefulStop,
 }
 
 impl OpenClawStdioActivation {
-    pub fn new(report_diagnostic: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>) -> Self {
-        Self::with_log_buffer(report_diagnostic, LifecycleLogBuffer::new())
+    pub fn new(
+        report_diagnostic: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
+        graceful_stop: OpenClawGracefulStop,
+    ) -> Self {
+        Self::with_log_buffer(report_diagnostic, LifecycleLogBuffer::new(), graceful_stop)
     }
 
     pub fn with_log_buffer(
         report_diagnostic: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
         log_buffer: LifecycleLogBuffer,
+        graceful_stop: OpenClawGracefulStop,
     ) -> Self {
         Self {
             report_diagnostic,
             log_buffer,
+            graceful_stop,
         }
     }
 
@@ -39,74 +48,29 @@ impl OpenClawStdioActivation {
 impl StdioActivation for OpenClawStdioActivation {
     fn activate(
         &self,
-        _process: ProcessObservation,
+        process: ProcessObservation,
         stdio: ProcessStdio,
         cancellation: CancellationToken,
     ) -> PolicyFuture<StdioActivationResult> {
         let report_diagnostic = Arc::clone(&self.report_diagnostic);
         let log_buffer = self.log_buffer.clone();
+        let graceful_stop = self.graceful_stop.clone();
         Box::pin(async move {
-            let (stdin, stdout, stderr) = stdio.into_parts();
-            activate_stdio_with_buffer(
-                stdin,
-                stdout,
-                stderr,
-                cancellation,
-                report_diagnostic,
-                log_buffer,
-            )
+            if cancellation.is_cancelled() {
+                return StdioActivationResult::Cancelled;
+            }
+            let (Some(stdin), Some(stdout), Some(stderr)) = stdio.into_parts() else {
+                return StdioActivationResult::Unavailable;
+            };
+            let Some(stdin_guard) = graceful_stop.bind_stdin(process, stdin, &cancellation) else {
+                return StdioActivationResult::Cancelled;
+            };
+            StdioActivationResult::Activated(StdioDrain::new(async move {
+                let _stdin_guard = stdin_guard;
+                drain_outputs(stdout, stderr, report_diagnostic, log_buffer).await
+            }))
         })
     }
-}
-
-#[cfg(test)]
-fn activate_stdio<I, O, E>(
-    stdin: Option<I>,
-    stdout: Option<O>,
-    stderr: Option<E>,
-    cancellation: CancellationToken,
-    report_diagnostic: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
-) -> StdioActivationResult
-where
-    O: AsyncRead + Send + Unpin + 'static,
-    E: AsyncRead + Send + Unpin + 'static,
-{
-    activate_stdio_with_buffer(
-        stdin,
-        stdout,
-        stderr,
-        cancellation,
-        report_diagnostic,
-        LifecycleLogBuffer::new(),
-    )
-}
-
-fn activate_stdio_with_buffer<I, O, E>(
-    stdin: Option<I>,
-    stdout: Option<O>,
-    stderr: Option<E>,
-    cancellation: CancellationToken,
-    report_diagnostic: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
-    log_buffer: LifecycleLogBuffer,
-) -> StdioActivationResult
-where
-    O: AsyncRead + Send + Unpin + 'static,
-    E: AsyncRead + Send + Unpin + 'static,
-{
-    if cancellation.is_cancelled() {
-        return StdioActivationResult::Cancelled;
-    }
-
-    let (None, Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
-        return StdioActivationResult::Unavailable;
-    };
-
-    StdioActivationResult::Activated(StdioDrain::new(drain_outputs(
-        stdout,
-        stderr,
-        report_diagnostic,
-        log_buffer,
-    )))
 }
 
 async fn drain_outputs<O, E>(
@@ -158,15 +122,129 @@ async fn drain_output(
     }
 }
 
+#[cfg(all(test, windows))]
+pub(super) async fn with_process_stdio<T, F>(
+    spec: foundation::process::StdioSpec,
+    check: impl FnOnce(ProcessObservation, ProcessStdio) -> F,
+) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    use std::{sync::Mutex, time::Duration};
+
+    use foundation::process::{
+        FixedLaunch, LaunchSpec, ProcessContainment, ShutdownOutcome, supervise,
+        supervision::{CommandReceipt, ReadinessProbe, ReadinessResult},
+    };
+    use tokio::{sync::oneshot, time::timeout};
+
+    const DEADLINE: Duration = Duration::from_secs(5);
+
+    #[derive(Clone)]
+    struct Capture {
+        sender: Arc<Mutex<Option<oneshot::Sender<(ProcessObservation, ProcessStdio)>>>>,
+        release: CancellationToken,
+    }
+
+    impl StdioActivation for Capture {
+        fn activate(
+            &self,
+            process: ProcessObservation,
+            stdio: ProcessStdio,
+            _: CancellationToken,
+        ) -> PolicyFuture<StdioActivationResult> {
+            let sender = self.sender.lock().unwrap().take();
+            let release = self.release.clone();
+            Box::pin(async move {
+                if let Some(sender) = sender {
+                    let _ = sender.send((process, stdio));
+                }
+                StdioActivationResult::Activated(StdioDrain::new(async move {
+                    release.cancelled().await;
+                    StdioDrainResult::Drained
+                }))
+            })
+        }
+    }
+
+    impl ReadinessProbe for Capture {
+        fn wait_ready(
+            &self,
+            _: ProcessObservation,
+            _: CancellationToken,
+        ) -> PolicyFuture<ReadinessResult> {
+            Box::pin(async { ReadinessResult::Ready })
+        }
+    }
+
+    let executable = std::env::current_exe().unwrap();
+    let launch = LaunchSpec::try_new_inheriting_environment(
+        executable.clone(),
+        executable.parent().unwrap().to_path_buf(),
+        [
+            "--exact".into(),
+            "surfaces::channels::gateway::pairing::tests::timeout_child_entry".into(),
+            "--nocapture".into(),
+        ],
+        [("MATCHA_PAIRING_TIMEOUT_CHILD".into(), "1".into())],
+        spec,
+    )
+    .unwrap();
+    let (sender, receiver) = oneshot::channel();
+    let release = CancellationToken::new();
+    let capture = Capture {
+        sender: Arc::new(Mutex::new(Some(sender))),
+        release: release.clone(),
+    };
+    let mut supervisor = supervise(
+        ProcessContainment::job(),
+        FixedLaunch::new(launch),
+        capture.clone(),
+        capture,
+        OpenClawGracefulStop::new(),
+        super::recovery::OpenClawStartRecovery::new(),
+        super::restart::OpenClawRestartPolicy,
+    );
+    let handle = supervisor.handle();
+    let receipt = timeout(DEADLINE, handle.start()).await;
+    let result = if matches!(
+        &receipt,
+        Ok(CommandReceipt::Accepted(_) | CommandReceipt::Shared(_))
+    ) {
+        timeout(DEADLINE, async move {
+            let Ok((process, stdio)) = receiver.await else {
+                return None;
+            };
+            Some(check(process, stdio).await)
+        })
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+    release.cancel();
+    let shutdown = timeout(DEADLINE, async {
+        match handle.shutdown().await {
+            CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => {
+                completion.wait().await.ok()
+            }
+            _ => None,
+        }
+    })
+    .await;
+    let joined = timeout(DEADLINE, supervisor.join()).await;
+    assert!(matches!(shutdown, Ok(Some(ShutdownOutcome::Terminated(_)))));
+    assert!(matches!(joined, Ok(Ok(()))));
+    result.expect("real stdio check did not finish within its bound")
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         io,
         pin::Pin,
-        sync::{
-            Mutex,
-            atomic::{AtomicBool, Ordering},
-        },
+        sync::Mutex,
         task::{Context, Poll},
         time::Duration,
     };
@@ -193,14 +271,12 @@ mod tests {
         let (mut stderr_writer, stderr) = tokio::io::duplex(32);
         let stderr_drained = Arc::new(Notify::new());
 
-        let drain = activated(activate_stdio_with_buffer(
-            None::<()>,
-            Some(stdout),
-            Some(stderr),
-            CancellationToken::new(),
+        let drain = drain_outputs(
+            stdout,
+            stderr,
             Arc::clone(&activation.report_diagnostic),
             activation.log_buffer(),
-        ));
+        );
         let stdout_release = Arc::clone(&stderr_drained);
         let stdout_task = async move {
             stdout_writer
@@ -250,62 +326,92 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[tokio::test]
     async fn cancelled_activation_precedes_stdio_shape_validation() {
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
+        use foundation::process::{StdioMode, StdioSpec};
 
-        assert!(matches!(
-            activate_stdio(
-                None::<()>,
-                None::<tokio::io::Empty>,
-                None::<tokio::io::Empty>,
-                cancellation,
-                no_diagnostics(),
-            ),
-            StdioActivationResult::Cancelled
-        ));
+        let cancelled = with_process_stdio(
+            StdioSpec::new(StdioMode::Null, StdioMode::Null, StdioMode::Null),
+            |process, stdio| async move {
+                let cancellation = CancellationToken::new();
+                cancellation.cancel();
+                matches!(
+                    OpenClawStdioActivation::new(no_diagnostics(), OpenClawGracefulStop::new())
+                        .activate(process, stdio, cancellation)
+                        .await,
+                    StdioActivationResult::Cancelled
+                )
+            },
+        )
+        .await;
+
+        assert!(cancelled);
     }
 
-    #[test]
-    fn rejects_missing_output_pipes_and_closes_unexpected_stdin() {
-        for (stdout, stderr) in [
-            (None, Some(tokio::io::empty())),
-            (Some(tokio::io::empty()), None),
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn requires_owned_stdin_and_both_output_pipes_and_cleans_bound_stdin() {
+        use foundation::process::{
+            StdioMode, StdioSpec,
+            supervision::{GracefulStop, GracefulStopResult},
+        };
+
+        for spec in [
+            StdioSpec::new(StdioMode::Piped, StdioMode::Null, StdioMode::Piped),
+            StdioSpec::new(StdioMode::Piped, StdioMode::Piped, StdioMode::Null),
+            StdioSpec::new(StdioMode::Null, StdioMode::Piped, StdioMode::Piped),
         ] {
-            let result = activate_stdio(
-                None::<DropProbe>,
-                stdout,
-                stderr,
-                CancellationToken::new(),
-                no_diagnostics(),
-            );
-            assert!(matches!(result, StdioActivationResult::Unavailable));
+            let unavailable = with_process_stdio(spec, |process, stdio| async move {
+                matches!(
+                    OpenClawStdioActivation::new(no_diagnostics(), OpenClawGracefulStop::new())
+                        .activate(process, stdio, CancellationToken::new())
+                        .await,
+                    StdioActivationResult::Unavailable
+                )
+            })
+            .await;
+            assert!(unavailable);
         }
 
-        let dropped = Arc::new(AtomicBool::new(false));
-        let result = activate_stdio(
-            Some(DropProbe(Arc::clone(&dropped))),
-            Some(tokio::io::empty()),
-            Some(tokio::io::empty()),
-            CancellationToken::new(),
-            no_diagnostics(),
-        );
-        assert!(matches!(result, StdioActivationResult::Unavailable));
-        assert!(dropped.load(Ordering::SeqCst));
+        for request_before_drop in [false, true] {
+            let (was_activated, requested, after_drop) = with_process_stdio(
+                StdioSpec::new(StdioMode::Piped, StdioMode::Piped, StdioMode::Piped),
+                move |process, stdio| async move {
+                    let stop = OpenClawGracefulStop::new();
+                    let result = OpenClawStdioActivation::new(no_diagnostics(), stop.clone())
+                        .activate(process, stdio, CancellationToken::new())
+                        .await;
+                    let was_activated = matches!(&result, StdioActivationResult::Activated(_));
+                    let requested = if request_before_drop {
+                        Some(stop.request_stop(process, CancellationToken::new()).await)
+                    } else {
+                        None
+                    };
+                    drop(result);
+                    let after_drop = stop.request_stop(process, CancellationToken::new()).await;
+                    (was_activated, requested, after_drop)
+                },
+            )
+            .await;
+            assert!(was_activated);
+            if request_before_drop {
+                assert_eq!(requested, Some(GracefulStopResult::Requested));
+            }
+            assert_eq!(after_drop, GracefulStopResult::Rejected);
+        }
     }
 
     #[tokio::test]
     async fn eof_finishes_partial_lines_before_returning_drained() {
         let diagnostics = Arc::new(Mutex::new(Vec::new()));
         let activation = activation(Arc::clone(&diagnostics));
-        let drain = activated(activate_stdio(
-            None::<()>,
-            Some(&b"[gateway] listening on ws://127.0.0.1:18789"[..]),
-            Some(tokio::io::empty()),
-            CancellationToken::new(),
-            activation.report_diagnostic,
-        ));
+        let drain = drain_outputs(
+            &b"[gateway] listening on ws://127.0.0.1:18789"[..],
+            tokio::io::empty(),
+            Arc::clone(&activation.report_diagnostic),
+            activation.log_buffer(),
+        );
 
         assert_eq!(drain.await, StdioDrainResult::Drained);
         let diagnostics = diagnostics.lock().unwrap();
@@ -330,13 +436,12 @@ mod tests {
         let stderr = format!(
             "Gateway start blocked: {SECRET_CANARY} {CONFIG_CANARY} {PATH_CANARY} {TRANSCRIPT_CANARY}\n"
         );
-        let drain = activated(activate_stdio(
-            None::<()>,
-            Some(output),
-            Some(io::Cursor::new(stderr.into_bytes())),
-            CancellationToken::new(),
-            activation.report_diagnostic,
-        ));
+        let drain = drain_outputs(
+            output,
+            io::Cursor::new(stderr.into_bytes()),
+            Arc::clone(&activation.report_diagnostic),
+            activation.log_buffer(),
+        );
 
         let result = drain.await;
 
@@ -358,21 +463,17 @@ mod tests {
     }
 
     fn activation(diagnostics: Arc<Mutex<Vec<LifecycleDiagnostic>>>) -> OpenClawStdioActivation {
-        OpenClawStdioActivation::new(Arc::new(move |diagnostic| {
-            diagnostics.lock().unwrap().push(diagnostic);
-        }))
+        OpenClawStdioActivation::new(
+            Arc::new(move |diagnostic| {
+                diagnostics.lock().unwrap().push(diagnostic);
+            }),
+            OpenClawGracefulStop::new(),
+        )
     }
 
+    #[cfg(windows)]
     fn no_diagnostics() -> Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync> {
         Arc::new(|_| {})
-    }
-
-    fn activated(result: StdioActivationResult) -> StdioDrain {
-        match result {
-            StdioActivationResult::Activated(drain) => drain,
-            StdioActivationResult::Unavailable => panic!("stdio was unavailable"),
-            StdioActivationResult::Cancelled => panic!("stdio was cancelled"),
-        }
     }
 
     fn assert_canary_absent(diagnostics: &[LifecycleDiagnostic]) {
@@ -383,14 +484,6 @@ mod tests {
                 assert!(!display.contains(canary));
                 assert!(!debug.contains(canary));
             }
-        }
-    }
-
-    struct DropProbe(Arc<AtomicBool>);
-
-    impl Drop for DropProbe {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
         }
     }
 

@@ -24,7 +24,7 @@ describe('security support store', () => {
         { platform: 'windows', command: 'del /s', category: 'filesystem', severity: 'critical', reason: 'x' },
       ],
     });
-    const { useSecuritySupportStore } = await import('@/stores/security-support-store');
+    const { useSecuritySupportStore } = await import('@/plugins/security/security-support-store');
 
     await useSecuritySupportStore.getState().loadRuleCatalog();
 
@@ -45,7 +45,7 @@ describe('security support store', () => {
       ruleId: 'destructive.shell',
     }];
     hostSecurityReadAuditMock.mockResolvedValue({ items });
-    const { useSecuritySupportStore } = await import('@/stores/security-support-store');
+    const { useSecuritySupportStore } = await import('@/plugins/security/security-support-store');
 
     await useSecuritySupportStore.getState().loadRecentAudits({
       gatewayProcessState: 'running',
@@ -62,7 +62,7 @@ describe('security support store', () => {
   });
 
   it('does not query audit state while the gateway is stopped and clears stale items', async () => {
-    const { useSecuritySupportStore } = await import('@/stores/security-support-store');
+    const { useSecuritySupportStore } = await import('@/plugins/security/security-support-store');
     useSecuritySupportStore.setState({
       auditItems: [{ ts: 1, toolName: 'shell.exec', risk: 'high', action: 'block', decision: 'deny' }],
       auditError: 'old error',
@@ -80,7 +80,7 @@ describe('security support store', () => {
 
   it('clears audit state and records an unavailable error when the read fails', async () => {
     hostSecurityReadAuditMock.mockRejectedValue(new Error('audit unavailable'));
-    const { useSecuritySupportStore } = await import('@/stores/security-support-store');
+    const { useSecuritySupportStore } = await import('@/plugins/security/security-support-store');
 
     await useSecuritySupportStore.getState().loadRecentAudits({ gatewayProcessState: 'running' });
 
@@ -92,7 +92,7 @@ describe('security support store', () => {
   });
 
   it('only changes live UI state for policy, remediation, and emergency actions', async () => {
-    const { useSecuritySupportStore } = await import('@/stores/security-support-store');
+    const { useSecuritySupportStore } = await import('@/plugins/security/security-support-store');
 
     useSecuritySupportStore.getState().setActiveSection('actionCenter');
     useSecuritySupportStore.getState().setAllowlistRegexTab('secretPatterns');

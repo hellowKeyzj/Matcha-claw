@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveArtifactWorkspaceRoot } from '@/pages/Chat/artifact-workspace';
+import { resolveArtifactWorkspaceRoot } from '@/plugins/chat/artifact-workspace';
 
 describe('artifact workspace root', () => {
   it('prefers the agent workspace even when the focused target is a directory', () => {

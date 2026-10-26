@@ -117,7 +117,9 @@ async fn handle_wiki(
     match wiki.execute_mcp(&tool.name, &tool.arguments).await {
         Ok(result) => Response::json(200, result),
         Err(ToolCallError::InvalidParams) => Response::bad_request(),
-        Err(ToolCallError::Internal | ToolCallError::Execution(_)) => wiki_unavailable(),
+        Err(
+            ToolCallError::Internal | ToolCallError::Execution(_) | ToolCallError::ExecutionText(_),
+        ) => wiki_unavailable(),
     }
 }
 

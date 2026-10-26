@@ -50,7 +50,7 @@ function projectedJob(id: string, updatedAtMs = 1): CronJob {
 
 describe('cron session utils', () => {
   it('keeps cron session classification local and exposes no history route', async () => {
-    const cronSessionUtils = await import('@/stores/chat/cron-session-utils');
+    const cronSessionUtils = await import('@/plugins/chat/store/cron-session-utils');
 
     expect(cronSessionUtils.parseCronSessionKey('agent::cron:job-1')).toBeNull();
     expect(cronSessionUtils.isCronSessionKey('agent::cron:job-1')).toBe(false);
@@ -88,7 +88,7 @@ describe('cron store', () => {
   it('fetches and projects the Rust-owned cron list response', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ jobs: [wireJob('job-1')] });
 
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     await useCronStore.getState().fetchJobs();
 
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/cron/jobs');
@@ -106,7 +106,7 @@ describe('cron store', () => {
       .mockResolvedValueOnce({ jobs: [wireJob('job-2')] })
       .mockRejectedValueOnce(new Error('Cron service is unavailable'));
 
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     await useCronStore.getState().fetchJobs();
     await useCronStore.getState().fetchJobs();
 
@@ -121,7 +121,7 @@ describe('cron store', () => {
     let resolveFetch: ((value: { jobs: ReturnType<typeof wireJob>[] }) => void) | undefined;
     hostApiFetchMock.mockReturnValue(new Promise((resolve) => { resolveFetch = resolve; }));
 
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     const first = useCronStore.getState().fetchJobs();
     const second = useCronStore.getState().fetchJobs();
     resolveFetch?.({ jobs: [wireJob('job-3')] });
@@ -139,7 +139,7 @@ describe('cron store', () => {
     };
     mockMutation('create', createdJob);
 
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     const result = await useCronStore.getState().createJob({
       name: createdJob.name,
       agentId: createdJob.agentId,
@@ -177,7 +177,7 @@ describe('cron store', () => {
 
   it('uses the delete response as the only source of local removal', async () => {
     const job = projectedJob('job-delete');
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     useCronStore.getState().setJobs([job]);
 
     mockMutation('delete', { removed: false }, job.id);
@@ -202,7 +202,7 @@ describe('cron store', () => {
     const toggledJob = { ...job, enabled: false, updatedAt: new Date(9).toISOString() };
     mockMutation('update', toggledJob);
 
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     useCronStore.getState().setJobs([job]);
     await useCronStore.getState().toggleJob(job.id, false);
 
@@ -217,7 +217,7 @@ describe('cron store', () => {
   });
 
   it('sends a closed update DTO and tracks the job mutation lifetime', async () => {
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     useCronStore.getState().setJobs([projectedJob('job-4')]);
     let resolveUpdate: ((value: unknown) => void) | undefined;
     hostApiFetchMock.mockResolvedValueOnce(receipt)
@@ -255,7 +255,7 @@ describe('cron store', () => {
       callId: receipt.callId, module: 'cron', command: 'update', status: 'unknown', start: 1, end: 2, revision: 3,
       detail: { jobId: 'job-5', outcome: 'outcome-unknown' },
     });
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     useCronStore.getState().setJobs([projectedJob('job-5')]);
 
     await expect(useCronStore.getState().toggleJob('job-5', false)).rejects.toThrow('Cron operation outcome is unknown');
@@ -273,7 +273,7 @@ describe('cron store', () => {
       if (path === '/api/capabilities/execute') return { success: true, result: { outcome: 'accepted' } };
       throw new Error(`unexpected path: ${path}`);
     });
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     useCronStore.getState().setJobs([projectedJob('job-6')]);
 
     await expect(useCronStore.getState().triggerJob('job-6')).resolves.toEqual({ ran: true });
@@ -288,7 +288,7 @@ describe('cron store', () => {
   it('maps skipped manual trigger reasons to callback result', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ success: true, result: { outcome: 'skipped', reason: 'disabled' } });
 
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     useCronStore.getState().setJobs([projectedJob('job-skipped')]);
 
     await expect(useCronStore.getState().triggerJob('job-skipped')).resolves.toEqual({
@@ -301,7 +301,7 @@ describe('cron store', () => {
   it('maps a skipped manual trigger without reason to the frozen already-running callback result', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ success: true, result: { outcome: 'skipped' } });
 
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     useCronStore.getState().setJobs([projectedJob('job-skipped')]);
 
     await expect(useCronStore.getState().triggerJob('job-skipped')).resolves.toEqual({
@@ -316,7 +316,7 @@ describe('cron store', () => {
   ] as const)('rejects a %s manual trigger outcome without local success', async (outcome, message) => {
     hostApiFetchMock.mockResolvedValueOnce({ success: true, result: { outcome } });
 
-    const { useCronStore } = await import('@/stores/cron');
+    const { useCronStore } = await import('@/plugins/tasks/stores/cron');
     const job = projectedJob(`job-${outcome}`);
     useCronStore.getState().setJobs([job]);
 
@@ -329,7 +329,7 @@ describe('cron store', () => {
   });
 
   it('refreshes the Rust-owned snapshot for matching terminal Cron events', async () => {
-    const { useCronStore, initCronEvents } = await import('@/stores/cron');
+    const { useCronStore, initCronEvents } = await import('@/plugins/tasks/stores/cron');
     const refreshedJobs = [
       { ...projectedJob('job-success'), lastRun: { time: new Date(3).toISOString(), success: true } },
       { ...projectedJob('job-failure'), lastRun: {
@@ -364,7 +364,7 @@ describe('cron store', () => {
   });
 
   it('rejects malformed Renderer events without mutating the snapshot', async () => {
-    const { useCronStore, initCronEvents } = await import('@/stores/cron');
+    const { useCronStore, initCronEvents } = await import('@/plugins/tasks/stores/cron');
     const job = { ...projectedJob('job-7'), runningAt: new Date(2).toISOString() };
     useCronStore.getState().setJobs([job]);
     initCronEvents();
@@ -383,7 +383,7 @@ describe('cron store', () => {
   });
 
   it('fences an old cleanup from disposing a replacement subscription', async () => {
-    const { initCronEvents } = await import('@/stores/cron');
+    const { initCronEvents } = await import('@/plugins/tasks/stores/cron');
     const firstCleanup = initCronEvents();
     const secondCleanup = initCronEvents();
 

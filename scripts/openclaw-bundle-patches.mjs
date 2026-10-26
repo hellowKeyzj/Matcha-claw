@@ -5,8 +5,9 @@ import { safeRmSync } from './lib/safe-delete.mjs';
 import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
 import { patchOpenClawSearch } from './openclaw-search-patches.mjs';
 import { patchOpenClawBoard } from './openclaw-board-patches.mjs';
+import { patchOpenClawWorldInvestigation } from './openclaw-world-investigation-patches.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view']);
+const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'owned-stdin-stop']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -2391,6 +2392,215 @@ function patchChannelPairingApprovalExport(openclawDir) {
   return { status: 'applied', detail: path.basename(targetFile) };
 }
 
+const MATCHA_CHAT_STAGE_HELPER = `function createMatchaChatStageTrace(log, runId, sessionKey) {
+	if (process.env.MATCHACLAW_TRACE !== "1") return () => {};
+	const startedAtMs = performance.now();
+	const runHash = matchaChatRedactIdentifier(runId, { len: 12 });
+	const sessionHash = matchaChatRedactIdentifier(sessionKey, { len: 12 });
+	const emitted = new Set();
+	return (stage, state = "none", agentRunId) => {
+		if (!["ack_sent", "dispatch_entered", "inbound_entered", "followup_deferred", "followup_adopted", "embedded_entered", "lane_wait", "lane_admitted", "model_call_started", "agent_started", "agent_terminal", "dispatch_returned", "dispatch_failed", "post_dispatch_completed", "finalize_entered", "finalize_completed", "publication_import_entered", "publication_import_returned", "publication_entered", "publication_replacement_wait", "publication_owner_wait", "publication_returned", "admission_entered", "admission_ticket_returned", "admission_returned", "inbound_claim_entered", "inbound_claim_returned", "before_dispatch_entered", "before_dispatch_returned", "reply_dispatch_entered", "reply_dispatch_returned", "resolver_import_entered", "resolver_import_returned", "workspace_entered", "workspace_returned", "remote_media_entered", "remote_media_returned", "media_understanding_entered", "media_understanding_returned", "session_init_entered", "session_init_returned", "prepared_reply_entered", "prepared_reply_returned", "agent_preflight_entered", "compaction_entered", "compaction_returned", "user_commit_entered", "user_commit_returned", "projection_retry_entered", "projection_retry_returned", "baseline_entered", "baseline_returned"].includes(stage) || emitted.has(stage)) return;
+		emitted.add(stage);
+		const safeState = ["none", "queued", "inline", "completed", "failed", "cancelled", "unknown", "client-retry", "retry", "reconcile", "terminal"].includes(state) ? state : "unknown";
+		const elapsedMs = Math.max(0, Math.round(performance.now() - startedAtMs));
+		const agentRunHash = agentRunId === void 0 ? "-" : matchaChatRedactIdentifier(agentRunId, { len: 12 });
+		log.info(\`[matcha-chat-stage] runHash=\${runHash} sessionHash=\${sessionHash} stage=\${stage} elapsedMs=\${elapsedMs} state=\${safeState} agentRunHash=\${agentRunHash}\`);
+	};
+}`;
+
+function patchChatDispatchDiagnostics(openclawDir) {
+  const patchId = 'chat-dispatch-diagnostics';
+  const distDir = path.join(openclawDir, 'dist');
+  const hashFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'node-crypto-',
+    markers: ['function redactIdentifier(value, opts)', 'function sha256HexPrefixCore(input, length)'],
+  });
+  const gatewayFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'chat-send-handler-',
+    markers: ['function startChatDispatch(params)', 'function createChatSendDispatchErrorLifecycle(params)'],
+  });
+  const agentFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'agent-runner.runtime-',
+    markers: ['async function runEmbeddedFallbackCandidate(params)', 'const agentTurnTimingLog = createSubsystemLogger('],
+  });
+  const dispatchFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'dispatch-from-config-',
+    markers: ['async function gatherDispatchRequest(params, messageAuditTerminal', 'async function prepareDispatchOperation(state)'],
+  });
+  const resolverFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'get-reply-',
+    markers: ['async function getReplyFromConfig(ctx, opts, configOverride)', 'const traceGetReplyPhase ='],
+  });
+  const publicationFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'prepared-model-runtime-',
+    markers: ['var PreparedReplyDispatchPublicationOwner = class', 'const pendingOwner = this.host.getPendingOwnerPublication(agentId);'],
+  });
+  const plans = [
+    {
+      file: gatewayFile,
+      hashImport: true,
+      replacements: [
+        ['function startChatDispatch(params) {', `${MATCHA_CHAT_STAGE_HELPER}\nfunction startChatDispatch(params) {`],
+        ['\t\trespond(true, ackPayload, void 0, { runId: clientRunId });\n\t\tcontext.recordClientActivity?.(client);', '\t\tconst matchaChatStage = createMatchaChatStageTrace(context.logGateway, clientRunId, sessionKey);\n\t\trespond(true, ackPayload, void 0, { runId: clientRunId });\n\t\tmatchaChatStage("ack_sent");\n\t\tcontext.recordClientActivity?.(client);'],
+        ['\t\tstartChatDispatch({\n\t\t\tadmissionStartedAt,', '\t\tstartChatDispatch({\n\t\t\tmatchaChatStage,\n\t\t\tadmissionStartedAt,'],
+        ['\tlet agentRunStarted = false;\n\tlet replyDispatchRun;', '\tconst matchaChatStage = params.matchaChatStage;\n\tmatchaChatStage("dispatch_entered");\n\tlet agentRunStarted = false;\n\tlet replyDispatchRun;'],
+        ['\t\tretainWorkAdmission: retainGatewayWorkAdmission\n\t});', '\t\tretainWorkAdmission: retainGatewayWorkAdmission,\n\t\tmatchaChatStage\n\t});'],
+        ['\t\tonAdopted: async () => {},\n\t\tonDeferred: () => {', '\t\tonAdopted: async () => { params.matchaChatStage("followup_adopted"); },\n\t\tonDeferred: () => {'],
+        ['\t\t\tif (enqueued) lateFollowup.recordQueued();\n\t\t\treturn enqueued;', '\t\t\tif (enqueued) lateFollowup.recordQueued();\n\t\t\tparams.matchaChatStage("followup_deferred", enqueued ? "queued" : "inline");\n\t\t\treturn enqueued;'],
+        ['\t\tclassifyFailure: classifyDispatchFailure,\n\t\tcontext,', '\t\tclassifyFailure: classifyDispatchFailure,\n\t\tmatchaChatStage,\n\t\tcontext,'],
+        ['\t\t\tphase: "post-ack"\n\t\t});\n\t\tif (isQueuedFollowupEnqueued()) {', '\t\t\tphase: "post-ack"\n\t\t});\n\t\tparams.matchaChatStage("dispatch_failed", failureDisposition);\n\t\tif (isQueuedFollowupEnqueued()) {'],
+        ['\t\tconst dispatchInbound = () => {\n\t\t\tassertWorkspaceRunOwnership?.();', '\t\tconst dispatchInbound = () => {\n\t\t\tmatchaChatStage("inbound_entered");\n\t\t\tassertWorkspaceRunOwnership?.();'],
+        ['\t\t\t\t\tprepareAssistantTranscriptMessage: replyDispatch.prepareAssistantTranscriptMessage,', '\t\t\t\t\tmatchaChatStage,\n\t\t\t\t\tprepareAssistantTranscriptMessage: replyDispatch.prepareAssistantTranscriptMessage,'],
+        ['async function waitForAcceptedChatSendRetry(scope, error, abortSignal) {\n\tif (!isSessionTranscriptProjectionUnavailableError(error)) throw error;', 'async function waitForAcceptedChatSendRetry(scope, error, abortSignal, matchaChatStage) {\n\tif (!isSessionTranscriptProjectionUnavailableError(error)) throw error;\n\tmatchaChatStage?.("projection_retry_entered");'],
+        ['\t\tsessionId: error.sessionId\n\t}, abortSignal);', '\t\tsessionId: error.sessionId\n\t}, abortSignal);\n\tmatchaChatStage?.("projection_retry_returned");'],
+        ['\t\t\t}, error, activeRunAbort.controller.signal)', '\t\t\t}, error, activeRunAbort.controller.signal, matchaChatStage)'],
+        ['\t\t\t\t\tonAgentRunStart: (runId, _identity, options) => {\n\t\t\t\t\t\treplyDispatchRun = options;', '\t\t\t\t\tonAgentRunTerminalOutcome: (outcome) => matchaChatStage("agent_terminal", outcome),\n\t\t\t\t\tonAgentRunStart: (runId, _identity, options) => {\n\t\t\t\t\t\tmatchaChatStage("agent_started", "none", runId);\n\t\t\t\t\t\treplyDispatchRun = options;'],
+        ['\t})).then(async (dispatchResult) => {\n\t\tif (acceptedMessageInjection) return;', '\t})).then(async (dispatchResult) => {\n\t\tmatchaChatStage("dispatch_returned");\n\t\tif (acceptedMessageInjection) return;'],
+        ['\t\t\tconst runtimeCancelled = runtimeClassification === "cancellation";', '\t\t\tif (runtimeClassification) matchaChatStage("agent_terminal", runtimeClassification === "success" ? "completed" : runtimeClassification === "cancellation" ? "cancelled" : "failed");\n\t\t\tconst runtimeCancelled = runtimeClassification === "cancellation";'],
+        ['\t\temitServerTiming("post-dispatch-completed", { postDispatchMs: roundedChatSendTimingMs(performance.now() - postDispatchStartedAtMs) }, dispatchStartedAtMs);', '\t\temitServerTiming("post-dispatch-completed", { postDispatchMs: roundedChatSendTimingMs(performance.now() - postDispatchStartedAtMs) }, dispatchStartedAtMs);\n\t\tmatchaChatStage("post_dispatch_completed");'],
+        ['\t\t\tawait dispatchErrorLifecycle.finalize();\n\t\t\temitSessionsChanged(context, {', '\t\t\tmatchaChatStage("finalize_entered");\n\t\t\tawait dispatchErrorLifecycle.finalize();\n\t\t\tmatchaChatStage("finalize_completed");\n\t\t\temitSessionsChanged(context, {'],
+      ],
+    },
+    {
+      file: agentFile,
+      hashImport: true,
+      replacements: [
+        ['async function runEmbeddedFallbackCandidate(params) {\n\tconst turn = params.turn;', `${MATCHA_CHAT_STAGE_HELPER}\nasync function runEmbeddedFallbackCandidate(params) {\n\tconst turn = params.turn;\n\tconst matchaChatStage = turn.opts?.matchaChatStage ?? createMatchaChatStageTrace(agentTurnTimingLog, params.runId, turn.sessionKey);\n\tmatchaChatStage("embedded_entered");`],
+        ['\t\t\t\tonExecutionPhase: (info) => {\n\t\t\t\t\tif (info.phase === "model_call_started"', '\t\t\t\tonExecutionPhase: (info) => {\n\t\t\t\t\tif (info.phase === "model_call_started") matchaChatStage("model_call_started");\n\t\t\t\t\tif (info.phase === "model_call_started"'],
+        ['\t\t\t\tonLaneWait: ({ waiting }) => {\n\t\t\t\t\tconst replyOperation = turn.replyOperation;', '\t\t\t\tonLaneWait: ({ waiting }) => {\n\t\t\t\t\tmatchaChatStage(waiting ? "lane_wait" : "lane_admitted");\n\t\t\t\t\tconst replyOperation = turn.replyOperation;'],
+        ['async function runReplyAgent(params) {', 'async function runReplyAgent(params) {\n\tparams.opts?.matchaChatStage?.("agent_preflight_entered");'],
+        ['\tactiveSessionEntry = await traceAgentPhase("reply.preflight_compaction",', '\topts?.matchaChatStage?.("compaction_entered");\n\tactiveSessionEntry = await traceAgentPhase("reply.preflight_compaction",'],
+        ['\t\tonCompactionNotice: sendDirectCompactionNotice\n\t}));\n\tsetActiveSessionEntry(activeSessionEntry);', '\t\tonCompactionNotice: sendDirectCompactionNotice\n\t}));\n\topts?.matchaChatStage?.("compaction_returned");\n\tsetActiveSessionEntry(activeSessionEntry);'],
+        ['\t\tconst result = await admitUserTurnWithRecovery(...args);\n\t\tactiveSessionEntry = getActiveSessionEntry();', '\t\topts?.matchaChatStage?.("user_commit_entered");\n\t\tconst result = await admitUserTurnWithRecovery(...args);\n\t\topts?.matchaChatStage?.("user_commit_returned");\n\t\tactiveSessionEntry = getActiveSessionEntry();'],
+      ],
+    },
+    {
+      file: dispatchFile,
+      replacements: [
+        ['\t\t\tconst { loadPublishedGatewayReplyDispatchRuntime } = await loadPreparedModelRuntime();', '\t\t\tparams.replyOptions?.matchaChatStage?.("publication_import_entered");\n\t\t\tconst { loadPublishedGatewayReplyDispatchRuntime } = await loadPreparedModelRuntime();\n\t\t\tparams.replyOptions?.matchaChatStage?.("publication_import_returned");'],
+        ['\t\t\t\tagentId: preparedReplyDispatchAgentId,\n\t\t\t\tabortSignal: params.replyOptions?.abortSignal', '\t\t\t\tagentId: preparedReplyDispatchAgentId,\n\t\t\t\tmatchaChatStage: params.replyOptions?.matchaChatStage,\n\t\t\t\tabortSignal: params.replyOptions?.abortSignal'],
+        ['\tconst admissionTicket = params.replyOptions?.[REPLY_ADMISSION_TICKET];', '\tparams.replyOptions?.matchaChatStage?.("admission_entered");\n\tconst admissionTicket = params.replyOptions?.[REPLY_ADMISSION_TICKET];'],
+        ['\tconst preDispatchAcquisition = await state.ensureDispatchReplyOperation("pre_dispatch", Boolean(pluginOwnedBinding));', '\tparams.replyOptions?.matchaChatStage?.("admission_ticket_returned");\n\tconst preDispatchAcquisition = await state.ensureDispatchReplyOperation("pre_dispatch", Boolean(pluginOwnedBinding));\n\tparams.replyOptions?.matchaChatStage?.("admission_returned");'],
+        ['\t\t\tconst targetedClaimOutcome = hookRunner?.runInboundClaimForPluginOutcome ? await (async () => {', '\t\t\tparams.replyOptions?.matchaChatStage?.("inbound_claim_entered");\n\t\t\tconst targetedClaimOutcome = hookRunner?.runInboundClaimForPluginOutcome ? await (async () => {'],
+        ['\t\t\t})();\n\t\t\tif (isPreDispatchOperationAborted()) return {', '\t\t\t})();\n\t\t\tparams.replyOptions?.matchaChatStage?.("inbound_claim_returned");\n\t\t\tif (isPreDispatchOperationAborted()) return {'],
+        ['\t\tconst beforeDispatchResult = await traceReplyPhase("reply.before_dispatch_hooks",', '\t\tparams.replyOptions?.matchaChatStage?.("before_dispatch_entered");\n\t\tconst beforeDispatchResult = await traceReplyPhase("reply.before_dispatch_hooks",'],
+        ['\t\t}, pluginSubagentRequester), trackDispatchLifecycleWork)));\n\t\tif (beforeDispatchResult?.handled)', '\t\t}, pluginSubagentRequester), trackDispatchLifecycleWork)));\n\t\tparams.replyOptions?.matchaChatStage?.("before_dispatch_returned");\n\t\tif (beforeDispatchResult?.handled)'],
+        ['\tconst result = await runReplyDispatchHook(state, { shouldSendToolSummaries });', '\tstate.params.replyOptions?.matchaChatStage?.("reply_dispatch_entered");\n\tconst result = await runReplyDispatchHook(state, { shouldSendToolSummaries });\n\tstate.params.replyOptions?.matchaChatStage?.("reply_dispatch_returned");'],
+        ['\tconst replyResolver = params.replyResolver ?? (await state.traceReplyPhase("reply.load_reply_resolver", () => loadGetReplyFromConfigRuntime())).getReplyFromConfig;', '\tparams.replyOptions?.matchaChatStage?.("resolver_import_entered");\n\tconst replyResolver = params.replyResolver ?? (await state.traceReplyPhase("reply.load_reply_resolver", () => loadGetReplyFromConfigRuntime())).getReplyFromConfig;\n\tparams.replyOptions?.matchaChatStage?.("resolver_import_returned");'],
+      ],
+    },
+    {
+      file: resolverFile,
+      replacements: [
+        ['\tconst workspaceDir = (await traceGetReplyPhase("reply.ensure_workspace",', '\topts?.matchaChatStage?.("workspace_entered");\n\tconst workspaceDir = (await traceGetReplyPhase("reply.ensure_workspace",'],
+        ['\t}))).dir;', '\t}))).dir;\n\topts?.matchaChatStage?.("workspace_returned");'],
+        ['\tif (!isFastTestEnv && !inboundMediaWasAlreadyStaged && normalizeOptionalString(finalized.MediaRemoteHost) && hasInboundMedia(finalized)) await traceGetReplyPhase("reply.stage_remote_media_pre_understanding",', '\topts?.matchaChatStage?.("remote_media_entered");\n\tif (!isFastTestEnv && !inboundMediaWasAlreadyStaged && normalizeOptionalString(finalized.MediaRemoteHost) && hasInboundMedia(finalized)) await traceGetReplyPhase("reply.stage_remote_media_pre_understanding",'],
+        ['\tconst mediaUnderstandingRequested = !isFastTestEnv && hasInboundMediaForUnderstanding(finalized);', '\topts?.matchaChatStage?.("remote_media_returned");\n\tconst mediaUnderstandingRequested = !isFastTestEnv && hasInboundMediaForUnderstanding(finalized);'],
+        ['\t\t\tconst mediaResult = await traceGetReplyPhase("reply.apply_media_understanding",', '\t\t\topts?.matchaChatStage?.("media_understanding_entered");\n\t\t\tconst mediaResult = await traceGetReplyPhase("reply.apply_media_understanding",'],
+        ['\t\t\tif (mediaResult?.extractedFileImages.length)', '\t\t\topts?.matchaChatStage?.("media_understanding_returned");\n\t\t\tif (mediaResult?.extractedFileImages.length)'],
+        ['\t\tsessionState = useFastTestBootstrap ? initFastReplySessionState({', '\t\topts?.matchaChatStage?.("session_init_entered");\n\t\tsessionState = useFastTestBootstrap ? initFastReplySessionState({'],
+        ['\t\t\tsignal: internalOptsWithSkillFilter?.abortSignal\n\t\t}));', '\t\t\tsignal: internalOptsWithSkillFilter?.abortSignal\n\t\t}));\n\t\topts?.matchaChatStage?.("session_init_returned");'],
+        ['\t\tconst baselineEntry = await traceGetReplyPhase("reply.capture_session_diff_baseline",', '\t\topts?.matchaChatStage?.("baseline_entered");\n\t\tconst baselineEntry = await traceGetReplyPhase("reply.capture_session_diff_baseline",'],
+        ['\t\tsessionState.sessionEntry = baselineEntry;', '\t\topts?.matchaChatStage?.("baseline_returned");\n\t\tsessionState.sessionEntry = baselineEntry;'],
+        ['\tconst replyResult = await traceGetReplyPhase("reply.run_prepared_reply",', '\topts?.matchaChatStage?.("prepared_reply_entered");\n\tconst replyResult = await traceGetReplyPhase("reply.run_prepared_reply",'],
+        ['\tif (profilerEnabled) logResolverTiming("completed", "prepared_reply");', '\topts?.matchaChatStage?.("prepared_reply_returned");\n\tif (profilerEnabled) logResolverTiming("completed", "prepared_reply");'],
+      ],
+    },
+    {
+      file: publicationFile,
+      replacements: [
+        ['\t\tthis.load = async ({ agentId, abortSignal }) => {\n\t\t\tfor (;;) {', '\t\tthis.load = async ({ agentId, abortSignal, matchaChatStage }) => {\n\t\t\tmatchaChatStage?.("publication_entered");\n\t\t\tfor (;;) {'],
+        ['\t\t\t\tif (replacement) {\n\t\t\t\t\tawait racePromiseWithAbortSignal(replacement, abortSignal);', '\t\t\t\tif (replacement) {\n\t\t\t\t\tmatchaChatStage?.("publication_replacement_wait");\n\t\t\t\t\tawait racePromiseWithAbortSignal(replacement, abortSignal);'],
+        ['\t\t\t\tif (pendingOwner) {\n\t\t\t\t\tawait racePromiseWithAbortSignal(pendingOwner, abortSignal);', '\t\t\t\tif (pendingOwner) {\n\t\t\t\t\tmatchaChatStage?.("publication_owner_wait");\n\t\t\t\t\tawait racePromiseWithAbortSignal(pendingOwner, abortSignal);'],
+        ['\t\t\t\treturn matches[0];', '\t\t\t\tmatchaChatStage?.("publication_returned");\n\t\t\t\treturn matches[0];'],
+      ],
+    },
+  ];
+  const sources = plans.map(({ file }) => readText(file));
+  const patched = sources.map((source) => source.includes('matchaChatStage') || source.includes('matchaChatRedactIdentifier') || source.includes('[matcha-chat-stage]'));
+  const imports = sources.map((source, index) => {
+    if (!plans[index].hashImport) return;
+    const result = ensureNamedImport(source, plans[index].file, hashFile, 'redactIdentifier', 'matchaChatRedactIdentifier', patchId).source;
+    return result.split('\n').find((line) => line.startsWith('import { ') && line.includes(' as matchaChatRedactIdentifier }'));
+  });
+  if (patched.some(Boolean)) {
+    if (!patched.every(Boolean)) throw new Error(`${patchId}: incomplete diagnostics patch`);
+    for (const [index, plan] of plans.entries()) {
+      let original = sources[index];
+      for (const expected of [...(plan.hashImport ? [imports[index]] : []), ...plan.replacements.map(([, replacement]) => replacement)]) {
+        if (!expected || original.split(expected).length - 1 !== 1) throw new Error(`${patchId}: incomplete or changed diagnostics patch in ${path.basename(plan.file)} at anchor ${plan.replacements.findIndex(([, replacement]) => replacement === expected)}`);
+      }
+      for (const [needle, replacement] of plan.replacements) original = original.replace(replacement, needle);
+      for (const [needle] of plan.replacements) {
+        if (original.split(needle).length - 1 !== 1) throw new Error(`${patchId}: changed original diagnostics anchor`);
+      }
+    }
+    return { status: 'clean', detail: 'already patched' };
+  }
+  if (sources[0].includes('onAgentRunTerminalOutcome')) throw new Error(`${patchId}: existing terminal observer requires composition`);
+  const updates = plans.map((plan, index) => {
+    let source = sources[index];
+    if (source.includes('matchaChatStage') || source.includes('matchaChatRedactIdentifier') || source.includes('[matcha-chat-stage]')) throw new Error(`${patchId}: incomplete diagnostics patch`);
+    for (const [needle, replacement] of plan.replacements) source = replaceOnce(source, needle, replacement, patchId);
+    return plan.hashImport ? ensureNamedImport(source, plan.file, hashFile, 'redactIdentifier', 'matchaChatRedactIdentifier', patchId).source : source;
+  });
+  for (const [index, plan] of plans.entries()) writeText(plan.file, updates[index]);
+  return { status: 'applied', detail: plans.map(({ file }) => path.basename(file)).join(', ') };
+}
+
+function patchOwnedStdinStop(openclawDir) {
+  const patchId = 'owned-stdin-stop';
+  const targetFile = locateSingleJavaScriptFile(path.join(openclawDir, 'dist'), patchId, {
+    fileNamePrefix: 'run-',
+    markers: ['async function runGatewayLoop(params)', 'const cleanupSignals = () => {', 'request("stop", "SIGINT")'],
+  });
+  let source = readText(targetFile);
+  const cleanup = `\tlet cleanupOwnedStdin = () => {};
+\tconst cleanupSignals = () => {
+\t\tcleanupOwnedStdin();`;
+  const binding = `\tprocess.on("SIGUSR1", onSigusr1);
+\tconst ownedStdinStop = process.env.MATCHACLAW_OPENCLAW_OWNED_STDIN === "1" && params.ownsProcessLifecycle === true;
+\tdelete process.env.MATCHACLAW_OPENCLAW_OWNED_STDIN;
+\tif (ownedStdinStop) {
+\t\tconst input = process.stdin;
+\t\tconst frame = Buffer.from("matchaclaw.openclaw.stop.v1\\n");
+\t\tlet offset = 0;
+\t\tconst close = () => {
+\t\t\tinput.removeListener("data", onData);
+\t\t\tinput.removeListener("end", close);
+\t\t\tinput.removeListener("error", close);
+\t\t\tinput.pause();
+\t\t};
+\t\tconst onData = (chunk) => {
+\t\t\tconst bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+\t\t\tif (bytes.length > frame.length - offset) return close();
+\t\t\tfor (const byte of bytes) {
+\t\t\t\tif (byte !== frame[offset++]) return close();
+\t\t\t}
+\t\t\tif (offset === frame.length) {
+\t\t\t\tclose();
+\t\t\t\trequest("stop", "MatchaClaw owner stop");
+\t\t\t}
+\t\t};
+\t\tcleanupOwnedStdin = close;
+\t\tinput.on("data", onData);
+\t\tinput.once("end", close);
+\t\tinput.once("error", close);
+\t\tinput.resume();
+\t}
+\ttry {`;
+  if (source.includes(cleanup) && source.includes(binding)) {
+    return { status: 'clean', detail: 'already patched' };
+  }
+  if (source.includes('cleanupOwnedStdin') || source.includes('MATCHACLAW_OPENCLAW_OWNED_STDIN')) {
+    throw new Error(`${patchId}: incomplete or changed owned stdin stop patch`);
+  }
+  source = replaceOnce(source, '\tconst cleanupSignals = () => {', cleanup, patchId);
+  source = replaceOnce(source, '\tprocess.on("SIGUSR1", onSigusr1);\n\ttry {', binding, patchId);
+  writeText(targetFile, source);
+  return { status: 'applied', detail: path.basename(targetFile) };
+}
+
 const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'strip-bundled-channel-plugins',
@@ -2435,6 +2645,18 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'native-board-view',
     apply: patchOpenClawBoard,
+  },
+  {
+    id: 'native-world-investigation',
+    apply: patchOpenClawWorldInvestigation,
+  },
+  {
+    id: 'owned-stdin-stop',
+    apply: patchOwnedStdinStop,
+  },
+  {
+    id: 'chat-dispatch-diagnostics',
+    apply: patchChatDispatchDiagnostics,
   },
 ]);
 

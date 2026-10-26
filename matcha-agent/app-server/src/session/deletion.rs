@@ -215,6 +215,7 @@ impl Sessions {
             }
         }
         let mut execution = session.data.lock().await;
+        record::ensure_investigations_settled(&self.0.database, &session_id).await?;
         let mut deleting = execution.record.clone();
         deleting.status = record::Status::Deleting;
         deleting.updated_at_ms = rpc::now_ms();

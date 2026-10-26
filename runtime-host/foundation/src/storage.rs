@@ -31,7 +31,7 @@ mod platform {
         ffi::{OsStr, c_void},
         fs, io,
         mem::size_of,
-        os::windows::ffi::OsStrExt,
+        os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle},
         path::{Path, PathBuf},
         ptr::{addr_of, null_mut},
     };
@@ -48,6 +48,29 @@ mod platform {
     const DIRECTORY_SDDL: &str = "D:P(A;OICI;FA;;;OW)";
     const FILE_SDDL: &str = "D:P(A;;FA;;;OW)";
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+    fn failure(
+        stage: &'static str,
+        check: &'static str,
+        error: Option<io::Error>,
+    ) -> PrivateStorageError {
+        if std::env::var("MATCHACLAW_TRACE").as_deref() == Ok("1") {
+            let code = error.as_ref().and_then(io::Error::raw_os_error);
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "prefix": "session-trace",
+                    "source": "foundation",
+                    "stage": stage,
+                    "check": check,
+                    "rawWin32Status": code.map(|code| code as u32),
+                    "ioKind": error.as_ref().map(|error| format!("{:?}", error.kind())),
+                    "errorCode": code,
+                })
+            );
+        }
+        PrivateStorageError
+    }
 
     struct Token(F::HANDLE);
 
@@ -76,9 +99,19 @@ mod platform {
                     null_mut(),
                 )
             } == 0
-                || descriptor.is_null()
             {
-                return Err(PrivateStorageError);
+                return Err(failure(
+                    "storage.private.descriptor",
+                    "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+                    Some(io::Error::last_os_error()),
+                ));
+            }
+            if descriptor.is_null() {
+                return Err(failure(
+                    "storage.private.descriptor",
+                    "descriptor_null",
+                    None,
+                ));
             }
             Ok(Self(descriptor))
         }
@@ -98,10 +131,18 @@ mod platform {
             if unsafe {
                 S::GetSecurityDescriptorDacl(self.0, &mut present, &mut dacl, &mut defaulted)
             } == 0
-                || present == 0
-                || dacl.is_null()
             {
-                return Err(PrivateStorageError);
+                return Err(failure(
+                    "storage.private.descriptor",
+                    "GetSecurityDescriptorDacl",
+                    Some(io::Error::last_os_error()),
+                ));
+            }
+            if present == 0 {
+                return Err(failure("storage.private.descriptor", "dacl_absent", None));
+            }
+            if dacl.is_null() {
+                return Err(failure("storage.private.descriptor", "dacl_null", None));
             }
             Ok(dacl)
         }
@@ -109,14 +150,18 @@ mod platform {
 
     impl Drop for SecurityDescriptor {
         fn drop(&mut self) {
-            // SAFETY: The descriptor is allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW or GetNamedSecurityInfoW.
+            // SAFETY: The descriptor is allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW or GetSecurityInfo.
             unsafe { F::LocalFree(self.0) };
         }
     }
 
     pub(super) fn provision_private_directory(path: &Path) -> Result<(), PrivateStorageError> {
         if !path.is_absolute() {
-            return Err(PrivateStorageError);
+            return Err(failure(
+                "storage.private.provision",
+                "path_not_absolute",
+                None,
+            ));
         }
         provision_components(path)?;
         set_private_mode(path, PrivateMode::Directory)
@@ -126,13 +171,13 @@ mod platform {
         path: &Path,
         mode: PrivateMode,
     ) -> Result<(), PrivateStorageError> {
-        validate_target(path, mode)?;
-        ensure_current_user_owns_path(path)?;
+        let target = open_target(path, mode, FS::WRITE_DAC)?;
+        let handle = target.as_raw_handle() as F::HANDLE;
+        ensure_current_user_owns_target(handle)?;
         let descriptor = SecurityDescriptor::owner_only(mode)?;
-        let name = wide(path.as_os_str())?;
         let status = unsafe {
-            A::SetNamedSecurityInfoW(
-                name.as_ptr(),
+            A::SetSecurityInfo(
+                handle,
                 A::SE_FILE_OBJECT,
                 S::PROTECTED_DACL_SECURITY_INFORMATION | S::DACL_SECURITY_INFORMATION,
                 null_mut(),
@@ -142,9 +187,13 @@ mod platform {
             )
         };
         if status != F::ERROR_SUCCESS {
-            return Err(PrivateStorageError);
+            return Err(failure(
+                "storage.private.set_mode",
+                "SetSecurityInfo",
+                Some(io::Error::from_raw_os_error(status as i32)),
+            ));
         }
-        verify_private_mode(path, mode)
+        verify_target_private_mode(handle, mode)
     }
 
     fn provision_components(path: &Path) -> Result<(), PrivateStorageError> {
@@ -159,14 +208,24 @@ mod platform {
             match fs::symlink_metadata(&candidate) {
                 Ok(metadata) => {
                     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                        return Err(PrivateStorageError);
+                        return Err(failure(
+                            "storage.private.provision",
+                            "ancestor_not_plain_directory",
+                            None,
+                        ));
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     create_missing = true;
                     create_private_directory(&candidate)?;
                 }
-                Err(_) => return Err(PrivateStorageError),
+                Err(error) => {
+                    return Err(failure(
+                        "storage.private.provision",
+                        "symlink_metadata",
+                        Some(error),
+                    ));
+                }
             }
             if create_missing {
                 verify_private_mode(&candidate, PrivateMode::Directory)?;
@@ -186,29 +245,70 @@ mod platform {
         if error.raw_os_error() == Some(F::ERROR_ALREADY_EXISTS as i32) {
             validate_target(path, PrivateMode::Directory)
         } else {
-            Err(PrivateStorageError)
+            Err(failure(
+                "storage.private.create_directory",
+                "CreateDirectoryW",
+                Some(error),
+            ))
         }
     }
 
     fn validate_target(path: &Path, mode: PrivateMode) -> Result<(), PrivateStorageError> {
-        let metadata = fs::symlink_metadata(path).map_err(|_| PrivateStorageError)?;
-        if metadata.file_type().is_symlink() {
-            return Err(PrivateStorageError);
-        }
-        match mode {
-            PrivateMode::Directory if metadata.is_dir() => Ok(()),
-            PrivateMode::File if metadata.is_file() => Ok(()),
-            _ => Err(PrivateStorageError),
-        }
+        open_target(path, mode, 0).map(drop)
     }
 
-    fn ensure_current_user_owns_path(path: &Path) -> Result<(), PrivateStorageError> {
+    fn open_target(
+        path: &Path,
+        mode: PrivateMode,
+        additional_access: u32,
+    ) -> Result<fs::File, PrivateStorageError> {
+        // Keep validation and security changes on one object, without following or replacing it.
+        let target = fs::OpenOptions::new()
+            .access_mode(FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | additional_access)
+            .share_mode(FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE)
+            .custom_flags(FS::FILE_FLAG_BACKUP_SEMANTICS | FS::FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|error| failure("storage.private.open", "OpenOptions::open", Some(error)))?;
+        let mut attributes = FS::FILE_ATTRIBUTE_TAG_INFO::default();
+        if unsafe {
+            FS::GetFileInformationByHandleEx(
+                target.as_raw_handle() as F::HANDLE,
+                FS::FileAttributeTagInfo,
+                (&mut attributes as *mut FS::FILE_ATTRIBUTE_TAG_INFO).cast(),
+                size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(failure(
+                "storage.private.validate_target",
+                "GetFileInformationByHandleEx",
+                Some(io::Error::last_os_error()),
+            ));
+        }
+        if attributes.FileAttributes & FS::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(failure(
+                "storage.private.validate_target",
+                "target_reparse_point",
+                None,
+            ));
+        }
+        let is_directory = attributes.FileAttributes & FS::FILE_ATTRIBUTE_DIRECTORY != 0;
+        if is_directory != (mode == PrivateMode::Directory) {
+            return Err(failure(
+                "storage.private.validate_target",
+                "target_type_mismatch",
+                None,
+            ));
+        }
+        Ok(target)
+    }
+
+    fn ensure_current_user_owns_target(handle: F::HANDLE) -> Result<(), PrivateStorageError> {
         let mut owner = null_mut();
         let mut descriptor = null_mut();
-        let name = wide(path.as_os_str())?;
         let status = unsafe {
-            A::GetNamedSecurityInfoW(
-                name.as_ptr(),
+            A::GetSecurityInfo(
+                handle,
                 A::SE_FILE_OBJECT,
                 S::OWNER_SECURITY_INFORMATION,
                 &mut owner,
@@ -218,26 +318,49 @@ mod platform {
                 &mut descriptor,
             )
         };
-        if status != F::ERROR_SUCCESS || descriptor.is_null() || !owner_is_current_user(owner)? {
+        if status != F::ERROR_SUCCESS {
             if !descriptor.is_null() {
-                // SAFETY: Descriptor ownership is returned by GetNamedSecurityInfoW.
+                // SAFETY: Descriptor ownership is returned by GetSecurityInfo.
                 unsafe { F::LocalFree(descriptor) };
             }
-            return Err(PrivateStorageError);
+            return Err(failure(
+                "storage.private.owner",
+                "GetSecurityInfo",
+                Some(io::Error::from_raw_os_error(status as i32)),
+            ));
         }
-        // SAFETY: Descriptor ownership is returned by GetNamedSecurityInfoW.
-        unsafe { F::LocalFree(descriptor) };
+        if descriptor.is_null() {
+            return Err(failure("storage.private.owner", "descriptor_null", None));
+        }
+        let _descriptor = SecurityDescriptor(descriptor);
+        if owner.is_null() {
+            return Err(failure("storage.private.owner", "owner_null", None));
+        }
+        if !owner_is_current_user(owner)? {
+            return Err(failure(
+                "storage.private.owner",
+                "EqualSid_current_user",
+                None,
+            ));
+        }
         Ok(())
     }
 
     fn verify_private_mode(path: &Path, mode: PrivateMode) -> Result<(), PrivateStorageError> {
+        let target = open_target(path, mode, 0)?;
+        verify_target_private_mode(target.as_raw_handle() as F::HANDLE, mode)
+    }
+
+    fn verify_target_private_mode(
+        handle: F::HANDLE,
+        mode: PrivateMode,
+    ) -> Result<(), PrivateStorageError> {
         let mut owner = null_mut();
         let mut dacl = null_mut();
         let mut descriptor = null_mut();
-        let name = wide(path.as_os_str())?;
         let status = unsafe {
-            A::GetNamedSecurityInfoW(
-                name.as_ptr(),
+            A::GetSecurityInfo(
+                handle,
                 A::SE_FILE_OBJECT,
                 S::OWNER_SECURITY_INFORMATION | S::DACL_SECURITY_INFORMATION,
                 &mut owner,
@@ -247,39 +370,95 @@ mod platform {
                 &mut descriptor,
             )
         };
-        if status != F::ERROR_SUCCESS || descriptor.is_null() {
-            return Err(PrivateStorageError);
+        if status != F::ERROR_SUCCESS {
+            if !descriptor.is_null() {
+                // SAFETY: Descriptor ownership is returned by GetSecurityInfo.
+                unsafe { F::LocalFree(descriptor) };
+            }
+            return Err(failure(
+                "storage.private.verify",
+                "GetSecurityInfo",
+                Some(io::Error::from_raw_os_error(status as i32)),
+            ));
+        }
+        if descriptor.is_null() {
+            return Err(failure("storage.private.verify", "descriptor_null", None));
         }
         let descriptor = SecurityDescriptor(descriptor);
+        if owner.is_null() {
+            return Err(failure("storage.private.verify", "owner_null", None));
+        }
         if !owner_is_current_user(owner)? {
-            return Err(PrivateStorageError);
+            return Err(failure(
+                "storage.private.verify",
+                "EqualSid_current_user",
+                None,
+            ));
         }
         let mut control = 0_u16;
         let mut revision = 0_u32;
-        if owner.is_null()
-            || dacl.is_null()
-            || unsafe { S::GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) }
-                == 0
-            || control & S::SE_DACL_PROTECTED == 0
-            || unsafe { (*dacl).AceCount } != 1
+        if dacl.is_null() {
+            return Err(failure("storage.private.verify", "dacl_null", None));
+        }
+        if unsafe { S::GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) }
+            == 0
         {
-            return Err(PrivateStorageError);
+            return Err(failure(
+                "storage.private.verify",
+                "GetSecurityDescriptorControl",
+                Some(io::Error::last_os_error()),
+            ));
+        }
+        if control & S::SE_DACL_PROTECTED == 0 {
+            return Err(failure(
+                "storage.private.verify",
+                "dacl_not_protected",
+                None,
+            ));
+        }
+        if unsafe { (*dacl).AceCount } != 1 {
+            return Err(failure("storage.private.verify", "ace_count_not_one", None));
         }
 
         let mut raw_ace: *mut c_void = null_mut();
-        if unsafe { S::GetAce(dacl, 0, &mut raw_ace) } == 0 || raw_ace.is_null() {
-            return Err(PrivateStorageError);
+        if unsafe { S::GetAce(dacl, 0, &mut raw_ace) } == 0 {
+            return Err(failure(
+                "storage.private.verify",
+                "GetAce",
+                Some(io::Error::last_os_error()),
+            ));
+        }
+        if raw_ace.is_null() {
+            return Err(failure("storage.private.verify", "ace_null", None));
         }
         // SAFETY: GetAce returned the sole ACE from an OS-validated ACL.
         let ace = unsafe { &*(raw_ace as *const S::ACCESS_ALLOWED_ACE) };
         let sid = addr_of!(ace.SidStart) as S::PSID;
-        if ace.Header.AceType != ACCESS_ALLOWED_ACE_TYPE
-            || ace.Mask != FS::FILE_ALL_ACCESS
-            || !ace_inheritance_matches(u32::from(ace.Header.AceFlags), mode)
-            || (unsafe { S::EqualSid(owner, sid) } == 0
-                && unsafe { S::IsWellKnownSid(sid, S::WinCreatorOwnerRightsSid) } == 0)
+        if ace.Header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+            return Err(failure(
+                "storage.private.verify",
+                "ace_type_not_allow",
+                None,
+            ));
+        }
+        if ace.Mask != FS::FILE_ALL_ACCESS {
+            return Err(failure(
+                "storage.private.verify",
+                "ace_mask_not_full_access",
+                None,
+            ));
+        }
+        if !ace_inheritance_matches(u32::from(ace.Header.AceFlags), mode) {
+            return Err(failure(
+                "storage.private.verify",
+                "ace_inheritance_mismatch",
+                None,
+            ));
+        }
+        if unsafe { S::EqualSid(owner, sid) } == 0
+            && unsafe { S::IsWellKnownSid(sid, S::WinCreatorOwnerRightsSid) } == 0
         {
-            return Err(PrivateStorageError);
+            return Err(failure("storage.private.verify", "ace_sid_not_owner", None));
         }
         Ok(())
     }
@@ -297,13 +476,21 @@ mod platform {
     fn owner_is_current_user(owner: S::PSID) -> Result<bool, PrivateStorageError> {
         let mut raw = null_mut();
         if unsafe { T::OpenProcessToken(T::GetCurrentProcess(), S::TOKEN_QUERY, &mut raw) } == 0 {
-            return Err(PrivateStorageError);
+            return Err(failure(
+                "storage.private.token",
+                "OpenProcessToken",
+                Some(io::Error::last_os_error()),
+            ));
         }
         let token = Token(raw);
         let mut required = 0_u32;
         unsafe { S::GetTokenInformation(token.0, S::TokenUser, null_mut(), 0, &mut required) };
         if required < size_of::<S::TOKEN_USER>() as u32 {
-            return Err(PrivateStorageError);
+            return Err(failure(
+                "storage.private.token",
+                "GetTokenInformation_required_size",
+                Some(io::Error::last_os_error()),
+            ));
         }
         let mut buffer = vec![0_u8; required as usize];
         if unsafe {
@@ -316,11 +503,15 @@ mod platform {
             )
         } == 0
         {
-            return Err(PrivateStorageError);
+            return Err(failure(
+                "storage.private.token",
+                "GetTokenInformation",
+                Some(io::Error::last_os_error()),
+            ));
         }
         let user = unsafe { &*(buffer.as_ptr() as *const S::TOKEN_USER) };
         if user.User.Sid.is_null() {
-            Err(PrivateStorageError)
+            Err(failure("storage.private.token", "user_sid_null", None))
         } else {
             Ok(unsafe { S::EqualSid(owner, user.User.Sid) } != 0)
         }
@@ -328,7 +519,7 @@ mod platform {
 
     fn wide(value: &OsStr) -> Result<Vec<u16>, PrivateStorageError> {
         if value.encode_wide().any(|unit| unit == 0) {
-            return Err(PrivateStorageError);
+            return Err(failure("storage.private.wide", "embedded_nul", None));
         }
         Ok(value.encode_wide().chain([0]).collect())
     }

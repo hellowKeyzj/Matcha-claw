@@ -10,7 +10,12 @@ const sessionTranscriptModule = feature('KAIROS')
 import { APIUserAbortError } from '@anthropic-ai/sdk'
 import { markPostCompaction } from 'src/bootstrap/state.js'
 import { getInvokedSkillsForAgent } from '../../bootstrap/state.js'
-import { collectSealedMessageReferences, parseSealedSkillReference, sealedReferenceKey, sealedSkillPath } from '../../skills/sealed/reference.js'
+import {
+  collectSealedMessageReferences,
+  parseSealedSkillReference,
+  sealedReferenceKey,
+  sealedSkillPath,
+} from '../../skills/sealed/reference.js'
 import type { QuerySource } from '../../constants/querySource.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import type { Tool, ToolUseContext } from '../../Tool.js'
@@ -583,7 +588,10 @@ export async function compactConversation(
     }
 
     // Add skill attachment if skills were invoked in this session
-    const skillAttachment = createSkillAttachmentIfNeeded(context.agentId, messages)
+    const skillAttachment = createSkillAttachmentIfNeeded(
+      context.agentId,
+      messages,
+    )
     if (skillAttachment) {
       postCompactFileAttachments.push(skillAttachment)
     }
@@ -980,7 +988,10 @@ export async function partialCompactConversation(
       postCompactFileAttachments.push(planModeAttachment)
     }
 
-    const skillAttachment = createSkillAttachmentIfNeeded(context.agentId, allMessages)
+    const skillAttachment = createSkillAttachmentIfNeeded(
+      context.agentId,
+      allMessages,
+    )
     if (skillAttachment) {
       postCompactFileAttachments.push(skillAttachment)
     }
@@ -1549,7 +1560,12 @@ export function createSkillAttachmentIfNeeded(
   messages: Message[] = [],
 ): AttachmentMessage | null {
   const invokedSkills = getInvokedSkillsForAgent(agentId)
-  const references = new Map(collectSealedMessageReferences(messages).map(ref => [sealedReferenceKey(ref), ref]))
+  const references = new Map(
+    collectSealedMessageReferences(messages).map(ref => [
+      sealedReferenceKey(ref),
+      ref,
+    ]),
+  )
   for (const skill of invokedSkills.values()) {
     const ref = parseSealedSkillReference(skill.content)
     if (ref) references.set(sealedReferenceKey(ref), ref)
@@ -1586,7 +1602,11 @@ export function createSkillAttachmentIfNeeded(
   // Reference facts are durable, tiny and indivisible. Their contentTokens
   // are charged only when hydrated, not dropped by ordinary carry truncation.
   for (const ref of references.values()) {
-    skills.push({ name: ref.skillKey, path: sealedSkillPath(ref.skillKey, ref.path), content: JSON.stringify(ref) })
+    skills.push({
+      name: ref.skillKey,
+      path: sealedSkillPath(ref.skillKey, ref.path),
+      content: JSON.stringify(ref),
+    })
   }
   if (skills.length === 0) {
     return null

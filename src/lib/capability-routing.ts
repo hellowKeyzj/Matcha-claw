@@ -1,7 +1,6 @@
 import { hostApiFetch } from '@/lib/host-api';
 import { isProviderMutationCommitted, waitForProviderMutation } from '@/lib/provider-call';
 import type { ProviderCallDetail } from '@/types/call-log/provider';
-import { nativeProjectionError } from '@/lib/provider-projection-errors';
 
 export type CapabilityKey =
   | 'chat'
@@ -35,7 +34,6 @@ export interface PersistCapabilityRoutingResult {
   routing: CapabilityRouting;
   receipt?: ProviderCallDetail;
   error?: string;
-  warning?: string;
 }
 
 const PROVIDER_ROUTING_PATH = '/api/provider-routing';
@@ -204,6 +202,5 @@ export async function persistCapabilityRouting(
     };
   }
   const snapshot = await fetchCapabilityRouting();
-  const warning = nativeProjectionError(receipt);
-  return { success: true, ...snapshot, receipt, ...(warning ? { warning } : {}) };
+  return { success: true, ...snapshot, receipt };
 }

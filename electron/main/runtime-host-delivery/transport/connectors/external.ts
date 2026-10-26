@@ -3,6 +3,7 @@ import { sessionIdentitiesEqual, validateSessionIdentity, type SessionIdentity }
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
 import { isProductRuntimeScope, type ProductRuntimeScope } from '../runtime-scope';
 import { isConnectorObservationResult } from '../../../../../src/types/connectors-observation';
+import { isConnectorOAuthInput } from '../../../../../src/types/connectors-oauth';
 
 const UNAVAILABLE = {
   success: false,
@@ -42,6 +43,7 @@ type ExternalConnectorOperation =
   | 'externalConnectors.status'
   | 'externalConnectors.observationResult'
   | 'externalConnectors.probe'
+  | 'externalConnectors.oauth'
   | 'externalConnectors.sessionStatus'
   | 'externalConnectors.sessionMcpServerEnabled'
   | 'externalConnectors.get'
@@ -76,10 +78,11 @@ export function createExternalConnectorsTransport(
         method: 'POST',
         fetcher,
         body: request,
+        timeoutMs: request.operationId === 'externalConnectors.oauth' || request.operationId === 'externalConnectors.observationResult' ? 5_000 : undefined,
       });
       if (response?.status === 202
         && (request.operationId === 'externalConnectors.upsert' || request.operationId === 'externalConnectors.update' || request.operationId === 'externalConnectors.remove' || request.operationId === 'externalConnectors.sessionMcpServerEnabled'
-          || request.operationId === 'externalConnectors.status' || request.operationId === 'externalConnectors.probe' || request.operationId === 'externalConnectors.sessionStatus')
+          || request.operationId === 'externalConnectors.status' || request.operationId === 'externalConnectors.probe' || request.operationId === 'externalConnectors.sessionStatus' || request.operationId === 'externalConnectors.oauth')
         && isRecord(response.body) && hasExactKeys(response.body, ['callId', 'accepted'])
         && typeof response.body.callId === 'string' && /^[a-f0-9]{32}$/.test(response.body.callId)
         && response.body.accepted === true) {
@@ -112,7 +115,7 @@ function isRequest(value: unknown): value is Request {
     || !hasExactKeys(value.target, ['kind'])
     || value.target.kind !== 'external-connectors'
     || !isRecord(value.input)) return false;
-  if (isRuntimeObservation(value.operationId, value.input)
+  if (value.operationId === 'externalConnectors.oauth' || isRuntimeObservation(value.operationId, value.input)
     ? !isProductRuntimeScope(value.scope) : !isCatalogScope(value.scope)) return false;
 
   switch (value.operationId) {
@@ -122,8 +125,12 @@ function isRequest(value: unknown): value is Request {
       return hasExactKeys(value.input, ['kind'])
         && typeof value.input.kind === 'string'
         && value.input.kind === operationKind(value.operationId);
+    case 'externalConnectors.oauth':
+      return value.input.kind === 'oauth' && isConnectorOAuthInput(value.input)
+        && isConnectorOAuthScope(value.scope, value.input.agentId);
     case 'externalConnectors.observationResult':
       return (hasExactKeys(value.input, ['kind', 'callId'])
+        || (hasExactKeys(value.input, ['kind', 'callId', 'agentId']) && isConnectorOAuthScope(value.scope, value.input.agentId))
         || (hasExactKeys(value.input, ['kind', 'callId', 'sessionIdentity']) && !validateSessionIdentity(value.input.sessionIdentity)))
         && value.input.kind === 'observationResult'
         && typeof value.input.callId === 'string' && /^[a-f0-9]{32}$/.test(value.input.callId);
@@ -158,6 +165,12 @@ function isRequest(value: unknown): value is Request {
   }
 }
 
+export function isConnectorOAuthScope(scope: unknown, agentId: unknown): scope is ProductRuntimeScope {
+  return isProductRuntimeScope(scope) && (scope.endpoint.runtimeAdapterId === 'matcha-agent'
+    ? typeof agentId === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(agentId)
+    : agentId === undefined);
+}
+
 function isCatalogScope(value: unknown): boolean {
   return isRecord(value) && hasExactKeys(value, ['kind']) && value.kind === 'external-connector-catalog';
 }
@@ -182,10 +195,13 @@ function isSuccessResponse(request: Request, value: unknown): boolean {
       && Array.isArray(value.programs) && value.programs.every(isProgram);
   }
   if (operation === 'externalConnectors.observationResult') {
-    return isConnectorObservationResult(value) && value.callId === request.input.callId
-      && (value.kind === 'sessionStatus'
-        ? request.input.sessionIdentity !== undefined && sessionIdentitiesEqual(value.sessionIdentity, request.input.sessionIdentity as SessionIdentity)
-        : request.input.sessionIdentity === undefined);
+    if (!isConnectorObservationResult(value) || value.callId !== request.input.callId) return false;
+    if (value.kind === 'oauth') {
+      return request.input.sessionIdentity === undefined && isConnectorOAuthScope(request.scope, request.input.agentId);
+    }
+    return request.input.agentId === undefined && (value.kind === 'sessionStatus'
+      ? request.input.sessionIdentity !== undefined && sessionIdentitiesEqual(value.sessionIdentity, request.input.sessionIdentity as SessionIdentity)
+      : request.input.sessionIdentity === undefined);
   }
   if (operation === 'externalConnectors.get') {
     return isRecord(value) && hasExactKeys(value, ['connector']) && isConnector(value.connector);
@@ -197,7 +213,7 @@ function isConnector(value: unknown): boolean {
   return isRecord(value) && hasOnlyKeys(value, [
     'id', 'kind', 'displayName', 'description', 'enabled', 'workspaceId', 'sourceId',
     'mcpServerProgram', 'tags', 'url', 'transport', 'connectionTimeoutMs', 'baseUrl',
-    'provider', 'packageName', 'secretEnv', 'secretHeaders', 'secretConfigRefs',
+    'provider', 'packageName', 'auth', 'secretEnv', 'secretHeaders', 'secretConfigRefs',
   ]) && isConnectorFields(value);
 }
 
@@ -212,7 +228,7 @@ function isConnectorPatch(value: unknown): boolean {
   if (!isRecord(value) || !hasOnlyKeys(value, [
     'displayName', 'description', 'enabled', 'command', 'args', 'cwd', 'env', 'secretEnv',
     'url', 'transport', 'headers', 'secretHeaders', 'connectionTimeoutMs', 'baseUrl',
-    'provider', 'packageName', 'config', 'secretConfigRefs',
+    'provider', 'packageName', 'config', 'auth', 'secretConfigRefs',
   ])) return false;
   return ['displayName', 'description', 'cwd', 'packageName'].every((key) => value[key] === null || optionalText(value[key]))
     && ['command', 'url', 'baseUrl', 'provider'].every((key) => optionalText(value[key]))
@@ -220,6 +236,7 @@ function isConnectorPatch(value: unknown): boolean {
     && (value.args === null || optionalStringArray(value.args))
     && ['env', 'headers'].every((key) => value[key] === null || optionalStringMap(value[key]))
     && (value.transport === undefined || value.transport === null || value.transport === 'streamable-http' || value.transport === 'sse')
+    && (value.auth === undefined || value.auth === null || value.auth === 'oauth')
     && (value.connectionTimeoutMs === null || optionalPositive(value.connectionTimeoutMs))
     && (value.config === null || optionalRecord(value.config))
     && (value.secretEnv === null || optionalSecretReferenceMap(value.secretEnv, true))
@@ -231,7 +248,7 @@ function isConnectorFields(value: unknown): boolean {
     'id', 'kind', 'displayName', 'description', 'enabled', 'workspaceId', 'sourceId',
     'mcpServerProgram', 'tags', 'command', 'args', 'cwd', 'env', 'url', 'transport',
     'headers', 'connectionTimeoutMs', 'baseUrl', 'provider', 'packageName', 'config',
-    'secretEnv', 'secretHeaders', 'secretConfigRefs',
+    'auth', 'secretEnv', 'secretHeaders', 'secretConfigRefs',
   ]) || !isConnectorId(value.id) || !isConnectorKind(value.kind)) return false;
   return optionalText(value.displayName)
     && optionalText(value.description)
@@ -247,6 +264,7 @@ function isConnectorFields(value: unknown): boolean {
     && optionalStringMap(value.env)
     && optionalText(value.url)
     && (value.transport === undefined || value.transport === 'streamable-http' || value.transport === 'sse')
+    && (!Object.hasOwn(value, 'auth') || (value.kind === 'mcp-http' && value.auth === 'oauth'))
     && optionalStringMap(value.headers)
     && optionalPositive(value.connectionTimeoutMs)
     && optionalText(value.baseUrl)

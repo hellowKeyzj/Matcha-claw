@@ -1,28 +1,40 @@
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { applicationShellPlugin } from '@/app/extensions';
+import { filesPlugin } from '@/plugins/files/plugin';
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 
-import { ExecutionGraphCard } from '@/pages/Chat/ExecutionGraphCard';
+import { ExecutionGraphCard } from '@/plugins/message-rendering/ExecutionGraphCard';
 import type { SessionExecutionGraphStep } from '../../src/types/session/render-item';
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string, options?: Record<string, unknown>) => {
-      if (key === 'executionGraph.agentRun') return `${String(options?.agent ?? '')} execution`;
-      if (key === 'executionGraph.branchLabel') return '分支';
-      if (key.startsWith('taskPanel.stepStatus.')) return key.split('.').at(-1) ?? key;
-      return key;
-    },
-  }),
-}));
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-i18next')>();
+  return {
+    ...actual,
+    useTranslation: () => ({
+      t: (key: string, options?: Record<string, unknown>) => {
+        if (key === 'executionGraph.agentRun') return `${String(options?.agent ?? '')} execution`;
+        if (key === 'executionGraph.branchLabel') return '分支';
+        if (key.startsWith('taskPanel.stepStatus.')) return key.split('.').at(-1) ?? key;
+        return key;
+      },
+    }),
+  };
+});
+
+const pluginHost = createPluginHost([applicationShellPlugin, filesPlugin]);
 
 function renderExecutionGraph(steps: SessionExecutionGraphStep[]) {
   return render(
-    <ExecutionGraphCard
-      agentLabel="main"
-      sessionLabel="agent:main:subagent:session"
-      steps={steps}
-      active={false}
-    />,
+    <PluginHostProvider host={pluginHost}>
+      <ExecutionGraphCard
+        agentLabel="main"
+        sessionLabel="agent:main:subagent:session"
+        steps={steps}
+        active={false}
+      />
+    </PluginHostProvider>,
   );
 }
 

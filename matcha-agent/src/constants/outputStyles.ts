@@ -1,6 +1,7 @@
 import figures from 'figures'
 import memoize from 'lodash-es/memoize.js'
 import { getOutputStyleDirStyles } from '../outputStyles/loadOutputStylesDir.js'
+import { rethrowInvestigationAdmission } from '../services/api/investigation.js'
 import type { OutputStyle } from '../utils/config.js'
 import { getCwd } from '../utils/cwd.js'
 import { logForDebugging } from '../utils/debug.js'
@@ -134,11 +135,27 @@ ${EXPLANATORY_FEATURE_PROMPT}`,
   },
 }
 
-export const getAllOutputStyles = memoize(async function getAllOutputStyles(
+export const getAllOutputStyles = memoize(async (
   cwd: string,
-): Promise<{ [styleName: string]: OutputStyleConfig | null }> {
-  const customStyles = await getOutputStyleDirStyles(cwd)
-  const pluginStyles = await loadPluginOutputStyles()
+): Promise<{ [styleName: string]: OutputStyleConfig | null }> => {
+  const customStyles = await getOutputStyleDirStyles(cwd).catch(error => {
+    try {
+      rethrowInvestigationAdmission(error)
+    } catch (admissionError) {
+      getAllOutputStyles.cache?.delete?.(cwd)
+      throw admissionError
+    }
+    throw error
+  })
+  const pluginStyles = await loadPluginOutputStyles().catch(error => {
+    try {
+      rethrowInvestigationAdmission(error)
+    } catch (admissionError) {
+      getAllOutputStyles.cache?.delete?.(cwd)
+      throw admissionError
+    }
+    throw error
+  })
 
   // Start with built-in modes
   const allStyles = {

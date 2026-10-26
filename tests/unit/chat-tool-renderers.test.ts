@@ -5,8 +5,8 @@ import en from '../../src/i18n/locales/en/chat.json';
 import ja from '../../src/i18n/locales/ja/chat.json';
 import ru from '../../src/i18n/locales/ru/chat.json';
 
-import { buildToolActivityViewModel } from '../../src/pages/Chat/tool-activity-view-model';
-import { projectSessionViewItems } from '../../src/stores/chat/store-state-helpers';
+import { buildToolActivityViewModel } from '../../src/plugins/message-rendering/tool-activity-view-model';
+import { projectSessionViewItems } from '../../src/plugins/chat/store/store-state-helpers';
 import type { SessionView } from '../../src/types/session/snapshot';
 import type { SessionRenderToolCard } from '../../src/types/session/tool-card';
 

@@ -2,8 +2,10 @@ use platform::state_dir::CanonicalStateDir;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ::provider::{
-    ProviderAccount, ProviderAccountAuthMode, ProviderAccountKind, ProviderMediaApiProtocol,
-    ProviderModel, ProviderModelCapability, ProviderModelCatalog,
+    ProviderAccount, ProviderAccountAuthMode, ProviderAccountExecution,
+    ProviderAccountExecutionStatus, ProviderAccountKind, ProviderCallDiagnostic,
+    ProviderCallDiagnosticReason, ProviderMediaApiProtocol, ProviderModel, ProviderModelCapability,
+    ProviderModelCatalog,
 };
 use serde_json::{Map, Value};
 
@@ -155,6 +157,8 @@ impl ProviderModelProjection {
         catalog: &ProviderModelCatalog,
         retired: &[ProviderAccount],
         required_auth_accounts: &BTreeSet<::provider::ProviderAccountId>,
+        account_failures: &mut Vec<ProviderAccountExecution>,
+        routing_owns_default: bool,
         now_millis: u64,
     ) -> Result<ProviderModelProjectionEffect, ProviderModelProjectionError> {
         let plan = Self::build_plan(
@@ -163,12 +167,13 @@ impl ProviderModelProjection {
             catalog,
             retired,
             required_auth_accounts,
+            account_failures,
             now_millis,
         )?;
         let store = OpenClawConfigStore::new(state_dir);
         let update = store
             .update(|document| {
-                if plan.apply_to_document(document) {
+                if plan.apply_to_document(document, routing_owns_default) {
                     OpenClawConfigMutation::changed()
                 } else {
                     OpenClawConfigMutation::unchanged()
@@ -188,6 +193,8 @@ impl ProviderModelProjection {
         catalog: &ProviderModelCatalog,
         retired: &[ProviderAccount],
         required_auth_accounts: &BTreeSet<::provider::ProviderAccountId>,
+        account_failures: &mut Vec<ProviderAccountExecution>,
+        routing_owns_default: bool,
         now_millis: u64,
     ) -> Result<bool, ProviderModelProjectionError> {
         let plan = Self::build_plan(
@@ -196,9 +203,10 @@ impl ProviderModelProjection {
             catalog,
             retired,
             required_auth_accounts,
+            account_failures,
             now_millis,
         )?;
-        Ok(plan.apply_to_document(document))
+        Ok(plan.apply_to_document(document, routing_owns_default))
     }
 
     fn build_plan<'a>(
@@ -207,27 +215,52 @@ impl ProviderModelProjection {
         catalog: &'a ProviderModelCatalog,
         retired: &'a [ProviderAccount],
         required_auth_accounts: &BTreeSet<::provider::ProviderAccountId>,
+        account_failures: &mut Vec<ProviderAccountExecution>,
         now_millis: u64,
     ) -> Result<ProjectionPlan<'a>, ProviderModelProjectionError> {
-        let plan = ProjectionPlan::build(accounts, catalog, retired)?;
-        for (account_id, account) in &plan.accounts {
-            if !required_auth_accounts.contains(account.id()) {
+        let enabled = accounts
+            .iter()
+            .filter(|account| account.configuration().enabled())
+            .map(|account| (account.id().as_str().to_owned(), account))
+            .collect::<BTreeMap<_, _>>();
+        let keys = projection_keys(&enabled, true)?;
+        for (account_id, account) in &enabled {
+            if !required_auth_accounts.contains(account.id())
+                || account_failures
+                    .iter()
+                    .any(|failure| failure.account_id == *account_id)
+            {
                 continue;
             }
             let Some(credential) = account.configuration().credential() else {
                 continue;
             };
-            let key = plan
-                .keys
+            let key = keys
                 .get(account_id)
-                .expect("every projected account receives a provider key");
-            if !auth::credential_is_available(state_dir, key.as_str(), credential, now_millis)
-                .map_err(|_| ProviderModelProjectionError::CredentialUnavailable)?
-            {
-                return Err(ProviderModelProjectionError::CredentialUnavailable);
-            }
+                .expect("every account receives a provider key");
+            let (execution, reason) =
+                match auth::credential_is_available(state_dir, key, credential, now_millis) {
+                    Ok(true) => continue,
+                    Ok(false) => (
+                        ProviderAccountExecutionStatus::Blocked,
+                        ProviderCallDiagnosticReason::ProviderCredentialUnavailable,
+                    ),
+                    Err(_) => (
+                        ProviderAccountExecutionStatus::Unknown,
+                        ProviderCallDiagnosticReason::PrivateResolverUnavailable,
+                    ),
+                };
+            account_failures.push(ProviderAccountExecution {
+                account_id: account_id.clone(),
+                account_revision: account.revision().get(),
+                execution,
+                diagnostic: Some(ProviderCallDiagnostic {
+                    reason: Some(reason),
+                    private_resolver_code: None,
+                }),
+            });
         }
-        Ok(plan)
+        ProjectionPlan::build(accounts, catalog, retired, account_failures)
     }
 }
 
@@ -244,6 +277,8 @@ struct ProjectionPlan<'a> {
     owned_model_providers: BTreeSet<String>,
     valid_model_references: BTreeSet<String>,
     has_custom_chat_models: bool,
+    preserved_provider_keys: BTreeSet<String>,
+    migrate_legacy_openai: bool,
 }
 
 impl<'a> ProjectionPlan<'a> {
@@ -251,6 +286,7 @@ impl<'a> ProjectionPlan<'a> {
         accounts: &'a [ProviderAccount],
         catalog: &ProviderModelCatalog,
         retired: &'a [ProviderAccount],
+        account_failures: &[ProviderAccountExecution],
     ) -> Result<Self, ProviderModelProjectionError> {
         let mut all_accounts = BTreeMap::new();
         for account in accounts
@@ -260,7 +296,24 @@ impl<'a> ProjectionPlan<'a> {
             all_accounts.insert(account.id().as_str().to_owned(), account);
         }
         let keys = projection_keys(&all_accounts, true)?;
-        let projected_accounts = all_accounts.clone();
+        let projected_accounts = all_accounts
+            .iter()
+            .filter(|(id, _)| {
+                !account_failures
+                    .iter()
+                    .any(|failure| failure.account_id == **id)
+            })
+            .map(|(id, account)| (id.clone(), *account))
+            .collect::<BTreeMap<_, _>>();
+        let preserved_provider_keys = keys
+            .iter()
+            .filter(|(id, _)| !projected_accounts.contains_key(*id))
+            .map(|(_, key)| key.clone())
+            .collect::<BTreeSet<_>>();
+        let migrate_legacy_openai = !all_accounts.values().any(|account| {
+            account.provider().as_str() == "provider:openai"
+                && !projected_accounts.contains_key(account.id().as_str())
+        });
         let keys = keys
             .into_iter()
             .map(|(account_id, key)| {
@@ -277,7 +330,11 @@ impl<'a> ProjectionPlan<'a> {
             .collect::<BTreeMap<_, _>>();
         for account in all_accounts.values() {
             if let Some(plugin) = native_provider_plugin(account.provider().as_str()) {
-                provider_plugins.insert(plugin, true);
+                if projected_accounts.contains_key(account.id().as_str()) {
+                    provider_plugins.insert(plugin, true);
+                } else if provider_plugins.get(plugin) == Some(&false) {
+                    provider_plugins.remove(plugin);
+                }
             }
         }
 
@@ -286,10 +343,11 @@ impl<'a> ProjectionPlan<'a> {
         let mut empty_text = Vec::new();
         let mut empty_transport = Vec::new();
         let mut media = Vec::new();
-        let owned_model_providers = canonical_provider_keys(accounts, retired)?;
+        let mut owned_model_providers = canonical_provider_keys(accounts, retired)?;
+        owned_model_providers.retain(|key| !preserved_provider_keys.contains(key));
         let mut valid_model_references = BTreeSet::new();
         let mut has_custom_chat_models = false;
-        for (account_id, account) in &all_accounts {
+        for (account_id, account) in &projected_accounts {
             let key = keys
                 .get(account_id)
                 .expect("every projected account receives a provider key");
@@ -369,11 +427,18 @@ impl<'a> ProjectionPlan<'a> {
             owned_model_providers,
             valid_model_references,
             has_custom_chat_models,
+            preserved_provider_keys,
+            migrate_legacy_openai,
         })
     }
 
-    fn apply_to_document(&self, document: &mut OpenClawConfigDocument) -> bool {
-        let mut changed = super::provider::migrate_legacy_openai_codex_runtime(document);
+    fn apply_to_document(
+        &self,
+        document: &mut OpenClawConfigDocument,
+        routing_owns_default: bool,
+    ) -> bool {
+        let mut changed = self.migrate_legacy_openai
+            && super::provider::migrate_legacy_openai_codex_runtime(document);
         for (account_id, account) in &self.accounts {
             let key = self
                 .keys
@@ -409,7 +474,9 @@ impl<'a> ProjectionPlan<'a> {
             changed |= ProviderProjection::remove_from_document(provider, document);
             changed |= remove_keyless_auth_profile(provider, document);
         }
-        changed |= self.media.apply_to_document(document);
+        changed |= self
+            .media
+            .apply_to_document(document, &self.preserved_provider_keys);
         changed |= apply_model_allowlist(
             document,
             &self.owned_model_providers,
@@ -418,7 +485,14 @@ impl<'a> ProjectionPlan<'a> {
         if self.has_custom_chat_models {
             changed |= apply_compaction_safeguard_default(document);
         }
-        changed | prune_unknown_model_references(document, &self.valid_model_references)
+        changed
+            | prune_unknown_model_references(
+                document,
+                &self.valid_model_references,
+                &self.owned_model_providers,
+                &self.preserved_provider_keys,
+                routing_owns_default,
+            )
     }
 }
 
@@ -577,6 +651,11 @@ fn apply_model_allowlist(
 fn provider_owns_model_reference(provider: &str, reference: &str) -> bool {
     reference
         .strip_prefix(provider)
+        .or_else(|| {
+            reference
+                .strip_prefix("matchaclaw-media/")
+                .and_then(|reference| reference.strip_prefix(provider))
+        })
         .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
@@ -1148,6 +1227,9 @@ fn apply_compaction_safeguard_default(document: &mut OpenClawConfigDocument) -> 
 fn prune_unknown_model_references(
     document: &mut OpenClawConfigDocument,
     valid: &BTreeSet<String>,
+    owned: &BTreeSet<String>,
+    preserved: &BTreeSet<String>,
+    routing_owns_default: bool,
 ) -> bool {
     let mut root = document.as_value();
     let Some(root_object) = root.as_object_mut() else {
@@ -1157,12 +1239,14 @@ fn prune_unknown_model_references(
         return false;
     };
     let mut changed = false;
-    if let Some(defaults) = agents.get_mut("defaults").and_then(Value::as_object_mut) {
-        changed |= prune_model_field(defaults, "model", valid);
+    if !routing_owns_default
+        && let Some(defaults) = agents.get_mut("defaults").and_then(Value::as_object_mut)
+    {
+        changed |= prune_model_field(defaults, "model", valid, owned, preserved);
     }
     if let Some(list) = agents.get_mut("list").and_then(Value::as_array_mut) {
         for agent in list.iter_mut().filter_map(Value::as_object_mut) {
-            changed |= prune_model_field(agent, "model", valid);
+            changed |= prune_model_field(agent, "model", valid, owned, preserved);
         }
     }
     if changed {
@@ -1175,14 +1259,42 @@ fn prune_model_field(
     object: &mut Map<String, Value>,
     field: &str,
     valid: &BTreeSet<String>,
+    owned: &BTreeSet<String>,
+    preserved: &BTreeSet<String>,
 ) -> bool {
     let Some(current) = object.get(field).cloned() else {
         return false;
     };
+    let preserved_reference = |reference: &str| {
+        preserved
+            .iter()
+            .any(|key| provider_owns_model_reference(key, reference))
+    };
+    if current.as_str().is_some_and(preserved_reference)
+        || current
+            .get("primary")
+            .and_then(Value::as_str)
+            .is_some_and(preserved_reference)
+        || current
+            .get("fallbacks")
+            .and_then(Value::as_array)
+            .is_some_and(|fallbacks| {
+                fallbacks
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(preserved_reference)
+            })
+    {
+        return false;
+    }
+    let retained = |reference: &str| {
+        valid.contains(reference)
+            || !owned
+                .iter()
+                .any(|key| provider_owns_model_reference(key, reference))
+    };
     let next = match &current {
-        Value::String(reference) => valid
-            .contains(reference)
-            .then_some(Value::String(reference.clone())),
+        Value::String(reference) => retained(reference).then_some(Value::String(reference.clone())),
         Value::Object(route) => {
             let mut route = route.clone();
             let primary = route
@@ -1194,11 +1306,11 @@ fn prune_model_field(
                 .unwrap_or_default()
                 .into_iter()
                 .filter_map(|value| value.as_str().map(str::to_owned))
-                .filter(|reference| valid.contains(reference))
+                .filter(|reference| retained(reference))
                 .collect::<Vec<_>>();
             fallbacks.dedup();
             let primary = primary
-                .filter(|reference| valid.contains(reference))
+                .filter(|reference| retained(reference))
                 .or_else(|| (!fallbacks.is_empty()).then(|| fallbacks.remove(0)));
             primary.map(|primary| {
                 fallbacks.retain(|fallback| fallback != &primary);
@@ -1431,6 +1543,8 @@ mod tests {
             &catalog,
             &[],
             &auth_accounts(&accounts),
+            &mut Vec::new(),
+            false,
             1_800_000_000_000,
         )
         .expect("local projection must not require private auth");
@@ -1473,6 +1587,8 @@ mod tests {
                 &catalog,
                 &[],
                 &auth_accounts(&accounts),
+                &mut Vec::new(),
+                false,
                 1_800_000_000_000,
             ),
             Err(ProviderModelProjectionError::CredentialUnavailable)
@@ -1511,6 +1627,8 @@ mod tests {
                 &catalog,
                 &[],
                 &auth_accounts(&accounts),
+                &mut Vec::new(),
+                false,
                 1_800_000_000_000,
             ),
             Err(ProviderModelProjectionError::CredentialUnavailable)
@@ -1535,6 +1653,8 @@ mod tests {
             &catalog,
             &[],
             &auth_accounts(&accounts),
+            &mut Vec::new(),
+            false,
             1_800_000_000_000,
         )
         .expect("project with canonical provider profile");
@@ -1602,6 +1722,8 @@ mod tests {
                 &catalog,
                 &[],
                 &required,
+                &mut Vec::new(),
+                false,
                 1_800_000_000_000,
             )
             .expect("unrelated missing auth must not block projection")
@@ -1628,7 +1750,7 @@ mod tests {
         let catalog =
             ProviderModelCatalog::try_new(vec![model(&account, "gpt-5.6")]).expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
         document.insert(
             "models".into(),
@@ -1640,7 +1762,7 @@ mod tests {
             }),
         );
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         assert_eq!(
             document.get("agents"),
             Some(&json!({
@@ -1667,7 +1789,7 @@ mod tests {
                 .pointer("/models/providers/openai/apiKey"),
             None
         );
-        assert!(!plan.apply_to_document(&mut document));
+        assert!(!plan.apply_to_document(&mut document, false));
     }
 
     #[test]
@@ -1718,7 +1840,7 @@ mod tests {
         ])
         .expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
         document.insert(
             "models".into(),
@@ -1743,7 +1865,7 @@ mod tests {
             }),
         );
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         let value = document.as_value();
         assert_eq!(
             value.pointer("/models/providers/custom-12345678/models/0/contextWindow"),
@@ -1795,10 +1917,10 @@ mod tests {
         ])
         .expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         let value = document.as_value();
         let models = value
             .pointer("/models/providers/custom-12345678/models")
@@ -1840,10 +1962,10 @@ mod tests {
         ])
         .expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         let value = document.as_value();
         assert_eq!(
             value.pointer("/models/providers/openai/api"),
@@ -1872,10 +1994,10 @@ mod tests {
         ])
         .expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         let value = document.as_value();
         assert_eq!(
             value.pointer("/models/providers/ollama-local/models/0/id"),
@@ -1922,10 +2044,10 @@ mod tests {
         ])
         .expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         assert_eq!(
             document
                 .as_value()
@@ -1958,7 +2080,7 @@ mod tests {
         ])
         .expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
         document.insert(
             "agents".into(),
@@ -1972,7 +2094,7 @@ mod tests {
             }),
         );
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         assert_eq!(
             document.as_value().pointer("/agents/defaults/compaction"),
             Some(&json!({ "mode": "default", "keepRecentTokens": 123 }))
@@ -1990,7 +2112,7 @@ mod tests {
         let catalog =
             ProviderModelCatalog::try_new(vec![model(&account, "gpt-5.6")]).expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
         document.insert(
             "models".into(),
@@ -2019,7 +2141,7 @@ mod tests {
             }),
         );
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         let value = document.as_value();
         assert_eq!(
             value.pointer("/models/providers/openai/baseUrl"),
@@ -2051,7 +2173,7 @@ mod tests {
         let catalog =
             ProviderModelCatalog::try_new(vec![model(&account, "gpt-5.6")]).expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
         document.insert(
             "agents".into(),
@@ -2065,7 +2187,7 @@ mod tests {
             }),
         );
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         assert_eq!(
             document.get("agents"),
             Some(&json!({
@@ -2090,7 +2212,7 @@ mod tests {
         let catalog =
             ProviderModelCatalog::try_new(vec![model(&account, "gpt-5.6")]).expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
         document.insert(
             "agents".into(),
@@ -2105,7 +2227,7 @@ mod tests {
             }),
         );
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         let value = document.as_value();
         assert_eq!(
             value.pointer("/agents/defaults/models/openai~1gpt-5.6/alias"),
@@ -2137,10 +2259,10 @@ mod tests {
         );
         let catalog = ProviderModelCatalog::try_new(vec![]).expect("catalog");
         let accounts = [openai, minimax];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         assert_eq!(
             document.get("models"),
             Some(&json!({
@@ -2201,7 +2323,7 @@ mod tests {
         );
         let catalog = ProviderModelCatalog::try_new(vec![]).expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
         document.insert(
             "models".into(),
@@ -2235,7 +2357,7 @@ mod tests {
             }),
         );
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         assert_eq!(document.get("models"), Some(&json!({ "providers": {} })));
         assert_eq!(
             document.get("agents"),
@@ -2270,7 +2392,7 @@ mod tests {
         );
         let catalog = ProviderModelCatalog::try_new(vec![]).expect("catalog");
         let accounts = [disabled];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
         document.insert(
             "agents".into(),
@@ -2283,7 +2405,7 @@ mod tests {
             }),
         );
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         let value = document.as_value();
         assert_eq!(value.pointer("/agents/defaults/models"), None);
         assert_eq!(value.pointer("/agents/defaults"), None);
@@ -2300,7 +2422,7 @@ mod tests {
         );
         let catalog = ProviderModelCatalog::try_new(vec![]).expect("catalog");
         let retired = [retired];
-        let plan = ProjectionPlan::build(&[], &catalog, &retired).expect("plan");
+        let plan = ProjectionPlan::build(&[], &catalog, &retired, &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
         document.insert(
             "models".into(),
@@ -2334,7 +2456,7 @@ mod tests {
             }),
         );
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         let value = document.as_value();
         assert_eq!(value.pointer("/models/providers/openai"), None);
         assert_eq!(
@@ -2359,7 +2481,7 @@ mod tests {
         );
         let catalog = ProviderModelCatalog::try_new(vec![]).expect("catalog");
         let retired = [retired];
-        let plan = ProjectionPlan::build(&[], &catalog, &retired).expect("plan");
+        let plan = ProjectionPlan::build(&[], &catalog, &retired, &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
         document.insert(
             "models".into(),
@@ -2385,7 +2507,7 @@ mod tests {
             }),
         );
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         assert_eq!(
             document.get("models"),
             Some(&json!({
@@ -2447,11 +2569,11 @@ mod tests {
         .expect("catalog");
         let accounts = [account];
         let identities = public_provider_model_identities(&accounts).expect("public identities");
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
 
         assert_eq!(identities["zai-global-main"].provider_key(), "zai");
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         let value = document.as_value();
         assert_eq!(
             value.pointer("/models/providers/zai/models/0/id"),
@@ -2491,10 +2613,10 @@ mod tests {
         let catalog =
             ProviderModelCatalog::try_new(vec![model(&account, "glm-5")]).expect("catalog");
         let accounts = [account];
-        let plan = ProjectionPlan::build(&accounts, &catalog, &[]).expect("plan");
+        let plan = ProjectionPlan::build(&accounts, &catalog, &[], &[]).expect("plan");
         let mut document = OpenClawConfigDocument::empty();
 
-        assert!(plan.apply_to_document(&mut document));
+        assert!(plan.apply_to_document(&mut document, false));
         let value = document.as_value();
         assert_eq!(
             value.pointer("/models/providers/zai/api"),

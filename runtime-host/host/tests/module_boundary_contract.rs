@@ -24,6 +24,7 @@ const HOST_FORBIDDEN_CRATES: &[&str] = &[
     "task_manager",
     "usage",
     "wiki",
+    "world",
     "workspace",
 ];
 
@@ -45,6 +46,7 @@ const MODULE_CRATES: &[&str] = &[
     "task_manager",
     "usage",
     "wiki",
+    "world",
     "workspace",
 ];
 
@@ -319,7 +321,7 @@ fn host_control_lifecycle_keeps_runtime_specific_projection_out_of_private_contr
         "control must only own private stdio loop semantics, not Host construction/app shutdown"
     );
     assert!(
-        app_runtime.contains("Host::new(input)")
+        app_runtime.contains("Host::new(input, verifier)")
             && app_runtime.contains("run_loop(")
             && app_shutdown.contains("async fn shutdown_host"),
         "app service must own Host construction/startup/shutdown and enter the private control loop"

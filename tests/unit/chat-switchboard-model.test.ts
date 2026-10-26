@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildRuntimeEndpointKey, buildSessionIdentityKey, type RuntimeEndpointRef, type SessionIdentity } from '../../src/types/desktop/runtime-address';
 import { buildAgentSessionSwitchboardModel } from '@/components/layout/agent-session-switchboard-model';
-import type { AgentSessionsPaneSessionEntry } from '@/stores/chat/selectors';
-import type { ChatSession, ChatSessionRuntimeEndpointNode } from '@/stores/chat/types';
+import type { AgentSessionsPaneSessionEntry } from '@/plugins/chat/store/selectors';
+import type { ChatSession, ChatSessionRuntimeEndpointNode } from '@/plugins/chat/store/types';
 
 const openClawEndpoint: RuntimeEndpointRef = {
   kind: 'native-runtime',

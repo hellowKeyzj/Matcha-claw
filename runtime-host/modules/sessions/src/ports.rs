@@ -21,6 +21,7 @@ use crate::{
     session_history::{SessionHistoryCommand, SessionHistoryFailure, SessionHistoryOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
     state::{RunPhase, SessionIdentity as ViewIdentity, SessionSourceBinding, SessionView},
+    thinking::{SessionThinkingCommand, SessionThinkingOutcome},
     timeline::WindowRequest,
     timeline::{self, ContentCommand, ContentOutcome},
 };
@@ -287,6 +288,22 @@ pub trait SessionOps: Send + Sync {
         cancellation: CancellationToken,
     ) -> SessionFuture<'a, SessionSendOutcome>;
 
+    /// Native enforcement support only; prompt instructions are not budget capabilities.
+    fn unsupported_task_budget(
+        &self,
+        budget: &organization::TaskExecutionBudget,
+    ) -> Vec<organization::TaskBudgetDimension> {
+        budget.required_dimensions()
+    }
+
+    /// Reads an existing native run under its original identity; never submits work.
+    fn read_session_run<'a>(
+        &'a self,
+        _command: crate::execution::SessionRunReadCommand,
+    ) -> SessionFuture<'a, crate::execution::SessionRunReadOutcome> {
+        Box::pin(async { crate::execution::SessionRunReadOutcome::Unsupported })
+    }
+
     fn select_session_model<'a>(
         &'a self,
         command: ResolvedSessionModelSelection,
@@ -336,6 +353,13 @@ pub trait SessionOps: Send + Sync {
         _command: SessionPermissionCommand,
     ) -> SessionFuture<'a, SessionPermissionOutcome> {
         Box::pin(async { SessionPermissionOutcome::unsupported() })
+    }
+
+    fn session_thinking<'a>(
+        &'a self,
+        command: SessionThinkingCommand,
+    ) -> SessionFuture<'a, SessionThinkingOutcome> {
+        Box::pin(async move { SessionThinkingOutcome::Unsupported(command.runtime()) })
     }
 }
 

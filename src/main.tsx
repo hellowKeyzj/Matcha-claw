@@ -10,6 +10,8 @@ import './styles/globals.css';
 import 'katex/dist/katex.min.css';
 import { initializeDefaultTransports } from './lib/api-client';
 import { isTraceEnabled, startupTrace } from './lib/trace-logger';
+import { applicationPluginsHost, observeApplicationPluginPackages } from './app/plugins';
+import { PluginHostProvider } from './plugin-host/react';
 
 if (isTraceEnabled()) performance.mark('matchaclaw.renderer.module-body');
 startupTrace('renderer.main', 'module.body', () => ({
@@ -23,11 +25,17 @@ startupTrace('renderer.main', 'transport.init.end', () => ({
   durationMs: Math.round(performance.now() - transportStartedAt),
 }));
 
-if (import.meta.env.DEV) {
-  void import('./lib/chat-memory-diagnostics').then(({ installChatMemoryDiagnosticsDebugApi }) => {
-    installChatMemoryDiagnosticsDebugApi(window);
-  });
-}
+// Install observers before any page can acquire a runtime observation.
+const stopBuiltinPlugins = applicationPluginsHost.start();
+const stopPackages = observeApplicationPluginPackages();
+const stopPlugins = () => {
+  stopPackages();
+  stopBuiltinPlugins();
+};
+const onPageHide = (event: PageTransitionEvent) => {
+  if (!event.persisted) stopPlugins();
+};
+window.addEventListener('pagehide', onPageHide);
 
 const createRootStartedAt = isTraceEnabled() ? performance.now() : 0;
 startupTrace('renderer.main', 'root.create.start');
@@ -39,11 +47,21 @@ const renderStartedAt = isTraceEnabled() ? performance.now() : 0;
 startupTrace('renderer.main', 'root.render.start');
 root.render(
   <React.StrictMode>
-    <HashRouter>
-      <App />
-    </HashRouter>
+    <PluginHostProvider host={applicationPluginsHost}>
+      <HashRouter>
+        <App />
+      </HashRouter>
+    </PluginHostProvider>
   </React.StrictMode>,
 );
 startupTrace('renderer.main', 'root.render.return', () => ({
   durationMs: Math.round(performance.now() - renderStartedAt),
 }));
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    root.unmount();
+    window.removeEventListener('pagehide', onPageHide);
+    stopPlugins();
+  });
+}

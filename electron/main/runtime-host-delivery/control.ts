@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import type { AccessPolicyRef, AccessScope, Effect, PolicyRule, RetentionPolicy, Timestamp, WorldRef } from '../../../src/types/world';
 import { decodeBoardChangedEvent, decodeBoardCommandEvent, type BoardChangedEvent, type BoardCommandEvent } from '../../../src/types/board';
 import { isProductRuntimeEndpoint, type ProductRuntimeEndpoint } from './transport/runtime-scope';
+import {
+  isWorldChangedEvent, isWorldResyncEvent, isWorldRef, type WorldChangedHint, type WorldResyncHint,
+} from '../world/events';
 
 export const RUNTIME_HOST_CONTROL_VERSION = 1;
 export const MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES = 1024 * 1024;
@@ -33,9 +37,64 @@ type RuntimeHostPeerLifecycle =
   | 'failed'
   | 'shutDown';
 
+export type WorldStorageTransferCut = Readonly<{
+  world: Readonly<{ tenantId: string; worldId: string }>;
+  transferId: string;
+  sourceStorageId: string;
+  targetStorageId: string;
+  sourceEpoch: string;
+  targetEpoch: string;
+}>;
+export type WorldStorageTransferPrepare = Readonly<{
+  world: Readonly<{ tenantId: string; worldId: string }>;
+  targetStorageId: string;
+  transferId: string;
+}>;
+export type WorldStorageTransferRequest = Readonly<{
+  action: 'resume' | 'abort';
+  cut: WorldStorageTransferCut;
+}>;
+export type WorldAccessGrantRequest = Readonly<{
+  world: WorldRef;
+  commitId: string;
+  id: string;
+  actor: Readonly<{ kind: 'human' | 'service'; id: string }>;
+  access: ReadonlyArray<AccessScope>;
+  labels: ReadonlyArray<string>;
+  effects: ReadonlyArray<Effect>;
+  expiresAt?: Timestamp | null;
+}>;
+export type WorldEvaluationConfiguration = Readonly<{
+  world: WorldRef;
+  commitId: string;
+  evaluation: Readonly<{
+    execution: Readonly<{ issuer: string; subject: string }>;
+    oracle: Readonly<{ issuer: string; subject: string }>;
+    caseAccess: AccessPolicyRef;
+    caseRetention: RetentionPolicy;
+  }>;
+  principals: ReadonlyArray<Readonly<{
+    issuer: string; subject: string; actor: WorldAccessGrantRequest['actor']; expiresAt?: Timestamp | null;
+  }>>;
+  grants: ReadonlyArray<Omit<WorldAccessGrantRequest, 'world' | 'commitId' | 'actor'> & { readonly recipient: 'execution' | 'oracle' }>;
+  policies: ReadonlyArray<Readonly<{
+    rule: Omit<PolicyRule, 'reference'> & { reference: Omit<PolicyRule['reference'], 'contract'> };
+    scope: string; mandatory: boolean; available: boolean;
+  }>>;
+  retentionPolicies: ReadonlyArray<Readonly<{ scope: string; policy: RetentionPolicy }>>;
+}>;
 export type RuntimeHostControlCommand =
   | { readonly name: 'host.health' }
-  | { readonly name: 'host.runtime.snapshot' };
+  | { readonly name: 'host.runtime.snapshot' }
+  | { readonly name: 'world.storage.connect'; readonly input: Readonly<{ connectionString: string }> }
+  | { readonly name: 'world.initial.prepare'; readonly input: Readonly<{ storageId: string; configuration: Readonly<Record<string, unknown>> }> }
+  | { readonly name: 'world.initial.provision'; readonly input: Readonly<{ storage: Readonly<{ storageId: string; connectionString: string }>; configuration: Readonly<Record<string, unknown>> }> }
+  | { readonly name: 'world.access.grant'; readonly input: WorldAccessGrantRequest }
+  | { readonly name: 'world.evaluation.prepare'; readonly input: Readonly<{ world: WorldRef; configuration: WorldEvaluationConfiguration }> }
+  | { readonly name: 'world.evaluation.install'; readonly input: WorldEvaluationConfiguration }
+  | { readonly name: 'world.evaluation.status'; readonly input: Readonly<{ world: WorldRef }> }
+  | { readonly name: 'world.storage.transfer.prepare'; readonly input: WorldStorageTransferPrepare }
+  | { readonly name: 'world.storage.transfer'; readonly input: WorldStorageTransferRequest };
 
 export type RuntimeHostCommandRejectionCode =
   | 'INVALID_INPUT'
@@ -62,6 +121,8 @@ export type RuntimeHostControlOutcome =
   | { readonly kind: 'timed-out' };
 
 export type RuntimeHostSafeEvent =
+  | ({ readonly type: 'world.changed' } & Omit<WorldChangedHint, 'kind'>)
+  | ({ readonly type: 'world.resync-required' } & Omit<WorldResyncHint, 'kind'>)
   | ({ readonly type: 'board:changed' } & BoardChangedEvent)
   | ({ readonly type: 'board:command' } & BoardCommandEvent)
   | { readonly type: 'board:resync' }
@@ -484,24 +545,165 @@ function decodeEvent(raw: Record<string, unknown>): IncomingMessage | undefined 
   return { kind: 'event', event: raw.event };
 }
 
-function isRuntimeHostControlCommand(value: RuntimeHostControlCommand): boolean {
-  if (!isRecord(value) || typeof value.name !== 'string') return false;
+export function isRuntimeHostControlCommand(value: unknown): value is RuntimeHostControlCommand & RuntimeHostJsonObject {
+  if (!isRecord(value) || !isJsonValue(value) || typeof value.name !== 'string') return false;
   switch (value.name) {
     case 'host.health':
     case 'host.runtime.snapshot':
       return hasExactKeys(value, ['name']);
+    case 'world.storage.connect':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['connectionString']) && typeof value.input.connectionString === 'string'
+        && value.input.connectionString.trim().length > 0 && Buffer.byteLength(value.input.connectionString) <= 64 * 1024
+        && !value.input.connectionString.includes('\0');
+    case 'world.initial.prepare':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['storageId', 'configuration']) && worldIdentifier(value.input.storageId)
+        && isRecord(value.input.configuration) && !Object.hasOwn(value.input.configuration, 'storageId');
+    case 'world.initial.provision':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['storage', 'configuration']) && isRecord(value.input.storage)
+        && hasExactKeys(value.input.storage, ['storageId', 'connectionString']) && worldIdentifier(value.input.storage.storageId)
+        && typeof value.input.storage.connectionString === 'string' && value.input.storage.connectionString.length > 0
+        && isRecord(value.input.configuration) && value.input.configuration.storageId === value.input.storage.storageId;
+    case 'world.access.grant':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['world', 'commitId', 'id', 'actor', 'access', 'labels', 'effects',
+          ...(Object.hasOwn(value.input, 'expiresAt') ? ['expiresAt'] : [])])
+        && isWorldRef(value.input.world) && worldIdentifier(value.input.commitId) && worldIdentifier(value.input.id)
+        && isRecord(value.input.actor) && hasExactKeys(value.input.actor, ['kind', 'id'])
+        && (value.input.actor.kind === 'human' || value.input.actor.kind === 'service')
+        && worldIdentifier(value.input.actor.id) && Array.isArray(value.input.access)
+        && value.input.access.every((scope) => isRecord(scope) && Array.isArray(scope.resources) && scope.resources.length > 0)
+        && Array.isArray(value.input.labels) && value.input.labels.every((label) => typeof label === 'string')
+        && Array.isArray(value.input.effects) && value.input.effects.every((effect) =>
+          effect === 'pure' || effect === 'source_read' || effect === 'clock_read'
+          || effect === 'probabilistic' || effect === 'external_write')
+        && (value.input.expiresAt == null || typeof value.input.expiresAt === 'string');
+    case 'world.evaluation.prepare':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['world', 'configuration']) && isWorldRef(value.input.world)
+        && isWorldEvaluationConfiguration(value.input.configuration)
+        && value.input.world.tenantId === value.input.configuration.world.tenantId
+        && value.input.world.worldId === value.input.configuration.world.worldId;
+    case 'world.evaluation.install':
+      return hasExactKeys(value, ['name', 'input']) && isWorldEvaluationConfiguration(value.input);
+    case 'world.evaluation.status':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['world']) && isWorldRef(value.input.world);
+    case 'world.storage.transfer.prepare':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['world', 'targetStorageId', 'transferId'])
+        && isWorldRef(value.input.world) && worldIdentifier(value.input.targetStorageId)
+        && worldIdentifier(value.input.transferId);
+    case 'world.storage.transfer':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['action', 'cut'])
+        && (value.input.action === 'resume' || value.input.action === 'abort')
+        && isWorldStorageTransferCut(value.input.cut);
     default:
       return false;
   }
 }
 
-function isMutatingCommand(_command: RuntimeHostControlCommand): boolean {
-  return false;
+export function isWorldEvaluationConfiguration(value: unknown): value is WorldEvaluationConfiguration {
+  if (!isRecord(value) || !hasExactKeys(value, ['world', 'commitId', 'evaluation', 'principals', 'grants', 'policies', 'retentionPolicies'])
+    || !isWorldRef(value.world) || !worldIdentifier(value.commitId) || !isRecord(value.evaluation)
+    || !hasExactKeys(value.evaluation, ['execution', 'oracle', 'caseAccess', 'caseRetention'])) return false;
+  const principal = (entry: unknown): entry is Record<string, unknown> => isRecord(entry)
+    && hasExactKeys(entry, ['issuer', 'subject']) && typeof entry.issuer === 'string' && typeof entry.subject === 'string';
+  const retention = (entry: unknown): boolean => isRecord(entry) && hasExactKeys(entry, ['policyId', 'revision'])
+    && worldIdentifier(entry.policyId) && worldCounter(entry.revision);
+  const strings = (entries: unknown): entries is string[] => Array.isArray(entries) && entries.every((entry) => typeof entry === 'string');
+  const effects = (entries: unknown): boolean => Array.isArray(entries) && entries.every((entry) =>
+    entry === 'pure' || entry === 'source_read' || entry === 'clock_read' || entry === 'probabilistic' || entry === 'external_write');
+  const access = (entries: unknown): boolean => Array.isArray(entries) && entries.every(isEvaluationAccessScope);
+  const grant = (entry: unknown): boolean => isRecord(entry)
+    && hasExactKeys(entry, ['id', 'recipient', 'access', 'labels', 'effects', ...(Object.hasOwn(entry, 'expiresAt') ? ['expiresAt'] : [])])
+    && worldIdentifier(entry.id) && (entry.recipient === 'execution' || entry.recipient === 'oracle')
+    && access(entry.access) && strings(entry.labels) && effects(entry.effects)
+    && (entry.expiresAt == null || typeof entry.expiresAt === 'string');
+  return principal(value.evaluation.execution) && principal(value.evaluation.oracle)
+    && isRecord(value.evaluation.caseAccess) && hasExactKeys(value.evaluation.caseAccess, ['policyId', 'revision', 'labels'])
+    && worldIdentifier(value.evaluation.caseAccess.policyId) && worldCounter(value.evaluation.caseAccess.revision)
+    && strings(value.evaluation.caseAccess.labels) && retention(value.evaluation.caseRetention)
+    && Array.isArray(value.principals) && value.principals.every((entry) => isRecord(entry)
+      && hasExactKeys(entry, ['issuer', 'subject', 'actor', ...(Object.hasOwn(entry, 'expiresAt') ? ['expiresAt'] : [])])
+      && typeof entry.issuer === 'string' && typeof entry.subject === 'string'
+      && isRecord(entry.actor) && hasExactKeys(entry.actor, ['kind', 'id'])
+      && (entry.actor.kind === 'human' || entry.actor.kind === 'service') && worldIdentifier(entry.actor.id)
+      && (entry.expiresAt == null || typeof entry.expiresAt === 'string'))
+    && Array.isArray(value.grants) && value.grants.every(grant)
+    && Array.isArray(value.policies) && value.policies.every((entry) => isRecord(entry)
+      && hasExactKeys(entry, ['rule', 'scope', 'mandatory', 'available']) && worldIdentifier(entry.scope)
+      && typeof entry.mandatory === 'boolean' && typeof entry.available === 'boolean'
+      && isRecord(entry.rule) && hasExactKeys(entry.rule, ['reference', 'verdict', 'access', 'labels', 'effects'])
+      && isRecord(entry.rule.reference) && hasExactKeys(entry.rule.reference, ['policyId', 'revision', 'obligations'])
+      && worldIdentifier(entry.rule.reference.policyId) && worldCounter(entry.rule.reference.revision)
+      && Array.isArray(entry.rule.reference.obligations) && entry.rule.reference.obligations.every(isEvaluationObligation)
+      && (entry.rule.verdict === 'allow' || entry.rule.verdict === 'deny' || entry.rule.verdict === 'needs_approval')
+      && access(entry.rule.access) && strings(entry.rule.labels) && effects(entry.rule.effects))
+    && Array.isArray(value.retentionPolicies) && value.retentionPolicies.every((entry) => isRecord(entry)
+      && hasExactKeys(entry, ['scope', 'policy']) && worldIdentifier(entry.scope) && retention(entry.policy));
+}
+
+function isEvaluationAccessScope(value: unknown): boolean {
+  return isRecord(value) && hasExactKeys(value, ['scope', 'resources', 'fields', 'modes', ...(Object.hasOwn(value, 'validTime') ? ['validTime'] : [])])
+    && worldIdentifier(value.scope) && Array.isArray(value.resources)
+    && value.resources.every((entry) => isRecord(entry) && (entry.kind === 'head'
+      ? hasExactKeys(entry, ['kind', 'channel']) && worldIdentifier(entry.channel)
+      : hasExactKeys(entry, ['kind', 'id']) && typeof entry.kind === 'string'
+        && ['object', 'relation', 'definition', 'assertion', 'evidence', 'support', 'watch', 'state', 'binding', 'operation',
+          'source', 'package', 'change_set', 'branch', 'task', 'case', 'test_case', 'suite', 'evaluation'].includes(entry.kind) && worldIdentifier(entry.id)))
+    && Array.isArray(value.fields) && value.fields.every((entry) => isRecord(entry)
+      && hasExactKeys(entry, ['id', 'revision', 'world']) && worldIdentifier(entry.id) && worldCounter(entry.revision) && isWorldRef(entry.world))
+    && Array.isArray(value.modes) && value.modes.every((entry) => typeof entry === 'string'
+      && ['read', 'write', 'execute', 'approve', 'publish', 'manage', 'export', 'delete'].includes(entry))
+    && (value.validTime == null || isRecord(value.validTime)
+      && hasExactKeys(value.validTime, ['from', ...(Object.hasOwn(value.validTime, 'to') ? ['to'] : [])])
+      && typeof value.validTime.from === 'string' && (value.validTime.to == null || typeof value.validTime.to === 'string'));
+}
+
+function isEvaluationObligation(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.kind === 'approval' || value.kind === 'audit' || value.kind === 'revalidate_before_effect') return hasExactKeys(value, ['kind']);
+  if (value.kind === 'redact') return hasExactKeys(value, ['kind', 'fields']) && Array.isArray(value.fields) && value.fields.every(worldIdentifier);
+  return value.kind === 'limit' && hasExactKeys(value, ['kind', 'maximum']) && typeof value.maximum === 'string'
+    && /^(0|[1-9][0-9]{0,19})$/.test(value.maximum) && BigInt(value.maximum) <= 18_446_744_073_709_551_615n;
+}
+
+function isMutatingCommand(command: RuntimeHostControlCommand): boolean {
+  return command.name === 'world.storage.connect' || command.name === 'world.initial.provision'
+    || command.name === 'world.access.grant' || command.name === 'world.evaluation.install'
+    || command.name === 'world.storage.transfer.prepare' || command.name === 'world.storage.transfer';
+}
+
+export function isWorldStorageTransferCut(value: unknown): value is WorldStorageTransferCut {
+  return isRecord(value)
+    && hasExactKeys(value, ['world', 'transferId', 'sourceStorageId', 'targetStorageId', 'sourceEpoch', 'targetEpoch'])
+    && isWorldRef(value.world) && worldIdentifier(value.transferId)
+    && worldIdentifier(value.sourceStorageId) && worldIdentifier(value.targetStorageId)
+    && worldEpoch(value.sourceEpoch) && worldEpoch(value.targetEpoch);
+}
+function worldIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(value);
+}
+function worldEpoch(value: unknown): value is string {
+  return typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value)
+    && BigInt(value) <= 18_446_744_073_709_551_615n;
+}
+function worldCounter(value: unknown): value is string {
+  return typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value)
+    && BigInt(value) <= 18_446_744_073_709_551_615n;
 }
 
 function isRuntimeHostSafeEvent(value: unknown): value is RuntimeHostSafeEvent {
   if (!isRecord(value) || typeof value.type !== 'string') return false;
   switch (value.type) {
+    case 'world.changed':
+      return isWorldChangedEvent(value);
+    case 'world.resync-required':
+      return isWorldResyncEvent(value);
     case 'board:changed':
     case 'board:command': {
       const { type, ...payload } = value;

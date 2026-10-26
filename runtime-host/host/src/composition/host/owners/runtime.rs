@@ -39,6 +39,8 @@ pub(in crate::composition::host) struct OwnerRuntimeTasks {
     wiki_calls: wiki::WikiHandle,
     join_failures: Arc<Mutex<Vec<&'static str>>>,
     pub(in crate::composition::host) organization: organization::OrganizationRuntime,
+    world: Arc<tokio::sync::Mutex<world::WorldRuntime>>,
+    world_quiesce: Arc<Mutex<Option<world::QuiesceOutcome>>>,
     session: SessionHandle,
     session_terminal: Arc<super::super::ports::organization::OrganizationSessionTerminal>,
     shutdown_stage: OwnerShutdownStage,
@@ -50,6 +52,7 @@ pub(in crate::composition::host) enum OwnerRuntimeShutdownError {
     Organization(organization::OrganizationShutdownError),
     OrganizationTerminal(organization::OrganizationTerminalCloseError),
     SessionsTerminal(sessions_module::SessionTerminalCloseError),
+    World,
 }
 
 impl OwnerRuntimeShutdownError {
@@ -91,9 +94,42 @@ impl OwnerRuntimeTasks {
             .collect()
     }
 
+    pub(in crate::composition::host) fn world_shutdown_failure(
+        &self,
+    ) -> Option<super::super::shutdown::WorldShutdownFailure> {
+        self.world_quiesce
+            .lock()
+            .expect("world shutdown state poisoned")
+            .as_ref()
+            .and_then(super::super::shutdown::WorldShutdownFailure::from_outcome)
+    }
+
     pub(in crate::composition::host) async fn drain_and_join(
         &mut self,
     ) -> Result<(), OwnerRuntimeShutdownError> {
+        let world_closed = self
+            .world_quiesce
+            .lock()
+            .expect("world shutdown state poisoned")
+            .as_ref()
+            .is_some_and(world::QuiesceOutcome::mechanisms_closed);
+        if !world_closed {
+            let outcome = self
+                .world
+                .lock()
+                .await
+                .checked_quiesce(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+                .await;
+            let closed = outcome.mechanisms_closed();
+            *self
+                .world_quiesce
+                .lock()
+                .expect("world shutdown state poisoned") = Some(outcome);
+            if !closed {
+                return Err(OwnerRuntimeShutdownError::World);
+            }
+            self.dispose_module_scope("world").await;
+        }
         self.check_joins()?;
         if self.shutdown_stage == OwnerShutdownStage::Closed {
             return Ok(());
@@ -133,9 +169,14 @@ impl OwnerRuntimeTasks {
                 if is_runtime_dependency_scope(self.module_scopes[index].id()) {
                     continue;
                 }
+                let module = self.module_scopes[index].id();
+                platform::trace::runtime_trace("host.shutdown.module", || serde_json::json!({
+                    "module": module, "phase": "draining",
+                }));
                 self.module_scopes[index].dispose_all_lifo().await;
                 self.check_joins()?;
             }
+            platform::trace::runtime_trace("host.shutdown.peer", || serde_json::json!({ "phase": "draining" }));
             if self.peer.drain_and_join().await.is_err() {
                 record_join_failure(&self.join_failures, "peer");
                 return Err(OwnerRuntimeShutdownError::Join);
@@ -248,6 +289,12 @@ pub(in crate::composition::host) struct RuntimeOwners {
     pub(in crate::composition::host) session_module: SessionModule,
     pub(in crate::composition::host) session_handle: SessionHandle,
     pub(in crate::composition::host) provider_module: ProviderModule,
+    pub(in crate::composition::host) world: world::WorldHandle,
+    pub(in crate::composition::host) world_authority: Arc<world::AuthorityRoot>,
+    pub(in crate::composition::host) world_storage: Result<
+        Arc<super::super::ports::world_storage::DurableWorldStorage>,
+        world::StoreError,
+    >,
     pub(in crate::composition::host) settings: settings::SettingsModule,
     pub(in crate::composition::host) connector: ConnectorModule,
     pub(in crate::composition::host) board: board::BoardModule,
@@ -270,10 +317,21 @@ pub(in crate::composition::host) struct RuntimeOwners {
 }
 
 pub(in crate::composition::host) struct RuntimeOwnerInput {
+    #[cfg(unix)]
+    pub(in crate::composition::host) world_guardian: std::path::PathBuf,
     pub(in crate::composition::host) calls: platform::call::CallRecorder,
     pub(in crate::composition::host) organization:
         super::super::resources::OrganizationOwnerProvision,
     pub(in crate::composition::host) runtime_state_dir: std::path::PathBuf,
+    pub(in crate::composition::host) world_postgres: Option<super::super::WorldPostgresConfig>,
+    pub(in crate::composition::host) world_storage_targets: Vec<super::super::WorldPostgresConfig>,
+    pub(in crate::composition::host) world_source_access:
+        Option<super::super::WorldSourceAccessConfig>,
+    pub(in crate::composition::host) initial_world: Option<world::Provision>,
+    pub(in crate::composition::host) world_authority: Arc<world::AuthorityRoot>,
+    pub(in crate::composition::host) world_native: super::super::ports::world_native::Verifiers,
+    pub(in crate::composition::host) world_investigation: super::super::ports::world_investigation::HostWorldInvestigation,
+    pub(in crate::composition::host) verifier: crate::module_registry::CapabilityVerifier,
     pub(in crate::composition::host) diagnostics_state_root: CanonicalStateDir,
     pub(in crate::composition::host) runtime_host_mcp_executable: std::path::PathBuf,
     pub(in crate::composition::host) runtime_host_mcp_state_dir: std::path::PathBuf,
@@ -288,8 +346,7 @@ pub(in crate::composition::host) struct RuntimeOwnerInput {
     pub(in crate::composition::host) toolchain: Arc<toolchain::NativeToolchain>,
     pub(in crate::composition::host) search_service: Arc<searxng::Service>,
     pub(in crate::composition::host) open_claw: Arc<openclaw::driver::OpenClawDriver>,
-    pub(in crate::composition::host) matcha_driver:
-        Arc<matcha_agent::driver::MatchaRuntimeDriver>,
+    pub(in crate::composition::host) matcha_driver: Arc<matcha_agent::driver::MatchaRuntimeDriver>,
     pub(in crate::composition::host) admission: Arc<crate::composition::admission::HostAdmission>,
     pub(in crate::composition::host) sealed_resource: sealed_resource::SealedResourceModule,
     pub(in crate::composition::host) session_delta: Option<sessions_module::SessionDeltaSource>,
@@ -302,9 +359,19 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     owner_input: RuntimeOwnerInput,
 ) -> Result<RuntimeOwners, ConstructionError> {
     let RuntimeOwnerInput {
+        #[cfg(unix)]
+        world_guardian,
         calls,
         organization,
         runtime_state_dir,
+        world_postgres,
+        world_storage_targets,
+        world_source_access,
+        initial_world,
+        world_authority,
+        world_native,
+        world_investigation,
+        verifier,
         diagnostics_state_root,
         runtime_host_mcp_executable,
         runtime_host_mcp_state_dir,
@@ -482,7 +549,9 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             runtime_directory: runtime_directory.clone(),
         },
     );
-    open_claw.gateway.set_board_event_sink(Some(board.event_sink()));
+    open_claw
+        .gateway
+        .set_board_event_sink(Some(board.event_sink()));
     let mut board_scope = ModuleScope::new("board");
     let board_shutdown = board.clone();
     let board_failures = Arc::clone(&join_failures);
@@ -670,11 +739,107 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
 
     let diagnostics = diagnostics.with_call_recorder(calls.clone());
     let workspace = workspace.with_call_recorder(calls);
+    let storage_catalog = super::super::ports::world_storage::DurableWorldStorage::open(
+        &runtime_state_dir,
+        world_authority.clone(),
+    );
+    let initial_storage_id = world_postgres
+        .as_ref()
+        .map(|input| input.storage_id().to_owned());
+    let storage_catalog = storage_catalog.and_then(|catalog| {
+        for configuration in world_postgres.into_iter().chain(world_storage_targets) {
+            if initial_world.as_ref().is_some_and(|initial| {
+                initial.storage_id.as_str() == configuration.storage_id()
+            }) {
+                catalog.stage(&world_authority, configuration)?;
+            } else {
+                catalog.stage_existing(&world_authority, configuration)?;
+            }
+        }
+        Ok(catalog)
+    });
+    let storage = match (&storage_catalog, initial_storage_id) {
+        (Ok(catalog), Some(storage_id)) => {
+            world::WorldStorage::configuration(catalog.as_ref(), &storage_id)
+                .unwrap_or_else(world::StoreConfiguration::Unavailable)
+        }
+        (Err(error), Some(_)) => world::StoreConfiguration::Unavailable(error.clone()),
+        (_, None) => world::StoreConfiguration::NotConfigured,
+    };
+    #[cfg(windows)]
+    let containment = Ok(foundation::process::ProcessContainment::job());
+    #[cfg(unix)]
+    let containment = foundation::process::ProcessContainment::guardian(world_guardian)
+        .map_err(world::Error::preparation_failed);
+    let prepared = containment.and_then(|containment| {
+        super::super::ports::world_resources::prepare(
+            &runtime_state_dir,
+            wiki.handle().clone(),
+            provider_handle.clone(),
+            world_investigation,
+            containment,
+        )
+    });
+    let (resources, world_epoch_clock) = match prepared {
+        Ok((resources, clock)) => (Ok(resources), Some(clock)),
+        Err(error) => (Err(error), None),
+    };
+    let locator = storage_catalog
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|catalog| {
+            super::super::ports::world_locator::DurableWorldLocator::open(
+                &runtime_state_dir,
+                catalog.clone(),
+            )
+        });
+    let world_runtime = world::WorldRuntime::spawn(
+        &owner_runtime_system,
+        storage,
+        resources,
+        storage_catalog
+            .clone()
+            .map(|catalog| catalog as Arc<dyn world::WorldStorage>),
+        world_authority.clone(),
+        locator,
+        super::super::ports::world_sources::HostSourceAccess::new(world_source_access)
+            .map(|access| Arc::new(access) as Arc<dyn world::SourceAccess>),
+        "electron-main".into(),
+        verifier,
+        world_native,
+        initial_world,
+    );
+    let world_handle = world_runtime.handle();
+    let world_runtime = Arc::new(tokio::sync::Mutex::new(world_runtime));
+    let world_quiesce = Arc::new(Mutex::new(None));
+    let mut world_scope = ModuleScope::new("world");
+    let mut epoch_clock = world_epoch_clock;
+    let failures = Arc::clone(&join_failures);
+    let runtime = Arc::clone(&world_runtime);
+    let settled = Arc::clone(&world_quiesce);
+    world_scope.register_effect_disposer(
+        ScopedEffectKind::OwnerTask,
+        "owner-task",
+        move || async move {
+            let outcome = runtime
+                .lock()
+                .await
+                .checked_quiesce(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+                .await;
+            *settled.lock().expect("world shutdown state poisoned") = Some(outcome);
+            if let Some(clock) = epoch_clock.as_mut() {
+                if clock.cancel_and_join().await.is_err() {
+                    record_join_failure(&failures, "world-epoch-clock");
+                }
+            }
+        },
+    );
     Ok(RuntimeOwners {
         tasks: OwnerRuntimeTasks {
             system: owner_runtime_system,
             peer: peer_task,
             module_scopes: vec![
+                world_scope,
                 module_scope("provider", provider_task),
                 module_scope("sessions", session_task),
                 module_scope("fleet", fleet_task),
@@ -707,6 +872,8 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             wiki_calls: wiki.handle().clone(),
             join_failures,
             organization: organization_runtime,
+            world: world_runtime,
+            world_quiesce,
             session: session_handle.clone(),
             session_terminal,
             shutdown_stage: OwnerShutdownStage::Running,
@@ -717,6 +884,9 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         session_module,
         session_handle,
         provider_module,
+        world: world_handle,
+        world_authority,
+        world_storage: storage_catalog,
         settings,
         connector,
         board,

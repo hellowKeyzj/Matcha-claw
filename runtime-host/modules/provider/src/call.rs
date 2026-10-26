@@ -87,9 +87,9 @@ enum ProviderCallCommit {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum ProviderCallDiagnosticReason {
+pub enum ProviderCallDiagnosticReason {
     InvalidProviderKey,
     ConfigSnapshotUnavailable,
     InvalidConfigDocument,
@@ -102,6 +102,14 @@ pub(crate) enum ProviderCallDiagnosticReason {
     GatewayWriteUnknown,
     ProviderAccountConfigurationInvalid,
     ProviderCredentialUnavailable,
+    ProviderProjectionPartial,
+    ProviderAuthUnsupported,
+    ProviderRestartRequired,
+    ProviderCleanupPartial,
+    ProviderProjectionNotSent,
+    ProviderProjectionOutcomeUnknown,
+    ProviderCleanupBlocked,
+    ProviderProjectionRejected,
     ProviderKeyDuplicate,
     ProviderModelCapabilityInvalid,
     ProviderModelIdentifierInvalid,
@@ -121,9 +129,9 @@ pub(crate) enum ProviderCallDiagnosticReason {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum ProviderCallPrivateResolverCode {
+pub enum ProviderCallPrivateResolverCode {
     InvalidRequest,
     CredentialMissing,
     CredentialDecryptFailed,
@@ -135,11 +143,23 @@ pub(crate) enum ProviderCallPrivateResolverCode {
     Unknown,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProviderCallDiagnostic {
-    reason: Option<ProviderCallDiagnosticReason>,
-    private_resolver_code: Option<ProviderCallPrivateResolverCode>,
+pub struct ProviderCallDiagnostic {
+    pub reason: Option<ProviderCallDiagnosticReason>,
+    pub private_resolver_code: Option<ProviderCallPrivateResolverCode>,
+}
+
+impl ProviderCallDiagnostic {
+    pub(crate) fn from_native_reason(reason: &str) -> Self {
+        Self {
+            reason: Some(
+                serde_json::from_value(serde_json::Value::String(reason.to_owned()))
+                    .unwrap_or(ProviderCallDiagnosticReason::Unknown),
+            ),
+            private_resolver_code: None,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -148,6 +168,7 @@ struct ProviderNativeCallDetail {
     changed: bool,
     applied: &'static str,
     observed: &'static str,
+    reports: Vec<ProviderRuntimeReport>,
 }
 
 impl CallDetail for ProviderCallDetail {
@@ -305,18 +326,13 @@ impl ProviderCallDetail {
         if let Some(diagnostic) = &native.diagnostic
             && self.diagnostic.is_none()
         {
-            self.diagnostic = Some(ProviderCallDiagnostic {
-                reason: Some(
-                    serde_json::from_value(serde_json::Value::String(diagnostic.reason.clone()))
-                        .unwrap_or(ProviderCallDiagnosticReason::Unknown),
-                ),
-                private_resolver_code: None,
-            });
+            self.diagnostic = Some(ProviderCallDiagnostic::from_native_reason(&diagnostic.reason));
         }
         self.native = Some(ProviderNativeCallDetail {
             changed: native.changed,
             applied: native.applied,
             observed: native.observed,
+            reports: native.reports.clone(),
         });
         if persisted == ProviderPersistedOutcome::Unknown
             || commit == ProviderCommitOutcome::CommitOutcomeUnknown
@@ -360,15 +376,34 @@ pub(crate) async fn send_reply<T: ProviderCallOutcome>(
     let _ = reply.send(outcome);
 }
 
+impl ProviderCallOutcome for Result<crate::generation::Receipt, crate::generation::Failure> {
+    fn summarize(&self, detail: &mut ProviderCallDetail) -> CallStatus {
+        match self {
+            Ok(_) => {
+                detail.outcome = Some(ProviderCallResult::Generated);
+                CallStatus::Succeeded
+            }
+            Err(failure) if failure.kind == crate::generation::FailureKind::Cancelled => {
+                detail.outcome = Some(ProviderCallResult::Cancelled);
+                CallStatus::Failed
+            }
+            Err(_) => {
+                detail.outcome = Some(ProviderCallResult::Unavailable);
+                CallStatus::Failed
+            }
+        }
+    }
+}
+
 impl ProviderCallOutcome for ProviderAccountsDelivery {
     fn summarize(&self, detail: &mut ProviderCallDetail) -> CallStatus {
         match self {
-            Self::List(accounts) => {
+            Self::List { accounts, .. } => {
                 detail.outcome = Some(ProviderCallResult::Available);
                 detail.count = Some(accounts.len());
                 CallStatus::Succeeded
             }
-            Self::Account(_) => {
+            Self::Account { .. } => {
                 detail.outcome = Some(ProviderCallResult::Available);
                 CallStatus::Succeeded
             }

@@ -16,6 +16,7 @@ import type {
   ChatCompletionCreateParamsStreaming,
 } from 'openai/resources/chat/completions/completions.mjs'
 import { getGrokClient } from './client.js'
+import { rethrowInvestigationAdmission } from '../investigation.js'
 import { updateOpenAIUsage } from '../openai/openaiShared.js'
 import {
   anthropicMessagesToOpenAI,
@@ -264,6 +265,7 @@ export async function* queryModelGrok(
       tools: convertToolsToLangfuse(toolSchemas as unknown[]),
     })
   } catch (error) {
+    rethrowInvestigationAdmission(error)
     const errorMessage = error instanceof Error ? error.message : String(error)
     logForDebugging(`[Grok] Error: ${errorMessage}`, { level: 'error' })
     yield createAssistantAPIErrorMessage({

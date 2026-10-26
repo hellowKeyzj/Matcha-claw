@@ -6,7 +6,7 @@ import {
   executeLoadSessions,
   executeSetViewportAnchorItemKey,
   executeSwitchSession,
-} from '@/stores/chat/session-actions';
+} from '@/plugins/chat/store/session-actions';
 import {
   createEmptySessionRecord,
   createEmptySessionViewportState,
@@ -14,13 +14,13 @@ import {
   projectSessionViewItems,
   resetSessionProjection,
   selectViewportItems,
-} from '@/stores/chat/store-state-helpers';
+} from '@/plugins/chat/store/store-state-helpers';
 import type { SessionWireItem } from '@/types/session/snapshot';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { buildSessionRuntimeGraph } from '@/stores/chat/session-runtime-graph';
-import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
-import type { StoreHistoryCache } from '@/stores/chat/history-cache';
-import type { ChatStoreState } from '@/stores/chat/types';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
+import { buildSessionRuntimeGraph } from '@/plugins/chat/store/session-runtime-graph';
+import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex } from '@/plugins/chat/store/session-identity';
+import type { StoreHistoryCache } from '@/plugins/chat/store/history-cache';
+import type { ChatStoreState } from '@/plugins/chat/store/types';
 import {
   assistantItem,
   completeFact,

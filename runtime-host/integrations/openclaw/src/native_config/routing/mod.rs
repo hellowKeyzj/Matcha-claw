@@ -1,5 +1,8 @@
 use platform::state_dir::CanonicalStateDir;
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use ::provider::{
     ProviderAccount, ProviderAccountKind, ProviderModelCatalog,
@@ -142,6 +145,7 @@ pub(crate) struct CapabilityRouting {
     pub(crate) video_generate: Option<ModelRoute>,
     pub(crate) music_generate: Option<ModelRoute>,
     pub(crate) tts_provider: Option<ProviderKey>,
+    pub(crate) preserved: BTreeSet<ProviderRoutingCapability>,
 }
 
 impl CapabilityRouting {
@@ -181,37 +185,51 @@ impl CapabilityRouting {
     ) -> Result<bool, RoutingProjectionError> {
         let mut agents = object(document.get("agents"));
         let mut defaults = object(agents.get("defaults"));
-        set_route(&mut defaults, "model", self.chat.as_ref(), false)?;
-        set_route(
-            &mut defaults,
-            "imageModel",
-            self.image_understand.as_ref(),
-            true,
-        )?;
-        set_route(
-            &mut defaults,
-            "imageGenerationModel",
-            self.image_generate.as_ref(),
-            true,
-        )?;
-        set_route(
-            &mut defaults,
-            "videoGenerationModel",
-            self.video_generate.as_ref(),
-            true,
-        )?;
-        set_route(
-            &mut defaults,
-            "musicGenerationModel",
-            self.music_generate.as_ref(),
-            true,
-        )?;
+        for (capability, key, route) in [
+            (ProviderRoutingCapability::Chat, "model", self.chat.as_ref()),
+            (
+                ProviderRoutingCapability::ImageUnderstand,
+                "imageModel",
+                self.image_understand.as_ref(),
+            ),
+            (
+                ProviderRoutingCapability::ImageGenerate,
+                "imageGenerationModel",
+                self.image_generate.as_ref(),
+            ),
+            (
+                ProviderRoutingCapability::VideoGenerate,
+                "videoGenerationModel",
+                self.video_generate.as_ref(),
+            ),
+            (
+                ProviderRoutingCapability::MusicGenerate,
+                "musicGenerationModel",
+                self.music_generate.as_ref(),
+            ),
+        ] {
+            if !self.preserved.contains(&capability) {
+                set_route(
+                    &mut defaults,
+                    key,
+                    route,
+                    capability != ProviderRoutingCapability::Chat,
+                )?;
+            }
+        }
         if self.has_media_route() {
             defaults.insert(
                 "mediaGenerationAutoProviderFallback".into(),
                 Value::Bool(false),
             );
-        } else {
+        } else if ![
+            ProviderRoutingCapability::ImageGenerate,
+            ProviderRoutingCapability::VideoGenerate,
+            ProviderRoutingCapability::MusicGenerate,
+        ]
+        .iter()
+        .any(|capability| self.preserved.contains(capability))
+        {
             defaults.remove("mediaGenerationAutoProviderFallback");
         }
         agents.insert("defaults".into(), Value::Object(defaults));
@@ -219,6 +237,9 @@ impl CapabilityRouting {
     }
 
     fn apply_tts_provider(&self, document: &mut OpenClawConfigDocument) -> bool {
+        if self.preserved.contains(&ProviderRoutingCapability::Tts) {
+            return false;
+        }
         let Some(provider) = &self.tts_provider else {
             let Some(messages) = document.get("messages").and_then(Value::as_object) else {
                 return false;
@@ -275,10 +296,17 @@ impl ProviderRoutingProjection {
         accounts: &[ProviderAccount],
         models: &ProviderModelCatalog,
         routing: &DesiredProviderRouting,
+        account_failures: &mut Vec<::provider::ProviderAccountExecution>,
         now_millis: u64,
     ) -> Result<ProviderRoutingProjectionEffect, ProviderRoutingProjectionError> {
-        let routes =
-            ProjectionRoutes::build(state_dir.clone(), accounts, models, routing, now_millis)?;
+        let routes = ProjectionRoutes::build(
+            state_dir.clone(),
+            accounts,
+            models,
+            routing,
+            account_failures,
+            now_millis,
+        )?;
         let update = routes
             .routing
             .apply(&OpenClawConfigStore::new(state_dir))
@@ -294,10 +322,17 @@ impl ProviderRoutingProjection {
         accounts: &[ProviderAccount],
         models: &ProviderModelCatalog,
         routing: &DesiredProviderRouting,
+        account_failures: &mut Vec<::provider::ProviderAccountExecution>,
         now_millis: u64,
     ) -> Result<bool, ProviderRoutingProjectionError> {
-        let routes =
-            ProjectionRoutes::build(state_dir.clone(), accounts, models, routing, now_millis)?;
+        let routes = ProjectionRoutes::build(
+            state_dir.clone(),
+            accounts,
+            models,
+            routing,
+            account_failures,
+            now_millis,
+        )?;
         routes
             .routing
             .apply_to_document(document)
@@ -315,21 +350,41 @@ impl ProjectionRoutes {
         accounts: &[ProviderAccount],
         models: &ProviderModelCatalog,
         desired: &DesiredProviderRouting,
+        account_failures: &mut Vec<::provider::ProviderAccountExecution>,
         now_millis: u64,
     ) -> Result<Self, ProviderRoutingProjectionError> {
         let accounts = accounts_by_id(accounts)?;
         let keys = projection_keys(&accounts)?;
         let mut routing = CapabilityRouting::default();
         for (capability, route) in desired.routes() {
-            let route = route_for(
+            if std::iter::once(route.primary())
+                .chain(route.fallbacks())
+                .any(|reference| {
+                    account_failures
+                        .iter()
+                        .any(|failure| failure.account_id == reference.account_id().as_str())
+                })
+            {
+                routing.preserved.insert(*capability);
+                continue;
+            }
+            let route = match route_for(
                 state_dir.clone(),
                 &accounts,
                 &keys,
                 models,
                 *capability,
                 route,
+                account_failures,
                 now_millis,
-            )?;
+            ) {
+                Ok(route) => route,
+                Err(ProviderRoutingProjectionError::CredentialUnavailable) => {
+                    routing.preserved.insert(*capability);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             match capability {
                 ProviderRoutingCapability::Chat => routing.chat = Some(route),
                 ProviderRoutingCapability::ImageUnderstand => {
@@ -357,6 +412,7 @@ fn route_for(
     models: &ProviderModelCatalog,
     capability: ProviderRoutingCapability,
     route: &::provider::ProviderRoute,
+    account_failures: &mut Vec<::provider::ProviderAccountExecution>,
     now_millis: u64,
 ) -> Result<ModelRoute, ProviderRoutingProjectionError> {
     let primary = reference_for(
@@ -366,6 +422,7 @@ fn route_for(
         models,
         capability,
         route.primary(),
+        account_failures,
         now_millis,
     )?;
     let fallbacks = route
@@ -379,6 +436,7 @@ fn route_for(
                 models,
                 capability,
                 reference,
+                account_failures,
                 now_millis,
             )
         })
@@ -398,6 +456,7 @@ fn reference_for(
     models: &ProviderModelCatalog,
     capability: ProviderRoutingCapability,
     reference: &::provider::ProviderModelReference,
+    account_failures: &mut Vec<::provider::ProviderAccountExecution>,
     now_millis: u64,
 ) -> Result<ModelReference, ProviderRoutingProjectionError> {
     let account = accounts
@@ -415,11 +474,30 @@ fn reference_for(
     let key = keys
         .get(account.id().as_str())
         .ok_or(ProviderRoutingProjectionError::AccountUnavailable)?;
-    if let Some(credential) = account.configuration().credential()
-        && !auth::credential_is_available(&state_dir, key, credential, now_millis)
-            .map_err(|_| ProviderRoutingProjectionError::CredentialUnavailable)?
-    {
-        return Err(ProviderRoutingProjectionError::CredentialUnavailable);
+    if let Some(credential) = account.configuration().credential() {
+        let failure = match auth::credential_is_available(&state_dir, key, credential, now_millis) {
+            Ok(true) => None,
+            Ok(false) => Some((
+                ::provider::ProviderAccountExecutionStatus::Blocked,
+                ::provider::ProviderCallDiagnosticReason::ProviderCredentialUnavailable,
+            )),
+            Err(_) => Some((
+                ::provider::ProviderAccountExecutionStatus::Unknown,
+                ::provider::ProviderCallDiagnosticReason::PrivateResolverUnavailable,
+            )),
+        };
+        if let Some((execution, reason)) = failure {
+            account_failures.push(::provider::ProviderAccountExecution {
+                account_id: account.id().as_str().to_owned(),
+                account_revision: account.revision().get(),
+                execution,
+                diagnostic: Some(::provider::ProviderCallDiagnostic {
+                    reason: Some(reason),
+                    private_resolver_code: None,
+                }),
+            });
+            return Err(ProviderRoutingProjectionError::CredentialUnavailable);
+        }
     }
     let model = match account.configuration().kind() {
         ProviderAccountKind::Chat => reference.model_id().to_owned(),

@@ -1,11 +1,17 @@
+import { Suspense, type ReactElement, type ReactNode } from 'react';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { applicationShellPlugin } from '@/app/extensions';
+import { messageRenderingPlugin } from '@/plugins/message-rendering/plugin';
+import { filesPlugin } from '@/plugins/files/plugin';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { ChatAssistantTurn } from '@/pages/Chat/ChatAssistantTurn';
-import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item-model';
+import { ChatAssistantTurn } from '@/plugins/message-rendering/ChatAssistantTurn';
+import { applyAssistantPresentationToItems } from '@/plugins/message-rendering/chat-render-item-model';
 import { prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
-import type { ChatAssistantTurnItem } from '@/pages/Chat/chat-render-item-model';
+import type { ChatAssistantTurnItem } from '@/plugins/message-rendering/chat-render-item-model';
 
 const invokeIpcMock = vi.fn();
 const hostFileStatMock = vi.fn();
@@ -40,6 +46,23 @@ function buildItem(message: RawMessage) {
   return item;
 }
 
+const pluginHost = createPluginHost([applicationShellPlugin, messageRenderingPlugin, filesPlugin]);
+
+function MessagePlugins({ children }: { children: ReactNode }) {
+  return <PluginHostProvider host={pluginHost}><Suspense fallback={null}>{children}</Suspense></PluginHostProvider>;
+}
+
+async function renderMessage(element: ReactElement) {
+  let view!: ReturnType<typeof render>;
+  await act(async () => {
+    view = render(element, { wrapper: MessagePlugins });
+  });
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
+  return view;
+}
+
 describe('chat message links', () => {
   beforeEach(() => {
     invokeIpcMock.mockReset();
@@ -57,7 +80,7 @@ describe('chat message links', () => {
     vi.useRealTimers();
   });
 
-  it('plain text file cards open mapped paths through the artifact callback', () => {
+  it('plain text file cards open mapped paths through the artifact callback', async () => {
     const targetPath = 'C:/Users/Mr.Key/.openclaw/workspace/TOOLS.md';
     const onOpenAttachedArtifact = vi.fn();
     const message: RawMessage = {
@@ -75,7 +98,7 @@ describe('chat message links', () => {
     };
     prewarmAssistantMarkdownBody(buildItem(message));
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} onOpenAttachedArtifact={onOpenAttachedArtifact} />);
+    await renderMessage(<ChatAssistantTurn item={buildItem(message)} showThinking={false} onOpenAttachedArtifact={onOpenAttachedArtifact} />);
 
     fireEvent.click(screen.getByRole('button', { name: /TOOLS\.md/i }));
 
@@ -83,7 +106,7 @@ describe('chat message links', () => {
     expect(invokeIpcMock).not.toHaveBeenCalledWith('shell:openPath', targetPath);
   });
 
-  it('legacy markdown relative file link should stay actionable when attached absolute path exists', () => {
+  it('legacy markdown relative file link should stay actionable when attached absolute path exists', async () => {
     const targetPath = 'C:/Users/Mr.Key/.openclaw/workspace/TOOLS.md';
     const onOpenAttachedArtifact = vi.fn();
     const message: RawMessage = {
@@ -101,7 +124,7 @@ describe('chat message links', () => {
     };
     prewarmAssistantMarkdownBody(buildItem(message));
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} onOpenAttachedArtifact={onOpenAttachedArtifact} />);
+    await renderMessage(<ChatAssistantTurn item={buildItem(message)} showThinking={false} onOpenAttachedArtifact={onOpenAttachedArtifact} />);
 
     const actionable = screen.queryByRole('link', { name: 'TOOLS.md' })
       ?? screen.getByRole('button', { name: /TOOLS\.md/i });
@@ -111,27 +134,27 @@ describe('chat message links', () => {
     expect(invokeIpcMock).not.toHaveBeenCalledWith('shell:openPath', targetPath);
   });
 
-  it('legacy markdown relative file link should not be clickable without attached absolute path', () => {
+  it('legacy markdown relative file link should not be clickable without attached absolute path', async () => {
     const message: RawMessage = {
       role: 'assistant',
       content: '[TOOLS.md](TOOLS.md)',
     };
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
+    await renderMessage(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     expect(screen.queryByRole('button', { name: 'TOOLS.md' })).toBeNull();
     expect(screen.queryByRole('link', { name: 'TOOLS.md' })).toBeNull();
     expect(invokeIpcMock).not.toHaveBeenCalled();
   });
 
-  it('http links should remain external links', () => {
+  it('http links should remain external links', async () => {
     const message: RawMessage = {
       role: 'assistant',
       content: '[OpenAI](https://openai.com)',
     };
     prewarmAssistantMarkdownBody(buildItem(message));
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
+    await renderMessage(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     const link = screen.getByRole('link', { name: 'OpenAI' });
     expect(link).toHaveAttribute('href', 'https://openai.com');
@@ -140,7 +163,7 @@ describe('chat message links', () => {
     expect(invokeIpcMock).not.toHaveBeenCalled();
   });
 
-  it('renders attachment source and unavailable preview labels', () => {
+  it('renders attachment source and unavailable preview labels', async () => {
     const item = buildItem({
       role: 'assistant',
       content: '附件状态',
@@ -160,13 +183,13 @@ describe('chat message links', () => {
       }],
     });
 
-    render(<ChatAssistantTurn item={item} showThinking={false} />);
+    await renderMessage(<ChatAssistantTurn item={item} showThinking={false} />);
 
     expect(screen.getByText(/工具结果 · 12 B/)).toBeInTheDocument();
     expect(screen.getByText('预览不可用')).toBeInTheDocument();
   });
 
-  it('user-upload attached file card should open file directly when filePath exists', () => {
+  it('user-upload attached file card should open file directly when filePath exists', async () => {
     const message: RawMessage = {
       role: 'assistant',
       content: '文件已上传',
@@ -182,7 +205,7 @@ describe('chat message links', () => {
       ],
     };
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
+    await renderMessage(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     fireEvent.click(screen.getByRole('button', { name: /TOOLS\.md/i }));
 
@@ -206,7 +229,7 @@ describe('chat message links', () => {
       content: '已生成报告，位置： /tmp/report.pdf',
     };
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={buildItem(message)}
         showThinking={false}
@@ -239,7 +262,7 @@ describe('chat message links', () => {
       content: '图片已生成： /tmp/chart.png',
     };
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={buildItem(message)}
         showThinking={false}
@@ -272,7 +295,7 @@ describe('chat message links', () => {
       content: '已生成报告，位置： /tmp/report.pdf',
     };
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={buildItem(message)}
         showThinking={false}
@@ -304,7 +327,7 @@ describe('chat message links', () => {
       content: '已生成报告，位置： /tmp/report.pdf',
     };
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={buildItem(message)}
         showThinking={false}
@@ -335,7 +358,7 @@ describe('chat message links', () => {
       content: '位置： ~/.openclaw/skills/open-eastmoney',
     };
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={buildItem(message)}
         showThinking={false}
@@ -356,7 +379,7 @@ describe('chat message links', () => {
     expect(await screen.findByRole('button', { name: /open-eastmoney/i })).toBeInTheDocument();
   });
 
-  it('heavy assistant markdown should render rich content immediately', () => {
+  it('heavy assistant markdown should render rich content immediately', async () => {
     const longMarkdown = Array.from(
       { length: 80 },
       (_, index) => `line-${index}: [OpenAI](https://openai.com) with **bold** text and \`code\``,
@@ -367,20 +390,20 @@ describe('chat message links', () => {
     };
     prewarmAssistantMarkdownBody(buildItem(message));
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
+    await renderMessage(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     expect(screen.getAllByRole('link', { name: 'OpenAI' }).length).toBeGreaterThan(0);
     expect(screen.queryByText('[OpenAI](https://openai.com)')).toBeNull();
   });
 
-  it('assistant streaming message should render markdown links in real time', () => {
+  it('assistant streaming message should render markdown links in real time', async () => {
     const message: RawMessage = {
       role: 'assistant',
       content: '[OpenAI](https://openai.com)',
       streaming: true,
     };
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={buildItem(message)}
         showThinking={false}
@@ -392,27 +415,27 @@ describe('chat message links', () => {
     expect(screen.queryByText('[OpenAI](https://openai.com)')).toBeNull();
   });
 
-  it('assistant plain markdown miss should render rich markdown immediately without raw-text fallback', () => {
+  it('assistant plain markdown miss should render rich markdown immediately without raw-text fallback', async () => {
     const content = '[OpenAI Miss](https://openai.com/?miss=1)';
     const message: RawMessage = {
       role: 'assistant',
       content,
     };
 
-    render(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
+    await renderMessage(<ChatAssistantTurn item={buildItem(message)} showThinking={false} />);
 
     expect(screen.getByRole('link', { name: 'OpenAI Miss' })).toHaveAttribute('href', 'https://openai.com/?miss=1');
     expect(screen.queryByText(content)).toBeNull();
   });
 
-  it('assistant streaming settle should switch to final markdown immediately without plain-text flash', () => {
+  it('assistant streaming settle should switch to final markdown immediately without plain-text flash', async () => {
     const content = '[OpenAI Stream Final](https://openai.com/?stream-final=1)';
     const message: RawMessage = {
       role: 'assistant',
       content,
     };
 
-    const view = render(
+    const view = await renderMessage(
       <ChatAssistantTurn
         item={buildItem({ ...message, streaming: true })}
         showThinking={false}
@@ -427,7 +450,7 @@ describe('chat message links', () => {
     expect(screen.queryByText(content)).toBeNull();
   });
 
-  it('assistant streaming settle keeps long markdown rendered after finalization', () => {
+  it('assistant streaming settle keeps long markdown rendered after finalization', async () => {
     const content = Array.from(
       { length: 60 },
       (_, index) => `- line ${index}: [OpenAI Stable](https://openai.com/?stable=${index})`,
@@ -439,7 +462,7 @@ describe('chat message links', () => {
       content,
     };
 
-    const view = render(
+    const view = await renderMessage(
       <ChatAssistantTurn
         item={buildItem({ ...message, streaming: true })}
         showThinking={false}
@@ -453,13 +476,13 @@ describe('chat message links', () => {
     expect(screen.getAllByRole('link', { name: 'OpenAI Stable' }).length).toBeGreaterThan(0);
   });
 
-  it('assistant streaming text remains visible after settle without losing content', () => {
+  it('assistant streaming text remains visible after settle without losing content', async () => {
     const message: RawMessage = {
       role: 'assistant',
       content: 'stream body',
     };
 
-    const view = render(
+    const view = await renderMessage(
       <ChatAssistantTurn
         item={buildItem({ ...message, streaming: true })}
         showThinking={false}
@@ -473,7 +496,7 @@ describe('chat message links', () => {
     expect(view.container.textContent).toContain('stream body');
   });
 
-  it('assistant streaming plain csv should keep the same markdown body after settle', () => {
+  it('assistant streaming plain csv should keep the same markdown body after settle', async () => {
     const message: RawMessage = {
       role: 'assistant',
       content: [
@@ -484,7 +507,7 @@ describe('chat message links', () => {
       ].join('\n'),
     };
 
-    const view = render(
+    const view = await renderMessage(
       <ChatAssistantTurn
         item={buildItem({ ...message, streaming: true })}
         showThinking={false}
@@ -504,7 +527,7 @@ describe('chat message links', () => {
     expect(screen.queryByRole('table')).toBeNull();
   });
 
-  it('assistant streaming markdown table should keep the same markdown body after settle', () => {
+  it('assistant streaming markdown table should keep the same markdown body after settle', async () => {
     const message: RawMessage = {
       role: 'assistant',
       content: [
@@ -515,7 +538,7 @@ describe('chat message links', () => {
       ].join('\n'),
     };
 
-    const view = render(
+    const view = await renderMessage(
       <ChatAssistantTurn
         item={buildItem({ ...message, streaming: true })}
         showThinking={false}
@@ -533,7 +556,7 @@ describe('chat message links', () => {
     expect(screen.getByRole('cell', { name: 'Build UI' })).toBeInTheDocument();
   });
 
-  it('assistant final reply should show completed duration from user send time only once', () => {
+  it('assistant final reply should show completed duration from user send time only once', async () => {
     const item: ChatAssistantTurnItem = {
       key: 'assistant-turn:reply-duration',
       kind: 'assistant-turn',
@@ -567,7 +590,7 @@ describe('chat message links', () => {
       attachedFiles: [],
     };
 
-    render(<ChatAssistantTurn item={item} showThinking={false} replyStartedAt={1000} />);
+    await renderMessage(<ChatAssistantTurn item={item} showThinking={false} replyStartedAt={1000} />);
 
     expect(screen.getAllByText('回复耗时 4s')).toHaveLength(1);
   });
@@ -603,7 +626,7 @@ describe('chat message links', () => {
       attachedFiles: [],
     };
 
-    render(<ChatAssistantTurn item={item} showThinking={false} replyStartedAt={1000} />);
+    await renderMessage(<ChatAssistantTurn item={item} showThinking={false} replyStartedAt={1000} />);
 
     expect(screen.getByText('回复耗时 4s')).toBeTruthy();
 
@@ -615,7 +638,7 @@ describe('chat message links', () => {
     expect(screen.getByText('回复耗时 6s')).toBeTruthy();
   });
 
-  it('assistant markdown remains rich when a tool card splits a code fence boundary', () => {
+  it('assistant markdown remains rich when a tool card splits a code fence boundary', async () => {
     const item: ChatAssistantTurnItem = {
       key: 'assistant-turn:split-fence',
       kind: 'assistant-turn',
@@ -662,7 +685,7 @@ describe('chat message links', () => {
       attachedFiles: [],
     };
 
-    render(<ChatAssistantTurn item={item} showThinking={false} />);
+    await renderMessage(<ChatAssistantTurn item={item} showThinking={false} />);
 
     expect(screen.getByRole('heading', { name: '配置写入口也找到了' })).toBeInTheDocument();
   });

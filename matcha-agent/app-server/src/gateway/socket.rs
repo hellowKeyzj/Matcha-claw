@@ -1,18 +1,31 @@
 use super::{Gateway, PROTOCOL_VERSION, dispatch, subscriptions};
 use crate::rpc;
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
+    time::timeout,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+const CLOSE_DEADLINE: Duration = Duration::from_secs(1);
+
+enum ReaderEnd {
+    Stopped,
+    PeerClosed,
+    Ended,
+    Failed,
+}
 
 pub(super) struct Outbound {
     message: Message,
@@ -90,18 +103,18 @@ pub(super) async fn serve(socket: WebSocket, gateway: Gateway) {
                 let _ = ready.send(());
             }
         }
-        // Dropping the socket is immediate; never wait for a stalled peer's close ACK.
         writing.closed.cancel();
+        writer
     });
     let mut frames = JoinSet::new();
-    loop {
+    let read_ended = loop {
         tokio::select! {
             biased;
-            _ = connection.closed.cancelled() => break,
+            _ = connection.closed.cancelled() => break ReaderEnd::Stopped,
             result = frames.join_next(), if !frames.is_empty() => {
                 if result.is_some_and(|result| result.is_err()) {
                     connection.record("request", "request_task_failed").await;
-                    break;
+                    break ReaderEnd::Stopped;
                 }
             },
             message = reader.next() => {
@@ -117,7 +130,17 @@ pub(super) async fn serve(socket: WebSocket, gateway: Gateway) {
                         });
                     }
                     Some(Ok(Message::Pong(_))) => {},
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(frame))) => {
+                        if !normal_close(frame.as_ref()) {
+                            connection.record("read", "socket_close_protocol").await;
+                            break ReaderEnd::Failed;
+                        }
+                        break ReaderEnd::PeerClosed;
+                    }
+                    None => {
+                        connection.record("read", "socket_eof_without_close").await;
+                        break ReaderEnd::Ended;
+                    }
                     Some(Ok(Message::Binary(_))) => {
                         let connection = connection.clone();
                         frames.spawn(async move {
@@ -128,13 +151,54 @@ pub(super) async fn serve(socket: WebSocket, gateway: Gateway) {
                     }
                     Some(Err(_)) => {
                         connection.record("read", "socket_read_failed").await;
-                        break;
+                        break ReaderEnd::Failed;
                     }
                 }
             },
         }
-    }
+    };
     connection.closed.cancel();
+    match writer_task.await {
+        Ok(writer) => match writer.reunite(reader) {
+            Ok(mut socket) => {
+                let closed = timeout(CLOSE_DEADLINE, async {
+                    match read_ended {
+                        ReaderEnd::PeerClosed => {
+                            socket.flush().await.map_err(|_| "socket_close_failed")
+                        }
+                        ReaderEnd::Stopped => {
+                            socket.close().await.map_err(|_| "socket_close_failed")?;
+                            loop {
+                                match socket.next().await {
+                                    Some(Ok(Message::Close(frame))) => {
+                                        if !normal_close(frame.as_ref()) {
+                                            return Err("socket_close_protocol");
+                                        }
+                                        return socket
+                                            .flush()
+                                            .await
+                                            .map_err(|_| "socket_close_failed");
+                                    }
+                                    None => return Err("socket_eof_without_close"),
+                                    Some(Err(_)) => return Err("socket_close_read_failed"),
+                                    Some(Ok(_)) => {}
+                                }
+                            }
+                        }
+                        ReaderEnd::Ended | ReaderEnd::Failed => Ok(()),
+                    }
+                })
+                .await;
+                match closed {
+                    Ok(Ok(())) => {}
+                    Ok(Err(kind)) => connection.record("close", kind).await,
+                    Err(_) => connection.record("close", "socket_close_timeout").await,
+                }
+            }
+            Err(_) => connection.record("close", "socket_reunite_failed").await,
+        },
+        Err(_) => connection.record("write", "writer_task_failed").await,
+    }
     // Accepted business calls may already have side effects. Join rather than abort;
     // server shutdown concurrently asks the Session owner to release native pending.
     while let Some(result) = frames.join_next().await {
@@ -144,9 +208,6 @@ pub(super) async fn serve(socket: WebSocket, gateway: Gateway) {
     }
     connection.streams.close();
     connection.streams.wait().await;
-    if writer_task.await.is_err() {
-        connection.record("write", "writer_task_failed").await;
-    }
 }
 
 impl Connection {
@@ -352,6 +413,10 @@ impl Connection {
             eprintln!("matcha-app-server: gateway diagnostic write failed");
         }
     }
+}
+
+fn normal_close(frame: Option<&CloseFrame>) -> bool {
+    matches!(frame.map(|frame| frame.code), None | Some(1000 | 1001))
 }
 
 fn response(id: Value, result: rpc::Result) -> Value {

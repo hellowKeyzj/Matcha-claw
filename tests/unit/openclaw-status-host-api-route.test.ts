@@ -42,15 +42,14 @@ function succeeded(result: unknown) {
 }
 
 describe('OpenClaw Host API routes', () => {
-  it('projects the Rust installation status and readiness with the trusted directory', async () => {
+  it.each([
+    { packageExists: true, isBuilt: true, version: '1.2.3' },
+    { packageExists: true, isBuilt: false },
+    { packageExists: false, isBuilt: false },
+  ])('projects the public Rust installation status and package readiness: %j', async (payload) => {
     const command = vi.fn();
     const openClawPlatformTransport = {
-      environmentStatus: vi.fn().mockResolvedValue(transportResponse({
-        packageExists: true,
-        isBuilt: true,
-        dir: 'E:/runtime/openclaw',
-        version: '1.2.3',
-      })),
+      environmentStatus: vi.fn().mockResolvedValue(transportResponse(payload)),
     };
     const status = createResponse();
     const ready = createResponse();
@@ -71,15 +70,10 @@ describe('OpenClaw Host API routes', () => {
     expect(openClawPlatformTransport.environmentStatus).toHaveBeenCalledTimes(2);
     expect(command).not.toHaveBeenCalled();
     expect(status.response.statusCode).toBe(200);
-    expect(status.response.body).toEqual({
-      packageExists: true,
-      isBuilt: true,
-      dir: 'E:/runtime/openclaw',
-      version: '1.2.3',
-    });
+    expect(status.response.body).toEqual(payload);
     expect(ready.response.statusCode).toBe(200);
-    expect(ready.response.body).toBe(true);
-    expect(JSON.stringify(status.response.body)).not.toMatch(/(?:path|sourcePath|configPath|token|secret|endpoint|argv)/);
+    expect(ready.response.body).toBe(payload.packageExists);
+    expect(JSON.stringify(status.response.body)).not.toMatch(/(?:dir|path|sourcePath|configPath|token|secret|endpoint|argv)/);
   });
 
   it('fails closed for unexpected status fields', async () => {
@@ -88,7 +82,6 @@ describe('OpenClaw Host API routes', () => {
       environmentStatus: vi.fn().mockResolvedValue(transportResponse({
         packageExists: true,
         isBuilt: true,
-        dir: 'E:/runtime/openclaw',
         version: '1.2.3',
         path: 'E:/private/openclaw',
       })),
@@ -111,20 +104,15 @@ describe('OpenClaw Host API routes', () => {
   });
 
   it.each([
+    { status: 200, body: { packageExists: true, version: '1.2.3' } },
+    { status: 200, body: { packageExists: 'true', isBuilt: true } },
+    { status: 200, body: { packageExists: true, isBuilt: 'true' } },
+    { status: 200, body: { packageExists: true, isBuilt: true, version: 'E:/private/openclaw' } },
     {
       status: 200,
       body: {
         packageExists: true,
         isBuilt: true,
-        version: '1.2.3',
-      },
-    },
-    {
-      status: 200,
-      body: {
-        packageExists: true,
-        isBuilt: true,
-        dir: 'E:/runtime/openclaw',
         token: 'private-token',
       },
     },
@@ -151,8 +139,8 @@ describe('OpenClaw Host API routes', () => {
     expect(JSON.stringify(fixture.response.body)).not.toContain('private-token');
   });
 
-  it('rejects empty, control-character, and oversized installation directories', async () => {
-    for (const dir of ['', 'E:/runtime/\u0000openclaw', 'x'.repeat(16 * 1024 + 1)]) {
+  it('rejects private installation directories regardless of their value', async () => {
+    for (const dir of ['E:/runtime/openclaw', '', 'E:/runtime/\u0000openclaw', 'x'.repeat(16 * 1024 + 1)]) {
       const command = vi.fn();
       const openClawPlatformTransport = {
         environmentStatus: vi.fn().mockResolvedValue(transportResponse({ packageExists: true, isBuilt: true, dir })),

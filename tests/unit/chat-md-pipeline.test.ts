@@ -6,7 +6,7 @@ import {
   getOrBuildMarkdownBody,
   peekRenderedMarkdownBody,
   prewarmMarkdownBody,
-} from '@/pages/Chat/md-pipeline';
+} from '@/plugins/message-rendering/md-pipeline';
 import type { SessionTimelineEntry } from '../../src/types/session/render-item';
 
 describe('chat markdown pipeline cache', () => {

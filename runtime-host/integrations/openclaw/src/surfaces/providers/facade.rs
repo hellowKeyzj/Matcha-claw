@@ -26,6 +26,7 @@ pub struct NativeProviderConfigurationContext<'a> {
 
 pub struct NativeProviderConfigurationCommand<'a> {
     pub accounts: &'a [provider_module::ProviderAccount],
+    pub account_failures: &'a [provider_module::ProviderAccountExecution],
     pub models: &'a provider_module::ProviderModelCatalog,
     pub routing: Option<&'a provider_module::ProviderRouting>,
     pub retired: &'a [provider_module::ProviderAccount],
@@ -40,6 +41,7 @@ impl<'a> From<provider_module::ProviderNativeConfigurationCommand<'a>>
     fn from(command: provider_module::ProviderNativeConfigurationCommand<'a>) -> Self {
         Self {
             accounts: command.accounts,
+            account_failures: command.account_failures,
             models: command.models,
             routing: command.routing,
             retired: command.retired,
@@ -79,6 +81,7 @@ pub async fn discover_provider_models(
 pub async fn reconcile_native_configuration_evidence(
     context: NativeProviderConfigurationContext<'_>,
     command: NativeProviderConfigurationCommand<'_>,
+    account_failures: &mut Vec<provider_module::ProviderAccountExecution>,
 ) -> ProviderNativeConfigurationEvidence {
     let plugin_ids = command
         .accounts
@@ -133,6 +136,7 @@ pub async fn reconcile_native_configuration_evidence(
                 command.routing,
                 command.retired,
                 command.required_auth_accounts,
+                account_failures,
                 command.auth_state_refresh_required,
                 command.now_millis,
             )
@@ -144,15 +148,27 @@ pub async fn reconcile_native_configuration_evidence(
             "[startup-trace] source=openclaw-driver phase=provider-config detail=private-reconcile-start"
         );
     }
-    private_provider_native_configuration_evidence(context.state_dir, command)
+    private_provider_native_configuration_evidence(context.state_dir, command, account_failures)
 }
 
 pub async fn reconcile_provider_native_configuration(
     context: NativeProviderConfigurationContext<'_>,
     command: NativeProviderConfigurationCommand<'_>,
 ) -> provider_module::ProviderNativeConfigurationEffect {
-    provider_native_configuration_effect(
-        reconcile_native_configuration_evidence(context, command).await,
+    let accounts = command.accounts;
+    let required = command.required_auth_accounts;
+    let runtime_running = context.runtime_running;
+    let state_dir = context.state_dir.clone();
+    let mut account_failures = command.account_failures.to_vec();
+    let evidence =
+        reconcile_native_configuration_evidence(context, command, &mut account_failures).await;
+    configuration_effect(
+        evidence,
+        accounts,
+        required,
+        account_failures,
+        runtime_running,
+        &state_dir,
     )
 }
 
@@ -160,13 +176,144 @@ pub fn prepare_private_projection(
     state_dir: CanonicalStateDir,
     command: provider_module::ProviderPrivateProjectionCommand<'_>,
 ) -> provider_module::ProviderPrivateProjectionEffect {
-    provider_private_projection_effect(PrivateProjectionEffect::apply(
-        state_dir,
+    let required = command
+        .routing
+        .map(|routing| {
+            routing
+                .routes()
+                .iter()
+                .flat_map(|(_, route)| std::iter::once(route.primary()).chain(route.fallbacks()))
+                .map(|reference| reference.account_id().clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut failures = command.account_failures.to_vec();
+    let effect = PrivateProjectionEffect::apply_required_auth(
+        state_dir.clone(),
         command.accounts,
         command.models,
         command.routing,
+        &[],
+        &required,
+        &mut failures,
         command.now_millis,
-    ))
+    );
+    let evidence = config_write_evidence(&state_dir, &effect.providers);
+    let report = configuration_effect(
+        evidence,
+        command.accounts,
+        &required,
+        failures,
+        false,
+        &state_dir,
+    );
+    let mut projected = provider_private_projection_effect(effect);
+    projected.reports = report.reports().to_vec();
+    projected
+}
+
+fn configuration_effect(
+    mut evidence: ProviderNativeConfigurationEvidence,
+    accounts: &[provider_module::ProviderAccount],
+    required: &BTreeSet<provider_module::ProviderAccountId>,
+    failures: Vec<provider_module::ProviderAccountExecution>,
+    runtime_running: bool,
+    state_dir: &CanonicalStateDir,
+) -> provider_module::ProviderNativeConfigurationEffect {
+    let partial = !failures.is_empty();
+    let executions = account_executions(accounts, required, failures, &evidence, runtime_running);
+    if evidence.applied() == AppliedStatus::Confirmed
+        && evidence.observed() == ObservedStatus::Matches
+        && (partial || !runtime_running)
+    {
+        evidence = if partial {
+            ProviderNativeConfigurationEvidence::with_diagnostic(
+                evidence.changed(),
+                AppliedStatus::Unknown,
+                if runtime_running {
+                    ObservedStatus::Mismatch
+                } else {
+                    ObservedStatus::Unavailable
+                },
+                ProviderNativeConfigurationDiagnostic::new(
+                    "provider-config",
+                    "provider-projection-partial",
+                    state_dir
+                        .as_path()
+                        .join("openclaw.json")
+                        .display()
+                        .to_string(),
+                    None,
+                    Some("models.providers"),
+                    None,
+                ),
+            )
+        } else {
+            ProviderNativeConfigurationEvidence::new(
+                evidence.changed(),
+                AppliedStatus::Unknown,
+                ObservedStatus::Unavailable,
+            )
+        };
+    }
+    provider_native_configuration_effect(evidence).with_report(
+        provider_module::ProviderSessionEndpoint::OpenClawLocal,
+        executions,
+    )
+}
+
+fn account_executions(
+    accounts: &[provider_module::ProviderAccount],
+    required: &BTreeSet<provider_module::ProviderAccountId>,
+    mut failures: Vec<provider_module::ProviderAccountExecution>,
+    evidence: &ProviderNativeConfigurationEvidence,
+    runtime_running: bool,
+) -> Vec<provider_module::ProviderAccountExecution> {
+    use provider_module::{
+        ProviderAccountAuthMode, ProviderAccountExecutionStatus as Status,
+        ProviderCallDiagnosticReason as Reason,
+    };
+    let confirmed = evidence.applied() == AppliedStatus::Confirmed
+        && evidence.observed() == ObservedStatus::Matches;
+    for account in accounts
+        .iter()
+        .filter(|account| account.configuration().enabled())
+    {
+        if failures
+            .iter()
+            .any(|failure| failure.account_id == account.id().as_str())
+        {
+            continue;
+        }
+        let auth_known = required.contains(account.id())
+            || matches!(
+                account.configuration().auth_mode(),
+                ProviderAccountAuthMode::Local | ProviderAccountAuthMode::CliReuse
+            );
+        if !auth_known {
+            continue;
+        }
+        let (execution, reason) = if !confirmed {
+            (
+                Status::Unknown,
+                Some(Reason::ProviderProjectionOutcomeUnknown),
+            )
+        } else if !runtime_running {
+            (Status::Unknown, None)
+        } else {
+            (Status::Ready, None)
+        };
+        failures.push(provider_module::ProviderAccountExecution {
+            account_id: account.id().as_str().to_owned(),
+            account_revision: account.revision().get(),
+            execution,
+            diagnostic: reason.map(|reason| provider_module::ProviderCallDiagnostic {
+                reason: Some(reason),
+                private_resolver_code: None,
+            }),
+        });
+    }
+    failures
 }
 
 fn provider_unavailable_evidence() -> ProviderNativeConfigurationEvidence {
@@ -180,6 +327,7 @@ fn provider_unavailable_evidence() -> ProviderNativeConfigurationEvidence {
 fn private_provider_native_configuration_evidence(
     state_dir: CanonicalStateDir,
     command: NativeProviderConfigurationCommand<'_>,
+    account_failures: &mut Vec<provider_module::ProviderAccountExecution>,
 ) -> ProviderNativeConfigurationEvidence {
     let effect = PrivateProjectionEffect::apply_required_auth(
         state_dir.clone(),
@@ -188,9 +336,17 @@ fn private_provider_native_configuration_evidence(
         command.routing,
         command.retired,
         command.required_auth_accounts,
+        account_failures,
         command.now_millis,
     );
-    match effect.providers {
+    config_write_evidence(&state_dir, &effect.providers)
+}
+
+fn config_write_evidence(
+    state_dir: &CanonicalStateDir,
+    effect: &ConfigWriteEffect,
+) -> ProviderNativeConfigurationEvidence {
+    match effect {
         ConfigWriteEffect::Unchanged => ProviderNativeConfigurationEvidence::new(
             false,
             AppliedStatus::Confirmed,
@@ -280,6 +436,7 @@ fn provider_private_projection_effect(
     provider_module::ProviderPrivateProjectionEffect {
         providers: provider_config_write_effect(effect.providers),
         restart: provider_restart_preparation(effect.restart),
+        reports: Vec::new(),
     }
 }
 

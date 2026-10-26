@@ -1,5 +1,14 @@
-import axios from 'axios'
+import axios, { type AxiosRequestConfig } from 'axios'
 import type { HookEvent } from 'src/entrypoints/agentSdkTypes.js'
+import { requestInvestigationFile } from '../../services/api/fileInvestigation.js'
+import {
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+  investigationSignal,
+  requireInvestigationEffects,
+} from '../../world/investigation.js'
+import { hookJSONOutputSchema, isAsyncHookJSONOutput } from '../../types/hooks.js'
+import { jsonParse } from '../slowOperations.js'
 import { createCombinedAbortSignal } from '../combinedAbortSignal.js'
 import { logForDebugging } from '../debug.js'
 import { errorMessage } from '../errors.js'
@@ -133,6 +142,8 @@ export async function execHttpHook(
   error?: string
   aborted?: boolean
 }> {
+  requireInvestigationEffects(['external_write', 'source_read'])
+
   // Enforce URL allowlist before any I/O. Follows allowedMcpServers semantics:
   // undefined → no restriction; [] → block all; non-empty → must match a pattern.
   const policy = getHttpHookPolicy()
@@ -151,7 +162,7 @@ export async function execHttpHook(
 
   const { signal: combinedSignal, cleanup } = createCombinedAbortSignal(
     signal,
-    { timeoutMs },
+    { signalB: investigationSignal(), timeoutMs },
   )
 
   try {
@@ -199,10 +210,10 @@ export async function execHttpHook(
       logForDebugging(`Hooks: HTTP hook POST to ${hook.url}`)
     }
 
-    const response = await axios.post<string>(hook.url, jsonInput, {
+    const axiosConfig: AxiosRequestConfig = {
       headers,
       signal: combinedSignal,
-      responseType: 'text',
+      responseType: 'text' as const,
       validateStatus: () => true,
       maxRedirects: 0,
       // Explicit false prevents axios's own env-var proxy detection; when an
@@ -215,7 +226,38 @@ export async function execHttpHook(
       // guard would instead validate the proxy's own IP, breaking
       // connections to corporate proxies on private networks.
       lookup: sandboxProxy || envProxyActive ? undefined : ssrfGuardedLookup,
-    })
+    }
+    const response = currentInvestigationScope()
+      ? await requestInvestigationFile({
+          producer: 'matcha_http_hook',
+          operation: 'http_post',
+          url: hook.url,
+          method: 'POST',
+          headers,
+          body: Buffer.from(jsonInput),
+          timeoutMs,
+          signal: combinedSignal,
+          axiosConfig,
+          records(body, status) {
+            if (status < 200 || status >= 300) return 0n
+            const text = body.toString('utf8').trim()
+            let value: unknown
+            try {
+              value = text ? jsonParse(text) : {}
+            } catch {
+              throw new InvestigationAdmissionError('investigation_http_hook_receipt_invalid')
+            }
+            const parsed = hookJSONOutputSchema().safeParse(value)
+            if (!parsed.success) {
+              throw new InvestigationAdmissionError('investigation_http_hook_receipt_invalid')
+            }
+            if (isAsyncHookJSONOutput(parsed.data)) {
+              throw new InvestigationAdmissionError('investigation_http_hook_async_unjoined')
+            }
+            return text ? 1n : 0n
+          },
+        }).then(response => ({ ...response, data: response.data.toString('utf8') }))
+      : await axios.post<string>(hook.url, jsonInput, axiosConfig)
 
     cleanup()
 
@@ -231,6 +273,7 @@ export async function execHttpHook(
     }
   } catch (error) {
     cleanup()
+    if (error instanceof InvestigationAdmissionError) throw error
 
     if (combinedSignal.aborted) {
       return { ok: false, body: '', aborted: true }

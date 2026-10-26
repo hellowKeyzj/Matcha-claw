@@ -65,12 +65,12 @@ describe('task center store', () => {
       task({ id: '2', status: 'pending' }),
       task({ id: '1', status: 'in_progress' }),
     ]));
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskCenterStore } = await import('@/plugins/tasks/stores/task-center-store');
 
     await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', sessionIdentity });
 
     const state = useTaskCenterStore.getState();
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     expect(state.sessionKey).toBe('agent:main:main');
     expect(state.initialLoading).toBe(false);
     expect(state.refreshing).toBe(false);
@@ -80,7 +80,7 @@ describe('task center store', () => {
   });
 
   it('init without session clears tasks and marks initialized', async () => {
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskCenterStore } = await import('@/plugins/tasks/stores/task-center-store');
 
     await useTaskCenterStore.getState().init();
 
@@ -91,14 +91,14 @@ describe('task center store', () => {
 
   it('refreshTasks keeps previous snapshot when request fails', async () => {
     listTaskSnapshotMock.mockResolvedValueOnce(snapshot([task({ id: '1', status: 'pending' })]));
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskCenterStore } = await import('@/plugins/tasks/stores/task-center-store');
     await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', sessionIdentity });
 
     listTaskSnapshotMock.mockRejectedValueOnce(new Error('refresh failed'));
     await useTaskCenterStore.getState().refreshTasks();
 
     const state = useTaskCenterStore.getState();
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     expect(useTaskSnapshotStore.getState().getTaskDataList('agent:main:main').map((item) => item.id)).toEqual(['1']);
     expect(state.refreshing).toBe(false);
     expect(state.error).toBe('refresh failed');
@@ -106,8 +106,8 @@ describe('task center store', () => {
 
   it('refreshTasks clears existing todo snapshot when TaskList returns an empty snapshot', async () => {
     listTaskSnapshotMock.mockResolvedValueOnce({ tasks: [], todos: [] });
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskCenterStore } = await import('@/plugins/tasks/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
 
     useTaskSnapshotStore.getState().reportTodos('agent:main:main', [
       { content: '已有待办', status: 'pending' },
@@ -121,8 +121,8 @@ describe('task center store', () => {
 
   it('refreshTasks does not list unsupported task.management sessions', async () => {
     isTaskManagementAvailableMock.mockResolvedValueOnce(false);
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskCenterStore } = await import('@/plugins/tasks/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
 
     useTaskSnapshotStore.getState().reportTodos('matcha-session', [
       { content: '已有待办', status: 'pending' },
@@ -149,8 +149,8 @@ describe('task center store', () => {
       }
       return Promise.resolve(snapshot([task({ id: '2', subject: 'second task' })], sessionKey));
     });
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskCenterStore } = await import('@/plugins/tasks/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
 
     const firstRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:first', sessionIdentity: firstSessionIdentity, silent: true });
     const secondRefresh = useTaskCenterStore.getState().refreshTasks({ sessionKey: 'agent:main:second', sessionIdentity: secondSessionIdentity, silent: true });
@@ -169,7 +169,7 @@ describe('task center store', () => {
 
   it('deleteTaskById does not update unsupported task.management sessions', async () => {
     isTaskManagementAvailableMock.mockResolvedValue(false);
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
+    const { useTaskCenterStore } = await import('@/plugins/tasks/stores/task-center-store');
 
     await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', sessionIdentity });
     isTaskManagementAvailableMock.mockClear();
@@ -193,8 +193,8 @@ describe('task center store', () => {
       task({ id: '1', status: 'pending' }),
       task({ id: '3', status: 'completed' }),
     ]));
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskCenterStore } = await import('@/plugins/tasks/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', sessionIdentity });
 
     await useTaskCenterStore.getState().deleteTaskById({ taskId: '2' });
@@ -219,8 +219,8 @@ describe('task center store', () => {
       task({ id: '1', status: 'pending' }),
       task({ id: '2', status: 'in_progress' }),
     ]));
-    const { useTaskCenterStore } = await import('@/stores/task-center-store');
-    const { useTaskSnapshotStore } = await import('@/stores/chat/task-snapshot-store');
+    const { useTaskCenterStore } = await import('@/plugins/tasks/stores/task-center-store');
+    const { useTaskSnapshotStore } = await import('@/plugins/chat/store/task-snapshot-store');
     await useTaskCenterStore.getState().init({ recordKey: 'agent:main:main', sessionIdentity });
 
     await useTaskCenterStore.getState().deleteTaskById({ taskId: '2' });

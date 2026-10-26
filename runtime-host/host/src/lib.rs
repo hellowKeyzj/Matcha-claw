@@ -18,7 +18,7 @@ pub use composition::{
     OpenClawConstructionError, OpenClawInput, OwnerShutdownFailure, RequestAdmission,
     RequestAdmissionClosed, RuntimeExit, RuntimeLifecycleFailure, RuntimeSessionError,
     RuntimeShutdownFailure, RuntimeShutdownOutcome, RuntimeStartFailure, SessionShutdownFailure,
-    ShutdownFailures, ShutdownReport,
+    ShutdownFailures, ShutdownReport, WorldPostgresConfig, WorldShutdownFailure, WorldSourceAccessConfig,
 };
 pub use control::ControlError;
 pub use organization::{TeamRunMcpFacade, open_organization_store};

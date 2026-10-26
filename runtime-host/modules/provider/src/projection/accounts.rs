@@ -7,7 +7,7 @@ use crate::{
 
 pub(crate) fn status_code(delivery: &ProviderAccountsDelivery) -> u16 {
     match delivery {
-        ProviderAccountsDelivery::List(_) | ProviderAccountsDelivery::Account(_) => 200,
+        ProviderAccountsDelivery::List { .. } | ProviderAccountsDelivery::Account { .. } => 200,
         ProviderAccountsDelivery::Stored {
             persisted, commit, ..
         }
@@ -25,11 +25,14 @@ pub(crate) fn status_code(delivery: &ProviderAccountsDelivery) -> u16 {
 
 pub(crate) fn body(delivery: &ProviderAccountsDelivery) -> Value {
     match delivery {
-        ProviderAccountsDelivery::List(accounts) => {
-            json!({ "accounts": accounts.iter().map(account_json).collect::<Vec<_>>() })
+        ProviderAccountsDelivery::List { accounts, reports } => {
+            json!({
+                "accounts": accounts.iter().map(account_json).collect::<Vec<_>>(),
+                "reports": reports,
+            })
         }
-        ProviderAccountsDelivery::Account(account) => {
-            json!({ "account": account_json(account) })
+        ProviderAccountsDelivery::Account { account, reports } => {
+            json!({ "account": account_json(account), "reports": reports })
         }
         ProviderAccountsDelivery::Stored {
             account,

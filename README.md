@@ -363,6 +363,10 @@ pnpm package:linux        # Package for Linux
 
 For release packaging, GitHub Actions downloads the bundled MiniLM model automatically. If you package locally and want the installer to include `memory-lancedb-pro`'s offline `local-minilm` assets, run `pnpm run download:minilm-model` before `pnpm build` or `pnpm package*`.
 
+### Electron E2E
+
+Run `pnpm run check:e2e` to verify the Screenplay architecture, then `pnpm run test:e2e` to build and test the real application. Each run shares one dedicated test profile and one Electron instance. See the [E2E guide](e2e/README.md) for native prerequisites, reports, and contribution rules.
+
 ### Tech Stack
 
 | Layer | Technology |

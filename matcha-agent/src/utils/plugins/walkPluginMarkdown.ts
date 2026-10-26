@@ -1,4 +1,5 @@
 import { join } from 'path'
+import { rethrowInvestigationAdmission } from '../../services/api/investigation.js'
 import { logForDebugging } from '../debug.js'
 import { getFsImplementation } from '../fsOperations.js'
 
@@ -58,6 +59,7 @@ export async function walkPluginMarkdown(
         }),
       )
     } catch (error) {
+      rethrowInvestigationAdmission(error)
       logForDebugging(
         `Failed to scan ${label} directory ${dirPath}: ${error}`,
         { level: 'error' },

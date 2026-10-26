@@ -1,11 +1,41 @@
 use crate::{
     InvalidProviderModel, ProviderAccount, ProviderAccountAuthMode, ProviderAccountId,
-    ProviderAccountKind, ProviderApiProtocol, ProviderAppliedStatus, ProviderCascadeFault,
-    ProviderMediaApiProtocol, ProviderModel, ProviderModelCapability, ProviderModelReference,
+    ProviderAccountKind, ProviderApiProtocol, ProviderAppliedStatus, ProviderCallDiagnostic,
+    ProviderCascadeFault, ProviderMediaApiProtocol, ProviderModel, ProviderModelCapability,
+    ProviderModelReference,
     ProviderModelStoreFault, ProviderNativeConfigurationDiagnostic,
     ProviderNativeConfigurationEffect, ProviderObservedStatus, ProviderRoute, ProviderRouting,
     ProviderRoutingCapability, ProviderRoutingStoreFault,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRuntimeReport {
+    pub endpoint: ProviderSessionEndpoint,
+    pub changed: bool,
+    pub applied: ProviderAppliedStatus,
+    pub observed: ProviderObservedStatus,
+    pub diagnostic: Option<ProviderCallDiagnostic>,
+    pub accounts: Vec<ProviderAccountExecution>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAccountExecution {
+    pub account_id: String,
+    pub account_revision: u64,
+    pub execution: ProviderAccountExecutionStatus,
+    pub diagnostic: Option<ProviderCallDiagnostic>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderAccountExecutionStatus {
+    Ready,
+    Blocked,
+    Unknown,
+    Unsupported,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderCommitOutcome {
@@ -31,6 +61,7 @@ pub struct ProviderNativeConfigurationView {
     pub applied: &'static str,
     pub observed: &'static str,
     pub diagnostic: Option<ProviderNativeConfigurationDiagnosticView>,
+    pub reports: Vec<ProviderRuntimeReport>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,6 +81,7 @@ impl ProviderNativeConfigurationView {
             applied: "unknown",
             observed: "unavailable",
             diagnostic: None,
+            reports: Vec::new(),
         }
     }
 
@@ -62,6 +94,7 @@ impl ProviderNativeConfigurationView {
                 diagnostic: evidence
                     .diagnostic()
                     .map(ProviderNativeConfigurationDiagnosticView::from_diagnostic),
+                reports: evidence.reports().to_vec(),
             },
             ProviderNativeConfigurationEffect::Unavailable => Self::unavailable(),
         }
@@ -139,8 +172,14 @@ impl ProviderAccountView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderAccountsDelivery {
-    List(Vec<ProviderAccountView>),
-    Account(ProviderAccountView),
+    List {
+        accounts: Vec<ProviderAccountView>,
+        reports: Vec<ProviderRuntimeReport>,
+    },
+    Account {
+        account: ProviderAccountView,
+        reports: Vec<ProviderRuntimeReport>,
+    },
     Stored {
         account: ProviderAccountView,
         persisted: ProviderPersistedOutcome,
@@ -394,6 +433,12 @@ pub struct ProviderSessionModelSelection {
 pub enum ProviderSessionEndpoint {
     OpenClawLocal,
     MatchaAgentLocal,
+}
+
+impl serde::Serialize for ProviderSessionEndpoint {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.runtime_endpoint(), serializer)
+    }
 }
 
 impl ProviderSessionEndpoint {

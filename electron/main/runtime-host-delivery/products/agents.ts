@@ -753,12 +753,12 @@ function isConfigurationDefaults(value: unknown): boolean {
 
 function isConfigurationAgent(value: unknown): boolean {
   return isRecord(value)
-    && hasExactKeys(value, ['id', 'description', 'model', 'skills'])
+    && hasAllowedKeys(value, ['id', 'description', 'model', 'skills'], ['id', 'description', 'model'])
     && isNonEmptyBoundedText(value.id, 4096)
     && (value.description === null || isNonEmptyBoundedText(value.description, 4096))
     && isConfigurationModel(value.model)
-    && Array.isArray(value.skills)
-    && value.skills.every((skill) => isNonEmptyBoundedText(skill, 4096));
+    && (!Object.hasOwn(value, 'skills') || (Array.isArray(value.skills)
+      && value.skills.every((skill) => isNonEmptyBoundedText(skill, 4096))));
 }
 
 function isFailure(value: unknown): boolean {

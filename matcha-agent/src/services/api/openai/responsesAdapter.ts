@@ -5,6 +5,8 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { ResponseCreateParamsStreaming } from 'openai/resources/responses/responses.mjs'
 import { getOpenAIClient } from './client.js'
+import { investigationFetch } from '../investigation.js'
+import { currentInvestigationScope, InvestigationAdmissionError } from '../../../world/investigation.js'
 import { normalizeOpenAIUsage, type AnthropicUsage } from '@ant/model-provider'
 import { getValidChatGPTAuth } from './chatgptAuth.js'
 
@@ -498,6 +500,31 @@ export async function* adaptResponsesStreamToAnthropic(
         type: 'message_delta',
         delta: { stop_reason: mapStopReason(response), stop_sequence: null },
         usage: extractUsage(response),
+        native_complete: type === 'response.completed',
+        native_usage: (() => {
+          const raw = response?.usage as Record<string, unknown> | undefined
+          const details = raw?.input_tokens_details as
+            | Record<string, unknown>
+            | undefined
+          const read = details?.cached_tokens
+          const write = details?.cache_write_tokens
+          return {
+            ...(typeof raw?.output_tokens === 'number'
+              ? { output_tokens: raw.output_tokens }
+              : {}),
+            ...(typeof read === 'number'
+              ? { cache_read_input_tokens: read }
+              : {}),
+            ...(typeof write === 'number'
+              ? { cache_creation_input_tokens: write }
+              : {}),
+            ...(typeof raw?.input_tokens === 'number' &&
+            typeof read === 'number' &&
+            typeof write === 'number'
+              ? { input_tokens: raw.input_tokens - read - write }
+              : {}),
+          }
+        })(),
       } as unknown as BetaRawMessageStreamEvent
       yield { type: 'message_stop' } as BetaRawMessageStreamEvent
     }
@@ -526,8 +553,9 @@ export async function createChatGPTResponsesStream(params: {
   signal: AbortSignal
   fetchOverride?: typeof fetch
 }): Promise<AsyncIterable<Record<string, unknown>>> {
+  if (currentInvestigationScope()) throw new InvestigationAdmissionError('investigation_exact_input_count_unavailable')
   const auth = await getValidChatGPTAuth()
-  const fetchFn = params.fetchOverride ?? (globalThis.fetch as typeof fetch)
+  const fetchFn = investigationFetch(params.fetchOverride ?? (globalThis.fetch as typeof fetch), 'chatgpt')
   const headers: Record<string, string> = {
     Authorization: `Bearer ${auth.accessToken}`,
     'Content-Type': 'application/json',

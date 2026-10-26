@@ -13,16 +13,9 @@ const REJECTED: &str = "state directory rejected";
 /// Publishes a flushed file without replacing an existing destination or copying across volumes.
 #[cfg(windows)]
 pub fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::{io, os::windows::ffi::OsStrExt};
+    use std::io;
 
-    fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
-        let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if value.contains(&0) {
-            return Err(io::Error::from(io::ErrorKind::InvalidInput));
-        }
-        value.push(0);
-        Ok(value)
-    }
+    use self::windows::wide_path;
 
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
     #[link(name = "kernel32")]
@@ -67,8 +60,26 @@ impl CanonicalStateDir {
         Ok(Self { path, identity })
     }
 
+    /// Captures an existing verified directory without creating it or changing permissions.
+    pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, StateDirError> {
+        let path = path.as_ref();
+        if !path.is_absolute() {
+            return Err(StateDirError);
+        }
+        let (path, identity) = platform::open_existing(path)?;
+        Ok(Self { path, identity })
+    }
+
     pub fn open(&self) -> Result<StateDirHandle, StateDirError> {
         platform::open(&self.path, &self.identity)
+    }
+
+    /// Opens one anchored regular file without following links; the caller retains the handle.
+    pub fn open_regular_file_readonly(
+        &self,
+        name: &str,
+    ) -> Result<Option<std::fs::File>, StateDirError> {
+        self.open()?.open_regular_file_readonly(name)
     }
 
     pub fn read_regular_file_bounded(
@@ -161,12 +172,16 @@ impl std::error::Error for StateFileReplaceError {}
 
 #[cfg(unix)]
 mod platform {
-    pub(super) use super::posix::{StateDirIdentity, open, provision, provision_private};
+    pub(super) use super::posix::{
+        StateDirIdentity, open, open_existing, provision, provision_private,
+    };
 }
 
 #[cfg(windows)]
 mod platform {
-    pub(super) use super::windows::{StateDirIdentity, open, provision, provision_private};
+    pub(super) use super::windows::{
+        StateDirIdentity, open, open_existing, provision, provision_private,
+    };
 }
 
 #[cfg(unix)]

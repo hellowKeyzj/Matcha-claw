@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useUpdateStore } from '@/stores/update';
+import { useUpdateStore } from '@/plugins/settings/update/store';
 
 describe('Update Store', () => {
   beforeEach(() => {

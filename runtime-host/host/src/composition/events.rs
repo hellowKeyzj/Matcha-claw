@@ -22,6 +22,7 @@ pub enum HostEvent {
     Board(board::BoardEvent),
     BoardResync,
     OrganizationChanged,
+    World(world_protocol::events::WorldHint),
 }
 
 pub struct HostEvents {
@@ -33,8 +34,8 @@ pub struct HostEvents {
     matcha_lifecycle: mpsc::Receiver<SupervisorSnapshot>,
     calls: Option<broadcast::Receiver<platform::call::CallChanged>>,
     board: Option<board::BoardEventSubscription>,
-    organization:
-        Option<tokio::sync::watch::Receiver<organization::TeamRunWake>>,
+    world: Option<world::WorldHintSubscription>,
+    organization: Option<tokio::sync::watch::Receiver<organization::TeamRunWake>>,
     open_claw_open: bool,
     cron_open: bool,
     open_claw_runtime_open: bool,
@@ -44,6 +45,10 @@ pub struct HostEvents {
 impl HostEvents {
     pub(super) fn set_board_events(&mut self, events: board::BoardEventSubscription) {
         self.board = Some(events);
+    }
+
+    pub(super) fn set_world_hints(&mut self, hints: world::WorldHintSubscription) {
+        self.world = Some(hints);
     }
 
     pub(super) fn set_call_changes(
@@ -70,11 +75,24 @@ impl HostEvents {
                 && !self.matcha_lifecycle_open
                 && self.calls.is_none()
                 && self.board.is_none()
+                && self.world.is_none()
                 && self.organization.is_none()
             {
                 return None;
             }
             tokio::select! {
+                hint = async {
+                    match self.world.as_mut() {
+                        Some(world) => world.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match hint {
+                    Ok(hint) => return Some(HostEvent::World(hint)),
+                    Err(error) => {
+                        eprintln!("[world] hint subscription stopped: {error}");
+                        self.world = None;
+                    }
+                },
                 event = async {
                     match self.board.as_mut() {
                         Some(board) => board.recv().await,
@@ -228,6 +246,7 @@ pub(super) fn channels() -> (EventSinks, HostEvents) {
             matcha_lifecycle: matcha_lifecycle_events,
             calls: None,
             board: None,
+            world: None,
             organization: None,
             open_claw_open: true,
             cron_open: true,

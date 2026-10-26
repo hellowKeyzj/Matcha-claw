@@ -23,7 +23,7 @@ vi.mock('@/lib/telemetry', () => ({
 }));
 
 import { normalizeProviderSnapshot } from '@/lib/provider-accounts';
-import { useProviderStore } from '@/stores/providers';
+import { useProviderStore } from '@/plugins/providers/stores/providers';
 
 describe('provider account public round trip', () => {
   beforeEach(() => {
@@ -66,6 +66,7 @@ describe('provider account public round trip', () => {
         'custom-chat': 3,
         'custom-media': 5,
       },
+      reports: [],
     });
     fetchProviderSnapshotMock.mockResolvedValue(snapshot);
     hostProviderUpdateAccountMock.mockImplementation(async (account, revision) => ({
@@ -81,7 +82,7 @@ describe('provider account public round trip', () => {
         accountId: account.id,
         accountRevision: revision,
         diagnostic: null,
-        native: { changed: false, applied: 'unknown', observed: 'unavailable' },
+        native: { changed: false, applied: 'unknown', observed: 'unavailable', reports: [] },
       },
     }));
     useProviderStore.setState({
@@ -147,11 +148,13 @@ describe('provider account public round trip', () => {
         { ...validVendor, supportedAuthModes: ['unsupported'] },
       ],
       revisions: {},
+      reports: [],
     })).toEqual({
       credentials: [],
       statuses: [],
       vendors: [validVendor],
       revisions: {},
+      reports: [],
     });
   });
 });

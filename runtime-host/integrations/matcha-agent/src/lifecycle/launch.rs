@@ -58,6 +58,7 @@ pub struct LaunchInput {
     pub working_directory: PathBuf,
     pub storage_root: PathBuf,
     pub port: u16,
+    pub world_runtime_host: Option<crate::world::WorldRuntimeHost>,
     pub secret: Arc<Secret>,
     pub toolchain: Arc<NativeToolchain>,
     #[cfg(windows)]
@@ -117,6 +118,7 @@ struct LaunchFactoryInput {
     secret: Arc<Secret>,
     toolchain: Arc<NativeToolchain>,
     sealed_target: Option<SealedResourceTarget>,
+    world_runtime_host: Option<crate::world::WorldRuntimeHost>,
     #[cfg(windows)]
     git_bash: PathBuf,
 }
@@ -136,6 +138,7 @@ impl TryFrom<LaunchInput> for LaunchFactoryInput {
             secret: input.secret,
             toolchain: input.toolchain,
             sealed_target: None,
+            world_runtime_host: input.world_runtime_host,
             #[cfg(windows)]
             git_bash: input.git_bash,
         })
@@ -216,6 +219,7 @@ impl Clone for LaunchFactoryInput {
             secret: Arc::clone(&self.secret),
             toolchain: Arc::clone(&self.toolchain),
             sealed_target: self.sealed_target.clone(),
+            world_runtime_host: self.world_runtime_host.clone(),
             #[cfg(windows)]
             git_bash: self.git_bash.clone(),
         }
@@ -239,6 +243,13 @@ fn build_spec(
     );
     if let Some(sealed_target) = &input.sealed_target {
         public_environment.extend(sealed_resource_environment(sealed_target));
+    }
+    if let Some(world) = &input.world_runtime_host {
+        push_environment(
+            &mut public_environment,
+            crate::world::PROJECTION_ENV,
+            world.path().into_os_string(),
+        );
     }
     #[cfg(windows)]
     {

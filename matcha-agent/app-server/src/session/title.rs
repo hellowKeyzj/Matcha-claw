@@ -58,10 +58,11 @@ impl Sessions {
         session: Arc<Session>,
         instance_id: String,
         description: String,
+        native_execution: Option<Value>,
     ) {
         let record = session.data.lock().await.record.clone();
         let result = self
-            .generate_title_inner(&session, &instance_id, &record, description)
+            .generate_title_inner(&session, &instance_id, &record, description, native_execution)
             .await;
         if let Err(error) = result {
             self.title_failure(&record, &instance_id, &error).await;
@@ -74,6 +75,7 @@ impl Sessions {
         instance_id: &str,
         record: &record::Record,
         description: String,
+        native_execution: Option<Value>,
     ) -> rpc::Result<()> {
         let metadata =
             history::metadata(&record.runtime, &record.workspace, &record.session_id).await?;
@@ -106,6 +108,7 @@ impl Sessions {
         let response = control
             .request(json!({
                 "subtype": "generate_session_title", "description": description, "persist": true,
+                "native_execution": native_execution,
             }))
             .await?;
         if response

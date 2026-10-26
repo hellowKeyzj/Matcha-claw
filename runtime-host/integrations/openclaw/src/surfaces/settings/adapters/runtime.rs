@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use ::settings::ports::SettingsOps;
-use foundation::process::supervision::{SupervisorHandle, SupervisorPhase};
+use foundation::process::supervision::SupervisorPhase;
 
 use crate::{
     driver::{
-        OpenClawDriver,
+        OpenClawDriver, SupervisorLifecycleHandle,
         lifecycle::{prepare_openclaw_lifecycle, restart_supervisor},
     },
     lifecycle::logs::LifecycleDiagnostic,
@@ -26,14 +26,23 @@ impl SettingsOps for OpenClawDriver {
     > {
         let state_dir = self.state_dir.clone();
         let gateway = Arc::clone(&self.gateway);
-        let control_lease = self.control_lease();
         let plugins = self.plugins();
         let supervisor = self.supervisor_handle();
         let gateway_port = self.gateway_port;
         let diagnostic_reporter = Arc::clone(&self.diagnostic_reporter);
         Box::pin(async move {
             let browser_mode = crate::surfaces::settings::browser_mode_projection(browser_mode);
-            let snapshot = supervisor.snapshot();
+            let mut lifecycle = supervisor.subscribe();
+            let snapshot = loop {
+                let snapshot = supervisor.snapshot();
+                if snapshot.phase() != SupervisorPhase::Starting {
+                    break snapshot;
+                }
+                lifecycle
+                    .changed()
+                    .await
+                    .map_err(|_| ::settings::ports::SettingsRuntimeFailure::Unknown)?;
+            };
             match snapshot.phase() {
                 SupervisorPhase::Idle | SupervisorPhase::OperationFailed
                     if snapshot.process().is_none() && snapshot.active_operation().is_none() =>
@@ -45,6 +54,7 @@ impl SettingsOps for OpenClawDriver {
                     )
                 }
                 SupervisorPhase::Running => {
+                    let control_lease = self.control_lease();
                     if gateway.observe_control().await != OpenClawControlReadiness::Ready
                         || control_lease.snapshot_control().await != OpenClawControlReadiness::Ready
                     {
@@ -102,7 +112,7 @@ fn prepare_settings_relay_plugin(
 
 async fn restart_after_settings_projection(
     prepare_lifecycle: bool,
-    supervisor: SupervisorHandle,
+    supervisor: SupervisorLifecycleHandle,
     gateway_port: u16,
     plugins: crate::native_config::plugins::PluginProjection,
     diagnostic_reporter: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,
@@ -123,7 +133,7 @@ async fn restart_after_settings_projection(
 async fn project_settings_config_outcome(
     outcome: crate::surfaces::settings::gateway::config::SettingsConfigMutationOutcome,
     artifact_changed: bool,
-    supervisor: SupervisorHandle,
+    supervisor: SupervisorLifecycleHandle,
     gateway_port: u16,
     plugins: crate::native_config::plugins::PluginProjection,
     diagnostic_reporter: Arc<dyn Fn(LifecycleDiagnostic) + Send + Sync>,

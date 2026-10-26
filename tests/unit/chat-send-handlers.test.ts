@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyStoreSendStart, executeStoreSend, NO_RESPONSE_RECEIVED_ERROR, startStoreSendWatchers } from '@/stores/chat/send-handlers';
-import { createStoreSessionRunCache } from '@/stores/chat/session-run-cache';
-import { buildSessionIdentityRecordIndex } from '@/stores/chat/session-identity';
-import type { ChatStoreState } from '@/stores/chat/types';
-import { getSessionItems, applySessionView } from '@/stores/chat/store-state-helpers';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { applyStoreSendStart, executeStoreSend, NO_RESPONSE_RECEIVED_ERROR, startStoreSendWatchers } from '@/plugins/chat/store/send-handlers';
+import { createStoreSessionRunCache } from '@/plugins/chat/store/session-run-cache';
+import { buildSessionIdentityRecordIndex } from '@/plugins/chat/store/session-identity';
+import type { ChatStoreState } from '@/plugins/chat/store/types';
+import { getSessionItems, applySessionView } from '@/plugins/chat/store/store-state-helpers';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
 import type { SessionRenderItem } from '../../src/types/session/render-item';
 import { assistantItem, completeFact, sessionView, userItem } from './helpers/session-fixtures';
 
@@ -47,7 +47,7 @@ function buildRenderItemsFromMessages(sessionKey: string, messages: readonly Raw
 
 const sendChatTransportMock = vi.fn();
 
-vi.mock('@/stores/chat/send-transport', () => ({
+vi.mock('@/plugins/chat/store/send-transport', () => ({
   CHAT_SEND_RPC_TIMEOUT_MS: 120000,
   sendChatTransport: (...args: unknown[]) => sendChatTransportMock(...args),
 }));

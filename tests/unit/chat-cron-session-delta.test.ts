@@ -6,8 +6,8 @@ import {
   createEmptySessionRecord,
   getSessionItems,
   getSessionRuntime,
-} from '@/stores/chat/store-state-helpers';
-import type { ChatStoreState } from '@/stores/chat/types';
+} from '@/plugins/chat/store/store-state-helpers';
+import type { ChatStoreState } from '@/plugins/chat/store/types';
 import {
   completeFact,
   runtimeView,

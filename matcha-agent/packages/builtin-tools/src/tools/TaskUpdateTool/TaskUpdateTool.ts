@@ -260,9 +260,25 @@ export const TaskUpdateTool = buildTool({
       }
     }
 
-    if (Object.keys(updates).length > 0 || addBlocks?.length || addBlockedBy?.length) {
-      const updated = await patchTask(taskListId, taskId, { ...updates, addBlocks, addBlockedBy })
-      if (!updated) return { data: { success: false, taskId, updatedFields: [], error: 'Task not found' } }
+    if (
+      Object.keys(updates).length > 0 ||
+      addBlocks?.length ||
+      addBlockedBy?.length
+    ) {
+      const updated = await patchTask(taskListId, taskId, {
+        ...updates,
+        addBlocks,
+        addBlockedBy,
+      })
+      if (!updated)
+        return {
+          data: {
+            success: false,
+            taskId,
+            updatedFields: [],
+            error: 'Task not found',
+          },
+        }
     }
 
     // Notify new owner via mailbox when ownership changes

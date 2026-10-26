@@ -5,6 +5,7 @@ import {
 import { sanitizeToolNameForAnalytics } from 'src/services/analytics/metadata.js'
 import type z from 'zod/v4'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
+import { InvestigationAdmissionError } from '../../world/investigation.js'
 import type { AnyObject, Tool, ToolUseContext } from '../../Tool.js'
 import type { HookProgress } from '../../types/hooks.js'
 import type {
@@ -154,6 +155,7 @@ export async function* runPostToolUseHooks<Input extends AnyObject, Output>(
           }
         }
       } catch (error) {
+        if (error instanceof InvestigationAdmissionError) throw error
         const postToolDurationMs = Date.now() - postToolStartTime
         logEvent('tengu_post_tool_hook_error', {
           messageID:
@@ -190,6 +192,7 @@ export async function* runPostToolUseHooks<Input extends AnyObject, Output>(
       }
     }
   } catch (error) {
+    if (error instanceof InvestigationAdmissionError) throw error
     logError(error)
   }
 }
@@ -287,6 +290,7 @@ export async function* runPostToolUseFailureHooks<Input extends AnyObject>(
           }
         }
       } catch (hookError) {
+        if (hookError instanceof InvestigationAdmissionError) throw hookError
         const postToolDurationMs = Date.now() - postToolStartTime
         logEvent('tengu_post_tool_failure_hook_error', {
           messageID:
@@ -322,6 +326,7 @@ export async function* runPostToolUseFailureHooks<Input extends AnyObject>(
       }
     }
   } catch (outerError) {
+    if (outerError instanceof InvestigationAdmissionError) throw outerError
     logError(outerError)
   }
 }
@@ -617,6 +622,7 @@ export async function* runPreToolUseHooks(
           return
         }
       } catch (error) {
+        if (error instanceof InvestigationAdmissionError) throw error
         logError(error)
         const durationMs = Date.now() - hookStartTime
         logEvent('tengu_pre_tool_hook_error', {
@@ -658,6 +664,7 @@ export async function* runPreToolUseHooks(
       }
     }
   } catch (error) {
+    if (error instanceof InvestigationAdmissionError) throw error
     logError(error)
     yield { type: 'stop' }
     return

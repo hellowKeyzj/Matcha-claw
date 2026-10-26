@@ -2618,6 +2618,12 @@ fn append_ingest_warnings(root: &Path, identity: &str, warnings: &[String]) {
 fn write_wiki_page(root: &Path, relative_path: &str, content: &str) -> Result<(), WikiFailure> {
     let path = resolve_project_path(root, relative_path)?;
     crate::history::record(root, relative_path, "baseline", "before.wiki.write_page")?;
+    match std::fs::read(&path) {
+        Ok(bytes) => crate::history::capture_version(root, relative_path, &bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(WikiFailure::io(path_text(&path), error)),
+    }
+    crate::history::capture_version(root, relative_path, content.as_bytes())?;
     std::fs::write(&path, content.as_bytes())
         .map_err(|error| WikiFailure::io(path_text(&path), error))?;
     record_written_wiki_page(root, relative_path);
@@ -3469,6 +3475,7 @@ fn refresh_file_snapshot_inner(
                 .map_err(|error| WikiFailure::io(path_text(&path), error))?;
             let bytes =
                 std::fs::read(&path).map_err(|error| WikiFailure::io(path_text(&path), error))?;
+            crate::history::capture_version(root, relative_path, &bytes)?;
             snapshot.entries.insert(
                 (*relative_path).to_owned(),
                 FileSnapshotEntry {

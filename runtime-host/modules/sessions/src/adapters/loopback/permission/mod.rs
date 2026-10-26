@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(
             set.action(),
             SessionPermissionAction::Set {
-                permission_mode: None,
+                selection: SessionPermissionSelection::OpenClaw(None),
             }
         );
     }
@@ -382,7 +382,9 @@ mod tests {
         assert_eq!(
             set.action(),
             SessionPermissionAction::Set {
-                permission_mode: Some(SessionPermissionMode::Workspace),
+                selection: SessionPermissionSelection::OpenClaw(Some(
+                    SessionPermissionMode::Workspace,
+                )),
             }
         );
 

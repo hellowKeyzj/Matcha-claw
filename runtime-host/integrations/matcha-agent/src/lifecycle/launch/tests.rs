@@ -54,6 +54,7 @@ fn input(root: &TestRoot) -> LaunchInput {
         working_directory: working_directory.clone(),
         storage_root: root.0.clone(),
         port: 18_790,
+        world_runtime_host: None,
         secret: Arc::new(Secret::new(SECRET_CANARY.to_owned()).unwrap()),
         toolchain: Arc::new(NativeToolchain::new(
             ToolchainPlatform::current(),

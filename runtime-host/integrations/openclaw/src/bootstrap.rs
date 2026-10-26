@@ -96,6 +96,7 @@ impl PrivateProjectionEffect {
             routing,
             &[],
             &required_auth_accounts,
+            &mut Vec::new(),
             now_millis,
         )
     }
@@ -107,6 +108,7 @@ impl PrivateProjectionEffect {
         routing: Option<&ProviderRouting>,
         retired: &[ProviderAccount],
         required_auth_accounts: &BTreeSet<ProviderAccountId>,
+        account_failures: &mut Vec<::provider::ProviderAccountExecution>,
         now_millis: u64,
     ) -> Self {
         let providers = project_providers(
@@ -116,6 +118,7 @@ impl PrivateProjectionEffect {
             routing,
             retired,
             required_auth_accounts,
+            account_failures,
             now_millis,
         );
         let restart = restart_preparation(&providers);
@@ -130,6 +133,7 @@ fn project_providers(
     routing: Option<&ProviderRouting>,
     retired: &[ProviderAccount],
     required_auth_accounts: &BTreeSet<ProviderAccountId>,
+    account_failures: &mut Vec<::provider::ProviderAccountExecution>,
     now_millis: u64,
 ) -> ConfigWriteEffect {
     let models_changed = match ProviderModelProjection::apply(
@@ -138,6 +142,8 @@ fn project_providers(
         models,
         retired,
         required_auth_accounts,
+        account_failures,
+        routing.is_some(),
         now_millis,
     ) {
         Ok(ProviderModelProjectionEffect::ConfigurationWritten { changed }) => changed,
@@ -145,8 +151,14 @@ fn project_providers(
     };
     let routing_changed = match routing {
         Some(routing) => {
-            match ProviderRoutingProjection::apply(state_dir, accounts, models, routing, now_millis)
-            {
+            match ProviderRoutingProjection::apply(
+                state_dir,
+                accounts,
+                models,
+                routing,
+                account_failures,
+                now_millis,
+            ) {
                 Ok(ProviderRoutingProjectionEffect::ConfigurationWritten { changed }) => changed,
                 Err(error) => return ConfigWriteEffect::Unknown(routing_diagnostic(error)),
             }

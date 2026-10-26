@@ -1,9 +1,13 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
-import { Channels } from '@/pages/Channels';
-import { useChannelsStore } from '@/stores/channels';
-import { useSubagentsStore } from '@/stores/subagents';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { channelsPlugin } from '@/plugins/channels/plugin';
+import { Channels } from '@/plugins/channels/page';
+import { useChannelsStore } from '@/plugins/channels/store';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 
 const hostChannelsActivateMock = vi.fn();
 const hostChannelsConfigureMock = vi.fn();
@@ -51,7 +55,7 @@ vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
 
-vi.mock('@/stores/gateway', () => ({
+vi.mock('@/plugins/runtime/store', () => ({
   useGatewayStore: (selector: (state: {
     status: {
       processState: string;
@@ -113,11 +117,22 @@ function configuredWeixinSnapshot() {
   );
 }
 
-function clickAvailableChannel(name: string) {
+const pluginHost = createPluginHost([applicationShellPlugin, channelsPlugin]);
+
+function renderChannels() {
+  return render(
+    <PluginHostProvider host={pluginHost}>
+      <Channels />
+    </PluginHostProvider>,
+  );
+}
+
+async function clickAvailableChannel(name: string) {
   const label = screen.getByText(name, { exact: true });
   const button = label.closest('button');
   expect(button).toBeInstanceOf(HTMLButtonElement);
   fireEvent.click(button as HTMLButtonElement);
+  await screen.findByLabelText('Channel Name');
 }
 
 describe('Channels page QR session lifecycle', () => {
@@ -192,7 +207,7 @@ describe('Channels page QR session lifecycle', () => {
   });
 
   it('shows only the current configurable channel catalog by default', async () => {
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Available Channels')).toBeInTheDocument();
     for (const name of ['WeChat', 'QQ Bot', 'DingTalk', 'WeCom', 'Feishu / Lark']) {
@@ -206,7 +221,7 @@ describe('Channels page QR session lifecycle', () => {
   it('shows an existing legacy config without adding it to the available catalog', async () => {
     hostChannelsFetchSnapshotMock.mockResolvedValue(configuredTelegramSnapshot());
 
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Configured Channels')).toBeInTheDocument();
     expect(screen.getByText('Telegram Bot')).toBeInTheDocument();
@@ -240,10 +255,10 @@ describe('Channels page QR session lifecycle', () => {
       })
       .mockReturnValueOnce(connectedPromise);
 
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Available Channels')).toBeInTheDocument();
-    clickAvailableChannel('WeChat');
+    await clickAvailableChannel('WeChat');
     fireEvent.change(await screen.findByLabelText('Channel Name'), { target: { value: 'wechat-main' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Generate QR Code' }));
 
@@ -320,10 +335,10 @@ describe('Channels page QR session lifecycle', () => {
       })
       .mockReturnValueOnce(connectedPromise);
 
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Available Channels')).toBeInTheDocument();
-    clickAvailableChannel('QQ Bot');
+    await clickAvailableChannel('QQ Bot');
     expect(await screen.findByRole('button', { name: 'Scan / authorize' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Use configuration' })).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Start authorization' }));
@@ -395,10 +410,10 @@ describe('Channels page QR session lifecycle', () => {
       }))
       .mockReturnValueOnce(new Promise(() => { }));
 
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Available Channels')).toBeInTheDocument();
-    clickAvailableChannel(name);
+    await clickAvailableChannel(name);
     fireEvent.click(await screen.findByRole('button', { name: 'Start authorization' }));
     await screen.findByAltText(qrAlt);
     fireEvent.click(await screen.findByRole('button', { name: 'Refresh QR code' }));
@@ -420,10 +435,10 @@ describe('Channels page QR session lifecycle', () => {
     });
     hostChannelsWaitAuthorizationMock.mockReturnValueOnce(new Promise(() => { }));
 
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Available Channels')).toBeInTheDocument();
-    clickAvailableChannel('Feishu / Lark');
+    await clickAvailableChannel('Feishu / Lark');
     expect(await screen.findByRole('button', { name: 'Scan / authorize' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Use configuration' })).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Start authorization' }));
@@ -441,10 +456,10 @@ describe('Channels page QR session lifecycle', () => {
   });
 
   it('saves QQ Bot credentials when configuration mode is selected', async () => {
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Available Channels')).toBeInTheDocument();
-    clickAvailableChannel('QQ Bot');
+    await clickAvailableChannel('QQ Bot');
     fireEvent.click(await screen.findByRole('button', { name: 'Use configuration' }));
     fireEvent.change(await screen.findByLabelText(/App ID/), { target: { value: 'qq-app-1' } });
     fireEvent.change(await screen.findByLabelText(/Client Secret/), { target: { value: 'qq-secret-1' } });
@@ -465,10 +480,10 @@ describe('Channels page QR session lifecycle', () => {
   });
 
   it('keeps WeCom on credential configuration instead of authorization', async () => {
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Available Channels')).toBeInTheDocument();
-    clickAvailableChannel('WeCom');
+    await clickAvailableChannel('WeCom');
     expect(screen.queryByRole('button', { name: 'Scan / authorize' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Use configuration' })).not.toBeInTheDocument();
     fireEvent.change(await screen.findByLabelText(/Bot ID/), { target: { value: 'bot-1' } });
@@ -505,10 +520,10 @@ describe('Channels page QR session lifecycle', () => {
     });
     const snapshotCallCountBeforeLogin = hostChannelsFetchSnapshotMock.mock.calls.length;
 
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Available Channels')).toBeInTheDocument();
-    clickAvailableChannel('WeChat');
+    await clickAvailableChannel('WeChat');
     fireEvent.change(await screen.findByLabelText('Channel Name'), { target: { value: 'wechat-main' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Generate QR Code' }));
 
@@ -528,7 +543,7 @@ describe('Channels page QR session lifecycle', () => {
   it('updates a configured Weixin agent without starting QR login', async () => {
     hostChannelsFetchSnapshotMock.mockResolvedValue(configuredWeixinSnapshot());
 
-    render(<Channels />);
+    renderChannels();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Configure WeChat' }));
     const agentSelect = await screen.findByRole('combobox', { name: 'Agent' });
@@ -556,7 +571,7 @@ describe('Channels page QR session lifecycle', () => {
   it('updates a configured token channel agent without credential validation', async () => {
     hostChannelsFetchSnapshotMock.mockResolvedValue(configuredFeishuSnapshot());
 
-    render(<Channels />);
+    renderChannels();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Configure Feishu' }));
     const agentSelect = await screen.findByRole('combobox', { name: 'Agent' });
@@ -601,10 +616,10 @@ describe('Channels page QR session lifecycle', () => {
         accountId: 'default',
       });
 
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Available Channels')).toBeInTheDocument();
-    clickAvailableChannel('WeChat');
+    await clickAvailableChannel('WeChat');
     fireEvent.click(await screen.findByRole('button', { name: 'Generate QR Code' }));
 
     await waitFor(() => expect(hostChannelsLoginWaitMock).toHaveBeenCalledTimes(2));
@@ -629,10 +644,10 @@ describe('Channels page QR session lifecycle', () => {
       return new Promise(() => { });
     });
 
-    render(<Channels />);
+    renderChannels();
 
     expect(await screen.findByText('Available Channels')).toBeInTheDocument();
-    clickAvailableChannel('WeChat');
+    await clickAvailableChannel('WeChat');
     fireEvent.change(await screen.findByLabelText('Channel Name'), { target: { value: 'wechat-main' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Generate QR Code' }));
     await screen.findByAltText('WeChat login QR code');
@@ -657,7 +672,7 @@ describe('Channels page QR session lifecycle', () => {
     hostChannelsDeleteConfigMock.mockResolvedValue({ outcome: 'confirmed' });
 
     try {
-      render(<Channels />);
+      renderChannels();
 
       expect(await screen.findByText('Configured Channels')).toBeInTheDocument();
       expect(screen.getByText('Feishu', { exact: true })).toBeInTheDocument();
@@ -691,7 +706,7 @@ describe('Channels page QR session lifecycle', () => {
     hostChannelsDeleteConfigMock.mockResolvedValue({ outcome });
 
     try {
-      render(<Channels />);
+      renderChannels();
 
       expect(await screen.findByText('Configured Channels')).toBeInTheDocument();
       nowMs = 3_000;

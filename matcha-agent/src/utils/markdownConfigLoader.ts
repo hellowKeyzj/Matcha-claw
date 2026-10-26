@@ -1,6 +1,5 @@
 import { feature } from 'bun:bundle'
 import { statSync } from 'fs'
-import { lstat, readdir, readFile, realpath, stat } from 'fs/promises'
 import memoize from 'lodash-es/memoize.js'
 import { homedir } from 'os'
 import { dirname, join, resolve, sep } from 'path'
@@ -9,14 +8,33 @@ import {
   logEvent,
 } from 'src/services/analytics/index.js'
 import { getProjectRoot } from '../bootstrap/state.js'
+import {
+  InvestigationAdmissionError,
+  currentInvestigationScope,
+  investigationSignal,
+  requireInvestigationEffects,
+  rethrowInvestigationAdmission,
+  trackInvestigationOperation,
+} from '../world/investigation.js'
 import { logForDebugging } from './debug.js'
 import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
-import { isFsInaccessible } from './errors.js'
+import { isAbortError, isFsInaccessible } from './errors.js'
 import { normalizePathForComparison } from './file.js'
 import type { FrontmatterData } from './frontmatterParser.js'
 import { parseFrontmatter } from './frontmatterParser.js'
-import { findCanonicalGitRoot, findGitRoot } from './git.js'
+import {
+  readSourceDirectory,
+  realSourcePath,
+  statSourcePath,
+} from './fsOperations.js'
+import {
+  findCanonicalGitRoot,
+  findCanonicalGitRootAsync,
+  findGitRoot,
+  findGitRootAsync,
+} from './git.js'
 import { parseToolListFromCLI } from './permissions/permissionSetup.js'
+import { readSourceBytes } from './readFileInRange.js'
 import { ripGrep } from './ripgrep.js'
 import {
   isSettingSourceEnabled,
@@ -139,6 +157,18 @@ export function parseSlashCommandToolsFromFrontmatter(
   return parsed
 }
 
+function rethrowSourceFailure(error: unknown, signal?: AbortSignal): void {
+  rethrowInvestigationAdmission(error)
+  if (!currentInvestigationScope()) return
+  signal?.throwIfAborted()
+  investigationSignal()?.throwIfAborted()
+  if (
+    isAbortError(error) ||
+    (error instanceof Error &&
+      (error.name === 'TimeoutError' || error.cause !== undefined))
+  ) throw error
+}
+
 /**
  * Gets a unique identifier for a file based on its device ID and inode.
  * This allows detection of duplicate files accessed through different paths
@@ -158,7 +188,10 @@ export function parseSlashCommandToolsFromFrontmatter(
  */
 async function getFileIdentity(filePath: string): Promise<string | null> {
   try {
-    const stats = await lstat(filePath, { bigint: true })
+    const stats = await statSourcePath(filePath, {
+      bigint: true,
+      followSymlinks: false,
+    })
     // Some filesystems (NFS, FUSE, network mounts) report dev=0 and ino=0
     // for all files, which would cause every file to look like a duplicate.
     // Return null to skip deduplication for these unreliable identities.
@@ -166,7 +199,8 @@ async function getFileIdentity(filePath: string): Promise<string | null> {
       return null
     }
     return `${stats.dev}:${stats.ino}`
-  } catch {
+  } catch (error) {
+    rethrowSourceFailure(error)
     return null
   }
 }
@@ -196,7 +230,29 @@ function resolveStopBoundary(cwd: string): string | null {
   }
   // findCanonicalGitRoot resolves worktree `.git` files to the main repo.
   // Submodules (no commondir) and standalone clones fall through unchanged.
-  const cwdCanonical = findCanonicalGitRoot(cwd)
+  return selectStopBoundary(
+    cwdGitRoot,
+    sessionGitRoot,
+    findCanonicalGitRoot(cwd),
+  )
+}
+
+async function resolveStopBoundaryAsync(cwd: string): Promise<string | null> {
+  const cwdGitRoot = await findGitRootAsync(cwd)
+  const sessionGitRoot = await findGitRootAsync(getProjectRoot())
+  if (!cwdGitRoot || !sessionGitRoot) return cwdGitRoot
+  return selectStopBoundary(
+    cwdGitRoot,
+    sessionGitRoot,
+    await findCanonicalGitRootAsync(cwd),
+  )
+}
+
+function selectStopBoundary(
+  cwdGitRoot: string,
+  sessionGitRoot: string,
+  cwdCanonical: string | null,
+): string {
   if (
     cwdCanonical &&
     normalizePathForComparison(cwdCanonical) ===
@@ -235,10 +291,45 @@ export function getProjectDirsUpToHome(
   subdir: ClaudeConfigDirectory,
   cwd: string,
 ): string[] {
-  const home = resolve(homedir()).normalize('NFC')
-  const gitRoot = resolveStopBoundary(cwd)
-  let current = resolve(cwd)
+  if (currentInvestigationScope()) {
+    throw new InvestigationAdmissionError('investigation_sync_project_dirs_unavailable')
+  }
   const dirs: string[] = []
+  for (const current of projectDirAncestors(cwd, resolveStopBoundary(cwd))) {
+    const claudeSubdir = join(current, '.claude', subdir)
+    try {
+      statSync(claudeSubdir)
+      dirs.push(claudeSubdir)
+    } catch (e: unknown) {
+      if (!isFsInaccessible(e)) throw e
+    }
+  }
+  return dirs
+}
+
+export async function getProjectDirsUpToHomeAsync(
+  subdir: ClaudeConfigDirectory,
+  cwd: string,
+): Promise<string[]> {
+  if (!currentInvestigationScope()) return getProjectDirsUpToHome(subdir, cwd)
+  requireInvestigationEffects(['source_read'])
+  const dirs: string[] = []
+  for (const current of projectDirAncestors(cwd, await resolveStopBoundaryAsync(cwd))) {
+    const claudeSubdir = join(current, '.claude', subdir)
+    try {
+      await statSourcePath(claudeSubdir)
+      dirs.push(claudeSubdir)
+    } catch (error) {
+      rethrowSourceFailure(error)
+      if (!isFsInaccessible(error)) throw error
+    }
+  }
+  return dirs
+}
+
+function* projectDirAncestors(cwd: string, gitRoot: string | null): Generator<string> {
+  const home = resolve(homedir()).normalize('NFC')
+  let current = resolve(cwd)
 
   // Traverse from current directory up to git root (or home if not in a git repo)
   while (true) {
@@ -250,19 +341,7 @@ export function getProjectDirsUpToHome(
       break
     }
 
-    const claudeSubdir = join(current, '.claude', subdir)
-    // Filter to existing dirs. This is a perf filter (avoids spawning
-    // ripgrep on non-existent dirs downstream) and the worktree fallback
-    // in loadMarkdownFilesForSubdir relies on it. statSync + explicit error
-    // handling instead of existsSync — re-throws unexpected errors rather
-    // than silently swallowing them. Downstream loadMarkdownFiles handles
-    // the TOCTOU window (dir disappearing before read) gracefully.
-    try {
-      statSync(claudeSubdir)
-      dirs.push(claudeSubdir)
-    } catch (e: unknown) {
-      if (!isFsInaccessible(e)) throw e
-    }
+    yield current
 
     // Stop after processing the git root directory - this prevents commands from parent
     // directories outside the repository from appearing in the project
@@ -284,8 +363,6 @@ export function getProjectDirsUpToHome(
 
     current = parent
   }
-
-  return dirs
 }
 
 /**
@@ -294,140 +371,179 @@ export function getProjectDirsUpToHome(
  * @param cwd Current working directory for project directory traversal
  * @returns Array of parsed markdown files with metadata
  */
+const fulfilledMarkdownLoads = new WeakSet<Promise<MarkdownFile[]>>()
+const pendingMarkdownLoads = new WeakMap<
+  Promise<MarkdownFile[]>,
+  ReturnType<typeof currentInvestigationScope>
+>()
+
 export const loadMarkdownFilesForSubdir = memoize(
-  async function (
-    subdir: ClaudeConfigDirectory,
-    cwd: string,
-  ): Promise<MarkdownFile[]> {
-    const searchStartTime = Date.now()
-    const userDir = join(getClaudeConfigHomeDir(), subdir)
-    const managedDir = join(getManagedFilePath(), '.claude', subdir)
-    const projectDirs = getProjectDirsUpToHome(subdir, cwd)
-
-    // For git worktrees where the worktree does NOT have .claude/<subdir> checked
-    // out (e.g. sparse-checkout), fall back to the main repository's copy.
-    // getProjectDirsUpToHome stops at the worktree root (where the .git file is),
-    // so it never sees the main repo on its own.
-    //
-    // Only add the main repo's copy when the worktree root's .claude/<subdir>
-    // is absent. A standard `git worktree add` checks out the full tree, so the
-    // worktree already has identical .claude/<subdir> content — loading the main
-    // repo's copy too would duplicate every command/agent/skill
-    // (anthropics/claude-code#29599, #28182, #26992).
-    //
-    // projectDirs already reflects existence (getProjectDirsUpToHome checked
-    // each dir), so we compare against that instead of stat'ing again.
-    const gitRoot = findGitRoot(cwd)
-    const canonicalRoot = findCanonicalGitRoot(cwd)
-    if (gitRoot && canonicalRoot && canonicalRoot !== gitRoot) {
-      const worktreeSubdir = normalizePathForComparison(
-        join(gitRoot, '.claude', subdir),
-      )
-      const worktreeHasSubdir = projectDirs.some(
-        dir => normalizePathForComparison(dir) === worktreeSubdir,
-      )
-      if (!worktreeHasSubdir) {
-        const mainClaudeSubdir = join(canonicalRoot, '.claude', subdir)
-        if (!projectDirs.includes(mainClaudeSubdir)) {
-          projectDirs.push(mainClaudeSubdir)
+  (subdir: ClaudeConfigDirectory, cwd: string): Promise<MarkdownFile[]> => {
+    const loading = trackInvestigationOperation(loadMarkdownFilesForSubdirUncached(subdir, cwd))
+    pendingMarkdownLoads.set(loading, currentInvestigationScope())
+    void loading.then(
+      () => {
+        pendingMarkdownLoads.delete(loading)
+        fulfilledMarkdownLoads.add(loading)
+      },
+      error => {
+        pendingMarkdownLoads.delete(loading)
+        try {
+          rethrowSourceFailure(error)
+        } catch {
+          const key = `${subdir}:${cwd}`
+          if (loadMarkdownFilesForSubdir.cache.get(key) === loading) {
+            loadMarkdownFilesForSubdir.cache.delete(key)
+          }
         }
-      }
-    }
-
-    const [managedFiles, userFiles, projectFilesNested] = await Promise.all([
-      // Always load managed (policy settings)
-      loadMarkdownFiles(managedDir).then(_ =>
-        _.map(file => ({
-          ...file,
-          baseDir: managedDir,
-          source: 'policySettings' as const,
-        })),
-      ),
-      // Conditionally load user files
-      isSettingSourceEnabled('userSettings') &&
-      !(subdir === 'agents' && isRestrictedToPluginOnly('agents'))
-        ? loadMarkdownFiles(userDir).then(_ =>
-            _.map(file => ({
-              ...file,
-              baseDir: userDir,
-              source: 'userSettings' as const,
-            })),
-          )
-        : Promise.resolve([]),
-      // Conditionally load project files from all directories up to home
-      isSettingSourceEnabled('projectSettings') &&
-      !(subdir === 'agents' && isRestrictedToPluginOnly('agents'))
-        ? Promise.all(
-            projectDirs.map(projectDir =>
-              loadMarkdownFiles(projectDir).then(_ =>
-                _.map(file => ({
-                  ...file,
-                  baseDir: projectDir,
-                  source: 'projectSettings' as const,
-                })),
-              ),
-            ),
-          )
-        : Promise.resolve([]),
-    ])
-
-    // Flatten nested project files array
-    const projectFiles = projectFilesNested.flat()
-
-    // Combine all files with priority: managed > user > project
-    const allFiles = [...managedFiles, ...userFiles, ...projectFiles]
-
-    // Deduplicate files that resolve to the same physical file (same inode).
-    // This prevents the same file from appearing multiple times when ~/.claude is
-    // symlinked to a directory within the project hierarchy, causing the same
-    // physical file to be discovered through different paths.
-    const fileIdentities = await Promise.all(
-      allFiles.map(file => getFileIdentity(file.filePath)),
+      },
     )
-
-    const seenFileIds = new Map<string, SettingSource>()
-    const deduplicatedFiles: MarkdownFile[] = []
-
-    for (const [i, file] of allFiles.entries()) {
-      const fileId = fileIdentities[i] ?? null
-      if (fileId === null) {
-        // If we can't identify the file, include it (fail open)
-        deduplicatedFiles.push(file)
-        continue
-      }
-      const existingSource = seenFileIds.get(fileId)
-      if (existingSource !== undefined) {
-        logForDebugging(
-          `Skipping duplicate file '${file.filePath}' from ${file.source} (same inode already loaded from ${existingSource})`,
-        )
-        continue
-      }
-      seenFileIds.set(fileId, file.source)
-      deduplicatedFiles.push(file)
-    }
-
-    const duplicatesRemoved = allFiles.length - deduplicatedFiles.length
-    if (duplicatesRemoved > 0) {
-      logForDebugging(
-        `Deduplicated ${duplicatesRemoved} files in ${subdir} (same inode via symlinks or hard links)`,
-      )
-    }
-
-    logEvent(`tengu_dir_search`, {
-      durationMs: Date.now() - searchStartTime,
-      managedFilesFound: managedFiles.length,
-      userFilesFound: userFiles.length,
-      projectFilesFound: projectFiles.length,
-      projectDirsSearched: projectDirs.length,
-      subdir:
-        subdir as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-    })
-
-    return deduplicatedFiles
+    return loading
   },
-  // Custom resolver creates cache key from both subdir and cwd parameters
-  (subdir: ClaudeConfigDirectory, cwd: string) => `${subdir}:${cwd}`,
+  (subdir: ClaudeConfigDirectory, cwd: string): string => {
+    if (currentInvestigationScope()) requireInvestigationEffects([])
+    const key = `${subdir}:${cwd}`
+    const cached = loadMarkdownFilesForSubdir.cache.get(key)
+    const scope = currentInvestigationScope()
+    if (cached && scope !== undefined && (
+      pendingMarkdownLoads.has(cached)
+        ? pendingMarkdownLoads.get(cached) !== scope
+        : !fulfilledMarkdownLoads.has(cached)
+    )) loadMarkdownFilesForSubdir.cache.delete(key)
+    return key
+  },
 )
+
+async function loadMarkdownFilesForSubdirUncached(
+  subdir: ClaudeConfigDirectory,
+  cwd: string,
+): Promise<MarkdownFile[]> {
+  const searchStartTime = Date.now()
+  const userDir = join(getClaudeConfigHomeDir(), subdir)
+  const managedDir = join(getManagedFilePath(), '.claude', subdir)
+  const projectDirs = await getProjectDirsUpToHomeAsync(subdir, cwd)
+
+  // For git worktrees where the worktree does NOT have .claude/<subdir> checked
+  // out (e.g. sparse-checkout), fall back to the main repository's copy.
+  // getProjectDirsUpToHome stops at the worktree root (where the .git file is),
+  // so it never sees the main repo on its own.
+  //
+  // Only add the main repo's copy when the worktree root's .claude/<subdir>
+  // is absent. A standard `git worktree add` checks out the full tree, so the
+  // worktree already has identical .claude/<subdir> content — loading the main
+  // repo's copy too would duplicate every command/agent/skill
+  // (anthropics/claude-code#29599, #28182, #26992).
+  //
+  // projectDirs already reflects existence (getProjectDirsUpToHome checked
+  // each dir), so we compare against that instead of stat'ing again.
+  const gitRoot = await findGitRootAsync(cwd)
+  const canonicalRoot = await findCanonicalGitRootAsync(cwd)
+  if (gitRoot && canonicalRoot && canonicalRoot !== gitRoot) {
+    const worktreeSubdir = normalizePathForComparison(
+      join(gitRoot, '.claude', subdir),
+    )
+    const worktreeHasSubdir = projectDirs.some(
+      dir => normalizePathForComparison(dir) === worktreeSubdir,
+    )
+    if (!worktreeHasSubdir) {
+      const mainClaudeSubdir = join(canonicalRoot, '.claude', subdir)
+      if (!projectDirs.includes(mainClaudeSubdir)) {
+        projectDirs.push(mainClaudeSubdir)
+      }
+    }
+  }
+
+  const [managedFiles, userFiles, projectFilesNested] = await Promise.all([
+    // Always load managed (policy settings)
+    loadMarkdownFiles(managedDir).then(_ =>
+      _.map(file => ({
+        ...file,
+        baseDir: managedDir,
+        source: 'policySettings' as const,
+      })),
+    ),
+    // Conditionally load user files
+    isSettingSourceEnabled('userSettings') &&
+    !(subdir === 'agents' && isRestrictedToPluginOnly('agents'))
+      ? loadMarkdownFiles(userDir).then(_ =>
+          _.map(file => ({
+            ...file,
+            baseDir: userDir,
+            source: 'userSettings' as const,
+          })),
+        )
+      : Promise.resolve([]),
+    // Conditionally load project files from all directories up to home
+    isSettingSourceEnabled('projectSettings') &&
+    !(subdir === 'agents' && isRestrictedToPluginOnly('agents'))
+      ? Promise.all(
+          projectDirs.map(projectDir =>
+            loadMarkdownFiles(projectDir).then(_ =>
+              _.map(file => ({
+                ...file,
+                baseDir: projectDir,
+                source: 'projectSettings' as const,
+              })),
+            ),
+          ),
+        )
+      : Promise.resolve([]),
+  ])
+
+  // Flatten nested project files array
+  const projectFiles = projectFilesNested.flat()
+
+  // Combine all files with priority: managed > user > project
+  const allFiles = [...managedFiles, ...userFiles, ...projectFiles]
+
+  // Deduplicate files that resolve to the same physical file (same inode).
+  // This prevents the same file from appearing multiple times when ~/.claude is
+  // symlinked to a directory within the project hierarchy, causing the same
+  // physical file to be discovered through different paths.
+  const fileIdentities = await Promise.all(
+    allFiles.map(file => getFileIdentity(file.filePath)),
+  )
+
+  const seenFileIds = new Map<string, SettingSource>()
+  const deduplicatedFiles: MarkdownFile[] = []
+
+  for (const [i, file] of allFiles.entries()) {
+    const fileId = fileIdentities[i] ?? null
+    if (fileId === null) {
+      // If we can't identify the file, include it (fail open)
+      deduplicatedFiles.push(file)
+      continue
+    }
+    const existingSource = seenFileIds.get(fileId)
+    if (existingSource !== undefined) {
+      logForDebugging(
+        `Skipping duplicate file '${file.filePath}' from ${file.source} (same inode already loaded from ${existingSource})`,
+      )
+      continue
+    }
+    seenFileIds.set(fileId, file.source)
+    deduplicatedFiles.push(file)
+  }
+
+  const duplicatesRemoved = allFiles.length - deduplicatedFiles.length
+  if (duplicatesRemoved > 0) {
+    logForDebugging(
+      `Deduplicated ${duplicatesRemoved} files in ${subdir} (same inode via symlinks or hard links)`,
+    )
+  }
+
+  logEvent(`tengu_dir_search`, {
+    durationMs: Date.now() - searchStartTime,
+    managedFilesFound: managedFiles.length,
+    userFilesFound: userFiles.length,
+    projectFilesFound: projectFiles.length,
+    projectDirsSearched: projectDirs.length,
+    subdir:
+      subdir as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+  })
+
+  return deduplicatedFiles
+}
 
 /**
  * Native implementation to find markdown files using Node.js fs APIs
@@ -457,6 +573,7 @@ async function findMarkdownFilesNative(
 
   async function walk(currentDir: string): Promise<void> {
     if (signal.aborted) {
+      rethrowSourceFailure(signal.reason, signal)
       return
     }
 
@@ -465,12 +582,12 @@ async function findMarkdownFilesNative(
     // that exceed JavaScript's Number precision (53 bits).
     // See: https://github.com/anthropics/claude-code/issues/13893
     try {
-      const stats = await stat(currentDir, { bigint: true })
+      const stats = await statSourcePath(currentDir, { bigint: true, signal })
       if (stats.isDirectory()) {
         const dirKey =
           stats.dev !== undefined && stats.ino !== undefined
             ? `${stats.dev}:${stats.ino}` // Unix/Linux: device + inode
-            : await realpath(currentDir) // Windows: canonical path
+            : await realSourcePath(currentDir, signal) // Windows: canonical path
 
         if (visitedDirs.has(dirKey)) {
           logForDebugging(
@@ -481,6 +598,7 @@ async function findMarkdownFilesNative(
         visitedDirs.add(dirKey)
       }
     } catch (error) {
+      rethrowSourceFailure(error, signal)
       const errorMessage =
         error instanceof Error ? error.message : String(error)
       logForDebugging(`Failed to stat directory ${currentDir}: ${errorMessage}`)
@@ -488,10 +606,11 @@ async function findMarkdownFilesNative(
     }
 
     try {
-      const entries = await readdir(currentDir, { withFileTypes: true })
+      const entries = await readSourceDirectory(currentDir, signal)
 
       for (const entry of entries) {
         if (signal.aborted) {
+          rethrowSourceFailure(signal.reason, signal)
           break
         }
 
@@ -501,13 +620,14 @@ async function findMarkdownFilesNative(
           // Handle symlinks: isFile() and isDirectory() return false for symlinks
           if (entry.isSymbolicLink()) {
             try {
-              const stats = await stat(fullPath) // stat() follows symlinks
+              const stats = await statSourcePath(fullPath, { signal }) // stat() follows symlinks
               if (stats.isDirectory()) {
                 await walk(fullPath)
               } else if (stats.isFile() && entry.name.endsWith('.md')) {
                 files.push(fullPath)
               }
             } catch (error) {
+              rethrowSourceFailure(error, signal)
               const errorMessage =
                 error instanceof Error ? error.message : String(error)
               logForDebugging(
@@ -520,6 +640,7 @@ async function findMarkdownFilesNative(
             files.push(fullPath)
           }
         } catch (error) {
+          rethrowSourceFailure(error, signal)
           // Skip files/directories we can't access
           const errorMessage =
             error instanceof Error ? error.message : String(error)
@@ -527,6 +648,7 @@ async function findMarkdownFilesNative(
         }
       }
     } catch (error) {
+      rethrowSourceFailure(error, signal)
       // If readdir fails (e.g., permission denied), log and continue
       const errorMessage =
         error instanceof Error ? error.message : String(error)
@@ -555,8 +677,9 @@ async function loadMarkdownFiles(dir: string): Promise<
   // - Fallback: native Node.js (when CLAUDE_CODE_USE_NATIVE_FILE_SEARCH is set)
   //
   // Why both? Ripgrep has poor startup performance in native builds.
-  const useNative = isEnvTruthy(process.env.CLAUDE_CODE_USE_NATIVE_FILE_SEARCH)
-  const signal = AbortSignal.timeout(3000)
+  const scoped = currentInvestigationScope() !== undefined
+  const useNative = scoped || isEnvTruthy(process.env.CLAUDE_CODE_USE_NATIVE_FILE_SEARCH)
+  const signal = investigationSignal() ?? AbortSignal.timeout(3000)
   let files: string[]
   try {
     files = useNative
@@ -567,6 +690,7 @@ async function loadMarkdownFiles(dir: string): Promise<
           signal,
         )
   } catch (e: unknown) {
+    rethrowSourceFailure(e, signal)
     // Handle missing/inaccessible dir directly instead of pre-checking
     // existence (TOCTOU). findMarkdownFilesNative already catches internally;
     // ripGrep rejects on inaccessible target paths.
@@ -577,7 +701,9 @@ async function loadMarkdownFiles(dir: string): Promise<
   const results = await Promise.all(
     files.map(async filePath => {
       try {
-        const rawContent = await readFile(filePath, { encoding: 'utf-8' })
+        const rawContent = (await readSourceBytes(filePath, {
+          signal: scoped ? signal : undefined,
+        })).toString('utf-8')
         const { frontmatter, content } = parseFrontmatter(rawContent, filePath)
 
         return {
@@ -586,6 +712,7 @@ async function loadMarkdownFiles(dir: string): Promise<
           content,
         }
       } catch (error) {
+        rethrowSourceFailure(error, scoped ? signal : undefined)
         const errorMessage =
           error instanceof Error ? error.message : String(error)
         logForDebugging(

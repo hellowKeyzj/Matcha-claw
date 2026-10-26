@@ -36,6 +36,7 @@ pub enum ToolCallError {
     InvalidParams,
     Internal,
     Execution(Value),
+    ExecutionText(String),
 }
 
 pub struct ToolCatalog {
@@ -260,6 +261,12 @@ async fn call_tool(
     let (result, is_error) = match catalog.call(name, arguments).await {
         Ok(result) => (result, false),
         Err(ToolCallError::Execution(result)) => (result, true),
+        Err(ToolCallError::ExecutionText(text)) => {
+            return Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": true,
+            }));
+        }
         Err(ToolCallError::InvalidParams) => return Err(invalid_params()),
         Err(ToolCallError::Internal) => return Err(internal_error()),
     };

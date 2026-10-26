@@ -22,6 +22,7 @@ pub async fn dispatch(
             config::dispatch(method, params, config, sessions).await
         }
         "models.list" => models::list(params, sessions).await,
+        "models.thinking" => models::thinking(params, config, sessions).await,
         "auth.status" | "auth.login" | "auth.logout" => {
             auth::dispatch(method, params, config, sessions).await
         }

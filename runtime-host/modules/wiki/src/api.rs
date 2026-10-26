@@ -203,6 +203,16 @@ impl WikiHandle {
         .unwrap_or(Err(WikiFailure::OwnerUnavailable))
     }
 
+    /// Export an explicitly selected immutable version; never reads today's source as a fallback.
+    pub async fn export_version(
+        &self,
+        input: crate::history::WikiVersionInput,
+    ) -> Result<crate::history::WikiVersionExport, WikiFailure> {
+        self.request_query(None, |reply| WikiQuery::ExportVersion { input, reply })
+            .await
+            .unwrap_or(Err(WikiFailure::OwnerUnavailable))
+    }
+
     pub async fn read_source_preview(
         &self,
         input: WikiReadInput,

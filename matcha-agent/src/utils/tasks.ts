@@ -140,11 +140,17 @@ const LOCK_OPTIONS = {
 const heldTaskLists = new AsyncLocalStorage<ReadonlySet<string>>()
 
 // All native writers share the existing proper-lockfile list lock, including cascades.
-export async function withTaskListLock<T>(taskListId: string, operation: () => Promise<T>): Promise<T> {
+export async function withTaskListLock<T>(
+  taskListId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
   const key = getTasksDir(taskListId)
   const held = heldTaskLists.getStore()
   if (held?.has(key)) return operation()
-  const release = await lockfile.lock(await ensureTaskListLockFile(taskListId), LOCK_OPTIONS)
+  const release = await lockfile.lock(
+    await ensureTaskListLockFile(taskListId),
+    LOCK_OPTIONS,
+  )
   try {
     return await heldTaskLists.run(new Set([...(held ?? []), key]), operation)
   } finally {
@@ -161,7 +167,8 @@ async function readHighWaterMark(taskListId: string): Promise<number> {
   try {
     const content = (await readFile(path, 'utf-8')).trim()
     const value = parseInt(content, 10)
-    if (!Number.isSafeInteger(value) || value < 0 || String(value) !== content) throw new Error('task_native_schema')
+    if (!Number.isSafeInteger(value) || value < 0 || String(value) !== content)
+      throw new Error('task_native_schema')
     return value
   } catch (error) {
     if (getErrnoCode(error) === 'ENOENT') return 0
@@ -334,7 +341,8 @@ export async function createTask(
   return withTaskListLock(taskListId, async () => {
     // Read highest ID from disk while holding the lock
     const highestId = await findHighestTaskId(taskListId)
-    if (!Number.isSafeInteger(highestId + 1)) throw new Error('task_id_exhausted')
+    if (!Number.isSafeInteger(highestId + 1))
+      throw new Error('task_id_exhausted')
     const id = String(highestId + 1)
     const task: Task = { id, ...taskData }
     const path = getTaskPath(taskListId, id)
@@ -351,14 +359,19 @@ export async function getTask(
   try {
     return await readTask(taskListId, taskId)
   } catch (error) {
-    logForDebugging(`[Tasks] Failed to read task ${taskId}: ${errorMessage(error)}`)
+    logForDebugging(
+      `[Tasks] Failed to read task ${taskId}: ${errorMessage(error)}`,
+    )
     logError(error)
     return null
   }
 }
 
 // Structured controls must distinguish missing data from schema/IO failures.
-export async function readTask(taskListId: string, taskId: string): Promise<Task | null> {
+export async function readTask(
+  taskListId: string,
+  taskId: string,
+): Promise<Task | null> {
   const path = getTaskPath(taskListId, taskId)
   try {
     const content = await readFile(path, 'utf-8')
@@ -379,7 +392,14 @@ export async function readTask(taskListId: string, taskId: string): Promise<Task
       }
     }
     const parsed = TaskSchema().safeParse(data)
-    if (!parsed.success || parsed.data.id !== taskId || [...parsed.data.blocks, ...parsed.data.blockedBy].some(id => !/^[a-zA-Z0-9_-]+$/.test(id))) throw new Error('task_native_schema')
+    if (
+      !parsed.success ||
+      parsed.data.id !== taskId ||
+      [...parsed.data.blocks, ...parsed.data.blockedBy].some(
+        id => !/^[a-zA-Z0-9_-]+$/.test(id),
+      )
+    )
+      throw new Error('task_native_schema')
     return parsed.data
   } catch (error) {
     if (getErrnoCode(error) === 'ENOENT') return null
@@ -410,7 +430,9 @@ export async function updateTask(
   taskId: string,
   updates: Partial<Omit<Task, 'id'>>,
 ): Promise<Task | null> {
-  return withTaskListLock(taskListId, () => updateTaskLocked(taskListId, taskId, updates))
+  return withTaskListLock(taskListId, () =>
+    updateTaskLocked(taskListId, taskId, updates),
+  )
 }
 
 async function updateTaskLocked(
@@ -447,11 +469,19 @@ export async function deleteTask(
   }
 }
 
-export async function deleteTaskStrict(taskListId: string, taskId: string): Promise<boolean> {
-  return withTaskListLock(taskListId, () => deleteTaskLocked(taskListId, taskId))
+export async function deleteTaskStrict(
+  taskListId: string,
+  taskId: string,
+): Promise<boolean> {
+  return withTaskListLock(taskListId, () =>
+    deleteTaskLocked(taskListId, taskId),
+  )
 }
 
-async function deleteTaskLocked(taskListId: string, taskId: string): Promise<boolean> {
+async function deleteTaskLocked(
+  taskListId: string,
+  taskId: string,
+): Promise<boolean> {
   const path = getTaskPath(taskListId, taskId)
 
   try {
@@ -498,9 +528,16 @@ async function deleteTaskLocked(taskListId: string, taskId: string): Promise<boo
   }
 }
 
-export async function readTaskView(taskListId: string, task: Task): Promise<Task & { createdAt: number; updatedAt: number }> {
+export async function readTaskView(
+  taskListId: string,
+  task: Task,
+): Promise<Task & { createdAt: number; updatedAt: number }> {
   const file = await stat(getTaskPath(taskListId, task.id))
-  return { ...task, createdAt: Math.max(0, Math.floor(file.birthtimeMs)), updatedAt: Math.max(0, Math.floor(file.mtimeMs)) }
+  return {
+    ...task,
+    createdAt: Math.max(0, Math.floor(file.birthtimeMs)),
+    updatedAt: Math.max(0, Math.floor(file.mtimeMs)),
+  }
 }
 
 export async function readTasks(taskListId: string): Promise<Task[]> {
@@ -512,7 +549,9 @@ export async function readTasks(taskListId: string): Promise<Task[]> {
     throw error
   }
   const tasks: Task[] = []
-  for (const file of files.filter(name => name.endsWith('.json') && !name.startsWith('.')).sort()) {
+  for (const file of files
+    .filter(name => name.endsWith('.json') && !name.startsWith('.'))
+    .sort()) {
     const id = file.slice(0, -5)
     if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('task_native_schema')
     const task = await readTask(taskListId, id)
@@ -542,10 +581,16 @@ export async function blockTask(
   fromTaskId: string,
   toTaskId: string,
 ): Promise<boolean> {
-  return withTaskListLock(taskListId, () => blockTaskLocked(taskListId, fromTaskId, toTaskId))
+  return withTaskListLock(taskListId, () =>
+    blockTaskLocked(taskListId, fromTaskId, toTaskId),
+  )
 }
 
-async function blockTaskLocked(taskListId: string, fromTaskId: string, toTaskId: string): Promise<boolean> {
+async function blockTaskLocked(
+  taskListId: string,
+  fromTaskId: string,
+  toTaskId: string,
+): Promise<boolean> {
   const [fromTask, toTask] = await Promise.all([
     readTask(taskListId, fromTaskId),
     readTask(taskListId, toTaskId),
@@ -576,20 +621,31 @@ export type TaskPatch = Partial<Omit<Task, 'id' | 'blocks' | 'blockedBy'>> & {
   addBlockedBy?: string[]
 }
 
-export async function patchTask(taskListId: string, taskId: string, patch: TaskPatch): Promise<Task | null> {
+export async function patchTask(
+  taskListId: string,
+  taskId: string,
+  patch: TaskPatch,
+): Promise<Task | null> {
   return withTaskListLock(taskListId, async () => {
     const current = await readTask(taskListId, taskId)
     if (!current) return null
     const { addBlocks = [], addBlockedBy = [], metadata, ...fields } = patch
     const updates: Partial<Omit<Task, 'id'>> = fields
     for (const id of [...addBlocks, ...addBlockedBy]) {
-      if (!await readTask(taskListId, id)) throw new Error('task_dependency_missing')
+      if (!(await readTask(taskListId, id)))
+        throw new Error('task_dependency_missing')
     }
     if (metadata !== undefined) {
       const merged = { ...(current.metadata ?? {}) }
       for (const [key, value] of Object.entries(metadata)) {
         if (value === null) delete merged[key]
-        else Object.defineProperty(merged, key, { value, enumerable: true, configurable: true, writable: true })
+        else
+          Object.defineProperty(merged, key, {
+            value,
+            enumerable: true,
+            configurable: true,
+            writable: true,
+          })
       }
       updates.metadata = merged
     }
@@ -660,7 +716,9 @@ export async function claimTask(
   claimantAgentId: string,
   options: ClaimTaskOptions = {},
 ): Promise<ClaimTaskResult> {
-  return withTaskListLock(taskListId, () => claimTaskLocked(taskListId, taskId, claimantAgentId, options))
+  return withTaskListLock(taskListId, () =>
+    claimTaskLocked(taskListId, taskId, claimantAgentId, options),
+  )
 }
 
 async function claimTaskLocked(

@@ -1,5 +1,7 @@
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk'
 import { randomUUID } from 'crypto'
+import { investigationFetch } from './investigation.js'
+import { currentInvestigationScope } from '../../world/investigation.js'
 import type { GoogleAuth } from 'google-auth-library'
 import {
   checkAndRefreshOAuthTokenIfNeeded,
@@ -74,7 +76,8 @@ import {
 
 function createStderrLogger(): ClientOptions['logger'] {
   const log = (level: string, msg: unknown, args: unknown[]) => {
-    if (sealedModelContext()) console.error(`[Anthropic SDK ${level}]`, SEALED_REDACTION)
+    if (sealedModelContext())
+      console.error(`[Anthropic SDK ${level}]`, SEALED_REDACTION)
     else console.error(`[Anthropic SDK ${level}]`, msg, ...args)
   }
   return {
@@ -144,7 +147,7 @@ export async function getAnthropicClient({
 
   const ARGS = {
     defaultHeaders,
-    maxRetries,
+    maxRetries: currentInvestigationScope() ? 0 : maxRetries,
     timeout: parseInt(process.env.API_TIMEOUT_MS || String(600 * 1000), 10),
     dangerouslyAllowBrowser: true,
     fetchOptions: getProxyFetchOptions({
@@ -364,7 +367,9 @@ function buildFetch(
   source: string | undefined,
 ): ClientOptions['fetch'] {
   // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
-  const inner = fetchOverride ?? globalThis.fetch
+  const provider = getAPIProvider()
+  const protocol = provider === 'bedrock' || provider === 'vertex' ? provider : 'anthropic'
+  const inner = investigationFetch((fetchOverride ?? globalThis.fetch) as typeof fetch, protocol)
   // Only send to the first-party API — Bedrock/Vertex/Foundry don't log it
   // and unknown headers risk rejection by strict proxies (inc-4029 class).
   const injectClientRequestId =

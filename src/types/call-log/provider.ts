@@ -1,4 +1,6 @@
 import type { CallDetailByModule } from '../call-log';
+import { decodeProviderRuntimeReports, isProviderDiagnostic, type ProviderDiagnostic, type ProviderRuntimeReport } from '../provider-runtime-report';
+export { PROVIDER_CALL_DIAGNOSTIC_REASONS, PROVIDER_CALL_PRIVATE_RESOLVER_CODES, type ProviderCallDiagnosticReason, type ProviderCallPrivateResolverCode } from '../provider-runtime-report';
 
 export type ProviderCallKind =
   | 'listAccounts' | 'getAccount' | 'replaceAccount' | 'deleteAccount'
@@ -6,30 +8,6 @@ export type ProviderCallKind =
   | 'listRouting' | 'replaceRouting' | 'textGenerationModelLimits' | 'generateText'
   | 'selectSessionModel' | 'selectMatchaSessionModelRuntime'
   | 'acceptSessionRuntimeModels' | 'selectSessionModelRebound';
-
-export const PROVIDER_CALL_DIAGNOSTIC_REASONS = [
-  'invalid-provider-key', 'config-snapshot-unavailable', 'invalid-config-document',
-  'projection-serialize-failed', 'config-document-invalid', 'request-build-failed',
-  'config-readback-unavailable', 'config-readback-mismatch', 'gateway-write-rejected',
-  'gateway-write-unknown', 'provider-account-configuration-invalid',
-  'provider-credential-unavailable', 'provider-key-duplicate',
-  'provider-model-capability-invalid', 'provider-model-identifier-invalid',
-  'provider-model-token-limit-invalid', 'provider-model-persistence-failed',
-  'provider-routing-account-unavailable', 'provider-routing-credential-unavailable',
-  'provider-routing-invalid', 'provider-routing-model-capability-unavailable',
-  'provider-routing-model-unavailable', 'provider-routing-persistence-failed',
-  'private-profile-deadline', 'private-profile-credential-missing',
-  'private-profile-invalid-provider-key', 'private-resolver-unavailable',
-  'private-transaction-settle-failed', 'unknown',
-] as const;
-export type ProviderCallDiagnosticReason = typeof PROVIDER_CALL_DIAGNOSTIC_REASONS[number];
-
-export const PROVIDER_CALL_PRIVATE_RESOLVER_CODES = [
-  'invalid-request', 'credential-missing', 'credential-decrypt-failed',
-  'credential-provider-mismatch', 'credential-invalid', 'auth-profile-read-invalid',
-  'auth-profile-write-failed', 'credential-store-unavailable', 'unknown',
-] as const;
-export type ProviderCallPrivateResolverCode = typeof PROVIDER_CALL_PRIVATE_RESOLVER_CODES[number];
 
 export interface ProviderCallDetail {
   kind: ProviderCallKind;
@@ -43,14 +21,12 @@ export interface ProviderCallDetail {
   commit: 'committed' | 'unknown' | null;
   accountId: string | null;
   accountRevision: number | null;
-  diagnostic: {
-    reason: ProviderCallDiagnosticReason | null;
-    privateResolverCode: ProviderCallPrivateResolverCode | null;
-  } | null;
+  diagnostic: ProviderDiagnostic | null;
   native: {
     changed: boolean;
     applied: 'confirmed' | 'unknown';
     observed: 'matches' | 'mismatch' | 'unavailable';
+    reports: ProviderRuntimeReport[];
   } | null;
 }
 
@@ -88,14 +64,12 @@ export function decodeProviderCallDetail(value: unknown): CallDetailByModule['pr
     || ![null, 'committed', 'unknown'].includes(value.commit as string | null)
     || !(value.accountId === null || typeof value.accountId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value.accountId))
     || !(value.accountRevision === null || Number.isSafeInteger(value.accountRevision) && (value.accountRevision as number) > 0)) return undefined;
-  if (value.diagnostic !== null
-    && (!hasKeys(value.diagnostic, ['reason', 'privateResolverCode'])
-      || !(value.diagnostic.reason === null || PROVIDER_CALL_DIAGNOSTIC_REASONS.includes(value.diagnostic.reason as ProviderCallDiagnosticReason))
-      || !(value.diagnostic.privateResolverCode === null || PROVIDER_CALL_PRIVATE_RESOLVER_CODES.includes(value.diagnostic.privateResolverCode as ProviderCallPrivateResolverCode)))) return undefined;
+  if (!isProviderDiagnostic(value.diagnostic)) return undefined;
   if (value.native !== null
-    && (!hasKeys(value.native, ['changed', 'applied', 'observed'])
+    && (!hasKeys(value.native, ['changed', 'applied', 'observed', 'reports'])
       || typeof value.native.changed !== 'boolean'
       || !['confirmed', 'unknown'].includes(value.native.applied as string)
-      || !['matches', 'mismatch', 'unavailable'].includes(value.native.observed as string))) return undefined;
+      || !['matches', 'mismatch', 'unavailable'].includes(value.native.observed as string)
+      || decodeProviderRuntimeReports(value.native.reports) === undefined)) return undefined;
   return value as unknown as ProviderCallDetail;
 }

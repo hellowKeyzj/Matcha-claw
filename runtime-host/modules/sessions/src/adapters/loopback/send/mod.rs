@@ -199,29 +199,21 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::state::SessionEndpoint;
 
-    fn request(adapter: &str) -> Value {
+    fn request(provider: SessionProvider) -> Value {
+        let session_key = match provider {
+            SessionProvider::OpenClaw => "agent:main:demo",
+            SessionProvider::MatchaAgent => "matcha-agent:main:demo",
+        };
+        let identity = SessionIdentity::new(session_key, provider, "main".into()).unwrap();
         json!({
             "id": "session.prompt",
             "operationId": "sessions.send",
-            "scope": {
-                "kind": "session",
-                "endpoint": {
-                    "kind": "native-runtime",
-                    "runtimeAdapterId": adapter,
-                    "runtimeInstanceId": "local",
-                },
-                "sessionKey": "agent:main:demo",
-                "routeKey": "renderer-route:test",
-            },
-            "target": { "kind": "session" },
+            "scope": { "kind": "session", "identity": identity },
+            "target": { "kind": "session", "identity": identity },
             "input": {
-                "endpoint": {
-                    "kind": "native-runtime",
-                    "runtimeAdapterId": adapter,
-                    "runtimeInstanceId": "local",
-                },
-                "sessionKey": "agent:main:demo",
+                "identity": identity,
                 "message": "describe this",
                 "runId": "run-1",
                 "deliver": true,
@@ -235,31 +227,40 @@ mod tests {
     }
 
     #[test]
-    fn parses_supported_and_unsupported_native_endpoint_commands() {
-        let openclaw = SessionSendRequest::decode_semantics(request("openclaw"))
+    fn parses_supported_and_rejects_unsupported_native_endpoint_commands() {
+        let openclaw = SessionSendRequest::decode_semantics(request(SessionProvider::OpenClaw))
             .unwrap()
             .into_command(None)
             .unwrap();
-        assert_eq!(openclaw.endpoint, NativeEndpoint::OpenClawLocal);
+        assert_eq!(
+            openclaw.identity.endpoint,
+            SessionEndpoint::local(SessionProvider::OpenClaw)
+        );
         assert_eq!(openclaw.endpoint_session_id, None);
         assert_eq!(openclaw.deliver, Some(true));
 
-        let matcha = SessionSendRequest::decode_semantics(request("matcha-agent"))
+        let matcha = SessionSendRequest::decode_semantics(request(SessionProvider::MatchaAgent))
             .unwrap()
             .into_command(None)
             .unwrap();
-        assert_eq!(matcha.endpoint, NativeEndpoint::MatchaAgentLocal);
+        assert_eq!(
+            matcha.identity.endpoint,
+            SessionEndpoint::local(SessionProvider::MatchaAgent)
+        );
 
-        let unsupported = SessionSendRequest::decode_semantics(request("other-runtime"))
-            .unwrap()
-            .into_command(None)
-            .unwrap();
-        assert_eq!(unsupported.endpoint, NativeEndpoint::Unsupported);
+        let mut unsupported = request(SessionProvider::OpenClaw);
+        for part in ["scope", "target", "input"] {
+            unsupported[part]["identity"]["endpoint"]["runtimeAdapterId"] = json!("other-runtime");
+        }
+        assert_eq!(
+            SessionSendRequest::decode_semantics(unsupported).map(|_| ()),
+            Err(RequestError::Invalid)
+        );
     }
 
     #[test]
     fn preserves_public_endpoint_session_binding_on_active_send() {
-        let mut value = request("openclaw");
+        let mut value = request(SessionProvider::OpenClaw);
         value["input"]["endpointSessionId"] = json!("endpoint-session-1");
 
         let command = SessionSendRequest::decode_semantics(value)
@@ -270,7 +271,7 @@ mod tests {
             command.endpoint_session_id.as_deref(),
             Some("endpoint-session-1")
         );
-        assert_eq!(command.session_key, "agent:main:demo");
+        assert_eq!(command.identity.session_key, "agent:main:demo");
         assert_eq!(command.run_id.as_deref(), Some("run-1"));
     }
 
@@ -281,9 +282,10 @@ mod tests {
             "agent:main:cron:heartbeat-main:run:run-1",
             "cron:heartbeat-main",
         ] {
-            let mut value = request("openclaw");
-            value["scope"]["sessionKey"] = json!(session_key);
-            value["input"]["sessionKey"] = json!(session_key);
+            let mut value = request(SessionProvider::OpenClaw);
+            value["scope"]["identity"]["sessionKey"] = json!(session_key);
+            value["target"]["identity"]["sessionKey"] = json!(session_key);
+            value["input"]["identity"]["sessionKey"] = json!(session_key);
 
             assert_eq!(
                 SessionSendRequest::decode_semantics(value)
@@ -295,7 +297,7 @@ mod tests {
 
     #[test]
     fn preserves_host_private_trace_id_through_command_resolution() {
-        let command = SessionSendRequest::decode_semantics(request("openclaw"))
+        let command = SessionSendRequest::decode_semantics(request(SessionProvider::OpenClaw))
             .unwrap()
             .into_command(Some("trace-1".into()))
             .unwrap();
@@ -311,7 +313,7 @@ mod tests {
 
     #[test]
     fn rejects_model_selection_on_prompt_send() {
-        let mut value = request("openclaw");
+        let mut value = request(SessionProvider::OpenClaw);
         value["input"]["modelSelectionId"] = json!("account-1/model-1");
 
         assert_eq!(
@@ -323,7 +325,7 @@ mod tests {
 
     #[test]
     fn accepts_text_requests_without_attachments() {
-        let mut value = request("openclaw");
+        let mut value = request(SessionProvider::OpenClaw);
         value["input"]["attachments"] = json!([]);
 
         let command = SessionSendRequest::decode_semantics(value)
@@ -335,7 +337,7 @@ mod tests {
 
     #[test]
     fn accepts_legacy_prompt_without_run_id_and_with_idempotency_key() {
-        let mut value = request("openclaw");
+        let mut value = request(SessionProvider::OpenClaw);
         value["input"].as_object_mut().unwrap().remove("runId");
         value["input"]["idempotencyKey"] = json!("idem-1");
 
@@ -351,7 +353,7 @@ mod tests {
 
     #[test]
     fn accepts_main_materialized_generic_attachments() {
-        let mut value = request("openclaw");
+        let mut value = request(SessionProvider::OpenClaw);
         value["input"]["attachments"] = json!([{
             "mimeType": "text/plain",
             "fileName": "fixed-profile.txt",
@@ -371,13 +373,13 @@ mod tests {
     fn rejects_malformed_requests_without_validating_peer_media_grammar() {
         for value in [
             {
-                let mut value = request("openclaw");
+                let mut value = request(SessionProvider::OpenClaw);
                 value["input"]["attachments"][0]["filePath"] = json!("C:/private/image.png");
                 value
             },
             {
-                let mut value = request("openclaw");
-                value["scope"]["sessionKey"] = json!("agent:main:other");
+                let mut value = request(SessionProvider::OpenClaw);
+                value["scope"]["identity"]["sessionKey"] = json!("agent:main:other");
                 value
             },
         ] {

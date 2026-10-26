@@ -1,4 +1,4 @@
-import type { ManualTeamCandidate } from '@/stores/teams';
+import type { ManualTeamCandidate } from '@/plugins/teams/store';
 import type { OrganizationProvisionProgress, TeamCreationFailure } from './call-log/organization';
 
 export interface TeamCreationObserver {

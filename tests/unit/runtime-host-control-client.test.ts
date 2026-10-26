@@ -8,6 +8,7 @@ import {
 } from '../../electron/main/runtime-host-delivery/control';
 
 class ControlStreams {
+  private readonly inputEvents = new EventEmitter();
   readonly output = new EventEmitter();
   readonly writes: Buffer[] = [];
   readonly input: RuntimeHostControlInput = {
@@ -16,6 +17,8 @@ class ControlStreams {
       callback(null);
       return true;
     },
+    on: this.inputEvents.on.bind(this.inputEvents),
+    removeListener: this.inputEvents.removeListener.bind(this.inputEvents),
   };
 }
 

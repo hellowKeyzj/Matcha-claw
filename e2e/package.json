@@ -1,0 +1,32 @@
+{
+  "name": "@matchaclaw/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^24.15.0"
+  },
+  "scripts": {
+    "verify": "node scripts/check-structure.mjs && eslint src --max-warnings 0 && tsc --noEmit && node scripts/check-enforcement.mjs",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "license:activate": "node scripts/activate-license.mjs",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@serenity-js/assertions": "3.49.0",
+    "@serenity-js/core": "3.49.0",
+    "@serenity-js/html-reporter": "3.49.0",
+    "@serenity-js/playwright": "3.49.0",
+    "@serenity-js/playwright-test": "3.49.0",
+    "@serenity-js/web": "3.49.0",
+    "@types/node": "24.10.0",
+    "eslint": "9.39.1",
+    "eslint-import-resolver-typescript": "4.4.4",
+    "eslint-plugin-boundaries": "7.1.0",
+    "playwright-core": "1.64.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.48.0"
+  }
+}

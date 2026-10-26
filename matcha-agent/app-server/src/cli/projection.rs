@@ -103,7 +103,10 @@ pub async fn environment(
                 "Managed MCP sources must be projected through the Agent's MCP binding",
             ));
         }
-        if reserved_environment(&target) || env_name(source.clone()).starts_with("MATCHA_SEALED_") {
+        if reserved_environment(&target)
+            || env_name(source.clone()).starts_with("MATCHA_SEALED_")
+            || env_name(source.clone()).starts_with("MATCHA_WORLD_")
+        {
             return Err(Error::invalid(
                 "CLI environment cannot override the Agent's native directories, initialization, recovery policy, or scoped sealed access",
             ));
@@ -257,6 +260,9 @@ pub(crate) async fn launch(
                 | "--mcp-config"
                 | "--strict-mcp-config"
                 | "--model"
+                | "--effort"
+                | "--effort-capabilities"
+                | "--mcp-oauth-control"
                 | "--agent"
                 | "--agents"
                 | "--system-prompt"
@@ -282,11 +288,16 @@ pub(crate) async fn launch(
     let mut env = environment(config, paths, agent_id).await?;
     let mut command_args = config.cli.args.clone();
     // The native entrypoint dispatches this fast path only when weixin is argv[0].
-    if args.first().map(String::as_str) != Some("weixin")
+    let capability_query = args.first().map(String::as_str) == Some("--effort-capabilities");
+    let settings_args = if args.first().map(String::as_str) != Some("weixin")
         && !args.iter().any(|argument| argument == "--settings")
     {
-        command_args.push("--settings".into());
-        command_args.push(path_string(settings_file(paths, agent_id)?)?);
+        vec!["--settings".into(), path_string(settings_file(paths, agent_id)?)?]
+    } else {
+        Vec::new()
+    };
+    if !capability_query {
+        command_args.extend(settings_args.iter().cloned());
     }
     if args
         .iter()
@@ -295,6 +306,9 @@ pub(crate) async fn launch(
         command_args.extend(crate::mcp::project(config, paths, agent_id, &mut env).await?);
     }
     command_args.extend(args);
+    if capability_query {
+        command_args.extend(settings_args);
+    }
     Ok(Launch {
         command: config.cli.command.clone(),
         args: command_args,
@@ -338,6 +352,7 @@ pub(crate) fn env_name(name: String) -> String {
 
 fn reserved_environment(name: &str) -> bool {
     name.starts_with("MATCHA_SEALED_")
+        || name.starts_with("MATCHA_WORLD_")
         || matches!(
             name,
             "CLAUDE_CONFIG_DIR"

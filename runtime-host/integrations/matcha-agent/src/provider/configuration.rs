@@ -2,12 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use connectors::{ConnectorSecretRef, ConnectorSecretResolution, ConnectorSecretResolverPort};
 use provider_module::{
-    ProviderAccount, ProviderAccountAuthMode, ProviderAccountKind, ProviderApiProtocol,
-    ProviderAppliedStatus, ProviderConfigWriteEffect, ProviderNativeConfigurationCommand,
+    ProviderAccount, ProviderAccountAuthMode, ProviderAccountExecution,
+    ProviderAccountExecutionStatus, ProviderAccountKind, ProviderApiProtocol,
+    ProviderAppliedStatus, ProviderCallDiagnostic, ProviderCallDiagnosticReason,
+    ProviderCallPrivateResolverCode, ProviderConfigWriteEffect, ProviderNativeConfigurationCommand,
     ProviderNativeConfigurationDiagnostic, ProviderNativeConfigurationEffect,
     ProviderNativeConfigurationEvidence, ProviderObservedStatus, ProviderPrivateProjectionCommand,
     ProviderPrivateProjectionEffect, ProviderProjectionBuildDiagnostic, ProviderRestartPreparation,
-    Resolver,
+    ProviderSessionEndpoint, Resolver,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -22,49 +24,106 @@ pub(super) async fn reconcile(
     client: &Client,
     command: ProviderNativeConfigurationCommand<'_>,
 ) -> ProviderNativeConfigurationEffect {
-    match apply(client, command.accounts, command.resolver).await {
-        Ok((receipt, unsupported)) => {
-            ProviderNativeConfigurationEffect::Evidence(if unsupported > 0 {
-                ProviderNativeConfigurationEvidence::with_diagnostic(
-                    receipt.changed,
-                    ProviderAppliedStatus::Unknown,
-                    ProviderObservedStatus::Mismatch,
-                    diagnostic(
-                        "provider-projection-partial",
-                        format!(
-                            "{unsupported} enabled chat accounts do not have supported Matcha execution authentication/protocol"
-                        ),
-                    ),
-                )
-            } else if !receipt.cleanup.blocked_provider_ids.is_empty() {
-                ProviderNativeConfigurationEvidence::with_diagnostic(
-                    receipt.changed,
-                    ProviderAppliedStatus::Unknown,
-                    ProviderObservedStatus::Mismatch,
-                    diagnostic(
-                        "provider-cleanup-partial",
-                        "Desired providers were projected; referenced retired providers were retained",
-                    ),
-                )
-            } else if receipt.requires_restart {
-                ProviderNativeConfigurationEvidence::with_diagnostic(
-                    receipt.changed,
-                    ProviderAppliedStatus::Unknown,
-                    ProviderObservedStatus::Matches,
-                    diagnostic(
-                        "provider-restart-required",
-                        "Provider configuration is confirmed for future CLI instances; active sessions require restart",
-                    ),
-                )
+    let (result, accounts) = apply(client, command.accounts, command.resolver).await;
+    ProviderNativeConfigurationEffect::Evidence(evidence(&result, accounts))
+}
+
+pub(super) async fn prepare(
+    client: &Client,
+    command: ProviderPrivateProjectionCommand<'_>,
+) -> ProviderPrivateProjectionEffect {
+    let (result, accounts) = apply(client, command.accounts, command.resolver).await;
+    let reports = evidence(&result, accounts).reports().to_vec();
+    match result {
+        Ok(receipt) => ProviderPrivateProjectionEffect {
+            providers: if receipt.changed {
+                ProviderConfigWriteEffect::Written
             } else {
-                ProviderNativeConfigurationEvidence::new(
+                ProviderConfigWriteEffect::Unchanged
+            },
+            restart: if receipt.requires_restart {
+                ProviderRestartPreparation::Required
+            } else {
+                ProviderRestartPreparation::NotRequired
+            },
+            reports,
+        },
+        Err(failure) => ProviderPrivateProjectionEffect {
+            providers: ProviderConfigWriteEffect::Unknown(ProviderProjectionBuildDiagnostic::new(
+                failure_reason(&failure),
+                "providers",
+                failure.to_string(),
+            )),
+            restart: ProviderRestartPreparation::Unknown,
+            reports,
+        },
+    }
+}
+
+fn evidence(
+    result: &Result<ProjectionReceipt, ProjectionFailure>,
+    mut accounts: Vec<ProviderAccountExecution>,
+) -> ProviderNativeConfigurationEvidence {
+    let evidence = match result {
+        Ok(receipt) => {
+            let cleanup_blocked = !receipt.cleanup.blocked_provider_ids.is_empty();
+            let mut observed = if cleanup_blocked {
+                ProviderObservedStatus::Mismatch
+            } else {
+                ProviderObservedStatus::Matches
+            };
+            for account in &accounts {
+                match account.execution {
+                    ProviderAccountExecutionStatus::Blocked
+                    | ProviderAccountExecutionStatus::Unsupported => {
+                        observed = ProviderObservedStatus::Mismatch;
+                    }
+                    ProviderAccountExecutionStatus::Unknown
+                        if observed == ProviderObservedStatus::Matches =>
+                    {
+                        observed = ProviderObservedStatus::Unavailable;
+                    }
+                    _ => {}
+                }
+            }
+            let diagnostic = if cleanup_blocked {
+                Some(diagnostic(
+                    "provider-cleanup-partial",
+                    "Desired providers were projected; referenced retired providers were retained",
+                ))
+            } else if receipt.requires_restart {
+                Some(diagnostic(
+                    "provider-restart-required",
+                    "Provider configuration is confirmed for future CLI instances; active sessions require restart",
+                ))
+            } else if observed != ProviderObservedStatus::Matches {
+                Some(diagnostic(
+                    "provider-projection-partial",
+                    "Eligible chat accounts were projected for future CLI instances; other accounts are not ready",
+                ))
+            } else {
+                None
+            };
+            match diagnostic {
+                Some(diagnostic) => ProviderNativeConfigurationEvidence::with_diagnostic(
+                    receipt.changed,
+                    ProviderAppliedStatus::Unknown,
+                    observed,
+                    diagnostic,
+                ),
+                None => ProviderNativeConfigurationEvidence::new(
                     receipt.changed,
                     ProviderAppliedStatus::Confirmed,
-                    ProviderObservedStatus::Matches,
-                )
-            })
+                    observed,
+                ),
+            }
         }
-        Err(failure) => ProviderNativeConfigurationEffect::Evidence(
+        Err(failure) => {
+            for account in &mut accounts {
+                if account.execution == ProviderAccountExecutionStatus::Ready {
+                    account.execution = ProviderAccountExecutionStatus::Unknown;
+                }
+            }
             ProviderNativeConfigurationEvidence::with_diagnostic(
                 false,
                 ProviderAppliedStatus::Unknown,
@@ -76,60 +135,22 @@ pub(super) async fn reconcile(
                 } else {
                     ProviderObservedStatus::Unavailable
                 },
-                diagnostic(failure_reason(&failure), failure.to_string()),
-            ),
-        ),
-    }
-}
-
-pub(super) async fn prepare(
-    client: &Client,
-    command: ProviderPrivateProjectionCommand<'_>,
-) -> ProviderPrivateProjectionEffect {
-    match apply(client, command.accounts, command.resolver).await {
-        Ok((receipt, unsupported)) => ProviderPrivateProjectionEffect {
-            providers: if unsupported > 0 {
-                ProviderConfigWriteEffect::Unknown(ProviderProjectionBuildDiagnostic::new(
-                    "provider-projection-partial",
-                    "providers",
-                    format!(
-                        "{unsupported} enabled chat accounts do not have supported Matcha execution authentication/protocol"
-                    ),
-                ))
-            } else if !receipt.cleanup.blocked_provider_ids.is_empty() {
-                ProviderConfigWriteEffect::Unknown(ProviderProjectionBuildDiagnostic::new(
-                    "provider-cleanup-partial",
-                    "providers",
-                    "Desired providers were projected; referenced retired providers were retained",
-                ))
-            } else if receipt.changed {
-                ProviderConfigWriteEffect::Written
-            } else {
-                ProviderConfigWriteEffect::Unchanged
-            },
-            restart: if receipt.requires_restart {
-                ProviderRestartPreparation::Required
-            } else {
-                ProviderRestartPreparation::NotRequired
-            },
-        },
-        Err(failure) => ProviderPrivateProjectionEffect {
-            providers: ProviderConfigWriteEffect::Unknown(ProviderProjectionBuildDiagnostic::new(
-                failure_reason(&failure),
-                "providers",
-                failure.to_string(),
-            )),
-            restart: ProviderRestartPreparation::Unknown,
-        },
-    }
+                diagnostic(failure_reason(failure), failure.to_string()),
+            )
+        }
+    };
+    evidence.with_report(ProviderSessionEndpoint::MatchaAgentLocal, accounts)
 }
 
 async fn apply(
     client: &Client,
     accounts: &[ProviderAccount],
     resolver: &Resolver,
-) -> Result<(ProjectionReceipt, usize), ProjectionFailure> {
-    let mut unsupported = 0;
+) -> (
+    Result<ProjectionReceipt, ProjectionFailure>,
+    Vec<ProviderAccountExecution>,
+) {
+    let mut executions = Vec::new();
     let mut desired_ids = BTreeSet::new();
     let mut projection = Projection {
         providers: BTreeMap::new(),
@@ -140,98 +161,148 @@ async fn apply(
         account.configuration().enabled()
             && account.configuration().kind() == ProviderAccountKind::Chat
     }) {
-        desired_ids.insert(account_provider_id(account.id().as_str()));
-        let Some(protocol) = provider_module::provider_execution_protocol(account) else {
-            unsupported += 1;
-            continue;
-        };
-        let (kind, target) = match protocol {
-            ProviderApiProtocol::AnthropicMessages => ("firstParty", "ANTHROPIC_API_KEY"),
-            ProviderApiProtocol::GoogleGenerativeAi => ("gemini", "GEMINI_API_KEY"),
-            ProviderApiProtocol::OpenAiCompletions => ("openai", "OPENAI_API_KEY"),
-            ProviderApiProtocol::OpenAiResponses => ("openaiResponses", "OPENAI_API_KEY"),
-        };
-        let configuration = account.configuration();
-        // Match the existing Host Matcha session resolver's supported authentication, rather
-        // than silently treating OpenClaw OAuth profiles or CLI user stores as API keys.
-        if !matches!(
-            configuration.auth_mode(),
-            ProviderAccountAuthMode::ApiKey | ProviderAccountAuthMode::Local
-        ) {
-            unsupported += 1;
-            continue;
-        }
+        // Missing credentials do not retire an existing native identity or revoke its old source.
         let id = account_provider_id(account.id().as_str());
-        let mut env = BTreeMap::new();
-        if configuration.auth_mode() == ProviderAccountAuthMode::ApiKey {
-            let source = format!(
-                "MATCHA_PROVIDER_{}",
-                id.trim_start_matches("host-account-").to_ascii_uppercase()
-            );
-            let credential = configuration.credential().ok_or(ProjectionFailure::new(
-                ProjectionFailureKind::CredentialMissing,
-            ))?;
-            let reference = ConnectorSecretRef::try_new(credential.as_str())
-                .map_err(|_| ProjectionFailure::new(ProjectionFailureKind::InvalidBinding))?;
-            let value = match resolver.resolve(&reference).await.map_err(|error| {
-                ProjectionFailure::caused(ProjectionFailureKind::CredentialUnavailable, error)
-            })? {
-                ConnectorSecretResolution::Resolved { value, .. } => {
-                    let mut secret = None;
-                    value.with_private_bytes(|bytes| {
-                        secret = std::str::from_utf8(bytes).ok().map(str::to_owned);
-                    });
-                    secret
-                        .filter(|value| !value.trim().is_empty() && !value.contains('\0'))
-                        .ok_or(ProjectionFailure::new(
-                            ProjectionFailureKind::CredentialUnavailable,
-                        ))?
-                }
-                ConnectorSecretResolution::NotFound { .. } => {
-                    return Err(ProjectionFailure::new(
-                        ProjectionFailureKind::CredentialMissing,
-                    ));
-                }
-                ConnectorSecretResolution::Unavailable { .. } => {
-                    return Err(ProjectionFailure::new(
-                        ProjectionFailureKind::CredentialUnavailable,
-                    ));
-                }
+        desired_ids.insert(id.clone());
+        let (execution, diagnostic) =
+            match prepare_account(account, id, resolver, &mut projection).await {
+                Ok(()) => (ProviderAccountExecutionStatus::Ready, None),
+                Err((execution, diagnostic)) => (execution, Some(diagnostic)),
             };
-            env.insert(target, source.clone());
-            projection.sources.insert(source, value);
+        executions.push(ProviderAccountExecution {
+            account_id: account.id().as_str().to_owned(),
+            account_revision: account.revision().get(),
+            execution,
+            diagnostic,
+        });
+    }
+    let result = async {
+        let response = client
+            .call("providers.list", json!({}))
+            .await
+            .map_err(projection::transport_failure)?;
+        #[derive(Deserialize)]
+        struct List {
+            providers: Vec<Entry>,
         }
-        let endpoint = provider_module::provider_execution_endpoint(account)
-            .map_err(|_| ProjectionFailure::new(ProjectionFailureKind::InvalidBinding))?;
-        projection.providers.insert(
-            id,
-            projection::provider_config(kind, Some(endpoint.as_str()), env),
+        #[derive(Deserialize)]
+        struct Entry {
+            id: String,
+        }
+        let current: List = serde_json::from_value(response).map_err(|error| {
+            ProjectionFailure::caused(ProjectionFailureKind::InvalidReadback, error)
+        })?;
+        projection.retired = current
+            .providers
+            .into_iter()
+            .map(|provider| provider.id)
+            .filter(|id| id.starts_with("host-account-") && !desired_ids.contains(id))
+            .collect();
+        projection::project(client, projection).await
+    }
+    .await;
+    (result, executions)
+}
+
+async fn prepare_account(
+    account: &ProviderAccount,
+    id: String,
+    resolver: &Resolver,
+    projection: &mut Projection,
+) -> Result<(), (ProviderAccountExecutionStatus, ProviderCallDiagnostic)> {
+    use ProviderAccountExecutionStatus::{Blocked, Unknown, Unsupported};
+    use ProviderCallDiagnosticReason::{
+        PrivateResolverUnavailable, ProviderAccountConfigurationInvalid, ProviderAuthUnsupported,
+        ProviderCredentialUnavailable,
+    };
+    use ProviderCallPrivateResolverCode::{CredentialInvalid, CredentialMissing};
+
+    let failure = |execution, reason, private_resolver_code| {
+        (
+            execution,
+            ProviderCallDiagnostic {
+                reason: Some(reason),
+                private_resolver_code,
+            },
+        )
+    };
+    let protocol = provider_module::provider_execution_protocol(account)
+        .ok_or_else(|| failure(Unsupported, ProviderAccountConfigurationInvalid, None))?;
+    let configuration = account.configuration();
+    // OpenClaw OAuth profiles and CLI user stores are not Matcha API keys.
+    if !matches!(
+        configuration.auth_mode(),
+        ProviderAccountAuthMode::ApiKey | ProviderAccountAuthMode::Local
+    ) {
+        return Err(failure(Unsupported, ProviderAuthUnsupported, None));
+    }
+    let endpoint = provider_module::provider_execution_endpoint(account)
+        .map_err(|_| failure(Unknown, ProviderAccountConfigurationInvalid, None))?;
+    let mut env = BTreeMap::new();
+    if configuration.auth_mode() == ProviderAccountAuthMode::ApiKey {
+        let credential = configuration.credential().ok_or_else(|| {
+            failure(
+                Blocked,
+                ProviderCredentialUnavailable,
+                Some(CredentialMissing),
+            )
+        })?;
+        let reference = ConnectorSecretRef::try_new(credential.as_str())
+            .map_err(|_| failure(Unknown, ProviderAccountConfigurationInvalid, None))?;
+        let value = match resolver
+            .resolve(&reference)
+            .await
+            .map_err(|_| failure(Unknown, PrivateResolverUnavailable, None))?
+        {
+            ConnectorSecretResolution::Resolved { value, .. } => {
+                let mut secret = None;
+                value.with_private_bytes(|bytes| {
+                    secret = std::str::from_utf8(bytes).ok().map(str::to_owned);
+                });
+                secret
+                    .filter(|value| !value.trim().is_empty() && !value.contains('\0'))
+                    .ok_or_else(|| {
+                        failure(
+                            Unknown,
+                            ProviderCredentialUnavailable,
+                            Some(CredentialInvalid),
+                        )
+                    })?
+            }
+            ConnectorSecretResolution::NotFound { .. } => {
+                return Err(failure(
+                    Blocked,
+                    ProviderCredentialUnavailable,
+                    Some(CredentialMissing),
+                ));
+            }
+            ConnectorSecretResolution::Unavailable { .. } => {
+                return Err(failure(Unknown, PrivateResolverUnavailable, None));
+            }
+        };
+        let target = match protocol {
+            ProviderApiProtocol::AnthropicMessages => "ANTHROPIC_API_KEY",
+            ProviderApiProtocol::GoogleGenerativeAi => "GEMINI_API_KEY",
+            ProviderApiProtocol::OpenAiCompletions | ProviderApiProtocol::OpenAiResponses => {
+                "OPENAI_API_KEY"
+            }
+        };
+        let source = format!(
+            "MATCHA_PROVIDER_{}",
+            id.trim_start_matches("host-account-").to_ascii_uppercase()
         );
+        env.insert(target, source.clone());
+        projection.sources.insert(source, value);
     }
-    let response = client
-        .call("providers.list", json!({}))
-        .await
-        .map_err(projection::transport_failure)?;
-    #[derive(Deserialize)]
-    struct List {
-        providers: Vec<Entry>,
-    }
-    #[derive(Deserialize)]
-    struct Entry {
-        id: String,
-    }
-    let current: List = serde_json::from_value(response).map_err(|error| {
-        ProjectionFailure::caused(ProjectionFailureKind::InvalidReadback, error)
-    })?;
-    projection.retired = current
-        .providers
-        .into_iter()
-        .map(|provider| provider.id)
-        .filter(|id| id.starts_with("host-account-") && !desired_ids.contains(id))
-        .collect();
-    projection::project(client, projection)
-        .await
-        .map(|receipt| (receipt, unsupported))
+    projection.providers.insert(
+        id,
+        projection::provider_config(
+            super::native_protocol(protocol),
+            Some(endpoint.as_str()),
+            env,
+        ),
+    );
+    Ok(())
 }
 
 fn diagnostic(

@@ -125,12 +125,19 @@ async fn handle_external_connectors(request: Request, dependencies: Dependencies
             .await
             .map(external::Delivery::Accepted)
             .unwrap_or(external::Delivery::Unavailable),
-        external::Command::ObservationResult(call_id, identity, endpoint, principal) => {
+        external::Command::OAuth(id, endpoint, request, principal) => dependencies
+            .connector
+            .admit_oauth(id, endpoint, request, principal)
+            .await
+            .map(external::Delivery::Accepted)
+            .unwrap_or(external::Delivery::Unavailable),
+        external::Command::ObservationResult(call_id, identity, endpoint, agent_id, principal) => {
             match dependencies.connector.observation_result(
                 &call_id,
                 &principal,
                 endpoint.as_ref(),
                 identity.as_ref(),
+                agent_id.as_deref(),
             ) {
                 Ok(result) => external::Delivery::ObservationResult(call_id, result),
                 Err(crate::owner::observations::ObservationReadError::Pending) => {

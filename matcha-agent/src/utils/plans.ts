@@ -19,11 +19,20 @@ import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '@claude-code-best/builtin-tools/too
 import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
 import { getClaudeConfigHomeDir } from './envUtils.js'
-import { isENOENT } from './errors.js'
+import { isAbortError, isENOENT } from './errors.js'
 import { getEnvironmentKind } from './filePersistence/outputsScanner.js'
-import { getFsImplementation } from './fsOperations.js'
+import { getFsImplementation, statSourcePath } from './fsOperations.js'
+import { readSourceBytes } from './readFileInRange.js'
+import {
+  InvestigationAdmissionError,
+  admitInvestigationStep,
+  investigationSignal,
+  requireInvestigationEffects,
+  rethrowInvestigationAdmission,
+} from '../world/investigation.js'
 import { logError } from './log.js'
 import { getInitialSettings } from './settings/settings.js'
+import { getSessionSettingsCache } from './settings/settingsCache.js'
 import { generateWordSlug } from './words.js'
 
 const MAX_SLUG_RETRIES = 10
@@ -76,14 +85,9 @@ export function clearAllPlanSlugs(): void {
   getPlanSlugCache().clear()
 }
 
-// Memoized: called from render bodies (FileReadTool/FileEditTool/FileWriteTool UI.tsx)
-// and permission checks. Inputs (initial settings + cwd) are fixed at startup, so the
-// mkdirSync result is stable for the session. Without memoization, each rendered tool
-// message triggers a mkdirSync syscall (regressed in #20005).
-export const getPlansDirectory = memoize(function getPlansDirectory(): string {
-  const settings = getInitialSettings()
-  const settingsDir = settings.plansDirectory
+function resolvePlansDirectory(settingsDir: string | undefined): { plansPath: string; error?: Error } {
   let plansPath: string
+  let error: Error | undefined
 
   if (settingsDir) {
     // Settings.json (relative to project root)
@@ -92,9 +96,7 @@ export const getPlansDirectory = memoize(function getPlansDirectory(): string {
 
     // Validate path stays within project root to prevent path traversal
     if (!resolved.startsWith(cwd + sep) && resolved !== cwd) {
-      logError(
-        new Error(`plansDirectory must be within project root: ${settingsDir}`),
-      )
+      error = new Error(`plansDirectory must be within project root: ${settingsDir}`)
       plansPath = join(getClaudeConfigHomeDir(), 'plans')
     } else {
       plansPath = resolved
@@ -103,6 +105,17 @@ export const getPlansDirectory = memoize(function getPlansDirectory(): string {
     // Default
     plansPath = join(getClaudeConfigHomeDir(), 'plans')
   }
+
+  return { plansPath, error }
+}
+
+// Memoized: called from render bodies (FileReadTool/FileEditTool/FileWriteTool UI.tsx)
+// and permission checks. Inputs (initial settings + cwd) are fixed at startup, so the
+// mkdirSync result is stable for the session. Without memoization, each rendered tool
+// message triggers a mkdirSync syscall (regressed in #20005).
+export const getPlansDirectory = memoize(function getPlansDirectory(): string {
+  const { plansPath, error } = resolvePlansDirectory(getInitialSettings().plansDirectory)
+  if (error) logError(error)
 
   // Ensure directory exists (mkdirSync with recursive: true is a no-op if it exists)
   try {
@@ -144,6 +157,64 @@ export function getPlan(agentId?: AgentId): string | null {
     if (isENOENT(error)) return null
     logError(error)
     return null
+  }
+}
+
+function rethrowPlanPreparationError(error: unknown, signal?: AbortSignal): void {
+  if (error instanceof Error &&
+    (error.cause !== undefined || error instanceof AggregateError || isAbortError(error))) throw error
+  rethrowInvestigationAdmission(error)
+  signal?.throwIfAborted()
+  investigationSignal()?.throwIfAborted()
+  requireInvestigationEffects([])
+}
+
+export async function preparePlanAttachment(
+  agentId?: AgentId,
+  signal?: AbortSignal,
+): Promise<{ planFilePath: string; planExists: boolean }> {
+  signal?.throwIfAborted()
+  await admitInvestigationStep()
+  let plansPath = getPlansDirectory.cache.get(undefined)
+  if (plansPath === undefined) {
+    const settings = getSessionSettingsCache()
+    if (settings === null) {
+      throw new InvestigationAdmissionError('investigation_plan_preparation_unavailable')
+    }
+    plansPath = resolvePlansDirectory(settings.settings.plansDirectory).plansPath
+  }
+  const sessionId = getSessionId()
+  const cache = getPlanSlugCache()
+  let slug = cache.get(sessionId)
+  if (!slug) {
+    for (let i = 0; i < MAX_SLUG_RETRIES; i++) {
+      slug = generateWordSlug()
+      try {
+        await statSourcePath(join(plansPath, `${slug}.md`), { signal })
+      } catch (error) {
+        rethrowPlanPreparationError(error, signal)
+        if (isENOENT(error)) break
+        throw error
+      }
+    }
+    const cachedSlug = cache.get(sessionId)
+    if (cachedSlug) slug = cachedSlug
+    else setPlanSlugCacheEntry(sessionId, slug!)
+  }
+  const planFilePath = join(plansPath,
+    agentId ? `${slug}-agent-${agentId}.md` : `${slug}.md`)
+  try {
+    await readSourceBytes(planFilePath, { maxBytes: 0, signal })
+    return { planFilePath, planExists: true }
+  } catch (error) {
+    rethrowPlanPreparationError(error, signal)
+    // Only native read failures mean no readable plan; close/settlement failures do not.
+    const readFailure = error instanceof Error &&
+      (('syscall' in error && (error.syscall === 'open' || error.syscall === 'fstat')) ||
+        (isENOENT(error) && !('syscall' in error)) ||
+        ('code' in error && error.code === 'EISDIR' && !('syscall' in error)))
+    if (!readFailure) throw error
+    return { planFilePath, planExists: false }
   }
 }
 

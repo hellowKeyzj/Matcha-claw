@@ -92,6 +92,7 @@ pub(super) struct RunHeader {
     pub(super) lifecycle: GraphRunLifecycle,
     pub(super) start_gate: RunStartGate,
     pub(super) retired_executions: BTreeSet<(NodeId, ExecutionFence)>,
+    pub(super) task_execution_context: Option<crate::TaskExecutionContext>,
 }
 
 impl RunHeader {
@@ -101,6 +102,7 @@ impl RunHeader {
             runtime: run.runtime.clone(), lifecycle: run.lifecycle.clone(),
             start_gate: run.start_gate.clone(),
             retired_executions: run.retired_executions.clone(),
+            task_execution_context: run.task_execution_context.clone(),
         }
     }
 
@@ -111,6 +113,7 @@ impl RunHeader {
         run.lifecycle = self.lifecycle;
         run.start_gate = self.start_gate;
         run.retired_executions = self.retired_executions;
+        run.task_execution_context = self.task_execution_context;
     }
 }
 
@@ -201,13 +204,17 @@ impl OrganizationFacts {
                 return Err(OrganizationFactsError::InvalidGraphRun);
             }
             if let RunUndo::Updated(old) = old {
-                if run.team != old.team || run.frozen_team_revision != old.revision { return Err(OrganizationFactsError::RunOwnershipChanged); }
+                if run.team != old.team || run.frozen_team_revision != old.revision
+                    || run.task_execution_context != old.task_execution_context { return Err(OrganizationFactsError::RunOwnershipChanged); }
                 if !run.lifecycle.can_transition_from(&old.lifecycle) { return Err(OrganizationFactsError::InvalidGraphRunLifecycle); }
                 if !run.start_gate.can_transition_from(&old.start_gate) { return Err(OrganizationFactsError::InvalidRunStartGate); }
                 if !old.retired_executions.is_subset(&run.retired_executions) {
                     return Err(OrganizationFactsError::InvalidGraphRun);
                 }
             }
+            if run.task_execution_context.as_ref().is_some_and(|context| {
+                !context.valid() || context.root_request_id != run.lifecycle().creation_idempotency_key()
+            }) { return Err(OrganizationFactsError::InvalidGraphRun); }
             run.validate_retired_executions(&run.retired_executions)?;
             if matches!(old, RunUndo::Inserted) {
                 GraphState::restore_durable(run.graph.durable_snapshot()).map_err(|_| OrganizationFactsError::InvalidGraphRun)?;

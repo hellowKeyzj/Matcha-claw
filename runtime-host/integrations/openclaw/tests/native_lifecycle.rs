@@ -27,6 +27,7 @@ use openclaw::{
         recovery::OpenClawStartRecovery,
         restart::OpenClawRestartPolicy,
         stdio::OpenClawStdioActivation,
+        stop::OpenClawGracefulStop,
     },
     port::{
         CronExecutionStatus, CronMutationOutcome, CronTriggerOutcome, OpenClawControlReadiness,
@@ -224,6 +225,7 @@ impl NativeOpenClawFixture {
             state_dir,
             port,
             secret: Arc::clone(&secret),
+            world_runtime_host: None,
         }
         .try_into_launch_factory()
         .expect("packaged OpenClaw launch inputs must be valid");
@@ -611,17 +613,21 @@ fn build_supervisor(
     gateway: &OpenClawGateway,
     diagnostics: Arc<Mutex<Vec<LifecycleDiagnostic>>>,
 ) -> Supervisor {
+    let graceful_stop = OpenClawGracefulStop::new();
     supervise(
         ProcessContainment::job(),
         launch,
-        OpenClawStdioActivation::new(Arc::new(move |diagnostic| {
-            diagnostics
-                .lock()
-                .expect("fixture diagnostic sink lock must be available")
-                .push(diagnostic);
-        })),
+        OpenClawStdioActivation::new(
+            Arc::new(move |diagnostic| {
+                diagnostics
+                    .lock()
+                    .expect("fixture diagnostic sink lock must be available")
+                    .push(diagnostic);
+            }),
+            graceful_stop.clone(),
+        ),
         gateway.readiness_policy(),
-        gateway.graceful_stop_policy(),
+        graceful_stop,
         OpenClawStartRecovery::new(),
         OpenClawRestartPolicy,
     )

@@ -86,7 +86,7 @@ describe('provider metadata', () => {
   });
 
   it('Z.AI static vendor projection keeps env key and singleton credential id', async () => {
-    vi.mocked(hostApiFetch).mockResolvedValueOnce({ accounts: [] });
+    vi.mocked(hostApiFetch).mockResolvedValueOnce({ accounts: [], reports: [] });
 
     const snapshot = await fetchProviderSnapshot();
     const zaiCn = snapshot.vendors.find((vendor) => vendor.id === 'zai');

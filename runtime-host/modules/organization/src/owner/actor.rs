@@ -260,7 +260,7 @@ impl OrganizationShared {
         })
     }
 
-    fn team_abort_role_sessions(
+    pub(super) fn team_abort_role_sessions(
         &self,
         bindings: Vec<organization::RoleSessionReceipt>,
         cancellation: tokio_util::sync::CancellationToken,
@@ -1164,6 +1164,13 @@ impl OwnerSpec for OrganizationOwner {
             OrganizationCommand::ManualTeamRunCreate { run, .. } => {
                 CommandRoute::Keyed(OrganizationLaneKey::Run(run.run_id().clone()))
             }
+            OrganizationCommand::TaskCreate { request, .. } => {
+                CommandRoute::Keyed(OrganizationLaneKey::Run(request.identity.run_id.clone()))
+            }
+            OrganizationCommand::TaskCancel { identity, .. }
+            | OrganizationCommand::TaskNativeExecutionObserved { identity, .. } => {
+                CommandRoute::Keyed(OrganizationLaneKey::Run(identity.run_id.clone()))
+            }
             OrganizationCommand::RunDeleteAndPurge { run_id, .. }
             | OrganizationCommand::RunCreate { run_id, .. }
             | OrganizationCommand::RunCreateFromTeamTemplate { run_id, .. }
@@ -1221,6 +1228,7 @@ impl OwnerSpec for OrganizationOwner {
     fn route_query(query: &Self::Query) -> QueryRoute<Self::Key> {
         match query {
             OrganizationQuery::RunSnapshot { query, .. } => QueryRoute::Keyed(OrganizationLaneKey::Run(query.run().clone())),
+            OrganizationQuery::TaskInspect { identity, .. } => QueryRoute::Keyed(OrganizationLaneKey::Run(identity.run_id.clone())),
             OrganizationQuery::TeamRunPublicProjection { run_id, .. }
             | OrganizationQuery::TeamRunPublicSnapshot { run_id, .. }
             | OrganizationQuery::TeamRunDiagnostics { run_id, .. }
@@ -1452,6 +1460,30 @@ impl OwnerSpec for OrganizationOwner {
                             .await
                     }
                     Err(error) => Err(error),
+                };
+                let _ = reply.send(outcome).await;
+            }
+            OrganizationCommand::TaskCreate { request, reply } => {
+                let identity = request.identity.clone();
+                let outcome = match OrganizationRunLane::open_store(&mut state.store, &state.store_path) {
+                    Ok(mut store) => super::task_execution::create(&shared, &state.team_run,
+                        &mut store, request, reply.cancellation()).await,
+                    Err(error) => Err(crate::task_execution::store_failure(identity, &error)),
+                };
+                let _ = reply.send(outcome).await;
+            }
+            OrganizationCommand::TaskNativeExecutionObserved { identity, request, execution, reply } => {
+                let outcome = OrganizationRunLane::open_store(&mut state.store, &state.store_path)
+                    .and_then(|mut store| super::task_execution::record_inspection(
+                        &mut store, identity, request, execution,
+                    ));
+                let _ = reply.send(outcome);
+            }
+            OrganizationCommand::TaskCancel { identity, idempotency_key, requested_at, reply } => {
+                let outcome = match OrganizationRunLane::open_store(&mut state.store, &state.store_path) {
+                    Ok(mut store) => super::task_execution::cancel(&shared, &state.team_run,
+                        &mut store, identity, idempotency_key, requested_at, reply.cancellation()).await,
+                    Err(error) => crate::task_execution::store_failure(identity, &error),
                 };
                 let _ = reply.send(outcome).await;
             }
@@ -1934,6 +1966,7 @@ impl OwnerSpec for OrganizationOwner {
                 let _ = reply.send(outcome).await;
             }
             OrganizationCommand::TeamMessageTerminalObserved {
+                task_observation,
                 native_run_id,
                 delivery_context,
                 status,
@@ -1949,7 +1982,9 @@ impl OwnerSpec for OrganizationOwner {
                     "phase": format!("{status:?}"), "candidateCount": assistant_texts.len(),
                     "hasDeliveryContext": delivery_context.is_some(),
                 }));
-                let outcome = state.terminal_settlement.observe_team_message_terminal(
+                let outcome = state.terminal_settlement.observe_task_native_execution(
+                    &mut state.store, &state.team_run, &native_run_id, delivery_context.as_ref(), task_observation,
+                ).and_then(|()| state.terminal_settlement.observe_team_message_terminal(
                     &mut state.store,
                     &state.team_run,
                     native_run_id,
@@ -1957,7 +1992,7 @@ impl OwnerSpec for OrganizationOwner {
                     status,
                     assistant_texts,
                     settled_at,
-                );
+                ));
                 runtime_trace("runtime.team_run.terminal.owner.result", || json!({
                     "nativeRunHash": native_run_hash, "deliveryHash": delivery_hash,
                     "outcome": match &outcome {
@@ -2062,6 +2097,9 @@ impl OwnerSpec for OrganizationOwner {
             | OrganizationCommand::RunDeleteAndPurge { .. }
             | OrganizationCommand::RunCreate { .. }
             | OrganizationCommand::RunCreateFromTeamTemplate { .. }
+            | OrganizationCommand::TaskCreate { .. }
+            | OrganizationCommand::TaskNativeExecutionObserved { .. }
+            | OrganizationCommand::TaskCancel { .. }
             | OrganizationCommand::RunCancel { .. }
             | OrganizationCommand::RunDelete { .. }
             | OrganizationCommand::Design { .. }
@@ -2102,6 +2140,19 @@ impl OwnerSpec for OrganizationOwner {
     ) {
         if !query.call_running().await { return; }
         match query {
+            OrganizationQuery::TaskInspect { identity, reply } => {
+                let outcome = match OrganizationRunLane::open_store(&mut state.store, &state.store_path) {
+                    Ok(store) => {
+                        let receipt = crate::task_execution::inspect(&store, identity.clone());
+                        match super::task_execution::inspection_requests(&store, &receipt) {
+                            Ok(requests) => (receipt, requests),
+                            Err(error) => (crate::task_execution::store_failure(identity, &error), Vec::new()),
+                        }
+                    }
+                    Err(error) => (crate::task_execution::store_failure(identity, &error), Vec::new()),
+                };
+                let _ = reply.send(outcome).await;
+            }
             OrganizationQuery::RunSnapshot { query, reply } => {
                 let outcome = OrganizationRunLane::open_store(&mut state.store, &state.store_path)
                     .map_or(organization::TeamRunQueryOutcome::Unavailable, |store| {
@@ -2474,6 +2525,7 @@ impl OwnerSpec for OrganizationOwner {
             }
             OrganizationQuery::WorkflowRunTeam { .. }
             | OrganizationQuery::RunSnapshot { .. }
+            | OrganizationQuery::TaskInspect { .. }
             | OrganizationQuery::TeamRunPublicProjection { .. }
             | OrganizationQuery::TeamRunPublicSnapshot { .. }
             | OrganizationQuery::TeamRunDiagnostics { .. }

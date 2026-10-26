@@ -66,7 +66,16 @@ async fn handle_request(request: Request, dependencies: super::super::Dependenci
             .unwrap_or(Err(crate::WorkspaceMediaFailure::Unavailable));
         map_resolve(result)
     } else if request.is_thumbnail() {
-        let result = if request.gateway_url().is_empty() {
+        let result = if !request.reference().is_empty() {
+            dependencies
+                .workspace
+                .thumbnail_media_reference(
+                    request.endpoint(),
+                    request.session_key().to_owned(),
+                    request.reference().to_owned(),
+                )
+                .await
+        } else if request.gateway_url().is_empty() {
             dependencies
                 .workspace
                 .thumbnail_media(

@@ -1,16 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { Settings } from '@/pages/Settings';
-import { useSettingsStore } from '@/stores/settings';
-import { useAccountStore } from '@/stores/account';
-import { useLicenseStore } from '@/stores/license';
-import { useRuntimeHostStore } from '@/stores/gateway';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { accountPlugin } from '@/plugins/account/plugin';
+import { callsPlugin } from '@/plugins/calls/plugin';
+import { searchPlugin } from '@/plugins/search/plugin';
+import { settingsPlugin } from '@/plugins/settings/plugin';
+import { Settings } from '@/plugins/settings/page';
+import { useSettingsStore } from '@/plugins/settings/store';
+import { useAccountStore } from '@/plugins/account/stores/account';
+import { useLicenseStore } from '@/plugins/account/stores/license';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
 import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
-import { useUpdateStore } from '@/stores/update';
+import { useUpdateStore } from '@/plugins/settings/update/store';
 import i18n from '@/i18n';
 
-vi.mock('@/components/settings/UpdateSettings', () => ({
+vi.mock('@/plugins/settings/update/UpdateSettings', () => ({
   UpdateSettings: () => <div data-testid="update-settings-panel">mock-updates</div>,
 }));
 
@@ -53,7 +60,29 @@ const hostApiFetchMock = vi.hoisted(() => vi.fn(async (path: string, init?: Requ
     return { success: true, status: { processState: 'running' } };
   }
   if (path === '/api/matcha-agent/app-server/restart' && init?.method === 'POST') {
-    return { success: true };
+    return { callId: 'a'.repeat(32), accepted: true };
+  }
+  if (path === '/api/calls/get' && init?.method === 'POST') {
+    return {
+      callId: 'a'.repeat(32),
+      module: 'runtime-control',
+      command: 'lifecycle.restart',
+      status: 'succeeded',
+      start: 1,
+      end: 2,
+      revision: 1,
+      detail: {
+        endpoint: { kind: 'native-runtime', runtimeAdapterId: 'matcha-agent', runtimeInstanceId: 'local' },
+        lifecycle: 'running',
+        result: 'succeeded',
+        count: null,
+        ready: true,
+        healthy: true,
+        failure: null,
+        startupDiagnostic: null,
+        error: null,
+      },
+    };
   }
   if (path === '/api/matcha-agent/app-server/status') {
     return {
@@ -74,6 +103,7 @@ vi.mock('@/lib/host-api', () => ({
   hostCapabilityExecute: vi.fn().mockResolvedValue(undefined),
   resolveSingleCapabilityScope: vi.fn().mockResolvedValue({ kind: 'app' }),
   hostApiFetch: hostApiFetchMock,
+  hostApiFetchDecoded: async (path: string, decode: (value: unknown) => unknown, init?: RequestInit) => decode(await hostApiFetchMock(path, init)),
   hostOpenClawGetLifecycleStatus: () => hostApiFetchMock('/api/openclaw/lifecycle/status'),
   hostOpenClawGetRuntimeSnapshot: () => hostApiFetchMock('/api/openclaw/runtime/snapshot'),
   hostOpenClawGetLogs: (cursor?: number) => hostApiFetchMock(
@@ -125,11 +155,21 @@ function buildRuntimeEndpoint(runtimeAdapterId: 'openclaw' | 'matcha-agent') {
   };
 }
 
+const pluginsHost = createPluginHost([
+  applicationShellPlugin,
+  accountPlugin,
+  callsPlugin,
+  searchPlugin,
+  settingsPlugin,
+]);
+
 describe('settings page section switch', () => {
   const renderWithRouter = (entry = '/settings?section=gateway') => render(
-    <MemoryRouter initialEntries={[entry]}>
-      <Settings />
-    </MemoryRouter>,
+    <PluginHostProvider host={pluginsHost}>
+      <MemoryRouter initialEntries={[entry]}>
+        <Settings />
+      </MemoryRouter>
+    </PluginHostProvider>,
   );
 
   beforeEach(() => {
@@ -240,7 +280,7 @@ describe('settings page section switch', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Updates' }));
     });
-    expect(screen.getByTestId('update-settings-panel')).toBeInTheDocument();
+    expect(await screen.findByTestId('update-settings-panel')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Runtime Status' })).not.toBeInTheDocument();
   });
 

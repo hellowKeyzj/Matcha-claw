@@ -159,7 +159,9 @@ const isHardFailMode = memoize((): boolean => {
 })
 
 export function logError(error: unknown): void {
-  const err = sealedModelContext() ? new Error(SEALED_REDACTION) : toError(error)
+  const err = sealedModelContext()
+    ? new Error(SEALED_REDACTION)
+    : toError(error)
   if (feature('HARD_FAIL') && isHardFailMode()) {
     console.error('[HARD FAIL] logError called with:', err.stack || err.message)
     // eslint-disable-next-line custom-rules/no-process-exit

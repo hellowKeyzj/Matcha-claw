@@ -15,7 +15,20 @@ pub async fn run(
     agent_id: &str,
     args: Vec<String>,
 ) -> rpc::Result<CommandOutput> {
-    let (output, stderr_observed) = execute(config, paths, agent_id, args).await?;
+    let (output, stderr_observed) = execute(config, paths, agent_id, args, None).await?;
+    successful(output, stderr_observed)
+}
+
+pub(crate) async fn run_bounded(
+    launch: super::process::Launch,
+    max_stdout: usize,
+    deadline: std::time::Duration,
+) -> rpc::Result<CommandOutput> {
+    let (output, stderr_observed) = execute_launch(launch, Some((max_stdout, deadline))).await?;
+    successful(output, stderr_observed)
+}
+
+fn successful(output: CommandOutput, stderr_observed: bool) -> rpc::Result<CommandOutput> {
     if output.code != Some(0) {
         return Err(Error::new(
             -32004,
@@ -35,7 +48,7 @@ pub async fn run_observed(
     agent_id: &str,
     args: Vec<String>,
 ) -> rpc::Result<CommandOutput> {
-    execute(config, paths, agent_id, args)
+    execute(config, paths, agent_id, args, None)
         .await
         .map(|(output, _)| output)
 }
@@ -45,19 +58,38 @@ async fn execute(
     paths: &Paths,
     agent_id: &str,
     args: Vec<String>,
+    limits: Option<(usize, std::time::Duration)>,
 ) -> rpc::Result<(CommandOutput, bool)> {
     let launch = super::projection::launch(config, paths, agent_id, args).await?;
+    execute_launch(launch, limits).await
+}
+
+async fn execute_launch(
+    launch: super::process::Launch,
+    limits: Option<(usize, std::time::Duration)>,
+) -> rpc::Result<(CommandOutput, bool)> {
     let (process, mut output) = Process::spawn(launch).await?;
     let mut cleanup = ReapOnDrop::new(process.clone());
-    let result = async {
+    let observing = async {
         process.finish_input().await?;
         let mut stdout = Vec::new();
         let mut stderr_observed = false;
         while let Some(event) = output.recv().await {
             match event {
-                Output::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+                Output::Stdout(bytes) => {
+                    if limits.is_some_and(|(maximum, _)| {
+                        bytes.len() > maximum.saturating_sub(stdout.len())
+                    }) {
+                        return Err(Error::new(
+                            -32004,
+                            "native_command_stdout_limit",
+                            "Native command stdout exceeded its bounded response size",
+                        ));
+                    }
+                    stdout.extend_from_slice(&bytes);
+                }
                 Output::Stderr => stderr_observed = true,
-                Output::StdoutClosed => {},
+                Output::StdoutClosed => {}
                 Output::ReadFailed { stream, kind } => {
                     return Err(Error::new(-32004, "native_command_read", "Reading native command output failed")
                         .with_data(serde_json::json!({"stream": stream, "reason": kind, "stderrObserved": stderr_observed})));
@@ -67,15 +99,35 @@ async fn execute(
                         return Err(Error::new(-32004, "native_command_terminated", "The native command terminated without an exit code")
                             .with_data(serde_json::json!({"exitCode": code, "signal": signal, "stderrObserved": stderr_observed})));
                     }
-                    let stdout = String::from_utf8(stdout).map_err(|_| Error::new(
-                        -32004, "native_command_encoding", "Native command stdout was not UTF-8",
-                    ))?;
+                    let stdout = String::from_utf8(stdout).map_err(|_| {
+                        Error::new(
+                            -32004,
+                            "native_command_encoding",
+                            "Native command stdout was not UTF-8",
+                        )
+                    })?;
                     return Ok((CommandOutput { code, stdout }, stderr_observed));
                 }
             }
         }
-        Err(Error::new(-32006, "native_command_exit_unobserved", "The native command output closed before its exit was observed"))
-    }.await;
+        Err(Error::new(
+            -32006,
+            "native_command_exit_unobserved",
+            "The native command output closed before its exit was observed",
+        ))
+    };
+    let result = match limits {
+        Some((_, deadline)) => tokio::time::timeout(deadline, observing)
+            .await
+            .unwrap_or_else(|_| {
+                Err(Error::new(
+                    -32004,
+                    "native_command_timeout",
+                    "The native capability command did not finish before its deadline",
+                ))
+            }),
+        None => observing.await,
+    };
     let reclaimed = process.close().await;
     cleanup.disarm();
     combine_cleanup(result, reclaimed)

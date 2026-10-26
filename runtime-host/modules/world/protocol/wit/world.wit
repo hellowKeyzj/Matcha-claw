@@ -1,0 +1,978 @@
+package matcha:%world@1.0.0;
+
+interface types {
+    record world-ref { tenant-id: string, world-id: string }
+    record revision-ref { %world: world-ref, id: string, revision: u64 }
+    type definition-ref = revision-ref;
+    type assertion-ref = revision-ref;
+    type evidence-ref = revision-ref;
+    type support-ref = revision-ref;
+    type schema-ref = revision-ref;
+    type mapping-ref = revision-ref;
+    type identity-rule-ref = revision-ref;
+    record blob-ref { digest: string, byte-size: u64 }
+    record contract-ref { id: string, version: string, schema-digest: string }
+    record valid-time { %from: string, to: option<string> }
+    record unit { code: string, dimension: string }
+    record money { amount: string, currency: string }
+    record quantity { amount: string, unit: unit }
+    record business-date { value: string, calendar: string }
+    record value-field { name: string, node: u32 }
+    variant value-node { null, boolean(bool), integer(s64), decimal(string), text(string), money(money), quantity(quantity), timestamp(string), date(business-date), duration(u64), object(string), relation(string), %list(list<u32>), %record(list<value-field>) }
+    // Postorder canonical tree: root is last, children precede parents, each nonroot has exactly one parent.
+    // Maximum 4096 nodes / 64 levels; no cycles, sharing, unreachable nodes or duplicate record fields.
+    record value { nodes: list<value-node>, root: u32 }
+    record decimal-type { precision: u16, scale: u16 }
+    record list-type { element: u32, max-items: u32 }
+    record type-field { name: string, node: u32, nullable: bool, optional: bool }
+    variant type-node { null, boolean, integer, decimal(decimal-type), text(u32), money(string), quantity(unit), timestamp(string), date(string), duration, object(string), relation(string), %list(list-type), %record(list<type-field>) }
+    record value-type { nodes: list<type-node>, root: u32 }
+    variant subject { object(string), relation(string) }
+    enum unknown-reason { not-observed, unmapped, needs-evidence, unsupported, incomplete-coverage, pending-recomputation }
+    record watch-dependency { id: string, generation: u64 }
+    record dirty-detail { generation: u64, invalidated-at: string, watches: list<string> }
+    variant dirty-state { clean, dirty(dirty-detail) }
+    record unavailable { source-id: string, failure: source-failure }
+    variant cell { known(value), unknown(unknown-reason), conflicted(list<assertion-ref>), source-unavailable(unavailable) }
+    record field-cell { property: definition-ref, cell: cell, evidence: list<evidence-ref>, dirty: dirty-state }
+    record projected-cell { subject: subject, field: field-cell }
+    record attribute-claim { subject: subject, property: definition-ref, value: value }
+    record role-binding { role: string, object-id: string }
+    record relation-claim { relation-id: string, relation-type: definition-ref, roles: list<role-binding> }
+    variant claim { attribute(attribute-claim), relation(relation-claim) }
+    enum polarity { positive, negative }
+    record authority-ref { policy-id: string, revision: u64, fields: list<string>, roles: list<string> }
+    record source-position { source-id: string, incarnation: string, partition: string, format: string, cursor: string, transaction: option<string>, event-index: option<u64> }
+    record source-origin { binding: definition-ref, authority: authority-ref, position: option<source-position> }
+    record extraction-origin { run-id: string, model-call-id: option<string> }
+    variant assertion-origin { source(source-origin), derived, human-observation(string), extraction(extraction-origin) }
+    enum assertion-status { candidate, accepted, rejected, withdrawn }
+    record assertion { reference: assertion-ref, scope: string, claim: claim, polarity: polarity, valid-time: valid-time, recorded-at: string, superseded-at: option<string>, status: assertion-status, origin: assertion-origin, evidence: list<evidence-ref>, supersedes: option<assertion-ref> }
+    record observation-draft { claim: claim, polarity: polarity, scope: string, valid-time: valid-time, observed-at: string, origin: assertion-origin, evidence: list<evidence-ref>, supersedes: option<assertion-ref> }
+    record owned-roles { relation-type: definition-ref, roles: list<string> }
+    variant authority-ownership { properties(list<definition-ref>), relation-roles(owned-roles) }
+    record source-authority { incarnation: string, %world: world-ref, source-id: string, binding: definition-ref, authority: authority-ref, scope: string, valid-time: valid-time, recorded-at: string, ownership: authority-ownership }
+    record source-read-dependency { position: source-position, binding: definition-ref }
+    record identity-dependency { subject: subject, revision: u64 }
+    record alias-dependency { digest: string, generation: u64 }
+    record mapping-dependency { mapping: mapping-ref, identity-rule: identity-rule-ref, authority: authority-ref, binding: definition-ref }
+    record source-field-dependency { schema: schema-ref, field: string, value-type: value-type, nullable: bool, optional: bool, name: string }
+    variant read-dependency { assertion(assertion-ref), evidence(evidence-ref), definition(definition-ref), watch(watch-dependency), source(source-read-dependency), time-boundary(string), identity(identity-dependency), alias-range(alias-dependency), source-mapping(mapping-dependency), source-field(source-field-dependency) }
+    variant premise { assertion(assertion-ref), evidence(evidence-ref), read(read-dependency) }
+    enum support-status { valid, invalid, pending }
+    record support-set { reference: support-ref, conclusion: assertion-ref, rule: definition-ref, arguments: list<query-argument>, scope: string, valid-time: valid-time, release-id: string, branch-id: option<string>, premises: list<premise>, status: support-status, dirty: dirty-state }
+    enum source-guarantee { projection, authoritative, recorded-replay, assumed }
+    enum gap-reason { position-expired, non-replayable, incomplete-enumeration, permission-narrowed, schema-drift, interrupted-snapshot }
+    record source-gap { reason: gap-reason, after: option<source-position>, before: option<source-position> }
+    record source-basis { source-id: string, incarnation: string, binding: definition-ref, mapping-revision: u64, authority-revision: u64, schema: schema-ref, identity-rule: identity-rule-ref, field-definitions: list<definition-ref>, position: option<source-position>, snapshot: option<string>, observed-at: string, captured-at: option<string>, last-reconciled-at: option<string>, guarantee: source-guarantee, gap: option<source-gap> }
+    record cost { amount: string, currency: string }
+    record budget { max-wall-time: u64, max-steps: u64, max-source-reads: u64, max-rows: u64, max-bytes: u64, max-model-calls: u64, max-input-tokens: u64, max-output-tokens: u64, max-cost: option<cost>, deadline: option<string> }
+    record usage { elapsed: u64, steps: u64, source-reads: u64, rows: u64, bytes: u64, model-calls: u64, input-tokens: u64, output-tokens: u64, cost: option<cost> }
+    enum diagnostic-severity { warning, error }
+    record diagnostic { definition: definition-ref, field: list<string>, severity: diagnostic-severity, code: string, diagnostic-id: string }
+    record bounding-box { left: f64, bottom: f64, right: f64, top: f64 }
+    record text-anchor { start: u64, end: u64 }
+    record pdf-anchor { page: u32, bbox: option<bounding-box> }
+    record html-anchor { node-path: option<string>, text-start: u64, text-end: u64 }
+    record sheet-anchor { sheet: string, row: u32, column: u32 }
+    record part-anchor { part: string, element: option<string> }
+    record media-anchor { start-ms: option<u64>, end-ms: option<u64> }
+    record record-anchor { namespace: string, native-key: string, fields: list<string> }
+    variant source-anchor { text(text-anchor), pdf(pdf-anchor), html(html-anchor), sheet(sheet-anchor), package-part(part-anchor), media(media-anchor), %record(record-anchor) }
+    enum record-error { invalid-number, invalid-date, invalid-formula, precision-lost, unsupported-value, permission-denied }
+    variant record-cell { missing, known(value), error(record-error) }
+    record formula-value { expression: string, cached: option<value>, cache-current: bool }
+    record source-field { id: string, name: string, value: record-cell, raw-lexeme: option<string>, formula: option<formula-value>, locator: option<source-anchor> }
+    record source-row { native-key: string, incarnation: string, fields: list<source-field> }
+    enum unary-operator { not, negate }
+    enum binary-operator { equal, not-equal, less, less-or-equal, greater, greater-or-equal, add, subtract, multiply, divide, contains }
+    enum aggregate-operator { count, sum, minimum, maximum, average, any, all }
+    record sliding-window { width: u64, timestamp-property: definition-ref }
+    variant time-window { fixed(valid-time), sliding(sliding-window) }
+    record field-expression { subject: string, property: definition-ref }
+    record role-expression { relation: string, role: string }
+    record unary-expression { operator: unary-operator, operand: u32 }
+    record binary-expression { operator: binary-operator, left: u32, right: u32 }
+    record conditional-expression { condition: u32, then-value: u32, else-value: u32 }
+    record call-expression { function: definition-ref, arguments: list<u32> }
+    record aggregate-expression { operator: aggregate-operator, collection: string, expression: u32, window: option<time-window> }
+    variant expression-node { literal(value), parameter(string), field(field-expression), role(role-expression), unary(unary-expression), binary(binary-expression), all(list<u32>), any(list<u32>), conditional(conditional-expression), call(call-expression), aggregate(aggregate-expression), is-null(u32), is-known(u32) }
+    record expression { nodes: list<expression-node>, root: u32 }
+    record source-order { field: string, descending: bool }
+    record source-read-request { binding: definition-ref, %resource: string, row-symbol: string, fields: list<string>, predicate: option<expression>, order: list<source-order>, limit: u32, continuation: option<string>, as-of: option<string> }
+    record source-page { rows: list<source-row>, basis: source-basis, continuation: option<string>, complete: bool }
+    enum source-capability { schema-discovery, snapshot, history, change-stream, conditional-write, idempotency, inspect-effect, filter, sort, aggregate }
+    variant resource-ref { object(string), relation(string), definition(string), assertion(string), evidence(string), support(string), watch(string), head(string), state(string), binding(string), operation(string), source(string), %package(string), change-set(string), branch(string), task(string), %case(string), test-case(string), suite(string), evaluation(string) }
+    record revision-conflict { expected: u64, actual: u64 }
+    record resource-revision-conflict { %resource: resource-ref, expected: u64, actual: u64 }
+    record epoch-changed { policy-epoch: u64, grant-epoch: u64 }
+    variant authorization-failure { invalid-principal, invalid-delegation, insufficient-scope, revoked, audience-mismatch, request-digest-mismatch, deadline-expired, replay, approval-missing, approval-expired, approval-digest-mismatch, required-policy-unavailable(string), policy-contract-mismatch(string), epoch-changed(epoch-changed), obligation-unsatisfied, internal-fault }
+    enum installation-failure { unsupported-version, extension-unavailable, permission-denied, schema-mismatch, storage-identity-mismatch }
+    enum constraint-code { database-constraint, identity-alias, immutable-revision, idempotency-payload, support-cycle, head-generation, state-epoch, foreign-reference, scope-overlap }
+    variant commit-failure { installation(installation-failure), not-configured, closed, connection, pool-timeout, statement-timeout, serialization-conflict, deadlock, rollback-failed, commit-id-payload-conflict(string), invalid-batch, read-dependency-changed(resource-ref), constraint-conflict(constraint-code), revision-conflict(resource-revision-conflict), rolled-back, fenced(revision-conflict), commit-indeterminate(string), transfer-indeterminate(string), internal-fault }
+    enum source-plan-reason { empty, unknown-resource, unknown-field, field-not-readable, field-not-writable, invalid-key, invalid-identifier, invalid-endpoint, unsupported-predicate, unsupported-ordering, unsupported-history, unsupported-limit, invalid-value, capability-not-declared }
+    record invalid-plan { field: list<string>, reason: source-plan-reason }
+    record digest-mismatch { expected: string, actual: string }
+    enum source-credential-reason { missing, resolver-unavailable, resolver-authentication, decrypt-failed, invalid, store-unavailable }
+    variant source-failure-leaf { authorization(authorization-failure), commit(commit-failure), binding(binding-failure), compile(compile-failure), mapping(mapping-failure), release(release-failure-leaf), lifecycle(lifecycle-failure), %package(package-failure), concurrent-call-limit, budget-exceeded(budget-dimension), invalid-plan(invalid-plan), connection-missing(string), revision-conflict(revision-conflict), sql-state(string), response-invalid(list<string>), response-limit, effect-indeterminate(string), credential(source-credential-reason), authentication, permission-denied, connection, connect-timeout, read-timeout, rate-limited(option<u64>), service-unavailable, unsupported-field(string), history-unavailable, capability-missing(source-capability), schema-drift(digest-mismatch), checkpoint-incompatible(string), position-expired, position-incomparable, incomplete-transaction, reader-not-stopped, ack-channel-not-stopped, epoch-stale(revision-conflict), gap(gap-reason), protocol-violation, upstream-unrecognized(string), cancelled, internal-fault }
+    record source-cleanup { primary: option<u32>, code: string }
+    record source-release-backfill { release-id: string, partition: string, failure: u32 }
+    variant source-failure-node { leaf(source-failure-leaf), cleanup(source-cleanup), release-backfill(source-release-backfill), plugin-invocation(u32), host(host-failure-node), operation(operation-failure-node), slot(slot-failure-node), query(query-failure-node), action(action-failure-node), release(release-failure-node) }
+    record source-failure { nodes: list<source-failure-node>, root: u32 }
+    record projection-source-witness { basis: source-basis, cell: projected-cell }
+    record projection-request { %world: world-ref, release-id: string, definitions: list<definition-definition-body>, scopes: list<scope>, scope: string, valid-time: valid-time, known-at: option<string>, cells: list<projected-cell>, fixed: list<projected-cell>, assertions: list<assertion>, sources: list<projection-source-witness>, basis: list<source-basis>, dependencies: list<read-dependency>, budget: budget }
+    record projection-result { cells: list<projected-cell>, dependencies: list<read-dependency>, diagnostics: list<diagnostic> }
+    variant projection-failure { invalid-input(list<string>), basis-changed, budget-exceeded, cancelled, internal-fault }
+    record reconcile-request { %world: world-ref, release-id: string, definitions: list<definition-definition-body>, scopes: list<scope>, scope: string, valid-time: valid-time, known-at: option<string>, cells: list<projected-cell>, fixed: list<projected-cell>, assertions: list<assertion>, sources: list<projection-source-witness>, basis: list<source-basis>, dependencies: list<read-dependency>, budget: budget }
+    record reconcile-result { selected: list<assertion-ref>, conflicts: list<projected-cell>, observations: list<observation-draft>, dependencies: list<read-dependency> }
+    variant reconcile-failure { invalid-input(list<string>), authority-missing, basis-changed, budget-exceeded, cancelled, internal-fault }
+    record oracle-query-observation { step-id: string, page: query-page }
+    record oracle-request { %world: world-ref, test-case-id: string, fixture: list<u8>, expected: list<u8>, observed: list<u8>, queries: list<oracle-query-observation>, budget: budget }
+    record oracle-result { passed: bool, evidence: list<evidence-ref>, diagnostics: list<diagnostic>, evidence-satisfied: option<u64>, evidence-required: option<u64>, conflicts-detected: option<u64>, conflicts-present: option<u64> }
+    enum oracle-failure { bad-fixture, schema-mismatch, unavailable, budget-exceeded, cancelled, internal-fault }
+    record config-value { name: string, value: value }
+    record package-config { install-id: string, revision: u64, digest: string, fields: list<config-value> }
+    enum config-read-failure { unavailable, digest-mismatch, authorization-revoked }
+    record binding-failure-lock-retiring { activation-lock-id: string }
+    record binding-failure-retained-references { activation-lock-id: string }
+    record binding-failure-missing-activation-lock { activation-lock-id: string }
+    record binding-failure-package-unavailable { node-id: string, install-id: string }
+    record binding-failure-quarantined { node-id: string }
+    record binding-failure-configuration-changed { node-id: string }
+    enum publication-conflict-reason { empty-scope, resolution-mismatch, rollback-unproven }
+    record binding-failure-publication-conflict { reason: publication-conflict-reason }
+    record binding-failure-duplicate-port { node-id: string, port: string }
+    record binding-failure-ambiguous-provider { consumer: string, port: string, providers: list<string> }
+    record binding-failure-invalid-channels { binding-id: string }
+    record binding-failure-duplicate-node { node-id: string }
+    record binding-failure-missing-node { node-id: string }
+    record binding-failure-missing-required-provider { consumer: string, contract: contract-ref }
+    record binding-failure-missing-port { node-id: string, port: string }
+    record binding-failure-contract-mismatch { consumer: string, provider: string, contract: contract-ref }
+    record binding-failure-schema-mismatch { consumer: string, provider: string }
+    record binding-failure-dependency-cycle { nodes: list<string> }
+    record binding-failure-dataflow-cycle { nodes: list<string> }
+    record binding-failure-invalid-composition { binding-id: string }
+    enum slot-kind { connector, identity, schema, resolver, projection, provenance, compiler, policy, action, reconcile, abstraction, evaluation, context, agent-bridge, storage }
+    enum merge-policy { none, ordered-concatenation, disjoint-fields, require-equal, explicit-conflict, mandatory-and-deny-overrides }
+    record binding-failure-composition-unsupported-merge { slot: slot-kind, policy: merge-policy }
+    record binding-failure-composition-merge-conflict { nodes: list<string> }
+    record binding-failure-composition-incomplete { nodes: list<string> }
+    record binding-failure-composition-blocked { dependencies: list<string> }
+    record binding-failure-merge-policy-required { binding-id: string }
+    record binding-failure-trust-boundary { node-id: string }
+    record binding-failure-state-conflict { node-id: string }
+    record binding-failure-head-conflict { expected: u64, actual: u64 }
+    record binding-failure-commit { failure: commit-failure }
+    variant binding-failure { lock-retiring(binding-failure-lock-retiring), retained-references(binding-failure-retained-references), missing-activation-lock(binding-failure-missing-activation-lock), package-unavailable(binding-failure-package-unavailable), quarantined(binding-failure-quarantined), configuration-changed(binding-failure-configuration-changed), head-invalid, publication-conflict(binding-failure-publication-conflict), lock-identity-conflict, duplicate-port(binding-failure-duplicate-port), ambiguous-provider(binding-failure-ambiguous-provider), invalid-channels(binding-failure-invalid-channels), invalid-roots, duplicate-node(binding-failure-duplicate-node), missing-node(binding-failure-missing-node), missing-required-provider(binding-failure-missing-required-provider), missing-port(binding-failure-missing-port), contract-mismatch(binding-failure-contract-mismatch), schema-mismatch(binding-failure-schema-mismatch), dependency-cycle(binding-failure-dependency-cycle), dataflow-cycle(binding-failure-dataflow-cycle), invalid-composition(binding-failure-invalid-composition), composition-unsupported-merge(binding-failure-composition-unsupported-merge), composition-merge-conflict(binding-failure-composition-merge-conflict), composition-incomplete(binding-failure-composition-incomplete), composition-blocked(binding-failure-composition-blocked), merge-policy-required(binding-failure-merge-policy-required), trust-boundary(binding-failure-trust-boundary), state-conflict(binding-failure-state-conflict), digest-mismatch, head-conflict(binding-failure-head-conflict), commit(binding-failure-commit), internal-fault }
+    record lifecycle-failure-missing-install { install-id: string }
+    record lifecycle-failure-missing-configuration { install-id: string }
+    record lifecycle-failure-missing-trust { install-id: string }
+    record lifecycle-failure-concurrent-call-limit { node-id: string }
+    record lifecycle-failure-dependency-missing { node-id: string }
+    record lifecycle-failure-prepare-failed { node-id: string }
+    enum lifecycle-stage { prepare, acquire, close-acquisition, revoke, cancel, join, cleanup, stop-engine, stop-process, commit, recover }
+    enum resource-kind { invocation, dependency, registration, %stream, body, host-io, callback, timer, child-call, task-join, store, process, private-material }
+    enum resource-failure-stage { acquisition, admission, cancel, stop, shutdown, supervisor-join, task-join, material-cleanup, cleanup, completion }
+    record resource-part-failure { kind: resource-kind, name: string, stage: resource-failure-stage, code: string, message: string }
+    enum resource-stage { acquiring, running, joining, cleanup-failed }
+    enum resource-failure-reason { acquisition-closed, dependency-missing, authorization-revoked, cleanup-failed, join-failed, engine-not-stopped, process-exit-unconfirmed, timeout }
+    record retained-resource { parts: list<resource-part-failure>, token: string, generation-id: string, invocation-id: option<string>, acquisition-id: option<string>, kind: resource-kind, stage: resource-stage, reason: resource-failure-reason }
+    record lifecycle-failure-retained { stage: lifecycle-stage, remaining-resources: list<retained-resource> }
+    record lifecycle-failure-state-migration-required { migration-id: string }
+    record lifecycle-failure-revision-conflict { expected: u64, actual: u64 }
+    record lifecycle-failure-commit { failure: commit-failure }
+    variant lifecycle-failure { missing-install(lifecycle-failure-missing-install), missing-configuration(lifecycle-failure-missing-configuration), missing-trust(lifecycle-failure-missing-trust), invalid-persisted-state, already-prepared, concurrent-call-limit(lifecycle-failure-concurrent-call-limit), acquisition-closed, dependency-missing(lifecycle-failure-dependency-missing), authorization-revoked, prepare-failed(lifecycle-failure-prepare-failed), retained(lifecycle-failure-retained), state-migration-required(lifecycle-failure-state-migration-required), revision-conflict(lifecycle-failure-revision-conflict), commit(lifecycle-failure-commit), internal-fault }
+    record package-failure-authorization { failure: authorization-failure }
+    enum config-failure { unknown-field, duplicate-field, required-field, type-mismatch, immutable, secret-field }
+    record package-failure-config-invalid { field: list<string>, reason: config-failure }
+    record package-failure-manifest-invalid { field: list<string> }
+    record package-failure-file-missing { path: string }
+    record package-failure-unlisted-file { path: string }
+    record package-failure-size-mismatch { path: string }
+    record package-failure-digest-mismatch { path: string }
+    record package-failure-contract-mismatch { contract-id: string }
+    record package-failure-artifact-invalid { artifact-id: string }
+    record package-failure-target-unavailable { artifact-id: string }
+    record package-failure-dependency-missing { package-id: string }
+    record package-failure-dependency-conflict { package-id: string }
+    record package-failure-commit { failure: commit-failure }
+    variant package-failure { authorization(package-failure-authorization), config-invalid(package-failure-config-invalid), cancelled, invalid-archive, archive-limit, unsupported-compression, encrypted-archive, invalid-path, duplicate-path, case-collision, link-entry, manifest-missing, manifest-invalid(package-failure-manifest-invalid), unsupported-format, invalid-version, file-missing(package-failure-file-missing), unlisted-file(package-failure-unlisted-file), size-mismatch(package-failure-size-mismatch), digest-mismatch(package-failure-digest-mismatch), contract-mismatch(package-failure-contract-mismatch), wit-invalid, schema-invalid, artifact-invalid(package-failure-artifact-invalid), target-unavailable(package-failure-target-unavailable), dependency-missing(package-failure-dependency-missing), dependency-conflict(package-failure-dependency-conflict), dependency-cycle, signature-missing, signature-invalid, publisher-untrusted, process-not-trusted, native-not-trusted, io-read, io-write, io-sync, install-conflict, retained-references, cleanup-failed, commit(package-failure-commit), internal-fault }
+    record mapping-failure-schema-missing { reference: schema-ref }
+    record mapping-failure-mapping-changed { reference: mapping-ref }
+    record mapping-failure-field-removed { field: string }
+    record mapping-failure-field-renamed { field: string }
+    record mapping-failure-field-type-changed { field: string }
+    record mapping-failure-precision-changed { field: string }
+    record mapping-failure-invalid-value { field: string, reason: record-error }
+    record mapping-failure-type-mismatch { property: definition-ref }
+    record mapping-failure-unit-mismatch { property: definition-ref }
+    record mapping-failure-null-not-allowed { property: definition-ref }
+    record mapping-failure-formula-unavailable { field: string }
+    record mapping-failure-permission-denied { field: option<string> }
+    record mapping-failure-capability-missing { capability: source-capability }
+    enum budget-dimension { wall-time, steps, source-reads, rows, bytes, model-calls, input-tokens, output-tokens, cost, deadline }
+    record mapping-failure-budget-exceeded { dimension: budget-dimension }
+    variant mapping-failure { schema-missing(mapping-failure-schema-missing), mapping-changed(mapping-failure-mapping-changed), identity-unresolved, identity-ambiguous, incomplete-key, duplicate-key, field-removed(mapping-failure-field-removed), field-renamed(mapping-failure-field-renamed), field-type-changed(mapping-failure-field-type-changed), precision-changed(mapping-failure-precision-changed), invalid-value(mapping-failure-invalid-value), type-mismatch(mapping-failure-type-mismatch), unit-mismatch(mapping-failure-unit-mismatch), null-not-allowed(mapping-failure-null-not-allowed), formula-unavailable(mapping-failure-formula-unavailable), permission-denied(mapping-failure-permission-denied), capability-missing(mapping-failure-capability-missing), authority-mismatch, revision-mismatch, cross-world, budget-exceeded(mapping-failure-budget-exceeded), cancelled, internal-fault }
+    record release-failure-leaf-branch-missing { branch-id: string }
+    record release-failure-leaf-release-missing { release-id: string }
+    record release-failure-leaf-branch-conflict { branch-id: string, expected: u64, actual: u64, fields: list<list<string>> }
+    record release-head { %world: world-ref, channel: string, generation: u64, revision: u64, release-id: string }
+    record release-failure-leaf-head-conflict { channel: string, expected: option<release-head>, actual: option<release-head> }
+    record merge-conflict { definition-id: string, fields: list<list<string>> }
+    record release-failure-leaf-merge-conflicts { conflicts: list<merge-conflict> }
+    record release-failure-leaf-basis-changed { resources: list<resource-ref> }
+    record release-failure-leaf-evaluation-required { suites: list<string> }
+    record release-failure-leaf-backfill-not-ready { release-id: string, partitions: list<string> }
+    record release-failure-leaf-invalid-branch { field: list<string> }
+    record release-failure-leaf-invalid-artifact { field: list<string> }
+    record release-failure-leaf-evaluation-missing { evaluation-id: string }
+    record release-failure-leaf-evaluation-rejected { evaluation-id: string }
+    record release-failure-leaf-authorization { failure: authorization-failure }
+    record compile-failure-reference-missing { reference: definition-ref, field: list<string> }
+    record compile-failure-reference-ambiguous { id: string, field: list<string> }
+    record compile-failure-dependency-cycle { path: list<definition-ref> }
+    record compile-failure-type-mismatch { definition: definition-ref, field: list<string>, expected: value-type, actual: value-type }
+    record compile-failure-unit-mismatch { definition: definition-ref, field: list<string>, expected: unit, actual: unit }
+    record compile-failure-currency-mismatch { definition: definition-ref, field: list<string>, expected: string, actual: string }
+    record compile-failure-time-mismatch { definition: definition-ref, field: list<string> }
+    record compile-failure-scope-mismatch { definition: definition-ref, field: list<string> }
+    enum effect { pure, source-read, clock-read, probabilistic, external-write }
+    record compile-failure-effect-violation { definition: definition-ref, field: list<string>, effect: effect }
+    record compile-failure-source-capability-missing { binding: definition-ref, capability: source-capability }
+    record compile-failure-policy-contract-missing { policy-id: string }
+    record compile-failure-policy-contract-mismatch { contract: contract-ref }
+    record compile-failure-required-provider-missing { contract: contract-ref }
+    record compile-failure-pass-contract-invalid { provider-id: string }
+    record compile-failure-pass-output-invalid { provider-id: string, field: list<string> }
+    record compile-failure-artifact-invalid { field: list<string> }
+    enum compile-target { query-plan, validator, action-manifest, tool-catalog, type-script-sdk, rust-sdk }
+    record compile-failure-generated-sdk-invalid { target: compile-target, field: list<string> }
+    record compile-failure-compatibility-break { definition: definition-ref, callers: list<definition-ref> }
+    record definition-failure-authorization { failure: authorization-failure }
+    record definition-failure-head-conflict { definition-id: string, expected: u64, actual: u64, fields: list<list<string>> }
+    record definition-failure-missing-reference { reference: definition-ref }
+    record definition-failure-revision-conflict { expected: u64, actual: u64 }
+    record definition-failure-scope-conflict { definitions: list<definition-ref> }
+    record definition-failure-valid-time-conflict { definitions: list<definition-ref> }
+    record definition-failure-type-mismatch { field: list<string> }
+    record definition-failure-unit-mismatch { field: list<string> }
+    record definition-failure-invalid-cardinality { field: list<string> }
+    record definition-failure-duplicate-local-id { field: list<string> }
+    record definition-failure-cyclic-dependency { definitions: list<definition-ref> }
+    record definition-failure-unknown-kind { contract-id: string }
+    record definition-failure-provider-missing { contract-id: string }
+    enum definition-kind { object-type, property, relation-type, facet, concept-view, rule, metric, function, state-model, action-contract, strategy, policy-binding, source-binding, extension }
+    record definition-failure-wrong-kind { reference: definition-ref, expected: definition-kind, actual: definition-kind }
+    record definition-failure-cross-world-reference { reference: definition-ref }
+    record definition-failure-deprecated-reference { reference: definition-ref }
+    record definition-failure-immutable-revision { reference: definition-ref }
+    record definition-failure-kind-contract-incomplete { contract-id: string }
+    enum definition-field-reason { empty, duplicate, invalid-date, invalid-time-zone, invalid-calendar, invalid-precision, invalid-scale, null-not-allowed, type-mismatch, invalid-cardinality, invalid-interval, invalid-role, invalid-state, invalid-transition, impure-expression, incomplete-contract }
+    record definition-failure-invalid-field { field: list<string>, reason: definition-field-reason }
+    record definition-failure-missing-field { field: list<string> }
+    record definition-failure-limit-exceeded { field: list<string>, maximum: u64 }
+    record definition-failure-commit { failure: commit-failure }
+    variant definition-failure { authorization(definition-failure-authorization), head-conflict(definition-failure-head-conflict), missing-reference(definition-failure-missing-reference), revision-conflict(definition-failure-revision-conflict), scope-conflict(definition-failure-scope-conflict), valid-time-conflict(definition-failure-valid-time-conflict), type-mismatch(definition-failure-type-mismatch), unit-mismatch(definition-failure-unit-mismatch), invalid-cardinality(definition-failure-invalid-cardinality), duplicate-local-id(definition-failure-duplicate-local-id), cyclic-dependency(definition-failure-cyclic-dependency), unknown-kind(definition-failure-unknown-kind), provider-missing(definition-failure-provider-missing), lifecycle-conflict, wrong-kind(definition-failure-wrong-kind), cross-world-reference(definition-failure-cross-world-reference), deprecated-reference(definition-failure-deprecated-reference), immutable-revision(definition-failure-immutable-revision), kind-contract-incomplete(definition-failure-kind-contract-incomplete), invalid-field(definition-failure-invalid-field), missing-field(definition-failure-missing-field), limit-exceeded(definition-failure-limit-exceeded), commit(definition-failure-commit), internal-fault }
+    record compile-failure-definition { failure: definition-failure }
+    record compile-failure-invalid-expression { definition: definition-ref, field: list<string> }
+    record compile-failure-limit-exceeded { field: list<string> }
+    variant compile-failure { reference-missing(compile-failure-reference-missing), reference-ambiguous(compile-failure-reference-ambiguous), dependency-cycle(compile-failure-dependency-cycle), type-mismatch(compile-failure-type-mismatch), unit-mismatch(compile-failure-unit-mismatch), currency-mismatch(compile-failure-currency-mismatch), time-mismatch(compile-failure-time-mismatch), scope-mismatch(compile-failure-scope-mismatch), effect-violation(compile-failure-effect-violation), source-capability-missing(compile-failure-source-capability-missing), policy-contract-missing(compile-failure-policy-contract-missing), policy-contract-mismatch(compile-failure-policy-contract-mismatch), required-provider-missing(compile-failure-required-provider-missing), pass-contract-invalid(compile-failure-pass-contract-invalid), pass-output-invalid(compile-failure-pass-output-invalid), artifact-invalid(compile-failure-artifact-invalid), generated-sdk-invalid(compile-failure-generated-sdk-invalid), compatibility-break(compile-failure-compatibility-break), definition(compile-failure-definition), invalid-expression(compile-failure-invalid-expression), limit-exceeded(compile-failure-limit-exceeded), cancelled, internal-fault }
+    record release-failure-leaf-compile { failure: compile-failure }
+    record release-failure-leaf-commit { failure: commit-failure }
+    variant release-failure-leaf { branch-missing(release-failure-leaf-branch-missing), release-missing(release-failure-leaf-release-missing), branch-conflict(release-failure-leaf-branch-conflict), head-conflict(release-failure-leaf-head-conflict), merge-conflicts(release-failure-leaf-merge-conflicts), basis-changed(release-failure-leaf-basis-changed), evaluation-required(release-failure-leaf-evaluation-required), backfill-not-ready(release-failure-leaf-backfill-not-ready), invalid-branch(release-failure-leaf-invalid-branch), invalid-artifact(release-failure-leaf-invalid-artifact), evaluation-missing(release-failure-leaf-evaluation-missing), evaluation-rejected(release-failure-leaf-evaluation-rejected), authorization(release-failure-leaf-authorization), compile(release-failure-leaf-compile), commit(release-failure-leaf-commit), cancelled, internal-fault }
+    record process-failure-contract-mismatch { contract-id: string }
+    record process-failure-child-exited { code: option<s32> }
+    variant process-failure { invalid-request-id, spawn-failed, sandbox-unavailable, stdio-failed, readiness-failed, transport-closed, backpressure-timeout, handshake-timeout, handshake-mismatch, contract-mismatch(process-failure-contract-mismatch), frame-empty, frame-too-large, frame-malformed, partial-header, partial-body, duplicate-request, unexpected-direction, unknown-correlation, credit-exceeded, sequence-mismatch, child-exited(process-failure-child-exited), read-failed, write-failed, flush-failed, cancel-timeout, exit-unconfirmed, retained, internal-fault }
+    record input-failure-missing-field { field: list<string> }
+    record input-failure-invalid-value { field: list<string> }
+    record input-failure-invalid-unit { field: list<string> }
+    enum input-limit { bytes, depth, items, string-length }
+    record input-failure-limit-exceeded { limit: input-limit, maximum: u64 }
+    record input-failure-schema-mismatch { contract-id: string, expected: string }
+    record input-failure-unresolved-reference { %resource: resource-ref }
+    record input-failure-unknown-field { field: list<string> }
+    variant input-failure { missing-field(input-failure-missing-field), invalid-value(input-failure-invalid-value), invalid-unit(input-failure-invalid-unit), limit-exceeded(input-failure-limit-exceeded), schema-mismatch(input-failure-schema-mismatch), unresolved-reference(input-failure-unresolved-reference), unknown-field(input-failure-unknown-field) }
+    enum generation-stage { admission, binding, credential, connect, read, output }
+    record generation-failure-kind-authorization { failure: authorization-failure }
+    record generation-failure-kind-commit { failure: commit-failure }
+    record source-version-ref { %world: world-ref, source-id: string, version-id: string }
+    record material-failure-version-content-unavailable { reference: source-version-ref }
+    record material-failure-source-version-missing { reference: source-version-ref }
+    variant material-failure { version-content-unavailable(material-failure-version-content-unavailable), input-invalid, read-failed, write-failed, sync-failed, publish-failed, content-not-found, retained-references, cleanup-failed, unsupported-format, corrupt-content, encrypted-content, parser-unavailable, size-limit, ocr-unavailable, transcription-unavailable, incomplete-location, source-version-missing(material-failure-source-version-missing), digest-mismatch, deleted, retention-denied, cancelled, internal-fault }
+    record generation-failure-kind-material { failure: material-failure }
+    record generation-failure-kind-run-mismatch { run-id: string, step-id: string }
+    record generation-failure-kind-call-conflict { model-call-id: string }
+    record generation-failure-kind-call-indeterminate { model-call-id: string }
+    record generation-failure-kind-unsupported-parameter { parameter: string }
+    record generation-failure-kind-binding-missing { binding-id: string }
+    record retry-after-seconds { value: u64 }
+    record retry-after-http-date { value: string }
+    variant retry-after { seconds(retry-after-seconds), http-date(retry-after-http-date) }
+    record generation-failure-kind-rate-limited { retry-after: option<retry-after> }
+    record generation-failure-kind-provider-rejected { status: option<u16> }
+    record generation-failure-kind-provider-unavailable { status: option<u16> }
+    record generation-failure-kind-schema-mismatch { expected: string }
+    record generation-failure-kind-budget-exceeded { dimension: budget-dimension }
+    record generation-failure-kind-remote-unrecognized { status: option<u16> }
+    variant generation-failure-kind { authorization(generation-failure-kind-authorization), commit(generation-failure-kind-commit), material(generation-failure-kind-material), run-mismatch(generation-failure-kind-run-mismatch), call-conflict(generation-failure-kind-call-conflict), call-indeterminate(generation-failure-kind-call-indeterminate), unsupported-parameter(generation-failure-kind-unsupported-parameter), binding-store-unavailable, owner-unavailable, audit-unavailable, binding-invalid, binding-missing(generation-failure-kind-binding-missing), binding-stale, no-selection, selection-unavailable, remote-version-unlocked, unsupported-protocol, unsupported-authentication, credential-missing, credential-unavailable, authentication, permission-denied, rate-limited(generation-failure-kind-rate-limited), connect-deadline, read-deadline, generation-deadline, connect-failed, read-failed, provider-rejected(generation-failure-kind-provider-rejected), provider-unavailable(generation-failure-kind-provider-unavailable), context-limit, output-limit, structured-output-unsupported, tool-unsupported, media-unsupported, refused, truncated, invalid-output, schema-mismatch(generation-failure-kind-schema-mismatch), budget-exceeded(generation-failure-kind-budget-exceeded), cancelled, sink, remote-unrecognized(generation-failure-kind-remote-unrecognized), internal-fault }
+    record model-binding-ref { id: string, revision: u64, digest: string }
+    record model-usage { input-tokens: option<u64>, output-tokens: option<u64>, total-tokens: option<u64> }
+    enum generation-state { completed, refused, truncated, partial }
+    record generation-receipt { id: string, binding: model-binding-ref, prompt-digest: string, context-digests: list<string>, output: option<blob-ref>, value: option<value>, text: string, finish-reason: option<string>, usage: option<model-usage>, started-at: string, completed-at: option<string>, actual-model: option<string>, remote-revision: option<string>, provider-call-reference: option<string>, remote-call-reference: option<string>, state: generation-state, delivered-text-bytes: u64, delivery-uncertain: bool }
+    record generation-failure { stage: generation-stage, kind: generation-failure-kind, receipt: option<generation-receipt> }
+    record state-failure-revision-conflict { expected: option<u64>, actual: option<u64> }
+    record state-failure-root-conflict { expected: revision-ref, actual: revision-ref }
+    record state-failure-namespace-missing { namespace: string }
+    record state-failure-epoch-stale { expected: u64, actual: u64 }
+    record state-failure-schema-mismatch { expected: string, actual: string }
+    record state-failure-checkpoint-incompatible { format: string }
+    record state-failure-migration-unavailable { migration-id: string }
+    record state-failure-migration-failed { migration-id: string }
+    record state-failure-commit { failure: commit-failure }
+    variant state-failure { key-invalid, size-limit, revision-conflict(state-failure-revision-conflict), root-conflict(state-failure-root-conflict), namespace-missing(state-failure-namespace-missing), epoch-stale(state-failure-epoch-stale), schema-mismatch(state-failure-schema-mismatch), checkpoint-incompatible(state-failure-checkpoint-incompatible), migration-unavailable(state-failure-migration-unavailable), migration-failed(state-failure-migration-failed), checkpoint-barrier-unsatisfied, reader-not-stopped, writer-not-stopped, ack-not-stopped, shadow-validation-failed, fenced, commit(state-failure-commit), internal-fault }
+    record host-failure-node-budget-exceeded { dimension: budget-dimension }
+    variant host-failure-node { process(process-failure), operation(u32), input(input-failure), authorization(authorization-failure), binding(binding-failure), source(u32), slot(u32), query(u32), generation(generation-failure), state(state-failure), budget-exceeded(host-failure-node-budget-exceeded), cancelled, internal-fault }
+    record upload-failure-offset-mismatch { expected: u64, actual: u64 }
+    record upload-failure-storage { failure: material-failure }
+    variant upload-failure { not-found, expired, already-sealed, offset-mismatch(upload-failure-offset-mismatch), chunk-too-large, chunk-digest-mismatch, size-mismatch, digest-mismatch, admission-mismatch, storage(upload-failure-storage) }
+    record identity-failure-ambiguous { candidates: list<subject> }
+    record source-key { %world: world-ref, source-id: string, namespace: string, native-key: string, incarnation: string, valid-time: valid-time }
+    record identity-failure-alias-conflict { key: source-key }
+    record identity-failure-revision-conflict { expected: u64, actual: u64 }
+    record identity-failure-overlapping-incarnation { source-id: string }
+    record identity-failure-unresolved-identity { subject: subject }
+    record identity-failure-unresolved-type { reference: definition-ref }
+    record identity-failure-type-kind-mismatch { reference: definition-ref }
+    record identity-failure-basis-changed { %resource: resource-ref }
+    record identity-failure-commit { failure: commit-failure }
+    variant identity-failure { ambiguous(identity-failure-ambiguous), alias-conflict(identity-failure-alias-conflict), revision-conflict(identity-failure-revision-conflict), overlapping-incarnation(identity-failure-overlapping-incarnation), invalid-merge, invalid-split, cross-world, scope-conflict, invalid-interval, unresolved-identity(identity-failure-unresolved-identity), unresolved-type(identity-failure-unresolved-type), type-kind-mismatch(identity-failure-type-kind-mismatch), permission-denied, cancelled, candidate-scope-incomplete, basis-changed(identity-failure-basis-changed), impact-set-changed, commit(identity-failure-commit), internal-fault }
+    record fact-failure-compilation { failure: compile-failure }
+    enum provenance-dependency { rule-evaluation-proof, closed-world-query-proof, field-coverage-proof, query-receipt, current-authorization }
+    record provenance-failure-dependency-missing { dependency: provenance-dependency }
+    enum provenance-limit { component-nodes, alternative-supports, proposal-items, query-nodes, watch-partitions }
+    record provenance-failure-limit-exceeded { %resource: provenance-limit, limit: u64 }
+    record provenance-failure-dirty { watches: list<string> }
+    record provenance-failure-unclosed-range { watch-id: string }
+    record provenance-failure-cyclic-support { assertions: list<assertion-ref> }
+    record provenance-failure-basis-changed { watch-id: string, expected: u64, actual: u64 }
+    record provenance-failure-commit { failure: commit-failure }
+    variant provenance-failure { dependency-missing(provenance-failure-dependency-missing), limit-exceeded(provenance-failure-limit-exceeded), dirty(provenance-failure-dirty), cancelled, cleanup-failed, unclosed-range(provenance-failure-unclosed-range), cyclic-support(provenance-failure-cyclic-support), missing-premise, cross-scope, invalid-interval, basis-changed(provenance-failure-basis-changed), incomplete-negative-range, commit(provenance-failure-commit), internal-fault }
+    record fact-failure-provenance { failure: provenance-failure }
+    record fact-failure-source-mapping { failure: mapping-failure }
+    record fact-failure-missing-definition { reference: definition-ref }
+    record fact-failure-missing-subject { subject: subject }
+    record fact-failure-type-mismatch { field: list<string> }
+    record fact-failure-unit-mismatch { field: list<string> }
+    record fact-failure-null-not-allowed { property: definition-ref }
+    record fact-failure-invalid-role-group { relation-type: definition-ref }
+    record fact-failure-evidence-missing { reference: evidence-ref }
+    record fact-failure-evidence-incomplete { reference: evidence-ref }
+    record fact-failure-source-authority-denied { binding: definition-ref }
+    record fact-failure-revision-conflict { expected: u64, actual: u64 }
+    record fact-failure-structural { field: list<string> }
+    record fact-failure-source-capability-missing { capability: source-capability }
+    record fact-failure-invalid-evidence-locator { reference: evidence-ref }
+    record fact-failure-evidence-cycle { references: list<evidence-ref> }
+    record fact-failure-evidence-unavailable { reference: evidence-ref }
+    record fact-failure-evidence-deleted { reference: evidence-ref }
+    record fact-failure-supersedes-mismatch { expected: assertion-ref }
+    record fact-failure-commit { failure: commit-failure }
+    variant fact-failure { compilation(fact-failure-compilation), provenance(fact-failure-provenance), source-mapping(fact-failure-source-mapping), missing-definition(fact-failure-missing-definition), missing-subject(fact-failure-missing-subject), type-mismatch(fact-failure-type-mismatch), unit-mismatch(fact-failure-unit-mismatch), null-not-allowed(fact-failure-null-not-allowed), invalid-role-group(fact-failure-invalid-role-group), scope-mismatch, valid-time-mismatch, cross-world, evidence-missing(fact-failure-evidence-missing), evidence-incomplete(fact-failure-evidence-incomplete), source-authority-denied(fact-failure-source-authority-denied), revision-conflict(fact-failure-revision-conflict), structural(fact-failure-structural), source-capability-missing(fact-failure-source-capability-missing), invalid-evidence-locator(fact-failure-invalid-evidence-locator), evidence-cycle(fact-failure-evidence-cycle), access-denied, invalid-recorded-time, evidence-unavailable(fact-failure-evidence-unavailable), evidence-deleted(fact-failure-evidence-deleted), cancelled, supersedes-mismatch(fact-failure-supersedes-mismatch), commit(fact-failure-commit), internal-fault }
+    record learning-failure-constraint-violated { field: list<string> }
+    record learning-failure-invalid-operation { index: u32, field: list<string> }
+    record learning-failure-missing-evidence { reference: evidence-ref }
+    record learning-failure-definition { failure: definition-failure }
+    record learning-failure-evaluation-required { suites: list<string> }
+    record learning-failure-counterexample-protected { test-case-id: string }
+    record learning-failure-model { failure: generation-failure }
+    record learning-failure-commit { failure: commit-failure }
+    variant learning-failure { constraint-violated(learning-failure-constraint-violated), invalid-operation(learning-failure-invalid-operation), missing-evidence(learning-failure-missing-evidence), basis-changed, unauthorized-operation, definition(learning-failure-definition), evaluation-required(learning-failure-evaluation-required), counterexample-protected(learning-failure-counterexample-protected), model(learning-failure-model), commit(learning-failure-commit), cancelled, internal-fault }
+    record operation-failure-node-budget-exceeded { dimension: budget-dimension }
+    record evaluation-failure-bad-case { test-case-id: string }
+    record evaluation-failure-schema-mismatch { expected: string }
+    record evaluation-failure-source-missing { source-id: string }
+    record evaluation-failure-budget-exhausted { dimension: budget-dimension }
+    record evaluation-failure-commit { failure: commit-failure }
+    variant evaluation-failure { bad-case(evaluation-failure-bad-case), oracle-unavailable, schema-mismatch(evaluation-failure-schema-mismatch), source-missing(evaluation-failure-source-missing), basis-changed, epoch-changed, budget-exhausted(evaluation-failure-budget-exhausted), cancelled, execution-failed, commit(evaluation-failure-commit), internal-fault }
+    record evaluation-summary-failure-budget-exhausted { dimension: budget-dimension }
+    variant evaluation-summary-failure { bad-case, oracle-unavailable, schema-mismatch, source-missing, basis-changed, epoch-changed, budget-exhausted(evaluation-summary-failure-budget-exhausted), cancelled, execution-failed, commit, internal-fault }
+    variant operation-failure-node { details-withheld, not-configured, not-found, revision-conflict, input(input-failure), authorization(authorization-failure), upload(upload-failure), material(material-failure), source(u32), mapping(mapping-failure), query(u32), slot(u32), identity(identity-failure), fact(fact-failure), definition(definition-failure), release(u32), compile(compile-failure), learning(learning-failure), generation(generation-failure), budget-exceeded(operation-failure-node-budget-exceeded), evaluation(evaluation-failure), evaluation-summary(evaluation-summary-failure), action(u32), %package(package-failure), binding(binding-failure), state(state-failure), lifecycle(lifecycle-failure), process(process-failure), commit(commit-failure), cancelled, cleanup-failed, internal-fault }
+    record abstraction-failure-slot-unbound { slot-id: string }
+    record abstraction-failure-duplicate-binding { slot-id: string }
+    record abstraction-failure-type-mismatch { slot-id: string }
+    enum assurance { heuristic, tested, guarded, verified }
+    record abstraction-failure-assurance-unsupported { requested: assurance }
+    variant abstraction-failure { slot-unbound(abstraction-failure-slot-unbound), duplicate-binding(abstraction-failure-duplicate-binding), type-mismatch(abstraction-failure-type-mismatch), guard-false, guard-unknown, assurance-unsupported(abstraction-failure-assurance-unsupported), evidence-missing, basis-changed, budget-exceeded, cancelled, internal-fault }
+    enum context-failure { invalid-task, budget-exceeded, query-unavailable, authorization-denied, basis-changed, cancelled, internal-fault }
+    enum bridge-failure { principal-invalid, session-unavailable, runtime-unavailable, protocol-mismatch, timeout, cancelled, internal-fault }
+    variant slot-failure-node { connector(u32), identity(identity-failure), schema(compile-failure), resolver(u32), projection(projection-failure), provenance(provenance-failure), compiler(compile-failure), policy(authorization-failure), action(u32), reconcile(reconcile-failure), abstraction(abstraction-failure), evaluation(oracle-failure), context(context-failure), agent-bridge(bridge-failure), storage(commit-failure) }
+    record expression-failure-division-by-zero { field: list<string> }
+    record expression-failure-non-terminating-decimal { field: list<string> }
+    record expression-failure-overflow { field: list<string> }
+    record expression-failure-precision-exceeded { field: list<string>, precision: u16, scale: u16 }
+    record expression-failure-invalid-operand { field: list<string> }
+    record expression-failure-budget-exceeded { dimension: budget-dimension }
+    variant expression-failure { division-by-zero(expression-failure-division-by-zero), non-terminating-decimal(expression-failure-non-terminating-decimal), overflow(expression-failure-overflow), precision-exceeded(expression-failure-precision-exceeded), invalid-operand(expression-failure-invalid-operand), budget-exceeded(expression-failure-budget-exceeded), cancelled, internal-fault }
+    record query-failure-node-expression { failure: expression-failure }
+    record query-failure-node-authorization { failure: authorization-failure }
+    record query-failure-node-compile { failure: compile-failure }
+    record query-failure-node-invalid-query { field: list<string> }
+    record query-failure-node-source { source-id: string, failure: u32 }
+    record read-mode-projected { max-lag: u64 }
+    record read-mode-after { receipt-id: string }
+    variant read-mode { projected(read-mode-projected), authoritative, after(read-mode-after) }
+    record query-failure-node-guarantee-unsatisfied { mode: read-mode, source-id: option<string> }
+    record query-failure-node-projection-lag { source-id: string, actual: u64, maximum: u64 }
+    record query-failure-node-gap { source-id: string }
+    record query-failure-node-dirty { watches: list<string> }
+    record query-failure-node-history-unavailable { source-id: string }
+    enum truncation-reason { rows, objects, bytes, tokens, deadline }
+    record query-failure-node-budget-exceeded { limit: truncation-reason }
+    variant query-failure-node { expression(query-failure-node-expression), authorization(query-failure-node-authorization), compile(query-failure-node-compile), invalid-query(query-failure-node-invalid-query), source(query-failure-node-source), guarantee-unsatisfied(query-failure-node-guarantee-unsatisfied), projection-lag(query-failure-node-projection-lag), gap(query-failure-node-gap), dirty(query-failure-node-dirty), history-unavailable(query-failure-node-history-unavailable), budget-exceeded(query-failure-node-budget-exceeded), cursor-invalid, basis-changed, cancelled, internal-fault }
+    record action-failure-node-contract-missing { reference: definition-ref }
+    record action-failure-node-input { failure: input-failure }
+    record action-failure-node-compilation { failure: compile-failure }
+    record action-failure-node-evaluation { failure: u32 }
+    record action-failure-node-definition { failure: definition-failure }
+    record action-failure-node-precondition-false { index: u32 }
+    enum truth-value { true, false, unknown, conflicted, source-unavailable }
+    record action-failure-node-precondition-unknown { index: u32, value: truth-value }
+    record action-failure-node-authorization { failure: authorization-failure }
+    record action-failure-node-source { failure: u32 }
+    record action-failure-node-effect-indeterminate { intent-id: string }
+    record action-failure-node-verification-failed { verification-id: string }
+    record action-failure-node-commit { failure: commit-failure }
+    record action-failure-node-budget-exceeded { dimension: budget-dimension }
+    variant action-failure-node { contract-missing(action-failure-node-contract-missing), input(action-failure-node-input), compilation(action-failure-node-compilation), evaluation(action-failure-node-evaluation), definition(action-failure-node-definition), precondition-false(action-failure-node-precondition-false), precondition-unknown(action-failure-node-precondition-unknown), authorization(action-failure-node-authorization), proposal-expired, proposal-digest-mismatch, idempotency-conflict, source(action-failure-node-source), conditional-write-conflict, effect-indeterminate(action-failure-node-effect-indeterminate), verification-failed(action-failure-node-verification-failed), verification-unavailable, compensation-failed, commit(action-failure-node-commit), budget-exceeded(action-failure-node-budget-exceeded), cancelled-before-effect, cancelled-after-effect, cleanup-failed, internal-fault }
+    record release-failure-node-leaf { failure: release-failure-leaf }
+    record release-failure-node-backfill { release-id: string, partition: string, failure: u32 }
+    variant release-failure-node { leaf(release-failure-node-leaf), backfill(release-failure-node-backfill) }
+    type host-failure = source-failure;
+    type operation-failure = source-failure;
+    type slot-failure = source-failure;
+    type query-failure = source-failure;
+    type action-failure = source-failure;
+    type release-failure = source-failure;
+    record state-epoch { %world: world-ref, namespace: string, root: revision-ref, writer-domain: string, writer-epoch: u64, schema: string, checkpoint-format: string }
+    record state-migration { id: string, expected: state-epoch, target-schema: string, target-checkpoint-format: string, contract: contract-ref, shadow-root: string, reversible: bool }
+    record state-migration-input { migration: state-migration, checkpoint: list<u8> }
+    record state-migration-output { schema: string, checkpoint-format: string, checkpoint: list<u8> }
+    enum failure-stage { decode, admission, read, parse, generate, resolve, validate, compile, prepare, execute, verify, commit, activate, migrate, drain, stop, recover, disclose }
+    record recovery-correct-input { fields: list<list<string>> }
+    record recovery-rebase { current-revision: u64 }
+    record recovery-supply-dependency { contract-id: string }
+    record recovery-restore-credential { source-id: option<string> }
+    record recovery-retry-read { after: option<u64> }
+    record recovery-resume-operation { operation-id: string, after: option<u64> }
+    record recovery-read-commit { commit-id: string }
+    record recovery-read-transfer { transfer-id: string }
+    record recovery-inspect-effect { operation-id: string, step-id: string }
+    record recovery-request-evidence { evidence: list<evidence-ref> }
+    variant recovery { none, correct-input(recovery-correct-input), refresh, rebase(recovery-rebase), supply-dependency(recovery-supply-dependency), restore-credential(recovery-restore-credential), retry-read(recovery-retry-read), resume-operation(recovery-resume-operation), read-commit(recovery-read-commit), read-transfer(recovery-read-transfer), inspect-effect(recovery-inspect-effect), request-evidence(recovery-request-evidence), manual-review }
+    record failure-host-failure { code: string, stage: failure-stage, message: string, diagnostic-id: string, operation-id: option<string>, run-id: option<string>, step-id: option<string>, details: host-failure, recovery: recovery }
+    record state-read { key: string }
+    record state-write { key: string, expected-revision: option<u64>, value: list<u8> }
+    record state-value { revision: u64, value: list<u8> }
+    enum log-level { debug, info, warn, error }
+    record log-record { level: log-level, code: string, message: string }
+    record parameter { id: string, value-type: value-type, nullable: bool, optional: bool }
+    record query-column { name: string, expression: expression }
+    record query-ir { root: query-tree, parameters: list<parameter>, output: list<query-column>, limit: u32 }
+    record query-argument { parameter-id: string, value: value }
+    record page-request { limit: u32, cursor: option<string> }
+    record query-request { %world: world-ref, branch-id: option<string>, release-id: option<string>, query: query-ir, arguments: list<query-argument>, read-mode: read-mode, valid-at: option<string>, known-at: option<string>, page: page-request }
+    record named-cell { name: string, cell: cell }
+    record query-row { columns: list<named-cell> }
+    record page-query-row { items: list<query-row>, next-cursor: option<string> }
+    record object { %world: world-ref, id: string, type-id: string }
+    record object-view { object: object, fields: list<field-cell>, receipt-id: string }
+    record relation { %world: world-ref, id: string, type-id: string }
+    record relation-view { relation: relation, claim: option<assertion-ref>, roles: list<role-binding>, fields: list<field-cell>, receipt-id: string }
+    record query-coverage { scope-digest: string, complete: bool, missing-sources: list<string>, missing-fields: list<string>, gap-sources: list<string> }
+    record source-freshness { source-id: string, lag: option<u64>, last-reconciled-at: option<string>, satisfied: bool }
+    record truncation { reason: truncation-reason, delivered: u64, limit: u64 }
+    enum consistency-basis { per-source, single-source-snapshot, recorded-replay, branch-assumptions }
+    record read-receipt { %world: world-ref, id: string, branch-id: option<string>, release-id: string, activation-lock-id: string, query-digest: string, evaluated-scope-digest: string, decision-id: string, policy-epoch: u64, grant-epoch: u64, observed-at: string, expires-at: option<string>, requested-mode: read-mode, basis: list<source-basis>, projection-generation: option<u64>, actual-dependencies: list<read-dependency>, coverage: query-coverage, freshness: list<source-freshness>, dirty: list<string>, truncation: option<truncation>, consistency: consistency-basis }
+    record query-page { rows: page-query-row, objects: list<object-view>, relations: list<relation-view>, receipt: read-receipt }
+    record generation-request { %world: world-ref, run-id: string, step-id: string, binding: model-binding-ref, prompt: blob-ref, context: list<blob-ref>, result-schema: string, budget: budget }
+    record query-tree-objects { type-ref: definition-ref, symbol: string }
+    record query-tree-relations { type-ref: definition-ref, symbol: string }
+    record query-tree-filter { input: u32, predicate: expression }
+    enum join-kind { inner, left }
+    record query-tree-join { left: u32, right: u32, on: expression, join-kind: join-kind }
+    record query-tree-traverse { input: u32, relation-type: definition-ref, from-role: string, to-role: string, target: string }
+    record query-tree-project { input: u32, columns: list<query-column> }
+    record query-aggregate { name: string, operator: aggregate-operator, expression: expression }
+    record query-tree-aggregate { input: u32, group-by: list<query-column>, aggregates: list<query-aggregate> }
+    enum null-order { first, last }
+    record query-order { expression: expression, descending: bool, nulls: null-order }
+    record query-tree-sort { input: u32, order: list<query-order> }
+    record query-tree-distinct { input: u32 }
+    record query-tree-union { inputs: list<u32> }
+    record query-tree-not-exists { input: u32, correlated: u32, predicate: expression }
+    record query-tree-limit { input: u32, count: u32 }
+    variant query-tree-node { objects(query-tree-objects), relations(query-tree-relations), filter(query-tree-filter), join(query-tree-join), traverse(query-tree-traverse), project(query-tree-project), aggregate(query-tree-aggregate), sort(query-tree-sort), distinct(query-tree-distinct), union(query-tree-union), not-exists(query-tree-not-exists), limit(query-tree-limit) }
+    record query-tree { nodes: list<query-tree-node>, root: u32 }
+    record source-schema-request { %resource: string }
+    record discovered-field { id: string, name: string, value-type: value-type, nullable: bool, optional: bool, readable: bool, writable: bool }
+    enum key-basis { declared-primary, declared-unique, observed-unique }
+    record key-declaration { fields: list<string>, basis: key-basis }
+    record schema-observation { incarnation: string, namespace: string, fields: list<discovered-field>, keys: list<key-declaration>, complete: bool }
+    variant identity-record { object(object), relation(relation) }
+    record identity-snapshot { %record: identity-record, revision: u64 }
+    record identity-candidate { identity: identity-snapshot, evidence: list<evidence-ref> }
+    record identity-resolve-request { key: source-key, type-ref: definition-ref, candidates: list<identity-candidate>, scope: string, candidates-complete: bool, dependencies: list<read-dependency> }
+    record identity-proposal-same { target: subject, evidence: list<evidence-ref> }
+    record identity-proposal-new { type-ref: definition-ref, evidence: list<evidence-ref> }
+    record identity-proposal-ambiguous { candidates: list<subject>, evidence: list<evidence-ref> }
+    variant identity-proposal { same(identity-proposal-same), new(identity-proposal-new), ambiguous(identity-proposal-ambiguous) }
+    record cardinality { minimum: u32, maximum: option<u32> }
+    record role-definition { id: string, name: string, target-type: definition-ref, cardinality: cardinality }
+    record relation-type { name: string, roles: list<role-definition>, properties: list<definition-ref> }
+    record definition-lifecycle-deprecated { replacements: list<definition-ref>, reason: string, effective-at: string }
+    record definition-lifecycle-split { replacements: list<definition-ref>, effective-at: string }
+    variant definition-lifecycle { available, deprecated(definition-lifecycle-deprecated), split(definition-lifecycle-split) }
+    record definition-relation-type { reference: definition-ref, scope: string, valid-time: valid-time, body: relation-type, content-digest: string, dependencies: list<definition-ref>, evidence: list<evidence-ref>, previous-ref: option<definition-ref>, lifecycle: definition-lifecycle }
+    enum binding-mode { virtual, projected, hybrid }
+    record field-mode { field-id: string, mode: binding-mode }
+    record identity-mapping { type-id: string, key-fields: list<string>, incarnation-field: option<string> }
+    record source-transform-money { currency: string }
+    record source-transform-quantity { unit: unit }
+    record source-transform-date { calendar: string }
+    variant source-transform { identity, exact-integer, exact-decimal, money(source-transform-money), quantity(source-transform-quantity), timestamp, text, boolean, date(source-transform-date) }
+    record field-mapping { source-field: string, property: definition-ref, source-type: value-type, transform: option<source-transform> }
+    record role-mapping { source-field: string, role: string, target-source-id: string, target-namespace: string }
+    enum snapshot-capability { transactional, stable-key-enumeration, weak-pagination, none }
+    enum change-stream-capability { resumable-transactions, resumable-events, non-replayable, none }
+    record source-capabilities { contract: contract-ref, snapshot: snapshot-capability, historical-read: bool, change-stream: change-stream-capability, conditional-write: bool, idempotency-key: bool, inspect-effect: bool, predicate-pushdown: bool, ordering-pushdown: bool, aggregate-pushdown: bool }
+    record sync-policy-poll { interval: u64 }
+    variant sync-policy { on-demand, poll(sync-policy-poll), change-stream, webhook }
+    record retention-policy { policy-id: string, revision: u64 }
+    record source-binding { source-id: string, connection-id: string, connection-revision: u64, connector: string, %resource: string, namespace: string, incarnation: string, scope: string, schema: schema-ref, mapping: mapping-ref, identity-rule: identity-rule-ref, selected-fields: list<string>, field-modes: list<field-mode>, identity-mapping: identity-mapping, field-mapping: list<field-mapping>, role-mapping: list<role-mapping>, authority: authority-ref, capabilities: source-capabilities, mode: binding-mode, sync: sync-policy, retention: retention-policy }
+    record definition-source-binding { reference: definition-ref, scope: string, valid-time: valid-time, body: source-binding, content-digest: string, dependencies: list<definition-ref>, evidence: list<evidence-ref>, previous-ref: option<definition-ref>, lifecycle: definition-lifecycle }
+    record schema-discovery { reference: schema-ref, source-id: string, incarnation: string, namespace: string, fields: list<discovered-field>, keys: list<key-declaration>, complete: bool, observed-at: string }
+    enum missing-semantics { unknown, skip, reject }
+    enum null-semantics { known-null, reject }
+    enum formula-semantics { require-current-cache, preserve-only, reject }
+    record mapped-field { source-field: string, property: definition-ref, transform: source-transform, missing: missing-semantics, null: null-semantics, formula: formula-semantics }
+    record mapped-role { role: string, source-field: string, target-source: string, target-namespace: string }
+    record mapped-relation { relation-type: definition-ref, roles: list<mapped-role> }
+    enum delete-semantics { withdraw-source-claims, mark-unavailable, require-reconcile }
+    record schema-mapping { reference: mapping-ref, schema: schema-ref, identity-rule: identity-rule-ref, type-ref: definition-ref, key-fields: list<string>, fields: list<mapped-field>, relations: list<mapped-relation>, delete: delete-semantics }
+    record property { name: string, domain: list<string>, value-type: value-type, cardinality: cardinality, nullable: bool, access-labels: list<string> }
+    record definition-property { reference: definition-ref, scope: string, valid-time: valid-time, body: property, content-digest: string, dependencies: list<definition-ref>, evidence: list<evidence-ref>, previous-ref: option<definition-ref>, lifecycle: definition-lifecycle }
+    record compile-source-request { relation-definitions: list<definition-relation-type>, binding: definition-source-binding, schema: schema-discovery, mapping: schema-mapping, authority: source-authority, field-definitions: list<definition-property> }
+    record field-mapping-failure { row: u64, field: option<string>, failure: mapping-failure }
+    record compiled-source-plan { blocked-fields: list<field-mapping-failure>, binding-body: source-binding, schema: schema-discovery, relation-definitions: list<definition-relation-type>, binding: definition-ref, mapping: schema-mapping, authority: source-authority, field-definitions: list<definition-property>, digest: string }
+    record resolve-query-request { query: query-request, source-plans: list<source-read-request>, budget: budget }
+    record resolve-query-result { page: query-page, actual-dependencies: list<read-dependency> }
+    enum watch-purpose { membership, not-exists, aggregate, top-k, time-window, missing-field }
+    enum watch-coverage { complete-authorized-range, partial, gap }
+    record query-watch { %world: world-ref, id: string, scope: string, selector: expression, predicate-digest: string, purpose: watch-purpose, window: option<time-window>, generation: u64, coverage: watch-coverage, query: query-ir, arguments: list<query-argument>, datasets: list<definition-ref>, partitions: list<string>, visibility-digest: string, policy-epoch: u64, grant-epoch: u64, next-boundary: option<string> }
+    record support-snapshot { assertions: list<assertion-ref>, evidence: list<evidence-ref>, supports: list<support-set>, watches: list<query-watch> }
+    record support-delta-proposal { upserts: list<support-set>, invalidate: list<support-ref>, affected-watches: list<string>, observed-dependencies: list<read-dependency> }
+    record object-type { name: string, identity-rule: option<definition-ref>, properties: list<definition-ref>, interfaces: list<definition-ref>, state-model: option<definition-ref>, source-bindings: list<definition-ref> }
+    record facet { name: string, attaches-to: list<string>, applicability: expression, definitions: list<definition-ref> }
+    record concept-view { name: string, inputs: list<string>, query: query-ir }
+    record rule-conclusion-attribute { subject: expression, property: definition-ref, value: expression, polarity: polarity }
+    record rule-role-template { role: string, object: expression }
+    record rule-conclusion-relation { relation: expression, relation-type: definition-ref, roles: list<rule-role-template>, polarity: polarity }
+    variant rule-conclusion { attribute(rule-conclusion-attribute), relation(rule-conclusion-relation) }
+    record rule { name: string, parameters: list<parameter>, condition: expression, conclusion: rule-conclusion, effects: list<effect> }
+    record metric { name: string, parameters: list<parameter>, expression: expression, result-type: value-type, unit: option<unit>, grain: list<definition-ref>, window: option<time-window> }
+    record function { name: string, parameters: list<parameter>, result-type: value-type, expression: expression, effects: list<effect>, max-evaluations: u64 }
+    record state-definition { id: string, name: string, terminal: bool }
+    record state-transition { %from: string, to: string, guard: expression, source-constraint: option<string>, action: option<definition-ref> }
+    record state-model { name: string, property: definition-ref, states: list<state-definition>, transitions: list<state-transition> }
+    record action-target { parameter-id: string, type-ref: definition-ref, scope: string }
+    record policy-obligation-redact { fields: list<string> }
+    record policy-obligation-limit { maximum: u64 }
+    variant policy-obligation { approval, audit, redact(policy-obligation-redact), limit(policy-obligation-limit), revalidate-before-effect }
+    record policy-ref { policy-id: string, revision: u64, contract: contract-ref, obligations: list<policy-obligation> }
+    enum approval-requirement { none, human, separate-actor }
+    enum risk-class { read-only, reversible, consequential, irreversible }
+    record source-field-expression { field: string, expression: expression }
+    record source-mutation-insert { values: list<source-field-expression> }
+    record source-mutation-update { keys: list<source-field-expression>, values: list<source-field-expression>, expected: list<source-field-expression> }
+    record source-mutation-delete { keys: list<source-field-expression>, expected: list<source-field-expression> }
+    variant source-mutation { insert(source-mutation-insert), update(source-mutation-update), delete(source-mutation-delete) }
+    record source-operation { binding: definition-ref, %resource: string, mutation: source-mutation }
+    enum idempotency-policy { source-key, conditional-write, inspect-before-retry, no-automatic-retry }
+    record verifier-spec { query: query-ir, expected: expression, require-authoritative: bool, maximum-attempts: u32 }
+    record named-expression { name: string, expression: expression }
+    record compensation-spec { action: definition-ref, arguments: list<named-expression>, preconditions: list<expression>, approval: approval-requirement }
+    record action-contract { name: string, parameters: list<parameter>, result-type: value-type, targets: list<action-target>, reads: list<definition-ref>, writes: list<definition-ref>, effects: list<effect>, preconditions: list<expression>, policies: list<policy-ref>, approval: approval-requirement, risk: risk-class, source-operation: source-operation, idempotency: idempotency-policy, expected-effect: expression, verifier: verifier-spec, compensation: option<compensation-spec>, budget: budget }
+    record strategy-operation-query { query: query-ir }
+    record strategy-operation-action { action: definition-ref, arguments: list<query-argument> }
+    record strategy-operation-function { function: definition-ref, arguments: list<expression> }
+    enum stop-reason { goal-satisfied, constraint-violated, budget-exhausted, evidence-required, human-required }
+    record strategy-operation-stop { reason: stop-reason }
+    variant strategy-operation { query(strategy-operation-query), action(strategy-operation-action), function(strategy-operation-function), stop(strategy-operation-stop) }
+    record strategy-step { id: string, depends-on: list<string>, guard: expression, operation: strategy-operation }
+    record strategy { name: string, parameters: list<parameter>, guard: expression, steps: list<strategy-step>, budget: budget, cases: list<string>, counterexamples: list<string>, fallback: option<definition-ref> }
+    enum access-mode { read, write, execute, approve, publish, manage, %export, delete }
+    record policy-binding { name: string, policy: policy-ref, applies-to: list<resource-ref>, scope: string, predicate: expression, access: list<access-mode>, labels: list<string> }
+    record extension-definition { name: string, contract: contract-ref, payload: value }
+    variant definition-body { object-type(object-type), property(property), relation-type(relation-type), facet(facet), concept-view(concept-view), rule(rule), metric(metric), function(function), state-model(state-model), action-contract(action-contract), strategy(strategy), policy-binding(policy-binding), source-binding(source-binding), extension(extension-definition) }
+    record expression-annotation { field: list<string>, result-type: value-type, nullable: bool, optional: bool, effects: list<effect> }
+    record source-requirement { binding: definition-ref, required: list<source-capability> }
+    record definition-ir { reference: definition-ref, body-hash: string, body: definition-body, scope: string, valid-time: valid-time, annotations: list<expression-annotation>, policy-refs: list<policy-ref>, source-requirements: list<source-requirement> }
+    record entrypoint-native { registration: string, host-build: string }
+    record entrypoint-wasm { %world: string, %interface: string }
+    record entrypoint-process { executable: string, protocol: contract-ref }
+    variant entrypoint { native(entrypoint-native), wasm(entrypoint-wasm), process(entrypoint-process) }
+    record implementation-ref { install-id: string, package-digest: string, artifact-id: string, artifact-digest: string, entrypoint: entrypoint, contracts: list<contract-ref>, config-digest: string, dependency-lock: string, checkpoint-format: option<string> }
+    variant dependency-target { definition(definition-ref), contract(contract-ref), implementation(implementation-ref), config(string), unit(unit), schema(schema-ref), policy(policy-ref) }
+    enum dependency-use { %type, body, %interface, schema, source-capability, policy, unit, provider, compiler-pass, config }
+    record compile-dependency { dependent: definition-ref, target: dependency-target, usage: dependency-use, selector: list<string>, invalidates: list<compile-target> }
+    record dependency-graph { edges: list<compile-dependency> }
+    record typed-ir { ir-version: string, %world: world-ref, definitions: list<definition-ir>, dependencies: dependency-graph }
+    record compiler-pass-request { ir: typed-ir, declared-reads: list<dependency-target>, allowed-rewrites: list<list<string>>, invariants: list<string>, contract: contract-ref }
+    record compiler-pass-result { ir: typed-ir, observed-dependencies: list<compile-dependency>, diagnostics: list<diagnostic> }
+    record access-scope { resources: list<resource-ref>, fields: list<definition-ref>, modes: list<access-mode>, scope: string, valid-time: option<valid-time> }
+    record actual-impact { access: list<access-scope>, effects: list<effect>, labels: list<string>, state: list<revision-ref>, source-ids: list<string>, digest: string }
+    record policy-evaluation-request { %world: world-ref, impact: actual-impact, policies: list<policy-ref>, scope-digest: string }
+    enum policy-verdict { allow, deny, needs-approval }
+    record policy-evaluation-result { verdict: policy-verdict, obligations: list<policy-obligation>, policies: list<policy-ref> }
+    record action-proposal-request { %world: world-ref, branch-id: option<string>, action: definition-ref, arguments: list<query-argument>, targets: list<subject>, basis: list<string> }
+    record action-proposal { id: string, request: action-proposal-request, digest: string, impact: actual-impact, preconditions: list<truth-value>, read-dependencies: list<read-dependency>, activation-lock-id: string, created-at: string, expires-at: string }
+    record definition-action-contract { reference: definition-ref, scope: string, valid-time: valid-time, body: action-contract, content-digest: string, dependencies: list<definition-ref>, evidence: list<evidence-ref>, previous-ref: option<definition-ref>, lifecycle: definition-lifecycle }
+    record action-plan-request { proposal: action-proposal, contract: definition-action-contract, basis: list<read-receipt> }
+    record action-plan-result { source-operation: source-operation, arguments: list<query-argument>, dependencies: list<read-dependency>, expected-effect: expression }
+    record oracle-spec-program { implementation: implementation-ref, fixture-schema: string, result-schema: string }
+    enum effect-disposition { not-sent, rejected, accepted, applied, not-applied, indeterminate }
+    record oracle-spec-source-receipt { source-id: string, required-disposition: effect-disposition }
+    record oracle-spec-human { actor-id: string, decision-id: string, binding-digest: string }
+    variant oracle-spec { program(oracle-spec-program), source-receipt(oracle-spec-source-receipt), human(oracle-spec-human) }
+    record task-contract { %world: world-ref, id: string, revision: u64, goal: string, input-type: value-type, scope: string, hard-constraints: list<expression>, allowed-effects: list<effect>, success-oracle: oracle-spec, required-suites: list<string>, budget: budget, stop-conditions: list<expression> }
+    record abstraction-request { %world: world-ref, task: task-contract, definitions: list<definition-ref>, assurance: assurance, budget: budget }
+    record branch-ref { %world: world-ref, id: string, revision: u64 }
+    enum slot-role { input, output, object, relation, action, state }
+    record abstraction-slot { id: string, value-type: value-type, role: slot-role, cardinality: cardinality }
+    record binding-target-object { id: string }
+    record binding-target-relation { id: string }
+    record binding-target-property { definition: definition-ref }
+    record binding-target-action { definition: definition-ref }
+    record binding-target-state { reference: revision-ref }
+    record binding-target-expression { expression: expression }
+    variant binding-target { object(binding-target-object), relation(binding-target-relation), property(binding-target-property), action(binding-target-action), state(binding-target-state), expression(binding-target-expression) }
+    record concrete-binding { slot-id: string, parameter-id: option<string>, target: binding-target, transform: option<expression>, inverse-transform: option<expression>, inverse-scope: string, guard: option<expression>, dependencies: list<read-dependency>, evidence: list<evidence-ref> }
+    record binding-map { bindings: list<concrete-binding> }
+    record fallback-expand-concrete { concrete-strategy: definition-ref }
+    record fallback-request-evidence { evidence: list<evidence-ref> }
+    variant fallback { expand-concrete(fallback-expand-concrete), request-evidence(fallback-request-evidence), stop }
+    record abstraction-contract { %world: world-ref, id: string, revision: u64, candidate-id: string, branch: option<branch-ref>, strategy: option<definition-ref>, task-id: string, task-revision: u64, base-release: string, scope: string, applicable-actions: list<definition-ref>, original-definitions: list<definition-ref>, forward-plan: list<strategy-step>, preserved-invariants: list<expression>, parameters: list<parameter>, slots: list<abstraction-slot>, binding-map: binding-map, guard: expression, assurance: assurance, assumptions: list<expression>, evaluation-ids: list<string>, fallback: fallback, read-dependencies: list<read-dependency> }
+    record abstraction-ref { %world: world-ref, id: string, revision: u64 }
+    record page-abstraction-contract { items: list<abstraction-contract>, next-cursor: option<string> }
+    record context-request { %world: world-ref, task: task-contract, query: query-request, budget: budget }
+    record world-view { %world: world-ref, task-id: string, task-revision: u64, scope: string, goal: string, hard-constraints: list<expression>, allowed-effects: list<effect>, stop-conditions: list<expression>, labels: list<string>, rows: list<query-row>, objects: list<object-view>, relations: list<relation-view>, definitions: list<definition-ref>, actions: list<action-proposal>, abstractions: list<abstraction-contract>, read-receipts: list<read-receipt>, truncation: option<truncation>, untrusted-material: list<blob-ref> }
+    record context-result { view: world-view, receipt: read-receipt }
+    record discover-query { include-capabilities: bool }
+    record explain-query { assertion: assertion-ref, read-mode: read-mode }
+    record approval-binding { approval-id: string, action-digest: string, impact-digest: string, contract: definition-ref, expires-at: string }
+    record action-submit-request { %world: world-ref, proposal-id: string, proposal-digest: string, idempotency-key: string, approval: option<approval-binding> }
+    record operation-key { %world: world-ref, operation-id: string }
+    record observe-request { observations: list<observation-draft> }
+    record task-ref { %world: world-ref, id: string, revision: u64 }
+    record abstractions-query { task: task-ref, page: page-request }
+    record world-view-query { task: task-ref, query: query-request, budget: budget }
+    record external-contract-use-definition-kind { name: string }
+    record external-contract-use-function { reference: definition-ref }
+    record external-contract-use-source { binding: definition-ref }
+    record external-contract-use-policy { policy-id: string, revision: u64 }
+    variant external-contract-use { definition-kind(external-contract-use-definition-kind), function(external-contract-use-function), source(external-contract-use-source), policy(external-contract-use-policy), compiler-pass }
+    record external-contract-selection { node-id: string, contract-id: string, kind: external-contract-use }
+    record compile-selection { activation-lock-id: string, external-contracts: list<external-contract-selection> }
+    record semantic-operation-no-op { reason: string }
+    record semantic-operation-attach-evidence { target: resource-ref, evidence: list<evidence-ref> }
+    record annotation { label: option<string>, description: option<string>, aliases: list<string> }
+    record semantic-operation-enrich-annotation { target: definition-ref, annotation: annotation }
+    record definition-definition-body { reference: definition-ref, scope: string, valid-time: valid-time, body: definition-body, content-digest: string, dependencies: list<definition-ref>, evidence: list<evidence-ref>, previous-ref: option<definition-ref>, lifecycle: definition-lifecycle }
+    record kind-contract { name: string, standard-kind: option<definition-kind>, schema: contract-ref, validate: contract-ref, lower: contract-ref, index: contract-ref, migrate: contract-ref, reducer: contract-ref, lifecycle: contract-ref }
+    enum kind-verb { create, refine, deprecate, split }
+    record kind-operation-reducer { verb: kind-verb }
+    variant kind-operation { validate, lower-standard, index, migrate, reducer(kind-operation-reducer), lifecycle }
+    record kind-request { kind: kind-contract, definition: definition-definition-body, previous: option<definition-definition-body>, definitions: list<definition-definition-body>, scopes: list<scope>, operation: kind-operation }
+    record kind-result-lowered { body: definition-body }
+    record kind-result-indexed { dependencies: list<definition-ref> }
+    record kind-result-migrated { definition: definition-definition-body }
+    record kind-result-reduced { definition: definition-definition-body }
+    variant kind-result { validated, lowered(kind-result-lowered), indexed(kind-result-indexed), migrated(kind-result-migrated), reduced(kind-result-reduced), lifecycle-checked }
+    record kind-response { contract: contract-ref, %result: kind-result }
+    record semantic-operation-refine-definition { previous: definition-ref, replacement: definition-definition-body }
+    record semantic-operation-scope-definition { previous: definition-ref, scope: string, valid-time: valid-time }
+    record semantic-operation-supersede-rule { previous: definition-ref, replacement: definition-definition-body }
+    enum semantic-link { equivalent-within-scope, specializes, implements, depends-on }
+    record semantic-operation-link-existing { source: definition-ref, target: definition-ref, relation: semantic-link }
+    record semantic-operation-merge-aliases { sources: list<definition-ref>, target: definition-ref, evidence: list<evidence-ref> }
+    record semantic-operation-deprecate-definition { previous: definition-ref, replacements: list<definition-ref>, reason: string, effective-at: string }
+    record split-partition { replacement: string, predicate: expression }
+    record semantic-operation-split-definition { previous: definition-ref, replacements: list<definition-definition-body>, partition: list<split-partition> }
+    record semantic-operation-create-definition { definition: definition-definition-body }
+    variant semantic-operation { no-op(semantic-operation-no-op), attach-evidence(semantic-operation-attach-evidence), enrich-annotation(semantic-operation-enrich-annotation), refine-definition(semantic-operation-refine-definition), scope-definition(semantic-operation-scope-definition), supersede-rule(semantic-operation-supersede-rule), link-existing(semantic-operation-link-existing), merge-aliases(semantic-operation-merge-aliases), deprecate-definition(semantic-operation-deprecate-definition), split-definition(semantic-operation-split-definition), create-definition(semantic-operation-create-definition) }
+    record propose-change { task: task-ref, compile: compile-selection, base-release: string, operations: list<semantic-operation>, evidence: list<evidence-ref>, cases: list<string> }
+    record suite-ref { %world: world-ref, id: string, revision: u64 }
+    record test-branch { branch: branch-ref, suite: suite-ref, budget: budget }
+    variant peer-operation { discover(discover-query), query(query-request), explain(explain-query), action-propose(action-proposal-request), action-submit(action-submit-request), action-status(operation-key), observe(observe-request), change-propose(propose-change), branch-test(test-branch) }
+    record peer-request { %world: world-ref, request-id: string, operation: peer-operation }
+    record agent-bridge-request { peer: peer-request, deadline: string }
+    enum world-status { not-configured, ready, draining, restoring, deleting, retained, unavailable }
+    enum port-direction { %import, %export }
+    record method-port { name: string, contract: contract-ref, request-schema: string, result-schema: string, direction: port-direction, required: bool }
+    record state-binding { namespace: string, root: revision-ref, schema: string, writer-domain: string, writer-epoch: u64, migration: option<string> }
+    enum trust-class { ordinary-guest, trusted-native, trusted-process, private-root }
+    record binding-node { id: string, provider-id: string, binding-id: string, slot: slot-kind, implementation: implementation-ref, ports: list<method-port>, required: bool, state: option<state-binding>, trust: trust-class }
+    record binding-edge { consumer: string, consumer-port: string, provider: string, provider-port: string, contract: contract-ref, required: bool }
+    enum composition-mode { single, ordered, chain, typed-dag, fan-out }
+    enum dataflow-projection { compiler-ir }
+    record dataflow-edge { projection: dataflow-projection, output-node: string, output-port: string, input-node: string, input-port: string, schema-digest: string }
+    enum composition-failure-policy { fail-closed, collect-independent }
+    record composition { binding-id: string, nodes: list<string>, mode: composition-mode, order: list<string>, wiring: list<dataflow-edge>, merge: merge-policy, failure: composition-failure-policy }
+    record activation-lock { %world: world-ref, id: string, digest: string, nodes: list<binding-node>, edges: list<binding-edge>, compositions: list<composition>, roots: list<string>, trusted-roots: list<string> }
+    record scope { %world: world-ref, id: string, predicate: expression }
+    record external-contract-kind-definition-kind { name: string }
+    record external-contract-kind-function { reference: definition-ref }
+    record external-contract-kind-source { binding: definition-ref, capabilities: list<source-capability> }
+    record external-contract-kind-policy { policy: policy-ref }
+    record external-contract-kind-compiler-pass { pass-id: string }
+    variant external-contract-kind { definition-kind(external-contract-kind-definition-kind), function(external-contract-kind-function), source(external-contract-kind-source), policy(external-contract-kind-policy), compiler-pass(external-contract-kind-compiler-pass) }
+    record external-contract { contract: contract-ref, implementation: implementation-ref, kind: external-contract-kind }
+    record compile-request { %world: world-ref, base-release: string, activation-lock: activation-lock, definitions: list<definition-definition-body>, scopes: list<scope>, targets: list<compile-target>, external-contracts: list<external-contract>, config-digest: string }
+    record access-policy-ref { policy-id: string, revision: u64, labels: list<string> }
+    record material-scope { scope: string, access: list<access-policy-ref>, retention: list<retention-policy> }
+    enum read-guarantee { projected, authoritative, after }
+    record world-description { %world: world-ref, revision: u64, incarnation: u64, status: world-status, operations: list<string>, active-release: option<string>, active-release-head: option<release-head>, editing-context: option<compile-request>, material-scopes: list<material-scope>, read-modes: list<read-guarantee> }
+    record explanation-graph { conclusion: assertion-ref, revision: u64, supports: list<support-set>, visible-evidence: list<evidence-ref> }
+    record operation-accepted { %world: world-ref, operation-id: string, revision: u64, incarnation: u64 }
+    enum action-phase { proposed, admitted, prepared, dispatching, effect-pending, verifying, committing, completed, rejected, cancelled-before-effect, cancelled-after-effect, effect-indeterminate, commit-indeterminate, compensating, retained }
+    record source-receipt { id: string, intent-id: string, source-id: string, observed-at: string, disposition: effect-disposition, position: option<source-position>, %result: option<value>, evidence: list<evidence-ref> }
+    enum verification-verdict { verified, not-satisfied, inconclusive }
+    record verification-receipt { id: string, intent-id: string, verdict: verification-verdict, read-receipt: read-receipt, evidence: list<evidence-ref>, verified-at: string }
+    record committed-revision { %resource: resource-ref, revision: u64 }
+    record write-fence { %world: world-ref, domain: string, epoch: u64 }
+    record commit-receipt { %world: world-ref, commit-id: string, committed-at: string, revisions: list<committed-revision>, outbox-ids: list<string>, fence: write-fence }
+    record failure-action-failure { code: string, stage: failure-stage, message: string, diagnostic-id: string, operation-id: option<string>, run-id: option<string>, step-id: option<string>, details: action-failure, recovery: recovery }
+    record action-status { operation-id: string, run-id: string, phase: action-phase, source-receipts: list<source-receipt>, verifications: list<verification-receipt>, commit: option<commit-receipt>, failure: option<failure-action-failure> }
+    enum change-status { proposed, validated, testing, ready, rejected, published, superseded }
+    record change-set { %world: world-ref, id: string, revision: u64, base-release: string, operations: list<semantic-operation>, evidence: list<evidence-ref>, cases: list<string>, rationale: string, status: change-status }
+    variant peer-response { discover(world-description), query(query-page), explain(explanation-graph), action-propose(action-proposal), accepted(operation-accepted), action-status(action-status), change(change-set) }
+    record agent-bridge-result { response: peer-response, native-run-id: option<string> }
+    record storage-read-request { %world: world-ref, resources: list<resource-ref>, known-at: option<string> }
+    record evidence-locator { source-version: source-version-ref, parse-artifact-id: option<string>, anchor: source-anchor }
+    enum evidence-status { active, withdrawn, content-deleted }
+    enum evidence-availability { available, unavailable }
+    record evidence { reference: evidence-ref, locator: evidence-locator, digest: option<string>, origin-family: string, derived-from: list<evidence-ref>, observed-at: string, authority: option<authority-ref>, access: access-policy-ref, retention: retention-policy, status: evidence-status, availability: evidence-availability }
+    record storage-read-result { assertions: list<assertion>, definitions: list<definition-definition-body>, evidence: list<evidence>, revisions: list<committed-revision> }
+
+    // BEGIN canonical materials worker types
+    // Source SHA-256: 757414e50ba52768190654573edab7c2651e9e3a4d4dff428482c3ed4ca52f82
+    // Contract: world.materials.v1@1.0.0 sha256:9cd8cfdbd58fe73ecbf09fa1ef1abbc5fb68b220cb64e3f4d3e3817a5a57060e
+    // Core arena types are shared; numeric wire projections require checked native conversion.
+    record artifact-manifest { activation-lock-id: string, config-digest: string, dependencies: dependency-graph, digest: string, id: string, ir-version: string, model-digest: string, outputs: list<artifact-output>, release-id: string, targets: list<compile-target>, %world: world-ref }
+    record artifact-output { content: blob-ref, contract: contract-ref, definition: option<definition-ref>, kind: compile-target, schema-digest: string }
+    variant block-kind { paragraph, heading(block-kind-heading), list-item, quote, code(block-kind-code), rule, table(block-kind-table), note }
+    record block-kind-code { language: option<string> }
+    record block-kind-heading { level: u8 }
+    record block-kind-table { table-id: string }
+    record candidate { change-set: change-set, created-at: string, evidence: list<evidence>, id: string, model-calls: list<string>, origin: candidate-origin, %world: world-ref }
+    record candidate-batch { candidates: list<candidate>, coverage: list<coverage-entry>, evidence: list<evidence>, observations: list<observation-draft>, read-needs: list<read-need> }
+    enum candidate-origin { direct, human, extraction, case-induction, reconciliation, abstraction }
+    record coverage-entry { anchor: option<source-anchor>, reason: option<coverage-reason>, status: coverage-status }
+    variant coverage-reason { parsed, ocr-unavailable, transcription-unavailable, page-missing, timing-unavailable, location-unavailable, precision-unavailable, raw-value-unavailable, binary-float-precision, formula-unavailable, asset-extraction-disabled, asset-filtered, asset-decode-failed, asset-encode-failed, image-limit(coverage-reason-image-limit), text-unavailable, chapter-unavailable, parser-recovery(coverage-reason-parser-recovery), upstream-recovery-not-reported, lossy-text-decoding, sheet-read-failed, unsupported-element, resource-limit, corrupt-element, fallback-parser }
+    record coverage-reason-image-limit { limit: u64 }
+    record coverage-reason-parser-recovery { failure: option<parse-failure-kind>, parser: string }
+    enum coverage-status { processed, missing, failed, truncated, fallback }
+    record document-asset { blob: blob-ref, derivation: option<string>, derived-from: list<string>, height: option<u32>, id: string, media-type: string, source-anchor: option<source-anchor>, source-digest: option<string>, width: option<u32> }
+    record document-block { id: string, kind: block-kind, parent: option<string>, text: string }
+    variant document-cell-value { missing, null, text(string), boolean(bool), integer(string), decimal(string), float(f64), date-time(document-cell-value-date-time), date-time-iso(string), duration-iso(string), error(string), covered(document-cell-value-covered) }
+    record document-cell-value-covered { column: u32, row: u32 }
+    record document-cell-value-date-time { display: string, serial: f64 }
+    record document-chunk { anchors: list<source-anchor>, context-targets: list<document-target>, id: string, parse-artifact-id: string, primary-targets: list<document-target>, source-version: source-version-ref, token-estimate: u64 }
+    record document-chunk-content { assets: list<document-asset>, blocks: list<document-text-slice>, chunk: document-chunk, coverage: list<coverage-entry>, source-map: list<source-map-entry>, tables: list<document-table> }
+    record document-table { cells: list<table-cell>, header-rows: u32, id: string, name: option<string> }
+    variant document-target { block(document-target-block), cell(document-target-cell), asset(document-target-asset) }
+    record document-target-asset { asset-id: string }
+    record document-target-block { block-id: string, end: u32, start: u32 }
+    record document-target-cell { column: u32, row: u32, table-id: string }
+    record document-text-slice { block-id: string, end: u32, kind: block-kind, parent: option<string>, start: u32, text: string }
+    record generation-parameters { maximum-output-tokens: u64, seed: option<u64>, temperature: option<string>, top-p: option<string> }
+    record image-options { full-page-coverage-ratio: f32, full-page-min-text-chars: u64, max-images: u64, min-height: u32, min-width: u32, skip-full-page-images: bool }
+    variant material-request { parse(material-request-parse), chunks(material-request-chunks), read(material-request-read), prepare(material-request-prepare), finish(material-request-finish), align(material-request-align) }
+    record material-request-align { base: release, batches: list<candidate-batch>, draft: candidate }
+    record material-request-chunks { artifact: parse-artifact, base: release, binding: model-binding, budget: budget, run-id: string, scope: scope, source: source-version }
+    record material-request-finish { artifact: parse-artifact, generation: generation-request, receipt: generation-receipt, request: semantic-extract-request, source: source-version }
+    record material-request-parse { bytes: list<u8>, name: string, plan: parse-plan, source: source-version }
+    record material-request-prepare { artifact: parse-artifact, binding: model-binding, request: semantic-extract-request, run-id: string, source: source-version, step-id: string }
+    record material-request-read { artifact: parse-artifact, base: release, binding: model-binding, budget: budget, need: read-need, run-id: string, scope: scope, source: source-version }
+    variant material-response { parse(material-response-parse), chunks(material-response-chunks), read(material-response-read), prepare(material-response-prepare), finish(material-response-finish), align(material-response-align) }
+    record material-response-align { batch: candidate-batch }
+    record material-response-chunks { chunks: list<document-chunk-content> }
+    record material-response-finish { batch: candidate-batch }
+    record material-response-parse { asset-bytes: list<list<u8>>, diagnostics: list<parser-diagnostic>, projection: parse-input }
+    record material-response-prepare { context-bytes: list<list<u8>>, generation: generation-request, prompt-bytes: list<u8>, schema-bytes: list<u8> }
+    record material-response-read { content: document-chunk-content }
+    record model-binding { account-id: string, account-revision: u64, capabilities: option<model-capabilities>, capability: string, model-id: string, parameters: generation-parameters, protocol: string, provider-fingerprint: string, reference: model-binding-ref, remote-version-lock: remote-version-lock, selection-id: string }
+    record model-capabilities { audio: bool, context-tokens: u64, images: bool, structured-output: bool, tools: bool }
+    record parse-artifact { assets: list<document-asset>, blocks: list<document-block>, coverage: list<coverage-entry>, dependency-fingerprints: list<string>, id: string, manifest: blob-ref, metadata: list<tuple<string, string>>, options-digest: string, parse-run: string, parser-fingerprint: string, source-map: list<source-map-entry>, source-version: source-version-ref, tables: list<document-table>, %world: world-ref }
+    enum parse-failure-kind { unsupported, corrupt, encrypted, parser-unavailable, resource-limit, cancelled, internal }
+    record parse-input { assets: list<document-asset>, blocks: list<document-block>, coverage: list<coverage-entry>, dependency-fingerprints: list<string>, id: string, metadata: list<tuple<string, string>>, options-digest: string, parse-run: string, parser-fingerprint: string, source-map: list<source-map-entry>, source-version: source-version-ref, tables: list<document-table>, %world: world-ref }
+    record parse-options { extract-assets: bool, images: image-options }
+    record parse-plan { dependency-fingerprints: list<string>, id: string, options: parse-options, parse-run: string, parser-fingerprint: string }
+    record parser-diagnostic { causes: list<string>, kind: parser-diagnostic-kind, limit: option<string> }
+    enum parser-diagnostic-kind { unsupported, corrupt, encrypted, parser-unavailable, resource-limit, cancelled, internal }
+    record read-need { parse-artifact-id: string, reason: read-need-reason, source-version: source-version-ref, targets: list<document-target> }
+    enum read-need-reason { context-missing, identity-ambiguous, temporal-context-missing, value-context-missing }
+    record release { artifact: artifact-manifest, basis: list<read-dependency>, definitions: list<definition-definition-body>, evaluations: list<string>, id: string, parent: option<string>, published-at: string, read-receipts: list<read-receipt>, scopes: list<scope>, source-branch: option<branch-ref>, sources: list<source-basis>, %world: world-ref }
+    enum remote-version-lock { unlocked }
+    record semantic-extract-request { base-release: string, budget: budget, content: document-chunk-content, definitions: list<definition-definition-body>, scope: scope, %world: world-ref }
+    variant source-lineage { source-version(source-lineage-source-version), wiki-source(source-lineage-wiki-source), wiki-page(source-lineage-wiki-page), generated(source-lineage-generated) }
+    record source-lineage-generated { inputs: list<source-version-ref>, run-id: string }
+    record source-lineage-source-version { reference: source-version-ref }
+    record source-lineage-wiki-page { page-id: string, project-id: string, source-versions: list<string>, version: string }
+    record source-lineage-wiki-source { project-id: string, source-id: string, version: string }
+    record source-map-entry { anchor: source-anchor, target: document-target }
+    record source-version { access: access-policy-ref, blob: blob-ref, captured-at: string, lineage: list<source-lineage>, media-type: string, origin-family: string, reference: source-version-ref, retention: retention-policy, supersedes: option<source-version-ref> }
+    record table-cell { column: u32, column-span: u32, formula: option<string>, precision: value-precision, raw: option<string>, row: u32, row-span: u32, value: document-cell-value }
+    enum value-precision { exact, approximate, unavailable }
+    variant worker-failure { material(worker-failure-material), learning(worker-failure-learning), compile(worker-failure-compile) }
+    record worker-failure-compile { causes: list<string>, failure: compile-failure }
+    record worker-failure-learning { causes: list<string>, failure: learning-failure }
+    record worker-failure-material { causes: list<string>, failure: material-failure }
+    // END canonical materials worker types
+}
+
+// Pure material-worker ABI: no storage, authority, model or effect imports.
+interface materials {
+    use types.{material-request, material-response, worker-failure};
+    execute: func(request: material-request) -> result<material-response, worker-failure>;
+}
+world materials-worker { export materials; }
+
+interface source {
+    use types.{source-read-request, source-page, source-failure};
+    read: func(request: source-read-request) -> result<source-page, source-failure>;
+}
+interface config {
+    use types.{package-config, config-read-failure};
+    read: func() -> result<package-config, config-read-failure>;
+}
+interface projection {
+    use types.{projection-request, projection-result, projection-failure};
+    project: func(request: projection-request) -> result<projection-result, projection-failure>;
+}
+interface reconcile {
+    use types.{reconcile-request, reconcile-result, reconcile-failure};
+    reconcile: func(request: reconcile-request) -> result<reconcile-result, reconcile-failure>;
+}
+interface evaluation {
+    use types.{oracle-request, oracle-result, oracle-failure};
+    evaluate: func(request: oracle-request) -> result<oracle-result, oracle-failure>;
+}
+world projection-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export projection; }
+world reconcile-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export reconcile; }
+world evaluation-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export evaluation; }
+
+interface connector {
+    use types.{source-read-request, source-page, source-failure, source-schema-request, schema-observation};
+    read: func(request: source-read-request) -> result<source-page, source-failure>;
+    discover: func(request: source-schema-request) -> result<schema-observation, source-failure>;
+}
+world connector-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export connector; }
+
+interface identity {
+    use types.{identity-resolve-request, identity-proposal, identity-failure};
+    resolve: func(request: identity-resolve-request) -> result<identity-proposal, identity-failure>;
+}
+world identity-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export identity; }
+
+interface schema {
+    use types.{compile-request, typed-ir, compile-failure, kind-request, kind-response};
+    compile: func(request: compile-request) -> result<typed-ir, compile-failure>;
+    kind: func(request: kind-request) -> result<kind-response, compile-failure>;
+}
+world schema-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export schema; }
+
+interface resolver {
+    use types.{resolve-query-request, resolve-query-result, query-failure};
+    resolve: func(request: resolve-query-request) -> result<resolve-query-result, query-failure>;
+}
+world resolver-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export resolver; }
+
+interface provenance {
+    use types.{support-snapshot, support-delta-proposal, provenance-failure};
+    recompute: func(request: support-snapshot) -> result<support-delta-proposal, provenance-failure>;
+}
+world provenance-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export provenance; }
+
+interface compiler {
+    use types.{compiler-pass-request, compiler-pass-result, compile-failure};
+    compile: func(request: compiler-pass-request) -> result<compiler-pass-result, compile-failure>;
+}
+world compiler-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export compiler; }
+
+interface policy {
+    use types.{policy-evaluation-request, policy-evaluation-result, authorization-failure};
+    evaluate: func(request: policy-evaluation-request) -> result<policy-evaluation-result, authorization-failure>;
+}
+world policy-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export policy; }
+
+interface action {
+    use types.{action-plan-request, action-plan-result, action-failure};
+    plan: func(request: action-plan-request) -> result<action-plan-result, action-failure>;
+}
+world action-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export action; }
+
+interface abstraction {
+    use types.{abstraction-request, abstraction-contract, abstraction-failure};
+    derive: func(request: abstraction-request) -> result<abstraction-contract, abstraction-failure>;
+}
+world abstraction-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export abstraction; }
+
+interface context {
+    use types.{context-request, context-result, context-failure};
+    build: func(request: context-request) -> result<context-result, context-failure>;
+}
+world context-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export context; }
+
+interface agent-bridge {
+    use types.{agent-bridge-request, agent-bridge-result, bridge-failure};
+    dispatch: func(request: agent-bridge-request) -> result<agent-bridge-result, bridge-failure>;
+}
+world agent-bridge-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export agent-bridge; }
+
+interface storage {
+    use types.{storage-read-request, storage-read-result, commit-failure};
+    read: func(request: storage-read-request) -> result<storage-read-result, commit-failure>;
+}
+world storage-plugin { import source; import world-read; import model; import state; import clock; import logging; import config; export storage; }
+
+interface world-read {
+    use types.{query-request, query-page, failure-host-failure};
+    query: func(request: query-request) -> result<query-page, failure-host-failure>;
+}
+interface model {
+    use types.{generation-request, generation-receipt, failure-host-failure};
+    generate: func(request: generation-request) -> result<generation-receipt, failure-host-failure>;
+}
+interface state {
+    use types.{state-read, state-write, state-value, failure-host-failure};
+    read: func(request: state-read) -> result<option<state-value>, failure-host-failure>;
+    write: func(request: state-write) -> result<state-value, failure-host-failure>;
+}
+interface clock {
+    use types.{failure-host-failure};
+    now: func() -> result<string, failure-host-failure>;
+}
+interface logging {
+    use types.{log-record, failure-host-failure};
+    log: func(%record: log-record) -> result<_, failure-host-failure>;
+}
+
+interface state-migration {
+    use types.{state-migration-input, state-migration-output, state-failure};
+    migrate: func(request: state-migration-input) -> result<state-migration-output, state-failure>;
+}
+world state-migration-plugin {
+    export state-migration;
+}

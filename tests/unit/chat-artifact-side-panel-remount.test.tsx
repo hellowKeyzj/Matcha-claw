@@ -1,21 +1,28 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { forwardRef, useImperativeHandle } from 'react';
+import { forwardRef, Suspense, useImperativeHandle } from 'react';
 import { MemoryRouter } from 'react-router-dom';
-import Chat from '@/pages/Chat';
-import { useChatStore } from '@/stores/chat';
-import { useGatewayStore } from '@/stores/gateway';
+import Chat from '@/plugins/chat';
+import { useChatStore } from '@/plugins/chat/store';
+import { useGatewayStore } from '@/plugins/runtime/store';
 import { useLayoutStore } from '@/stores/layout';
 import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
-import { useSubagentsStore } from '@/stores/subagents';
-import { useCapabilityRoutingStore } from '@/stores/capability-routing';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
+import { useCapabilityRoutingStore } from '@/plugins/providers/stores/capability-routing';
 import { createReadyResourceStatusState } from '@/lib/resource-state';
-import { createEmptySessionRecord, createEmptySessionViewportState } from '@/stores/chat/store-state-helpers';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
+import { createEmptySessionRecord, createEmptySessionViewportState } from '@/plugins/chat/store/store-state-helpers';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
+import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 import type { SessionRenderItem } from '@/types/session/render-item';
 import type { SessionRenderToolCard } from '@/types/session/tool-card';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { chatPlugin } from '@/plugins/chat/plugin';
+import { filesPlugin } from '@/plugins/files/plugin';
+
+const pluginHost = createPluginHost([applicationShellPlugin, filesPlugin, chatPlugin]);
 
 const hostApiMocks = vi.hoisted(() => ({
   hostSessionPermissionGet: vi.fn(),
@@ -47,11 +54,11 @@ vi.mock('@/hooks/use-workspace-availability', () => ({
   useWorkspaceAvailability: () => ({}),
 }));
 
-vi.mock('@/pages/Chat/useChatInit', () => ({
+vi.mock('@/plugins/chat/useChatInit', () => ({
   useChatInit: () => undefined,
 }));
 
-vi.mock('@/pages/Chat/useAgentSkillConfig', () => ({
+vi.mock('@/plugins/chat/useAgentSkillConfig', () => ({
   useAgentSkillConfig: () => ({
     selectedSkillIds: [],
     allowedSkillIdsForChat: [],
@@ -63,7 +70,7 @@ vi.mock('@/pages/Chat/useAgentSkillConfig', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/useChatWindowDockController', () => ({
+vi.mock('@/plugins/chat/useChatWindowDockController', () => ({
   useChatWindowDockController: ({
     panelOpen,
     preferredWidth,
@@ -99,7 +106,7 @@ vi.mock('@/pages/Chat/useChatWindowDockController', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/components/ChatShell', () => ({
+vi.mock('@/plugins/chat/components/ChatShell', () => ({
   ChatShell: ({
     chatLayoutRef,
     sidePanelPhase,
@@ -121,7 +128,7 @@ vi.mock('@/pages/Chat/components/ChatShell', () => ({
   ),
 }));
 
-vi.mock('@/pages/Chat/components/ChatHeaderBar', () => ({
+vi.mock('@/plugins/chat/components/ChatHeaderBar', () => ({
   ChatHeaderBar: ({
     sidePanelOpen,
     onToggleSidePanel,
@@ -135,7 +142,7 @@ vi.mock('@/pages/Chat/components/ChatHeaderBar', () => ({
   ),
 }));
 
-vi.mock('@/pages/Chat/components/ChatSidePanel', () => ({
+vi.mock('@/plugins/chat/components/ChatSidePanel', () => ({
   ChatSidePanel: ({ activeTab, onClose }: { activeTab: string; onClose: () => void }) => (
     <aside data-testid="chat-side-panel" data-active-tab={activeTab}>
       <button type="button" data-testid="side-panel-collapse" onClick={onClose}>collapse</button>
@@ -143,7 +150,7 @@ vi.mock('@/pages/Chat/components/ChatSidePanel', () => ({
   ),
 }));
 
-vi.mock('@/pages/Chat/components/ChatList', () => ({
+vi.mock('@/plugins/chat/components/ChatList', () => ({
   ChatList: forwardRef((_props, ref) => {
     useImperativeHandle(ref, () => ({
       prepareCurrentLatestBottomAlign: () => undefined,
@@ -154,21 +161,21 @@ vi.mock('@/pages/Chat/components/ChatList', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/ChatInput', () => ({
+vi.mock('@/plugins/chat/ChatInput', () => ({
   ChatInput: () => <div data-testid="chat-input" />,
 }));
 
-vi.mock('@/pages/Chat/components/ChatStates', () => ({
+vi.mock('@/plugins/chat/components/ChatStates', () => ({
   WelcomeScreen: () => <div data-testid="welcome-screen" />,
 }));
 
-vi.mock('@/pages/Chat/components/ChatRuntimeDock', () => ({
+vi.mock('@/plugins/chat/components/ChatRuntimeDock', () => ({
   ChatApprovalDock: () => null,
   ChatErrorBanner: () => null,
   ChatRuntimeStatusDock: () => null,
 }));
 
-vi.mock('@/pages/Chat/components/SessionTodoPanel', () => ({
+vi.mock('@/plugins/chat/components/SessionTodoPanel', () => ({
   SessionTodoPanel: () => null,
 }));
 
@@ -290,9 +297,13 @@ function artifactRenderItems(): SessionRenderItem[] {
 
 function renderChat() {
   return render(
-    <MemoryRouter initialEntries={['/']}>
-      <Chat />
-    </MemoryRouter>,
+    <PluginHostProvider host={pluginHost}>
+      <MemoryRouter initialEntries={['/']}>
+        <Suspense fallback={null}>
+          <Chat />
+        </Suspense>
+      </MemoryRouter>
+    </PluginHostProvider>,
   );
 }
 
@@ -454,7 +465,7 @@ describe('chat artifact side panel remount', () => {
   });
 
   it('does not reopen remembered artifact workspace on chat remount after collapse', async () => {
-    const view = renderChat();
+    const view = await act(async () => renderChat());
 
     await waitFor(() => {
       expect(screen.getByTestId('chat-shell')).toHaveAttribute('data-side-panel-phase', 'closed');
@@ -473,7 +484,7 @@ describe('chat artifact side panel remount', () => {
     expect(screen.queryByTestId('chat-side-panel')).toBeNull();
 
     view.unmount();
-    renderChat();
+    await act(async () => renderChat());
 
     await waitFor(() => {
       expect(screen.getByTestId('chat-shell')).toHaveAttribute('data-side-panel-phase', 'closed');

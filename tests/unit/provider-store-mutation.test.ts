@@ -24,6 +24,7 @@ vi.mock('@/lib/provider-accounts', () => ({
       revisions: snapshot.revisions && typeof snapshot.revisions === 'object'
         ? snapshot.revisions as Record<string, number>
         : {},
+      reports: [],
     };
   },
 }));
@@ -39,7 +40,7 @@ vi.mock('@/lib/telemetry', () => ({
   startUiTiming: (...args: unknown[]) => startUiTimingMock(...args),
 }));
 
-vi.mock('@/stores/provider-model-catalog', () => ({
+vi.mock('@/plugins/providers/stores/provider-model-catalog', () => ({
   useProviderModelCatalogStore: {
     getState: () => ({
       refresh: providerModelCatalogRefreshMock,
@@ -47,7 +48,7 @@ vi.mock('@/stores/provider-model-catalog', () => ({
   },
 }));
 
-vi.mock('@/stores/capability-routing', () => ({
+vi.mock('@/plugins/providers/stores/capability-routing', () => ({
   useCapabilityRoutingStore: {
     getState: () => ({
       refresh: capabilityRoutingRefreshMock,
@@ -55,7 +56,7 @@ vi.mock('@/stores/capability-routing', () => ({
   },
 }));
 
-vi.mock('@/stores/subagents', () => ({
+vi.mock('@/plugins/agents/stores/subagents', () => ({
   useSubagentsStore: {
     getState: () => ({
       loadAvailableModels: subagentsLoadAvailableModelsMock,
@@ -63,7 +64,7 @@ vi.mock('@/stores/subagents', () => ({
   },
 }));
 
-import { useProviderStore } from '@/stores/providers';
+import { useProviderStore } from '@/plugins/providers/stores/providers';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -119,6 +120,7 @@ describe('useProviderStore mutation states', () => {
           defaultAuthMode: 'api_key',
           supportsMultipleAccounts: false,
         }],
+        reports: [],
       },
       snapshotReady: true,
       initialLoading: false,
@@ -147,6 +149,7 @@ describe('useProviderStore mutation states', () => {
       credentials: [{ id: 'openai-main', vendorId: 'openai', label: 'OpenAI primary' }],
       vendors: [{ id: 'openai', name: 'OpenAI' }],
       revisions: { 'openai-main': 2 },
+      reports: [],
     });
     await updateTask;
     expect(hostProviderUpdateAccountMock).toHaveBeenCalledWith(
@@ -173,6 +176,7 @@ describe('useProviderStore mutation states', () => {
       credentials: [{ id: 'ollama-local', vendorId: 'ollama', label: 'Ollama', authMode: 'local' }],
       vendors: [{ id: 'ollama', name: 'Ollama' }],
       revisions: { 'ollama-local': 1 },
+      reports: [],
     });
     hostProviderCreateAccountMock.mockResolvedValue({ success: true });
 
@@ -199,7 +203,7 @@ describe('useProviderStore mutation states', () => {
     expect(capabilityRoutingRefreshMock).toHaveBeenCalledTimes(1);
     expect(subagentsLoadAvailableModelsMock).toHaveBeenCalledWith({ force: true });
 
-    resolveInitialSnapshot?.({ statuses: [], credentials: [], vendors: [], revisions: {} });
+    resolveInitialSnapshot?.({ statuses: [], credentials: [], vendors: [], revisions: {}, reports: [] });
     await refreshTask;
     expect(useProviderStore.getState().providerSnapshot.credentials).toContainEqual(
       expect.objectContaining({ id: 'ollama-local', vendorId: 'ollama' }),
@@ -216,6 +220,7 @@ describe('useProviderStore mutation states', () => {
       statuses: [],
       credentials: [],
       vendors: [{ id: 'openai', name: 'OpenAI' }],
+      reports: [],
     });
 
     const removeTask = useProviderStore.getState().removeAccount('openai-main');

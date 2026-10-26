@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useChatWindowDockController } from '@/pages/Chat/useChatWindowDockController';
+import { useChatWindowDockController } from '@/plugins/chat/useChatWindowDockController';
 import { useLayoutStore } from '@/stores/layout';
 
 const invokeIpcMock = vi.hoisted(() => vi.fn());

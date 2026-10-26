@@ -5,12 +5,14 @@ mod execution;
 mod history;
 mod idle;
 mod instance;
+mod investigation;
 mod native;
 mod observation;
 mod record;
 mod retirement;
 mod run;
 mod title;
+mod thinking;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -258,8 +260,34 @@ impl Sessions {
     }
 
     pub async fn submit(&self, session_id: &str, content: Value) -> rpc::Result<String> {
+        Ok(self
+            .submit_run(session_id, content, None, None, None, None, None)
+            .await?
+            .run_id)
+    }
+
+    async fn submit_run(
+        &self,
+        session_id: &str,
+        content: Value,
+        request_id: Option<String>,
+        budget: Option<run::Budget>,
+        world_envelope: Option<investigation::Envelope>,
+        world_request_digest: Option<String>,
+        original_params: Option<Value>,
+    ) -> rpc::Result<run::Run> {
         self.accepting()?;
         run::validate_content(&content)?;
+        if let Some(request_id) = &request_id {
+            run::validate_request_id(request_id)?;
+        }
+        if world_envelope.is_some() && (request_id.is_none() || budget.is_some() || world_request_digest.is_none()) {
+            return Err(investigation::denied("investigation_accept_identity_invalid"));
+        }
+        let digest = request_id
+            .as_ref()
+            .map(|_| run::content_budget_digest(&content, &budget))
+            .transpose()?;
         let session = self.session(session_id).await?;
         let owner = self.clone();
         // The durable accept and executor wake outlive a disconnected RPC future.
@@ -273,6 +301,31 @@ impl Sessions {
             }
             let mut execution = session.data.lock().await;
             execution.record.mutable()?;
+            if let Some(request_id) = &request_id {
+                if let Some(existing) = record::get_run_by_request(
+                    &owner.0.database,
+                    &execution.record.session_id,
+                    request_id,
+                )
+                .await?
+                {
+                    if existing.run.content_budget_digest != digest
+                        || existing.run.world_investigation.as_ref().map(|world| &world.request_digest) != world_request_digest.as_ref()
+                    {
+                        return Err(not_sent(rpc::Error::conflict(
+                            "request_payload_conflict",
+                            "requestId was already accepted with different content or budget",
+                        )));
+                    }
+                    return Ok(existing.run);
+                }
+            }
+            if let Some(params) = &original_params {
+                crate::world::verify_investigation(params).map_err(not_sent)?;
+            }
+            if let Some(budget) = &budget {
+                budget.validate().map_err(not_sent)?;
+            }
             if execution.record.native_cleanup_failed {
                 return Err(rpc::Error::conflict(
                     "native_cleanup_unconfirmed",
@@ -294,13 +347,25 @@ impl Sessions {
             if let Some(error) = &execution.storage_fault {
                 return Err(error.clone());
             }
-            let pending = run::Record::new(&execution.record.session_id, content);
-            let run_id = pending.run.run_id.clone();
+            let world = world_envelope.map(|envelope| investigation::Investigation::accept(
+                envelope, world_request_digest.expect("verified World request digest"),
+                original_params.expect("verified World accepted params"), rpc::now_ms(),
+            )).transpose()?;
+            let pending = run::Record::new(
+                &execution.record.session_id,
+                content,
+                request_id,
+                digest,
+                budget,
+                world,
+            );
+            let accepted = pending.run.clone();
             owner.save_run_locked(&mut execution, &pending).await?;
             execution.queue.push_back(pending);
+            session.changed.notify_waiters();
             execution.idle.activity();
             session.wake.notify_one();
-            Ok(run_id)
+            Ok(accepted)
         })
         .await
         .map_err(|_| {

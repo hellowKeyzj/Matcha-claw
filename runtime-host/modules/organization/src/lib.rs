@@ -12,6 +12,12 @@ pub mod package;
 pub mod ports;
 mod store;
 mod trace;
+pub mod task_execution;
+pub use task_execution::{
+    TaskBudgetDimension, TaskExecutionBudget, TaskExecutionContext, TaskExecutionCost,
+    TaskMeasurementCoverage, TaskMeasurementScope, TaskMetric, TaskNativeExecution,
+    TaskNativeMeasurement, TaskRunMeasurement,
+};
 
 use std::sync::Arc;
 

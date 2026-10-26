@@ -3,7 +3,7 @@ import {
   areCurrentChatSendGateSourcesEquivalent,
   deriveChatSendGate,
   type CurrentChatSendGateSource,
-} from '@/stores/chat/send-gate';
+} from '@/plugins/chat/store/send-gate';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const sessionKey = 'agent:main:automation';

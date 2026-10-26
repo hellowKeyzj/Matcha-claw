@@ -1,4 +1,4 @@
-import { normalizeSubagentNameToSlug } from '@/features/subagents/domain/workspace';
+import { normalizeSubagentNameToSlug } from '@/plugins/agents/domain/workspace';
 
 export const AGENT_AVATAR_PICKER_OPTION_COUNT = 12;
 export const AGENT_AVATAR_STYLES = ['pixelArt', 'bottts', 'botttsNeutral'] as const;

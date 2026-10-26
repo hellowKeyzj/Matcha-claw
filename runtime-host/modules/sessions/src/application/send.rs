@@ -57,6 +57,8 @@ pub struct SessionSendCommand {
     pub system_provenance_receipt: Option<String>,
     pub source_binding: SessionSourceBinding,
     pub delivery_context: Option<SessionDeliveryContext>,
+    /// Immutable Organization context; native request identity remains the delivery key.
+    pub execution_context: Option<crate::execution::SessionExecutionContext>,
 }
 
 impl SessionSendCommand {
@@ -101,6 +103,7 @@ impl SessionSendCommand {
             system_provenance_receipt: None,
             source_binding: SessionSourceBinding::ordinary(),
             delivery_context: None,
+            execution_context: None,
         })
     }
 
@@ -157,6 +160,11 @@ impl SessionSendCommand {
 
     pub fn with_delivery_context(mut self, context: SessionDeliveryContext) -> Self {
         self.delivery_context = Some(context);
+        self
+    }
+
+    pub fn with_execution_context(mut self, context: crate::execution::SessionExecutionContext) -> Self {
+        self.execution_context = Some(context);
         self
     }
 
@@ -267,14 +275,13 @@ pub enum SessionSendStatus {
 mod tests {
     use serde_json::json;
 
-    use super::{NativeEndpoint, SessionSendCommand, SessionSendOutcome};
+    use super::{SessionSendCommand, SessionSendOutcome};
+    use crate::state::{SessionIdentity, SessionProvider};
 
-    fn command(endpoint: NativeEndpoint) -> SessionSendCommand {
+    fn command(identity: SessionIdentity) -> SessionSendCommand {
         SessionSendCommand::try_new(
-            endpoint,
-            "session-1".into(),
+            identity,
             Some("endpoint-session-1".into()),
-            "renderer-route:test".into(),
             "hello".into(),
             Some("requested-run".into()),
             None,
@@ -288,10 +295,13 @@ mod tests {
     #[test]
     fn request_run_identity_uses_idempotency_key_when_run_id_is_absent() {
         let command = SessionSendCommand::try_new(
-            NativeEndpoint::MatchaAgentLocal,
-            "session-1".into(),
+            SessionIdentity::new(
+                "matcha-agent:main:session-1",
+                SessionProvider::MatchaAgent,
+                "main".into(),
+            )
+            .unwrap(),
             Some("endpoint-session-1".into()),
-            "renderer-route:test".into(),
             "hello".into(),
             None,
             Some("idempotency-1".into()),

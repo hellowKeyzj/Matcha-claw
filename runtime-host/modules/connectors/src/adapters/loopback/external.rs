@@ -62,6 +62,17 @@ enum Input {
         call_id: CallId,
         #[serde(default, deserialize_with = "deserialize_session_identity")]
         session_identity: Option<SessionIdentity>,
+        #[serde(default, deserialize_with = "deserialize_optional_string")]
+        agent_id: Option<String>,
+    },
+    #[serde(rename = "oauth")]
+    OAuth {
+        connector_id: String,
+        action: crate::ports::McpOAuthAction,
+        #[serde(default, deserialize_with = "deserialize_optional_string")]
+        agent_id: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_optional_string")]
+        flow_id: Option<String>,
     },
     SessionStatus {
         session_identity: SessionIdentity,
@@ -97,6 +108,13 @@ where
     D: serde::Deserializer<'de>,
 {
     SessionIdentity::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_public_connector<'de, D>(deserializer: D) -> Result<Box<Connector>, D::Error>
@@ -163,6 +181,14 @@ fn public_connector_json(connector: &ConnectorReadModel) -> Value {
     }
     if let Some(transport) = connector.transport.as_ref() {
         object.insert("transport".into(), json!(mcp_transport(transport)));
+    }
+    if let Some(auth) = connector.auth {
+        object.insert(
+            "auth".into(),
+            json!(match auth {
+                crate::domain::McpAuth::OAuth => "oauth",
+            }),
+        );
     }
     if let Some(connection_timeout_ms) = connector.connection_timeout_ms {
         object.insert("connectionTimeoutMs".into(), json!(connection_timeout_ms));
@@ -257,8 +283,10 @@ pub(crate) enum Command {
         CallId,
         Option<SessionIdentity>,
         Option<RuntimeEndpoint>,
+        Option<String>,
         String,
     ),
+    OAuth(String, RuntimeEndpoint, crate::ports::McpOAuthRequest, String),
     SessionStatus(SessionStatusTarget, String),
     SessionMcpServerEnabled(SessionMcpServerEnabledTarget),
     Probe(String, RuntimeEndpoint, String),
@@ -295,7 +323,9 @@ impl Request {
     fn valid(&self) -> bool {
         self.id == CAPABILITY_ID
             && match &self.input {
-                Input::Status {} | Input::Probe { .. } => self.scope.endpoint().is_some(),
+                Input::Status {} | Input::Probe { .. } | Input::OAuth { .. } => {
+                    self.scope.endpoint().is_some()
+                }
                 Input::ObservationResult {
                     session_identity: None,
                     ..
@@ -309,12 +339,43 @@ impl Request {
                 | (Input::Status {}, "status") => true,
                 (
                     Input::ObservationResult {
-                        session_identity, ..
+                        session_identity,
+                        agent_id,
+                        ..
                     },
                     "observationResult",
-                ) => session_identity
-                    .as_ref()
-                    .is_none_or(SessionIdentity::is_valid),
+                ) => {
+                    session_identity.as_ref().is_none_or(SessionIdentity::is_valid)
+                        && agent_id.as_deref().is_none_or(|agent_id| {
+                            session_identity.is_none()
+                                && valid_oauth_agent(self.scope.endpoint(), Some(agent_id))
+                        })
+                }
+                (
+                    Input::OAuth {
+                        connector_id,
+                        action,
+                        agent_id,
+                        flow_id,
+                    },
+                    "oauth",
+                ) => {
+                    connector_id.len() <= 128
+                        && connector_id
+                            .as_bytes()
+                            .first()
+                            .is_some_and(u8::is_ascii_alphanumeric)
+                        && connector_id.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                        })
+                        && valid_oauth_agent(self.scope.endpoint(), agent_id.as_deref())
+                        && flow_id.as_deref().is_none_or(|flow_id| {
+                            *action != crate::ports::McpOAuthAction::Start
+                                && !flow_id.is_empty()
+                                && flow_id.encode_utf16().count() <= 256
+                                && !flow_id.chars().any(char::is_control)
+                        })
+                }
                 (Input::SessionStatus { session_identity }, "sessionStatus") => {
                     SessionStatusTarget {
                         session_identity: session_identity.clone(),
@@ -356,10 +417,27 @@ impl Request {
             Input::ObservationResult {
                 call_id,
                 session_identity,
+                agent_id,
             } => Command::ObservationResult(
                 call_id,
                 session_identity,
                 self.scope.into_endpoint(),
+                agent_id,
+                self.principal,
+            ),
+            Input::OAuth {
+                connector_id,
+                action,
+                agent_id,
+                flow_id,
+            } => Command::OAuth(
+                connector_id,
+                self.scope.into_endpoint().expect("validated runtime scope"),
+                crate::ports::McpOAuthRequest {
+                    action,
+                    agent_id,
+                    flow_id,
+                },
                 self.principal,
             ),
             Input::SessionStatus { session_identity } => {
@@ -387,6 +465,20 @@ impl Request {
     }
 }
 
+fn valid_oauth_agent(endpoint: Option<&RuntimeEndpoint>, agent_id: Option<&str>) -> bool {
+    match endpoint.map(RuntimeEndpoint::runtime_adapter_id) {
+        Some("openclaw") => agent_id.is_none(),
+        Some("matcha-agent") => agent_id.is_some_and(|agent_id| {
+            !agent_id.is_empty()
+                && agent_id.len() <= 256
+                && agent_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        }),
+        _ => false,
+    }
+}
+
 fn operation_name(operation: &str) -> Option<&'static str> {
     match operation {
         "externalConnectors.list" => Some("list"),
@@ -396,6 +488,7 @@ fn operation_name(operation: &str) -> Option<&'static str> {
         "externalConnectors.sessionStatus" => Some("sessionStatus"),
         "externalConnectors.sessionMcpServerEnabled" => Some("sessionMcpServerEnabled"),
         "externalConnectors.probe" => Some("probe"),
+        "externalConnectors.oauth" => Some("oauth"),
         "externalConnectors.get" => Some("get"),
         "externalConnectors.upsert" => Some("upsert"),
         "externalConnectors.update" => Some("update"),
@@ -463,6 +556,9 @@ impl Delivery {
             }
             Self::ObservationResult(call_id, ObservationResult::Probe(id, result)) => {
                 json!({ "callId": call_id, "kind": "probe", "status": status_json(id, &crate::api::map_observation_receipt(result.clone())) })
+            }
+            Self::ObservationResult(call_id, ObservationResult::OAuth { connector_id, oauth }) => {
+                json!({ "callId": call_id, "kind": "oauth", "connectorId": connector_id, "oauth": oauth })
             }
             Self::ObservationResult(
                 call_id,

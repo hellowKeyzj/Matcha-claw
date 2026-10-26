@@ -1,19 +1,31 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
-import { ChatShell } from '@/pages/Chat/components/ChatShell';
-import { ChatSidePanel } from '@/pages/Chat/components/ChatSidePanel';
-import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import type { ComponentProps } from 'react';
+import { ChatShell } from '@/plugins/chat/components/ChatShell';
+import { ChatSidePanel } from '@/plugins/chat/components/ChatSidePanel';
+import type { ArtifactPreviewTarget } from '@/plugins/files/types';
+import { ChatArtifactContext, type ChatArtifactContextValue } from '@/plugins/chat/artifact-context';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { chatPlugin } from '@/plugins/chat/plugin';
+import { filesPlugin } from '@/plugins/files/plugin';
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => {
-      if (key === 'artifacts.sectionLabel') {
-        return '产物';
-      }
-      return key;
-    },
-  }),
-}));
+const pluginHost = createPluginHost([applicationShellPlugin, filesPlugin, chatPlugin]);
+
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-i18next')>();
+  const t = (key: string) => {
+    if (key === 'artifacts.sectionLabel') {
+      return '产物';
+    }
+    if (key === 'board.runtimeTab') {
+      return '运行面';
+    }
+    return key;
+  };
+  return { ...actual, useTranslation: () => ({ t, i18n: { language: 'zh' } }) };
+});
 
 vi.mock('sonner', () => ({
   toast: {
@@ -27,7 +39,7 @@ vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => mockShowItemInFolder(...args),
 }));
 
-vi.mock('@/components/file-preview/FilePreviewBody', () => ({
+vi.mock('@/plugins/files/FilePreviewBody', () => ({
   FilePreviewBody: ({
     file,
     mode,
@@ -48,7 +60,7 @@ vi.mock('@/components/file-preview/FilePreviewBody', () => ({
   ),
 }));
 
-vi.mock('@/components/file-preview/WorkspaceBrowserBody', () => ({
+vi.mock('@/plugins/files/WorkspaceBrowserBody', () => ({
   WorkspaceBrowserBody: ({
     selectedFilePath,
     onSelectFile,
@@ -74,13 +86,33 @@ vi.mock('@/components/file-preview/WorkspaceBrowserBody', () => ({
   ),
 }));
 
+function ArtifactSidePanel({ artifactContext, ...props }: Omit<
+  ComponentProps<typeof ChatSidePanel>,
+  'content' | 'layout' | 'onLayoutChange' | 'artifactWorkbenchFullscreen' | 'onToggleArtifactWorkbenchFullscreen'
+> & { artifactContext: ChatArtifactContextValue }) {
+  return (
+    <PluginHostProvider host={pluginHost}>
+      <ChatArtifactContext.Provider value={artifactContext}>
+        <ChatSidePanel
+          {...props}
+          content={null}
+          layout={{ position: 'right', fullscreen: false }}
+          onLayoutChange={vi.fn()}
+          artifactWorkbenchFullscreen={artifactContext.artifactWorkbenchFullscreen}
+          onToggleArtifactWorkbenchFullscreen={artifactContext.onToggleArtifactWorkbenchFullscreen}
+        />
+      </ChatArtifactContext.Provider>
+    </PluginHostProvider>
+  );
+}
+
 describe('chat shell side panel layout', () => {
   beforeEach(() => {
     mockShowItemInFolder.mockClear();
     window.electron.platform = 'darwin';
   });
 
-  const sidePanelProps = {
+  const sidePanelProps: ChatArtifactContextValue = {
     artifactWorkbenchFullscreen: false,
     onToggleArtifactWorkbenchFullscreen: vi.fn(),
     artifactGroups: [],
@@ -102,6 +134,7 @@ describe('chat shell side panel layout', () => {
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="closed"
+        panelLayout={{ position: 'right', fullscreen: false }}
         sidePanelMode="docked"
         sidePanelWidth={360}
         artifactWorkbenchFullscreen={false}
@@ -110,8 +143,6 @@ describe('chat shell side panel layout', () => {
         sidePanel={<div data-testid="chat-side-panel" />}
         header={<div data-testid="chat-header" />}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={null}
-        approvalDock={null}
         input={<div data-testid="chat-input" />}
       />,
     );
@@ -130,6 +161,7 @@ describe('chat shell side panel layout', () => {
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="open"
+        panelLayout={{ position: 'right', fullscreen: false }}
         sidePanelMode="docked"
         sidePanelWidth={360}
         artifactWorkbenchFullscreen={false}
@@ -139,8 +171,6 @@ describe('chat shell side panel layout', () => {
         sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
         header={<div data-testid="chat-header" />}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={null}
-        approvalDock={null}
         input={<div data-testid="chat-input" />}
       />,
     );
@@ -157,6 +187,7 @@ describe('chat shell side panel layout', () => {
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="opening"
+        panelLayout={{ position: 'right', fullscreen: false }}
         sidePanelMode="docked"
         sidePanelWidth={360}
         artifactWorkbenchFullscreen={false}
@@ -165,8 +196,6 @@ describe('chat shell side panel layout', () => {
         sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
         header={<div data-testid="chat-header" />}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={null}
-        approvalDock={null}
         input={<div data-testid="chat-input" />}
       />,
     );
@@ -182,6 +211,7 @@ describe('chat shell side panel layout', () => {
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="open"
+        panelLayout={{ position: 'right', fullscreen: false }}
         sidePanelMode="docked"
         sidePanelWidth={520}
         sidePanelMainWidth={980}
@@ -192,8 +222,6 @@ describe('chat shell side panel layout', () => {
         sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
         header={<div data-testid="chat-header" />}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={null}
-        approvalDock={null}
         input={<div data-testid="chat-input" />}
       />,
     );
@@ -209,6 +237,7 @@ describe('chat shell side panel layout', () => {
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="closing"
+        panelLayout={{ position: 'right', fullscreen: false }}
         sidePanelMode="docked"
         sidePanelWidth={360}
         sidePanelMainWidth={900}
@@ -219,8 +248,6 @@ describe('chat shell side panel layout', () => {
         sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
         header={<div data-testid="chat-header" />}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={null}
-        approvalDock={null}
         input={<div data-testid="chat-input" />}
       />,
     );
@@ -236,6 +263,7 @@ describe('chat shell side panel layout', () => {
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="open"
+        panelLayout={{ position: 'right', fullscreen: false }}
         sidePanelMode="docked"
         sidePanelWidth={360}
         artifactWorkbenchFullscreen={false}
@@ -245,8 +273,6 @@ describe('chat shell side panel layout', () => {
         sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
         header={<button type="button" data-testid="chat-header-button">header action</button>}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={null}
-        approvalDock={null}
         input={<div data-testid="chat-input" />}
       />,
     );
@@ -265,6 +291,7 @@ describe('chat shell side panel layout', () => {
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="closed"
+        panelLayout={{ position: 'right', fullscreen: false }}
         sidePanelMode="docked"
         sidePanelWidth={360}
         artifactWorkbenchFullscreen={false}
@@ -273,8 +300,6 @@ describe('chat shell side panel layout', () => {
         sidePanel={<div data-testid="chat-side-panel" />}
         header={<div data-testid="chat-header" />}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={null}
-        approvalDock={null}
         input={<div data-testid="chat-input" />}
       />,
     );
@@ -287,6 +312,7 @@ describe('chat shell side panel layout', () => {
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="open"
+        panelLayout={{ position: 'right', fullscreen: false }}
         sidePanelMode="overlay"
         sidePanelWidth={320}
         artifactWorkbenchFullscreen={false}
@@ -295,8 +321,6 @@ describe('chat shell side panel layout', () => {
         sidePanel={<div data-testid="chat-side-panel" data-mode="overlay" />}
         header={<div data-testid="chat-header" />}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={null}
-        approvalDock={null}
         input={<div data-testid="chat-input" />}
       />,
     );
@@ -306,18 +330,18 @@ describe('chat shell side panel layout', () => {
     expect(screen.queryByTestId('chat-side-panel-resizer')).toBeNull();
   });
 
-  it('renders artifact and runtime tabs inside one shared side panel shell', () => {
+  it('renders artifact and runtime tabs inside one shared side panel shell', async () => {
     const onTabChange = vi.fn();
-    render(
-      <ChatSidePanel
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="docked"
         width={520}
         activeTab="artifacts"
         onTabChange={onTabChange}
         onClose={vi.fn()}
-        {...sidePanelProps}
+        artifactContext={sidePanelProps}
       />,
-    );
+    ));
 
     expect(screen.getAllByRole('tab')).toHaveLength(2);
     expect(screen.getByRole('tab', { name: 'artifacts.title' })).toBeInTheDocument();
@@ -331,17 +355,17 @@ describe('chat shell side panel layout', () => {
     expect(onTabChange).toHaveBeenCalledWith('runtime');
   });
 
-  it('switches the top tab strip to icon-only mode when per-tab space is not enough for labels', () => {
-    render(
-      <ChatSidePanel
+  it('switches the top tab strip to icon-only mode when per-tab space is not enough for labels', async () => {
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="docked"
         width={180}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
+        artifactContext={sidePanelProps}
       />,
-    );
+    ));
 
     const artifactsTab = screen.getByTestId('chat-side-panel-tab-artifacts');
     const runtimeTab = screen.getByTestId('chat-side-panel-tab-runtime');
@@ -353,36 +377,36 @@ describe('chat shell side panel layout', () => {
     expect(within(runtimeTab).queryByText('运行面')).toBeNull();
   });
 
-  it('keeps top tab labels visible at medium side panel widths', () => {
-    render(
-      <ChatSidePanel
+  it('keeps top tab labels visible at medium side panel widths', async () => {
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="docked"
         width={320}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
+        artifactContext={sidePanelProps}
       />,
-    );
+    ));
 
     expect(screen.queryByTestId('chat-side-panel-tab-skills')).toBeNull();
     expect(within(screen.getByTestId('chat-side-panel-tab-artifacts')).getByText('产物')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-side-panel-tab-runtime')).getByText('运行面')).toBeInTheDocument();
   });
 
-  it('switches artifact section buttons to icon-only mode when per-tab space is not enough for labels', () => {
-    render(
-      <ChatSidePanel
+  it('switches artifact section buttons to icon-only mode when per-tab space is not enough for labels', async () => {
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="overlay"
         width={220}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
+        artifactContext={sidePanelProps}
       />,
-    );
+    ));
 
-    const changesButton = screen.getByTestId('chat-artifact-section-changes');
+    const changesButton = await screen.findByTestId('chat-artifact-section-changes');
     const previewButton = screen.getByTestId('chat-artifact-section-preview');
     const workspaceButton = screen.getByTestId('chat-artifact-section-workspace');
 
@@ -391,36 +415,36 @@ describe('chat shell side panel layout', () => {
     expect(within(workspaceButton).queryByText('artifacts.workspaceTab')).toBeNull();
   });
 
-  it('keeps artifact section labels visible at medium side panel widths', () => {
-    render(
-      <ChatSidePanel
+  it('keeps artifact section labels visible at medium side panel widths', async () => {
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="overlay"
         width={360}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
+        artifactContext={sidePanelProps}
       />,
-    );
+    ));
 
-    expect(within(screen.getByTestId('chat-artifact-section-changes')).getByText('artifacts.changesTab')).toBeInTheDocument();
+    expect(within(await screen.findByTestId('chat-artifact-section-changes')).getByText('artifacts.changesTab')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-artifact-section-preview')).getByText('artifacts.previewTab')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-artifact-section-workspace')).getByText('artifacts.workspaceTab')).toBeInTheDocument();
   });
 
-  it('shows artifact section labels when the side panel is wide enough', () => {
-    render(
-      <ChatSidePanel
+  it('shows artifact section labels when the side panel is wide enough', async () => {
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="docked"
         width={520}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
+        artifactContext={sidePanelProps}
       />,
-    );
+    ));
 
-    expect(within(screen.getByTestId('chat-artifact-section-changes')).getByText('artifacts.changesTab')).toBeInTheDocument();
+    expect(within(await screen.findByTestId('chat-artifact-section-changes')).getByText('artifacts.changesTab')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-artifact-section-preview')).getByText('artifacts.previewTab')).toBeInTheDocument();
     expect(within(screen.getByTestId('chat-artifact-section-workspace')).getByText('artifacts.workspaceTab')).toBeInTheDocument();
   });
@@ -430,6 +454,7 @@ describe('chat shell side panel layout', () => {
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="open"
+        panelLayout={{ position: 'right', fullscreen: false }}
         sidePanelMode="docked"
         sidePanelWidth={960}
         artifactWorkbenchFullscreen
@@ -438,8 +463,6 @@ describe('chat shell side panel layout', () => {
         sidePanel={<div data-testid="chat-side-panel" data-mode="docked" />}
         header={<div data-testid="chat-header" />}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={null}
-        approvalDock={null}
         input={<div data-testid="chat-input" />}
       />,
     );
@@ -451,29 +474,44 @@ describe('chat shell side panel layout', () => {
     expect(screen.queryByTestId('chat-side-panel-overlay')).toBeNull();
   });
 
-  it('renders artifact summaries inside the shared side panel shell', () => {
+  it('renders artifact summaries inside the shared side panel shell', async () => {
     const onOpenGeneratedArtifactFile = vi.fn();
     const onOpenArtifactGroup = vi.fn();
     const onArtifactSectionChange = vi.fn();
     const onArtifactViewModeChange = vi.fn();
     const onToggleArtifactWorkbenchFullscreen = vi.fn();
-    render(
-      <ChatSidePanel
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="overlay"
         width={320}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
-        artifactWorkbenchFullscreen={false}
-        onToggleArtifactWorkbenchFullscreen={onToggleArtifactWorkbenchFullscreen}
-        onOpenGeneratedArtifactFile={onOpenGeneratedArtifactFile}
-        onOpenArtifactGroup={onOpenArtifactGroup}
-        onArtifactSectionChange={onArtifactSectionChange}
-        onArtifactViewModeChange={onArtifactViewModeChange}
-        artifactGroups={[{
-          graphItemKey: 'graph-1',
-          files: [{
+        artifactContext={{
+          ...sidePanelProps,
+          artifactWorkbenchFullscreen: false,
+          onToggleArtifactWorkbenchFullscreen: onToggleArtifactWorkbenchFullscreen,
+          onOpenGeneratedArtifactFile: onOpenGeneratedArtifactFile,
+          onOpenArtifactGroup: onOpenArtifactGroup,
+          onArtifactSectionChange: onArtifactSectionChange,
+          onArtifactViewModeChange: onArtifactViewModeChange,
+          artifactGroups: [{
+            graphItemKey: 'graph-1',
+            files: [{
+              filePath: '/workspace/demo.ts',
+              fileName: 'demo.ts',
+              ext: '.ts',
+              mimeType: 'text/typescript',
+              contentType: 'code',
+              sourceTool: 'edit',
+              action: 'modified',
+              baseline: 'const value = 1;\n',
+              content: 'const value = 2;\n',
+              lineStats: { added: 1, removed: 1 },
+              toolId: 'edit-1',
+            }],
+          }],
+          artifactFocusedGroupFiles: [{
             filePath: '/workspace/demo.ts',
             fileName: 'demo.ts',
             ext: '.ts',
@@ -486,42 +524,29 @@ describe('chat shell side panel layout', () => {
             lineStats: { added: 1, removed: 1 },
             toolId: 'edit-1',
           }],
-        }]}
-        artifactFocusedGroupFiles={[{
-          filePath: '/workspace/demo.ts',
-          fileName: 'demo.ts',
-          ext: '.ts',
-          mimeType: 'text/typescript',
-          contentType: 'code',
-          sourceTool: 'edit',
-          action: 'modified',
-          baseline: 'const value = 1;\n',
-          content: 'const value = 2;\n',
-          lineStats: { added: 1, removed: 1 },
-          toolId: 'edit-1',
-        }]}
-        artifactFocusedFile={{
-          filePath: '/workspace/demo.ts',
-          fileName: 'demo.ts',
-          ext: '.ts',
-          mimeType: 'text/typescript',
-          contentType: 'code',
-          sourceTool: 'edit',
-          action: 'modified',
-          baseline: 'const value = 1;\n',
-          content: 'const value = 2;\n',
-          lineStats: { added: 1, removed: 1 },
-          toolId: 'edit-1',
+          artifactFocusedFile: {
+            filePath: '/workspace/demo.ts',
+            fileName: 'demo.ts',
+            ext: '.ts',
+            mimeType: 'text/typescript',
+            contentType: 'code',
+            sourceTool: 'edit',
+            action: 'modified',
+            baseline: 'const value = 1;\n',
+            content: 'const value = 2;\n',
+            lineStats: { added: 1, removed: 1 },
+            toolId: 'edit-1',
+          },
+          artifactActiveSection: "changes",
+          artifactViewMode: "diff",
+          artifactWorkspaceRoot: "/workspace",
+          artifactFocusedGroupKey: "graph-1",
         }}
-        artifactActiveSection="changes"
-        artifactViewMode="diff"
-        artifactWorkspaceRoot="/workspace"
-        artifactFocusedGroupKey="graph-1"
       />,
-    );
+    ));
 
     expect(screen.getByRole('tab', { name: 'artifacts.title' })).toBeInTheDocument();
-    expect(screen.getAllByText('demo.ts').length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('demo.ts')).length).toBeGreaterThan(0);
     expect(screen.queryByText('/workspace/demo.ts')).toBeNull();
     expect(screen.getByText('+1 / -1')).toBeInTheDocument();
     expect(screen.getByTestId('artifact-preview-body')).toHaveTextContent('demo.ts');
@@ -536,20 +561,35 @@ describe('chat shell side panel layout', () => {
     expect(onToggleArtifactWorkbenchFullscreen).toHaveBeenCalled();
   });
 
-  it('opens artifact groups through group-level actions', () => {
+  it('opens artifact groups through group-level actions', async () => {
     const onOpenArtifactGroup = vi.fn();
-    render(
-      <ChatSidePanel
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="overlay"
         width={320}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
-        onOpenArtifactGroup={onOpenArtifactGroup}
-        artifactGroups={[{
-          graphItemKey: 'graph-1',
-          files: [{
+        artifactContext={{
+          ...sidePanelProps,
+          onOpenArtifactGroup: onOpenArtifactGroup,
+          artifactGroups: [{
+            graphItemKey: 'graph-1',
+            files: [{
+              filePath: '/workspace/demo.ts',
+              fileName: 'demo.ts',
+              ext: '.ts',
+              mimeType: 'text/typescript',
+              contentType: 'code',
+              sourceTool: 'edit',
+              action: 'modified',
+              baseline: 'const value = 1;\n',
+              content: 'const value = 2;\n',
+              lineStats: { added: 1, removed: 1 },
+              toolId: 'edit-1',
+            }],
+          }],
+          artifactFocusedGroupFiles: [{
             filePath: '/workspace/demo.ts',
             fileName: 'demo.ts',
             ext: '.ts',
@@ -562,58 +602,75 @@ describe('chat shell side panel layout', () => {
             lineStats: { added: 1, removed: 1 },
             toolId: 'edit-1',
           }],
-        }]}
-        artifactFocusedGroupFiles={[{
-          filePath: '/workspace/demo.ts',
-          fileName: 'demo.ts',
-          ext: '.ts',
-          mimeType: 'text/typescript',
-          contentType: 'code',
-          sourceTool: 'edit',
-          action: 'modified',
-          baseline: 'const value = 1;\n',
-          content: 'const value = 2;\n',
-          lineStats: { added: 1, removed: 1 },
-          toolId: 'edit-1',
-        }]}
-        artifactFocusedFile={{
-          filePath: '/workspace/demo.ts',
-          fileName: 'demo.ts',
-          ext: '.ts',
-          mimeType: 'text/typescript',
-          contentType: 'code',
-          sourceTool: 'edit',
-          action: 'modified',
-          baseline: 'const value = 1;\n',
-          content: 'const value = 2;\n',
-          lineStats: { added: 1, removed: 1 },
-          toolId: 'edit-1',
+          artifactFocusedFile: {
+            filePath: '/workspace/demo.ts',
+            fileName: 'demo.ts',
+            ext: '.ts',
+            mimeType: 'text/typescript',
+            contentType: 'code',
+            sourceTool: 'edit',
+            action: 'modified',
+            baseline: 'const value = 1;\n',
+            content: 'const value = 2;\n',
+            lineStats: { added: 1, removed: 1 },
+            toolId: 'edit-1',
+          },
+          artifactFocusedGroupKey: "graph-1",
+          artifactActiveSection: "preview",
+          artifactViewMode: "preview",
+          artifactWorkspaceRoot: "/workspace",
         }}
-        artifactFocusedGroupKey="graph-1"
-        artifactActiveSection="preview"
-        artifactViewMode="preview"
-        artifactWorkspaceRoot="/workspace"
       />,
-    );
+    ));
 
     fireEvent.click(screen.getByRole('button', { name: 'artifacts.openLatest' }));
     expect(onOpenArtifactGroup).toHaveBeenCalledWith('graph-1', { preserveSection: 'current' });
   });
 
-  it('uses relative artifact navigation without resetting the user section choice', () => {
+  it('uses relative artifact navigation without resetting the user section choice', async () => {
     const onOpenGeneratedArtifactFile = vi.fn();
-    render(
-      <ChatSidePanel
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="overlay"
         width={320}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
-        onOpenGeneratedArtifactFile={onOpenGeneratedArtifactFile}
-        artifactGroups={[{
-          graphItemKey: 'graph-1',
-          files: [
+        artifactContext={{
+          ...sidePanelProps,
+          onOpenGeneratedArtifactFile: onOpenGeneratedArtifactFile,
+          artifactGroups: [{
+            graphItemKey: 'graph-1',
+            files: [
+              {
+                filePath: '/workspace/demo.ts',
+                fileName: 'demo.ts',
+                ext: '.ts',
+                mimeType: 'text/typescript',
+                contentType: 'code',
+                sourceTool: 'edit',
+                action: 'modified',
+                baseline: 'const value = 1;\n',
+                content: 'const value = 2;\n',
+                lineStats: { added: 1, removed: 1 },
+                toolId: 'edit-1',
+              },
+              {
+                filePath: '/tmp/report.pdf',
+                fileName: 'report.pdf',
+                ext: '.pdf',
+                mimeType: 'application/pdf',
+                contentType: 'pdf',
+                sourceTool: 'write',
+                action: 'created',
+                baseline: '',
+                content: '',
+                lineStats: { added: 0, removed: 0 },
+                toolId: 'write-1',
+              },
+            ],
+          }],
+          artifactFocusedGroupFiles: [
             {
               filePath: '/workspace/demo.ts',
               fileName: 'demo.ts',
@@ -641,9 +698,7 @@ describe('chat shell side panel layout', () => {
               toolId: 'write-1',
             },
           ],
-        }]}
-        artifactFocusedGroupFiles={[
-          {
+          artifactFocusedFile: {
             filePath: '/workspace/demo.ts',
             fileName: 'demo.ts',
             ext: '.ts',
@@ -656,7 +711,126 @@ describe('chat shell side panel layout', () => {
             lineStats: { added: 1, removed: 1 },
             toolId: 'edit-1',
           },
-          {
+          artifactActiveSection: "changes",
+          artifactViewMode: "diff",
+          artifactWorkspaceRoot: "/workspace",
+        }}
+      />,
+    ));
+
+    fireEvent.click(screen.getByTestId('artifact-preview-next-file'));
+    expect(onOpenGeneratedArtifactFile).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: '/tmp/report.pdf',
+    }), { preserveSection: 'current' });
+  });
+
+  it('scopes artifact prev-next navigation to the current group instead of crossing groups', async () => {
+    await act(async () => render(
+      <ArtifactSidePanel
+        mode="overlay"
+        width={320}
+        activeTab="artifacts"
+        onTabChange={vi.fn()}
+        onClose={vi.fn()}
+        artifactContext={{
+          ...sidePanelProps,
+          artifactGroups: [
+            {
+              graphItemKey: 'graph-1',
+              files: [{
+                filePath: '/workspace/demo.ts',
+                fileName: 'demo.ts',
+                ext: '.ts',
+                mimeType: 'text/typescript',
+                contentType: 'code',
+                sourceTool: 'edit',
+                action: 'modified',
+                baseline: 'const value = 1;\n',
+                content: 'const value = 2;\n',
+                lineStats: { added: 1, removed: 1 },
+                toolId: 'edit-1',
+              }],
+            },
+            {
+              graphItemKey: 'graph-2',
+              files: [{
+                filePath: '/tmp/report.pdf',
+                fileName: 'report.pdf',
+                ext: '.pdf',
+                mimeType: 'application/pdf',
+                contentType: 'pdf',
+                sourceTool: 'write',
+                action: 'created',
+                baseline: '',
+                content: '',
+                lineStats: { added: 0, removed: 0 },
+                toolId: 'write-1',
+              }],
+            },
+          ],
+          artifactFocusedGroupFiles: [{
+            filePath: '/workspace/demo.ts',
+            fileName: 'demo.ts',
+            ext: '.ts',
+            mimeType: 'text/typescript',
+            contentType: 'code',
+            sourceTool: 'edit',
+            action: 'modified',
+            baseline: 'const value = 1;\n',
+            content: 'const value = 2;\n',
+            lineStats: { added: 1, removed: 1 },
+            toolId: 'edit-1',
+          }],
+          artifactFocusedFile: {
+            filePath: '/workspace/demo.ts',
+            fileName: 'demo.ts',
+            ext: '.ts',
+            mimeType: 'text/typescript',
+            contentType: 'code',
+            sourceTool: 'edit',
+            action: 'modified',
+            baseline: 'const value = 1;\n',
+            content: 'const value = 2;\n',
+            lineStats: { added: 1, removed: 1 },
+            toolId: 'edit-1',
+          },
+          artifactActiveSection: "changes",
+          artifactViewMode: "diff",
+          artifactWorkspaceRoot: "/workspace",
+        }}
+      />,
+    ));
+
+    expect(screen.getByTestId('artifact-preview-next-file')).toBeDisabled();
+  });
+
+  it('disables changes when the focused artifact does not support inline diff', async () => {
+    await act(async () => render(
+      <ArtifactSidePanel
+        mode="overlay"
+        width={320}
+        activeTab="artifacts"
+        onTabChange={vi.fn()}
+        onClose={vi.fn()}
+        artifactContext={{
+          ...sidePanelProps,
+          artifactGroups: [{
+            graphItemKey: 'graph-1',
+            files: [{
+              filePath: '/tmp/report.pdf',
+              fileName: 'report.pdf',
+              ext: '.pdf',
+              mimeType: 'application/pdf',
+              contentType: 'pdf',
+              sourceTool: 'write',
+              action: 'created',
+              baseline: '',
+              content: '',
+              lineStats: { added: 0, removed: 0 },
+              toolId: 'write-1',
+            }],
+          }],
+          artifactFocusedFile: {
             filePath: '/tmp/report.pdf',
             fileName: 'report.pdf',
             ext: '.pdf',
@@ -669,43 +843,79 @@ describe('chat shell side panel layout', () => {
             lineStats: { added: 0, removed: 0 },
             toolId: 'write-1',
           },
-        ]}
-        artifactFocusedFile={{
-          filePath: '/workspace/demo.ts',
-          fileName: 'demo.ts',
-          ext: '.ts',
-          mimeType: 'text/typescript',
-          contentType: 'code',
-          sourceTool: 'edit',
-          action: 'modified',
-          baseline: 'const value = 1;\n',
-          content: 'const value = 2;\n',
-          lineStats: { added: 1, removed: 1 },
-          toolId: 'edit-1',
+          artifactActiveSection: "preview",
+          artifactViewMode: "preview",
+          artifactWorkspaceRoot: "/workspace",
         }}
-        artifactActiveSection="changes"
-        artifactViewMode="diff"
-        artifactWorkspaceRoot="/workspace"
       />,
-    );
+    ));
 
-    fireEvent.click(screen.getByTestId('artifact-preview-next-file'));
-    expect(onOpenGeneratedArtifactFile).toHaveBeenCalledWith(expect.objectContaining({
-      filePath: '/tmp/report.pdf',
-    }), { preserveSection: 'current' });
+    expect(screen.getByTestId('chat-artifact-section-changes')).toBeDisabled();
   });
 
-  it('scopes artifact prev-next navigation to the current group instead of crossing groups', () => {
-    render(
-      <ChatSidePanel
+  it('shows a reveal-folder toolbar action for rich preview files instead of diff toggle', async () => {
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="overlay"
         width={320}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
-        artifactGroups={[
-          {
+        artifactContext={{
+          ...sidePanelProps,
+          artifactGroups: [{
+            graphItemKey: 'graph-1',
+            files: [{
+              filePath: '/tmp/report.pdf',
+              fileName: 'report.pdf',
+              ext: '.pdf',
+              mimeType: 'application/pdf',
+              contentType: 'pdf',
+              sourceTool: 'write',
+              action: 'created',
+              baseline: '',
+              content: '',
+              lineStats: { added: 0, removed: 0 },
+              toolId: 'write-1',
+            }],
+          }],
+          artifactFocusedFile: {
+            filePath: '/tmp/report.pdf',
+            fileName: 'report.pdf',
+            ext: '.pdf',
+            mimeType: 'application/pdf',
+            contentType: 'pdf',
+            sourceTool: 'write',
+            action: 'created',
+            baseline: '',
+            content: '',
+            lineStats: { added: 0, removed: 0 },
+            toolId: 'write-1',
+          },
+          artifactActiveSection: "preview",
+          artifactViewMode: "preview",
+          artifactWorkspaceRoot: "/workspace",
+        }}
+      />,
+    ));
+
+    expect(screen.getByTestId('chat-artifact-section-changes')).toBeDisabled();
+    const revealButtons = screen.getAllByRole('button', { name: 'artifacts.reveal' });
+    fireEvent.click(revealButtons[revealButtons.length - 1]!);
+    expect(mockShowItemInFolder).toHaveBeenCalledWith('shell:showItemInFolder', '/tmp/report.pdf');
+  });
+
+  it('keeps the diff toolbar action for diff-capable files', async () => {
+    await act(async () => render(
+      <ArtifactSidePanel
+        mode="overlay"
+        width={320}
+        activeTab="artifacts"
+        onTabChange={vi.fn()}
+        onClose={vi.fn()}
+        artifactContext={{
+          ...sidePanelProps,
+          artifactGroups: [{
             graphItemKey: 'graph-1',
             files: [{
               filePath: '/workspace/demo.ts',
@@ -720,168 +930,8 @@ describe('chat shell side panel layout', () => {
               lineStats: { added: 1, removed: 1 },
               toolId: 'edit-1',
             }],
-          },
-          {
-            graphItemKey: 'graph-2',
-            files: [{
-              filePath: '/tmp/report.pdf',
-              fileName: 'report.pdf',
-              ext: '.pdf',
-              mimeType: 'application/pdf',
-              contentType: 'pdf',
-              sourceTool: 'write',
-              action: 'created',
-              baseline: '',
-              content: '',
-              lineStats: { added: 0, removed: 0 },
-              toolId: 'write-1',
-            }],
-          },
-        ]}
-        artifactFocusedGroupFiles={[{
-          filePath: '/workspace/demo.ts',
-          fileName: 'demo.ts',
-          ext: '.ts',
-          mimeType: 'text/typescript',
-          contentType: 'code',
-          sourceTool: 'edit',
-          action: 'modified',
-          baseline: 'const value = 1;\n',
-          content: 'const value = 2;\n',
-          lineStats: { added: 1, removed: 1 },
-          toolId: 'edit-1',
-        }]}
-        artifactFocusedFile={{
-          filePath: '/workspace/demo.ts',
-          fileName: 'demo.ts',
-          ext: '.ts',
-          mimeType: 'text/typescript',
-          contentType: 'code',
-          sourceTool: 'edit',
-          action: 'modified',
-          baseline: 'const value = 1;\n',
-          content: 'const value = 2;\n',
-          lineStats: { added: 1, removed: 1 },
-          toolId: 'edit-1',
-        }}
-        artifactActiveSection="changes"
-        artifactViewMode="diff"
-        artifactWorkspaceRoot="/workspace"
-      />,
-    );
-
-    expect(screen.getByTestId('artifact-preview-next-file')).toBeDisabled();
-  });
-
-  it('disables changes when the focused artifact does not support inline diff', () => {
-    render(
-      <ChatSidePanel
-        mode="overlay"
-        width={320}
-        activeTab="artifacts"
-        onTabChange={vi.fn()}
-        onClose={vi.fn()}
-        {...sidePanelProps}
-        artifactGroups={[{
-          graphItemKey: 'graph-1',
-          files: [{
-            filePath: '/tmp/report.pdf',
-            fileName: 'report.pdf',
-            ext: '.pdf',
-            mimeType: 'application/pdf',
-            contentType: 'pdf',
-            sourceTool: 'write',
-            action: 'created',
-            baseline: '',
-            content: '',
-            lineStats: { added: 0, removed: 0 },
-            toolId: 'write-1',
           }],
-        }]}
-        artifactFocusedFile={{
-          filePath: '/tmp/report.pdf',
-          fileName: 'report.pdf',
-          ext: '.pdf',
-          mimeType: 'application/pdf',
-          contentType: 'pdf',
-          sourceTool: 'write',
-          action: 'created',
-          baseline: '',
-          content: '',
-          lineStats: { added: 0, removed: 0 },
-          toolId: 'write-1',
-        }}
-        artifactActiveSection="preview"
-        artifactViewMode="preview"
-        artifactWorkspaceRoot="/workspace"
-      />,
-    );
-
-    expect(screen.getByTestId('chat-artifact-section-changes')).toBeDisabled();
-  });
-
-  it('shows a reveal-folder toolbar action for rich preview files instead of diff toggle', () => {
-    render(
-      <ChatSidePanel
-        mode="overlay"
-        width={320}
-        activeTab="artifacts"
-        onTabChange={vi.fn()}
-        onClose={vi.fn()}
-        {...sidePanelProps}
-        artifactGroups={[{
-          graphItemKey: 'graph-1',
-          files: [{
-            filePath: '/tmp/report.pdf',
-            fileName: 'report.pdf',
-            ext: '.pdf',
-            mimeType: 'application/pdf',
-            contentType: 'pdf',
-            sourceTool: 'write',
-            action: 'created',
-            baseline: '',
-            content: '',
-            lineStats: { added: 0, removed: 0 },
-            toolId: 'write-1',
-          }],
-        }]}
-        artifactFocusedFile={{
-          filePath: '/tmp/report.pdf',
-          fileName: 'report.pdf',
-          ext: '.pdf',
-          mimeType: 'application/pdf',
-          contentType: 'pdf',
-          sourceTool: 'write',
-          action: 'created',
-          baseline: '',
-          content: '',
-          lineStats: { added: 0, removed: 0 },
-          toolId: 'write-1',
-        }}
-        artifactActiveSection="preview"
-        artifactViewMode="preview"
-        artifactWorkspaceRoot="/workspace"
-      />,
-    );
-
-    expect(screen.getByTestId('chat-artifact-section-changes')).toBeDisabled();
-    const revealButtons = screen.getAllByRole('button', { name: 'artifacts.reveal' });
-    fireEvent.click(revealButtons[revealButtons.length - 1]!);
-    expect(mockShowItemInFolder).toHaveBeenCalledWith('shell:showItemInFolder', '/tmp/report.pdf');
-  });
-
-  it('keeps the diff toolbar action for diff-capable files', () => {
-    render(
-      <ChatSidePanel
-        mode="overlay"
-        width={320}
-        activeTab="artifacts"
-        onTabChange={vi.fn()}
-        onClose={vi.fn()}
-        {...sidePanelProps}
-        artifactGroups={[{
-          graphItemKey: 'graph-1',
-          files: [{
+          artifactFocusedFile: {
             filePath: '/workspace/demo.ts',
             fileName: 'demo.ts',
             ext: '.ts',
@@ -893,43 +943,45 @@ describe('chat shell side panel layout', () => {
             content: 'const value = 2;\n',
             lineStats: { added: 1, removed: 1 },
             toolId: 'edit-1',
-          }],
-        }]}
-        artifactFocusedFile={{
-          filePath: '/workspace/demo.ts',
-          fileName: 'demo.ts',
-          ext: '.ts',
-          mimeType: 'text/typescript',
-          contentType: 'code',
-          sourceTool: 'edit',
-          action: 'modified',
-          baseline: 'const value = 1;\n',
-          content: 'const value = 2;\n',
-          lineStats: { added: 1, removed: 1 },
-          toolId: 'edit-1',
+          },
+          artifactActiveSection: "preview",
+          artifactViewMode: "preview",
+          artifactWorkspaceRoot: "/workspace",
         }}
-        artifactActiveSection="preview"
-        artifactViewMode="preview"
-        artifactWorkspaceRoot="/workspace"
       />,
-    );
+    ));
 
     expect(screen.getAllByRole('button', { name: 'artifacts.changesTab' }).length).toBeGreaterThan(0);
   });
 
-  it('keeps workspace section active when selecting a file from the workspace browser', () => {
+  it('keeps workspace section active when selecting a file from the workspace browser', async () => {
     const onArtifactFocusFile = vi.fn();
-    render(
-      <ChatSidePanel
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="overlay"
         width={320}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
-        artifactGroups={[{
-          graphItemKey: 'graph-1',
-          files: [{
+        artifactContext={{
+          ...sidePanelProps,
+          artifactGroups: [{
+            graphItemKey: 'graph-1',
+            files: [{
+              filePath: '/workspace/demo.ts',
+              fileName: 'demo.ts',
+              ext: '.ts',
+              mimeType: 'text/typescript',
+              contentType: 'code',
+              sourceTool: 'edit',
+              action: 'modified',
+              baseline: 'const value = 1;\n',
+              content: 'const value = 2;\n',
+              lineStats: { added: 1, removed: 1 },
+              toolId: 'edit-1',
+            }],
+          }],
+          artifactFocusedFile: {
             filePath: '/workspace/demo.ts',
             fileName: 'demo.ts',
             ext: '.ts',
@@ -941,27 +993,14 @@ describe('chat shell side panel layout', () => {
             content: 'const value = 2;\n',
             lineStats: { added: 1, removed: 1 },
             toolId: 'edit-1',
-          }],
-        }]}
-        artifactFocusedFile={{
-          filePath: '/workspace/demo.ts',
-          fileName: 'demo.ts',
-          ext: '.ts',
-          mimeType: 'text/typescript',
-          contentType: 'code',
-          sourceTool: 'edit',
-          action: 'modified',
-          baseline: 'const value = 1;\n',
-          content: 'const value = 2;\n',
-          lineStats: { added: 1, removed: 1 },
-          toolId: 'edit-1',
+          },
+          artifactActiveSection: "workspace",
+          artifactViewMode: "preview",
+          artifactWorkspaceRoot: "/workspace",
+          onArtifactFocusFile: onArtifactFocusFile,
         }}
-        artifactActiveSection="workspace"
-        artifactViewMode="preview"
-        artifactWorkspaceRoot="/workspace"
-        onArtifactFocusFile={onArtifactFocusFile}
       />,
-    );
+    ));
 
     fireEvent.click(screen.getByRole('button', { name: 'select-workspace-file' }));
     expect(onArtifactFocusFile).toHaveBeenCalledWith(expect.objectContaining({
@@ -969,22 +1008,24 @@ describe('chat shell side panel layout', () => {
     }), { preserveSection: 'workspace' });
   });
 
-  it('keeps workspace root stable when a directory is focused from the workspace browser', () => {
+  it('keeps workspace root stable when a directory is focused from the workspace browser', async () => {
     const onArtifactFocusFile = vi.fn();
-    render(
-      <ChatSidePanel
+    await act(async () => render(
+      <ArtifactSidePanel
         mode="overlay"
         width={320}
         activeTab="artifacts"
         onTabChange={vi.fn()}
         onClose={vi.fn()}
-        {...sidePanelProps}
-        artifactActiveSection="workspace"
-        artifactViewMode="preview"
-        artifactWorkspaceRoot="/workspace"
-        onArtifactFocusFile={onArtifactFocusFile}
+        artifactContext={{
+          ...sidePanelProps,
+          artifactActiveSection: "workspace",
+          artifactViewMode: "preview",
+          artifactWorkspaceRoot: "/workspace",
+          onArtifactFocusFile: onArtifactFocusFile,
+        }}
       />,
-    );
+    ));
 
     expect(screen.getByTestId('workspace-browser-body')).toHaveTextContent('none');
   });
@@ -994,6 +1035,7 @@ describe('chat shell side panel layout', () => {
       <ChatShell
         chatLayoutRef={{ current: null }}
         sidePanelPhase="closed"
+        panelLayout={{ position: 'right', fullscreen: false }}
         sidePanelMode="docked"
         sidePanelWidth={360}
         artifactWorkbenchFullscreen={false}
@@ -1002,8 +1044,6 @@ describe('chat shell side panel layout', () => {
         sidePanel={<div data-testid="chat-side-panel" />}
         header={<div data-testid="chat-header" />}
         viewportPane={<div data-testid="thread-panel" />}
-        errorBanner={null}
-        approvalDock={null}
         input={<div data-testid="chat-bottom-input" />}
       />,
     );
@@ -1047,6 +1087,7 @@ describe('chat shell side panel layout', () => {
         <ChatShell
           chatLayoutRef={{ current: null }}
           sidePanelPhase="closed"
+          panelLayout={{ position: 'right', fullscreen: false }}
           sidePanelMode="docked"
           sidePanelWidth={360}
           artifactWorkbenchFullscreen={false}
@@ -1055,8 +1096,6 @@ describe('chat shell side panel layout', () => {
           sidePanel={<div data-testid="chat-side-panel" />}
           header={<div data-testid="chat-header" />}
           viewportPane={<div data-testid="thread-panel" />}
-          errorBanner={null}
-          approvalDock={null}
           input={<div data-testid="chat-bottom-input" />}
         />,
       );
@@ -1071,6 +1110,7 @@ describe('chat shell side panel layout', () => {
         <ChatShell
           chatLayoutRef={{ current: null }}
           sidePanelPhase="closed"
+          panelLayout={{ position: 'right', fullscreen: false }}
           sidePanelMode="docked"
           sidePanelWidth={360}
           artifactWorkbenchFullscreen={false}
@@ -1079,8 +1119,6 @@ describe('chat shell side panel layout', () => {
           sidePanel={<div data-testid="chat-side-panel" />}
           header={<div data-testid="chat-header" />}
           viewportPane={<div data-testid="thread-panel" />}
-          errorBanner={null}
-          approvalDock={null}
           input={<div data-testid="chat-bottom-input" />}
         />,
       );

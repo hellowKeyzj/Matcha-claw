@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::domain::{Connector, ConnectorConfigValue, McpProgramSource as DomainMcpProgramSource};
+use crate::domain::{
+    Connector, ConnectorConfigValue, McpAuth, McpProgramSource as DomainMcpProgramSource,
+};
 
 use crate::delivery::{ConnectorKind, McpProgramSource, McpServerProgram, McpTransport};
 
@@ -20,6 +22,7 @@ pub(crate) struct ConnectorRecord {
     pub(crate) env: Option<BTreeMap<String, String>>,
     pub(crate) url: Option<String>,
     pub(crate) transport: Option<McpTransport>,
+    pub(crate) auth: Option<McpAuth>,
     pub(crate) connection_timeout_ms: Option<u64>,
     pub(crate) headers: Option<BTreeMap<String, String>>,
     pub(crate) base_url: Option<String>,
@@ -115,6 +118,7 @@ impl ConnectorRecord {
             env: connector.env().cloned(),
             url: connector.url().map(str::to_owned),
             transport: connector.transport().map(mcp_transport),
+            auth: connector.auth(),
             connection_timeout_ms: connector.connection_timeout_ms(),
             headers: connector.headers().cloned(),
             base_url: connector.base_url().map(str::to_owned),

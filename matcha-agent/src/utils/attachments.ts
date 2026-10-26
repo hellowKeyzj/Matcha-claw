@@ -17,11 +17,14 @@ import {
   readImageWithTokenBudget,
 } from '@claude-code-best/builtin-tools/tools/FileReadTool/FileReadTool.js'
 import { FileTooLargeError, readFileInRange } from './readFileInRange.js'
+import {
+  InvestigationAdmissionError, currentInvestigationScope, investigationSignal,
+  requireInvestigationEffects, rethrowInvestigationAdmission, trackInvestigationOperation,
+} from '../world/investigation.js'
 import { expandPath } from './path.js'
 import { countCharInString } from './stringUtils.js'
 import { uniq } from './array.js'
-import { getFsImplementation } from './fsOperations.js'
-import { readdir, stat } from 'fs/promises'
+import { getFsImplementation, readSourceDirectory, statSourcePath } from './fsOperations.js'
 import type { IDESelection } from '../hooks/useIdeSelection.js'
 import { TODO_WRITE_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/TodoWriteTool/constants.js'
 import { TASK_CREATE_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/TaskCreateTool/constants.js'
@@ -35,7 +38,7 @@ import {
   getTaskListId,
   isTodoV2Enabled,
 } from './tasks.js'
-import { getPlanFilePath, getPlan } from './plans.js'
+import { getPlanFilePath, getPlan, preparePlanAttachment } from './plans.js'
 import { getConnectedIdeName } from './ide.js'
 import {
   getManagedAndUserConditionalRules,
@@ -135,7 +138,7 @@ import { getSubscriptionType } from './auth.js'
 import { mcpInfoFromString } from '../services/mcp/mcpStringUtils.js'
 import {
   matchingRuleForInput,
-  pathInAllowedWorkingPath,
+  pathInAllowedWorkingPathAsync,
 } from './permissions/filesystem.js'
 import {
   generateTaskAttachments,
@@ -253,6 +256,16 @@ import { isInProcessTeammate } from './teammateContext.js'
 import { removeTeammateFromTeamFile } from './swarm/teamHelpers.js'
 import { unassignTeammateTasks } from './tasks.js'
 import { getCompanionIntroAttachment } from '../buddy/prompt.js'
+
+function rethrowInvestigationAttachmentError(error: unknown, signal?: AbortSignal): void {
+  rethrowInvestigationAdmission(error)
+  if (currentInvestigationScope()) {
+    if (error instanceof Error && error.cause !== undefined) throw error
+    signal?.throwIfAborted()
+    investigationSignal()?.throwIfAborted()
+    requireInvestigationEffects([])
+  }
+}
 
 export const TODO_REMINDER_CONFIG = {
   TURNS_SINCE_WRITE: 10,
@@ -790,9 +803,11 @@ export async function getAttachments(
   // This will slow down submissions
   // TODO: Compute attachments as the user types, not here (though we use this
   // function for slash command prompts too)
-  const abortController = createAbortController()
-  const timeoutId = setTimeout(ac => ac.abort(), 1000, abortController)
+  const scoped = currentInvestigationScope() !== undefined
+  const abortController = scoped ? createChildAbortController(toolUseContext.abortController) : createAbortController()
+  const timeoutId = scoped ? undefined : setTimeout(ac => ac.abort(), 1000, abortController)
   const context = { ...toolUseContext, abortController }
+  try {
 
   const isMainThread = !toolUseContext.agentId
 
@@ -1045,7 +1060,6 @@ export async function getAttachments(
       Promise.all(mainThreadAttachments),
     ])
 
-  clearTimeout(timeoutId)
   // Defensive: a getter leaking [undefined] crashes .map(a => a.type) below.
   return (
     [
@@ -1054,12 +1068,16 @@ export async function getAttachments(
       ...mainThreadAttachmentResults.flat(),
     ] as Attachment[]
   ).filter(a => a !== undefined && a !== null)
+  } finally {
+    clearTimeout(timeoutId)
+    if (scoped) abortController.abort()
+  }
 }
 
 async function maybe<A>(label: string, f: () => Promise<A[]>): Promise<A[]> {
   const startTime = Date.now()
   try {
-    const result = await f()
+    const result = await trackInvestigationOperation(f())
     const duration = Date.now() - startTime
     // Log only 5% of events to reduce volume
     if (Math.random() < 0.05) {
@@ -1078,6 +1096,8 @@ async function maybe<A>(label: string, f: () => Promise<A[]>): Promise<A[]> {
     }
     return result
   } catch (e) {
+    if (currentInvestigationScope() && (label === 'plan_mode' || label === 'plan_mode_exit')) throw e
+    rethrowInvestigationAttachmentError(e)
     const duration = Date.now() - startTime
     // Log only 5% of events to reduce volume
     if (Math.random() < 0.05) {
@@ -1261,13 +1281,15 @@ async function getPlanModeAttachments(
     }
   }
 
-  const planFilePath = getPlanFilePath(toolUseContext.agentId)
-  const existingPlan = getPlan(toolUseContext.agentId)
+  const { planFilePath, planExists } = currentInvestigationScope()
+    ? await preparePlanAttachment(toolUseContext.agentId, toolUseContext.abortController.signal)
+    : { planFilePath: getPlanFilePath(toolUseContext.agentId),
+        planExists: getPlan(toolUseContext.agentId) !== null }
 
   const attachments: Attachment[] = []
 
   // Check for re-entry: flag is set AND plan file exists
-  if (hasExitedPlanModeInSession() && existingPlan !== null) {
+  if (hasExitedPlanModeInSession() && planExists) {
     attachments.push({ type: 'plan_mode_reentry', planFilePath })
     setHasExitedPlanMode(false) // Clear flag - one-time guidance
   }
@@ -1289,7 +1311,7 @@ async function getPlanModeAttachments(
     reminderType,
     isSubAgent: !!toolUseContext.agentId,
     planFilePath,
-    planExists: existingPlan !== null,
+    planExists,
   })
 
   return attachments
@@ -1313,11 +1335,13 @@ async function getPlanModeExitAttachment(
     return []
   }
 
-  // Clear the flag - this is a one-time notification
-  setNeedsPlanModeExitAttachment(false)
+  const { planFilePath, planExists } = currentInvestigationScope()
+    ? await preparePlanAttachment(toolUseContext.agentId, toolUseContext.abortController.signal)
+    : { planFilePath: getPlanFilePath(toolUseContext.agentId),
+        planExists: getPlan(toolUseContext.agentId) !== null }
 
-  const planFilePath = getPlanFilePath(toolUseContext.agentId)
-  const planExists = getPlan(toolUseContext.agentId) !== null
+  // Clear the flag only after preparation succeeds.
+  setNeedsPlanModeExitAttachment(false)
 
   // Note: skill discovery does NOT fire on plan exit. By the time the plan is
   // written, it's too late — the model should have had relevant skills WHILE
@@ -1809,7 +1833,7 @@ export function memoryFilesToAttachments(
           : memoryFile.parent
             ? 'include'
             : 'nested_traversal'
-        void executeInstructionsLoadedHooks(
+        void trackInvestigationOperation(executeInstructionsLoadedHooks(
           memoryFile.path,
           memoryFile.type,
           loadReason,
@@ -1818,7 +1842,7 @@ export function memoryFilesToAttachments(
             triggerFilePath,
             parentFilePath: memoryFile.parent,
           },
-        )
+        ))
       }
     }
   }
@@ -1850,7 +1874,7 @@ async function getNestedMemoryAttachmentsForFile(
 
   try {
     // Early return if path is not in allowed working path
-    if (!pathInAllowedWorkingPath(filePath, appState.toolPermissionContext)) {
+    if (!await pathInAllowedWorkingPathAsync(filePath, appState.toolPermissionContext, toolUseContext.abortController.signal)) {
       return attachments
     }
 
@@ -1907,6 +1931,7 @@ async function getNestedMemoryAttachmentsForFile(
       )
     }
   } catch (error) {
+    rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
     logError(error)
   }
 
@@ -1965,12 +1990,10 @@ async function processAtMentionedFiles(
 
         // Check if it's a directory
         try {
-          const stats = await stat(absoluteFilename)
+          const stats = await statSourcePath(absoluteFilename, { signal: toolUseContext.abortController.signal })
           if (stats.isDirectory()) {
             try {
-              const entries = await readdir(absoluteFilename, {
-                withFileTypes: true,
-              })
+              const entries = await readSourceDirectory(absoluteFilename, toolUseContext.abortController.signal)
               const MAX_DIR_ENTRIES = 1000
               const truncated = entries.length > MAX_DIR_ENTRIES
               const names = entries.slice(0, MAX_DIR_ENTRIES).map(e => e.name)
@@ -1988,11 +2011,13 @@ async function processAtMentionedFiles(
                 content: stdout,
                 displayPath: relative(getCwd(), absoluteFilename),
               }
-            } catch {
+            } catch (error) {
+              rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
               return null
             }
           }
-        } catch {
+        } catch (error) {
+          rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
           // If stat fails, continue with file logic
         }
 
@@ -2007,7 +2032,8 @@ async function processAtMentionedFiles(
             limit: lineEnd && lineStart ? lineEnd - lineStart + 1 : undefined,
           },
         )
-      } catch {
+      } catch (error) {
+        rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
         logEvent('tengu_at_mention_extracting_filename_error', {})
       }
     }),
@@ -2081,6 +2107,7 @@ async function processMcpResourceAttachments(
         }
 
         try {
+          if (currentInvestigationScope()) throw new InvestigationAdmissionError('investigation_mcp_resource_bound_unavailable')
           const result = await client.client.readResource({
             uri,
           })
@@ -2096,11 +2123,13 @@ async function processMcpResourceAttachments(
             content: result,
           }
         } catch (error) {
+          rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
           logEvent('tengu_at_mention_mcp_resource_error', {})
           logError(error)
           return null
         }
-      } catch {
+      } catch (error) {
+        rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
         logEvent('tengu_at_mention_mcp_resource_error', {})
         return null
       }
@@ -2183,6 +2212,7 @@ export async function getChangedFiles(
               content: data,
             }
           } catch (compressionError) {
+            rethrowInvestigationAttachmentError(compressionError, toolUseContext.abortController.signal)
             logError(compressionError)
             logEvent('tengu_watched_file_compression_failed', {
               file: normalizedPath,
@@ -2195,6 +2225,7 @@ export async function getChangedFiles(
         // null so the map callback has no implicit-undefined path.
         return null
       } catch (err) {
+        rethrowInvestigationAttachmentError(err, toolUseContext.abortController.signal)
         // Evict ONLY on ENOENT (file truly deleted). Transient stat
         // failures — atomic-save races (editor writes tmp→rename and
         // stat hits the gap), EACCES churn, network-FS hiccups — must
@@ -2274,7 +2305,10 @@ async function getRelevantMemoryAttachments(
         recentTools,
         alreadySurfaced,
         parentSpan as Parameters<typeof findRelevantMemories>[5],
-      ).catch(() => []),
+      ).catch(error => {
+        rethrowInvestigationAttachmentError(error, signal)
+        return []
+      }),
     ),
   )
   // alreadySurfaced is filtered inside the selector so Sonnet spends its
@@ -2370,7 +2404,8 @@ export async function readMemoriesForSurfacing(
           header: memoryHeader(filePath, mtimeMs),
           limit: truncated ? result.lineCount : undefined,
         }
-      } catch {
+      } catch (error) {
+        rethrowInvestigationAttachmentError(error, signal)
         return null
       }
     }),
@@ -2454,7 +2489,7 @@ export function startRelevantMemoryPrefetch(
   // immediately, not just on [Symbol.dispose] when queryLoop exits.
   const controller = createChildAbortController(toolUseContext.abortController)
   const firedAt = Date.now()
-  const promise = getRelevantMemoryAttachments(
+  const promise = trackInvestigationOperation(getRelevantMemoryAttachments(
     input,
     toolUseContext.options.agentDefinitions.activeAgents,
     toolUseContext.readFileState,
@@ -2463,11 +2498,12 @@ export function startRelevantMemoryPrefetch(
     surfaced.paths,
     toolUseContext.langfuseTrace,
   ).catch(e => {
+    rethrowInvestigationAttachmentError(e, controller.signal)
     if (!isAbortError(e)) {
       logError(e)
     }
     return []
-  })
+  }))
 
   const handle: MemoryPrefetch = {
     promise,
@@ -2483,7 +2519,9 @@ export function startRelevantMemoryPrefetch(
       })
     },
   }
-  void promise.finally(() => {
+  void promise.then(() => {
+    handle.settledAt = Date.now()
+  }, () => {
     handle.settledAt = Date.now()
   })
   return handle
@@ -2626,7 +2664,7 @@ async function getDynamicSkillAttachments(
     const perDirResults = await Promise.all(
       Array.from(toolUseContext.dynamicSkillDirTriggers).map(async skillDir => {
         try {
-          const entries = await readdir(skillDir, { withFileTypes: true })
+          const entries = await readSourceDirectory(skillDir, toolUseContext.abortController.signal)
           const candidates = entries
             .filter(e => e.isDirectory() || e.isSymbolicLink())
             .map(e => e.name)
@@ -2634,9 +2672,10 @@ async function getDynamicSkillAttachments(
           const checked = await Promise.all(
             candidates.map(async name => {
               try {
-                await stat(resolve(skillDir, name, 'SKILL.md'))
+                await statSourcePath(resolve(skillDir, name, 'SKILL.md'), { signal: toolUseContext.abortController.signal })
                 return name
-              } catch {
+              } catch (error) {
+                rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
                 return null // SKILL.md doesn't exist, skip this entry
               }
             }),
@@ -2645,7 +2684,8 @@ async function getDynamicSkillAttachments(
             skillDir,
             skillNames: checked.filter((n): n is string => n !== null),
           }
-        } catch {
+        } catch (error) {
+          rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
           // Ignore errors reading skill directories (e.g., directory doesn't exist)
           return { skillDir, skillNames: [] }
         }
@@ -3073,6 +3113,7 @@ export async function tryGetPDFReference(
     return null
   }
   try {
+    if (currentInvestigationScope()) throw new InvestigationAdmissionError('investigation_pdf_metadata_bound_unavailable')
     const [stats, pageCount] = await Promise.all([
       getFsImplementation().stat(filename),
       getPDFPageCount(filename),
@@ -3093,7 +3134,8 @@ export async function tryGetPDFReference(
         displayPath: relative(getCwd(), filename),
       }
     }
-  } catch {
+  } catch (error) {
+    rethrowInvestigationAttachmentError(error)
     // If we can't stat the file, return null to proceed with normal reading
   }
   return null
@@ -3124,14 +3166,23 @@ export async function generateFileAttachment(
     return null
   }
 
-  // Check file size before attempting to read (skip for PDFs — they have their own size/page handling below)
-  if (
-    mode === 'at-mention' &&
-    !isFileWithinReadSizeLimit(
-      filename,
-      getDefaultFileReadingLimits().maxSizeBytes,
-    )
-  ) {
+  // Prepare the size check asynchronously in an accepted input; the sync
+  // utility remains untouched for its non-World callers.
+  let withinReadSizeLimit = true
+  if (mode === 'at-mention') {
+    if (currentInvestigationScope()) {
+      try {
+        const stats = await statSourcePath(filename, { signal: toolUseContext.abortController.signal })
+        withinReadSizeLimit = stats.size <= getDefaultFileReadingLimits().maxSizeBytes
+      } catch (error) {
+        rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
+        withinReadSizeLimit = false
+      }
+    } else {
+      withinReadSizeLimit = isFileWithinReadSizeLimit(filename, getDefaultFileReadingLimits().maxSizeBytes)
+    }
+  }
+  if (mode === 'at-mention' && !withinReadSizeLimit) {
     const ext = parse(filename).ext.toLowerCase()
     if (!isPDFExtension(ext)) {
       try {
@@ -3141,7 +3192,8 @@ export async function generateFileAttachment(
           mode,
         } as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS)
         return null
-      } catch {
+      } catch (error) {
+        rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
         // If we can't stat the file, proceed with normal reading (will fail later if file doesn't exist)
       }
     }
@@ -3195,7 +3247,8 @@ export async function generateFileAttachment(
           },
         }
       }
-    } catch {
+    } catch (error) {
+      rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
       // If we can't stat the file, proceed with normal reading
     }
   }
@@ -3244,7 +3297,8 @@ export async function generateFileAttachment(
           truncated: true,
           displayPath: relative(getCwd(), filename),
         }
-      } catch {
+      } catch (error) {
+        rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
         logEvent(errorEventName, {})
         return null
       }
@@ -3274,7 +3328,8 @@ export async function generateFileAttachment(
       }
       throw error
     }
-  } catch {
+  } catch (error) {
+    rethrowInvestigationAttachmentError(error, toolUseContext.abortController.signal)
     logEvent(errorEventName, {})
     return null
   }

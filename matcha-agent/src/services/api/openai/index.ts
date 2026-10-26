@@ -15,6 +15,7 @@ import type { AgentId } from '../../../types/ids.js'
 import type { Tools } from '../../../Tool.js'
 import { getSessionId } from '../../../bootstrap/state.js'
 import { getOpenAIClient } from './client.js'
+import { rethrowInvestigationAdmission } from '../investigation.js'
 import {
   formatOpenAIPromptCacheKey,
   getOfficialOpenAIPromptCacheKey,
@@ -28,12 +29,12 @@ import {
 } from '@ant/model-provider'
 import { isChatGPTAuthEnabled } from './chatgptAuth.js'
 import { getAPIProvider } from '../../../utils/model/providers.js'
+import { isEffortLevel, resolveAdapterEffort, traceEffort } from '../../../utils/effort.js'
 import {
   adaptResponsesStreamToAnthropic,
   buildResponsesRequest,
   createChatGPTResponsesStream,
   createOpenAIResponsesStream,
-  type ResponsesReasoningEffort,
 } from './responsesAdapter.js'
 import { normalizeMessagesForAPI } from '../../../utils/messages.js'
 import { toolToAPISchema } from '../../../utils/api.js'
@@ -78,31 +79,6 @@ import {
   isDeferredTool,
   SEARCH_EXTRA_TOOLS_TOOL_NAME,
 } from '@claude-code-best/builtin-tools/tools/SearchExtraToolsTool/prompt.js'
-
-function convertToResponsesReasoningEffort(
-  effortValue: unknown,
-): ResponsesReasoningEffort | undefined {
-  if (effortValue === 'low') return 'low'
-  if (effortValue === 'medium') return 'medium'
-  if (effortValue === 'high') return 'high'
-  if (effortValue === 'xhigh') return 'xhigh'
-  if (effortValue === 'max') return 'max'
-  if (typeof effortValue === 'number') return 'high'
-  return undefined
-}
-
-function getResponsesReasoningEffort(
-  effortValue: unknown,
-  defaultEffort?: ResponsesReasoningEffort,
-): ResponsesReasoningEffort | undefined {
-  const envOverride = process.env.CLAUDE_CODE_EFFORT_LEVEL?.toLowerCase()
-  if (envOverride === 'auto' || envOverride === 'unset') return undefined
-  return (
-    convertToResponsesReasoningEffort(envOverride) ??
-    convertToResponsesReasoningEffort(effortValue) ??
-    defaultEffort
-  )
-}
 
 /**
  * Mirrors the Anthropic request path's deferred-tool announcement for OpenAI.
@@ -368,6 +344,7 @@ export async function* queryModelOpenAI(
     )
 
     // 11. Responses shares conversion, not authentication or endpoint ownership.
+    const effort = resolveAdapterEffort(options.model, options.effortValue)
     const responsesRequest =
       useAPIKeyResponses || useChatGPTResponses
         ? buildResponsesRequest({
@@ -375,10 +352,7 @@ export async function* queryModelOpenAI(
             messages: openaiMessages,
             tools: openaiTools,
             toolChoice: openaiToolChoice,
-            reasoningEffort: getResponsesReasoningEffort(
-              options.effortValue,
-              useChatGPTResponses ? 'medium' : undefined,
-            ),
+            reasoningEffort: typeof effort === 'string' ? effort : undefined,
             promptCacheKey,
             ...(!useChatGPTResponses && {
               maxOutputTokens: maxTokens,
@@ -387,6 +361,22 @@ export async function* queryModelOpenAI(
             }),
           })
         : undefined
+    const completionsRequest = responsesRequest ? undefined : buildOpenAIRequestBody({
+      model: openaiModel,
+      messages: openaiMessages,
+      tools: openaiTools,
+      toolChoice: openaiToolChoice,
+      enableThinking,
+      maxTokens,
+      reasoningEffort: typeof effort === 'string' ? effort : undefined,
+      temperatureOverride: options.temperatureOverride,
+      promptCacheKey,
+    })
+    const senderEffort = responsesRequest?.reasoning?.effort ?? completionsRequest?.reasoning_effort
+    traceEffort('sender_request', options.model, options.effortValue, {
+      actual: typeof senderEffort === 'string' && isEffortLevel(senderEffort) ? senderEffort : null,
+      senderField: responsesRequest ? 'reasoning.effort' : 'reasoning_effort',
+    })
     const adaptedStream = responsesRequest
       ? adaptResponsesStreamToAnthropic(
           await (useChatGPTResponses
@@ -404,16 +394,7 @@ export async function* queryModelOpenAI(
             fetchOverride: options.fetchOverride as unknown as typeof fetch,
             source: options.querySource,
           }).chat.completions.create(
-            buildOpenAIRequestBody({
-              model: openaiModel,
-              messages: openaiMessages,
-              tools: openaiTools,
-              toolChoice: openaiToolChoice,
-              enableThinking,
-              maxTokens,
-              temperatureOverride: options.temperatureOverride,
-              promptCacheKey,
-            }),
+            completionsRequest!,
             { signal },
           ),
           openaiModel,
@@ -428,6 +409,8 @@ export async function* queryModelOpenAI(
     const collectedMessages: AssistantMessage[] = []
     let partialMessage: BetaMessage | null = null
     let stopReason: string | null = null
+    let nativeUsage: Record<string, number> = {}
+    let nativeComplete = false
     let usage = {
       input_tokens: 0,
       output_tokens: 0,
@@ -491,6 +474,12 @@ export async function* queryModelOpenAI(
           break
         }
         case 'message_delta': {
+          nativeComplete =
+            (event as unknown as { native_complete?: boolean })
+              .native_complete === true
+          nativeUsage =
+            (event as unknown as { native_usage?: Record<string, number> })
+              .native_usage ?? {}
           const deltaUsage = event.usage
           if (deltaUsage) {
             usage = {
@@ -560,7 +549,11 @@ export async function* queryModelOpenAI(
         event,
         ...(event.type === 'message_start' ? { ttftMs } : undefined),
         ...(event.type === 'message_stop'
-          ? { usageSnapshot: usage }
+          ? {
+              usageSnapshot: usage,
+              nativeUsageSnapshot: nativeUsage,
+              nativeComplete,
+            }
           : undefined),
       } as StreamEvent
     }
@@ -599,6 +592,7 @@ export async function* queryModelOpenAI(
       }
     }
   } catch (error) {
+    rethrowInvestigationAdmission(error)
     const errorMessage = error instanceof Error ? error.message : String(error)
     logForDebugging(`[OpenAI] Error: ${errorMessage}`, { level: 'error' })
     yield {

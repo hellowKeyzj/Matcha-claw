@@ -18,6 +18,10 @@ const RETENTION: Duration = Duration::from_secs(5 * 60);
 pub(crate) enum ObservationResult {
     Status(Vec<(String, ConnectorObservationReceipt)>),
     Probe(String, ConnectorObservationReceipt),
+    OAuth {
+        connector_id: String,
+        oauth: crate::ports::McpOAuthReceipt,
+    },
     SessionStatus {
         session_identity: SessionIdentity,
         statuses: Vec<SessionConnectorStatus>,
@@ -28,6 +32,7 @@ pub(crate) struct ObservationSubject {
     pub(crate) principal: String,
     pub(crate) endpoint: Option<RuntimeEndpoint>,
     pub(crate) session_identity: Option<SessionIdentity>,
+    pub(crate) agent_id: Option<String>,
 }
 
 struct ObservationSlot {
@@ -91,6 +96,7 @@ impl ObservationResults {
         principal: &str,
         endpoint: Option<&RuntimeEndpoint>,
         session_identity: Option<&SessionIdentity>,
+        agent_id: Option<&str>,
     ) -> Result<ObservationResult, ObservationReadError> {
         let mut slots = self.0.lock().expect("connector observations lock");
         purge(&mut slots);
@@ -98,6 +104,7 @@ impl ObservationResults {
         if slot.session.principal != principal
             || slot.session.endpoint.as_ref() != endpoint
             || slot.session.session_identity.as_ref() != session_identity
+            || slot.session.agent_id.as_deref() != agent_id
         {
             return Err(ObservationReadError::Missing);
         }

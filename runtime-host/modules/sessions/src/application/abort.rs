@@ -97,7 +97,8 @@ pub enum SessionAbortOutcome {
 mod tests {
     use serde_json::json;
 
-    use super::{NativeEndpoint, SessionAbortCommand, SessionAbortOutcome};
+    use super::{SessionAbortCommand, SessionAbortOutcome};
+    use crate::state::{SessionIdentity, SessionProvider};
 
     #[test]
     fn serializes_public_rejection_as_target_rejected() {
@@ -111,8 +112,8 @@ mod tests {
     fn rejects_empty_run_identifier_when_one_is_provided() {
         assert!(
             SessionAbortCommand::try_new(
-                NativeEndpoint::OpenClawLocal,
-                "agent:main:demo".into(),
+                SessionIdentity::new("agent:main:demo", SessionProvider::OpenClaw, "main".into())
+                    .unwrap(),
                 None,
                 Some(" ".into()),
                 None,
@@ -124,8 +125,12 @@ mod tests {
     #[test]
     fn preserves_missing_approval_ids_as_session_wide_abort() {
         let command = SessionAbortCommand::try_new(
-            NativeEndpoint::MatchaAgentLocal,
-            "session-1".into(),
+            SessionIdentity::new(
+                "matcha-agent:main:session-1",
+                SessionProvider::MatchaAgent,
+                "main".into(),
+            )
+            .unwrap(),
             None,
             None,
             None,
@@ -138,8 +143,12 @@ mod tests {
     fn rejects_empty_approval_ids_without_treating_them_as_run_identity() {
         assert!(
             SessionAbortCommand::try_new(
-                NativeEndpoint::MatchaAgentLocal,
-                "session-1".into(),
+                SessionIdentity::new(
+                    "matcha-agent:main:session-1",
+                    SessionProvider::MatchaAgent,
+                    "main".into(),
+                )
+                .unwrap(),
                 None,
                 None,
                 Some(Vec::new()),

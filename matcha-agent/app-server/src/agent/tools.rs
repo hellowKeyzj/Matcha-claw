@@ -22,6 +22,15 @@ const TOOLS: &[&str] = &[
     "Agent",
     "TodoWrite",
     "AskUserQuestion",
+    "world_discover",
+    "world_query",
+    "world_explain",
+    "world_action_propose",
+    "world_action_submit",
+    "world_action_status",
+    "world_observe",
+    "world_change_propose",
+    "world_branch_test",
 ];
 
 #[derive(Deserialize)]

@@ -156,6 +156,7 @@ impl ConnectorHandle {
                 principal,
                 endpoint: Some(endpoint),
                 session_identity: None,
+                agent_id: None,
             },
         )
         .await
@@ -191,9 +192,10 @@ impl ConnectorHandle {
         principal: &str,
         endpoint: Option<&RuntimeEndpoint>,
         session_identity: Option<&SessionIdentity>,
+        agent_id: Option<&str>,
     ) -> Result<ObservationResult, ObservationReadError> {
         self.observations
-            .read(call_id, principal, endpoint, session_identity)
+            .read(call_id, principal, endpoint, session_identity, agent_id)
     }
 
     pub(crate) async fn get(&self, id: String) -> Result<GetOutcome, ()> {
@@ -332,9 +334,60 @@ impl ConnectorHandle {
                 principal,
                 endpoint: Some(endpoint),
                 session_identity: None,
+                agent_id: None,
             },
         )
         .await
+    }
+
+    pub(crate) async fn admit_oauth(
+        &self,
+        connector_id: String,
+        endpoint: RuntimeEndpoint,
+        request: crate::ports::McpOAuthRequest,
+        principal: String,
+    ) -> Result<CallReceipt, ()> {
+        let mut call = self
+            .begin(
+                "externalConnectors.oauth",
+                ConnectorCallDetail::connector(&connector_id)?,
+            )
+            .await?
+            .ok_or(())?;
+        let call_id = call.context.id().clone();
+        if self
+            .observations
+            .reserve(
+                &call_id,
+                ObservationSubject {
+                    principal,
+                    endpoint: Some(endpoint.clone()),
+                    session_identity: None,
+                    agent_id: request.agent_id.clone(),
+                },
+            )
+            .is_err()
+        {
+            call.detail.result = Some(CallResult::Unavailable);
+            call.finish(CallStatus::Rejected).await;
+            return Err(());
+        }
+        if self
+            .owner
+            .try_send_command(ConnectorCommand::OAuth {
+                endpoint,
+                connector_id,
+                request,
+                call: call.clone(),
+            })
+            .is_err()
+        {
+            self.observations.discard(&call_id);
+            call.detail.result = Some(CallResult::Unavailable);
+            call.finish(CallStatus::Rejected).await;
+            return Err(());
+        }
+        call.accepted().await
     }
 
     pub(crate) async fn admit_session_status(
@@ -362,6 +415,7 @@ impl ConnectorHandle {
                 principal,
                 endpoint: None,
                 session_identity: Some(session_identity),
+                agent_id: None,
             },
         )
         .await
@@ -586,6 +640,7 @@ fn map_connector_record(connector: ConnectorRecord) -> ConnectorReadModel {
         env: connector.env,
         url: connector.url,
         transport: connector.transport,
+        auth: connector.auth,
         connection_timeout_ms: connector.connection_timeout_ms,
         headers: connector.headers,
         base_url: connector.base_url,

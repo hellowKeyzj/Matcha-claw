@@ -81,7 +81,13 @@ pub async fn serve(
     let closing_sessions = sessions.clone();
     let cleanup = tokio::spawn(async move {
         stopping.cancelled().await;
-        closing_sessions.shutdown().await
+        let oauth = crate::mcp::shutdown_oauth().await;
+        let sessions = closing_sessions.shutdown().await;
+        match (oauth, sessions) {
+            (Err(error), Err(sessions)) => Err(error.with_data(json!({"sessionCleanup": sessions}))),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            _ => Ok(()),
+        }
     });
     let gateway = Gateway {
         config,

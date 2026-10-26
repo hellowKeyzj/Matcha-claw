@@ -11,6 +11,7 @@ mod receipt_router;
 mod run_actor;
 mod run_scheduler;
 mod step_runtime;
+mod task_execution;
 mod supervisor;
 pub(crate) mod team_run;
 mod terminal_settlement;

@@ -22,7 +22,11 @@ import {
 import { sanitizeToolNameForAnalytics } from 'src/services/analytics/metadata.js'
 import type { AgentId } from 'src/types/ids.js'
 import { companionIntroText } from '../buddy/prompt.js'
-import { hasSealedSkillReferences, markSealedMetaContent, parseSealedSkillReference } from '../skills/sealed/reference.js'
+import {
+  hasSealedSkillReferences,
+  markSealedMetaContent,
+  parseSealedSkillReference,
+} from '../skills/sealed/reference.js'
 import { NO_CONTENT_MESSAGE } from '../constants/messages.js'
 import { OUTPUT_STYLE_CONFIG } from '../constants/outputStyles.js'
 import { isAutoMemoryEnabled } from '../memdir/paths.js'
@@ -1932,7 +1936,10 @@ function appendMessageTagToUserMessage(message: UserMessage): UserMessage {
       message: {
         ...message.message,
         content: parseSealedSkillReference(content)
-          ? [{ type: 'text', text: content }, { type: 'text', text: tag }]
+          ? [
+              { type: 'text', text: content },
+              { type: 'text', text: tag },
+            ]
           : content + tag,
       },
     }
@@ -2110,7 +2117,11 @@ function ensureSystemReminderWrap(msg: UserMessage): UserMessage {
   const content = msg.message.content
   if (!content) return msg
   if (typeof content === 'string') {
-    if (content.startsWith('<system-reminder>') || parseSealedSkillReference(content)) return msg
+    if (
+      content.startsWith('<system-reminder>') ||
+      parseSealedSkillReference(content)
+    )
+      return msg
     return {
       ...msg,
       message: { ...msg.message, content: wrapInSystemReminder(content) },
@@ -2118,7 +2129,11 @@ function ensureSystemReminderWrap(msg: UserMessage): UserMessage {
   }
   let changed = false
   const newContent = content.map(b => {
-    if (b.type === 'text' && !b.text.startsWith('<system-reminder>') && !parseSealedSkillReference(b.text)) {
+    if (
+      b.type === 'text' &&
+      !b.text.startsWith('<system-reminder>') &&
+      !parseSealedSkillReference(b.text)
+    ) {
       changed = true
       return { ...b, text: wrapInSystemReminder(b.text) }
     }
@@ -2858,7 +2873,11 @@ function joinTextAtSeam(
 ): ContentBlockParam[] {
   const lastA = a.at(-1)
   const firstB = b[0]
-  if (lastA?.type === 'text' && firstB?.type === 'text' && !parseSealedSkillReference(lastA.text)) {
+  if (
+    lastA?.type === 'text' &&
+    firstB?.type === 'text' &&
+    !parseSealedSkillReference(lastA.text)
+  ) {
     return [...a.slice(0, -1), { ...lastA, text: lastA.text + '\n' }, ...b]
   }
   return [...a, ...b]
@@ -2886,7 +2905,8 @@ function smooshIntoToolResult(
   blocks: ContentBlockParam[],
 ): ToolResultBlockParam | null {
   if (blocks.length === 0) return tr
-  if (hasSealedSkillReferences(tr.content) || hasSealedSkillReferences(blocks)) return null
+  if (hasSealedSkillReferences(tr.content) || hasSealedSkillReferences(blocks))
+    return null
 
   const existing = tr.content
   if (Array.isArray(existing) && existing.some(isToolReferenceBlock)) {
@@ -4097,9 +4117,18 @@ Read the team config to discover your teammates' names. Check the task list peri
         return []
       }
 
-      const sealed = attachment.skills.filter(skill => parseSealedSkillReference(skill.content))
-      const ordinary = attachment.skills.filter(skill => !parseSealedSkillReference(skill.content))
-      const sealedMessages = sealed.map(skill => createUserMessage({ content: [{ type: 'text', text: skill.content }], isMeta: true }))
+      const sealed = attachment.skills.filter(skill =>
+        parseSealedSkillReference(skill.content),
+      )
+      const ordinary = attachment.skills.filter(
+        skill => !parseSealedSkillReference(skill.content),
+      )
+      const sealedMessages = sealed.map(skill =>
+        createUserMessage({
+          content: [{ type: 'text', text: skill.content }],
+          isMeta: true,
+        }),
+      )
       if (ordinary.length === 0) return sealedMessages
       const skillsContent = ordinary
         .map(

@@ -17,6 +17,12 @@ use super::{
 };
 
 pub(crate) enum ConnectorCommand {
+    OAuth {
+        endpoint: RuntimeEndpoint,
+        connector_id: String,
+        request: crate::ports::McpOAuthRequest,
+        call: ConnectorCall,
+    },
     Upsert {
         connector: Box<Connector>,
         call: Option<ConnectorCall>,
@@ -51,6 +57,16 @@ pub(crate) enum ConnectorCommand {
 impl ConnectorCommand {
     pub(crate) fn route(&self) -> CommandRoute<ConnectorOwnerKey> {
         match self {
+            Self::OAuth {
+                endpoint,
+                connector_id,
+                request,
+                ..
+            } => CommandRoute::Keyed(ConnectorOwnerKey::OAuth {
+                endpoint: endpoint.clone(),
+                connector_id: connector_id.clone(),
+                agent_id: request.agent_id.clone(),
+            }),
             Self::Upsert { .. }
             | Self::Update { .. }
             | Self::Remove { .. }

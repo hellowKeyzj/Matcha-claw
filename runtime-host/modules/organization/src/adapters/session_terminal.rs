@@ -54,6 +54,10 @@ pub struct OrganizationRunTerminalSnapshot<SourceBinding> {
     pub source_binding: SourceBinding,
     pub native_run_id: String,
     pub delivery_context: Option<(crate::DeliveryId, crate::EndpointSessionId)>,
+    pub execution_context: Option<crate::TaskExecutionContext>,
+    pub native_request_id: Option<String>,
+    pub native_message_id: Option<String>,
+    pub measurement: crate::TaskRunMeasurement,
     pub phase: OrganizationRunPhase,
     pub assistant_texts: Vec<String>,
 }
@@ -523,6 +527,10 @@ async fn settle<SourceBinding>(
     let OrganizationRunTerminalSnapshot {
         native_run_id,
         delivery_context,
+        execution_context,
+        native_request_id,
+        native_message_id,
+        measurement,
         phase,
         assistant_texts,
         ..
@@ -543,6 +551,9 @@ async fn settle<SourceBinding>(
             status,
             assistant_texts,
             settled_at,
+            crate::task_execution::TaskNativeObservation {
+                execution_context, native_request_id, native_message_id, measurement,
+            },
         )
         .await
     {

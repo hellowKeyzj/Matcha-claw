@@ -150,7 +150,7 @@ function terminalAccountCall(
       kind: 'replaceAccount', phase: 'terminal', outcome: 'stored',
       count: null, acceptedCount: null, persisted: 'confirmed', commit: 'committed',
       accountId: target.id, accountRevision: target.revision, diagnostic: null,
-      native: { changed: false, applied: 'unknown', observed: 'unavailable' },
+      native: { changed: false, applied: 'unknown', observed: 'unavailable', reports: [] },
       ...detail,
     },
   };

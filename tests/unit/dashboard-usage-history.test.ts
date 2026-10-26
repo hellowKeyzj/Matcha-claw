@@ -3,7 +3,7 @@ import {
   filterUsageHistoryByWindow,
   groupUsageHistory,
   type UsageHistoryEntry,
-} from '@/pages/Dashboard/usage-history';
+} from '@/plugins/dashboard/pages/usage-history';
 
 function createEntry(day: number, totalTokens: number): UsageHistoryEntry {
   return {

@@ -35,6 +35,7 @@ import { createSessionQuestionTransport } from './sessions/questions';
 import { createSessionListTransport } from './sessions/list';
 import { createSessionModelSelectionTransport } from './sessions/model-selection';
 import { createSessionPermissionTransport } from './sessions/permission';
+import { createSessionThinkingTransport } from './sessions/thinking';
 import { createSessionRenameTransport } from './sessions/rename';
 import { createSessionSendTransport } from './sessions/send';
 import { createSessionTimelineTransport } from './sessions/timeline';
@@ -77,6 +78,7 @@ import { createRuntimeEndpointDirectoryTransport } from './runtime-directory';
 import { createSealedResourceAuthorizationTransport } from './sealed-resource';
 import { createUsageTransport } from './usage';
 import { createWikiTransport } from './wiki';
+import { createWorldTransport } from '../../world/transport';
 
 type CronE2ETraceReporter = NonNullable<
   NonNullable<Parameters<typeof createCronTransport>[3]>['reportE2ETrace']
@@ -129,6 +131,7 @@ export function createRuntimeHostTransportBundle(
     sessionQuestionTransport: createSessionQuestionTransport(issuer, runtimeHostTransportPort),
     sessionModelSelectionTransport: createSessionModelSelectionTransport(issuer, runtimeHostTransportPort),
     sessionPermissionTransport: createSessionPermissionTransport(issuer, runtimeHostTransportPort),
+    sessionThinkingTransport: createSessionThinkingTransport(issuer, runtimeHostTransportPort),
     securityEmergencyTransport: createSecurityEmergencyTransport(issuer, runtimeHostTransportPort),
     channelStatusTransport: createChannelStatusTransport(issuer, runtimeHostTransportPort),
     channelCatalogTransport,
@@ -178,6 +181,7 @@ export function createRuntimeHostTransportBundle(
     toolchainTransport: createToolchainTransport(issuer, runtimeHostTransportPort),
     usageTransport: createUsageTransport(issuer, runtimeHostTransportPort),
     wikiTransport: createWikiTransport(issuer, runtimeHostTransportPort),
+    worldTransport: createWorldTransport(issuer, runtimeHostTransportPort),
     sessionHistoryTransport: createSessionHistoryTransport(issuer, runtimeHostTransportPort),
   };
 

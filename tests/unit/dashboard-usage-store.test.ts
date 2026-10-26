@@ -37,7 +37,7 @@ describe('dashboard usage refresh cache', () => {
 
   it('reads the runtime-host legacy array DTO and keeps cached entries across errors', async () => {
     hostApiFetchMock.mockResolvedValueOnce([entry]).mockResolvedValueOnce([entry]);
-    const { useDashboardUsageStore } = await import('@/stores/dashboard-usage');
+    const { useDashboardUsageStore } = await import('@/plugins/dashboard/stores/dashboard-usage');
 
     await useDashboardUsageStore.getState().refreshUsageHistory({ maxAttempts: 1, silent: true });
     await useDashboardUsageStore.getState().refreshUsageHistory({ maxAttempts: 1, silent: true });
@@ -73,7 +73,7 @@ describe('dashboard usage refresh cache', () => {
 
   it('loads session details through the public session identity', async () => {
     hostApiFetchMock.mockResolvedValueOnce([entry]).mockResolvedValueOnce([entry]);
-    const { useDashboardUsageStore } = await import('@/stores/dashboard-usage');
+    const { useDashboardUsageStore } = await import('@/plugins/dashboard/stores/dashboard-usage');
 
     await useDashboardUsageStore.getState().loadSessionDetails(entry.sessionId, entry.agentId);
 

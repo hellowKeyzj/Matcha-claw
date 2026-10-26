@@ -10,10 +10,11 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import logoSvg from '@/assets/logo.svg';
 import { invokeIpc } from '@/lib/api-client';
-import { preloadLazyRouteForPath } from '@/lib/route-preload';
+import { preloadApplicationPath } from '@/app/navigation';
+import { usePluginHost } from '@/plugin-host/react';
 import { useLayoutStore } from '@/stores/layout';
-import { useLocalLicenseLocked } from '@/stores/license';
-import { buildSettingsSectionLink } from '@/lib/sections';
+import { useLocalLicenseLocked } from '@/plugins/account/stores/license';
+import { buildSettingsSectionLink } from '@/plugins/settings/sections';
 
 export function TitleBar() {
   const platform = window.electron?.platform;
@@ -48,6 +49,7 @@ function SidebarToggleButton() {
 }
 
 function SettingsButton() {
+  const host = usePluginHost();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const licenseLocked = useLocalLicenseLocked();
@@ -57,7 +59,7 @@ function SettingsButton() {
   };
 
   const handleSettingsHover = () => {
-    void preloadLazyRouteForPath('/settings');
+    void preloadApplicationPath(host, '/settings');
   };
 
   return (

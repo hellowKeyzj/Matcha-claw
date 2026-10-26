@@ -9,7 +9,11 @@ const PLUGIN_ID: &str = "matchaclaw-media";
 
 /// Projects non-secret custom-media desired facts into OpenClaw's private config.
 /// A successful write is an effect receipt only; it does not prove runtime acceptance or health.
-pub(super) fn apply(catalog: &MediaProviderCatalog, document: &mut OpenClawConfigDocument) -> bool {
+pub(super) fn apply(
+    catalog: &MediaProviderCatalog,
+    document: &mut OpenClawConfigDocument,
+    preserved_provider_keys: &BTreeSet<String>,
+) -> bool {
     let mut changed = if catalog.providers().is_empty() {
         false
     } else {
@@ -19,16 +23,14 @@ pub(super) fn apply(catalog: &MediaProviderCatalog, document: &mut OpenClawConfi
     let mut entries = object(plugins.get("entries"));
     let mut entry = object(entries.get(PLUGIN_ID));
     let mut config = object(entry.get("config"));
-    let providers = catalog
-        .providers()
-        .iter()
-        .map(|provider| {
-            (
-                provider.provider.as_str().to_owned(),
-                provider_json(provider),
-            )
-        })
-        .collect::<Map<_, _>>();
+    let mut providers = object(config.get("providers"));
+    providers.retain(|key, _| preserved_provider_keys.contains(key));
+    providers.extend(catalog.providers().iter().map(|provider| {
+        (
+            provider.provider.as_str().to_owned(),
+            provider_json(provider),
+        )
+    }));
     if config.get("providers") != Some(&Value::Object(providers.clone())) {
         config.insert("providers".into(), Value::Object(providers));
         changed = true;

@@ -1,0 +1,19 @@
+{
+  "name": "@matchaclaw/world-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw-native World tools with execution-bound private ingress.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": "./dist/index.js",
+  "scripts": {
+    "build": "node ../../scripts/build-local-openclaw-plugins.mjs world-tools"
+  },
+  "openclaw": {
+    "extensions": ["./dist/index.js"],
+    "runtimeExtensions": ["./dist/index.js"]
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

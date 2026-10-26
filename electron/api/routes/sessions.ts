@@ -21,6 +21,7 @@ import {
 } from '../../main/runtime-host-delivery/transport/sessions/permission';
 import { decodeSessionGoalOutcome, decodeSessionGoalRequest, isGoalIdentifier, isGoalObjective, isSessionSendIntent } from '../../main/runtime-host-delivery/transport/sessions/goal';
 import type { SessionSendRequest } from '../../main/runtime-host-delivery/transport/sessions/send';
+import { isSessionThinkingRequest } from '../../../src/types/session-thinking';
 import type { WorkspaceMediaTransport } from '../../main/runtime-host-delivery/transport/workspace/media';
 import {
   isSessionTraceEnabled,
@@ -50,6 +51,7 @@ export type SessionCapabilityRouteDeps = RuntimeHostTransportContext<
   | 'sessionGoalTransport'
   | 'sessionModelSelectionTransport'
   | 'sessionPermissionTransport'
+  | 'sessionThinkingTransport'
   | 'workspaceMediaTransport'
 > & Readonly<{
   sessionObservers: RendererSessionObservationRegistry;
@@ -115,6 +117,13 @@ export async function dispatchSessionCapability(
       body.operationId,
       traceId,
     );
+  }
+  if (body.id === 'session.thinking') {
+    if (!isSessionThinkingRequest(body)) {
+      return { status: 400, body: { success: false, error: 'Session thinking request is invalid' } };
+    }
+    const method = body.operationId === 'sessions.thinking.get' ? 'get' : 'set';
+    return await deps.runtimeHostTransports.sessionThinkingTransport[method](body, traceId);
   }
   if (body.id === 'session.management' && body.operationId === 'sessions.list') {
     return await deps.runtimeHostTransports.sessionListTransport.list(adaptSessionListRequest(body));

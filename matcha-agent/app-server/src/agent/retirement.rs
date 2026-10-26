@@ -49,6 +49,7 @@ pub(super) async fn retire(
                 "Retiring an existing Agent requires managed custody",
             ));
         }
+        crate::mcp::stop_agent_oauth(&params.agent_id).await?;
         return finish_deletion(receipt.clone(), config).await;
     }
     if let Some(agent) = snapshot.agents.get(&params.agent_id) {
@@ -70,6 +71,7 @@ pub(super) async fn retire(
     check_references(&snapshot, &params.agent_id)?;
     let custody =
         storage::orphan_custody(config.paths(), &params.agent_id, &params.expected_owner).await?;
+    crate::mcp::stop_agent_oauth(&params.agent_id).await?;
     let removed_sessions = sessions
         .delete_agent_sessions_guarded(&params.agent_id)
         .await?;

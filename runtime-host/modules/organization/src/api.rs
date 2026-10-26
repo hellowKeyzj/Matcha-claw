@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use foundation::{
     execution::OwnedTask,
     lifecycle::{EffectRegistration, ModuleScope, ScopedEffectKind},
@@ -70,6 +72,7 @@ impl OrganizationRuntime {
         input: TeamRunCoordinatorInput,
         admission_changes: tokio::sync::watch::Receiver<T>,
     ) -> TeamRunCoordinatorHandle {
+        input.organization.bind_activity_executor(Arc::clone(&input.activity_executor));
         let (coordinator, handle) = TeamRunCoordinator::spawn(input, admission_changes);
         self.coordinator = Some(coordinator);
         handle

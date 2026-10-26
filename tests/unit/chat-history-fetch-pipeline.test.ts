@@ -3,8 +3,8 @@ import {
   CHAT_HISTORY_FULL_LIMIT,
   decodeHistorySessionView,
   fetchHistoryWindow,
-} from '@/stores/chat/history-fetch-helpers';
-import { projectSessionViewItems } from '@/stores/chat/store-state-helpers';
+} from '@/plugins/chat/store/history-fetch-helpers';
+import { projectSessionViewItems } from '@/plugins/chat/store/store-state-helpers';
 import { decodeSessionView } from '@/types/session/snapshot';
 import {
   assistantItem,
@@ -16,7 +16,7 @@ import {
   userItem,
   windowView,
 } from './helpers/session-fixtures';
-import { buildSessionRecordKey } from '@/stores/chat/session-identity';
+import { buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
 
 const hostSessionLoadMock = vi.fn();

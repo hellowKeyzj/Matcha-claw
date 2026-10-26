@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const registeredHandlers = new Map<string, (...args: unknown[]) => unknown>();
+const fromWebContentsMock = vi.fn();
 const showOpenDialogMock = vi.fn();
 const showSaveDialogMock = vi.fn();
 const showMessageBoxMock = vi.fn();
@@ -17,6 +18,9 @@ const realpathMock = vi.fn((path: string) => Promise.resolve(path));
 vi.mock('electron', () => ({
   app: {
     getPath: (name: string) => name === 'userData' ? 'C:\\matcha\\user-data' : '',
+  },
+  BrowserWindow: {
+    fromWebContents: (...args: unknown[]) => fromWebContentsMock(...args),
   },
   dialog: {
     showOpenDialog: (...args: unknown[]) => showOpenDialogMock(...args),
@@ -69,6 +73,7 @@ describe('dialog ipc', () => {
   beforeEach(() => {
     vi.resetModules();
     registeredHandlers.clear();
+    fromWebContentsMock.mockReset();
     showOpenDialogMock.mockReset();
     showSaveDialogMock.mockReset();
     showMessageBoxMock.mockReset();
@@ -337,15 +342,43 @@ describe('dialog ipc', () => {
   });
 
   it('opens the native dialog for general file selection', async () => {
+    const sender = { id: 23 };
+    const owner = { isDestroyed: vi.fn(() => false) };
+    const options: Electron.OpenDialogOptions = {
+      title: 'Select file',
+      properties: ['openFile'],
+      filters: [{ name: 'Text', extensions: ['txt'] }],
+    };
     const result = { canceled: false, filePaths: ['/tmp/selected.txt'] };
+    fromWebContentsMock.mockReturnValue(owner);
     showOpenDialogMock.mockResolvedValue(result);
     const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:open');
 
-    await expect(handler?.({}, { title: 'Select file' })).resolves.toEqual(result);
-    expect(showOpenDialogMock).toHaveBeenCalledWith({ title: 'Select file' });
+    await expect(handler?.({ sender }, options)).resolves.toBe(result);
+    expect(fromWebContentsMock).toHaveBeenCalledTimes(1);
+    expect(fromWebContentsMock).toHaveBeenCalledWith(sender);
+    expect(owner.isDestroyed).toHaveBeenCalledTimes(1);
+    expect(showOpenDialogMock).toHaveBeenCalledTimes(1);
+    expect(showOpenDialogMock).toHaveBeenCalledWith(owner, options);
+    expect(showOpenDialogMock.mock.calls[0][0]).toBe(owner);
+    expect(showOpenDialogMock.mock.calls[0][1]).toBe(options);
+  });
+
+  it.each(['absent', 'destroyed'])('rejects when the sender window is %s without opening a native dialog', async (ownerState) => {
+    const sender = { id: 23 };
+    fromWebContentsMock.mockReturnValue(ownerState === 'absent' ? null : { isDestroyed: () => true });
+    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    registerDialogHandlers();
+
+    const handler = registeredHandlers.get('dialog:open');
+
+    await expect(handler?.({ sender }, { title: 'Select file' })).rejects.toThrow(new Error('Dialog owner is not available'));
+    expect(fromWebContentsMock).toHaveBeenCalledTimes(1);
+    expect(fromWebContentsMock).toHaveBeenCalledWith(sender);
+    expect(showOpenDialogMock).not.toHaveBeenCalled();
   });
 
   it('uses the E2E open-dialog result without opening a native dialog', async () => {

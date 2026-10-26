@@ -1,4 +1,6 @@
 import OpenAI from 'openai'
+import { investigationFetch } from '../investigation.js'
+import { currentInvestigationScope } from '../../../world/investigation.js'
 import { openaiAdapter } from 'src/services/providerUsage/adapters/openai.js'
 import { updateProviderBuckets } from 'src/services/providerUsage/store.js'
 import { getProxyFetchOptions } from 'src/utils/proxy.js'
@@ -41,18 +43,18 @@ export function getOpenAIClient(options?: {
   fetchOverride?: typeof fetch
   source?: string
 }): OpenAI {
-  if (cachedClient) return cachedClient
+  if (cachedClient && !currentInvestigationScope()) return cachedClient
 
   const apiKey = process.env.OPENAI_API_KEY || ''
   const baseURL = process.env.OPENAI_BASE_URL
 
   const baseFetch = options?.fetchOverride ?? (globalThis.fetch as typeof fetch)
-  const wrappedFetch = wrapFetchForUsage(baseFetch)
+  const wrappedFetch = wrapFetchForUsage(investigationFetch(baseFetch, 'openai'))
 
   const client = new OpenAI({
     apiKey,
     ...(baseURL && { baseURL }),
-    maxRetries: options?.maxRetries ?? 0,
+    maxRetries: currentInvestigationScope() ? 0 : options?.maxRetries ?? 0,
     timeout: parseInt(process.env.API_TIMEOUT_MS || String(600 * 1000), 10),
     dangerouslyAllowBrowser: true,
     ...(process.env.OPENAI_ORG_ID && {
@@ -65,7 +67,7 @@ export function getOpenAIClient(options?: {
     fetch: wrappedFetch,
   })
 
-  if (!options?.fetchOverride) {
+  if (!options?.fetchOverride && !currentInvestigationScope()) {
     cachedClient = client
   }
 

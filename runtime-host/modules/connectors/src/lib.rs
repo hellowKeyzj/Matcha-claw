@@ -31,7 +31,7 @@ pub use api::ConnectorHandle as ModuleConnectorHandle;
 pub use domain::{
     Connector, ConnectorCatalog, ConnectorConfig, ConnectorConfigValue, ConnectorError,
     ConnectorInput, ConnectorKind, ConnectorPublicInput, InvalidConnectorConfig, McpProgramSource,
-    McpServerProgram, McpTransport,
+    McpAuth, McpServerProgram, McpTransport,
 };
 pub use owner::actor::ConnectorOwnerInput;
 pub use ports::{

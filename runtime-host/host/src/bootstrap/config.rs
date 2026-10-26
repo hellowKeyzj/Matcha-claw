@@ -24,6 +24,10 @@ pub(crate) struct Bootstrap {
     app_version: String,
     app_log_dir: PathBuf,
     runtime_host_state_dir: PathBuf,
+    world_postgres: Option<runtime_host::WorldPostgresConfig>,
+    world_storage_targets: Vec<runtime_host::WorldPostgresConfig>,
+    world_source_access: Option<runtime_host::WorldSourceAccessConfig>,
+    initial_world: Option<world::Provision>,
     searxng_resources_dir: PathBuf,
     runtime_host_mcp_executable: PathBuf,
     parent_callback_base_url: String,
@@ -76,6 +80,7 @@ impl Bootstrap {
                     working_directory: self.matcha.working_directory,
                     storage_root: self.matcha.storage_root,
                     port: self.matcha.port,
+                    world_runtime_host: None,
                     #[cfg(windows)]
                     git_bash: self.matcha.git_bash,
                     #[cfg(unix)]
@@ -96,6 +101,7 @@ impl Bootstrap {
                     port: self.open_claw.port,
                     sealed_endpoint: Some(sealed_endpoint),
                     sealed_token: Some(sealed_runtime_token),
+                    world_runtime_host: None,
                     client_metadata: metadata,
                     report_diagnostic: Arc::new(|_| {}),
                     #[cfg(unix)]
@@ -104,6 +110,14 @@ impl Bootstrap {
                 open_claw_secret,
                 organization_store,
                 runtime_state_dir: runtime_host_state_dir,
+                world_postgres: self.world_postgres,
+                world_storage_targets: self.world_storage_targets,
+                world_source_access: self.world_source_access,
+                initial_world: self.initial_world,
+                world_peer_endpoint: Some(format!(
+                    "http://127.0.0.1:{runtime_host_transport_port}{}",
+                    world_protocol::api::PEER_ENDPOINT
+                )),
                 searxng_resources_dir: self.searxng_resources_dir,
                 app_log_dir: self.app_log_dir,
                 parent_callback_base_url: self.parent_callback_base_url,
@@ -176,6 +190,24 @@ pub(crate) fn decode(mut input: Vec<u8>) -> Result<Bootstrap, BootstrapError> {
         app_version,
         app_log_dir: absolute(wire.app_log_dir)?,
         runtime_host_state_dir,
+        world_postgres: wire.world_postgres.map(|value| {
+            runtime_host::WorldPostgresConfig::new(value.storage_id, value.connection_string)
+        }),
+        world_storage_targets: wire
+            .world_storage_targets
+            .into_iter()
+            .map(|value| {
+                runtime_host::WorldPostgresConfig::new(value.storage_id, value.connection_string)
+            })
+            .collect(),
+        world_source_access: wire.world_source_access.map(|value| {
+            runtime_host::WorldSourceAccessConfig::new(value.endpoint, value.authorization)
+        }),
+        initial_world: wire
+            .initial_world
+            .map(super::world::InitialWorldWire::into_provision)
+            .transpose()
+            .map_err(|_| BootstrapError)?,
         searxng_resources_dir,
         runtime_host_mcp_executable,
         parent_callback_base_url,
@@ -221,6 +253,14 @@ struct Wire {
     app_version: String,
     app_log_dir: String,
     runtime_host_state_dir: String,
+    #[serde(default)]
+    world_postgres: Option<WorldPostgresWire>,
+    #[serde(default)]
+    world_storage_targets: Vec<WorldPostgresWire>,
+    #[serde(default)]
+    world_source_access: Option<WorldSourceAccessWire>,
+    #[serde(default)]
+    initial_world: Option<super::world::InitialWorldWire>,
     searxng_resources_dir: PathBuf,
     runtime_host_mcp_executable: String,
     parent_callback_base_url: String,
@@ -270,6 +310,20 @@ impl Default for RuntimeObservationModeWire {
     fn default() -> Self {
         Self::Off
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorldPostgresWire {
+    storage_id: String,
+    connection_string: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorldSourceAccessWire {
+    endpoint: String,
+    authorization: String,
 }
 
 #[derive(Deserialize)]

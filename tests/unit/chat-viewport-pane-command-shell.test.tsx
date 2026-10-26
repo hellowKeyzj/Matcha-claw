@@ -1,9 +1,9 @@
 import { createRef } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { ChatList, type ChatListHandle } from '@/pages/Chat/components/ChatList';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { ChatList, type ChatListHandle } from '@/plugins/chat/components/ChatList';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
 
 const scrollHandlers = {
   prepareScopeAnchorRestore: vi.fn<(nextScopeKey: string) => void>(),
@@ -11,7 +11,7 @@ const scrollHandlers = {
   jumpToBottom: vi.fn(),
 };
 
-vi.mock('@/pages/Chat/useChatScroll', () => ({
+vi.mock('@/plugins/chat/useChatScroll', () => ({
   useChatScroll: () => ({
     handleViewportPointerDown: vi.fn(),
     handleViewportTouchMove: vi.fn(),
@@ -25,8 +25,8 @@ vi.mock('@/pages/Chat/useChatScroll', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/components/ChatList', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/pages/Chat/components/ChatList')>();
+vi.mock('@/plugins/chat/components/ChatList', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/plugins/chat/components/ChatList')>();
   return {
     ...actual,
     ChatListSurface: (props: {

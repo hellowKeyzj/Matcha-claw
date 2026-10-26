@@ -2009,131 +2009,134 @@ where
         completion_tx: mpsc::UnboundedSender<Admitted<Completion<O>>>,
         permit: OwnedSemaphorePermit,
     ) -> RuntimeWork {
-        Box::pin(async move {
-            let completion = match self {
-                Self::DirectQuery {
-                    id,
-                    query,
-                    cancellation,
-                } => {
-                    let failed = run_observed_handler::<O, _>(
-                        &observation,
-                        owner_id,
-                        item,
-                        route,
-                        key_hash,
-                        &cancellation,
-                        async { O::handle_direct_query(shared, query).await },
-                    )
-                    .await;
-                    Completion::Direct { id, failed }
-                }
-                Self::KeyedCommand {
-                    mut key,
-                    mut state,
-                    command,
-                    cancellation,
-                } => {
-                    let handler_key = &mut key;
-                    let handler_state = &mut state;
-                    let failed = run_observed_handler::<O, _>(
-                        &observation,
-                        owner_id,
-                        item,
-                        route,
-                        key_hash,
-                        &cancellation,
-                        async move {
-                            O::handle_keyed_command(shared, handler_key.clone(), handler_state, command).await;
-                        },
-                    )
-                    .await;
-                    Completion::Keyed { key, state, failed }
-                }
-                Self::KeyedQuery {
-                    mut key,
-                    mut state,
-                    query,
-                    cancellation,
-                } => {
-                    let handler_key = &mut key;
-                    let handler_state = &mut state;
-                    let failed = run_observed_handler::<O, _>(
-                        &observation,
-                        owner_id,
-                        item,
-                        route,
-                        key_hash,
-                        &cancellation,
-                        async move {
-                            O::handle_keyed_query(shared, handler_key.clone(), handler_state, query).await;
-                        },
-                    )
-                    .await;
-                    Completion::Keyed { key, state, failed }
-                }
-                Self::GlobalCommand {
-                    mut state,
-                    command,
+        match self {
+            Self::DirectQuery {
+                id,
+                query,
+                cancellation,
+            } => Box::pin(async move {
+                let failed = run_observed_handler::<O, _>(
+                    &observation,
+                    owner_id,
+                    item,
+                    route,
+                    key_hash,
+                    &cancellation,
+                    Box::pin(async { O::handle_direct_query(shared, query).await }),
+                )
+                .await;
+                let completion = Completion::Direct { id, failed };
+                let _ = completion_tx.send(Admitted { item: completion, permit });
+            }),
+            Self::KeyedCommand {
+                mut key,
+                mut state,
+                command,
+                cancellation,
+            } => Box::pin(async move {
+                let handler_key = &mut key;
+                let handler_state = &mut state;
+                let failed = run_observed_handler::<O, _>(
+                    &observation,
+                    owner_id,
+                    item,
+                    route,
+                    key_hash,
+                    &cancellation,
+                    Box::pin(async move {
+                        O::handle_keyed_command(shared, handler_key.clone(), handler_state, command).await;
+                    }),
+                )
+                .await;
+                let completion = Completion::Keyed { key, state, failed };
+                let _ = completion_tx.send(Admitted { item: completion, permit });
+            }),
+            Self::KeyedQuery {
+                mut key,
+                mut state,
+                query,
+                cancellation,
+            } => Box::pin(async move {
+                let handler_key = &mut key;
+                let handler_state = &mut state;
+                let failed = run_observed_handler::<O, _>(
+                    &observation,
+                    owner_id,
+                    item,
+                    route,
+                    key_hash,
+                    &cancellation,
+                    Box::pin(async move {
+                        O::handle_keyed_query(shared, handler_key.clone(), handler_state, query).await;
+                    }),
+                )
+                .await;
+                let completion = Completion::Keyed { key, state, failed };
+                let _ = completion_tx.send(Admitted { item: completion, permit });
+            }),
+            Self::GlobalCommand {
+                mut state,
+                command,
+                close_after,
+                cancellation,
+            } => Box::pin(async move {
+                let failed = run_observed_handler::<O, _>(
+                    &observation,
+                    owner_id,
+                    item,
+                    route,
+                    key_hash,
+                    &cancellation,
+                    Box::pin(async { O::handle_global_command(shared, &mut state, command).await }),
+                )
+                .await;
+                let completion = Completion::Global {
+                    state,
+                    failed,
                     close_after,
-                    cancellation,
-                } => {
-                    let failed = run_observed_handler::<O, _>(
-                        &observation,
-                        owner_id,
-                        item,
-                        route,
-                        key_hash,
-                        &cancellation,
-                        async { O::handle_global_command(shared, &mut state, command).await },
-                    )
-                    .await;
-                    Completion::Global {
-                        state,
-                        failed,
-                        close_after,
-                    }
-                }
-                Self::GlobalQuery {
-                    mut state,
-                    query,
-                    cancellation,
-                } => {
-                    let failed = run_observed_handler::<O, _>(
-                        &observation,
-                        owner_id,
-                        item,
-                        route,
-                        key_hash,
-                        &cancellation,
-                        async { O::handle_global_query(shared, &mut state, query).await },
-                    )
-                    .await;
-                    Completion::Global {
-                        state,
-                        failed,
-                        close_after: false,
-                    }
-                }
-                Self::ExclusiveQuery {
-                    mut state,
-                    query,
-                    cancellation,
-                } => {
-                    let failed = run_observed_handler::<O, _>(
-                        &observation,
-                        owner_id,
-                        item,
-                        route,
-                        key_hash,
-                        &cancellation,
-                        async { O::handle_exclusive_query(shared, &mut state, query).await },
-                    )
-                    .await;
-                    Completion::Exclusive { state, failed }
-                }
-            };
-            let _ = completion_tx.send(Admitted { item: completion, permit });
-        })
+                };
+                let _ = completion_tx.send(Admitted { item: completion, permit });
+            }),
+            Self::GlobalQuery {
+                mut state,
+                query,
+                cancellation,
+            } => Box::pin(async move {
+                let failed = run_observed_handler::<O, _>(
+                    &observation,
+                    owner_id,
+                    item,
+                    route,
+                    key_hash,
+                    &cancellation,
+                    Box::pin(async { O::handle_global_query(shared, &mut state, query).await }),
+                )
+                .await;
+                let completion = Completion::Global {
+                    state,
+                    failed,
+                    close_after: false,
+                };
+                let _ = completion_tx.send(Admitted { item: completion, permit });
+            }),
+            Self::ExclusiveQuery {
+                mut state,
+                query,
+                cancellation,
+            } => Box::pin(async move {
+                let failed = run_observed_handler::<O, _>(
+                    &observation,
+                    owner_id,
+                    item,
+                    route,
+                    key_hash,
+                    &cancellation,
+                    Box::pin(async { O::handle_exclusive_query(shared, &mut state, query).await }),
+                )
+                .await;
+                let completion = Completion::Exclusive { state, failed };
+                let _ = completion_tx.send(Admitted { item: completion, permit });
+            }),
+        }
     }
 }

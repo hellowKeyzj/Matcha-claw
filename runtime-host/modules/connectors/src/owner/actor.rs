@@ -120,11 +120,31 @@ impl OwnerSpec for ConnectorOwner {
     }
 
     async fn handle_keyed_command(
-        _shared: Self::Shared,
+        shared: Self::Shared,
         _key: Self::Key,
         _lane: &mut Self::LaneState,
-        _command: Self::Command,
+        command: Self::Command,
     ) {
+        match command {
+            ConnectorCommand::OAuth {
+                endpoint,
+                connector_id,
+                request,
+                call,
+            } => {
+                super::oauth::execute(
+                    &shared.snapshot,
+                    &shared.observations,
+                    shared.runtime_directory.as_ref(),
+                    endpoint,
+                    connector_id,
+                    request,
+                    call,
+                )
+                .await;
+            }
+            _ => unreachable!("connector keyed command is OAuth"),
+        }
     }
 
     async fn handle_global_command(
@@ -221,6 +241,7 @@ impl OwnerSpec for ConnectorOwner {
                 }
                 let _ = reply.send(outcome);
             }
+            ConnectorCommand::OAuth { .. } => unreachable!("connector OAuth uses keyed execution"),
         }
     }
 

@@ -26,6 +26,8 @@ struct Row {
     phase: Phase,
     completed_attempts: u32,
     next_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_native_execution: Option<crate::TaskNativeExecution>,
 }
 #[derive(Serialize, Deserialize)]
 pub(super) struct Correlation {
@@ -360,6 +362,7 @@ pub(super) fn encode(value: &Delivery, bodies: &Bodies<'_>) -> Result<Vec<u8>, S
         phase,
         completed_attempts: snapshot.completed_attempts(),
         next_generation: snapshot.next_claim_generation(),
+        task_native_execution: snapshot.task_native_execution().cloned(),
     })
 }
 
@@ -424,5 +427,5 @@ pub(super) fn decode(bytes: &[u8], bodies: &Bodies<'_>) -> Result<Delivery, Stor
         phase,
         row.completed_attempts,
         row.next_generation,
-    )))
+    ).with_task_native_execution(row.task_native_execution)))
 }

@@ -36,6 +36,15 @@ use sessions_module::model_selection::{
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
+fn verifier() -> crate::module_registry::CapabilityVerifier {
+    Arc::new(tokio::sync::Mutex::new(
+        platform::capability::CapabilityDecisionVerifier::try_new(
+            "MCowBQYDK2VwAyEAhI7FT5ZzRIPEHVkZavhKl2CqMou1WrMW7b9vB7BHXoE",
+        )
+        .expect("test verifier key"),
+    ))
+}
+
 struct TestRoot {
     base: PathBuf,
     matcha_storage_parent: PathBuf,
@@ -156,11 +165,11 @@ async fn local_account_supports_model_replace_list_selectable_and_routing_admiss
     .expect("open provider account store");
     accounts.persist(account).expect("persist local account");
     drop(accounts);
-    let (mut host, _events, handles) = Host::new(host_input).expect("construct host");
+    let (mut host, _events, handles) = Host::new(host_input, verifier()).expect("construct host");
     host.start_admission_only().await.expect("start host");
     assert!(matches!(
         handles.provider.handle().list_provider_accounts().await.unwrap(),
-        provider_module::ProviderAccountsDelivery::List(ref accounts)
+        provider_module::ProviderAccountsDelivery::List { ref accounts, .. }
             if accounts.len() == 1 && accounts[0].id == "local-ollama"
     ));
 
@@ -289,7 +298,7 @@ fn construction_is_atomic_and_does_not_materialize_runtime_files() {
     input.open_claw.port = 0;
     let entries_before_construction = root.relative_entries();
 
-    let error = match Host::new(input) {
+    let error = match Host::new(input, verifier()) {
         Ok(_) => panic!("invalid OpenClaw input was accepted"),
         Err(error) => error,
     };
@@ -323,7 +332,7 @@ fn open_claw_client_custody_stays_behind_the_concrete_port() {
 #[tokio::test]
 async fn created_host_shuts_down_both_idle_owners_and_retains_terminal_state() {
     let root = TestRoot::new();
-    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, _handles) = Host::new(host_input(&root), verifier()).unwrap();
 
     let report = host.shutdown().await.unwrap();
 
@@ -351,7 +360,7 @@ async fn created_host_shuts_down_both_idle_owners_and_retains_terminal_state() {
 #[tokio::test]
 async fn ready_host_admits_peer_lifecycle_requests() {
     let root = TestRoot::new();
-    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, _handles) = Host::new(host_input(&root), verifier()).unwrap();
 
     host.start().await.unwrap();
 
@@ -364,7 +373,7 @@ async fn ready_host_admits_peer_lifecycle_requests() {
 #[tokio::test]
 async fn openclaw_prelaunch_projection_failure_does_not_block_host_startup() {
     let root = TestRoot::new();
-    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, _handles) = Host::new(host_input(&root), verifier()).unwrap();
     fs::write(
         root.state_parent.join("openclaw/openclaw.json"),
         b"not-json",
@@ -383,7 +392,7 @@ async fn auto_openclaw_port_guard_failure_returns_start_failure_without_blocking
     let root = TestRoot::new();
     let port_guard = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, root.openclaw_port))
         .expect("occupy OpenClaw gateway port");
-    let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, handles) = Host::new(host_input(&root), verifier()).unwrap();
 
     host.start_admission_only().await.unwrap();
 
@@ -405,7 +414,7 @@ async fn auto_openclaw_port_guard_failure_returns_start_failure_without_blocking
 #[tokio::test]
 async fn diagnostics_module_requires_a_ready_host_and_closes_after_shutdown() {
     let root = TestRoot::new();
-    let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, handles) = Host::new(host_input(&root), verifier()).unwrap();
     let cancellation = ::diagnostics::DiagnosticsArchiveCancellation::new();
 
     assert!(
@@ -443,7 +452,7 @@ async fn diagnostics_module_requires_a_ready_host_and_closes_after_shutdown() {
 #[tokio::test]
 async fn matcha_startup_diagnostic_is_projected_once_without_private_details() {
     let root = TestRoot::new();
-    let (mut host, _events, _handles) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, _handles) = Host::new(host_input(&root), verifier()).unwrap();
 
     host.matcha_startup_diagnostics
         .report(::diagnostics::RuntimeStartupDiagnostic::AppServerReportedError);
@@ -466,7 +475,7 @@ async fn matcha_startup_diagnostic_is_projected_once_without_private_details() {
 #[tokio::test]
 async fn peer_lifecycle_failures_do_not_shut_down_the_host() {
     let root = TestRoot::new();
-    let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, handles) = Host::new(host_input(&root), verifier()).unwrap();
 
     host.start_admission_only().await.unwrap();
 
@@ -718,7 +727,7 @@ fn team_run_private_control_is_not_in_framed_wire() {
 #[tokio::test]
 async fn team_run_trigger_actor_rejects_unknown_run() {
     let root = TestRoot::new();
-    let (host, events, handles) = Host::new(host_input(&root)).unwrap();
+    let (host, events, handles) = Host::new(host_input(&root), verifier()).unwrap();
     let mut owner = crate::host_actor::Owner::spawn(host, events);
     let handle = handles.organization.clone();
 
@@ -809,11 +818,17 @@ fn team_scheduler_is_owned_by_organization_runtime_and_not_root_actor() {
     assert!(owners.contains("self.organization.drain_and_join().await"));
     assert!(
         owners.find("self.organization.quiesce().await").unwrap()
-            < owners.find("self.dispose_module_scope(\"sessions\")").unwrap()
+            < owners
+                .find("self.dispose_module_scope(\"sessions\")")
+                .unwrap()
     );
     assert!(
-        owners.find("self.dispose_module_scope(\"sessions\")").unwrap()
-            < owners.find("self.organization.drain_and_join().await").unwrap()
+        owners
+            .find("self.dispose_module_scope(\"sessions\")")
+            .unwrap()
+            < owners
+                .find("self.organization.drain_and_join().await")
+                .unwrap()
     );
     assert!(!host.contains("team_run_coordinator: organization::TeamRunCoordinatorHandle"));
     assert!(!host.contains("self.team_run_coordinator.wake()"));
@@ -929,7 +944,11 @@ async fn host_startup_resubmits_pending_fleet_dispatches() {
                             fleet::outbox::DispatchId::try_new("dispatch-pending").unwrap(),
                             command_id.clone(),
                             platform::endpoint::NativeAgentId::try_new("agent-1").unwrap(),
-                            fleet::FleetTargetSelector::new(target_id, 1, fleet::TargetKind::Docker),
+                            fleet::FleetTargetSelector::new(
+                                target_id,
+                                1,
+                                fleet::TargetKind::Docker
+                            ),
                         ),
                     )
                     .unwrap(),
@@ -948,7 +967,7 @@ async fn host_startup_resubmits_pending_fleet_dispatches() {
         system.drain_and_join().await.unwrap();
     }
 
-    let (mut host, _events, handles) = Host::new(input).unwrap();
+    let (mut host, _events, handles) = Host::new(input, verifier()).unwrap();
     host.start_admission_only().await.unwrap();
     assert_eq!(host.admission_state().phase(), HostPhase::Ready);
 
@@ -1122,7 +1141,7 @@ fn host_keeps_business_operations_in_typed_owner_and_facade_entries() {
 #[tokio::test]
 async fn gateway_health_observation_does_not_block_state_reads() {
     let root = TestRoot::new();
-    let (host, events, handles) = Host::new(host_input(&root)).unwrap();
+    let (host, events, handles) = Host::new(host_input(&root), verifier()).unwrap();
     let _gateway = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, root.openclaw_port))
         .expect("hold OpenClaw gateway probe");
     host.admission.begin_start().unwrap();
@@ -1156,7 +1175,7 @@ async fn gateway_health_observation_does_not_block_state_reads() {
 #[tokio::test]
 async fn ready_host_rejects_runtime_operations_when_runtimes_are_not_running() {
     let root = TestRoot::new();
-    let (mut host, _events, handles) = Host::new(host_input(&root)).unwrap();
+    let (mut host, _events, handles) = Host::new(host_input(&root), verifier()).unwrap();
 
     host.start().await.unwrap();
 
@@ -1207,10 +1226,15 @@ fn host_input(root: &TestRoot) -> HostInput {
         matcha: MatchaAgentInput {
             server_executable: absolute_path("bin/matcha-app-server"),
             cli_executable: absolute_path("bin/bun"),
-            cli_args: vec![absolute_path("matcha-agent/dist/cli-bun.js").to_string_lossy().into_owned()],
+            cli_args: vec![
+                absolute_path("matcha-agent/dist/cli-bun.js")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
             working_directory: absolute_path("runtime"),
             storage_root: root.matcha_storage_parent.join("app-server"),
             port: root.matcha_port,
+            world_runtime_host: None,
             #[cfg(windows)]
             git_bash: absolute_path("bin/bash.exe"),
             #[cfg(unix)]
@@ -1235,6 +1259,7 @@ fn host_input(root: &TestRoot) -> HostInput {
             port: root.openclaw_port,
             sealed_endpoint: None,
             sealed_token: None,
+            world_runtime_host: None,
             client_metadata: GatewayClientMetadata::try_new(
                 "test".into(),
                 std::env::consts::OS.into(),
@@ -1247,6 +1272,11 @@ fn host_input(root: &TestRoot) -> HostInput {
         open_claw_secret: GatewaySecret::new(entropy()).unwrap(),
         organization_store: organization::open_organization_store(&root.state_parent).unwrap(),
         runtime_state_dir: root.state_parent.join("runtime-host"),
+        world_postgres: None,
+        world_storage_targets: Vec::new(),
+        world_source_access: None,
+        initial_world: None,
+        world_peer_endpoint: None,
         searxng_resources_dir: root.state_parent.join("searxng"),
         app_log_dir: root.state_parent.join("userdata-logs"),
         parent_callback_base_url: "http://127.0.0.1:34100".into(),

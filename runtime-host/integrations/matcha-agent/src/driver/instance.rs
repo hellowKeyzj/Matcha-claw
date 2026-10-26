@@ -146,6 +146,7 @@ pub struct MatchaAgentInput {
     pub working_directory: PathBuf,
     pub storage_root: PathBuf,
     pub port: u16,
+    pub world_runtime_host: Option<crate::world::WorldRuntimeHost>,
     #[cfg(windows)]
     pub git_bash: PathBuf,
     #[cfg(unix)]
@@ -166,6 +167,7 @@ pub fn build_peer(
             working_directory: input.working_directory,
             storage_root: input.storage_root,
             port: input.port,
+            world_runtime_host: input.world_runtime_host,
             toolchain,
             report_diagnostic,
             #[cfg(windows)]

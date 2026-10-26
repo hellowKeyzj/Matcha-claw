@@ -48,6 +48,8 @@ const moduleDependencies = new Map([
   ['sessions', ['connectors', 'organization', 'provider', 'runtime-directory']],
   // Sealed store implementations consume Skills/Subagents port and projection contracts.
   ['sealed-resource', ['skills', 'subagents']],
+  ['world', ['world-protocol', 'world-plugin-sdk']],
+  ['world-plugin-sdk', ['world-protocol']],
 ])
 
 const workspaceMembers = new Set(metadata.workspace_members)
@@ -67,6 +69,8 @@ const dependencies = new Map(crates.map(crate => [crate.id, []]))
 function isAllowed(from, to) {
   if (from.layer === 'unknown' || to.layer === 'unknown') return false
   if (from.layer === 'host') return true
+  if (from.member === 'modules/world/protocol') return false
+  if (from.member === 'modules/world/plugin-sdk') return to.member === 'modules/world/protocol'
   if (from.layer === 'foundation') return false
   if (from.layer === 'platform') return to.layer === 'foundation'
   if (from.layer === 'external') return ['foundation', 'platform'].includes(to.layer)

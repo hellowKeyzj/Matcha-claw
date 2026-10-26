@@ -436,6 +436,7 @@ pub(crate) struct GraphRunFacts {
     lifecycle: GraphRunLifecycle,
     pub(super) start_gate: RunStartGate,
     pub(super) retired_executions: BTreeSet<(NodeId, ExecutionFence)>,
+    pub(super) task_execution_context: Option<crate::TaskExecutionContext>,
 }
 
 impl GraphRunFacts {
@@ -500,7 +501,27 @@ impl GraphRunFacts {
             lifecycle,
             start_gate,
             retired_executions: BTreeSet::new(),
+            task_execution_context: None,
         })
+    }
+
+    pub(crate) fn task_execution_context(&self) -> Option<&crate::TaskExecutionContext> {
+        self.task_execution_context.as_ref()
+    }
+
+    pub(crate) fn restore_task_execution_context(
+        &mut self,
+        context: Option<crate::TaskExecutionContext>,
+    ) -> Result<(), OrganizationFactsError> {
+        if context.as_ref().is_some_and(|context| !context.valid()
+            || (!self.lifecycle.creation_idempotency_key().is_empty()
+                && context.root_request_id != self.lifecycle.creation_idempotency_key()))
+            || self.task_execution_context.as_ref().is_some_and(|old| Some(old) != context.as_ref())
+        {
+            return Err(OrganizationFactsError::InvalidGraphRun);
+        }
+        self.task_execution_context = context;
+        Ok(())
     }
 
     pub(crate) fn retired_executions(&self) -> &BTreeSet<(NodeId, ExecutionFence)> {
@@ -808,6 +829,11 @@ impl OrganizationFacts {
 
         let mut run_facts = BTreeMap::new();
         for run in runs {
+            if run.task_execution_context.as_ref().is_some_and(|context| {
+                !context.valid() || context.root_request_id != run.lifecycle().creation_idempotency_key()
+            }) {
+                return Err(OrganizationFactsError::InvalidGraphRun);
+            }
             run.validate_retired_executions(&run.retired_executions)?;
             let team = team_facts
                 .get(run.team().as_str())
@@ -1957,6 +1983,33 @@ impl OrganizationFacts {
         Ok(ApprovalResolutionOutcome::Recorded)
     }
 
+    pub(crate) fn record_task_native_execution(
+        &mut self,
+        delivery_id: &crate::DeliveryId,
+        native: crate::TaskNativeExecution,
+    ) -> Result<(), OrganizationFactsError> {
+        let invalid = OrganizationFactsError::InvalidTerminalObservation;
+        let delivery = self.deliveries.delivery(delivery_id).ok_or(invalid.clone())?;
+        let run = self.runs.get(&delivery.facts().run_id).ok_or(invalid.clone())?;
+        if run.task_execution_context().is_none()
+            || native.native_request_id.as_deref() != Some(delivery.facts().idempotency_key.as_str())
+            || native.native_message_id.as_ref().is_none_or(|id| id.trim().is_empty())
+        { return Err(invalid); }
+        if let Some(old) = delivery.task_native_execution() {
+            if old == &native { return Ok(()); }
+            if old.endpoint_session_id != native.endpoint_session_id || old.native_run_id != native.native_run_id
+                || old.native_request_id != native.native_request_id || old.native_message_id != native.native_message_id
+                || !matches!(old.measurement, crate::TaskRunMeasurement::Unavailable)
+            { return Err(invalid); }
+        }
+        let endpoint = crate::EndpointSessionId::try_new(native.endpoint_session_id.clone())
+            .map_err(|_| invalid.clone())?;
+        self.accept_native_terminal_context(delivery_id, endpoint, native.native_run_id.clone())?;
+        self.deliveries.delivery_mut(delivery_id).ok_or(invalid)?
+            .task_native_execution = Some(native);
+        Ok(())
+    }
+
     pub(crate) fn accept_native_terminal_context(
         &mut self,
         delivery_id: &crate::DeliveryId,
@@ -2299,6 +2352,7 @@ impl OrganizationFacts {
                 .ok_or(OrganizationFactsError::RemovedRun)?;
             if current.team() != previous_run.team()
                 || current.frozen_team_revision() != previous_run.frozen_team_revision()
+                || current.task_execution_context != previous_run.task_execution_context
             {
                 return Err(OrganizationFactsError::RunOwnershipChanged);
             }
@@ -2444,13 +2498,15 @@ impl OrganizationFacts {
         if self.materialization(&run.team).is_none() {
             return Err(OrganizationFactsError::RunMaterializationMissing);
         }
-        let run = GraphRunFacts::with_lifecycle(
+        let context = run.task_execution_context.clone();
+        let mut run = GraphRunFacts::with_lifecycle(
             run.team.clone(),
             run.frozen_team_revision,
             run.graph,
             run.runtime,
             GraphRunLifecycle::created(creation_idempotency_key.to_owned()),
         )?;
+        run.restore_task_execution_context(context)?;
         self.touch_run(&run_id);
         self.runs.insert(run_id.clone(), run);
         Ok(CreateGraphRunOutcome::Created(GraphRunId::new(run_id)))
@@ -4871,6 +4927,15 @@ fn validate_delivery_transition(
     previous: &crate::Delivery,
     current: &crate::Delivery,
 ) -> Result<(), OrganizationFactsError> {
+    if let Some(old) = previous.task_native_execution() {
+        let Some(native) = current.task_native_execution() else {
+            return Err(OrganizationFactsError::InvalidDeliveryTransition);
+        };
+        if old.endpoint_session_id != native.endpoint_session_id || old.native_run_id != native.native_run_id
+            || old.native_request_id != native.native_request_id || old.native_message_id != native.native_message_id
+            || (old.measurement != native.measurement && !matches!(old.measurement, crate::TaskRunMeasurement::Unavailable))
+        { return Err(OrganizationFactsError::InvalidDeliveryTransition); }
+    }
     match (previous.phase(), current.phase()) {
         (
             DeliveryPhase::TerminalObserved {

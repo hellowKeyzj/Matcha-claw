@@ -3,13 +3,20 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import App from '@/App';
 import { Sidebar } from '@/components/layout/Sidebar';
-import { useChatStore } from '@/stores/chat';
-import { useRuntimeHostStore } from '@/stores/gateway';
+import { useChatStore } from '@/plugins/chat/store';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { applicationShellPlugin } from '@/app/extensions';
+import { tasksPlugin } from '@/plugins/tasks/plugin';
+import { providersPlugin } from '@/plugins/providers/plugin';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
 import { useLayoutStore } from '@/stores/layout';
-import { useSettingsStore } from '@/stores/settings';
-import { useAccountStore } from '@/stores/account';
-import { useSubagentsStore } from '@/stores/subagents';
+import { useSettingsStore } from '@/plugins/settings/store';
+import { useAccountStore } from '@/plugins/account/stores/account';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import i18n from '@/i18n';
+
+const host = createPluginHost([applicationShellPlugin, tasksPlugin, providersPlugin]);
 
 function enableMainAppRoutes() {
   useSettingsStore.setState({
@@ -85,7 +92,9 @@ describe('tasks navigation', () => {
 
     render(
       <MemoryRouter>
-        <Sidebar />
+        <PluginHostProvider host={host}>
+          <Sidebar />
+        </PluginHostProvider>
       </MemoryRouter>,
     );
 
@@ -101,7 +110,9 @@ describe('tasks navigation', () => {
 
     render(
       <MemoryRouter initialEntries={['/tasks']}>
-        <App />
+        <PluginHostProvider host={host}>
+          <App />
+        </PluginHostProvider>
       </MemoryRouter>,
     );
 
@@ -120,7 +131,9 @@ describe('tasks navigation', () => {
 
     render(
       <MemoryRouter initialEntries={['/cron']}>
-        <App />
+        <PluginHostProvider host={host}>
+          <App />
+        </PluginHostProvider>
       </MemoryRouter>,
     );
 
@@ -133,7 +146,9 @@ describe('tasks navigation', () => {
 
     render(
       <MemoryRouter initialEntries={['/providers']}>
-        <App />
+        <PluginHostProvider host={host}>
+          <App />
+        </PluginHostProvider>
       </MemoryRouter>,
     );
 

@@ -24,7 +24,7 @@ function terminal(detail: Partial<ProviderCallDetail>, status = 'unknown') {
       accountId: 'openai-main',
       accountRevision: 1,
       diagnostic: null,
-      native: { changed: false, applied: 'unknown', observed: 'unavailable' },
+      native: { changed: false, applied: 'unknown', observed: 'unavailable', reports: [] },
       ...detail,
     },
   };
@@ -60,6 +60,6 @@ describe('provider private mutation projection', () => {
     const result = await hostProviderDeleteAccount('openai-main', 1);
     expect(result).toMatchObject({ success: true, receipt: { commit: 'committed', persisted: 'confirmed' } });
     expect(result.warning).toBeTruthy();
-    expect(result.receipt?.native).toEqual({ changed: false, applied: 'unknown', observed: 'unavailable' });
+    expect(result.receipt?.native).toEqual({ changed: false, applied: 'unknown', observed: 'unavailable', reports: [] });
   });
 });

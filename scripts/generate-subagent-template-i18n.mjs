@@ -306,7 +306,7 @@ async function buildZhTemplateEntries(baseEntries, existingZh, sourcePathByTempl
 
 async function main() {
   const projectRoot = resolve(process.cwd());
-  const templateRoot = resolve(projectRoot, 'src/features/subagents/templates');
+  const templateRoot = resolve(projectRoot, 'src/plugins/agents/templates');
   const catalogPath = resolve(templateRoot, 'catalog.json');
   const agencyZhRoot = process.env.MATCHACLAW_AGENCY_AGENTS_ZH_DIR
     ? resolve(process.env.MATCHACLAW_AGENCY_AGENTS_ZH_DIR)

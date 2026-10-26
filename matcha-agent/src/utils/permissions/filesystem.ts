@@ -13,6 +13,7 @@ import {
 } from '@claude-code-best/builtin-tools/tools/FileEditTool/constants.js'
 import type { z } from 'zod/v4'
 import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js'
+import { currentInvestigationScope } from '../../world/investigation.js'
 import { checkStatsigFeatureGate_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import type { AnyObject, Tool, ToolPermissionContext } from '../../Tool.js'
 import { FILE_READ_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/FileReadTool/prompt.js'
@@ -21,6 +22,7 @@ import { getClaudeConfigHomeDir } from '../envUtils.js'
 import {
   getFsImplementation,
   getPathsForPermissionCheck,
+  getSourcePathsForPermissionCheck,
 } from '../fsOperations.js'
 import {
   containsPathTraversal,
@@ -697,6 +699,29 @@ export function pathInAllowedWorkingPath(
     allWorkingDirectories(toolPermissionContext),
   ).flatMap(wp => getResolvedWorkingDirPaths(wp))
 
+  return pathsInAllowedWorkingPaths(pathsToCheck, workingPaths)
+}
+
+export async function pathInAllowedWorkingPathAsync(
+  filePath: string,
+  toolPermissionContext: ToolPermissionContext,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (!currentInvestigationScope()) {
+    return pathInAllowedWorkingPath(filePath, toolPermissionContext)
+  }
+  const pathsToCheck = await getSourcePathsForPermissionCheck(filePath, signal)
+  const workingPaths: string[] = []
+  for (const workingPath of allWorkingDirectories(toolPermissionContext)) {
+    workingPaths.push(...await getSourcePathsForPermissionCheck(workingPath, signal))
+  }
+  return pathsInAllowedWorkingPaths(pathsToCheck, workingPaths)
+}
+
+function pathsInAllowedWorkingPaths(
+  pathsToCheck: readonly string[],
+  workingPaths: readonly string[],
+): boolean {
   // All paths must be within allowed working paths
   // If any resolved path is outside, deny access
   return pathsToCheck.every(pathToCheck =>

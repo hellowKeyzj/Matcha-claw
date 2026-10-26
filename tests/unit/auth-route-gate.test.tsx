@@ -1,10 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import type { ComponentProps } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
 import type { LicenseGateSnapshot } from '@/lib/license';
 import App from '@/App';
-import { AuthPage } from '@/pages/Auth';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { AuthPage } from '@/plugins/account/pages/Auth';
+import { accountPlugin } from '@/plugins/account/plugin';
+import { chatPlugin } from '@/plugins/chat/plugin';
+import { dashboardPlugin } from '@/plugins/dashboard/plugin';
+import { providersPlugin } from '@/plugins/providers/plugin';
+import { settingsPlugin } from '@/plugins/settings/plugin';
 import i18n from '@/i18n';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
@@ -68,9 +76,10 @@ const providerState = vi.hoisted(() => ({
 
 const updateState = vi.hoisted(() => ({
   init: vi.fn(),
+  subscribe: vi.fn(() => vi.fn()),
 }));
 
-vi.mock('@/stores/account', () => ({
+vi.mock('@/plugins/account/stores/account', () => ({
   useAccountStore: Object.assign(
     (selector: (state: typeof accountState) => unknown) => selector(accountState),
     {
@@ -80,24 +89,27 @@ vi.mock('@/stores/account', () => ({
   ),
 }));
 
-vi.mock('@/stores/license', () => ({
+vi.mock('@/plugins/account/stores/license', () => ({
   useLicenseStore: (selector: (state: typeof licenseState) => unknown) => selector(licenseState),
   useLocalLicenseLocked: () => accountState.status !== 'signedIn' && licenseState.snapshot?.state !== 'granted',
 }));
 
-vi.mock('@/stores/settings', () => ({
-  useSettingsStore: (selector: (state: typeof settingsState) => unknown) => selector(settingsState),
+vi.mock('@/plugins/settings/store', () => ({
+  useSettingsStore: Object.assign(
+    (selector: (state: typeof settingsState) => unknown) => selector(settingsState),
+    { getState: () => settingsState },
+  ),
 }));
 
-vi.mock('@/stores/gateway', () => ({
+vi.mock('@/plugins/runtime/store', () => ({
   useGatewayStore: (selector: (state: typeof gatewayState) => unknown) => selector(gatewayState),
 }));
 
-vi.mock('@/stores/providers', () => ({
+vi.mock('@/plugins/providers/stores/providers', () => ({
   useProviderStore: (selector: (state: typeof providerState) => unknown) => selector(providerState),
 }));
 
-vi.mock('@/stores/update', () => ({
+vi.mock('@/plugins/settings/update/store', () => ({
   useUpdateStore: (selector: (state: typeof updateState) => unknown) => selector(updateState),
 }));
 
@@ -121,7 +133,7 @@ vi.mock('@/components/layout/MainLayout', async () => {
   };
 });
 
-vi.mock('@/components/update/UpdateNotifier', () => ({
+vi.mock('@/plugins/settings/update/UpdateNotifier', () => ({
   UpdateNotifier: () => null,
 }));
 
@@ -129,26 +141,27 @@ vi.mock('@/components/ui/tooltip', () => ({
   TooltipProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-vi.mock('@/lib/route-preload', () => {
-  const MockRoute = ({ name }: { name: string }) => <div data-testid={`${name}-route`}>{name}</div>;
-  return {
-    AuthRoute: () => <MockRoute name="auth" />,
-    SkillsRoute: () => <MockRoute name="skills" />,
-    SecurityRoute: () => <MockRoute name="security" />,
-    SettingsRoute: () => <MockRoute name="settings" />,
-    DashboardRoute: () => <MockRoute name="dashboard" />,
-    ChannelsRoute: () => <MockRoute name="channels" />,
-    TeamsRoute: () => <MockRoute name="teams" />,
-    TeamChatRoute: () => <MockRoute name="team-chat" />,
-    ProvidersRoute: () => <MockRoute name="providers" />,
-    SubAgentsRoute: () => <MockRoute name="subagents" />,
-    TasksRoute: () => <MockRoute name="tasks" />,
-    PluginsRoute: () => <MockRoute name="plugins" />,
-    ExternalConnectorsRoute: () => <MockRoute name="connectors" />,
-    RemoteFleetRoute: () => <MockRoute name="remote-fleet" />,
-    WikiRoute: () => <MockRoute name="wiki" />,
-  };
-});
+vi.mock('@/plugins/chat/page', () => ({ default: () => null }));
+vi.mock('@/plugins/chat/host-observation', () => ({ subscribeChatHostEvents: vi.fn() }));
+vi.mock('@/plugins/settings/page', () => ({
+  default: () => <div data-testid="settings-route">settings</div>,
+}));
+vi.mock('@/plugins/dashboard/pages', () => ({
+  default: () => <div data-testid="dashboard-route">dashboard</div>,
+}));
+
+const pluginsHost = createPluginHost([
+  applicationShellPlugin,
+  accountPlugin,
+  chatPlugin,
+  dashboardPlugin,
+  providersPlugin,
+  settingsPlugin,
+]);
+
+function TestPlugins({ children }: { children: ReactNode }) {
+  return <PluginHostProvider host={pluginsHost}>{children}</PluginHostProvider>;
+}
 
 function LocationEcho() {
   const location = useLocation();
@@ -173,6 +186,7 @@ function renderAppRoute(initialEntries: ComponentProps<typeof MemoryRouter>['ini
       <App />
       <LocationEcho />
     </MemoryRouter>,
+    { wrapper: TestPlugins },
   );
 }
 
@@ -403,12 +417,7 @@ describe('auth route gate', () => {
     licenseState.snapshot = state === null || state === 'error' ? null : { ...grantedLicense, state };
     licenseState.error = state === 'error' ? 'License refresh failed' : null;
 
-    render(
-      <MemoryRouter initialEntries={[{ pathname: '/login', state: { accountEntry: 'local' } }]}>
-        <App />
-        <LocationEcho />
-      </MemoryRouter>,
-    );
+    renderAppRoute([{ pathname: '/login', state: { accountEntry: 'local' } }]);
 
     await waitFor(() => {
       expect(screen.getByTestId('location-echo')).toHaveTextContent(/^\/$/);

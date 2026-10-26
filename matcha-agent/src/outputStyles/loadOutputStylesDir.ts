@@ -9,6 +9,7 @@ import {
   loadMarkdownFilesForSubdir,
 } from '../utils/markdownConfigLoader.js'
 import { clearPluginOutputStyleCache } from '../utils/plugins/loadPluginOutputStyles.js'
+import { rethrowInvestigationAdmission } from '../services/api/investigation.js'
 
 /**
  * Loads markdown files from .claude/output-styles directories throughout the project
@@ -85,6 +86,12 @@ export const getOutputStyleDirStyles = memoize(
 
       return styles
     } catch (error) {
+      try {
+        rethrowInvestigationAdmission(error)
+      } catch (admissionError) {
+        getOutputStyleDirStyles.cache?.delete?.(cwd)
+        throw admissionError
+      }
       logError(error)
       return []
     }

@@ -221,6 +221,13 @@ mod native_receipt_tests {
 }
 
 impl organization::OrganizationNativeRuntime for OpenClawDriver {
+    fn unsupported_task_budget(
+        &self,
+        budget: &organization::TaskExecutionBudget,
+    ) -> Vec<organization::TaskBudgetDimension> {
+        <Self as sessions_module::ports::SessionOps>::unsupported_task_budget(self, budget)
+    }
+
     fn read_team_member_profiles(
         &self,
         agents: Vec<organization::ManagedAgentReference>,

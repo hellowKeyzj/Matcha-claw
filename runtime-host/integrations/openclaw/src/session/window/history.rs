@@ -203,9 +203,10 @@ pub fn decode_window(payload: Value, request: PageRequest) -> Result<SessionWind
     } else if kind == HistoryKind::Delta {
         envelope.as_ref().and_then(|value| value.get("messages")).and_then(Value::as_array)
             .ok_or_else(|| payload_error("messages", "expected_array", "missing"))?
-            .iter().map(decode_session_message).collect::<Result<Vec<_>, _>>()?
+            .iter().map(|message| decode_session_message_in_session(message, native_session_id.as_deref()))
+            .collect::<Result<Vec<_>, _>>()?
     } else {
-        match decode_native_window(payload.clone()) {
+        match decode_native_window(payload.clone(), native_session_id.as_deref()) {
             Ok(messages) => messages,
             Err(_) if is_text_history(&payload) => decode_text_history(payload)?,
             Err(error) => return Err(error),
@@ -594,7 +595,7 @@ fn bounded_id(value: &Value, field: &'static str) -> Result<String, HistoryError
     Ok(text.to_owned())
 }
 
-fn decode_native_window(payload: Value) -> Result<Vec<Message>, HistoryError> {
+fn decode_native_window(payload: Value, native_session_id: Option<&str>) -> Result<Vec<Message>, HistoryError> {
     let envelope = match payload {
         Value::Object(envelope) => envelope,
         value => {
@@ -622,7 +623,7 @@ fn decode_native_window(payload: Value) -> Result<Vec<Message>, HistoryError> {
     messages
         .iter()
         .enumerate()
-        .map(|(index, message)| decode_message(index, message, None))
+        .map(|(index, message)| decode_message(index, message, None, native_session_id))
         .collect()
 }
 
@@ -673,14 +674,20 @@ fn decode_text_history(payload: Value) -> Result<Vec<Message>, HistoryError> {
 }
 
 pub(crate) fn decode_session_message(value: &Value) -> Result<Message, HistoryError> {
+    decode_session_message_in_session(value, None)
+}
+
+fn decode_session_message_in_session(value: &Value, native_session_id: Option<&str>) -> Result<Message, HistoryError> {
     let envelope = value.as_object().ok_or_else(HistoryError::malformed)?;
+    let envelope_session_id = decode_native_session_id(envelope)?;
+    let native_session_id = envelope_session_id.as_deref().or(native_session_id);
     let mut message = envelope.get("message").and_then(Value::as_object)
         .cloned().ok_or_else(HistoryError::malformed)?;
     insert_missing_string_alias(&mut message, "messageId", "id", envelope.get("messageId"))?;
     if !message.contains_key("seq") && !message.contains_key("sequence") {
         if let Some(sequence) = envelope.get("messageSeq") { message.insert("seq".to_owned(), sequence.clone()); }
     }
-    let message = decode_message(0, &Value::Object(message), Some(envelope))?;
+    let message = decode_message(0, &Value::Object(message), Some(envelope), native_session_id)?;
     let mirror_origin = message.mirror_origin().map(str::to_owned);
     let run_terminal = message.run_terminal();
     let has_active_run = match envelope.get("hasActiveRun") {
@@ -721,7 +728,8 @@ pub(crate) fn decode_event_message(
     if !message.contains_key("seq") && !message.contains_key("sequence") {
         if let Some(sequence) = source_sequence { message.insert("seq".to_owned(), Value::from(sequence)); }
     }
-    decode_message(0, &Value::Object(message), Some(object))
+    let native_session_id = decode_native_session_id(object)?;
+    decode_message(0, &Value::Object(message), Some(object), native_session_id.as_deref())
 }
 
 fn insert_missing_string_alias(
@@ -767,7 +775,7 @@ fn validate_envelope(envelope: &Map<String, Value>) -> Result<(), HistoryError> 
     Ok(())
 }
 
-fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Value>>) -> Result<Message, HistoryError> {
+fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Value>>, native_session_id: Option<&str>) -> Result<Message, HistoryError> {
     let message = value
         .as_object()
         .ok_or_else(|| message_error(index, "message", "expected_object", value_kind(value)))?;
@@ -780,18 +788,6 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
     let truncated = native.map(|meta| optional_alias_bool_message(meta, index, "truncated", &["truncated"]))
         .transpose()?.flatten().unwrap_or(false);
     let hidden_control_reply = role == MessageRole::Assistant && hidden_control_reply(message, &text);
-    if let Some(media) = native.and_then(|meta| meta.get("media")).and_then(Value::as_array) {
-        for fact in media.iter().filter_map(Value::as_object) {
-            if fact.get("hydrationSuppressed").and_then(Value::as_bool) == Some(true) { continue; }
-            let Some(reference) = fact.get("url").and_then(Value::as_str).and_then(safe_native_media_reference) else { continue; };
-            let media_type = explicit_media_type(fact).or_else(|| fact.get("contentType").and_then(Value::as_str)
-                .filter(|value| valid_media_reference_shape(value, MAX_TOOL_NAME_BYTES)).map(str::to_owned))
-                .or_else(|| infer_media_type(&reference));
-            if !content.iter().any(|block| matches!(block, MessageContent::Media { reference: Some(old), .. } if old == &reference)) {
-                content.push(MessageContent::Media { media_type, reference: Some(reference), bytes: None });
-            }
-        }
-    }
     let mirror_origin = native.map(|meta| projection_string(meta, index, "mirrorOrigin"))
         .transpose()?.flatten();
     let run_terminal = native.map(|meta| optional_alias_bool_message(meta, index, "runTerminal", &["runTerminal"]))
@@ -855,6 +851,29 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
     let identity_sequence = native.map(|meta| optional_u64_message(meta, index, "seq")).transpose()?.flatten().filter(|seq| *seq > 0)
         .or(envelope.map(|envelope| optional_u64_message(envelope, index, "messageSeq")).transpose()?.flatten().filter(|seq| *seq > 0));
     let sequence = identity_sequence.or(optional_alias_u64_pair_message(message, index, "seq", "sequence")?);
+    if let Some(media) = native.and_then(|meta| meta.get("media")).and_then(Value::as_array) {
+        for (fact_index, fact) in media.iter().enumerate() {
+            let Some(fact) = fact.as_object() else {
+                content.push(MessageContent::Omitted { kind: OmittedContentKind::UnsafeMedia });
+                continue;
+            };
+            if fact.get("hydrationSuppressed").and_then(Value::as_bool) == Some(true) { continue; }
+            let source = fact.get("url").and_then(Value::as_str);
+            let reference = source.and_then(|source| {
+                if crate::session::operation::media::inbound_source(source) {
+                    crate::session::operation::media::media_reference(
+                        native_session_id, identity_message_id.as_deref(), identity_sequence, fact_index, source,
+                    )
+                } else { safe_native_media_reference(source) }
+            });
+            let media_type = explicit_media_type(fact).or_else(|| fact.get("contentType").and_then(Value::as_str)
+                .filter(|value| valid_media_reference_shape(value, MAX_TOOL_NAME_BYTES)).map(str::to_owned))
+                .or_else(|| source.and_then(infer_media_type));
+            if reference.is_none() || !content.iter().any(|block| matches!(block, MessageContent::Media { reference: old, .. } if old == &reference)) {
+                content.push(MessageContent::Media { media_type, reference, bytes: None });
+            }
+        }
+    }
     let after_sequence = match envelope.and_then(|envelope| envelope.get("afterSequence")) {
         None => None,
         Some(Value::Null) => Some(None),

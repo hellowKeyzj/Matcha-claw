@@ -1,15 +1,15 @@
-import { getAttachmentImageCacheStats } from '@/stores/chat/attachment-helpers';
+import { getAttachmentImageCacheStats } from '@/plugins/chat/store/attachment-helpers';
 import {
   useChatStore,
   type AttachedFileMeta,
   type ChatStoreState,
-} from '@/stores/chat';
-import { isSessionHistoryReady } from '@/stores/chat/store-state-helpers';
+} from '@/plugins/chat/store';
+import { isSessionHistoryReady } from '@/plugins/chat/store/store-state-helpers';
 import type { SessionRenderItem } from '../types/session/render-item';
-import { getMarkdownRenderCacheStats } from '@/pages/Chat/md-pipeline';
-import { getStaticRenderItemsCacheStats } from '@/pages/Chat/chat-render-items-cache';
+import { getMarkdownRenderCacheStats } from '@/plugins/message-rendering/md-pipeline';
+import { getStaticRenderItemsCacheStats } from '@/plugins/message-rendering/chat-render-items-cache';
 import { hostApiFetch } from './host-api';
-import { getSessionWindowCacheStats } from '@/stores/chat/session-projection-state';
+import { getSessionWindowCacheStats } from '@/plugins/chat/store/session-projection-state';
 
 interface RendererHeapMemoryStats {
   usedJsHeapSize: number;

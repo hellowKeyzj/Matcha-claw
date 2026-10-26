@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { SecurityPage } from '@/pages/Security';
+import { SecurityPage } from '@/plugins/security';
+import { securityPlugin } from '@/plugins/security/plugin';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
 import {
   hostSecurityApplyRemediation,
   hostSecurityCheckAdvisories,
@@ -15,7 +19,7 @@ import {
   SECURITY_EMERGENCY_OUTCOME_UNKNOWN_MESSAGE,
   resolveSecurityEmergencyOutcome,
 } from '@/lib/security-runtime';
-import { useSecuritySupportStore } from '@/stores/security-support-store';
+import { useSecuritySupportStore } from '@/plugins/security/security-support-store';
 
 const { toastSuccessMock, toastErrorMock } = vi.hoisted(() => ({
   toastSuccessMock: vi.fn(),
@@ -48,11 +52,11 @@ const gatewayState = {
   isInitialized: true,
 };
 
-vi.mock('@/stores/subagents', () => ({
+vi.mock('@/plugins/agents/stores/subagents', () => ({
   useSubagentsStore: (selector: (state: typeof subagentsState) => unknown) => selector(subagentsState),
 }));
 
-vi.mock('@/stores/gateway', () => ({
+vi.mock('@/plugins/runtime/store', () => ({
   useGatewayStore: (selector: (state: typeof gatewayState) => unknown) => selector(gatewayState),
 }));
 
@@ -115,8 +119,14 @@ const policy = {
   },
 };
 
+const pluginHost = createPluginHost([applicationShellPlugin, securityPlugin]);
+
 function mountPage() {
-  return render(<MemoryRouter><SecurityPage /></MemoryRouter>);
+  return render(
+    <PluginHostProvider host={pluginHost}>
+      <MemoryRouter><SecurityPage /></MemoryRouter>
+    </PluginHostProvider>,
+  );
 }
 
 describe('SecurityPage API 接入', () => {
@@ -189,7 +199,7 @@ describe('SecurityPage API 接入', () => {
     useSecuritySupportStore.setState({ activeSection: 'actionCenter' });
 
     mountPage();
-    fireEvent.click(screen.getByRole('button', { name: 'actionCenter.emergency' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'actionCenter.emergency' }));
 
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalledWith(SECURITY_EMERGENCY_OUTCOME_UNKNOWN_MESSAGE);
@@ -299,7 +309,7 @@ describe('SecurityPage API 接入', () => {
     ]);
   });
 
-  it('页面加载前审计区显示准备中，不显示停止文案', () => {
+  it('页面加载前审计区显示准备中，不显示停止文案', async () => {
     gatewayState.isInitialized = false;
     gatewayState.status = {
       ...gatewayState.status,
@@ -313,7 +323,7 @@ describe('SecurityPage API 接入', () => {
 
     mountPage();
 
-    expect(screen.getByText('audit.gatewayPreparing')).toBeInTheDocument();
+    expect(await screen.findByText('audit.gatewayPreparing')).toBeInTheDocument();
     expect(screen.queryByText('audit.gatewayStopped')).not.toBeInTheDocument();
   });
 });

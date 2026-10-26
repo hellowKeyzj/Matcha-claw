@@ -1,5 +1,9 @@
 mod model;
 mod store;
+mod versions;
+
+pub use versions::{WikiVersionContent, WikiVersionExport, WikiVersionInput};
+pub(crate) use versions::{capture as capture_version, export as export_version};
 
 pub(crate) use store::{replace_store, version_id, write_private_store, write_store};
 
@@ -194,6 +198,7 @@ pub(crate) fn restore(
         path: path.to_owned(),
     })?;
     let relative = store::relative_path(&root, &file);
+    capture_version(&root, path, current.as_bytes())?;
     if current != selected.content && !entries.last().is_some_and(|entry| entry.content == current)
     {
         entries.push(store::entry(
@@ -210,6 +215,7 @@ pub(crate) fn restore(
         store::write_entries(&history_path, &entries)?;
         store::prune_store(&root, &history_path)?;
     }
+    capture_version(&root, path, selected.content.as_bytes())?;
     fs::write(&file, selected.content.as_bytes()).map_err(|error| store::io(&file, error))?;
     let metadata = fs::metadata(&file).map_err(|error| store::io(&file, error))?;
     let revision = WikiRevision::for_bytes(

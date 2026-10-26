@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { formatTimestamp } from '@/pages/Chat/message-utils';
+import { formatTimestamp } from '@/plugins/message-rendering/message-utils';
 
 describe('chat message utils', () => {
   it('returns empty string for invalid timestamp values', () => {

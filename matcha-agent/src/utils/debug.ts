@@ -101,10 +101,13 @@ export const getDebugFilePath = memoize((): string | null => {
   return null
 })
 
-function shouldLogDebugMessage(message: string): boolean {
+function shouldLogDebugMessage(message: string, matchaTrace: boolean): boolean {
   if (process.env.NODE_ENV === 'test' && !isDebugToStdErr()) {
     return false
   }
+
+  // Matcha trace enables only explicitly projected records, never all debug logs.
+  if (matchaTrace) return process.env.MATCHACLAW_TRACE === '1'
 
   // Non-ants only write debug logs when debug mode is active (via --debug at
   // startup or /debug mid-session). Ants always log for /share, bug reports.
@@ -161,7 +164,7 @@ function getDebugWriter(): BufferedWriter {
         const dir = dirname(path)
         const needMkdir = ensuredDir !== dir
         ensuredDir = dir
-        if (isDebugMode()) {
+        if (isDebugMode() || process.env.MATCHACLAW_TRACE === '1') {
           // immediateMode: must stay sync. Async writes are lost on direct
           // process.exit() and keep the event loop alive in beforeExit
           // handlers (infinite loop with Perfetto tracing). See #22257.
@@ -198,7 +201,7 @@ function getDebugWriter(): BufferedWriter {
       },
       flushIntervalMs: 1000,
       maxBufferSize: 100,
-      immediateMode: isDebugMode(),
+      immediateMode: isDebugMode() || process.env.MATCHACLAW_TRACE === '1',
     })
     registerCleanup(async () => {
       debugWriter?.dispose()
@@ -215,14 +218,15 @@ export async function flushDebugLogs(): Promise<void> {
 
 export function logForDebugging(
   message: string,
-  { level }: { level: DebugLogLevel } = {
-    level: 'debug',
-  },
+  { level = 'debug', matchaTrace = false }: {
+    level?: DebugLogLevel
+    matchaTrace?: boolean
+  } = {},
 ): void {
-  if (LEVEL_ORDER[level] < LEVEL_ORDER[getMinDebugLogLevel()]) {
+  if (!matchaTrace && LEVEL_ORDER[level] < LEVEL_ORDER[getMinDebugLogLevel()]) {
     return
   }
-  if (!shouldLogDebugMessage(message)) {
+  if (!shouldLogDebugMessage(message, matchaTrace)) {
     return
   }
   if (sealedModelContext()) message = SEALED_REDACTION
@@ -233,7 +237,7 @@ export function logForDebugging(
   }
   const timestamp = new Date().toISOString()
   const output = `${timestamp} [${level.toUpperCase()}] ${message.trim()}\n`
-  if (isDebugToStdErr()) {
+  if (isDebugToStdErr() && !matchaTrace) {
     writeToStderr(output)
     return
   }

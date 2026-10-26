@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { extractMessageText, normalizeMessageRole } from '../../src/stores/chat/message-content';
+import { extractMessageText, normalizeMessageRole } from '../../src/plugins/chat/store/message-content';
 import {
   sanitizeAssistantDisplayText,
   sanitizeCanonicalUserText,
-} from '../../src/stores/chat/message-display';
-import { normalizeRawChatMessage } from '../../src/stores/chat/message-identity';
+} from '../../src/plugins/chat/store/message-display';
+import { normalizeRawChatMessage } from '../../src/plugins/chat/store/message-identity';
 import {
   isAssistantControlPrefixMessage,
   isInternalRuntimeDisplayMessage,
   shouldPreserveCanonicalTranscriptMessage,
-} from '../../src/stores/chat/message-filter';
+} from '../../src/plugins/chat/store/message-filter';
 
 describe('chat message normalization', () => {
   it('normalizes message content roles and text blocks', () => {

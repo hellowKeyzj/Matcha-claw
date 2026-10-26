@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { SubagentFilesPreview } from '@/pages/SubAgents/components/SubagentFilesPreview';
+import { SubagentFilesPreview } from '@/plugins/agents/pages/components/SubagentFilesPreview';
 import type { SubagentTargetFile } from '@/types/subagent';
 
 describe('subagents files preview', () => {

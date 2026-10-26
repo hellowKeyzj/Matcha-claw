@@ -78,6 +78,39 @@ impl AuditOutcome for TeamRuntimeStatus {
     }
 }
 
+impl AuditFailure for crate::task_execution::TaskExecutionReceipt {
+    fn outcome(&self) -> Outcome {
+        use crate::task_execution::TaskExecutionState;
+        match &self.state {
+            TaskExecutionState::Rejected(_) => Outcome::Rejected,
+            TaskExecutionState::Unknown => Outcome::OutcomeUnknown,
+            TaskExecutionState::Unavailable => Outcome::Unavailable,
+            TaskExecutionState::Pending
+            | TaskExecutionState::Accepted
+            | TaskExecutionState::Terminal => Outcome::Read,
+        }
+    }
+}
+
+impl AuditOutcome for crate::task_execution::TaskExecutionReceipt {
+    fn summarize(&self, detail: &mut OrganizationCallDetail) {
+        detail.team_reference(self.identity.selection.team_id.as_str());
+        detail.run_reference(self.identity.run_id.as_str());
+        detail.set_outcome(self.outcome());
+    }
+}
+
+impl AuditOutcome
+    for (
+        crate::task_execution::TaskExecutionReceipt,
+        Vec<crate::ActivityExecutionRequest>,
+    )
+{
+    fn summarize(&self, detail: &mut OrganizationCallDetail) {
+        self.0.summarize(detail);
+    }
+}
+
 impl AuditFailure for TeamSkillSelectionError {
     fn outcome(&self) -> Outcome {
         match self {

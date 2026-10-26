@@ -1,10 +1,12 @@
 import { invokeIpc } from '@/lib/api-client';
 import type { CallReceipt } from '@/types/call-log';
+import type { AppPluginCatalog, AppPluginInspection, InstalledAppPlugin } from '@/types/desktop/app-plugin';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
 import { decodeSecurityCallDetail } from '@/types/call-log/security';
 import { waitForCall } from './call-log-await';
 import { decodeNativePolicyResult, isNativePolicyRequest, type NativePolicyRequest, type NativePolicyResult } from '@/types/native-policy';
 import { createSessionPermissionRequest, decodeSessionPermissionResult, type SessionPermissionGetResult, type SessionPermissionSetResult, type SessionPermissionSelection } from '@/types/session-permission';
+import { createSessionThinkingRequest, decodeSessionThinkingResult, type SessionThinkingResult, type SessionThinkingScope } from '@/types/session-thinking';
 import { decodeWikiCallResult, type WikiCallResult } from '@/types/wiki-call-result';
 import { decodeWikiNavigation, type WikiNavigation } from '@/types/wiki-navigation';
 import { decodeWikiSelectionTask, type WikiSelectionInput, type WikiSelectionSnapshot, type WikiSelectionTask } from '@/types/wiki-selection';
@@ -136,7 +138,6 @@ const SESSION_TRACE_HEADER = 'X-MatchaClaw-Session-Trace';
 export interface OpenClawStatusPayload {
   packageExists: boolean;
   isBuilt: boolean;
-  dir: string;
   version?: string;
 }
 
@@ -342,6 +343,39 @@ function parseUnifiedProxyResponse<T>(
     if (result !== null) return result;
   }
   return unwrapHostApiProxyEnvelope<T>(envelope, { method, path }).data;
+}
+
+export function hostAppPluginRequest<T>(operation: string, body?: unknown): Promise<T> {
+  return hostApiFetch<T>(operation ? `/api/app-plugins/${operation}` : '/api/app-plugins', body === undefined
+    ? undefined
+    : { method: 'POST', body: JSON.stringify(body) });
+}
+
+export function hostAppPluginCatalog(): Promise<AppPluginCatalog> {
+  return hostAppPluginRequest('');
+}
+
+export function hostAppPluginInspect(packageBase64: string): Promise<AppPluginInspection> {
+  return hostAppPluginRequest('inspect', { packageBase64 });
+}
+
+export function hostAppPluginImport(packageBase64: string, digest: string): Promise<InstalledAppPlugin> {
+  return hostAppPluginRequest('import', { packageBase64, digest });
+}
+
+export function hostAppPluginBundle(id: string, digest: string, entry: string): Promise<{ html: string }> {
+  return hostAppPluginRequest('bundle', { id, digest, entry });
+}
+
+export function hostAppPluginRuntimeStatus(input: {
+  pluginId: string;
+  digest: string;
+  entry: string;
+  instanceId: string;
+  state: 'mounted' | 'ready' | 'error' | 'disposed';
+  message?: string;
+}): Promise<void> {
+  return hostAppPluginRequest('runtime-status', input);
 }
 
 export async function hostApiFetch<T>(path: string, init?: HostApiRequestInit): Promise<T> {
@@ -1329,6 +1363,9 @@ export async function hostFileThumbnails(payload: {
 }
 
 type WorkspaceMediaThumbnailPayload = {
+  reference: string;
+  sessionIdentity: SessionIdentity;
+} | {
   relativePath: string;
   mimeType: string;
   sessionIdentity: SessionIdentity;
@@ -1342,6 +1379,12 @@ type WorkspaceMediaThumbnailPayload = {
 export async function hostWorkspaceMediaThumbnail(
   payload: WorkspaceMediaThumbnailPayload,
 ): Promise<FileThumbnailResult> {
+  if ('reference' in payload && (payload.reference.length === 0
+    || payload.reference.length > 512
+    || /[^A-Za-z0-9._:-]/.test(payload.reference)
+    || /^[A-Za-z]:/.test(payload.reference))) {
+    return { preview: null, fileSize: 0, error: 'invalidPath' };
+  }
   if ('relativePath' in payload && !isSafeWorkspaceRelativePath(payload.relativePath)) {
     return { preview: null, fileSize: 0, error: 'invalidPath' };
   }
@@ -1350,13 +1393,15 @@ export async function hostWorkspaceMediaThumbnail(
   }
 
   try {
-    const input = 'relativePath' in payload
-      ? { relativePath: payload.relativePath, mimeType: payload.mimeType }
-      : {
-        gatewayUrl: payload.gatewayUrl,
-        mimeType: payload.mimeType,
-        agentId: payload.agentId,
-      };
+    const input = 'reference' in payload
+      ? { reference: payload.reference }
+      : 'relativePath' in payload
+        ? { relativePath: payload.relativePath, mimeType: payload.mimeType }
+        : {
+          gatewayUrl: payload.gatewayUrl,
+          mimeType: payload.mimeType,
+          agentId: payload.agentId,
+        };
     const thumbnail = await hostCapabilityExecute<unknown>(workspaceMediaPayload(
       'media.thumbnail',
       payload.sessionIdentity,
@@ -1594,10 +1639,12 @@ export async function hostRuntimeConnectorDisconnect(payload: {
 export async function hostCapabilityDescribe(payload: {
   id: string;
   scope: RuntimeScope;
-}): Promise<{ capability: CapabilityDescriptor }> {
+}, options?: SessionCapabilityOptions): Promise<{ capability: CapabilityDescriptor }> {
   return hostApiFetch('/api/capabilities/describe', {
     method: 'POST',
     body: JSON.stringify(payload),
+    headers: withSessionTraceHeader(undefined, options?.traceId),
+    timeoutMs: options?.timeoutMs,
   });
 }
 
@@ -1857,6 +1904,57 @@ export async function hostSessionPermissionSet(
   });
   const result = failure ?? decodeSessionPermissionResult(200, response, request);
   if (!result) throw new Error('Invalid session permission result');
+  return result;
+}
+
+export async function hostSessionThinkingGet(
+  payload: { scope: SessionThinkingScope; modelSelectionId?: string },
+  options?: SessionCapabilityOptions,
+): Promise<SessionThinkingResult> {
+  const request = createSessionThinkingRequest(payload.scope, payload.modelSelectionId === undefined ? {} : { modelSelectionId: payload.modelSelectionId });
+  const traceId = options?.traceId ?? createSessionTraceId('session.thinking.get');
+  logSessionTrace('hostapi.thinking.request', traceId, () => ({
+    operationId: request.operationId, scopeKind: payload.scope.kind,
+    scopeHash: summarizeIdentifier(buildCapabilityScopeKey(payload.scope)).hash,
+    modelSelection: summarizeIdentifier(payload.modelSelectionId),
+  }));
+  const response = await hostCapabilityExecute<unknown>(request, {
+    ...options, traceId, timeoutMs: options?.timeoutMs ?? SESSION_PEER_RPC_TIMEOUT_MS,
+  });
+  const result = decodeSessionThinkingResult(response, request);
+  logSessionTrace('hostapi.thinking.response', traceId, () => ({
+    outcome: result?.outcome ?? 'invalid_readback',
+    ...(result && 'options' in result ? {
+      level: summarizeIdentifier(result.level), effectiveLevel: summarizeIdentifier(result.effectiveLevel),
+      options: result.options.map((level) => summarizeIdentifier(level)),
+    } : {}),
+  }));
+  if (!result) throw new Error('Invalid session thinking result');
+  return result;
+}
+
+export async function hostSessionThinkingSet(
+  payload: { identity: SessionIdentity; level: string | null },
+  options?: SessionCapabilityOptions,
+): Promise<SessionThinkingResult> {
+  const request = createSessionThinkingRequest(sessionScope(payload.identity), { level: payload.level });
+  const traceId = options?.traceId ?? createSessionTraceId('session.thinking.set');
+  logSessionTrace('hostapi.thinking.request', traceId, () => ({
+    operationId: request.operationId, identity: summarizeSessionIdentity(payload.identity), requestedLevel: summarizeIdentifier(payload.level),
+  }));
+  const response = await hostCapabilityExecute<unknown>(request, {
+    ...options, traceId, timeoutMs: options?.timeoutMs ?? SESSION_PEER_RPC_TIMEOUT_MS,
+  });
+  const result = decodeSessionThinkingResult(response, request);
+  logSessionTrace('hostapi.thinking.response', traceId, () => ({
+    outcome: result?.outcome ?? 'invalid_readback',
+    ...(result && 'options' in result ? {
+      level: summarizeIdentifier(result.level), effectiveLevel: summarizeIdentifier(result.effectiveLevel),
+      options: result.options.map((level) => summarizeIdentifier(level)),
+    } : {}),
+    ...(result?.outcome === 'confirmed' ? { persisted: result.persisted, applied: result.applied } : {}),
+  }));
+  if (!result) throw new Error('Invalid session thinking result');
   return result;
 }
 

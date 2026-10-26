@@ -1325,7 +1325,7 @@ impl TeamRunCommandOutcome {
     }
 }
 
-fn agent_task_execution_request(
+pub(super) fn agent_task_execution_request(
     store: &OrganizationStore,
     activity: &ActivityRequest,
 ) -> Result<ActivityExecutionRequest, TeamRunActivityError> {
@@ -1353,6 +1353,7 @@ fn agent_task_execution_request(
         return Err(TeamRunActivityError::InvalidBinding);
     }
     ActivityExecutionRequest::agent_task(run.team(), activity, binding)
+        .map(|request| request.with_execution_context(run.task_execution_context().cloned()))
         .map_err(team_run_activity_error)
 }
 

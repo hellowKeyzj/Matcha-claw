@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import { ChatApprovalDock, ChatErrorBanner, ChatRuntimeStatusDock } from '@/pages/Chat/components/ChatRuntimeDock';
-import { ChatImageLightbox } from '@/pages/Chat/components/ChatImageLightbox';
-import type { ApprovalItem } from '@/stores/chat';
+import { ChatApprovalDock, ChatErrorBanner, ChatRuntimeStatusDock } from '@/plugins/chat/components/ChatRuntimeDock';
+import { ChatImageLightbox } from '@/plugins/chat/components/ChatImageLightbox';
+import type { ApprovalItem } from '@/plugins/chat/store';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({

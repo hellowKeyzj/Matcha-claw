@@ -2,9 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-import { useTeamsStore } from '@/stores/teams';
-import { useRuntimeHostStore } from '@/stores/gateway';
-import { TeamChat } from '@/pages/Teams/TeamChat';
+import { useTeamsStore } from '@/plugins/teams/store';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
+import { TeamChat } from '@/plugins/teams/pages/TeamChat';
 import i18n from '@/i18n';
 
 describe('team chat', () => {

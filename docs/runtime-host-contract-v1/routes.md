@@ -32,6 +32,16 @@ Renderer public entry 由 Electron [capabilities.ts](../../electron/api/routes/c
 
 Evidence: [capabilities.ts](../../electron/api/routes/capabilities.ts)、[cron.ts](../../electron/api/routes/cron.ts)、[runtime-host-delivery/control.ts](../../electron/main/runtime-host-delivery/control.ts)、[private_control.rs](../../runtime-host/host/src/module_registry/private_control.rs)、[http/router.rs](../../runtime-host/host/src/http/router.rs)。
 
+### World 独立评测私有入口（非 HTTP route）
+
+| Renderer Main IPC | private Host control | 私有输入／职责 |
+| --- | --- | --- |
+| `world:prepareEvaluation({world})` | `world.evaluation.prepare` | Main 原生 picker 读取配置；Host 接 `{world,configuration}`，严格解码并做纯配置校验，返回 Main-held 原配置与 safe summary，不是 DB 授权验证。 |
+| `world:commitEvaluation({world,ticket,accept})` | `world.evaluation.install` | Main 重核 ticket／admission 后交完整原输入，现有 root-only World owner 安装，返回 exact receipt 或 typed rejected／unknown。 |
+| `world:evaluationStatus({world})` | `world.evaluation.status` | 只读持久 canonical，返回 `{world,configured,commitId}`；不是当前权限或 ready 证明。 |
+
+三条 IPC 已列入 preload runtime-owned 名单；三条 control 注册于 Host private catalog，不加入普通 signed World HTTP 路由。[VERIFY: electron/preload/ipc-contract.ts:52-62] [VERIFY: electron/main/world/private-ipc.ts:32-54] [VERIFY: runtime-host/host/src/module_registry/private_control.rs:29-57,145-181,260-271] [VERIFY: runtime-host/host/src/bootstrap/world_evaluation.rs:8-55] [VERIFY: runtime-host/modules/world/src/owner/runtime.rs:375-392,598-603]
+
 ## B. capability and topology surface
 
 | Method | Path | Classification | Notes |
@@ -59,8 +69,11 @@ Session 操作经 `/api/capabilities/execute`；Main 校验后投影到 fixed si
 | `POST /api/sessions/send` | id=`session.prompt`、operationId=`sessions.send`；三处完整 identity 匹配，input=`{identity:I,endpointSessionId?,message,runId?,idempotencyKey?,deliver?,attachments}`，无 routeKey。既有 response 不变。 |
 | `POST /api/sessions/abort` | id=`session.abort`、operationId=`sessions.abort`；三处完整 identity 匹配，input=`{identity:I,endpointSessionId?,runId?,approvalIds?}`；无审批不发空 approvalIds，既有 response 不变。 |
 | `GET /api/sessions/events` | signed Session SSE；delta 与成功同步 commit resync，Main 只向 authorized complete identity 的页面投递，非全窗口广播。 |
+| `POST /api/sessions/thinking` | id=`session.thinking`；scope/target 相同，AgentScope 仅 `sessions.thinking.get`、SessionScope 可 get/set；GET input=`{modelSelectionId?}`，SET input=`{level:string|null}`。200 返回 typed available／confirmed／失败 outcome，详见 [Renderer 思考合同](renderer-api.md#session-思考强度本轮显式合同)。 |
 
 observe/release signed decision scope=`sessions:read`、capability=`session.management`、subject=`session-timeline`、endpoint 为 exact route；invalid/rejected400，unavailable/unknown503。leaseId 不替代身份或 native 授权，opaque history cursor/generation 不公开。[VERIFY: runtime-host/modules/sessions/src/adapters/loopback/observation.rs:9-76] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/observation.ts:9-76] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/send.ts:22-35] [VERIFY: electron/main/runtime-host-delivery/transport/sessions/abort.ts:12-41]
+
+thinking signed decision 使用 GET `sessions:read`／SET `sessions:write`、capability `session.thinking`、subject `session-thinking`；错误 envelope／授权分别为 400／401。此处 GET／SET 是 capability operation，HTTP 均为 POST。`level:null` 清 override，不等于关闭；typed confirmed 与模型执行分开。[VERIFY: electron/main/runtime-host-delivery/transport/sessions/thinking.ts:11-47] [VERIFY: runtime-host/modules/sessions/src/adapters/loopback/thinking.rs:135-191]
 
 ### Legacy session routes
 
@@ -121,6 +134,10 @@ configure/delete 已接入 native config store：非 running 时锁内原子提�
 WhatsApp 删除在每次配置提交前按 native 账户继承/覆盖与 Gateway cwd 解析 `authDir`，构造 cleanup plan；提交确认后才清理。managed `credentials/whatsapp` 严格子目录可递归删除，legacy OAuth 根仅清 Baileys 文件；共享目录、外部路径、父根、symlink/reparse escape 与越界 OAuth override 在提交前拒绝。CAS 耗尽返回 `target_rejected`，提交后清理失败返回 `unknown`。离线表单仅投影有依据的标量字段，不以空表单表示成功；微信 `2.4.8` 的真正 channel schema 仅含 `replyProgressMessages`，不混用插件级配置 schema。插件未安装、来源歧义或 schema 不可读仍返回 `unknown`；当前本地 `2026.9.2` 安装包未包含 WhatsApp extension，未验证其离线表单。上述不表示所有 ClawX 边缘行为或真实登录/删除现场已验证。
 
 当前实现依据：`runtime-host/modules/channels/src/adapters/loopback/delete.rs`、`runtime-host/modules/channels/src/owner/actor.rs`、`runtime-host/integrations/openclaw/src/surfaces/channels/adapter.rs`、`runtime-host/integrations/openclaw/src/surfaces/channels/gateway/status.rs` 与 `surfaces/channels/gateway/config.rs`、`surfaces/channels/gateway/config/{mutation,credentials}.rs`。
+
+Provider accounts 的原路由不扩展：Renderer `GET /api/provider-accounts` 经 Main 转 signed `POST /api/provider-accounts`；`providerAccounts.list` 返回 200 `{accounts,reports}`，`providerAccounts.get` 返回 200 `{account,reports}`，均必带 reports。get 是既有 signed operation，不是下方被拒绝的 Renderer `GET /api/provider-accounts/:id`。`GET /:id/has-api-key` 仍只返回 `{hasKey:boolean}`，失败不伪造 false，也不是 ready 证明。[VERIFY: electron/api/routes/provider-accounts.ts:23-78] [VERIFY: electron/main/runtime-host-delivery/transport/providers/accounts.ts:58-84,162-188,251-259] [VERIFY: src/lib/provider-accounts.ts:370-395]
+
+Accounts replace/delete、models replace、routing replace 接单仍 strict 202；安全 mutation detail 的 native 保留 changed/applied/observed 并必带 reports。当前报告只从 ProviderOwner snapshot 经原读路径返回，不从历史 receipt 恢复，不加 health 路由或 polling；逐 peer/account 字段与消费语义见 [Renderer Provider 报告](renderer-api.md#provider-当前运行报告)，验收见 [Provider dev](../architecture-knowledge/modules/provider-model-secret/dev.md#2026-10-26-单账号故障隔离验证-open)。
 
 `/api/provider-models/discover` response 只保留 public model option 字段：`modelId`、`capabilities`、`contextWindow`、`maxTokens`、`timeoutMs`、`aspectRatio`、`resolution`、`quality`；不返回 `source`、`checkedAt`、`apiKey`、`baseUrl`、`headers`、`runtimeModelRef`、`accountId`。
 

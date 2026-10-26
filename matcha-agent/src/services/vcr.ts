@@ -94,7 +94,11 @@ export async function withVCR(
   messages: Message[],
   f: () => Promise<(AssistantMessage | StreamEvent | SystemAPIErrorMessage)[]>,
 ): Promise<(AssistantMessage | StreamEvent | SystemAPIErrorMessage)[]> {
-  if (sealedModelContext() || hasSealedSkillReferences(messages) || !shouldUseVCR()) {
+  if (
+    sealedModelContext() ||
+    hasSealedSkillReferences(messages) ||
+    !shouldUseVCR()
+  ) {
     return await f()
   }
 
@@ -361,7 +365,11 @@ export async function* withStreamingVCR(
   StreamEvent | AssistantMessage | SystemAPIErrorMessage,
   void
 > {
-  if (sealedModelContext() || hasSealedSkillReferences(messages) || !shouldUseVCR()) {
+  if (
+    sealedModelContext() ||
+    hasSealedSkillReferences(messages) ||
+    !shouldUseVCR()
+  ) {
     return yield* f()
   }
 

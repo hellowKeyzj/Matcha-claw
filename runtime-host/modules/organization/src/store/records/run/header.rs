@@ -19,6 +19,8 @@ struct Header {
     gate: Gate,
     #[serde(default)]
     retired_executions: Vec<(String, String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_execution_context: Option<crate::TaskExecutionContext>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,6 +60,7 @@ pub(crate) struct RunHeader {
     pub(crate) gate: RunStartGate,
     pub(crate) retired_executions:
         std::collections::BTreeSet<(crate::NodeId, crate::ExecutionFence)>,
+    pub(crate) task_execution_context: Option<crate::TaskExecutionContext>,
 }
 
 pub(crate) fn encode_header(run: &GraphRunFacts) -> Result<StoredRecord, StoreFault> {
@@ -84,6 +87,7 @@ pub(crate) fn encode_header(run: &GraphRunFacts) -> Result<StoredRecord, StoreFa
     }).collect());
     record(run.team(), run.run_id(), RecordKind::RunHeader, "", &Header {
         revision: run.frozen_team_revision().get(), runtime,
+        task_execution_context: run.task_execution_context().cloned(),
         creation_key: run.lifecycle().creation_idempotency_key().to_owned(), lifecycle, gate,
         retired_executions: run
             .retired_executions()
@@ -142,7 +146,13 @@ pub(crate) fn decode_header(row: &StoredRecord) -> Result<RunHeader, StoreFault>
             return Err(StoreFault::InvalidFacts);
         }
     }
+    if header.task_execution_context.as_ref().is_some_and(|context| {
+        !context.valid() || context.root_request_id != lifecycle.creation_idempotency_key()
+    }) {
+        return Err(StoreFault::InvalidFacts);
+    }
     Ok(RunHeader {
+        task_execution_context: header.task_execution_context,
         team,
         run,
         revision,

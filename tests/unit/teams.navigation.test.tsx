@@ -3,14 +3,21 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import App from '@/App';
 import { Sidebar } from '@/components/layout/Sidebar';
-import { useChatStore } from '@/stores/chat';
-import { useRuntimeHostStore } from '@/stores/gateway';
+import { useChatStore } from '@/plugins/chat/store';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { applicationPages, applicationShellPlugin } from '@/app/extensions';
+import { teamsPlugin } from '@/plugins/teams/plugin';
+import { chatPlugin } from '@/plugins/chat/plugin';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
 import { useLayoutStore } from '@/stores/layout';
-import { useSettingsStore } from '@/stores/settings';
-import { useAccountStore } from '@/stores/account';
-import { useSubagentsStore } from '@/stores/subagents';
-import { preloadLazyRouteForPath } from '@/lib/route-preload';
+import { useSettingsStore } from '@/plugins/settings/store';
+import { useAccountStore } from '@/plugins/account/stores/account';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
+import { preloadRoute } from '@/app/routes';
 import i18n from '@/i18n';
+
+const host = createPluginHost([applicationShellPlugin, chatPlugin, teamsPlugin]);
 
 function LocationEcho() {
   const location = useLocation();
@@ -93,7 +100,9 @@ describe('teams navigation', () => {
 
     render(
       <MemoryRouter>
-        <Sidebar />
+        <PluginHostProvider host={host}>
+          <Sidebar />
+        </PluginHostProvider>
       </MemoryRouter>,
     );
 
@@ -102,20 +111,39 @@ describe('teams navigation', () => {
 
   it('redirects /teams while the feature flag is off', async () => {
     enableMainAppRoutes();
+    vi.stubEnv('VITE_ENABLE_TEAMS_FEATURE', 'false');
+    vi.resetModules();
+    try {
+      const [{ teamsPlugin: disabledTeamsPlugin }, { applicationShellPlugin: shellPlugin }, { chatPlugin: disabledChatPlugin }] = await Promise.all([
+        import('@/plugins/teams/plugin'),
+        import('@/app/extensions'),
+        import('@/plugins/chat/plugin'),
+      ]);
+      const disabledHost = createPluginHost([shellPlugin, disabledChatPlugin, disabledTeamsPlugin]);
+      render(
+        <MemoryRouter initialEntries={['/teams']}>
+          <PluginHostProvider host={disabledHost}>
+            <App />
+          </PluginHostProvider>
+          <LocationEcho />
+        </MemoryRouter>,
+      );
 
-    render(
-      <MemoryRouter initialEntries={['/teams']}>
-        <App />
-        <LocationEcho />
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByTestId('location-echo')).toHaveTextContent('/');
-    expect(screen.queryByText('Agents Workspace')).not.toBeInTheDocument();
+      expect(await screen.findByTestId('location-echo')).toHaveTextContent('/');
+      expect(screen.queryByText('Agents Workspace')).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   });
 
   it('preloads teams routes when the feature flag is enabled by default', async () => {
-    await expect(preloadLazyRouteForPath('/teams')).resolves.toBeDefined();
-    await expect(preloadLazyRouteForPath('/teams/team-1')).resolves.toBeDefined();
+    const pages = host.get(applicationPages);
+    const listPreload = vi.spyOn(pages.find((page) => page.path === '/teams')!, 'preload');
+    const detailPreload = vi.spyOn(pages.find((page) => page.path === '/teams/:teamId')!, 'preload');
+    await preloadRoute(host, '/teams');
+    await preloadRoute(host, '/teams/team-1');
+    expect(listPreload).toHaveBeenCalledTimes(1);
+    expect(detailPreload).toHaveBeenCalledTimes(1);
   });
 });

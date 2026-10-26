@@ -1,18 +1,31 @@
 import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
-import type { ComponentProps } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ChatSidePanel } from '@/pages/Chat/components/ChatSidePanel';
+import { ChatSidePanel } from '@/plugins/chat/components/ChatSidePanel';
+import { useChatSidePanelController } from '@/plugins/chat/useChatSidePanelController';
+import type { ChatPanelContent } from '@/plugins/chat/workspace-actions';
 import {
   openChatRuntimeSurface,
-  useChatSidePanelController,
   type ChatRuntimeSurfaceDescriptor,
-} from '@/pages/Chat/useChatSidePanelController';
-import { useGatewayStore } from '@/stores/gateway';
+} from '@/plugins/surfaces/chat/runtime-surfaces';
+import { useGatewayStore } from '@/plugins/runtime/store';
 import { useLayoutStore } from '@/stores/layout';
-import { useChatStore } from '@/stores/chat';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { useChatStore } from '@/plugins/chat/store';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import { createReadyResourceStatusState } from '@/lib/resource-state';
 import { createOpenClawTestSessionIdentity } from './helpers/runtime-address-fixtures';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { chatPlugin } from '@/plugins/chat/plugin';
+import { filesPlugin } from '@/plugins/files/plugin';
+import { surfacesPlugin } from '@/plugins/surfaces/plugin';
+
+const pluginHost = createPluginHost([applicationShellPlugin, filesPlugin, surfacesPlugin, chatPlugin]);
+
+function PluginWrapper({ children }: { children: ReactNode }) {
+  return <PluginHostProvider host={pluginHost}>{children}</PluginHostProvider>;
+}
 
 const mocks = vi.hoisted(() => ({
   hostOpenClawBrowserRequest: vi.fn(),
@@ -28,16 +41,11 @@ vi.mock('@/lib/host-api', async (importOriginal) => {
   };
 });
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => {
-      if (key === 'artifacts.sectionLabel') {
-        return '产物';
-      }
-      return key;
-    },
-  }),
-}));
+vi.mock('react-i18next', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-i18next')>();
+  const t = (key: string) => key === 'artifacts.sectionLabel' ? '产物' : key;
+  return { ...actual, useTranslation: () => ({ t, i18n: { language: 'en' } }) };
+});
 
 vi.mock('sonner', () => ({
   toast: {
@@ -46,16 +54,24 @@ vi.mock('sonner', () => ({
   },
 }));
 
-vi.mock('@/components/file-preview/FilePreviewBody', () => ({
+vi.mock('@/plugins/files/FilePreviewBody', () => ({
   FilePreviewBody: () => <div data-testid="artifact-preview-body" />,
 }));
 
-vi.mock('@/components/file-preview/WorkspaceBrowserBody', () => ({
+vi.mock('@/plugins/files/WorkspaceBrowserBody', () => ({
   WorkspaceBrowserBody: () => <div data-testid="workspace-browser-body" />,
 }));
 
+const sessionIdentity = {
+  ...createOpenClawTestSessionIdentity('agent:main:main'),
+  endpoint: { kind: 'native-runtime' as const, runtimeAdapterId: 'openclaw' as const, runtimeInstanceId: 'local' },
+};
+const screenshotDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6vXkAAAAASUVORK5CYII=';
+const sandboxUrl = 'https://mcp-preview.test/mcp-app-sandbox';
+
 const browserSurface = {
   kind: 'browser-tab',
+  sourceSessionIdentity: sessionIdentity,
   targetId: 'target-browser-1',
   profile: 'default',
   target: 'host',
@@ -67,12 +83,7 @@ const mcpSurface = {
   kind: 'mcp-app',
   title: 'MCP Preview',
   viewId: 'view-1',
-  mcpApp: {
-    viewId: 'view-1',
-    originSessionKey: 'agent:main:main',
-    serverName: 'demo-server',
-    toolName: 'demo__view',
-  },
+  sessionIdentity,
 } satisfies ChatRuntimeSurfaceDescriptor;
 
 function createLayoutNode(width = 900): HTMLDivElement {
@@ -84,35 +95,29 @@ function createLayoutNode(width = 900): HTMLDivElement {
   return layoutNode;
 }
 
-function publishRuntimeSurface(surface: ChatRuntimeSurfaceDescriptor): void {
-  const { unmount } = renderHook(() => useChatSidePanelController(false, { current: createLayoutNode() }));
+function publishRuntimeSurface(surface: ChatRuntimeSurfaceDescriptor): ChatPanelContent | null {
+  const { result, unmount } = renderHook(() => useChatSidePanelController(true, { current: createLayoutNode() }, sessionIdentity), { wrapper: PluginWrapper });
   act(() => {
     openChatRuntimeSurface(surface);
   });
+  const accepted = result.current.panelContent;
   unmount();
+  return accepted;
 }
 
 function defaultSidePanelProps(): ComponentProps<typeof ChatSidePanel> {
   return {
     mode: 'docked',
+    sessionIdentity,
     width: 520,
     activeTab: 'runtime',
+    content: null,
+    layout: { position: 'right', fullscreen: false },
+    onLayoutChange: vi.fn(),
     artifactWorkbenchFullscreen: false,
     onTabChange: vi.fn(),
     onClose: vi.fn(),
     onToggleArtifactWorkbenchFullscreen: vi.fn(),
-    artifactGroups: [],
-    artifactFocusedGroupFiles: [],
-    artifactFocusedFile: null,
-    artifactActiveSection: 'workspace',
-    artifactViewMode: 'preview',
-    artifactWorkspaceRoot: null,
-    onArtifactFocusFile: vi.fn(),
-    onOpenGeneratedArtifactFile: vi.fn(),
-    onOpenArtifactGroup: vi.fn(),
-    onArtifactSectionChange: vi.fn(),
-    onArtifactViewModeChange: vi.fn(),
-    onArtifactRevealInFileManager: vi.fn(),
   };
 }
 
@@ -135,7 +140,6 @@ function resetChatRuntimeFixtures(): void {
   useLayoutStore.setState({ chatTakeoverMode: 'none' });
 
   const mainSession = createEmptySessionRecord();
-  const mainSessionIdentity = createOpenClawTestSessionIdentity('agent:main:main');
   useChatStore.setState({
     currentSessionKey: 'agent:main:main',
     sessionCatalogStatus: createReadyResourceStatusState(1),
@@ -144,9 +148,9 @@ function resetChatRuntimeFixtures(): void {
         ...mainSession,
         meta: {
           ...mainSession.meta,
-          runtimeScopeKey: 'native:openclaw:openclaw:default',
+          runtimeScopeKey: 'native:openclaw:openclaw:local',
           agentId: 'main',
-          sessionIdentity: mainSessionIdentity,
+          sessionIdentity,
         },
       },
     },
@@ -160,17 +164,22 @@ function resetChatRuntimeFixtures(): void {
       };
     }
     if (input.path?.includes('/screenshot')) {
-      return { dataUrl: 'data:image/png;base64,aW1hZ2U=' };
+      return { dataUrl: screenshotDataUrl };
     }
-    return {};
+    return { enabled: true, running: true };
   });
   mocks.hostOpenClawMcpAppRequest.mockReset();
   mocks.hostOpenClawMcpAppRequest.mockResolvedValue({
-    standaloneUrl: 'https://mcp-preview.test/standalone',
+    sessionIdentity,
+    viewId: 'view-1',
+    sandboxUrl,
     html: '<p>inline secret html</p>',
     toolInput: { token: 'input-secret' },
     toolResult: { token: 'result-secret' },
     private: { token: 'private-secret' },
+    readOnly: false,
+    messageSupported: true,
+    updateModelContextSupported: false,
   });
 }
 
@@ -182,14 +191,12 @@ describe('chat side panel runtime surface', () => {
   it('ignores the deprecated stored open flag while restoring side panel preferences', () => {
     window.localStorage.setItem('chat:side-panel-open', '1');
     window.localStorage.setItem('chat:side-panel-tab', 'artifacts');
-    window.localStorage.setItem('chat:side-panel-light-width', '480');
-    window.localStorage.setItem('chat:side-panel-artifact-width', '700');
+    window.localStorage.setItem('chat:side-panel-width', '700');
 
-    const { result } = renderHook(() => useChatSidePanelController(false, { current: createLayoutNode(1200) }));
+    const { result } = renderHook(() => useChatSidePanelController(true, { current: createLayoutNode(1200) }, sessionIdentity), { wrapper: PluginWrapper });
 
     expect(result.current.sidePanelOpen).toBe(false);
     expect(result.current.activeSidePanelTab).toBe('artifacts');
-    expect(result.current.sidePanelWidthPolicy).toBe('artifacts');
     expect(result.current.sidePanelPreferredWidth).toBe(700);
 
     act(() => {
@@ -198,15 +205,14 @@ describe('chat side panel runtime surface', () => {
 
     expect(result.current.sidePanelOpen).toBe(true);
     expect(result.current.activeSidePanelTab).toBe('runtime');
-    expect(result.current.sidePanelWidthPolicy).toBe('light');
-    expect(result.current.sidePanelPreferredWidth).toBe(480);
+    expect(result.current.sidePanelPreferredWidth).toBe(700);
   });
 
   it.each([
     ['browser', browserSurface],
     ['mcp', mcpSurface],
   ])('opens the runtime tab when openChatRuntimeSurface receives a %s descriptor', (_label, surface) => {
-    const { result } = renderHook(() => useChatSidePanelController(false, { current: createLayoutNode() }));
+    const { result } = renderHook(() => useChatSidePanelController(true, { current: createLayoutNode() }, sessionIdentity), { wrapper: PluginWrapper });
 
     expect(result.current.sidePanelOpen).toBe(false);
 
@@ -219,15 +225,17 @@ describe('chat side panel runtime surface', () => {
   });
 
   it('loads Browser runtime surface tabs and screenshot through the OpenClaw browser host request', async () => {
-    publishRuntimeSurface(browserSurface);
+    const panelContent = publishRuntimeSurface(browserSurface);
 
     render(
       <ChatSidePanel
         {...defaultSidePanelProps()}
+        content={panelContent}
       />,
+      { wrapper: PluginWrapper },
     );
 
-    await waitFor(() => expect(mocks.hostOpenClawBrowserRequest).toHaveBeenCalled());
+    expect(await screen.findByTestId('chat-runtime-browser-screenshot')).toHaveAttribute('src', screenshotDataUrl);
 
     const requestPaths = mocks.hostOpenClawBrowserRequest.mock.calls.map(([input]) => (
       typeof input === 'object' && input !== null && 'path' in input ? String(input.path) : ''
@@ -236,29 +244,29 @@ describe('chat side panel runtime surface', () => {
     expect(requestPaths.some((path) => path.includes('/screenshot'))).toBe(true);
   });
 
-  it('loads MCP runtime surface as a standalone iframe without exposing private view fields', async () => {
-    publishRuntimeSurface(mcpSurface);
+  it('loads MCP runtime surface through its isolated sandbox without exposing private view fields', async () => {
+    const panelContent = publishRuntimeSurface(mcpSurface);
 
     const { container } = render(
       <ChatSidePanel
         {...defaultSidePanelProps()}
+        content={panelContent}
       />,
+      { wrapper: PluginWrapper },
     );
 
     await waitFor(() => expect(mocks.hostOpenClawMcpAppRequest).toHaveBeenCalled());
     expect(mocks.hostOpenClawMcpAppRequest.mock.calls.map(([input]) => input)).toContainEqual({
       operationId: 'mcp.app.view',
-      sessionKey: 'agent:main:main',
+      sessionIdentity,
       viewId: 'view-1',
-      standalone: true,
     });
 
     const iframe = await waitFor(() => {
       const frame = container.querySelector('iframe');
-      expect(frame).not.toBeNull();
+      expect(frame).toHaveAttribute('src', sandboxUrl);
       return frame as HTMLIFrameElement;
     });
-    expect(iframe.getAttribute('src')).toBe('https://mcp-preview.test/standalone');
     expect(iframe.getAttribute('srcdoc')).toBeNull();
     expect(container.innerHTML).not.toContain('inline secret html');
     expect(container.innerHTML).not.toContain('input-secret');

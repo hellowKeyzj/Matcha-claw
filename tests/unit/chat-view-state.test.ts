@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { useChatView } from '@/pages/Chat/useChatView';
+import { useChatView } from '@/plugins/chat/useChatView';
 
 describe('chat view state', () => {
   it('derives blocking loading directly from session status and rows without delay retention', () => {

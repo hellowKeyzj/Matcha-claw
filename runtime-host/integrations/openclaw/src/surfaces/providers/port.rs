@@ -45,6 +45,7 @@ impl OpenClawGateway {
         routing: Option<&::provider::ProviderRouting>,
         retired: &[::provider::ProviderAccount],
         required_auth_accounts: &std::collections::BTreeSet<::provider::ProviderAccountId>,
+        account_failures: &mut Vec<::provider::ProviderAccountExecution>,
         auth_state_refresh_required: bool,
         now_millis: u64,
     ) -> ProviderNativeConfigurationEvidence {
@@ -59,6 +60,7 @@ impl OpenClawGateway {
             routing,
             retired,
             required_auth_accounts,
+            account_failures,
             auth_state_refresh_required,
             now_millis,
         )

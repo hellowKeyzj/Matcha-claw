@@ -1,6 +1,7 @@
 import memoize from 'lodash-es/memoize.js'
 import { basename, dirname, join } from 'path'
 import { getInlinePlugins, getSessionId } from '../../bootstrap/state.js'
+import { rethrowInvestigationAdmission } from '../../services/api/investigation.js'
 import type { Command } from '../../types/command.js'
 import { getPluginErrorMessage } from '../../types/plugin.js'
 import {
@@ -401,6 +402,7 @@ function createPluginCommand(
       },
     } satisfies Command
   } catch (error) {
+    rethrowInvestigationAdmission(error)
     logForDebugging(
       `Failed to create command from ${file.filePath}: ${error}`,
       {
@@ -420,7 +422,15 @@ export const getPluginCommands = memoize(async (): Promise<Command[]> => {
     return []
   }
   // Only load commands from enabled plugins
-  const { enabled, errors } = await loadAllPluginsCacheOnly()
+  const { enabled, errors } = await loadAllPluginsCacheOnly().catch(error => {
+    try {
+      rethrowInvestigationAdmission(error)
+    } catch (admissionError) {
+      getPluginCommands.cache?.delete?.(undefined)
+      throw admissionError
+    }
+    throw error
+  })
 
   if (errors.length > 0) {
     logForDebugging(
@@ -455,6 +465,7 @@ export const getPluginCommands = memoize(async (): Promise<Command[]> => {
             )
           }
         } catch (error) {
+          rethrowInvestigationAdmission(error)
           logForDebugging(
             `Failed to load commands from plugin ${plugin.name} default directory: ${error}`,
             { level: 'error' },
@@ -587,6 +598,7 @@ export const getPluginCommands = memoize(async (): Promise<Command[]> => {
               }
               return []
             } catch (error) {
+              rethrowInvestigationAdmission(error)
               logForDebugging(
                 `Failed to load commands from plugin ${plugin.name} custom path ${commandPath}: ${error}`,
                 { level: 'error' },
@@ -659,6 +671,7 @@ export const getPluginCommands = memoize(async (): Promise<Command[]> => {
                 )
               }
             } catch (error) {
+              rethrowInvestigationAdmission(error)
               logForDebugging(
                 `Failed to load inline content command ${name} from plugin ${plugin.name}: ${error}`,
                 { level: 'error' },
@@ -669,7 +682,15 @@ export const getPluginCommands = memoize(async (): Promise<Command[]> => {
       }
       return pluginCommands
     }),
-  )
+  ).catch(error => {
+    try {
+      rethrowInvestigationAdmission(error)
+    } catch (admissionError) {
+      getPluginCommands.cache?.delete?.(undefined)
+      throw admissionError
+    }
+    throw error
+  })
 
   const allCommands = perPluginCommands.flat()
   logForDebugging(`Total plugin commands loaded: ${allCommands.length}`)
@@ -703,6 +724,7 @@ async function loadSkillsFromDirectory(
       encoding: 'utf-8',
     })
   } catch (e: unknown) {
+    rethrowInvestigationAdmission(e)
     if (!isENOENT(e)) {
       logForDebugging(`Failed to load skill from ${directSkillPath}: ${e}`, {
         level: 'error',
@@ -746,6 +768,7 @@ async function loadSkillsFromDirectory(
         skills.push(skill)
       }
     } catch (error) {
+      rethrowInvestigationAdmission(error)
       logForDebugging(
         `Failed to load skill from ${directSkillPath}: ${error}`,
         {
@@ -761,6 +784,7 @@ async function loadSkillsFromDirectory(
   try {
     entries = await fs.readdir(skillsPath)
   } catch (e: unknown) {
+    rethrowInvestigationAdmission(e)
     if (!isENOENT(e)) {
       logForDebugging(
         `Failed to load skills from directory ${skillsPath}: ${e}`,
@@ -785,6 +809,7 @@ async function loadSkillsFromDirectory(
       try {
         content = await fs.readFile(skillFilePath, { encoding: 'utf-8' })
       } catch (e: unknown) {
+        rethrowInvestigationAdmission(e)
         if (!isENOENT(e)) {
           logForDebugging(`Failed to load skill from ${skillFilePath}: ${e}`, {
             level: 'error',
@@ -826,6 +851,7 @@ async function loadSkillsFromDirectory(
           skills.push(skill)
         }
       } catch (error) {
+        rethrowInvestigationAdmission(error)
         logForDebugging(
           `Failed to load skill from ${skillFilePath}: ${error}`,
           { level: 'error' },
@@ -844,7 +870,15 @@ export const getPluginSkills = memoize(async (): Promise<Command[]> => {
     return []
   }
   // Only load skills from enabled plugins
-  const { enabled, errors } = await loadAllPluginsCacheOnly()
+  const { enabled, errors } = await loadAllPluginsCacheOnly().catch(error => {
+    try {
+      rethrowInvestigationAdmission(error)
+    } catch (admissionError) {
+      getPluginSkills.cache?.delete?.(undefined)
+      throw admissionError
+    }
+    throw error
+  })
 
   if (errors.length > 0) {
     logForDebugging(
@@ -886,6 +920,7 @@ export const getPluginSkills = memoize(async (): Promise<Command[]> => {
             `Loaded ${skills.length} skills from plugin ${plugin.name} default directory`,
           )
         } catch (error) {
+          rethrowInvestigationAdmission(error)
           logForDebugging(
             `Failed to load skills from plugin ${plugin.name} default directory: ${error}`,
             { level: 'error' },
@@ -920,6 +955,7 @@ export const getPluginSkills = memoize(async (): Promise<Command[]> => {
               )
               return skills
             } catch (error) {
+              rethrowInvestigationAdmission(error)
               logForDebugging(
                 `Failed to load skills from plugin ${plugin.name} custom path ${skillPath}: ${error}`,
                 { level: 'error' },
@@ -934,7 +970,15 @@ export const getPluginSkills = memoize(async (): Promise<Command[]> => {
       }
       return pluginSkills
     }),
-  )
+  ).catch(error => {
+    try {
+      rethrowInvestigationAdmission(error)
+    } catch (admissionError) {
+      getPluginSkills.cache?.delete?.(undefined)
+      throw admissionError
+    }
+    throw error
+  })
 
   const allSkills = perPluginSkills.flat()
   logForDebugging(`Total plugin skills loaded: ${allSkills.length}`)

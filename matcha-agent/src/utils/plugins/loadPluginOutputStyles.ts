@@ -1,6 +1,7 @@
 import memoize from 'lodash-es/memoize.js'
 import { basename } from 'path'
 import type { OutputStyleConfig } from '../../constants/outputStyles.js'
+import { rethrowInvestigationAdmission } from '../../services/api/investigation.js'
 import { getPluginErrorMessage } from '../../types/plugin.js'
 import { logForDebugging } from '../debug.js'
 import {
@@ -77,6 +78,7 @@ async function loadOutputStyleFromFile(
       forceForPlugin,
     }
   } catch (error) {
+    rethrowInvestigationAdmission(error)
     logForDebugging(`Failed to load output style from ${filePath}: ${error}`, {
       level: 'error',
     })
@@ -87,7 +89,15 @@ async function loadOutputStyleFromFile(
 export const loadPluginOutputStyles = memoize(
   async (): Promise<OutputStyleConfig[]> => {
     // Only load output styles from enabled plugins
-    const { enabled, errors } = await loadAllPluginsCacheOnly()
+    const { enabled, errors } = await loadAllPluginsCacheOnly().catch(error => {
+      try {
+        rethrowInvestigationAdmission(error)
+      } catch (admissionError) {
+        loadPluginOutputStyles.cache?.delete?.(undefined)
+        throw admissionError
+      }
+      throw error
+    })
     const allStyles: OutputStyleConfig[] = []
 
     if (errors.length > 0) {
@@ -116,6 +126,12 @@ export const loadPluginOutputStyles = memoize(
             )
           }
         } catch (error) {
+          try {
+            rethrowInvestigationAdmission(error)
+          } catch (admissionError) {
+            loadPluginOutputStyles.cache?.delete?.(undefined)
+            throw admissionError
+          }
           logForDebugging(
             `Failed to load output styles from plugin ${plugin.name} default directory: ${error}`,
             { level: 'error' },
@@ -159,6 +175,12 @@ export const loadPluginOutputStyles = memoize(
               }
             }
           } catch (error) {
+            try {
+              rethrowInvestigationAdmission(error)
+            } catch (admissionError) {
+              loadPluginOutputStyles.cache?.delete?.(undefined)
+              throw admissionError
+            }
             logForDebugging(
               `Failed to load output styles from plugin ${plugin.name} custom path ${stylePath}: ${error}`,
               { level: 'error' },

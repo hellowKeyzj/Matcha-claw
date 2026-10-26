@@ -15,7 +15,7 @@ function buildToolCard(partial: Partial<SessionRenderToolCard>): SessionRenderTo
 
 describe('generated files', () => {
   it('extracts edit tool changes from assistant tool cards', async () => {
-    const { extractGeneratedFilesFromToolCards } = await import('@/lib/generated-files');
+    const { extractGeneratedFilesFromToolCards } = await import('@/plugins/files/generated-files');
 
     const files = extractGeneratedFilesFromToolCards([
       buildToolCard({
@@ -46,7 +46,7 @@ describe('generated files', () => {
   });
 
   it('extracts write tool snapshots from assistant tool cards', async () => {
-    const { extractGeneratedFilesFromToolCards } = await import('@/lib/generated-files');
+    const { extractGeneratedFilesFromToolCards } = await import('@/plugins/files/generated-files');
 
     const files = extractGeneratedFilesFromToolCards([
       buildToolCard({
@@ -76,7 +76,7 @@ describe('generated files', () => {
   });
 
   it('dedupes later tool updates by file path and keeps the latest content', async () => {
-    const { extractGeneratedFilesFromToolCards } = await import('@/lib/generated-files');
+    const { extractGeneratedFilesFromToolCards } = await import('@/plugins/files/generated-files');
 
     const files = extractGeneratedFilesFromToolCards([
       buildToolCard({
@@ -107,7 +107,7 @@ describe('generated files', () => {
   });
 
   it('ignores non file-mutating tools', async () => {
-    const { extractGeneratedFilesFromToolCards } = await import('@/lib/generated-files');
+    const { extractGeneratedFilesFromToolCards } = await import('@/plugins/files/generated-files');
 
     const files = extractGeneratedFilesFromToolCards([
       buildToolCard({
@@ -126,25 +126,28 @@ describe('generated files', () => {
   });
 
   it('classifies previewable document types for downstream viewers', async () => {
-    const {
-      classifyFileContentType,
-      extnameOf,
-      getMimeTypeForPath,
-      supportsInlineDiff,
-      supportsInlineDocumentPreview,
-    } = await import('@/lib/generated-files');
+    const { classifyFileContentType, extnameOf, getMimeTypeForPath } = await import('@/plugins/files/file-types');
+    const { createPluginHost } = await import('@/plugin-host/core');
+    const { applicationShellPlugin } = await import('@/app/extensions');
+    const { filesPlugin } = await import('@/plugins/files/plugin');
+    const { fileFormats, fileReaders, findFileReader, resolveFilePreviewTarget } = await import('@/plugins/files/extensions');
+    const { buildArtifactPreviewTargetFromPath } = await import('@/plugins/files/types');
+    const host = createPluginHost([applicationShellPlugin, filesPlugin]);
+    const formats = host.get(fileFormats);
+    const readers = host.get(fileReaders);
+    const target = (ext: string) => resolveFilePreviewTarget(buildArtifactPreviewTargetFromPath(`/workspace/report${ext}`), formats);
 
     expect(extnameOf('/workspace/Dockerfile')).toBe('.dockerfile');
-    expect(getMimeTypeForPath('/workspace/report.pdf')).toBe('application/pdf');
-    expect(classifyFileContentType('.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')).toBe('sheet');
-    expect(classifyFileContentType('.html', 'text/html')).toBe('html');
-    expect(classifyFileContentType('.pdf', 'application/pdf')).toBe('pdf');
-    expect(classifyFileContentType('.png', 'image/png')).toBe('image');
-    expect(supportsInlineDocumentPreview('.pdf')).toBe(true);
-    expect(supportsInlineDocumentPreview('.html')).toBe(true);
-    expect(supportsInlineDocumentPreview('.xlsx')).toBe(true);
-    expect(supportsInlineDiff({ contentType: 'sheet', ext: '.csv', baseline: 'a\n', content: 'b\n' })).toBe(true);
-    expect(supportsInlineDiff({ contentType: 'sheet', ext: '.xlsx', baseline: 'a\n', content: 'b\n' })).toBe(false);
-    expect(supportsInlineDiff({ contentType: 'pdf' })).toBe(false);
+    expect(getMimeTypeForPath('/workspace/report.pdf', formats)).toBe('application/pdf');
+    expect(classifyFileContentType('.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', formats)).toBe('sheet');
+    expect(classifyFileContentType('.html', 'text/html', formats)).toBe('html');
+    expect(classifyFileContentType('.pdf', 'application/pdf', formats)).toBe('pdf');
+    expect(classifyFileContentType('.png', 'image/png', formats)).toBe('image');
+    expect(findFileReader(readers, target('.pdf'), 'preview')).toMatchObject({ id: 'pdf', source: 'binary' });
+    expect(findFileReader(readers, target('.html'), 'preview')).toMatchObject({ id: 'html', source: 'text' });
+    expect(findFileReader(readers, target('.xlsx'), 'preview')).toMatchObject({ id: 'sheet', source: 'binary' });
+    expect(findFileReader(readers, { ...target('.csv'), baseline: 'a\n', content: 'b\n' }, 'diff')).toMatchObject({ id: 'text-diff', source: 'snapshot' });
+    expect(findFileReader(readers, { ...target('.xlsx'), baseline: 'a\n', content: 'b\n' }, 'diff')).toBeUndefined();
+    expect(findFileReader(readers, target('.pdf'), 'diff')).toBeUndefined();
   });
 });

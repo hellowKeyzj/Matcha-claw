@@ -16,6 +16,7 @@ use super::{
     rename::{SessionRenameCommand, SessionRenameOutcome},
     send::{SessionSendCommand, SessionSendOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
+    thinking::{SessionThinkingCommand, SessionThinkingOutcome, ThinkingScope},
     state::{
         SessionDelta, SessionEventBinding, SessionIdentity, SessionProvider, SessionSourceBinding,
         SessionState,
@@ -186,6 +187,7 @@ pub enum SessionCommand {
     TerminalDelivered {
         identity: SessionIdentity,
         run_id: String,
+        request_id: Option<String>,
         reply: oneshot::Sender<bool>,
     },
     ObservationClosed {
@@ -251,6 +253,10 @@ pub enum SessionCommand {
     Permission {
         command: SessionPermissionCommand,
         reply: oneshot::Sender<SessionPermissionOutcome>,
+    },
+    Thinking {
+        command: SessionThinkingCommand,
+        reply: oneshot::Sender<SessionThinkingOutcome>,
     },
     ConfigurePrivateResolver {
         resolver: Arc<dyn ConnectorSecretResolverPort>,
@@ -318,6 +324,9 @@ impl SessionCommand {
             Self::Permission { reply, .. } => {
                 let _ = reply.send(SessionPermissionOutcome::Unavailable);
             }
+            Self::Thinking { command, reply } => {
+                let _ = reply.send(SessionThinkingOutcome::Unavailable(command.runtime()));
+            }
             Self::ConfigurePrivateResolver { reply, .. } => {
                 let _ = reply.send(());
             }
@@ -373,6 +382,13 @@ impl SessionCommand {
             Self::GoalCompleted { command, .. } => {
                 CommandRoute::KeyedControl(session_identity_lane_key(&command.identity))
             }
+            Self::Thinking { command, .. } => CommandRoute::Keyed(match &command.scope {
+                ThinkingScope::Session { identity } => session_identity_lane_key(identity),
+                ThinkingScope::Agent { endpoint, agent_id } => {
+                    serde_json::to_string(&("agent", endpoint, agent_id))
+                        .expect("thinking agent address serialization")
+                }
+            }),
             Self::ConfigurePrivateResolver { .. } => CommandRoute::Global,
             Self::Create { command, .. } => {
                 CommandRoute::Keyed(session_identity_lane_key(&command.identity()))

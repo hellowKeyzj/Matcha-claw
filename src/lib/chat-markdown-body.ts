@@ -1,4 +1,5 @@
-import type { AttachedFileMeta } from '@/stores/chat';
+import type { AttachedFileMeta } from '@/plugins/chat/store';
+import type { MarkdownExtension } from '@/plugins/message-rendering/extensions';
 import type { SessionAssistantTurnItem, SessionTimelineAssistantTurnEntry } from '../types/session/render-item';
 import {
   buildMarkdownCacheKey,
@@ -6,12 +7,12 @@ import {
   renderStreamingMarkdownBody,
   peekRenderedMarkdownBody,
   type MarkdownBodyRenderResult,
-} from '@/pages/Chat/md-pipeline';
+} from '@/plugins/message-rendering/md-pipeline';
 import {
   createFileHintPathResolver,
   linkifyFileHintsInMarkdown,
   migrateLegacyMarkdownFileLinks,
-} from '@/pages/Chat/md-link';
+} from '@/plugins/message-rendering/md-link';
 
 type AssistantMarkdownSource = Pick<
   SessionTimelineAssistantTurnEntry,
@@ -62,12 +63,12 @@ export function prewarmAssistantMarkdownBodies(entries: SessionTimelineAssistant
   }
 }
 
-export function getOrBuildAssistantMarkdownBody(source: AssistantMarkdownSource): MarkdownBodyRenderResult | undefined {
+export function getOrBuildAssistantMarkdownBody(source: AssistantMarkdownSource, extensions?: readonly MarkdownExtension[]): MarkdownBodyRenderResult | undefined {
   const cacheKey = buildAssistantMarkdownCacheKey(source);
-  return getOrPrepareMarkdownBody(cacheKey, () => prepareAssistantMarkdown(source));
+  return getOrPrepareMarkdownBody(cacheKey, () => prepareAssistantMarkdown(source), extensions);
 }
 
-export function renderStreamingAssistantMarkdownBody(source: AssistantMarkdownSource): MarkdownBodyRenderResult | undefined {
+export function renderStreamingAssistantMarkdownBody(source: AssistantMarkdownSource, extensions?: readonly MarkdownExtension[]): MarkdownBodyRenderResult | undefined {
   const markdown = prepareAssistantMarkdown(source);
-  return markdown.trim() ? renderStreamingMarkdownBody(markdown) : undefined;
+  return markdown.trim() ? renderStreamingMarkdownBody(markdown, extensions) : undefined;
 }

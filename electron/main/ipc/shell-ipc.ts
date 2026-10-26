@@ -201,9 +201,13 @@ async function openChromeExtensionsPage(): Promise<void> {
 export function registerShellHandlers(): void {
   ipcMain.handle('shell:openExternal', async (_, url: string) => {
     if (!isAllowedExternalUrl(url)) {
-      throw new Error(`Blocked openExternal for disallowed URL: ${url}`);
+      throw new Error('Blocked openExternal for disallowed URL');
     }
-    await shell.openExternal(url);
+    try {
+      await shell.openExternal(url);
+    } catch {
+      throw new Error('Unable to open external browser');
+    }
   });
 
   ipcMain.handle('shell:openChromeExtensions', async () => {

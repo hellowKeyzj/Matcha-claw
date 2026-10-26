@@ -1,6 +1,7 @@
 use std::{
     cmp::Ordering,
     ffi::{OsStr, OsString, c_void},
+    fs,
     os::windows::ffi::OsStrExt,
 };
 
@@ -21,9 +22,14 @@ pub(super) struct CreateProcessInput {
 
 impl CreateProcessInput {
     pub(super) fn from_spec(spec: &LaunchSpec) -> Result<Self> {
+        let executable =
+            fs::canonicalize(spec.executable()).map_err(|error| match error.raw_os_error() {
+                Some(code) => WindowsCustodyError::native("canonicalize executable", code as u32),
+                None => WindowsCustodyError::invalid("canonicalize executable"),
+            })?;
         Ok(Self {
-            application: wide(spec.executable().as_os_str(), "executable contains NUL")?,
-            command_line: command_line(spec)?,
+            application: wide(executable.as_os_str(), "executable contains NUL")?,
+            command_line: command_line(executable.as_os_str(), spec.arguments())?,
             working_directory: wide(
                 spec.working_directory().as_os_str(),
                 "working directory contains NUL",
@@ -40,10 +46,10 @@ pub(super) fn environment_ptr(environment: &[u16]) -> *const c_void {
     environment.as_ptr().cast()
 }
 
-fn command_line(spec: &LaunchSpec) -> Result<Vec<u16>> {
+fn command_line(executable: &OsStr, arguments: &[OsString]) -> Result<Vec<u16>> {
     let mut command = Vec::new();
-    quote(spec.executable().as_os_str(), &mut command)?;
-    for argument in spec.arguments() {
+    quote(executable, &mut command)?;
+    for argument in arguments {
         command.push(u16::from(b' '));
         quote(argument, &mut command)?;
     }

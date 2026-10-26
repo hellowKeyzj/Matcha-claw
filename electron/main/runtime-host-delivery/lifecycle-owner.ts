@@ -11,8 +11,6 @@ import type {
   DirectRuntimeHostExit,
 } from './direct-host';
 
-const GRACEFUL_STOP_TIMEOUT_MS = 5_000;
-
 type SafeEventHandler = (event: RuntimeHostSafeEvent) => void;
 type ExitHandler = (exit: DirectRuntimeHostExit) => void;
 type DisconnectHandler = (error: RuntimeHostControlError) => void;
@@ -222,7 +220,7 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
       this.replacingEpoch = previousRuntimeHost.epoch;
       this.replacementExit = undefined;
       try {
-        await stopOrForceKillRuntimeHost(previousRuntimeHost.host);
+        await previousRuntimeHost.host.stop();
       } catch (error) {
         const observedExit = this.replacementExit;
         this.replacingEpoch = undefined;
@@ -366,25 +364,5 @@ export class RuntimeHostLifecycleOwner implements RuntimeHostLifecycle {
       throw new RuntimeHostLifecycleUnavailableError();
     }
     return this.activeRuntimeHost;
-  }
-}
-
-export async function stopOrForceKillRuntimeHost(runtimeHost: DirectRuntimeHost): Promise<void> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const stopped = await Promise.race([
-    Promise.resolve().then(() => runtimeHost.stop()).then(
-      () => true,
-      () => false,
-    ),
-    new Promise<boolean>((resolve) => {
-      timeout = setTimeout(() => resolve(false), GRACEFUL_STOP_TIMEOUT_MS);
-      timeout.unref?.();
-    }),
-  ]);
-  if (timeout !== undefined) {
-    clearTimeout(timeout);
-  }
-  if (!stopped) {
-    await runtimeHost.forceKill();
   }
 }

@@ -19,7 +19,11 @@ type RuntimeHostBootstrapDeliveryField =
   | 'deliveryVerificationKey'
   | 'parentCallbackBaseUrl'
   | 'parentCallbackDispatchToken'
-  | 'providerCredentialResolver';
+  | 'providerCredentialResolver'
+  | 'worldSourceAccess'
+  | 'worldPostgres'
+  | 'worldStorageTargets'
+  | 'initialWorld';
 
 type RuntimeHostBootstrapResources =
   | Omit<UnixRuntimeHostBootstrapInput, RuntimeHostBootstrapDeliveryField>
@@ -261,7 +265,7 @@ function resolveRuntimeLayout(input: RuntimeLayoutInput): RuntimeLayout {
       companionSkillSourceRoot,
       subagentTemplateDir: input.mode === 'packaged'
         ? input.path.join(resourcesRoot!, 'resources', 'subagent-templates')
-        : input.path.join(projectRoot!, 'src', 'features', 'subagents', 'templates'),
+        : input.path.join(projectRoot!, 'src', 'plugins', 'agents', 'templates'),
       entry: input.path.join(openClawDir, 'openclaw.mjs'),
       stateDir: input.getOpenClawConfigDir(),
       port: input.getPort('OPENCLAW_GATEWAY'),

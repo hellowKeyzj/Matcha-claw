@@ -300,6 +300,26 @@ impl OwnerSpec for WorkspaceOwner {
                     .await;
                 let _ = reply.send(result);
             }
+            WorkspaceOperation::ThumbnailMediaReference {
+                endpoint,
+                session_key,
+                reference,
+                reply,
+            } => {
+                let result = shared
+                    .execute(
+                        call,
+                        endpoint,
+                        WorkspaceMediaFailure::Unavailable,
+                        move |ops| {
+                            Box::pin(async move {
+                                ops.thumbnail_media_reference(&session_key, &reference).await
+                            })
+                        },
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
             WorkspaceOperation::ThumbnailMediaGateway {
                 endpoint,
                 session_key,

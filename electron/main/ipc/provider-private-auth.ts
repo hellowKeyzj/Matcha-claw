@@ -9,6 +9,10 @@ import { platform } from 'node:process';
 import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron';
 
 import type { ProviderAccountsTransport } from '../runtime-host-delivery/transport/providers/accounts';
+import {
+  drainWorldSourceCredentials, isWorldCredentialIdentity, resolveWorldSourceCredential,
+  WorldSourceCredentialError,
+} from '../world/source-credentials';
 import type { CallReceipt, CallRecord } from '../../../src/types/call-log';
 import type { ProviderCallDetail } from '../../../src/types/call-log/provider';
 import { decodeCallReceipt } from '../../../src/types/call-log/receipt';
@@ -267,6 +271,24 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
       return;
     }
     const body = await readBoundedBody(request);
+    if (body?.operation === 'source.resolve') {
+      const identity = { world: body.world, connectionId: body.connectionId, revision: body.revision };
+      if (request.method !== 'POST' || Object.keys(body).sort().join(',') !== 'connectionId,operation,revision,world'
+        || !isWorldCredentialIdentity(identity)) {
+        sendPrivateResolverFailure(response, 'invalid-request', 400);
+        return;
+      }
+      try {
+        const credential = await resolveWorldSourceCredential(identity);
+        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(credential));
+      } catch (error) {
+        const code = error instanceof WorldSourceCredentialError ? error.code : 'credential-store-unavailable';
+        response.writeHead(code === 'credential-missing' ? 404 : 503, {
+          'content-type': 'application/json', 'cache-control': 'no-store',
+        }).end(JSON.stringify({ error: code }));
+      }
+      return;
+    }
     if (request.method === 'POST' && body?.operation === 'recover') {
       if (Object.keys(body).sort().join(',') !== 'accounts,operation' || !Array.isArray(body.accounts)
         || !body.accounts.every((account: unknown) => isRecord(account) && Object.keys(account).sort().join(',') === 'accountId,reference'
@@ -402,7 +424,7 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
     }
   };
   const server = createServer((request, response) => {
-    if (closing || isPrivateAccountRecoveryActive() || requests.size >= MAX_PRIVATE_RESOLVER_REQUESTS) {
+    if (closing || requests.size >= MAX_PRIVATE_RESOLVER_REQUESTS) {
       sendPrivateResolverFailure(response, 'auth-profile-write-failed');
       request.resume();
       return;
@@ -440,6 +462,7 @@ export async function startProviderPrivateCredentialResolver(openClawStateDir: s
           await closeServer(server);
           await Promise.all(requests);
           await privateStoreWrite;
+          await drainWorldSourceCredentials();
           await closePrivateAccountTransactions(settleCredential);
         } finally {
           await authProfiles.close();
@@ -636,7 +659,30 @@ function accountTrace(account: AccountIntent): Record<string, unknown> {
 }
 
 function detailTrace(detail: ProviderCallDetail | undefined): Record<string, unknown> {
-  return detail ? { persisted: detail.persisted, commit: detail.commit, native: detail.native, diagnostic: detail.diagnostic } : {};
+  if (!detail) return {};
+  return {
+    persisted: detail.persisted,
+    commit: detail.commit,
+    diagnostic: detail.diagnostic,
+    native: detail.native && {
+      changed: detail.native.changed,
+      applied: detail.native.applied,
+      observed: detail.native.observed,
+      reports: detail.native.reports.map((report) => ({
+        endpoint: report.endpoint,
+        changed: report.changed,
+        applied: report.applied,
+        observed: report.observed,
+        diagnostic: report.diagnostic,
+        accounts: report.accounts.map((account) => ({
+          accountId: summarizeIdentifier(account.accountId),
+          accountRevision: account.accountRevision,
+          execution: account.execution,
+          diagnostic: account.diagnostic,
+        })),
+      })),
+    },
+  };
 }
 
 export async function storeProviderPrivateAccount(

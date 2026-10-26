@@ -208,6 +208,10 @@
       "retry": "Retry refresh"
     },
     "custom": "Custom",
+    "execution": {
+      "blocked": "Unavailable",
+      "unsupported": "Not supported by this runtime"
+    },
     "notRequired": "Not required",
     "empty": {
       "title": "No providers configured",
@@ -253,6 +257,7 @@
     "card": {
       "configured": "Configured",
       "noKey": "No API key set",
+      "credentialUnknown": "Credential status not confirmed",
       "none": "None",
       "editKey": "Edit API key",
       "delete": "Delete provider"
@@ -293,17 +298,26 @@
       "submitCode": "Submit code"
     },
     "projectionErrors": {
-      "diagnostic": "OpenClaw config sync failed: {{reason}}",
-      "readbackMismatch": "OpenClaw config readback does not match the saved provider settings.",
-      "readbackUnavailable": "OpenClaw config was written but could not be read back for verification.",
-      "outcomeUnknown": "OpenClaw config sync outcome is unknown.",
-      "providerAccountConfigurationInvalid": "OpenClaw provider account configuration is invalid. Check the provider, endpoint, and protocol, then try again.",
+      "providerProjectionPartial": "Some accounts are not available in this runtime. Check the account details below.",
+      "providerAuthUnsupported": "This runtime does not support this account's authentication method.",
+      "providerRestartRequired": "Settings are saved. Restart this runtime to apply them.",
+      "providerCleanupPartial": "Some account cleanup could not be completed in this runtime.",
+      "providerProjectionNotSent": "Settings are saved, but have not been sent to this runtime.",
+      "providerProjectionOutcomeUnknown": "Settings are saved, but this runtime's result is not confirmed.",
+      "providerCleanupBlocked": "Account cleanup is blocked in this runtime.",
+      "providerProjectionRejected": "This runtime rejected the account configuration. Check the account settings.",
+      "privateResolverUnavailable": "The local credential service is unavailable. Try again when it recovers.",
+      "diagnostic": "Runtime config sync failed: {{reason}}",
+      "readbackMismatch": "Runtime config readback does not match the saved provider settings.",
+      "readbackUnavailable": "Runtime config could not be read back for verification.",
+      "outcomeUnknown": "Runtime config sync outcome is unknown.",
+      "providerAccountConfigurationInvalid": "Provider account configuration is invalid. Check the provider, endpoint, and protocol, then try again.",
       "providerCascadeUnavailable": "Provider configuration state is unavailable. Refresh and try again.",
       "providerCredentialUnavailable": "The current provider credential is unavailable. Enter it again and save.",
-      "providerKeyDuplicate": "OpenClaw provider identifiers conflict. Remove duplicate accounts or use a custom configuration.",
+      "providerKeyDuplicate": "Provider identifiers conflict. Remove duplicate accounts or use a custom configuration.",
       "providerModelCapabilityInvalid": "The model capability configuration is invalid. Check the model type and save again.",
       "providerModelIdentifierInvalid": "The model ID is invalid. Check it and save again.",
-      "providerModelPersistenceFailed": "Cannot write the OpenClaw model configuration. Check file permissions and try again.",
+      "providerModelPersistenceFailed": "Cannot save the model configuration. Check file permissions and try again.",
       "providerModelTokenLimitInvalid": "The model token limits are invalid. Ensure max output tokens is not greater than the context window.",
       "providerOwnerResponseUnavailable": "Provider configuration write returned no result. Refresh and try again.",
       "providerOwnerUnavailable": "Provider configuration service is unavailable. Restart the app and try again.",
@@ -312,17 +326,17 @@
       "providerRoutingInvalid": "Model routing is invalid. Check it and save again.",
       "providerRoutingModelCapabilityUnavailable": "Model routing references a model that does not support this capability. Select another model.",
       "providerRoutingModelUnavailable": "Model routing references a missing model. Select the model again.",
-      "providerRoutingPersistenceFailed": "Cannot write the OpenClaw model routing configuration. Check file permissions and try again.",
+      "providerRoutingPersistenceFailed": "Cannot save the model routing configuration. Check file permissions and try again.",
       "privateResolver": {
         "credentialMissing": "This account has no saved API key. Enter the API key again and save.",
         "credentialDecryptFailed": "The saved API key cannot be decrypted on this machine. Enter it again and save.",
         "credentialProviderMismatch": "The saved API key belongs to a different provider. Enter this provider's API key again and save.",
         "credentialInvalid": "The saved credential for this account is invalid. Enter it again and save.",
-        "authProfileReadInvalid": "The OpenClaw auth profile file is invalid. Repair or remove it, then save again.",
-        "authProfileWriteFailed": "Cannot write the OpenClaw auth profile file. Check file permissions and try again.",
+        "authProfileReadInvalid": "The runtime auth profile file is invalid. Repair or remove it, then save again.",
+        "authProfileWriteFailed": "Cannot write the runtime auth profile file. Check file permissions and try again.",
         "credentialStoreUnavailable": "Cannot read the local provider credential store. Enter the API key again and save.",
         "invalidRequest": "The internal auth sync request is invalid. Try again.",
-        "unknown": "OpenClaw auth sync failed. Enter the API key again and save."
+        "unknown": "The runtime's authentication status could not be confirmed. Refresh and try again."
       }
     }
   },

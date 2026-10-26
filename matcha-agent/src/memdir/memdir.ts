@@ -1,6 +1,12 @@
 import { feature } from 'bun:bundle'
 import { join } from 'path'
 import { getFsImplementation } from '../utils/fsOperations.js'
+import {
+  currentInvestigationScope,
+  requireInvestigationEffects,
+  rethrowInvestigationAdmission,
+  trackInvestigationOperation,
+} from '../world/investigation.js'
 import { getAutoMemPath, isAutoMemoryEnabled } from './paths.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -129,8 +135,12 @@ export const DIRS_EXIST_GUIDANCE =
 export async function ensureMemoryDirExists(memoryDir: string): Promise<void> {
   const fs = getFsImplementation()
   try {
+    requireInvestigationEffects(['external_write'])
     await fs.mkdir(memoryDir)
+    requireInvestigationEffects([])
   } catch (e) {
+    rethrowInvestigationAdmission(e)
+    if (currentInvestigationScope() && e instanceof Error && e.cause !== undefined) throw e
     // fs.mkdir already handles EEXIST internally. Anything reaching here is
     // a real problem (EACCES/EPERM/EROFS) — log so --debug shows why. Prompt
     // building continues either way; the model's Write will surface the
@@ -148,7 +158,7 @@ export async function ensureMemoryDirExists(memoryDir: string): Promise<void> {
 
 /**
  * Log memory directory file/subdir counts asynchronously.
- * Fire-and-forget — doesn't block prompt building.
+ * Detached outside World; scoped prompt loaders await the complete task.
  */
 function logMemoryDirCounts(
   memoryDir: string,
@@ -158,10 +168,11 @@ function logMemoryDirCounts(
     | boolean
     | AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
   >,
-): void {
+): Promise<void> {
   const fs = getFsImplementation()
-  void fs.readdir(memoryDir).then(
+  return trackInvestigationOperation(fs.readdir(memoryDir).then(
     dirents => {
+      requireInvestigationEffects([])
       let fileCount = 0
       let subdirCount = 0
       for (const d of dirents) {
@@ -177,11 +188,13 @@ function logMemoryDirCounts(
         total_subdir_count: subdirCount,
       })
     },
-    () => {
+    error => {
+      rethrowInvestigationAdmission(error)
+      if (currentInvestigationScope() && error instanceof Error && error.cause !== undefined) throw error
       // Directory unreadable — log without counts
       logEvent('tengu_memdir_loaded', baseMetadata)
     },
-  )
+  ))
 }
 
 /**
@@ -430,10 +443,11 @@ export async function loadMemoryPrompt(): Promise<string | null> {
   // means the !autoEnabled case falls through to the tengu_memdir_disabled
   // telemetry block below, matching the non-KAIROS path.
   if (feature('KAIROS') && autoEnabled && getKairosActive()) {
-    logMemoryDirCounts(getAutoMemPath(), {
+    const counts = logMemoryDirCounts(getAutoMemPath(), {
       memory_type:
         'auto' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     })
+    if (currentInvestigationScope()) await counts
     return buildAssistantDailyLogPrompt(skipIndex)
   }
 
@@ -457,14 +471,16 @@ export async function loadMemoryPrompt(): Promise<string | null> {
       // out from under the auto dir, add a second ensureMemoryDirExists call
       // for autoDir here.
       await ensureMemoryDirExists(teamDir)
-      logMemoryDirCounts(autoDir, {
+      const autoCounts = logMemoryDirCounts(autoDir, {
         memory_type:
           'auto' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
-      logMemoryDirCounts(teamDir, {
+      if (currentInvestigationScope()) await autoCounts
+      const teamCounts = logMemoryDirCounts(teamDir, {
         memory_type:
           'team' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
+      if (currentInvestigationScope()) await teamCounts
       return teamMemPrompts!.buildCombinedMemoryPrompt(
         extraGuidelines,
         skipIndex,
@@ -477,10 +493,11 @@ export async function loadMemoryPrompt(): Promise<string | null> {
     // Harness guarantees the directory exists so the model can write without
     // checking. The prompt text reflects this ("already exists").
     await ensureMemoryDirExists(autoDir)
-    logMemoryDirCounts(autoDir, {
+    const counts = logMemoryDirCounts(autoDir, {
       memory_type:
         'auto' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     })
+    if (currentInvestigationScope()) await counts
     return buildMemoryLines(
       'auto memory',
       autoDir,

@@ -21,6 +21,7 @@ import enTeams from './locales/en/teams.json';
 import enTasks from './locales/en/tasks.json';
 import enSecurity from './locales/en/security.json';
 import enPlugins from './locales/en/plugins.json';
+import enWorld from './locales/en/world.json';
 
 // ZH
 import zhCommon from './locales/zh/common.json';
@@ -37,6 +38,7 @@ import zhTeams from './locales/zh/teams.json';
 import zhTasks from './locales/zh/tasks.json';
 import zhSecurity from './locales/zh/security.json';
 import zhPlugins from './locales/zh/plugins.json';
+import zhWorld from './locales/zh/world.json';
 
 // JA
 import jaCommon from './locales/ja/common.json';
@@ -53,6 +55,7 @@ import jaTeams from './locales/ja/teams.json';
 import jaTasks from './locales/ja/tasks.json';
 import jaSecurity from './locales/ja/security.json';
 import jaPlugins from './locales/ja/plugins.json';
+import jaWorld from './locales/ja/world.json';
 
 // RU
 import ruCommon from './locales/ru/common.json';
@@ -69,6 +72,7 @@ import ruTeams from './locales/ru/teams.json';
 import ruTasks from './locales/ru/tasks.json';
 import ruSecurity from './locales/ru/security.json';
 import ruPlugins from './locales/ru/plugins.json';
+import ruWorld from './locales/ru/world.json';
 
 export const SUPPORTED_LANGUAGES = [
     { code: 'en', label: 'English' },
@@ -95,6 +99,7 @@ const resources = {
         tasks: enTasks,
         security: enSecurity,
         plugins: enPlugins,
+        world: enWorld,
     },
     zh: {
         common: zhCommon,
@@ -111,6 +116,7 @@ const resources = {
         tasks: zhTasks,
         security: zhSecurity,
         plugins: zhPlugins,
+        world: zhWorld,
     },
     ja: {
         common: jaCommon,
@@ -127,6 +133,7 @@ const resources = {
         tasks: jaTasks,
         security: jaSecurity,
         plugins: jaPlugins,
+        world: jaWorld,
     },
     ru: {
         common: ruCommon,
@@ -143,6 +150,7 @@ const resources = {
         tasks: ruTasks,
         security: ruSecurity,
         plugins: ruPlugins,
+        world: ruWorld,
     },
 };
 
@@ -154,7 +162,7 @@ i18n
         fallbackLng: 'en',
         supportedLngs: [...SUPPORTED_LANGUAGE_CODES],
         defaultNS: 'common',
-        ns: ['common', 'settings', 'dashboard', 'wiki', 'chat', 'channels', 'skills', 'cron', 'subagents', 'subagentTemplates', 'teams', 'tasks', 'security', 'plugins'],
+        ns: ['common', 'settings', 'dashboard', 'wiki', 'chat', 'channels', 'skills', 'cron', 'subagents', 'subagentTemplates', 'teams', 'tasks', 'security', 'plugins', 'world'],
         interpolation: {
             escapeValue: false, // React already escapes
         },

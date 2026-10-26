@@ -178,57 +178,59 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::state::{SessionEndpoint, SessionProvider};
 
-    fn request(adapter: &str) -> Value {
+    fn request(provider: SessionProvider) -> Value {
+        let session_key = match provider {
+            SessionProvider::OpenClaw => "agent:main:demo",
+            SessionProvider::MatchaAgent => "matcha-agent:main:demo",
+        };
+        let identity = SessionIdentity::new(session_key, provider, "main".into()).unwrap();
         json!({
             "id": "session.abort",
             "operationId": "sessions.abort",
-            "scope": {
-                "kind": "session",
-                "endpoint": {
-                    "kind": "native-runtime",
-                    "runtimeAdapterId": adapter,
-                    "runtimeInstanceId": "local",
-                },
-                "sessionKey": "agent:main:demo",
-            },
-            "target": { "kind": "session" },
+            "scope": { "kind": "session", "identity": identity },
+            "target": { "kind": "session", "identity": identity },
             "input": {
-                "endpoint": {
-                    "kind": "native-runtime",
-                    "runtimeAdapterId": adapter,
-                    "runtimeInstanceId": "local",
-                },
-                "sessionKey": "agent:main:demo",
+                "identity": identity,
                 "runId": "run-1",
             },
         })
     }
 
     #[test]
-    fn parses_supported_and_unsupported_native_endpoint_commands() {
-        let openclaw = SessionAbortRequest::decode_semantics(request("openclaw"))
+    fn parses_supported_and_rejects_unsupported_native_endpoint_commands() {
+        let openclaw = SessionAbortRequest::decode_semantics(request(SessionProvider::OpenClaw))
             .unwrap()
             .into_command()
             .unwrap();
-        assert_eq!(openclaw.endpoint, NativeEndpoint::OpenClawLocal);
+        assert_eq!(
+            openclaw.identity.endpoint,
+            SessionEndpoint::local(SessionProvider::OpenClaw)
+        );
 
-        let matcha = SessionAbortRequest::decode_semantics(request("matcha-agent"))
+        let matcha = SessionAbortRequest::decode_semantics(request(SessionProvider::MatchaAgent))
             .unwrap()
             .into_command()
             .unwrap();
-        assert_eq!(matcha.endpoint, NativeEndpoint::MatchaAgentLocal);
+        assert_eq!(
+            matcha.identity.endpoint,
+            SessionEndpoint::local(SessionProvider::MatchaAgent)
+        );
 
-        let unsupported = SessionAbortRequest::decode_semantics(request("other-runtime"))
-            .unwrap()
-            .into_command()
-            .unwrap();
-        assert_eq!(unsupported.endpoint, NativeEndpoint::Unsupported);
+        let mut unsupported = request(SessionProvider::OpenClaw);
+        for part in ["scope", "target", "input"] {
+            unsupported[part]["identity"]["endpoint"]["runtimeAdapterId"] = json!("other-runtime");
+        }
+        assert_eq!(
+            SessionAbortRequest::decode_semantics(unsupported).map(|_| ()),
+            Err(RequestError::Invalid)
+        );
     }
 
     #[test]
     fn accepts_session_wide_abort_without_a_run_identifier() {
-        let mut value = request("openclaw");
+        let mut value = request(SessionProvider::OpenClaw);
         value["input"].as_object_mut().unwrap().remove("runId");
 
         assert_eq!(
@@ -243,7 +245,7 @@ mod tests {
 
     #[test]
     fn decodes_approval_ids_without_treating_them_as_run_identity() {
-        let mut value = request("openclaw");
+        let mut value = request(SessionProvider::OpenClaw);
         value["input"].as_object_mut().unwrap().remove("runId");
         value["input"]["approvalIds"] = json!(["approval-1"]);
         let command = SessionAbortRequest::decode_semantics(value)
@@ -256,7 +258,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_approval_ids_without_treating_them_as_run_identity() {
-        let mut empty = request("openclaw");
+        let mut empty = request(SessionProvider::OpenClaw);
         empty["input"].as_object_mut().unwrap().remove("runId");
         empty["input"]["approvalIds"] = json!([]);
 
@@ -264,22 +266,25 @@ mod tests {
     }
 
     #[test]
-    fn ignores_public_endpoint_session_binding_on_active_abort() {
-        let mut value = request("openclaw");
+    fn preserves_public_endpoint_session_binding_on_active_abort() {
+        let mut value = request(SessionProvider::OpenClaw);
         value["input"]["endpointSessionId"] = json!("native-session-1");
 
         let command = SessionAbortRequest::decode_semantics(value)
             .unwrap()
             .into_command()
             .unwrap();
-        assert_eq!(command.endpoint_session_id, None);
-        assert_eq!(command.session_key, "agent:main:demo");
+        assert_eq!(
+            command.endpoint_session_id.as_deref(),
+            Some("native-session-1")
+        );
+        assert_eq!(command.identity.session_key, "agent:main:demo");
         assert_eq!(command.run_id.as_deref(), Some("run-1"));
     }
 
     #[test]
     fn rejects_legacy_session_identity_input() {
-        let mut value = request("openclaw");
+        let mut value = request(SessionProvider::OpenClaw);
         value["input"]["sessionIdentity"] = json!({});
         assert_eq!(
             SessionAbortRequest::decode_semantics(value)

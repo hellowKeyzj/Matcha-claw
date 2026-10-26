@@ -3,7 +3,11 @@ use crate::{
     SessionHandle, SessionOps,
     abort::SessionAbortCommand,
     create::SessionAdmission,
-    ports::{OwnedRuntimeFuture, SessionFuture, SessionOwnershipQuery, SessionOwnershipReader},
+    ports::{
+        ItemsSyncMode, OwnedRuntimeFuture, SessionFuture, SessionObservation,
+        SessionObservationRequest, SessionOwnershipQuery, SessionOwnershipReader,
+        SessionSync, SessionSyncCut,
+    },
     state::{ItemStatus, SessionContent, SessionItem},
 };
 use foundation::{
@@ -61,9 +65,51 @@ impl LifecycleOps for NativeBoundary {
     }
 }
 
+struct ObservationBoundary;
+
+impl SessionObservation for ObservationBoundary {
+    fn sync<'a>(
+        &'a self,
+        command: timeline::Command,
+        epoch: u64,
+    ) -> SessionFuture<'a, Result<SessionSync, RuntimeOperationFailure>> {
+        Box::pin(async move {
+            Ok(sync(SessionState::new(command.identity().clone(), epoch).unwrap().view()))
+        })
+    }
+
+    fn restart(&self, _: u64) -> OwnedRuntimeFuture<Result<(), RuntimeOperationFailure>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn close(&self) -> OwnedRuntimeFuture<()> {
+        Box::pin(async {})
+    }
+}
+
+fn sync(view: SessionView) -> SessionSync {
+    SessionSync {
+        view,
+        source_epoch: None,
+        source_branch: None,
+        cut: SessionSyncCut::Snapshot,
+        replay_baseline: None,
+        terminal_runs: Vec::new(),
+        retired_item_ids: Vec::new(),
+        retired_tool_ids: Vec::new(),
+        retired_approval_ids: Vec::new(),
+    }
+}
+
 impl SessionOps for NativeBoundary {
     fn admission(&self) -> SessionAdmission {
         SessionAdmission::new(self.endpoint(), SessionProvider::OpenClaw)
+    }
+    fn prepare_observation(
+        &self,
+        _: SessionObservationRequest,
+    ) -> Result<Arc<dyn SessionObservation>, RuntimeOperationFailure> {
+        Ok(Arc::new(ObservationBoundary))
     }
     fn abort_session<'a>(
         &'a self,
@@ -84,6 +130,13 @@ impl SessionOps for NativeBoundary {
     ) -> SessionFuture<'a, SessionModelSelectionOutcome> {
         panic!("unused native boundary")
     }
+    fn select_session_model_cancellable<'a>(
+        &'a self,
+        command: ResolvedSessionModelSelection,
+        _: CancellationToken,
+    ) -> SessionFuture<'a, SessionModelSelectionOutcome> {
+        self.select_session_model(command)
+    }
     fn send_session<'a>(
         &'a self,
         command: SessionSendCommand,
@@ -93,6 +146,19 @@ impl SessionOps for NativeBoundary {
             self.entered.send(()).await.unwrap();
             self.release.notified().await;
             self.outcome.lock().unwrap().clone()
+        })
+    }
+    fn send_session_cancellable<'a>(
+        &'a self,
+        command: SessionSendCommand,
+        cancellation: CancellationToken,
+    ) -> SessionFuture<'a, SessionSendOutcome> {
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => SessionSendOutcome::Unavailable,
+                outcome = self.send_session(command) => outcome,
+            }
         })
     }
 }
@@ -139,8 +205,15 @@ impl SessionOwnershipReader for MissingOwnershipReader {
 #[derive(Default)]
 struct TerminalBoundary(StdMutex<Vec<SessionRunTerminalSnapshot>>);
 impl SessionTerminalHook for TerminalBoundary {
-    fn run_terminal(&self, snapshot: SessionRunTerminalSnapshot) {
-        self.0.lock().unwrap().push(snapshot);
+    fn run_terminal_async<'a>(
+        &'a self,
+        snapshot: SessionRunTerminalSnapshot,
+        _: CancellationToken,
+    ) -> SessionFuture<'a, Result<(), SessionRunTerminalSnapshot>> {
+        Box::pin(async move {
+            self.0.lock().unwrap().push(snapshot);
+            Ok(())
+        })
     }
 }
 
@@ -150,6 +223,7 @@ struct Harness {
     session_task: OwnedTask<()>,
     owner: OwnerRuntimeHandle<SessionCommand, SessionQuery>,
     handle: SessionHandle,
+    shared: SessionShared,
     snapshot: Arc<ArcSwap<SessionSnapshot>>,
     native: Arc<NativeBoundary>,
     entered: mpsc::Receiver<()>,
@@ -196,11 +270,15 @@ impl Harness {
             None,
             Some(terminals.clone()),
         );
+        let completion_handle = session.completion_handle_slot();
+        let shared = session.shared();
         let (owner, session_task) = system.spawn_owner(
             session,
             OwnerRuntimeConfig::new(64, SessionOwner::lane_retention()),
         );
-        let handle = SessionHandle::new(owner.clone(), directory);
+        assert!(completion_handle.set(owner.clone()).is_ok());
+        shared.start_terminal_delivery();
+        let handle = SessionHandle::new(owner.clone(), directory, shared.clone());
         assert!(matches!(
             handle
                 .ensure_bound_session(identity(), source())
@@ -214,6 +292,7 @@ impl Harness {
             session_task,
             owner,
             handle,
+            shared,
             snapshot,
             native,
             entered,
@@ -227,10 +306,8 @@ impl Harness {
         context: Option<SessionDeliveryContext>,
     ) -> oneshot::Receiver<SessionSendOutcome> {
         let mut command = SessionSendCommand::try_new(
-            NativeEndpoint::OpenClawLocal,
-            SESSION.into(),
+            identity(),
             None,
-            "renderer-route:test".into(),
             "review".into(),
             Some("requested-run".into()),
             None,
@@ -244,7 +321,11 @@ impl Harness {
         let (reply, response) = oneshot::channel();
         self.owner
             .command(SessionCommand::Send {
-                request: SessionSendRequest::Session { command, reply },
+                request: SessionSendRequest::Session {
+                    command,
+                    cancellation: CancellationToken::new(),
+                    reply,
+                },
             })
             .await
             .unwrap();
@@ -253,10 +334,11 @@ impl Harness {
     }
 
     fn state(&self) -> SessionState {
-        self.snapshot.load().states[&session_lane_key(SessionProvider::OpenClaw, SESSION)].clone()
+        self.snapshot.load().states[&session_identity_lane_key(&identity())].clone()
     }
 
     async fn finish(mut self) {
+        self.handle.close_terminal_delivery().await.unwrap();
         self.session_task.cancel_and_join().await.unwrap();
         self.provider_task.cancel_and_join().await.unwrap();
         self.system.cancel_and_join().await.unwrap();
@@ -265,7 +347,7 @@ impl Harness {
 }
 
 fn identity() -> SessionIdentity {
-    SessionIdentity::new(SESSION, SessionProvider::OpenClaw, Some("reviewer".into())).unwrap()
+    SessionIdentity::new(SESSION, SessionProvider::OpenClaw, "reviewer".into()).unwrap()
 }
 
 fn source() -> SessionSourceBinding {
@@ -305,8 +387,7 @@ fn event(phase: RunPhase, text: Option<&str>) -> SessionEvent {
         phase,
     });
     SessionEvent {
-        binding: SessionEventBinding::new(SESSION, Some("renderer-route:test".into()), None)
-            .unwrap(),
+        binding: SessionEventBinding::new(identity(), None).unwrap(),
         run_id: Some(NATIVE_RUN.into()),
         cursor: None,
         history_refresh: false,
@@ -327,12 +408,14 @@ async fn send_binds_actual_native_run_before_early_terminal_and_preserves_option
             let mut harness = Harness::new().await;
             let mut accepted = harness.begin_send(Some(context())).await;
             let (reply, terminal) = oneshot::channel();
+            let permit = harness.shared.terminal_permit().await;
             // Ingress is admitted while native send is still awaiting its acceptance receipt.
             harness
                 .owner
-                .command(SessionCommand::Ingest {
+                .command(SessionCommand::TerminalIngest {
                     identity: identity(),
                     event: event(phase, text),
+                    permit,
                     reply,
                 })
                 .await
@@ -352,6 +435,7 @@ async fn send_binds_actual_native_run_before_early_terminal_and_preserves_option
                 terminal.await.unwrap(),
                 SessionIngestOutcome::Applied(_)
             ));
+            drop(harness.shared.terminal_permit().await);
             {
                 let terminals = harness.terminals.0.lock().unwrap();
                 assert_eq!(terminals.len(), 1);
@@ -406,7 +490,8 @@ async fn repeated_accepted_run_retains_context_without_public_projection_leak() 
     ] {
         assert!(!public.contains(private));
     }
-    let rehydrated = state_from_view_seeded(&after.view(), Some(&after)).unwrap();
+    let mut rehydrated = after.clone();
+    rehydrated.reconcile_sync(&sync(after.view()), &after, ItemsSyncMode::Merge).unwrap();
     assert_eq!(
         rehydrated.run_delivery_contexts.get(NATIVE_RUN),
         Some(&context())
@@ -427,8 +512,9 @@ async fn rejected_send_does_not_retain_delivery_context() {
     harness.finish().await;
 }
 
-#[test]
-fn hydrated_terminal_uses_pending_context_once_and_history_keeps_none() {
+#[tokio::test]
+async fn hydrated_terminal_uses_pending_context_once_and_history_keeps_none() {
+    let harness = Harness::new().await;
     let mut pending = SessionState::new(identity(), 1)
         .unwrap()
         .with_source_binding(source());
@@ -437,19 +523,31 @@ fn hydrated_terminal_uses_pending_context_once_and_history_keeps_none() {
         .insert(NATIVE_RUN.into(), context());
     let mut hydrated = SessionState::new(identity(), 1).unwrap();
     let event = event(RunPhase::Completed, Some("hydrated answer"));
-    assert!(matches!(
-        hydrated.apply_native_bound(event.binding, event.run_id, event.cursor, event.changes),
-        crate::state::SessionApplyResult::Applied(_)
-    ));
-    let mut state = state_from_view_seeded(&hydrated.view(), Some(&pending)).unwrap();
-    let first = SessionShared::hydrated_terminal_snapshots(&mut state);
+    let result = hydrated.apply_native_bound(event.binding, event.run_id, event.cursor, event.changes);
+    assert!(matches!(result, crate::state::SessionApplyResult::Applied(_)));
+    let crate::state::SessionApplyResult::Applied(delta) = result else { unreachable!() };
+    let mut state = pending.clone();
+    let mut synchronized = sync(hydrated.view());
+    synchronized.terminal_runs.push(crate::ports::SessionTerminalRun {
+        run_id: NATIVE_RUN.into(),
+        phase: RunPhase::Completed,
+    });
+    state.reconcile_sync(&synchronized, &pending, ItemsSyncMode::Merge).unwrap();
+    let first = SessionShared::terminal_snapshots(&delta, &state, |run_id| state.assistant_texts_for_run_id(run_id));
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].delivery_context, Some(context()));
     assert_eq!(
         first[0].assistant_texts,
         vec!["hydrated answer"]
     );
+    let mut lane = harness.shared.open_lane(&session_identity_lane_key(&identity()));
+    lane.terminal_permit = Some(harness.shared.terminal_permit().await);
+    assert!(lane.retain_terminals(&harness.shared, &mut state, &first));
+    lane.state = Some(state);
+    assert!(lane.terminal_delivered(&harness.shared, identity(), NATIVE_RUN.into(), None).await);
+    let state = lane.state.as_ref().unwrap();
     assert!(state.run_delivery_contexts.is_empty());
-    let history = SessionShared::hydrated_terminal_snapshots(&mut state);
+    let history = SessionShared::terminal_snapshots(&delta, state, |run_id| state.assistant_texts_for_run_id(run_id));
     assert_eq!(history[0].delivery_context, None);
+    harness.finish().await;
 }

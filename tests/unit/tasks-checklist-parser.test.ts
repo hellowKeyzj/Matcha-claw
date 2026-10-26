@@ -3,7 +3,7 @@ import {
   buildStepDetailRows,
   countProgress,
   parseChecklist,
-} from '@/pages/Tasks/checklist-parser';
+} from '@/plugins/tasks/pages/Tasks/checklist-parser';
 
 describe('tasks checklist parser', () => {
   it('解析 markdown checklist，并支持完成情况与证据区块', () => {

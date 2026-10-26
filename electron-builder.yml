@@ -39,7 +39,7 @@ extraResources:
   - from: build/preinstalled-skills/
     to: resources/preinstalled-skills/
   # Preloaded subagent templates
-  - from: src/features/subagents/templates/
+  - from: src/plugins/agents/templates/
     to: resources/subagent-templates/
   # NOTE: OpenClaw plugin mirrors are bundled by the afterPack hook
   # (after-pack.cjs). Third-party plugins come from node_modules, while

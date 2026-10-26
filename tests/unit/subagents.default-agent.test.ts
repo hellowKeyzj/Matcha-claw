@@ -4,7 +4,7 @@ import {
   hostApiFetchMock,
   resetGatewayClientMocks,
 } from './helpers/mock-gateway-client';
-import { useSubagentsStore } from '@/stores/subagents';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 
 describe('subagents default agent', () => {
   beforeEach(() => {

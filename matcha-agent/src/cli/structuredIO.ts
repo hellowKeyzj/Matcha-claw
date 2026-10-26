@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { InvestigationAdmissionError } from '../world/investigation.js'
 import type {
   ElicitResult,
   JSONRPCMessage,
@@ -555,6 +556,17 @@ export class StructuredIO {
         error ? reject(error) : resolve(),
       )
     })
+  }
+
+  async requestInvestigation(
+    request: import('../world/investigation.js').InvestigationControlRequest,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    try {
+      return await this.sendRequest(request, z.record(z.string(), z.unknown()), signal)
+    } catch (error) {
+      throw new InvestigationAdmissionError(error instanceof Error ? error.message : 'investigation_io_outcome_unknown')
+    }
   }
 
   private async sendRequest<Response>(

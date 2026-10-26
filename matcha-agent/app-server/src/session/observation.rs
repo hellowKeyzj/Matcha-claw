@@ -26,8 +26,27 @@ impl Sessions {
                     None => break,
                 },
                 result = titles.join_next(), if !titles.is_empty() => {
-                    if result.is_some_and(|result| result.is_err()) {
+                    if result.as_ref().is_some_and(|result| result.is_err()) {
                         eprintln!("session title task failed");
+                    }
+                    let mut execution = session.data.lock().await;
+                    if let Some(Ok(Some(run_id))) = result
+                        && let Some(active) = execution.active.as_mut().filter(|active|
+                            active.record.run.run_id == run_id)
+                    {
+                        active.auxiliary_pending -= 1;
+                        session.changed.notify_waiters();
+                    }
+                    if let Some(active) = execution.active.as_ref().filter(|active|
+                        active.idle_observed && active.auxiliary_pending == 0 && !active.budget_expired)
+                    {
+                        let (status, reason) = active.outcome();
+                        let result = active.owned_result();
+                        if let Err(error) = self.finish_locked(&mut execution, status, reason, result).await {
+                            execution.fault(error);
+                        }
+                        session.changed.notify_waiters();
+                        session.wake.notify_one();
                     }
                     continue;
                 }
@@ -87,6 +106,14 @@ impl Sessions {
             if result.is_err() {
                 eprintln!("session title task failed");
             }
+            if let Ok(Some(run_id)) = result {
+                let mut execution = session.data.lock().await;
+                if let Some(active) = execution.active.as_mut().filter(|active|
+                    active.record.run.run_id == run_id)
+                {
+                    active.auxiliary_pending -= 1;
+                }
+            }
         }
         let session_id;
         {
@@ -100,7 +127,10 @@ impl Sessions {
                 .as_ref()
                 .is_some_and(|cli| cli.instance_id() == instance_id)
             {
-                if execution.active.is_some()
+                if execution
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| !active.budget_expired)
                     && let Err(error) = self
                         .finish_locked(
                             &mut execution,
@@ -144,7 +174,7 @@ impl Sessions {
         instance_id: &str,
         batch: Vec<CliEvent>,
         exited: &mut bool,
-        titles: &mut tokio::task::JoinSet<()>,
+        titles: &mut tokio::task::JoinSet<Option<String>>,
     ) -> rpc::Result<()> {
         let mut execution = session.data.lock().await;
         if !execution
@@ -205,9 +235,12 @@ impl Sessions {
                             && active.input_started
                             && (active.acknowledged || active.native_cycle_observed)
                         {
+                            active.idle_observed = true;
                             let (status, reason) = active.outcome();
                             let result = active.owned_result();
-                            terminal = Some((status, reason, result));
+                            if active.auxiliary_pending == 0 {
+                                terminal = Some((status, reason, result));
+                            }
                         }
                     }
                     if !execution.closing
@@ -220,11 +253,19 @@ impl Sessions {
                     {
                         match self.accept_title_locked(&mut execution, &message).await {
                             Ok(Some(description)) => {
+                                let scope = execution.active.as_ref().and_then(|active|
+                                    active.record.run.world_investigation.as_ref().map(|world| world.frame(&active.record.run))).transpose()?;
+                                let run_id = if scope.is_some() {
+                                    let active = execution.active.as_mut().expect("acknowledged active Run");
+                                    active.auxiliary_pending += 1;
+                                    Some(active.record.run.run_id.clone())
+                                } else { None };
                                 let owner = self.clone();
                                 let session = session.clone();
                                 let instance = instance_id.to_owned();
                                 titles.spawn(async move {
-                                    owner.generate_title(session, instance, description).await;
+                                    owner.generate_title(session, instance, description, scope).await;
+                                    run_id
                                 });
                             }
                             Ok(None) => {}
@@ -247,13 +288,21 @@ impl Sessions {
                     }
                     if let Some(active) = execution.active.as_mut() {
                         active.result_count += 1;
-                        if !active.input_started || active.result_count > 1 {
+                        if !active.input_started
+                            || active.result_count > 1
+                            || result.get("input_message_id").is_some_and(|id| {
+                                id.as_str() != Some(active.record.run.message_id.as_str())
+                            })
+                            || (active.record.run.request_id.is_some()
+                                && result.get("input_message_id").and_then(Value::as_str)
+                                    != Some(active.record.run.message_id.as_str()))
+                        {
                             active.ownership_ambiguous = true;
                         }
                         active.result = Some(result.clone());
                     }
-                    // Result has no input UUID. Its ownership is known only at drained idle;
-                    // retain the session fact now, never an irreversible guessed Run link.
+                    // Input identity does not replace ACK/unique-result/drained-idle ownership.
+                    // Retain the session fact now; the Run link is settled only at idle.
                     items.push(("native.result".to_owned(), result));
                 }
                 CliEvent::Request {
@@ -265,6 +314,20 @@ impl Sessions {
                             .events
                             .append_batch(&session_id, None, std::mem::take(&mut items))
                             .await?;
+                    }
+                    if matches!(request.get("subtype").and_then(Value::as_str),
+                        Some("native_io_admit" | "native_io_observe"))
+                    {
+                        let outcome = self.investigation_control_locked(&mut execution, instance_id, &request).await;
+                        let cli = execution.cli.clone().expect("observed CLI instance");
+                        let response = match outcome {
+                            Ok(response) => json!({"subtype":"success","response":response}),
+                            Err(error) => json!({"subtype":"error","error":error.data.as_ref().and_then(|data| data.get("kind")).and_then(Value::as_str).unwrap_or("investigation_io_outcome_unknown")}),
+                        };
+                        drop(execution);
+                        cli.respond(&request_id, response).await?;
+                        execution = session.data.lock().await;
+                        continue;
                     }
                     let run_id = execution
                         .active
@@ -332,6 +395,14 @@ impl Sessions {
                 record::save_session(&self.0.database, &started).await?;
                 execution.record = started;
             }
+            if execution.active.as_ref().is_some_and(|active| {
+                active.budget_expired
+                    || active
+                        .deadline
+                        .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+            }) {
+                terminal = None;
+            }
             if let Some((status, reason, result)) = terminal {
                 if !items.is_empty() {
                     self.0
@@ -341,6 +412,7 @@ impl Sessions {
                 }
                 self.finish_locked(&mut execution, status, reason, result)
                     .await?;
+                session.changed.notify_waiters();
                 session.wake.notify_one();
             }
         }

@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { StructuredTablePreview } from '@/pages/Chat/components/StructuredTablePreview';
-import { CsvPreview } from '@/pages/Chat/components/CsvPreview';
-import { ExecutionGraphCard } from '@/pages/Chat/ExecutionGraphCard';
+import { StructuredTablePreview } from '@/plugins/chat/components/StructuredTablePreview';
+import { CsvPreview } from '@/plugins/chat/components/CsvPreview';
+import { ExecutionGraphCard } from '@/plugins/message-rendering/ExecutionGraphCard';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({

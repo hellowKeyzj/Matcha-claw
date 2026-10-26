@@ -1,15 +1,15 @@
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use foundation::execution::{CommandRoute, LaneRetention, OwnerSpec, QueryRoute};
-use tokio::time::{Instant, timeout_at};
 use platform::trace::{session_trace, with_session_trace};
 use serde_json::json;
+use tokio::time::Instant;
 
 use crate::{
     ProviderAccount, ProviderAccountId, ProviderCascade, ProviderModel, ProviderModelCapability,
-    ProviderModelCatalog, ProviderNativeConfigurationEffect, ProviderPrivateProjectionCommand,
-    ProviderPrivateProjectionEffect, ProviderRouting, Resolver,
+    ProviderModelCatalog, ProviderNativeConfigurationEffect, ProviderRouting, ProviderRuntimeReport,
+    Resolver,
     api::{ProviderAccountPrivateTransaction, ProviderCommand, ProviderQuery},
     application::receipts::{
         ProviderAccountView, ProviderAccountsDelivery, ProviderCommitOutcome,
@@ -27,17 +27,19 @@ use super::{
     routing::ProviderRoutingOwner,
 };
 
-struct ProviderSnapshot {
-    accounts: Vec<ProviderAccount>,
-    catalog: ProviderModelCatalog,
-    routing: Option<ProviderRouting>,
+pub(super) struct ProviderSnapshot {
+    pub(super) accounts: Vec<ProviderAccount>,
+    pub(super) catalog: ProviderModelCatalog,
+    pub(super) routing: Option<ProviderRouting>,
     models: ProviderModelOwner,
+    pub(super) reports: Vec<ProviderRuntimeReport>,
 }
 
 #[derive(Clone)]
 pub(crate) struct ProviderShared {
     snapshot: Arc<ArcSwap<ProviderSnapshot>>,
     runtime_directory: Arc<dyn ProviderRuntimeDirectory>,
+    generation_bindings: crate::adapters::generation_bindings::GenerationBindings,
 }
 
 pub struct ProviderOwnerInput {
@@ -46,12 +48,13 @@ pub struct ProviderOwnerInput {
 }
 
 pub(crate) struct ProviderOwner {
-    cascade: ProviderCascade,
-    accounts: ProviderAccountsOwner,
+    pub(super) cascade: ProviderCascade,
+    pub(super) accounts: ProviderAccountsOwner,
     models: ProviderModelOwner,
     routing: ProviderRoutingOwner,
-    runtime_directory: Arc<dyn ProviderRuntimeDirectory>,
-    snapshot: Arc<ArcSwap<ProviderSnapshot>>,
+    pub(super) runtime_directory: Arc<dyn ProviderRuntimeDirectory>,
+    pub(super) snapshot: Arc<ArcSwap<ProviderSnapshot>>,
+    generation_bindings: crate::adapters::generation_bindings::GenerationBindings,
 }
 
 impl ProviderOwner {
@@ -62,9 +65,13 @@ impl ProviderOwner {
             catalog: input.cascade.catalog().clone(),
             routing: input.cascade.routing().cloned(),
             models: models.clone(),
+            reports: Vec::new(),
         })));
 
         Self {
+            generation_bindings: crate::adapters::generation_bindings::GenerationBindings::new(
+                input.cascade.generation_bindings_path(),
+            ),
             cascade: input.cascade,
             accounts: ProviderAccountsOwner::new(Resolver::disabled()),
             models,
@@ -92,6 +99,7 @@ impl OwnerSpec for ProviderOwner {
             ProviderShared {
                 snapshot: Arc::clone(&self.snapshot),
                 runtime_directory: Arc::clone(&self.runtime_directory),
+                generation_bindings: self.generation_bindings.clone(),
             },
             self,
         )
@@ -163,15 +171,22 @@ impl ProviderOwner {
                 | ProviderCommand::DeleteAccount {
                     transaction, reply, ..
                 } => {
-                    let outcome = self.settle_account_transaction(
-                        &mut call,
-                        transaction.as_ref(),
-                        ProviderAccountsDelivery::Rejected,
-                    ).await;
+                    let outcome = self
+                        .settle_account_transaction(
+                            &mut call,
+                            transaction.as_ref(),
+                            ProviderAccountsDelivery::Rejected,
+                        )
+                        .await;
                     send_reply(call, reply, outcome).await;
                 }
                 ProviderCommand::DiscoverModels { reply, .. } => {
-                    send_reply(call, reply, crate::ProviderModelDiscoverOutcome::Unavailable).await
+                    send_reply(
+                        call,
+                        reply,
+                        crate::ProviderModelDiscoverOutcome::Unavailable,
+                    )
+                    .await
                 }
                 ProviderCommand::ReplaceModels { reply, .. } => {
                     send_reply(call, reply, crate::ProviderModelReplaceOutcome::Unavailable).await
@@ -192,7 +207,9 @@ impl ProviderOwner {
             ProviderCommand::ConfigurePrivateResolver { resolver, reply } => {
                 // Before routes/ready: reconcile only this freshly reloaded canonical inventory.
                 if self.cascade.reload().is_ok() {
-                    let _ = resolver.recover_account_credentials(self.cascade.accounts()).await;
+                    let _ = resolver
+                        .recover_account_credentials(self.cascade.accounts())
+                        .await;
                 }
                 self.accounts.set_private_resolver(resolver.clone());
                 self.models.set_private_resolver(resolver);
@@ -212,39 +229,57 @@ impl ProviderOwner {
                             send_reply(call, reply, ProviderAccountsDelivery::Rejected).await;
                             return;
                         };
-                        match self.accounts.begin_transaction(
-                            account_id, draft.revision_value(), "replace",
-                            !matches!(draft.auth_mode(), "local" | "cliReuse"),
-                        ).await {
+                        match self
+                            .accounts
+                            .begin_transaction(
+                                account_id,
+                                draft.revision_value(),
+                                "replace",
+                                !matches!(draft.auth_mode(), "local" | "cliReuse"),
+                            )
+                            .await
+                        {
                             Ok(transaction) => transaction,
                             Err(error) => {
                                 if let Some(call) = &mut call {
                                     call.diagnostic(ProviderCallDiagnosticReason::PrivateTransactionSettleFailed, Some(error.safe_code()));
                                 }
-                                send_reply(call, reply, ProviderAccountsDelivery::Unavailable).await;
+                                send_reply(call, reply, ProviderAccountsDelivery::Unavailable)
+                                    .await;
                                 return;
                             }
                         }
                     }
                 };
-                if !self.claim_account_transaction(&mut call, transaction.as_ref()).await {
-                    let outcome = self.settle_account_transaction(&mut call, transaction.as_ref(), ProviderAccountsDelivery::Unavailable).await;
+                if !self
+                    .claim_account_transaction(&mut call, transaction.as_ref())
+                    .await
+                {
+                    let outcome = self
+                        .settle_account_transaction(
+                            &mut call,
+                            transaction.as_ref(),
+                            ProviderAccountsDelivery::Unavailable,
+                        )
+                        .await;
                     send_reply(call, reply, outcome).await;
                     return;
                 }
-                let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops(&crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint())
-                else {
-                    let outcome = self.settle_account_transaction(
-                        &mut call,
-                        transaction.as_ref(),
-                        ProviderAccountsDelivery::Unavailable,
-                    ).await;
-                    send_reply(call, reply, outcome).await;
-                    return;
-                };
+                let identity_ops = self.runtime_directory.provider_runtime_identity_ops(
+                    &crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint(),
+                );
+                let snapshot = &self.snapshot;
+                let models = &self.models;
                 let outcome = self
                     .accounts
-                    .replace(&mut self.cascade, identity_ops, draft, transaction.as_ref()).await;
+                    .replace(
+                        &mut self.cascade,
+                        identity_ops,
+                        draft,
+                        transaction.as_ref(),
+                        |cascade| publish_provider_snapshot(snapshot, cascade, models, &[]),
+                    )
+                    .await;
                 self.update_snapshot();
                 if matches!(
                     outcome.desired,
@@ -256,8 +291,9 @@ impl ProviderOwner {
                 }
                 self.record_private_profile_error(&mut call, &outcome);
                 let outcome = self.finish_account_mutation(outcome, &mut call).await;
-                let outcome =
-                    self.settle_account_transaction(&mut call, transaction.as_ref(), outcome).await;
+                let outcome = self
+                    .settle_account_transaction(&mut call, transaction.as_ref(), outcome)
+                    .await;
                 send_reply(call, reply, outcome).await;
             }
             ProviderCommand::DeleteAccount {
@@ -269,35 +305,54 @@ impl ProviderOwner {
             } => {
                 let transaction = match transaction {
                     Some(transaction) => Some(transaction),
-                    None => match self.accounts.begin_transaction(id.clone(), revision.get(), "delete", false).await {
-                        Ok(transaction) => transaction,
-                        Err(error) => {
-                            if let Some(call) = &mut call {
-                                call.diagnostic(ProviderCallDiagnosticReason::PrivateTransactionSettleFailed, Some(error.safe_code()));
+                    None => {
+                        match self
+                            .accounts
+                            .begin_transaction(id.clone(), revision.get(), "delete", false)
+                            .await
+                        {
+                            Ok(transaction) => transaction,
+                            Err(error) => {
+                                if let Some(call) = &mut call {
+                                    call.diagnostic(ProviderCallDiagnosticReason::PrivateTransactionSettleFailed, Some(error.safe_code()));
+                                }
+                                send_reply(call, reply, ProviderAccountsDelivery::Unavailable)
+                                    .await;
+                                return;
                             }
-                            send_reply(call, reply, ProviderAccountsDelivery::Unavailable).await;
-                            return;
                         }
                     }
                 };
-                if !self.claim_account_transaction(&mut call, transaction.as_ref()).await {
-                    let outcome = self.settle_account_transaction(&mut call, transaction.as_ref(), ProviderAccountsDelivery::Unavailable).await;
+                if !self
+                    .claim_account_transaction(&mut call, transaction.as_ref())
+                    .await
+                {
+                    let outcome = self
+                        .settle_account_transaction(
+                            &mut call,
+                            transaction.as_ref(),
+                            ProviderAccountsDelivery::Unavailable,
+                        )
+                        .await;
                     send_reply(call, reply, outcome).await;
                     return;
                 }
-                let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops(&crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint())
-                else {
-                    let outcome = self.settle_account_transaction(
-                        &mut call,
-                        transaction.as_ref(),
-                        ProviderAccountsDelivery::Unavailable,
-                    ).await;
-                    send_reply(call, reply, outcome).await;
-                    return;
-                };
+                let identity_ops = self.runtime_directory.provider_runtime_identity_ops(
+                    &crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint(),
+                );
+                let snapshot = &self.snapshot;
+                let models = &self.models;
                 let outcome = self
                     .accounts
-                    .delete(&mut self.cascade, identity_ops, id, revision, transaction.as_ref()).await;
+                    .delete(
+                        &mut self.cascade,
+                        identity_ops,
+                        id,
+                        revision,
+                        transaction.as_ref(),
+                        |cascade| publish_provider_snapshot(snapshot, cascade, models, &[]),
+                    )
+                    .await;
                 self.update_snapshot();
                 if matches!(
                     outcome.desired,
@@ -309,8 +364,9 @@ impl ProviderOwner {
                 }
                 self.record_private_profile_error(&mut call, &outcome);
                 let outcome = self.finish_account_mutation(outcome, &mut call).await;
-                let outcome =
-                    self.settle_account_transaction(&mut call, transaction.as_ref(), outcome).await;
+                let outcome = self
+                    .settle_account_transaction(&mut call, transaction.as_ref(), outcome)
+                    .await;
                 send_reply(call, reply, outcome).await;
             }
             ProviderCommand::DiscoverModels {
@@ -322,7 +378,12 @@ impl ProviderOwner {
                 let mut diagnostic = None;
                 let mut outcome = self
                     .models
-                    .discover(self.runtime_directory.as_ref(), &mut self.cascade, &account_id, &mut diagnostic)
+                    .discover(
+                        self.runtime_directory.as_ref(),
+                        &mut self.cascade,
+                        &account_id,
+                        &mut diagnostic,
+                    )
                     .await;
                 if let (Some(call), Some(reason)) = (call.as_mut(), diagnostic) {
                     let (reason, code) = reason.diagnostic();
@@ -360,7 +421,9 @@ impl ProviderOwner {
                 {
                     ProviderCall::persisted(&mut call, *persisted, *commit).await;
                 }
-                let outcome = self.finish_model_mutation(outcome, returned_id, &mut call).await;
+                let outcome = self
+                    .finish_model_mutation(outcome, returned_id, &mut call)
+                    .await;
                 send_reply(call, reply, outcome).await;
             }
             ProviderCommand::ReplaceRouting { routing, reply, .. } => {
@@ -393,11 +456,20 @@ impl ProviderOwner {
         let Some(transaction) = transaction else {
             return true;
         };
-        if self.cascade.reload().is_err() { return false; }
-        let previous_reference = self.cascade.account(&transaction.account_id)
+        if self.cascade.reload().is_err() {
+            return false;
+        }
+        self.update_snapshot();
+        let previous_reference = self
+            .cascade
+            .account(&transaction.account_id)
             .and_then(|account| account.configuration().credential())
             .map(crate::CredentialReference::as_str);
-        let Err(error) = self.accounts.claim_transaction(transaction, previous_reference).await else {
+        let Err(error) = self
+            .accounts
+            .claim_transaction(transaction, previous_reference)
+            .await
+        else {
             return true;
         };
         if let Some(call) = call {
@@ -425,12 +497,24 @@ impl ProviderOwner {
             ProviderAccountsDelivery::Unknown { .. } => "unknown",
             _ => "rejected",
         };
-        let committed = matches!(&outcome,
-            ProviderAccountsDelivery::Stored { commit: ProviderCommitOutcome::Committed, .. }
-            | ProviderAccountsDelivery::Deleted { commit: ProviderCommitOutcome::Committed, .. }
-            | ProviderAccountsDelivery::Unknown { commit: ProviderCommitOutcome::Committed, .. }
+        let committed = matches!(
+            &outcome,
+            ProviderAccountsDelivery::Stored {
+                commit: ProviderCommitOutcome::Committed,
+                ..
+            } | ProviderAccountsDelivery::Deleted {
+                commit: ProviderCommitOutcome::Committed,
+                ..
+            } | ProviderAccountsDelivery::Unknown {
+                commit: ProviderCommitOutcome::Committed,
+                ..
+            }
         );
-        let Err(error) = self.accounts.settle_transaction(transaction, settlement, committed).await else {
+        let Err(error) = self
+            .accounts
+            .settle_transaction(transaction, settlement, committed)
+            .await
+        else {
             return outcome;
         };
         if let Some(call) = call {
@@ -508,7 +592,11 @@ impl ProviderOwner {
                 .await;
             }
             ProviderQuery::TextGenerationModelLimits { .. }
-            | ProviderQuery::GenerateText { .. } => {
+            | ProviderQuery::GenerateText { .. }
+            | ProviderQuery::PrepareGenerationBinding { .. }
+            | ProviderQuery::RestoreGenerationBinding { .. }
+            | ProviderQuery::CountBoundInput { .. }
+            | ProviderQuery::GenerateBound { .. } => {
                 unreachable!("text generation queries use the direct route")
             }
             ProviderQuery::SelectSessionModel {
@@ -556,14 +644,12 @@ impl ProviderOwner {
         }
     }
 
-    fn update_snapshot(&self) {
-        let new_snapshot = ProviderSnapshot {
-            accounts: self.cascade.accounts().to_vec(),
-            catalog: self.cascade.catalog().clone(),
-            routing: self.cascade.routing().cloned(),
-            models: self.models.clone(),
-        };
-        self.snapshot.store(Arc::new(new_snapshot));
+    pub(super) fn update_snapshot(&self) {
+        self.publish_reports(&[]);
+    }
+
+    pub(super) fn publish_reports(&self, reports: &[ProviderRuntimeReport]) {
+        publish_provider_snapshot(&self.snapshot, &self.cascade, &self.models, reports);
     }
 
     async fn finish_account_mutation(
@@ -571,17 +657,24 @@ impl ProviderOwner {
         mutation: ProviderAccountsMutation,
         call: &mut Option<ProviderCall>,
     ) -> ProviderAccountsDelivery {
-        let native = if mutation.private.is_err() {
-            ProviderNativeConfigurationEffect::Unavailable
-        } else if mutation.commit == ProviderCommitOutcome::Committed {
-            let native = self
+        let native = if mutation.commit == ProviderCommitOutcome::Committed {
+            let failures = mutation.private.as_ref().err()
+                .and_then(|error| mutation.account.as_ref().or_else(|| mutation.retired.first())
+                    .map(|account| error.account_execution(account)))
+                .into_iter()
+                .collect();
+            let mut native = self
                 .reconcile(
                     &mutation.retired,
                     mutation.required_auth_accounts(),
                     mutation.auth_state_refresh_required,
+                    failures,
                     call,
                 )
                 .await;
+            if mutation.private.is_err() {
+                native = native.merge(ProviderNativeConfigurationEffect::Unavailable);
+            }
             log_provider_native_effect("account-mutation", &native);
             native
         } else {
@@ -634,7 +727,7 @@ impl ProviderOwner {
         };
         let mut required = self.routing.route_account_ids(&self.cascade);
         required.insert(account_id);
-        let native = self.reconcile(&[], &required, false, call).await;
+        let native = self.reconcile(&[], &required, false, Vec::new(), call).await;
         crate::ProviderModelReplaceOutcome::DesiredStored {
             persisted,
             native: ProviderNativeConfigurationView::from_effect(&native),
@@ -654,7 +747,7 @@ impl ProviderOwner {
             return outcome;
         };
         let required = self.routing.route_account_ids(&self.cascade);
-        let native = self.reconcile(&[], &required, false, call).await;
+        let native = self.reconcile(&[], &required, false, Vec::new(), call).await;
         crate::ProviderRoutingReplaceOutcome::DesiredStored {
             persisted,
             native: ProviderNativeConfigurationView::from_effect(&native),
@@ -662,131 +755,23 @@ impl ProviderOwner {
         }
     }
 
-    async fn prepare_private_projection(
-        &mut self,
-        endpoint: &platform::endpoint::runtime_address::RuntimeEndpoint,
-    ) -> ProviderPrivateProjectionEffect {
-        if self.cascade.reload().is_err() {
-            return ProviderPrivateProjectionEffect::unknown(
-                "provider-cascade-unavailable",
-                "Provider cascade is unavailable",
-            );
-        }
-        let Some(private_projection) = self.runtime_directory.provider_private_projection_ops(endpoint)
-        else {
-            return ProviderPrivateProjectionEffect::unknown(
-                "provider-private-projection-unavailable",
-                "Provider private projection is unavailable",
-            );
-        };
-        private_projection.prepare_private_projection(ProviderPrivateProjectionCommand {
-            resolver: self.accounts.private_resolver(),
-            accounts: self.cascade.accounts(),
-            models: self.cascade.catalog(),
-            routing: self.cascade.routing(),
-            now_millis: now_millis(),
-        }).await
-    }
+}
 
-    async fn reconcile(
-        &mut self,
-        retired: &[ProviderAccount],
-        required_auth_accounts: &BTreeSet<ProviderAccountId>,
-        auth_state_refresh_required: bool,
-        call: &mut Option<ProviderCall>,
-    ) -> ProviderNativeConfigurationEffect {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let effect = timeout_at(
-            deadline,
-            self.reconcile_until(
-                retired,
-                required_auth_accounts,
-                auth_state_refresh_required,
-                deadline,
-                call,
-            ),
-        )
-        .await;
-        match effect {
-            Ok(effect) if Instant::now() < deadline => effect,
-            _ => {
-                if let Some(call) = call {
-                    call.diagnostic(ProviderCallDiagnosticReason::PrivateProfileDeadline, None);
-                }
-                eprintln!(
-                    "[startup-trace] source=provider-owner phase=reconcile detail=budget-exhausted budget_ms=30000"
-                );
-                ProviderNativeConfigurationEffect::Unavailable
-            }
-        }
-    }
-
-    async fn reconcile_until(
-        &mut self,
-        retired: &[ProviderAccount],
-        required_auth_accounts: &BTreeSet<ProviderAccountId>,
-        auth_state_refresh_required: bool,
-        deadline: Instant,
-        call: &mut Option<ProviderCall>,
-    ) -> ProviderNativeConfigurationEffect {
-        if self.cascade.reload().is_err() || Instant::now() >= deadline {
-            return ProviderNativeConfigurationEffect::Unavailable;
-        }
-        let Some(identity_ops) = self.runtime_directory.provider_runtime_identity_ops(&crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint()) else {
-            return ProviderNativeConfigurationEffect::Unavailable;
-        };
-        let accounts = self.cascade.accounts().to_vec();
-        let catalog = self.cascade.catalog().clone();
-        let routing = self.cascade.routing().cloned();
-        let auth_state_refresh_required =
-            match self.accounts.apply_private_profiles_for_provider_config(
-                identity_ops,
-                &accounts,
-                required_auth_accounts,
-                deadline,
-            ).await {
-                Ok(applied) => auth_state_refresh_required || applied,
-                Err(error) => {
-                    if let Some(call) = call {
-                        let (reason, code) = error.diagnostic();
-                        call.diagnostic(reason, code);
-                    }
-                    return ProviderNativeConfigurationEffect::Unavailable;
-                },
-            };
-
-        let now_millis = now_millis();
-        let mut effects = Vec::new();
-        for provider_ops in self.runtime_directory.provider_config_ops() {
-            if Instant::now() >= deadline {
-                return ProviderNativeConfigurationEffect::Unavailable;
-            }
-            let command = crate::ProviderNativeConfigurationCommand {
-                resolver: self.accounts.private_resolver(),
-                accounts: &accounts,
-                models: &catalog,
-                routing: routing.as_ref(),
-                retired,
-                required_auth_accounts,
-                auth_state_refresh_required,
-                now_millis,
-            };
-            effects.push(
-                provider_ops
-                    .reconcile_provider_native_configuration(command)
-                    .await,
-            );
-        }
-
-        if effects.is_empty() {
-            ProviderNativeConfigurationEffect::Unavailable
-        } else {
-            effects
-                .into_iter()
-                .reduce(|acc, effect| acc.merge(effect))
-                .unwrap()
-        }
-    }
+fn publish_provider_snapshot(
+    snapshot: &ArcSwap<ProviderSnapshot>,
+    cascade: &ProviderCascade,
+    models: &ProviderModelOwner,
+    reports: &[ProviderRuntimeReport],
+) {
+    let previous = snapshot.load_full();
+    let reports = super::reconciliation::current_reports(&previous, cascade, reports);
+    snapshot.store(Arc::new(ProviderSnapshot {
+        accounts: cascade.accounts().to_vec(),
+        catalog: cascade.catalog().clone(),
+        routing: cascade.routing().cloned(),
+        models: models.clone(),
+        reports,
+    }));
 }
 
 async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: ProviderQuery) {
@@ -805,6 +790,12 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
     };
     if started.is_err() {
         ProviderCall::not_admitted(call).await;
+        if let ProviderQuery::GenerateBound { reply, .. } = query {
+            let _ = reply.send(Err(crate::generation::Failure::new(
+                crate::generation::Stage::Admission,
+                crate::generation::FailureKind::AuditUnavailable,
+            )));
+        }
         return;
     }
     match query {
@@ -853,6 +844,66 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
                 list_provider_routing_for_snapshot(&shared.snapshot),
             )
             .await;
+        }
+        ProviderQuery::PrepareGenerationBinding { request, reply } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = snapshot.models.prepare_generation_binding(
+                shared.runtime_directory.as_ref(),
+                &snapshot.accounts,
+                &snapshot.catalog,
+                snapshot.routing.as_ref(),
+                &shared.generation_bindings,
+                request,
+            );
+            let _ = reply.send(outcome);
+        }
+        ProviderQuery::RestoreGenerationBinding { descriptor, reply } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = snapshot.models.restore_generation_binding(
+                &snapshot.accounts,
+                &snapshot.catalog,
+                &shared.generation_bindings,
+                descriptor,
+            );
+            let _ = reply.send(outcome);
+        }
+        ProviderQuery::CountBoundInput {
+            request,
+            cancellation,
+            reply,
+        } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = snapshot
+                .models
+                .count_bound_input(&snapshot.accounts, &snapshot.catalog, request, cancellation)
+                .await;
+            let _ = reply.send(outcome);
+        }
+        ProviderQuery::GenerateBound {
+            request,
+            cancellation,
+            stream,
+            reply,
+            ..
+        } => {
+            let snapshot = shared.snapshot.load_full();
+            let call_reference = call.as_ref().map(|call| call.id().as_str().to_owned());
+            let mut stream = stream.map(crate::api::ProviderStreamSink);
+            let outcome = snapshot
+                .models
+                .generate_bound(
+                    &snapshot.accounts,
+                    &snapshot.catalog,
+                    request,
+                    cancellation,
+                    call_reference,
+                    stream
+                        .as_mut()
+                        .map(|sink| sink as &mut dyn crate::llm_client::LlmStreamSink),
+                )
+                .await;
+            drop(stream);
+            send_reply(call, reply, outcome).await;
         }
         ProviderQuery::TextGenerationModelLimits { request, reply, .. } => {
             let snapshot = shared.snapshot.load_full();
@@ -969,13 +1020,14 @@ fn list_provider_accounts_for_snapshot(
     snapshot: &ArcSwap<ProviderSnapshot>,
 ) -> ProviderAccountsDelivery {
     let snapshot = snapshot.load_full();
-    ProviderAccountsDelivery::List(
-        snapshot
+    ProviderAccountsDelivery::List {
+        accounts: snapshot
             .accounts
             .iter()
             .map(ProviderAccountView::from_account)
             .collect(),
-    )
+        reports: snapshot.reports.clone(),
+    }
 }
 
 fn get_provider_account_for_snapshot(
@@ -985,7 +1037,10 @@ fn get_provider_account_for_snapshot(
     let snapshot = snapshot.load_full();
     account_for_snapshot(&snapshot, id)
         .map(ProviderAccountView::from_account)
-        .map(ProviderAccountsDelivery::Account)
+        .map(|account| ProviderAccountsDelivery::Account {
+            account,
+            reports: snapshot.reports.clone(),
+        })
         .unwrap_or(ProviderAccountsDelivery::Missing)
 }
 
@@ -1009,7 +1064,9 @@ fn selectable_provider_models_for_snapshot(
     capability: ProviderModelCapability,
 ) -> ProviderModelSelectableOutcome {
     let snapshot = snapshot.load_full();
-    let Some(identity_ops) = runtime.provider_runtime_identity_ops(&crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint()) else {
+    let Some(identity_ops) = runtime.provider_runtime_identity_ops(
+        &crate::ProviderSessionEndpoint::OpenClawLocal.runtime_endpoint(),
+    ) else {
         return ProviderModelSelectableOutcome::Unavailable;
     };
     let Ok(identities) = identity_ops.runtime_identities(&snapshot.accounts) else {
@@ -1066,12 +1123,4 @@ fn model_view_for_snapshot(
 ) -> Option<ProviderModelView> {
     let account = account_for_snapshot(snapshot, model.account_id())?;
     Some(ProviderModelView::from_model(account, model))
-}
-
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|d| u64::try_from(d.as_millis()).ok())
-        .unwrap_or(u64::MAX)
 }

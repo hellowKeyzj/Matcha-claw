@@ -1,5 +1,8 @@
 import { app, session, type BrowserWindow } from 'electron';
 import type { Server } from 'node:http';
+import { join } from 'node:path';
+import { ApplicationPluginOwner } from './app-plugins/owner';
+import { startAppPluginAgentGateway } from './app-plugins/agent-gateway';
 import type { RuntimeHostApiDependencies } from '../api/context';
 import {
   registerRuntimeIpcHandlers,
@@ -24,7 +27,7 @@ import {
   type DirectRuntimeHostDeliveryErrorCode,
 } from './runtime-host-delivery/direct-host';
 import { createRuntimeHostDelivery, type RuntimeHostDelivery } from './runtime-host-delivery/delivery';
-import { RuntimeHostLifecycleOwner, stopOrForceKillRuntimeHost } from './runtime-host-delivery/lifecycle-owner';
+import { RuntimeHostLifecycleOwner } from './runtime-host-delivery/lifecycle-owner';
 import { createCloudAccountClient } from './cloud-account/client';
 import { createCloudAccountService, type CloudAccountRuntime } from './cloud-account/service';
 import { createCloudProviderSync } from './cloud-account/provider-sync';
@@ -41,12 +44,16 @@ import {
   type ProviderPrivateAccountDependencies,
 } from './ipc/provider-private-auth';
 import { createFleetCredentialWriteAdapter } from './ipc/fleet-private';
+import { registerWorldPrivateHandlers } from './world/private-ipc';
 import { composeLicenseService } from './license/composition';
 
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 const e2eStartupOutcomeKey = '__matchaclawE2EStartupOutcome';
 const directRuntimeHostDeliveryErrorCodes = new Set<DirectRuntimeHostDeliveryErrorCode>([
   'SPAWN_FAILED',
+  'LAUNCH_ABORTED',
+  'PROCESS_SCOPE_FAILED',
+  'PROCESS_TREE_UNCONFIRMED',
   'READY_TIMEOUT',
   'CHILD_EXITED',
   'CHILD_FAILED',
@@ -151,6 +158,8 @@ export type MainApplication = Readonly<{
   mainWindow: BrowserWindow;
   ready: Promise<void>;
   close: () => Promise<void>;
+  forceClose: () => Promise<void>;
+  readShutdownStage: () => string;
 }>;
 
 export function bootstrapMainApplication(deps: {
@@ -201,8 +210,22 @@ export function bootstrapMainApplication(deps: {
   const licenseService = composeLicenseService({
     onGateChanged: (snapshot) => deps.hostEventBus.emit('license:gate-changed', snapshot),
   });
+  const appPlugins = new ApplicationPluginOwner({
+    rootDir: join(app.getPath('userData'), 'app-plugins'),
+    onChanged: (event) => deps.hostEventBus.emit('app-plugins:changed', event),
+  });
+  const appPluginAgentGateway = startAppPluginAgentGateway({
+    owner: appPlugins,
+    root: join(app.getPath('userData'), 'app-plugin-agent'),
+  });
+  const appPluginGatewaySettled = appPluginAgentGateway.then(() => undefined, () => {
+    logger.warn('[AppPlugins] Agent SDK gateway unavailable; existing runtimes will start without plugin development tools');
+  });
   const shutdown = new AbortController();
+  const heldRuntimeHosts = new Set<DirectRuntimeHost>();
+  let shutdownStage = 'running';
   let closeTask: Promise<void> | undefined;
+  let forceCloseTask: Promise<void> | undefined;
   let delivery: RuntimeHostDelivery | undefined;
   let startedRuntimeHost: DirectRuntimeHost | undefined;
   let directRuntimeHost: RuntimeHostLifecycleOwner | undefined;
@@ -220,7 +243,15 @@ export function bootstrapMainApplication(deps: {
   }> => {
     try {
       assertStarting();
-      delivery = await createRuntimeHostDelivery(deps.hostEventBus);
+      await appPluginGatewaySettled;
+      assertStarting();
+      delivery = await createRuntimeHostDelivery(deps.hostEventBus, {
+        signal: shutdown.signal,
+        onSpawn: (host, closed) => {
+          heldRuntimeHosts.add(host);
+          void closed.then(() => heldRuntimeHosts.delete(host), () => undefined);
+        },
+      });
       assertStarting();
       startedRuntimeHost = await delivery.launchRuntimeHost();
       assertStarting();
@@ -318,11 +349,29 @@ export function bootstrapMainApplication(deps: {
   const providerAuth = runtimeSetup.then((runtime) => runtime.providerAuth);
   void providerAuth.catch(() => undefined);
   const drainProviderAuth = registerProviderPrivateAuthHandlers(deps.getMainWindow, providerAuth, shutdown.signal);
+  const drainWorldPrivate = registerWorldPrivateHandlers(
+    runtimeSetup.then(({ api }) => api.runtimeHostTransports.worldTransport), shutdown.signal,
+    apiRuntime.then(({ runtimeHost }) => runtimeHost),
+    {
+      getMainWindow: deps.getMainWindow,
+      authorizeInitialImport: async () => {
+        const account = await cloudAccountService.getSession().catch(() => null);
+        return account?.state === 'authenticated' || (await licenseService.gate()).state === 'granted';
+      },
+      validateStorageBootstrap: async (storage, configuration) => {
+        await apiRuntime;
+        if (!delivery) throw new Error('world.initial_host_unavailable');
+        await delivery.validateWorldStorageBootstrap(storage, configuration);
+      },
+    },
+  );
   let server: Server | undefined;
   const startup = (async () => {
     server = startHostApiServer({
       licenseService,
       cloudAccountService,
+      appPlugins,
+      appPluginAgentGateway,
       eventBus: deps.hostEventBus,
       sessionObservers,
       runtime: apiRuntime,
@@ -347,6 +396,7 @@ export function bootstrapMainApplication(deps: {
   const close = (): Promise<void> => {
     if (closeTask) return closeTask;
     shutdown.abort();
+    shutdownStage = 'host-api';
     closeTask = (async () => {
       const hostApiServer = server;
       const serverClosed = hostApiServer && new Promise<void>((resolve, reject) => {
@@ -354,29 +404,58 @@ export function bootstrapMainApplication(deps: {
         hostApiServer.closeAllConnections();
       });
       void serverClosed?.catch(() => undefined);
+      const appPluginsClosed = appPluginAgentGateway.then((gateway) => gateway.close(), () => undefined)
+        .finally(() => appPlugins.close());
+      void appPluginsClosed.catch(() => undefined);
+      shutdownStage = 'startup';
       await Promise.allSettled([runtimeSetup, startup]);
       if (!runtimeReady) cloudAccountService.runtimeExited();
       try {
         try {
+          shutdownStage = 'license';
           await licenseService.dispose();
         } finally {
+          shutdownStage = 'session-observations';
           await sessionObservers.close().catch(() => logger.warn('Failed to release session observations during application close'));
+          shutdownStage = 'cloud-account';
           await cloudAccountService.close();
         }
       } finally {
+        shutdownStage = 'provider-auth';
         await drainProviderAuth();
+        shutdownStage = 'world-private';
+        await drainWorldPrivate();
         for (const unsubscribe of subscriptions) unsubscribe();
         try {
+          shutdownStage = 'runtime-host';
           const runtimeHost = directRuntimeHost ?? startedRuntimeHost;
-          if (runtimeHost) await stopOrForceKillRuntimeHost(runtimeHost);
+          if (runtimeHost) await runtimeHost.stop();
         } finally {
+          shutdownStage = 'delivery';
           transportBundle?.close();
           await delivery?.close();
-          await serverClosed;
+          shutdownStage = 'app-plugins';
+          try { await appPluginsClosed; }
+          finally {
+            shutdownStage = 'host-api';
+            await serverClosed;
+          }
         }
       }
+      shutdownStage = 'completed';
     })();
     return closeTask;
+  };
+  const forceClose = (): Promise<void> => {
+    shutdown.abort();
+    forceCloseTask ??= (async () => {
+      const results = await Promise.allSettled([...heldRuntimeHosts].map((host) => host.forceKill()));
+      const failures = results.filter((result) => result.status === 'rejected');
+      if (failures.length > 0) {
+        throw new AggregateError(failures.map((result) => result.reason), 'Runtime-host force confirmation failed');
+      }
+    })();
+    return forceCloseTask;
   };
   const ready = startup.catch(async (error) => {
     publishE2EStartupOutcome({ stage: 'host-api', outcome: 'HOST_API_FAILED' });
@@ -385,7 +464,7 @@ export function bootstrapMainApplication(deps: {
   });
   cloudAccountService.prewarm();
   loadMainWindowContent(mainWindow);
-  return { mainWindow, ready, close };
+  return { mainWindow, ready, close, forceClose, readShutdownStage: () => shutdownStage };
 }
 
 function publishE2ELaunchDiagnostic(error: unknown): void {

@@ -9,6 +9,7 @@ use super::external::{ConnectorProjectionEffect, projection_effect};
 
 pub const PRESET_MCP_SERVER_ID: &str = connectors::ports::PRESET_MCP_SERVER_ID;
 const OLD_PRESET_MCP_SERVER_ID: &str = "matcha-teamrun";
+pub(super) const RETIRED_APP_PLUGIN_MCP_SERVER_ID: &str = "matcha-app-plugins";
 
 #[derive(Clone, Copy)]
 pub struct PresetMcpProjection<'a> {
@@ -97,7 +98,8 @@ pub(super) fn reconcile_server(servers: &mut Map<String, Value>, projected: &mut
     if changed {
         servers.insert(PRESET_MCP_SERVER_ID.into(), projected.clone());
     }
-    old.is_some() || changed
+    let retired = servers.remove(RETIRED_APP_PLUGIN_MCP_SERVER_ID).is_some();
+    old.is_some() || changed || retired
 }
 
 fn mcp_server(
@@ -136,6 +138,7 @@ fn projection_readback_matches(store: &OpenClawConfigStore, expected: &Value) ->
 
 pub(super) fn server_matches(servers: &Map<String, Value>, expected: &Value) -> bool {
     !servers.contains_key(OLD_PRESET_MCP_SERVER_ID)
+        && !servers.contains_key(RETIRED_APP_PLUGIN_MCP_SERVER_ID)
         && servers.get(PRESET_MCP_SERVER_ID) == Some(expected)
 }
 

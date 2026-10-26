@@ -5,6 +5,7 @@
  * only through the Main-owned has-key projection.
  */
 import { hostApiFetch } from '@/lib/host-api';
+import { decodeProviderRuntimeReports, type ProviderRuntimeReport } from '@/types/provider-runtime-report';
 import {
   PROVIDER_TYPE_INFO,
   PROVIDER_TYPES,
@@ -325,6 +326,7 @@ export interface ProviderSnapshot {
   statuses: ProviderWithKeyInfo[];
   vendors: ProviderVendorInfo[];
   revisions: Record<string, number>;
+  reports: ProviderRuntimeReport[];
 }
 
 export interface ProviderListItem {
@@ -335,6 +337,8 @@ export interface ProviderListItem {
 
 export function normalizeProviderSnapshot(value: unknown): ProviderSnapshot {
   const snapshot = isRecord(value) ? value : {};
+  const reports = decodeProviderRuntimeReports(snapshot.reports);
+  if (!reports) throw new Error('Provider runtime reports are unavailable');
   const revisions = isRecord(snapshot.revisions)
     ? Object.fromEntries(Object.entries(snapshot.revisions).filter(([, revision]) => (
       typeof revision === 'number' && Number.isSafeInteger(revision) && revision > 0
@@ -347,27 +351,34 @@ export function normalizeProviderSnapshot(value: unknown): ProviderSnapshot {
       ? snapshot.vendors.map(normalizeVendor).filter((vendor): vendor is ProviderVendorInfo => vendor !== null)
       : [],
     revisions,
+    reports,
   };
 }
 
 export async function fetchProviderSnapshot(): Promise<ProviderSnapshot> {
   const payload = await hostApiFetch<unknown>('/api/provider-accounts');
-  const rawAccounts = isRecord(payload) && Array.isArray(payload.accounts) ? payload.accounts : [];
-  const accounts = rawAccounts.filter(isAccount);
-  if (accounts.length !== rawAccounts.length) {
-    return { credentials: [], statuses: [], vendors: [], revisions: {} };
+  if (!isRecord(payload) || Object.keys(payload).length !== 2
+    || !hasOnlyKeys(payload, ['accounts', 'reports']) || !Array.isArray(payload.accounts)) {
+    throw new Error('Provider accounts are unavailable');
+  }
+  const accounts = payload.accounts.filter(isAccount);
+  const reports = decodeProviderRuntimeReports(payload.reports);
+  if (accounts.length !== payload.accounts.length || !reports) {
+    throw new Error('Provider accounts are unavailable');
   }
 
-  const statuses = await Promise.all(accounts.map(async (account) => {
+  const statuses = await Promise.all(accounts.map(async (account): Promise<ProviderWithKeyInfo | null> => {
     let hasKey = account.authMode !== 'apiKey' && account.authMode !== 'token';
     if (account.authMode === 'apiKey' || account.authMode === 'token') {
       try {
         const result = await hostApiFetch<unknown>(
           `/api/provider-accounts/${encodeURIComponent(account.id)}/has-api-key`,
         );
-        hasKey = isRecord(result) && result.hasKey === true;
+        if (!isRecord(result) || Object.keys(result).length !== 1 || typeof result.hasKey !== 'boolean') return null;
+        hasKey = result.hasKey;
       } catch {
         // A missing private status is not evidence that the credential is absent.
+        return null;
       }
     }
     return {
@@ -380,14 +391,15 @@ export async function fetchProviderSnapshot(): Promise<ProviderSnapshot> {
       updatedAt: '',
       hasKey,
       keyMasked: hasKey ? '****' : null,
-    } satisfies ProviderWithKeyInfo;
+    };
   }));
 
   return {
     credentials: accounts.map(toCredential),
-    statuses,
+    statuses: statuses.filter((status): status is ProviderWithKeyInfo => status !== null),
     vendors: staticVendorProjection(),
     revisions: Object.fromEntries(accounts.map((account) => [account.id, account.revision])),
+    reports,
   };
 }
 

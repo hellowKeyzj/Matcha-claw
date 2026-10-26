@@ -4,6 +4,12 @@ use tokio_util::sync::CancellationToken;
 use crate::team::{materialization, native_effects, profiles};
 
 impl organization::OrganizationNativeRuntime for MatchaRuntimeDriver {
+    fn unsupported_task_budget(
+        &self,
+        budget: &organization::TaskExecutionBudget,
+    ) -> Vec<organization::TaskBudgetDimension> {
+        <Self as sessions_module::SessionOps>::unsupported_task_budget(self, budget)
+    }
     fn read_team_member_profiles(
         &self,
         agents: Vec<organization::ManagedAgentReference>,

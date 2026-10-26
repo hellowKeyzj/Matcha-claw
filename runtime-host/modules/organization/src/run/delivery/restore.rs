@@ -14,6 +14,7 @@ pub struct DeliverySnapshot {
     phase: DeliveryPhaseSnapshot,
     completed_attempts: u32,
     next_claim_generation: u64,
+    task_native_execution: Option<crate::TaskNativeExecution>,
 }
 
 impl fmt::Debug for DeliverySnapshot {
@@ -40,7 +41,17 @@ impl DeliverySnapshot {
             phase,
             completed_attempts,
             next_claim_generation,
+            task_native_execution: None,
         }
+    }
+
+    pub(crate) fn with_task_native_execution(mut self, native: Option<crate::TaskNativeExecution>) -> Self {
+        self.task_native_execution = native;
+        self
+    }
+
+    pub(crate) fn task_native_execution(&self) -> Option<&crate::TaskNativeExecution> {
+        self.task_native_execution.as_ref()
     }
 
     pub fn facts(&self) -> &DeliveryRequest {
@@ -314,7 +325,7 @@ impl Delivery {
             DeliveryPhaseSnapshot::from_phase(&self.phase),
             self.completed_attempts,
             self.next_claim_generation,
-        )
+        ).with_task_native_execution(self.task_native_execution.clone())
     }
 
     pub fn restore(snapshot: DeliverySnapshot) -> Result<Self, RestoreDeliveryError> {
@@ -325,6 +336,7 @@ impl Delivery {
             phase: snapshot.phase.into_phase(),
             completed_attempts: snapshot.completed_attempts,
             next_claim_generation: snapshot.next_claim_generation,
+            task_native_execution: snapshot.task_native_execution,
         })
     }
 }
@@ -465,6 +477,20 @@ fn validate_snapshot(snapshot: &DeliverySnapshot) -> Result<(), RestoreDeliveryE
         .validate()
         .map_err(RestoreDeliveryError::InvalidRequest)?;
 
+    if let Some(native) = &snapshot.task_native_execution {
+        let correlation = match &snapshot.phase {
+            DeliveryPhaseSnapshot::Delivered { native_correlation, .. } => native_correlation.as_ref(),
+            DeliveryPhaseSnapshot::TerminalObserved { observation } => Some(observation.correlation()),
+            _ => None,
+        };
+        if native.native_request_id.as_deref() != Some(snapshot.facts.idempotency_key.as_str())
+            || native.native_message_id.as_ref().is_none_or(|id| id.trim().is_empty())
+            || correlation.is_none_or(|correlation| {
+                correlation.endpoint_session_id().as_str() != native.endpoint_session_id
+                    || correlation.native_run_receipt().as_str() != native.native_run_id
+            })
+        { return Err(RestoreDeliveryError::TerminalObservationCorrelationMismatch); }
+    }
     if snapshot.next_claim_generation == 0 || snapshot.next_claim_generation == u64::MAX {
         return Err(RestoreDeliveryError::InvalidNextClaimGeneration);
     }

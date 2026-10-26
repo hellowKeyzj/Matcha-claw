@@ -423,6 +423,13 @@ impl GatewayClient {
         self.endpoint.http_url("")
     }
 
+    pub(super) fn authenticate_media_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, super::auth::GatewayAuthError> {
+        self.secret.with_token(|token| request.bearer_auth(token))
+    }
+
     pub(crate) async fn config_transaction(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.config_writes.lock().await
     }
@@ -1542,6 +1549,15 @@ impl GatewayClient {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub(crate) async fn rpc_mutation_once(&self, request: wire::RpcRequest) -> MutationDelivery {
+        let cancellation = CancellationToken::new();
+        let control = match self.control_dispatcher_cancellable(&cancellation).await {
+            Ok(control) => control,
+            Err(error) => return MutationDelivery::NotWritten(client_error_to_dispatcher_error(error)),
+        };
+        control.dispatcher.mutate_with_deadline_cancellable(request, RPC_DEADLINE, &cancellation).await
     }
 
     pub(crate) async fn rpc_mutation(&self, request: wire::RpcRequest) -> MutationDelivery {

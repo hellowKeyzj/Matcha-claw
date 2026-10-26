@@ -2,15 +2,15 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { forwardRef, type ReactNode, useImperativeHandle } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import Chat from '@/pages/Chat';
-import { useChatStore as realUseChatStore } from '@/stores/chat';
-import { useRuntimeHostStore } from '@/stores/gateway';
-import { useSubagentsStore } from '@/stores/subagents';
-import { useTeamsStore } from '@/stores/teams';
+import Chat from '@/plugins/chat';
+import { useChatStore as realUseChatStore } from '@/plugins/chat/store';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
+import { useTeamsStore } from '@/plugins/teams/store';
 import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph } from '@/stores/chat/session-runtime-graph';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
+import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph } from '@/plugins/chat/store/session-runtime-graph';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 import type { RuntimeEndpointRef } from '../../src/types/desktop/runtime-address';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
@@ -37,13 +37,13 @@ vi.mock('sonner', () => ({
   },
 }));
 
-vi.mock('@/pages/Chat/useChatInit', () => ({
+vi.mock('@/plugins/chat/useChatInit', () => ({
   useChatInit: (input: unknown) => {
     useChatInitSpy(input);
   },
 }));
 
-vi.mock('@/pages/Chat/useChatSidePanelController', () => ({
+vi.mock('@/plugins/chat/useChatSidePanelController', () => ({
   useChatSidePanelController: (enabled: boolean) => {
     useChatSidePanelControllerSpy(enabled);
     return {
@@ -63,7 +63,7 @@ vi.mock('@/pages/Chat/useChatSidePanelController', () => ({
   },
 }));
 
-vi.mock('@/pages/Chat/useChatWindowDockController', () => ({
+vi.mock('@/plugins/chat/useChatWindowDockController', () => ({
   useChatWindowDockController: () => ({
     phase: 'closed',
     sidePanelMounted: false,
@@ -80,7 +80,7 @@ vi.mock('@/pages/Chat/useChatWindowDockController', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/useAgentSkillConfig', () => ({
+vi.mock('@/plugins/chat/useAgentSkillConfig', () => ({
   useAgentSkillConfig: () => ({
     selectedSkillIds: [],
     allowedSkillIdsForChat: [],
@@ -92,7 +92,7 @@ vi.mock('@/pages/Chat/useAgentSkillConfig', () => ({
   }),
 }));
 
-vi.mock('@/pages/Chat/components/ChatShell', () => ({
+vi.mock('@/plugins/chat/components/ChatShell', () => ({
   ChatShell: ({
     header,
     viewportPane,
@@ -121,11 +121,11 @@ vi.mock('@/pages/Chat/components/ChatShell', () => ({
   },
 }));
 
-vi.mock('@/pages/Chat/components/ChatHeaderBar', () => ({
+vi.mock('@/plugins/chat/components/ChatHeaderBar', () => ({
   ChatHeaderBar: () => <div data-testid="chat-header-bar" />,
 }));
 
-vi.mock('@/pages/Chat/components/ChatRuntimeDock', () => ({
+vi.mock('@/plugins/chat/components/ChatRuntimeDock', () => ({
   ChatErrorBanner: ({
     error,
     onDismiss,
@@ -141,7 +141,7 @@ vi.mock('@/pages/Chat/components/ChatRuntimeDock', () => ({
   ChatApprovalDock: () => <div data-testid="chat-approval-dock" />,
 }));
 
-vi.mock('@/pages/Chat/ChatInput', () => ({
+vi.mock('@/plugins/chat/ChatInput', () => ({
   ChatInput: ({
     disabled,
     reconnecting,
@@ -182,7 +182,7 @@ vi.mock('@/pages/Chat/ChatInput', () => ({
   ),
 }));
 
-vi.mock('@/pages/Chat/components/ChatOffline', () => ({
+vi.mock('@/plugins/chat/components/ChatOffline', () => ({
   ChatOffline: ({
     title,
     description,
@@ -199,7 +199,7 @@ vi.mock('@/pages/Chat/components/ChatOffline', () => ({
   ),
 }));
 
-vi.mock('@/pages/Chat/components/ChatList', () => ({
+vi.mock('@/plugins/chat/components/ChatList', () => ({
   ChatList: forwardRef(function MockChatViewportPane(
     props: {
       items: ReturnType<typeof createEmptySessionRecord>['items'];

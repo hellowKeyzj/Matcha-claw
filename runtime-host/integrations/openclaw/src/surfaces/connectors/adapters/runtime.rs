@@ -11,6 +11,15 @@ impl ConnectorOps for OpenClawDriver {
     ) -> ::connectors::ports::ConnectorFuture<'a, ::connectors::ports::ConnectorProjectionEffect>
     {
         Box::pin(async move {
+            let _projection = match self.mcp_oauth.prepare_projection(&catalog).await {
+                Ok(guard) => guard,
+                Err(::connectors::ports::ConnectorOperationFailure::Unknown) => {
+                    return ::connectors::ports::ConnectorProjectionEffect::Unknown;
+                }
+                Err(::connectors::ports::ConnectorOperationFailure::Unavailable) => {
+                    return ::connectors::ports::ConnectorProjectionEffect::Unavailable;
+                }
+            };
             crate::surfaces::connectors::apply_runtime_mcp_projection(
                 self.state_dir.clone(),
                 preset,
@@ -28,6 +37,17 @@ impl ConnectorOps for OpenClawDriver {
         Box::pin(
             async move { crate::surfaces::connectors::probe_external_connector(&connector).await },
         )
+    }
+
+    fn mcp_oauth<'a>(
+        &'a self,
+        connector: ::connectors::Connector,
+        request: ::connectors::ports::McpOAuthRequest,
+    ) -> ::connectors::ports::ConnectorFuture<
+        'a,
+        Result<::connectors::ports::McpOAuthReceipt, ::connectors::ports::ConnectorOperationFailure>,
+    > {
+        Box::pin(async move { self.mcp_oauth.execute(&connector, request).await })
     }
 
     fn list_mcp_servers<'a>(

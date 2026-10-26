@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getOrBuildChatMessageView } from '@/pages/Chat/chat-message-view';
+import { getOrBuildChatMessageView } from '@/plugins/message-rendering/chat-message-view';
 import type {
   SessionAssistantTurnItem,
   SessionRenderItem,

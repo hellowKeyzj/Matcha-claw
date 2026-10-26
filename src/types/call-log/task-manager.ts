@@ -1,4 +1,5 @@
 import type { CallDetailByModule } from '../call-log';
+import { decodeTaskFailure, type TaskFailure } from '../desktop/task-failure';
 
 type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
 
@@ -15,6 +16,9 @@ export interface TaskManagerCallDetail {
   mutation: 'applied' | 'rejected' | 'unknown' | null;
   read: 'found' | 'notFound' | 'unavailable' | 'rejected' | 'protocol' | null;
   failure: 'admissionClosed' | 'unsupported' | 'unavailable' | 'ownerUnavailable' | null;
+  diagnostic: TaskFailure | null;
+  runtimeAdapterId: string | null;
+  runtimeInstanceId: string | null;
 }
 
 declare module '../call-log' {
@@ -29,9 +33,9 @@ export function decodeTaskManagerCallDetail(value: unknown): TaskManagerCallDeta
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const detail = value as Record<string, unknown>;
   const keys = ['agentRef', 'sessionRef', 'teamRef', 'taskRef', 'requestedStatus', 'taskStatus',
-    'taskCount', 'todoCount', 'mutation', 'read', 'failure'];
+    'taskCount', 'todoCount', 'mutation', 'read', 'failure', 'diagnostic', 'runtimeAdapterId', 'runtimeInstanceId'];
   if (Object.keys(detail).length !== keys.length || !keys.every((key) => Object.hasOwn(detail, key))) return null;
-  if (!['agentRef', 'sessionRef', 'teamRef', 'taskRef'].every((key) => detail[key] === null
+  if (!['agentRef', 'sessionRef', 'teamRef', 'taskRef', 'runtimeAdapterId', 'runtimeInstanceId'].every((key) => detail[key] === null
     || (typeof detail[key] === 'string' && detail[key].length > 0 && detail[key].length <= 128
       && !/[^A-Za-z0-9._:-]/.test(detail[key])))) return null;
   const taskStatuses = ['pending', 'in_progress', 'completed', 'deleted'];
@@ -41,6 +45,8 @@ export function decodeTaskManagerCallDetail(value: unknown): TaskManagerCallDeta
     || !nullableLabel(detail.read, ['found', 'notFound', 'unavailable', 'rejected', 'protocol'])
     || !nullableLabel(detail.failure, ['admissionClosed', 'unsupported', 'unavailable', 'ownerUnavailable'])
     || (detail.mutation !== null && detail.read !== null)) return null;
+  const diagnostic = detail.diagnostic === null ? null : decodeTaskFailure(detail.diagnostic);
+  if (detail.diagnostic !== null && diagnostic === null) return null;
   return {
     agentRef: detail.agentRef as string | null,
     sessionRef: detail.sessionRef as string | null,
@@ -53,6 +59,9 @@ export function decodeTaskManagerCallDetail(value: unknown): TaskManagerCallDeta
     mutation: detail.mutation as TaskManagerCallDetail['mutation'],
     read: detail.read as TaskManagerCallDetail['read'],
     failure: detail.failure as TaskManagerCallDetail['failure'],
+    diagnostic,
+    runtimeAdapterId: detail.runtimeAdapterId as string | null,
+    runtimeInstanceId: detail.runtimeInstanceId as string | null,
   };
 }
 

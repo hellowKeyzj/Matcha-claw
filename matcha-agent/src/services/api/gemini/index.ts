@@ -28,6 +28,9 @@ import {
   convertToolsToLangfuse,
 } from '../../../services/langfuse/convert.js'
 import { streamGeminiGenerateContent } from './client.js'
+import { rethrowInvestigationAdmission } from '../investigation.js'
+import { currentInvestigationScope } from '../../../world/investigation.js'
+import { getModelMaxOutputTokens } from '../../../utils/context.js'
 import {
   anthropicMessagesToGemini,
   resolveGeminiModel,
@@ -95,6 +98,11 @@ export async function* queryModelGemini(
           },
         }),
         generationConfig: {
+          ...(currentInvestigationScope() && {
+            maxOutputTokens:
+              options.maxOutputTokensOverride ??
+              getModelMaxOutputTokens(geminiModel).upperLimit,
+          }),
           ...(options.temperatureOverride !== undefined && {
             temperature: options.temperatureOverride,
           }),
@@ -224,6 +232,7 @@ export async function* queryModelGemini(
           : undefined,
     })
   } catch (error) {
+    rethrowInvestigationAdmission(error)
     const errorMessage = error instanceof Error ? error.message : String(error)
     logForDebugging(`[Gemini] Error: ${errorMessage}`, { level: 'error' })
     yield createAssistantAPIErrorMessage({

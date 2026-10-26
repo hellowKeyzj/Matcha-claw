@@ -1,6 +1,6 @@
 import { act } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useProviderModelCatalogStore } from '@/stores/provider-model-catalog';
+import { useProviderModelCatalogStore } from '@/plugins/providers/stores/provider-model-catalog';
 import type { CallRecord } from '@/types/call-log';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
@@ -19,7 +19,7 @@ vi.mock('@/lib/host-events', () => ({
   subscribeBrowserRecovery: () => () => {},
 }));
 
-vi.mock('@/stores/providers', () => ({
+vi.mock('@/plugins/providers/stores/providers', () => ({
   useProviderStore: {
     getState: () => ({
       refreshProviderSnapshot: providerSnapshotRefreshMock,
@@ -27,7 +27,7 @@ vi.mock('@/stores/providers', () => ({
   },
 }));
 
-vi.mock('@/stores/capability-routing', () => ({
+vi.mock('@/plugins/providers/stores/capability-routing', () => ({
   useCapabilityRoutingStore: {
     getState: () => ({
       refresh: capabilityRefreshMock,
@@ -35,7 +35,7 @@ vi.mock('@/stores/capability-routing', () => ({
   },
 }));
 
-vi.mock('@/stores/subagents', () => ({
+vi.mock('@/plugins/agents/stores/subagents', () => ({
   useSubagentsStore: {
     getState: () => ({
       loadAvailableModels: subagentsLoadAvailableModelsMock,
@@ -63,7 +63,7 @@ const storedProviderModelsCall: CallRecord<'provider'> = {
     accountId: 'custom-1',
     accountRevision: null,
     diagnostic: null,
-    native: { changed: true, applied: 'confirmed', observed: 'matches' },
+    native: { changed: true, applied: 'confirmed', observed: 'matches', reports: [] },
   },
 };
 

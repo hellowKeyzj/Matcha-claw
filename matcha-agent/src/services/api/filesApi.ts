@@ -17,6 +17,10 @@ import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { logError } from '../../utils/log.js'
 import { sleep } from '../../utils/sleep.js'
+import { readSourceBytes } from '../../utils/readFileInRange.js'
+import { checkFileInvestigation, requestInvestigationFile, stageInvestigationFile } from './fileInvestigation.js'
+import { rethrowInvestigationAdmission } from './investigation.js'
+import { currentInvestigationScope, investigationSignal, InvestigationAdmissionError } from '../../world/investigation.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -97,10 +101,12 @@ type RetryResult<T> = { done: true; value: T } | { done: false; error?: string }
 async function retryWithBackoff<T>(
   operation: string,
   attemptFn: (attempt: number) => Promise<RetryResult<T>>,
+  signal?: AbortSignal,
 ): Promise<T> {
   let lastError = ''
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    checkFileInvestigation(signal)
     const result = await attemptFn(attempt)
 
     if (result.done) {
@@ -115,7 +121,9 @@ async function retryWithBackoff<T>(
     if (attempt < MAX_RETRIES) {
       const delayMs = BASE_DELAY_MS * 2 ** (attempt - 1)
       logDebug(`Retrying ${operation} in ${delayMs}ms...`)
-      await sleep(delayMs)
+      const scopedSignal = investigationSignal()
+      await sleep(delayMs, scopedSignal ? signal ? AbortSignal.any([scopedSignal, signal]) : scopedSignal : undefined)
+      checkFileInvestigation(signal)
     }
   }
 
@@ -146,12 +154,16 @@ export async function downloadFile(
 
   return retryWithBackoff(`Download file ${fileId}`, async () => {
     try {
-      const response = await axios.get(url, {
-        headers,
-        responseType: 'arraybuffer',
-        timeout: 60000, // 60 second timeout for large files
-        validateStatus: status => status < 500,
-      })
+      const response = currentInvestigationScope()
+        ? await requestInvestigationFile({ producer: 'matcha_files_api', operation: 'file_download',
+            url, method: 'GET', headers, timeoutMs: 60000,
+            records: (_body, status) => status === 200 ? 1n : 0n })
+        : await axios.get(url, {
+            headers,
+            responseType: 'arraybuffer',
+            timeout: 60000, // 60 second timeout for large files
+            validateStatus: status => status < 500,
+          })
 
       if (response.status === 200) {
         logDebug(`Downloaded file ${fileId} (${response.data.length} bytes)`)
@@ -171,6 +183,7 @@ export async function downloadFile(
 
       return { done: false, error: `status ${response.status}` }
     } catch (error) {
+      rethrowInvestigationAdmission(error)
       if (!axios.isAxiosError(error)) {
         throw error
       }
@@ -236,12 +249,17 @@ export async function downloadAndSaveFile(
     // Download the file content
     const content = await downloadFile(fileId, config)
 
-    // Ensure the parent directory exists
-    const parentDir = path.dirname(fullPath)
-    await fs.mkdir(parentDir, { recursive: true })
+    if (currentInvestigationScope()) {
+      await stageInvestigationFile({ producer: 'matcha_files_api', operation: 'file_stage', sessionId: config.sessionId,
+        root: path.join(getCwd(), config.sessionId, 'uploads'), target: fullPath, data: content })
+    } else {
+      // Ensure the parent directory exists
+      const parentDir = path.dirname(fullPath)
+      await fs.mkdir(parentDir, { recursive: true })
 
-    // Write the file
-    await fs.writeFile(fullPath, content)
+      // Write the file
+      await fs.writeFile(fullPath, content)
+    }
 
     logDebug(`Saved file ${fileId} to ${fullPath} (${content.length} bytes)`)
 
@@ -252,6 +270,7 @@ export async function downloadAndSaveFile(
       bytesWritten: content.length,
     }
   } catch (error) {
+    rethrowInvestigationAdmission(error)
     logDebugError(`Failed to download file ${fileId}: ${errorMessage(error)}`)
     if (error instanceof Error) {
       logError(error)
@@ -297,12 +316,18 @@ async function parallelWithLimit<T, R>(
 
   // Start workers up to the concurrency limit
   const workers: Promise<void>[] = []
-  const workerCount = Math.min(concurrency, items.length)
+  const workerCount = currentInvestigationScope() ? Math.min(1, items.length) : Math.min(concurrency, items.length)
   for (let i = 0; i < workerCount; i++) {
     workers.push(worker())
   }
 
-  await Promise.all(workers)
+  if (currentInvestigationScope()) {
+    const completed = await Promise.allSettled(workers)
+    const failure = completed.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failure) throw failure.reason
+  } else {
+    await Promise.all(workers)
+  }
   return results
 }
 
@@ -392,11 +417,14 @@ export async function uploadFile(
 
   logDebug(`Uploading file ${filePath} as ${relativePath}`)
 
-  // Read file content first (outside retry loop since it's not a network operation)
+  // Read file content once; each upload retry has its own transport admission.
   let content: Buffer
   try {
-    content = await fs.readFile(filePath)
+    content = currentInvestigationScope()
+      ? await readSourceBytes(filePath, { signal: opts?.signal })
+      : await fs.readFile(filePath)
   } catch (error) {
+    rethrowInvestigationAdmission(error)
     logEvent('tengu_file_upload_failed', {
       error_type:
         'file_read' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -457,16 +485,26 @@ export async function uploadFile(
   try {
     return await retryWithBackoff(`Upload file ${relativePath}`, async () => {
       try {
-        const response = await axios.post(url, body, {
-          headers: {
-            ...headers,
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length.toString(),
-          },
-          timeout: 120000, // 2 minute timeout for uploads
-          signal: opts?.signal,
-          validateStatus: status => status < 500,
-        })
+        const uploadHeaders = { ...headers,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': body.length.toString() }
+        const response = currentInvestigationScope()
+          ? await requestInvestigationFile({ producer: 'matcha_files_api', operation: 'file_upload',
+              url, method: 'POST', headers: uploadHeaders, body, timeoutMs: 120000, signal: opts?.signal,
+              records: (content, status) => {
+                const receipt: unknown = JSON.parse(content.toString('utf8'))
+                if ((status !== 200 && status !== 201) || !receipt || typeof receipt !== 'object'
+                  || !('id' in receipt) || typeof receipt.id !== 'string' || !receipt.id) {
+                  throw new InvestigationAdmissionError('investigation_file_upload_receipt_unknown')
+                }
+                return 1n
+              } }).then(result => ({ status: result.status, data: JSON.parse(result.data.toString('utf8')) }))
+          : await axios.post(url, body, {
+              headers: uploadHeaders,
+              timeout: 120000, // 2 minute timeout for uploads
+              signal: opts?.signal,
+              validateStatus: status => status < 500,
+            })
 
         if (response.status === 200 || response.status === 201) {
           const fileId = response.data?.id
@@ -517,6 +555,7 @@ export async function uploadFile(
 
         return { done: false, error: `status ${response.status}` }
       } catch (error) {
+        rethrowInvestigationAdmission(error)
         // Non-retriable errors propagate up
         if (error instanceof UploadNonRetriableError) {
           throw error
@@ -530,8 +569,9 @@ export async function uploadFile(
         }
         throw error
       }
-    })
+    }, opts?.signal)
   } catch (error) {
+    rethrowInvestigationAdmission(error)
     if (error instanceof UploadNonRetriableError) {
       return {
         path: relativePath,
@@ -571,6 +611,7 @@ export async function uploadSessionFiles(
   files: Array<{ path: string; relativePath: string }>,
   config: FilesApiConfig,
   concurrency: number = DEFAULT_CONCURRENCY,
+  opts?: { signal?: AbortSignal },
 ): Promise<UploadResult[]> {
   if (files.length === 0) {
     return []
@@ -581,7 +622,7 @@ export async function uploadSessionFiles(
 
   const results = await parallelWithLimit(
     files,
-    file => uploadFile(file.path, file.relativePath, config),
+    file => uploadFile(file.path, file.relativePath, config, opts),
     concurrency,
   )
 
@@ -643,12 +684,23 @@ export async function listFilesCreatedAfter(
       `List files after ${afterCreatedAt}`,
       async () => {
         try {
-          const response = await axios.get(`${baseUrl}/v1/files`, {
-            headers,
-            params,
-            timeout: 60000,
-            validateStatus: status => status < 500,
-          })
+          const response = currentInvestigationScope()
+            ? await requestInvestigationFile({ producer: 'matcha_files_api', operation: 'file_list',
+                url: `${baseUrl}/v1/files?${new URLSearchParams(params)}`, method: 'GET', headers, timeoutMs: 60000,
+                records: (content, status) => {
+                  if (status !== 200) return 0n
+                  const page: unknown = JSON.parse(content.toString('utf8'))
+                  if (!page || typeof page !== 'object' || !('data' in page) || !Array.isArray(page.data)) {
+                    throw new InvestigationAdmissionError('investigation_file_list_response_invalid')
+                  }
+                  return BigInt(page.data.length)
+                } }).then(result => ({ status: result.status, data: JSON.parse(result.data.toString('utf8')) }))
+            : await axios.get(`${baseUrl}/v1/files`, {
+                headers,
+                params,
+                timeout: 60000,
+                validateStatus: status => status < 500,
+              })
 
           if (response.status === 200) {
             return { done: true, value: response.data }
@@ -671,6 +723,7 @@ export async function listFilesCreatedAfter(
 
           return { done: false, error: `status ${response.status}` }
         } catch (error) {
+          rethrowInvestigationAdmission(error)
           if (!axios.isAxiosError(error)) {
             throw error
           }

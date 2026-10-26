@@ -2,6 +2,7 @@ mod config;
 mod gateway_token;
 mod stdin;
 mod webhook_token;
+mod world;
 
 pub(crate) use config::{Bootstrap, BootstrapError};
 

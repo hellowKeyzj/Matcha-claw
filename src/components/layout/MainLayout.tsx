@@ -5,29 +5,21 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
-import { ChatWorkspaceHost } from './ChatWorkspaceHost';
 import { TitleBar } from './TitleBar';
 import { VerticalPaneResizer } from './VerticalPaneResizer';
 import { resolveChatWorkspaceLayout } from './chat-workspace-layout';
 import { invokeIpc } from '@/lib/api-client';
 import { StableScrollArea } from '@/components/scroll';
 import { useLayoutStore } from '@/stores/layout';
-import { useLocalLicenseLocked } from '@/stores/license';
+import { useLocalLicenseLocked } from '@/plugins/account/stores/license';
+import { applicationPages } from '@/app/extensions';
+import { resolvePageContribution } from '@/app/routes';
+import { useContributions } from '@/plugin-host/react';
 
-type PageViewportMode = 'document' | 'workspace';
-
-const WORKSPACE_PAGE_PATH_PREFIXES = ['/wiki'] as const;
-
-const PAGE_VIEWPORT_CLASS_NAME: Record<PageViewportMode, string> = {
+const PAGE_VIEWPORT_CLASS_NAME = {
   document: 'h-full overflow-auto overscroll-contain bg-[hsl(var(--shell-surface))] px-5 py-4 [scrollbar-gutter:stable] md:px-8 md:py-6',
   workspace: 'h-full overflow-auto overscroll-contain bg-[hsl(var(--shell-surface))] [scrollbar-gutter:stable]',
 };
-
-function resolvePageViewportMode(pathname: string): PageViewportMode {
-  return WORKSPACE_PAGE_PATH_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
-    ? 'workspace'
-    : 'document';
-}
 
 export function MainLayout() {
   const location = useLocation();
@@ -41,10 +33,13 @@ export function MainLayout() {
   const layoutRef = useRef<HTMLDivElement>(null);
   const resizeRafRef = useRef<number | null>(null);
   const licenseLocked = useLocalLicenseLocked();
-  const isChatRoute = !licenseLocked && location.pathname === '/';
-  const pageViewportMode = resolvePageViewportMode(location.pathname);
-  const chatTakeoverActive = isChatRoute && chatTakeoverMode !== 'none';
-  const activeRightDockLayout = isChatRoute ? chatWindowRightDockLayout : null;
+  const pages = useContributions(applicationPages);
+  const pageViewportMode = useMemo(() => (
+    resolvePageContribution(pages, location.pathname)?.viewport ?? 'document'
+  ), [pages, location.pathname]);
+  const customViewportActive = !licenseLocked && pageViewportMode === 'custom';
+  const chatTakeoverActive = customViewportActive && chatTakeoverMode !== 'none';
+  const activeRightDockLayout = customViewportActive ? chatWindowRightDockLayout : null;
 
   const layoutContainerWidth = useMemo(() => {
     const dockLayout = activeRightDockLayout;
@@ -79,11 +74,11 @@ export function MainLayout() {
     : { flex: `0 0 ${chatMainFlexWidth}px` };
 
   useEffect(() => {
-    if (isChatRoute) {
+    if (customViewportActive) {
       return;
     }
     clearChatTakeoverMode();
-  }, [clearChatTakeoverMode, isChatRoute]);
+  }, [clearChatTakeoverMode, customViewportActive]);
 
   useEffect(() => {
     if (window.electron?.platform !== 'darwin') {
@@ -181,8 +176,8 @@ export function MainLayout() {
           />
         ) : null}
         <main className="min-w-0 flex-1 overflow-hidden bg-[hsl(var(--shell-surface))]" style={mainStyle}>
-          {isChatRoute ? (
-            <ChatWorkspaceHost takeoverMode={chatTakeoverMode} />
+          {pageViewportMode === 'custom' ? (
+            <Outlet />
           ) : (
             <StableScrollArea
               data-page-scroll

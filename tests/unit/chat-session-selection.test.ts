@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { pickStartupSessionFallback } from '@/stores/chat/session-selection';
-import type { ChatSession } from '@/stores/chat/types';
+import { pickStartupSessionFallback } from '@/plugins/chat/store/session-selection';
+import type { ChatSession } from '@/plugins/chat/store/types';
 
 function session(key: string, updatedAt: number, overrides: Partial<ChatSession> = {}): ChatSession {
   const agentId = overrides.agentId ?? key.split(':')[1] ?? 'main';

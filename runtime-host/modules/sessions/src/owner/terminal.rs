@@ -122,7 +122,44 @@ impl SessionShared {
                 changed.as_mut().enable();
                 let pending = shared.snapshot.load().states.values()
                     .find_map(|state| state.pending_terminals.first().cloned());
-                if let Some(snapshot) = pending {
+                if let Some(mut snapshot) = pending {
+                    let read = crate::execution::SessionRunReadCommand::try_new(
+                        snapshot.identity.clone(), None,
+                        crate::execution::SessionRunSelector::RunId(snapshot.native_run_id.clone()),
+                    );
+                    let needs_execution_facts = snapshot.execution_context.is_some()
+                        || shared.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
+                            .is_some_and(|state| state.run_execution_contexts.contains_key(&snapshot.native_run_id));
+                    if needs_execution_facts && let Ok(read) = read {
+                        let outcome = tokio::select! {
+                            outcome = shared.handle_read_run(read) => Some(outcome),
+                            _ = cancellation.cancelled() => None,
+                        };
+                        if let Some(crate::execution::SessionRunReadOutcome::Found(record)) = outcome {
+                            let execution = shared.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
+                                .and_then(|state| state.run_execution_contexts.get(&snapshot.native_run_id)
+                                    .or_else(|| record.request_id.as_ref().and_then(|id| state.run_execution_contexts.get(id))))
+                                .cloned();
+                            if let Some((request_id, context)) = execution
+                                && record.request_id.as_deref() == Some(request_id.as_str())
+                                && snapshot.native_request_id.as_ref().is_none_or(|expected| expected == &request_id)
+                                && snapshot.execution_context.as_ref().is_none_or(|expected| expected == &context)
+                                && record.phase == snapshot.phase && crate::state::terminal_run_phase(record.phase)
+                            {
+                                snapshot.execution_context = Some(context);
+                                snapshot.native_request_id = Some(request_id);
+                                snapshot.native_message_id = Some(record.message_id);
+                                snapshot.measurement = record.measurement;
+                                snapshot.assistant_texts = record.assistant_texts;
+                                if snapshot.delivery_context.is_none() {
+                                    snapshot.delivery_context = shared.snapshot.load().states.get(&crate::command::session_identity_lane_key(&snapshot.identity))
+                                        .and_then(|state| snapshot.native_request_id.as_ref()
+                                            .and_then(|id| state.run_delivery_contexts.get(id))).cloned();
+                                }
+                            }
+                        }
+                    }
+                    let request_id = snapshot.native_request_id.clone();
                     let identity = snapshot.identity.clone();
                     let run_id = snapshot.native_run_id.clone();
                     let Some(hook) = &shared.terminal_hook else {
@@ -133,7 +170,7 @@ impl SessionShared {
                     }
                     let (reply, received) = tokio::sync::oneshot::channel();
                     let sender = shared.completion_handle.get().expect("session completion handle");
-                    if sender.send_command(SessionCommand::TerminalDelivered { identity, run_id, reply }).await.is_err()
+                    if sender.send_command(SessionCommand::TerminalDelivered { identity, run_id, request_id, reply }).await.is_err()
                         || received.await != Ok(true)
                     {
                         return Err(SessionTerminalCloseError::Unsettled);
@@ -165,6 +202,18 @@ impl SessionShared {
         *self.terminal_delivery.task.try_lock().expect("session terminal task lock") = Some(self.terminal_task());
     }
 
+    fn trace_terminal_close(&self, stage: &'static str) {
+        crate::trace::log_unscoped("sessions.terminal.close", || serde_json::json!({
+            "phase": stage,
+            "producers": self.terminal_delivery.producers.load(Ordering::Acquire),
+            "blocked": self.terminal_delivery.blocked.load(Ordering::Acquire),
+            "pendingTerminals": self.snapshot.load().states.values()
+                .map(|state| state.pending_terminals.len()).sum::<usize>(),
+            "observations": self.observations.lock().expect("session observation lock").len(),
+            "readTasks": self.read_tasks.lock().expect("session read tasks lock").len(),
+        }));
+    }
+
     pub(crate) async fn close_terminal_delivery(&self) -> Result<(), SessionTerminalCloseError> {
         let _close = self.terminal_delivery.close.lock().await;
         if self.terminal_delivery.closed.load(Ordering::Acquire) { return Ok(()); }
@@ -176,7 +225,9 @@ impl SessionShared {
         self.terminal_delivery.retry.fetch_add(1, Ordering::AcqRel);
         self.terminal_delivery.retry_changed.notify_waiters();
         self.terminal_delivery.notify();
+        self.trace_terminal_close("stopping");
         self.stop_observation_waiters().await;
+        self.trace_terminal_close("waiters_stopped");
         {
             let observations = self.observations.lock().expect("session observation lock");
             for observation in observations.values() { observation.cancel_task(); }
@@ -187,7 +238,9 @@ impl SessionShared {
         let mut slot = self.terminal_delivery.task.lock().await;
         if slot.is_none() { *slot = Some(self.terminal_task()); }
         if let Some(task) = slot.as_mut() {
+            self.trace_terminal_close(if first { "cancel_join" } else { "join" });
             let result = if first { task.cancel_and_join().await } else { task.join().await };
+            self.trace_terminal_close("joined");
             match result {
                 Ok(result) => {
                     slot.take();
@@ -203,6 +256,7 @@ impl SessionShared {
         if self.terminal_delivery.producers.load(Ordering::Acquire) != 0
             || self.snapshot.load().states.values().any(|state| !state.pending_terminals.is_empty())
         { return Err(SessionTerminalCloseError::Unsettled); }
+        self.trace_terminal_close("joining_reads");
         loop {
             let task = self.read_tasks.lock().expect("session read tasks lock").last().cloned();
             let Some(task) = task else { break; };
@@ -237,7 +291,10 @@ impl SessionLane {
         terminals: &[crate::terminal_hook::SessionRunTerminalSnapshot],
     ) -> bool {
         if shared.terminal_hook.is_none() {
-            for terminal in terminals { state.run_delivery_contexts.remove(&terminal.native_run_id); }
+            for terminal in terminals {
+                state.run_delivery_contexts.remove(&terminal.native_run_id);
+                state.run_execution_contexts.remove(&terminal.native_run_id);
+            }
             return true;
         }
         if terminals.is_empty() { return true; }
@@ -254,12 +311,18 @@ impl SessionLane {
         shared: &SessionShared,
         identity: crate::state::SessionIdentity,
         run_id: String,
+        request_id: Option<String>,
     ) -> bool {
         let Some(state) = &mut self.state else { return false; };
         if state.identity() != &identity { return false; }
         let Some(index) = state.pending_terminals.iter().position(|snapshot| snapshot.native_run_id == run_id) else { return false; };
         state.pending_terminals.remove(index);
         state.run_delivery_contexts.remove(&run_id);
+        let execution = state.run_execution_contexts.remove(&run_id);
+        if let Some(request_id) = request_id.or_else(|| execution.map(|(request, _)| request)) {
+            state.run_delivery_contexts.remove(&request_id);
+            state.run_execution_contexts.remove(&request_id);
+        }
         if state.pending_terminals.is_empty() {
             if let Some(permit) = state.terminal_permit.take() {
                 permit.lock().expect("session terminal permit lock").take();

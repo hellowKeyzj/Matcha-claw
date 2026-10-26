@@ -3,65 +3,29 @@
  * Navigation sidebar with menu items.
  */
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import {
-  Home,
-  MessageSquare,
-  Bot,
-  Radio,
-  KeyRound,
-  ListTodo,
-  Users,
-  Terminal,
-  ExternalLink,
-  CreditCard,
-  Info,
-  LogIn,
-  LogOut,
-  Palette,
-  UserPlus,
-  BookOpen,
-} from 'lucide-react';
-import { cn } from '@/lib/utils';
-import { useSettingsStore } from '@/stores/settings';
-import { useChatStore, type ApprovalItem, type ChatStoreState } from '@/stores/chat';
-import { selectSidebarNewSessionAction } from '@/stores/chat/selectors';
-import { readSessionsFromState, resolveSessionListLabel } from '@/stores/chat/session-helpers';
-import { getSessionItemCount } from '@/stores/chat/store-state-helpers';
-import { useTeamsStore } from '@/stores/teams';
-import { useTaskCenterStore } from '@/stores/task-center-store';
-import { useAccountStore } from '@/stores/account';
-import { useLocalLicenseLocked } from '@/stores/license';
-import { useSubscriptionStore } from '@/stores/subscription';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import { SubscriptionPlanDialog } from '@/components/billing/SubscriptionPlanDialog';
-import { hostApiFetch } from '@/lib/host-api';
-import { isRuntimeEndpointReady, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
-import { runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
-import { preloadLazyRouteForPath } from '@/lib/route-preload';
-import { prefetchSubagentTemplateCatalog } from '@/services/openclaw/subagent-template-catalog';
-import type { AccountSubscriptionProjection, AccountUsageProjection, CloudUser } from '@/lib/account';
-import type { SubscriptionProgress as SubscriptionProgressItem, SubscriptionSummary } from '@/lib/subscription';
-import { TEAMS_FEATURE_ENABLED } from '@/features/teams/feature-flag';
-import type { TeamApprovalRecord } from '@/services/openclaw/team-runtime-client';
+import { ChevronRight } from 'lucide-react';
+import { Suspense, startTransition, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { useShallow } from 'zustand/react/shallow';
-import { inferUntitledSessionLabel } from './useAgentSessionsPaneViewModel';
+import { cn } from '@/lib/utils';
+import { useLocalLicenseLocked } from '@/plugins/account/stores/license';
+import { useContributions, usePluginHost } from '@/plugin-host/react';
+import type { ExtensionPoint } from '@/plugin-host/core';
+import {
+  applicationNavigation,
+  sidebarActions,
+  sidebarPanels,
+  sidebarFooter,
+  type ComponentContribution,
+  type NavigationContribution,
+} from '@/app/extensions';
+import { preloadApplicationPath } from '@/app/navigation';
 
 interface NavItemProps {
   to: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
   label: string;
   active?: boolean;
+  end?: boolean;
   disabled?: boolean;
   onMouseEnter?: () => void;
   onFocus?: () => void;
@@ -74,457 +38,18 @@ interface SidebarProps {
   showRightDivider?: boolean;
 }
 
-interface PendingBlockerCard {
-  id: string;
-  source: 'team_approval' | 'chat_approval';
-  teamId: string;
-  teamName: string;
-  title: string;
-  content: string;
-  from: string;
-  createdAt: number;
-  sessionKey?: string;
-}
-
-const EMPTY_TEAM_APPROVALS: TeamApprovalRecord[] = [];
-const EMPTY_APPROVAL_ITEMS: ApprovalItem[] = [];
-const teamApprovalCardsCacheByApprovalsRef = new WeakMap<TeamApprovalRecord[], Map<string, PendingBlockerCard[]>>();
-const approvalCardsCacheByApprovalsRef = new WeakMap<ApprovalItem[], Map<string, PendingBlockerCard[]>>();
-
-function formatMessageTime(createdAt: number): string {
-  if (!Number.isFinite(createdAt) || createdAt <= 0) {
-    return '-';
-  }
-  return new Date(createdAt).toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
-
-function formatSidebarUsageAmount(value: number, unit: string): string {
-  const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
-  const formatted = Number.isInteger(safeValue)
-    ? String(safeValue)
-    : safeValue.toFixed(1).replace(/\.0$/, '');
-  return unit ? `${formatted} ${unit}` : formatted;
-}
-
-function buildSidebarQuotaView(quota: SidebarQuotaInput, index: number, t: (key: string, options?: Record<string, unknown>) => string): SidebarQuotaView {
-  const used = Number.isFinite(quota.used) ? Math.max(0, quota.used) : 0;
-  const hasLimit = quota.limit !== null && Number.isFinite(quota.limit) && quota.limit > 0;
-  const limit = hasLimit ? quota.limit as number : null;
-  const formattedUsed = formatSidebarUsageAmount(used, quota.unit);
-  return {
-    id: quota.id || `${quota.name || 'quota'}-${index}`,
-    name: quota.name || t('sidebar.account.quota.usage'),
-    usageLabel: limit === null
-      ? t('sidebar.account.quota.usedAmount', { amount: formattedUsed })
-      : t('sidebar.account.quota.usedOfLimit', { used: formattedUsed, limit: formatSidebarUsageAmount(limit, quota.unit) }),
-    percent: limit === null ? 0 : Math.min(100, Math.round((used / limit) * 100)),
-    hasLimit,
-  };
-}
-
-function buildSidebarQuotaViews(quotas: readonly SidebarQuotaInput[], t: (key: string, options?: Record<string, unknown>) => string): SidebarQuotaView[] {
-  return quotas
-    .slice(0, SIDEBAR_ACCOUNT_QUOTA_RENDER_LIMIT)
-    .map((quota, index) => buildSidebarQuotaView(quota, index, t));
-}
-
-function buildSidebarBalanceViews(user: CloudUser | null, t: (key: string, options?: Record<string, unknown>) => string): SidebarQuotaView[] {
-  if (!user) return [];
-  const frozenBalance = user.frozenBalance ?? 0;
-  return buildSidebarQuotaViews([
-    { id: 'balance:available', name: t('sidebar.account.quota.availableBalance'), used: user.balance, limit: null, unit: 'USD' },
-    { id: 'balance:frozen', name: t('sidebar.account.quota.frozenBalance'), used: frozenBalance, limit: null, unit: 'USD' },
-  ], t);
-}
-
-function isUsableSubscriptionStatus(status: string | undefined): boolean {
-  return status === 'active' || status === 'trialing';
-}
-
-function buildSidebarSubscriptionQuotaViews(input: {
-  summary: SubscriptionSummary | null;
-  progress: readonly SubscriptionProgressItem[] | null;
-  t: (key: string, options?: Record<string, unknown>) => string;
-}): SidebarQuotaView[] {
-  const summarySubscription = input.summary?.subscriptions.find((subscription) => isUsableSubscriptionStatus(subscription.status))
-    ?? null;
-  const progress = summarySubscription
-    ? input.progress?.find((item) => item.subscriptionId === summarySubscription.id) ?? null
-    : null;
-
-  const quotas: SidebarQuotaInput[] = [];
-  if (progress?.daily) {
-    quotas.push({ id: `${progress.subscriptionId}:daily`, name: input.t('sidebar.account.quota.subscriptionDaily'), used: progress.daily.used, limit: progress.daily.limit, unit: 'USD' });
-  } else if (summarySubscription?.dailyUsedUsd !== undefined || summarySubscription?.dailyLimitUsd !== undefined) {
-    quotas.push({ id: `${summarySubscription.id}:daily`, name: input.t('sidebar.account.quota.subscriptionDaily'), used: summarySubscription.dailyUsedUsd ?? 0, limit: summarySubscription.dailyLimitUsd ?? null, unit: 'USD' });
-  }
-
-  if (progress?.weekly) {
-    quotas.push({ id: `${progress.subscriptionId}:weekly`, name: input.t('sidebar.account.quota.subscriptionWeekly'), used: progress.weekly.used, limit: progress.weekly.limit, unit: 'USD' });
-  } else if (summarySubscription?.weeklyUsedUsd !== undefined || summarySubscription?.weeklyLimitUsd !== undefined) {
-    quotas.push({ id: `${summarySubscription.id}:weekly`, name: input.t('sidebar.account.quota.subscriptionWeekly'), used: summarySubscription.weeklyUsedUsd ?? 0, limit: summarySubscription.weeklyLimitUsd ?? null, unit: 'USD' });
-  }
-
-  if (progress?.monthly) {
-    quotas.push({ id: `${progress.subscriptionId}:monthly`, name: input.t('sidebar.account.quota.subscriptionMonthly'), used: progress.monthly.used, limit: progress.monthly.limit, unit: 'USD' });
-  } else if (summarySubscription?.monthlyUsedUsd !== undefined || summarySubscription?.monthlyLimitUsd !== undefined) {
-    quotas.push({ id: `${summarySubscription.id}:monthly`, name: input.t('sidebar.account.quota.subscriptionMonthly'), used: summarySubscription.monthlyUsedUsd ?? 0, limit: summarySubscription.monthlyLimitUsd ?? null, unit: 'USD' });
-  }
-
-  return buildSidebarQuotaViews(quotas, input.t);
-}
-
-function sidebarPlanBadgeVariant(status: string | undefined): SidebarPlanBadgeVariant {
-  if (status === 'active' || status === 'trialing') {
-    return 'success';
-  }
-  if (status === 'past_due') {
-    return 'warning';
-  }
-  if (status === 'cancelled' || status === 'expired') {
-    return 'outline';
-  }
-  return 'secondary';
-}
-
-function sidebarPlanLabel(input: {
-  subscription: AccountSubscriptionProjection | null;
-  summary: SubscriptionSummary | null;
-  t: (key: string) => string;
-}): string {
-  const summarySubscription = input.summary?.subscriptions[0];
-  if (summarySubscription?.groupName) {
-    return summarySubscription.groupName;
-  }
-  if (input.subscription?.planName) {
-    return input.subscription.planName;
-  }
-  const status = summarySubscription?.status ?? input.subscription?.status;
-  switch (status) {
-    case 'trialing':
-      return input.t('sidebar.account.plan.trialing');
-    case 'active':
-      return input.t('sidebar.account.plan.active');
-    case 'past_due':
-      return input.t('sidebar.account.plan.pastDue');
-    case 'cancelled':
-      return input.t('sidebar.account.plan.cancelled');
-    case 'expired':
-      return input.t('sidebar.account.plan.expired');
-    case 'none':
-    default:
-      return input.t('sidebar.account.plan.free');
-  }
-}
-
-function accountDisplayName(user: CloudUser | null, signedOutLabel: string): string {
-  const name = user?.name?.trim();
-  if (name) {
-    return name;
-  }
-  const email = user?.email?.trim();
-  if (email) {
-    return email.split('@')[0] || email;
-  }
-  return signedOutLabel;
-}
-
-function accountInitial(displayName: string, email: string | undefined, signedOutLabel: string): string {
-  const source = displayName !== signedOutLabel ? displayName : email;
-  return Array.from(source?.trim() || 'M')[0]?.toUpperCase() || 'M';
-}
-
-function accountStatusLabel(status: string, hasUser: boolean, t: (key: string) => string): string {
-  if (hasUser) {
-    if (status === 'checking') return t('sidebar.account.syncing');
-    if (status === 'offline') return t('sidebar.account.offline');
-    return t('sidebar.account.signedIn');
-  }
-  if (status === 'checking') return t('sidebar.account.checking');
-  if (status === 'offline') return t('sidebar.account.offline');
-  return t('sidebar.account.signedOut');
-}
-
-interface SidebarAccountCardProps {
-  licenseLocked: boolean;
-  status: string;
-  user: CloudUser | null;
-  subscription: AccountSubscriptionProjection | null;
-  usage: AccountUsageProjection | null;
-  subscriptionSummary: SubscriptionSummary | null;
-  subscriptionProgress: readonly SubscriptionProgressItem[] | null;
-  onLogin: () => void;
-  onRegister: () => void;
-  onOpenSubscription: () => void;
-  onOpenAppearance: () => void;
-  onOpenAbout: () => void;
-  onLogout: () => void;
-}
-
-function SidebarAccountAvatar({ user, initial }: { user: CloudUser | null; initial: string }) {
-  if (user?.avatarUrl) {
-    return (
-      <img
-        src={user.avatarUrl}
-        alt=""
-        className="h-8 w-8 rounded-full object-cover"
-      />
-    );
-  }
-
-  return (
-    <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[hsl(var(--shell-surface-muted))] text-xs font-semibold text-[hsl(var(--shell-icon-active))]">
-      {initial}
-    </span>
-  );
-}
-
-const SidebarAccountCard = memo(function SidebarAccountCard({
-  licenseLocked,
-  status,
-  user,
-  subscription,
-  usage,
-  subscriptionSummary,
-  subscriptionProgress,
-  onLogin,
-  onRegister,
-  onOpenSubscription,
-  onOpenAppearance,
-  onOpenAbout,
-  onLogout,
-}: SidebarAccountCardProps) {
-  const { t } = useTranslation();
-  const signedOutLabel = t('sidebar.account.signedOut');
-  const displayName = useMemo(() => accountDisplayName(user, signedOutLabel), [signedOutLabel, user]);
-  const email = user?.email?.trim() || undefined;
-  const initial = useMemo(() => accountInitial(displayName, email, signedOutLabel), [displayName, email, signedOutLabel]);
-  const planLabel = useMemo(() => sidebarPlanLabel({ subscription, summary: subscriptionSummary, t }), [subscription, subscriptionSummary, t]);
-  const planVariant = sidebarPlanBadgeVariant(subscriptionSummary?.subscriptions[0]?.status ?? subscription?.status);
-  const signedIn = status === 'signedIn' && user !== null;
-  const statusLabel = accountStatusLabel(status, signedIn, t);
-  const quotaViews = useMemo(() => {
-    const subscriptionQuotaViews = buildSidebarSubscriptionQuotaViews({ summary: subscriptionSummary, progress: subscriptionProgress, t });
-    if (subscriptionQuotaViews.length > 0) {
-      return subscriptionQuotaViews;
-    }
-    const balanceViews = buildSidebarBalanceViews(user, t);
-    if (balanceViews.length > 0) {
-      return balanceViews;
-    }
-    if (usage) {
-      return buildSidebarQuotaViews([{ ...usage, id: 'account-usage', name: t('sidebar.account.quota.totalUsage') }], t);
-    }
-    return [];
-  }, [subscriptionProgress, subscriptionSummary, t, usage, user]);
-
-  const triggerClassName = 'w-full rounded-[12px] border border-transparent bg-transparent px-2.5 py-2 text-left transition-[background-color,border-color] hover:bg-[hsl(var(--shell-surface-hover))] data-[state=open]:[border-color:hsl(var(--shell-border))] data-[state=open]:bg-[hsl(var(--shell-surface-active))]';
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button type="button" className={triggerClassName} aria-label={signedIn ? t('sidebar.account.openMenu') : t('sidebar.account.loginAria')}>
-          <div className="flex min-w-0 items-center gap-2.5">
-            <SidebarAccountAvatar user={user} initial={initial} />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[hsl(var(--shell-icon-active))]">{displayName}</span>
-                {signedIn ? (
-                  <Badge variant={planVariant} className="max-w-[92px] shrink-0 px-2 py-0.5">
-                    {planLabel}
-                  </Badge>
-                ) : null}
-              </div>
-              <div className="mt-0.5 truncate text-xs text-[hsl(var(--shell-text-muted))]">
-                {email ?? statusLabel}
-              </div>
-            </div>
-          </div>
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" side="right" className="w-72">
-        <DropdownMenuLabel className="space-y-1.5">
-          <div className="flex min-w-0 items-center gap-2.5">
-            <SidebarAccountAvatar user={user} initial={initial} />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-semibold text-foreground">{displayName}</div>
-              <div className="truncate text-xs font-normal text-[hsl(var(--shell-text-muted))]">{email ?? statusLabel}</div>
-            </div>
-            <Badge variant={planVariant} className="max-w-[96px] shrink-0 px-2 py-0.5">
-              {planLabel}
-            </Badge>
-          </div>
-        </DropdownMenuLabel>
-
-        <div className="space-y-2 px-2.5 py-2">
-          {quotaViews.length > 0 ? (
-            quotaViews.map((quota) => (
-              <div key={quota.id} className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2 text-[11px] text-[hsl(var(--shell-text-muted))]">
-                  <span className="truncate">{quota.name}</span>
-                  <span className="shrink-0">{quota.usageLabel}</span>
-                </div>
-                {quota.hasLimit ? (
-                  <div className="h-1.5 overflow-hidden rounded-full bg-[hsl(var(--shell-surface-muted))]">
-                    <div
-                      className="h-full rounded-full bg-[hsl(var(--shell-icon-active))]"
-                      style={{ width: `${quota.percent}%` }}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ))
-          ) : (
-            <div className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-[hsl(var(--shell-text-muted))]">
-              {t('sidebar.account.quotaEmpty')}
-            </div>
-          )}
-        </div>
-
-        <DropdownMenuSeparator />
-        {signedIn ? (
-          <>
-            <DropdownMenuItem onSelect={onOpenSubscription} disabled={licenseLocked}>
-              <CreditCard className="h-4 w-4" />
-              <span className="min-w-0 flex-1 truncate">{t('sidebar.account.subscription')}</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onOpenAppearance}>
-              <Palette className="h-4 w-4" />
-              <span className="min-w-0 flex-1 truncate">{t('sidebar.account.appearanceSettings')}</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onOpenAbout}>
-              <Info className="h-4 w-4" />
-              <span className="min-w-0 flex-1 truncate">{t('sidebar.account.about')}</span>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onLogout} className="text-destructive data-[highlighted]:bg-destructive/10 data-[highlighted]:text-destructive">
-              <LogOut className="h-4 w-4" />
-              <span className="min-w-0 flex-1 truncate">{t('sidebar.account.logout')}</span>
-            </DropdownMenuItem>
-          </>
-        ) : (
-          <>
-            <DropdownMenuItem onSelect={onLogin}>
-              <LogIn className="h-4 w-4" />
-              <span className="min-w-0 flex-1 truncate">{t('sidebar.account.login')}</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onRegister}>
-              <UserPlus className="h-4 w-4" />
-              <span className="min-w-0 flex-1 truncate">{t('sidebar.account.register')}</span>
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onOpenSubscription} disabled={licenseLocked}>
-              <CreditCard className="h-4 w-4" />
-              <span className="min-w-0 flex-1 truncate">{t('sidebar.account.upgradeSubscription')}</span>
-            </DropdownMenuItem>
-          </>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-});
-
-const SIDEBAR_BLOCKER_RENDER_LIMIT = 8;
-const TEAM_APPROVAL_SCAN_LIMIT = 80;
-const TEAM_APPROVAL_CARD_LIMIT = 3;
-const CHAT_APPROVAL_SCAN_LIMIT = 24;
 const SIDEBAR_PREFETCH_FALLBACK_DELAY_MS = 120;
 const SIDEBAR_PREFETCH_IDLE_TIMEOUT_MS = 400;
-const SIDEBAR_ACCOUNT_QUOTA_RENDER_LIMIT = 2;
-
-type SidebarPlanBadgeVariant = 'success' | 'warning' | 'secondary' | 'outline';
-
-type SidebarQuotaInput = {
-  id?: string;
-  name?: string;
-  used: number;
-  limit: number | null;
-  unit: string;
-};
-
-type SidebarQuotaView = {
-  id: string;
-  name: string;
-  usageLabel: string;
-  percent: number;
-  hasLimit: boolean;
-};
 
 type PrefetchScheduleHandle =
   | { type: 'idle'; id: number }
   | { type: 'timeout'; id: number };
 
-function buildTeamApprovalBlockerCards(input: {
-  teamId: string;
-  teamName: string;
-  approvals: TeamApprovalRecord[];
-  t: (key: string, options?: Record<string, unknown>) => string;
-}): PendingBlockerCard[] {
-  if (input.approvals.length === 0) {
-    return [];
-  }
-  const cards: PendingBlockerCard[] = [];
-  const startIndex = Math.max(0, input.approvals.length - TEAM_APPROVAL_SCAN_LIMIT);
-
-  for (let index = input.approvals.length - 1; index >= startIndex; index -= 1) {
-    if (cards.length >= TEAM_APPROVAL_CARD_LIMIT) {
-      break;
-    }
-    const approval = input.approvals[index];
-    if (approval.status !== 'pending') {
-      continue;
-    }
-    cards.push({
-      id: `team:${input.teamId}:${approval.approvalId}`,
-      source: 'team_approval',
-      teamId: input.teamId,
-      teamName: input.teamName,
-      title: input.t('sidebar.pendingBlockerStage', { stageId: approval.stageId }),
-      content: approval.requestedAction || approval.reason,
-      from: approval.roleId,
-      createdAt: approval.createdAt,
-    });
-  }
-
-  return cards;
-}
-
-function buildApprovalBlockerCards(input: {
-  sessionKey: string;
-  approvals: ApprovalItem[];
-  sessionLabel: string;
-  approvalTitlePrefix: string;
-  approvalHint: string;
-}): PendingBlockerCard[] {
-  if (input.approvals.length === 0) {
-    return [];
-  }
-  const cards: PendingBlockerCard[] = [];
-  const startIndex = Math.max(0, input.approvals.length - CHAT_APPROVAL_SCAN_LIMIT);
-  for (let index = input.approvals.length - 1; index >= startIndex; index -= 1) {
-    const approval = input.approvals[index];
-    cards.push({
-      id: `chat-approval:${approval.id}`,
-      source: 'chat_approval',
-      teamId: '',
-      teamName: input.sessionLabel,
-      title: `${input.approvalTitlePrefix} · ${approval.title}`,
-      content: approval.command ?? input.approvalHint,
-      from: approval.id,
-      createdAt: approval.createdAtMs,
-      sessionKey: input.sessionKey,
-    });
-  }
-  return cards;
-}
-
-function NavItem({ to, icon, label, active, disabled, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
+function NavItem({ to, icon, label, active, end, disabled, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
   if (disabled) {
     return (
       <button type="button" disabled className="flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-left text-[13px] font-medium text-[hsl(var(--shell-text-muted))] opacity-45">
-        <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center">{icon}</span>
+        {icon && <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center">{icon}</span>}
         <span className="min-w-0 flex-1 truncate">{label}</span>
       </button>
     );
@@ -532,6 +57,7 @@ function NavItem({ to, icon, label, active, disabled, onMouseEnter, onFocus, onN
   return (
     <NavLink
       to={to}
+      end={end}
       aria-current={active ? 'page' : undefined}
       onMouseEnter={onMouseEnter}
       onFocus={onFocus}
@@ -562,294 +88,102 @@ function NavItem({ to, icon, label, active, disabled, onMouseEnter, onFocus, onN
         )
       }
     >
-      <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[hsl(var(--shell-icon))] transition-colors group-hover:text-[hsl(var(--shell-icon-active))] group-aria-[current=page]:text-[hsl(var(--shell-icon-active))]">
+      {icon && <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[hsl(var(--shell-icon))] transition-colors group-hover:text-[hsl(var(--shell-icon-active))] group-aria-[current=page]:text-[hsl(var(--shell-icon-active))]">
         {icon}
-      </span>
+      </span>}
       <span className="min-w-0 flex-1 truncate">{label}</span>
     </NavLink>
   );
 }
 
-const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
-  const { t, i18n } = useTranslation();
-  const navigate = useNavigate();
-  const teams = useTeamsStore((state) => state.teams);
-  const approvalsByTeamId = useTeamsStore((state) => state.approvalsByTeamId);
-  const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
-  const pendingApprovalsBySession = useChatStore((state) => state.pendingApprovalsBySession);
-  const deferredTeams = useDeferredValue(teams);
-  const deferredApprovalsByTeamId = useDeferredValue(approvalsByTeamId);
-  const deferredPendingApprovalsBySession = useDeferredValue(pendingApprovalsBySession);
+function SidebarSlot({ point }: { point: ExtensionPoint<ComponentContribution> }) {
+  const contributions = useContributions(point);
+  const ordered = useMemo(() => [...contributions].sort((a, b) => a.order - b.order), [contributions]);
+  return ordered.map(({ id, component: Component }) => (
+    <Suspense key={id} fallback={null}><Component /></Suspense>
+  ));
+}
 
-  const teamApprovalCards = useMemo(() => {
-    if (!TEAMS_FEATURE_ENABLED) {
-      return [];
-    }
+function NavigationItem({ item, pathname, disabled, onPrefetch, onNavigate }: {
+  item: NavigationContribution;
+  pathname: string;
+  disabled: boolean;
+  onPrefetch: (path: string) => void;
+  onNavigate: (path: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [expansion, setExpansion] = useState<{ path: string; expanded: boolean } | null>(null);
+  const isActive = pathname === item.to || pathname.startsWith(`${item.to}/`) || item.activePaths?.includes(pathname) === true;
+  const expanded = expansion?.path === pathname ? expansion.expanded : isActive;
+  const Icon = item.icon;
 
-    const cards: PendingBlockerCard[] = [];
-
-    for (const team of deferredTeams) {
-      const approvals = deferredApprovalsByTeamId[team.id] ?? EMPTY_TEAM_APPROVALS;
-      let variants = teamApprovalCardsCacheByApprovalsRef.get(approvals);
-      if (!variants) {
-        variants = new Map<string, PendingBlockerCard[]>();
-        teamApprovalCardsCacheByApprovalsRef.set(approvals, variants);
-      }
-      const variantKey = `${team.id}|${team.name}|${i18n.language}`;
-      let teamCards = variants.get(variantKey);
-      if (!teamCards) {
-        teamCards = buildTeamApprovalBlockerCards({
-          teamId: team.id,
-          teamName: team.name,
-          approvals,
-          t,
-        });
-        variants.set(variantKey, teamCards);
-      }
-      if (teamCards.length > 0) {
-        cards.push(...teamCards);
-      }
-    }
-
-    return cards;
-  }, [deferredApprovalsByTeamId, deferredTeams, i18n.language, t]);
-
-  const approvalCards = useMemo(() => {
-    const cards: PendingBlockerCard[] = [];
-    let approvalCardsCount = 0;
-    const approvalTitlePrefix = t('sidebar.pendingBlockerTypeApproval');
-    const approvalHint = t('sidebar.pendingBlockerApprovalHint');
-
-    for (const [sessionKey, approvalItems] of Object.entries(deferredPendingApprovalsBySession)) {
-      if (approvalCardsCount >= CHAT_APPROVAL_SCAN_LIMIT) {
-        break;
-      }
-      const approvals = approvalItems ?? EMPTY_APPROVAL_ITEMS;
-      const sessionLabel = sessionKey;
-      let variants = approvalCardsCacheByApprovalsRef.get(approvals);
-      if (!variants) {
-        variants = new Map<string, PendingBlockerCard[]>();
-        approvalCardsCacheByApprovalsRef.set(approvals, variants);
-      }
-      const variantKey = `${sessionKey}|${sessionLabel}|${i18n.language}|${approvalTitlePrefix}|${approvalHint}`;
-      let sessionCards = variants.get(variantKey);
-      if (!sessionCards) {
-        sessionCards = buildApprovalBlockerCards({
-          sessionKey,
-          approvals,
-          sessionLabel,
-          approvalTitlePrefix,
-          approvalHint,
-        });
-        variants.set(variantKey, sessionCards);
-      }
-      if (sessionCards.length === 0) {
-        continue;
-      }
-      const remain = CHAT_APPROVAL_SCAN_LIMIT - approvalCardsCount;
-      if (sessionCards.length <= remain) {
-        cards.push(...sessionCards);
-        approvalCardsCount += sessionCards.length;
-      } else {
-        cards.push(...sessionCards.slice(0, remain));
-        approvalCardsCount += remain;
-      }
-    }
-    return cards;
-  }, [
-    deferredPendingApprovalsBySession,
-    i18n.language,
-    t,
-  ]);
-
-  const visibleBlockers = useMemo<PendingBlockerCard[]>(() => {
-    return [...teamApprovalCards, ...approvalCards]
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, SIDEBAR_BLOCKER_RENDER_LIMIT);
-  }, [approvalCards, teamApprovalCards]);
-
-  const selectSessionTitles = useCallback((state: ChatStoreState) => {
-    const titles: Record<string, string> = {};
-    for (const card of visibleBlockers) {
-      const sessionKey = card.sessionKey;
-      if (card.source !== 'chat_approval' || !sessionKey || titles[sessionKey] !== undefined) {
-        continue;
-      }
-      const record = state.loadedSessions[sessionKey];
-      if (!record) {
-        titles[sessionKey] = sessionKey;
-        continue;
-      }
-      const label = resolveSessionListLabel(state, sessionKey);
-      const { sessionIdentity, ownership, kind, endpointSessionId } = record.meta;
-      titles[sessionKey] = label || (sessionIdentity
-        ? inferUntitledSessionLabel({
-            key: sessionKey,
-            agentId: record.meta.agentId ?? sessionIdentity.agentId,
-            sessionIdentity,
-            ownership,
-            kind: kind ?? undefined,
-            endpointSessionId: endpointSessionId ?? undefined,
-          }, t)
-        : t('sidebar.untitledSession'));
-    }
-    return titles;
-  }, [visibleBlockers, t]);
-  const sessionTitles = useChatStore(useShallow(selectSessionTitles));
-
-  const pendingBlockers = useMemo(() => visibleBlockers.map((card) => (
-    card.source === 'chat_approval' && card.sessionKey
-      ? { ...card, teamName: sessionTitles[card.sessionKey] || card.sessionKey }
-      : card
-  )), [sessionTitles, visibleBlockers]);
-
-  if (pendingBlockers.length === 0) {
-    return null;
+  if (!item.children?.length) {
+    return (
+      <NavItem
+        to={item.to}
+        icon={<Icon className="h-[17px] w-[17px]" />}
+        label={t(item.label)}
+        disabled={disabled}
+        active={item.activePaths?.includes(pathname) ? true : undefined}
+        onMouseEnter={() => onPrefetch(item.to)}
+        onFocus={() => onPrefetch(item.to)}
+        onNavigate={onNavigate}
+      />
+    );
   }
 
+  const childrenId = `sidebar-${item.id}-pages`;
   return (
-    <section className="mt-3 space-y-1.5" aria-label={t('sidebar.pendingBlockers')}>
-      <div className="flex items-center justify-between px-2.5 text-[10.5px] font-medium tracking-[0.04em] text-[hsl(var(--shell-text-muted))]">
-        <span>{t('sidebar.pendingBlockers')}</span>
-        <span>{pendingBlockers.length}</span>
-      </div>
-      <div className="max-h-56 space-y-1 overflow-y-auto pr-0.5">
-        {pendingBlockers.map((card) => (
-          <button
-            key={card.id}
-            type="button"
-            className="w-full rounded-[12px] px-2.5 py-2 text-left transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))]"
-            onClick={() => {
-              if (card.source === 'team_approval') {
-                setActiveTeam(card.teamId);
-                navigate(`/teams/${card.teamId}`);
-                return;
-              }
-              if (card.source === 'chat_approval' && card.sessionKey) {
-                navigate(`/?session=${encodeURIComponent(card.sessionKey)}`);
-                return;
-              }
-              navigate('/tasks');
-            }}
-          >
-            <div className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--shell-icon-active))]">
-              <span className="min-w-0 flex-1 truncate">{card.title}</span>
-              <span className="shrink-0 text-[11px] font-normal text-[hsl(var(--shell-text-muted))]">{formatMessageTime(card.createdAt)}</span>
-            </div>
-            <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[hsl(var(--shell-text-muted))]">
-              <span className="min-w-0 flex-1 truncate">
-                {card.source === 'team_approval'
-                  ? card.teamName
-                  : t('sidebar.pendingBlockerSourceChat')}
-              </span>
-              <span className="shrink-0">
-                {card.source === 'team_approval'
-                  ? t('sidebar.pendingBlockerFrom', { from: card.from })
-                  : t('sidebar.pendingBlockerApprovalId', { id: card.from })}
-              </span>
-            </div>
-            <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[hsl(var(--shell-text-muted))]">
-              {card.content}
-            </div>
-          </button>
+    <div className="shrink-0 space-y-1">
+      <button
+        type="button"
+        disabled={disabled}
+        aria-expanded={expanded}
+        aria-controls={childrenId}
+        onClick={() => setExpansion({ path: pathname, expanded: !expanded })}
+        onMouseEnter={() => onPrefetch(item.to)}
+        onFocus={() => onPrefetch(item.to)}
+        className={cn(
+          'group flex w-full items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-left text-[13px] font-medium tracking-[-0.01em] transition-[background-color,color]',
+          'hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))] disabled:pointer-events-none disabled:opacity-45',
+          isActive ? 'text-[hsl(var(--shell-icon-active))]' : 'text-[hsl(var(--shell-text-muted))]',
+        )}
+      >
+        <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center"><Icon className="h-[17px] w-[17px]" /></span>
+        <span className="min-w-0 flex-1 truncate">{t(item.label)}</span>
+        <ChevronRight aria-hidden="true" className={cn('h-3.5 w-3.5 shrink-0 transition-transform motion-reduce:transition-none', expanded && 'rotate-90')} />
+      </button>
+      <div id={childrenId} hidden={!expanded} className="ml-7 space-y-0.5">
+        {item.children.map((page) => (
+          <NavItem
+            key={page.to}
+            to={page.to}
+            icon={null}
+            label={t(page.label)}
+            end
+            disabled={disabled}
+            onMouseEnter={() => onPrefetch(page.to)}
+            onFocus={() => onPrefetch(page.to)}
+            onNavigate={onNavigate}
+          />
         ))}
       </div>
-    </section>
+    </div>
   );
-});
+}
 
 export function Sidebar({
   width = 256,
   overlay = false,
   showRightDivider = true,
 }: SidebarProps) {
-  const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
-  const newSession = useChatStore(selectSidebarNewSessionAction);
-  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
-  const taskCenterInitialized = useTaskCenterStore((state) => state.initialized);
-  const initTaskCenter = useTaskCenterStore((state) => state.init);
-  const refreshTaskCenter = useTaskCenterStore((state) => state.refreshTasks);
-  const accountStatus = useAccountStore((state) => state.status);
+  const host = usePluginHost();
+  const navigation = useContributions(applicationNavigation);
+  const navItems = useMemo(() => [...navigation].sort((a, b) => a.order - b.order), [navigation]);
   const licenseLocked = useLocalLicenseLocked();
-  const accountUser = useAccountStore((state) => state.user);
-  const accountSubscription = useAccountStore((state) => state.subscription);
-  const accountUsage = useAccountStore((state) => state.usage);
-  const logoutAccount = useAccountStore((state) => state.logout);
-  const subscriptionSummary = useSubscriptionStore((state) => state.summary);
-  const subscriptionProgress = useSubscriptionStore((state) => state.progress);
-  const [subscriptionDialogOpen, setSubscriptionDialogOpen] = useState(false);
   const prefetchHandlesRef = useRef<Map<string, PrefetchScheduleHandle>>(new Map());
-
   const navigate = useNavigate();
   const location = useLocation();
-  const isOnChat = location.pathname === '/';
-  const { t } = useTranslation();
-
-  const openDevConsole = async () => {
-    try {
-      const result = await hostApiFetch<{
-        success: boolean;
-        url?: string;
-        error?: string;
-      }>('/api/gateway/control-ui');
-      if (result.success && result.url) {
-        window.electron.openExternal(result.url);
-      } else {
-        console.error('Failed to get Dev Console URL:', result.error);
-      }
-    } catch (error) {
-      console.error('Error opening Dev Console:', error);
-    }
-  };
-
-  const navItems = [
-    { to: '/tasks', icon: <ListTodo className="h-[17px] w-[17px]" />, label: t('sidebar.tasks') },
-    { to: '/subagents', icon: <Bot className="h-[17px] w-[17px]" />, label: t('sidebar.subagents') },
-    ...(TEAMS_FEATURE_ENABLED
-      ? [{ to: '/teams', icon: <Users className="h-[17px] w-[17px]" />, label: t('sidebar.teams') }]
-      : []),
-    { to: '/providers', icon: <KeyRound className="h-[17px] w-[17px]" />, label: t('settings:aiProviders.title') },
-    { to: '/channels', icon: <Radio className="h-[17px] w-[17px]" />, label: t('sidebar.channels') },
-    { to: '/wiki', icon: <BookOpen className="h-[17px] w-[17px]" />, label: 'Wiki' },
-    { to: '/dashboard', icon: <Home className="h-[17px] w-[17px]" />, label: t('sidebar.dashboard') },
-  ];
-
-  const prefetchNavPath = useCallback((path: string) => {
-    void preloadLazyRouteForPath(path);
-
-    if (path === '/subagents') {
-      void prefetchSubagentTemplateCatalog();
-      return;
-    }
-
-    if (path === '/tasks') {
-      const chatState = useChatStore.getState();
-      const currentSession = readSessionsFromState(chatState).find((session) => session.key === currentSessionKey);
-      const runtime = currentSession && useRuntimeEndpointsStore.getState().endpoints.find(
-        (entry) => runtimeEndpointsEqual(entry.endpointRef, currentSession.sessionIdentity.endpoint));
-      if (!currentSession || !runtime || !isRuntimeEndpointReady(runtime) || !supportsRuntimeEndpointCapabilityFamily(runtime, 'task')) {
-        return;
-      }
-      const taskSession = {
-        recordKey: currentSession.key,
-        sessionIdentity: currentSession.sessionIdentity,
-      };
-      if (!taskCenterInitialized) {
-        void initTaskCenter(taskSession);
-      }
-      void refreshTaskCenter({
-        sessionKey: taskSession.recordKey,
-        sessionIdentity: taskSession.sessionIdentity,
-        silent: true,
-      });
-      return;
-    }
-  }, [
-    initTaskCenter,
-    refreshTaskCenter,
-    taskCenterInitialized,
-    currentSessionKey,
-  ]);
 
   const clearPrefetchHandle = useCallback((path: string) => {
     const current = prefetchHandlesRef.current.get(path);
@@ -873,7 +207,7 @@ export function Sidebar({
 
     const runPrefetch = () => {
       prefetchHandlesRef.current.delete(path);
-      prefetchNavPath(path);
+      void preloadApplicationPath(host, path);
     };
 
     if ('requestIdleCallback' in window && typeof window.requestIdleCallback === 'function') {
@@ -884,14 +218,14 @@ export function Sidebar({
 
     const timeoutId = window.setTimeout(runPrefetch, SIDEBAR_PREFETCH_FALLBACK_DELAY_MS);
     prefetchHandlesRef.current.set(path, { type: 'timeout', id: timeoutId });
-  }, [licenseLocked, prefetchNavPath]);
+  }, [host, licenseLocked]);
 
   useEffect(() => () => {
     const paths = Array.from(prefetchHandlesRef.current.keys());
     for (const path of paths) {
       clearPrefetchHandle(path);
     }
-  }, [clearPrefetchHandle, licenseLocked]);
+  }, [clearPrefetchHandle, host, licenseLocked]);
 
   const navigateToPath = useCallback((to: string) => {
     if (location.pathname === to) {
@@ -902,38 +236,6 @@ export function Sidebar({
     });
   }, [location.pathname, navigate]);
 
-  const openSubscriptionDialog = useCallback(() => {
-    setSubscriptionDialogOpen(true);
-  }, []);
-
-  const navigateToLogin = useCallback(() => {
-    startTransition(() => {
-      navigate('/login');
-    });
-  }, [navigate]);
-
-  const navigateToRegister = useCallback(() => {
-    startTransition(() => {
-      navigate('/register');
-    });
-  }, [navigate]);
-
-  const navigateToAppearanceSettings = useCallback(() => {
-    startTransition(() => {
-      navigate('/settings?section=appearance');
-    });
-  }, [navigate]);
-
-  const navigateToAbout = useCallback(() => {
-    startTransition(() => {
-      navigate('/settings?section=updates');
-    });
-  }, [navigate]);
-
-  const handleLogout = useCallback(() => {
-    void logoutAccount();
-  }, [logoutAccount]);
-
   return (
     <aside
       className={cn(
@@ -943,75 +245,24 @@ export function Sidebar({
       )}
       style={{ width }}
     >
-      <nav className="flex flex-1 flex-col gap-1 overflow-hidden p-2.5">
-        <button
-          type="button"
-          disabled={licenseLocked}
-          onClick={() => {
-            const { currentSessionKey, loadedSessions } = useChatStore.getState();
-            const hasItems = getSessionItemCount(loadedSessions[currentSessionKey]) > 0;
-            if (isOnChat && hasItems) {
-              newSession();
-            }
-            startTransition(() => {
-              navigate('/');
-            });
-          }}
-          className="group flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-[hsl(var(--shell-text-muted))] transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))] disabled:pointer-events-none disabled:opacity-45"
-        >
-          <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[hsl(var(--shell-icon))] group-hover:text-[hsl(var(--shell-icon-active))]">
-            <MessageSquare className="h-[17px] w-[17px]" />
-          </span>
-          <span className="min-w-0 flex-1 truncate text-left">{t('sidebar.newChat')}</span>
-        </button>
-
+      <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-2.5">
+        <SidebarSlot point={sidebarActions} />
         {navItems.map((item) => (
-          <NavItem
-            key={item.to}
-            {...item}
+          <NavigationItem
+            key={item.id}
+            item={item}
+            pathname={location.pathname}
             disabled={licenseLocked}
-            active={item.to === '/subagents' && ['/subagents', '/skills', '/plugins', '/connectors'].includes(location.pathname) ? true : undefined}
-            onMouseEnter={() => scheduleNavPrefetch(item.to)}
-            onFocus={() => scheduleNavPrefetch(item.to)}
+            onPrefetch={scheduleNavPrefetch}
             onNavigate={navigateToPath}
           />
         ))}
-
-        {!licenseLocked && <SidebarPendingBlockers />}
+        {!licenseLocked && <SidebarSlot point={sidebarPanels} />}
       </nav>
 
       <div className="space-y-1.5 p-2.5 pt-0">
-        {devModeUnlocked && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="w-full justify-start"
-            onClick={openDevConsole}
-            disabled={licenseLocked}
-          >
-            <Terminal className="mr-2 h-4 w-4" />
-            {t('sidebar.devConsole')}
-            <ExternalLink className="ml-auto h-3 w-3" />
-          </Button>
-        )}
-        <SidebarAccountCard
-          licenseLocked={licenseLocked}
-          status={accountStatus}
-          user={accountUser}
-          subscription={accountSubscription}
-          usage={accountUsage}
-          subscriptionSummary={subscriptionSummary}
-          subscriptionProgress={subscriptionProgress}
-          onLogin={navigateToLogin}
-          onRegister={navigateToRegister}
-          onOpenSubscription={openSubscriptionDialog}
-          onOpenAppearance={navigateToAppearanceSettings}
-          onOpenAbout={navigateToAbout}
-          onLogout={handleLogout}
-        />
+        <SidebarSlot point={sidebarFooter} />
       </div>
-
-      {!licenseLocked && <SubscriptionPlanDialog open={subscriptionDialogOpen} onOpenChange={setSubscriptionDialogOpen} />}
     </aside>
   );
 }

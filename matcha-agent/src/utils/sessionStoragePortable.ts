@@ -712,18 +712,8 @@ function finalizeOutput(s: LoadState): void {
   }
 }
 
-export async function readTranscriptForLoad(
-  filePath: string,
-  fileSize: number,
-): Promise<{
-  boundaryStartOffset: number
-  postBoundaryBuf: Buffer
-  hasPreservedSegment: boolean
-}> {
-  const boundaryMarker = compactBoundaryMarker()
-  const CHUNK_SIZE = TRANSCRIPT_READ_CHUNK_SIZE
-
-  const s: LoadState = {
+function createLoadState(fileSize: number): LoadState {
+  return {
     out: {
       // Gated callers enter with fileSize > 5MB, so min(fileSize, 8MB) lands
       // in [5, 8]MB; large boundaryless sessions (24-31MB output) take 2
@@ -746,7 +736,60 @@ export async function readTranscriptForLoad(
     straddleSnapCarryLen: 0,
     straddleSnapTailEnd: 0,
   }
+}
 
+function processLoadChunk(
+  s: LoadState,
+  chunk: Buffer,
+  bytesRead: number,
+  boundaryMarker: Buffer,
+): void {
+  const chunkOff = processStraddle(s, chunk, bytesRead)
+
+  let buf: Buffer
+  if (s.carryLen > 0) {
+    const bufLen = s.carryLen + (bytesRead - chunkOff)
+    buf = Buffer.allocUnsafe(bufLen)
+    s.carryBuf!.copy(buf, 0, 0, s.carryLen)
+    chunk.copy(buf, s.carryLen, chunkOff, bytesRead)
+  } else {
+    buf = chunk.subarray(chunkOff, bytesRead)
+  }
+
+  const r = scanChunkLines(s, buf, boundaryMarker)
+  captureSnap(s, buf, chunk, r.lastSnapStart, r.lastSnapEnd)
+  captureCarry(s, buf, r.trailStart)
+  s.bufFileOff += r.trailStart
+}
+
+type TranscriptLoadResult = {
+  boundaryStartOffset: number
+  postBoundaryBuf: Buffer
+  hasPreservedSegment: boolean
+}
+
+export function readTranscriptBufferForLoad(buffer: Buffer): TranscriptLoadResult {
+  const s = createLoadState(buffer.length)
+  const boundaryMarker = compactBoundaryMarker()
+  for (let offset = 0; offset < buffer.length; offset += TRANSCRIPT_READ_CHUNK_SIZE) {
+    const chunk = buffer.subarray(offset, offset + TRANSCRIPT_READ_CHUNK_SIZE)
+    processLoadChunk(s, chunk, chunk.length, boundaryMarker)
+  }
+  finalizeOutput(s)
+  return {
+    boundaryStartOffset: s.boundaryStartOffset,
+    postBoundaryBuf: s.out.buf.subarray(0, s.out.len),
+    hasPreservedSegment: s.hasPreservedSegment,
+  }
+}
+
+export async function readTranscriptForLoad(
+  filePath: string,
+  fileSize: number,
+): Promise<TranscriptLoadResult> {
+  const boundaryMarker = compactBoundaryMarker()
+  const CHUNK_SIZE = TRANSCRIPT_READ_CHUNK_SIZE
+  const s = createLoadState(fileSize)
   const chunk = Buffer.allocUnsafe(CHUNK_SIZE)
   const fd = await fsOpen(filePath, 'r')
   try {
@@ -761,22 +804,7 @@ export async function readTranscriptForLoad(
       if (bytesRead === 0) break
       filePos += bytesRead
 
-      const chunkOff = processStraddle(s, chunk, bytesRead)
-
-      let buf: Buffer
-      if (s.carryLen > 0) {
-        const bufLen = s.carryLen + (bytesRead - chunkOff)
-        buf = Buffer.allocUnsafe(bufLen)
-        s.carryBuf!.copy(buf, 0, 0, s.carryLen)
-        chunk.copy(buf, s.carryLen, chunkOff, bytesRead)
-      } else {
-        buf = chunk.subarray(chunkOff, bytesRead)
-      }
-
-      const r = scanChunkLines(s, buf, boundaryMarker)
-      captureSnap(s, buf, chunk, r.lastSnapStart, r.lastSnapEnd)
-      captureCarry(s, buf, r.trailStart)
-      s.bufFileOff += r.trailStart
+      processLoadChunk(s, chunk, bytesRead, boundaryMarker)
     }
     finalizeOutput(s)
   } finally {

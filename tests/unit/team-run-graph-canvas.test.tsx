@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { TeamRunGraphCanvas } from '@/pages/Teams/TeamRunGraphCanvas';
+import { TeamRunGraphCanvas } from '@/plugins/teams/pages/TeamRunGraphCanvas';
 import type { TeamGraphNodeRecord, TeamGraphSnapshotRecord } from '@/services/openclaw/team-runtime-client';
 import teamsEn from '@/i18n/locales/en/teams.json';
 import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';

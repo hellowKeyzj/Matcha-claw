@@ -1,6 +1,5 @@
 import { hostApiFetch } from '@/lib/host-api';
 import { isTraceEnabled } from '@/lib/trace-logger';
-import { nativeProjectionError } from '@/lib/provider-projection-errors';
 import { isProviderMutationCommitted, waitForProviderMutation } from '@/lib/provider-call';
 import { decodeProviderCallDetail, type ProviderCallDetail } from '@/types/call-log/provider';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
@@ -28,7 +27,6 @@ export type ProviderModelDraft = Omit<ProviderModel, 'accountId' | 'label'>;
 
 export interface ProviderModelsReplaceResult {
   receipt: ProviderCallDetail;
-  warning?: string;
 }
 
 export interface ProviderModelsDiscoverResult {
@@ -245,8 +243,7 @@ export async function persistProviderModels(
       }
       throw new Error('Provider models are unavailable');
     }
-    const warning = nativeProjectionError(receipt);
-    return { receipt, ...(warning ? { warning } : {}) };
+    return { receipt };
   } catch (error) {
     if (isTraceEnabled()) logProviderConfigTrace('request-failed', {
       errorName: error instanceof Error ? error.name : typeof error,

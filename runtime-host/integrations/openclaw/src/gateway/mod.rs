@@ -10,6 +10,7 @@ pub mod device_identity;
 pub(crate) mod dispatcher;
 pub(crate) mod ingress;
 pub mod loopback;
+pub(crate) mod media;
 pub(crate) mod operation;
 pub(crate) mod observation;
 pub mod request;

@@ -31,6 +31,9 @@ usage = { version = "0.1.0", path = "../../modules/usage" }
 workspace-module = { package = "workspace", version = "0.1.0", path = "../../modules/workspace" }
 futures-util.workspace = true
 getrandom.workspace = true
+hmac.workspace = true
+world = { version = "0.1.0", path = "../../modules/world" }
+world-protocol = { version = "0.1.0", path = "../../modules/world/protocol" }
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 json5.workspace = true
 platform = { version = "0.1.0", path = "../../platform" }

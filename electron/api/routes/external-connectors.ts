@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import type { ExternalConnectorsTransport } from '../../main/runtime-host-delivery/transport/connectors/external';
+import { isConnectorOAuthScope, type ExternalConnectorsTransport } from '../../main/runtime-host-delivery/transport/connectors/external';
 import { validateSessionIdentity } from '../../../src/types/desktop/runtime-address';
+import { isConnectorOAuthInput } from '../../../src/types/connectors-oauth';
 import { isProductRuntimeScope, readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { parseJsonBody, sendJson } from '../route-utils';
 
@@ -20,6 +21,7 @@ type ExternalConnectorOperation =
   | 'externalConnectors.sessionStatus'
   | 'externalConnectors.sessionMcpServerEnabled'
   | 'externalConnectors.probe'
+  | 'externalConnectors.oauth'
   | 'externalConnectors.get'
   | 'externalConnectors.upsert'
   | 'externalConnectors.update'
@@ -103,11 +105,24 @@ export async function handleExternalConnectorsRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/external-connectors/oauth' && req.method === 'POST') {
+    const body = await parseLegacyBody(req, res);
+    if (!body) return true;
+    const { scope, ...input } = body;
+    if (Object.hasOwn(input, 'kind') || !isConnectorOAuthInput(input) || !isConnectorOAuthScope(scope, input.agentId)) {
+      sendJson(res, 400, INVALID);
+      return true;
+    }
+    await deliver(transport, res, createRequest('externalConnectors.oauth', { kind: 'oauth', ...input }, scope));
+    return true;
+  }
+
   if (url.pathname === '/api/external-connectors/observation-result' && req.method === 'POST') {
     const body = await parseLegacyBody(req, res);
     if (!body) return true;
     if (!(hasExactKeys(body, ['callId'])
       || (hasExactKeys(body, ['callId', 'scope']) && isProductRuntimeScope(body.scope))
+      || (hasExactKeys(body, ['callId', 'scope', 'agentId']) && isConnectorOAuthScope(body.scope, body.agentId))
       || (hasExactKeys(body, ['callId', 'sessionIdentity']) && !validateSessionIdentity(body.sessionIdentity)))
       || typeof body.callId !== 'string' || !/^[a-f0-9]{32}$/.test(body.callId)) {
       sendJson(res, 400, INVALID);
@@ -116,6 +131,7 @@ export async function handleExternalConnectorsRoutes(
     await deliver(transport, res, createRequest('externalConnectors.observationResult', {
       kind: 'observationResult', callId: body.callId,
       ...(body.sessionIdentity === undefined ? {} : { sessionIdentity: body.sessionIdentity }),
+      ...(body.agentId === undefined ? {} : { agentId: body.agentId }),
     }, body.scope));
     return true;
   }
@@ -180,7 +196,7 @@ export async function handleExternalConnectorsRoutes(
 }
 
 function createRequest(operationId: ExternalConnectorOperation, input: Record<string, unknown>, scope?: unknown) {
-  const runtimeObservation = operationId === 'externalConnectors.status' || operationId === 'externalConnectors.probe'
+  const runtimeObservation = operationId === 'externalConnectors.status' || operationId === 'externalConnectors.probe' || operationId === 'externalConnectors.oauth'
     || (operationId === 'externalConnectors.observationResult' && !Object.hasOwn(input, 'sessionIdentity'));
   return {
     id: 'external.connectors',

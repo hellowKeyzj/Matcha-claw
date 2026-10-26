@@ -2,6 +2,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { app } from 'electron';
 import type { HostEventBus } from '../../api/event-bus';
+import { observeWorldStorageRegistration, readWorldStorageBootstrap, type WorldPostgresConfiguration } from '../world/storage-config';
+import { readInitialWorldBootstrap } from '../world/initial-config';
 import { getPort } from '../../utils/config';
 import { buildRuntimeHostBootstrap } from './bootstrap';
 import { resolveRuntimeHostBootstrap } from './bootstrap-resources';
@@ -28,15 +30,21 @@ type E2EProcess = typeof process & {
 export type RuntimeHostDelivery = Readonly<{
   readonly issuer: RuntimeHostDeliveryIssuer;
   readonly launchRuntimeHost: () => Promise<DirectRuntimeHost>;
+  readonly validateWorldStorageBootstrap: (storage: WorldPostgresConfiguration, configuration?: Readonly<Record<string, unknown>>) => Promise<void>;
   readonly close: () => Promise<void>;
   readonly runtimeHostTransportPort: number;
 }>;
 
 export async function createRuntimeHostDelivery(
   hostEventBus: HostEventBus,
+  lifecycle: Readonly<{
+    signal: AbortSignal;
+    onSpawn: (host: DirectRuntimeHost, closed: Promise<void>) => void;
+  }>,
 ): Promise<RuntimeHostDelivery> {
   const workingDirectory = app.isPackaged ? process.resourcesPath : process.cwd();
-  let launch: Parameters<typeof launchDirectRuntimeHost>[0];
+  let launch: Omit<Parameters<typeof launchDirectRuntimeHost>[0], 'bootstrapBytes'>;
+  let bootstrapInput: Parameters<typeof buildRuntimeHostBootstrap>[0];
   let providerCredentialResolver: ProviderPrivateCredentialResolver | undefined;
   let parentCallback: ParentCallbackReceiver | undefined;
   const issuer = createRuntimeHostDeliveryIssuer();
@@ -58,17 +66,21 @@ export async function createRuntimeHostDelivery(
           : { projectRoot: workingDirectory }),
       }),
       workingDirectory,
-      bootstrapBytes: buildRuntimeHostBootstrap({
+      environment: runtimeHostLaunchEnvironment(),
+    };
+    bootstrapInput = {
         ...bootstrap,
         deliveryVerificationKey: issuer.verificationKey,
         parentCallbackBaseUrl: parentCallback.baseUrl,
         parentCallbackDispatchToken: parentCallback.dispatchToken,
-        providerCredentialResolver: providerCredentialResolver && {
+        providerCredentialResolver: {
           endpoint: providerCredentialResolver.endpoint,
           authorization: providerCredentialResolver.authorization,
         },
-      }),
-      environment: runtimeHostLaunchEnvironment(),
+        worldSourceAccess: {
+          endpoint: providerCredentialResolver.endpoint,
+          authorization: providerCredentialResolver.authorization,
+        },
     };
   } catch (error) {
     await providerCredentialResolver?.close().catch(() => undefined);
@@ -76,10 +88,26 @@ export async function createRuntimeHostDelivery(
     publishE2EBootstrapResolveFailure();
     throw error;
   }
-  const launchRuntimeHost = async (): Promise<DirectRuntimeHost> =>
-    launchDirectRuntimeHost(launch);
+  const launchRuntimeHost = async (): Promise<DirectRuntimeHost> => {
+    const storage = await readWorldStorageBootstrap();
+    const initialWorld = await readInitialWorldBootstrap();
+    const host = await launchDirectRuntimeHost({ ...launch, ...lifecycle, bootstrapBytes: buildRuntimeHostBootstrap({
+      ...bootstrapInput, ...storage, ...(initialWorld ? { initialWorld } : {}),
+    }) });
+    host.onExit(observeWorldStorageRegistration(storage.worldStorageTargets.map((target) => target.storageId)));
+    return host;
+  };
   return {
     launchRuntimeHost,
+    validateWorldStorageBootstrap: async (storage, configuration) => {
+      const saved = await readWorldStorageBootstrap();
+      if (configuration && configuration.storageId !== storage.storageId) {
+        throw new Error('world.initial_storage_conflict');
+      }
+      buildRuntimeHostBootstrap({ ...bootstrapInput, worldPostgres: storage,
+        worldStorageTargets: saved.worldStorageTargets.filter((target) => target.storageId !== storage.storageId),
+        ...(configuration ? { initialWorld: configuration } : {}) });
+    },
     close: async () => {
       await providerCredentialResolver?.close();
       await parentCallback?.close();

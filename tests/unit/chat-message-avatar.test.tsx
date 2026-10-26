@@ -1,11 +1,17 @@
+import { Suspense, type ReactElement, type ReactNode } from 'react';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { applicationShellPlugin } from '@/app/extensions';
+import { messageRenderingPlugin } from '@/plugins/message-rendering/plugin';
+import { filesPlugin } from '@/plugins/files/plugin';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { ChatAssistantTurn } from '@/pages/Chat/ChatAssistantTurn';
-import { ChatMessage } from '@/pages/Chat/ChatMessage';
-import { SessionTodoPanel } from '@/pages/Chat/components/SessionTodoPanel';
-import { applyAssistantPresentationToItems } from '@/pages/Chat/chat-render-item-model';
-import { CHAT_LAYOUT_TOKENS } from '@/pages/Chat/chat-layout-tokens';
-import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
+import { ChatAssistantTurn } from '@/plugins/message-rendering/ChatAssistantTurn';
+import { ChatMessage } from '@/plugins/message-rendering/ChatMessage';
+import { SessionTodoPanel } from '@/plugins/chat/components/SessionTodoPanel';
+import { applyAssistantPresentationToItems } from '@/plugins/message-rendering/chat-render-item-model';
+import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
+import { useTaskSnapshotStore } from '@/plugins/chat/store/task-snapshot-store';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { vi } from 'vitest';
@@ -76,7 +82,24 @@ function buildRenderItem(message: RawMessage) {
 function findToolRenderItem(message: RawMessage) {
   return buildAllRenderItems(message).find(
     (item) => item.kind === 'assistant-turn' && item.turnKey?.startsWith('tool:'),
-  ) as import('@/pages/Chat/chat-render-item-model').ChatAssistantTurnItem | undefined;
+  ) as import('@/plugins/message-rendering/chat-render-item-model').ChatAssistantTurnItem | undefined;
+}
+
+const pluginHost = createPluginHost([applicationShellPlugin, messageRenderingPlugin, filesPlugin]);
+
+function MessagePlugins({ children }: { children: ReactNode }) {
+  return <PluginHostProvider host={pluginHost}><Suspense fallback={null}>{children}</Suspense></PluginHostProvider>;
+}
+
+async function renderMessage(element: ReactElement) {
+  let view!: ReturnType<typeof render>;
+  await act(async () => {
+    view = render(element, { wrapper: MessagePlugins });
+  });
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
+  return view;
 }
 
 describe('chat message avatar', () => {
@@ -84,7 +107,7 @@ describe('chat message avatar', () => {
     useTaskSnapshotStore.getState().cleanup('agent:test:main');
   });
 
-  it('assistant turn renders generated agent avatar', () => {
+  it('assistant turn renders generated agent avatar', async () => {
     const item = buildRenderItem({
       role: 'assistant',
       content: 'hello',
@@ -93,7 +116,7 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turn');
     }
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -106,7 +129,7 @@ describe('chat message avatar', () => {
     expect(img?.src.startsWith('data:image/svg+xml')).toBe(true);
   });
 
-  it('uses the OpenClaw-style assistant shrink layout instead of a fixed 80% shell', () => {
+  it('uses the OpenClaw-style assistant shrink layout instead of a fixed 80% shell', async () => {
     const item = buildRenderItem({
       role: 'assistant',
       content: 'layout-check',
@@ -115,7 +138,7 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turn');
     }
 
-    const { container } = render(
+    const { container } = await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -136,7 +159,7 @@ describe('chat message avatar', () => {
     expect(body?.className).toContain(CHAT_LAYOUT_TOKENS.assistantSurface);
   });
 
-  it('thinking and tool rails keep a stable width while expand/collapse only changes inner content', () => {
+  it('thinking and tool rails keep a stable width while expand/collapse only changes inner content', async () => {
     const thinkingItem = buildRenderItem({
       role: 'assistant',
       content: [{ type: 'thinking', thinking: 'reviewing options' }],
@@ -149,13 +172,13 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turns');
     }
 
-    const thinkingRender = render(
+    const thinkingRender = await renderMessage(
       <ChatAssistantTurn
         item={thinkingItem}
         showThinking
       />,
     );
-    const toolRender = render(
+    const toolRender = await renderMessage(
       <ChatAssistantTurn
         item={toolItem}
         showThinking={false}
@@ -180,7 +203,7 @@ describe('chat message avatar', () => {
     expect(screen.getByText(/reviewing options/)).toBeInTheDocument();
   });
 
-  it('tool-only assistant turn renders expandable tool cards without empty assistant body shell', () => {
+  it('tool-only assistant turn renders expandable tool cards without empty assistant body shell', async () => {
     const item = findToolRenderItem({
       role: 'assistant',
       content: [{
@@ -195,7 +218,7 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turn');
     }
 
-    const { container } = render(
+    const { container } = await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -213,7 +236,7 @@ describe('chat message avatar', () => {
     expect(document.querySelector('[data-compact-rail="tool"]')?.textContent).toContain('读取，README.md');
   });
 
-  it('streaming turn without content shows thinking indicator from runtime state', () => {
+  it('streaming turn without content shows thinking indicator from runtime state', async () => {
     const item = {
       ...buildRenderItem({
         role: 'assistant',
@@ -229,7 +252,7 @@ describe('chat message avatar', () => {
       attachedFiles: [],
     };
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -241,7 +264,7 @@ describe('chat message avatar', () => {
     expect(document.querySelector('[data-chat-body-mode="streaming"]')).toBeNull();
   });
 
-  it('stale typing pendingState does not resurrect an empty assistant turn', () => {
+  it('stale typing pendingState does not resurrect an empty assistant turn', async () => {
     const item = {
       ...buildRenderItem({
         role: 'assistant',
@@ -258,7 +281,7 @@ describe('chat message avatar', () => {
       pendingState: 'typing' as const,
     };
 
-    const { container } = render(
+    const { container } = await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -270,7 +293,7 @@ describe('chat message avatar', () => {
     expect(document.querySelector('[data-chat-pending-mode]')).toBeNull();
   });
 
-  it('pending activity turn shows tool activity indicator', () => {
+  it('pending activity turn shows tool activity indicator', async () => {
     const item = {
       ...buildRenderItem({
         role: 'assistant',
@@ -287,7 +310,7 @@ describe('chat message avatar', () => {
       pendingState: 'activity' as const,
     };
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -298,7 +321,7 @@ describe('chat message avatar', () => {
     expect(document.querySelector('[data-chat-pending-mode="activity"]')).not.toBeNull();
   });
 
-  it('tool card stays collapsed by default and expands to show tool output', () => {
+  it('tool card stays collapsed by default and expands to show tool output', async () => {
     const item = findToolRenderItem({
       role: 'assistant',
       content: [{
@@ -317,7 +340,7 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turn');
     }
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -418,7 +441,7 @@ describe('chat message avatar', () => {
     view.unmount();
   });
 
-  it('tool card renders json output as a collapsible JSON block', () => {
+  it('tool card renders json output as a collapsible JSON block', async () => {
     const item = findToolRenderItem({
       role: 'assistant',
       content: [{
@@ -437,7 +460,7 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turn');
     }
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -461,7 +484,7 @@ describe('chat message avatar', () => {
     expect(screen.getAllByText(/tool output body/).length).toBeGreaterThan(0);
   });
 
-  it('collapsed tool summary avoids exposing raw object-like payload text', () => {
+  it('collapsed tool summary avoids exposing raw object-like payload text', async () => {
     const item = findToolRenderItem({
       role: 'assistant',
       content: [{
@@ -480,7 +503,7 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turn');
     }
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -500,7 +523,7 @@ describe('chat message avatar', () => {
     expect(screen.getByText(/store_failed/)).toBeInTheDocument();
   });
 
-  it('collapsed tool header avoids exposing raw object-like input payload text', () => {
+  it('collapsed tool header avoids exposing raw object-like input payload text', async () => {
     const item = findToolRenderItem({
       role: 'assistant',
       content: [{
@@ -519,7 +542,7 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turn');
     }
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -541,7 +564,7 @@ describe('chat message avatar', () => {
     expect(screen.getByText(/search_failed/)).toBeInTheDocument();
   });
 
-  it('clicking the assistant body collapses open thinking section in the same turn', () => {
+  it('clicking the assistant body collapses open thinking section in the same turn', async () => {
     const item = buildRenderItem({
       role: 'assistant',
       content: [
@@ -553,7 +576,7 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turn');
     }
 
-    render(
+    await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking
@@ -573,7 +596,7 @@ describe('chat message avatar', () => {
     expect(screen.queryByText(/reviewing options/)).toBeNull();
   });
 
-  it('long tool output uses its own scroll region instead of expanding the chat column indefinitely', () => {
+  it('long tool output uses its own scroll region instead of expanding the chat column indefinitely', async () => {
     const longOutput = Array.from({ length: 80 }, (_, index) => `line-${index}: long tool output content`).join('\n');
     const item = findToolRenderItem({
       role: 'assistant',
@@ -593,7 +616,7 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turn');
     }
 
-    const { container } = render(
+    const { container } = await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}
@@ -616,7 +639,7 @@ describe('chat message avatar', () => {
     expect(scrollRegion?.className).toContain('overflow-y-auto');
   });
 
-  it('tool card renders canvas preview with raw details disclosure', () => {
+  it('tool card renders canvas preview with raw details disclosure', async () => {
     const item = findToolRenderItem({
       role: 'assistant',
       content: [{
@@ -647,7 +670,7 @@ describe('chat message avatar', () => {
       throw new Error('expected assistant turn');
     }
 
-    const { container } = render(
+    const { container } = await renderMessage(
       <ChatAssistantTurn
         item={item}
         showThinking={false}

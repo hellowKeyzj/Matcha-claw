@@ -45,6 +45,10 @@ impl ProviderCascade {
         Ok(cascade)
     }
 
+    pub(crate) fn generation_bindings_path(&self) -> PathBuf {
+        crate::adapters::generation_bindings::GenerationBindings::path_for_journal(&self.journal.path)
+    }
+
     pub fn accounts(&self) -> &[ProviderAccount] {
         self.accounts.accounts()
     }

@@ -57,6 +57,13 @@ impl WorkspaceMediaRequest {
                 AUTHORIZATION_SUBJECT,
             )
             .map_err(|_| ())?;
+        if operation_id == THUMBNAIL_OPERATION_ID
+            && value.get("input").and_then(Value::as_object).is_some_and(|input| {
+                input.contains_key("reference") && input.len() != 3
+            })
+        {
+            return Err(());
+        }
         let request = serde_json::from_value::<Self>(value).map_err(|_| ())?;
         request.valid().then_some(request).ok_or(())
     }
@@ -80,7 +87,11 @@ impl WorkspaceMediaRequest {
             && self.target.kind == "workspace-media"
             && match self.operation_id.as_str() {
                 PREPARE_OPERATION_ID => self.input.is_relative_media(),
-                THUMBNAIL_OPERATION_ID => self.input.is_relative_media() || self.input.is_gateway(),
+                THUMBNAIL_OPERATION_ID => {
+                    self.input.is_relative_media()
+                        || self.input.is_gateway()
+                        || self.input.is_thumbnail_reference()
+                }
                 RESOLVE_OPERATION_ID => self.input.is_reference(),
                 THUMBNAILS_OPERATION_ID => self.input.is_paths() && valid_paths(self.input.paths()),
                 STAGE_PATHS_OPERATION_ID => {
@@ -247,6 +258,16 @@ fn valid_reference(value: &str) -> bool {
         && value[6..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn valid_thumbnail_reference(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 512
+        && !matches!(bytes, [drive, b':', ..] if drive.is_ascii_alphabetic())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b':' | b'.'))
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct Scope {
@@ -320,6 +341,17 @@ impl Input {
 
     fn is_reference(&self) -> bool {
         valid_reference(self.reference.as_deref().unwrap_or_default())
+            && self.relative_path.is_none()
+            && self.gateway_url.is_none()
+            && self.mime_type.is_none()
+            && self.agent_id.is_none()
+            && self.paths.is_none()
+            && self.base64.is_none()
+            && self.file_name.is_none()
+    }
+
+    fn is_thumbnail_reference(&self) -> bool {
+        valid_thumbnail_reference(self.reference.as_deref().unwrap_or_default())
             && self.relative_path.is_none()
             && self.gateway_url.is_none()
             && self.mime_type.is_none()

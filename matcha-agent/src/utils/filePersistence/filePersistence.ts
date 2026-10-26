@@ -10,6 +10,11 @@
 import { feature } from 'bun:bundle'
 import { join, relative } from 'path'
 import {
+  currentInvestigationScope,
+  requireInvestigationEffects,
+  rethrowInvestigationAdmission,
+} from '../../world/investigation.js'
+import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
 } from '../../services/analytics/index.js'
@@ -52,6 +57,8 @@ export async function runFilePersistence(
   turnStartTime: TurnStartTime,
   signal?: AbortSignal,
 ): Promise<FilesPersistedEventData | null> {
+  if (currentInvestigationScope()) signal?.throwIfAborted()
+  requireInvestigationEffects([])
   const environmentKind = getEnvironmentKind()
   if (environmentKind !== 'byoc') {
     return null
@@ -79,7 +86,6 @@ export async function runFilePersistence(
 
   const outputsDir = join(getCwd(), sessionId, OUTPUTS_SUBDIR)
 
-  // Check if aborted
   if (signal?.aborted) {
     logDebug('Persistence aborted before processing')
     return null
@@ -99,6 +105,8 @@ export async function runFilePersistence(
       signal,
     )
 
+    if (currentInvestigationScope()) signal?.throwIfAborted()
+    requireInvestigationEffects([])
     // Nothing to report
     if (result.files.length === 0 && result.failed.length === 0) {
       return null
@@ -114,6 +122,11 @@ export async function runFilePersistence(
 
     return result
   } catch (error) {
+    rethrowInvestigationAdmission(error)
+    if (currentInvestigationScope()) {
+      if (error instanceof Error && error.cause !== undefined) throw error
+      signal?.throwIfAborted()
+    }
     logError(error)
     logDebug(`File persistence failed: ${error}`)
 
@@ -151,7 +164,9 @@ async function executeBYOCPersistence(
 ): Promise<FilesPersistedEventData> {
   // Find modified files via local filesystem scan
   // Uses same directory structure as downloads: {cwd}/{sessionId}/outputs
-  const modifiedFiles = await findModifiedFiles(turnStartTime, outputsDir)
+  const modifiedFiles = await findModifiedFiles(turnStartTime, outputsDir, signal)
+  if (currentInvestigationScope()) signal?.throwIfAborted()
+  requireInvestigationEffects([])
 
   if (modifiedFiles.length === 0) {
     logDebug('No modified files to persist')
@@ -205,7 +220,10 @@ async function executeBYOCPersistence(
     filesToProcess,
     config,
     DEFAULT_UPLOAD_CONCURRENCY,
+    { signal },
   )
+  if (currentInvestigationScope()) signal?.throwIfAborted()
+  requireInvestigationEffects([])
 
   // Separate successful and failed uploads
   const persistedFiles: PersistedFile[] = []
@@ -238,7 +256,7 @@ async function executeBYOCPersistence(
 
 /**
  * Execute file persistence and emit result via callback.
- * Handles errors internally.
+ * Handles ordinary errors internally; scoped admission failures and cancellation propagate.
  */
 export async function executeFilePersistence(
   turnStartTime: TurnStartTime,
@@ -251,6 +269,11 @@ export async function executeFilePersistence(
       onResult(result)
     }
   } catch (error) {
+    rethrowInvestigationAdmission(error)
+    if (currentInvestigationScope()) {
+      if (error instanceof Error && error.cause !== undefined) throw error
+      signal?.throwIfAborted()
+    }
     logError(error)
   }
 }

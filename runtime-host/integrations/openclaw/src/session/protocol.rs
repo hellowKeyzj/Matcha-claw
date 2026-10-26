@@ -3258,7 +3258,7 @@ pub enum SessionApprovalLifecycle {
     Resolved,
 }
 
-fn openclaw_model_ref(provider: Option<&str>, model: &str) -> String {
+pub(super) fn openclaw_model_ref(provider: Option<&str>, model: &str) -> String {
     let Some(provider) = provider else {
         return model.to_owned();
     };

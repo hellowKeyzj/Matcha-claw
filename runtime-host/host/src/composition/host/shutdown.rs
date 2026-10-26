@@ -91,12 +91,15 @@ impl Host {
         }
         observe_shutdown_start(&observation, "ownerRuntimeTasks");
         let owner_shutdown = self.owner_runtime_tasks.drain_and_join().await;
+        self.shutdown_failures.world = self.owner_runtime_tasks.world_shutdown_failure();
         self.shutdown_failures.organization = match owner_shutdown {
             Err(super::owners::OwnerRuntimeShutdownError::Organization(error)) => Some(error),
             _ => None,
         };
         self.shutdown_failures.organization_terminal = match owner_shutdown {
-            Err(super::owners::OwnerRuntimeShutdownError::OrganizationTerminal(error)) => Some(error),
+            Err(super::owners::OwnerRuntimeShutdownError::OrganizationTerminal(error)) => {
+                Some(error)
+            }
             _ => None,
         };
         self.shutdown_failures.sessions_terminal = match owner_shutdown {
@@ -118,8 +121,7 @@ impl Host {
             });
         }
         shutdown_open_claw_session(self, &observation).await;
-        if self.shutdown_failures.open_claw_session.failure()
-            == Some(SessionShutdownFailure::Join)
+        if self.shutdown_failures.open_claw_session.failure() == Some(SessionShutdownFailure::Join)
         {
             observe_shutdown_start(&observation, "shutdownReport");
             observe_shutdown_settle(&observation, "shutdownReport", ShutdownReason::JoinFailed);
@@ -171,6 +173,17 @@ impl Host {
             );
             return Err(HostShutdownError::Resources { failures, report });
         }
+        observe_shutdown_start(&observation, "worldNativeProjection");
+        self.shutdown_failures.world_native = self.runtime_processes.revoke_world_projections();
+        observe_shutdown_settle(
+            &observation,
+            "worldNativeProjection",
+            if self.shutdown_failures.world_native.is_empty() {
+                ShutdownReason::Completed
+            } else {
+                ShutdownReason::Unresolved
+            },
+        );
         observe_shutdown_start(&observation, "callLog");
         self.call_scope.dispose_all_lifo().await;
         observe_shutdown_settle(
@@ -227,6 +240,8 @@ pub(super) struct RuntimeProcessScopes {
     matcha: ModuleScope,
     matcha_runtime_driver: Arc<MatchaRuntimeDriver>,
     matcha_instance: Arc<tokio::sync::Mutex<MatchaAgentInstance>>,
+    open_claw_world_projection: Option<openclaw::world::WorldRuntimeHost>,
+    matcha_world_projection: Option<matcha_agent::world::WorldRuntimeHost>,
 }
 
 impl RuntimeProcessScopes {
@@ -234,6 +249,8 @@ impl RuntimeProcessScopes {
         open_claw: Arc<OpenClawDriver>,
         matcha: MatchaAgentInstance,
         matcha_runtime_driver: Arc<MatchaRuntimeDriver>,
+        open_claw_world_projection: Option<openclaw::world::WorldRuntimeHost>,
+        matcha_world_projection: Option<matcha_agent::world::WorldRuntimeHost>,
         observation: ObservationSink,
         shutdown: &ShutdownState,
     ) -> Self {
@@ -251,6 +268,8 @@ impl RuntimeProcessScopes {
             ),
             matcha_runtime_driver,
             matcha_instance: matcha,
+            open_claw_world_projection,
+            matcha_world_projection,
         }
     }
 
@@ -276,7 +295,12 @@ impl RuntimeProcessScopes {
         if slot_is_pending(state) {
             self.open_claw.dispose_all_lifo().await;
         } else {
-            shutdown_open_claw(Arc::clone(open_claw), observation.clone(), Arc::clone(state)).await;
+            shutdown_open_claw(
+                Arc::clone(open_claw),
+                observation.clone(),
+                Arc::clone(state),
+            )
+            .await;
         }
     }
 
@@ -298,6 +322,35 @@ impl RuntimeProcessScopes {
             )
             .await;
         }
+    }
+
+    fn revoke_world_projections(&mut self) -> Vec<(&'static str, world::NativeVerificationError)> {
+        let mut failures = Vec::new();
+        if let Some(projection) = &self.open_claw_world_projection {
+            match projection.revoke_projection() {
+                Ok(()) => self.open_claw_world_projection = None,
+                Err(cause) => failures.push((
+                    "openclaw",
+                    world::NativeVerificationError::new(
+                        world_protocol::authorization::AuthorizationFailure::InternalFault,
+                        cause,
+                    ),
+                )),
+            }
+        }
+        if let Some(projection) = &self.matcha_world_projection {
+            match projection.revoke_projection() {
+                Ok(()) => self.matcha_world_projection = None,
+                Err(cause) => failures.push((
+                    "matcha-agent",
+                    world::NativeVerificationError::new(
+                        world_protocol::authorization::AuthorizationFailure::InternalFault,
+                        cause,
+                    ),
+                )),
+            }
+        }
+        failures
     }
 }
 
@@ -688,7 +741,8 @@ impl HostShutdownError {
             Self::Resources { failures, .. } => {
                 failures.owner_joins().is_empty()
                     && failures.call_log().is_none()
-                    && failures.organization() != Some(organization::OrganizationShutdownError::Join)
+                    && failures.organization()
+                        != Some(organization::OrganizationShutdownError::Join)
                     && failures.organization_terminal()
                         != Some(organization::OrganizationTerminalCloseError::Join)
                     && failures.sessions_terminal()
@@ -707,6 +761,25 @@ impl fmt::Display for HostShutdownError {
             Self::Transition(error) => error.fmt(formatter),
             Self::Resources { failures, .. } => {
                 formatter.write_str("one or more runtime resources did not shut down cleanly")?;
+                if let Some(world) = failures.world() {
+                    write!(
+                        formatter,
+                        "; world shutdown incomplete: owner={}, store={}, resources={}, operations={}, commits={}, diagnostics={}",
+                        world.owner_remaining,
+                        world.store_remaining,
+                        world.retained_resources,
+                        world.durable_unsettled,
+                        world.indeterminate_commits,
+                        world.diagnostic_codes.len(),
+                    )?;
+                }
+                if !failures.world_native().is_empty() {
+                    write!(
+                        formatter,
+                        "; world native private projection cleanup failed: {}",
+                        failures.world_native().join(", ")
+                    )?;
+                }
                 if !failures.owner_joins().is_empty() {
                     write!(
                         formatter,
@@ -758,7 +831,38 @@ impl std::error::Error for HostShutdownError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorldShutdownFailure {
+    pub owner_remaining: bool,
+    pub store_remaining: bool,
+    pub retained_resources: usize,
+    pub durable_unsettled: usize,
+    pub indeterminate_commits: usize,
+    pub diagnostic_codes: Vec<String>,
+}
+
+impl WorldShutdownFailure {
+    pub(in crate::composition::host) fn from_outcome(
+        outcome: &world::QuiesceOutcome,
+    ) -> Option<Self> {
+        (!outcome.closed()).then(|| Self {
+            owner_remaining: outcome.owner_remaining,
+            store_remaining: outcome.store_remaining,
+            retained_resources: outcome.retained_resources.len(),
+            durable_unsettled: outcome.durable_unsettled.len(),
+            indeterminate_commits: outcome.indeterminate_commits.len(),
+            diagnostic_codes: outcome
+                .diagnostics
+                .iter()
+                .map(|error| error.safe_failure().code.clone())
+                .collect(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Failures {
+    world: Option<WorldShutdownFailure>,
+    world_native: Vec<&'static str>,
     owner_joins: Vec<&'static str>,
     call_log: Option<CallLogError>,
     organization: Option<organization::OrganizationShutdownError>,
@@ -770,6 +874,14 @@ pub struct Failures {
 }
 
 impl Failures {
+    pub fn world(&self) -> Option<&WorldShutdownFailure> {
+        self.world.as_ref()
+    }
+
+    pub fn world_native(&self) -> &[&'static str] {
+        &self.world_native
+    }
+
     pub fn owner_joins(&self) -> &[&'static str] {
         &self.owner_joins
     }
@@ -782,7 +894,9 @@ impl Failures {
         self.organization
     }
 
-    pub const fn organization_terminal(&self) -> Option<organization::OrganizationTerminalCloseError> {
+    pub const fn organization_terminal(
+        &self,
+    ) -> Option<organization::OrganizationTerminalCloseError> {
         self.organization_terminal
     }
 
@@ -803,7 +917,9 @@ impl Failures {
     }
 
     fn any(&self) -> bool {
-        !self.owner_joins.is_empty()
+        self.world.is_some()
+            || !self.world_native.is_empty()
+            || !self.owner_joins.is_empty()
             || self.call_log.is_some()
             || self.organization.is_some()
             || self.organization_terminal.is_some()
@@ -822,6 +938,8 @@ pub enum OwnerShutdownFailure {
 
 pub(super) struct ShutdownState {
     cron_closed: bool,
+    world: Option<WorldShutdownFailure>,
+    world_native: Vec<(&'static str, world::NativeVerificationError)>,
     owner_joins: Arc<Mutex<Vec<&'static str>>>,
     call_log: Arc<Mutex<Option<Result<(), CallLogError>>>>,
     organization: Option<organization::OrganizationShutdownError>,
@@ -836,6 +954,8 @@ impl ShutdownState {
     pub(super) fn new(owner_joins: Arc<Mutex<Vec<&'static str>>>) -> Self {
         Self {
             cron_closed: false,
+            world: None,
+            world_native: Vec::new(),
             owner_joins,
             call_log: Arc::new(Mutex::new(None)),
             organization: None,
@@ -872,6 +992,7 @@ impl ShutdownState {
 
     fn all_settled(&self) -> bool {
         self.call_log_outcome().is_some()
+            && self.world_native.is_empty()
             && self.organization.is_none()
             && self.organization_terminal.is_none()
             && self.sessions_terminal.is_none()
@@ -882,6 +1003,8 @@ impl ShutdownState {
 
     fn failures(&self) -> Failures {
         Failures {
+            world: self.world.clone(),
+            world_native: self.world_native.iter().map(|(peer, _)| *peer).collect(),
             owner_joins: self
                 .owner_joins
                 .lock()
@@ -969,7 +1092,11 @@ impl SlotState {
     const fn is_settled(&self) -> bool {
         matches!(
             self,
-            Self::NoProcess | Self::Settled { outcome: Some(_), .. }
+            Self::NoProcess
+                | Self::Settled {
+                    outcome: Some(_),
+                    ..
+                }
         )
     }
 
@@ -989,7 +1116,11 @@ impl SlotState {
 
     const fn failure(&self) -> Option<OwnerShutdownFailure> {
         match self {
-            Self::Pending | Self::NoProcess | Self::Settled { outcome: Some(_), .. } => None,
+            Self::Pending
+            | Self::NoProcess
+            | Self::Settled {
+                outcome: Some(_), ..
+            } => None,
             Self::Shutdown | Self::Unresolved { .. } | Self::Settled { outcome: None, .. } => {
                 Some(OwnerShutdownFailure::Shutdown)
             }
@@ -999,7 +1130,10 @@ impl SlotState {
 
     const fn settle_reason(&self) -> Option<ShutdownReason> {
         match self {
-            Self::NoProcess | Self::Settled { outcome: Some(_), .. } => Some(ShutdownReason::Completed),
+            Self::NoProcess
+            | Self::Settled {
+                outcome: Some(_), ..
+            } => Some(ShutdownReason::Completed),
             Self::JoinFailed { .. } => Some(ShutdownReason::JoinFailed),
             Self::Unresolved { .. } => Some(ShutdownReason::Unresolved),
             Self::Shutdown | Self::Settled { outcome: None, .. } => {
@@ -1029,8 +1163,9 @@ impl SlotState {
     fn snapshot(&self) -> Option<SupervisorSnapshot> {
         match self {
             Self::Joining { snapshot, .. } => Some(snapshot.borrow().clone()),
-            Self::JoinFailed { snapshot, .. }
-            | Self::Settled { snapshot, .. } => Some(snapshot.clone()),
+            Self::JoinFailed { snapshot, .. } | Self::Settled { snapshot, .. } => {
+                Some(snapshot.clone())
+            }
             Self::Pending | Self::NoProcess | Self::Shutdown | Self::Unresolved { .. } => None,
         }
     }
@@ -1052,8 +1187,9 @@ async fn finish_slot_join(
         let Poll::Ready(result) = result else {
             return Poll::Pending;
         };
-        let SlotState::Joining { snapshot, outcome, .. } =
-            std::mem::replace(&mut *state, SlotState::Shutdown)
+        let SlotState::Joining {
+            snapshot, outcome, ..
+        } = std::mem::replace(&mut *state, SlotState::Shutdown)
         else {
             unreachable!("joining slot was polled");
         };

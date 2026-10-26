@@ -29,8 +29,11 @@ pub(crate) struct RuntimeService {
     gateway_auto_start: bool,
 }
 
-pub(crate) async fn start(input: HostInput) -> Result<RuntimeService, ControlError> {
-    let (mut host, events, handles) = Host::new(input).map_err(ControlError::Construction)?;
+pub(crate) async fn start(
+    input: HostInput,
+    verifier: crate::module_registry::CapabilityVerifier,
+) -> Result<RuntimeService, ControlError> {
+    let (mut host, events, handles) = Host::new(input, verifier).map_err(ControlError::Construction)?;
     let gateway_auto_start = handles.settings.gateway_auto_start().await;
     host.start_admission_only()
         .await
@@ -106,9 +109,11 @@ where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin,
 {
-    let mut runtime = start(input).await?;
     let verifier = platform::capability::CapabilityDecisionVerifier::try_new(TEST_VERIFICATION_KEY)
         .expect("test verifier key");
+    let mcp_verifier = verifier.clone();
+    let verifier = Arc::new(tokio::sync::Mutex::new(verifier));
+    let mut runtime = start(input, Arc::clone(&verifier)).await?;
     let webhook_token =
         organization::WebhookToken::try_new(TEST_WEBHOOK_TOKEN)
             .expect("test webhook token");
@@ -116,11 +121,11 @@ where
         handles: &runtime.handles,
         mcp: crate::mcp::route::descriptor(
             runtime.handles.organization.clone(),
-            verifier.clone(),
+            mcp_verifier,
             runtime.handles.runtime_directory.clone(),
             runtime.handles.wiki.handle().clone(),
         ),
-        verifier: Arc::new(tokio::sync::Mutex::new(verifier)),
+        verifier,
         webhook_token,
     });
     let route_snapshot = install_plan.route_snapshot();
@@ -146,7 +151,12 @@ where
                 return Err(ControlError::ModuleInstall(error));
             }
         };
-    let private_control = PrivateControlRegistry::from_snapshot(private_control_catalog);
+    let private_control = PrivateControlRegistry::from_snapshot(
+        private_control_catalog,
+        runtime.handles.world.clone(),
+        runtime.handles.world_authority.clone(),
+        runtime.handles.world_storage.clone(),
+    );
     runtime.spawn_owner();
     let result =
         run_private_control(&mut runtime, private_control, control_input, control_output).await;

@@ -51,6 +51,16 @@ export const DIAGNOSTICS_INVOKE_CHANNELS = [
 
 export const RUNTIME_OWNED_INVOKE_CHANNELS = [
   'fleet:writeCredential',
+  'world:configureConnection',
+  'world:configureStorage',
+  'world:prepareAccess',
+  'world:commitAccess',
+  'world:openStorage',
+  'world:prepareEvaluation',
+  'world:commitEvaluation',
+  'world:evaluationStatus',
+  'world:storageStatus',
+  'world:transferStorage',
   'settings:splitProxyIntent',
   'providers:storeAccount',
   'providers:deleteAccount',

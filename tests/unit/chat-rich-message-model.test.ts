@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { richTimelineItems } from '@/stores/chat/history-fetch-helpers';
-import { patchSessionSnapshot } from '@/stores/chat/store-state-helpers';
+import { richTimelineItems } from '@/plugins/chat/store/history-fetch-helpers';
+import { patchSessionSnapshot } from '@/plugins/chat/store/store-state-helpers';
 import type { SessionRenderItem } from '@/types/session/render-item';
 import type { SessionStateSnapshot } from '@/types/session/snapshot';
-import type { RichTimelineMessage } from '@/stores/chat/history-fetch-helpers';
+import type { RichTimelineMessage } from '@/plugins/chat/store/history-fetch-helpers';
 
 const sessionKey = 'agent:main:rich-model';
 

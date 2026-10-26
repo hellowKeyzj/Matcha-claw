@@ -1,0 +1,44 @@
+[package]
+name = "world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+deadpool-postgres.workspace = true
+document-parser = { version = "0.1.0", path = "../../external/document-parser" }
+ed25519-dalek.workspace = true
+futures-util.workspace = true
+jsonschema.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+platform = { version = "0.1.0", path = "../../platform" }
+reqwest.workspace = true
+schemars.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+sha2.workspace = true
+foundation = { version = "0.1.0", path = "../../foundation" }
+world-protocol = { version = "0.1.0", path = "protocol" }
+wasm-host = { version = "0.1.0", path = "../../external/wasm-host" }
+tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+wit-parser.workspace = true
+zip.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

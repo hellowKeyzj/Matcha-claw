@@ -1,0 +1,10 @@
+use super::*;
+
+unit_enum!(world_protocol::lifecycle::LifecycleStage, LifecycleStage; Prepare, Acquire, CloseAcquisition, Revoke, Cancel, Join, Cleanup, StopEngine, StopProcess, Commit, Recover);
+unit_enum!(world_protocol::lifecycle::ResourceKind, ResourceKind; Invocation, Dependency, Registration, Stream, Body, HostIo, Callback, Timer, ChildCall, TaskJoin, Store, Process, PrivateMaterial);
+unit_enum!(world_protocol::lifecycle::ResourceFailureStage, ResourceFailureStage; Acquisition, Admission, Cancel, Stop, Shutdown, SupervisorJoin, TaskJoin, MaterialCleanup, Cleanup, Completion);
+record!(world_protocol::lifecycle::ResourcePartFailure, ResourcePartFailure; kind, name, stage, code, message);
+unit_enum!(world_protocol::lifecycle::ResourceStage, ResourceStage; Acquiring, Running, Joining, CleanupFailed);
+unit_enum!(world_protocol::lifecycle::ResourceFailureReason, ResourceFailureReason; AcquisitionClosed, DependencyMissing, AuthorizationRevoked, CleanupFailed, JoinFailed, EngineNotStopped, ProcessExitUnconfirmed, Timeout);
+record!(world_protocol::lifecycle::RetainedResource, RetainedResource; parts, token, generation_id, invocation_id, acquisition_id, kind, stage, reason);
+variant!(world_protocol::lifecycle::LifecycleFailure, LifecycleFailure; units [InvalidPersistedState, AlreadyPrepared, AcquisitionClosed, AuthorizationRevoked, InternalFault]; tuples []; records [MissingInstall { install_id } => LifecycleFailureMissingInstall, MissingConfiguration { install_id } => LifecycleFailureMissingConfiguration, MissingTrust { install_id } => LifecycleFailureMissingTrust, ConcurrentCallLimit { node_id } => LifecycleFailureConcurrentCallLimit, DependencyMissing { node_id } => LifecycleFailureDependencyMissing, PrepareFailed { node_id } => LifecycleFailurePrepareFailed, Retained { stage, remaining_resources } => LifecycleFailureRetained, StateMigrationRequired { migration_id } => LifecycleFailureStateMigrationRequired, RevisionConflict { expected, actual } => LifecycleFailureRevisionConflict, Commit { failure } => LifecycleFailureCommit]);

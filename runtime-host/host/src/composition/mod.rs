@@ -14,7 +14,7 @@ pub use host::SessionShutdownFailure;
 pub use host::{
     ConstructionError, Host, HostInput, HostShutdownError, OwnerShutdownFailure, RuntimeExit,
     RuntimeLifecycleFailure, RuntimeShutdownFailure, RuntimeShutdownOutcome, RuntimeStartFailure,
-    ShutdownFailures, ShutdownReport,
+    ShutdownFailures, ShutdownReport, WorldPostgresConfig, WorldShutdownFailure, WorldSourceAccessConfig,
 };
 pub use matcha_agent::{
     driver::MatchaAgentInput, peer::ConstructionError as MatchaConstructionError,

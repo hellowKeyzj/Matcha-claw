@@ -3,8 +3,8 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useLayoutStore } from '@/stores/layout';
-import { useSettingsStore } from '@/stores/settings';
-import { useRuntimeHostStore } from '@/stores/gateway';
+import { useSettingsStore } from '@/plugins/settings/store';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
 
 describe('Settings Store', () => {
   beforeEach(() => {

@@ -34,11 +34,11 @@ mod shutdown;
 
 pub use errors::{ConstructionError, RuntimeLifecycleFailure, RuntimeStartFailure};
 pub(crate) use handles::HostHandles;
-pub use input::HostInput;
+pub use input::{HostInput, WorldPostgresConfig, WorldSourceAccessConfig};
 pub use session_shutdown::SessionShutdownFailure;
 pub use shutdown::{
     Failures as ShutdownFailures, HostShutdownError, OwnerShutdownFailure, RuntimeExit,
-    RuntimeShutdownFailure, RuntimeShutdownOutcome, ShutdownReport,
+    RuntimeShutdownFailure, RuntimeShutdownOutcome, ShutdownReport, WorldShutdownFailure,
 };
 
 pub struct Host {
@@ -65,6 +65,8 @@ struct PeerRuntimeArtifacts {
     matcha: MatchaAgentInstance,
     open_claw: Arc<OpenClawDriver>,
     matcha_runtime_driver: Arc<MatchaRuntimeDriver>,
+    open_claw_world_projection: Option<openclaw::world::WorldRuntimeHost>,
+    matcha_world_projection: Option<matcha_agent::world::WorldRuntimeHost>,
     event_sinks: EventSinks,
     events: HostEvents,
     openclaw_session_events: Option<mpsc::Receiver<SessionIngressEvent>>,
@@ -91,6 +93,11 @@ fn prepare_host_stage(
         open_claw_secret,
         organization_store,
         runtime_state_dir,
+        world_postgres,
+        world_storage_targets,
+        world_source_access,
+        initial_world,
+        world_peer_endpoint,
         searxng_resources_dir,
         app_log_dir,
         parent_callback_base_url,
@@ -107,6 +114,11 @@ fn prepare_host_stage(
         open_claw_secret,
         organization_store,
         runtime_state_dir,
+        world_postgres,
+        world_storage_targets,
+        world_source_access,
+        initial_world,
+        world_peer_endpoint,
         searxng_resources_dir,
         app_log_dir,
         runtime_observation,
@@ -156,6 +168,10 @@ fn build_peer_runtime_stage(
             .join("cache/skill-downloads"),
         clawhub_containment,
     );
+    #[cfg(unix)]
+    let world_guardian = prepared.openclaw_input.guardian_executable.clone();
+    let open_claw_world_projection = prepared.openclaw_input.world_runtime_host.clone();
+    let matcha_world_projection = prepared.matcha_input.world_runtime_host.clone();
     let open_claw = OpenClawDriver::prepare(prepared.openclaw_input, prepared.openclaw_secret)
         .map_err(ConstructionError::OpenClaw)?;
     let sealed = resources::provision_sealed_resources(
@@ -184,8 +200,16 @@ fn build_peer_runtime_stage(
         prepared.diagnostics_state_root.as_path(),
     )?;
     let provisioned = provisioning::ProvisionedHost {
+        #[cfg(unix)]
+        world_guardian,
         organization,
         runtime_state_dir: prepared.runtime_state_dir,
+        world_postgres: prepared.world_postgres,
+        world_storage_targets: prepared.world_storage_targets,
+        world_source_access: prepared.world_source_access,
+        initial_world: prepared.initial_world,
+        world_authority: prepared.world_authority,
+        world_native: prepared.world_native,
         diagnostics_state_root: prepared.diagnostics_state_root,
         runtime_observation: prepared.runtime_observation,
         matcha_startup_diagnostics: prepared.matcha_startup_diagnostics,
@@ -224,6 +248,8 @@ fn build_peer_runtime_stage(
             matcha,
             open_claw,
             matcha_runtime_driver,
+            open_claw_world_projection,
+            matcha_world_projection,
             event_sinks,
             events,
             openclaw_session_events: Some(openclaw_session_events),
@@ -237,10 +263,19 @@ fn spawn_owner_runtime_stage(
     provisioned: provisioning::ProvisionedHost,
     runtime: &PeerRuntimeArtifacts,
     admission: &Arc<HostAdmission>,
+    verifier: crate::module_registry::CapabilityVerifier,
 ) -> Result<(owners::RuntimeOwners, HostAssemblyArtifacts), ConstructionError> {
     let provisioning::ProvisionedHost {
+        #[cfg(unix)]
+        world_guardian,
         organization,
         runtime_state_dir,
+        world_postgres,
+        world_storage_targets,
+        world_source_access,
+        initial_world,
+        world_authority,
+        world_native,
         diagnostics_state_root,
         runtime_observation,
         matcha_startup_diagnostics,
@@ -259,9 +294,24 @@ fn spawn_owner_runtime_stage(
         .map_err(ConstructionError::CallLog)?;
     let sealed_resource = sealed_resource.with_call_recorder(calls.recorder());
     let owners = owners::spawn_runtime_owners(owners::RuntimeOwnerInput {
+        #[cfg(unix)]
+        world_guardian,
         calls: calls.recorder(),
         organization,
         runtime_state_dir,
+        world_postgres,
+        world_storage_targets,
+        world_source_access,
+        initial_world,
+        world_authority,
+        world_native,
+        world_investigation: ports::world_investigation::HostWorldInvestigation {
+            open_claw: runtime.open_claw_world_projection.clone()
+                .map(|projection| runtime.open_claw.world_investigation(projection)),
+            matcha: runtime.matcha_world_projection.clone()
+                .map(|projection| runtime.matcha_runtime_driver.world_investigation(projection)),
+        },
+        verifier,
         diagnostics_state_root,
         runtime_host_mcp_executable,
         runtime_host_mcp_state_dir,
@@ -358,7 +408,8 @@ fn wire_session_catalog(owners: &mut owners::RuntimeOwners, runtime: &PeerRuntim
     let lifecycle = runtime.matcha_runtime_driver.lifecycle_handle();
     let failures = owners.tasks.join_failures();
     let (mut task, _) = foundation::execution::OwnedTask::spawn(|cancellation| async move {
-        if let Err(error) = session_catalog::observe(client, changed, cancellation, lifecycle).await {
+        if let Err(error) = session_catalog::observe(client, changed, cancellation, lifecycle).await
+        {
             eprintln!("[matcha-session-catalog] observation stopped: {error}");
         }
     });
@@ -428,6 +479,8 @@ fn assemble_host(
         matcha,
         open_claw,
         matcha_runtime_driver,
+        open_claw_world_projection,
+        matcha_world_projection,
         event_sinks,
         mut events,
         session_delta_source,
@@ -439,6 +492,7 @@ fn assemble_host(
             .subscribe_events()
             .expect("Board event subscription must be available during construction"),
     );
+    events.set_world_hints(owners.world.subscribe_hints());
     events.set_call_changes(calls.subscribe());
     events.set_organization_changes(owners.organization_handle.subscribe_schedule_changes());
     let handles = handle_wiring::build_handles(
@@ -461,6 +515,8 @@ fn assemble_host(
         Arc::clone(&open_claw),
         matcha,
         Arc::clone(&matcha_runtime_driver),
+        open_claw_world_projection,
+        matcha_world_projection,
         runtime_observation.sink(),
         &shutdown_failures,
     );
@@ -490,11 +546,13 @@ fn assemble_host(
 impl Host {
     pub(crate) fn new(
         input: HostInput,
+        verifier: crate::module_registry::CapabilityVerifier,
     ) -> Result<(Self, HostEvents, HostHandles), ConstructionError> {
         let (parent_callback, prepared) = prepare_host_stage(input)?;
         let (provisioned, mut runtime) = build_peer_runtime_stage(&parent_callback, prepared)?;
         let admission = Arc::new(HostAdmission::new());
-        let (mut owners, artifacts) = spawn_owner_runtime_stage(provisioned, &runtime, &admission)?;
+        let (mut owners, artifacts) =
+            spawn_owner_runtime_stage(provisioned, &runtime, &admission, verifier)?;
         wire_session_ingress(&mut owners, &mut runtime);
         wire_session_catalog(&mut owners, &runtime);
         wire_cron_receipts(&mut owners, &runtime);

@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod/v4'
+import { AcceptedCorrelationSchema, InvestigationUsageSchema } from '../../world/investigation.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { TodoListSchema } from '../../utils/todo/types.js'
 import {
@@ -149,6 +150,23 @@ export const SDKControlSetModelRequestSchema = lazySchema(() =>
       model: z.string().optional(),
     })
     .describe('Sets the model to use for subsequent conversation turns.'),
+)
+
+export const SDKControlSetEffortRequestSchema = lazySchema(() =>
+  z.strictObject({
+    subtype: z.literal('set_effort'),
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).nullable(),
+  }),
+)
+
+export const SDKControlSetEffortResponseSchema = lazySchema(() =>
+  z.strictObject({
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).nullable(),
+    appliedEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).nullable(),
+    model: z.string(),
+    supportsEffort: z.boolean(),
+    supportedEffortLevels: z.array(z.enum(['low', 'medium', 'high', 'xhigh', 'max'])),
+  }),
 )
 
 export const SDKControlSetMaxThinkingTokensRequestSchema = lazySchema(() =>
@@ -459,27 +477,52 @@ export const SDKControlMcpToggleRequestSchema = lazySchema(() =>
     .describe('Enables or disables an MCP server.'),
 )
 
-const NativeTaskCreateSchema = lazySchema(() => z.strictObject({
-  subject: z.string().min(1),
-  description: z.string().min(1),
-  activeForm: z.string().min(1).optional(),
-  owner: z.string().min(1).optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-}))
+const NativeTaskCreateSchema = lazySchema(() =>
+  z.strictObject({
+    subject: z.string().min(1),
+    description: z.string().min(1),
+    activeForm: z.string().min(1).optional(),
+    owner: z.string().min(1).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  }),
+)
 
-const NativeTaskUpdateSchema = lazySchema(() => NativeTaskCreateSchema().partial().extend({
-  taskId: z.string().regex(/^[a-zA-Z0-9_-]+$/),
-  status: z.enum(['pending', 'in_progress', 'completed', 'deleted']).optional(),
-  addBlocks: z.array(z.string().regex(/^[a-zA-Z0-9_-]+$/)).optional(),
-  addBlockedBy: z.array(z.string().regex(/^[a-zA-Z0-9_-]+$/)).optional(),
-}))
+const NativeTaskUpdateSchema = lazySchema(() =>
+  NativeTaskCreateSchema()
+    .partial()
+    .extend({
+      taskId: z.string().regex(/^[a-zA-Z0-9_-]+$/),
+      status: z
+        .enum(['pending', 'in_progress', 'completed', 'deleted'])
+        .optional(),
+      addBlocks: z.array(z.string().regex(/^[a-zA-Z0-9_-]+$/)).optional(),
+      addBlockedBy: z.array(z.string().regex(/^[a-zA-Z0-9_-]+$/)).optional(),
+    }),
+)
 
-export const SDKControlTaskRequestSchema = lazySchema(() => z.discriminatedUnion('subtype', [
-  z.strictObject({ subtype: z.literal('task_list'), list_id: z.string().min(1).optional() }),
-  z.strictObject({ subtype: z.literal('task_get'), list_id: z.string().min(1).optional(), task_id: z.string().regex(/^[a-zA-Z0-9_-]+$/) }),
-  z.strictObject({ subtype: z.literal('task_create'), list_id: z.string().min(1).optional(), input: NativeTaskCreateSchema() }),
-  z.strictObject({ subtype: z.literal('task_update'), list_id: z.string().min(1).optional(), input: NativeTaskUpdateSchema() }),
-]))
+export const SDKControlTaskRequestSchema = lazySchema(() =>
+  z.discriminatedUnion('subtype', [
+    z.strictObject({
+      subtype: z.literal('task_list'),
+      list_id: z.string().min(1).optional(),
+    }),
+    z.strictObject({
+      subtype: z.literal('task_get'),
+      list_id: z.string().min(1).optional(),
+      task_id: z.string().regex(/^[a-zA-Z0-9_-]+$/),
+    }),
+    z.strictObject({
+      subtype: z.literal('task_create'),
+      list_id: z.string().min(1).optional(),
+      input: NativeTaskCreateSchema(),
+    }),
+    z.strictObject({
+      subtype: z.literal('task_update'),
+      list_id: z.string().min(1).optional(),
+      input: NativeTaskUpdateSchema(),
+    }),
+  ]),
+)
 
 export const SDKControlGetTodosRequestSchema = lazySchema(() =>
   z.strictObject({ subtype: z.literal('get_todos') }),
@@ -549,6 +592,8 @@ export const SDKControlGetSettingsResponseSchema = lazySchema(() =>
           // String levels only — numeric effort is ant-only and the
           // Zod→proto generator can't emit enum∪number unions.
           effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).nullable(),
+          supportsEffort: z.boolean(),
+          supportedEffortLevels: z.array(z.enum(['low', 'medium', 'high', 'xhigh', 'max'])),
           webSearchAdapter: z
             .enum(['api', 'bing', 'brave', 'exa', 'tavily', 'searxng'])
             .optional(),
@@ -594,12 +639,26 @@ export const SDKControlElicitationResponseSchema = lazySchema(() =>
 
 export const SDKControlRequestInnerSchema = lazySchema(() =>
   z.union([
+    z.strictObject({
+      subtype: z.literal('native_io_admit'), correlation: AcceptedCorrelationSchema,
+      ioId: z.uuid(), kind: z.enum(['model', 'loop', 'tool', 'source']),
+      preparedRequestDigest: z.string(), reservation: InvestigationUsageSchema,
+      proof: z.record(z.string(), z.unknown()),
+    }),
+    z.strictObject({
+      subtype: z.literal('native_io_observe'), correlation: AcceptedCorrelationSchema,
+      ioId: z.uuid(), observation: z.strictObject({
+        status: z.enum(['complete', 'unknown', 'not_sent']), usage: InvestigationUsageSchema.optional(),
+        rawUsage: z.record(z.string(), z.unknown()).optional(), reason: z.string().optional(),
+      }),
+    }),
     SDKControlPrepareToSleepRequestSchema(),
     SDKControlInterruptRequestSchema(),
     SDKControlPermissionRequestSchema(),
     SDKControlInitializeRequestSchema(),
     SDKControlSetPermissionModeRequestSchema(),
     SDKControlSetModelRequestSchema(),
+    SDKControlSetEffortRequestSchema(),
     SDKControlSetMaxThinkingTokensRequestSchema(),
     SDKControlMcpStatusRequestSchema(),
     SDKControlGetContextUsageRequestSchema(),

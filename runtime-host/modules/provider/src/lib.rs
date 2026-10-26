@@ -4,6 +4,7 @@ mod application;
 mod call;
 pub mod capability;
 pub mod domain;
+pub mod generation;
 pub mod llm_client;
 mod owner;
 mod persistence;
@@ -38,13 +39,14 @@ pub use adapters::model_store::{ProviderModelStore, ProviderModelStoreFault};
 pub use adapters::routing_store::{ProviderRoutingStore, ProviderRoutingStoreFault};
 pub use api::ProviderHandle;
 pub use application::receipts::{
-    ProviderAccountMutationKind, ProviderAccountView, ProviderAccountsDelivery,
-    ProviderCommitOutcome, ProviderModelDiscoverOutcome, ProviderModelDiscoveryView,
+    ProviderAccountExecution, ProviderAccountExecutionStatus, ProviderAccountMutationKind,
+    ProviderAccountView, ProviderAccountsDelivery, ProviderCommitOutcome,
+    ProviderModelDiscoverOutcome, ProviderModelDiscoveryView,
     ProviderModelDraft, ProviderModelListOutcome, ProviderModelReferenceView,
     ProviderModelReplaceOutcome, ProviderModelSelectableOutcome, ProviderModelView,
     ProviderNativeConfigurationDiagnosticView, ProviderNativeConfigurationView,
     ProviderPersistedOutcome, ProviderRouteView, ProviderRoutingListOutcome,
-    ProviderRoutingReplaceOutcome, ProviderRoutingView, ProviderSessionEndpoint,
+    ProviderRoutingReplaceOutcome, ProviderRoutingView, ProviderRuntimeReport, ProviderSessionEndpoint,
     ProviderSessionModelSelection, ProviderSessionModelSelectionOutcome,
     SelectableProviderModelView,
 };
@@ -53,6 +55,9 @@ pub use application::{
     ProviderTextGenerationModelLimitsOutcome, ProviderTextGenerationModelLimitsRequest,
     ProviderTextGenerationOutcome, ProviderTextGenerationRequest,
     ProviderTextGenerationUnavailableReason,
+};
+pub use call::{
+    ProviderCallDiagnostic, ProviderCallDiagnosticReason, ProviderCallPrivateResolverCode,
 };
 pub use owner::actor::ProviderOwnerInput;
 pub use owner::models::{provider_execution_endpoint, provider_execution_protocol};

@@ -1,20 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { AgentSessionsPane } from '@/components/layout/AgentSessionsPane';
-import { useChatStore } from '@/stores/chat';
-import { useRuntimeHostStore } from '@/stores/gateway';
-import { useSubagentsStore } from '@/stores/subagents';
-import { useTeamsStore } from '@/stores/teams';
+import { AgentSessionsPane } from '@/plugins/chat/AgentSessionsPane';
+import { useChatStore } from '@/plugins/chat/store';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
+import { useTeamsStore } from '@/plugins/teams/store';
 import i18n from '@/i18n';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import type { RawMessage } from './helpers/timeline-fixtures';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
 import {
   buildCurrentConversationFromSessionRecord,
   buildSessionRuntimeGraph,
-} from '@/stores/chat/session-runtime-graph';
+} from '@/plugins/chat/store/session-runtime-graph';
 import {
   buildRuntimeEndpointKey,
   buildSessionIdentityKey,

@@ -5,6 +5,11 @@ import {
   withMemoryCorrectionHint,
 } from 'src/utils/messages.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
+import {
+  assertInvestigationToolEffects,
+  InvestigationAdmissionError,
+  trackInvestigationOperation,
+} from '../../world/investigation.js'
 import { findToolByName, type Tools, type ToolUseContext } from '../../Tool.js'
 import { BASH_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/BashTool/toolName.js'
 import type { AssistantMessage, Message } from '../../types/message.js'
@@ -128,12 +133,14 @@ export class StreamingToolExecutor {
       return
     }
 
+    assertInvestigationToolEffects(toolDefinition)
     const parsedInput = toolDefinition.inputSchema.safeParse(block.input)
     const isConcurrencySafe = parsedInput?.success
       ? (() => {
           try {
             return Boolean(toolDefinition.isConcurrencySafe(parsedInput.data))
-          } catch {
+          } catch (error) {
+            if (error instanceof InvestigationAdmissionError) throw error
             return false
           }
         })()
@@ -147,7 +154,7 @@ export class StreamingToolExecutor {
       pendingProgress: [],
     })
 
-    void this.processQueue()
+    void trackInvestigationOperation(this.processQueue())
   }
 
   /**
@@ -422,13 +429,13 @@ export class StreamingToolExecutor {
       }
     }
 
-    const promise = collectResults()
+    const promise = trackInvestigationOperation(collectResults())
     tool.promise = promise
 
     // Process more queue when done
-    void promise.finally(() => {
-      void this.processQueue()
-    })
+    void trackInvestigationOperation(promise.finally(() => {
+      void trackInvestigationOperation(this.processQueue())
+    }))
   }
 
   /**

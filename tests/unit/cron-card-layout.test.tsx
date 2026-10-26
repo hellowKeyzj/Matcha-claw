@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { Cron } from '@/pages/Cron';
-import { useChatStore } from '@/stores/chat';
-import { useCronStore } from '@/stores/cron';
-import { useGatewayStore } from '@/stores/gateway';
-import { useSkillsStore } from '@/stores/skills';
-import { useSubagentsStore } from '@/stores/subagents';
+import { Cron } from '@/plugins/tasks/pages/Cron';
+import { useChatStore } from '@/plugins/chat/store';
+import { useCronStore } from '@/plugins/tasks/stores/cron';
+import { useGatewayStore } from '@/plugins/runtime/store';
+import { useSkillsStore } from '@/plugins/skills/stores/skills';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import type { CronJob } from '@/types/cron';
 
 vi.mock('sonner', () => ({

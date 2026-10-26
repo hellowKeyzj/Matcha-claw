@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { ChatInput } from '@/pages/Chat/ChatInput';
+import { ChatInput } from '@/plugins/chat/ChatInput';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({

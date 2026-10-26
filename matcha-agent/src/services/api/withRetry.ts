@@ -46,6 +46,8 @@ import {
 } from '../rateLimitMocking.js'
 import { REPEATED_529_ERROR_MESSAGE } from './errors.js'
 import { extractConnectionErrorDetails } from './errorUtils.js'
+import { rethrowInvestigationAdmission } from './investigation.js'
+import { investigationSignal } from '../../world/investigation.js'
 
 const abortError = () => new APIUserAbortError()
 
@@ -176,6 +178,8 @@ export async function* withRetry<T>(
   ) => Promise<T>,
   options: RetryOptions,
 ): AsyncGenerator<SystemAPIErrorMessage, T> {
+  const scopedSignal = investigationSignal()
+  if (scopedSignal) options = { ...options, signal: options.signal ? AbortSignal.any([options.signal, scopedSignal]) : scopedSignal }
   const maxRetries = getMaxRetries(options)
   const retryContext: RetryContext = {
     model: options.model,
@@ -252,6 +256,7 @@ export async function* withRetry<T>(
 
       return await operation(client, attempt, retryContext)
     } catch (error) {
+      rethrowInvestigationAdmission(error)
       lastError = error
       logForDebugging(
         `API error (attempt ${attempt}/${maxRetries + 1}): ${error instanceof APIError ? `${error.status} ${error.message}` : errorMessage(error)}`,

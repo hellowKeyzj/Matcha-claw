@@ -48,7 +48,24 @@ pub(super) async fn get(params: Value, config: &ConfigStore) -> rpc::Result {
     }))
 }
 
-pub(super) async fn replace(params: Value, config: &ConfigStore) -> rpc::Result {
+pub(super) struct Prepared {
+    servers: BTreeMap<String, Value>,
+    private: PrivateProjection,
+    expected: BTreeSet<String>,
+}
+
+impl Prepared {
+    pub(super) fn unchanged(&self, config: &Config, name: &str) -> bool {
+        if self.servers.get(name) != config.mcp_servers.get(name) { return false; }
+        let Some(value) = self.servers.get(name) else { return false; };
+        let Ok(entry) = serde_json::from_value::<ManagedServer>(value.clone()) else { return false; };
+        sources(&entry.server).iter().all(|source| {
+            self.private.source(source) == config.private_mcp_env.source(source)
+        })
+    }
+}
+
+pub(super) fn prepare(params: Value) -> rpc::Result<Prepared> {
     let input: Replace = rpc::params(params)?;
     let mut expected = BTreeSet::new();
     let mut servers = BTreeMap::new();
@@ -74,6 +91,11 @@ pub(super) async fn replace(params: Value, config: &ConfigStore) -> rpc::Result 
             "Managed MCP projection must supply exactly the enabled source references",
         ));
     }
+    Ok(Prepared { servers, private, expected })
+}
+
+pub(super) async fn replace(input: Prepared, config: &ConfigStore) -> rpc::Result {
+    let Prepared { servers, private, expected } = input;
     let changed = config
         .update(move |config| {
             reject_source_collisions(config, &expected)?;
@@ -94,6 +116,28 @@ pub(super) async fn replace(params: Value, config: &ConfigStore) -> rpc::Result 
     Ok(
         json!({"persisted": true, "changed": changed, "projection": "nextLaunch", "live": "notApplied"}),
     )
+}
+
+pub(super) fn oauth_server(
+    config: &Config,
+    name: &str,
+    env: &mut BTreeMap<String, String>,
+) -> rpc::Result<Value> {
+    let mut servers = parse(config)?;
+    let entry = servers.remove(name).ok_or_else(|| Error::not_found("managed MCP server"))?;
+    if !entry.enabled || !matches!(&entry.server,
+        ServerInput::Http(remote) | ServerInput::Sse(remote) if remote.oauth.is_some() && remote.oauth.as_ref().is_none_or(|oauth| oauth.xaa != Some(true))) {
+        return Err(Error::invalid("MCP OAuth requires an enabled managed remote OAuth server"));
+    }
+    let referenced = sources(&entry.server);
+    reject_source_collisions(config, &referenced)?;
+    for source in referenced {
+        let value = config.private_mcp_env.source(&source).ok_or_else(|| {
+            Error::unavailable("mcp_private_source_unavailable", "Managed MCP credentials require private Host reprojection before launch")
+        })?;
+        env.insert(source, value.to_owned());
+    }
+    rpc::value(entry.server)
 }
 
 pub fn validate_config(config: &Config) -> rpc::Result<()> {

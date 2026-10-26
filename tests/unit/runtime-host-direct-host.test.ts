@@ -8,6 +8,10 @@ import {
   type DirectRuntimeHostSpawner,
 } from '../../electron/main/runtime-host-delivery/direct-host';
 
+vi.mock('../../electron/utils/logger', () => ({
+  logger: { debug: vi.fn(), error: vi.fn() },
+}));
+
 class FakeControlOutput {
   private readonly emitter = new EventEmitter();
 
@@ -56,6 +60,7 @@ function createChild(pid = 42_424): DirectRuntimeHostChild & {
   readonly emitError: (error?: Error) => void;
 } {
   const events = new EventEmitter();
+  const inputEvents = new EventEmitter();
   const stdout = new FakeControlOutput();
   const stderr = new FakeControlOutput();
   const write = vi.fn<DirectRuntimeHostChild['stdin']['write']>((_chunk, callback) => {
@@ -65,6 +70,12 @@ function createChild(pid = 42_424): DirectRuntimeHostChild & {
   const end = vi.fn<() => void>();
   const emitExit = (code: number | null = 0, signal: NodeJS.Signals | null = null): void => {
     events.emit('exit', code, signal);
+    stdout.emitEnd();
+    stderr.emitEnd();
+    stdout.emitClose();
+    stderr.emitClose();
+    inputEvents.emit('close');
+    events.emit('close', code, signal);
   };
   const emitError = (error = new Error('child failed')): void => {
     events.emit('error', error);
@@ -75,10 +86,16 @@ function createChild(pid = 42_424): DirectRuntimeHostChild & {
   });
   return {
     pid,
-    stdin: { write, end },
+    stdin: {
+      write,
+      end,
+      on: inputEvents.on.bind(inputEvents),
+      removeListener: inputEvents.removeListener.bind(inputEvents),
+    },
     stdout,
     stderr,
     kill,
+    on: events.on.bind(events) as DirectRuntimeHostChild['on'],
     once: events.once.bind(events) as DirectRuntimeHostChild['once'],
     write,
     end,

@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use ::task_manager::{TaskDelivery, TaskFailure, TaskFailureCode, TaskFailureStage};
 use serde::{Deserialize, Serialize};
 
 use crate::gateway::{
@@ -41,8 +42,14 @@ impl TaskManagerOperation {
     }
 
     pub async fn get(&self, task_id: String) -> Result<Task, TaskReadFailure> {
-        let request =
-            TaskGetRequest::new(&self.scope, task_id).map_err(|_| TaskReadFailure::Rejected)?;
+        let request = TaskGetRequest::new(&self.scope, task_id).map_err(|_| {
+            TaskReadFailure::new(
+                ::task_manager::TaskReadFailure::Rejected,
+                TaskFailureStage::TaskRequest,
+                TaskFailureCode::InvalidParams,
+                TaskDelivery::NotSent,
+            )
+        })?;
         self.read(TASK_GET_METHOD, request, |response| {
             decode_task_get(&self.scope, response)
         })
@@ -156,12 +163,23 @@ impl TaskManagerOperation {
         params: P,
         decode: impl FnOnce(GatewayResponse) -> Result<T, ProtocolError>,
     ) -> Result<T, TaskReadFailure> {
-        let request = plugin_request(method, params).map_err(|_| TaskReadFailure::Protocol)?;
-        self.gateway
+        let request = plugin_request(method, params).map_err(|_| {
+            TaskReadFailure::new(
+                ::task_manager::TaskReadFailure::Protocol,
+                TaskFailureStage::TaskRequest,
+                TaskFailureCode::Protocol,
+                TaskDelivery::NotSent,
+            )
+        })?;
+        let response = self
+            .gateway
             .rpc_query(request)
             .await
-            .map_err(TaskReadFailure::from_gateway)
-            .and_then(|response| decode(response).map_err(Into::into))
+            .map_err(TaskReadFailure::from_gateway)?;
+        if let GatewayResponse::Failure { error, .. } = &response {
+            return Err(TaskReadFailure::from_native(method, error));
+        }
+        decode(response).map_err(Into::into)
     }
 
     async fn mutate<P: Serialize>(&self, method: &'static str, params: P) -> MutationDelivery {
@@ -547,29 +565,100 @@ impl TodoSnapshot {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TaskReadFailure {
-    NotFound,
-    Unavailable,
-    Rejected,
-    Protocol,
+#[derive(Clone, Copy, Debug)]
+pub struct TaskReadFailure {
+    pub(super) outcome: ::task_manager::TaskReadFailure,
+    pub(super) diagnostic: TaskFailure,
 }
 
 impl TaskReadFailure {
-    fn from_gateway(error: GatewayClientError) -> Self {
-        match error {
-            GatewayClientError::Protocol | GatewayClientError::RpcFailed => Self::Protocol,
-            _ => Self::Unavailable,
+    pub(super) fn new(
+        outcome: ::task_manager::TaskReadFailure,
+        stage: TaskFailureStage,
+        code: TaskFailureCode,
+        delivery: TaskDelivery,
+    ) -> Self {
+        Self {
+            outcome,
+            diagnostic: TaskFailure {
+                delivery: Some(delivery),
+                ..TaskFailure::new(stage, code)
+            },
         }
+    }
+
+    fn from_gateway(error: GatewayClientError) -> Self {
+        let outcome = match error {
+            GatewayClientError::Protocol | GatewayClientError::RpcFailed => {
+                ::task_manager::TaskReadFailure::Protocol
+            }
+            _ => ::task_manager::TaskReadFailure::Unavailable,
+        };
+        let code = match error {
+            GatewayClientError::Authentication => TaskFailureCode::AuthenticationFailed,
+            GatewayClientError::UpgradeDeadline
+            | GatewayClientError::ChallengeDeadline
+            | GatewayClientError::ConnectDeadline
+            | GatewayClientError::RpcDeadline => TaskFailureCode::Deadline,
+            GatewayClientError::UpgradeFailed => TaskFailureCode::UpgradeFailed,
+            GatewayClientError::Starting => TaskFailureCode::RuntimeNotReady,
+            GatewayClientError::ConnectFailed => TaskFailureCode::ConnectFailed,
+            GatewayClientError::RpcFailed => TaskFailureCode::RemoteError,
+            GatewayClientError::ConnectionClosed => TaskFailureCode::ConnectionClosed,
+            GatewayClientError::Transport | GatewayClientError::SecretCleanupFailed => {
+                TaskFailureCode::Transport
+            }
+            GatewayClientError::InvalidEndpoint
+            | GatewayClientError::InvalidClientMetadata
+            | GatewayClientError::ChallengeFailed
+            | GatewayClientError::Protocol => TaskFailureCode::Protocol,
+        };
+        // rpc_query does not retain whether a failed exchange wrote the request.
+        Self::new(
+            outcome,
+            TaskFailureStage::Transport,
+            code,
+            TaskDelivery::Unknown,
+        )
+    }
+
+    fn from_native(method: &str, error: &wire::GatewayError) -> Self {
+        let code = match error.code() {
+            "INVALID_REQUEST" if error.message() == format!("unknown method: {method}") => {
+                TaskFailureCode::MethodNotFound
+            }
+            "invalid_params" => TaskFailureCode::InvalidParams,
+            "INVALID_REQUEST" | "FORBIDDEN" => TaskFailureCode::RequestRejected,
+            "task_not_found" => TaskFailureCode::NotFound,
+            _ => TaskFailureCode::RemoteError,
+        };
+        Self::new(
+            ::task_manager::TaskReadFailure::Rejected,
+            TaskFailureStage::NativeRead,
+            code,
+            TaskDelivery::ResponseReceived,
+        )
     }
 }
 
 impl From<ProtocolError> for TaskReadFailure {
     fn from(value: ProtocolError) -> Self {
-        match value {
-            ProtocolError::Rejected => Self::Rejected,
-            ProtocolError::Invalid => Self::Protocol,
-        }
+        let (outcome, code) = match value {
+            ProtocolError::Rejected => (
+                ::task_manager::TaskReadFailure::Rejected,
+                TaskFailureCode::RequestRejected,
+            ),
+            ProtocolError::Invalid => (
+                ::task_manager::TaskReadFailure::Protocol,
+                TaskFailureCode::Protocol,
+            ),
+        };
+        Self::new(
+            outcome,
+            TaskFailureStage::Response,
+            code,
+            TaskDelivery::ResponseReceived,
+        )
     }
 }
 
@@ -1507,7 +1596,10 @@ mod tests {
             .await;
             assert!(matches!(
                 timeout(TEST_TIMEOUT, &mut todo_get).await.unwrap(),
-                Err(TaskReadFailure::Rejected)
+                Err(TaskReadFailure {
+                    outcome: ::task_manager::TaskReadFailure::Rejected,
+                    ..
+                })
             ));
         }
         client.close_control_connection().await;

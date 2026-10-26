@@ -1,7 +1,12 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { agentsPlugin } from '@/plugins/agents/plugin';
+import { skillsPlugin } from '@/plugins/skills/plugin';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
 const terminalMock = vi.hoisted(() => vi.fn());
@@ -27,10 +32,10 @@ vi.mock('sonner', () => ({
   },
 }));
 
-import { useGatewayStore } from '@/stores/gateway';
-import { useSkillsStore } from '@/stores/skills';
-import { useSealedSkillsStore } from '@/stores/sealed-skills';
-import { Skills } from '@/pages/Skills';
+import { useGatewayStore } from '@/plugins/runtime/store';
+import { useSkillsStore } from '@/plugins/skills/stores/skills';
+import { useSealedSkillsStore } from '@/plugins/skills/stores/sealed-skills';
+import { Skills } from '@/plugins/skills/page';
 
 const status = {
   skills: [{
@@ -55,11 +60,15 @@ const marketplaceResult = {
   }],
 };
 
-function renderSkills() {
+const pluginHost = createPluginHost([applicationShellPlugin, agentsPlugin, skillsPlugin]);
+
+function renderSkills(initialEntries = ['/']) {
   return render(
-    <MemoryRouter>
-      <Skills />
-    </MemoryRouter>,
+    <PluginHostProvider host={pluginHost}>
+      <MemoryRouter initialEntries={initialEntries}>
+        <Skills />
+      </MemoryRouter>
+    </PluginHostProvider>,
   );
 }
 
@@ -74,7 +83,10 @@ function mockSkillsApi() {
 }
 
 describe('Skills page', () => {
+  let stopPlugins: (() => void) | undefined;
+
   beforeEach(async () => {
+    stopPlugins = pluginHost.start();
     await i18n.changeLanguage('zh');
     hostApiFetchMock.mockReset();
     useSealedSkillsStore.setState(useSealedSkillsStore.getInitialState(), true);
@@ -106,6 +118,12 @@ describe('Skills page', () => {
     });
   });
 
+  afterEach(() => {
+    cleanup();
+    stopPlugins?.();
+    stopPlugins = undefined;
+  });
+
   it('renders status skills and management controls', async () => {
     hostApiFetchMock.mockResolvedValue(status);
     renderSkills();
@@ -128,7 +146,7 @@ describe('Skills page', () => {
       if (path === '/api/packages/draft-id/publish') return { ...draft, status: 'published' };
       return status;
     });
-    render(<MemoryRouter initialEntries={['/?tab=sealed']}><Skills /></MemoryRouter>);
+    renderSkills(['/?tab=sealed']);
     expect(screen.getByRole('tab', { name: '已安装', selected: true })).toBeInTheDocument();
     fireEvent.mouseDown(screen.getByRole('tab', { name: '我的云端包' }), { button: 0, ctrlKey: false });
     expect(await screen.findByRole('heading', { name: 'My Draft' })).toBeInTheDocument();

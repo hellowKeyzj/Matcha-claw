@@ -1,16 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import Chat from '@/pages/Chat';
+import Chat from '@/plugins/chat';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import { useChatStore } from '@/stores/chat';
-import { useRuntimeHostStore } from '@/stores/gateway';
-import { useSubagentsStore } from '@/stores/subagents';
-import { useTaskCenterStore } from '@/stores/task-center-store';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
+import { useChatStore } from '@/plugins/chat/store';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
+import { useTaskCenterStore } from '@/plugins/tasks/stores/task-center-store';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import { buildRenderItemsFromMessages, type RawMessage } from './helpers/timeline-fixtures';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
-import { bottomScrollTop, isAtBottom } from '@/pages/Chat/chat-scroll-model';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
+import { bottomScrollTop, isAtBottom } from '@/plugins/chat/chat-scroll-model';
 
 let triggerResizeObserver: (() => void) | null = null;
 let resizeObserverCallbacks: Array<() => void> = [];

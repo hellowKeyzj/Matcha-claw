@@ -15,6 +15,7 @@ pub enum DeliveryRejection {
 pub struct ActivityExecutionRequest {
     delivery: crate::DeliveryRequest,
     binding: RoleSessionReceipt,
+    execution_context: Option<crate::TaskExecutionContext>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,14 +76,23 @@ impl ActivityExecutionRequest {
         delivery
             .validate()
             .map_err(|_| ActivityExecutionRequestError::InvalidPromptPayload)?;
-        Ok(Self { delivery, binding })
+        Ok(Self { delivery, binding, execution_context: None })
     }
 
     pub fn from_delivery_request(
         delivery: crate::DeliveryRequest,
         binding: RoleSessionReceipt,
     ) -> Self {
-        Self { delivery, binding }
+        Self { delivery, binding, execution_context: None }
+    }
+
+    pub(crate) fn with_execution_context(mut self, context: Option<crate::TaskExecutionContext>) -> Self {
+        self.execution_context = context;
+        self
+    }
+
+    pub fn execution_context(&self) -> Option<&crate::TaskExecutionContext> {
+        self.execution_context.as_ref()
     }
 
     pub fn binding(&self) -> &RoleSessionReceipt {

@@ -11,6 +11,7 @@ mod package_status;
 pub mod platform_runtime;
 pub mod port;
 pub mod session;
+pub mod world;
 pub use session::window as session_window;
 
 pub use surfaces::tooling::tool_permission;

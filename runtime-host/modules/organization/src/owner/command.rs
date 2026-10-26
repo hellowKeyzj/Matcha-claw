@@ -114,6 +114,22 @@ pub(crate) enum OrganizationCommand {
             Option<crate::TeamCreationFailure>,
         )>,
     },
+    TaskCreate {
+        request: crate::task_execution::TaskExecutionRequest,
+        reply: crate::call::CallReply<Result<String, crate::task_execution::TaskExecutionReceipt>>,
+    },
+    TaskNativeExecutionObserved {
+        identity: crate::task_execution::TaskExecutionIdentity,
+        request: crate::ActivityExecutionRequest,
+        execution: crate::TaskNativeExecution,
+        reply: tokio::sync::oneshot::Sender<Result<(), StoreFault>>,
+    },
+    TaskCancel {
+        identity: crate::task_execution::TaskExecutionIdentity,
+        idempotency_key: IdempotencyKey,
+        requested_at: u64,
+        reply: crate::call::CallReply<crate::task_execution::TaskExecutionReceipt>,
+    },
     RunCancel {
         run_id: GraphRunId,
         idempotency_key: String,
@@ -241,6 +257,7 @@ pub(crate) enum OrganizationCommand {
         >,
     },
     TeamMessageTerminalObserved {
+        task_observation: crate::task_execution::TaskNativeObservation,
         native_run_id: String,
         delivery_context: Option<(DeliveryId, crate::EndpointSessionId)>,
         status: organization::NativeTerminalStatus,
@@ -275,6 +292,8 @@ impl OrganizationCommand {
             Self::TeamDelete { reply, .. } => reply.running().await,
             Self::RunCreate { reply, .. } => reply.running().await,
             Self::RunCreateFromTeamTemplate { reply, .. } => reply.running().await,
+            Self::TaskCreate { reply, .. } => reply.running().await,
+            Self::TaskCancel { reply, .. } => reply.running().await,
             Self::RunCancel { reply, .. } => reply.running().await,
             Self::RunDelete { reply, .. } => reply.running().await,
             Self::RunDeleteAndPurge { reply, .. } => reply.running().await,

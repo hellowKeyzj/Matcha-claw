@@ -23,6 +23,16 @@ pub(crate) fn project_observed(
     observation: &ObservationSink,
 ) -> Option<SafeEvent> {
     match event {
+        HostEvent::World(world_protocol::events::WorldHint::Changed { world, incarnation, resource, revision }) => project_accepted(
+            observation,
+            "world.changed",
+            SafeEvent::WorldChanged { world, incarnation, resource, revision },
+        ),
+        HostEvent::World(world_protocol::events::WorldHint::ResyncRequired { world, incarnation }) => project_accepted(
+            observation,
+            "world.resync-required",
+            SafeEvent::WorldResyncRequired { world, incarnation },
+        ),
         HostEvent::CallChanged(event) => project_accepted(
             observation,
             "call.changed",

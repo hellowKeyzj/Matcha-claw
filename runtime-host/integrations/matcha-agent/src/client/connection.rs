@@ -19,7 +19,11 @@ use tokio::{
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{
+    Error as SocketError, Message,
+    error::ProtocolError,
+    protocol::{CloseFrame, frame::coding::CloseCode},
+};
 use tokio_util::{
     sync::CancellationToken,
     task::{AbortOnDropHandle, TaskTracker},
@@ -33,6 +37,17 @@ const QUEUED: u8 = 0;
 const SENT: u8 = 1;
 const CANCELLED: u8 = 2;
 const CLOSE_DEADLINE: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy)]
+enum ReadEnd {
+    Stopped,
+    PeerClosed,
+}
+
+enum WriteEnd {
+    Stopped,
+    CloseObserved,
+}
 
 struct Awaited {
     response: oneshot::Sender<Result<Value, Error>>,
@@ -81,30 +96,62 @@ impl Connection {
             )));
             let mut writer =
                 AbortOnDropHandle::new(tokio::spawn(write_messages(writer, queued, writing)));
-            let (result, finished) = tokio::select! {
+            let (mut read, mut write) = tokio::select! {
                 biased;
-                _ = closing.cancelled() => (Ok(()), 0),
-                result = &mut reader => (joined(result), 1),
-                result = &mut writer => (joined(result), 2),
+                _ = closing.cancelled() => (None, None),
+                result = &mut reader => (Some(joined(result)), None),
+                result = &mut writer => (None, Some(joined(result))),
             };
-            *failed.lock().expect("connection failure is not poisoned") =
-                result.as_ref().err().cloned();
+            let failure = read
+                .as_ref()
+                .and_then(|result| result.as_ref().err())
+                .or_else(|| write.as_ref().and_then(|result| result.as_ref().err()))
+                .cloned();
+            *failed.lock().expect("connection failure is not poisoned") = failure.clone();
             closing.cancel();
-            fail_pending(&requests, result.as_ref().err());
-            // Each child is joined, including an aborted stalled reader/writer.
+            fail_pending(&requests, failure.as_ref());
+            // Joining and the wire handshake share one deadline; aborts are also awaited.
             let expires_at = Instant::now() + CLOSE_DEADLINE;
-            let reader_result = if finished == 1 {
-                Ok(())
-            } else {
-                finish(&mut reader, expires_at).await
+            if let Some(error) = &failure {
+                trace_failure(
+                    if read.is_some() {
+                        "reader_terminal"
+                    } else {
+                        "writer_terminal"
+                    },
+                    error,
+                );
+            }
+            let read = match read.take() {
+                Some(result) => result,
+                None => finish(&mut reader, expires_at, "reader_finish_timeout").await,
             };
-            let writer_result = if finished == 2 {
-                Ok(())
-            } else {
-                finish(&mut writer, expires_at).await
+            let write = match write.take() {
+                Some(result) => result,
+                None => finish(&mut writer, expires_at, "writer_finish_timeout").await,
             };
             drop(closed_notifications);
-            result.and(reader_result).and(writer_result)
+            if let Err(error) = &read {
+                trace_failure("reader_finish", error);
+            }
+            if let Err(error) = &write {
+                trace_failure("writer_finish", error);
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            let (reader, read_end) = read?;
+            let (writer, write_end) = write?;
+            if matches!(write_end, WriteEnd::CloseObserved)
+                && !matches!(read_end, ReadEnd::PeerClosed)
+            {
+                return Err(Error::local("transport", Delivery::Unknown));
+            }
+            // Reuniting drops any unsent SplitSink slot; SENT requests remain Unknown.
+            let mut socket = writer
+                .reunite(reader)
+                .map_err(|_| Error::local("protocol", Delivery::Unknown))?;
+            close_socket(&mut socket, read_end, expires_at).await
         });
         Self {
             output,
@@ -202,6 +249,9 @@ impl Connection {
             Some(join) => {
                 let result = joined(join.await);
                 task.take();
+                if let Err(error) = &result {
+                    trace_failure("owner_join", error);
+                }
                 result
             }
             None => Ok(()),
@@ -250,45 +300,53 @@ async fn write_messages(
     mut writer: SplitSink<Socket, Message>,
     mut queued: mpsc::Receiver<Outbound>,
     stopped: CancellationToken,
-) -> Result<(), Error> {
-    let result: Result<(), Error> = async {
+) -> Result<(SplitSink<Socket, Message>, WriteEnd), Error> {
+    let result = async {
         loop {
             let outbound = tokio::select! {
                 biased;
-                _ = stopped.cancelled() => return Ok(()),
-                outbound = queued.recv() => match outbound { Some(outbound) => outbound, None => return Ok(()) },
+                _ = stopped.cancelled() => return Ok(WriteEnd::Stopped),
+                outbound = queued.recv() => match outbound { Some(outbound) => outbound, None => return Ok(WriteEnd::Stopped) },
             };
             if outbound.progress.load(Ordering::Acquire) == CANCELLED {
                 continue;
             }
             tokio::select! {
                 biased;
-                _ = stopped.cancelled() => return Ok(()),
+                _ = stopped.cancelled() => return Ok(WriteEnd::Stopped),
                 ready = timeout_at(outbound.expires_at, poll_fn(|cx| Sink::poll_ready(Pin::new(&mut writer), cx))) => {
-                    ready.map_err(|_| Error::local("deadline", Delivery::NotSent))?
-                        .map_err(|_| Error::local("transport", Delivery::NotSent))?;
+                    if let Err(error) = ready.map_err(|_| Error::local("deadline", Delivery::NotSent))? {
+                        return write_error(error, Delivery::NotSent);
+                    }
                 },
             }
             if outbound.progress.compare_exchange(QUEUED, SENT, Ordering::AcqRel, Ordering::Acquire).is_err() {
                 continue;
             }
-            Sink::start_send(Pin::new(&mut writer), Message::Text(outbound.text.into()))
-                .map_err(|_| Error::local("transport", Delivery::Unknown))?;
+            if let Err(error) = Sink::start_send(Pin::new(&mut writer), Message::Text(outbound.text.into())) {
+                return write_error(error, Delivery::Unknown);
+            }
             tokio::select! {
                 biased;
-                _ = stopped.cancelled() => return Ok(()),
+                _ = stopped.cancelled() => return Ok(WriteEnd::Stopped),
                 flushed = timeout_at(outbound.expires_at, writer.flush()) => {
-                    flushed.map_err(|_| Error::local("deadline", Delivery::Unknown))?
-                        .map_err(|_| Error::local("transport", Delivery::Unknown))?;
+                    if let Err(error) = flushed.map_err(|_| Error::local("deadline", Delivery::Unknown))? {
+                        return write_error(error, Delivery::Unknown);
+                    }
                 },
             }
         }
     }.await;
-    let closed = match timeout_at(Instant::now() + CLOSE_DEADLINE, writer.close()).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) | Err(_) => Err(Error::local("close_failed", Delivery::Unknown)),
-    };
-    result.and(closed)
+    result.map(|end| (writer, end))
+}
+
+fn write_error(error: SocketError, delivery: Delivery) -> Result<WriteEnd, Error> {
+    match error {
+        SocketError::ConnectionClosed
+        | SocketError::AlreadyClosed
+        | SocketError::Protocol(ProtocolError::SendAfterClosing) => Ok(WriteEnd::CloseObserved),
+        _ => Err(Error::local("transport", delivery)),
+    }
 }
 
 async fn read_messages(
@@ -296,11 +354,11 @@ async fn read_messages(
     pending: Pending,
     notifications: Option<mpsc::Sender<wire::JsonRpcNotification>>,
     stopped: CancellationToken,
-) -> Result<(), Error> {
+) -> Result<(SplitStream<Socket>, ReadEnd), Error> {
     loop {
         let message = tokio::select! {
             biased;
-            _ = stopped.cancelled() => return Ok(()),
+            _ = stopped.cancelled() => return Ok((reader, ReadEnd::Stopped)),
             message = reader.next() => message,
         };
         match message {
@@ -331,7 +389,7 @@ async fn read_messages(
                             .ok_or_else(|| Error::local("protocol", Delivery::Unknown))?;
                         tokio::select! {
                             biased;
-                            _ = stopped.cancelled() => return Ok(()),
+                            _ = stopped.cancelled() => return Ok((reader, ReadEnd::Stopped)),
                             sent = output.send(notification) => sent.map_err(|_| Error::local("connection_closed", Delivery::Unknown))?,
                         }
                     }
@@ -341,13 +399,88 @@ async fn read_messages(
                 }
             }
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-            Some(Ok(Message::Close(_))) | None => {
-                return Err(Error::local("connection_closed", Delivery::Unknown));
+            Some(Ok(Message::Close(frame))) => {
+                validate_close(frame.as_ref())?;
+                return Ok((reader, ReadEnd::PeerClosed));
+            }
+            None => {
+                let error = Error::local("connection_closed", Delivery::Unknown);
+                trace_failure("reader_eof_without_close", &error);
+                return Err(error);
             }
             Some(Ok(Message::Binary(_) | Message::Frame(_))) => {
                 return Err(Error::local("protocol", Delivery::Unknown));
             }
-            Some(Err(_)) => return Err(Error::local("transport", Delivery::Unknown)),
+            Some(Err(error)) => return Err(read_error(error)),
+        }
+    }
+}
+
+fn read_error(error: SocketError) -> Error {
+    let phase = match error {
+        SocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+            "reader_reset_without_close"
+        }
+        SocketError::Io(_) => "reader_io",
+        SocketError::Protocol(_) => "reader_websocket_protocol",
+        _ => "reader_websocket_error",
+    };
+    let error = Error::local("transport", Delivery::Unknown);
+    trace_failure(phase, &error);
+    error
+}
+
+fn validate_close(frame: Option<&CloseFrame>) -> Result<(), Error> {
+    match frame.map(|frame| frame.code) {
+        None | Some(CloseCode::Normal | CloseCode::Away) => Ok(()),
+        _ => Err(Error::local("protocol", Delivery::Unknown)),
+    }
+}
+
+async fn close_socket(socket: &mut Socket, end: ReadEnd, expires_at: Instant) -> Result<(), Error> {
+    let result = timeout_at(expires_at, async {
+        if matches!(end, ReadEnd::Stopped) {
+            if SinkExt::close(socket).await.is_err() {
+                let error = Error::local("close_failed", Delivery::Unknown);
+                trace_failure("writer_close_io", &error);
+                return Err(error);
+            }
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Close(frame))) => {
+                        validate_close(frame.as_ref())?;
+                        break;
+                    }
+                    None => return Err(Error::local("connection_closed", Delivery::Unknown)),
+                    Some(Err(error)) => return Err(read_error(error)),
+                    // Already-sent frames can precede the peer's Close; do not dispatch them.
+                    Some(Ok(Message::Text(_) | Message::Ping(_) | Message::Pong(_))) => {}
+                    Some(Ok(_)) => return Err(Error::local("protocol", Delivery::Unknown)),
+                }
+            }
+        }
+        // A valid Close was observed on either path. Flush its automatic response, not a new Close.
+        match socket.flush().await {
+            Ok(()) | Err(SocketError::ConnectionClosed | SocketError::AlreadyClosed) => Ok(()),
+            Err(_) => {
+                let error = Error::local("close_failed", Delivery::Unknown);
+                trace_failure("writer_close_io", &error);
+                Err(error)
+            }
+        }
+    })
+    .await;
+    match result {
+        Ok(result) => {
+            if let Err(error) = &result {
+                trace_failure("close_handshake", error);
+            }
+            result
+        }
+        Err(_) => {
+            let error = Error::local("close_failed", Delivery::Unknown);
+            trace_failure("close_handshake_timeout", &error);
+            Err(error)
         }
     }
 }
@@ -381,20 +514,33 @@ fn fail_pending(pending: &Pending, failure: Option<&Error>) {
     }
 }
 
-fn joined(result: Result<Result<(), Error>, tokio::task::JoinError>) -> Result<(), Error> {
+fn trace_failure(phase: &'static str, error: &Error) {
+    platform::trace::runtime_trace("matcha.client.connection.failed", || {
+        serde_json::json!({
+            "phase": phase,
+            "error": format!("{error:?}"),
+            "delivery": format!("{:?}", error.delivery()),
+        })
+    });
+}
+
+fn joined<T>(result: Result<Result<T, Error>, tokio::task::JoinError>) -> Result<T, Error> {
     result.map_err(|_| Error::local("connection_task_failed", Delivery::Unknown))?
 }
 
-async fn finish(
-    task: &mut AbortOnDropHandle<Result<(), Error>>,
+async fn finish<T>(
+    task: &mut AbortOnDropHandle<Result<T, Error>>,
     expires_at: Instant,
-) -> Result<(), Error> {
+    timeout_phase: &'static str,
+) -> Result<T, Error> {
     match timeout_at(expires_at, &mut *task).await {
         Ok(result) => joined(result),
         Err(_) => {
             task.abort();
             let _ = task.await;
-            Err(Error::local("close_failed", Delivery::Unknown))
+            let error = Error::local("close_failed", Delivery::Unknown);
+            trace_failure(timeout_phase, &error);
+            Err(error)
         }
     }
 }

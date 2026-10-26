@@ -1382,6 +1382,7 @@ pub struct SessionState {
     completeness: SessionCompleteness,
     terminal_run_ids: HashSet<String>,
     pub(crate) run_delivery_contexts: HashMap<String, SessionDeliveryContext>,
+    pub(crate) run_execution_contexts: HashMap<String, (String, crate::execution::SessionExecutionContext)>,
     pub(crate) pending_terminals: Vec<crate::terminal_hook::SessionRunTerminalSnapshot>,
     pub(crate) terminal_permit: Option<crate::owner::terminal::TerminalPermit>,
     host_source_epoch: Option<u64>,
@@ -1441,6 +1442,7 @@ impl SessionState {
             completeness: facts.completeness,
             terminal_run_ids,
             run_delivery_contexts: HashMap::new(),
+            run_execution_contexts: HashMap::new(),
             pending_terminals: Vec::new(),
             terminal_permit: None,
             host_source_epoch: None,
@@ -3905,7 +3907,10 @@ fn valid_content(content: &SessionContent) -> bool {
         SessionContent::Media {
             media_type,
             reference,
-        } => media_type.as_deref().is_none_or(valid_id) && valid_id(reference),
+        } => {
+            media_type.as_deref().is_none_or(valid_id)
+                && valid_id_with_limit(reference, MAX_CONTENT_REF_BYTES)
+        },
         SessionContent::Omitted { .. } => true,
     }
 }
@@ -4198,7 +4203,7 @@ mod tests {
     use super::*;
 
     fn identity() -> SessionIdentity {
-        SessionIdentity::new("session-1", SessionProvider::MatchaAgent, None)
+        SessionIdentity::new("session-1", SessionProvider::MatchaAgent, "agent-1".to_owned())
             .expect("test identity")
     }
 
@@ -4238,7 +4243,6 @@ mod tests {
     fn applies_ordered_delta_and_projects_view() {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let result = state.apply(
-            Some("renderer-route:test".to_owned()),
             Some("run-1".to_owned()),
             1,
             vec![SessionChange::MessageUpdated { item: message() }],
@@ -4259,7 +4263,7 @@ mod tests {
     fn native_bound_derives_outer_run_id_from_single_run_changes() {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let binding =
-            SessionEventBinding::new("session-1", Some("renderer-route:test".to_owned()), Some(1))
+            SessionEventBinding::new(identity(), Some(1))
                 .expect("binding");
         let result = state.apply_native_bound(
             binding,
@@ -4286,7 +4290,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageDelta {
@@ -4302,7 +4305,6 @@ mod tests {
         ));
 
         let result = state.apply(
-            None,
             Some("run-1".to_owned()),
             2,
             vec![SessionChange::RunPhaseChanged {
@@ -4427,7 +4429,7 @@ mod tests {
 
         let delta = SessionDelta {
             session_key: "session-1".to_owned(),
-            route_key: None,
+            identity: identity(),
             epoch: 1,
             seq: 1,
             cursor: 1,
@@ -4549,7 +4551,7 @@ mod tests {
     fn delta_validates_run_phase_changed_with_outer_run_id() {
         let delta = SessionDelta {
             session_key: "session-1".to_owned(),
-            route_key: Some("renderer-route:test".to_owned()),
+            identity: identity(),
             epoch: 1,
             seq: 1,
             cursor: 1,
@@ -4567,7 +4569,6 @@ mod tests {
     fn rejected_runtime_failure_can_project_failed_error_state() {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let result = state.apply(
-            None,
             Some("ack-run-1".to_owned()),
             1,
             vec![
@@ -4626,7 +4627,6 @@ mod tests {
     fn terminal_runtime_change_clears_active_run_and_closes_run() {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let result = state.apply(
-            None,
             Some("run-1".to_owned()),
             1,
             vec![SessionChange::RuntimeChanged {
@@ -4663,7 +4663,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::MessageDelta {
@@ -4686,18 +4685,18 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let change = vec![SessionChange::MessageUpdated { item: message() }];
         assert!(matches!(
-            state.apply(None, Some("run-1".to_owned()), 2, change.clone()),
+            state.apply(Some("run-1".to_owned()), 2, change.clone()),
             SessionApplyResult::Gap {
                 expected: 1,
                 received: 2
             }
         ));
         assert!(matches!(
-            state.apply(None, Some("run-1".to_owned()), 1, change.clone()),
+            state.apply(Some("run-1".to_owned()), 1, change.clone()),
             SessionApplyResult::Applied(_)
         ));
         assert!(matches!(
-            state.apply(None, Some("run-1".to_owned()), 1, change),
+            state.apply(Some("run-1".to_owned()), 1, change),
             SessionApplyResult::Duplicate { cursor: 1 }
         ));
         let invalid = SessionItem::System {
@@ -4707,7 +4706,6 @@ mod tests {
         };
         assert!(matches!(
             state.apply(
-                None,
                 None,
                 2,
                 vec![
@@ -4727,7 +4725,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageUpdated { item: message() }],
@@ -4736,7 +4733,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 None,
                 2,
                 vec![SessionChange::WindowChanged {
@@ -4748,7 +4744,6 @@ mod tests {
 
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageUpdated {
@@ -4792,7 +4787,6 @@ mod tests {
         let mut state = SessionState::from_facts(identity(), 1, 0, facts).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageUpdated { item: message() }],
@@ -4813,7 +4807,6 @@ mod tests {
         assert_eq!(state.seq(), 0);
         assert_eq!(state.cursor(), 6);
         let first = state.apply(
-            None,
             Some("run-1".to_owned()),
             7,
             vec![SessionChange::MessageUpdated { item: message() }],
@@ -4822,7 +4815,6 @@ mod tests {
             matches!(first, SessionApplyResult::Applied(ref delta) if delta.seq() == 1 && delta.cursor() == 7)
         );
         let second = state.apply(
-            None,
             Some("run-1".to_owned()),
             8,
             vec![SessionChange::WindowChanged {
@@ -4841,7 +4833,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageUpdated {
@@ -4852,7 +4843,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::MessageUpdated {
@@ -4872,7 +4862,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::RunPhaseChanged {
@@ -4885,7 +4874,6 @@ mod tests {
         let stale_item = message_with_ids("item-1", "run-1", "message-1", "late");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::MessageUpdated { item: stale_item }],
@@ -4896,7 +4884,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::RunPhaseChanged {
@@ -4910,7 +4897,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::ToolUpdated {
@@ -4934,7 +4920,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::ApprovalUpdated {
@@ -4952,7 +4937,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::RuntimeChanged {
@@ -4972,7 +4956,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 None,
                 2,
                 vec![SessionChange::RuntimeChanged {
@@ -4996,7 +4979,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageUpdated {
@@ -5013,7 +4995,6 @@ mod tests {
     fn tool_update_anchors_an_assistant_turn_for_live_projection() {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let result = state.apply(
-            None,
             Some("run-1".to_owned()),
             1,
             vec![SessionChange::ToolUpdated {
@@ -5082,7 +5063,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::ToolUpdated {
@@ -5104,7 +5084,6 @@ mod tests {
         ));
 
         let result = state.apply(
-            None,
             Some("run-1".to_owned()),
             2,
             vec![SessionChange::ToolUpdated {
@@ -5145,7 +5124,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageDelta {
@@ -5161,7 +5139,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::ToolUpdated {
@@ -5183,7 +5160,6 @@ mod tests {
         ));
 
         let result = state.apply(
-            None,
             Some("run-1".to_owned()),
             3,
             vec![SessionChange::MessageDelta {
@@ -5218,7 +5194,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::ToolUpdated {
@@ -5240,7 +5215,6 @@ mod tests {
         ));
 
         let result = state.apply(
-            None,
             Some("run-1".to_owned()),
             2,
             vec![SessionChange::MessageDelta {
@@ -5286,7 +5260,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageDelta {
@@ -5302,7 +5275,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::ToolUpdated {
@@ -5313,7 +5285,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 3,
                 vec![SessionChange::MessageDelta {
@@ -5355,7 +5326,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageUpdated {
@@ -5388,7 +5358,6 @@ mod tests {
 
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::ToolUpdated {
@@ -5399,7 +5368,6 @@ mod tests {
         ));
 
         let result = state.apply(
-            None,
             Some("run-1".to_owned()),
             3,
             vec![SessionChange::ToolUpdated {
@@ -5456,7 +5424,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::ToolUpdated {
@@ -5478,7 +5445,6 @@ mod tests {
         ));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 2,
                 vec![SessionChange::MessageDelta {
@@ -5494,7 +5460,6 @@ mod tests {
         ));
 
         let tool_result = state.apply(
-            None,
             Some("run-1".to_owned()),
             3,
             vec![SessionChange::ToolUpdated {
@@ -5537,7 +5502,6 @@ mod tests {
         ));
 
         let terminal = state.apply(
-            None,
             Some("run-1".to_owned()),
             4,
             vec![SessionChange::RunPhaseChanged {
@@ -5597,7 +5561,6 @@ mod tests {
         let mut state = SessionState::new(identity(), 1).expect("state");
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::ToolUpdated {
@@ -5638,7 +5601,6 @@ mod tests {
             text: "before tool after tool".to_owned(),
         };
         let result = state.apply(
-            None,
             Some("run-1".to_owned()),
             2,
             vec![SessionChange::MessageUpdated { item: ordered }],
@@ -5690,7 +5652,7 @@ mod tests {
     fn native_cursor_is_separate_from_host_cursor_and_seq() {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let binding =
-            SessionEventBinding::new("session-1", Some("renderer-route:test".to_owned()), Some(7))
+            SessionEventBinding::new(identity(), Some(7))
                 .expect("binding");
         let first = state.apply_native_bound(
             binding.clone(),
@@ -5728,7 +5690,7 @@ mod tests {
     fn native_gap_is_checked_only_for_explicitly_contiguous_binding() {
         let mut state = SessionState::new(identity(), 1).expect("state");
         let first_binding =
-            SessionEventBinding::new_contiguous("session-1", None, Some(3)).expect("binding");
+            SessionEventBinding::new_contiguous(identity(), Some(3)).expect("binding");
         assert!(matches!(
             state.apply_native_bound(
                 first_binding,
@@ -5739,7 +5701,7 @@ mod tests {
             SessionApplyResult::Applied(_)
         ));
         let gap_binding =
-            SessionEventBinding::new_contiguous("session-1", None, Some(3)).expect("binding");
+            SessionEventBinding::new_contiguous(identity(), Some(3)).expect("binding");
         assert!(matches!(
             state.apply_native_bound(
                 gap_binding,
@@ -5761,7 +5723,7 @@ mod tests {
     #[test]
     fn native_epoch_change_is_rejected_without_fabricating_an_epoch() {
         let mut state = SessionState::new(identity(), 1).expect("state");
-        let first_binding = SessionEventBinding::new("session-1", None, None).expect("binding");
+        let first_binding = SessionEventBinding::new(identity(), None).expect("binding");
         assert!(matches!(
             state.apply_native_bound(
                 first_binding,
@@ -5774,7 +5736,7 @@ mod tests {
         assert_eq!(state.native_source_epoch, None);
 
         let changed_binding =
-            SessionEventBinding::new("session-1", None, Some(9)).expect("binding");
+            SessionEventBinding::new(identity(), Some(9)).expect("binding");
         assert!(matches!(
             state.apply_native_bound(
                 changed_binding,
@@ -5797,7 +5759,7 @@ mod tests {
     #[test]
     fn native_recovery_cursor_does_not_conflict_with_recovered_event() {
         let mut state = SessionState::new(identity(), 1).expect("state");
-        let first_binding = SessionEventBinding::new("session-1", None, None).expect("binding");
+        let first_binding = SessionEventBinding::new(identity(), None).expect("binding");
         assert!(matches!(
             state.apply_native_bound(
                 first_binding,
@@ -5809,7 +5771,7 @@ mod tests {
         ));
 
         let changed_binding =
-            SessionEventBinding::new("session-1", None, Some(9)).expect("binding");
+            SessionEventBinding::new(identity(), Some(9)).expect("binding");
         assert!(matches!(
             state.apply_native_recovery_bound(
                 changed_binding.clone(),
@@ -5877,7 +5839,6 @@ mod tests {
         assert!(state.terminal_run_ids.contains("run-1"));
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageUpdated {
@@ -5899,7 +5860,6 @@ mod tests {
         assert!(state.terminal_run_ids.is_empty());
         assert!(matches!(
             state.apply(
-                None,
                 Some("run-1".to_owned()),
                 1,
                 vec![SessionChange::MessageUpdated { item: message() }],
@@ -5912,31 +5872,10 @@ mod tests {
     fn view_wire_round_trips_and_rejects_unknown_fields() {
         let state = SessionState::new(identity(), 1).expect("state");
         let value = serde_json::to_value(state.view()).expect("encode view");
-        let decoded: SessionView = serde_json::from_value(value).expect("decode view");
+        let decoded: SessionView = serde_json::from_value(value.clone()).expect("decode view");
         assert_eq!(decoded.cursor(), 0);
-        let invalid = serde_json::json!({
-            "sessionKey": "session-1",
-            "endpointSessionId": null,
-            "ownership": null,
-            "identity": {
-                "sessionKey": "session-1",
-                "endpoint": {
-                    "kind": "native-runtime",
-                    "runtimeAdapterId": "matcha-agent",
-                    "runtimeInstanceId": "local"
-                }
-            },
-            "epoch": 1,
-            "seq": 0,
-            "cursor": 0,
-            "items": "unknown",
-            "tools": "unknown",
-            "approvals": "unknown",
-            "runtime": "unknown",
-            "window": "unknown",
-            "completeness": { "incomplete": { "missing": ["catalog"] } },
-            "extra": true
-        });
+        let mut invalid = value;
+        invalid["extra"] = serde_json::json!(true);
         assert!(serde_json::from_value::<SessionView>(invalid).is_err());
     }
 }

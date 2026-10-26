@@ -505,7 +505,7 @@ fn project_openclaw_create(
     command: &SessionCreateCommand,
     outcome: InvocationOutcome<
         crate::session::protocol::SessionCreateResult,
-        crate::port::OpenClawSessionError,
+        crate::port::OpenClawSessionMutationFailure,
     >,
     epoch: u64,
 ) -> SessionCreateOutcome {
@@ -905,11 +905,34 @@ impl SessionOps for OpenClawDriver {
                     Ok(InvocationOutcome::Unknown) => ("unknown", None, None),
                     Err(_) => ("error", None, None),
                 };
+                let peer_rejection = match &result {
+                    Ok(InvocationOutcome::TargetRejected(failure)) => failure.peer_rejection().map(|rejection| {
+                        let code = match rejection.code() {
+                            "INVALID_REQUEST" => "INVALID_REQUEST",
+                            "FORBIDDEN" => "FORBIDDEN",
+                            "UNAVAILABLE" => "UNAVAILABLE",
+                            _ => "unrecognized",
+                        };
+                        let reason = match (rejection.code(), rejection.message()) {
+                            ("INVALID_REQUEST", "unknown method: sessions.create") => "unknown_method",
+                            ("INVALID_REQUEST", message) if message.starts_with("invalid sessions.create params:") => "invalid_params",
+                            ("INVALID_REQUEST", message) if message.starts_with("Unknown agent id \"") => "unknown_agent",
+                            ("INVALID_REQUEST", message) if message.starts_with("invalid model:") => "invalid_model",
+                            ("INVALID_REQUEST", message) if message.starts_with("Model ") && message.contains(" requires agent harness \"") && message.ends_with("\", but no enabled plugin provides it. Install and enable its plugin, restart the Gateway, then select the model again.") => "agent_harness_plugin_unavailable",
+                            ("INVALID_REQUEST", message) if message.starts_with("agent \"") && message.contains(" does not match session key agent \"") => "agent_session_mismatch",
+                            ("UNAVAILABLE", "model catalog is still loading; retry in a few seconds") => "model_catalog_loading",
+                            _ => "native_rejected",
+                        };
+                        serde_json::json!({ "code": code, "reason": reason })
+                    }),
+                    _ => None,
+                };
                 serde_json::json!({
                     "sessionHash": sessions_module::trace::fingerprint(command.session_key()),
                     "agentHash": sessions_module::trace::fingerprint(command.agent_id()),
                     "outcome": outcome, "nativeSessionId": sessions_module::trace::id_shape(native_session_id),
                     "modelState": session_model_trace_state(model_state.as_ref()),
+                    "peerRejection": peer_rejection,
                 })
             });
             match result {
@@ -1058,6 +1081,13 @@ impl SessionOps for OpenClawDriver {
         command: SessionPermissionCommand,
     ) -> sessions_module::SessionFuture<'a, SessionPermissionOutcome> {
         Box::pin(self.session_permission(command))
+    }
+
+    fn session_thinking<'a>(
+        &'a self,
+        command: sessions_module::thinking::SessionThinkingCommand,
+    ) -> sessions_module::SessionFuture<'a, sessions_module::thinking::SessionThinkingOutcome> {
+        Box::pin(self.session_gateway.session_thinking(command))
     }
 }
 

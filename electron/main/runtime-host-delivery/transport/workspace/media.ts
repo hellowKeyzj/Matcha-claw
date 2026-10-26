@@ -126,7 +126,13 @@ function isRequest(value: unknown): value is Request {
         || (exact(input, ['endpoint', 'sessionKey', 'gatewayUrl', 'mimeType', 'agentId'])
           && isGatewayUrl(input.gatewayUrl)
           && isMimeType(input.mimeType)
-          && isIdentifier(input.agentId));
+          && isIdentifier(input.agentId))
+        || (exact(input, ['endpoint', 'sessionKey', 'reference'])
+          && typeof input.reference === 'string'
+          && input.reference.length > 0
+          && input.reference.length <= 512
+          && !/[^A-Za-z0-9._:-]/.test(input.reference)
+          && !/^[A-Za-z]:/.test(input.reference));
     case 'media.resolve':
       return exact(input, ['endpoint', 'sessionKey', 'reference']) && isReference(input.reference);
     case 'media.thumbnails':

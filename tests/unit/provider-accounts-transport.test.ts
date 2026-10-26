@@ -34,11 +34,11 @@ describe('provider accounts delivery transport', () => {
   it('binds provider-account requests to the fixed localhost endpoint', async () => {
     const fetcher = vi.fn().mockResolvedValue({
       status: 200,
-      json: async () => ({ accounts: [] }),
+      json: async () => ({ accounts: [], reports: [] }),
     });
     const transport = createProviderAccountsTransport(createRuntimeHostDeliveryIssuer(), 3240, fetcher);
 
-    await expect(transport.execute(listRequest)).resolves.toEqual({ status: 200, body: { accounts: [] } });
+    await expect(transport.execute(listRequest)).resolves.toEqual({ status: 200, body: { accounts: [], reports: [] } });
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:3240/api/provider-accounts', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify(listRequest),

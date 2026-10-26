@@ -4,6 +4,11 @@ import type {
   ToolUseBlock,
 } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { CanUseToolFn } from './hooks/useCanUseTool.js'
+import {
+  admitInvestigationStep,
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+} from './world/investigation.js'
 import { FallbackTriggeredError } from './services/api/withRetry.js'
 import {
   calculateTokenWarningState,
@@ -458,6 +463,7 @@ async function* queryLoop(
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    await admitInvestigationStep()
     // Destructure state at the top of each iteration. toolUseContext alone
     // is reassigned within an iteration (queryTracking, messages updates);
     // the rest are read-only between continue sites.
@@ -931,7 +937,7 @@ async function* queryLoop(
                 c => c.type === 'pending',
               ),
               queryTracking,
-              effortValue: appState.effortValue,
+              effortValue: toolUseContext.getAppState().effortValue,
               advisorModel: appState.advisorModel,
               skipCacheWrite,
               agentId: toolUseContext.agentId,
@@ -1211,6 +1217,7 @@ async function* queryLoop(
         }
       }
     } catch (error) {
+      if (error instanceof InvestigationAdmissionError) throw error
       logError(error)
       const errorMessage =
         error instanceof Error ? error.message : String(error)
@@ -1285,7 +1292,7 @@ async function* queryLoop(
 
     // Execute post-sampling hooks after model response is complete
     if (assistantMessages.length > 0) {
-      void executePostSamplingHooks(
+      const postSampling = executePostSamplingHooks(
         messagesForQuery.concat(assistantMessages),
         systemPrompt,
         userContext,
@@ -1293,6 +1300,8 @@ async function* queryLoop(
         toolUseContext,
         querySource,
       )
+      if (currentInvestigationScope()) await postSampling
+      else void postSampling
     }
 
     // We need to handle a streaming abort before anything else.
@@ -1864,6 +1873,7 @@ async function* queryLoop(
     const queuedCommandsSnapshot = getCommandsByMaxPriority(
       sleepRan ? 'later' : 'next',
     ).filter(cmd => {
+      if (cmd.nativeExecution || cmd.nativeBudget || cmd.nativeInputMessage) return false
       if (isSlashCommand(cmd)) return false
       if (isMainThread) return cmd.agentId === undefined
       // Subagents only drain task-notifications addressed to them — never

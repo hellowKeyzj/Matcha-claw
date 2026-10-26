@@ -32,6 +32,16 @@ pub fn describe(id: &str, scope: &Value) -> Option<Value> {
                 operation("sessions.goal.clear", "Clear session Goal", "session"),
             ],
         )),
+        ("session.thinking", Some("agent")) => Some(scoped_descriptor(
+            "session.thinking", "session-thinking", scope.clone(),
+            vec![operation("sessions.thinking.get", "Get thinking capability", "agent")],
+        )),
+        ("session.thinking", Some("session")) => Some(scoped_descriptor(
+            "session.thinking", "session-thinking", scope.clone(), vec![
+                operation("sessions.thinking.get", "Get thinking capability", "session"),
+                operation("sessions.thinking.set", "Set thinking level", "session"),
+            ],
+        )),
         ("session.approval", Some("session")) => Some(approval_descriptor(scope.clone())),
         ("session.modelSelection", Some("session")) => {
             Some(model_selection_descriptor(scope.clone()))
@@ -160,8 +170,8 @@ fn runtime_identity_for_scope(
     scope: &Value,
 ) -> Option<runtime_directory::RuntimeDriverIdentity> {
     match (id, scope.get("kind").and_then(Value::as_str)?) {
-        ("session.prompt", "agent") => runtime_identity_for_endpoint(scope.get("endpoint")?),
-        ("session.prompt" | "session.approval" | "session.modelSelection" | "session.goal", "session")
+        ("session.prompt" | "session.thinking", "agent") => runtime_identity_for_endpoint(scope.get("endpoint")?),
+        ("session.prompt" | "session.approval" | "session.modelSelection" | "session.goal" | "session.thinking", "session")
         | ("session.management", "session") => {
             runtime_identity_for_endpoint(scope.get("identity")?.get("endpoint")?)
         }

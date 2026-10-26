@@ -30,6 +30,45 @@ impl TeamRunTerminalSettlement {
         !self.repairs.is_empty()
     }
 
+    pub(crate) fn observe_task_native_execution(
+        &self,
+        store: &mut OrganizationStore,
+        owner: &TeamRunOwner,
+        native_run_id: &str,
+        delivery_context: Option<&(DeliveryId, EndpointSessionId)>,
+        observation: crate::task_execution::TaskNativeObservation,
+    ) -> Result<(), StoreFault> {
+        store.refresh()?;
+        let target = match delivery_context {
+            Some((delivery, endpoint)) => Some((delivery.clone(), endpoint.clone())),
+            None => owner.native_delivery_by_run(store, native_run_id)?.and_then(|delivery| {
+                store.native_terminal_target(&delivery)
+                    .map(|target| (delivery, target.correlation().endpoint_session_id().clone()))
+            }),
+        };
+        let Some((delivery_id, endpoint_session_id)) = target else { return Ok(()) };
+        let delivery = store.facts().deliveries().delivery(&delivery_id).ok_or(StoreFault::InvalidFacts)?;
+        let run = store.facts().run(&crate::GraphRunId::new(&delivery.facts().run_id))
+            .ok_or(StoreFault::InvalidFacts)?;
+        let Some(context) = run.task_execution_context() else { return Ok(()) };
+        if observation.execution_context.as_ref().is_some_and(|received| received != context)
+            || observation.native_request_id.as_ref().is_some_and(|request| request != &delivery.facts().idempotency_key)
+        {
+            return Err(StoreFault::InvalidFacts);
+        }
+        // Missing native ownership facts are unavailable, not guessed from the prompt or run UUID.
+        if observation.native_request_id.is_none() || observation.native_message_id.is_none() {
+            return Ok(());
+        }
+        store.record_task_native_execution(&delivery_id, crate::TaskNativeExecution {
+            endpoint_session_id: endpoint_session_id.as_str().to_owned(),
+            native_run_id: native_run_id.to_owned(),
+            native_request_id: observation.native_request_id,
+            native_message_id: observation.native_message_id,
+            measurement: observation.measurement,
+        })
+    }
+
     pub(crate) fn observe_team_message_terminal(
         &mut self,
         store: &mut OrganizationStore,

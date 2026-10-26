@@ -137,6 +137,7 @@ pub struct Delivery {
     pub(super) phase: DeliveryPhase,
     pub(super) completed_attempts: u32,
     pub(super) next_claim_generation: u64,
+    pub(crate) task_native_execution: Option<crate::TaskNativeExecution>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -800,11 +801,16 @@ impl Delivery {
             phase: DeliveryPhase::Pending,
             completed_attempts: 0,
             next_claim_generation: 1,
+            task_native_execution: None,
         })
     }
 
     pub fn facts(&self) -> &DeliveryRequest {
         &self.facts
+    }
+
+    pub(crate) fn task_native_execution(&self) -> Option<&crate::TaskNativeExecution> {
+        self.task_native_execution.as_ref()
     }
 
     pub fn phase(&self) -> &DeliveryPhase {

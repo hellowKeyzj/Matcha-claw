@@ -10,9 +10,10 @@ import type {
   ExternalConnectorUpsertMutationReceipt,
   ExternalConnectorRemoveMutationReceipt,
   ExternalConnectorMutationApplied,
-} from '../stores/external-connectors';
+} from '@/plugins/connectors/store';
 import { sessionIdentitiesEqual, runtimeScopeQuery, type RuntimeInstanceScope, type SessionIdentity } from '../types/desktop/runtime-address';
 import { isConnectorObservationResult, type ConnectorObservationResult, type ExternalConnectorConnectionStatus, type SessionConnectorStatus } from '../types/connectors-observation';
+import { isConnectorOAuthInput, type ConnectorOAuthInput, type McpOAuthReceipt } from '../types/connectors-oauth';
 
 async function mutate(path: string, body: object, command: string): Promise<ConnectorsCallDetail> {
   const receipt = await hostApiFetch<CallReceipt>(path, { method: 'POST', body: JSON.stringify(body) });
@@ -34,33 +35,49 @@ function validateReceipt(receipt: CallReceipt): void {
   }
 }
 
-async function observe(request: { kind: 'status'; scope: RuntimeInstanceScope } | { kind: 'probe'; connectorId: string; scope: RuntimeInstanceScope } | { kind: 'sessionStatus'; sessionIdentity: SessionIdentity }): Promise<ConnectorObservationResult> {
+async function observe(request: { kind: 'status'; scope: RuntimeInstanceScope } | { kind: 'probe'; connectorId: string; scope: RuntimeInstanceScope } | { kind: 'sessionStatus'; sessionIdentity: SessionIdentity } | (ConnectorOAuthInput & { kind: 'oauth'; scope: RuntimeInstanceScope }), signal?: AbortSignal): Promise<ConnectorObservationResult> {
   const { kind } = request;
   const path = `/api/external-connectors/${kind === 'sessionStatus' ? 'session-status' : kind}${request.kind === 'status' ? `?${runtimeScopeQuery(request.scope)}` : ''}`;
-  const receipt = await hostApiFetch<CallReceipt>(path, request.kind === 'probe'
-    ? { method: 'POST', body: JSON.stringify({ connectorId: request.connectorId, scope: request.scope }) }
-    : kind === 'sessionStatus' ? { method: 'POST', body: JSON.stringify({ sessionIdentity: request.sessionIdentity }) } : undefined);
+  const body = request.kind === 'probe' ? { connectorId: request.connectorId, scope: request.scope }
+    : request.kind === 'sessionStatus' ? { sessionIdentity: request.sessionIdentity }
+    : request.kind === 'oauth' ? { connectorId: request.connectorId, scope: request.scope, action: request.action,
+      ...(request.agentId === undefined ? {} : { agentId: request.agentId }),
+      ...(request.flowId === undefined ? {} : { flowId: request.flowId }) } : undefined;
+  const receipt = await hostApiFetch<CallReceipt>(path, { ...(body ? { method: 'POST', body: JSON.stringify(body) } : {}), signal });
   validateReceipt(receipt);
-  const call = await waitForCall(receipt, 'connectors');
+  const call = await waitForCall(receipt, 'connectors', { signal });
   if (call.module !== 'connectors' || call.command !== `externalConnectors.${kind}`) throw new Error('Connector call identity is invalid');
   const detail = decodeConnectorsCallDetail(call.detail);
-  if (request.kind === 'probe' && detail.connectorId !== request.connectorId) throw new Error('Connector probe identity is invalid');
+  if ((request.kind === 'probe' || request.kind === 'oauth') && detail.connectorId !== request.connectorId) throw new Error('Connector observation identity is invalid');
   if (call.status === 'unknown') throw new Error('Connector observation outcome is unknown; do not retry automatically');
   if (detail.result === 'missing') throw new Error('External connector is unknown');
   if (call.status !== 'succeeded' || detail.result !== 'available') throw new Error('Connector observation is unavailable');
   const result = await hostApiFetch<unknown>('/api/external-connectors/observation-result', {
-    method: 'POST', body: JSON.stringify({
+    method: 'POST', signal, body: JSON.stringify({
       callId: receipt.callId,
       ...(request.kind === 'sessionStatus' ? { sessionIdentity: request.sessionIdentity } : { scope: request.scope }),
+      ...(request.kind === 'oauth' && request.agentId !== undefined ? { agentId: request.agentId } : {}),
     }),
   });
   if (!isConnectorObservationResult(result) || result.callId !== receipt.callId || result.kind !== kind
     || (result.kind === 'probe' && request.kind === 'probe' && result.status.connectorId !== request.connectorId)
+    || (result.kind === 'oauth' && request.kind === 'oauth' && result.connectorId !== request.connectorId)
     || (result.kind === 'sessionStatus' && request.kind === 'sessionStatus' && !sessionIdentitiesEqual(result.sessionIdentity, request.sessionIdentity))
-    || (result.kind !== 'probe' && result.statuses.length !== detail.count)) {
+    || ((result.kind === 'status' || result.kind === 'sessionStatus') && result.statuses.length !== detail.count)) {
     throw new Error('Connector observation result is invalid');
   }
   return result;
+}
+
+export async function requestConnectorOAuth(scope: RuntimeInstanceScope, input: ConnectorOAuthInput, signal?: AbortSignal): Promise<McpOAuthReceipt> {
+  if (!isConnectorOAuthInput(input) || scope.endpoint.kind !== 'native-runtime'
+    || !['openclaw', 'matcha-agent'].includes(scope.endpoint.runtimeAdapterId)
+    || (scope.endpoint.runtimeAdapterId === 'matcha-agent' ? !input.agentId : input.agentId !== undefined)) {
+    throw new Error('Connector OAuth target is invalid');
+  }
+  const result = await observe({ ...input, kind: 'oauth', scope }, signal);
+  if (result.kind !== 'oauth') throw new Error('Connector OAuth result is invalid');
+  return result.oauth;
 }
 
 export async function readConnectorStatuses(scope: RuntimeInstanceScope): Promise<ExternalConnectorConnectionStatus[]> {

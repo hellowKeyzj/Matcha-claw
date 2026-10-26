@@ -2,13 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { MainLayout } from '@/components/layout/MainLayout';
-import { useChatStore } from '@/stores/chat';
+import { useChatStore } from '@/plugins/chat/store';
 import { useLayoutStore } from '@/stores/layout';
-import { useSettingsStore } from '@/stores/settings';
-import { useSubagentsStore } from '@/stores/subagents';
+import { useSettingsStore } from '@/plugins/settings/store';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import i18n from '@/i18n';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { createViewportWindowState } from '@/stores/chat/viewport-state';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
+import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
 
 const invokeIpcMock = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/api-client', () => ({
@@ -27,7 +27,7 @@ function MockChat({ isActive = true }: { isActive?: boolean }) {
   );
 }
 
-vi.mock('@/pages/Chat', () => ({
+vi.mock('@/plugins/chat', () => ({
   Chat: MockChat,
   default: MockChat,
 }));

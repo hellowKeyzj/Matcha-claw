@@ -69,6 +69,7 @@ fn input(root: &TestRoot) -> MatchaPeerInput {
         working_directory: absolute_path("runtime"),
         storage_root: root.0.join("storage"),
         port: 18_790,
+        world_runtime_host: None,
         toolchain: toolchain(),
         report_diagnostic: Arc::new(|_| {}),
         #[cfg(windows)]
@@ -157,6 +158,7 @@ fn packaged_input(root: &TestRoot, artifact: &PackagedMatchaArtifact) -> MatchaP
         working_directory: artifact.resources.clone(),
         storage_root: root.0.join("storage"),
         port: available_loopback_port(),
+        world_runtime_host: None,
         toolchain: toolchain(),
         report_diagnostic: Arc::new(|_| {}),
         git_bash: artifact.git_bash.clone(),

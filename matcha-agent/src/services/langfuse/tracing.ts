@@ -8,7 +8,11 @@ import { isLangfuseEnabled } from './client.js'
 import { sanitizeToolInput, sanitizeToolOutput } from './sanitize.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { getCoreUserData } from 'src/utils/user.js'
-import { markSealedTelemetry, sealedModelContext, sealedTelemetryValue } from '../../skills/sealed/privacy.js'
+import {
+  markSealedTelemetry,
+  sealedModelContext,
+  sealedTelemetryValue,
+} from '../../skills/sealed/privacy.js'
 
 export type { LangfuseSpan }
 
@@ -126,9 +130,12 @@ export function recordLLMObservation(
       genName,
       {
         model: params.model,
-        input: sealedTelemetryValue(params.tools
-          ? { messages: params.input, tools: params.tools }
-          : params.input, rootSpan),
+        input: sealedTelemetryValue(
+          params.tools
+            ? { messages: params.input, tools: params.tools }
+            : params.input,
+          rootSpan,
+        ),
         metadata: {
           provider: params.provider,
           model: params.model,
@@ -205,7 +212,10 @@ export function recordToolObservation(
     const toolObs = startObservation(
       params.toolName,
       {
-        input: sealedTelemetryValue(sanitizeToolInput(params.toolName, params.input), rootSpan),
+        input: sealedTelemetryValue(
+          sanitizeToolInput(params.toolName, params.input),
+          rootSpan,
+        ),
         metadata: {
           toolUseId: params.toolUseId,
           isError: String(params.isError ?? false),
@@ -235,7 +245,10 @@ export function recordToolObservation(
     }
 
     toolObs.update({
-      output: sealedTelemetryValue(sanitizeToolOutput(params.toolName, params.output), rootSpan),
+      output: sealedTelemetryValue(
+        sanitizeToolOutput(params.toolName, params.output),
+        rootSpan,
+      ),
       ...(params.isError && { level: 'ERROR' as const }),
     })
 
@@ -398,7 +411,8 @@ export function createChildSpan(
         parentSpanContext: parentSpan.otelSpan.spanContext(),
       },
     ) as LangfuseSpan
-    if (sealedTelemetryValue(undefined, parentSpan) !== undefined) markSealedTelemetry(span)
+    if (sealedTelemetryValue(undefined, parentSpan) !== undefined)
+      markSealedTelemetry(span)
 
     // Propagate session ID and user ID from parent
     const parent = parentSpan as unknown as RootTrace
@@ -438,7 +452,8 @@ export function endTrace(
   if (!rootSpan) return
   try {
     const updatePayload: Record<string, unknown> = {}
-    if (output !== undefined) updatePayload.output = sealedTelemetryValue(output, rootSpan)
+    if (output !== undefined)
+      updatePayload.output = sealedTelemetryValue(output, rootSpan)
     if (status === 'interrupted') updatePayload.level = 'WARNING'
     else if (status === 'error') updatePayload.level = 'ERROR'
     if (Object.keys(updatePayload).length > 0) rootSpan.update(updatePayload)

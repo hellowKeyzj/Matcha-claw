@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import i18n from '@/i18n';
-import { MediaCapabilitiesPanel } from '@/components/settings/MediaCapabilitiesPanel';
+import { MediaCapabilitiesPanel } from '@/plugins/providers/components/MediaCapabilitiesPanel';
 import type { CapabilityRouting } from '@/lib/capability-routing';
 import type { ProviderModel } from '@/lib/provider-model-catalog';
 
@@ -34,15 +34,15 @@ const providerStoreState = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@/stores/capability-routing', () => ({
+vi.mock('@/plugins/providers/stores/capability-routing', () => ({
   useCapabilityRoutingStore: (selector: (state: typeof routingState) => unknown) => selector(routingState),
 }));
 
-vi.mock('@/stores/provider-model-catalog', () => ({
+vi.mock('@/plugins/providers/stores/provider-model-catalog', () => ({
   useProviderModelCatalogStore: (selector: (state: typeof catalogState) => unknown) => selector(catalogState),
 }));
 
-vi.mock('@/stores/providers', () => ({
+vi.mock('@/plugins/providers/stores/providers', () => ({
   useProviderStore: (selector: (state: typeof providerStoreState) => unknown) => selector(providerStoreState),
 }));
 

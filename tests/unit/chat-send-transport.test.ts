@@ -31,7 +31,7 @@ describe('chat send transport', () => {
       snapshot: view,
     });
 
-    const { sendChatTransport } = await import('@/stores/chat/send-transport');
+    const { sendChatTransport } = await import('@/plugins/chat/store/send-transport');
     const result = await sendChatTransport({
       sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
@@ -57,7 +57,7 @@ describe('chat send transport', () => {
       projection: null,
     });
 
-    const { sendChatTransport } = await import('@/stores/chat/send-transport');
+    const { sendChatTransport } = await import('@/plugins/chat/store/send-transport');
     await sendChatTransport({
       sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
@@ -82,7 +82,7 @@ describe('chat send transport', () => {
       projection: null,
     });
 
-    const { sendChatTransport } = await import('@/stores/chat/send-transport');
+    const { sendChatTransport } = await import('@/plugins/chat/store/send-transport');
     await expect(sendChatTransport({
       sessionKey: sessionIdentity.sessionKey,
       sessionIdentity,
@@ -115,7 +115,7 @@ describe('chat send transport', () => {
   });
 
   it('maps prompt rejection errors to the transport failure result', async () => {
-    const { sendChatTransport } = await import('@/stores/chat/send-transport');
+    const { sendChatTransport } = await import('@/plugins/chat/store/send-transport');
     hostSessionPromptMock.mockResolvedValueOnce({
       success: false,
       sessionKey: sessionIdentity.sessionKey,
@@ -149,7 +149,7 @@ describe('chat send transport', () => {
   });
 
   it('rejects accepted-looking responses without a native run id', async () => {
-    const { sendChatTransport } = await import('@/stores/chat/send-transport');
+    const { sendChatTransport } = await import('@/plugins/chat/store/send-transport');
     for (const response of [
       { success: true, runId: null },
       { outcome: 'queued', runId: '   ' },

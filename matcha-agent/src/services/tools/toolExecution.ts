@@ -1,4 +1,12 @@
 import { feature } from 'bun:bundle'
+import { invokeWorldTool } from '../../world/tools.js'
+import {
+  admitInvestigationTool,
+  assertInvestigationToolEffects,
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+  trackInvestigationOperation,
+} from '../../world/investigation.js'
 import type {
   ContentBlockParam,
   ToolResultBlockParam,
@@ -496,6 +504,7 @@ export async function* runToolUse(
       yield update
     }
   } catch (error) {
+    if (error instanceof InvestigationAdmissionError) throw error
     logError(error)
     const errorMessage = error instanceof Error ? error.message : String(error)
     const toolInfo = tool ? ` (${tool.name})` : ''
@@ -536,7 +545,7 @@ function streamedCheckPermissionsAndCallTool(
   // Ideally the progress reporting and tool call reporting would
   // be via separate mechanisms.
   const stream = new Stream<MessageUpdateLazy>()
-  checkPermissionsAndCallTool(
+  const operation = checkPermissionsAndCallTool(
     tool,
     toolUseID,
     input,
@@ -584,6 +593,8 @@ function streamedCheckPermissionsAndCallTool(
       })
     },
   )
+  trackInvestigationOperation(operation)
+  void operation
     .then(results => {
       for (const result of results) {
         stream.enqueue(result)
@@ -595,7 +606,14 @@ function streamedCheckPermissionsAndCallTool(
     .finally(() => {
       stream.done()
     })
-  return stream
+  if (!currentInvestigationScope()) return stream
+  return (async function* () {
+    try {
+      yield* stream
+    } finally {
+      await operation
+    }
+  })()
 }
 
 /**
@@ -653,6 +671,8 @@ async function checkPermissionsAndCallTool(
     progress: ToolProgress<ToolProgressData> | ProgressMessage<HookProgress>,
   ) => void,
 ): Promise<MessageUpdateLazy[]> {
+  assertInvestigationToolEffects(tool)
+
   // Validate input types with zod (surprisingly, the model is not great at generating valid input)
   const parsedInput = tool.inputSchema.safeParse(input)
   if (!parsedInput.success) {
@@ -1253,23 +1273,28 @@ async function checkPermissionsAndCallTool(
     //
     // The invoke lambda is shared between the flag-on (wrapper) and flag-off
     // (direct) paths so that post-call processing is never duplicated.
-    const invokeToolCall = () =>
-      tool.call(
-        callInput,
-        {
-          ...toolUseContext,
-          toolUseId: toolUseID,
-          userModified: permissionDecision.userModified ?? false,
-        },
-        canUseTool,
-        assistantMessage,
-        progress => {
-          onToolProgress({
-            toolUseID: progress.toolUseID,
-            data: progress.data,
-          })
-        },
+    const invokeToolCall = async () => {
+      await admitInvestigationTool(tool, callInput)
+      const context = {
+        ...toolUseContext,
+        toolUseId: toolUseID,
+        userModified: permissionDecision.userModified ?? false,
+      }
+      return invokeWorldTool(tool, callInput, context, () =>
+        tool.call(
+          callInput,
+          context,
+          canUseTool,
+          assistantMessage,
+          progress => {
+            onToolProgress({
+              toolUseID: progress.toolUseID,
+              data: progress.data,
+            })
+          },
+        ),
       )
+    }
     // Fast-path: skip wrapper entirely when skill-learning is disabled to
     // avoid even the cached-import resolution on the hot path.
     const result = isSkillLearningEnabled()
@@ -1662,6 +1687,7 @@ async function checkPermissionsAndCallTool(
     }
     return resultingMessages
   } catch (error) {
+    if (error instanceof InvestigationAdmissionError) throw error
     const durationMs = Date.now() - startTime
     addToToolDuration(durationMs)
 

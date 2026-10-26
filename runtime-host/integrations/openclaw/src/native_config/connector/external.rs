@@ -6,7 +6,7 @@ use std::{
 
 use connectors::{
     Connector, ConnectorCatalog, ConnectorKind, ConnectorSecretRef, ConnectorSecretResolution,
-    ConnectorSecretResolverPort, McpTransport,
+    ConnectorSecretResolverPort, McpAuth, McpTransport,
 };
 use futures_util::StreamExt;
 use reqwest::{Client, header};
@@ -17,7 +17,10 @@ use crate::native_config::config_store::{
     OpenClawConfigMutation, OpenClawConfigStore, OpenClawConfigStoreError,
 };
 
-use super::preset::{PRESET_MCP_SERVER_ID, PresetMcpProjection, reconcile_server, server_matches};
+use super::preset::{
+    PRESET_MCP_SERVER_ID, PresetMcpProjection, RETIRED_APP_PLUGIN_MCP_SERVER_ID, reconcile_server,
+    server_matches,
+};
 
 const MANAGED_EXTERNAL_SERVER_PREFIX: &str = "matcha-external.";
 const DEFAULT_MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -214,7 +217,8 @@ fn projection_readback_matches(store: &OpenClawConfigStore, expected: &Map<Strin
 }
 
 fn is_stale_managed_server_id(id: &str, projected: &Map<String, Value>) -> bool {
-    !projected.contains_key(id) && id.starts_with(MANAGED_EXTERNAL_SERVER_PREFIX)
+    id == RETIRED_APP_PLUGIN_MCP_SERVER_ID
+        || !projected.contains_key(id) && id.starts_with(MANAGED_EXTERNAL_SERVER_PREFIX)
 }
 
 pub(crate) fn projection_effect(error: OpenClawConfigStoreError) -> ConnectorProjectionEffect {
@@ -263,6 +267,9 @@ async fn server_for(
             };
             let mut server = Map::new();
             server.insert("url".into(), Value::String(url.to_owned()));
+            if connector.auth() == Some(McpAuth::OAuth) {
+                server.insert("auth".into(), Value::String("oauth".into()));
+            }
             server.insert(
                 "transport".into(),
                 Value::String(

@@ -101,6 +101,7 @@ pub(crate) fn runtime_module_install_plan(
             handles.agents.descriptor(Arc::clone(&verifier)),
             handles.workspace.descriptor(Arc::clone(&verifier)),
             handles.wiki.descriptor(Arc::clone(&verifier)),
+            world::loopback_descriptor(handles.world.clone()),
             handles.platform_tools.descriptor(Arc::clone(&verifier)),
             handles.toolchain.descriptor(Arc::clone(&verifier)),
             handles.search.descriptor(Arc::clone(&verifier)),

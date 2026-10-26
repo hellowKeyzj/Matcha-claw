@@ -63,8 +63,19 @@ import {
   parseFrontmatter,
   splitPathInFrontmatter,
 } from './frontmatterParser.js'
-import { getFsImplementation, safeResolvePath } from './fsOperations.js'
-import { findCanonicalGitRoot, findGitRoot } from './git.js'
+import {
+  getFsImplementation,
+  readSourceDirectory,
+  realSourcePath,
+  safeResolveSourcePath,
+  statSourcePath,
+} from './fsOperations.js'
+import {
+  findCanonicalGitRoot,
+  findCanonicalGitRootAsync,
+  findGitRoot,
+  findGitRootAsync,
+} from './git.js'
 import {
   executeInstructionsLoadedHooks,
   hasInstructionsLoadedHook,
@@ -75,7 +86,15 @@ import type { MemoryType } from './memory/types.js'
 import { expandPath } from './path.js'
 import { pathInWorkingPath } from './permissions/filesystem.js'
 import { isSettingSourceEnabled } from './settings/constants.js'
+import { readSourceBytes } from './readFileInRange.js'
 import { getInitialSettings } from './settings/settings.js'
+import {
+  currentInvestigationScope,
+  investigationSignal,
+  requireInvestigationEffects,
+  rethrowInvestigationAdmission,
+  trackInvestigationOperation,
+} from '../world/investigation.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const teamMemPaths = feature('TEAMMEM')
@@ -398,7 +417,16 @@ function parseMemoryFileContent(
   }
 }
 
+function rethrowInvestigationFailure(error: unknown): void {
+  rethrowInvestigationAdmission(error)
+  if (currentInvestigationScope()) {
+    requireInvestigationEffects([])
+    if (error instanceof Error && error.cause !== undefined) throw error
+  }
+}
+
 function handleMemoryFileReadError(error: unknown, filePath: string): void {
+  rethrowInvestigationFailure(error)
   const code = getErrnoCode(error)
   // ENOENT = file doesn't exist, EISDIR = is a directory — both expected
   if (code === 'ENOENT' || code === 'EISDIR') {
@@ -426,8 +454,9 @@ async function safelyReadMemoryFileAsync(
   includeBasePath?: string,
 ): Promise<{ info: MemoryFileInfo | null; includePaths: string[] }> {
   try {
-    const fs = getFsImplementation()
-    const rawContent = await fs.readFile(filePath, { encoding: 'utf-8' })
+    const rawContent = currentInvestigationScope()
+      ? (await readSourceBytes(filePath, { signal: investigationSignal() })).toString('utf-8')
+      : await getFsImplementation().readFile(filePath, { encoding: 'utf-8' })
     return parseMemoryFileContent(rawContent, filePath, type, includeBasePath)
   } catch (error) {
     handleMemoryFileReadError(error, filePath)
@@ -535,49 +564,22 @@ function extractIncludePathsFromTokens(
 
 const MAX_INCLUDE_DEPTH = 5
 
-/**
- * Checks whether a CLAUDE.md file path is excluded by the claudeMdExcludes setting.
- * Only applies to User, Project, and Local memory types.
- * Managed, AutoMem, and TeamMem types are never excluded.
- *
- * Matches both the original path and the realpath-resolved path to handle symlinks
- * (e.g., /tmp -> /private/tmp on macOS).
- */
-function isClaudeMdExcluded(filePath: string, type: MemoryType): boolean {
-  if (type !== 'User' && type !== 'Project' && type !== 'Local') {
-    return false
-  }
-
-  const patterns = getInitialSettings().claudeMdExcludes
-  if (!patterns || patterns.length === 0) {
-    return false
-  }
-
-  const matchOpts = { dot: true }
-  const normalizedPath = filePath.replaceAll('\\', '/')
-
-  // Build an expanded pattern list that includes realpath-resolved versions of
-  // absolute patterns. This handles symlinks like /tmp -> /private/tmp on macOS:
-  // the user writes "/tmp/project/CLAUDE.md" in their exclude, but the system
-  // resolves the CWD to "/private/tmp/project/...", so the file path uses the
-  // real path. By resolving the patterns too, both sides match.
-  const expandedPatterns = resolveExcludePatterns(patterns).filter(
-    p => p.length > 0,
-  )
+/** Matches paths against exclude patterns whose symlink prefixes are already resolved. */
+function isClaudeMdExcluded(filePath: string, expandedPatterns: string[]): boolean {
   if (expandedPatterns.length === 0) {
     return false
   }
 
-  return picomatch.isMatch(normalizedPath, expandedPatterns, matchOpts)
+  return picomatch.isMatch(filePath.replaceAll('\\', '/'), expandedPatterns, { dot: true })
 }
 
 /**
  * Expands exclude patterns by resolving symlinks in absolute path prefixes.
  * For each absolute pattern (starting with /), tries to resolve the longest
- * existing directory prefix via realpathSync and adds the resolved version.
+ * existing directory prefix and adds the resolved version.
  * Glob patterns (containing *) have their static prefix resolved.
  */
-function resolveExcludePatterns(patterns: string[]): string[] {
+async function resolveExcludePatterns(patterns: string[]): Promise<string[]> {
   const fs = getFsImplementation()
   const expanded: string[] = patterns.map(p => p.replaceAll('\\', '/'))
 
@@ -595,19 +597,21 @@ function resolveExcludePatterns(patterns: string[]): string[] {
     const dirToResolve = dirname(staticPrefix)
 
     try {
-      // sync IO: called from sync context (isClaudeMdExcluded -> processMemoryFile -> getMemoryFiles)
-      const resolvedDir = fs.realpathSync(dirToResolve).replaceAll('\\', '/')
+      const resolvedDir = (currentInvestigationScope()
+        ? (await realSourcePath(dirToResolve, investigationSignal())).normalize('NFC')
+        : fs.realpathSync(dirToResolve)).replaceAll('\\', '/')
       if (resolvedDir !== dirToResolve) {
         const resolvedPattern =
           resolvedDir + normalized.slice(dirToResolve.length)
         expanded.push(resolvedPattern)
       }
-    } catch {
+    } catch (error) {
+      rethrowInvestigationFailure(error)
       // Directory doesn't exist; skip resolution for this pattern
     }
   }
 
-  return expanded
+  return expanded.filter(p => p.length > 0)
 }
 
 /**
@@ -630,15 +634,18 @@ export async function processMemoryFile(
     return []
   }
 
-  // Skip if path is excluded by claudeMdExcludes setting
-  if (isClaudeMdExcluded(filePath, type)) {
-    return []
+  // Managed, AutoMem, and TeamMem are never excluded.
+  if (type === 'User' || type === 'Project' || type === 'Local') {
+    const patterns = getInitialSettings().claudeMdExcludes
+    if (patterns?.length && isClaudeMdExcluded(filePath, await resolveExcludePatterns(patterns))) {
+      return []
+    }
   }
 
   // Resolve symlink path early for @import resolution
-  const { resolvedPath, isSymlink } = safeResolvePath(
-    getFsImplementation(),
+  const { resolvedPath, isSymlink } = await safeResolveSourcePath(
     filePath,
+    investigationSignal(),
   )
 
   processedPaths.add(normalizedPath)
@@ -715,9 +722,9 @@ export async function processMdRules({
   try {
     const fs = getFsImplementation()
 
-    const { resolvedPath: resolvedRulesDir, isSymlink } = safeResolvePath(
-      fs,
+    const { resolvedPath: resolvedRulesDir, isSymlink } = await safeResolveSourcePath(
       rulesDir,
+      investigationSignal(),
     )
 
     visitedDirs.add(rulesDir)
@@ -728,8 +735,11 @@ export async function processMdRules({
     const result: MemoryFileInfo[] = []
     let entries: import('fs').Dirent[]
     try {
-      entries = await fs.readdir(resolvedRulesDir)
+      entries = currentInvestigationScope()
+        ? await readSourceDirectory(resolvedRulesDir, investigationSignal())
+        : await fs.readdir(resolvedRulesDir)
     } catch (e: unknown) {
+      rethrowInvestigationFailure(e)
       const code = getErrnoCode(e)
       if (code === 'ENOENT' || code === 'EACCES' || code === 'ENOTDIR') {
         return []
@@ -739,14 +749,18 @@ export async function processMdRules({
 
     for (const entry of entries) {
       const entryPath = join(rulesDir, entry.name)
-      const { resolvedPath: resolvedEntryPath, isSymlink } = safeResolvePath(
-        fs,
+      const { resolvedPath: resolvedEntryPath, isSymlink } = await safeResolveSourcePath(
         entryPath,
+        investigationSignal(),
       )
 
       // Use Dirent methods for non-symlinks to avoid extra stat calls.
       // For symlinks, we need stat to determine what the target is.
-      const stats = isSymlink ? await fs.stat(resolvedEntryPath) : null
+      const stats = isSymlink
+        ? currentInvestigationScope()
+          ? await statSourcePath(resolvedEntryPath, { signal: investigationSignal() })
+          : await fs.stat(resolvedEntryPath)
+        : null
       const isDirectory = stats ? stats.isDirectory() : entry.isDirectory()
       const isFile = stats ? stats.isFile() : entry.isFile()
 
@@ -776,6 +790,7 @@ export async function processMdRules({
 
     return result
   } catch (error) {
+    rethrowInvestigationFailure(error)
     if (error instanceof Error && error.message.includes('EACCES')) {
       logEvent('tengu_claude_rules_md_permission_error', {
         is_access_error: 1,
@@ -786,7 +801,7 @@ export async function processMdRules({
   }
 }
 
-export const getMemoryFiles = memoize(
+const memoizedGetMemoryFiles = memoize(
   async (forceIncludeExternal: boolean = false): Promise<MemoryFileInfo[]> => {
     const startTime = Date.now()
     logForDiagnosticsNoPII('info', 'memory_files_started')
@@ -864,8 +879,12 @@ export const getMemoryFiles = memoize(
     // already has its own checkout. CLAUDE.local.md is gitignored so it only
     // exists in the main repo and is still loaded.
     // See: https://github.com/anthropics/claude-code/issues/29599
-    const gitRoot = findGitRoot(originalCwd)
-    const canonicalRoot = findCanonicalGitRoot(originalCwd)
+    const gitRoot = currentInvestigationScope()
+      ? await findGitRootAsync(originalCwd)
+      : findGitRoot(originalCwd)
+    const canonicalRoot = currentInvestigationScope()
+      ? await findCanonicalGitRootAsync(originalCwd)
+      : findCanonicalGitRoot(originalCwd)
     const isNestedWorktree =
       gitRoot !== null &&
       canonicalRoot !== null &&
@@ -1038,8 +1057,8 @@ export const getMemoryFiles = memoize(
       })
     }
 
-    // Fire InstructionsLoaded hook for each instruction file loaded
-    // (fire-and-forget, audit/observability only).
+    // Fire InstructionsLoaded hook for each instruction file loaded.
+    // Scoped hooks are joined; outside a scope they remain fire-and-forget.
     // AutoMem/TeamMem are intentionally excluded — they're a separate
     // memory system, not "instructions" in the CLAUDE.md/rules sense.
     // Gated on !forceIncludeExternal: the forceIncludeExternal=true variant
@@ -1056,7 +1075,7 @@ export const getMemoryFiles = memoize(
         for (const file of result) {
           if (!isInstructionsMemoryType(file.type)) continue
           const loadReason = file.parent ? 'include' : eagerLoadReason
-          void executeInstructionsLoadedHooks(
+          const hook = executeInstructionsLoadedHooks(
             file.path,
             file.type,
             loadReason,
@@ -1065,12 +1084,63 @@ export const getMemoryFiles = memoize(
               parentFilePath: file.parent,
             },
           )
+          if (currentInvestigationScope()) {
+            await trackInvestigationOperation(hook)
+          } else {
+            void hook
+          }
         }
       }
     }
 
     return result
   },
+)
+
+// Only known fulfilled loads are reusable across inputs without source I/O.
+const fulfilledMemoryFileLoads = new WeakSet<Promise<MemoryFileInfo[]>>()
+const pendingMemoryFileLoads = new WeakMap<
+  Promise<MemoryFileInfo[]>,
+  ReturnType<typeof currentInvestigationScope>
+>()
+
+export const getMemoryFiles: typeof memoizedGetMemoryFiles = Object.assign(
+  (forceIncludeExternal?: boolean): Promise<MemoryFileInfo[]> => {
+    requireInvestigationEffects([])
+    const scope = currentInvestigationScope()
+    const cache = getMemoryFiles.cache
+    memoizedGetMemoryFiles.cache = cache
+    const cached: Promise<MemoryFileInfo[]> | undefined = cache.get(forceIncludeExternal)
+    if (cached !== undefined) {
+      const pending = pendingMemoryFileLoads.has(cached)
+      if (
+        !scope ||
+        fulfilledMemoryFileLoads.has(cached) ||
+        (pending && pendingMemoryFileLoads.get(cached) === scope)
+      ) {
+        return cached
+      }
+      // A different input or an externally primed promise has no current custody.
+      cache.delete(forceIncludeExternal)
+    }
+
+    const load = trackInvestigationOperation(memoizedGetMemoryFiles(forceIncludeExternal))
+    pendingMemoryFileLoads.set(load, scope)
+    void load.then(
+      () => {
+        pendingMemoryFileLoads.delete(load)
+        fulfilledMemoryFileLoads.add(load)
+      },
+      () => {
+        pendingMemoryFileLoads.delete(load)
+        if (scope && cache.get(forceIncludeExternal) === load) {
+          cache.delete(forceIncludeExternal)
+        }
+      },
+    )
+    return load
+  },
+  { cache: memoizedGetMemoryFiles.cache },
 )
 
 function isInstructionsMemoryType(

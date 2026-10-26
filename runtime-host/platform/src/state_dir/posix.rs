@@ -78,6 +78,30 @@ impl StateDirHandle {
         Ok(file)
     }
 
+    /// Opens relative to this directory and rejects links, special files and shared permissions.
+    pub fn open_regular_file_readonly(
+        &self,
+        name: &str,
+    ) -> Result<Option<std::fs::File>, StateDirError> {
+        let name = relative_name(name)?;
+        let descriptor =
+            unsafe { libc::openat(self._descriptor.as_raw_fd(), name.as_ptr(), FILE_OPEN_FLAGS) };
+        if descriptor == -1 {
+            return match io::Error::last_os_error().raw_os_error() {
+                Some(libc::ENOENT) => Ok(None),
+                _ => Err(StateDirError),
+            };
+        }
+        // SAFETY: openat returned a new owned descriptor without following links.
+        let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        let information = metadata(file.as_raw_fd())?;
+        if information.st_nlink != 1 {
+            return Err(StateDirError);
+        }
+        verify_owner_only(file.as_raw_fd(), libc::S_IFREG, information.st_mode & 0o700)?;
+        Ok(Some(file))
+    }
+
     pub fn clone_descriptor(&self) -> Result<OwnedFd, StateDirError> {
         let descriptor =
             unsafe { libc::fcntl(self._descriptor.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
@@ -367,6 +391,20 @@ fn provision_with(
     let path = canonical_path(directory.as_raw_fd())?;
     Ok((
         path,
+        StateDirIdentity {
+            device: identity.device,
+            inode: identity.inode,
+            _descriptor: Arc::new(directory),
+        },
+    ))
+}
+
+pub(super) fn open_existing(path: &Path) -> Result<(PathBuf, StateDirIdentity), StateDirError> {
+    let directory = open_chain(&components(path)?)?;
+    verify_private(directory.as_raw_fd())?;
+    let identity = identity(directory.as_raw_fd())?;
+    Ok((
+        canonical_path(directory.as_raw_fd())?,
         StateDirIdentity {
             device: identity.device,
             inode: identity.inode,

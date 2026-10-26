@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { WelcomeScreen } from '@/pages/Chat/components/ChatStates';
+import { WelcomeScreen } from '@/plugins/chat/components/ChatStates';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({

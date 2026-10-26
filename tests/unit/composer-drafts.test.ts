@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { clampComposerDraftSelection, useComposerDraftStore } from '@/stores/composer-drafts';
+import { clampComposerDraftSelection, useComposerDraftStore } from '@/plugins/chat/composer-drafts';
 
 describe('composer draft store', () => {
   beforeEach(() => {

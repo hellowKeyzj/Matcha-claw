@@ -3,15 +3,15 @@ import {
   executeForgetAgentSessions,
   executeLoadSessions,
   executeReconcileAgentSessionTombstones,
-} from '@/stores/chat/session-actions';
-import { handleStoreSessionUpdateEvent } from '@/stores/chat/event-actions';
-import { useComposerDraftStore } from '@/stores/composer-drafts';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph } from '@/stores/chat/session-runtime-graph';
-import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/stores/chat/session-identity';
-import { useTaskSnapshotStore } from '@/stores/chat/task-snapshot-store';
-import type { StoreHistoryCache } from '@/stores/chat/history-cache';
-import type { ChatSession, ChatSessionRecord, ChatStoreState } from '@/stores/chat/types';
+} from '@/plugins/chat/store/session-actions';
+import { handleStoreSessionUpdateEvent } from '@/plugins/chat/store/event-actions';
+import { useComposerDraftStore } from '@/plugins/chat/composer-drafts';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
+import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph } from '@/plugins/chat/store/session-runtime-graph';
+import { buildRuntimeScopeKey, buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
+import { useTaskSnapshotStore } from '@/plugins/chat/store/task-snapshot-store';
+import type { StoreHistoryCache } from '@/plugins/chat/store/history-cache';
+import type { ChatSession, ChatSessionRecord, ChatStoreState } from '@/plugins/chat/store/types';
 import type { SessionStateSnapshot } from '@/types/session/snapshot';
 import type { SessionUpdateEvent } from '@/types/session/update-event';
 import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';

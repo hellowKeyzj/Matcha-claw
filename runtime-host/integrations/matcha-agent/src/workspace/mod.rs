@@ -75,6 +75,14 @@ impl WorkspaceOps for MatchaRuntimeDriver {
         })
     }
 
+    fn thumbnail_media_reference<'a>(
+        &'a self,
+        _session_key: &'a str,
+        _reference: &'a str,
+    ) -> WorkspaceFuture<'a, WorkspaceMediaThumbnail, WorkspaceMediaFailure> {
+        Box::pin(async { Err(WorkspaceMediaFailure::InvalidReference) })
+    }
+
     fn thumbnail_media_gateway<'a>(
         &'a self,
         _session_key: &'a str,

@@ -38,6 +38,7 @@ pub(crate) mod presenter;
 mod rename;
 pub(crate) mod send;
 mod timeline;
+mod thinking;
 mod observation;
 mod goal;
 pub mod trace;
@@ -69,6 +70,7 @@ const PATHS: &[RoutePath] = &[
     RoutePath::ExactWithQuery(DELETE_PATH),
     RoutePath::ExactWithQuery(RENAME_PATH),
     RoutePath::ExactWithQuery(PERMISSION_PATH),
+    RoutePath::ExactWithQuery(thinking::PATH),
     RoutePath::ExactWithQuery(SEND_PATH),
     RoutePath::ExactWithQuery(ABORT_PATH),
     RoutePath::ExactWithQuery(GOAL_PATH),
@@ -162,6 +164,9 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
         if request.method() == "POST" && request.path() == GOAL_PATH {
             return goal::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
         }
+        if request.method() == "POST" && request.path() == thinking::PATH {
+            return thinking::handle(&request, Arc::clone(&dependencies.verifier), dependencies.session).await.into();
+        }
         let response = handler::handle_loopback(
             &request,
             Arc::clone(&dependencies.verifier),
@@ -224,6 +229,7 @@ fn is_session_route(path: &str) -> bool {
             | DELETE_PATH
             | RENAME_PATH
             | PERMISSION_PATH
+            | thinking::PATH
             | SEND_PATH
             | ABORT_PATH
             | GOAL_PATH
@@ -635,6 +641,8 @@ mod tests {
             agent_id,
             endpoint_session_id,
             ownership: None,
+            label: None,
+            display_name: None,
             model_state: None,
             updated_at,
             preferred: None,

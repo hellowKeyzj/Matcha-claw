@@ -18,7 +18,7 @@ describe('chat attachment preview loads', () => {
   });
 
   it('loads outgoing Gateway media through the gateway URL preview payload', async () => {
-    const { loadMissingItemPreviews } = await import('@/stores/chat/attachment-helpers');
+    const { loadMissingItemPreviews } = await import('@/plugins/chat/store/attachment-helpers');
     const gatewayUrl = '/api/chat/media/outgoing/agent%3Atest%3Amain/attachment-1/full';
     const item: SessionAssistantTurnItem = {
       key: 'assistant-turn-1',
@@ -89,7 +89,7 @@ describe('chat attachment preview loads', () => {
 
   it('loads an outgoing Gateway image when the record appears during retry', async () => {
     vi.useFakeTimers();
-    const { loadMissingItemPreviews } = await import('@/stores/chat/attachment-helpers');
+    const { loadMissingItemPreviews } = await import('@/plugins/chat/store/attachment-helpers');
     const gatewayUrl = '/api/chat/media/outgoing/agent%3Atest%3Amain/attachment-retry/full';
     const item: SessionAssistantTurnItem = {
       key: 'assistant-turn-retry',
@@ -136,7 +136,7 @@ describe('chat attachment preview loads', () => {
 
   it('marks Gateway images unavailable only after bounded retries', async () => {
     vi.useFakeTimers();
-    const { loadMissingItemPreviews } = await import('@/stores/chat/attachment-helpers');
+    const { loadMissingItemPreviews } = await import('@/plugins/chat/store/attachment-helpers');
     const gatewayUrl = '/api/chat/media/outgoing/agent%3Aother%3Amain/attachment-1/full';
     const item: SessionAssistantTurnItem = {
       key: 'assistant-turn-retry-unavailable',
@@ -180,7 +180,7 @@ describe('chat attachment preview loads', () => {
   });
 
   it('does not retry invalid Gateway references', async () => {
-    const { loadMissingItemPreviews } = await import('@/stores/chat/attachment-helpers');
+    const { loadMissingItemPreviews } = await import('@/plugins/chat/store/attachment-helpers');
     const gatewayUrl = 'not-a-gateway-url';
     const item: SessionAssistantTurnItem = {
       key: 'assistant-turn-invalid',

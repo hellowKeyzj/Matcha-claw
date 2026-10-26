@@ -12,7 +12,7 @@ import * as hostApiModule from '@/lib/host-api';
 import {
   __resetSubagentsStoreInternalCachesForTest,
   useSubagentsStore,
-} from '@/stores/subagents';
+} from '@/plugins/agents/stores/subagents';
 
 const AVATAR_STORAGE_KEY = 'matchaclaw-subagent-avatar-presentations';
 const runtimeEndpoint = {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isGatewayPreparing } from '@/lib/gateway-status';
 import type { GatewayStatus } from '@/types/gateway';
 
@@ -31,23 +31,45 @@ function createGatewayStatus(overrides: Partial<GatewayStatus> = {}): GatewaySta
 }
 
 describe('gateway store host event wiring', () => {
+  let stopPlugins: (() => void) | undefined;
+
+  async function startPlugins() {
+    const [
+      { createPluginHost },
+      { applicationShellPlugin },
+      { runtimePlugin },
+      { chatPlugin },
+      { channelsPlugin },
+    ] = await Promise.all([
+      import('@/plugin-host/core'),
+      import('@/app/extensions'),
+      import('@/plugins/runtime/plugin'),
+      import('@/plugins/chat/plugin'),
+      import('@/plugins/channels/plugin'),
+    ]);
+    stopPlugins = createPluginHost([applicationShellPlugin, runtimePlugin, chatPlugin, channelsPlugin]).start();
+    return import('@/plugins/runtime/store');
+  }
+
+  afterEach(() => {
+    stopPlugins?.();
+    stopPlugins = undefined;
+  });
+
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
     hostApiFetchMock.mockResolvedValue(createGatewayStatus());
   });
 
-  it('subscribes to gateway and runtime-host projections on initialization', async () => {
+  it('subscribes to gateway and runtime-host projections before initialization', async () => {
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
-      return () => {};
+      return () => { handlers.delete(eventName); };
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
-    await useGatewayStore.getState().init();
-
-    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/gateway/status');
+    const { useGatewayStore } = await startPlugins();
     expect([...handlers.keys()].sort()).toEqual([
       'gateway:channel-status',
       'gateway:error',
@@ -56,15 +78,18 @@ describe('gateway store host event wiring', () => {
       'runtime-host:restart',
       'runtime-host:status',
       'session.delta',
+      'session.resync',
       'task:snapshot',
     ]);
+    await useGatewayStore.getState().init();
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/gateway/status');
   });
 
   it('keeps initialization preparing when the first gateway status snapshot fails', async () => {
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
-      return () => {};
+      return () => { handlers.delete(eventName); };
     });
     hostApiFetchMock.mockImplementation((path: string) => {
       if (path === '/api/gateway/status') {
@@ -78,7 +103,7 @@ describe('gateway store host event wiring', () => {
       });
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await startPlugins();
     await useGatewayStore.getState().init();
 
     const state = useGatewayStore.getState();
@@ -98,10 +123,10 @@ describe('gateway store host event wiring', () => {
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
-      return () => {};
+      return () => { handlers.delete(eventName); };
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await startPlugins();
     await useGatewayStore.getState().init();
 
     const gatewayStatus = handlers.get('gateway:status');
@@ -136,13 +161,13 @@ describe('gateway store host event wiring', () => {
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
-      return () => {};
+      return () => { handlers.delete(eventName); };
     });
     hostApiFetchMock.mockImplementation((path: string) => Promise.resolve(path === '/api/gateway/status'
       ? createGatewayStatus({ processState: 'starting', updatedAt: 2 })
       : { status: 'running', updatedAt: 2 }));
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await startPlugins();
     const init = useGatewayStore.getState().init();
     handlers.get('gateway:status')!(createGatewayStatus({
       processState: 'running',
@@ -165,7 +190,7 @@ describe('gateway store host event wiring', () => {
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
-      return () => {};
+      return () => { handlers.delete(eventName); };
     });
     let resolveRuntimeHost: ((value: unknown) => void) | null = null;
     hostApiFetchMock.mockImplementation((path: string) => {
@@ -177,7 +202,7 @@ describe('gateway store host event wiring', () => {
       });
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await startPlugins();
     const init = useGatewayStore.getState().init();
     handlers.get('runtime-host:status')!({
       status: 'running',
@@ -200,10 +225,10 @@ describe('gateway store host event wiring', () => {
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
-      return () => {};
+      return () => { handlers.delete(eventName); };
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await startPlugins();
     await useGatewayStore.getState().init();
 
     const runtimeHostStatus = handlers.get('runtime-host:status');

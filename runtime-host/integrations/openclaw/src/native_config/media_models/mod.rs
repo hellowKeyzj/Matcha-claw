@@ -20,7 +20,7 @@ impl MediaProviderCatalog {
     ) -> Result<OpenClawConfigUpdate, MediaCatalogError> {
         store
             .update(|document| {
-                if self.apply_to_document(document) {
+                if self.apply_to_document(document, &std::collections::BTreeSet::new()) {
                     OpenClawConfigMutation::changed()
                 } else {
                     OpenClawConfigMutation::unchanged()
@@ -29,8 +29,12 @@ impl MediaProviderCatalog {
             .map_err(|_| MediaCatalogError::ConfigPersist)
     }
 
-    pub(crate) fn apply_to_document(&self, document: &mut OpenClawConfigDocument) -> bool {
-        plugin_config::apply(self, document)
+    pub(crate) fn apply_to_document(
+        &self,
+        document: &mut OpenClawConfigDocument,
+        preserved_provider_keys: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        plugin_config::apply(self, document, preserved_provider_keys)
     }
 }
 

@@ -97,6 +97,12 @@ pub struct RunRecord {
     pub run_id: String,
     pub session_id: String,
     pub message_id: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub content_budget_digest: Option<String>,
+    #[serde(default)]
+    pub result: Option<serde_json::Value>,
     pub status: RunStatus,
 }
 

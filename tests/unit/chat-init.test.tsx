@@ -1,16 +1,16 @@
 import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useChatInit } from '@/pages/Chat/useChatInit';
-import { useChatStore } from '@/stores/chat';
+import { useChatInit } from '@/plugins/chat/useChatInit';
+import { useChatStore } from '@/plugins/chat/store';
 import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
+import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
 import {
   buildCurrentConversationFromSessionRecord,
   buildSessionRuntimeGraph,
   createDraftCurrentConversation,
-} from '@/stores/chat/session-runtime-graph';
-import { useSubagentsStore } from '@/stores/subagents';
+} from '@/plugins/chat/store/session-runtime-graph';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 
 const openClawTestRuntimeEndpoint = {

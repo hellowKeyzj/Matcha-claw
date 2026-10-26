@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useChatStore } from '@/stores/chat';
-import { createEmptySessionRecord } from '@/stores/chat/store-state-helpers';
-import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/stores/chat/session-identity';
-import type { ApprovalItem } from '@/stores/chat/types';
+import { useChatStore } from '@/plugins/chat/store';
+import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
+import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
+import type { ApprovalItem } from '@/plugins/chat/store/types';
 import type { SessionIdentity } from '../../src/types/desktop/runtime-address';
 
 function createMatchaAgentTestSessionIdentity(

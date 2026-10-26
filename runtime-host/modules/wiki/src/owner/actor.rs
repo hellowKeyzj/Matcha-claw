@@ -850,6 +850,13 @@ async fn handle_query(shared: WikiShared, query: WikiQuery) {
         WikiQuery::ReadBinaryFile { input, reply } => {
             let _ = reply.send(read_binary_file(&state, input)).await;
         }
+        WikiQuery::ExportVersion { input, reply } => {
+            let result = shared.blocking.run(move || {
+                let project = selected_project(&state, Some(&input.project_id))?;
+                crate::history::export_version(project_root(project), &input)
+            }).await;
+            let _ = reply.send(result).await;
+        }
         WikiQuery::ReadSourcePreview { input, reply } => {
             let _ = reply.send(read_source_preview(&state, input).await).await;
         }
@@ -1316,6 +1323,10 @@ pub(super) fn write_file_with_history(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(WikiFailure::io(path_text(&path), error)),
     };
+    if let Some(bytes) = &previous {
+        crate::history::capture_version(root, &input.relative_path, bytes)?;
+    }
+    crate::history::capture_version(root, &input.relative_path, input.content.as_bytes())?;
     crate::history::write_store(&path, input.content.as_bytes())?;
     if crate::history::record(root, &input.relative_path, author, tool).is_err() {
         eprintln!("[wiki] file written; history recording failed");
@@ -1531,6 +1542,16 @@ fn stage_import_folder(
         )?;
         if let Err(error) = append_source_tasks(&root, &project_id, std::slice::from_mut(&mut staged), true) {
             skipped.push(WikiSourceSkip::new(relative_inside_folder, format!("{error:?}")));
+            continue;
+        }
+        let custody = match std::fs::read(&destination) {
+            Ok(bytes) => crate::history::capture_version(&root, &staged.source_relative_path, &bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(WikiFailure::io(path_text(&destination), error)),
+        };
+        if let Err(failure) = custody {
+            source_execution(&staged)?.finish(&Err::<(), _>(failure))?;
+            skipped.push(WikiSourceSkip::new(relative_inside_folder, "source version custody failed".to_owned()));
             continue;
         }
         if let Err(error) = std::fs::copy(&source, &destination) {
@@ -1904,6 +1925,7 @@ pub(super) fn read_snapshot_entry(
     let metadata =
         std::fs::metadata(&path).map_err(|error| WikiFailure::io(path_text(&path), error))?;
     let bytes = std::fs::read(&path).map_err(|error| WikiFailure::io(path_text(&path), error))?;
+    crate::history::capture_version(root, relative_path, &bytes)?;
     Ok(Some(FileSnapshotEntry {
         revision: stable_content_hash(&bytes),
         size: metadata.len(),
@@ -4778,6 +4800,7 @@ fn collect_snapshot_entries(
         }
         let bytes =
             std::fs::read(&path).map_err(|error| WikiFailure::io(path_text(&path), error))?;
+        crate::history::capture_version(root, &relative_path, &bytes)?;
         entries.insert(
             relative_path,
             FileSnapshotEntry {

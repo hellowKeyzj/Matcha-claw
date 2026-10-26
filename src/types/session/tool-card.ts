@@ -13,6 +13,7 @@ export interface SessionRenderAttachedFile {
   attachmentStatus?: SessionRenderAttachmentStatus;
   filePath?: string;
   gatewayUrl?: string;
+  mediaReference?: string;
   source?: 'user-upload' | 'tool-result' | 'message-ref';
 }
 

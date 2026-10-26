@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { FilePreviewBody } from '@/components/file-preview/FilePreviewBody';
-import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
-import type { SessionIdentity } from '../../src/types/desktop/runtime-address';
+import type { ReactNode } from 'react';
+import { FilePreviewBody } from '@/plugins/files/FilePreviewBody';
+import type { ArtifactPreviewTarget } from '@/plugins/files/types';
+import type { AgentScope } from '../../src/types/desktop/runtime-address';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { applicationShellPlugin } from '@/app/extensions';
+import { filesPlugin } from '@/plugins/files/plugin';
 
 const hostFileReadTextMock = vi.fn();
 const hostFileReadBinaryMock = vi.fn();
@@ -13,17 +18,23 @@ const revealArtifactPathInFileManagerMock = vi.fn();
 const createObjectUrlMock = vi.fn(() => 'blob:mock-image-url');
 const revokeObjectUrlMock = vi.fn();
 const NativeUrl = URL;
-const sessionIdentity: SessionIdentity = {
+const agentScope: AgentScope = {
   endpoint: {
     kind: 'native-runtime',
     runtimeAdapterId: 'openclaw',
     runtimeInstanceId: 'local',
   },
   agentId: 'main',
-  sessionKey: 'agent:main:main',
 };
+const workspaceContext = { agentScope, workspaceRoot: '/workspace' };
+const pluginHost = createPluginHost([applicationShellPlugin, filesPlugin]);
 
-vi.mock('react-i18next', () => ({
+function FilesPlugins({ children }: { children: ReactNode }) {
+  return <PluginHostProvider host={pluginHost}>{children}</PluginHostProvider>;
+}
+
+vi.mock('react-i18next', async (importOriginal) => ({
+  ...await importOriginal<typeof import('react-i18next')>(),
   useTranslation: () => ({
     t: (key: string, options?: Record<string, unknown>) => {
       if (key === 'artifacts.previewLoadFailed') {
@@ -43,7 +54,7 @@ vi.mock('@/lib/api-client', () => ({
   invokeIpc: (...args: unknown[]) => invokeIpcMock(...args),
 }));
 
-vi.mock('@/components/file-preview/open-file-utils', () => ({
+vi.mock('@/plugins/files/open-file-utils', () => ({
   shouldOfferDirectOpenFallback: (ext?: string | null, size?: number) => (
     !!ext && ['.pdf', '.xls', '.xlsx'].includes(ext.toLowerCase()) && typeof size === 'number' && size > 2 * 1024 * 1024
   ),
@@ -52,27 +63,27 @@ vi.mock('@/components/file-preview/open-file-utils', () => ({
   revealArtifactPathInFileManager: (...args: unknown[]) => revealArtifactPathInFileManagerMock(...args),
 }));
 
-vi.mock('@/components/file-preview/MonacoViewer', () => ({
+vi.mock('@/plugins/files/MonacoViewer', () => ({
   MonacoViewer: ({ value }: { value: string }) => <div data-testid="monaco-viewer">{value}</div>,
 }));
 
-vi.mock('@/components/file-preview/MonacoDiffViewer', () => ({
+vi.mock('@/plugins/files/MonacoDiffViewer', () => ({
   MonacoDiffViewer: () => <div data-testid="monaco-diff-viewer" />,
 }));
 
-vi.mock('@/components/file-preview/MarkdownPreview', () => ({
+vi.mock('@/plugins/files/MarkdownPreview', () => ({
   MarkdownPreview: ({ markdown }: { markdown: string }) => <div data-testid="markdown-preview">{markdown}</div>,
 }));
 
-vi.mock('@/components/file-preview/HtmlPreview', () => ({
+vi.mock('@/plugins/files/HtmlPreview', () => ({
   HtmlPreview: ({ source }: { source: string }) => <iframe data-testid="html-preview-frame" srcDoc={source} sandbox="" />,
 }));
 
-vi.mock('@/components/file-preview/PdfViewer', () => ({
+vi.mock('@/plugins/files/PdfViewer', () => ({
   PdfViewer: () => <div data-testid="pdf-viewer" />,
 }));
 
-vi.mock('@/components/file-preview/SheetViewer', () => ({
+vi.mock('@/plugins/files/SheetViewer', () => ({
   SheetViewer: () => <div data-testid="sheet-viewer" />,
 }));
 
@@ -107,15 +118,14 @@ describe('file preview body', () => {
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.ts',
       relativePath: 'demo.ts',
-      sessionIdentity,
     };
 
-    render(<FilePreviewBody file={file} mode="preview" />);
+    render(<FilePreviewBody file={file} mode="preview" workspaceContext={workspaceContext} />, { wrapper: FilesPlugins });
 
     await waitFor(() => {
       expect(hostFileReadTextMock).toHaveBeenCalledWith({
-        endpoint: sessionIdentity.endpoint,
-        sessionKey: sessionIdentity.sessionKey,
+        endpoint: agentScope.endpoint,
+        agentId: agentScope.agentId,
         relativePath: 'demo.ts',
       });
     });
@@ -141,15 +151,14 @@ describe('file preview body', () => {
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.html',
       relativePath: 'demo.html',
-      sessionIdentity,
     };
 
-    render(<FilePreviewBody file={file} mode="preview" />);
+    render(<FilePreviewBody file={file} mode="preview" workspaceContext={workspaceContext} />, { wrapper: FilesPlugins });
 
     await waitFor(() => {
       expect(hostFileReadTextMock).toHaveBeenCalledWith({
-        endpoint: sessionIdentity.endpoint,
-        sessionKey: sessionIdentity.sessionKey,
+        endpoint: agentScope.endpoint,
+        agentId: agentScope.agentId,
         relativePath: 'demo.html',
       });
     });
@@ -177,15 +186,14 @@ describe('file preview body', () => {
       lineStats: { added: 0, removed: 0 },
       toolId: 'workspace:/workspace/demo.png',
       relativePath: 'images/demo.png',
-      sessionIdentity,
     };
 
-    render(<FilePreviewBody file={file} mode="preview" />);
+    render(<FilePreviewBody file={file} mode="preview" workspaceContext={workspaceContext} />, { wrapper: FilesPlugins });
 
     await waitFor(() => {
       expect(hostFileReadBinaryMock).toHaveBeenCalledWith({
-        endpoint: sessionIdentity.endpoint,
-        sessionKey: sessionIdentity.sessionKey,
+        endpoint: agentScope.endpoint,
+        agentId: agentScope.agentId,
         relativePath: 'images/demo.png',
         maxBytes: 50 * 1024 * 1024,
       });
@@ -211,7 +219,7 @@ describe('file preview body', () => {
       fileSize: 60 * 1024 * 1024,
     };
 
-    render(<FilePreviewBody file={file} mode="preview" />);
+    render(<FilePreviewBody file={file} mode="preview" />, { wrapper: FilesPlugins });
 
     fireEvent.click(screen.getAllByRole('button', { name: 'artifacts.openDirectly' }).at(-1)!);
     fireEvent.click(screen.getAllByRole('button', { name: 'artifacts.reveal' }).at(-1)!);

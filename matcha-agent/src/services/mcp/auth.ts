@@ -34,6 +34,7 @@ import xss from 'xss'
 import { MCP_CLIENT_METADATA_URL } from '../../constants/oauth.js'
 import { openBrowser } from '../../utils/browser.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import { createCombinedAbortSignal } from '../../utils/combinedAbortSignal.js'
 import { errorMessage, getErrnoCode } from '../../utils/errors.js'
 import * as lockfile from '../../utils/lockfile.js'
 import { logMCPDebug } from '../../utils/log.js'
@@ -164,43 +165,20 @@ export async function normalizeOAuthErrorBody(
  * Used by ClaudeAuthProvider for metadata discovery and token refresh.
  * Prevents stale timeout signals from affecting auth operations.
  */
-function createAuthFetch(): FetchLike {
+function createAuthFetch(abortSignal?: AbortSignal): FetchLike {
   return async (url: string | URL, init?: RequestInit) => {
-    const timeoutSignal = AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS)
-    const isPost = init?.method?.toUpperCase() === 'POST'
-
-    // No existing signal - just use timeout
-    if (!init?.signal) {
-      // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
-      const response = await fetch(url, { ...init, signal: timeoutSignal })
-      return isPost ? normalizeOAuthErrorBody(response) : response
-    }
-
-    // Combine signals: abort when either fires
-    const controller = new AbortController()
-    const abort = () => controller.abort()
-
-    init.signal.addEventListener('abort', abort)
-    timeoutSignal.addEventListener('abort', abort)
-
-    // Cleanup to prevent event listener leaks after fetch completes
-    const cleanup = () => {
-      init.signal?.removeEventListener('abort', abort)
-      timeoutSignal.removeEventListener('abort', abort)
-    }
-
-    if (init.signal.aborted) {
-      controller.abort()
-    }
-
+    const combined = createCombinedAbortSignal(abortSignal, {
+      signalB: init?.signal ?? undefined,
+      timeoutMs: AUTH_REQUEST_TIMEOUT_MS,
+    })
     try {
       // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
-      const response = await fetch(url, { ...init, signal: controller.signal })
-      cleanup()
-      return isPost ? normalizeOAuthErrorBody(response) : response
-    } catch (error) {
-      cleanup()
-      throw error
+      const response = await fetch(url, { ...init, signal: combined.signal })
+      return init?.method?.toUpperCase() === 'POST'
+        ? await normalizeOAuthErrorBody(response)
+        : response
+    } finally {
+      combined.cleanup()
     }
   }
 }
@@ -309,6 +287,17 @@ export function getServerKey(
   return `${serverName}|${hash}`
 }
 
+export function getMcpOAuthCredentialState(
+  serverName: string,
+  serverConfig: McpSSEServerConfig | McpHTTPServerConfig,
+): 'authorized' | 'unauthenticated' {
+  clearKeychainCache()
+  const entry = getSecureStorage().read()?.mcpOAuth?.[getServerKey(serverName, serverConfig)]
+  return entry?.refreshToken || (entry?.accessToken && entry.expiresAt > Date.now())
+    ? 'authorized'
+    : 'unauthenticated'
+}
+
 /**
  * True when we have probed this server before (OAuth discovery state is
  * stored) but hold no credentials to try. A connection attempt in this
@@ -356,6 +345,7 @@ async function revokeToken({
   clientSecret,
   accessToken,
   authMethod = 'client_secret_basic',
+  signal,
 }: {
   serverName: string
   endpoint: string
@@ -365,6 +355,7 @@ async function revokeToken({
   clientSecret?: string
   accessToken?: string
   authMethod?: 'client_secret_basic' | 'client_secret_post'
+  signal?: AbortSignal
 }): Promise<void> {
   const params = new URLSearchParams()
   params.set('token', token)
@@ -397,7 +388,7 @@ async function revokeToken({
   }
 
   try {
-    await axios.post(endpoint, params, { headers })
+    await axios.post(endpoint, params, { headers, signal })
     logMCPDebug(serverName, `Successfully revoked ${tokenTypeHint}`)
   } catch (error: unknown) {
     // Fallback for non-RFC-7009-compliant servers that require Bearer auth
@@ -416,6 +407,7 @@ async function revokeToken({
       params.delete('client_secret')
       await axios.post(endpoint, params, {
         headers: { ...headers, Authorization: `Bearer ${accessToken}` },
+        signal,
       })
       logMCPDebug(
         serverName,
@@ -436,7 +428,7 @@ async function revokeToken({
 export async function revokeServerTokens(
   serverName: string,
   serverConfig: McpSSEServerConfig | McpHTTPServerConfig,
-  { preserveStepUpState = false }: { preserveStepUpState?: boolean } = {},
+  { preserveStepUpState = false, signal }: { preserveStepUpState?: boolean; signal?: AbortSignal } = {},
 ): Promise<void> {
   const storage = getSecureStorage()
   const existingData = storage.read()
@@ -456,6 +448,7 @@ export async function revokeServerTokens(
         serverName,
         asUrl,
         serverConfig.oauth?.authServerMetadataUrl,
+        createAuthFetch(signal),
       )
 
       if (!metadata) {
@@ -498,6 +491,7 @@ export async function revokeServerTokens(
                 clientSecret: tokenData.clientSecret,
                 accessToken: tokenData.accessToken,
                 authMethod,
+                signal,
               })
             } catch (error: unknown) {
               // Log but continue
@@ -520,6 +514,7 @@ export async function revokeServerTokens(
                 clientSecret: tokenData.clientSecret,
                 accessToken: tokenData.accessToken,
                 authMethod,
+                signal,
               })
             } catch (error: unknown) {
               logMCPDebug(
@@ -809,6 +804,7 @@ export async function performMCPOAuthFlow(
     onWaitingForCallback?: (submit: (callbackUrl: string) => void) => void
   },
 ): Promise<void> {
+  if (abortSignal?.aborted) throw new AuthenticationCancelledError()
   // XAA (SEP-990): if configured, bypass the per-server consent dance.
   // If the IdP id_token isn't cached, this pops the browser once at the IdP
   // (shared across all XAA servers for that issuer). Subsequent servers hit
@@ -926,13 +922,15 @@ export async function performMCPOAuthFlow(
       options?.skipBrowserOpen,
     )
 
+    const fetchFn = createAuthFetch(abortSignal)
+
     // Fetch and store OAuth metadata for scope information
     try {
       const metadata = await fetchAuthServerMetadata(
         serverName,
         serverConfig.url,
         serverConfig.oauth?.authServerMetadataUrl,
-        undefined,
+        fetchFn,
         wwwAuthParams.resourceMetadataUrl,
       )
       if (metadata) {
@@ -949,6 +947,8 @@ export async function performMCPOAuthFlow(
 
     // Get the OAuth state from the provider for validation
     const oauthState = await provider.state()
+    if (abortSignal?.aborted) throw new AuthenticationCancelledError()
+    let initialAuth: Promise<void> | undefined
 
     // Store the server, timeout, and abort listener references for cleanup
     let server: Server | null = null
@@ -1117,33 +1117,36 @@ export async function performMCPOAuthFlow(
         }
       })
 
-      server.listen(port, '127.0.0.1', async () => {
-        try {
-          logMCPDebug(serverName, `Starting SDK auth`)
+      server.listen(port, '127.0.0.1', () => {
+        initialAuth = (async () => {
+          try {
+            logMCPDebug(serverName, `Starting SDK auth`)
 
-          // First call to start the auth flow - should redirect
-          // Pass the scope and resource_metadata from WWW-Authenticate header if available
-          const result = await sdkAuth(provider, {
-            serverUrl: serverConfig.url,
-            scope: wwwAuthParams.scope,
-            resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
-          })
-          logMCPDebug(serverName, `Initial auth result: ${result}`)
+            // First call to start the auth flow - should redirect
+            // Pass the scope and resource_metadata from WWW-Authenticate header if available
+            const result = await sdkAuth(provider, {
+              serverUrl: serverConfig.url,
+              scope: wwwAuthParams.scope,
+              resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
+              fetchFn,
+            })
+            logMCPDebug(serverName, `Initial auth result: ${result}`)
 
-          if (result !== 'REDIRECT') {
+            if (result !== 'REDIRECT') {
+              logMCPDebug(
+                serverName,
+                `Unexpected auth result, expected REDIRECT: ${result}`,
+              )
+            }
+          } catch (error) {
             logMCPDebug(
               serverName,
-              `Unexpected auth result, expected REDIRECT: ${result}`,
+              `SDK auth error (${error instanceof Error ? error.constructor.name : 'unknown'})`,
             )
+            cleanup()
+            rejectOnce(new Error(`SDK auth failed: ${errorMessage(error)}`))
           }
-        } catch (error) {
-          logMCPDebug(
-            serverName,
-            `SDK auth error (${error instanceof Error ? error.constructor.name : 'unknown'})`,
-          )
-          cleanup()
-          rejectOnce(new Error(`SDK auth failed: ${errorMessage(error)}`))
-        }
+        })()
       })
 
       // Don't let the callback server or timeout pin the event loop — if the UI
@@ -1162,8 +1165,9 @@ export async function performMCPOAuthFlow(
         rejectOnce,
       )
       timeoutId.unref()
-    })
+    }).finally(async () => { await initialAuth })
 
+    if (abortSignal?.aborted) throw new AuthenticationCancelledError()
     authorizationCodeObtained = true
 
     // Now complete the auth flow with the received code
@@ -1172,6 +1176,7 @@ export async function performMCPOAuthFlow(
       serverUrl: serverConfig.url,
       authorizationCode,
       resourceMetadataUrl: wwwAuthParams.resourceMetadataUrl,
+      fetchFn,
     })
 
     logMCPDebug(serverName, `Auth result: ${result}`)

@@ -4,7 +4,9 @@ members = [
   "modules/fleet",
   "modules/organization",
   "external/clawhub",
+  "external/document-parser",
   "external/searxng",
+  "external/wasm-host",
   "modules/search",
   "integrations/matcha-agent",
   "integrations/openclaw",
@@ -25,6 +27,9 @@ members = [
   "modules/provider",
   "modules/sessions",
   "modules/wiki",
+  "modules/world",
+  "modules/world/protocol",
+  "modules/world/plugin-sdk",
   "modules/runtime-directory",
   "modules/plugins",
   "modules/skills",
@@ -44,44 +49,59 @@ license = "MIT"
 aes-gcm = "0.10"
 base64 = "0.22"
 chrono = "0.4"
+chrono-tz = "0.10"
 anydoc = "0.1.6"
 arrow-array = "57"
 arrow-schema = "57"
 calamine = "0.34.0"
+deadpool-postgres = "0.14"
 docx-rs = { version = "0.4.20", default-features = false }
 epub = "2.1.5"
 getrandom = "0.3"
 hkdf = "0.12"
+hmac = "0.12"
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
 futures-util = "0.3"
 html2text = { version = "0.17.1", default-features = false, features = ["xml"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 json5 = "1.3.1"
+jsonschema = { version = "0.59.0", default-features = false, features = ["arbitrary-precision"] }
 libc = "0.2"
 qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring", "zeroize"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots", "stream"] }
 rustls = { version = "0.23.35", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 lancedb = "0.27.2"
 mobi = "0.8"
 notify = "8"
+num-bigint = "0.4"
+num-traits = "0.2"
 office_oxide = "=0.1.2"
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-24"] }
 pdfium-render = "0.9"
+schemars = "1"
+semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
-zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 cron = "0.17"
 tokio = { version = "1.48", features = ["io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"] }
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["__rustls-tls", "connect", "handshake"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 zeroize = "1"
 uuid = { version = "1", features = ["v4"] }
+wasmtime = { version = "=49.0.3", default-features = false, features = ["std", "runtime", "cranelift", "async", "component-model"] }
+wit-parser = { version = "0.258.3", default-features = false, features = ["std"] }
+wit-component = { version = "0.258.3", default-features = false }
+wit-bindgen = { version = "0.57.1", default-features = false, features = ["macros", "realloc", "std"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
@@ -93,6 +113,25 @@ windows-sys = { version = "0.61", features = [
   "Wdk_Storage_FileSystem",
   "Wdk_System_SystemServices",
 ] }
+
+[patch.crates-io]
+wit-bindgen-core = { path = "external/wit-bindgen-core" }
+wit-bindgen-rust = { path = "external/wit-bindgen-rust" }
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package.cranelift-codegen]
+opt-level = 2
+
+[profile.dev.package.cranelift-frontend]
+opt-level = 2
+
+[profile.dev.package.regalloc2]
+opt-level = 2
+
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 2
 
 [profile.release]
 opt-level = "s"

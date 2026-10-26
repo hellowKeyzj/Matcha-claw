@@ -1,3 +1,4 @@
+import { logger } from '../../utils/logger';
 import { traceDebug, isTraceEnabled } from '../../utils/trace-logger';
 import {
   spawn,
@@ -13,9 +14,10 @@ import {
   type RuntimeHostControlOutput,
   type RuntimeHostSafeEvent,
 } from './control';
+import { createRuntimeHostProcessScope, type RuntimeHostProcessScope } from './process-scope';
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const MAX_READY_TIMEOUT_MS = 2_147_483_647;
-const MAX_LAUNCH_STDERR_BYTES = 4_096;
+const MAX_STDERR_CODE_UNITS = 4_096;
 
 export interface DirectRuntimeHostLaunch {
   readonly executablePath: string;
@@ -23,6 +25,8 @@ export interface DirectRuntimeHostLaunch {
   /** Exact bootstrap payload bytes from the delivery bootstrap builder. */
   readonly bootstrapBytes: Uint8Array;
   readonly environment: Readonly<Record<string, string>>;
+  readonly signal?: AbortSignal;
+  readonly onSpawn?: (host: DirectRuntimeHost, closed: Promise<void>) => void;
 }
 
 export type DirectRuntimeHostSpawnOptions = Readonly<{
@@ -57,6 +61,9 @@ export interface DirectRuntimeHostDependencies {
 
 export type DirectRuntimeHostDeliveryErrorCode =
   | 'SPAWN_FAILED'
+  | 'LAUNCH_ABORTED'
+  | 'PROCESS_SCOPE_FAILED'
+  | 'PROCESS_TREE_UNCONFIRMED'
   | 'READY_TIMEOUT'
   | 'CHILD_EXITED'
   | 'CHILD_FAILED'
@@ -123,6 +130,7 @@ export async function launchDirectRuntimeHost(
   dependencies: DirectRuntimeHostDependencies = {},
 ): Promise<DirectRuntimeHost> {
   const readyTimeoutMs = resolveReadyTimeoutMs(dependencies.readyTimeoutMs);
+  if (launch.signal?.aborted) throw new DirectRuntimeHostDeliveryError('LAUNCH_ABORTED');
   const child = spawnDirectRuntimeHost(launch, dependencies.spawn ?? directRuntimeHostSpawn);
   traceDebug(() => ['[startup-trace]', {
     source: 'runtime-host',
@@ -131,6 +139,7 @@ export async function launchDirectRuntimeHost(
     ...(child.pid === undefined ? {} : { pid: child.pid }),
   }]);
   const stderr = captureLaunchStderr(child.stderr);
+  streamWorldStoreDiagnostics(child.stderr);
   streamRuntimeHostStartupTrace(child.stderr);
   const cronProviderTrace = captureE2ECronProviderTrace(child.stderr);
   const controlClient = new RuntimeHostControlClient({
@@ -141,32 +150,16 @@ export async function launchDirectRuntimeHost(
   // Publish disconnect before lifecycle observers detach this child's subscriptions.
   exit.onExit(() => controlClient.close());
 
-  try {
-    await writeBootstrapFrame(child.stdin, frameBootstrapBytes(launch.bootstrapBytes));
-    await waitUntilReady(controlClient, exit, readyTimeoutMs);
-    traceDebug(() => ['[startup-trace]', {
-      source: 'runtime-host',
-      phase: 'ready',
-      detail: 'control channel ready',
-      ...(child.pid === undefined ? {} : { pid: child.pid }),
-    }]);
-  } catch (error) {
-    controlClient.close();
-    await terminateFailedLaunch(child, exit);
-    if (error instanceof DirectRuntimeHostDeliveryError) throw error;
-    if (error instanceof RuntimeHostControlError) {
-      if (error.kind === 'provider-migration-failed') {
-        throw new DirectRuntimeHostDeliveryError('CHILD_FAILED', undefined, error.kind);
-      }
-      throw exit.controlFailure();
-    }
-    throw new DirectRuntimeHostDeliveryError('CHILD_FAILED');
-  }
-
+  let processScope: RuntimeHostProcessScope | undefined;
   let gracefulStop: Promise<void> | undefined;
   let forceTermination: Promise<void> | undefined;
-
-  return {
+  const closed = exit.completion.then(async () => {
+    if (!processScope) return;
+    await processScope.close();
+    logger.info('[RuntimeHost] process scope closed:', { pid: child.pid, activeProcesses: 0 });
+  });
+  void closed.catch(() => undefined);
+  const host: DirectRuntimeHost = {
     ...(child.pid === undefined ? {} : { pid: child.pid }),
     command: (command, options) => controlClient.command(command, options),
     onSafeEvent: (handler) => controlClient.onSafeEvent(handler),
@@ -176,15 +169,65 @@ export async function launchDirectRuntimeHost(
     stop: () => {
       controlClient.close();
       if (forceTermination) return forceTermination;
-      gracefulStop ??= stopDirectRuntimeHost(child, exit);
+      gracefulStop ??= (async () => {
+        try { await stopDirectRuntimeHost(child, exit); }
+        finally { await closed; }
+      })();
       return gracefulStop;
     },
     forceKill: () => {
       controlClient.close();
-      forceTermination ??= forceTerminateDirectRuntimeHost(child, exit);
+      forceTermination ??= (async () => {
+        if (processScope) await processScope.terminate();
+        await forceTerminateDirectRuntimeHost(child, exit);
+        await closed;
+        if (!dependencies.spawn && process.platform !== 'win32') {
+          throw new DirectRuntimeHostDeliveryError('PROCESS_TREE_UNCONFIRMED');
+        }
+      })();
       return forceTermination;
     },
   };
+  launch.onSpawn?.(host, closed);
+
+  try {
+    if (!dependencies.spawn && process.platform === 'win32' && child.pid !== undefined) {
+      try { processScope = createRuntimeHostProcessScope(child.pid, launch.executablePath); }
+      catch (error) {
+        logger.error('[RuntimeHost] process scope setup failed:', error);
+        throw new DirectRuntimeHostDeliveryError('PROCESS_SCOPE_FAILED');
+      }
+    }
+    await writeBootstrapFrame(child.stdin, frameBootstrapBytes(launch.bootstrapBytes));
+    await waitUntilReady(controlClient, exit, readyTimeoutMs, stderr.markReady);
+    traceDebug(() => ['[startup-trace]', {
+      source: 'runtime-host',
+      phase: 'ready',
+      detail: 'control channel ready',
+      ...(child.pid === undefined ? {} : { pid: child.pid }),
+    }]);
+  } catch (error) {
+    controlClient.close();
+    await processScope?.terminate();
+    await terminateFailedLaunch(child, exit);
+    await closed;
+    if (error instanceof DirectRuntimeHostDeliveryError) {
+      if (!error.diagnostic) throw error;
+      throw new DirectRuntimeHostDeliveryError(error.code, {
+        kind: error.diagnostic.kind,
+        stderr: stderr.read(),
+      }, error.startupFailure);
+    }
+    if (error instanceof RuntimeHostControlError) {
+      if (error.kind === 'provider-migration-failed') {
+        throw new DirectRuntimeHostDeliveryError('CHILD_FAILED', undefined, error.kind);
+      }
+      throw exit.controlFailure();
+    }
+    throw new DirectRuntimeHostDeliveryError('CHILD_FAILED');
+  }
+
+  return host;
 }
 
 function spawnDirectRuntimeHost(
@@ -227,7 +270,7 @@ function normalizeEnvironmentName(name: string): string {
 
 function monitorChildExit(
   child: DirectRuntimeHostChild,
-  stderr: () => string,
+  stderr: ReturnType<typeof captureLaunchStderr>,
   onError: () => void,
 ): ChildExitMonitor {
   let finished = false;
@@ -242,19 +285,16 @@ function monitorChildExit(
 
     finished = true;
     observed = exit;
-    resolveCompletion(exit);
     for (const listener of listeners) listener(exit);
     listeners.clear();
   };
   child.once('exit', (code, signal) => {
-    const abnormalExit = code !== 0 || signal !== null;
     traceDebug(() => ['[startup-trace]', {
       source: 'runtime-host',
       phase: 'exit',
       detail: 'process exited',
       code,
       signal,
-      ...(abnormalExit ? { stderr: stderr() } : {}),
     }]);
     finish({ kind: 'exited', code, signal });
   });
@@ -267,7 +307,18 @@ function monitorChildExit(
     onError();
   });
   child.once('close', (code, signal) => {
-    finish(child.pid === undefined ? { kind: 'failed' } : { kind: 'exited', code, signal });
+    const completion: DirectRuntimeHostExit = child.pid === undefined
+      ? { kind: 'failed' }
+      : { kind: 'exited', code, signal };
+    if (stderr.isReady() && (code !== 0 || signal !== null)) {
+      logger.error('[RuntimeHost] process exit diagnostic:', {
+        code,
+        signal,
+        stderr: stderr.read(),
+      });
+    }
+    finish(completion);
+    resolveCompletion(completion);
   });
   return {
     completion,
@@ -276,16 +327,16 @@ function monitorChildExit(
       completion.kind === 'exited' ? 'CHILD_EXITED' : 'CHILD_FAILED',
       {
         kind: completion.kind === 'exited' ? 'child-exited' : 'child-failed',
-        stderr: stderr(),
+        stderr: stderr.read(),
       },
     ),
     controlFailure: () => new DirectRuntimeHostDeliveryError('CHILD_FAILED', {
       kind: 'child-failed',
-      stderr: stderr(),
+      stderr: stderr.read(),
     }),
     readyTimeout: () => new DirectRuntimeHostDeliveryError('READY_TIMEOUT', {
       kind: 'child-failed',
-      stderr: stderr(),
+      stderr: stderr.read(),
     }),
     onExit: (handler) => {
       if (observed) {
@@ -302,8 +353,7 @@ async function terminateFailedLaunch(
   child: DirectRuntimeHostChild,
   exit: ChildExitMonitor,
 ): Promise<void> {
-  if (exit.isFinished()) return;
-  if (child.pid === undefined) {
+  if (exit.isFinished() || child.pid === undefined) {
     await exit.completion;
     return;
   }
@@ -311,13 +361,9 @@ async function terminateFailedLaunch(
   try {
     child.kill('SIGKILL');
   } catch {
-    return;
+    // A failed kill is not evidence that the child's stdio has drained.
   }
-  try {
-    await exit.completion;
-  } catch {
-    return;
-  }
+  await exit.completion;
 }
 
 async function stopDirectRuntimeHost(
@@ -371,6 +417,7 @@ function waitUntilReady(
   controlClient: RuntimeHostControlClient,
   exit: ChildExitMonitor,
   timeoutMs: number,
+  onReady: () => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -388,6 +435,7 @@ function waitUntilReady(
       stopWaitingForReady?.();
       stopWaitingForDisconnect?.();
       stopWaitingForExit?.();
+      onReady();
       resolve();
     };
     const rejectWhenPending = (error: Error): void => {
@@ -424,13 +472,85 @@ function waitUntilReady(
   });
 }
 
-function captureLaunchStderr(output: RuntimeHostControlOutput): () => string {
+function captureLaunchStderr(output: RuntimeHostControlOutput) {
   let captured = '';
+  let ready = false;
+  let startsAtLineStart = true;
+  let endsAtLineStart = true;
   output.on('data', (chunk: unknown) => {
-    if (captured.length >= MAX_LAUNCH_STDERR_BYTES) return;
-    captured += Buffer.from(chunk as Uint8Array).toString('utf8').slice(0, MAX_LAUNCH_STDERR_BYTES - captured.length);
+    const text = Buffer.from(chunk as Uint8Array).toString('utf8');
+    if (!ready) {
+      captured += text.slice(0, MAX_STDERR_CODE_UNITS - captured.length);
+    } else {
+      const combined = captured + text;
+      const offset = Math.max(0, combined.length - MAX_STDERR_CODE_UNITS);
+      if (offset > 0) startsAtLineStart = combined[offset - 1] === '\n';
+      captured = combined.slice(offset);
+    }
+    if (text.length > 0) endsAtLineStart = text.endsWith('\n');
   });
-  return () => redactLaunchStderr(captured);
+  return {
+    markReady: () => {
+      ready = true;
+      captured = '';
+      startsAtLineStart = endsAtLineStart;
+    },
+    isReady: () => ready,
+    read: () => {
+      const newline = ready && !startsAtLineStart ? captured.indexOf('\n') : -1;
+      const value = ready && !startsAtLineStart
+        ? (newline === -1 ? '' : captured.slice(newline + 1))
+        : captured;
+      const redacted = redactLaunchStderr(value);
+      return ready
+        ? redacted.slice(-MAX_STDERR_CODE_UNITS)
+        : redacted.slice(0, MAX_STDERR_CODE_UNITS);
+    },
+  };
+}
+
+function streamWorldStoreDiagnostics(output: RuntimeHostControlOutput): void {
+  let buffered = '';
+  let discarding = false;
+  output.on('data', (chunk: unknown) => {
+    const fragments = Buffer.from(chunk as Uint8Array).toString('utf8').split('\n');
+    for (let index = 0; index < fragments.length; index++) {
+      if (!discarding) {
+        if (buffered.length + fragments[index].length > 8192) {
+          buffered = '';
+          discarding = true;
+        } else buffered += fragments[index];
+      }
+      if (index === fragments.length - 1) continue;
+      if (!discarding && buffered.startsWith('{') && buffered.includes('"world-store-diagnostic"')) {
+        try { logWorldStoreDiagnostic(JSON.parse(buffered)); } catch { /* Non-diagnostic stderr is not a log payload. */ }
+      }
+      buffered = '';
+      discarding = false;
+    }
+  });
+}
+
+function logWorldStoreDiagnostic(value: unknown): void {
+  const object = (item: unknown): item is Record<string, unknown> => item !== null && typeof item === 'object' && !Array.isArray(item);
+  const identifier = (item: unknown): item is string => typeof item === 'string' && /^store-[0-9]{1,10}-[0-9]{1,20}$/.test(item);
+  const code = (item: unknown): item is string => typeof item === 'string' && /^world\.[a-z_]{1,96}$/.test(item);
+  const stage = (item: unknown): item is string => typeof item === 'string' && ['decode', 'admission', 'read', 'parse', 'generate', 'resolve', 'validate', 'compile', 'prepare', 'execute', 'verify', 'commit', 'activate', 'migrate', 'drain', 'stop', 'recover', 'disclose'].includes(item);
+  if (!object(value) || value.prefix !== 'world-store-diagnostic' || !identifier(value.diagnosticId)
+    || !code(value.code) || !stage(value.stage) || !Array.isArray(value.causes) || value.causes.length > 8) return;
+  const causes: Record<string, unknown>[] = [];
+  for (const cause of value.causes) {
+    if (!object(cause)) return;
+    if (cause.kind === 'store' && identifier(cause.diagnosticId) && code(cause.code) && stage(cause.stage)) {
+      causes.push({ kind: cause.kind, diagnosticId: cause.diagnosticId, code: cause.code, stage: cause.stage });
+    } else if (cause.kind === 'postgres' && typeof cause.closed === 'boolean'
+      && (cause.sqlstate === null || (typeof cause.sqlstate === 'string' && /^[0-9A-Z]{5}$/.test(cause.sqlstate)))) {
+      causes.push({ kind: cause.kind, sqlstate: cause.sqlstate, closed: cause.closed });
+    } else if (typeof cause.kind === 'string' && ['io_connection_refused', 'io_connection_reset', 'io_connection_aborted', 'io_not_connected', 'io_timed_out', 'io_permission_denied', 'io_other', 'pool_closed', 'pool_timeout', 'pool_backend', 'pool_other', 'timeout', 'postgres_parameter_type', 'json', 'unclassified'].includes(cause.kind)) {
+      causes.push({ kind: cause.kind });
+    } else return;
+  }
+  logger.warn('[World] Storage diagnostic', { diagnosticId: value.diagnosticId, code: value.code, stage: value.stage, causes });
 }
 
 function streamRuntimeHostStartupTrace(output: RuntimeHostControlOutput): void {
@@ -500,6 +620,12 @@ function directRuntimeHostDeliveryErrorMessage(code: DirectRuntimeHostDeliveryEr
   switch (code) {
     case 'SPAWN_FAILED':
       return 'Runtime-host process could not be started.';
+    case 'LAUNCH_ABORTED':
+      return 'Runtime-host launch was cancelled during application shutdown.';
+    case 'PROCESS_SCOPE_FAILED':
+      return 'Runtime-host process tree could not be contained.';
+    case 'PROCESS_TREE_UNCONFIRMED':
+      return 'Runtime-host exited but descendant termination could not be confirmed on this platform.';
     case 'READY_TIMEOUT':
       return 'Runtime-host process did not become ready.';
     case 'CHILD_EXITED':

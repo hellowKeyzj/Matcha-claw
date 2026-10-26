@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyAssistantPresentationToItems,
   type ChatAssistantTurnItem,
-} from '@/pages/Chat/chat-render-item-model';
+} from '@/plugins/message-rendering/chat-render-item-model';
 import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 

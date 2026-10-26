@@ -15,6 +15,7 @@ import { handleCapabilityRoutes } from './routes/capabilities';
 import { handleCallRoutes } from './routes/calls';
 import { handleAgentsRoutes } from './routes/agents';
 import { handleAppRoutes, handleMainAppRoutes } from './routes/app';
+import { handleAppPluginRoutes } from './routes/app-plugins';
 import { handleChannelAuthorizationRoutes } from './routes/channel-authorization';
 import { handleChannelCatalogRoutes } from './routes/channel-catalog';
 import { handleChannelConfigureRoutes } from './routes/channel-configure';
@@ -71,6 +72,7 @@ import { handleTeamWebhookAuthRoutes } from './routes/team-webhook-auth';
 import { handleToolchainRoutes } from './routes/toolchain';
 import { handleUsageRoutes } from './routes/usage';
 import { handleWikiRoutes } from './routes/wiki';
+import { handleWorldRoutes } from '../main/world/routes';
 import { proxyFleetRuntimeAgentIngress, proxyFleetTerminalStreamUpgrade } from '../main/runtime-host-delivery/transport/fleet';
 import {
   isHostApiProxyWebSocketRoute,
@@ -90,6 +92,7 @@ type RouteHandler<Context> = (
 
 const mainRouteHandlers: readonly RouteHandler<MainHostApiContext>[] = [
   handleMainAppRoutes,
+  handleAppPluginRoutes,
   handleAccountRoutes,
   handleBillingRoutes,
   handleLicenseRoutes,
@@ -186,6 +189,7 @@ const runtimeRouteHandlers: readonly RouteHandler<HostApiContext>[] = [
   (req, res, url, deps) => handleToolchainRoutes(req, res, url, deps.runtimeHostTransports.toolchainTransport),
   (req, res, url, deps) => handleUsageRoutes(req, res, url, deps.runtimeHostTransports.usageTransport),
   (req, res, url, deps) => handleWikiRoutes(req, res, url, deps.runtimeHostTransports.wikiTransport),
+  (req, res, url, deps) => handleWorldRoutes(req, res, url, deps.runtimeHostTransports.worldTransport),
 ];
 
 export type HostApiConnection = Readonly<{

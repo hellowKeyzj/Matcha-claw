@@ -13,7 +13,7 @@ use foundation::process::{
 };
 use zeroize::Zeroizing;
 
-use crate::gateway::auth::GatewaySecret;
+use crate::{gateway::auth::GatewaySecret, world::{WorldRuntimeHost, PROJECTION_ENV}};
 
 use platform::state_dir::CanonicalStateDir;
 
@@ -40,6 +40,7 @@ const MATCHA_SEALED_TOKEN: &str = "MATCHA_SEALED_TOKEN";
 const MATCHA_SEALED_RUNTIME: &str = "MATCHA_SEALED_RUNTIME";
 const OPENCLAW_SEALED_RUNTIME: &str = "openclaw";
 const OPENCLAW_NO_RESPAWN: &str = "OPENCLAW_NO_RESPAWN";
+const MATCHACLAW_OPENCLAW_OWNED_STDIN: &str = "MATCHACLAW_OPENCLAW_OWNED_STDIN";
 const OPENCLAW_DISABLE_BONJOUR: &str = "OPENCLAW_DISABLE_BONJOUR";
 const OPENCLAW_SKIP_CHANNELS: &str = "OPENCLAW_SKIP_CHANNELS";
 const CLAWDBOT_SKIP_CHANNELS: &str = "CLAWDBOT_SKIP_CHANNELS";
@@ -77,7 +78,7 @@ const NON_LEGACY_LAUNCH_ENV_KEYS: [&str; 7] = [
 ];
 const CANONICAL_CONFIG_FILE: &str = "openclaw.json";
 const OPENCLAW_STDIO: StdioSpec =
-    StdioSpec::new(StdioMode::Null, StdioMode::Piped, StdioMode::Piped);
+    StdioSpec::new(StdioMode::Piped, StdioMode::Piped, StdioMode::Piped);
 
 #[derive(Clone)]
 pub struct OpenClawLaunchInput {
@@ -88,6 +89,7 @@ pub struct OpenClawLaunchInput {
     pub state_dir: CanonicalStateDir,
     pub port: u16,
     pub secret: Arc<GatewaySecret>,
+    pub world_runtime_host: Option<WorldRuntimeHost>,
 }
 
 impl OpenClawLaunchInput {
@@ -109,6 +111,7 @@ impl OpenClawLaunchInput {
             state_dir: self.state_dir,
             port: self.port,
             secret: self.secret,
+            world_runtime_host: self.world_runtime_host,
             sealed_runtime_host,
         };
         factory.validate_spec()?;
@@ -143,6 +146,7 @@ pub struct LaunchFactory {
     state_dir: CanonicalStateDir,
     port: u16,
     secret: Arc<GatewaySecret>,
+    world_runtime_host: Option<WorldRuntimeHost>,
     sealed_runtime_host: Option<SealedRuntimeHost>,
 }
 
@@ -199,6 +203,7 @@ impl LaunchFactory {
             (MATCHACLAW_RUNTIME_HOST_GATEWAY_PORT.into(), gateway_port),
             (MATCHACLAW_RUNTIME_HOST_GATEWAY_TOKEN.into(), gateway_token),
             (OPENCLAW_NO_RESPAWN.into(), "1".into()),
+            (MATCHACLAW_OPENCLAW_OWNED_STDIN.into(), "1".into()),
             (OPENCLAW_DISABLE_BONJOUR.into(), "1".into()),
         ]);
         if let Some(sealed_runtime_host) = &self.sealed_runtime_host {
@@ -213,6 +218,9 @@ impl LaunchFactory {
                 ),
                 (MATCHA_SEALED_RUNTIME.into(), OPENCLAW_SEALED_RUNTIME.into()),
             ]);
+        }
+        if let Some(world) = &self.world_runtime_host {
+            public_environment.push((PROJECTION_ENV.into(), world.path().into_os_string()));
         }
         if skip_channels {
             public_environment.push((OPENCLAW_SKIP_CHANNELS.into(), "1".into()));
@@ -237,7 +245,7 @@ fn gateway_token_os_string(secret: &GatewaySecret) -> Result<OsString, LaunchErr
     Ok(value.into())
 }
 
-pub(super) fn base_launch_environment(
+pub(crate) fn base_launch_environment(
     working_directory: &Path,
 ) -> Result<Vec<(OsString, OsString)>, LaunchError> {
     let mut environment = sanitize_inherited_environment(std::env::vars_os());
@@ -292,7 +300,9 @@ fn is_managed_launch_env_key(key: &OsStr) -> bool {
         MATCHA_SEALED_ENDPOINT,
         MATCHA_SEALED_TOKEN,
         MATCHA_SEALED_RUNTIME,
+        PROJECTION_ENV,
         OPENCLAW_NO_RESPAWN,
+        MATCHACLAW_OPENCLAW_OWNED_STDIN,
         OPENCLAW_DISABLE_BONJOUR,
         OPENCLAW_SKIP_CHANNELS,
         CLAWDBOT_SKIP_CHANNELS,

@@ -1,0 +1,10 @@
+{
+  "electron": "44.3.0",
+  "chromium": "152.0.7977.78",
+  "pid": 16972,
+  "userData": "E:\\code\\Matcha-claw\\e2e\\.profiles\\licensed\\user-data",
+  "cwd": "E:\\code\\Matcha-claw",
+  "profileRoot": "E:\\code\\Matcha-claw\\e2e\\.profiles\\licensed",
+  "main": "E:\\code\\Matcha-claw\\e2e\\.cache\\app\\dist-electron\\main\\index.js",
+  "renderer": "file:///E:/code/Matcha-claw/e2e/.cache/app/dist/index.html"
+}

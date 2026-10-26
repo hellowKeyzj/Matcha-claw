@@ -150,6 +150,7 @@ import { execPromptHook } from './hooks/execPromptHook.js'
 import type { Message, AssistantMessage } from '../types/message.js'
 import { execAgentHook } from './hooks/execAgentHook.js'
 import { execHttpHook } from './hooks/execHttpHook.js'
+import { hasStructuredOutput } from './hooks/hookHelpers.js'
 import { hasActivePostSamplingHooks } from './hooks/postSamplingHooks.js'
 import type { ShellCommand } from './ShellCommand.js'
 import {
@@ -164,6 +165,14 @@ import type { AppState } from '../state/AppState.js'
 import { jsonStringify, jsonParse } from './slowOperations.js'
 import { isEnvTruthy } from './envUtils.js'
 import { errorMessage, getErrnoCode } from './errors.js'
+import {
+  assertInvestigationToolEffects,
+  currentInvestigationScope,
+  InvestigationAdmissionError,
+  investigationSignal,
+  requireInvestigationEffects,
+  trackInvestigationOperation,
+} from '../world/investigation.js'
 
 const TOOL_HOOK_EXECUTION_TIMEOUT_MS = 10 * 60 * 1000
 
@@ -849,6 +858,10 @@ async function execCommandHook(
   aborted?: boolean
   backgrounded?: boolean
 }> {
+  if (currentInvestigationScope()) {
+    throw new InvestigationAdmissionError('investigation_command_hook_effects_unbounded')
+  }
+
   // Gated to once-per-session events to keep diag_log volume bounded.
   // started/completed live inside the try/finally so setup-path throws
   // don't orphan a started marker — that'd be indistinguishable from a hang.
@@ -1540,6 +1553,7 @@ async function prepareIfConditionMatcher(
 
   const toolName = normalizeLegacyToolName(hookInput.tool_name as string)
   const tool = tools && findToolByName(tools, hookInput.tool_name as string)
+  if (tool) assertInvestigationToolEffects(tool)
   const input = tool?.inputSchema.safeParse(hookInput.tool_input)
   const patternMatcher =
     input?.success && tool?.preparePermissionMatcher
@@ -2005,7 +2019,8 @@ export async function getMatchingHooks(
       { level: 'verbose' },
     )
     return filteredHooks
-  } catch {
+  } catch (error) {
+    if (error instanceof InvestigationAdmissionError) throw error
     return []
   }
 }
@@ -2201,6 +2216,9 @@ async function* executeHooksImpl({
       : undefined
     for (const [i, { hook }] of matchingHooks.entries()) {
       if (hook.type === 'callback') {
+        if (currentInvestigationScope()) {
+          throw new InvestigationAdmissionError('investigation_callback_hook_effects_unbounded')
+        }
         await hook.callback(hookInput, toolUseID, signal, i, context)
       }
     }
@@ -2333,7 +2351,7 @@ async function* executeHooksImpl({
       }
 
       // Function hooks only come from session storage with callback embedded
-      yield executeFunctionHook({
+      yield trackInvestigationOperation(executeFunctionHook({
         hook,
         messages,
         hookName,
@@ -2341,7 +2359,7 @@ async function* executeHooksImpl({
         hookEvent,
         timeoutMs,
         signal,
-      })
+      }))
       return
     }
 
@@ -2381,7 +2399,7 @@ async function* executeHooksImpl({
             'ToolUseContext is required for prompt hooks. This is a bug.',
           )
         }
-        const promptResult = await execPromptHook(
+        const promptResult = await trackInvestigationOperation(execPromptHook(
           hook,
           hookName,
           hookEvent,
@@ -2390,7 +2408,7 @@ async function* executeHooksImpl({
           toolUseContext,
           messages,
           toolUseID,
-        )
+        ))
         // Inject timing fields for hook visibility
         if (promptResult.message?.type === 'attachment') {
           const att = promptResult.message.attachment!
@@ -2413,12 +2431,15 @@ async function* executeHooksImpl({
             'ToolUseContext is required for agent hooks. This is a bug.',
           )
         }
-        if (!messages) {
+        const agentMessages = messages ?? (
+          currentInvestigationScope() ? toolUseContext.messages : undefined
+        )
+        if (!agentMessages) {
           throw new Error(
             'Messages are required for agent hooks. This is a bug.',
           )
         }
-        const agentResult = await execAgentHook(
+        const agentResult = await trackInvestigationOperation(execAgentHook(
           hook,
           hookName,
           hookEvent,
@@ -2426,11 +2447,11 @@ async function* executeHooksImpl({
           abortSignal,
           toolUseContext,
           toolUseID,
-          messages,
+          agentMessages,
           'agent_type' in hookInput
             ? (hookInput.agent_type as string)
             : undefined,
-        )
+        ))
         // Inject timing fields for hook visibility
         if (agentResult.message?.type === 'attachment') {
           const att = agentResult.message.attachment!
@@ -2453,12 +2474,12 @@ async function* executeHooksImpl({
         // execHttpHook manages its own timeout internally via hook.timeout or
         // DEFAULT_HTTP_HOOK_TIMEOUT_MS, so pass the parent signal directly
         // to avoid double-stacking timeouts with abortSignal.
-        const httpResult = await execHttpHook(
+        const httpResult = await trackInvestigationOperation(execHttpHook(
           hook,
           hookEvent,
           jsonInput,
           signal,
-        )
+        ))
         cleanup?.()
 
         if (httpResult.aborted) {
@@ -2853,6 +2874,7 @@ async function* executeHooksImpl({
     } catch (error) {
       // Clean up on error
       cleanup?.()
+      if (error instanceof InvestigationAdmissionError) throw error
 
       const errorMessage =
         error instanceof Error ? error.message : String(error)
@@ -3073,8 +3095,12 @@ async function* executeHooksImpl({
       // Invoke onHookSuccess only on success outcome
       if (hookEntry?.onHookSuccess && result.outcome === 'success') {
         try {
+          if (currentInvestigationScope()) {
+            throw new InvestigationAdmissionError('investigation_hook_success_callback_effects_unbounded')
+          }
           hookEntry.onHookSuccess(result.hook, result as AggregatedHookResult)
         } catch (error) {
+          if (error instanceof InvestigationAdmissionError) throw error
           logError(
             Error('Session hook success callback failed', { cause: error }),
           )
@@ -3258,6 +3284,9 @@ async function executeHooksOutsideREPLImpl({
         )
 
         try {
+          if (currentInvestigationScope()) {
+            throw new InvestigationAdmissionError('investigation_callback_hook_effects_unbounded')
+          }
           const toolUseID = randomUUID()
           const json = await hook.callback(
             hookInput,
@@ -3300,6 +3329,7 @@ async function executeHooksOutsideREPLImpl({
           }
         } catch (error) {
           cleanup?.()
+          if (error instanceof InvestigationAdmissionError) throw error
 
           const errorMessage =
             error instanceof Error ? error.message : String(error)
@@ -3357,12 +3387,12 @@ async function executeHooksOutsideREPLImpl({
       // DEFAULT_HTTP_HOOK_TIMEOUT_MS, so we pass signal directly.
       if (hook.type === 'http') {
         try {
-          const httpResult = await execHttpHook(
+          const httpResult = await trackInvestigationOperation(execHttpHook(
             hook,
             hookEvent,
             jsonInput,
             signal,
-          )
+          ))
 
           if (httpResult.aborted) {
             logForDebugging(`${hookName} [${hook.url}] cancelled`)
@@ -3430,6 +3460,7 @@ async function executeHooksOutsideREPLImpl({
             blocked: !!jsonBlocked,
           }
         } catch (error) {
+          if (error instanceof InvestigationAdmissionError) throw error
           const errorMessage =
             error instanceof Error ? error.message : String(error)
           logForDebugging(
@@ -3532,6 +3563,7 @@ async function executeHooksOutsideREPLImpl({
       } catch (error) {
         // Clean up on error
         cleanup?.()
+        if (error instanceof InvestigationAdmissionError) throw error
 
         const errorMessage =
           error instanceof Error ? error.message : String(error)
@@ -4857,6 +4889,7 @@ export async function executeStatusLineCommand(
 
     return undefined
   } catch (error) {
+    if (error instanceof InvestigationAdmissionError) throw error
     logForDebugging(`Status hook failed: ${error}`, { level: 'error' })
     return undefined
   }
@@ -4927,6 +4960,7 @@ export async function executeFileSuggestionCommand(
       .map(line => line.trim())
       .filter(Boolean)
   } catch (error) {
+    if (error instanceof InvestigationAdmissionError) throw error
     logForDebugging(`File suggestion helper failed: ${error}`, {
       level: 'error',
     })
@@ -4951,8 +4985,15 @@ async function executeFunctionHook({
   timeoutMs: number
   signal?: AbortSignal
 }): Promise<HookResult> {
+  if (currentInvestigationScope()) {
+    if (hook.callback !== hasStructuredOutput) {
+      throw new InvestigationAdmissionError('investigation_function_hook_effects_unbounded')
+    }
+    requireInvestigationEffects(['pure'])
+  }
   const callbackTimeoutMs = hook.timeout ?? timeoutMs
   const { signal: abortSignal, cleanup } = createCombinedAbortSignal(signal, {
+    signalB: investigationSignal(),
     timeoutMs: callbackTimeoutMs,
   })
 
@@ -4967,7 +5008,9 @@ async function executeFunctionHook({
     }
 
     // Execute callback with abort signal
-    const passed = await new Promise<boolean>((resolve, reject) => {
+    const passed = currentInvestigationScope()
+      ? await hook.callback(messages, abortSignal)
+      : await new Promise<boolean>((resolve, reject) => {
       // Handle abort signal
       const onAbort = () => reject(new Error('Function hook cancelled'))
       abortSignal.addEventListener('abort', onAbort)
@@ -5002,6 +5045,7 @@ async function executeFunctionHook({
     }
   } catch (error) {
     cleanup()
+    if (error instanceof InvestigationAdmissionError) throw error
 
     // Handle cancellation
     if (
@@ -5051,6 +5095,10 @@ async function executeHookCallback({
   hookIndex?: number
   toolUseContext?: ToolUseContext
 }): Promise<HookResult> {
+  if (currentInvestigationScope()) {
+    throw new InvestigationAdmissionError('investigation_callback_hook_effects_unbounded')
+  }
+
   // Create context for callbacks that need state access
   const context = toolUseContext
     ? {

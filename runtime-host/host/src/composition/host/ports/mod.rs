@@ -1,10 +1,19 @@
 mod cron_history;
 mod diagnostics_archive;
 pub(crate) mod organization;
+pub(crate) mod postgres;
 pub(crate) mod search;
 pub(crate) mod tasks;
 mod team_member_introductions;
 mod wiki_ingest_llm;
+pub(crate) mod world_generation;
+pub(crate) mod world_investigation;
+pub(crate) mod world_locator;
+pub(crate) mod world_native;
+pub(crate) mod world_resources;
+pub(crate) mod world_sources;
+pub(crate) mod world_storage;
+pub(crate) mod world_wiki;
 
 pub(in crate::composition::host) use cron_history::CronSessionHistory;
 pub(in crate::composition::host) use diagnostics_archive::HostDiagnostics;

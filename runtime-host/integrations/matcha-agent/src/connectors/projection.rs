@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use connectors::{
     Connector, ConnectorCatalog, ConnectorKind, ConnectorSecretRef, ConnectorSecretResolution,
-    ConnectorSecretResolverPort, McpTransport, ports::McpPreset,
+    ConnectorSecretResolverPort, McpAuth, McpTransport, ports::McpPreset,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -46,12 +46,8 @@ pub(super) async fn params(
         if connector.cwd().is_some() || connector.connection_timeout_ms().is_some() {
             return Err(ConnectorError::UnsupportedConfiguration);
         }
-        let server_name = if connector.id().starts_with("matcha-external.") {
-            connector.id().to_owned()
-        } else {
-            format!("matcha-external.{}", connector.id())
-        };
-        let server = match connector.kind() {
+        let server_name = server_name(connector.id());
+        let mut server = match connector.kind() {
             ConnectorKind::McpStdio => json!({
                 "type":"stdio", "command":connector.command().ok_or(ConnectorError::UnsupportedConfiguration)?,
                 "args":connector.args().unwrap_or_default(),
@@ -64,12 +60,25 @@ pub(super) async fn params(
             }),
             _ => unreachable!(),
         };
-        servers.insert(
-            server_name,
-            json!({"enabled":connector.enabled(),"server":server}),
-        );
+        if connector.auth() == Some(McpAuth::OAuth) {
+            server["oauth"] = json!({});
+        }
+        if servers
+            .insert(server_name, json!({"enabled":connector.enabled(),"server":server}))
+            .is_some()
+        {
+            return Err(ConnectorError::UnsupportedConfiguration);
+        }
     }
     Ok(json!({"servers":servers,"privateSources":private_sources}))
+}
+
+pub(super) fn server_name(id: &str) -> String {
+    if id.starts_with("matcha-external.") {
+        id.to_owned()
+    } else {
+        format!("matcha-external.{id}")
+    }
 }
 
 async fn values<'a>(

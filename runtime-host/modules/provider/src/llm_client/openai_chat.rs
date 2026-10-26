@@ -32,8 +32,9 @@ pub struct OpenAiChatHttpRequest {
 pub async fn generate(
     http: &reqwest::Client,
     request: LlmRequest,
+    observation: Option<&mut super::observation::Observation>,
 ) -> Result<LlmResponse, LlmClientError> {
-    let response = send_json(http, openai_request(request, false)).await?;
+    let response = send_json(http, openai_request(request, false), observation).await?;
     Ok(parse_openai_chat_text_response(&response))
 }
 
@@ -41,18 +42,25 @@ pub async fn stream_generate(
     http: &reqwest::Client,
     request: LlmRequest,
     sink: &mut dyn LlmStreamSink,
+    mut observation: Option<&mut super::observation::Observation>,
 ) -> Result<(), LlmClientError> {
     let started = platform::trace::enabled().then(Instant::now);
-    let response = request_builder(http, &openai_request(request, true))
+    let response = request_builder(http, &openai_request(request, true), observation.is_some())
         .send()
         .await?;
     let status = response.status();
+    if let Some(observation) = observation.as_deref_mut() { observation.headers(&response); }
     session_trace("runtime.team.provider.http.response", || json!({
         "protocol": "open_ai_completions", "statusCode": status.as_u16(), "streaming": true,
         "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
     }));
     if !status.is_success() {
         let text = response.text().await?;
+        if let Some(observation) = observation.as_deref_mut() {
+            if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+                observation.payload(crate::ProviderApiProtocol::OpenAiCompletions, &payload);
+            }
+        }
         let error = serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|payload| parse_openai_chat_error(&payload))
@@ -63,7 +71,8 @@ pub async fn stream_generate(
         });
     }
 
-    super::consume_sse(response, sink, parse_openai_chat_sse_chunk).await
+    super::consume_sse(response, sink, parse_openai_chat_sse_chunk,
+        observation.map(|observation| (observation, crate::ProviderApiProtocol::OpenAiCompletions))).await
 }
 
 pub fn build_openai_chat_http_request(request: &OpenAiChatRequest) -> OpenAiChatHttpRequest {
@@ -163,10 +172,12 @@ pub fn parse_openai_chat_error(payload: &Value) -> Option<String> {
 async fn send_json(
     http: &reqwest::Client,
     request: OpenAiChatRequest,
+    mut observation: Option<&mut super::observation::Observation>,
 ) -> Result<Value, LlmClientError> {
     let started = platform::trace::enabled().then(Instant::now);
-    let response = request_builder(http, &request).send().await?;
+    let response = request_builder(http, &request, false).send().await?;
     let status = response.status();
+    if let Some(observation) = observation.as_deref_mut() { observation.headers(&response); }
     session_trace("runtime.team.provider.http.response", || json!({
         "protocol": "open_ai_completions", "statusCode": status.as_u16(), "streaming": false,
         "elapsedMs": started.map(|started| started.elapsed().as_millis() as u64),
@@ -184,6 +195,7 @@ async fn send_json(
             }
         }
     })?;
+    if let Some(observation) = observation { observation.payload(crate::ProviderApiProtocol::OpenAiCompletions, &payload); }
     if status.is_success() {
         Ok(payload)
     } else {
@@ -195,8 +207,11 @@ async fn send_json(
     }
 }
 
-fn request_builder(http: &reqwest::Client, request: &OpenAiChatRequest) -> reqwest::RequestBuilder {
-    let request = build_openai_chat_http_request(request);
+fn request_builder(http: &reqwest::Client, request: &OpenAiChatRequest, include_usage: bool) -> reqwest::RequestBuilder {
+    let mut request = build_openai_chat_http_request(request);
+    if include_usage {
+        request.body["stream_options"] = json!({ "include_usage": true });
+    }
     let mut builder = http.post(&request.endpoint);
     for (name, value) in request.headers {
         builder = builder.header(name, value);
@@ -344,7 +359,7 @@ fn extract_content_text(content: &Value) -> String {
         .join("")
 }
 
-fn map_finish_reason(reason: &str) -> LlmFinishReason {
+pub(super) fn map_finish_reason(reason: &str) -> LlmFinishReason {
     match reason {
         "stop" => LlmFinishReason::Stop,
         "length" => LlmFinishReason::Length,

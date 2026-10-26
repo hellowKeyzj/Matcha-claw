@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { toast } from 'sonner';
-import { SubAgents } from '@/pages/SubAgents';
-import { useRuntimeHostStore } from '@/stores/gateway';
-import { useAgentSkillConfigStore, __resetAgentSkillConfigStoreInternalCachesForTest } from '@/stores/agent-skill-config';
-import { useAgentToolConfigStore, __resetAgentToolConfigStoreInternalCachesForTest } from '@/stores/agent-tool-config';
-import { useSubagentsStore } from '@/stores/subagents';
+import { SubAgents } from '@/plugins/agents/pages';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
+import { useAgentSkillConfigStore, __resetAgentSkillConfigStoreInternalCachesForTest } from '@/plugins/agents/stores/agent-skill-config';
+import { useAgentToolConfigStore, __resetAgentToolConfigStoreInternalCachesForTest } from '@/plugins/agents/stores/agent-tool-config';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import i18n from '@/i18n';
-import { __resetSubagentTemplateCatalogCacheForTest } from '@/services/openclaw/subagent-template-catalog';
+import { __resetSubagentTemplateCatalogCacheForTest } from '@/plugins/agents/services/subagent-template-catalog';
 import type { AgentScope, RuntimeEndpointRef, RuntimeScope } from '../../src/types/desktop/runtime-address';
 
 vi.mock('sonner', () => ({

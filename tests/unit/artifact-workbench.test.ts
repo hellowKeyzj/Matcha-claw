@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ArtifactPreviewTarget } from '@/components/file-preview/types';
+import type { ArtifactPreviewTarget } from '@/plugins/files/types';
 import {
   collectArtifactGroupPaths,
   collectArtifactGroupTargets,
@@ -7,8 +7,8 @@ import {
   resolveArtifactGroupKeyForFile,
   resolvePreviewableArtifactGroupTarget,
   resolveArtifactWorkbenchSelection,
-} from '@/pages/Chat/artifact-workbench';
-import type { ChatArtifactGroup } from '@/pages/Chat/artifacts';
+} from '@/plugins/chat/artifact-workbench';
+import type { ChatArtifactGroup } from '@/plugins/chat/artifacts';
 
 function makeGroup(graphItemKey: string, filePaths: string[]): ChatArtifactGroup {
   return {

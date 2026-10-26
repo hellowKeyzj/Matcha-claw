@@ -1,0 +1,17 @@
+use super::*;
+
+record!(world_protocol::learning::TaskRef, TaskRef; world, id, revision);
+variant!(world_protocol::learning::LearningFailure, LearningFailure; units [BasisChanged, UnauthorizedOperation, Cancelled, InternalFault]; tuples []; records [ConstraintViolated { field } => LearningFailureConstraintViolated, InvalidOperation { index, field } => LearningFailureInvalidOperation, MissingEvidence { reference } => LearningFailureMissingEvidence, Definition { failure } => LearningFailureDefinition, EvaluationRequired { suites } => LearningFailureEvaluationRequired, CounterexampleProtected { test_case_id } => LearningFailureCounterexampleProtected, Model { failure } => LearningFailureModel, Commit { failure } => LearningFailureCommit]);
+
+unit_enum!(world_protocol::learning::StopReason, StopReason; GoalSatisfied, ConstraintViolated, BudgetExhausted, EvidenceRequired, HumanRequired);
+variant!(world_protocol::learning::StrategyOperation, StrategyOperation; units []; tuples []; records [Query { query } => StrategyOperationQuery, Action { action, arguments } => StrategyOperationAction, Function { function, arguments } => StrategyOperationFunction, Stop { reason } => StrategyOperationStop]);
+record!(world_protocol::learning::StrategyStep, StrategyStep; id, depends_on, guard, operation);
+record!(world_protocol::learning::Strategy, Strategy; name, parameters, guard, steps, budget, cases, counterexamples, fallback);
+variant!(world_protocol::learning::OracleSpec, OracleSpec; units []; tuples []; records [Program { implementation, fixture_schema, result_schema } => OracleSpecProgram, SourceReceipt { source_id, required_disposition } => OracleSpecSourceReceipt, Human { actor_id, decision_id, binding_digest } => OracleSpecHuman]);
+record!(world_protocol::learning::TaskContract, TaskContract; world, id, revision, goal, input_type, scope, hard_constraints, allowed_effects, success_oracle, required_suites, budget, stop_conditions);
+record!(world_protocol::learning::Annotation, Annotation; label, description, aliases);
+unit_enum!(world_protocol::learning::SemanticLink, SemanticLink; EquivalentWithinScope, Specializes, Implements, DependsOn);
+record!(world_protocol::learning::SplitPartition, SplitPartition; replacement, predicate);
+variant!(world_protocol::learning::SemanticOperation, SemanticOperation; units []; tuples []; records [NoOp { reason } => SemanticOperationNoOp, AttachEvidence { target, evidence } => SemanticOperationAttachEvidence, EnrichAnnotation { target, annotation } => SemanticOperationEnrichAnnotation, RefineDefinition { previous, replacement } => SemanticOperationRefineDefinition, ScopeDefinition { previous, scope, valid_time } => SemanticOperationScopeDefinition, SupersedeRule { previous, replacement } => SemanticOperationSupersedeRule, LinkExisting { source, target, relation } => SemanticOperationLinkExisting, MergeAliases { sources, target, evidence } => SemanticOperationMergeAliases, DeprecateDefinition { previous, replacements, reason, effective_at } => SemanticOperationDeprecateDefinition, SplitDefinition { previous, replacements, partition } => SemanticOperationSplitDefinition, CreateDefinition { definition } => SemanticOperationCreateDefinition]);
+unit_enum!(world_protocol::learning::ChangeStatus, ChangeStatus; Proposed, Validated, Testing, Ready, Rejected, Published, Superseded);
+record!(world_protocol::learning::ChangeSet, ChangeSet; world, id, revision, base_release, operations, evidence, cases, rationale, status);

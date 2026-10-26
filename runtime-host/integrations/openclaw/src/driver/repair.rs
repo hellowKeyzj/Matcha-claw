@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use foundation::process::{
-    TerminationOutcome,
+    ShutdownOutcome, TerminationOutcome,
     supervision::{StartOutcome, SupervisorPhase, TerminationCompletion},
 };
 use runtime_directory::{
@@ -28,16 +28,24 @@ impl OpenClawDriver {
         &self,
         effects: &impl StartupEffects,
     ) -> Result<StartOutcome, RuntimeStartFailure> {
+        if effects.is_shutting_down() {
+            return Err(RuntimeStartFailure::ShuttingDown);
+        }
         let starting = self.snapshot().phase() != SupervisorPhase::Running;
         if starting {
             self.confirm_stopped()
                 .await
                 .map_err(|_| RuntimeStartFailure::CompletionFailed)?;
+            if effects.is_shutting_down() {
+                return Err(RuntimeStartFailure::ShuttingDown);
+            }
             self.begin_start_attempt();
             effects.prepare().await?;
         }
-        let result = self.start().await;
-        effects.record_start(result.clone());
+        let result = self.start_with_shutdown(effects).await;
+        if effects.is_shutting_down() {
+            return result;
+        }
         match result {
             Ok(StartOutcome::Started) => effects.ready().await.map(|()| StartOutcome::Started),
             _ if starting && self.requires_automatic_repair() => self
@@ -82,12 +90,12 @@ impl OpenClawDriver {
                 .map_err(|_| RuntimeRepairFailure::PreparationFailed)?;
             ensure_not_shutting_down(effects)?;
             self.advance_repair(RuntimeRepairPhase::Starting);
-            let result = self.start().await;
-            effects.record_start(result.clone());
+            let result = self.start_with_shutdown(effects).await;
             match result {
                 Ok(StartOutcome::Started) => {}
                 _ => return Err(RuntimeRepairFailure::StartFailed),
             }
+            ensure_not_shutting_down(effects)?;
             effects
                 .ready()
                 .await
@@ -103,6 +111,36 @@ impl OpenClawDriver {
             }
         }
         effects.notify();
+        result
+    }
+
+    async fn start_with_shutdown(
+        &self,
+        effects: &impl StartupEffects,
+    ) -> Result<StartOutcome, RuntimeStartFailure> {
+        if effects.is_shutting_down() {
+            return Err(RuntimeStartFailure::ShuttingDown);
+        }
+        let lifecycle = self.owner();
+        let start = self.start();
+        tokio::pin!(start);
+        let result = tokio::select! {
+            biased;
+            _ = effects.wait_for_shutdown() => {
+                let (shutdown, result) = tokio::join!(lifecycle.confirm_shutdown(), &mut start);
+                effects.record_start(result.clone());
+                return match shutdown {
+                    Ok(ShutdownOutcome::Detached | ShutdownOutcome::Terminated(
+                        TerminationOutcome::Graceful(_)
+                        | TerminationOutcome::Forced(_)
+                        | TerminationOutcome::NoProcess,
+                    )) => result,
+                    _ => Err(RuntimeStartFailure::CompletionFailed),
+                };
+            }
+            result = &mut start => result,
+        };
+        effects.record_start(result.clone());
         result
     }
 

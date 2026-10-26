@@ -7,10 +7,10 @@ use std::{
 };
 
 use foundation::process::{
-    ShutdownOutcome,
+    ShutdownOutcome, TerminationOutcome,
     supervision::{
         CommandReceipt, RestartOutcome, StartOutcome, Supervisor, SupervisorHandle,
-        SupervisorSnapshot, TerminationCompletion,
+        SupervisorOutcome, SupervisorPhase, SupervisorSnapshot, TerminationCompletion,
     },
 };
 
@@ -96,6 +96,30 @@ impl MatchaPeer {
     }
 
     pub async fn confirm_shutdown(&self) -> Result<ShutdownOutcome, ShutdownError> {
+        // Stop owns the native protocol request, grace deadline and process/stdio drain.
+        // Shutdown only releases the owner after that attempt has settled.
+        let stopped = if self.handle.snapshot().phase() == SupervisorPhase::ShutDown {
+            Ok(None)
+        } else {
+            match self.handle.stop().await {
+                CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => {
+                    completion
+                        .wait()
+                        .await
+                        .map(Some)
+                        .map_err(ShutdownError::from)
+                }
+                CommandReceipt::AlreadySatisfied => {
+                    Ok(match self.handle.snapshot().last_outcome() {
+                        Some(SupervisorOutcome::Terminated(completion)) => Some(completion.clone()),
+                        _ => None,
+                    })
+                }
+                CommandReceipt::Busy => Err(ShutdownError::Busy),
+                CommandReceipt::Rejected(rejection) => Err(ShutdownError::Rejected(rejection)),
+                CommandReceipt::ShuttingDown => Err(ShutdownError::ShuttingDown),
+            }
+        };
         let outcome = match self.handle.shutdown().await {
             CommandReceipt::Accepted(completion) | CommandReceipt::Shared(completion) => {
                 completion.wait().await.map_err(ShutdownError::from)
@@ -111,25 +135,56 @@ impl MatchaPeer {
             CommandReceipt::ShuttingDown => Err(ShutdownError::ShuttingDown),
         };
         let cleanup = self.native.shutdown().await;
-        if cleanup.is_err() {
-            platform::trace::runtime_trace(
-                "matcha.peer.shutdown.cleanup_failed",
-                || serde_json::json!({"supervisorFailed":outcome.is_err(),"transportFailed":true}),
-            );
+        platform::trace::runtime_trace("matcha.peer.shutdown.settled", || {
+            serde_json::json!({
+                "stop": format!("{stopped:?}"),
+                "owner": format!("{outcome:?}"),
+                "transportFailed": cleanup.is_err(),
+            })
+        });
+        if let Err(error) = &cleanup {
+            platform::trace::runtime_trace("matcha.peer.shutdown.cleanup_failed", || {
+                serde_json::json!({
+                    "supervisorFailed": stopped.is_err() || outcome.is_err(),
+                    "transportFailed": true,
+                    "phase": "native_shutdown",
+                    "error": format!("{error:?}"),
+                    "delivery": format!("{:?}", error.delivery()),
+                })
+            });
         }
         let outcome = outcome?;
+        let stopped = stopped?;
         cleanup.map_err(|_| ShutdownError::CompletionFailed)?;
-        Ok(outcome)
+        // Releasing an already drained owner returns NoProcess, not the stop's exit evidence.
+        Ok(match (outcome, stopped) {
+            (
+                ShutdownOutcome::Terminated(TerminationOutcome::NoProcess),
+                Some(
+                    TerminationCompletion::Completed(outcome)
+                    | TerminationCompletion::Superseded {
+                        final_outcome: outcome,
+                        ..
+                    },
+                ),
+            ) => ShutdownOutcome::Terminated(outcome),
+            (outcome, _) => outcome,
+        })
     }
 
     pub async fn join(mut self) -> Result<(), JoinError> {
         let result = self.supervisor.join().await.map_err(JoinError::from);
         let cleanup = self.native.shutdown().await;
-        if cleanup.is_err() {
-            platform::trace::runtime_trace(
-                "matcha.peer.join.cleanup_failed",
-                || serde_json::json!({"supervisorFailed":result.is_err(),"transportFailed":true}),
-            );
+        if let Err(error) = &cleanup {
+            platform::trace::runtime_trace("matcha.peer.join.cleanup_failed", || {
+                serde_json::json!({
+                    "supervisorFailed": result.is_err(),
+                    "transportFailed": true,
+                    "phase": "native_shutdown",
+                    "error": format!("{error:?}"),
+                    "delivery": format!("{:?}", error.delivery()),
+                })
+            });
         }
         result?;
         cleanup.map_err(|_| JoinError::TransportCleanup)

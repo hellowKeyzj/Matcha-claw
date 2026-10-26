@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     Connector, ConnectorCatalog, ConnectorConfig, ConnectorConfigValue, ConnectorInput,
-    ConnectorKind, McpProgramSource, McpServerProgram, McpTransport,
+    ConnectorKind, McpAuth, McpProgramSource, McpServerProgram, McpTransport,
 };
 
 use super::store::ConnectorStoreError;
@@ -136,6 +136,8 @@ struct PersistedConnector {
     #[serde(skip_serializing_if = "Option::is_none")]
     transport: Option<PersistedMcpTransport>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    auth: Option<McpAuth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     headers: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     connection_timeout_ms: Option<u64>,
@@ -177,6 +179,7 @@ impl PersistedConnector {
             transport: connector
                 .transport()
                 .map(PersistedMcpTransport::from_domain),
+            auth: connector.auth(),
             headers: connector.headers().cloned(),
             connection_timeout_ms: connector.connection_timeout_ms(),
             base_url: connector.base_url().map(str::to_owned),
@@ -233,6 +236,7 @@ impl PersistedConnector {
         input.env = self.env;
         input.url = self.url;
         input.transport = self.transport.map(PersistedMcpTransport::into_domain);
+        input.auth = self.auth;
         input.headers = self.headers;
         input.connection_timeout_ms = self.connection_timeout_ms;
         input.base_url = self.base_url;

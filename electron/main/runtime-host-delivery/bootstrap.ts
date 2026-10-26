@@ -1,6 +1,7 @@
 import { posix, win32 } from 'node:path';
 
 const RUNTIME_HOST_BOOTSTRAP_VERSION = 1;
+export const MAX_RUNTIME_HOST_BOOTSTRAP_BYTES = 16 * 1024;
 const MAX_PORT = 65_535;
 
 export type RuntimeHostBootstrapPlatform = 'unix' | 'win32';
@@ -40,6 +41,16 @@ interface RuntimeHostBootstrapBaseInput {
     readonly endpoint: string;
     readonly authorization: string;
   }>;
+  /** Independent world source credential namespace in Main's private resolver. */
+  readonly worldSourceAccess?: Readonly<{
+    readonly endpoint: string;
+    readonly authorization: string;
+  }>;
+  /** Private initial database and explicit migration targets, not an active world locator. */
+  readonly worldPostgres?: Readonly<{ storageId: string; connectionString: string }>;
+  readonly worldStorageTargets?: readonly Readonly<{ storageId: string; connectionString: string }>[];
+  /** Unresolved original request custody, decoded by the Host's strict InitialWorldWire. */
+  readonly initialWorld?: Readonly<Record<string, unknown>>;
   /** Electron Main's per-host verification key; its matching private key never leaves Main. */
   readonly deliveryVerificationKey: string;
   /** Loopback callback receiver URL for Rust-to-Main event delivery. */
@@ -101,6 +112,21 @@ export function buildRuntimeHostBootstrap(input: RuntimeHostBootstrapInput): Uin
           },
         }
       : {}),
+    ...(input.worldSourceAccess
+      ? {
+          worldSourceAccess: {
+            endpoint: input.worldSourceAccess.endpoint,
+            authorization: input.worldSourceAccess.authorization,
+          },
+        }
+      : {}),
+    ...(input.worldPostgres ? { worldPostgres: {
+      storageId: input.worldPostgres.storageId, connectionString: input.worldPostgres.connectionString,
+    } } : {}),
+    ...(input.worldStorageTargets ? { worldStorageTargets: input.worldStorageTargets.map((target) => ({
+      storageId: target.storageId, connectionString: target.connectionString,
+    })) } : {}),
+    ...(input.initialWorld ? { initialWorld: input.initialWorld } : {}),
     deliveryVerificationKey: input.deliveryVerificationKey,
     parentCallbackBaseUrl: input.parentCallbackBaseUrl,
     parentCallbackDispatchToken: input.parentCallbackDispatchToken,
@@ -120,7 +146,11 @@ export function buildRuntimeHostBootstrap(input: RuntimeHostBootstrapInput): Uin
     ...(input.platform === 'unix' ? { guardianExecutable: input.guardianExecutable } : {}),
   };
 
-  return new TextEncoder().encode(JSON.stringify(payload));
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  if (bytes.byteLength > MAX_RUNTIME_HOST_BOOTSTRAP_BYTES) {
+    throw new RuntimeHostBootstrapValidationError('frameSize');
+  }
+  return bytes;
 }
 
 function validateBootstrapInput(input: RuntimeHostBootstrapInput): void {
@@ -138,6 +168,14 @@ function validateBootstrapInput(input: RuntimeHostBootstrapInput): void {
   validateParentCallbackBaseUrl(input.parentCallbackBaseUrl);
   validateParentCallbackDispatchToken(input.parentCallbackDispatchToken);
   validatePrivateResolver(input.providerCredentialResolver, 'providerCredentialResolver', '/resolve');
+  validatePrivateResolver(input.worldSourceAccess, 'worldSourceAccess', '/resolve');
+  if (input.worldPostgres) validateWorldStorage(input.worldPostgres, 'worldPostgres');
+  if (input.worldStorageTargets !== undefined) {
+    if (!Array.isArray(input.worldStorageTargets)) throw new RuntimeHostBootstrapValidationError('worldStorageTargets');
+    for (const target of input.worldStorageTargets) validateWorldStorage(target, 'worldStorageTargets');
+    const ids = [...(input.worldPostgres ? [input.worldPostgres.storageId] : []), ...input.worldStorageTargets.map((target) => target.storageId)];
+    if (new Set(ids).size !== ids.length) throw new RuntimeHostBootstrapValidationError('worldStorageTargets');
+  }
   validatePort(input.runtimeHostTransportPort, 'runtimeHostTransportPort');
   validateMatchaInput(input.matcha, input.platform);
   validateOpenClawInput(input.openClaw, input.platform);
@@ -184,6 +222,14 @@ function validateParentCallbackDispatchToken(value: string): void {
     || value.includes('\\0')
   ) {
     throw new RuntimeHostBootstrapValidationError('parentCallbackDispatchToken');
+  }
+}
+
+function validateWorldStorage(value: Readonly<{ storageId: string; connectionString: string }>, field: string): void {
+  if (!value || typeof value.storageId !== 'string' || !/^[A-Za-z0-9_.:-]{1,256}$/.test(value.storageId)
+    || typeof value.connectionString !== 'string' || !value.connectionString.trim()
+    || Buffer.byteLength(value.connectionString) > 64 * 1024 || value.connectionString.includes('\0')) {
+    throw new RuntimeHostBootstrapValidationError(field);
   }
 }
 

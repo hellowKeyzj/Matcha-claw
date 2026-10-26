@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer};
 
 use super::model::{
     Connector, ConnectorError, ConnectorKind, ConnectorSecretReference, ConnectorSecretReferences,
-    McpTransport, connector_config,
+    McpAuth, McpTransport, connector_config,
 };
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -30,6 +30,8 @@ pub(crate) struct ConnectorPatch {
     url: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_field")]
     transport: Option<Option<McpTransport>>,
+    #[serde(default, deserialize_with = "deserialize_field")]
+    auth: Option<Option<McpAuth>>,
     #[serde(default, deserialize_with = "deserialize_field")]
     headers: Option<Option<BTreeMap<String, String>>>,
     #[serde(default, deserialize_with = "deserialize_field")]
@@ -71,8 +73,10 @@ impl ConnectorPatch {
             || self.env.is_some()
             || self.secret_env.is_some();
         let http = self.headers.is_some() || self.secret_headers.is_some();
-        let mcp_http =
-            self.url.is_some() || self.transport.is_some() || self.connection_timeout_ms.is_some();
+        let mcp_http = self.url.is_some()
+            || self.transport.is_some()
+            || self.auth.is_some()
+            || self.connection_timeout_ms.is_some();
         let sdk = self.provider.is_some()
             || self.package_name.is_some()
             || self.config.is_some()
@@ -119,6 +123,9 @@ impl ConnectorPatch {
         }
         if let Some(value) = self.transport {
             connector.transport = value;
+        }
+        if let Some(value) = self.auth {
+            connector.auth = value;
         }
         if let Some(value) = self.headers {
             connector.headers = value;

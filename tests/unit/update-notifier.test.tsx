@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
-import { UpdateNotifier } from '@/components/update/UpdateNotifier';
-import { useUpdateStore } from '@/stores/update';
+import { UpdateNotifier } from '@/plugins/settings/update/UpdateNotifier';
+import { useUpdateStore } from '@/plugins/settings/update/store';
 import { toast } from 'sonner';
 
 vi.mock('react-i18next', async (importOriginal) => {

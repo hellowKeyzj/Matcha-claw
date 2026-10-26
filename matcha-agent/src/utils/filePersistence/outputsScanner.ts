@@ -7,9 +7,14 @@
  * - Find modified files by comparing file mtimes against turn start time
  */
 
-import * as fs from 'fs/promises'
 import * as path from 'path'
+import {
+  currentInvestigationScope,
+  requireInvestigationEffects,
+  rethrowInvestigationAdmission,
+} from '../../world/investigation.js'
 import { logForDebugging } from '../debug.js'
+import { readSourceDirectory, statSourcePath } from '../fsOperations.js'
 import type { EnvironmentKind } from '../teleport/environments.js'
 import type { TurnStartTime } from './types.js'
 
@@ -30,26 +35,6 @@ export function getEnvironmentKind(): EnvironmentKind | null {
   return null
 }
 
-function hasParentPath(
-  entry: object,
-): entry is { parentPath: string; name: string } {
-  return 'parentPath' in entry && typeof entry.parentPath === 'string'
-}
-
-function hasPath(entry: object): entry is { path: string; name: string } {
-  return 'path' in entry && typeof entry.path === 'string'
-}
-
-function getEntryParentPath(entry: object, fallback: string): string {
-  if (hasParentPath(entry)) {
-    return entry.parentPath
-  }
-  if (hasPath(entry)) {
-    return entry.path
-  }
-  return fallback
-}
-
 /**
  * Find files that have been modified since the turn started.
  * Returns paths of files with mtime >= turnStartTime.
@@ -58,36 +43,40 @@ function getEntryParentPath(entry: object, fallback: string): string {
  *
  * @param turnStartTime - The timestamp when the turn started
  * @param outputsDir - The directory to scan for modified files
+ * @param signal - Optional abort signal for cancellation
  */
 export async function findModifiedFiles(
   turnStartTime: TurnStartTime,
   outputsDir: string,
+  signal?: AbortSignal,
 ): Promise<string[]> {
-  // Use recursive flag to get all entries in one call
-  let entries:
-    | Awaited<ReturnType<typeof fs.readdir>>
-    | { name: string; isFile(): boolean; isSymbolicLink(): boolean }[]
+  const filePaths: string[] = []
   try {
-    entries = (await fs.readdir(outputsDir, {
-      withFileTypes: true,
-      recursive: true,
-    })) as { name: string; isFile(): boolean; isSymbolicLink(): boolean }[]
-  } catch {
+    const directories = [outputsDir]
+    for (const directory of directories) {
+      if (currentInvestigationScope()) signal?.throwIfAborted()
+      requireInvestigationEffects([])
+      const entries = await readSourceDirectory(directory, signal)
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue
+        const filePath = path.join(directory, entry.name)
+        if (entry.isDirectory()) {
+          directories.push(filePath)
+        } else if (entry.isFile()) {
+          filePaths.push(filePath)
+        }
+      }
+    }
+    if (currentInvestigationScope()) signal?.throwIfAborted()
+    requireInvestigationEffects([])
+  } catch (error) {
+    rethrowInvestigationAdmission(error)
+    if (currentInvestigationScope()) {
+      if (error instanceof Error && error.cause !== undefined) throw error
+      signal?.throwIfAborted()
+    }
     // Directory doesn't exist or is not accessible
     return []
-  }
-
-  // Filter to regular files only (skip symlinks for security) and build full paths
-  const filePaths: string[] = []
-  for (const entry of entries) {
-    if (entry.isSymbolicLink()) {
-      continue
-    }
-    if (entry.isFile()) {
-      // entry.parentPath is available in Node 20+, fallback to entry.path for older versions
-      const parentPath = getEntryParentPath(entry, outputsDir)
-      filePaths.push(path.join(parentPath, entry.name))
-    }
   }
 
   if (filePaths.length === 0) {
@@ -96,27 +85,34 @@ export async function findModifiedFiles(
   }
 
   // Parallelize stat calls for all files
-  const statResults = await Promise.all(
+  const statResults = await Promise.allSettled(
     filePaths.map(async filePath => {
-      try {
-        const stat = await fs.lstat(filePath)
-        // Skip if it became a symlink between readdir and stat (race condition)
-        if (stat.isSymbolicLink()) {
-          return null
-        }
-        return { filePath, mtimeMs: stat.mtimeMs }
-      } catch {
-        // File may have been deleted between readdir and stat
+      if (currentInvestigationScope()) signal?.throwIfAborted()
+      requireInvestigationEffects([])
+      const stat = await statSourcePath(filePath, { followSymlinks: false, signal })
+      // Skip if it became a symlink between readdir and stat (race condition)
+      if (stat.isSymbolicLink()) {
         return null
       }
+      return { filePath, mtimeMs: stat.mtimeMs }
     }),
   )
+  if (currentInvestigationScope()) signal?.throwIfAborted()
+  requireInvestigationEffects([])
 
   // Filter to files modified since turn start
   const modifiedFiles: string[] = []
   for (const result of statResults) {
-    if (result && result.mtimeMs >= turnStartTime.turnStartTime) {
-      modifiedFiles.push(result.filePath)
+    if (result.status === 'rejected') {
+      rethrowInvestigationAdmission(result.reason)
+      if (currentInvestigationScope() && result.reason instanceof Error && result.reason.cause !== undefined) {
+        throw result.reason
+      }
+      // File may have been deleted between readdir and stat
+      continue
+    }
+    if (result.value && result.value.mtimeMs >= turnStartTime.turnStartTime) {
+      modifiedFiles.push(result.value.filePath)
     }
   }
 

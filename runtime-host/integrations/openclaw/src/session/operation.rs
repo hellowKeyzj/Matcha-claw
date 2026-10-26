@@ -1,5 +1,9 @@
 #[path = "content.rs"]
 pub(crate) mod content;
+#[path = "thinking.rs"]
+mod thinking;
+#[path = "media.rs"]
+pub(crate) mod media;
 
 use std::{fmt, sync::Arc};
 

@@ -149,6 +149,7 @@ impl Sessions {
             session_id: execution.record.session_id.clone(),
             paths: self.0.config.paths().clone(),
             resume: execution.record.native_started,
+            effort: execution.record.effort,
             fork_from: if execution.record.native_started {
                 None
             } else {

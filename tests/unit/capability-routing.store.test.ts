@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useCapabilityRoutingStore } from '@/stores/capability-routing';
+import { useCapabilityRoutingStore } from '@/plugins/providers/stores/capability-routing';
 
 const fetchCapabilityRoutingMock = vi.hoisted(() => vi.fn());
 const persistCapabilityRoutingMock = vi.hoisted(() => vi.fn());
@@ -13,7 +13,7 @@ vi.mock('@/lib/capability-routing', async (importOriginal) => ({
   persistCapabilityRouting: persistCapabilityRoutingMock,
 }));
 
-vi.mock('@/stores/providers', () => ({
+vi.mock('@/plugins/providers/stores/providers', () => ({
   useProviderStore: {
     getState: () => ({
       refreshProviderSnapshot: providerSnapshotRefreshMock,
@@ -21,7 +21,7 @@ vi.mock('@/stores/providers', () => ({
   },
 }));
 
-vi.mock('@/stores/provider-model-catalog', () => ({
+vi.mock('@/plugins/providers/stores/provider-model-catalog', () => ({
   useProviderModelCatalogStore: {
     getState: () => ({
       refresh: providerModelCatalogRefreshMock,
@@ -29,7 +29,7 @@ vi.mock('@/stores/provider-model-catalog', () => ({
   },
 }));
 
-vi.mock('@/stores/subagents', () => ({
+vi.mock('@/plugins/agents/stores/subagents', () => ({
   useSubagentsStore: {
     getState: () => ({
       loadAvailableModels: subagentsLoadAvailableModelsMock,

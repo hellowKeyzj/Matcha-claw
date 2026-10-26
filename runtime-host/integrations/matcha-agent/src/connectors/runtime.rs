@@ -1,8 +1,9 @@
 use connectors::{
-    Connector, ConnectorCatalog, ConnectorKind, ConnectorSecretResolverPort,
+    Connector, ConnectorCatalog, ConnectorKind, ConnectorSecretResolverPort, McpAuth,
     ports::{
         ConnectorFuture, ConnectorObservation, ConnectorOperationFailure, ConnectorOps,
-        ConnectorProjectionEffect, McpPreset, McpServerConfig, McpServerKind, McpServerStatusEntry,
+        ConnectorProjectionEffect, McpOAuthAction, McpOAuthReceipt, McpOAuthRequest, McpOAuthState,
+        McpPreset, McpServerConfig, McpServerKind, McpServerStatusEntry,
         McpServerStatusList,
     },
 };
@@ -53,6 +54,56 @@ impl ConnectorOps for MatchaRuntimeDriver {
                 ConnectorKind::McpStdio | ConnectorKind::McpHttp => ConnectorObservation::Unknown,
                 _ => ConnectorObservation::Unsupported,
             }
+        })
+    }
+
+    fn mcp_oauth<'a>(
+        &'a self,
+        connector: Connector,
+        request: McpOAuthRequest,
+    ) -> ConnectorFuture<'a, Result<McpOAuthReceipt, ConnectorOperationFailure>> {
+        Box::pin(async move {
+            if connector.kind() != ConnectorKind::McpHttp
+                || connector.auth() != Some(McpAuth::OAuth)
+                || !connector.enabled()
+                || connector.id() == "matcha"
+                || matches!(request.action, McpOAuthAction::Start) && request.flow_id.is_some()
+            {
+                return Err(ConnectorOperationFailure::Unavailable);
+            }
+            let agent = request.agent_id.as_deref().filter(|id| {
+                !id.trim().is_empty() && !id.chars().any(char::is_control)
+            }).ok_or(ConnectorOperationFailure::Unavailable)?;
+            let method = match request.action {
+                McpOAuthAction::Start => "mcp.oauth.start",
+                McpOAuthAction::Status => "mcp.oauth.status",
+                McpOAuthAction::Logout => "mcp.oauth.logout",
+            };
+            let mut params = json!({"agentId":agent,"name":projection::server_name(connector.id())});
+            if let Some(flow) = request.flow_id.as_deref() {
+                if uuid::Uuid::parse_str(flow).is_err() {
+                    return Err(ConnectorOperationFailure::Unavailable);
+                }
+                params["flowId"] = json!(flow);
+            }
+            let response = self.native_client().call(method, params).await
+                .map_err(ConnectorError::from).map_err(operation_failure)?;
+            let receipt: McpOAuthReceipt = serde_json::from_value(response)
+                .map_err(|_| ConnectorOperationFailure::Unknown)?;
+            if receipt.flow_id.as_ref().is_some_and(|flow| uuid::Uuid::parse_str(flow).is_err())
+                || matches!(request.action, McpOAuthAction::Start) && receipt.flow_id.is_none()
+                || matches!(request.action, McpOAuthAction::Logout) && receipt.flow_id.is_some()
+                || request.flow_id.as_ref().is_some_and(|flow| {
+                    !matches!(request.action, McpOAuthAction::Logout) && receipt.flow_id.as_ref() != Some(flow)
+                })
+                || receipt.authorization_url.as_ref().is_some_and(|url| {
+                    !matches!(receipt.state, McpOAuthState::Authorizing)
+                        || !safe_authorization_url(url)
+                })
+            {
+                return Err(ConnectorOperationFailure::Unknown);
+            }
+            Ok(receipt)
         })
     }
 
@@ -219,6 +270,18 @@ impl MatchaRuntimeDriver {
         }
         Ok(session_id.into())
     }
+}
+
+fn safe_authorization_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else { return false; };
+    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+        && url.username().is_empty() && url.password().is_none() && url.fragment().is_none()
+        && value.len() <= 16 * 1024 && !value.chars().any(char::is_control)
+        && url.query_pairs().all(|(key, _)| {
+            let key = key.to_ascii_lowercase().replace(['-', '_'], "");
+            !key.contains("token") && !key.contains("secret") && !key.contains("password")
+                && !key.contains("apikey") && key != "code" && key != "authorization"
+        })
 }
 
 fn operation_failure(error: ConnectorError) -> ConnectorOperationFailure {

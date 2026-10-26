@@ -1,12 +1,19 @@
+import { Suspense, type ReactElement, type ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { toast } from 'sonner';
 import i18n from '@/i18n';
-import { ProvidersSettings } from '@/components/settings/ProvidersSettings';
+import { ProvidersSettings } from '@/plugins/providers/components/ProvidersSettings';
 import type { ProviderModel } from '@/lib/provider-model-catalog';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { providersPlugin } from '@/plugins/providers/plugin';
 
 const hoisted = vi.hoisted(() => {
   const defaultProviderSnapshot = {
+    revisions: {},
+    reports: [],
     statuses: [
       {
         id: 'custom-1',
@@ -99,21 +106,21 @@ vi.mock('@/lib/provider-model-catalog', async (importOriginal) => {
   };
 });
 
-vi.mock('@/stores/providers', () => ({
+vi.mock('@/plugins/providers/stores/providers', () => ({
   useProviderStore: () => providerStoreState,
 }));
 
-vi.mock('@/stores/provider-model-catalog', () => ({
+vi.mock('@/plugins/providers/stores/provider-model-catalog', () => ({
   useProviderModelCatalogStore: (selector: (state: typeof catalogState) => unknown) => selector(catalogState),
 }));
 
-vi.mock('@/stores/settings', () => ({
+vi.mock('@/plugins/settings/store', () => ({
   useSettingsStore: (selector: ((state: typeof settingsState) => unknown) | undefined) => (
     selector ? selector(settingsState) : settingsState
   ),
 }));
 
-vi.mock('@/stores/gateway', () => ({
+vi.mock('@/plugins/runtime/store', () => ({
   useGatewayStore: (selector: (state: typeof gatewayState) => unknown) => selector(gatewayState),
 }));
 
@@ -123,6 +130,30 @@ vi.mock('sonner', () => ({
     error: vi.fn(),
   },
 }));
+
+const pluginHost = createPluginHost([applicationShellPlugin, providersPlugin]);
+
+function ProviderPlugins({ children }: { children: ReactNode }) {
+  return <PluginHostProvider host={pluginHost}><Suspense fallback={null}>{children}</Suspense></PluginHostProvider>;
+}
+
+async function clickLazyTrigger(element: HTMLElement) {
+  fireEvent.click(element);
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
+}
+
+async function renderSettings(element: ReactElement) {
+  let view!: ReturnType<typeof render>;
+  await act(async () => {
+    view = render(element, { wrapper: ProviderPlugins });
+  });
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
+  return view;
+}
 
 describe('providers settings edit flow', () => {
   beforeEach(() => {
@@ -160,23 +191,23 @@ describe('providers settings edit flow', () => {
     fireEvent.click(trigger);
   }
 
-  it('编辑态应提供清晰的取消入口', () => {
-    render(<ProvidersSettings />);
+  it('编辑态应提供清晰的取消入口', async () => {
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Custom');
-    fireEvent.click(screen.getByTitle('Edit API key'));
+    await clickLazyTrigger(screen.getByTitle('Edit API key'));
 
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
   });
 
-  it('provider 卡片默认收起', () => {
-    render(<ProvidersSettings />);
+  it('provider 卡片默认收起', async () => {
+    await renderSettings(<ProvidersSettings />);
 
     expect(screen.queryByTitle('Edit API key')).toBeNull();
     expect(screen.queryByText('Model catalog')).toBeNull();
   });
 
-  it('Gateway 未就绪时仍可打开新增 provider', () => {
+  it('Gateway 未就绪时仍可打开新增 provider', async () => {
     gatewayState.status = {
       processState: 'stopped',
       port: 0,
@@ -188,31 +219,31 @@ describe('providers settings edit flow', () => {
       updatedAt: Date.now(),
     };
 
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
     const addButton = screen.getByRole('button', { name: 'Add Provider' });
     expect(addButton).toBeEnabled();
-    fireEvent.click(addButton);
+    await clickLazyTrigger(addButton);
 
     expect(screen.getByRole('dialog', { name: 'Add AI Provider' })).toBeInTheDocument();
   });
 
-  it('按 Escape 键应退出编辑态', () => {
-    render(<ProvidersSettings />);
+  it('按 Escape 键应退出编辑态', async () => {
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Custom');
-    fireEvent.click(screen.getByTitle('Edit API key'));
+    await clickLazyTrigger(screen.getByTitle('Edit API key'));
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
     fireEvent.keyDown(window, { key: 'Escape' });
 
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
   });
 
-  it('编辑态保留私密 API key 和运行时配置，不显示旧模型字段', () => {
-    render(<ProvidersSettings />);
+  it('编辑态保留私密 API key 和运行时配置，不显示旧模型字段', async () => {
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Custom');
-    fireEvent.click(screen.getByTitle('Edit API key'));
+    await clickLazyTrigger(screen.getByTitle('Edit API key'));
 
     expect(screen.getByTestId('provider-edit-key-input-custom-1')).toBeInTheDocument();
     expect(screen.getByLabelText('Base URL')).toBeInTheDocument();
@@ -232,7 +263,7 @@ describe('providers settings edit flow', () => {
       contextWindow: 200000,
     }];
 
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     expect(screen.getByText('Model catalog')).toBeInTheDocument();
@@ -272,8 +303,8 @@ describe('providers settings edit flow', () => {
     });
   });
 
-  it('模型限制输入框使用 OpenClaw 内部默认值作为 placeholder', () => {
-    render(<ProvidersSettings />);
+  it('模型限制输入框使用 OpenClaw 内部默认值作为 placeholder', async () => {
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
@@ -295,7 +326,7 @@ describe('providers settings edit flow', () => {
       ],
     });
 
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByRole('button', { name: 'Fetch models' }));
@@ -356,7 +387,7 @@ describe('providers settings edit flow', () => {
       codePlan: { modelId: 'ark-code-latest' },
     }];
 
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Ark');
     fireEvent.click(screen.getByRole('button', { name: 'Add ark-code-latest' }));
@@ -368,8 +399,8 @@ describe('providers settings edit flow', () => {
     });
   });
 
-  it('自定义 provider 可登记聊天和图像理解，但不显示生成类媒体能力', () => {
-    render(<ProvidersSettings />);
+  it('自定义 provider 可登记聊天和图像理解，但不显示生成类媒体能力', async () => {
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
@@ -384,11 +415,11 @@ describe('providers settings edit flow', () => {
   });
 
   it('新增自定义 provider 时只提交账号事实、运行时配置和私密 API key', async () => {
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await clickLazyTrigger(screen.getByRole('button', { name: 'Add Provider' }));
     const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
-    fireEvent.click(within(dialog).getAllByText('Custom')[0]!);
+    await clickLazyTrigger(within(dialog).getAllByText('Custom')[0]!);
 
     expect(screen.getByLabelText('Base URL')).toBeInTheDocument();
     expect(screen.getByLabelText('Protocol')).toBeInTheDocument();
@@ -414,7 +445,7 @@ describe('providers settings edit flow', () => {
     });
   });
 
-  it('Z.AI CN 已存在时隐藏 Z.AI Global 添加卡片', () => {
+  it('Z.AI CN 已存在时隐藏 Z.AI Global 添加卡片', async () => {
     providerStoreState.providerSnapshot.credentials = [{
       id: 'zai',
       vendorId: 'zai',
@@ -464,9 +495,9 @@ describe('providers settings edit flow', () => {
       },
     ];
 
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await clickLazyTrigger(screen.getByRole('button', { name: 'Add Provider' }));
     const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
 
     expect(within(dialog).queryByText('Z.AI (CN)')).toBeNull();
@@ -514,10 +545,10 @@ describe('providers settings edit flow', () => {
         modelCapabilities: ['chat', 'imageUnderstand'],
       },
     ];
-    const view = render(<ProvidersSettings />);
+    const view = await renderSettings(<ProvidersSettings />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
-    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add AI Provider' })).getByText('Z.AI (Global)'));
+    await clickLazyTrigger(screen.getByRole('button', { name: 'Add Provider' }));
+    await clickLazyTrigger(within(screen.getByRole('dialog', { name: 'Add AI Provider' })).getByText('Z.AI (Global)'));
     providerStoreState.providerSnapshot.credentials = [{
       id: 'zai',
       vendorId: 'zai',
@@ -559,11 +590,11 @@ describe('providers settings edit flow', () => {
       modelCapabilities: ['chat', 'imageUnderstand'],
     }];
 
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await clickLazyTrigger(screen.getByRole('button', { name: 'Add Provider' }));
     const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
-    fireEvent.click(within(dialog).getByText('Z.AI (Global)'));
+    await clickLazyTrigger(within(dialog).getByText('Z.AI (Global)'));
     fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'zai-secret' } });
     fireEvent.click(screen.getByLabelText('Code Plan endpoint'));
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://api.z.ai/api/coding/paas/v4');
@@ -600,11 +631,11 @@ describe('providers settings edit flow', () => {
       supportsMultipleAccounts: true,
     }];
 
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await clickLazyTrigger(screen.getByRole('button', { name: 'Add Provider' }));
     const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
-    fireEvent.click(within(dialog).getByText('OpenAI'));
+    await clickLazyTrigger(within(dialog).getByText('OpenAI'));
 
     expect(screen.getByRole('button', { name: 'OAuth Login' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'API Key' })).toBeInTheDocument();
@@ -646,11 +677,11 @@ describe('providers settings edit flow', () => {
       status: 'started',
     });
 
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await clickLazyTrigger(screen.getByRole('button', { name: 'Add Provider' }));
     const dialog = screen.getByRole('dialog', { name: 'Add AI Provider' });
-    fireEvent.click(within(dialog).getByText('OpenAI'));
+    await clickLazyTrigger(within(dialog).getByText('OpenAI'));
     fireEvent.click(screen.getByRole('button', { name: 'Login with Browser' }));
 
     await waitFor(() => {
@@ -712,10 +743,10 @@ describe('providers settings edit flow', () => {
       modelCapabilities: ['chat', 'imageUnderstand'],
     }];
 
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Z.AI');
-    fireEvent.click(screen.getByTitle('Edit API key'));
+    await clickLazyTrigger(screen.getByTitle('Edit API key'));
     fireEvent.click(screen.getByLabelText('Code Plan endpoint'));
     expect(screen.getByLabelText('Base URL')).toHaveValue('https://open.bigmodel.cn/api/coding/paas/v4');
     fireEvent.click(screen.getByTestId('provider-edit-save-zai'));
@@ -757,7 +788,7 @@ describe('providers settings edit flow', () => {
       modelCapabilities: ['chat', 'imageUnderstand'],
     }];
 
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Z.AI');
     fireEvent.click(screen.getByRole('button', { name: 'Add glm-5.2' }));
@@ -770,7 +801,7 @@ describe('providers settings edit flow', () => {
   });
 
   it('删除 provider 时将当前 accountId 交给 store mutation', async () => {
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Custom');
     fireEvent.click(screen.getByTitle('Delete provider'));
@@ -781,10 +812,10 @@ describe('providers settings edit flow', () => {
   });
 
   it('编辑 provider 时直接将新的 API key 交给私密 Main ingress', async () => {
-    render(<ProvidersSettings />);
+    await renderSettings(<ProvidersSettings />);
 
     expandProviderCard('Custom');
-    fireEvent.click(screen.getByTitle('Edit API key'));
+    await clickLazyTrigger(screen.getByTitle('Edit API key'));
     fireEvent.change(screen.getByTestId('provider-edit-key-input-custom-1'), {
       target: { value: 'sk-next' },
     });

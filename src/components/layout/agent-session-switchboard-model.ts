@@ -1,10 +1,10 @@
 import type { AgentAvatarStyle } from '@/lib/agent-avatar';
-import type { AgentSessionsPaneSessionEntry } from '@/stores/chat/selectors';
+import type { AgentSessionsPaneSessionEntry } from '@/plugins/chat/store/selectors';
 import type {
   ChatCurrentConversation,
   ChatSession,
   ChatSessionRuntimeEndpointNode,
-} from '@/stores/chat/types';
+} from '@/plugins/chat/store/types';
 import { buildRuntimeEndpointKey, buildSessionIdentityKey, type SessionIdentity } from '../../types/desktop/runtime-address';
 
 export type AgentSessionSwitchboardSessionBucketId = 'today' | 'within_7_days' | 'within_30_days' | 'older';

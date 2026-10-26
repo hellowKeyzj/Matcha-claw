@@ -4,7 +4,7 @@ import {
   isRuntimeEventUsefulForPolling,
   isUnboundLifecycleEvent,
   shouldIgnoreRuntimeEvent,
-} from '@/stores/chat/event-routing';
+} from '@/plugins/chat/store/event-routing';
 
 describe('chat runtime event routing helpers', () => {
   it('ignores events for a different backend session', () => {

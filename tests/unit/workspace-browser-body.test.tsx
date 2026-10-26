@@ -1,18 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { WorkspaceBrowserBody } from '@/components/file-preview/WorkspaceBrowserBody';
-import type { SessionIdentity } from '../../src/types/desktop/runtime-address';
+import { WorkspaceBrowserBody } from '@/plugins/files/WorkspaceBrowserBody';
+import type { AgentScope } from '../../src/types/desktop/runtime-address';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { applicationShellPlugin } from '@/app/extensions';
+import { filesPlugin } from '@/plugins/files/plugin';
 
-const sessionIdentity: SessionIdentity = {
+const agentScope: AgentScope = {
   endpoint: {
     kind: 'native-runtime',
     runtimeAdapterId: 'openclaw',
     runtimeInstanceId: 'local',
   },
   agentId: 'default',
-  sessionKey: 'test-session',
 };
+const workspaceContext = { agentScope, workspaceRoot: '/workspace' };
+const pluginHost = createPluginHost([applicationShellPlugin, filesPlugin]);
+
+function FilesPlugins({ children }: { children: ReactNode }) {
+  return <PluginHostProvider host={pluginHost}>{children}</PluginHostProvider>;
+}
 
 const hostFileListDirMock = vi.fn();
 const openArtifactPathExternallyMock = vi.fn();
@@ -37,7 +46,8 @@ const filePreviewBodyMock = vi.fn(({
   </div>
 ));
 
-vi.mock('react-i18next', () => ({
+vi.mock('react-i18next', async (importOriginal) => ({
+  ...await importOriginal<typeof import('react-i18next')>(),
   useTranslation: () => ({
     t: (key: string, options?: Record<string, unknown>) => {
       if (key === 'artifacts.workspaceLoadFailed') {
@@ -52,11 +62,11 @@ vi.mock('@/lib/host-api', () => ({
   hostFileListDir: (...args: unknown[]) => hostFileListDirMock(...args),
 }));
 
-vi.mock('@/components/file-preview/FilePreviewBody', () => ({
+vi.mock('@/plugins/files/FilePreviewBody', () => ({
   FilePreviewBody: (props: unknown) => filePreviewBodyMock(props),
 }));
 
-vi.mock('@/components/file-preview/open-file-utils', () => ({
+vi.mock('@/plugins/files/open-file-utils', () => ({
   openArtifactPathExternally: (...args: unknown[]) => openArtifactPathExternallyMock(...args),
   revealArtifactPathInFileManager: (...args: unknown[]) => revealArtifactPathInFileManagerMock(...args),
 }));
@@ -87,17 +97,18 @@ describe('workspace browser body', () => {
         rootPath="/workspace"
         selectedFilePath={null}
         selectedFile={null}
-        sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         previewMode="preview"
         onSelectFile={onSelectFile}
       />,
+      { wrapper: FilesPlugins },
     );
 
     await waitFor(() => {
       expect(hostFileListDirMock).toHaveBeenCalledWith(
         {
-          endpoint: sessionIdentity.endpoint,
-          sessionKey: sessionIdentity.sessionKey,
+          endpoint: agentScope.endpoint,
+          agentId: agentScope.agentId,
           relativePath: '',
         },
         { timeoutMs: 60000 },
@@ -132,10 +143,11 @@ describe('workspace browser body', () => {
         rootPath="/workspace"
         selectedFilePath={null}
         selectedFile={null}
-        sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         previewMode="preview"
         onSelectFile={onSelectFile}
       />,
+      { wrapper: FilesPlugins },
     );
 
     fireEvent.click(await screen.findByRole('button', { name: /demo\.ts/i }));
@@ -162,11 +174,12 @@ describe('workspace browser body', () => {
           mimeType: 'text/typescript',
           contentType: 'code',
         }}
-        sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         previewMode="preview"
         onSelectFile={vi.fn()}
         onPreviewModeChange={vi.fn()}
       />,
+      { wrapper: FilesPlugins },
     );
 
     expect(await screen.findByTestId('workspace-preview-body')).toHaveTextContent('demo.ts');
@@ -201,11 +214,12 @@ describe('workspace browser body', () => {
           mimeType: 'text/typescript',
           contentType: 'code',
         }}
-        sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         previewMode="preview"
         onSelectFile={vi.fn()}
         onPreviewModeChange={vi.fn()}
       />,
+      { wrapper: FilesPlugins },
     );
 
     expect(await screen.findByRole('button', { name: /demo\.ts/i })).toBeInTheDocument();
@@ -246,10 +260,11 @@ describe('workspace browser body', () => {
           contentType: 'code',
         }}
         availableWidth={480}
-        sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         previewMode="preview"
         onSelectFile={vi.fn()}
       />,
+      { wrapper: FilesPlugins },
     );
 
     expect(await screen.findByTestId('workspace-browser-body')).toHaveAttribute('data-layout', 'stacked');
@@ -273,18 +288,19 @@ describe('workspace browser body', () => {
           mimeType: 'text/markdown',
           contentType: 'markdown',
         }}
-        sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         previewMode="preview"
         onSelectFile={vi.fn()}
         onPreviewModeChange={vi.fn()}
       />,
+      { wrapper: FilesPlugins },
     );
 
     await waitFor(() => {
       expect(hostFileListDirMock).toHaveBeenCalledWith(
         {
-          endpoint: sessionIdentity.endpoint,
-          sessionKey: sessionIdentity.sessionKey,
+          endpoint: agentScope.endpoint,
+          agentId: agentScope.agentId,
           relativePath: '',
         },
         { timeoutMs: 60000 },
@@ -337,18 +353,19 @@ describe('workspace browser body', () => {
           mimeType: 'text/typescript',
           contentType: 'code',
         }}
-        sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         previewMode="preview"
         onSelectFile={vi.fn()}
       />,
+      { wrapper: FilesPlugins },
     );
 
     expect(await screen.findByRole('button', { name: /demo\.ts/i })).toBeInTheDocument();
     expect(hostFileListDirMock).toHaveBeenNthCalledWith(
       2,
       {
-        endpoint: sessionIdentity.endpoint,
-        sessionKey: sessionIdentity.sessionKey,
+        endpoint: agentScope.endpoint,
+        agentId: agentScope.agentId,
         relativePath: 'src',
       },
       { timeoutMs: 60000 },
@@ -380,10 +397,11 @@ describe('workspace browser body', () => {
         rootPath="/workspace"
         selectedFilePath={null}
         selectedFile={null}
-        sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         previewMode="preview"
         onSelectFile={onSelectFile}
       />,
+      { wrapper: FilesPlugins },
     );
 
     fireEvent.click(await screen.findByRole('button', { name: /memory/i }));
@@ -391,8 +409,8 @@ describe('workspace browser body', () => {
       expect(hostFileListDirMock).toHaveBeenNthCalledWith(
         2,
         {
-          endpoint: sessionIdentity.endpoint,
-          sessionKey: sessionIdentity.sessionKey,
+          endpoint: agentScope.endpoint,
+          agentId: agentScope.agentId,
           relativePath: 'memory',
         },
         { timeoutMs: 60000 },
@@ -431,11 +449,12 @@ describe('workspace browser body', () => {
           lineStats: { added: 1, removed: 1 },
           toolId: 'edit-1',
         }}
-        sessionIdentity={sessionIdentity}
+        workspaceContext={workspaceContext}
         previewMode="diff"
         onSelectFile={vi.fn()}
         onPreviewModeChange={vi.fn()}
       />,
+      { wrapper: FilesPlugins },
     );
 
     expect(await screen.findByTestId('workspace-preview-body')).toHaveTextContent('diff');

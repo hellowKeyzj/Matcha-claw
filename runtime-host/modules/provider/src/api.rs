@@ -1,9 +1,9 @@
+use crate::owner::discovery::{DiscoveryReservation, DiscoveryResult, ProviderDiscoveries};
 use foundation::execution::{CommandRoute, OwnerRuntimeHandle, QueryRoute};
 use platform::call::{CallId, CallReceipt, CallRecorder};
 use platform::trace::{current_session_trace, session_trace};
 use serde_json::json;
 use std::sync::Arc;
-use crate::owner::discovery::{DiscoveryReservation, DiscoveryResult, ProviderDiscoveries};
 
 use crate::call::{ProviderCall, ProviderCallKind};
 use crate::llm_client::{LlmClientError, LlmStreamEvent, LlmStreamSink};
@@ -434,19 +434,32 @@ impl ProviderHandle {
             ProviderCallKind::GenerateText,
             "providerGeneration.generateText",
         )
-        .await.map_err(|_| {
-            session_trace("provider-generation.call-begin-failed", || json!({ "streaming": false }));
+        .await
+        .map_err(|_| {
+            session_trace(
+                "provider-generation.call-begin-failed",
+                || json!({ "streaming": false }),
+            );
         })?;
-        let provider_call_hash = platform::trace::enabled().then(|| call.as_ref().map(|call| platform::trace::identifier_hash(call.id().as_str()))).flatten();
-        session_trace("provider-generation.call-begun", || json!({
-            "providerCallHash": provider_call_hash, "streaming": false,
-        }));
+        let provider_call_hash = platform::trace::enabled()
+            .then(|| {
+                call.as_ref()
+                    .map(|call| platform::trace::identifier_hash(call.id().as_str()))
+            })
+            .flatten();
+        session_trace("provider-generation.call-begun", || {
+            json!({
+                "providerCallHash": provider_call_hash, "streaming": false,
+            })
+        });
         let (reply, rx) = oneshot::channel();
         self.send_query(ProviderQuery::GenerateText {
             call,
             request,
             cancellation,
-            diagnostic_trace: platform::trace::enabled().then(current_session_trace).flatten(),
+            diagnostic_trace: platform::trace::enabled()
+                .then(current_session_trace)
+                .flatten(),
             stream: None,
             reply,
         })
@@ -519,6 +532,105 @@ impl ProviderHandle {
                 })
             } => outcome,
         }
+    }
+
+    pub async fn prepare_generation_binding(
+        &self,
+        request: crate::generation::BindingRequest,
+    ) -> Result<crate::generation::Binding, crate::generation::Failure> {
+        use crate::generation::{Failure, FailureKind, Stage};
+        let (reply, rx) = oneshot::channel();
+        self.send_query(ProviderQuery::PrepareGenerationBinding { request, reply })
+            .await
+            .map_err(|_| Failure::new(Stage::Admission, FailureKind::OwnerUnavailable))?;
+        rx.await
+            .map_err(|_| Failure::new(Stage::Admission, FailureKind::OwnerUnavailable))?
+    }
+
+    pub async fn restore_generation_binding(
+        &self,
+        descriptor: crate::generation::BindingDescriptor,
+    ) -> Result<crate::generation::Binding, crate::generation::Failure> {
+        use crate::generation::{Failure, FailureKind, Stage};
+        let (reply, rx) = oneshot::channel();
+        self.send_query(ProviderQuery::RestoreGenerationBinding { descriptor, reply })
+            .await
+            .map_err(|_| Failure::new(Stage::Admission, FailureKind::OwnerUnavailable))?;
+        rx.await
+            .map_err(|_| Failure::new(Stage::Admission, FailureKind::OwnerUnavailable))?
+    }
+
+    pub async fn count_bound_input(
+        &self,
+        request: crate::generation::BoundRequest,
+        cancellation: CancellationToken,
+    ) -> Result<u64, crate::generation::Failure> {
+        use crate::generation::{Failure, FailureKind, Stage};
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        let (reply, rx) = oneshot::channel();
+        self.send_query(ProviderQuery::CountBoundInput {
+            request,
+            cancellation,
+            reply,
+        })
+        .await
+        .map_err(|_| Failure::new(Stage::Admission, FailureKind::OwnerUnavailable))?;
+        rx.await
+            .map_err(|_| Failure::new(Stage::Admission, FailureKind::OwnerUnavailable))?
+    }
+
+    pub async fn generate_bound(
+        &self,
+        request: crate::generation::BoundRequest,
+        cancellation: CancellationToken,
+        mut sink: Option<&mut dyn LlmStreamSink>,
+    ) -> Result<crate::generation::Receipt, crate::generation::Failure> {
+        use crate::generation::{Failure, FailureKind, Stage};
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        let call = ProviderCall::begin(
+            self.recorder.as_ref(),
+            ProviderCallKind::GenerateText,
+            "providerGeneration.generateBound",
+        )
+        .await
+        .map_err(|_| Failure::new(Stage::Admission, FailureKind::AuditUnavailable))?;
+        let (stream, mut events) = mpsc::channel::<ProviderStreamMessage>(1);
+        let (reply, rx) = oneshot::channel();
+        self.send_query(ProviderQuery::GenerateBound {
+            call,
+            request,
+            cancellation: cancellation.clone(),
+            stream: sink.is_some().then_some(stream),
+            reply,
+        })
+        .await
+        .map_err(|_| Failure::new(Stage::Admission, FailureKind::OwnerUnavailable))?;
+        // Do not return on cancellation/sink failure: the owner must first return its partial receipt.
+        let mut sink_failed = false;
+        while let Some(message) = events.recv().await {
+            if let ProviderStreamMessage::Event(event, ack) = message {
+                let delivered = if sink_failed {
+                    Err(LlmClientError::StreamSink("stream consumer failed".into()))
+                } else if let Some(sink) = sink.as_mut() {
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => Err(LlmClientError::StreamSink("stream consumer cancelled".into())),
+                        result = sink.send(event) => result,
+                    }
+                } else {
+                    Ok(())
+                };
+                sink_failed |= delivered.is_err();
+                let _ = ack.send(
+                    delivered
+                        .map_err(|_| LlmClientError::StreamSink("stream consumer failed".into())),
+                );
+            }
+        }
+        rx.await
+            .map_err(|_| Failure::new(Stage::Admission, FailureKind::OwnerUnavailable))?
     }
 
     pub async fn replace_provider_routing(
@@ -707,6 +819,26 @@ impl LlmStreamSink for ProviderStreamSink {
 }
 
 pub(crate) enum ProviderQuery {
+    PrepareGenerationBinding {
+        request: crate::generation::BindingRequest,
+        reply: oneshot::Sender<Result<crate::generation::Binding, crate::generation::Failure>>,
+    },
+    RestoreGenerationBinding {
+        descriptor: crate::generation::BindingDescriptor,
+        reply: oneshot::Sender<Result<crate::generation::Binding, crate::generation::Failure>>,
+    },
+    CountBoundInput {
+        request: crate::generation::BoundRequest,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<u64, crate::generation::Failure>>,
+    },
+    GenerateBound {
+        call: Option<ProviderCall>,
+        request: crate::generation::BoundRequest,
+        cancellation: CancellationToken,
+        stream: Option<mpsc::Sender<ProviderStreamMessage>>,
+        reply: oneshot::Sender<Result<crate::generation::Receipt, crate::generation::Failure>>,
+    },
     ListAccounts {
         call: Option<ProviderCall>,
         reply: oneshot::Sender<ProviderAccountsDelivery>,
@@ -802,7 +934,11 @@ impl ProviderQuery {
             | Self::TextGenerationModelLimits { call, .. }
             | Self::GenerateText { call, .. }
             | Self::SelectSessionModel { call, .. }
-            | Self::SelectMatchaSessionModelRuntime { call, .. } => call.clone(),
+            | Self::SelectMatchaSessionModelRuntime { call, .. }
+            | Self::GenerateBound { call, .. } => call.clone(),
+            Self::PrepareGenerationBinding { .. }
+            | Self::RestoreGenerationBinding { .. }
+            | Self::CountBoundInput { .. } => None,
         }
     }
 
@@ -816,7 +952,11 @@ impl ProviderQuery {
             | Self::TextGenerationModelLimits { call, .. }
             | Self::GenerateText { call, .. }
             | Self::SelectSessionModel { call, .. }
-            | Self::SelectMatchaSessionModelRuntime { call, .. } => call.take(),
+            | Self::SelectMatchaSessionModelRuntime { call, .. }
+            | Self::GenerateBound { call, .. } => call.take(),
+            Self::PrepareGenerationBinding { .. }
+            | Self::RestoreGenerationBinding { .. }
+            | Self::CountBoundInput { .. } => None,
         }
     }
 
@@ -828,9 +968,14 @@ impl ProviderQuery {
             | Self::SelectableModels { .. }
             | Self::ListRouting { .. }
             | Self::TextGenerationModelLimits { .. }
-            | Self::GenerateText { .. } => QueryRoute::Direct,
-            Self::SelectSessionModel { .. }
-            | Self::SelectMatchaSessionModelRuntime { .. } => QueryRoute::Global,
+            | Self::GenerateText { .. }
+            | Self::PrepareGenerationBinding { .. }
+            | Self::RestoreGenerationBinding { .. }
+            | Self::CountBoundInput { .. }
+            | Self::GenerateBound { .. } => QueryRoute::Direct,
+            Self::SelectSessionModel { .. } | Self::SelectMatchaSessionModelRuntime { .. } => {
+                QueryRoute::Global
+            }
         }
     }
 }

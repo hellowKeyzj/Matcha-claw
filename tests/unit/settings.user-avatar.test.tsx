@@ -1,19 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { Settings } from '@/pages/Settings';
-import { useSettingsStore } from '@/stores/settings';
-import { useAccountStore } from '@/stores/account';
-import { useLicenseStore } from '@/stores/license';
-import { useRuntimeHostStore } from '@/stores/gateway';
-import { useUpdateStore } from '@/stores/update';
+import { applicationShellPlugin } from '@/app/extensions';
+import { createPluginHost } from '@/plugin-host/core';
+import { PluginHostProvider } from '@/plugin-host/react';
+import { accountPlugin } from '@/plugins/account/plugin';
+import { callsPlugin } from '@/plugins/calls/plugin';
+import { searchPlugin } from '@/plugins/search/plugin';
+import { settingsPlugin } from '@/plugins/settings/plugin';
+import { Settings } from '@/plugins/settings/page';
+import { useSettingsStore } from '@/plugins/settings/store';
+import { useAccountStore } from '@/plugins/account/stores/account';
+import { useLicenseStore } from '@/plugins/account/stores/license';
+import { useRuntimeHostStore } from '@/plugins/runtime/store';
+import { useUpdateStore } from '@/plugins/settings/update/store';
 import i18n from '@/i18n';
 
-vi.mock('@/components/settings/ProvidersSettings', () => ({
+vi.mock('@/plugins/providers/components/ProvidersSettings', () => ({
   ProvidersSettings: () => <div data-testid="providers-settings-panel">mock-providers</div>,
 }));
 
-vi.mock('@/components/settings/UpdateSettings', () => ({
+vi.mock('@/plugins/settings/update/UpdateSettings', () => ({
   UpdateSettings: () => <div data-testid="update-settings-panel">mock-updates</div>,
 }));
 
@@ -27,6 +34,14 @@ vi.mock('@/lib/host-api', () => ({
     throw new Error(`unhandled hostApiFetch path: ${path}`);
   }),
 }));
+
+const pluginsHost = createPluginHost([
+  applicationShellPlugin,
+  accountPlugin,
+  callsPlugin,
+  searchPlugin,
+  settingsPlugin,
+]);
 
 describe('settings user avatar', () => {
   beforeEach(() => {
@@ -63,13 +78,15 @@ describe('settings user avatar', () => {
   it('外观分栏显示用户头像管理入口', async () => {
     await act(async () => {
       render(
-        <MemoryRouter initialEntries={['/settings?section=appearance']}>
-          <Settings />
-        </MemoryRouter>,
+        <PluginHostProvider host={pluginsHost}>
+          <MemoryRouter initialEntries={['/settings?section=appearance']}>
+            <Settings />
+          </MemoryRouter>
+        </PluginHostProvider>,
       );
     });
 
-    expect(screen.getByText('User Avatar')).toBeInTheDocument();
+    expect(await screen.findByText('User Avatar')).toBeInTheDocument();
     expect(screen.getByLabelText('Upload User Avatar')).toHaveAttribute('type', 'file');
     expect(screen.getByRole('button', { name: 'Clear Avatar' })).toBeInTheDocument();
   });
@@ -77,14 +94,17 @@ describe('settings user avatar', () => {
   it('点击清除头像后会清空 settings store 中的头像数据', async () => {
     await act(async () => {
       render(
-        <MemoryRouter initialEntries={['/settings?section=appearance']}>
-          <Settings />
-        </MemoryRouter>,
+        <PluginHostProvider host={pluginsHost}>
+          <MemoryRouter initialEntries={['/settings?section=appearance']}>
+            <Settings />
+          </MemoryRouter>
+        </PluginHostProvider>,
       );
     });
 
+    const clearAvatarButton = await screen.findByRole('button', { name: 'Clear Avatar' });
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Clear Avatar' }));
+      fireEvent.click(clearAvatarButton);
     });
 
     expect(useSettingsStore.getState().userAvatarDataUrl).toBeNull();

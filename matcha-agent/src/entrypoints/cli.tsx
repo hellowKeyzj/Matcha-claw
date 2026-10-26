@@ -83,6 +83,18 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args.some(arg => arg === '--effort-capabilities' || arg.startsWith('--effort-capabilities='))) {
+    const { printEffortCapabilities } = await import('../cli/effortCapabilities.js');
+    await printEffortCapabilities(args);
+    return;
+  }
+
+  if (args.includes('--mcp-oauth-control')) {
+    const { runMcpOAuthControl } = await import('../services/mcp/oauthControl.js');
+    await runMcpOAuthControl(args);
+    return;
+  }
+
   // For all other paths, load the startup profiler
   const { profileCheckpoint } = await import('../utils/startupProfiler.js');
   profileCheckpoint('cli_entry');
