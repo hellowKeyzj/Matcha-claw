@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { toast } from 'sonner';
 import i18n from '@/i18n';
 import { ProvidersSettings } from '@/plugins/providers/components/ProvidersSettings';
-import type { ProviderModel } from '@/lib/provider-model-catalog';
+import type { ProviderModel } from '@/plugins/providers/services/provider-model-catalog';
 import { applicationShellPlugin } from '@/app/extensions';
 import { createPluginHost } from '@/plugin-host/core';
 import { PluginHostProvider } from '@/plugin-host/react';
@@ -98,8 +98,8 @@ const providerModelCatalogMock = vi.hoisted(() => ({
   discoverProviderModels: vi.fn(),
 }));
 
-vi.mock('@/lib/provider-model-catalog', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/lib/provider-model-catalog')>();
+vi.mock('@/plugins/providers/services/provider-model-catalog', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/plugins/providers/services/provider-model-catalog')>();
   return {
     ...actual,
     discoverProviderModels: providerModelCatalogMock.discoverProviderModels,

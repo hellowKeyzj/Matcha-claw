@@ -1,21 +1,22 @@
 use platform::endpoint::runtime_address::RuntimeEndpoint;
 use provider_module::{ProviderSessionEndpoint, ProviderSessionModelSelectionOutcome};
 
-use super::actor::{SessionLane, SessionShared};
+use super::actor::SessionShared;
 use crate::{
     ports::RuntimeOperationFailure,
-    state::SessionProvider,
+    state::{SessionProvider, SessionState},
     thinking::{
         SessionThinkingAction, SessionThinkingCommand, SessionThinkingOutcome, ThinkingModel,
         ThinkingRuntime,
     },
 };
 
-impl SessionLane {
+impl SessionShared {
     pub(super) async fn handle_thinking(
-        &mut self,
-        shared: &SessionShared,
+        &self,
         mut command: SessionThinkingCommand,
+        state: Option<&SessionState>,
+        pending_completions: bool,
     ) -> SessionThinkingOutcome {
         let runtime = command.runtime();
         let trace_id = command.trace_id().map(str::to_owned);
@@ -47,21 +48,21 @@ impl SessionLane {
                     SessionThinkingAction::Set { level } => level.as_deref().map(level_label),
                     SessionThinkingAction::Get => None,
                 },
-                "hasActiveRun": self.state.as_ref().is_some_and(|state| state.active_run_id().is_some()),
-                "executionPending": command.scope.identity().is_some_and(|identity| shared.session_execution_pending(identity)),
-                "pendingCompletions": self.has_pending_completions(),
+                "hasActiveRun": state.is_some_and(|state| state.active_run_id().is_some()),
+                "executionPending": command.scope.identity().is_some_and(|identity| self.session_execution_pending(identity)),
+                "pendingCompletions": pending_completions,
             })
         });
-        if shared.terminal_delivery.is_stopping() {
+        if self.terminal_delivery.is_stopping() {
             return failed("stopping", SessionThinkingOutcome::Unavailable(runtime));
         }
         if let Some(identity) = command.scope.identity()
-            && self.state.as_ref().is_some_and(|state| state.identity() != identity)
+            && state.is_some_and(|state| state.identity() != identity)
         {
             return failed("identity_mismatch", SessionThinkingOutcome::Rejected(runtime));
         }
         let endpoint = command.scope.endpoint();
-        let driver = match shared.running_session_driver(
+        let driver = match self.running_session_driver(
             RuntimeEndpoint::try_new(endpoint.provider().as_str(), &endpoint.runtime_instance_id)
                 .ok(),
         ) {
@@ -89,7 +90,7 @@ impl SessionLane {
                 .identity()
                 .map(|identity| identity.session_key.clone())
                 .unwrap_or_default();
-            let selection = match shared
+            let selection = match self
                 .provider_handle
                 .select_session_model(endpoint, session_key, None, selection_id.clone(), trace_id.clone())
                 .await

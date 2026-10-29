@@ -53,6 +53,10 @@ pub struct ImplementationRef {
     deny_unknown_fields
 )]
 pub enum Entrypoint {
+    Builtin {
+        registration: String,
+        revision: Revision,
+    },
     Native {
         registration: String,
         host_build: Digest,

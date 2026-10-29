@@ -611,27 +611,7 @@ impl CanonicalSessionDeltaProducer {
                 match chat.state {
                     ChatState::Status => chat_status_change(chat)?,
                     ChatState::Delta => {
-                        if chat.message_text.is_some() || chat.message_thinking.is_some() {
-                            return Self::from_native_changes(
-                                event,
-                                source_epoch,
-
-                                chat_snapshot_chunks(chat),
-                            );
-                        }
-                        return Self::from_native_changes(
-                            event,
-                            source_epoch,
-
-                            vec![CanonicalSessionChange::AssistantTurnChunk {
-                                run_id: chat.run_id.clone(),
-                                message_id: None,
-                                kind: AssistantTurnChunkKind::Text,
-                                text: chat.delta_text.clone()?,
-                                replace: chat.replace,
-                                status: AssistantTurnStatus::Streaming,
-                            }],
-                        );
+                        return Self::from_native_changes(event, source_epoch, chat_snapshot_chunks(chat));
                     }
                     _ => {
                         let terminal = CanonicalSessionChange::Terminal {
@@ -825,10 +805,9 @@ fn chat_status_change(chat: &super::protocol::ChatEvent) -> Option<CanonicalSess
 
 fn chat_snapshot_chunks(chat: &super::protocol::ChatEvent) -> Vec<CanonicalSessionChange> {
     let mut changes = Vec::with_capacity(2);
-    let text = chat.delta_text.as_deref().filter(|_| chat.replace).or(chat.message_text.as_deref());
     for (kind, text) in [
         (AssistantTurnChunkKind::Thinking, chat.message_thinking.as_deref()),
-        (AssistantTurnChunkKind::Text, text),
+        (AssistantTurnChunkKind::Text, chat.message_text.as_deref()),
     ] {
         if let Some(text) = text {
             changes.push(CanonicalSessionChange::AssistantTurnChunk {

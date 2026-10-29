@@ -13,8 +13,8 @@ async function prefetchTasks(): Promise<void> {
     { useTaskCenterStore },
   ] = await Promise.all([
     import('@/plugins/chat/store'),
-    import('@/plugins/chat/store/session-helpers'),
-    import('@/stores/runtime-endpoints'),
+    import('@/plugins/chat/session-catalog'),
+    import('@/plugins/runtime/directory'),
     import('@/types/desktop/runtime-address'),
     import('./stores/task-center-store'),
   ]);

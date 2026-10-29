@@ -6,12 +6,12 @@ const normalizeProviderSnapshotMock = vi.fn((value: unknown) => value);
 const trackUiEventMock = vi.hoisted(() => vi.fn());
 const startUiTimingMock = vi.hoisted(() => vi.fn(() => () => 1));
 
-vi.mock('@/lib/provider-accounts', () => ({
+vi.mock('@/plugins/providers/services/provider-accounts', () => ({
   fetchProviderSnapshot: (...args: unknown[]) => fetchProviderSnapshotMock(...args),
   normalizeProviderSnapshot: (...args: unknown[]) => normalizeProviderSnapshotMock(...args),
 }));
 
-vi.mock('@/lib/provider-projection', () => ({
+vi.mock('@/plugins/providers/services/provider-projection', () => ({
   hostProviderCreateAccount: vi.fn(),
   hostProviderDeleteAccount: vi.fn(),
   hostProviderReadApiKey: vi.fn(),

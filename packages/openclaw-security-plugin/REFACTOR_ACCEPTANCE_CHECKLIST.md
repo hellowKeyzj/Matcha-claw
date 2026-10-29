@@ -3,7 +3,7 @@
 ## 1. 验收目标
 
 - 本次重构只允许“内部结构升级”，不允许“对外行为缩水”。
-- 对外契约以 `security-core` 现状为准：HTTP 路由、Gateway 方法、5 个 Hook、策略模型、审计行为。
+- 对外契约以 `security-core` 现状为准：HTTP 路由、Gateway 方法、安全执行入口、策略模型、审计行为；OpenClaw 2026.10.8 工具审批以原生 runner 契约为准。
 - 任一关键项不通过，禁止进入下一阶段迁移。
 
 ## 2. 对外契约冻结（必须保持）
@@ -26,15 +26,17 @@
 - `security.remediation.apply`
 - `security.remediation.rollback`
 
-### 2.2 Hook 链路
+### 2.2 原生执行链路
 
 必须继续注册并执行：
 
-- `before_agent_start`
-- `before_tool_call`
+- `runtime-guard` trusted tool policy（manifest 声明，插件显式启用；替代普通 `before_tool_call` guard）
+- `before_prompt_build`
 - `tool_result_persist`
 - `message_received`
 - `after_tool_call`
+
+10.8 已删除的 `before_agent_start` 不再注册；原统计字段保留为零，不改变 RPC 结构。
 
 ## 3. 关键行为验收项
 
@@ -42,8 +44,9 @@
 
 - destructive 命中时按 `severity -> action` 生效（`block/confirm/warn/log`）。
 - secrets 命中时按 `severity -> action` 生效（含 `redact`）。
-- `confirm` 通过 `_clawguardian_confirm` 确认后放行，且清理确认标记。
-- exec-style 工具命中 `confirm` 时注入 `ask: "always"`。
+- `confirm` 通过原生 runner 的 `requireApproval` 审批最终参数；模型参数中的确认标记不授予权限。
+- destructive 与 secret 同时命中时，硬阻断优先、脱敏先物化，confirm 合为一次原生审批；批准后不再重跑 guard 或改写参数。
+- 不注入或删除 exec `ask`，不以独立 `exec.approval` bridge 批准代替原生 runner 审批。
 - allowlist tool/session 命中时绕过阻断逻辑。
 
 ### 3.2 输出扫描与分流
@@ -66,11 +69,11 @@
 
 已覆盖（当前存在）：
 
-- 网关方法注册与 5 hooks 注册：
+- 网关方法与 hook 注册（既有 fixture 尚基于普通 `before_tool_call`，未适配 trusted policy）：
   - `tests/unit/security-core-plugin.test.ts`
 - `policy.sync` / `audit.query` / `audit.latest`：
   - `tests/unit/security-core-plugin.test.ts`
-- `before_tool_call` 关键动作（block/confirm/redact/warn）：
+- 工具 guard 关键动作（block/redact/warn；旧确认 flag/ask 断言存在契约漂移，不能证明原生审批闭环）：
   - `tests/unit/security-core-plugin.test.ts`
 - `tool_result_persist` 关键动作（block/redact/confirm降级）：
   - `tests/unit/security-core-plugin.test.ts`

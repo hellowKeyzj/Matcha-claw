@@ -32,7 +32,7 @@ import { getModelBetas, modelSupportsStructuredOutputs } from './betas.js'
 import { logForDebugging } from './debug.js'
 import { errorMessage } from './errors.js'
 import { getAPIProvider } from './model/providers.js'
-import { normalizeModelStringForAPI } from './model/model.js'
+import { normalizeModelStringForAPI } from './model/configs.js'
 import { getOpenAIClient } from '../services/api/openai/client.js'
 import { getGrokClient } from '../services/api/grok/client.js'
 import { isChatGPTAuthEnabled } from '../services/api/openai/chatgptAuth.js'
@@ -48,11 +48,8 @@ import {
 } from '../services/api/openai/openaiShared.js'
 import {
   anthropicMessagesToOpenAI,
-  resolveOpenAIModel,
   anthropicToolsToOpenAI,
   anthropicToolChoiceToOpenAI,
-  resolveGrokModel,
-  resolveGeminiModel,
   anthropicToolsToGemini,
   anthropicToolChoiceToGemini,
   normalizeOpenAIUsage,
@@ -658,13 +655,7 @@ async function sideQueryViaOpenAICompatible(
   } = opts
 
   const provider = getAPIProvider()
-  const normalizedModel = normalizeModelStringForAPI(model)
-
-  // Resolve model name per provider
-  const openaiModel =
-    provider === 'grok'
-      ? resolveGrokModel(normalizedModel)
-      : resolveOpenAIModel(normalizedModel)
+  const openaiModel = normalizeModelStringForAPI(model)
 
   // Build system prompt text
   const systemText = extractSystemText(system)
@@ -842,8 +833,7 @@ async function sideQueryViaGemini(
     signal,
   } = opts
 
-  const normalizedModel = normalizeModelStringForAPI(model)
-  const geminiModel = resolveGeminiModel(normalizedModel)
+  const geminiModel = normalizeModelStringForAPI(model)
 
   // Build Gemini contents from Anthropic MessageParam[]
   const contents: Array<{

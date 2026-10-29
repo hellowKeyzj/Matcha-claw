@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { useGatewayStore } from '@/plugins/runtime/store';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
-import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
+import { isGatewayOperational, isGatewayPreparing } from '@/plugins/runtime/gateway-status';
 import { useContributions } from '@/plugin-host/react';
 import { useTranslation } from 'react-i18next';
 import { useSecurityPolicyStore } from './security-policy-store';

@@ -7,7 +7,7 @@ import { wikiContentPreviews, type WikiContentPreviewProps } from '../extensions
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import type { FileContentType } from '@/plugins/files/file-types';
-import { findDomTextSelection, findUniqueTextSelection, normalizeEditableMarkdown } from '@/lib/wiki-selection';
+import { findDomTextSelection, findUniqueTextSelection, normalizeEditableMarkdown } from '../wiki-selection';
 import type { WikiSelectionApplyReceipt, WikiSelectionSnapshot } from '@/types/wiki-selection';
 import { SelectionAssistantPanel } from '@/plugins/wiki/components/SelectionAssistantPanel';
 import { fileName, typeLabel } from '@/plugins/wiki/preview';

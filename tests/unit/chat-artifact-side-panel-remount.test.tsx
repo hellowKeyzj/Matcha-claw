@@ -5,8 +5,8 @@ import { MemoryRouter } from 'react-router-dom';
 import Chat from '@/plugins/chat';
 import { useChatStore } from '@/plugins/chat/store';
 import { useGatewayStore } from '@/plugins/runtime/store';
-import { useLayoutStore } from '@/stores/layout';
-import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { useLayoutStore } from '@/app/layout/store';
+import { useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { useCapabilityRoutingStore } from '@/plugins/providers/stores/capability-routing';
 import { createReadyResourceStatusState } from '@/lib/resource-state';
@@ -378,8 +378,8 @@ describe('chat artifact side panel remount', () => {
     } as never);
 
     useLayoutStore.setState({
-      chatTakeoverMode: 'none',
-      chatWindowRightDockLayout: null,
+      viewportTakeover: false,
+      viewportRightDockLayout: null,
     });
 
     const items = artifactRenderItems();

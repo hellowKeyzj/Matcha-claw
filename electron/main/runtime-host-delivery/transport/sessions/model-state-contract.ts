@@ -7,7 +7,7 @@ export function isSessionModelState(value: unknown): value is SessionModelState 
     && Object.keys(value).every((key) => ['selected', 'active', 'overrideSource', 'selectionId'].includes(key))
     && (value.selected === undefined || isSessionModelIdentity(value.selected))
     && (value.active === undefined || isSessionModelIdentity(value.active))
-    && (value.overrideSource === undefined || value.overrideSource === 'user' || value.overrideSource === 'auto')
+    && (value.overrideSource === undefined || value.overrideSource === 'user' || value.overrideSource === 'auto' || value.overrideSource === 'inherited')
     && (value.selectionId === undefined || typeof value.selectionId === 'string');
 }
 

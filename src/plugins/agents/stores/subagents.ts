@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
+import { SUBAGENT_TARGET_FILES } from '@/plugins/agents/subagent-files';
 import type {
   AgentScope, RuntimeEndpointRef, RuntimeInstanceScope,
 } from '@/types/desktop/runtime-address';
@@ -15,17 +15,16 @@ import {
   buildTemplateAvatarSeed,
   DEFAULT_AGENT_AVATAR_STYLE,
   resolveAgentAvatarStyle,
-  type AgentAvatarStyle,
-} from '@/lib/agent-avatar';
+} from '@/plugins/agents/presentation/agent-avatar';
 import { hostApiFetch } from '@/lib/host-api';
 import { agentScope, buildCapabilityScopeKey, runtimeEndpointsEqual, runtimeInstanceScope } from '@/types/desktop/runtime-address';
-import { selectManagementEndpoint, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
-import { hostExportSkillBundles, hostSkillsMutation } from '@/lib/skills';
-import { isSubagentMutation, subagentMutationError, waitForSubagentMutation, waitForSubagentResult } from '@/lib/subagent-call';
+import { selectManagementEndpoint, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
+import { hostExportSkillBundles, hostSkillsMutation } from '@/plugins/skills/services/client';
+import { isSubagentMutation, subagentMutationError, waitForSubagentMutation, waitForSubagentResult } from '@/plugins/agents/services/subagent-call';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
-import { runCloudPackageOperation } from '@/lib/cloud-package-call';
+import { runCloudPackageOperation } from '@/plugins/account/api/cloud-package-call';
 import i18n from '@/i18n';
-import { fetchSelectableProviderModels } from '@/lib/provider-models';
+import { fetchSelectableProviderModels } from '@/plugins/providers/services/provider-models';
 import { createSessionTraceId, logSessionTrace, summarizeError, summarizeIdentifier } from '@/lib/session-trace';
 import { useChatStore } from '@/plugins/chat/store';
 import {
@@ -34,6 +33,7 @@ import {
   normalizeSubagentNameToSlug,
 } from '@/plugins/agents/domain/workspace';
 import type {
+  AgentAvatarStyle,
   AgentsListResult,
   ModelCatalogEntry,
   SubagentCloudPackage,

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Task, TaskListSnapshot } from '@/services/openclaw/task-manager-client';
+import type { Task, TaskListSnapshot } from '@/plugins/tasks/services/task-manager-client';
 import type { SessionIdentity } from '../../src/types/desktop/runtime-address';
 
 function createOpenClawTestSessionIdentity(sessionKey: string, agentId = 'main'): SessionIdentity {
@@ -18,7 +18,7 @@ const listTaskSnapshotMock = vi.fn<(payload: { sessionKey: string; sessionIdenti
 const updateTaskMock = vi.fn();
 const isTaskManagementAvailableMock = vi.fn();
 
-vi.mock('@/services/openclaw/task-manager-client', () => ({
+vi.mock('@/plugins/tasks/services/task-manager-client', () => ({
   isTaskManagementAvailable: (...args: unknown[]) => isTaskManagementAvailableMock(...args),
   listTaskSnapshot: (...args: [{ sessionKey: string; sessionIdentity: typeof sessionIdentity; teamKey?: string }]) => listTaskSnapshotMock(...args),
   updateTask: (...args: unknown[]) => updateTaskMock(...args),

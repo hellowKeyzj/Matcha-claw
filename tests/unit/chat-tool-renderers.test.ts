@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { createInstance } from 'i18next';
-import zh from '../../src/i18n/locales/zh/chat.json';
-import en from '../../src/i18n/locales/en/chat.json';
-import ja from '../../src/i18n/locales/ja/chat.json';
-import ru from '../../src/i18n/locales/ru/chat.json';
+import zh from '../../src/plugins/chat/locales/zh/chat.json';
+import en from '../../src/plugins/chat/locales/en/chat.json';
+import ja from '../../src/plugins/chat/locales/ja/chat.json';
+import ru from '../../src/plugins/chat/locales/ru/chat.json';
 
 import { buildToolActivityViewModel } from '../../src/plugins/message-rendering/tool-activity-view-model';
 import { projectSessionViewItems } from '../../src/plugins/chat/store/store-state-helpers';

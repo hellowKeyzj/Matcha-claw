@@ -7,6 +7,19 @@
     "onStartup": true,
     "onCapabilities": ["tool", "hook"]
   },
+  "contracts": {
+    "tools": [
+      "world_discover",
+      "world_query",
+      "world_explain",
+      "world_action_propose",
+      "world_action_submit",
+      "world_action_status",
+      "world_observe",
+      "world_change_propose",
+      "world_branch_test"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

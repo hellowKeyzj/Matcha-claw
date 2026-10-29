@@ -4,7 +4,7 @@ use world_protocol::{
     bindings::{BindingNode, ImplementationRef, SlotKind},
     commit::CommitFailure,
     failure::FailureStage,
-    ids::{Digest, WorldRef},
+    ids::WorldRef,
     package::PackageLimits,
     process::HostFailure,
     slots::{self, StorageReadRequest, StorageReadResult},
@@ -31,7 +31,6 @@ impl PreparedStorage {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, NativePrepareFailure> {
         let contract = slots::slot_contract(SlotKind::Storage)
             .map_err(|_| NativePrepareFailure::Entrypoint)?;
@@ -40,7 +39,7 @@ impl PreparedStorage {
         }
         Ok(Self {
             proof: NativeProof::prepare(
-                node, config, artifact, host_build, slots::STORAGE_REGISTRATION, SlotKind::Storage,
+                node, config, artifact, slots::STORAGE_REGISTRATION, SlotKind::Storage,
             )?,
         })
     }

@@ -713,10 +713,8 @@ impl Sessions {
             }
             changed.await;
         }
-        if let Some(task) = session.consumer.lock().await.take()
-            && let Err(error) = task.await
-        {
-            failures.push(rpc::Error::internal("session_consumer_task").with_source(error));
+        if let Err(error) = self.join_consumer(&session).await {
+            failures.push(error);
         }
         {
             let mut execution = session.data.lock().await;

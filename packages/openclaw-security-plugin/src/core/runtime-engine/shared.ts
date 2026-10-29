@@ -8,10 +8,6 @@ import type {
 } from "../types.js";
 
 const COMPILED_PATTERN_CACHE = new Map<string, NamedPattern[]>();
-const EXEC_STYLE_TOOL_RE = /(?:^|\.)(exec|bash|run|shell|command)$/i;
-
-export const CONFIRM_FLAG = "_clawguardian_confirm";
-export const SECURITY_CONFIRM_FLAG = "_security_core_confirm";
 
 function normalizePatternList(patterns: string[]): string[] {
   return patterns
@@ -60,23 +56,6 @@ export function resolveActionForSeverity(
   return severityActions[severity] ?? fallback;
 }
 
-export function hasConfirmFlag(params: unknown): boolean {
-  if (typeof params !== "object" || params === null) {
-    return false;
-  }
-  const record = params as Record<string, unknown>;
-  return record[CONFIRM_FLAG] === true || record[SECURITY_CONFIRM_FLAG] === true;
-}
-
-export function stripConfirmFlag(params: unknown): Record<string, unknown> {
-  if (typeof params !== "object" || params === null || Array.isArray(params)) {
-    return {};
-  }
-  const { [CONFIRM_FLAG]: _confirmFlag, [SECURITY_CONFIRM_FLAG]: _securityConfirmFlag, ...rest } =
-    params as Record<string, unknown>;
-  return rest;
-}
-
 export function normalizeToolParams(toolParams: Record<string, unknown>): Record<string, unknown> {
   if (typeof toolParams !== "object" || toolParams === null || Array.isArray(toolParams)) {
     return {};
@@ -107,10 +86,6 @@ export function redactToolParams(
     return {};
   }
   return redacted as Record<string, unknown>;
-}
-
-export function isExecStyleTool(toolName: string): boolean {
-  return EXEC_STYLE_TOOL_RE.test(toolName);
 }
 
 function severityRank(severity: SecurityGuardSeverity): number {

@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { Sidebar } from '@/components/layout/Sidebar';
+import { Sidebar } from '@/app/layout/Sidebar';
 import { useChatStore } from '@/plugins/chat/store';
 import { createPluginHost, type PreloadableComponent } from '@/plugin-host/core';
 import { PluginHostProvider } from '@/plugin-host/react';
@@ -10,7 +10,7 @@ import { agentsPlugin } from '@/plugins/agents/plugin';
 import { navigationPlugin } from '@/plugins/navigation/plugin';
 import { useAccountStore } from '@/plugins/account/stores/account';
 import { useRuntimeHostStore } from '@/plugins/runtime/store';
-import { useLayoutStore } from '@/stores/layout';
+import { useLayoutStore } from '@/app/layout/store';
 import { useSettingsStore } from '@/plugins/settings/store';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { useTeamsStore } from '@/plugins/teams/store';

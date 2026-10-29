@@ -14,8 +14,8 @@ import {
   type RuntimeInstanceScope,
 } from '@/types/desktop/runtime-address';
 import { subscribeHostEvent } from '@/lib/host-events';
-import { waitForCronMutation } from '@/lib/cron-call';
-import type { CronMutationOperation } from '@/lib/cron-call';
+import { waitForCronMutation } from '@/plugins/tasks/services/cron-call';
+import type { CronMutationOperation } from '@/plugins/tasks/services/cron-call';
 import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '@/types/cron';
 
 interface CronState {

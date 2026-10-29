@@ -29,10 +29,10 @@ use crate::{
     store::{WorldSnapshot, WorldStore},
 };
 
-/// Only initial selection compares the current executable build. Resume consumes the durable pin.
+/// Select the enabled, trusted parser package. Resume consumes the durable pin.
 pub(crate) async fn select_materials(
     store: &WorldStore, admission: &Admission, inventory: &Inventory,
-    ports: &PreparationPorts, deadline: Instant,
+    deadline: Instant,
 ) -> Result<MaterialImplementation, owner::Error> {
     check_deadline(deadline)?;
     let records = inventory.list(&admission.invocation().world).await?;
@@ -42,7 +42,7 @@ pub(crate) async fn select_materials(
             || record.manifest.identity.id.as_str() != "world-materials" { continue; }
         let matching: Vec<_> = record.manifest.artifacts.iter().filter(|artifact| {
             artifact.kind == ArtifactKind::Implementation && artifact.runtime == ArtifactRuntime::TrustedProcess
-                && artifact.target == process::native_target() && artifact.digest == *ports.host_build()
+                && artifact.target == process::native_target()
         }).collect();
         if matching.is_empty() { continue; }
         if matching.len() != 1 { return Err(invalid()); }

@@ -1,4 +1,4 @@
-import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
+import { RuntimeScopeSelector } from '@/plugins/runtime/RuntimeScopeSelector';
 
 interface TaskCenterPageTitleProps {
   title: string;

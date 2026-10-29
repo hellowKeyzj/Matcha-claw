@@ -78,6 +78,13 @@ pub(super) fn validate(
                 }
                 require_contract(manifest, protocol)?;
             }
+            // Historical packages remain readable; preparation checks the current descriptor.
+            (
+                ArtifactRuntime::Native,
+                Entrypoint::Builtin { registration, revision },
+            ) if !registration.trim().is_empty()
+                && revision.0 > 0
+                && artifact.path.is_none() => {}
             (
                 ArtifactRuntime::Native,
                 Entrypoint::Native {

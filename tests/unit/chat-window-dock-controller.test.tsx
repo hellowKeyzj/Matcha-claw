@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatWindowDockController } from '@/plugins/chat/useChatWindowDockController';
-import { useLayoutStore } from '@/stores/layout';
+import { useLayoutStore } from '@/app/layout/store';
 
 const invokeIpcMock = vi.hoisted(() => vi.fn());
 
@@ -45,8 +45,8 @@ describe('chat window dock controller', () => {
     invokeIpcMock.mockReset();
     setWindowInnerWidth(1200);
     useLayoutStore.setState({
-      chatTakeoverMode: 'none',
-      chatWindowRightDockLayout: null,
+      viewportTakeover: false,
+      viewportRightDockLayout: null,
     });
   });
 
@@ -58,7 +58,7 @@ describe('chat window dock controller', () => {
     rerender({ panelOpen: true });
 
     await waitFor(() => {
-      expect(useLayoutStore.getState().chatWindowRightDockLayout).toEqual({
+      expect(useLayoutStore.getState().viewportRightDockLayout).toEqual({
         phase: 'opening',
         dockWidth: 526,
         baseWidth: 1200,
@@ -108,7 +108,7 @@ describe('chat window dock controller', () => {
     await waitFor(() => {
       expect(result.current.sidePanelMainWidth).toBe(1200);
       expect(result.current.sidePanelWidth).toBe(720);
-      expect(useLayoutStore.getState().chatWindowRightDockLayout).toEqual({
+      expect(useLayoutStore.getState().viewportRightDockLayout).toEqual({
         phase: 'open',
         dockWidth: 726,
         baseWidth: 1200,
@@ -138,7 +138,7 @@ describe('chat window dock controller', () => {
     await waitFor(() => {
       expect(result.current.sidePanelMainWidth).toBe(1200);
       expect(result.current.sidePanelWidth).toBe(320);
-      expect(useLayoutStore.getState().chatWindowRightDockLayout).toEqual({
+      expect(useLayoutStore.getState().viewportRightDockLayout).toEqual({
         phase: 'open',
         dockWidth: 326,
         baseWidth: 1200,
@@ -153,7 +153,7 @@ describe('chat window dock controller', () => {
     await waitFor(() => {
       expect(result.current.sidePanelMainWidth).toBe(1134);
       expect(result.current.sidePanelWidth).toBe(260);
-      expect(useLayoutStore.getState().chatWindowRightDockLayout).toEqual({
+      expect(useLayoutStore.getState().viewportRightDockLayout).toEqual({
         phase: 'open',
         dockWidth: 266,
         baseWidth: 1134,
@@ -168,7 +168,7 @@ describe('chat window dock controller', () => {
     await waitFor(() => {
       expect(result.current.sidePanelMainWidth).toBe(1200);
       expect(result.current.sidePanelWidth).toBe(520);
-      expect(useLayoutStore.getState().chatWindowRightDockLayout).toEqual({
+      expect(useLayoutStore.getState().viewportRightDockLayout).toEqual({
         phase: 'open',
         dockWidth: 526,
         baseWidth: 1200,
@@ -207,7 +207,7 @@ describe('chat window dock controller', () => {
 
     await waitFor(() => {
       expect(result.current.phase).toBe('closed');
-      expect(useLayoutStore.getState().chatWindowRightDockLayout).toBeNull();
+      expect(useLayoutStore.getState().viewportRightDockLayout).toBeNull();
     });
     expect(invokeIpcMock).toHaveBeenCalledWith('window:setRightDockWidth', 0, { currentDockWidth: 726 });
   });

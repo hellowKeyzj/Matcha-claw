@@ -18,11 +18,8 @@ export function selectRuntimeAgentScope(state: ChatStoreState) {
 import {
   deriveSessionImageGenerationPendingStateFromItems,
 } from '@/types/session/render-item';
-import {
-  readSessionCatalogStatusShell,
-  readSessionsFromState,
-  readSessionTitlesFromState,
-} from '@/plugins/chat/store/session-helpers';
+import { readSessionCatalogStatusShell } from '@/plugins/chat/store/session-helpers';
+import { readSessionsFromState, readSessionTitlesFromState } from '@/plugins/chat/session-catalog';
 import {
   getSessionMeta,
   getSessionRuntime,

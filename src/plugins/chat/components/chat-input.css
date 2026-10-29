@@ -68,4 +68,5 @@
 .chat-thinking-range[data-unpositioned]::-webkit-slider-thumb { opacity: 0; }
 
 .chat-thinking-range:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 4px; border-radius: 999px; }
-.chat-thinking-range:disabled { cursor: not-allowed; opacity: 0.45; }
+.chat-thinking-range[aria-disabled="true"] { cursor: not-allowed; }
+.chat-thinking-range[data-disabled] { opacity: 0.45; }

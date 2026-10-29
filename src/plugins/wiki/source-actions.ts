@@ -7,7 +7,7 @@ import {
   hostWikiRefreshSources,
   hostWikiRescanSources,
 } from '@/lib/host-api';
-import { pickLocalDirectory, pickLocalFile } from '@/services/local-path-picker';
+import { pickLocalDirectory, pickLocalFile } from '@/lib/local-path-picker';
 import type { WikiSourceActionContext } from './extensions';
 import { summarizeDeleteSourceResult, summarizeSourceCallCounts } from './wiki-model';
 

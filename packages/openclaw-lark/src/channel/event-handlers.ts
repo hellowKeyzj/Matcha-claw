@@ -24,7 +24,7 @@ import { resolveVcSender } from '../messaging/inbound/vc-sender';
 import { parseFeishuDriveCommentNoticeEventPayload } from '../messaging/inbound/comment-context';
 import { isMessageExpired } from '../messaging/inbound/dedup';
 import { withTicket } from '../core/lark-ticket';
-import { isTraceEnabled, larkLogger } from '../core/lark-logger';
+import { larkLogger } from '../core/lark-logger';
 import { handleCardAction } from '../tools/auto-auth';
 import { handleAskUserAction } from '../tools/ask-user-question';
 import { dispatchSyntheticTextMessage } from '../messaging/inbound/synthetic-message';
@@ -103,13 +103,13 @@ export async function handleMessageEvent(ctx: MonitorContext, data: unknown): Pr
 
     // Dedup — skip duplicate messages (e.g. from WebSocket reconnects).
     if (!ctx.messageDedup.tryRecord(msgId, accountId)) {
-      if (isTraceEnabled()) log(`feishu[${accountId}]: duplicate message ${msgId}, skipping`);
+      log(`feishu[${accountId}]: duplicate message ${msgId}, skipping`);
       return;
     }
 
     // Expiry — discard stale messages from reconnect replay.
     if (isMessageExpired(event.message?.create_time)) {
-      if (isTraceEnabled()) log(`feishu[${accountId}]: message ${msgId} expired, discarding`);
+      log(`feishu[${accountId}]: message ${msgId} expired, discarding`);
       return;
     }
 
@@ -164,7 +164,7 @@ export async function handleMessageEvent(ctx: MonitorContext, data: unknown): Pr
         }
       },
     });
-    if (isTraceEnabled()) log(`feishu[${accountId}]: message ${msgId} in chat ${chatId}${threadId ? ` thread ${threadId}` : ''} — ${status}`);
+    log(`feishu[${accountId}]: message ${msgId} in chat ${chatId}${threadId ? ` thread ${threadId}` : ''} — ${status}`);
   } catch (err) {
     error(`feishu[${accountId}]: error handling message: ${String(err)}`);
   }
@@ -181,20 +181,20 @@ export async function handleReactionEvent(ctx: MonitorContext, data: unknown): P
     const event = data as FeishuReactionCreatedEvent;
     const msgId = event.message_id ?? 'unknown';
 
-    if (isTraceEnabled()) log(`feishu[${accountId}]: reaction event on message ${msgId}`);
+    log(`feishu[${accountId}]: reaction event on message ${msgId}`);
 
     // ---- Dedup: deterministic key based on message + emoji + operator ----
     const emojiType = event.reaction_type?.emoji_type ?? '';
     const operatorOpenId = event.user_id?.open_id ?? '';
     const dedupKey = `${msgId}:reaction:${emojiType}:${operatorOpenId}`;
     if (!ctx.messageDedup.tryRecord(dedupKey, accountId)) {
-      if (isTraceEnabled()) log(`feishu[${accountId}]: duplicate reaction ${dedupKey}, skipping`);
+      log(`feishu[${accountId}]: duplicate reaction ${dedupKey}, skipping`);
       return;
     }
 
     // ---- Expiry: discard stale reaction events ----
     if (isMessageExpired(event.action_time)) {
-      if (isTraceEnabled()) log(`feishu[${accountId}]: reaction on ${msgId} expired, discarding`);
+      log(`feishu[${accountId}]: reaction on ${msgId} expired, discarding`);
       return;
     }
 
@@ -243,7 +243,7 @@ export async function handleReactionEvent(ctx: MonitorContext, data: unknown): P
         }
       },
     });
-    if (isTraceEnabled()) log(`feishu[${accountId}]: reaction on ${msgId} (chatId=${preResolved.chatId}) — ${status}`);
+    log(`feishu[${accountId}]: reaction on ${msgId} (chatId=${preResolved.chatId}) — ${status}`);
   } catch (err) {
     error(`feishu[${accountId}]: error handling reaction event: ${String(err)}`);
   }
@@ -293,20 +293,18 @@ export async function handleVcMeetingInvitedEvent(ctx: MonitorContext, data: unk
     //   fields are missing when we skip.
     const expectedAppId = ctx.lark.account.appId ?? '';
     const eventAppId = event.app_id?.trim() ?? '';
-    if (isTraceEnabled()) {
-      log(
-        `feishu[${accountId}]: vc invited event received (ingress=websocket)` +
-          `${eventId ? ` event_id=${eventId}` : ''}` +
-          `${eventAppId ? ` app_id=${eventAppId}` : ' app_id=<missing>'}` +
-          `${expectedAppId ? ` expected_app_id=${expectedAppId}` : ''}` +
-          `${invitedBotOpenId ? ` bot_open_id=${invitedBotOpenId}` : ' bot_open_id=<missing>'}` +
-          `${ctx.lark.botOpenId ? ` expected_bot_open_id=${ctx.lark.botOpenId}` : ''}` +
-          `${event.invite_time ? ` invite_time=${event.invite_time}` : ''}` +
-          ` meeting_no_present=${meetingNo ? 'true' : 'false'}` +
-          ` sender_present=${senderId ? 'true' : 'false'}` +
-          ` sender_from=${sender.fromFallback}`,
-      );
-    }
+    log(
+      `feishu[${accountId}]: vc invited event received (ingress=websocket)` +
+        `${eventId ? ` event_id=${eventId}` : ''}` +
+        `${eventAppId ? ` app_id=${eventAppId}` : ' app_id=<missing>'}` +
+        `${expectedAppId ? ` expected_app_id=${expectedAppId}` : ''}` +
+        `${invitedBotOpenId ? ` bot_open_id=${invitedBotOpenId}` : ' bot_open_id=<missing>'}` +
+        `${ctx.lark.botOpenId ? ` expected_bot_open_id=${ctx.lark.botOpenId}` : ''}` +
+        `${event.invite_time ? ` invite_time=${event.invite_time}` : ''}` +
+        ` meeting_no_present=${meetingNo ? 'true' : 'false'}` +
+        ` sender_present=${senderId ? 'true' : 'false'}` +
+        ` sender_from=${sender.fromFallback}`,
+    );
 
     if (!meetingNo) {
       log(`feishu[${accountId}]: vc invited event missing meeting_no, skipping`);
@@ -333,7 +331,7 @@ export async function handleVcMeetingInvitedEvent(ctx: MonitorContext, data: unk
     const dedupBotKey = ctx.lark.botOpenId ?? invitedBotOpenId ?? 'no-bot';
     const dedupKey = eventId ? `vc-invited:by-event:${eventId}` : `vc-invited:by-meeting:${meetingNo}:${dedupBotKey}`;
     if (!ctx.messageDedup.tryRecord(dedupKey, accountId)) {
-      if (isTraceEnabled()) log(`feishu[${accountId}]: duplicate vc invited event detected, skipping`);
+      log(`feishu[${accountId}]: duplicate vc invited event detected, skipping`);
       return;
     }
 
@@ -382,13 +380,13 @@ export async function handleCommentEvent(ctx: MonitorContext, data: unknown): Pr
     // Dedup: build a deterministic key from the comment/reply IDs
     const dedupKey = replyId ? `comment:${commentId}:reply:${replyId}` : `comment:${commentId}`;
     if (!ctx.messageDedup.tryRecord(dedupKey, accountId)) {
-      if (isTraceEnabled()) log(`feishu[${accountId}]: duplicate comment event ${dedupKey}, skipping`);
+      log(`feishu[${accountId}]: duplicate comment event ${dedupKey}, skipping`);
       return;
     }
 
     // Expiry check
     if (isMessageExpired(eventTimestamp)) {
-      if (isTraceEnabled()) log(`feishu[${accountId}]: comment event expired, discarding`);
+      log(`feishu[${accountId}]: comment event expired, discarding`);
       return;
     }
 

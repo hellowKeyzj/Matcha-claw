@@ -34,7 +34,7 @@ import {
   submitTeamRunNodeEvent,
   validateTeamSkillPackage,
   wakeDueTeamRunNodePromptRetries,
-} from '@/services/openclaw/team-runtime-client';
+} from '@/plugins/teams/services/team-runtime-client';
 
 type ClientCase = {
   name: string;

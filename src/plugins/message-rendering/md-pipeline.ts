@@ -2,7 +2,7 @@ import MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import type Renderer from 'markdown-it/lib/renderer.mjs';
 import { trackUiTiming } from '@/lib/telemetry';
-import type { AttachedFileMeta } from '@/plugins/chat/store';
+import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 import type { MarkdownExtension } from './extensions';
 import { BUILTIN_MARKDOWN_EXTENSIONS } from './md-rules';
 

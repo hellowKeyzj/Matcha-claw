@@ -144,7 +144,7 @@ pub(crate) fn agent_deleted(agent: super::AgentDeleted) -> agents::AgentDeleted 
         native_ok: agent.ok,
         removed_bindings: agent.removed_bindings,
         failed_count: agent.failed_count,
-        purge_failed_count: agent.purge_failed_count,
+        purge_failed_count: usize::from(agent.purge_failed),
         sealed_purge: agents::SealedPurge::NotAttempted,
     }
 }

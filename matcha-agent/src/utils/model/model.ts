@@ -5,6 +5,11 @@
  * literals with process.env.USER_TYPE === 'ant' for Bun to remove the codenames
  * during dead code elimination
  */
+import {
+  resolveGeminiModel,
+  resolveGrokModel,
+  resolveOpenAIModel,
+} from '@ant/model-provider'
 import { getMainLoopModelOverride } from '../../bootstrap/state.js'
 import { resolveAntModel, getAntModelOverrideConfig } from './antModels.js'
 import {
@@ -163,6 +168,21 @@ function getProviderPrimaryModel(): ModelName | undefined {
   return undefined
 }
 
+// Provider mappings apply only to defaults, never to an explicitly selected ID.
+function resolveProviderDefaultModel(model: ModelName): ModelName {
+  switch (getAPIProvider()) {
+    case 'openai':
+    case 'openaiResponses':
+      return resolveOpenAIModel(model)
+    case 'gemini':
+      return resolveGeminiModel(model)
+    case 'grok':
+      return resolveGrokModel(model)
+    default:
+      return model
+  }
+}
+
 // @[MODEL LAUNCH]: Update the default Opus model (3P providers may lag so keep defaults unchanged).
 export function getDefaultOpusModel(): ModelName {
   const provider = getAPIProvider()
@@ -182,10 +202,7 @@ export function getDefaultOpusModel(): ModelName {
   // when the user configured a third-party provider.
   const primaryModel = getProviderPrimaryModel()
   if (primaryModel) return primaryModel
-  if (provider !== 'firstParty') {
-    return getModelStrings().opus47
-  }
-  return getModelStrings().opus47
+  return resolveProviderDefaultModel(getModelStrings().opus47)
 }
 
 // @[MODEL LAUNCH]: Update the default Sonnet model (3P providers may lag so keep defaults unchanged).
@@ -207,7 +224,7 @@ export function getDefaultSonnetModel(): ModelName {
   const primaryModel = getProviderPrimaryModel()
   if (primaryModel) return primaryModel
   if (provider !== 'firstParty') {
-    return getModelStrings().sonnet45
+    return resolveProviderDefaultModel(getModelStrings().sonnet45)
   }
   return getModelStrings().sonnet46
 }
@@ -231,7 +248,7 @@ export function getDefaultHaikuModel(): ModelName {
   if (primaryModel) return primaryModel
 
   // Haiku 4.5 is available on all platforms (first-party, Foundry, Bedrock, Vertex)
-  return getModelStrings().haiku45
+  return resolveProviderDefaultModel(getModelStrings().haiku45)
 }
 
 /**
@@ -722,6 +739,4 @@ export function getMarketingNameForModel(modelId: string): string | undefined {
   return undefined
 }
 
-export function normalizeModelStringForAPI(model: string): string {
-  return model.replace(/\[(1|2)m\]/gi, '')
-}
+export { normalizeModelStringForAPI } from './configs.js'

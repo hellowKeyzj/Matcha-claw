@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { extractArtifactRefsFromAssistantText } from '@/plugins/chat/artifact-paths';
-import { applyAssistantPresentationToItems, type ChatRenderItem } from '@/plugins/message-rendering/chat-render-item-model';
+import { applyAssistantPresentationToItems } from '@/plugins/chat/render-item-projection';
+import type { ChatRenderItem } from '@/plugins/message-rendering/chat-render-item-model';
 import { extractGeneratedFilesFromToolCards } from '@/plugins/files/generated-files';
 import { collectChatArtifactGroups } from '@/plugins/chat/artifacts';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';

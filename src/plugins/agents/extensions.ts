@@ -1,9 +1,8 @@
 import type { ComponentType, ReactNode } from 'react';
 import type { NavigationContribution } from '@/app/extensions';
 import { defineExtensionPoint } from '@/plugin-host/core';
-import type { AgentAvatarStyle } from '@/lib/agent-avatar';
 import type { AgentScope, RuntimeEndpointRef } from '@/types/desktop/runtime-address';
-import type { ModelCatalogEntry, SubagentSummary } from '@/types/subagent';
+import type { AgentAvatarStyle, ModelCatalogEntry, SubagentSummary } from '@/types/subagent';
 import type { AgentSkillConfigView, SetAgentSkillConfigCommand } from './stores/agent-skill-config';
 import type { AgentToolConfigView, SetAgentToolConfigCommand } from './stores/agent-tool-config';
 import type { useSubagentsStore } from './stores/subagents';

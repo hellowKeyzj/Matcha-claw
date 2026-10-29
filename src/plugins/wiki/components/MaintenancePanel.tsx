@@ -7,7 +7,7 @@ import { invokeIpc } from '@/lib/api-client';
 import { waitForCall } from '@/lib/call-log-await';
 import { hostWikiCallResult, hostWikiExportArchive, hostWikiRebuildIndex } from '@/lib/host-api';
 import { useWikiProjectsStore } from '@/plugins/wiki/wiki-projects';
-import { pickLocalDirectory } from '@/services/local-path-picker';
+import { pickLocalDirectory } from '@/lib/local-path-picker';
 import { HistorySettingsPanel } from '@/plugins/wiki/components/HistorySettingsPanel';
 import { DedupPanel } from '@/plugins/wiki/components/DedupPanel';
 import { ReindexProgress } from '@/plugins/wiki/components/ReindexProgress';

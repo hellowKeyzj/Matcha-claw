@@ -1,0 +1,9 @@
+:root:not(.dark) .matchaclaw-diff-editor .monaco-diff-editor,
+:root:not(.dark) .matchaclaw-diff-editor .monaco-editor,
+:root:not(.dark) .matchaclaw-diff-editor .monaco-editor-background,
+:root:not(.dark) .matchaclaw-diff-editor .monaco-editor .margin,
+:root:not(.dark) .matchaclaw-diff-editor .monaco-editor .gutter,
+:root:not(.dark) .matchaclaw-diff-editor .diffOverview {
+  background-color: hsl(var(--background)) !important;
+}
+

@@ -18,7 +18,7 @@ fn main() {
 }
 fn run() -> Result<(), Error> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let usage = "usage: world-pack <connector|identity|schema|resolver|projection|provenance|compiler|policy|action|reconcile|abstraction|oracle|context|agent-bridge|storage> <version> <component.wasm> <output.worldpkg> | schema-kind <version> <component.wasm> <kind.json> <payload-request-schema.json> <payload-result-schema.json> <output.worldpkg> | materials <version> <host-executable> <target> <native-directory> <schema.json> <output.worldpkg> | oracle-process <version> <binary> <target> <output.worldpkg> | source <version> <binary> <target> <schema.json> <snapshot.json> <output.worldpkg> | <native-source-key-identity|native-definition-schema|native-checked-ir-compiler|native-current-policy|native-support-provenance|native-plan-action|native-field-oracle|native-assertion-projection|native-assertion-reconcile|native-contract-abstraction|native-query-bridge|native-postgres-storage|native-query-resolver|native-world-view-context> <version> <host-executable> <target> <output.worldpkg> | <native-postgres|native-http-json> <version> <host-executable> <target> <access.json> <output.worldpkg>\nEach form optionally accepts trailing --signature <envelope.json> --public-key <public-key.json> (either order); public-key.json must be a JSON array of exactly 32 bytes.";
+    let usage = "usage: world-pack <connector|identity|schema|resolver|projection|provenance|compiler|policy|action|reconcile|abstraction|oracle|context|agent-bridge|storage> <version> <component.wasm> <output.worldpkg> | schema-kind <version> <component.wasm> <kind.json> <payload-request-schema.json> <payload-result-schema.json> <output.worldpkg> | materials <version> <host-executable> <target> <native-directory> <schema.json> <output.worldpkg> | oracle-process <version> <binary> <target> <output.worldpkg> | source <version> <binary> <target> <schema.json> <snapshot.json> <output.worldpkg> | <native-source-key-identity|native-definition-schema|native-checked-ir-compiler|native-current-policy|native-support-provenance|native-plan-action|native-field-oracle|native-assertion-projection|native-assertion-reconcile|native-contract-abstraction|native-query-bridge|native-postgres-storage|native-query-resolver|native-world-view-context> <version> <target> <output.worldpkg> | <native-postgres|native-http-json> <version> <target> <access.json> <output.worldpkg>\nEach form optionally accepts trailing --signature <envelope.json> --public-key <public-key.json> (either order); public-key.json must be a JSON array of exactly 32 bytes.";
     let tail = args
         .iter()
         .position(|arg| arg.starts_with("--"))
@@ -88,28 +88,27 @@ fn run() -> Result<(), Error> {
             | "native-postgres-storage"
             | "native-query-resolver"
             | "native-world-view-context"
-    ) && args.len() == 5 {
+    ) && args.len() == 4 {
         let version = args[1].parse()?;
-        let host = bounded_read(&args[2], 1_073_741_824)?;
         match kind.as_str() {
-            "native-source-key-identity" => package::native_identity(version, &args[3], &host)?,
-            "native-definition-schema" => package::native_schema(version, &args[3], &host)?,
-            "native-checked-ir-compiler" => package::native_compiler(version, &args[3], &host)?,
-            "native-current-policy" => package::native_policy(version, &args[3], &host)?,
-            "native-support-provenance" => package::native_provenance(version, &args[3], &host)?,
-            "native-plan-action" => package::native_action(version, &args[3], &host)?,
-            "native-field-oracle" => package::native_evaluation(version, &args[3], &host)?,
-            "native-assertion-projection" => package::native_projection(version, &args[3], &host)?,
-            "native-assertion-reconcile" => package::native_reconcile(version, &args[3], &host)?,
-            "native-contract-abstraction" => package::native_abstraction(version, &args[3], &host)?,
-            "native-query-bridge" => package::native_agent_bridge(version, &args[3], &host)?,
-            "native-postgres-storage" => package::native_storage(version, &args[3], &host)?,
-            "native-query-resolver" => package::native_resolver(version, &args[3], &host)?,
-            _ => package::native_context(version, &args[3], &host)?,
+            "native-source-key-identity" => package::native_identity(version, &args[2])?,
+            "native-definition-schema" => package::native_schema(version, &args[2])?,
+            "native-checked-ir-compiler" => package::native_compiler(version, &args[2])?,
+            "native-current-policy" => package::native_policy(version, &args[2])?,
+            "native-support-provenance" => package::native_provenance(version, &args[2])?,
+            "native-plan-action" => package::native_action(version, &args[2])?,
+            "native-field-oracle" => package::native_evaluation(version, &args[2])?,
+            "native-assertion-projection" => package::native_projection(version, &args[2])?,
+            "native-assertion-reconcile" => package::native_reconcile(version, &args[2])?,
+            "native-contract-abstraction" => package::native_abstraction(version, &args[2])?,
+            "native-query-bridge" => package::native_agent_bridge(version, &args[2])?,
+            "native-postgres-storage" => package::native_storage(version, &args[2])?,
+            "native-query-resolver" => package::native_resolver(version, &args[2])?,
+            _ => package::native_context(version, &args[2])?,
         }
-    } else if matches!(kind.as_str(), "native-postgres" | "native-http-json") && args.len() == 6 {
+    } else if matches!(kind.as_str(), "native-postgres" | "native-http-json") && args.len() == 5 {
         let access: Vec<world_plugin_sdk::protocol::package::RequestedAccess> =
-            world_plugin_sdk::protocol::wire::decode(&bounded_read(&args[4], 65_536)?, 65_536)?;
+            world_plugin_sdk::protocol::wire::decode(&bounded_read(&args[3], 65_536)?, 65_536)?;
         package::native_source(
             if kind == "native-postgres" {
                 NativeSourceKind::Postgres
@@ -117,8 +116,7 @@ fn run() -> Result<(), Error> {
                 NativeSourceKind::HttpJson
             },
             args[1].parse()?,
-            &args[3],
-            &bounded_read(&args[2], 1_073_741_824)?,
+            &args[2],
             &access,
         )?
     } else if args.len() == 4 {

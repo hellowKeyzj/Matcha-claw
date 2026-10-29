@@ -3,11 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore, type ApprovalItem, type ChatStoreState } from '@/plugins/chat/store';
-import { resolveSessionListLabel } from '@/plugins/chat/store/session-helpers';
-import { useTeamsStore } from '@/plugins/teams/store';
+import { resolveSessionNavigationTitle, selectPendingApprovalsBySession } from '@/plugins/chat/session-status';
+import { useTeamApprovalProjection } from '@/plugins/teams/approval-projection';
 import { TEAMS_FEATURE_ENABLED } from '@/plugins/teams/feature-flag';
-import type { TeamApprovalRecord } from '@/services/openclaw/team-runtime-client';
-import { inferUntitledSessionLabel } from '@/plugins/chat/useAgentSessionsPaneViewModel';
+import type { TeamApprovalRecord } from '@/plugins/teams/services/team-runtime-client';
 
 const SIDEBAR_BLOCKER_RENDER_LIMIT = 8;
 const TEAM_APPROVAL_SCAN_LIMIT = 80;
@@ -108,10 +107,10 @@ function buildApprovalBlockerCards(input: {
 const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
-  const teams = useTeamsStore((state) => state.teams);
-  const approvalsByTeamId = useTeamsStore((state) => state.approvalsByTeamId);
-  const setActiveTeam = useTeamsStore((state) => state.setActiveTeam);
-  const pendingApprovalsBySession = useChatStore((state) => state.pendingApprovalsBySession);
+  const teams = useTeamApprovalProjection((state) => state.teams);
+  const approvalsByTeamId = useTeamApprovalProjection((state) => state.approvalsByTeamId);
+  const setActiveTeam = useTeamApprovalProjection((state) => state.setActiveTeam);
+  const pendingApprovalsBySession = useChatStore(selectPendingApprovalsBySession);
   const deferredTeams = useDeferredValue(teams);
   const deferredApprovalsByTeamId = useDeferredValue(approvalsByTeamId);
   const deferredPendingApprovalsBySession = useDeferredValue(pendingApprovalsBySession);
@@ -210,23 +209,7 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
       if (card.source !== 'chat_approval' || !sessionKey || titles[sessionKey] !== undefined) {
         continue;
       }
-      const record = state.loadedSessions[sessionKey];
-      if (!record) {
-        titles[sessionKey] = sessionKey;
-        continue;
-      }
-      const label = resolveSessionListLabel(state, sessionKey);
-      const { sessionIdentity, ownership, kind, endpointSessionId } = record.meta;
-      titles[sessionKey] = label || (sessionIdentity
-        ? inferUntitledSessionLabel({
-            key: sessionKey,
-            agentId: record.meta.agentId ?? sessionIdentity.agentId,
-            sessionIdentity,
-            ownership,
-            kind: kind ?? undefined,
-            endpointSessionId: endpointSessionId ?? undefined,
-          }, t)
-        : t('sidebar.untitledSession'));
+      titles[sessionKey] = resolveSessionNavigationTitle(state, sessionKey, t);
     }
     return titles;
   }, [visibleBlockers, t]);

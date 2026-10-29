@@ -120,8 +120,8 @@ export async function requestDeviceAuthorization(params: {
   body.set('client_id', appId);
   body.set('scope', scope);
 
-  log.trace(
-    () => `requesting device authorization (scope="${scope}") url=${endpoints.deviceAuthorization} token_url=${endpoints.token}`,
+  log.info(
+    `requesting device authorization (scope="${scope}") url=${endpoints.deviceAuthorization} token_url=${endpoints.token}`,
   );
 
   const resp = await feishuFetch(endpoints.deviceAuthorization, {
@@ -134,7 +134,7 @@ export async function requestDeviceAuthorization(params: {
   });
 
   const text = await resp.text();
-  log.trace(() => `response status=${resp.status}`);
+  log.info(`response status=${resp.status} body=${text.slice(0, 500)}`);
 
   let data: Record<string, unknown>;
   try {

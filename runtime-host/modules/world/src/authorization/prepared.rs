@@ -2,7 +2,6 @@ use world_protocol::{
     api::PackageConfigView,
     authorization::AuthorizationFailure,
     bindings::{BindingNode, ImplementationRef, SlotKind},
-    ids::Digest,
     package::PackageLimits,
     slots::{self, PolicyEvaluationRequest, PolicyEvaluationResult},
 };
@@ -21,7 +20,6 @@ impl PreparedPolicy {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, NativePrepareFailure> {
         let port = slots::slot_port(SlotKind::Policy)
             .map_err(|_| NativePrepareFailure::Entrypoint)?;
@@ -32,7 +30,6 @@ impl PreparedPolicy {
             node,
             config,
             artifact,
-            host_build,
             slots::POLICY_REGISTRATION,
             SlotKind::Policy,
         )?;

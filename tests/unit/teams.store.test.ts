@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/services/openclaw/team-runtime-client', () => ({
+vi.mock('@/plugins/teams/services/team-runtime-client', () => ({
   cancelTeamRun: vi.fn(),
   createTeamRun: vi.fn(),
   deleteTeamInstance: vi.fn(),
@@ -23,18 +23,16 @@ import { waitForCall } from '@/lib/call-log-await';
 import { useChatStore } from '@/plugins/chat/store';
 import { buildSessionIdentityRecordIndex, buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
 import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
+import { useTeamsStore } from '@/plugins/teams/store';
 import {
   buildTeamRoleChatTargetByIdentityKey,
   buildTeamRoleChatTargetIndex,
   resolveTeamRoleChatTarget,
   resolveTeamRoleChatTargetFromProbe,
   selectTeamRoleChatTargetIndex,
-  useTeamsStore,
-  type ManualTeamProvisionRecord,
-  type TeamMeta,
-  type TeamSkillCandidate,
-  type TeamSkillPackage,
-} from '@/plugins/teams/store';
+} from '@/plugins/teams/session-ownership';
+import type { ManualTeamProvisionRecord, TeamSkillCandidate, TeamSkillPackage } from '@/plugins/teams/types/team-creation';
+import type { TeamMeta } from '@/plugins/teams/types/team';
 import {
   cancelTeamRun as beginTeamRunCancellation,
   createTeamRun as createTeamRunLifecycle,
@@ -49,7 +47,7 @@ import {
   resumeTeam as resumeTeamRunLifecycle,
   submitTeamRunGraphPatch as submitTeamGraphPatch,
   type TeamGraphPatchOperation,
-} from '@/services/openclaw/team-runtime-client';
+} from '@/plugins/teams/services/team-runtime-client';
 import { createOpenClawTestSessionIdentity, openClawTestRuntimeEndpoint } from './helpers/runtime-address-fixtures';
 
 const basePackage: TeamSkillPackage = {

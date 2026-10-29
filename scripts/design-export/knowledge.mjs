@@ -218,7 +218,7 @@ const worldReady = {
   'settings-operations': '审阅草稿 · 修订 1',
 };
 const wiki = (id, title, actions = [], prepare = openLibrary) => ({ id: `wiki-${id}`, title, group: '知识库', route: '/wiki', sources: ['src/plugins/wiki/index.tsx', 'src/plugins/wiki/components/LibraryWorkspace.tsx'], actions, waitFor: wikiReady[id], ...(prepare ? { prepare } : {}) });
-const worldScene = (id, title, route = '/world', actions = []) => ({ id: `world-${id}`, title, group: '世界', route, sources: ['src/pages/World/index.tsx'], actions, waitFor: worldReady[id] });
+const worldScene = (id, title, route = '/world', actions = []) => ({ id: `world-${id}`, title, group: '世界', route, sources: ['src/plugins/world/pages/index.tsx'], actions, waitFor: worldReady[id] });
 export const knowledgeScenarios = [
   wiki('library', '资料库首页', [], null),
   wiki('library-empty', '资料库首页 · 空状态', [], null),
@@ -285,7 +285,7 @@ export async function seedKnowledge(context = {}) {
     useWikiProjectsStore.setState({ projects: empty ? [] : projects, currentProject: empty ? null : projects[0], loading: false, switching: false, ready: true });
     return;
   }
-  const { useWorldStore } = await import('/src/stores/world/index.ts');
+  const { useWorldStore } = await import('/src/plugins/world/store/index.ts');
   useWorldStore.setState({ world, description, definitions, materials, connections: [], proposals: [], changes, evaluations: [], operations: [accepted], actionSubmissions: [], objects: null, selectedType: null, materialDraft: id === 'world-materials-draft' ? materialDraft : null, loading: false, busy: false, operationBusy: false, pending: null, pendingOperation: null, upload: null, error: null, notice: null, storageTransfer: null, transferBusy: false });
 }
 

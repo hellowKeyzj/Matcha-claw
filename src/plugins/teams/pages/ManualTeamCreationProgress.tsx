@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { AlertCircle, Check, Circle, Loader2, Minus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { AgentAvatar } from '@/components/common/AgentAvatar';
-import type { ManualTeamCreation, ManualTeamCreationPhase } from '@/types/team-creation';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
+import type { ManualTeamCreation, ManualTeamCreationPhase } from '@/plugins/teams/types/team-creation';
 
 const creationSteps = [
   'submitting',

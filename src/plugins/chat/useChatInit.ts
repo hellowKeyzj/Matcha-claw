@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { useChatStore } from '@/plugins/chat/store';
-import { isSessionRuntimeEndpointReady, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { isSessionRuntimeEndpointReady, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { hasSessionCatalogLoaded } from '@/plugins/chat/store/session-helpers';
 import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
 import { getSessionItemCount } from '@/plugins/chat/store/store-state-helpers';

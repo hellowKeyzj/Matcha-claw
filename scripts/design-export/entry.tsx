@@ -71,7 +71,7 @@ let cleanup: (() => void) | undefined;
 try {
   const [app, { default: i18n }, { useSettingsStore }, { useAccountStore }, { useGatewayStore }, { useLicenseStore }, { useRuntimeEndpointsStore }, { useProviderStore }, { applicationPluginsHost }, { PluginHostProvider }] = await Promise.all([
     import('../../src/App'), import('../../src/i18n'), import('../../src/plugins/settings/store'), import('../../src/plugins/account/stores/account'),
-    import('../../src/plugins/runtime/store'), import('../../src/plugins/account/stores/license'), import('../../src/stores/runtime-endpoints'), import('../../src/plugins/providers/stores/providers'),
+    import('../../src/plugins/runtime/store'), import('../../src/plugins/account/stores/license'), import('../../src/plugins/runtime/directory'), import('../../src/plugins/providers/stores/providers'),
     import('../../src/app/plugins'), import('../../src/plugin-host/react'),
   ]);
   const stopPlugins = applicationPluginsHost.start();

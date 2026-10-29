@@ -20,7 +20,8 @@ import {
 } from '@/plugins/chat/store/attachment-helpers';
 import { getSessionRuntime } from '@/plugins/chat/store/store-state-helpers';
 import { isAgentSessionTombstoned } from '@/plugins/chat/store/session-actions';
-import { buildSessionRecordKey, findSessionRecordKey } from '@/plugins/chat/store/session-identity';
+import { buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
+import { findSessionRecordKey } from '@/plugins/chat/session-catalog';
 import {
   logRendererTodoToolDebug,
   summarizeAssistantTurnForTodoToolDebug,

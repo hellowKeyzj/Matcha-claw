@@ -9,7 +9,7 @@ import {
   refreshCloudAccountSession,
   registerCloudAccount,
   sendCloudAccountVerifyCode,
-} from '@/lib/account';
+} from '../api/account';
 import type {
   AccountSessionProjection,
   CloudUser,
@@ -20,7 +20,7 @@ import type {
   RegisterRequest,
   SendVerifyCodeRequest,
   SendVerifyCodeResult,
-} from '@/lib/account';
+} from '../api/account';
 
 export type CloudAccountLoginInput = LoginRequest;
 export type CloudAccountLogin2FAInput = Login2FARequest;

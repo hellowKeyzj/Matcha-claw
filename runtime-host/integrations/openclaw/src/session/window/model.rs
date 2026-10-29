@@ -259,6 +259,11 @@ pub struct Message {
     identity_run_id: Option<String>,
     identity_message_id: Option<String>,
     identity_sequence: Option<u64>,
+    idempotency_key: Option<String>,
+    input_id: Option<String>,
+    stop_reason: Option<String>,
+    final_content: Option<FinalContent>,
+    tool_continuation: bool,
     steer_target_run_id: Option<String>,
     after_sequence: Option<Option<u64>>,
     sequence: Option<u64>,
@@ -278,6 +283,13 @@ pub struct Message {
     hidden_control_reply: bool,
     truncated: bool,
     large_text: Option<LargeTextFacts>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FinalContent {
+    pub text: [u8; 32],
+    pub other: [u8; 32],
+    pub text_only: bool,
 }
 
 impl Message {
@@ -306,6 +318,11 @@ impl Message {
             identity_run_id: None,
             identity_message_id: None,
             identity_sequence: None,
+            idempotency_key: None,
+            input_id: None,
+            stop_reason: None,
+            final_content: None,
+            tool_continuation: false,
             steer_target_run_id: None,
             after_sequence: None,
             run_id,
@@ -355,7 +372,40 @@ impl Message {
             true
         });
         self.after_sequence = Some(after_sequence);
+        self.final_content = self.final_content.take().and_then(|mut content| {
+            if !content.text_only { return None; }
+            use sha2::Digest;
+            let text = self.text.trim_matches(|ch| matches!(ch, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}'
+                | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'));
+            if text.is_empty() { return None; }
+            content.text = sha2::Sha256::digest(text.as_bytes()).into();
+            Some(content)
+        });
         self
+    }
+
+    pub(super) fn with_content_identity(mut self, key: Option<String>, stop: Option<String>, content: Option<FinalContent>, continuation: bool) -> Self {
+        self.idempotency_key = key;
+        self.stop_reason = stop;
+        self.final_content = content;
+        self.tool_continuation = continuation;
+        self
+    }
+
+    pub(super) fn with_input_id(mut self, input_id: Option<String>) -> Self {
+        self.input_id = input_id;
+        self
+    }
+
+    pub(crate) fn input_id(&self) -> Option<&str> { self.input_id.as_deref() }
+    pub(crate) fn idempotency_key(&self) -> Option<&str> { self.idempotency_key.as_deref() }
+    pub(crate) fn stop_reason(&self) -> Option<&str> { self.stop_reason.as_deref() }
+    pub(crate) const fn tool_continuation(&self) -> bool { self.tool_continuation }
+    pub(crate) fn terminal_stop(&self) -> bool {
+        matches!(self.stop_reason(), Some("stop" | "length" | "error" | "aborted" | "end_turn"))
+    }
+    pub(crate) fn final_content_identity(&self) -> Option<([u8; 32], [u8; 32])> {
+        self.final_content.as_ref().map(|content| (content.text, content.other))
     }
 
     pub(crate) fn identity_message_id(&self) -> Option<&str> { self.identity_message_id.as_deref() }
@@ -597,38 +647,8 @@ impl PendingInput {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InputReceipt {
-    input_id: Option<String>,
-    run_id: Option<String>,
-    consumed: bool,
-}
-
-impl InputReceipt {
-    pub(crate) fn new(input_id: Option<String>, run_id: Option<String>, consumed: bool) -> Self {
-        Self {
-            input_id,
-            run_id,
-            consumed,
-        }
-    }
-
-    pub fn input_id(&self) -> Option<&str> {
-        self.input_id.as_deref()
-    }
-
-    pub fn run_id(&self) -> Option<&str> {
-        self.run_id.as_deref()
-    }
-
-    pub const fn consumed(&self) -> bool {
-        self.consumed
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionState {
     pending_inputs: Vec<PendingInput>,
-    input_receipts: Vec<InputReceipt>,
     in_flight_run: Option<InFlightRun>,
     delta_cursor: Option<String>,
     complete_snapshot: Option<bool>,
@@ -649,14 +669,12 @@ pub enum HistoryKind {
 impl SessionState {
     pub(crate) fn new(
         pending_inputs: Vec<PendingInput>,
-        input_receipts: Vec<InputReceipt>,
         in_flight_run: Option<InFlightRun>,
         delta_cursor: Option<String>,
         complete_snapshot: Option<bool>,
     ) -> Self {
         Self {
             pending_inputs,
-            input_receipts,
             in_flight_run,
             delta_cursor,
             complete_snapshot,
@@ -709,10 +727,6 @@ impl SessionState {
         &self.pending_inputs
     }
 
-    pub fn input_receipts(&self) -> &[InputReceipt] {
-        &self.input_receipts
-    }
-
     pub fn in_flight_run(&self) -> Option<&InFlightRun> {
         self.in_flight_run.as_ref()
     }
@@ -735,6 +749,7 @@ pub struct SessionWindow {
     session_key: Option<String>,
     native_session_id: Option<String>,
     state: SessionState,
+    input_receipts: Option<Vec<sessions_module::state::SessionInputReceipt>>,
 }
 
 impl SessionWindow {
@@ -755,7 +770,28 @@ impl SessionWindow {
             session_key,
             native_session_id,
             state,
+            input_receipts: None,
         }
+    }
+
+    pub(super) fn with_input_receipts(mut self, receipts: Option<Vec<sessions_module::state::SessionInputReceipt>>) -> Self {
+        self.input_receipts = receipts;
+        self
+    }
+
+    pub(crate) fn retain_input_receipts(&mut self, input_ids: &[String]) {
+        if input_ids.is_empty() { self.input_receipts = None; }
+        else if let Some(receipts) = self.input_receipts.as_mut() {
+            receipts.retain(|receipt| {
+                let (sessions_module::state::SessionInputReceipt::Pending { input_id, .. }
+                    | sessions_module::state::SessionInputReceipt::Consumed { input_id, .. }) = receipt;
+                input_ids.contains(input_id)
+            });
+        }
+    }
+
+    pub(crate) fn take_input_receipts(&mut self) -> Option<Vec<sessions_module::state::SessionInputReceipt>> {
+        self.input_receipts.take()
     }
 
     pub fn messages(&self) -> &[Message] {
@@ -800,7 +836,7 @@ impl fmt::Debug for SessionWindow {
             .field("has_session_key", &self.session_key.is_some())
             .field("has_native_session_id", &self.native_session_id.is_some())
             .field("pending_input_count", &self.state.pending_inputs.len())
-            .field("input_receipt_count", &self.state.input_receipts.len())
+            .field("input_receipt_count", &self.input_receipts.as_ref().map(Vec::len))
             .field("has_in_flight_run", &self.state.in_flight_run.is_some())
             .field("has_delta_cursor", &self.state.delta_cursor.is_some())
             .field("complete_snapshot", &self.state.complete_snapshot)

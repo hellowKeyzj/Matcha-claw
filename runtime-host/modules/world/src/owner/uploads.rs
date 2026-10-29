@@ -49,10 +49,11 @@ pub(crate) async fn run(
     ingress: Arc<ServiceIngress>,
     signed: SignedRequest,
     envelope: CommandEnvelope,
+    maintenance: bool,
 ) -> Result<CommandResult, Error> {
     let tasks = resources.tasks.clone();
     tasks
-        .spawn(async move { execute(store, resources, ingress, signed, envelope).await })
+        .spawn(async move { execute(store, resources, ingress, signed, envelope, maintenance).await })
         .await
         .map_err(|cause| Error::internal(FailureStage::Execute).caused(cause))?
 }
@@ -63,6 +64,7 @@ async fn execute(
     ingress: Arc<ServiceIngress>,
     signed: SignedRequest,
     envelope: CommandEnvelope,
+    maintenance: bool,
 ) -> Result<CommandResult, Error> {
     if envelope.world != *signed.binding.world()
         || !matches!(
@@ -83,7 +85,9 @@ async fn execute(
     ))?;
     let commit_id = CommitId::try_new(format!("upload-{}", &identity.as_str()[7..]))
         .map_err(|cause| Error::internal(FailureStage::Prepare).caused(cause))?;
-    let admission = authenticate(&store, ingress, signed, AccessMode::Write).await?;
+    let mut modes = vec![AccessMode::Read, AccessMode::Write];
+    if maintenance { modes.push(AccessMode::Manage); }
+    let admission = authenticate(&store, ingress, signed, modes).await?;
     if let Some(committed) = store
         .read_commit_optional::<UploadCommit>(&envelope.world, &commit_id, &digest)
         .await?
@@ -253,7 +257,7 @@ async fn authenticate(
     store: &WorldStore,
     ingress: Arc<ServiceIngress>,
     signed: SignedRequest,
-    mode: AccessMode,
+    modes: Vec<AccessMode>,
 ) -> Result<Admission, Error> {
     let world = signed.binding.world().clone();
     let digest = signed.binding.request_digest().clone();
@@ -276,11 +280,6 @@ async fn authenticate(
                     .authenticate(tx, &signed.token, signed.binding, &now)
                     .await?;
                 let scope = head::management_scope(tx).await?;
-                let modes = if mode == AccessMode::Read {
-                    vec![AccessMode::Read]
-                } else {
-                    vec![AccessMode::Read, mode]
-                };
                 let impact = authorization::actual_impact(
                     vec![AccessScope {
                         resources: Vec::new(),
@@ -379,7 +378,7 @@ pub(crate) async fn status(
     let tasks = resources.tasks.clone();
     tasks
         .spawn(async move {
-            let admission = authenticate(&store, ingress, signed, AccessMode::Read).await?;
+            let admission = authenticate(&store, ingress, signed, vec![AccessMode::Read]).await?;
             let actor = actor(&admission);
             store
                 .snapshot(admission.invocation().world.clone(), move |snapshot| {

@@ -42,7 +42,7 @@ afterEach(() => {
 describe('provider private mutation projection', () => {
   it('does not report an unknown delete outcome as success', async () => {
     waitForCall.mockResolvedValue(terminal({ outcome: 'unknown', commit: 'unknown', persisted: 'unknown' }));
-    const { hostProviderDeleteAccount } = await import('@/lib/provider-projection');
+    const { hostProviderDeleteAccount } = await import('@/plugins/providers/services/provider-projection');
 
     await expect(hostProviderDeleteAccount('openai-main', 1)).resolves.toMatchObject({
       success: false,
@@ -52,7 +52,7 @@ describe('provider private mutation projection', () => {
   });
 
   it('accepts only the expected durable success outcome', async () => {
-    const { hostProviderDeleteAccount } = await import('@/lib/provider-projection');
+    const { hostProviderDeleteAccount } = await import('@/plugins/providers/services/provider-projection');
     waitForCall.mockResolvedValue(terminal({ outcome: 'stored' }, 'succeeded'));
     await expect(hostProviderDeleteAccount('openai-main', 1)).resolves.toMatchObject({ success: false });
 

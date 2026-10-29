@@ -7,10 +7,10 @@ import { hostApiFetch } from '@/lib/host-api';
 import { isTraceEnabled } from '@/lib/trace-logger';
 import { waitForCall } from '@/lib/call-log-await';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
-import { runGatewayRepair, type GatewayRepairOutcome } from '@/lib/gateway-repair';
+import { runGatewayRepair, type GatewayRepairOutcome } from './gateway-repair';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { GatewayStatus } from '@/types/gateway';
-import { isGatewayOperational, isGatewayPreparing } from '@/lib/gateway-status';
+import { isGatewayOperational, isGatewayPreparing } from './gateway-status';
 import type { GatewayTransportIssue } from '@/types/session/runtime-state';
 
 let gatewayInitPromise: Promise<void> | null = null;

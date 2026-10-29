@@ -62,11 +62,7 @@ const FeishuCalendarEventAttendeeSchema = Type.Union([
     event_id: Type.String({
       description: '日程 ID',
     }),
-    page_size: Type.Optional(
-      Type.Number({
-        description: '每页数量（默认 50，最大 500）',
-      }),
-    ),
+    page_size: Type.Optional(Type.Number({ description: '每页数量（默认 50，最大 500）', minimum: 10, maximum: 100 })),
     page_token: Type.Optional(
       Type.String({
         description: '分页标记',
@@ -136,7 +132,7 @@ export function registerFeishuCalendarEventAttendeeTool(api: OpenClawPluginApi):
                 });
               }
 
-              log.trace(() =>
+              log.info(
                 `create: calendar_id=${p.calendar_id}, event_id=${p.event_id}, attendees_count=${p.attendees.length}`,
               );
 
@@ -193,7 +189,7 @@ export function registerFeishuCalendarEventAttendeeTool(api: OpenClawPluginApi):
             // LIST ATTENDEES
             // -----------------------------------------------------------------
             case 'list': {
-              log.trace(() => `list: calendar_id=${p.calendar_id}, event_id=${p.event_id}, page_size=${p.page_size ?? 50}`);
+              log.info(`list: calendar_id=${p.calendar_id}, event_id=${p.event_id}, page_size=${p.page_size ?? 50}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event_attendee.list',

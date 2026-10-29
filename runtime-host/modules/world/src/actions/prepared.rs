@@ -4,7 +4,6 @@ use world_protocol::{
     actions::ActionFailure,
     api::PackageConfigView,
     bindings::{BindingNode, ImplementationRef, SlotKind},
-    ids::Digest,
     package::PackageLimits,
     slots::{self, ActionPlanRequest, ActionPlanResult},
 };
@@ -23,7 +22,6 @@ impl PreparedAction {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, NativePrepareFailure> {
         let contract = slots::slot_contract(SlotKind::Action)
             .map_err(|_| NativePrepareFailure::Entrypoint)?;
@@ -32,7 +30,7 @@ impl PreparedAction {
         }
         Ok(Self {
             proof: NativeProof::prepare(
-                node, config, artifact, host_build, slots::ACTION_REGISTRATION, SlotKind::Action,
+                node, config, artifact, slots::ACTION_REGISTRATION, SlotKind::Action,
             )?,
         })
     }

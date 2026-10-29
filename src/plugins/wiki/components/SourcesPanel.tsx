@@ -6,7 +6,7 @@ import { wikiSourceActions, type WikiSourceActionContext } from '../extensions';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { fetchSelectableProviderModels } from '@/lib/provider-models';
+import { fetchSelectableProviderModels } from '@/plugins/providers/services/provider-models';
 import type { WikiFileItem, WikiReceiptSummary, WikiSourceTask, WikiSourceView, WikiSourceWatchConfig, WikiSourceWatchConfigUpdate } from '@/plugins/wiki/wiki-model';
 import { formatDateTime, isActiveSourceTask } from '@/plugins/wiki/wiki-model';
 import { WikiEmpty, WikiIconButton, WikiPanel, WikiPanelHeader, WikiPrimaryButton, WikiSurface } from '@/plugins/wiki/components/WikiChrome';

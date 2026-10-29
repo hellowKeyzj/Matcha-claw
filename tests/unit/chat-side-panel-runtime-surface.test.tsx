@@ -9,7 +9,7 @@ import {
   type ChatRuntimeSurfaceDescriptor,
 } from '@/plugins/surfaces/chat/runtime-surfaces';
 import { useGatewayStore } from '@/plugins/runtime/store';
-import { useLayoutStore } from '@/stores/layout';
+import { useLayoutStore } from '@/app/layout/store';
 import { useChatStore } from '@/plugins/chat/store';
 import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import { createReadyResourceStatusState } from '@/lib/resource-state';
@@ -137,7 +137,7 @@ function resetChatRuntimeFixtures(): void {
     runtimeHost: { lifecycle: 'running', restartCount: 0 },
     isInitialized: true,
   } as never);
-  useLayoutStore.setState({ chatTakeoverMode: 'none' });
+  useLayoutStore.setState({ viewportTakeover: false });
 
   const mainSession = createEmptySessionRecord();
   useChatStore.setState({

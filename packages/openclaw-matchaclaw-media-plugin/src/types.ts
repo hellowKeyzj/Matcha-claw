@@ -37,7 +37,7 @@ export type ImageGenerationSourceImage = {
 }
 
 export type ImageGenerationResolution = '1K' | '2K' | '4K'
-export type ImageGenerationQuality = 'low' | 'medium' | 'high' | 'auto'
+export type ImageGenerationQuality = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto'
 export type ImageGenerationOutputFormat = 'png' | 'jpeg' | 'webp'
 export type ImageGenerationBackground = 'transparent' | 'opaque' | 'auto'
 

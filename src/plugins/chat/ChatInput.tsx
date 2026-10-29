@@ -24,19 +24,19 @@ import { useSkillsStore } from '@/plugins/skills/stores/skills';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
-import { ChatImageLightbox } from '@/plugins/chat/components/ChatImageLightbox';
+import { ChatImageLightbox } from '@/plugins/message-rendering/ChatImageLightbox';
 import { ChatInputStatus, ChatInputToolbar } from '@/plugins/chat/components/ChatInputToolbar';
 import type { ModelPickerState } from '@/plugins/chat/components/ChatModelPicker';
 import { AgentSkillManagerDialog, type AgentSkillPreviewState } from '@/plugins/chat/components/AgentSkillManagerDialog';
 import type { AgentSkillOption } from '@/plugins/chat/components/AgentSkillConfigPanel';
-import { collectDroppedFiles } from '@/lib/collect-dropped-files';
+import { collectDroppedFiles } from '@/plugins/chat/collect-dropped-files';
 import type { ChatSendAttachment, ChatSendResult } from '@/plugins/chat/store';
 import { CHAT_INLINE_ATTACHMENT_MAX_BYTES } from '@/plugins/chat/store/types';
 import { resolveChatSendGateForPayload, type ChatSendGate } from '@/plugins/chat/store/send-gate';
 import { isDirectoryAttachment, isReadableChatAttachment, isUnsupportedGoalStartAttachment } from '@/plugins/chat/store/send-transport';
 import type { ChatContextUsageViewModel } from '@/plugins/chat/context-usage';
 import type { PermissionPickerState } from '@/plugins/chat/useChatPermissions';
-import { useComposerDraftStore, clampComposerDraftSelection, type ComposerMode, type ComposerDraftSelection } from '@/plugins/chat/composer-drafts';
+import { useComposerDraftStore, readComposerDraftSnapshot, clampComposerDraftSelection, type ComposerMode, type ComposerDraftSelection, type ComposerSkill } from '@/plugins/chat/composer-drafts';
 import type { SessionRunPhase } from '@/types/session/runtime-state';
 import { createSessionTraceId, isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
 
@@ -80,13 +80,7 @@ export interface MentionCandidate {
   insertText?: string;
 }
 
-interface SelectedSkill {
-  id: string;
-  name: string;
-  icon: string;
-  filePath?: string;
-  baseDir?: string;
-}
+type SelectedSkill = ComposerSkill;
 
 type SlashItem = (SelectedSkill & { kind: 'skill' }) | { kind: 'goal'; id: 'goal'; name: string };
 
@@ -123,7 +117,7 @@ export interface ChatInputHandle {
 
 interface ChatInputProps {
   ref?: Ref<ChatInputHandle>;
-  onSend: (text: string, attachments?: ChatSendAttachment[]) => ChatSendResult | Promise<ChatSendResult>;
+  onSend: (text: string, attachments?: ChatSendAttachment[], operationId?: string) => ChatSendResult | Promise<ChatSendResult>;
   onStop?: () => void;
   goal?: { supported: boolean; mode: ComposerMode | null; busy: boolean; unknown: boolean; canDiscard: boolean; error: string | null; onStart: () => void; onCancel: () => void; onRefresh: () => void; onSubmit: (text: string, attachments?: ChatSendAttachment[]) => Promise<ChatSendResult> };
   goalDock?: ReactNode;
@@ -444,6 +438,7 @@ export const ChatInput = memo(function ChatInput({
   const usesStoredDraft = Boolean(draftKey && !onDraftChange);
   const storedDraft = useComposerDraftStore((state) => draftKey && usesStoredDraft ? state.drafts[draftKey] ?? '' : '');
   const storedSelection = useComposerDraftStore((state) => draftKey && usesStoredDraft ? state.selections[draftKey] ?? null : null);
+  const submission = useComposerDraftStore((state) => draftKey ? state.submissions[draftKey] : undefined);
   const storedDraftChange = useCallback((update: SetStateAction<string>) => {
     if (draftKey) useComposerDraftStore.getState().setDraft(draftKey, update);
   }, [draftKey]);
@@ -1168,7 +1163,7 @@ export const ChatInput = memo(function ChatInput({
   const invalidGoalAttachments = Boolean(goal?.mode) && attachments.some((attachment) => isUnsupportedGoalStartAttachment(attachment) || Boolean(goal?.mode?.goalId));
   const editingGoal = Boolean(goal?.mode?.goalId);
   const effectiveSending = sending && !editingGoal;
-  const sendPending = pendingSend?.scope === composerScope
+  const sendPending = Boolean(submission) || pendingSend?.scope === composerScope
     || attachments.some((attachment) => pendingSend?.attachmentIds.has(attachment.stagedAttachmentId));
   const canSend = (payloadGate.canSend || editingGoal && !payloadGate.canSend && (payloadGate.reason === 'active' || payloadGate.reason === 'stopping'))
     && (!goal?.mode || Boolean(input.trim()) && goal.supported && !goal.busy && !goal.unknown && !invalidGoalAttachments)
@@ -1294,6 +1289,11 @@ export const ChatInput = memo(function ChatInput({
     const drafts = useComposerDraftStore.getState();
     const draftRevision = draftKey ? drafts.revisions[draftKey] : undefined;
     const ownsDraftSnapshot = draftKey && onDraftChange && (drafts.drafts[draftKey] ?? '') === input;
+    const operationId = !goal?.mode && ownsDraftSnapshot ? crypto.randomUUID() : undefined;
+    if (operationId && !drafts.prepareSubmission(draftKey!, {
+      operationId, snapshot: readComposerDraftSnapshot(draftKey!), skills: selectedSkills,
+      attachments: attachmentsToSend ?? [], ownedAttachmentIds: stagedIdsToSend, status: 'prepared',
+    })) return;
     const operation: SendOperation = {
       scope: composerScope, attachmentIds: sentAttachmentIds, initializationId: null, handoffScope: null, retired: false,
     };
@@ -1306,13 +1306,21 @@ export const ChatInput = memo(function ChatInput({
     let retainAttachments = false;
     try {
       try {
-        const send = goal?.mode ? goal.onSubmit(textToSend, attachmentsToSend) : onSend(textToSend, attachmentsToSend);
+        const send = goal?.mode ? goal.onSubmit(textToSend, attachmentsToSend) : onSend(textToSend, attachmentsToSend, operationId);
         operation.initializationId = draftKey ? useComposerDraftStore.getState().initializations[draftKey]?.operationId ?? null : null;
+        if (operationId && useComposerDraftStore.getState().submissions[draftKey!]?.status !== 'prepared') {
+          setAttachments((current) => current.filter((attachment) => !sentAttachmentIds.has(attachment.stagedAttachmentId)));
+          setSelectedSkills((current) => current.filter((skill) => !selectedSkills.includes(skill)));
+          closeMention();
+          closeSlash();
+          closeQuickPhrase();
+        }
         result = await send;
       } catch {
-        releaseStagedAttachmentIds(stagedIdsToSend);
+        if (!operationId) releaseStagedAttachmentIds(stagedIdsToSend);
         return;
       }
+      if (operationId) return;
       if (!result.accepted) {
         if (result.dispatch === 'not-dispatched') {
           const currentScope = currentScopeRef.current;
@@ -1345,6 +1353,13 @@ export const ChatInput = memo(function ChatInput({
       closeSlash();
       closeQuickPhrase();
     } finally {
+      const current = operationId && draftKey ? useComposerDraftStore.getState().submissions[draftKey] : undefined;
+      if (current && current.operationId === operationId && current.status === 'prepared') {
+        useComposerDraftStore.getState().removeSubmission(draftKey!, operationId!);
+        retainAttachments = ownsSend();
+        if (retainAttachments) stagedIdsToSend.forEach((id) => ownedStagedAttachmentIdsRef.current.add(id));
+        else releaseStagedAttachmentIds(stagedIdsToSend);
+      }
       if (mountedRef.current) {
         if (!retainAttachments) setAttachments((current) => current.filter((attachment) => !sentAttachmentIds.has(attachment.stagedAttachmentId)));
         setPendingSend((current) => current === operation ? null : current);
@@ -1352,6 +1367,26 @@ export const ChatInput = memo(function ChatInput({
       if (sendOperationRef.current === operation) sendOperationRef.current = null;
     }
   }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, composerScope, draftKey, goal, input, isCurrentScope, onDraftChange, onSend, releaseStagedAttachmentIds, selectedSkills, setInput]);
+
+  const restoreFailedSubmission = useCallback(() => {
+    if (!draftKey || !submission || submission.status !== 'failed' || input || goal?.mode || attachments.length || selectedSkills.length) return;
+    const drafts = useComposerDraftStore.getState();
+    if (!drafts.restoreSubmission(draftKey, submission.operationId)) return;
+    submission.ownedAttachmentIds.forEach((id) => ownedStagedAttachmentIdsRef.current.add(id));
+    setAttachments(submission.attachments.map((attachment) => ({
+      ...attachment,
+      status: submission.attachmentReselectionRequired && !isDirectoryAttachment(attachment) && attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES ? 'error' : 'ready',
+      ...(submission.attachmentReselectionRequired && !isDirectoryAttachment(attachment) && attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES
+        ? { error: t('input.attachmentReselectionRequired') } : {}),
+    })));
+    setSelectedSkills(submission.skills);
+    drafts.removeSubmission(draftKey, submission.operationId);
+  }, [attachments.length, draftKey, goal?.mode, input, selectedSkills.length, submission, t]);
+  useEffect(() => {
+    if (submission?.status === 'failed' && !pendingSend && draftKey
+      && !submission.attachments.length && !submission.skills.length
+      && useComposerDraftStore.getState().revisions[draftKey] === submission.revision) restoreFailedSubmission();
+  }, [draftKey, pendingSend, restoreFailedSubmission, submission]);
 
   const handleStop = useCallback(() => {
     logSessionTrace('stop.intent', createSessionTraceId('stop-intent'), () => ({
@@ -1534,6 +1569,19 @@ export const ChatInput = memo(function ChatInput({
           <div className={cn(CHAT_LAYOUT_TOKENS.inputBody, CHAT_LAYOUT_TOKENS.inputCardMinHeight, 'chat-input-card', topContent && 'border-t border-border/55')}>
           <div className="relative min-w-0">
             <div className="px-2 pt-1.5">
+              {submission && (submission.status === 'failed' || submission.status === 'unknown') ? <div role="alert" className="mb-2 space-y-1 text-xs">
+                <p className="text-destructive">{submission.error || t('input.submissionFailed')}</p>
+                <p className="max-h-24 overflow-y-auto whitespace-pre-wrap">{submission.snapshot.draft}</p>
+                {submission.skills.length ? <p>{submission.skills.map((skill) => skill.name).join(' / ')}</p> : null}
+                {submission.attachments.length ? <p>{submission.attachments.map((attachment) => attachment.fileName).join(' / ')}</p> : null}
+                {submission.attachmentReselectionRequired ? <p>{t('input.attachmentReselectionRequired')}</p> : null}
+                <div className="flex gap-3">
+                  <Button type="button" variant="link" className="h-auto p-0 text-xs" disabled={submission.status === 'unknown' || Boolean(input || goal?.mode || attachments.length || selectedSkills.length)} onClick={restoreFailedSubmission}>{t('reuseMessage')}</Button>
+                  <Button type="button" variant="link" className="h-auto p-0 text-xs" onClick={() => {
+                    useComposerDraftStore.getState().discardSubmission(draftKey!, submission.operationId);
+                  }}>{t('input.remove')}</Button>
+                </div>
+              </div> : null}
               {goal?.mode ? (
                 <div className="mb-2 space-y-1">
                   <span className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-background px-2.5 py-1 text-xs">
@@ -1915,6 +1963,7 @@ export const ChatInput = memo(function ChatInput({
         </Dialog.Root>
         {hasFailedAttachments && (
           <div className="mt-1 flex items-center justify-end gap-2 text-xs text-muted-foreground">
+            {attachments.some((attachment) => attachment.error === t('input.attachmentReselectionRequired')) ? <span>{t('input.attachmentReselectionRequired')}</span> : null}
             <Button
               variant="link"
               size="sm"

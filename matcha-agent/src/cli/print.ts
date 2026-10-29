@@ -131,12 +131,14 @@ import type {
   SDKControlResponse,
   SDKControlMcpSetServersResponse,
   SDKControlReloadPluginsResponse,
+  SDKControlPrepareToSleepRequest,
   SDKControlPrepareToSleepResponse,
 } from 'src/entrypoints/sdk/controlTypes.js'
 import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk'
 import type { PermissionMode as InternalPermissionMode } from 'src/types/permissions.js'
 import { cwd } from 'process'
 import { getCwd } from 'src/utils/cwd.js'
+import isEqual from 'lodash-es/isEqual.js'
 import omit from 'lodash-es/omit.js'
 import reject from 'lodash-es/reject.js'
 import { isPolicyAllowed } from 'src/services/policyLimits/index.js'
@@ -1083,6 +1085,9 @@ function runHeadlessStreaming(
   let running = false
   let activeRuns = 0
   let hasSessionOnlyControlState = false
+  let hasReplayableControlState = false
+  let hasInitializationPromptState = false
+  let hasSearchControlState = false
   let pendingBackgroundOperations = 0
   function trackBackgroundOperation<T>(operation: Promise<T>): Promise<T> {
     pendingBackgroundOperations++
@@ -3258,9 +3263,9 @@ function runHeadlessStreaming(
     flow: Promise<void>
   } | null = null
 
-  function sleepStatus():
-    | SDKControlPrepareToSleepResponse['status']
-    | undefined {
+  function sleepStatus(
+    replayState?: SDKControlPrepareToSleepRequest['replayState'],
+  ): SDKControlPrepareToSleepResponse['status'] | undefined {
     const state = getAppState()
     const tasks = Object.values(state.tasks)
     const hookConfig = getHooksConfigFromSnapshot()
@@ -3301,12 +3306,33 @@ function runHeadlessStreaming(
       (getNodeEnv() === 'test' &&
         !isEnvTruthy(process.env.TEST_ENABLE_SESSION_PERSISTENCE)) ||
       hasSessionOnlyControlState ||
+      (hasReplayableControlState && (!replayState || replayState.model === null)) ||
+      (hasInitializationPromptState && !replayState?.initialization) ||
+      (replayState?.initialization !== undefined && (
+        replayState.initialization.systemPrompt !== (options.systemPrompt ?? null) ||
+        replayState.initialization.appendSystemPrompt !== (options.appendSystemPrompt ?? null)
+      )) ||
+      (hasSearchControlState && !replayState?.search) ||
+      (replayState?.search !== undefined && !isEqual(replayState.search, {
+        webSearchAdapter: getFlagSettingsInline()?.webSearchAdapter ?? null,
+        searxng: getFlagSettingsInline()?.searxng ?? null,
+      })) ||
+      (replayState !== undefined && (
+        (replayState.model !== null && replayState.model !== getMainLoopModel()) ||
+        replayState.permissionMode !== state.toolPermissionContext.mode ||
+        (replayState.effort ?? getInitialEffortSetting()) !== state.effortValue
+      )) ||
       structuredIO.hasSessionOnlyEnvironment ||
       pendingSeeds.size > 0 ||
       (feature('EXTRACT_MEMORIES') && isExtractModeActive())
     )
       return 'resident'
-    if (
+    return isNativeBusy() ? 'busy' : undefined
+  }
+
+  function isNativeBusy(): boolean {
+    const state = getAppState()
+    return !!(
       running ||
       activeRuns > 0 ||
       hasCommandsInQueue() ||
@@ -3319,7 +3345,7 @@ function runHeadlessStreaming(
       hasActiveHookExecutions() ||
       suggestionState.inflightPromise ||
       suggestionState.pendingSuggestion ||
-      tasks.some(
+      Object.values(state.tasks).some(
         task =>
           task.status === 'pending' ||
           task.status === 'running' ||
@@ -3335,8 +3361,6 @@ function runHeadlessStreaming(
       state.speculation.status !== 'idle' ||
       isShuttingDown()
     )
-      return 'busy'
-    return undefined
   }
 
   // This is essentially spawning a parallel async task- we have two
@@ -3374,13 +3398,15 @@ function runHeadlessStreaming(
         // claude_authenticate, etc. so accessing their properties narrows to `never`.
         const req = msg.request as Record<string, unknown>
         if (msg.request.subtype === 'prepare_to_sleep') {
-          if (!SDKControlPrepareToSleepRequestSchema().safeParse(req).success) {
+          const parsed = SDKControlPrepareToSleepRequestSchema().safeParse(req)
+          if (!parsed.success) {
             sendControlResponseError(msg, 'Invalid prepare_to_sleep request')
             continue
           }
+          const { replayState } = parsed.data
           // Sealing and inspecting native facts run in one JS turn, without an await.
           structuredIO.prepareToSleep()
-          const status = sleepStatus()
+          const status = sleepStatus(replayState)
           if (status) {
             structuredIO.resumeInput()
             sendControlResponseSuccess(msg, { status })
@@ -3393,7 +3419,7 @@ function runHeadlessStreaming(
             for (const event of drainSdkEvents()) output.enqueue(event)
             await structuredIO.flushOutput()
             await structuredIO.flushStdout()
-            const changedStatus = sleepStatus()
+            const changedStatus = sleepStatus(replayState)
             if (changedStatus) {
               structuredIO.resumeInput()
               sendControlResponseSuccess(msg, { status: changedStatus })
@@ -3446,14 +3472,18 @@ function runHeadlessStreaming(
           if (
             msg.request.hooks ||
             msg.request.agents ||
-            msg.request.systemPrompt !== undefined ||
-            msg.request.appendSystemPrompt !== undefined ||
             msg.request.jsonSchema ||
             msg.request.sdkMcpServers?.length ||
             msg.request.promptSuggestions ||
             msg.request.agentProgressSummaries
           ) {
             hasSessionOnlyControlState = true
+          }
+          if (
+            msg.request.systemPrompt !== undefined ||
+            msg.request.appendSystemPrompt !== undefined
+          ) {
+            hasInitializationPromptState = true
           }
           // SDK MCP server names from the initialize message
           // Populated by both browser and ProcessTransport sessions
@@ -3510,7 +3540,8 @@ function runHeadlessStreaming(
             void run()
           }
         } else if (msg.request.subtype === 'set_permission_mode') {
-          hasSessionOnlyControlState = true
+          hasReplayableControlState = true
+          if (msg.request.ultraplan !== undefined) hasSessionOnlyControlState = true
           const m = msg.request // for typescript (TODO: use readonly types to avoid this)
           setAppState(prev => ({
             ...prev,
@@ -3526,12 +3557,16 @@ function runHeadlessStreaming(
           // notifySessionMetadataChanged that used to follow here is
           // now fired by onChangeAppState (with externalized mode name).
         } else if (msg.request.subtype === 'set_model') {
+          if (isNativeBusy()) {
+            sendControlResponseError(msg, 'Cannot change model while the session is busy')
+            continue
+          }
           const requestedModel = msg.request.model ?? 'default'
           const model =
             requestedModel === 'default'
               ? getDefaultMainLoopModel()
               : requestedModel
-          hasSessionOnlyControlState = true
+          hasReplayableControlState = true
           activeUserSpecifiedModel = model
           setMainLoopModelOverride(model)
           notifySessionMetadataChanged({ model })
@@ -3554,6 +3589,7 @@ function runHeadlessStreaming(
             continue
           }
           const effortValue = effort ?? getInitialEffortSetting()
+          hasReplayableControlState = true
           setAppState(prev => ({ ...prev, effortValue }))
           const appliedEffort = resolveAdapterEffort(model, effortValue)
           traceEffort('control_applied', model, effortValue, { requestId: msg.request_id, level: effort, actual: appliedEffort, applied: true, persisted: false })
@@ -4605,7 +4641,11 @@ function runHeadlessStreaming(
             sendControlResponseSuccess(msg, {})
           }
         } else if (msg.request.subtype === 'apply_flag_settings') {
-          hasSessionOnlyControlState = true
+          if (Object.keys(msg.request.settings).some(key => key !== 'webSearchAdapter' && key !== 'searxng')) {
+            hasSessionOnlyControlState = true
+          } else if (Object.keys(msg.request.settings).length > 0) {
+            hasSearchControlState = true
+          }
           // Snapshot the current model before applying — we need to detect
           // model switches so we can inject breadcrumbs and notify listeners.
           const prevModel = getMainLoopModel()

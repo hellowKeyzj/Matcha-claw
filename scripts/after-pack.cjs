@@ -129,39 +129,11 @@ function cleanupUnnecessaryFiles(dir) {
   return removedCount;
 }
 
-// ── Broken module patcher ─────────────────────────────────────────────────────
-// Some bundled packages have transpiled CJS that sets `module.exports = exports.default`
-// without ever assigning `exports.default`, leaving module.exports === undefined.
-// This causes `TypeError: Cannot convert undefined or null to object` in Node.js 22+
-// ESM interop (translators.js hasOwnProperty call).  We patch these after copying.
-
-const MODULE_PATCHES = {
-  // node-domexception@1.0.0: index.js sets module.exports = undefined.
-  // Node.js 18+ ships DOMException as a built-in; this shim re-exports it.
-  'node-domexception/index.js': [
-    "'use strict';",
-    '// Shim: original transpiled file sets module.exports = exports.default (undefined).',
-    '// Node.js 18+ has DOMException as a built-in global.',
-    'const dom = globalThis.DOMException ||',
-    '  class DOMException extends Error {',
-    "    constructor(msg, name) { super(msg); this.name = name || 'Error'; }",
-    '  };',
-    'module.exports = dom;',
-    'module.exports.DOMException = dom;',
-    'module.exports.default = dom;',
-  ].join('\n') + '\n',
-};
+// ── CJS export patcher ────────────────────────────────────────────────────────
 
 function patchBrokenModules(nodeModulesDir) {
   const { readFileSync, writeFileSync } = require('fs');
   let count = 0;
-  for (const [rel, content] of Object.entries(MODULE_PATCHES)) {
-    const target = join(nodeModulesDir, rel);
-    if (existsSync(target)) {
-      writeFileSync(target, content, 'utf8');
-      count++;
-    }
-  }
 
   // https-proxy-agent@8.x 仅声明了 ESM 导出，OpenClaw 网关在部分路径下通过
   // require() 加载会触发 ERR_PACKAGE_PATH_NOT_EXPORTED。这里补上 require 分支，
@@ -504,8 +476,7 @@ exports.default = async function afterPack(context) {
   cpSync(src, dest, { recursive: true });
   console.log('[after-pack] ✅ openclaw node_modules copied.');
 
-  // Patch broken modules whose CJS transpiled output sets module.exports = undefined,
-  // causing TypeError in Node.js 22+ ESM interop.
+  // Preserve require() access for the bundled proxy agent.
   patchBrokenModules(dest);
 
   // 1.1 Bundle OpenClaw plugins into packaged resources.

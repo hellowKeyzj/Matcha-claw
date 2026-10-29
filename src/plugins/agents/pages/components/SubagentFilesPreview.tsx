@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
+import { SUBAGENT_TARGET_FILES } from '@/plugins/agents/subagent-files';
 import type { SubagentTargetFile } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
 

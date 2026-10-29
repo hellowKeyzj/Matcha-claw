@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useGatewayStore } from '@/plugins/runtime/store';
-import { useLayoutStore } from '@/stores/layout';
+import { useLayoutStore } from '@/app/layout/store';
 import { useChatStore } from '@/plugins/chat/store';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { isGatewayOperational } from '@/plugins/runtime/gateway-status';
 import { buildSessionIdentityKey, sessionIdentitiesEqual, validateSessionIdentity, type SessionIdentity } from '@/types/desktop/runtime-address';
 import {
   CHAT_WORKSPACE_LAYOUT,
   clampChatSidePanelWidth,
   resolveChatSidePanelLayout,
   type ChatSidePanelMode,
-} from '@/components/layout/chat-workspace-layout';
+} from '@/app/layout/workspace';
 import { useContributions } from '@/plugin-host/react';
 import { chatSidePanels, type ChatPanelLayout, type ChatSidePanelContribution } from './extensions';
 import { CHAT_PANEL_OPEN_EVENT, type ChatPanelContent, type ChatPanelRequest } from './workspace-actions';
@@ -56,9 +56,9 @@ export function useChatSidePanelController(
   sessionIdentity?: SessionIdentity,
 ) {
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const chatTakeoverMode = useLayoutStore((state) => state.chatTakeoverMode);
-  const setChatTakeoverMode = useLayoutStore((state) => state.setChatTakeoverMode);
-  const clearChatTakeoverMode = useLayoutStore((state) => state.clearChatTakeoverMode);
+  const viewportTakeover = useLayoutStore((state) => state.viewportTakeover);
+  const setViewportTakeover = useLayoutStore((state) => state.setViewportTakeover);
+  const clearViewportTakeover = useLayoutStore((state) => state.clearViewportTakeover);
   const sessionsLoadedOnce = useChatStore((state) => state.sessionCatalogStatus.hasLoadedOnce);
   const loadSessions = useChatStore((state) => state.loadSessions);
   const resizeRafRef = useRef<number | null>(null);
@@ -78,7 +78,7 @@ export function useChatSidePanelController(
   const activePreferredWidth = clampChatSidePanelWidth(panelState.width, Number.POSITIVE_INFINITY);
   const artifactWorkbenchFullscreen = panelState.open
     && panelState.activeTab === 'artifacts'
-    && chatTakeoverMode === 'artifact-workbench';
+    && viewportTakeover;
   const layout = useMemo(
     () => resolveChatSidePanelLayout(panelState.open, containerWidth, activePreferredWidth),
     [activePreferredWidth, containerWidth, panelState.open],
@@ -93,7 +93,7 @@ export function useChatSidePanelController(
     }
   }, [panelState.activeTab, panelState.width]);
 
-  useEffect(() => () => clearChatTakeoverMode(), [clearChatTakeoverMode]);
+  useEffect(() => () => clearViewportTakeover(), [clearViewportTakeover]);
 
   const openPanel = useCallback((request: ChatPanelRequest) => {
     if (!enabled || !sessionIdentity || validateSessionIdentity(request.sessionIdentity)
@@ -106,8 +106,8 @@ export function useChatSidePanelController(
         : current);
     }
     setPanelState((prev) => ({ ...prev, open: true, activeTab: request.id }));
-    clearChatTakeoverMode();
-  }, [clearChatTakeoverMode, enabled, panels, sessionIdentity, sessionIdentityKey]);
+    clearViewportTakeover();
+  }, [clearViewportTakeover, enabled, panels, sessionIdentity, sessionIdentityKey]);
 
   useEffect(() => {
     const handleOpen = (event: Event) => {
@@ -119,8 +119,8 @@ export function useChatSidePanelController(
   }, [openPanel]);
 
   useEffect(() => {
-    if (!panelState.open || panelState.activeTab !== 'artifacts') clearChatTakeoverMode();
-  }, [clearChatTakeoverMode, panelState.activeTab, panelState.open]);
+    if (!panelState.open || panelState.activeTab !== 'artifacts') clearViewportTakeover();
+  }, [clearViewportTakeover, panelState.activeTab, panelState.open]);
 
   useEffect(() => {
     const applyResize = () => {
@@ -160,18 +160,18 @@ export function useChatSidePanelController(
 
   const setActiveSidePanelTab = useCallback((tab: ChatSidePanelTab) => {
     setPanelState((prev) => prev.open && prev.activeTab === tab ? prev : { ...prev, open: true, activeTab: tab });
-    if (tab !== 'artifacts') clearChatTakeoverMode();
-  }, [clearChatTakeoverMode]);
+    if (tab !== 'artifacts') clearViewportTakeover();
+  }, [clearViewportTakeover]);
 
   const closeSidePanel = useCallback(() => {
     setPanelState((prev) => ({ ...prev, open: false }));
-    clearChatTakeoverMode();
+    clearViewportTakeover();
     setPanelSession((current) => ({
       ...current,
       contents: {},
       layouts: Object.fromEntries(Object.entries(current.layouts).map(([id, value]) => [id, { ...value, fullscreen: false }])),
     }));
-  }, [clearChatTakeoverMode]);
+  }, [clearViewportTakeover]);
 
   const setPanelLayout = useCallback((patch: Partial<ChatPanelLayout>) => {
     const id = panelState.activeTab;
@@ -193,8 +193,8 @@ export function useChatSidePanelController(
 
   const toggleArtifactWorkbenchFullscreen = useCallback(() => {
     setPanelState((prev) => prev.activeTab === 'artifacts' ? { ...prev, open: true } : prev);
-    setChatTakeoverMode(chatTakeoverMode === 'artifact-workbench' ? 'none' : 'artifact-workbench');
-  }, [chatTakeoverMode, setChatTakeoverMode]);
+    setViewportTakeover(!viewportTakeover);
+  }, [viewportTakeover, setViewportTakeover]);
 
   return {
     sidePanelOpen: layout.sidePanelOpen,

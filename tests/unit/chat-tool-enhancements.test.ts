@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createInstance } from 'i18next';
-import zh from '../../src/i18n/locales/zh/chat.json';
+import zh from '../../src/plugins/chat/locales/zh/chat.json';
 
 import { buildToolActivityViewModel } from '../../src/plugins/message-rendering/tool-activity-view-model';
 import type { SessionRenderToolCard } from '../../src/types/session/tool-card';

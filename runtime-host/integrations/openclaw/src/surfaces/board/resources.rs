@@ -126,8 +126,24 @@ fn project_widget(
     if sandbox.path() != "/mcp-app-sandbox" {
         return Err(BoardFailure::Unknown);
     }
+    let mut csp = None;
+    let mut version_seen = false;
+    for (key, value) in sandbox.query_pairs() {
+        match key.as_ref() {
+            "csp" if csp.is_none() && !value.is_empty() => csp = Some(value),
+            "v" if !version_seen
+                && value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) =>
+            {
+                version_seen = true;
+            }
+            _ => return Err(BoardFailure::Unknown),
+        }
+    }
     validate_csp(
-        &single_query(&sandbox, "csp")?,
+        &csp.ok_or(BoardFailure::Unknown)?,
         widget,
         resource_origin.as_deref(),
     )?;
@@ -143,6 +159,7 @@ struct SandboxCsp {
     block_descendant_frames: bool,
     connect_domains: Option<Vec<String>>,
     resource_domains: Option<Vec<String>>,
+    media_domains: Option<Vec<String>>,
 }
 
 fn validate_csp(
@@ -173,10 +190,30 @@ fn validate_csp(
     } else {
         Vec::new()
     };
-    let expected_resources: Vec<String> = resource_origin.into_iter().map(str::to_owned).collect();
+    // Native widget CDNs and playback sources are not connect grants.
+    let mut expected_resources: Vec<String> = [
+        "https://cdnjs.cloudflare.com",
+        "https://cdn.jsdelivr.net",
+        "https://esm.sh",
+        "https://unpkg.com",
+        "https://fonts.googleapis.com",
+        "https://fonts.gstatic.com",
+        "https://fonts.bunny.net",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let mut expected_media = vec!["https:".to_owned(), "blob:".to_owned()];
+    if let Some(origin) = resource_origin {
+        if !expected_resources.iter().any(|value| value == origin) {
+            expected_resources.push(origin.to_owned());
+        }
+        expected_media.push(origin.to_owned());
+    }
     if !csp.block_descendant_frames
         || csp.connect_domains.unwrap_or_default() != expected_connect
         || csp.resource_domains.unwrap_or_default() != expected_resources
+        || csp.media_domains.unwrap_or_default() != expected_media
     {
         return Err(BoardFailure::Unknown);
     }

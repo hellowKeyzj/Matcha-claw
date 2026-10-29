@@ -13,7 +13,6 @@ import { getEnabledLarkAccounts, getLarkAccount } from '../core/accounts';
 import { LarkClient, getResolvedConfig } from '../core/lark-client';
 import type { LarkAccount } from '../core/types';
 import { getTicket } from '../core/lark-ticket';
-import { isTraceEnabled } from '../core/lark-logger';
 import type { ToolClient } from '../core/tool-client';
 import { createToolClient } from '../core/tool-client';
 import { shouldRegisterTool } from '../core/tools-config';
@@ -42,8 +41,7 @@ export interface ToolLogger {
   info: (msg: string) => void;
   warn: (msg: string) => void;
   error: (msg: string) => void;
-  trace: (msg: string | (() => string)) => void;
-  debug: (msg: string | (() => string)) => void;
+  debug: (msg: string) => void;
 }
 
 /**
@@ -252,7 +250,7 @@ export function checkToolRegistration(api: OpenClawPluginApi, toolName: string):
   if (!api.config) return false;
 
   if (!shouldRegisterTool(api.config, toolName)) {
-    if (isTraceEnabled()) api.logger.debug?.(`${toolName}: Skipped registration (in deny list)`);
+    api.logger.debug?.(`${toolName}: Skipped registration (in deny list)`);
     return false;
   }
 
@@ -409,13 +407,10 @@ export function createToolLogger(api: OpenClawPluginApi, toolName: string): Tool
         api.logger.error(`${prefix} ${msg}`);
       }
     },
-    trace: (msg) => {
-      if (!isTraceEnabled()) return;
-      api.logger.info?.(`${prefix} ${typeof msg === 'function' ? msg() : msg}`);
-    },
-    debug: (msg) => {
-      if (!isTraceEnabled()) return;
-      api.logger.debug?.(`${prefix} ${typeof msg === 'function' ? msg() : msg}`);
+    debug: (msg: string) => {
+      if (api.logger.debug) {
+        api.logger.debug(`${prefix} ${msg}`);
+      }
     },
   };
 }

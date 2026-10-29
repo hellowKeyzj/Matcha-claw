@@ -29,7 +29,8 @@ import {
   patchSessionViewportState,
   projectSessionViewItems,
 } from '@/plugins/chat/store/store-state-helpers';
-import { readSessionsFromState, resolveSessionThinkingLevelFromList } from '@/plugins/chat/store/session-helpers';
+import { readSessionsFromState } from '@/plugins/chat/session-catalog';
+import { resolveSessionThinkingLevelFromList } from '@/plugins/chat/store/session-helpers';
 import {
   createSessionTraceId,
   logSessionTrace,
@@ -39,10 +40,11 @@ import {
 } from '@/lib/session-trace';
 import { resolveSessionOperationTarget, sameRuntimeEndpointScope } from '@/plugins/chat/store/session-identity';
 import { reconcileSessionDirectory } from '@/plugins/chat/store/session-directory';
-import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { isSessionRuntimeEndpointStarting, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { createHistoryLoadAbortError, isHistoryLoadAbortError, throwIfHistoryLoadAborted } from '@/plugins/chat/store/history-abort';
 import { sessionIdentitiesEqual, type SessionIdentity } from '@/types/desktop/runtime-address';
 import type { StoreHistoryCache } from '@/plugins/chat/store/history-cache';
+import { getSessionInputIds } from '@/plugins/chat/store/session-presentation';
 import type { ChatHistoryLoadRequest, ChatStoreState } from '@/plugins/chat/store/types';
 
 type ChatStoreSetFn = (
@@ -57,8 +59,8 @@ export interface HistoryLoadExecutionDeps {
   get: ChatStoreGetFn;
   historyRuntime: StoreHistoryCache;
   loadingTimeoutMs: number;
-  observeHistory?: (identity: SessionIdentity, options: { timeoutMs?: number; traceId?: string | null }) => Promise<HistoryWindowResult['view'] | null>;
-  onObservedViewApplied?: (view: HistoryWindowResult['view']) => void;
+  observeHistory?: (identity: SessionIdentity, options: { timeoutMs?: number; traceId?: string | null }, inputIds: string[]) => Promise<HistoryWindowResult['view'] | null>;
+  onObservedViewCovered?: (view: HistoryWindowResult['view']) => void;
   isObservationCurrent?: () => boolean;
 }
 
@@ -73,7 +75,7 @@ interface CreateApplyLoadedMessagesInput {
   historyRuntime: StoreHistoryCache;
   requestedSessionKey: string;
   scope: ChatHistoryLoadRequest['scope'];
-  onObservedViewApplied?: HistoryLoadExecutionDeps['onObservedViewApplied'];
+  onObservedViewCovered?: HistoryLoadExecutionDeps['onObservedViewCovered'];
   abortSignal: AbortSignal;
   shouldAbortHistoryProcessing: () => boolean;
 }
@@ -190,8 +192,9 @@ async function fetchHistoryWindowWithStartupRetry(input: {
         sessionIdentity: summarizeSessionIdentity(target.sessionIdentity),
         attempt,
       }));
+      const inputIds = getSessionInputIds(get().loadedSessions[requestedSessionKey]);
       if (input.observeHistory && target.sessionIdentity.endpoint.kind === 'native-runtime' && target.sessionIdentity.endpoint.runtimeAdapterId === 'openclaw') {
-        const view = await input.observeHistory(target.sessionIdentity, options);
+        const view = await input.observeHistory(target.sessionIdentity, options, inputIds);
         if (!view) throw createHistoryLoadAbortError('observation_released');
         return { view, thinkingLevel: resolveSessionThinkingLevelFromList(readSessionsFromState(get()), requestedSessionKey) };
       }
@@ -201,6 +204,7 @@ async function fetchHistoryWindowWithStartupRetry(input: {
         sessionIdentity: target.sessionIdentity,
         sessions: readSessionsFromState(get()),
         limit: CHAT_HISTORY_FULL_LIMIT,
+        ...(inputIds.length ? { inputIds } : {}),
         traceId,
         ...(startupColdLoad ? { timeoutMs: CHAT_HISTORY_STARTUP_REQUEST_TIMEOUT_MS } : {}),
       });
@@ -318,6 +322,7 @@ export async function executeViewportWindowLoad(
       limit,
     }));
     readbackStage = 'request';
+    const inputIds = getSessionInputIds(currentState.loadedSessions[sessionKey]);
     const rawView = await hostSessionWindowFetch({
       ...(target.endpointSessionId ? { endpointSessionId: target.endpointSessionId } : {}),
       sessionIdentity: target.sessionIdentity,
@@ -325,6 +330,7 @@ export async function executeViewportWindowLoad(
       limit,
       ...(request.mode === 'older' ? { offset: beforeViewport.windowStartOffset } : {}),
       includeCanonical: true,
+      ...(inputIds.length ? { inputIds } : {}),
     });
     readbackStage = 'response';
     if (traceId) logSessionTrace('session.window.readback.response', traceId, () => ({
@@ -480,6 +486,9 @@ export function createApplyLoadedMessagesPipeline(
       if (projectionResult.status === 'unavailable' || projectionResult.status === 'epoch-mismatch') {
         throw new Error('Session view is unavailable');
       }
+      if (projectionResult.status === 'stale' && isCurrent(get())) {
+        input.onObservedViewCovered?.(view);
+      }
       return 'ignored';
     }
 
@@ -495,7 +504,7 @@ export function createApplyLoadedMessagesPipeline(
       };
     });
     if (!isCurrent(get())) return 'ignored';
-    input.onObservedViewApplied?.(view);
+    input.onObservedViewCovered?.(view);
     if (projectionResult.status === 'duplicate') return 'ignored';
     const sourceItems = projectSessionViewItems(view);
     const hydratedItems = hydrateAttachedFilesFromItems(sourceItems);
@@ -611,7 +620,7 @@ export async function executeHistoryLoad(
     historyRuntime,
     requestedSessionKey,
     scope,
-    onObservedViewApplied: deps.onObservedViewApplied,
+    onObservedViewCovered: deps.onObservedViewCovered,
     abortSignal: abortController.signal,
     shouldAbortHistoryProcessing,
   });

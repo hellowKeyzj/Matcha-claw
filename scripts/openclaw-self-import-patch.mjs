@@ -69,7 +69,7 @@ function listJavaScriptFiles(rootDir) {
       const fullPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
         stack.push(fullPath);
-      } else if (entry.isFile() && entry.name.endsWith('.js')) {
+      } else if (entry.isFile() && /\.(?:c|m)?js$/.test(entry.name)) {
         files.push(fullPath);
       }
     }

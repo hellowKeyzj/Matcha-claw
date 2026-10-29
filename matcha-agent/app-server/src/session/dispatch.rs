@@ -33,6 +33,7 @@ struct Get {
     #[serde(default)]
     offset: usize,
     limit: Option<usize>,
+    input_ids: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -99,16 +100,6 @@ struct Runs {
     session_id: String,
     limit: Option<usize>,
     before_run_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Model {
-    session_id: String,
-    model: String,
-    provider_id: Option<String>,
-    model_selection_id: Option<String>,
-    provider_fingerprint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -237,15 +228,10 @@ impl Sessions {
                 self.resume(&input.session_id).await
             }
             "sessions.fork" => self.fork(rpc::params(params)?).await,
-            "sessions.setModel" => {
-                let input: Model = rpc::params(params)?;
-                self.set_selection(&input.session_id, &input.model, true, Some(&input))
-                    .await
-            }
+            "sessions.setModel" => self.set_model(rpc::params(params)?).await,
             "sessions.setMode" => {
                 let input: Mode = rpc::params(params)?;
-                self.set_selection(&input.session_id, &input.mode, false, None)
-                    .await
+                self.set_mode(&input.session_id, &input.mode).await
             }
             "sessions.thinking.get" => {
                 let input: SessionKey = rpc::params(params)?;
@@ -502,6 +488,22 @@ impl Sessions {
     }
 
     async fn get(&self, input: Get) -> rpc::Result<Value> {
+        if let Some(input_ids) = &input.input_ids {
+            if !input.history || input_ids.len() > 50 {
+                return Err(rpc::Error::invalid(
+                    "inputIds requires history and at most 50 unique requestIds",
+                ));
+            }
+            let mut unique = std::collections::HashSet::new();
+            for input_id in input_ids {
+                run::validate_request_id(input_id)?;
+                if !unique.insert(input_id) {
+                    return Err(rpc::Error::invalid(
+                        "inputIds must contain unique requestIds",
+                    ));
+                }
+            }
+        }
         let session = self.session(&input.session_id).await?;
         let mut record = session.data.lock().await.record.clone();
         self.hydrate_titles(std::slice::from_mut(&mut record)).await;
@@ -517,6 +519,7 @@ impl Sessions {
                 &record.session_id,
                 input.offset,
                 input.limit.unwrap_or(80),
+                input.input_ids.as_deref(),
             )
             .await?;
         }
@@ -702,62 +705,16 @@ impl Sessions {
         }
     }
 
-    async fn set_selection(
-        &self,
-        session_id: &str,
-        selected: &str,
-        model: bool,
-        binding: Option<&Model>,
-    ) -> rpc::Result<Value> {
-        selection(selected, if model { "model" } else { "mode" })?;
-        if !model {
-            validate_mode(selected)?;
-        }
-        if let Some(binding) = binding {
-            if let Some(id) = &binding.provider_id {
-                config::validate_id(id)?;
-            }
-            if let Some(id) = &binding.model_selection_id {
-                selection(id, "modelSelectionId")?;
-            }
-            if let Some(fingerprint) = &binding.provider_fingerprint {
-                selection(fingerprint, "providerFingerprint")?;
-            }
-        }
+    async fn set_mode(&self, session_id: &str, selected: &str) -> rpc::Result<Value> {
+        selection(selected, "mode")?;
+        validate_mode(selected)?;
         let session = self.session(session_id).await?;
         let agent_id = session.data.lock().await.record.agent_id.clone();
         let _guard = self.agent_guard(&agent_id).await;
         self.accepting()?;
-        let snapshot = self.0.config.snapshot().await;
         let (cli, control) = {
             let mut execution = session.data.lock().await;
             execution.record.mutable()?;
-            if let Some(binding) = binding {
-                let provider = binding
-                    .provider_id
-                    .as_ref()
-                    .or(execution.record.provider_id.as_ref());
-                if provider.is_some_and(|id| !snapshot.providers.contains_key(id)) {
-                    return Err(rpc::Error::not_found("Provider"));
-                }
-                let effective_provider = execution.record.provider_id.as_ref().or_else(|| {
-                    snapshot
-                        .agents
-                        .get(&agent_id)
-                        .and_then(|agent| agent.provider.as_ref())
-                });
-                let provider_changed = binding
-                    .provider_id
-                    .as_ref()
-                    .is_some_and(|id| Some(id) != effective_provider);
-                if provider_changed && execution.cli.is_some() {
-                    return Err(rpc::Error::conflict(
-                        "session_provider_requires_restart",
-                        "Close the CLI instance before changing this session Provider",
-                    )
-                    .with_data(json!({ "requiresRestart": true, "nativeRequestSent": false })));
-                }
-            }
             if execution.closing
                 || execution.idle.handing_off()
                 || execution.launching
@@ -767,15 +724,6 @@ impl Sessions {
                     "session_transition_in_progress",
                     "Wait for session startup or cleanup",
                 )));
-            }
-            if model {
-                self.validate_model_thinking(
-                    snapshot.clone(),
-                    &execution,
-                    selected,
-                    binding.and_then(|binding| binding.provider_id.as_deref()),
-                )
-                .await?;
             }
             execution.idle.activity();
             session.wake.notify_one();
@@ -788,20 +736,10 @@ impl Sessions {
                     .transpose()?,
             )
         };
-        let response = if let Some(cli) = &cli {
-            cli.initialized().await?;
-            if model && cli.model_requires_restart() {
-                return Err(rpc::Error::conflict("native_model_override", "The current CLI model is fixed by its Provider environment; close and select the model before resuming").with_data(json!({ "requiresRestart": true, "nativeRequestSent": false })));
-            }
+        let response = if let Some(control) = &control {
             Some(
                 control
-                    .as_ref()
-                    .expect("CLI control admission")
-                    .request(if model {
-                        json!({ "subtype": "set_model", "model": selected })
-                    } else {
-                        json!({ "subtype": "set_permission_mode", "mode": selected })
-                    })
+                    .request(json!({ "subtype": "set_permission_mode", "mode": selected }))
                     .await?,
             )
         } else {
@@ -823,26 +761,7 @@ impl Sessions {
         }
         let mut updated = execution.record.clone();
         execution.record.mutable()?;
-        if model {
-            updated.model = Some(selected.to_owned());
-            if let Some(binding) = binding {
-                if let Some(provider) = &binding.provider_id {
-                    if updated.provider_id.as_ref() != Some(provider) {
-                        updated.model_selection_id = None;
-                        updated.provider_fingerprint = None;
-                    }
-                    updated.provider_id = Some(provider.clone());
-                }
-                if let Some(selection) = &binding.model_selection_id {
-                    updated.model_selection_id = Some(selection.clone());
-                }
-                if let Some(fingerprint) = &binding.provider_fingerprint {
-                    updated.provider_fingerprint = Some(fingerprint.clone());
-                }
-            }
-        } else {
-            updated.mode = Some(selected.to_owned());
-        }
+        updated.mode = Some(selected.to_owned());
         updated.updated_at_ms = rpc::now_ms();
         record::save_session(&self.0.database, &updated)
             .await

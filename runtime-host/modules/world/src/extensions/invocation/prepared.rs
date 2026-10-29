@@ -1,7 +1,6 @@
 use world_protocol::{
     api::PackageConfigView,
     bindings::{BindingNode, Entrypoint, ImplementationRef, SlotKind, TrustClass},
-    ids::Digest,
     package::{ArtifactRuntime, PackageLimits},
 };
 
@@ -12,7 +11,7 @@ pub(crate) enum NativePrepareFailure {
     Artifact,
     Configuration,
     Entrypoint,
-    HostBuild,
+    Implementation,
 }
 
 /// Exact common native preparation proof. A domain factory still validates its
@@ -28,20 +27,16 @@ impl NativeProof {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
         registration: &str,
         slot: SlotKind,
     ) -> Result<Self, NativePrepareFailure> {
         let implementation = &node.implementation;
-        let Entrypoint::Native {
-            registration: declared,
-            host_build: declared_build,
-        } = &implementation.entrypoint
-        else {
-            return Err(NativePrepareFailure::Entrypoint);
+        let (declared, revision) = match &implementation.entrypoint {
+            Entrypoint::Builtin { registration, revision } => (registration, revision),
+            Entrypoint::Native { .. } => return Err(NativePrepareFailure::Implementation),
+            _ => return Err(NativePrepareFailure::Entrypoint),
         };
         if node.slot != slot
-            || declared != registration
             || !matches!(
                 node.trust,
                 TrustClass::TrustedNative | TrustClass::PrivateRoot
@@ -49,8 +44,21 @@ impl NativeProof {
         {
             return Err(NativePrepareFailure::Entrypoint);
         }
-        if declared_build != host_build || implementation.artifact_digest != *host_build {
-            return Err(NativePrepareFailure::HostBuild);
+        if declared != registration {
+            return Err(NativePrepareFailure::Implementation);
+        }
+        let descriptor = world_protocol::native::implementation(registration)
+            .ok_or(NativePrepareFailure::Implementation)?;
+        if descriptor.slot != slot {
+            return Err(NativePrepareFailure::Entrypoint);
+        }
+        let contracts = descriptor.contracts().map_err(|_| NativePrepareFailure::Implementation)?;
+        if descriptor.revision != *revision
+            || descriptor.digest().map_err(|_| NativePrepareFailure::Implementation)?
+                != implementation.artifact_digest
+            || implementation.contracts.iter().any(|contract| !contracts.contains(contract))
+        {
+            return Err(NativePrepareFailure::Implementation);
         }
         if artifact.package_digest() != &implementation.package_digest
             || artifact.artifact.runtime != ArtifactRuntime::Native

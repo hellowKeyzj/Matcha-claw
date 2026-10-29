@@ -21,6 +21,7 @@ import {
 } from '../../main/runtime-host-delivery/transport/sessions/permission';
 import { decodeSessionGoalOutcome, decodeSessionGoalRequest, isGoalIdentifier, isGoalObjective, isSessionSendIntent } from '../../main/runtime-host-delivery/transport/sessions/goal';
 import type { SessionSendRequest } from '../../main/runtime-host-delivery/transport/sessions/send';
+import { isSessionInputIds } from '../../main/runtime-host-delivery/transport/sessions/session-contract';
 import { isSessionThinkingRequest } from '../../../src/types/session-thinking';
 import type { WorkspaceMediaTransport } from '../../main/runtime-host-delivery/transport/workspace/media';
 import {
@@ -176,7 +177,7 @@ async function dispatchSessionObservation(
       if (!isSessionObservationRequest(body, operation) || !deps.sessionObservers.isCurrent(page)) {
         return { status: 400, body: { success: false, error: 'Session observation request is invalid' } };
       }
-      const { sessionIdentity: identity, leaseId, limit } = body.input;
+      const { sessionIdentity: identity, leaseId, limit, inputIds } = body.input;
       if (operation === 'sessions.release') {
         const released = await deps.sessionObservers.releaseObservation(page, identity, leaseId);
         return { status: 200, body: { outcome: released ? 'released' : 'not-found' } };
@@ -195,7 +196,7 @@ async function dispatchSessionObservation(
       signal?.addEventListener('abort', cancel, { once: true });
       try {
         const response = await deps.runtimeHostTransports.sessionObservationTransport.observe(
-          observationRequest(identity, entry.nativeLeaseId, 'sessions.observe', limit), traceId);
+          observationRequest(identity, entry.nativeLeaseId, 'sessions.observe', limit, inputIds), traceId);
         if (signal?.aborted) {
           await deps.sessionObservers.rollbackObservation(entry);
           return unavailable;
@@ -877,13 +878,14 @@ function adaptSessionTimelineRequest(
   }
 
   const inputKeys = operationId === 'sessions.load'
-    ? ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'limit']
-    : ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'mode', 'limit', 'offset', 'includeCanonical'];
+    ? ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'limit', 'inputIds']
+    : ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'mode', 'limit', 'offset', 'includeCanonical', 'inputIds'];
   if (!hasAllowedKeys(body.input, ['sessionKey', 'sessionIdentity'], inputKeys.slice(2))
     || !isSessionIdentity(body.input.sessionIdentity)
     || !sameIdentity(body.scope.identity, body.input.sessionIdentity)
     || body.input.sessionKey !== body.scope.identity.sessionKey
     || (body.input.endpointSessionId !== undefined && !isIdentifier(body.input.endpointSessionId))
+    || (Object.hasOwn(body.input, 'inputIds') && (!isSessionInputIds(body.input.inputIds) || body.input.inputIds.length === 0))
     || (body.input.limit !== undefined && !isTimelineLimit(body.input.limit))) {
     logSessionTrace('electron.timeline.route.invalid', traceId, () => ({
       operationId,
@@ -911,6 +913,7 @@ function adaptSessionTimelineRequest(
         sessionIdentity: body.input.sessionIdentity,
         ...(body.input.endpointSessionId === undefined ? {} : { endpointSessionId: body.input.endpointSessionId }),
         ...(body.input.limit === undefined ? {} : { limit: body.input.limit }),
+        ...(body.input.inputIds === undefined ? {} : { inputIds: body.input.inputIds }),
       },
     };
     if (isSessionTraceEnabled()) logSessionTrace('electron.timeline.route.adapted', traceId, {
@@ -969,6 +972,7 @@ function adaptSessionTimelineRequest(
       ...(body.input.limit === undefined ? {} : { limit: body.input.limit }),
       ...(body.input.offset === undefined ? {} : { offset: body.input.offset }),
       ...(body.input.includeCanonical === undefined ? {} : { includeCanonical: body.input.includeCanonical }),
+      ...(body.input.inputIds === undefined ? {} : { inputIds: body.input.inputIds }),
     },
   };
   if (isSessionTraceEnabled()) logSessionTrace('electron.timeline.route.adapted', traceId, {

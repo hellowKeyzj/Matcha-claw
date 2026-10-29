@@ -13,6 +13,7 @@ mod body;
 pub mod replay;
 pub(crate) mod trace;
 pub mod window;
+mod wire_message;
 
 use platform::endpoint::runtime_address::RuntimeEndpoint;
 

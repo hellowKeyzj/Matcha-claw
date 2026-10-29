@@ -3,7 +3,7 @@ import { useChatStore, type ChatStoreState } from '@/plugins/chat/store';
 import { deriveSessionRecord } from '@/plugins/chat/store/session-presentation';
 import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import { buildCurrentConversationFromSessionRecord, resolveCurrentConversationRuntimeState } from '@/plugins/chat/store/session-runtime-graph';
-import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { selectAgentsResource, useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
 

@@ -53,9 +53,7 @@ export type DetectBeforeToolCallInput = {
 };
 
 export type DecideBeforeToolCallInput = {
-  toolName: string;
-  strippedParams: Record<string, unknown>;
-  confirmed: boolean;
+  toolParams: Record<string, unknown>;
   runtimeConfig: SecurityCoreRuntimeConfig;
   detection: RuntimeDetection;
 };
@@ -71,6 +69,7 @@ export type RuntimeDecision = {
   auditDecision: string;
   blockReason?: string;
   nextParams?: Record<string, unknown>;
+  requiresApproval?: boolean;
 };
 
 export type ApplyBeforeToolCallDecisionInput = {
@@ -80,4 +79,4 @@ export type ApplyBeforeToolCallDecisionInput = {
   decision: RuntimeDecision;
 };
 
-export type BeforeToolCallGuardOutcome = BeforeToolCallResult;
+export type BeforeToolCallGuardOutcome = Exclude<BeforeToolCallResult, void>;

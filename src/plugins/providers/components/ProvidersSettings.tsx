@@ -22,24 +22,24 @@ import { Select } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { ProviderCredentialModelsEditor } from '@/plugins/providers/components/ProviderCredentialModelsEditor';
 import { getProviderAccountRuntimeReport, useProviderStore, type ProviderCredential, type ProviderSnapshot, type ProviderVendorInfo } from '@/plugins/providers/stores/providers';
-import { providerDiagnosticError } from '@/lib/provider-projection-errors';
+import { providerDiagnosticError } from '@/plugins/providers/domain/provider-projection-errors';
 import { useProviderModelCatalogStore } from '@/plugins/providers/stores/provider-model-catalog';
 import {
   type ProviderModel,
-} from '@/lib/provider-model-catalog';
+} from '@/plugins/providers/services/provider-model-catalog';
 import {
   getProviderDocsUrl,
   getProviderIconUrl,
   shouldInvertInDark,
   type ProviderType,
-} from '@/lib/providers';
-import { getCustomMediaContract } from '@/lib/custom-media-provider-contracts';
+} from '@/plugins/providers/domain/providers';
+import { getCustomMediaContract } from '@/plugins/providers/domain/custom-media-provider-contracts';
 import {
   buildProviderCredentialId,
   buildProviderListItems,
   type ProviderListItem,
-} from '@/lib/provider-accounts';
-import { isGatewayOperational } from '@/lib/gateway-status';
+} from '@/plugins/providers/services/provider-accounts';
+import { isGatewayOperational } from '@/plugins/runtime/gateway-status';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useGatewayStore } from '@/plugins/runtime/store';
 import { cn } from '@/lib/utils';

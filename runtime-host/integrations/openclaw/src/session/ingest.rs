@@ -205,6 +205,7 @@ pub(crate) struct SessionEventIngest {
 
 pub(crate) enum IngestFrame {
     Socket { epoch: GatewayEpoch, frame: crate::gateway::connection::GatewayFrame, observations: Arc<crate::gateway::observation::Observations>, failure: tokio::sync::watch::Receiver<Option<crate::gateway::delivery::DispatcherError>> },
+    SocketClosed { epoch: GatewayEpoch },
     HistoryContent { identity: sessions_module::state::SessionIdentity, generation: u64, source_epoch: GatewayEpoch, window: super::window::SessionWindow, page: super::window::PageRequest, host_epoch: u64, observations: Arc<crate::gateway::observation::Observations>, reply: tokio::sync::oneshot::Sender<Result<Option<sessions_module::ports::SessionSync>, sessions_module::ports::RuntimeOperationFailure>> },
     HistoryStarted { identity: sessions_module::state::SessionIdentity, generation: u64, page: super::window::PageRequest, reply: tokio::sync::oneshot::Sender<u64> },
     HistoryFinished { identity: sessions_module::state::SessionIdentity, generation: u64, read: u64, reply: tokio::sync::oneshot::Sender<bool> },
@@ -284,6 +285,7 @@ impl SessionEventIngest {
                     }
                 } => {},
             }
+            let _ = sender.send(IngestFrame::SocketClosed { epoch }).await;
         });
         (epoch, task)
     }
@@ -335,6 +337,7 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
     let mut router = EventRouter::new(session_events);
     let mut active_epoch = 0;
     let mut last_sequence = None;
+    let mut wire_messages = super::wire_message::WireMessages::default();
     loop {
         let deadline = router.recovery_deadline();
         let frame = tokio::select! {
@@ -353,6 +356,14 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                 let _ = reply.send(router.history_finished(&identity, generation, read));
                 continue;
             }
+            IngestFrame::SocketClosed { epoch } => {
+                if epoch.as_u64() >= active_epoch {
+                    wire_messages.clear();
+                    active_epoch = epoch.as_u64();
+                    last_sequence = None;
+                }
+                continue;
+            }
             IngestFrame::Socket { epoch, frame, observations, failure } => (epoch, frame, observations, failure),
             IngestFrame::HistoryContent { identity, generation, source_epoch, window, page, host_epoch, observations, reply } => {
                 let result = if source_epoch.as_u64() != active_epoch || !observations.contains(&identity, generation, Some(active_epoch)) {
@@ -367,9 +378,15 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                 let _ = reply.send(result);
                 continue;
             }
-            IngestFrame::Close { identity, generation, reply } => { router.close(&identity, generation); let _ = reply.send(()); continue; }
+            IngestFrame::Close { identity, generation, reply } => {
+                wire_messages.retire(&identity.session_key, Some(&identity.agent_id));
+                router.close(&identity, generation);
+                let _ = reply.send(());
+                continue;
+            }
             IngestFrame::Restart { identity, generation, next_generation, observations, reply } => {
                 let result = if observations.contains(&identity, next_generation, None) {
+                    wire_messages.retire(&identity.session_key, Some(&identity.agent_id));
                     router.restart(&identity, generation, next_generation)
                 } else { Err(RuntimeOperationFailure::Unavailable) };
                 if super::trace::enabled() {
@@ -385,10 +402,11 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
         if epoch.as_u64() > active_epoch {
             if super::trace::enabled() { super::trace::log_unscoped("runtime.openclaw.ingress.source_epoch", || serde_json::json!({
                 "previousSourceEpoch": active_epoch, "sourceEpoch": epoch.as_u64(), "previousNativeCursor": last_sequence })); }
+            wire_messages.clear();
             active_epoch = epoch.as_u64(); last_sequence = None;
         }
         match frame {
-            GatewayFrame::Event(event) => {
+            GatewayFrame::Event(mut event) => {
                 let trace_payload = super::trace::enabled().then(|| gateway_event_trace_payload(&event, epoch));
                 if let Some(payload) = trace_payload.as_ref() {
                     super::trace::log_unscoped("runtime.openclaw.ingress.raw", || payload.clone());
@@ -399,6 +417,7 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                 }
                 let monotonic = event.sequence.is_none_or(|seq| last_sequence.is_none_or(|last| seq > last));
                 if !monotonic {
+                    wire_messages.clear();
                     if let Some(sink) = board_events.read().expect("Board ingress sink lock poisoned").as_ref() {
                         if observations.is_source_active(epoch.as_u64()) && failure.borrow().is_none() { sink.invalidate(); }
                     }
@@ -408,6 +427,7 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                     continue;
                 }
                 if event.sequence.zip(last_sequence).is_some_and(|(seq, last)| seq > last + 1) {
+                    wire_messages.clear();
                     if let Some(sink) = board_events.read().expect("Board ingress sink lock poisoned").as_ref() {
                         if observations.is_source_active(epoch.as_u64()) && failure.borrow().is_none() { sink.invalidate(); }
                     }
@@ -452,19 +472,32 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                         for (identity, generation) in observation_targets(&observations, active_epoch, Some(key)) {
                             if identity.agent_id != agent { continue; }
                             if router.goal(&identity, generation, session, goal.clone(), epoch, None, &observations).await.is_err() {
+                                wire_messages.retire(&identity.session_key, Some(&identity.agent_id));
                                 router.recover(identity, generation, epoch, CanonicalRecoveryReason::NativeUnknown, &observations).await;
                             }
                         }
                     }
                     Err(_) => {
                         for (identity, generation) in observation_targets(&observations, active_epoch, event.payload.as_ref().and_then(|payload| payload.get("sessionKey")).and_then(serde_json::Value::as_str)) {
+                            wire_messages.retire(&identity.session_key, Some(&identity.agent_id));
                             router.recover(identity, generation, epoch, CanonicalRecoveryReason::NativeUnknown, &observations).await;
                         }
                         continue;
                     }
                     Ok(None) => {}
                 }
-                let envelope = match decode_session_event(event) {
+                let reconstructed_append = match wire_messages.project(&mut event) {
+                    Ok(projected) => projected,
+                    Err(reason) => {
+                        let session = event.payload.as_ref().and_then(|payload| payload.get("sessionKey")).and_then(serde_json::Value::as_str);
+                        if let Some(session) = session { wire_messages.retire(session, None); }
+                        for (identity, generation) in observation_targets(&observations, active_epoch, session) {
+                            router.recover(identity, generation, epoch, reason, &observations).await;
+                        }
+                        continue;
+                    }
+                };
+                let mut envelope = match decode_session_event(event) {
                     Ok(Some(event)) => event,
                     Ok(None) => {
                         trace_gateway_drop("runtime.openclaw.ingress.dropped", trace_payload, "not_session_event");
@@ -472,10 +505,13 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                     }
                     Err(_) => {
                         trace_gateway_drop("runtime.openclaw.ingress.dropped", trace_payload, "decode_failed");
+                        wire_messages.clear();
                         for (identity, generation) in observation_targets(&observations, active_epoch, None) { router.recover(identity, generation, epoch, CanonicalRecoveryReason::NativeUnknown, &observations).await; }
                         continue;
                     }
                 };
+                let Some(reconstructed_append) = reconstructed_append else { continue; };
+                if let Some(chat) = envelope.chat.as_mut() { chat.reconstructed_append = reconstructed_append; }
                 let _ = send_lifecycle(&events, &envelope, epoch);
                 trace_decoded_event("runtime.openclaw.ingress.routed", &envelope, epoch);
                 let targets = observation_targets(&observations, active_epoch, Some(envelope.session_key.as_str()));
@@ -570,7 +606,7 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                         let _ = describe_reply.send(result);
                         status
                     }
-                    Some(OrderedContext::History { identity, generation, page, host_epoch, reply: history_reply }) => {
+                    Some(OrderedContext::History { identity, generation, page, host_epoch, input_ids, reply: history_reply }) => {
                         let request_hash = super::trace::enabled().then(|| sessions_module::trace::fingerprint(response.request_id()));
                         if super::trace::enabled() {
                             super::trace::log_unscoped("runtime.openclaw.ingress.history_response", || serde_json::json!({
@@ -583,7 +619,10 @@ async fn project_ingress(mut receiver: mpsc::Receiver<IngestFrame>, events: mpsc
                             match &response {
                                 crate::gateway::wire::GatewayResponse::Success { payload: Some(payload), .. } => {
                                     let decode_started = super::trace::enabled().then(std::time::Instant::now);
-                                    let decoded = super::window::decode_window(payload.clone(), page);
+                                    let decoded = super::window::decode_window(payload.clone(), page).map(|mut window| {
+                                        window.retain_input_receipts(&input_ids);
+                                        window
+                                    });
                                     let decode_elapsed_ms = decode_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
                                     if super::trace::enabled() {
                                         super::trace::log_unscoped("runtime.openclaw.ingress.history_decoded", || serde_json::json!({

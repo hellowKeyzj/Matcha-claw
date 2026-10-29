@@ -1,5 +1,6 @@
 import type { SessionAssistantTurnItem, SessionRenderItem } from '@/types/session/render-item';
-import type { SessionWireItem } from '@/types/session/snapshot';
+import type { SessionInputReceipt, SessionWireItem } from '@/types/session/snapshot';
+import { bindSessionInputReceipts, isPendingUserItem, reconcileSessionItems } from '@/plugins/chat/store/session-item-reconciliation';
 import { sanitizeAssistantDisplayText, sanitizeCanonicalUserText } from '@/plugins/chat/store/message-display';
 import type { SessionMessageProjection, SessionMessageState, SessionTextModel } from '@/plugins/chat/store/session-presentation';
 import {
@@ -16,6 +17,20 @@ export const text: SessionTextModel = {
   user: sanitizeCanonicalUserText,
   assistant: sanitizeAssistantDisplayText,
 };
+
+export { pendingSessionInputIds as inputIds } from '@/plugins/chat/store/session-item-reconciliation';
+
+export function reconcileItems(
+  current: SessionRenderItem[],
+  next: SessionRenderItem[],
+  receipts: readonly SessionInputReceipt[] = [],
+  sourceItems: readonly SessionWireItem[] = [],
+): SessionRenderItem[] {
+  const bound = bindSessionInputReceipts(current, next, receipts, sourceItems);
+  if (bound === current && current === next) return current;
+  const canonical = next.some(isPendingUserItem) ? next.filter((item) => !isPendingUserItem(item)) : next;
+  return reconcileSessionItems(bound, canonical, null);
+}
 
 export function startSend(
   record: ChatSessionRecord,
@@ -64,7 +79,7 @@ export function confirmSend(
   send: ChatSessionSendState,
   runId: string,
   admission: ChatSessionSendAdmission,
-  retainReceipt: boolean,
+  _retainReceipt: boolean,
   nextSend: ChatSessionSendState | null,
 ): SessionMessageState {
   const admitted = admission === 'queued' || admission === 'started';
@@ -94,9 +109,7 @@ export function confirmSend(
       lastUserMessageAt = item.createdAt ?? lastUserMessageAt;
       return {
         ...item,
-        key: retainReceipt ? `renderer-receipt:${runId}` : item.key,
         runId,
-        ...(retainReceipt ? { rendererReceiptRunId: runId } : {}),
       };
     }
     if (item.kind === 'assistant-turn' && item.key === clientAssistantKey) {

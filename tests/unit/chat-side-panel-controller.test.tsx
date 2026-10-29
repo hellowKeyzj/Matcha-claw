@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatSidePanelController } from '@/plugins/chat/useChatSidePanelController';
 import { useRuntimeHostStore } from '@/plugins/runtime/store';
-import { useLayoutStore } from '@/stores/layout';
+import { useLayoutStore } from '@/app/layout/store';
 import { useChatStore } from '@/plugins/chat/store';
 import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import { createReadyResourceStatusState } from '@/lib/resource-state';
@@ -48,7 +48,7 @@ describe('chat side panel controller', () => {
     } as never);
 
     useLayoutStore.setState({
-      chatTakeoverMode: 'none',
+      viewportTakeover: false,
     });
   });
 

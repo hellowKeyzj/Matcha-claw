@@ -27,6 +27,7 @@ pub(super) struct Body {
     terminal_marker: Option<TerminalMarker>,
     accepted_finals: HashSet<String>,
     last_terminal_run: Option<String>,
+    history_rebuilding: bool,
 }
 
 #[derive(Clone)]
@@ -60,6 +61,9 @@ struct Stream {
     body_closed: bool,
     anchors: Vec<String>,
     provisional: Vec<Provisional>,
+    final_content: Option<([u8; 32], [u8; 32])>,
+    terminal_observed: bool,
+    inferred: Option<identity::InferredTerminal>,
 }
 
 #[derive(Clone)]
@@ -206,6 +210,9 @@ impl Body {
                 CanonicalSessionChange::AssistantTurnChunk { run_id, message_id, kind, text, replace, status } => {
                     if terminal_chat.is_some() { continue; }
                     self.accept_live(run_id.as_str());
+                    if *kind == AssistantTurnChunkKind::Text && *replace && chat.is_some_and(|chat| chat.reconstructed_append)
+                        && self.stream_text(run_id.as_str()).is_some_and(|current| current.len() > text.len() && current.starts_with(text))
+                    { continue; }
                     if let Some(message_id) = message_id {
                         self.keyed_chunk(run_id.as_str(), message_id.as_str(), *kind, text, *replace, *status)?;
                     } else {
@@ -273,6 +280,7 @@ impl Body {
                 _ => {}
             }
         }
+        self.reconcile_terminals()?;
         self.check()?;
         Some(self.replacement(old))
     }
@@ -501,6 +509,7 @@ impl Body {
                 }
             }
         }
+        if live { self.reconcile_terminals()?; }
         self.check()?;
         Some(projected_id.filter(|id| self.items.iter().any(|item| item.item_id() == id)))
     }
@@ -764,7 +773,10 @@ impl Body {
     }
 
     fn accept_live(&mut self, run: &str) {
-        if self.status(run) == ItemStatus::Streaming && self.live_run.as_deref().is_none_or(|current| current == run) { self.live_run = Some(run.to_owned()); }
+        if self.status(run) == ItemStatus::Streaming && self.live_run.as_deref().is_none_or(|current| current == run) {
+            self.live_run = Some(run.to_owned());
+            if let Some(stream) = self.streams.get_mut(run) { stream.terminal_observed = false; }
+        }
     }
 
     pub(super) fn thinking(&mut self, run: &str, activity: &SessionActivity) -> Option<CanonicalSessionChange> {
@@ -792,7 +804,7 @@ impl Body {
 
     fn check(&mut self) -> Option<()> {
         placement::compose(&mut self.items, &self.persisted);
-        while self.items.len() > 200 {
+        while self.items.len() + self.streams.values().filter(|stream| stream.inferred.is_some()).count() > 200 {
             if trace::enabled() {
                 let available = self.items.iter().any(|item| match item {
                     SessionItem::AssistantTurn { run_id, status, .. } => matches!(status, ItemStatus::Final | ItemStatus::Error | ItemStatus::Aborted)
@@ -817,6 +829,7 @@ impl Body {
             if !self.evicted.iter().any(|id| id == item.item_id()) { self.evicted.push(item.item_id().to_owned()); }
             self.history_ids.remove(item.item_id());
             self.persisted.retain(|row| row.id != item.item_id());
+            self.evict_inferred(item.item_id());
         }
         self.history_ids.retain(|id| self.items.iter().any(|item| item.item_id() == id)
             || self.persisted.iter().any(|row| &row.id == id));
@@ -825,6 +838,7 @@ impl Body {
             stream.provisional.retain(|entry| visible.iter().any(|item| item.item_id() == entry.id));
         }
         self.streams.retain(|run, stream| visible.iter().any(|item| matches!(item, SessionItem::AssistantTurn { run_id: Some(id), .. } if id == run))
+            || stream.inferred.is_some()
             || !self.terminal.iter().any(|(id, _)| id == run)
             || (self.terminal_marker.as_ref().is_some_and(|marker| &marker.run_id == run)
                 && stream.anchors.iter().any(|id| self.retired.contains(id))));
@@ -840,7 +854,7 @@ impl Body {
         self.retired.retain(|id| self.streams.values().any(|stream| stream.all_parts().any(|part| part.id.as_ref() == Some(id))
             || stream.anchors.contains(&id)));
         if trace::enabled() {
-            let valid = self.items.len() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
+            let valid = self.items.len() + self.streams.values().filter(|stream| stream.inferred.is_some()).count() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
                 && self.terminal.len() <= 200 && self.retired.len() <= 200
                 && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200                    && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 1_000_000);
             trace::log_unscoped(if valid { "oc.body.check.accepted" } else { "oc.body.check.failed" }, || serde_json::json!({ "commitState": "candidate_only",
@@ -858,7 +872,7 @@ impl Body {
                     "textExceeded": stream.text_bytes() > 1_000_000, "thinkingExceeded": stream.thinking.len() > 1_000_000,
                 })).collect::<Vec<_>>() }));
         }
-        (self.items.len() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
+        (self.items.len() + self.streams.values().filter(|stream| stream.inferred.is_some()).count() <= 200 && self.persisted.len() <= 200 && self.streams.len() <= 200
             && self.terminal.len() <= 200 && self.retired.len() <= 200
             && self.streams.values().all(|stream| stream.part_count() <= 200 && stream.anchors.len() <= 200                && stream.text_bytes() <= 1_000_000 && stream.thinking.len() <= 1_000_000))
             .then_some(())

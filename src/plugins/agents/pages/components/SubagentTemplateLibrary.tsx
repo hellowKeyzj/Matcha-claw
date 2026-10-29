@@ -2,11 +2,11 @@ import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useSta
 import { ArrowRight } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { AgentAvatar } from '@/components/common/AgentAvatar';
-import { AgentResourceCard, AgentResourceFooter, AgentResourceGrid } from '@/components/common/AgentPage';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
+import { AgentResourceCard, AgentResourceFooter, AgentResourceGrid } from '@/components/common/AgentResource';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
-import { buildTemplateAvatarSeed } from '@/lib/agent-avatar';
+import { buildTemplateAvatarSeed } from '@/plugins/agents/presentation/agent-avatar';
 import { cn } from '@/lib/utils';
 import { prefetchSubagentTemplateById } from '@/plugins/agents/services/subagent-template-catalog';
 import type { SubagentTemplateCatalogResult, SubagentTemplateSummary } from '@/types/subagent';

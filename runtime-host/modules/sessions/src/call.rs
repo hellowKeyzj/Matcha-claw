@@ -19,7 +19,7 @@ use crate::{
     session_history::{SessionHistoryFailure, SessionHistoryOutcome},
     session_permission::{SessionPermissionAction, SessionPermissionOutcome},
     state::{SessionProvider, SessionView},
-    thinking::{SessionThinkingAction, SessionThinkingOutcome},
+    thinking::SessionThinkingOutcome,
     timeline::{self, ContentOutcome},
 };
 
@@ -272,11 +272,8 @@ impl SessionCommand {
                     None,
                 ),
             ),
-            Thinking { command, .. } => (
-                match command.action {
-                    SessionThinkingAction::Get => "sessions.thinking.get",
-                    SessionThinkingAction::Set { .. } => "sessions.thinking.set",
-                },
+            SetThinking { command, .. } => (
+                "sessions.thinking.set",
                 command.scope.identity().map_or_else(
                     || SessionsCallDetail { provider: Some(command.scope.endpoint().provider()), ..SessionsCallDetail::default() },
                     |identity| SessionsCallDetail::session(identity.provider(), identity.session_key(), None),
@@ -336,6 +333,13 @@ impl SessionQuery {
                 detail.count = command.approval_ids.as_ref().map(Vec::len);
                 ("sessions.abort", detail)
             }
+            Thinking { command, .. } => (
+                "sessions.thinking.get",
+                command.scope.identity().map_or_else(
+                    || SessionsCallDetail { provider: Some(command.scope.endpoint().provider()), ..SessionsCallDetail::default() },
+                    |identity| SessionsCallDetail::session(identity.provider(), identity.session_key(), None),
+                ),
+            ),
             PendingApprovals { command, .. } => (
                 "sessions.approvals.list",
                 SessionsCallDetail {

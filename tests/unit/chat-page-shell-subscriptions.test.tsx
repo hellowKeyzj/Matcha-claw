@@ -7,7 +7,7 @@ import { useChatStore as realUseChatStore } from '@/plugins/chat/store';
 import { useRuntimeHostStore } from '@/plugins/runtime/store';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { useTeamsStore } from '@/plugins/teams/store';
-import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph } from '@/plugins/chat/store/session-runtime-graph';
 import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';

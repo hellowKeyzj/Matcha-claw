@@ -1,16 +1,16 @@
 import { useMemo } from 'react';
-import type { AgentAvatarStyle } from '@/lib/agent-avatar';
+import type { AgentAvatarStyle } from '@/types/subagent';
 import type { ResourceStateMeta } from '@/lib/resource-state';
 import type { ChatSession } from '@/plugins/chat/store';
 import { findAgentScope } from '@/plugins/chat/store/session-identity';
-import { normalizeAutomaticSessionTitle, parseSessionCreatedAtMs } from '@/plugins/chat/store/session-helpers';
+import { inferUntitledSessionLabel, normalizeAutomaticSessionTitle, parseSessionCreatedAtMs } from '@/plugins/chat/session-catalog';
 import type { AgentSessionsPaneSessionEntry } from '@/plugins/chat/store/selectors';
 import type { ChatCurrentConversation, ChatSessionRuntimeEndpointNode, ChatSessionRuntimeEndpointTarget } from '@/plugins/chat/store/types';
 import type { AgentScope } from '@/types/desktop/runtime-address';
 import {
   buildAgentSessionSwitchboardModel,
   type AgentSessionSwitchboardSessionBucketInput,
-} from '@/components/layout/agent-session-switchboard-model';
+} from '@/plugins/chat/agent-session-switchboard-model';
 
 const SESSION_TITLE_MAX_LENGTH = 48;
 export type SessionBucketId = 'today' | 'within_7_days' | 'within_30_days' | 'older';
@@ -53,13 +53,6 @@ export function resolveAgentScopeForRuntimeEndpoint(endpoint: ChatSessionRuntime
 export function readSessionSuffix(session: Pick<ChatSession, 'key' | 'sessionIdentity'> | string): string {
   const sessionKey = typeof session === 'string' ? session : session.sessionIdentity.sessionKey;
   return sessionKey.split(':').slice(2).join(':') || sessionKey;
-}
-
-export function inferUntitledSessionLabel(session: ChatSession, t: (key: string, options?: Record<string, unknown>) => string): string {
-  if (session.kind === 'subsession') return t('sidebar.subSession');
-  if (session.kind === 'session') return t('sidebar.newSession');
-  if (session.kind === 'main') return t('sidebar.defaultSession');
-  return t('sidebar.untitledSession');
 }
 
 export function resolveSessionTitle(entry: AgentSessionsPaneSessionEntry, t: (key: string, options?: Record<string, unknown>) => string): string {

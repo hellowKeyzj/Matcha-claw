@@ -3,7 +3,6 @@ use tokio_util::sync::CancellationToken;
 use world_protocol::{
     api::PackageConfigView,
     bindings::{BindingNode, ImplementationRef, SlotKind},
-    ids::Digest,
     package::PackageLimits,
     slots::{self, AgentBridgeRequest, AgentBridgeResult},
 };
@@ -25,7 +24,6 @@ impl PreparedAgentBridge {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, NativePrepareFailure> {
         let contract = slots::slot_contract(SlotKind::AgentBridge)
             .map_err(|_| NativePrepareFailure::Entrypoint)?;
@@ -36,7 +34,6 @@ impl PreparedAgentBridge {
             node,
             config,
             artifact,
-            host_build,
             slots::AGENT_BRIDGE_REGISTRATION,
             SlotKind::AgentBridge,
         )?;

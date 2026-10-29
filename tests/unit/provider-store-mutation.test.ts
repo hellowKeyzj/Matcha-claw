@@ -11,7 +11,7 @@ const providerModelCatalogRefreshMock = vi.hoisted(() => vi.fn());
 const capabilityRoutingRefreshMock = vi.hoisted(() => vi.fn());
 const subagentsLoadAvailableModelsMock = vi.hoisted(() => vi.fn());
 
-vi.mock('@/lib/provider-accounts', () => ({
+vi.mock('@/plugins/providers/services/provider-accounts', () => ({
   fetchProviderSnapshot: (...args: unknown[]) => fetchProviderSnapshotMock(...args),
   normalizeProviderSnapshot: (value: unknown) => {
     const snapshot = value && typeof value === 'object'
@@ -29,7 +29,7 @@ vi.mock('@/lib/provider-accounts', () => ({
   },
 }));
 
-vi.mock('@/lib/provider-projection', () => ({
+vi.mock('@/plugins/providers/services/provider-projection', () => ({
   hostProviderCreateAccount: (...args: unknown[]) => hostProviderCreateAccountMock(...args),
   hostProviderDeleteAccount: (...args: unknown[]) => hostProviderDeleteAccountMock(...args),
   hostProviderUpdateAccount: (...args: unknown[]) => hostProviderUpdateAccountMock(...args),

@@ -9,7 +9,7 @@ import {
   hostSecurityScanSkills,
   resolveSecurityEmergencyOutcome,
   SECURITY_EMERGENCY_TARGET_REJECTED_MESSAGE,
-} from '@/lib/security-runtime';
+} from './security-runtime';
 import type { SecurityCheckProps } from './extensions';
 
 export function QuickAuditCheck({ disabled, runSecurityOp }: SecurityCheckProps) {

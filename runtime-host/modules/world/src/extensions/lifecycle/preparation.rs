@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use world_protocol::{
     api::PackageConfigView,
     bindings::{BindingNode, Entrypoint, SlotKind},
-    ids::{AcquisitionId, ActivationLockId, CommitId, Digest, ResourceToken, WorldRef},
+    ids::{AcquisitionId, ActivationLockId, CommitId, ResourceToken, WorldRef},
     lifecycle::LifecycleFailure,
     time::Timestamp,
 };
@@ -38,8 +38,7 @@ use crate::{
 /// Trusted composition inputs; package authority is read from PostgreSQL at preparation time.
 #[derive(Clone)]
 pub struct PreparationPorts {
-    engine: wasm_host::Engine,
-    host_build: Digest,
+    engine: Arc<wasm_host::EngineResources>,
     artifact_limit: usize,
     containment: ProcessContainment,
     process_directory: CanonicalStateDir,
@@ -48,8 +47,8 @@ pub struct PreparationPorts {
 
 impl PreparationPorts {
     pub fn new(
-        engine: wasm_host::Engine,
-        host_build: Digest,
+        engine_limits: wasm_host::EngineLimits,
+        epoch_interval: Duration,
         artifact_limit: usize,
         containment: ProcessContainment,
         process_directory: CanonicalStateDir,
@@ -58,8 +57,7 @@ impl PreparationPorts {
         cleanup_timeout: Duration,
     ) -> Self {
         Self {
-            engine,
-            host_build,
+            engine: Arc::new(wasm_host::EngineResources::new(engine_limits, epoch_interval)),
             artifact_limit,
             containment,
             process_directory,
@@ -71,8 +69,12 @@ impl PreparationPorts {
         }
     }
 
-    pub(crate) fn engine(&self) -> wasm_host::Engine {
+    pub(crate) fn engine_resources(&self) -> Arc<wasm_host::EngineResources> {
         self.engine.clone()
+    }
+
+    pub async fn shutdown(&self) -> Result<(), tokio::task::JoinError> {
+        self.engine.shutdown().await
     }
 
     pub(crate) fn artifact_limit(&self) -> usize {
@@ -83,7 +85,6 @@ impl PreparationPorts {
         self.execution_policy.clone()
     }
 
-    pub(super) fn host_build(&self) -> &Digest { &self.host_build }
     pub(super) fn containment(&self) -> ProcessContainment { self.containment.clone() }
     pub(super) fn process_directory(&self) -> &CanonicalStateDir { &self.process_directory }
 }
@@ -500,6 +501,10 @@ async fn prepare_node(
             // The ledger-owned preparation task keeps this handle until the blocking
             // work really joins; cancelling preparation never detaches compilation.
             let prepared = tokio::task::spawn_blocking(move || {
+                if cancellation.is_cancelled() {
+                    return Err(crate::extensions::wasm::WasmError::Cancelled);
+                }
+                let engine = engine.prepare_engine().map_err(crate::extensions::wasm::WasmError::from)?;
                 PreparedWasm::prepare(
                     engine,
                     implementation,
@@ -549,11 +554,15 @@ async fn prepare_node(
             .map_err(LifecycleError::Process)?;
             Ok(PreparedNode::process(node.id.clone(), prepared, ledger))
         }
-        Entrypoint::Native { .. } => match node.slot {
+        Entrypoint::Native { .. } => Err(LifecycleError::Native {
+            node: node.id.clone(),
+            cause: crate::extensions::invocation::NativePrepareFailure::Implementation,
+        }),
+        Entrypoint::Builtin { .. } => match node.slot {
             SlotKind::Connector => Ok(PreparedNode::source(
                 node.id.clone(),
                 Arc::new(
-                    PreparedSource::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedSource::prepare(&node, config, artifact)
                         .map_err(LifecycleError::Source)?,
                 ),
                 ledger,
@@ -561,15 +570,15 @@ async fn prepare_node(
             SlotKind::Identity => Ok(PreparedNode::identity(
                 node.id.clone(),
                 Arc::new(
-                    PreparedIdentity::prepare(&node, config, artifact, &ports.host_build)
-                        .map_err(LifecycleError::Identity)?,
+                    PreparedIdentity::prepare(&node, config, artifact)
+                        .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
             )),
             SlotKind::Schema => Ok(PreparedNode::schema(
                 node.id.clone(),
                 Arc::new(
-                    PreparedSchema::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedSchema::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -577,7 +586,7 @@ async fn prepare_node(
             SlotKind::Compiler => Ok(PreparedNode::compiler(
                 node.id.clone(),
                 Arc::new(
-                    PreparedCompiler::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedCompiler::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -585,7 +594,7 @@ async fn prepare_node(
             SlotKind::Policy => Ok(PreparedNode::policy(
                 node.id.clone(),
                 Arc::new(
-                    PreparedPolicy::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedPolicy::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -593,7 +602,7 @@ async fn prepare_node(
             SlotKind::Provenance => Ok(PreparedNode::provenance(
                 node.id.clone(),
                 Arc::new(
-                    PreparedProvenance::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedProvenance::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -601,7 +610,7 @@ async fn prepare_node(
             SlotKind::Action => Ok(PreparedNode::action(
                 node.id.clone(),
                 Arc::new(
-                    PreparedAction::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedAction::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -609,7 +618,7 @@ async fn prepare_node(
             SlotKind::Evaluation => Ok(PreparedNode::evaluation(
                 node.id.clone(),
                 Arc::new(
-                    PreparedEvaluation::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedEvaluation::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -617,7 +626,7 @@ async fn prepare_node(
             SlotKind::Projection => Ok(PreparedNode::projection(
                 node.id.clone(),
                 Arc::new(
-                    PreparedProjection::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedProjection::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -625,7 +634,7 @@ async fn prepare_node(
             SlotKind::Reconcile => Ok(PreparedNode::reconcile(
                 node.id.clone(),
                 Arc::new(
-                    PreparedReconcile::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedReconcile::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -633,7 +642,7 @@ async fn prepare_node(
             SlotKind::Abstraction => Ok(PreparedNode::abstraction(
                 node.id.clone(),
                 Arc::new(
-                    PreparedAbstraction::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedAbstraction::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -641,7 +650,7 @@ async fn prepare_node(
             SlotKind::AgentBridge => Ok(PreparedNode::agent_bridge(
                 node.id.clone(),
                 Arc::new(
-                    PreparedAgentBridge::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedAgentBridge::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -649,7 +658,7 @@ async fn prepare_node(
             SlotKind::Storage => Ok(PreparedNode::storage(
                 node.id.clone(),
                 Arc::new(
-                    PreparedStorage::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedStorage::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -657,7 +666,7 @@ async fn prepare_node(
             SlotKind::Resolver => Ok(PreparedNode::resolver(
                 node.id.clone(),
                 Arc::new(
-                    PreparedResolver::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedResolver::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -665,7 +674,7 @@ async fn prepare_node(
             SlotKind::Context => Ok(PreparedNode::context(
                 node.id.clone(),
                 Arc::new(
-                    PreparedContext::prepare(&node, config, artifact, &ports.host_build)
+                    PreparedContext::prepare(&node, config, artifact)
                         .map_err(|cause| LifecycleError::Native { node: node.id.clone(), cause })?,
                 ),
                 ledger,
@@ -730,6 +739,7 @@ fn trace_preparation(
             "slot": node.map(|node| node.slot),
             "entrypoint": node.map(|node| match &node.implementation.entrypoint {
                 Entrypoint::Native { .. } => "native",
+                Entrypoint::Builtin { .. } => "builtin",
                 Entrypoint::Wasm { .. } => "wasm",
                 Entrypoint::Process { .. } => "process",
             }),
@@ -788,12 +798,11 @@ fn preparation_reason(error: &LifecycleError) -> (&'static str, String) {
                 },
             )
         }
-        LifecycleError::Identity(_) => ("identity", "prepare"),
         LifecycleError::Native { cause, .. } => ("native", match cause {
             crate::extensions::invocation::NativePrepareFailure::Artifact => "artifact",
             crate::extensions::invocation::NativePrepareFailure::Configuration => "configuration",
             crate::extensions::invocation::NativePrepareFailure::Entrypoint => "entrypoint",
-            crate::extensions::invocation::NativePrepareFailure::HostBuild => "host_build",
+            crate::extensions::invocation::NativePrepareFailure::Implementation => "implementation",
         }),
         LifecycleError::Store(_) => ("store", "prepare"),
         LifecycleError::Binding(_) => ("binding", "prepare"),

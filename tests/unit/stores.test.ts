@@ -2,7 +2,7 @@
  * Zustand Stores Tests
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useLayoutStore } from '@/stores/layout';
+import { useLayoutStore } from '@/app/layout/store';
 import { useSettingsStore } from '@/plugins/settings/store';
 import { useRuntimeHostStore } from '@/plugins/runtime/store';
 
@@ -87,7 +87,7 @@ describe('Layout Store', () => {
     useLayoutStore.setState({
       sidebarVisible: true,
       sidebarWidth: 256,
-      chatTakeoverMode: 'none',
+      viewportTakeover: false,
     });
   });
 
@@ -95,7 +95,7 @@ describe('Layout Store', () => {
     const state = useLayoutStore.getState();
     expect(state.sidebarVisible).toBe(true);
     expect(state.sidebarWidth).toBe(256);
-    expect(state.chatTakeoverMode).toBe('none');
+    expect(state.viewportTakeover).toBe(false);
   });
 
   it('should toggle sidebar visibility', () => {
@@ -104,11 +104,11 @@ describe('Layout Store', () => {
   });
 
   it('should set and clear chat takeover mode', () => {
-    useLayoutStore.getState().setChatTakeoverMode('artifact-workbench');
-    expect(useLayoutStore.getState().chatTakeoverMode).toBe('artifact-workbench');
+    useLayoutStore.getState().setViewportTakeover(true);
+    expect(useLayoutStore.getState().viewportTakeover).toBe(true);
 
-    useLayoutStore.getState().clearChatTakeoverMode();
-    expect(useLayoutStore.getState().chatTakeoverMode).toBe('none');
+    useLayoutStore.getState().clearViewportTakeover();
+    expect(useLayoutStore.getState().viewportTakeover).toBe(false);
   });
 });
 

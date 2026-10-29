@@ -91,6 +91,148 @@ DP-xxx 或 `none`
 
 ## 6. 当前归档案例
 
+## Case: 热切模型暴露内部命令误分类与乐观输入残留
+
+### Status
+
+archived
+
+### Linked pattern
+
+DP-001；原生事实源、完整链路与身份区分已有规则覆盖，本次是执行遗漏，不新增同义规则。
+
+### Source incident
+
+2026-10-29，Matcha Agent 同连接热切模型后，历史显示原生 `/model` 标签并多出一条“你好”；跨层原修复未同时验收消息展示链。
+
+### Symptom
+
+原生两次发送、两条真人输入，Renderer 却保留第三条无 native messageId 的乐观输入；另有三条模型切换上下文被投影成真人消息。两次请求均有相同 WorkBuddy ECONNRESET，不能把对端错误归因给切换。
+
+### Surface path
+
+CLI 模型切换 breadcrumb → native transcript → Integration 归一／投影 → Renderer 历史确认。
+
+### Real minimum loop
+
+同一 Session 的两条真实输入 UUID、两条 durable Run 与 Renderer 记录对照，区分内部上下文、真人输入和未获精确身份的乐观项；模型是否真的切换另核实际 sender。
+
+### Wrong path taken
+
+先把共享 `inputIds/inputReceipts` 的存在当作 native 已支持消费确认，又扩大成全 CLI 合并／恢复协议改造；没有先核原生展示分类和当前产品串行发送路径。
+
+### Missed first probe
+
+对照 `createModelSwitchBreadcrumbs`、`UserTextMessage`、QueryEngine 与 print 队列／回显，再核普通 send 是否保留客户端 requestId。`type:user` 不等于真人，`isReplay` 也不等于持久化确认。
+
+### Root cause
+
+Integration 丢弃原生来源并把内部 command/output 当 user；Matcha 发送未保留客户端 requestId，前端依正文＋顺序确认，被前置 breadcrumb 阻断而留下乐观项。相关缺陷在 HEAD 已存在；开放热切触发旧缺陷，不是已完成旧版本实机 bisection 的结论。
+
+### Root cause boundary
+
+原生展示语义到 Integration 的翻译，以及既有 requestId／messageId／transcript UUID 到 Renderer 的精确关联；不是 OpenClaw 消费规则、CLI 新消息协议或按正文去重。
+
+### Correct first-round plan
+
+先核真实 native producer、输入消费与显示分支，再在当前产品路径接通已有身份。分开接单、stdout 回显、历史物化、运行终态与远端连接错误。
+
+### Fix boundary
+
+Matcha Integration 按原生命令语义投影；普通发送保留 requestId，真实主链存在对应 messageId 后才确认关联。Renderer 以 exact messageId 接管乐观项，不删除模型所需上下文，不修改 CLI 排队／合并／恢复规则或 OpenClaw 私有流程。
+
+### Verification closure
+
+只读日志已经证实两次原生发送、内部三条 breadcrumb 与前端多余乐观项；修复实施及独立验证状态见 [Session 本轮记录](../architecture-knowledge/modules/session-chat/dev.md)。历史诊断不是新产物运行验收，502 上游 reset 根因仍未证。
+
+### Reusable rule
+
+共享字段只是表达能力；native 消费／持久事实必须回到真实生产与消费路径。保留原生模型上下文，同时按原生展示语义区分来源，不把相同 role、回显或已分配 ID 当真人／落盘证据。
+
+### Applies to
+
+多 runtime 集成、内部命令混入 transcript、乐观输入与权威历史接管。
+
+### Does not apply to
+
+静态文案修改，或已经由原生明确提供 canonical 消息关联的纯字段转发。
+
+### Archive note
+
+现有规则明确，承认未遵守；在入口归因及 reviewer pass 核 native 原始路径，不继续堆叠新协议或同义规范。
+
+## Case: 模型菜单仅消除忙态样式，遗漏滑杆提交连续性
+
+### Status
+
+archived
+
+### Linked pattern
+
+none；现有宪法 §26、P3／P6 已覆盖完整状态链与真实验证，不新增同义规则。
+
+### Source incident
+
+2026-10-29，Chat 模型／思考菜单无感切换修复，用户再次指出列表闪动与补丁式修改。[VERIFY: docs/architecture-knowledge/modules/session-chat/dev.md#2026-10-29-模型菜单无感切换--部分完成]
+
+### Symptom
+
+thinking SET 令整个模型列表变灰，模型切换提示挤动列表；去掉这些忙态样式后，滑杆松手仍会先清 preview，再等原生确认回到目标档位。
+
+### Surface path
+
+Picker disabled／状态节点／局部 preview → thinking hook → 原生 SET 回执。
+
+### Real minimum loop
+
+拖动或键盘选档 → 提交 → 在途 → 原生确认或失败；列表身份、滚动和焦点保持，显示目标在提交前后连续，失败才回已确认值。
+
+### Wrong path taken
+
+先检查了整列灰态与组件 key，却未核完整提交显示生命周期。既有规则明确，属于执行遗漏，不是规则缺失。
+
+### Missed first probe
+
+核 pointer／keyboard commit 是否先 clearPreview，以及 busy 是否令提交预览失效；真实窗口验证须覆盖松手瞬间与异步确认之间，而非只看前后截图。
+
+### Root cause
+
+局部交互预览在提交时过早清除，且 switching 被当作展示失效条件。[VERIFY: src/plugins/chat/components/ChatModelPicker.tsx]
+
+### Root cause boundary
+
+Renderer 交互状态生命周期；不能以提前写 confirmed、延时或动画掩盖，也不能由此推断 CLI 模型已经应用。
+
+### Correct first-round plan
+
+分开业务不可用、操作互斥、提交预览与原生确认，沿完整操作链核显示连续性及失败回退。
+
+### Fix boundary
+
+复用原局部 preview 标记提交阶段，原生值接管或失败后失效；保留 store／native 事实权威，不新增缓存层。[VERIFY: src/plugins/chat/components/ChatModelPicker.tsx] [VERIFY: src/plugins/chat/useChatThinking.ts]
+
+### Verification closure
+
+限定 lint／diffcheck 通过；既有菜单 suite 受 plugin host 未挂载阻断，最终类型检查受磁盘门阻断，真实窗口不可达。实现已改，现场无闪动尚未验收；本卡不是成功运行证据。
+
+2026-10-30 续案：用户报告启动后再次新建发送仍会整页隐藏。主侧最初把首次异步 renderer 上冒 route Suspense 的真实风险说得过于接近定案，用户纠正后撤回该归因：贡献 Promise／lazy 模块可复用，不能解释全部后续新建；`useEffect([takeoverMode])` 的 mounted 标签也不是独立 remount 证据。日志已证输入清空等待约1.8–2秒接单、能力 GET 与发送共用 lane／agent 锁；整页挂起当次 fallback 提交仍未捕获。修已证输入生命周期、读写争用及局部加载边界，不把它们统称全部闪动的最终根因。本次属于未落实既有 P3／P6，不新增同义规则，实施与验证另见 [Session 本轮记录](../architecture-knowledge/modules/session-chat/dev.md)。
+
+### Reusable rule
+
+已有完整链路规则在 reviewer pass 应具体落到交互结束至异步结算之间的每次显示转移，不仅检查组件是否重挂或样式是否变灰。
+
+### Applies to
+
+异步滑杆、选项与设置面板的无感提交。
+
+### Does not apply to
+
+仅修改静态文案，或确实需要清空失效业务内容的 scope 切换。
+
+### Archive note
+
+问题已被既有原则覆盖，仅保留可追溯的执行遗漏与验证边界，不改变默认诊断顺序。
+
 ## Case: 去除首屏骨架时误删渲染调度
 
 ### Status

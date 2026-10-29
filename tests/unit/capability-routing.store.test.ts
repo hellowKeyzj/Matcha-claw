@@ -7,8 +7,8 @@ const providerSnapshotRefreshMock = vi.hoisted(() => vi.fn());
 const providerModelCatalogRefreshMock = vi.hoisted(() => vi.fn());
 const subagentsLoadAvailableModelsMock = vi.hoisted(() => vi.fn());
 
-vi.mock('@/lib/capability-routing', async (importOriginal) => ({
-  ...await importOriginal<typeof import('@/lib/capability-routing')>(),
+vi.mock('@/plugins/providers/services/capability-routing', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/plugins/providers/services/capability-routing')>(),
   fetchCapabilityRouting: fetchCapabilityRoutingMock,
   persistCapabilityRouting: persistCapabilityRoutingMock,
 }));

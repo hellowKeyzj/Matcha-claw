@@ -1,6 +1,6 @@
 import { memo } from 'react';
-import { AgentAvatar } from '@/components/common/AgentAvatar';
-import { AgentResourceCard, AgentResourceFooter, AgentResourcePill } from '@/components/common/AgentPage';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
+import { AgentResourceCard, AgentResourceFooter, AgentResourcePill } from '@/components/common/AgentResource';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,

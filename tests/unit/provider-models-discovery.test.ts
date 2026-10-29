@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { discoverProviderModels } from '@/lib/provider-model-catalog';
+import { discoverProviderModels } from '@/plugins/providers/services/provider-model-catalog';
 import {
   getMainApiBoundarySnapshot,
   isHostApiRequestAllowed,

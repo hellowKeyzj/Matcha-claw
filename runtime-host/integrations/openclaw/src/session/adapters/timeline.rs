@@ -33,7 +33,7 @@ impl OpenClawDriver {
         let page = match openclaw_page_request(&command) {
             Ok(page) => page, Err(_) => return Outcome::unavailable(UnavailableReason::OpenClawBindingInvalid),
         };
-        let window = match self.session_gateway.history_for_identity(command.identity(), page, None).await {
+        let mut window = match self.session_gateway.history_for_identity(command.identity(), page, None, command.input_ids()).await {
             Ok(window) => window,
             Err(error) => {
                 let failure = openclaw_read_failure(RuntimeSessionError::Client(error));
@@ -54,7 +54,11 @@ impl OpenClawDriver {
             return Outcome::unavailable(UnavailableReason::OpenClawProjectionInvalid);
         }
         match actor.snapshot(epoch) {
-            Ok(mut view) => { view.identity = command.identity().clone(); Outcome::Incomplete(view) },
+            Ok(mut view) => {
+                view.identity = command.identity().clone();
+                view.input_receipts = window.take_input_receipts();
+                Outcome::Incomplete(view)
+            },
             Err(_) => Outcome::unavailable(UnavailableReason::OpenClawProjectionInvalid),
         }
     }
@@ -363,6 +367,7 @@ fn project_openclaw_replay_view(
         endpoint_session_id: Some(endpoint_session_id),
         ownership: None,
         model_state: None,
+        input_receipts: None,
         goal: sessions_module::goal::SessionGoalView::Unknown,
         identity: identity.clone(),
         epoch,
@@ -1045,6 +1050,8 @@ pub(crate) fn transcript_session_item(
     match message.role() {
         crate::session::window::MessageRole::User => Some(SessionItem::UserMessage {
             item_id,
+            input_ids: message.input_id().filter(|_| message.identity_message_id().is_some())
+                .map(str::to_owned).into_iter().collect(),
             message_id,
             text,
             content: transcript_content(message, TranscriptContentMode::User, cache)?,
@@ -1526,6 +1533,7 @@ const fn openclaw_run_startup_phase(
     phase: crate::session::protocol::ChatStatusPhase,
 ) -> RunStartupPhase {
     match phase {
+        crate::session::protocol::ChatStatusPhase::WaitingForState => RunStartupPhase::WaitingForState,
         crate::session::protocol::ChatStatusPhase::PreparingWorkspace => {
             RunStartupPhase::PreparingWorkspace
         }
@@ -1542,6 +1550,7 @@ const fn openclaw_run_startup_phase(
         crate::session::protocol::ChatStatusPhase::PreparingContext => {
             RunStartupPhase::PreparingContext
         }
+        crate::session::protocol::ChatStatusPhase::MemoryFlushing => RunStartupPhase::MemoryFlushing,
         crate::session::protocol::ChatStatusPhase::StartingModel => RunStartupPhase::StartingModel,
     }
 }

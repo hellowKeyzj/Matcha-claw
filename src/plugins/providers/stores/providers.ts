@@ -3,17 +3,17 @@
  * Manages AI provider configurations
  */
 import { create } from 'zustand';
-import type { ProviderCredential } from '@/lib/providers';
+import type { ProviderCredential } from '@/plugins/providers/domain/providers';
 import {
   fetchProviderSnapshot,
   normalizeProviderSnapshot,
   type ProviderSnapshot,
-} from '@/lib/provider-accounts';
+} from '@/plugins/providers/services/provider-accounts';
 import {
   hostProviderCreateAccount,
   hostProviderDeleteAccount,
   hostProviderUpdateAccount,
-} from '@/lib/provider-projection';
+} from '@/plugins/providers/services/provider-projection';
 import { refreshProviderPostMutationProjections } from '@/plugins/providers/stores/provider-post-mutation-refresh';
 import { startUiTiming, trackUiEvent } from '@/lib/telemetry';
 import type { ProviderCallDetail } from '@/types/call-log/provider';
@@ -156,8 +156,8 @@ export type {
   ProviderCredential,
   ProviderVendorInfo,
   ProviderWithKeyInfo,
-} from '@/lib/providers';
-export type { ProviderSnapshot } from '@/lib/provider-accounts';
+} from '@/plugins/providers/domain/providers';
+export type { ProviderSnapshot } from '@/plugins/providers/services/provider-accounts';
 
 interface ProviderState {
   providerSnapshot: ProviderSnapshot;

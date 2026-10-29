@@ -40,6 +40,14 @@ const FEISHU_MESSAGE_TOOL_SCHEMA = {
   properties: {
     message: Type.Optional(Type.String({ description: FEISHU_SEND_TEXT_DESCRIPTION })),
     text: Type.Optional(Type.String({ description: FEISHU_SEND_TEXT_DESCRIPTION })),
+    // OpenClaw >=2026.8 dropped the core `cards` capability (and its `card`
+    // param); keep raw Feishu interactive-card sends as a plugin-owned param.
+    card: Type.Optional(
+      Type.Unknown({
+        description:
+          'Raw Feishu interactive card JSON (object or JSON string) for action=send. Set message to "" when sending only a card.',
+      }),
+    ),
   },
   visibility: 'current-channel' as const,
 } satisfies ChannelMessageToolSchemaContribution;
@@ -96,7 +104,7 @@ function parseCardParam(raw: unknown): Record<string, unknown> | undefined {
     try {
       const parsed: unknown = JSON.parse(trimmed);
       if (typeof parsed === 'object' && parsed != null && !Array.isArray(parsed)) {
-        log.trace('params.card was a JSON string, parsed successfully');
+        log.info('params.card was a JSON string, parsed successfully');
         return parsed as Record<string, unknown>;
       }
       log.warn('params.card JSON parsed but is not a plain object, ignoring');
@@ -181,8 +189,6 @@ export const feishuMessageActions: ChannelMessageActionAdapter = {
     }
     return {
       actions: Array.from(SUPPORTED_ACTIONS),
-      // 2026.9.x: raw capability names were replaced by the semantic surface.
-      // Feishu renders rich cards -> declare "presentation".
       capabilities: ['presentation'],
       schema: FEISHU_MESSAGE_TOOL_SCHEMA,
     };
@@ -245,11 +251,11 @@ async function deliverMessage(
   const payloadType = card ? 'card' : mediaUrl ? 'media' : 'text';
   const target = to || replyToMessageId || 'unknown';
 
-  log.trace(
-    () => (`deliverMessage: type=${payloadType}, target=${target}, ` +
+  log.info(
+    `deliverMessage: type=${payloadType}, target=${target}, ` +
       `isReply=${Boolean(replyToMessageId)}, replyInThread=${replyInThread}, ` +
       `textLen=${text.trim().length}, hasMedia=${Boolean(mediaUrl)}, ` +
-      `fileName=${fileName ?? '(none)'}`),
+      `fileName=${fileName ?? '(none)'}`,
   );
 
   if (!text.trim() && !card && !mediaUrl) {
@@ -261,7 +267,7 @@ async function deliverMessage(
 
   // Send text first if both text and card/media are present.
   if (text.trim() && (card || mediaUrl)) {
-    log.trace(() => (`deliverMessage: sending preceding text ` + `(${text.length} chars) before ${payloadType}`));
+    log.info(`deliverMessage: sending preceding text ` + `(${text.length} chars) before ${payloadType}`);
     await sendTextLark({ ...sendCtx, text });
   }
 
@@ -294,7 +300,7 @@ async function deliverMedia(
 ) {
   const { to, mediaUrl, fileName, replyToMessageId, replyInThread } = sp;
 
-  log.trace(() => (`deliverMedia: url=${mediaUrl}, fileName=${fileName ?? '(auto)'}`));
+  log.info(`deliverMedia: url=${mediaUrl}, fileName=${fileName ?? '(auto)'}`);
 
   try {
     const result = await uploadAndSendMediaLark({

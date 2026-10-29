@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '@/plugins/chat/store';
-import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { createEmptySessionRecord, getSessionItems } from '@/plugins/chat/store/store-state-helpers';
 import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';
 import { buildCurrentConversationFromSessionRecord, buildSessionRuntimeGraph, createDraftCurrentConversation } from '@/plugins/chat/store/session-runtime-graph';

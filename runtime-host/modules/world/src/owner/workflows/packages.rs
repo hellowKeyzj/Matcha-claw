@@ -102,6 +102,7 @@ pub(crate) fn run(
                 },
             )
             .await?;
+            ctx.owner.repair_startup(ctx.operation.world.clone()).await?;
             return Ok(CommandResult::Accepted(ctx.operation));
         }
         let request = ctx
@@ -121,6 +122,8 @@ pub(crate) fn run(
             at,
         };
         let uninstall = matches!(&command, WorldCommand::UninstallPackage(_));
+        let repair = matches!(&command, WorldCommand::UpgradePackage(_) | WorldCommand::GrantPackage(_)
+            | WorldCommand::ConfigurePackage(_) | WorldCommand::EnablePackage(_));
         let receipt = execute(&ctx, &context, command).await?;
         if receipt.accepted.world != ctx.operation.world
             || receipt.accepted.operation_id != ctx.operation.operation_id
@@ -134,6 +137,9 @@ pub(crate) fn run(
             )
         {
             return Err(Error::internal(FailureStage::Commit));
+        }
+        if repair && receipt.phase == world_protocol::operation::OperationPhase::Completed {
+            ctx.owner.repair_startup(ctx.operation.world.clone()).await?;
         }
         if uninstall
             && matches!(

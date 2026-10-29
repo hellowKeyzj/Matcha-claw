@@ -11,8 +11,12 @@
 
 import type { OpenClawConfig } from 'openclaw/plugin-sdk/core';
 import { resolveDefaultAgentId } from 'openclaw/plugin-sdk/agent-runtime';
-import { getSessionEntry, resolveStorePath } from 'openclaw/plugin-sdk/session-store-runtime';
+import { resolveStorePath } from 'openclaw/plugin-sdk/session-store-runtime';
 import type { FeishuConfig } from '../core/types';
+import { larkLogger } from '../core/lark-logger';
+import { directReadSessionEntryViaSqlite, getSessionEntryCompat } from './session-store-compat';
+
+const log = larkLogger('card/tool-use-config');
 
 export type ToolUseMode = 'off' | 'on' | 'full';
 
@@ -23,14 +27,14 @@ export interface ToolUseDisplayConfig {
   showFullPaths: boolean;
 }
 
-export function resolveToolUseDisplayConfig(params: {
+export async function resolveToolUseDisplayConfig(params: {
   cfg: OpenClawConfig;
   feishuCfg: FeishuConfig | undefined;
   agentId: string;
   sessionKey: string;
   body?: string;
-}): ToolUseDisplayConfig {
-  const mode = resolveEffectiveVerboseMode(params);
+}): Promise<ToolUseDisplayConfig> {
+  const mode = await resolveEffectiveVerboseMode(params);
   return {
     mode,
     showToolUse: mode !== 'off',
@@ -39,46 +43,67 @@ export function resolveToolUseDisplayConfig(params: {
   };
 }
 
-function resolveEffectiveVerboseMode(params: {
+async function resolveEffectiveVerboseMode(params: {
   cfg: OpenClawConfig;
   agentId: string;
   sessionKey: string;
   body?: string;
-}): ToolUseMode {
-  return (
-    extractInlineVerboseMode(params.body) ??
-    resolveSessionVerboseMode(params.cfg, params.sessionKey, params.agentId) ??
-    normalizeToolUseMode(params.cfg.agents?.defaults?.verboseDefault) ??
-    'off'
-  );
+}): Promise<ToolUseMode> {
+  const inline = extractInlineVerboseMode(params.body);
+  if (inline) return inline;
+  const sessionMode = await resolveSessionVerboseMode(params.cfg, params.sessionKey, params.agentId);
+  if (sessionMode) return sessionMode;
+  return normalizeToolUseMode(params.cfg.agents?.defaults?.verboseDefault) ?? 'off';
 }
 
-function resolveSessionVerboseMode(cfg: OpenClawConfig, sessionKey: string, agentId: string): ToolUseMode | undefined {
-  try {
-    const cfgWithSession = cfg as { session?: { store?: string }; sessions?: { store?: string } };
-    const sessionStorePath = cfgWithSession.session?.store ?? cfgWithSession.sessions?.store;
-    const storePath = resolveStorePath(sessionStorePath, { agentId });
-    const candidateKeys = resolveCandidateSessionKeys(cfg, sessionKey);
+async function resolveSessionVerboseMode(
+  cfg: OpenClawConfig,
+  sessionKey: string,
+  agentId: string,
+): Promise<ToolUseMode | undefined> {
+  const cfgWithSession = cfg as { session?: { store?: string }; sessions?: { store?: string } };
+  const sessionStorePath = cfgWithSession.session?.store ?? cfgWithSession.sessions?.store;
+  const storePath = resolveStorePath(sessionStorePath, { agentId });
+  const candidateKeys = resolveCandidateSessionKeys(cfg, sessionKey);
 
-    for (const candidateKey of candidateKeys) {
-      // 2026.9.x: sessions are SQLite-backed and read through the
-      // storage-neutral identity API. `loadSessionStore` no longer reads a
-      // legacy JSON store, so look the entry up by agent/session identity.
-      const entry = getSessionEntry({ agentId, sessionKey: candidateKey, storePath });
-      const mode = normalizeToolUseMode(entry?.verboseLevel);
-      if (mode) return mode;
-      if (entry) return undefined;
+  for (const candidateKey of candidateKeys) {
+    // v7：直读优先（双路径表名探测，10.4+ session_nodes / ≤10.3 session_entries）。
+    // verboseLevel 落在 entry_json 内，直读稳定；直读失败（如库不存在/权限/格式）
+    // 单独捕获后继续走 SDK 兼容层兜底，不吞掉回退路径。
+    let directEntry: Record<string, unknown> | undefined;
+    try {
+      directEntry = directReadSessionEntryViaSqlite(storePath, candidateKey);
+    } catch (err) {
+      log.warn('directReadSessionEntryViaSqlite failed, falling back to compat layer', {
+        error: String(err),
+      });
     }
-    return undefined;
-  } catch {
-    return undefined;
+    if (directEntry) {
+      const mode = normalizeToolUseMode(directEntry.verboseLevel);
+      if (mode) return mode;
+      return undefined;
+    }
+    const existing = await getSessionEntryCompat({ agentId, storePath, sessionKey: candidateKey });
+    const mode = normalizeToolUseMode(existing?.verboseLevel);
+    if (mode) return mode;
+    if (existing) return undefined;
   }
+  return undefined;
 }
 
 function resolveCandidateSessionKeys(cfg: OpenClawConfig, sessionKey: string): string[] {
   const key = sessionKey.trim().toLowerCase();
-  const defaultAgentId = resolveDefaultAgentId(cfg as Record<string, unknown>);
-  const fallbackKey = key.replace(/^(agent):[^:]+:/, `$1:${defaultAgentId}:`);
+  let defaultAgentId: string | undefined;
+  try {
+    defaultAgentId = resolveDefaultAgentId(cfg as Record<string, unknown>);
+  } catch (err) {
+    // v7：explicit 多 Agent 归属下 resolveDefaultAgentId 必然抛 AgentSelectionRequiredError，
+    // 与 streaming-card-controller 保持一致：回退为 undefined（仅保留原始 key）。
+    log.warn('resolveDefaultAgentId failed in resolveCandidateSessionKeys, using primary key only', {
+      error: String(err),
+    });
+  }
+  const fallbackKey = defaultAgentId ? key.replace(/^(agent):[^:]+:/, `$1:${defaultAgentId}:`) : key;
   return fallbackKey !== key ? [key, fallbackKey] : [key];
 }
 

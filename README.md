@@ -213,7 +213,7 @@ Notes:
 - A bare `host:port` value is treated as HTTP.
 - Saving proxy settings reapplies Electron networking immediately and restarts the Gateway automatically.
 - MatchaClaw also syncs the proxy to OpenClaw's Telegram channel config when Telegram is enabled.
-- On packaged Windows builds, the bundled `openclaw` CLI/TUI prefers the shipped `resources/bin/node.exe` entrypoint (falls back to `ELECTRON_RUN_AS_NODE` when unavailable).
+- The project pins OpenClaw `2026.10.8` and Electron `44.10.0`, whose embedded Node `24.22.1` meets OpenClaw's requirement. The packaged `openclaw` CLI/TUI uses MatchaClaw's Electron executable with `ELECTRON_RUN_AS_NODE=1`, like Gateway/doctor—not system Node.js. Windows cmd/Git Bash no longer prefer `resources/bin/node.exe`.
 
 ---
 
@@ -307,7 +307,7 @@ Chain multiple skills together to create sophisticated automation pipelines. Pro
 
 ### Prerequisites
 
-- **Node.js**: 22+ (LTS recommended)
+- **Node.js**: `>=24.22.1 <25 || >=26.12.1` for development/direct OpenClaw execution; packaged OpenClaw uses MatchaClaw's Electron runtime.
 - **Package Manager**: pnpm 9+ (recommended) or npm
 - **Linux (Ubuntu/Debian)**: Install required system libraries before running Electron:
   ```bash

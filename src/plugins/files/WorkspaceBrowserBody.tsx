@@ -3,7 +3,7 @@ import { ChevronDown, ChevronRight, FolderTree, GitCompare, PanelRight, RefreshC
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { AppPluginManager } from '@/plugin-host/AppPluginManager';
+import { AppPluginManager } from '@/plugins/application-plugins/AppPluginManager';
 import { hostFileListDir, type FilePreviewDirEntry, type WorkspaceFileContext } from '@/lib/host-api';
 import { classifyFileContentType, extnameOf, getMimeTypeForPath } from './file-types';
 import { useFilePreviewSupport } from './extensions';

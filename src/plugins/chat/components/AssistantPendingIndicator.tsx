@@ -1,7 +1,7 @@
 import { createContext, memo, useContext, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
-import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
+import { MESSAGE_LAYOUT_TOKENS } from '@/plugins/message-rendering/message-layout-tokens';
 
 const AssistantPendingLabelContext = createContext<string | null>(null);
 
@@ -58,7 +58,7 @@ export const AssistantPendingIndicator = memo(function AssistantPendingIndicator
     <div
       data-chat-pending-mode={mode}
       className={cn(
-        CHAT_LAYOUT_TOKENS.assistantSurface,
+        MESSAGE_LAYOUT_TOKENS.assistantSurface,
         'flex min-h-[34px] items-center px-0.5 py-1.5',
       )}
     >

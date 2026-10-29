@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { summarizeChatStoreMemory } from '@/lib/chat-memory-diagnostics';
+import { summarizeChatStoreMemory } from '@/plugins/chat/memory-diagnostics';
 import { useChatStore, type ChatStoreState } from '@/plugins/chat/store';
 import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';

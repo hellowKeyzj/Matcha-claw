@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { pickLocalDirectory } from '@/services/local-path-picker';
+import { pickLocalDirectory } from '@/lib/local-path-picker';
 import { openArtifactPathExternally } from '@/plugins/files/open-file-utils';
 import type { WikiNavigationPage } from '@/types/wiki-navigation';
 import type { WikiSelectionApplyReceipt, WikiSelectionSnapshot } from '@/types/wiki-selection';
-import { normalizeEditableMarkdown } from '@/lib/wiki-selection';
+import { normalizeEditableMarkdown } from './wiki-selection';
 import { waitForCall } from '@/lib/call-log-await';
 import { useWikiProjectsStore } from '@/plugins/wiki/wiki-projects';
 import { LibraryHome } from '@/plugins/wiki/components/LibraryHome';

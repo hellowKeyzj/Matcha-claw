@@ -119,32 +119,56 @@ impl Cli {
     }
 
     pub(crate) async fn prepare_to_sleep(&self) -> rpc::Result<Preparation> {
+        self.prepare(true, None).await
+    }
+
+    pub(crate) async fn prepare_handoff(
+        &self,
+        replay_state: Option<Value>,
+    ) -> rpc::Result<Preparation> {
+        self.prepare(false, replay_state).await
+    }
+
+    async fn prepare(
+        &self,
+        idle_window: bool,
+        replay_state: Option<Value>,
+    ) -> rpc::Result<Preparation> {
         let instance = &self.0.instance;
-        let Ok(mut admission) = timeout(PREPARE_WINDOW, instance.admission.write()).await else {
-            return Ok(Preparation::Busy);
+        let mut admission = if idle_window {
+            let Ok(admission) = timeout(PREPARE_WINDOW, instance.admission.write()).await else {
+                return Ok(Preparation::Busy);
+            };
+            admission
+        } else {
+            let Ok(admission) = instance.admission.try_write() else {
+                return Ok(Preparation::Busy);
+            };
+            admission
         };
         instance.ensure_open()?;
         if *admission != Admission::Open {
             return Err(sealed());
         }
         // Completion, not admission time, starts the continuous inactivity window.
-        if self.last_activity().elapsed() < IDLE_WINDOW {
+        if idle_window && self.last_activity().elapsed() < IDLE_WINDOW {
             return Ok(Preparation::Busy);
         }
         *admission = Admission::Sealed;
-        let response = timeout(
-            PREPARE_WINDOW,
-            instance.request_admitted(json!({ "subtype": "prepare_to_sleep" }), None),
-        )
-        .await
-        .map_err(|_| {
-            rpc::Error::new(
-                -32006,
-                "native_sleep_ack_unknown",
-                "Native sleep preparation was not confirmed",
-            )
-            .with_data(json!({ "instanceId": self.instance_id(), "delivery": "unknown" }))
-        })??;
+        let mut request = json!({ "subtype": "prepare_to_sleep" });
+        if let Some(replay_state) = replay_state {
+            request["replayState"] = replay_state;
+        }
+        let response = timeout(PREPARE_WINDOW, instance.request_admitted(request, None))
+            .await
+            .map_err(|_| {
+                rpc::Error::new(
+                    -32006,
+                    "native_sleep_ack_unknown",
+                    "Native sleep preparation was not confirmed",
+                )
+                .with_data(json!({ "instanceId": self.instance_id(), "delivery": "unknown" }))
+            })??;
         match response.get("status").and_then(Value::as_str) {
             Some("ready") => Ok(Preparation::Ready),
             Some("busy") => {

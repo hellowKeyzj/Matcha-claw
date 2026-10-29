@@ -1,10 +1,10 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
+import type { OpenClawPluginApi, PluginTrustedToolPolicyRegistration } from "openclaw/plugin-sdk/plugin-entry";
 import { runStartupAudit } from "../infrastructure/auditor.js";
 import { DEFAULT_POLICY, mergeRuntimeConfig, resolvePolicy, resolveRuntimeConfig } from "../core/policy.js";
 import { evaluateBeforeToolCall } from "../core/runtime-guard.js";
 import { decideFailureModeOnRuntimeError } from "../core/failure-mode.js";
+import { redactToolParams } from "../core/runtime-engine/shared.js";
 import { resolveStateDir } from "../vendor/secureclaw-runtime-bridge.js";
-import { ApprovalBridgeService } from "../infrastructure/approval-bridge.js";
 import { PII_PATTERNS, SECRET_PATTERNS, type NamedPattern } from "../vendor/shield-core/patterns.js";
 import { redactPatterns, scanForPatterns } from "../vendor/shield-core/scanner.js";
 import { costMonitor, credentialMonitor, memoryIntegrityMonitor } from "../infrastructure/monitors/selected-monitors.js";
@@ -41,7 +41,6 @@ import type {
   SecurityStartupAuditReport,
   SecuritySyncResult,
 } from "../core/types.js";
-import { isExecStyleTool, SECURITY_CONFIRM_FLAG } from "../core/runtime-engine/shared.js";
 
 const SECURITY_HOOK_NAMES = [
   "before_agent_start",
@@ -137,36 +136,6 @@ function normalizePolicyPayload(payload: unknown): SecurityPolicyPayload {
     return {};
   }
   return payload as SecurityPolicyPayload;
-}
-
-function isConfirmRequiredGuardResult(value: unknown): value is { block: true; auditItem?: SecurityAuditItem } {
-  if (!value || typeof value !== "object") return false;
-  const record = value as { block?: unknown; auditItem?: SecurityAuditItem };
-  if (record.block !== true) return false;
-  return record.auditItem?.decision === "confirm-required";
-}
-
-function isBlockedGuardResult(value: BeforeToolCallResult): value is {
-  block: true;
-  blockReason: string;
-  auditItem: SecurityAuditItem;
-} {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const record = value as { block?: unknown; blockReason?: unknown };
-  return record.block === true && typeof record.blockReason === "string";
-}
-
-function isParamsGuardResult(value: BeforeToolCallResult): value is {
-  params: Record<string, unknown>;
-  auditItem?: SecurityAuditItem;
-} {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const record = value as { params?: unknown };
-  return typeof record.params === "object" && record.params !== null;
 }
 
 function freezeRuntimeConfigSnapshot(input: SecurityCoreRuntimeConfig): SecurityCoreRuntimeConfig {
@@ -372,10 +341,6 @@ function createRemediationRuntime(api: OpenClawPluginApi): RemediationRuntime {
 
 export function registerSecurityRuntime(api: OpenClawPluginApi): void {
     let runtimeConfig = freezeRuntimeConfigSnapshot(resolveRuntimeConfig(api.pluginConfig));
-    const approvalBridge = new ApprovalBridgeService({
-      logger: api.logger,
-      loadConfig: async () => loadCurrentConfig(api),
-    });
     const stateDir = resolveStateDir();
     const remediationRuntime = createRemediationRuntime(api);
     let monitorsStarted = false;
@@ -428,9 +393,9 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
       }
     };
 
-    const resolveOutputSecretPatterns = (): NamedPattern[] => [
+    const resolveOutputSecretPatterns = (config = runtimeConfig): NamedPattern[] => [
       ...OUTPUT_SECRET_BASELINE_PATTERNS,
-      ...compileExtraSecretPatternsCached(runtimeConfig.extraSecretPatterns, "secret_extra"),
+      ...compileExtraSecretPatternsCached(config.extraSecretPatterns, "secret_extra"),
     ];
 
     const appendAuditItem = (item: SecurityAuditItem): void => {
@@ -591,13 +556,6 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
       }
     });
 
-    api.on("before_agent_start", async (_event) =>
-      withHookTimingAsync("before_agent_start", async () => {
-        // 不再向可见会话消息注入 security-core 前置文本，避免污染用户对话。
-        // 运行时治理仍由 before_tool_call / tool_result_persist 等钩子执行。
-        return undefined;
-      }));
-
     api.on("before_prompt_build", async () => {
       if (!runtimeConfig.runtimeGuardEnabled) {
         return undefined;
@@ -606,25 +564,16 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
       return { prependSystemContext: SECURITY_POLICY_SYSTEM_CONTEXT };
     });
 
-    api.on("before_tool_call", async (event, ctx) => {
+    const evaluateToolPolicy: PluginTrustedToolPolicyRegistration["evaluate"] = async (event, ctx) => {
       return withHookTimingAsync("before_tool_call", async () => {
         const agentId = normalizeAgentId(ctx);
-        const sourceParams = (event.params && typeof event.params === "object" && !Array.isArray(event.params))
-          ? (event.params as Record<string, unknown>)
-          : {};
-        const runGuard = async (toolParams: Record<string, unknown>) => await evaluateBeforeToolCall({
-          toolName: event.toolName,
-          toolParams,
-          runtimeConfig,
-          preset: currentPolicy.preset,
-          agentId,
-          sessionKey: ctx?.sessionKey,
-          logger: api.logger,
-        });
+        const policyPreset = currentPolicy.preset;
+        const configSnapshot = runtimeConfig;
+        const sourceParams = event.params;
 
         const applyFailureModeDecision = (error: unknown) => {
           const decision = decideFailureModeOnRuntimeError({
-            mode: runtimeConfig.auditFailureMode,
+            mode: configSnapshot.auditFailureMode,
             toolName: event.toolName,
           });
           const errorText = error instanceof Error
@@ -637,7 +586,7 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
             risk: decision.block ? "high" : "medium",
             action: decision.block ? "block" : "audit",
             decision: decision.decision,
-            policyPreset: currentPolicy.preset,
+            policyPreset,
             ruleId: "SC-RUNTIME-FAIL-001",
             source: "runtime-guard",
             detail: `mode=${decision.mode ?? "block_all"} class=${decision.toolClass}; ${errorText}`,
@@ -657,120 +606,82 @@ export function registerSecurityRuntime(api: OpenClawPluginApi): void {
           return undefined;
         };
 
+        let result: BeforeToolCallResult;
         try {
-          const result = await runGuard(sourceParams);
-
-          if (isConfirmRequiredGuardResult(result)) {
-            if (result.auditItem) {
-              appendAuditItem(result.auditItem);
-            }
-
-            appendAuditItem({
-              ts: Date.now(),
-              toolName: event.toolName,
-              risk: result.auditItem?.risk ?? "high",
-              action: "audit",
-              decision: "native-approval-requested",
-              policyPreset: currentPolicy.preset,
-              ruleId: "SC-RUNTIME-009",
-              source: "runtime-guard",
-              detail: "confirm requires native approval bridge",
-              agentId,
-            });
-
-            const approval = await approvalBridge.requestNativeApproval({
-              toolName: event.toolName,
-              toolParams: sourceParams,
-              agentId,
-              sessionKey: ctx?.sessionKey,
-            });
-
-            if (approval.status === "approved") {
-              appendAuditItem({
-                ts: Date.now(),
-                toolName: event.toolName,
-                risk: result.auditItem?.risk ?? "high",
-                action: "audit",
-                decision: "native-approval-approved",
-                policyPreset: currentPolicy.preset,
-                ruleId: "SC-RUNTIME-009",
-                source: "runtime-guard",
-                detail: `approvalId=${approval.approvalId}; decision=${approval.decision}`,
-                agentId,
-              });
-              const replayResult = await runGuard({
-                ...sourceParams,
-                [SECURITY_CONFIRM_FLAG]: true,
-              });
-              if (replayResult && typeof replayResult === "object" && "auditItem" in replayResult && replayResult.auditItem) {
-                appendAuditItem(replayResult.auditItem);
-              }
-              if (isBlockedGuardResult(replayResult)) {
-                return { block: true, blockReason: withHardStopBlockReason(replayResult.blockReason) };
-              }
-              if (isParamsGuardResult(replayResult)) {
-                if (isExecStyleTool(event.toolName)) {
-                  const replayParams = replayResult.params as Record<string, unknown>;
-                  const { ask: _ask, ...rest } = replayParams;
-                  return { params: rest };
-                }
-                return { params: replayResult.params };
-              }
-              return undefined;
-            }
-
-            if (approval.status === "denied") {
-              appendAuditItem({
-                ts: Date.now(),
-                toolName: event.toolName,
-                risk: result.auditItem?.risk ?? "high",
-                action: "block",
-                decision: "native-approval-denied",
-                policyPreset: currentPolicy.preset,
-                ruleId: "SC-RUNTIME-009",
-                source: "runtime-guard",
-                detail: `approvalId=${approval.approvalId}; decision=${approval.decision}`,
-                agentId,
-              });
-              return {
-                block: true,
-                blockReason: withHardStopBlockReason("Blocked by security-core: native approval denied."),
-              };
-            }
-
-            appendAuditItem({
-              ts: Date.now(),
-              toolName: event.toolName,
-              risk: result.auditItem?.risk ?? "high",
-              action: "audit",
-              decision: approval.status === "timeout" ? "native-approval-timeout" : "native-approval-error",
-              policyPreset: currentPolicy.preset,
-              ruleId: "SC-RUNTIME-009",
-              source: "runtime-guard",
-              detail: "detail" in approval ? approval.detail : undefined,
-              agentId,
-            });
-            return applyFailureModeDecision(
-              approval.status === "timeout"
-                ? new Error(`native approval timeout: ${approval.detail ?? "no decision"}`)
-                : new Error(`native approval error: ${approval.detail}`),
-            );
-          }
-
-          if (result && typeof result === "object" && "auditItem" in result && result.auditItem) {
-            appendAuditItem(result.auditItem);
-          }
-          if (isBlockedGuardResult(result)) {
-            return { block: true, blockReason: withHardStopBlockReason(result.blockReason) };
-          }
-          if (isParamsGuardResult(result)) {
-            return { params: result.params };
-          }
-          return undefined;
+          result = await evaluateBeforeToolCall({
+            toolName: event.toolName,
+            toolParams: sourceParams,
+            runtimeConfig: configSnapshot,
+            preset: policyPreset,
+            agentId,
+            sessionKey: ctx.sessionKey,
+            logger: api.logger,
+          });
         } catch (error) {
           return applyFailureModeDecision(error);
         }
+        if (!result) return undefined;
+        result.auditItems.forEach(appendAuditItem);
+        if (result.block) {
+          return { block: true, blockReason: withHardStopBlockReason(result.blockReason) };
+        }
+        if (!result.requiresApproval) {
+          return result.params ? { params: result.params } : undefined;
+        }
+
+        const approvalItems = result.auditItems.filter((item) => item.decision === "confirm-required");
+        const approvalAudit: SecurityAuditItem = {
+          ts: Date.now(),
+          toolName: event.toolName,
+          risk: approvalItems.some((item) => item.risk === "critical") ? "critical" : approvalItems[0]?.risk ?? "high",
+          action: "audit",
+          decision: "native-approval-requested",
+          policyPreset,
+          ruleId: "SC-RUNTIME-009",
+          source: "runtime-guard",
+          agentId,
+        };
+        const finalParams = result.params ?? sourceParams;
+        const summary = JSON.stringify(redactToolParams(finalParams, resolveOutputSecretPatterns(configSnapshot))).slice(0, 400);
+        appendAuditItem({ ...approvalAudit, detail: "final guard parameters require native runner approval" });
+        return {
+          params: finalParams,
+          requireApproval: {
+            title: "Security Core approval required",
+            description: `Policy checks and required redaction completed. Final tool parameters: ${summary}`,
+            pluginId: api.id,
+            severity: approvalAudit.risk === "critical" ? "critical" : "warning",
+            timeoutMs: 120000,
+            timeoutReason: withHardStopBlockReason("Blocked by security-core: native approval timed out."),
+            allowedDecisions: ["allow-once", "deny"],
+            onResolution(decision) {
+              const approved = decision === "allow-once";
+              appendAuditItem({
+                ...approvalAudit,
+                ts: Date.now(),
+                action: approved ? "audit" : "block",
+                decision: approved ? "native-approval-approved"
+                  : decision === "deny" ? "native-approval-denied"
+                    : decision === "timeout" ? "native-approval-timeout" : "native-approval-error",
+                detail: `decision=${decision}`,
+              });
+              if (approved) {
+                approvalItems.forEach((item) => appendAuditItem({
+                  ...item,
+                  ts: Date.now(),
+                  action: "allow",
+                  decision: item.ruleId === "SC-RUNTIME-002" ? "confirm-approved-redact" : "confirm-approved",
+                }));
+              }
+            },
+          },
+        };
       });
+    };
+    api.registerTrustedToolPolicy({
+      id: "runtime-guard",
+      description: "Validate and redact tool parameters before native approval and execution.",
+      evaluate: evaluateToolPolicy,
     });
 
     api.on("tool_result_persist", (event, ctx) =>

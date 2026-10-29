@@ -1,8 +1,8 @@
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry'
+import { dispatchGatewayMethod } from 'openclaw/plugin-sdk/gateway-method-runtime'
 import { logTaskPipeline } from '../shared/debug-logging.js'
 import { TaskStoreError, mapTaskStoreError } from '../shared/errors.js'
 import { toNonEmptyString } from '../shared/params.js'
-import { readTaskOutputGatewayPayload, readTaskStopGatewayPayload } from './background-task-tools.js'
 import { parseTaskCreateInput, parseTaskUpdateInput } from './task-inputs.js'
 import { asTaskDetailPayload } from './task-payloads.js'
 import { getStore, getTodoStore, resolveTaskScope, resolveTodoScopeKey } from './task-store-context.js'
@@ -24,14 +24,43 @@ async function withGatewayGuard(options: GatewayOptions, task: () => Promise<unk
   }
 }
 
-function gatewayToolContext(params: GatewayParams) {
-  const sessionKey = typeof params.sessionKey === 'string' && params.sessionKey.trim()
-    ? params.sessionKey.trim()
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
     : undefined
-  const deliveryContext = params.deliveryContext
-  return {
-    ...(sessionKey ? { sessionKey } : {}),
-    ...(deliveryContext ? { deliveryContext } : {}),
+}
+
+async function invokeBackgroundTask(options: GatewayOptions, name: 'TaskOutput' | 'TaskStop'): Promise<void> {
+  try {
+    const taskId = toNonEmptyString(options.params.taskId, 'taskId')
+    const sessionKey = toNonEmptyString(options.params.sessionKey, 'sessionKey')
+    const response = await dispatchGatewayMethod('tools.invoke', {
+      name,
+      sessionKey,
+      args: { taskId },
+    })
+    if (!response.ok) {
+      options.respond(false, undefined, {
+        code: response.error?.code ?? 'internal_error',
+        message: response.error?.message ?? `${name} dispatch failed.`,
+      })
+      return
+    }
+    const invocation = asRecord(response.payload)
+    const output = asRecord(invocation?.output)
+    const details = asRecord(output?.details)
+    if (invocation?.ok !== true || output?.isError === true || details?.success !== true) {
+      const error = asRecord(invocation?.error)
+      options.respond(false, details, {
+        code: typeof error?.code === 'string' ? error.code : typeof details?.status === 'string' ? details.status : 'internal_error',
+        message: typeof error?.message === 'string' ? error.message : typeof details?.message === 'string' ? details.message : `${name} execution failed.`,
+      })
+      return
+    }
+    options.respond(true, details)
+  } catch (error) {
+    const mapped = mapTaskStoreError(error)
+    options.respond(false, undefined, { code: mapped.code, message: mapped.message })
   }
 }
 
@@ -112,16 +141,10 @@ export function registerTaskGatewayMethods(api: OpenClawPluginApi): void {
     })
   })
 
-  api.registerGatewayMethod('TaskOutput', async (options: GatewayOptions) => {
-    await withGatewayGuard(options, async () => {
-      return await readTaskOutputGatewayPayload(api, gatewayToolContext(options.params), options.params)
-    })
-  })
-
-  api.registerGatewayMethod('TaskStop', async (options: GatewayOptions) => {
-    await withGatewayGuard(options, async () => {
-      return await readTaskStopGatewayPayload(api, gatewayToolContext(options.params), options.params)
-    })
-  })
+  for (const name of ['TaskOutput', 'TaskStop'] as const) {
+    api.registerGatewayMethod(name, async (options: GatewayOptions) => {
+      await invokeBackgroundTask(options, name)
+    }, { scope: 'operator.write', profileAccess: 'required', sessionAccess: { mode: 'write' } })
+  }
 
 }

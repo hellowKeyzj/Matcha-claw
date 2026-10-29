@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { AgentPageToolbar, AgentResourceCard, AgentResourceFooter, AgentResourceGrid, AgentResourceIcon, AgentResourcePill } from '@/components/common/AgentPage';
+import { AgentPageToolbar, AgentResourceCard, AgentResourceFooter, AgentResourceGrid, AgentResourceIcon, AgentResourcePill } from '@/components/common/AgentResource';
 import { LoadingState } from '@/components/common/LoadingSpinner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -35,7 +35,7 @@ import { invokeIpc } from '@/lib/api-client';
 import { hostApiFetch } from '@/lib/host-api';
 import { useIdleReady } from '@/lib/idle-ready';
 import { createSessionTraceId, logSessionTrace, summarizeError, summarizeIdentifier } from '@/lib/session-trace';
-import { requireSkillsScope, waitForSkillsMutation } from '@/lib/skills';
+import { requireSkillsScope, waitForSkillsMutation } from '../services/client';
 import { trackUiEvent } from '@/lib/telemetry';
 import { cn } from '@/lib/utils';
 import type { CapabilityTarget } from '@/types/desktop/capability-target';

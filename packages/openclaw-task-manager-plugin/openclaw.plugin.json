@@ -6,6 +6,7 @@
     "onStartup": true
   },
   "contracts": {
+    "gatewayMethodDispatch": ["authenticated-request"],
     "tools": [
       "TaskCreate",
       "TaskUpdate",

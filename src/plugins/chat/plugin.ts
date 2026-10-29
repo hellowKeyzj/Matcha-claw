@@ -38,7 +38,7 @@ export const chatPlugin = definePlugin({
     let active = true;
     let removeDiagnostics = () => {};
     if (import.meta.env.DEV) {
-      void import('@/lib/chat-memory-diagnostics').then(({ installChatMemoryDiagnosticsDebugApi, collectAppMemoryDiagnostics }) => {
+      void import('@/plugins/chat/memory-diagnostics').then(({ installChatMemoryDiagnosticsDebugApi, collectAppMemoryDiagnostics }) => {
         if (!active) return;
         installChatMemoryDiagnosticsDebugApi(window);
         removeDiagnostics = () => {

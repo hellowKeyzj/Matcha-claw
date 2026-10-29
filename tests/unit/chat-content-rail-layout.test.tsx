@@ -5,10 +5,8 @@ import { ChatInput } from '@/plugins/chat/ChatInput';
 import { ChatList, ChatListSurface } from '@/plugins/chat/components/ChatList';
 import { createChatScrollChromeStore } from '@/plugins/chat/chat-scroll-chrome-store';
 import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
-import {
-  applyAssistantPresentationToItems,
-  type ChatRenderItem,
-} from '@/plugins/message-rendering/chat-render-item-model';
+import { applyAssistantPresentationToItems } from '@/plugins/chat/render-item-projection';
+import type { ChatRenderItem } from '@/plugins/message-rendering/chat-render-item-model';
 import type { SessionRenderItem } from '../../src/types/session/render-item';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
@@ -34,7 +32,7 @@ vi.mock('@/plugins/message-rendering/ChatMessage', async () => {
   };
 });
 
-vi.mock('@/plugins/message-rendering/ChatAssistantTurn', async () => {
+vi.mock('@/plugins/chat/components/ChatAssistantTurn', async () => {
   const React = await import('react');
   return {
     ChatAssistantTurn: React.memo(function MockChatAssistantTurn(props: unknown) {

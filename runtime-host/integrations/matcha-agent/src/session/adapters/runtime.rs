@@ -299,13 +299,15 @@ impl SessionOps for MatchaRuntimeDriver {
                 Err(outcome) => return outcome,
             };
             let mut params = json!({"sessionId":record.session_id.as_str(),"content":content});
+            if let Some(request_id) = command.request_run_identity() {
+                params["requestId"] = json!(request_id);
+            }
             if let Some(context) = &command.execution_context {
-                params["requestId"] = json!(command.request_run_identity());
                 params["budget"] = super::model::native_budget(&context.budget);
             }
             let result = rpc::call_cancellable(&client, "runs.submit", params, &cancellation).await;
             match result {
-                Ok(receipt) if command.execution_context.is_some() => {
+                Ok(receipt) if command.request_run_identity().is_some() => {
                     let native: RunRecord = match rpc::decode(receipt) {
                         Ok(native) => native,
                         Err(_) => return SessionSendOutcome::Unknown,

@@ -354,7 +354,7 @@ fn retained_composition_settled_in_scope(
                     }
                 }
             }
-            (Entrypoint::Native { .. } | Entrypoint::Wasm { .. }, None) => {}
+            (Entrypoint::Builtin { .. } | Entrypoint::Native { .. } | Entrypoint::Wasm { .. }, None) => {}
             _ => return Err(invalid()),
         }
     }

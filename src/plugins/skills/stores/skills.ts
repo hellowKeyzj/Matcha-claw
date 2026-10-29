@@ -8,11 +8,11 @@ import {
   hostApiFetch,
 } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
-import { hostSkillsMutation, waitForSkillsOperation, selectedSkillsScope, requireSkillsScope } from '@/lib/skills';
+import { hostSkillsMutation, waitForSkillsOperation, selectedSkillsScope, requireSkillsScope } from '../services/client';
 import type { SkillsBatchStateResult } from '@/types/skills-operation-result';
 import type { Skill, MarketplaceSkill, SkillMissingCategory, SkillMissingRequirements, SkillUnavailableReason } from '@/types/skill';
 import type { CapabilityTarget } from '@/types/desktop/capability-target';
-import type { LocalSkillImportPayload } from '@/services/local-path-picker';
+import type { LocalSkillImportPayload } from '../services/local-import';
 
 type GatewaySkillMissing = {
   bins?: string[];

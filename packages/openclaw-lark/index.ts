@@ -136,7 +136,8 @@ const plugin = {
         runId: event.runId ?? ctx.runId,
       });
       if (!event.toolName.startsWith('feishu_')) return;
-      log.trace(() => `tool call: ${event.toolName} session=${ctx.sessionKey ?? '-'} params=${sanitizeParamsForLog(event.params)}`);
+      const paramsPreview = sanitizeParamsForLog(event.params);
+      log.info(`tool call: ${event.toolName} session=${ctx.sessionKey ?? '-'} params=${paramsPreview}`);
     });
 
     api.on('after_tool_call', (event, ctx) => {
@@ -197,19 +198,7 @@ const plugin = {
             }
           });
       },
-      // 2026.9.x: parse-time command descriptors are the official contract for
-      // lazy root CLI discovery (`openclaw --help` lists the command without
-      // loading the full plugin runtime). Supported since 2026.8.1, so this
-      // replaces the legacy `commands: [...]` shape ahead of its 9.5 removal.
-      {
-        descriptors: [
-          {
-            name: 'feishu-diagnose',
-            description: '运行飞书插件诊断，检查配置、连通性和权限状态',
-            hasSubcommands: false,
-          },
-        ],
-      },
+      { commands: ['feishu-diagnose'] },
     );
 
     // Chat commands: /feishu_diagnose, /feishu_doctor, /feishu_auth, /feishu

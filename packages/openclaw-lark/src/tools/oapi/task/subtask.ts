@@ -76,7 +76,7 @@ const FeishuTaskSubtaskSchema = Type.Union([
     action: Type.Literal('list'),
     auth_type: FeishuTaskSubtaskAuthType,
     task_guid: Type.String({ description: '父任务 GUID' }),
-    page_size: Type.Optional(Type.Number({ description: '每页数量，默认 50，最大 100' })),
+    page_size: Type.Optional(Type.Number({ description: '每页数量，默认 50，最大 100', minimum: 1, maximum: 100 })),
     page_token: Type.Optional(Type.String({ description: '分页标记' })),
   }),
 ]);
@@ -134,7 +134,7 @@ export function registerFeishuTaskSubtaskTool(api: OpenClawPluginApi): void {
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.trace(() => `create: task_guid=${p.task_guid}, summary=${p.summary}`);
+              log.info(`create: task_guid=${p.task_guid}, summary=${p.summary}`);
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const data: any = {
@@ -213,7 +213,7 @@ export function registerFeishuTaskSubtaskTool(api: OpenClawPluginApi): void {
             // LIST
             // -----------------------------------------------------------------
             case 'list': {
-              log.trace(() => `list: task_guid=${p.task_guid}, page_size=${p.page_size ?? 50}`);
+              log.info(`list: task_guid=${p.task_guid}, page_size=${p.page_size ?? 50}`);
 
               const res = await client.invoke(
                 'feishu_task_subtask.list',

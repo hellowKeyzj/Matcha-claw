@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-const VERSION = '2026.9.3';
+const VERSION = '2026.10.8';
 const PATCH = 'matcha-native-board-view-v1';
 const read = (file) => fs.readFileSync(file, 'utf8');
 const digest = (source) => createHash('sha256').update(source).digest('hex');
@@ -112,7 +112,7 @@ export function patchSandboxFileParent(source) {
       return;
     }
     if (event.source === inner.contentWindow) {`);
-  source = replace(source, '          const nextInner = createInner();', '          const nextInner = createInner();\n          if (params.sandbox === "strict") nextInner.setAttribute("sandbox", "");');
+  source = replace(source, '          const nextInner = createInner(params.allowScripts !== false);', '          const nextInner = createInner(params.allowScripts !== false && params.sandbox !== "strict");');
   source = replace(source, '          window.parent.postMessage(event.data, hostOrigin, [port]);', '          postToHost(event.data, [port]);');
   source = replace(source, '      window.parent.postMessage(event.data, hostOrigin);', '      postToHost(event.data);');
   source = replace(source, `  window.parent.postMessage({
@@ -122,7 +122,10 @@ export function patchSandboxFileParent(source) {
   }, hostOrigin);`, `  if (!fileParent) notifyReady();
   window.addEventListener("pagehide", () => hostPort?.close(), { once: true });`);
   source = replace(source, 'function buildSandboxHostContentSecurityPolicy(csp) {', 'function buildSandboxHostContentSecurityPolicy(csp, fileParent = false) {');
-  return replace(source, '\t\t"frame-ancestors http: https:"', '\t\tfileParent ? "frame-ancestors file:" : "frame-ancestors http: https:"');
+  source = replace(source, '\t\t"frame-ancestors http: https:"', '\t\tfileParent ? "frame-ancestors file:" : "frame-ancestors http: https:"');
+  source = replace(source, 'function buildSandboxHostDocument(csp) {', 'function buildSandboxHostDocument(csp, fileParent = false) {');
+  source = replace(source, '\tconst html = buildSandboxHostProxyHtml(csp);', '\tconst html = buildSandboxHostProxyHtml(csp, fileParent);');
+  return replace(source, '"Content-Security-Policy": buildSandboxHostContentSecurityPolicy(csp),', '"Content-Security-Policy": buildSandboxHostContentSecurityPolicy(csp, fileParent),');
 }
 
 export function patchSandboxHttpFileParent(source) {
@@ -135,10 +138,9 @@ export function patchSandboxHttpFileParent(source) {
 \t\tif (parents.length && (parents.length !== 1 || parents[0] !== "file")) throw new Error("invalid MCP App sandbox parent");
 \t\tfileParent = parents.length === 1;
 \t\tcsp = decodeSandboxHostCsp(url.searchParams.get("csp"));`);
-  source = replace(source,
-    'res.setHeader("Content-Security-Policy", buildSandboxHostContentSecurityPolicy(csp));',
-    'res.setHeader("Content-Security-Policy", buildSandboxHostContentSecurityPolicy(csp, fileParent));');
-  return replace(source, '\tconst html = buildSandboxHostProxyHtml(csp);', '\tconst html = buildSandboxHostProxyHtml(csp, fileParent);');
+  return replace(source,
+    '\tconst { html, headers, version } = buildSandboxHostDocument(csp);',
+    '\tconst { html, headers, version } = buildSandboxHostDocument(csp, fileParent);');
 }
 
 export function patchCanvasDisplayProjection(source) {
@@ -146,7 +148,7 @@ export function patchCanvasDisplayProjection(source) {
 \treturn typeof value === "string" && value.length > 0 && value.length <= 256 && /^(?!\\.{1,2}$)[A-Za-z0-9._-]+$/.test(value);
 }
 function coerceCanvasPreview(record) {`);
-  source = replace(source, '\tif (viewUrl) return {', `\tif (record.mcpApp === void 0 && !viewUrl && isCanvasDocumentViewId(viewId)) return {
+  source = replace(source, '\tconst url = viewUrl ?? (readNonBlankString(source?.type)?.trim().toLowerCase() === "url" ? readNonBlankString(source?.url) : void 0);', `\tif (record.mcpApp === void 0 && !viewUrl && isCanvasDocumentViewId(viewId)) return {
 \t\tkind: "canvas",
 \t\tsurface,
 \t\trender: "url",
@@ -156,7 +158,7 @@ function coerceCanvasPreview(record) {`);
 \t\t...sandbox ? { sandbox } : {},
 \t\t...boardWidgetName ? { boardWidgetName } : {}
 \t};
-\tif (viewUrl) return {`);
+\tconst url = viewUrl ?? (readNonBlankString(source?.type)?.trim().toLowerCase() === "url" ? readNonBlankString(source?.url) : void 0);`);
   source = replace(source,
     '\treturn coerceCanvasPreview(asOptionalRecord(details?.mcpAppPreview));',
     '\treturn coerceCanvasPreview(asOptionalRecord(details?.mcpAppPreview) ?? (details?.kind === "canvas" && details.mcpApp === void 0 ? details : void 0));');
@@ -246,7 +248,7 @@ export function patchBoardWidgetViewReasons(source) {
 \tif (!result.claims) throw new BoardValidationError("invalid_operation", "board widget view ticket is invalid", result.reason);
 \tconst claims = result.claims;`);
   for (const condition of [
-    '!document || document.grantState !== "none" && document.grantState !== "granted" || document.revision !== claims.revision || document.viewGeneration !== claims.viewGeneration',
+    '!document || !("viewGeneration" in document) || document.grantState !== "none" && document.grantState !== "granted" || document.revision !== claims.revision || document.viewGeneration !== claims.viewGeneration',
     '!("source" in document) || document.pluginKind !== claims.pluginFrame.pluginKind',
     '!("html" in document)',
   ]) {
@@ -254,6 +256,9 @@ export function patchBoardWidgetViewReasons(source) {
       `if (${condition}) throw new BoardValidationError("invalid_operation", "board widget view ticket is stale");`,
       `if (${condition}) throw new BoardValidationError("invalid_operation", "board widget view ticket is stale", "stale");`);
   }
+  source = replace(source,
+    'if (claims.expiresAtMs <= (options.nowMs ?? Date.now())) throw new BoardValidationError("invalid_operation", "board widget view ticket is expired");',
+    'if (claims.expiresAtMs <= (options.nowMs ?? Date.now())) throw new BoardValidationError("invalid_operation", "board widget view ticket is expired", "expired");');
   return replace(source,
     'if (!registration || !resourceUrls) throw new BoardValidationError("invalid_operation", "board widget content kind is unavailable");',
     'if (!registration || !resourceUrls) throw new BoardValidationError("invalid_operation", "board widget content kind is unavailable", "unavailable");');
@@ -309,11 +314,11 @@ export function patchOpenClawBoard(openclawDir) {
   const events = locate(dist, 'server-methods-list-', ['const GATEWAY_EVENTS = [']);
   const sandbox = locate(dist, 'sandbox-host-', ['function buildSandboxHostProxyHtml(csp', 'ui/notifications/sandbox-proxy-ready', 'openclaw:widget-bridge-port-offer', 'openclaw:widget-prompt-offer']);
   const mcp = locate(dist, 'mcp-app-', ['const mcpAppHandlers = {', '"mcp.app.view":', '"mcp.app.updateModelContext":', 'context.ensureSandboxHostPort?.()']);
-  const canvas = locate(dist, 'canvas-', ['"canvas.document.view":', 'context.ensureSandboxHostPort?.()', 'sandboxUrl: buildSandboxHostPath({ blockDescendantFrames: true })']);
+  const canvas = locate(dist, 'canvas-', ['"canvas.document.view":', 'context.ensureSandboxHostPort?.()', 'buildSandboxHostPath({ blockDescendantFrames: true })']);
   const projection = locate(dist, 'chat-display-projection.canvas-', ['function projectToolResultDetails(details, maxChars)', 'function coerceCanvasPreview(record)']);
   const layout = locate(dist, 'board-layout-', ['var BoardValidationError = class extends Error {']);
   const ticket = locate(dist, 'board-view-ticket-', ['function verifyBoardViewTicket(value, options = {})', 'function requireBoardViewTicketAuthority(claims, gatewayContext)']);
-  const widgetView = locate(dist, 'board-widget-view-', ['function resolveAuthorizedBoardWidgetView(store, ticket, options = {})']);
+  const widgetView = locate(dist, 'board-widget-view-', ['async function withAuthorizedBoardWidgetView(store, ticket, consume, options = {})']);
   const board = locate(dist, 'board-', ['function respondBoardError(error, respond)', '"board.widget.appView":']);
   for (const file of [server, canvas]) {
     if (!read(file).includes(`from "./${path.basename(sandbox)}"`)) throw new Error(`${PATCH}: native sandbox resource import missing in ${path.basename(file)}`);

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   filterUnfinishedTasks,
-} from '@/lib/task-domain';
-import type { Task } from '@/services/openclaw/task-manager-client';
+} from '@/plugins/tasks/domain/task-domain';
+import type { Task } from '@/plugins/tasks/services/task-manager-client';
 
 function buildTask(overrides: Partial<Task>): Task {
   return {

@@ -1,13 +1,13 @@
 import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
 import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
-import { deriveSessionRuntime, getSessionTextModel } from '@/plugins/chat/store/session-presentation';
+import { deriveSessionRuntime, reconcileSessionMessageItems } from '@/plugins/chat/store/session-presentation';
 import type { ApprovalItem, ChatSession, ChatSessionHistoryStatus, ChatSessionMetaState, ChatSessionRecord, ChatSessionRuntimeState, ChatSessionViewportState, ChatStoreState } from '@/plugins/chat/store/types';
 import { deriveSessionImageGenerationPendingStateFromItems, type SessionRenderItem } from '@/types/session/render-item';
 import type { SessionContextTokenSnapshot, SessionStateSnapshot } from '@/types/session/snapshot';
 import { containsTodoToolDebugSignal, logRendererTodoToolDebug, summarizeItemsForTodoToolDebug, summarizeSnapshotForTodoToolDebug } from '@/plugins/chat/store/todo-tool-debug';
 import { findLatestAssistantTextFromItems } from '@/plugins/chat/store/timeline-message';
 import { syncViewportState } from '@/plugins/chat/store/viewport-state';
-import { reconcileSessionItems, isPendingUserItem } from '@/plugins/chat/store/session-item-reconciliation';
+import { isPendingUserItem } from '@/plugins/chat/store/session-item-reconciliation';
 export function toMs(ts: number): number {
   return ts < 1e12 ? ts * 1000 : ts;
 }
@@ -651,7 +651,7 @@ export function patchSessionSnapshot(
 ): Record<string, ChatSessionRecord> {
   const current = getSessionRecord(state, sessionKey);
   const catalog = snapshot.catalog;
-  const nextItems = reconcileSessionItems(current.items, snapshot.items, getSessionTextModel(catalog.sessionIdentity).user);
+  const nextItems = reconcileSessionMessageItems(catalog.sessionIdentity, current.items, snapshot.items);
   const hasManualLabel = current.meta.manualLabel === true;
   const nextLabel = hasManualLabel ? current.meta.label : catalog.label ?? null;
   const nextTitleSource = hasManualLabel ? current.meta.titleSource : catalog.titleSource ?? 'none';

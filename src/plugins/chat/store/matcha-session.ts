@@ -1,5 +1,7 @@
 import { buildSessionIdentityKey } from '@/types/desktop/runtime-address';
 import { currentSessionSend, isSendPending } from '@/plugins/chat/store/send-state';
+import { bindSessionInputReceipts, isPendingUserItem, reconcileSessionItems } from '@/plugins/chat/store/session-item-reconciliation';
+import type { SessionRenderUserMessageItem } from '@/types/session/render-item';
 import type { SessionMessageModel, SessionTextModel } from '@/plugins/chat/store/session-presentation';
 import { isRunActive, type ChatSessionRecord, type ChatSessionRuntimeState } from '@/plugins/chat/store/types';
 
@@ -8,12 +10,44 @@ export const text: SessionTextModel = {
   assistant: (text) => text,
 };
 
+export const reconcileItems: SessionMessageModel['reconcileItems'] = (current, next, receipts, sourceItems) => {
+  const bound = bindSessionInputReceipts(current, next, receipts, sourceItems);
+  if (bound === current && current === next) return current;
+  const attachmentReceipts = new Map<string, SessionRenderUserMessageItem>();
+  for (const item of bound) {
+    if (item.kind === 'user-message' && item.messageId
+      && (item.rendererReceiptRunId || item.clientId && item.attachedFiles.length > 0)) {
+      attachmentReceipts.set(item.messageId, item);
+    }
+  }
+  const canonical = next.filter((item) => !isPendingUserItem(item)).map((item) => {
+    if (item.kind !== 'user-message' || !item.messageId) return item;
+    const receipt = attachmentReceipts.get(item.messageId);
+    if (!receipt) return item;
+    // Native history omits media; only this exact message may inherit its local attachment receipt.
+    const attachments = receipt.attachedFiles.filter((file) => !file.attachmentStatus);
+    const retainAttachments = attachments.length > 0 && item.images.length === 0
+      && !item.attachedFiles.some((file) => !file.attachmentStatus);
+    return {
+      ...item,
+      clientId: receipt.clientId,
+      rendererReceiptRunId: receipt.rendererReceiptRunId,
+      ...(retainAttachments ? {
+        attachedFiles: [...attachments, ...item.attachedFiles.filter((file) => file.attachmentStatus !== 'unsafe-media-omitted')],
+      } : {}),
+    };
+  });
+  return reconcileSessionItems(bound, canonical, null);
+};
+
+export { pendingSessionInputIds as inputIds } from '@/plugins/chat/store/session-item-reconciliation';
+
 export const startSend: SessionMessageModel['startSend'] = (record) => ({ items: record.items, runtime: record.runtime, abort: null });
 
 export const confirmSend: SessionMessageModel['confirmSend'] = (record, send, runId, admission, retainReceipt, nextSend) => ({
   items: record.items.map((item) => item.kind === 'user-message' && item.clientId === send.clientId ? {
     ...item,
-    key: retainReceipt ? `renderer-receipt:${runId}` : item.key,
+    key: retainReceipt && isPendingUserItem(item) ? `renderer-receipt:${runId}` : item.key,
     runId,
     ...(retainReceipt ? { rendererReceiptRunId: runId } : {}),
   } : item),

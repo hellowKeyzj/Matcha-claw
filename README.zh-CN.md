@@ -213,7 +213,7 @@ MatchaClaw 内置了代理设置，适用于需要通过本地代理客户端访
 - 只填写 `host:port` 时，会按 HTTP 代理处理。
 - 保存代理设置后，Electron 网络层会立即重新应用代理，并自动重启 Gateway。
 - 如果启用了 Telegram，MatchaClaw 还会把代理同步到 OpenClaw 的 Telegram 频道配置中。
-- Windows 打包版本中的 `openclaw` CLI/TUI 会优先使用随包 `resources/bin/node.exe` 入口（不可用时回退到 `ELECTRON_RUN_AS_NODE`）。
+- 项目固定 OpenClaw `2026.10.8`、Electron `44.10.0`，后者内嵌的 Node `24.22.1` 满足 OpenClaw 要求；打包版 `openclaw` CLI/TUI 与 Gateway／doctor 一样，通过 `ELECTRON_RUN_AS_NODE=1` 使用 MatchaClaw 的 Electron 可执行文件，而非系统 Node.js。Windows cmd／Git Bash 不再优先使用 `resources/bin/node.exe`。
 
 ---
 
@@ -307,7 +307,7 @@ MatchaClaw 采用 **桌面宿主 + 本地后端** 架构。渲染进程只调用
 
 ### 前置要求
 
-- **Node.js**：22+（推荐 LTS 版本）
+- **Node.js**：开发／直接运行 OpenClaw 需 `>=24.22.1 <25 || >=26.12.1`；产品内置 OpenClaw 使用 MatchaClaw 的 Electron 运行镜像。
 - **包管理器**：pnpm 9+（推荐）或 npm
 - **Linux（Ubuntu/Debian）**：运行 Electron 前，请先安装所需系统库：
   ```bash

@@ -4,7 +4,7 @@ import { Copy, Check, ChevronDown, ChevronRight, CornerDownLeft, SquareTerminal,
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { invokeIpc } from '@/lib/api-client';
-import type { AttachedFileMeta } from '@/plugins/chat/store';
+import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 import type {
   SessionRenderAssistantBubbleToolResult,
   SessionRenderToolCard,
@@ -15,7 +15,7 @@ import { formatTimestamp } from '@/plugins/message-rendering/message-utils';
 import { buildMarkdownCacheKey, getOrBuildMarkdownBody } from '@/plugins/message-rendering/md-pipeline';
 import { DIRECTORY_MIME_TYPE } from '@/plugins/files/types';
 import { useFilePreviewSupport } from '@/plugins/files/extensions';
-import { shouldKeepAssistantAttachmentVisible } from '@/plugins/chat/artifact-paths';
+import { shouldKeepAssistantAttachmentVisible } from '@/plugins/message-rendering/attachments';
 import {
   buildCanvasActivityViewModel,
   buildToolActivityPreview,
@@ -25,7 +25,7 @@ import {
 } from '@/plugins/message-rendering/tool-activity-view-model';
 import { describeToolActivity, getToolActivityStatus, summarizeToolActivities } from '@/plugins/message-rendering/tool-renderers';
 import type { ToolActivityDisclosure, ToolActivityKind } from '@/plugins/message-rendering/tool-renderers/types';
-import { getToolDisclosureKey, getToolGroupDisclosureKey } from '@/plugins/message-rendering/chat-tool-groups';
+import { getToolDisclosureKey, getToolGroupDisclosureKey } from '@/plugins/message-rendering/tool-groups';
 import { useToolActivityDisclosure } from '@/plugins/message-rendering/useToolActivityDisclosure';
 import ToolBrowserCard from '@/plugins/message-rendering/tool-browser-card';
 import { ToolWidgetCard } from '@/plugins/message-rendering/tool-widget-card';
@@ -615,6 +615,7 @@ export const ToolCardList = memo(function ToolCardList({
 export const AssistantEmbeddedToolResults = memo(function AssistantEmbeddedToolResults({
   embeddedToolResults,
   sourceTool,
+  sourceToolIsImmutable,
   collapseVersion,
   sessionIdentity,
   onOpenToolSurface,
@@ -623,6 +624,7 @@ export const AssistantEmbeddedToolResults = memo(function AssistantEmbeddedToolR
 }: {
   embeddedToolResults: ReadonlyArray<SessionRenderAssistantBubbleToolResult>;
   sourceTool?: SessionRenderToolCard;
+  sourceToolIsImmutable?: boolean;
   collapseVersion: number;
   sessionIdentity?: SessionIdentity;
   onOpenToolSurface?: (tool: SessionRenderToolCard, sessionIdentity: SessionIdentity) => void;
@@ -636,7 +638,7 @@ export const AssistantEmbeddedToolResults = memo(function AssistantEmbeddedToolR
   return (
     <div className="flex w-full flex-col items-start gap-2">
       {embeddedToolResults.map((item) => (
-        <AssistantEmbeddedToolResultCard key={item.key} item={item} sourceTool={sourceTool} collapseVersion={collapseVersion} sessionIdentity={sessionIdentity} onOpenToolSurface={onOpenToolSurface} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
+        <AssistantEmbeddedToolResultCard key={item.key} item={item} sourceTool={sourceTool} sourceToolIsImmutable={sourceToolIsImmutable} collapseVersion={collapseVersion} sessionIdentity={sessionIdentity} onOpenToolSurface={onOpenToolSurface} onRuntimeSendMessage={onRuntimeSendMessage} onRuntimeOpenLink={onRuntimeOpenLink} />
       ))}
     </div>
   );
@@ -1089,6 +1091,7 @@ const ToolCard = memo(function ToolCard({
 function AssistantEmbeddedToolResultCard({
   item,
   sourceTool,
+  sourceToolIsImmutable,
   collapseVersion,
   sessionIdentity,
   onOpenToolSurface,
@@ -1097,6 +1100,7 @@ function AssistantEmbeddedToolResultCard({
 }: {
   item: SessionRenderAssistantBubbleToolResult;
   sourceTool?: SessionRenderToolCard;
+  sourceToolIsImmutable?: boolean;
   collapseVersion: number;
   sessionIdentity?: SessionIdentity;
   onOpenToolSurface?: (tool: SessionRenderToolCard, sessionIdentity: SessionIdentity) => void;
@@ -1104,7 +1108,7 @@ function AssistantEmbeddedToolResultCard({
   onRuntimeOpenLink?: (url: string) => void | Promise<void>;
 }) {
   const { t } = useTranslation('chat');
-  const activity = useMemo(() => buildCanvasActivityViewModel(item, t, sourceTool, sessionIdentity), [item, t, sourceTool, sessionIdentity]);
+  const activity = useMemo(() => buildCanvasActivityViewModel(item, t, sourceTool, sessionIdentity, sourceToolIsImmutable), [item, t, sourceTool, sessionIdentity, sourceToolIsImmutable]);
   if (!activity) {
     return null;
   }

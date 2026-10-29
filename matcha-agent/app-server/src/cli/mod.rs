@@ -73,7 +73,7 @@ struct Instance {
     process: Process,
     instance_id: String,
     session_id: String,
-    model_overrides: [bool; 3],
+    connection_identity: [u8; 32],
     has_autonomous_inputs: bool,
     sealed: Option<crate::sealed::InstanceGuard>,
     search: tokio::sync::Mutex<search::State>,
@@ -206,8 +206,7 @@ impl Cli {
             sealed.inject(&mut launch.env);
         }
         let has_autonomous_inputs = has_channel_inputs || has_cron_inputs(&launch).await;
-        let model_overrides = ["OPENAI_MODEL", "GEMINI_MODEL", "GROK_MODEL"]
-            .map(|name| launch.env.get(name).is_some_and(|model| !model.is_empty()));
+        let connection_identity = projection::connection_identity(&spec.agent, &launch.env);
         let (process, output) = Process::spawn(launch).await?;
         let (closed, _) = watch::channel(None);
         let (initialized, _) = watch::channel(None);
@@ -215,7 +214,7 @@ impl Cli {
             process,
             instance_id,
             session_id: spec.session_id.clone(),
-            model_overrides,
+            connection_identity,
             has_autonomous_inputs,
             sealed,
             search: tokio::sync::Mutex::new(search::State::default()),
@@ -301,21 +300,50 @@ impl Cli {
         }
     }
 
-    pub fn model_requires_restart(&self) -> bool {
-        let initialized = self.0.instance.initialized.borrow();
-        let Some(Ok(initialized)) = initialized.as_ref() else {
-            return true;
-        };
-        match initialized
-            .pointer("/account/apiProvider")
-            .and_then(Value::as_str)
-        {
-            Some("openai" | "openaiResponses") => self.0.instance.model_overrides[0],
-            Some("gemini") => self.0.instance.model_overrides[1],
-            Some("grok") => self.0.instance.model_overrides[2],
-            Some("firstParty" | "bedrock" | "vertex" | "foundry") => false,
-            _ => true,
+    pub(crate) fn connection_matches(&self, spec: &LaunchSpec) -> rpc::Result<bool> {
+        let environment = projection::provider_environment(&spec.config, &spec.agent)?;
+        Ok(self.0.instance.connection_identity
+            == projection::connection_identity(&spec.agent, &environment))
+    }
+
+    pub(crate) async fn confirm_selection(
+        &self,
+        model: Option<&str>,
+        provider: Option<crate::provider::ProviderKind>,
+    ) -> rpc::Result<Value> {
+        let initialized = self.initialized().await?;
+        if let Some(provider) = provider {
+            let expected = serde_json::to_value(provider)
+                .map_err(|error| Error::internal("provider_kind_encode").with_source(error))?;
+            if initialized.pointer("/account/apiProvider") != Some(&expected) {
+                return Err(Error::new(-32006, "selection_provider_unconfirmed", "The initialized CLI Provider does not match the selected Provider")
+                    .with_data(json!({"instanceId":self.instance_id(),"nativeAcknowledged":true,"persisted":false})));
+            }
         }
+        let observed = tokio::time::timeout(
+            effort::CONTROL_WINDOW,
+            self.request(json!({"subtype":"get_settings"})),
+        ).await.map_err(|_| Error::new(-32006, "selection_readback_unknown", "Native model selection readback did not complete")
+            .with_data(json!({"instanceId":self.instance_id(),"nativeAcknowledged":true,"persisted":false})))?
+            .map_err(|source| Error::new(-32006, "selection_readback_unknown", "Native model selection could not be read back")
+                .with_data(json!({"instanceId":self.instance_id(),"nativeAcknowledged":true,"persisted":false}))
+                .with_source(source))?;
+        let actual = observed
+            .pointer("/applied/model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+            .ok_or_else(|| {
+                Error::new(
+                    -32006,
+                    "selection_model_unconfirmed",
+                    "The native model selection readback is invalid",
+                )
+            })?;
+        if model.is_some_and(|model| model != actual) {
+            return Err(Error::new(-32006, "selection_model_unconfirmed", "The native model does not match the selected model")
+                .with_data(json!({"instanceId":self.instance_id(),"nativeAcknowledged":true,"persisted":false})));
+        }
+        Ok(observed)
     }
 
     pub async fn request(&self, request: Value) -> rpc::Result<Value> {

@@ -29,12 +29,7 @@ const FeishuChatSchema = Type.Union([
     query: Type.String({
       description: '搜索关键词（必填）。支持匹配群名称、群成员名称。' + '支持多语种、拼音、前缀等模糊搜索。',
     }),
-    page_size: Type.Optional(
-      Type.Integer({
-        description: '分页大小（默认20）',
-        minimum: 1,
-      }),
-    ),
+    page_size: Type.Optional(Type.Integer({ description: '分页大小（默认20）', minimum: 1, maximum: 100 })),
     page_token: Type.Optional(
       Type.String({
         description: '分页标记。首次请求无需填写',
@@ -107,7 +102,7 @@ export function registerChatSearchTool(api: OpenClawPluginApi): boolean {
             // SEARCH
             // -----------------------------------------------------------------
             case 'search': {
-              log.trace(() => `search: query="${p.query}", page_size=${p.page_size ?? 20}`);
+              log.info(`search: query="${p.query}", page_size=${p.page_size ?? 20}`);
 
               const res = await client.invoke(
                 'feishu_chat.search',
@@ -142,7 +137,7 @@ export function registerChatSearchTool(api: OpenClawPluginApi): boolean {
             // GET
             // -----------------------------------------------------------------
             case 'get': {
-              log.trace(() => `get: chat_id=${p.chat_id}, user_id_type=${p.user_id_type ?? 'open_id'}`);
+              log.info(`get: chat_id=${p.chat_id}, user_id_type=${p.user_id_type ?? 'open_id'}`);
 
               const res = await client.invoke(
                 'feishu_chat.get',

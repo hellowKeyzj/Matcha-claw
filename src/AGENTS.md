@@ -18,12 +18,12 @@ Renderer 进程是单线程的（Main Thread），负责 UI 渲染和用户交�
 
 ### 1.2 目录结构约定
 遵守现有项目结构，禁止随意新增顶层目录：
-*   `pages/`：路由级页面组件。
-*   `features/`：复杂业务功能模块（包含其独有的组件和逻辑）。
-*   `components/`：通用 UI 组件（基于 shadcn/ui）。
-*   `stores/`：Zustand 全局状态仓库。
-*   `lib/`：核心工具库、API 客户端（`host-api`）。
-*   `hooks/`：通用自定义 Hooks。
+*   `plugins/<owner>/`：业务页面、投影 state/store、业务 client、专属组件、hooks、locales 与 assets/样式；Renderer 投影不接管后端事实。
+*   `app/`：具体插件清单、壳扩展点、路由/导航与 `layout/` 布局状态、工具链 warmup 装配。
+*   `plugin-host/`：中性的贡献、订阅与生命周期机制；产品包管理归 `plugins/application-plugins/`。
+*   `components/`：中性壳与通用 UI 组件（基于 shadcn/ui）。
+*   `lib/`：共享工具与统一通信（`host-api.ts`、`api-client.ts`）；`types/` 保留公开跨层 DTO/contract。
+*   `i18n/`：语言选择与资源聚合；业务翻译归所属插件，公共资源保留共享。
 
 ---
 
@@ -66,10 +66,10 @@ Renderer 进程卡顿是导致应用“假死”或“卡顿”的主要原因�
 *   **最小化状态**：只存储必要的、跨组件共享的状态。组件局部状态应使用 `useState`。
 
 ### 3.2 避免状态污染与内存泄漏
-*   **组件卸载清理**：在 `useEffect` 中订阅事件（如 `window.electronAPI.onUpdate`）时，必须在 cleanup 函数中取消订阅，防止内存泄漏和无效更新。
+*   **组件卸载清理**：在 `useEffect` 中通过 `src/lib/host-events.ts` 订阅事件时，必须在 cleanup 函数中取消订阅，防止内存泄漏和无效更新。
 ​```javascript
     useEffect(() => {
-      const unsubscribe = hostEvents.onUpdate(callback);
+      const unsubscribe = subscribeHostEvent('app-plugins:changed', callback);
       return () => unsubscribe(); // 必须清理
     }, []);
 ​```
@@ -85,8 +85,8 @@ Renderer 进程卡顿是导致应用“假死”或“卡顿”的主要原因�
 ## 4. 数据获取与 API 调用
 
 ### 4.1 统一 API 入口
-*   所有与后端（Main Process 或 OpenClaw Gateway）的通信，必须通过 `src/lib/` 下的模块进行。
-*   **禁止**在组件内部直接使用 `fetch` 或 `axios` 调用远程 API，必须走 `host-api`。
+*   业务 client 可以位于 `src/plugins/<owner>/`；所有后端请求仍复用 `src/lib/host-api.ts` → `src/lib/api-client.ts` 的统一 Electron IPC transport，事件复用 `src/lib/host-events.ts`。
+*   **禁止**组件或插件 client 自建 `fetch`、`axios`、IPC/连接通道绕过统一 transport；目录归属不改变后端合同或授权。
 
 ### 4.2 错误处理
 *   所有异步调用必须包含错误处理 UI（如 Toast 提示）。
@@ -118,61 +118,11 @@ Renderer 进程卡顿是导致应用“假死”或“卡顿”的主要原因�
 *   [ ] **内存泄漏**：切换路由离开新页面后，确认定时器、事件监听器已清除。
 *   [ ] **列表性能**：长列表是否使用了虚拟滚动？
 *   [ ] **数据更新**：是否处理了窗口重新聚焦时的数据刷新？
-*   [ ] **API 规范**：是否通过 `src/lib/host-api` 调用后端？
+*   [ ] **API 规范**：业务 client 是否复用 `src/lib/host-api.ts` / `api-client.ts` 的统一 transport？
 
 ---
 
-## 7. 示例：高性能列表页面模板
+## 7. 示例：实际任务列表实现
 
-```tsx
-import React, { useEffect, useMemo } from 'react';
-import { useTaskStore } from '@/stores/taskStore';
-import { FixedSizeList as List } from 'react-window';
-import { Skeleton } from '@/components/ui/skeleton';
-import { hostEvents } from '@/lib/host-events';
-
-// 单个列表项组件，使用 memo 优化
-const TaskRow = React.memo(({ data, index, style }) => {
-  const task = data[index];
-  return (
-    <div style={style} className="p-2 border-b">
-      {task.title}
-    </div>
-  );
-});
-
-export const TaskListPage = () => {
-  const { tasks, fetchTasks, isLoading } = useTaskStore();
-
-  // 1. 数据获取：首次加载 & 焦点刷新
-  useEffect(() => {
-    fetchTasks();
-    
-    // 监听后台数据变更
-    const unsubscribe = hostEvents.onTaskUpdated(fetchTasks);
-    
-    // 清理订阅
-    return () => unsubscribe();
-  }, [fetchTasks]);
-
-  // 2. 数据转换：使用 useMemo 缓存
-  const sortedTasks = useMemo(() => {
-    return [...tasks].sort((a, b) => b.createdAt - a.createdAt);
-  }, [tasks]);
-
-  if (isLoading) return <Skeleton count={10} />;
-
-  return (
-    <List
-      height={600}
-      itemCount={sortedTasks.length}
-      itemSize={50}
-      width="100%"
-      itemData={sortedTasks}
-    >
-      {TaskRow}
-    </List>
-  );
-};
-```
+页面、分页与虚拟列表参考 `src/plugins/tasks/pages/Tasks/index.tsx`，投影与请求去重参考 `src/plugins/tasks/stores/task-center-store.ts`，按当前 scope 预取参考 `src/plugins/tasks/plugin.ts`。复用实际 owner 与统一 transport，不照抄不存在的 Store 或事件 API。
 

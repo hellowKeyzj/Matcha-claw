@@ -42,7 +42,7 @@ const FeishuBitableAppSchema = Type.Union([
   Type.Object({
     action: Type.Literal('list'),
     folder_token: Type.Optional(Type.String({ description: '文件夹 token（默认列出我的空间）' })),
-    page_size: Type.Optional(Type.Number({ description: '每页数量，默认 50，最大 200' })),
+    page_size: Type.Optional(Type.Number({ description: '每页数量，默认 50，最大 200', minimum: 1, maximum: 200 })),
     page_token: Type.Optional(Type.String({ description: '分页标记' })),
   }),
 
@@ -125,7 +125,7 @@ export function registerFeishuBitableAppTool(api: OpenClawPluginApi): void {
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.trace(() => `create: name=${p.name}, folder_token=${p.folder_token ?? 'my_space'}`);
+              log.info(`create: name=${p.name}, folder_token=${p.folder_token ?? 'my_space'}`);
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const data: any = { name: p.name };
@@ -157,7 +157,7 @@ export function registerFeishuBitableAppTool(api: OpenClawPluginApi): void {
             // GET
             // -----------------------------------------------------------------
             case 'get': {
-              log.trace(() => `get: app_token=${p.app_token}`);
+              log.info(`get: app_token=${p.app_token}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app.get',
@@ -185,7 +185,7 @@ export function registerFeishuBitableAppTool(api: OpenClawPluginApi): void {
             // LIST - 使用 Drive API 筛选 bitable 类型文件
             // -----------------------------------------------------------------
             case 'list': {
-              log.trace(() => `list: folder_token=${p.folder_token ?? 'my_space'}, page_size=${p.page_size ?? 50}`);
+              log.info(`list: folder_token=${p.folder_token ?? 'my_space'}, page_size=${p.page_size ?? 50}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app.list',
@@ -225,7 +225,7 @@ export function registerFeishuBitableAppTool(api: OpenClawPluginApi): void {
             // PATCH
             // -----------------------------------------------------------------
             case 'patch': {
-              log.trace(() => `patch: app_token=${p.app_token}, name=${p.name}, is_advanced=${p.is_advanced}`);
+              log.info(`patch: app_token=${p.app_token}, name=${p.name}, is_advanced=${p.is_advanced}`);
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const updateData: any = {};
@@ -259,7 +259,7 @@ export function registerFeishuBitableAppTool(api: OpenClawPluginApi): void {
             // COPY (P1)
             // -----------------------------------------------------------------
             case 'copy': {
-              log.trace(() => `copy: app_token=${p.app_token}, name=${p.name}, folder_token=${p.folder_token ?? 'my_space'}`);
+              log.info(`copy: app_token=${p.app_token}, name=${p.name}, folder_token=${p.folder_token ?? 'my_space'}`);
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const data: any = { name: p.name };

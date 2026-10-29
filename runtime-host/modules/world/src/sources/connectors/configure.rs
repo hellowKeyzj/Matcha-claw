@@ -203,7 +203,7 @@ async fn require_provider(
                         (
                             Some(expected),
                             ArtifactRuntime::Native,
-                            Entrypoint::Native { registration, .. },
+                            Entrypoint::Builtin { registration, .. },
                         ) => registration == expected,
                         (None, ArtifactRuntime::WasmComponent, Entrypoint::Wasm { .. })
                         | (None, ArtifactRuntime::TrustedProcess, Entrypoint::Process { .. }) => {

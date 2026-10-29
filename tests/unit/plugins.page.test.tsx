@@ -107,7 +107,7 @@ describe('plugins page', () => {
       };
       throw new Error(`Unexpected path: ${path}`);
     });
-    const { useRuntimeEndpointsStore } = await import('@/stores/runtime-endpoints');
+    const { useRuntimeEndpointsStore } = await import('@/plugins/runtime/directory');
     await useRuntimeEndpointsStore.getState().refresh();
   });
 

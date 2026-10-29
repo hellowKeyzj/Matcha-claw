@@ -7,7 +7,7 @@ import {
   getChatSidePanelMaxWidth,
   resolveChatWorkspaceLayout,
   resolveChatSidePanelLayout,
-} from '@/components/layout/chat-workspace-layout';
+} from '@/app/layout/workspace';
 
 describe('chat workspace layout', () => {
   it('gives the hidden sidebar zero occupied width', () => {

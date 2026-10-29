@@ -10,6 +10,7 @@ use super::{
     session_catalog::{SessionCatalogCommand, SessionCatalogOutcome},
     session_history::{SessionHistoryCommand, SessionHistoryOutcome},
     state::SessionView,
+    thinking::{SessionThinkingCommand, SessionThinkingOutcome},
     timeline::{
         Command as SessionTimelineCommand, ContentCommand as SessionContentCommand,
         ContentOutcome as SessionContentOutcome, Outcome as SessionTimelineOutcome,
@@ -52,6 +53,10 @@ pub enum SessionQuery {
     Abort {
         command: SessionAbortCommand,
         reply: oneshot::Sender<SessionAbortOutcome>,
+    },
+    Thinking {
+        command: SessionThinkingCommand,
+        reply: oneshot::Sender<SessionThinkingOutcome>,
     },
     PendingApprovals {
         command: PendingApprovalsCommand,
@@ -104,6 +109,9 @@ impl SessionQuery {
             Self::Abort { reply, .. } => {
                 let _ = reply.send(SessionAbortOutcome::Unavailable);
             }
+            Self::Thinking { command, reply } => {
+                let _ = reply.send(SessionThinkingOutcome::Unavailable(command.runtime()));
+            }
             Self::PendingApprovals { reply, .. } => {
                 let _ = reply.send(PendingApprovalsOutcome::Unavailable);
             }
@@ -138,6 +146,7 @@ impl SessionQuery {
             Self::Audited { query, .. } | Self::Producing { query, .. } => query.route(),
             Self::ReadRun { .. }
             | Self::Abort { .. }
+            | Self::Thinking { .. }
             | Self::BoundaryOutcome { .. }
             | Self::EventsSubscribed { .. }
             | Self::ListSessions { .. }

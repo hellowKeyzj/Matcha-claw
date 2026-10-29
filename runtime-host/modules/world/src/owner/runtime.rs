@@ -53,6 +53,8 @@ struct Shared {
     stores: super::storage::Stores,
     world_resources: Mutex<std::collections::BTreeMap<(String, WorldRef), Result<Arc<super::resources::Resources>, Error>>>,
     startup_reports: Mutex<std::collections::BTreeMap<WorldRef, crate::extensions::lifecycle::StartupReport>>,
+    // ponytail: one startup inventory; scope it per store before parallel recovery.
+    startup_retry: tokio::sync::Mutex<()>,
     startup_failures: Mutex<std::collections::BTreeMap<WorldRef, Error>>,
     startup_inventory: AtomicBool,
     stage_cleanup: Mutex<std::collections::BTreeMap<(String, WorldRef, CommitId), crate::content::StageCleanupOutcome>>,
@@ -117,6 +119,7 @@ impl WorldRuntime {
             resources, stores: super::storage::Stores::new(storage_provider.map_err(Error::from)),
             world_resources: Mutex::new(std::collections::BTreeMap::new()),
             startup_reports: Mutex::new(std::collections::BTreeMap::new()),
+            startup_retry: tokio::sync::Mutex::new(()),
             startup_failures: Mutex::new(std::collections::BTreeMap::new()),
             startup_inventory: AtomicBool::new(false),
             stage_cleanup: Mutex::new(std::collections::BTreeMap::new()),
@@ -315,6 +318,22 @@ impl WorldHandle {
             record_initialization_diagnostic(&self.shared, "maintain", error);
         }
         Ok(())
+    }
+
+    pub(crate) async fn repair_startup(&self, world: WorldRef) -> Result<(), Error> {
+        let outcome = async {
+            let _retry = self.shared.startup_retry.lock().await;
+            if self.shared.startup_failures.lock().expect("world startup failures poisoned").contains_key(&world) {
+                let (store, _) = readable_for(&self.shared, &world).await?;
+                initialize(&self.shared, &store, self.clone(), Some(&world)).await?;
+                restore_ready(&self.shared)?;
+            }
+            Ok::<_, Error>(())
+        }.await;
+        if let Err(error) = outcome {
+            record_initialization_diagnostic(&self.shared, "package_repair", error);
+        }
+        self.maintain(world).await
     }
 
     pub(crate) async fn start_source_service(&self, parent: crate::sources::sync::SourceParent) -> Result<(), Error> {
@@ -555,6 +574,7 @@ impl OwnerSpec for WorldOwner {
                 let _ = reply.send(result);
             }),
             Command::Provision { input, target, reply } => Box::pin(async move {
+                let _retry = shared.startup_retry.lock().await;
                 let result = match provision_world(&shared, input).await {
                     Ok((store, provisioned)) => {
                         let initial = match shared.storage.borrow().clone() {
@@ -587,6 +607,7 @@ impl OwnerSpec for WorldOwner {
                 let _ = reply.send(result);
             }),
             Command::Initialize(configuration, initial, target) => Box::pin(async move {
+                let _retry = shared.startup_retry.lock().await;
                 let not_configured = matches!(&configuration, StoreConfiguration::NotConfigured);
                 let initialized = shared.stores.initialize(configuration).await;
                 let state = match initialized {
@@ -618,8 +639,8 @@ impl OwnerSpec for WorldOwner {
                 let _ = reply.send(result);
             }
             Query::Status { signed, key, reply } => {
-                let result = match ready_for_operation(&shared, &key.world).await {
-                    Ok(store) => operation::status(&store, shared.ingress.clone(), signed, key).await,
+                let result = match readable_for(&shared, &key.world).await {
+                    Ok((store, _)) => operation::status(&store, shared.ingress.clone(), signed, key).await,
                     Err(error) => Err(error),
                 };
                 let _ = reply.send(result);
@@ -680,6 +701,7 @@ async fn provision_world(shared: &Shared, input: Provision) -> Result<(WorldStor
     Ok((store, provisioned))
 }
 
+// The caller owns startup_retry through storage selection and readiness publication.
 async fn initialize(shared: &Arc<Shared>, store: &WorldStore, target: WorldHandle, retry_world: Option<&WorldRef>) -> Result<(), Error> {
     shared.startup_inventory.store(false, Ordering::Release);
     let worlds = store.worlds(&shared.authority).await?;
@@ -807,11 +829,10 @@ fn record_startup(shared: &Shared, world: &WorldRef, mut report: crate::extensio
         });
         report.blocked_graphs.insert(id, crate::extensions::lifecycle::LifecycleError::Binding(
             crate::extensions::bindings::BindingError::Operation(error.clone())));
-        if !local_startup_failure(&error) { errors.push(error); }
+        errors.push(error);
     }
     errors.extend(report.blocked_heads.values().chain(report.blocked_channels.values()).chain(report.blocked_retirements.values())
-        .map(|failure| Error::from(crate::extensions::bindings::BindingError::from(failure.clone())))
-        .filter(|error| !local_startup_failure(error)));
+        .map(|failure| Error::from(crate::extensions::bindings::BindingError::from(failure.clone()))));
     if !report.retained.is_empty() {
         errors.push(Error::new("world.startup_retained", FailureStage::Prepare,
             "世界启动仍持有未完成的运行资源。", ApiFailure::Operation(world_protocol::operation::OperationFailure::CleanupFailed), Recovery::Refresh));
@@ -950,6 +971,48 @@ async fn locate(shared: &Shared, initial: &WorldStore, world: &WorldRef) -> Resu
 async fn ready_for_operation(shared: &Shared, world: &WorldRef) -> Result<WorldStore, Error> {
     let initial = ready(shared).await?;
     locate(shared, &initial, world).await
+}
+
+// Connected storage is not execution readiness. Only metadata and the explicit
+// package-repair allowlist may use a completed but blocked startup inventory.
+async fn readable_for(shared: &Shared, world: &WorldRef) -> Result<(WorldStore, bool), Error> {
+    shared.live.require_world_open(world)?;
+    let mut state = shared.storage.subscribe();
+    let (initial, maintenance) = loop {
+        let current = state.borrow().clone();
+        match current {
+            Storage::Ready(store) => break (store, false),
+            Storage::Failed { error, store } => {
+                if !shared.startup_inventory.load(Ordering::Acquire)
+                    || !shared.startup_reports.lock().expect("world startup reports poisoned").contains_key(world) {
+                    return Err(error);
+                }
+                break (store.ok_or(error)?, true);
+            }
+            Storage::Initializing => state.changed().await.map_err(|_| closed())?,
+        }
+    };
+    let store = locate(shared, &initial, world).await?;
+    shared.live.require_world_open(world)?;
+    Ok((store, maintenance))
+}
+
+async fn ready_for_maintenance(shared: &Shared, world: &WorldRef) -> Result<(WorldStore, bool), Error> {
+    let admitted = readable_for(shared, world).await?;
+    if !shared.pending_provisions.lock().expect("world provision custody poisoned").is_empty() {
+        return Err(Error::internal(FailureStage::Recover));
+    }
+    let reports = shared.startup_reports.lock().expect("world startup reports poisoned");
+    let failures = shared.startup_failures.lock().expect("world startup failures poisoned");
+    if let Some(error) = failures.get(world) {
+        let repairable = reports.get(world).is_some_and(|report| {
+            !report.blocked_graphs.is_empty() && report.retained.is_empty()
+                && report.blocked_heads.is_empty() && report.blocked_channels.is_empty()
+                && report.blocked_retirements.is_empty() && local_startup_failure(error)
+        });
+        if !repairable { return Err(error.clone()); }
+    }
+    Ok(admitted)
 }
 
 async fn ready_for(shared: &Shared, world: &WorldRef) -> Result<WorldStore, Error> {

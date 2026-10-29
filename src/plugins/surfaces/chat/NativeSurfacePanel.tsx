@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'react';
 import { Pin } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
-import { boardExecute } from '@/lib/board-api';
+import { boardExecute } from '../board-api';
 import { decodeBoardFailure, type BoardFailure } from '@/types/board';
 import { useBoardStore } from '@/plugins/surfaces/board/store';
 import { RuntimeContentHost } from '@/plugins/surfaces/RuntimeContentHost';

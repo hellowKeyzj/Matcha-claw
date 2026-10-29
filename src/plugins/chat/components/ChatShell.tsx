@@ -2,8 +2,8 @@ import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, 
 import type { ChatPanelLayout } from '@/plugins/chat/extensions';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
-import { CHAT_WORKSPACE_LAYOUT } from '@/components/layout/chat-workspace-layout';
-import type { ChatSidePanelMode, ChatWindowDockPhase } from '@/components/layout/chat-workspace-layout';
+import { CHAT_WORKSPACE_LAYOUT } from '@/app/layout/workspace';
+import type { ChatSidePanelMode, ChatWindowDockPhase } from '@/app/layout/workspace';
 
 const CHAT_THREAD_BOTTOM_GAP_PX = 12;
 const CHAT_THREAD_TOP_GAP_PX = 8;
@@ -120,7 +120,7 @@ export function ChatShell({
 
     const headerNode = headerOverlayRef.current;
     const composerNode = composerOverlayRef.current;
-    if (!headerNode || !composerNode) {
+    if (!headerNode || !composerNode || isEmptyState) {
       resetOverlayOffsets();
       return;
     }
@@ -273,32 +273,29 @@ export function ChatShell({
           </div>
 
           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-            {isEmptyState ? (
-              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-12 pt-20 sm:px-8 md:pb-20">
-                {emptyState}
-              </div>
-            ) : (
-              <>
-                {viewportPane}
+            {!isEmptyState ? viewportPane : null}
 
-                <div
-                  data-testid="chat-stage-bottom-fade"
-                  className={CHAT_LAYOUT_TOKENS.stageBottomFade}
-                />
+            {!isEmptyState ? <div
+              data-testid="chat-stage-bottom-fade"
+              className={CHAT_LAYOUT_TOKENS.stageBottomFade}
+            /> : null}
 
+            <div
+              ref={composerOverlayRef}
+              className={isEmptyState
+                ? 'flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-12 pt-20 sm:px-8 md:pb-20'
+                : CHAT_LAYOUT_TOKENS.composerOverlay}
+            >
+              <div className={isEmptyState ? 'mx-auto my-auto w-full min-w-0 max-w-[44rem] py-8 text-left' : undefined}>
+                {isEmptyState ? emptyState : null}
                 <div
-                  ref={composerOverlayRef}
-                  className={CHAT_LAYOUT_TOKENS.composerOverlay}
+                  className={cn('pointer-events-auto chat-scroll-sync-input', isEmptyState && 'mt-7 w-full')}
+                  onWheelCapture={isEmptyState ? undefined : handleComposerWheelCapture}
                 >
-                  <div
-                    className="pointer-events-auto chat-scroll-sync-input"
-                    onWheelCapture={handleComposerWheelCapture}
-                  >
-                    {input}
-                  </div>
+                  {input}
                 </div>
-              </>
-            )}
+              </div>
+            </div>
           </div>
         </div>
       )}

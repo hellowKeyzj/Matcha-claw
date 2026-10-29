@@ -721,7 +721,7 @@ export function buildToolCallText(toolParams: Record<string, unknown>): string {
   return entries.map((item) => item.value).join(" ");
 }
 
-export function detectBeforeToolCall(input: DetectBeforeToolCallInput): RuntimeDetection | undefined {
+export function detectBeforeToolCall(input: DetectBeforeToolCallInput): RuntimeDetection[] {
   const entries = collectStringEntries(input.toolParams, 256);
   const policyDetection = buildPolicyDetection({
     toolName: input.toolName,
@@ -731,12 +731,9 @@ export function detectBeforeToolCall(input: DetectBeforeToolCallInput): RuntimeD
     entries,
   });
   if (policyDetection) {
-    return policyDetection;
+    return [policyDetection];
   }
 
-  const destructiveDetection = buildDestructiveMatch(input);
-  if (destructiveDetection) {
-    return destructiveDetection;
-  }
-  return buildSecretMatch(input);
+  return [buildDestructiveMatch(input), buildSecretMatch(input)]
+    .filter((detection) => detection !== undefined);
 }

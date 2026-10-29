@@ -6,9 +6,9 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { invokeIpc } from '@/lib/api-client';
-import { hostImportSkillArchive, requireSkillsScope } from '@/lib/skills';
+import { hostImportSkillArchive, requireSkillsScope } from '../services/client';
 import { cn } from '@/lib/utils';
-import { readLocalSkillImport } from '@/services/local-path-picker';
+import { readLocalSkillImport } from '../services/local-import';
 import type { SkillOwnerProps, SkillViewProps } from '../extensions';
 import { useSkillsStore } from '../stores/skills';
 

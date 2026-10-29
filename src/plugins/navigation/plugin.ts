@@ -1,10 +1,10 @@
 import { sidebarActions, sidebarFooter, sidebarPanels } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
 
-const NewChatAction = lazyWithPreload(() => import('./NewChatAction'));
+const NewChatAction = lazyWithPreload(() => import('@/plugins/chat/NewChatAction'));
 const PendingBlockers = lazyWithPreload(() => import('./PendingBlockers'));
 const DevConsoleFooter = lazyWithPreload(() => import('./DevConsoleFooter'));
-const AccountFooter = lazyWithPreload(() => import('./AccountFooter'));
+const AccountFooter = lazyWithPreload(() => import('@/plugins/account/AccountFooter'));
 
 // Trusted sidebar composition; business state and mutations remain with their owners.
 export const navigationPlugin = definePlugin({

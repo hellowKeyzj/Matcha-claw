@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const hostSecurityReadPolicyMock = vi.fn();
 const hostSecurityWritePolicyMock = vi.fn();
 
-vi.mock('@/lib/security-runtime', () => ({
+vi.mock('@/plugins/security/security-runtime', () => ({
   hostSecurityReadPolicy: (...args: unknown[]) => hostSecurityReadPolicyMock(...args),
   hostSecurityWritePolicy: (...args: unknown[]) => hostSecurityWritePolicyMock(...args),
 }));

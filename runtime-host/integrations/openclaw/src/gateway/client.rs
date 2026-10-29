@@ -599,11 +599,12 @@ impl GatewayClient {
         result.await.map_err(|_| RuntimeOperationFailure::Unavailable)?
     }
 
-    async fn history_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64, page: crate::session::window::PageRequest, host_epoch: u64) -> Result<sessions_module::ports::SessionSync, sessions_module::ports::RuntimeOperationFailure> {
+    async fn history_observation(&self, control: &ControlDispatcher, identity: &sessions_module::state::SessionIdentity, generation: u64, page: crate::session::window::PageRequest, host_epoch: u64, input_ids: &[String]) -> Result<sessions_module::ports::SessionSync, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         use crate::session::window::{self, Direction, PageRequest};
         let key = SessionKey::try_new(identity.session_key.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
-        let params = crate::session::protocol::ChatHistoryParams::new(key).try_for_agent(identity.agent_id.clone()).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
+        let params = crate::session::protocol::ChatHistoryParams::new(key).try_for_agent(identity.agent_id.clone())
+            .and_then(|params| params.try_with_input_run_ids(input_ids.to_vec())).map_err(|_| RuntimeOperationFailure::TargetRejected)?;
         let paged = !matches!(page.direction(), Direction::Latest) || page.limit() == 0;
         let mut total = 0;
         let mut end = 0;
@@ -663,7 +664,7 @@ impl GatewayClient {
             }
             let request = wire::session_request(id.clone(), crate::session::protocol::CHAT_HISTORY_METHOD, serde_json::to_value(params).map_err(|_| RuntimeOperationFailure::Unknown)?).map_err(|_| RuntimeOperationFailure::Unknown)?;
             let (reply, result) = tokio::sync::oneshot::channel();
-            self.observations.pending.lock().expect("observation pending lock poisoned").insert(id.clone(), OrderedContext::History { identity: identity.clone(), generation, page: decode_page, host_epoch, reply });
+            self.observations.pending.lock().expect("observation pending lock poisoned").insert(id.clone(), OrderedContext::History { identity: identity.clone(), generation, page: decode_page, host_epoch, input_ids: input_ids.to_vec(), reply });
             // ordered_query returns only after ordered ingress has decoded/projected the response; not pure socket IO.
             let ordered_started = trace::enabled().then(std::time::Instant::now);
             let response = control.dispatcher.ordered_query(request).await;
@@ -748,7 +749,7 @@ impl GatewayClient {
         Err(RuntimeOperationFailure::Unknown)
     }
 
-    pub(crate) async fn sync_observation(&self, identity: &sessions_module::state::SessionIdentity, generation: u64, page: crate::session::window::PageRequest, host_epoch: u64) -> Result<sessions_module::ports::SessionSync, sessions_module::ports::RuntimeOperationFailure> {
+    pub(crate) async fn sync_observation(&self, identity: &sessions_module::state::SessionIdentity, generation: u64, page: crate::session::window::PageRequest, host_epoch: u64, input_ids: &[String]) -> Result<sessions_module::ports::SessionSync, sessions_module::ports::RuntimeOperationFailure> {
         use sessions_module::ports::RuntimeOperationFailure;
         if trace::enabled() {
             trace::log_unscoped("runtime.openclaw.observation.sync.request", || serde_json::json!({
@@ -783,7 +784,7 @@ impl GatewayClient {
             subscribed?;
             let model_state = self.describe_observation(&control, identity, generation).await?;
             let started = trace::enabled().then(std::time::Instant::now);
-            let history = self.history_observation(&control, identity, generation, page, host_epoch).await;
+            let history = self.history_observation(&control, identity, generation, page, host_epoch, input_ids).await;
             history_elapsed_ms = started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
             let mut history = history?;
             history.view.model_state = model_state;

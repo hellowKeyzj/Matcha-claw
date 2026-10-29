@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { ChatListSurface } from '@/plugins/chat/components/ChatList';
-import { applyAssistantPresentationToItems } from '@/plugins/message-rendering/chat-render-item-model';
+import { applyAssistantPresentationToItems } from '@/plugins/chat/render-item-projection';
 import { createChatScrollChromeStore } from '@/plugins/chat/chat-scroll-chrome-store';
 import type { SessionRenderItem } from '../../src/types/session/render-item';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';

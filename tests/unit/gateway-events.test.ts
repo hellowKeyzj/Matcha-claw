@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isGatewayPreparing } from '@/lib/gateway-status';
+import { isGatewayPreparing } from '@/plugins/runtime/gateway-status';
 import type { GatewayStatus } from '@/types/gateway';
 
 const hostApiFetchMock = vi.hoisted(() => vi.fn());

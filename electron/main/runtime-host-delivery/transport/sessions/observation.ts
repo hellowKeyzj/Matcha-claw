@@ -1,7 +1,7 @@
 import type { SessionObservationResult } from '../../../../../src/types/session/snapshot';
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, sendLoopbackJson } from '../client';
-import { decodeSessionView, isSessionIdentity, sameSessionIdentity, type SessionIdentity, type SessionView } from './session-contract';
+import { decodeSessionView, isSessionIdentity, isSessionInputIds, sameSessionIdentity, type SessionIdentity, type SessionView } from './session-contract';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity, summarizeSessionView, traceHeader } from './trace';
 
 const UNAVAILABLE = { success: false, error: 'Session observation is unavailable' } as const;
@@ -12,7 +12,7 @@ export type SessionObservationRequest = Readonly<{
   operationId: 'sessions.observe' | 'sessions.release';
   scope: Readonly<{ kind: 'session'; identity: SessionIdentity }>;
   target: Readonly<{ kind: 'session'; identity: SessionIdentity }>;
-  input: Readonly<{ sessionIdentity: SessionIdentity; sessionKey: string; leaseId: string; limit?: number }>;
+  input: Readonly<{ sessionIdentity: SessionIdentity; sessionKey: string; leaseId: string; limit?: number; inputIds?: string[] }>;
 }>;
 export type SessionObservationResponse = Readonly<{
   status: 200 | 400 | 503;
@@ -24,11 +24,11 @@ export interface SessionObservationTransport {
   release(request: unknown, traceId?: string | null): Promise<SessionObservationResponse>;
 }
 
-export function observationRequest(identity: SessionIdentity, leaseId: string, operationId: SessionObservationRequest['operationId'], limit?: number): SessionObservationRequest {
+export function observationRequest(identity: SessionIdentity, leaseId: string, operationId: SessionObservationRequest['operationId'], limit?: number, inputIds?: string[]): SessionObservationRequest {
   return {
     id: 'session.management', operationId,
     scope: { kind: 'session', identity }, target: { kind: 'session', identity },
-    input: { sessionIdentity: identity, sessionKey: identity.sessionKey, leaseId, ...(limit === undefined ? {} : { limit }) },
+    input: { sessionIdentity: identity, sessionKey: identity.sessionKey, leaseId, ...(limit === undefined ? {} : { limit }), ...(inputIds === undefined ? {} : { inputIds }) },
   };
 }
 
@@ -38,8 +38,11 @@ export function isSessionObservationRequest(value: unknown, operation: SessionOb
     || !isRecord(value.scope) || !hasExactKeys(value.scope, ['kind', 'identity']) || value.scope.kind !== 'session' || !isSessionIdentity(value.scope.identity)
     || !isRecord(value.target) || !hasExactKeys(value.target, ['kind', 'identity']) || value.target.kind !== 'session' || !isSessionIdentity(value.target.identity)
     || !isRecord(value.input) || !isSessionIdentity(value.input.sessionIdentity)
-    || !hasExactKeys(value.input, operation === 'sessions.observe' && Object.hasOwn(value.input, 'limit')
-      ? ['sessionIdentity', 'sessionKey', 'leaseId', 'limit'] : ['sessionIdentity', 'sessionKey', 'leaseId'])
+    || !hasExactKeys(value.input, ['sessionIdentity', 'sessionKey', 'leaseId',
+      ...(operation === 'sessions.observe' && Object.hasOwn(value.input, 'limit') ? ['limit'] : []),
+      ...(operation === 'sessions.observe' && Object.hasOwn(value.input, 'inputIds') ? ['inputIds'] : []),
+    ])
+    || (Object.hasOwn(value.input, 'inputIds') && (!isSessionInputIds(value.input.inputIds) || value.input.inputIds.length === 0))
     || !isLeaseId(value.input.leaseId)
     || (value.input.limit !== undefined && (!Number.isSafeInteger(value.input.limit) || (value.input.limit as number) < 1 || (value.input.limit as number) > 200))) return false;
   return sameSessionIdentity(value.scope.identity, value.target.identity)

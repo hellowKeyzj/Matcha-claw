@@ -16,7 +16,7 @@ import type {
   TeamGraphSnapshotRecord,
   TeamRoleBindingRecord,
   TeamWebhookAuthProjection,
-} from '@/services/openclaw/team-runtime-client';
+} from '@/plugins/teams/services/team-runtime-client';
 
 import { TeamNodeInspector } from '@/plugins/teams/pages/TeamNodeInspector';
 import { TeamAssignmentEditor } from '@/plugins/teams/pages/TeamAssignmentEditor';

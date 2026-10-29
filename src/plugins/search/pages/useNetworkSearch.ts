@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppError } from '@/lib/error-model';
-import { fetchNetworkSearch, runNetworkSearchService, saveNetworkSearch } from '@/lib/network-search';
+import { fetchNetworkSearch, runNetworkSearchService, saveNetworkSearch } from '../network-search';
 import type { SearchConfig, SearchSnapshot } from '@/types/network-search';
 
 type SearchAction = 'refresh' | 'save' | 'prepare' | 'restart' | 'stop';

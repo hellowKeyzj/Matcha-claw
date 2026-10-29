@@ -806,8 +806,17 @@ impl SessionLane {
                 let outcome = self.handle_permission(shared, command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
-            Thinking { command, reply } => {
-                let outcome = self.handle_thinking(shared, command).await;
+            SetThinking { command, reply } => {
+                let outcome = if matches!(
+                    command.action,
+                    crate::thinking::SessionThinkingAction::Set { .. }
+                ) {
+                    shared
+                        .handle_thinking(command, self.state.as_ref(), self.has_pending_completions())
+                        .await
+                } else {
+                    crate::thinking::SessionThinkingOutcome::Rejected(command.runtime())
+                };
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             ConfigurePrivateResolver { reply, .. } => {
@@ -1940,7 +1949,7 @@ impl SessionLane {
                 let outcome = shared.handle_session_catalog(command).await;
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
-            query @ (SessionQuery::ReadRun { .. } | SessionQuery::Abort { .. } | SessionQuery::Audited { .. } | SessionQuery::Producing { .. }) => query.send_unavailable(),
+            query @ (SessionQuery::ReadRun { .. } | SessionQuery::Abort { .. } | SessionQuery::Thinking { .. } | SessionQuery::Audited { .. } | SessionQuery::Producing { .. }) => query.send_unavailable(),
         }
     }
 }
@@ -2035,6 +2044,22 @@ impl OwnerSpec for SessionOwner {
             }
             SessionQuery::Abort { command, reply } => {
                 let outcome: SessionAbortOutcome = shared.handle_abort(command).await;
+                crate::call::reply(call.as_ref(), reply, outcome).await;
+            }
+            SessionQuery::Thinking { command, reply } => {
+                let outcome = if matches!(command.action, crate::thinking::SessionThinkingAction::Get) {
+                    let state = command.scope.identity().and_then(|identity| {
+                        shared
+                            .snapshot
+                            .load()
+                            .states
+                            .get(&session_identity_lane_key(identity))
+                            .cloned()
+                    });
+                    shared.handle_thinking(command, state.as_ref(), false).await
+                } else {
+                    crate::thinking::SessionThinkingOutcome::Rejected(command.runtime())
+                };
                 crate::call::reply(call.as_ref(), reply, outcome).await;
             }
             query => query.send_unavailable(),

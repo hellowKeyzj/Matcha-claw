@@ -3,7 +3,7 @@ import {
   fetchActiveSubscriptions,
   fetchSubscriptionProgress,
   fetchSubscriptionSummary,
-} from '@/lib/subscription';
+} from '../api/subscription';
 
 export type SubscriptionSummary = Awaited<ReturnType<typeof fetchSubscriptionSummary>>;
 export type ActiveSubscriptions = Awaited<ReturnType<typeof fetchActiveSubscriptions>>;

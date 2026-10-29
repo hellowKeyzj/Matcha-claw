@@ -7,7 +7,6 @@
  */
 
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/core';
-import { isTraceEnabled } from '../../../core/lark-logger';
 import { getEnabledLarkAccounts } from '../../../core/accounts';
 import { resolveAnyEnabledToolsConfig } from '../../../core/tools-config';
 import { registerFeishuWikiSpaceTool } from './space';
@@ -18,19 +17,19 @@ import { registerFeishuWikiSpaceNodeTool } from './space-node';
  */
 export function registerFeishuWikiTools(api: OpenClawPluginApi): void {
   if (!api.config) {
-    if (isTraceEnabled()) api.logger.debug?.('feishu_wiki: No config available, skipping');
+    api.logger.debug?.('feishu_wiki: No config available, skipping');
     return;
   }
 
   const accounts = getEnabledLarkAccounts(api.config);
   if (accounts.length === 0) {
-    if (isTraceEnabled()) api.logger.debug?.('feishu_wiki: No Feishu accounts configured, skipping');
+    api.logger.debug?.('feishu_wiki: No Feishu accounts configured, skipping');
     return;
   }
 
   const toolsCfg = resolveAnyEnabledToolsConfig(accounts);
   if (!toolsCfg.wiki) {
-    if (isTraceEnabled()) api.logger.debug?.('feishu_wiki: wiki tool disabled in all accounts');
+    api.logger.debug?.('feishu_wiki: wiki tool disabled in all accounts');
     return;
   }
 
@@ -39,6 +38,6 @@ export function registerFeishuWikiTools(api: OpenClawPluginApi): void {
   if (registerFeishuWikiSpaceTool(api)) registered.push('feishu_wiki_space');
   if (registerFeishuWikiSpaceNodeTool(api)) registered.push('feishu_wiki_space_node');
   if (registered.length > 0) {
-    if (isTraceEnabled()) api.logger.debug?.(`feishu_wiki: Registered ${registered.join(', ')}`);
+    api.logger.debug?.(`feishu_wiki: Registered ${registered.join(', ')}`);
   }
 }

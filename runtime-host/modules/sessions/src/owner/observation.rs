@@ -509,6 +509,7 @@ impl SessionLane {
         let identity = command.identity;
         if identity.validate().is_err()
             || !valid_lease_id(&command.lease_id)
+            || !crate::state::valid_input_ids(&command.input_ids)
             || command.window.direction() != timeline::Direction::Latest
             || !(1..=200).contains(&command.window.limit())
         {
@@ -544,7 +545,8 @@ impl SessionLane {
             .get(&session_identity_lane_key(&identity)).expect("prepared observation").generation;
         let waiter_id = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         let reply = shared.watch_observe_reply(&identity, generation, waiter_id, reply);
-        let timeline = self.latest_command(&identity, command.window);
+        let timeline = self.latest_command(&identity, command.window)
+            .with_input_ids(command.input_ids).expect("validated observation input ids");
         let immediate = {
             let mut entries = shared
                 .observations
@@ -557,7 +559,8 @@ impl SessionLane {
             if entry.closing {
                 entry.restart_after_close = true;
             }
-            let ready = !entry.closing
+            let ready = timeline.input_ids().is_empty()
+                && !entry.closing
                 && !entry.needs_sync
                 && entry.baseline.is_none()
                 && entry.committed_command.as_ref() == Some(&timeline);
@@ -1446,6 +1449,7 @@ impl SessionLane {
                         if let Some(source) = &shared.session_delta {
                             source.resync(identity.clone(), view.epoch, view.seq);
                         }
+                        view.input_receipts = sync.view.input_receipts;
                         Some(view)
                     }
                     Err(_) => {

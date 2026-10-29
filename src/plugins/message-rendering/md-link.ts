@@ -1,4 +1,4 @@
-import type { AttachedFileMeta } from '@/plugins/chat/store';
+import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 
 const FILE_LINK_EXTENSIONS = 'md|txt|json|ya?ml|csv|pdf|docx?|xlsx?|pptx?|png|jpe?g|gif|webp|svg|mp4|mov|avi|mkv|webm|mp3|wav|ogg|aac|zip|tar|gz|rar|7z';
 const FILE_HINT_RE = new RegExp(

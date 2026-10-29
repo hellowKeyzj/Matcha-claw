@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
-import { useLayoutStore } from '@/stores/layout';
+import { useLayoutStore } from '@/app/layout/store';
 import { invokeIpc } from '@/lib/api-client';
 import {
   CHAT_WORKSPACE_LAYOUT,
   clampChatSidePanelWidth,
   type ChatSidePanelMode,
   type ChatWindowDockPhase,
-} from '@/components/layout/chat-workspace-layout';
+} from '@/app/layout/workspace';
 
 interface WindowRightDockResult {
   appliedWidth: number;
@@ -215,7 +215,7 @@ function waitForWindowWidthAtMost(width: number): Promise<boolean> {
 }
 
 function publishRightDockLayout(phase: ChatWindowDockPhase, dockWidth: number, baseWidth: number): void {
-  useLayoutStore.getState().setChatWindowRightDockLayout({
+  useLayoutStore.getState().setViewportRightDockLayout({
     phase,
     dockWidth: normalizeWidth(dockWidth),
     baseWidth: Math.max(1, normalizeWidth(baseWidth)),
@@ -223,7 +223,7 @@ function publishRightDockLayout(phase: ChatWindowDockPhase, dockWidth: number, b
 }
 
 function clearRightDockLayout(): void {
-  useLayoutStore.getState().setChatWindowRightDockLayout(null);
+  useLayoutStore.getState().setViewportRightDockLayout(null);
 }
 
 export function useChatWindowDockController({
@@ -437,7 +437,7 @@ export function useChatWindowDockController({
     const seq = transitionSeqRef.current + 1;
     transitionSeqRef.current = seq;
     const sidePanelWidth = currentState.sidePanelWidth;
-    const dockLayout = useLayoutStore.getState().chatWindowRightDockLayout;
+    const dockLayout = useLayoutStore.getState().viewportRightDockLayout;
     const windowWidth = normalizeWidth(window.innerWidth);
     const appliedDockWidth = currentState.mode === 'docked'
       ? currentState.appliedDockWidth || sidePanelWidth + CHAT_WORKSPACE_LAYOUT.paneResizerWidth

@@ -1,9 +1,9 @@
 import { Globe2 } from 'lucide-react';
 import { applicationNavigation, applicationPages } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
-import { WORLD_PAGES } from '@/pages/World/navigation';
+import { WORLD_PAGES } from './navigation';
 
-const WorldPage = lazyWithPreload(() => import('@/pages/World'));
+const WorldPage = lazyWithPreload(() => import('./pages'));
 
 export const worldPlugin = definePlugin({
   id: 'world',

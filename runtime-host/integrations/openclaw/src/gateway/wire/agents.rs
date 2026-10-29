@@ -550,7 +550,7 @@ pub struct AgentDeleted {
     pub ok: bool,
     pub removed_bindings: u64,
     pub failed_count: usize,
-    pub purge_failed_count: usize,
+    pub purge_failed: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1096,7 +1096,7 @@ struct AgentDeletedWire {
     #[serde(default)]
     failed: Vec<Value>,
     #[serde(default)]
-    purge_failed: Vec<Value>,
+    purge_failed: bool,
 }
 
 impl AgentDeletedWire {
@@ -1109,7 +1109,7 @@ impl AgentDeletedWire {
             ok: self.ok,
             removed_bindings: self.removed_bindings,
             failed_count: self.failed.len(),
-            purge_failed_count: self.purge_failed.len(),
+            purge_failed: self.purge_failed,
         })
     }
 }

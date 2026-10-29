@@ -537,6 +537,7 @@ impl Projection {
             retired_tool_ids: Vec::new(),
             retired_approval_ids: Vec::new(),
         };
+        let input_receipts = sync.view.input_receipts.take();
         let mut next = self.reserve_sync(&mut sync.view)?;
         sync.view = next
             .reconcile_sync(&sync, &baseline, ItemsSyncMode::Merge)
@@ -544,6 +545,7 @@ impl Projection {
                 self.trace_failure("sync.reconcile", None, None);
                 failure(Failure::InvalidReadback)
             })?;
+        sync.view.input_receipts = input_receipts;
         sync.view.epoch = epoch;
         if restoring {
             sync.cut = SessionSyncCut::Restored {

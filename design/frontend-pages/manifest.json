@@ -3725,7 +3725,7 @@
       "sources": [
         "src/pages/Settings/index.tsx",
         "src/pages/Settings/LicenseSection.tsx",
-        "src/lib/license.ts"
+        "src/plugins/account/api/license.ts"
       ],
       "errors": [],
       "missing": [],
@@ -3764,7 +3764,7 @@
       "sources": [
         "src/pages/Settings/index.tsx",
         "src/pages/Settings/LicenseSection.tsx",
-        "src/lib/license.ts"
+        "src/plugins/account/api/license.ts"
       ],
       "errors": [],
       "missing": [],
@@ -3803,7 +3803,7 @@
       "sources": [
         "src/pages/Settings/index.tsx",
         "src/pages/Settings/LicenseSection.tsx",
-        "src/lib/license.ts"
+        "src/plugins/account/api/license.ts"
       ],
       "errors": [],
       "missing": [],
@@ -3842,7 +3842,7 @@
       "sources": [
         "src/pages/Settings/index.tsx",
         "src/pages/Settings/LicenseSection.tsx",
-        "src/lib/license.ts"
+        "src/plugins/account/api/license.ts"
       ],
       "errors": [],
       "missing": [],
@@ -3881,7 +3881,7 @@
       "sources": [
         "src/pages/Settings/index.tsx",
         "src/pages/Settings/LicenseSection.tsx",
-        "src/lib/license.ts"
+        "src/plugins/account/api/license.ts"
       ],
       "errors": [],
       "missing": [],
@@ -3920,7 +3920,7 @@
       "sources": [
         "src/pages/Settings/index.tsx",
         "src/pages/Settings/LicenseSection.tsx",
-        "src/lib/license.ts"
+        "src/plugins/account/api/license.ts"
       ],
       "errors": [],
       "missing": [],
@@ -3959,7 +3959,7 @@
       "sources": [
         "src/pages/Settings/index.tsx",
         "src/pages/Settings/LicenseSection.tsx",
-        "src/lib/license.ts"
+        "src/plugins/account/api/license.ts"
       ],
       "errors": [],
       "missing": [],
@@ -3998,7 +3998,7 @@
       "sources": [
         "src/pages/Settings/index.tsx",
         "src/pages/Settings/LicenseSection.tsx",
-        "src/lib/license.ts"
+        "src/plugins/account/api/license.ts"
       ],
       "errors": [],
       "missing": [],
@@ -4037,7 +4037,7 @@
       "sources": [
         "src/pages/Settings/index.tsx",
         "src/pages/Settings/LicenseSection.tsx",
-        "src/lib/license.ts"
+        "src/plugins/account/api/license.ts"
       ],
       "errors": [],
       "missing": [],
@@ -4189,7 +4189,7 @@
       "route": "/settings?section=diagnostics",
       "sources": [
         "src/pages/Settings/index.tsx",
-        "src/lib/diagnostics-archive.ts"
+        "src/plugins/settings/services/diagnostics-archive.ts"
       ],
       "errors": [],
       "missing": [],
@@ -4227,7 +4227,7 @@
       "route": "/settings?section=diagnostics",
       "sources": [
         "src/pages/Settings/index.tsx",
-        "src/lib/diagnostics-archive.ts",
+        "src/plugins/settings/services/diagnostics-archive.ts",
         "src/types/call-log/diagnostics.ts"
       ],
       "errors": [],
@@ -16129,7 +16129,7 @@
       "group": "世界",
       "route": "/world",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16166,7 +16166,7 @@
       "group": "世界",
       "route": "/world",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16203,7 +16203,7 @@
       "group": "世界",
       "route": "/world",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16240,7 +16240,7 @@
       "group": "世界",
       "route": "/world",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16277,7 +16277,7 @@
       "group": "世界",
       "route": "/world",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16314,7 +16314,7 @@
       "group": "世界",
       "route": "/world?tab=materials",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16351,7 +16351,7 @@
       "group": "世界",
       "route": "/world?tab=materials",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16388,7 +16388,7 @@
       "group": "世界",
       "route": "/world?tab=materials&mode=upload",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16425,7 +16425,7 @@
       "group": "世界",
       "route": "/world?tab=materials&mode=wiki",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16462,7 +16462,7 @@
       "group": "世界",
       "route": "/world?tab=materials&mode=connection",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16499,7 +16499,7 @@
       "group": "世界",
       "route": "/world?tab=materials&mode=draft",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16536,7 +16536,7 @@
       "group": "世界",
       "route": "/world?tab=actions",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16573,7 +16573,7 @@
       "group": "世界",
       "route": "/world?tab=actions",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16610,7 +16610,7 @@
       "group": "世界",
       "route": "/world/model",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16647,7 +16647,7 @@
       "group": "世界",
       "route": "/world/model",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16684,7 +16684,7 @@
       "group": "世界",
       "route": "/world/model",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16721,7 +16721,7 @@
       "group": "世界",
       "route": "/world/model",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16758,7 +16758,7 @@
       "group": "世界",
       "route": "/world/changes",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16795,7 +16795,7 @@
       "group": "世界",
       "route": "/world/changes",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16832,7 +16832,7 @@
       "group": "世界",
       "route": "/world/changes",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16869,7 +16869,7 @@
       "group": "世界",
       "route": "/world/changes",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16906,7 +16906,7 @@
       "group": "世界",
       "route": "/world/changes",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16943,7 +16943,7 @@
       "group": "世界",
       "route": "/world/changes",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -16980,7 +16980,7 @@
       "group": "世界",
       "route": "/world/settings",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -17017,7 +17017,7 @@
       "group": "世界",
       "route": "/world/settings?tab=capabilities",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -17054,7 +17054,7 @@
       "group": "世界",
       "route": "/world/settings?tab=operations",
       "sources": [
-        "src/pages/World/index.tsx"
+        "src/plugins/world/pages/index.tsx"
       ],
       "errors": [],
       "missing": [],
@@ -18303,7 +18303,7 @@
         "src/pages/Providers/index.tsx",
         "src/components/settings/ProvidersSettings.tsx",
         "src/components/settings/ProviderCredentialModelsEditor.tsx",
-        "src/lib/custom-media-provider-contracts.ts"
+        "src/plugins/providers/domain/custom-media-provider-contracts.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18343,7 +18343,7 @@
         "src/pages/Providers/index.tsx",
         "src/components/settings/ProvidersSettings.tsx",
         "src/components/settings/ProviderCredentialModelsEditor.tsx",
-        "src/lib/custom-media-provider-contracts.ts"
+        "src/plugins/providers/domain/custom-media-provider-contracts.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18383,7 +18383,7 @@
         "src/pages/Providers/index.tsx",
         "src/components/settings/ProvidersSettings.tsx",
         "src/components/settings/ProviderCredentialModelsEditor.tsx",
-        "src/lib/custom-media-provider-contracts.ts"
+        "src/plugins/providers/domain/custom-media-provider-contracts.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18577,7 +18577,7 @@
       "route": "/providers",
       "sources": [
         "src/components/settings/MediaCapabilitiesPanel.tsx",
-        "src/lib/capability-routing.ts"
+        "src/plugins/providers/services/capability-routing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18615,7 +18615,7 @@
       "route": "/providers",
       "sources": [
         "src/components/settings/MediaCapabilitiesPanel.tsx",
-        "src/lib/capability-routing.ts"
+        "src/plugins/providers/services/capability-routing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18653,7 +18653,7 @@
       "route": "/providers",
       "sources": [
         "src/components/settings/MediaCapabilitiesPanel.tsx",
-        "src/lib/capability-routing.ts"
+        "src/plugins/providers/services/capability-routing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18691,7 +18691,7 @@
       "route": "/providers",
       "sources": [
         "src/components/settings/MediaCapabilitiesPanel.tsx",
-        "src/lib/capability-routing.ts"
+        "src/plugins/providers/services/capability-routing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18729,7 +18729,7 @@
       "route": "/providers",
       "sources": [
         "src/components/settings/MediaCapabilitiesPanel.tsx",
-        "src/lib/capability-routing.ts"
+        "src/plugins/providers/services/capability-routing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18767,7 +18767,7 @@
       "route": "/providers",
       "sources": [
         "src/components/settings/MediaCapabilitiesPanel.tsx",
-        "src/lib/capability-routing.ts"
+        "src/plugins/providers/services/capability-routing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18805,7 +18805,7 @@
       "route": "/providers",
       "sources": [
         "src/components/settings/MediaCapabilitiesPanel.tsx",
-        "src/lib/capability-routing.ts"
+        "src/plugins/providers/services/capability-routing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18879,10 +18879,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18919,10 +18919,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18959,10 +18959,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -18999,10 +18999,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19039,10 +19039,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19079,10 +19079,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19119,10 +19119,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19159,10 +19159,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19199,10 +19199,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19239,10 +19239,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19279,10 +19279,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19319,10 +19319,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19359,10 +19359,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19399,10 +19399,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19439,10 +19439,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19479,10 +19479,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19519,10 +19519,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19559,10 +19559,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -19599,10 +19599,10 @@
       "group": "账户",
       "route": "/dashboard",
       "sources": [
-        "src/components/layout/Sidebar.tsx",
+        "src/app/layout/Sidebar.tsx",
         "src/components/billing/SubscriptionPlanDialog.tsx",
-        "src/lib/subscription.ts",
-        "src/lib/billing.ts"
+        "src/plugins/account/api/subscription.ts",
+        "src/plugins/account/api/billing.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20109,7 +20109,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20148,7 +20148,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20187,7 +20187,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20226,7 +20226,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20265,7 +20265,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20304,7 +20304,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20343,7 +20343,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20382,7 +20382,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20421,7 +20421,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20460,7 +20460,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],
@@ -20499,7 +20499,7 @@
       "sources": [
         "src/pages/Auth/index.tsx",
         "src/stores/account.ts",
-        "src/lib/account.ts"
+        "src/plugins/account/api/account.ts"
       ],
       "errors": [],
       "missing": [],

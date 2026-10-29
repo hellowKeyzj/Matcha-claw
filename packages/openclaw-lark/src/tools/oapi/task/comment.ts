@@ -48,7 +48,7 @@ const FeishuTaskCommentSchema = Type.Union([
         description: '排序方式（asc=从旧到新，desc=从新到旧，默认 asc）',
       }),
     ),
-    page_size: Type.Optional(Type.Number({ description: '每页数量，默认 50，最大 100' })),
+    page_size: Type.Optional(Type.Number({ description: '每页数量，默认 50，最大 100', minimum: 1, maximum: 100 })),
     page_token: Type.Optional(Type.String({ description: '分页标记' })),
   }),
 
@@ -113,7 +113,7 @@ export function registerFeishuTaskCommentTool(api: OpenClawPluginApi): void {
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.trace(() => `create: task_guid=${p.task_guid}, reply_to=${p.reply_to_comment_id ?? 'none'}`);
+              log.info(`create: task_guid=${p.task_guid}, reply_to=${p.reply_to_comment_id ?? 'none'}`);
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const data: any = {
@@ -154,7 +154,7 @@ export function registerFeishuTaskCommentTool(api: OpenClawPluginApi): void {
             // LIST
             // -----------------------------------------------------------------
             case 'list': {
-              log.trace(() =>
+              log.info(
                 `list: resource_id=${p.resource_id}, direction=${p.direction ?? 'asc'}, page_size=${p.page_size ?? 50}`,
               );
 
@@ -193,7 +193,7 @@ export function registerFeishuTaskCommentTool(api: OpenClawPluginApi): void {
             // GET
             // -----------------------------------------------------------------
             case 'get': {
-              log.trace(() => `get: comment_id=${p.comment_id}`);
+              log.info(`get: comment_id=${p.comment_id}`);
 
               const res = await client.invoke(
                 'feishu_task_comment.get',

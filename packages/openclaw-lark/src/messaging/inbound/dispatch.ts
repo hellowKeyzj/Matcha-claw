@@ -20,7 +20,7 @@ import type { HistoryEntry } from 'openclaw/plugin-sdk/reply-history';
 import { clearHistoryEntriesIfEnabled } from 'openclaw/plugin-sdk/reply-history';
 import type { MessageContext } from '../types';
 import type { FeishuGroupConfig, LarkAccount  } from '../../core/types';
-import { isTraceEnabled, larkLogger } from '../../core/lark-logger';
+import { larkLogger } from '../../core/lark-logger';
 import { ticketElapsed } from '../../core/lark-ticket';
 import { createFeishuReplyDispatcher } from '../../card/reply-dispatcher';
 import {
@@ -91,8 +91,8 @@ async function dispatchCommentMessage(
   skillFilter?: string[],
 ): Promise<void> {
   const effectiveSessionKey = dc.threadSessionKey ?? dc.route.sessionKey;
-  if (isTraceEnabled()) dc.log(`feishu[${dc.account.accountId}]: dispatching comment reply (session=${effectiveSessionKey})`);
-  log.trace(() => `dispatching comment reply (session=${effectiveSessionKey})`);
+  dc.log(`feishu[${dc.account.accountId}]: dispatching comment reply (session=${effectiveSessionKey})`);
+  log.info(`dispatching comment reply (session=${effectiveSessionKey})`);
 
   let delivered = false;
 
@@ -146,12 +146,10 @@ async function dispatchSyntheticMessage(
   const effectiveSessionKey = dc.threadSessionKey ?? dc.route.sessionKey;
   const isVcSynthetic = dc.ctx.chatId === SYNTHETIC_VC_CHAT_ID;
   let deliveredFinalToSender = false;
-  if (isTraceEnabled()) {
-    dc.log(
-      `feishu[${dc.account.accountId}]: dispatching synthetic reply (session=${effectiveSessionKey}, target=${dc.ctx.chatId})`,
-    );
-  }
-  log.trace(() => `dispatching synthetic reply (session=${effectiveSessionKey})`);
+  dc.log(
+    `feishu[${dc.account.accountId}]: dispatching synthetic reply (session=${effectiveSessionKey}, target=${dc.ctx.chatId})`,
+  );
+  log.info(`dispatching synthetic reply (session=${effectiveSessionKey})`);
 
   await dc.core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
@@ -159,6 +157,7 @@ async function dispatchSyntheticMessage(
     dispatcherOptions: {
       deliver: async (payload, info) => {
         const text = payload.text?.trim() ?? '';
+        const preview = text.slice(0, 120);
 
         // VC invited flows intentionally keep the synthetic target to avoid
         // leaking intermediate tool output to IM, but the final business
@@ -178,7 +177,7 @@ async function dispatchSyntheticMessage(
               accountId: dc.account.accountId,
             });
             dc.log(
-              `feishu[${dc.account.accountId}]: synthetic VC final delivered explicitly to sender=${dc.ctx.senderId}`,
+              `feishu[${dc.account.accountId}]: synthetic VC final delivered explicitly to sender=${dc.ctx.senderId}, preview="${preview}"`,
             );
             return;
           } catch (err) {
@@ -251,7 +250,7 @@ async function dispatchNormalMessage(
   }
 
   const effectiveSessionKey = dc.threadSessionKey ?? dc.route.sessionKey;
-  const toolUseDisplay = resolveToolUseDisplayConfig({
+  const toolUseDisplay = await resolveToolUseDisplayConfig({
     cfg: dc.accountScopedCfg,
     feishuCfg: dc.account.config,
     agentId: dc.route.agentId,
@@ -287,8 +286,8 @@ async function dispatchNormalMessage(
   const queueKey = buildQueueKey(dc.account.accountId, dc.ctx.chatId, dc.ctx.threadId);
   registerActiveDispatcher(queueKey, { abortCard, abortController });
 
-  if (isTraceEnabled()) dc.log(`feishu[${dc.account.accountId}]: dispatching to agent (session=${effectiveSessionKey})`);
-  log.trace(() => `dispatching to agent (session=${effectiveSessionKey})`);
+  dc.log(`feishu[${dc.account.accountId}]: dispatching to agent (session=${effectiveSessionKey})`);
+  log.info(`dispatching to agent (session=${effectiveSessionKey})`);
 
   // Attach the resolved bot-peer (if any) so the outbound `ensureMention`
   // backstop can guarantee an @ even when the LLM forgets. Resolved by the

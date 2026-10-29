@@ -9,7 +9,7 @@ import { resolveSupportedLanguage } from '@/i18n/language';
 import {
   hostSettingsFetchAll,
   hostSettingsPutPatch,
-} from '@/lib/settings-runtime';
+} from './settings-runtime';
 
 type Theme = 'light' | 'dark' | 'system';
 type UpdateChannel = 'stable' | 'beta' | 'dev';

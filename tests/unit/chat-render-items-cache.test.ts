@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getOrBuildStaticRenderItemsCacheEntry,
   prewarmStaticRenderItems,
-} from '@/plugins/message-rendering/chat-render-items-cache';
+} from '@/plugins/chat/static-render-items-cache';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 

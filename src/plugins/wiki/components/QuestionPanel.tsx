@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { waitForCall } from '@/lib/call-log-await';
 import { hostWikiAskQuestion, hostWikiCallResult, hostWikiCancelQuestion, hostWikiQuestionTask, hostWikiSaveQuestion } from '@/lib/host-api';
-import { fetchSelectableProviderModels, resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/lib/provider-models';
+import { fetchSelectableProviderModels, resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/plugins/providers/services/provider-models';
 import type { ModelCatalogEntry } from '@/types/subagent';
 import type { WikiQuestionTask } from '@/types/wiki-capabilities';
 import { QuestionMessage, type QuestionTurn } from '@/plugins/wiki/components/QuestionMessage';

@@ -11,7 +11,7 @@ pub(crate) fn session_view(view: &SessionView) -> Value {
     if crate::trace::enabled() {
         crate::trace::log_unscoped("sessions.public.view", || crate::trace::view_shape(view));
     }
-    json!({
+    let mut value = json!({
         "sessionKey": &view.session_key,
         "endpointSessionId": &view.endpoint_session_id,
         "ownership": &view.ownership,
@@ -27,7 +27,11 @@ pub(crate) fn session_view(view: &SessionView) -> Value {
         "runtime": fact_value(&view.runtime, runtime_value),
         "window": fact_value(&view.window, window_value),
         "completeness": completeness_value(&view.completeness),
-    })
+    });
+    if let Some(receipts) = &view.input_receipts {
+        value["inputReceipts"] = json!(receipts);
+    }
+    value
 }
 
 fn fact_value<T>(fact: &SessionFact<T>, map: impl Fn(&T) -> Value) -> Value {
@@ -50,17 +54,24 @@ fn item_value(item: &SessionItem) -> Value {
         SessionItem::UserMessage {
             item_id,
             message_id,
+            input_ids,
             text,
             content,
             status,
-        } => json!({
-            "kind": "userMessage",
-            "itemId": item_id,
-            "messageId": message_id,
-            "text": text,
-            "content": content.iter().map(content_value).collect::<Vec<_>>(),
-            "status": item_status(*status),
-        }),
+        } => {
+            let mut value = json!({
+                "kind": "userMessage",
+                "itemId": item_id,
+                "messageId": message_id,
+                "text": text,
+                "content": content.iter().map(content_value).collect::<Vec<_>>(),
+                "status": item_status(*status),
+            });
+            if !input_ids.is_empty() {
+                value["inputIds"] = json!(input_ids);
+            }
+            value
+        },
         SessionItem::AssistantTurn {
             item_id,
             run_id,
@@ -303,12 +314,14 @@ fn run_progress(progress: RunProgress) -> Value {
 
 fn run_startup_phase(phase: RunStartupPhase) -> &'static str {
     match phase {
+        RunStartupPhase::WaitingForState => "waiting_for_state",
         RunStartupPhase::PreparingWorkspace => "preparing_workspace",
         RunStartupPhase::NamingWorktree => "naming_worktree",
         RunStartupPhase::CreatingWorktree => "creating_worktree",
         RunStartupPhase::RunningSetup => "running_setup",
         RunStartupPhase::ProvisioningEnvironment => "provisioning_environment",
         RunStartupPhase::PreparingContext => "preparing_context",
+        RunStartupPhase::MemoryFlushing => "memory_flushing",
         RunStartupPhase::StartingModel => "starting_model",
     }
 }

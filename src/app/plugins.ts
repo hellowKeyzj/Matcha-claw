@@ -1,5 +1,6 @@
 import { createPluginHost } from '@/plugin-host/core';
-import { observeInstalledAppPlugins } from '@/plugin-host/installed';
+import { observeInstalledAppPlugins } from '@/plugins/application-plugins/installed';
+import { applicationPluginsPlugin } from '@/plugins/application-plugins/plugin';
 import { applicationShellPlugin } from './extensions';
 import { runtimePlugin } from '@/plugins/runtime/plugin';
 import { accountPlugin } from '@/plugins/account/plugin';
@@ -27,6 +28,7 @@ import { searchPlugin } from '@/plugins/search/plugin';
 
 export const applicationPluginsHost = createPluginHost([
   applicationShellPlugin,
+  applicationPluginsPlugin,
   runtimePlugin,
   accountPlugin,
   settingsPlugin,

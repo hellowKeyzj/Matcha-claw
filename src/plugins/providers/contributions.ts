@@ -1,5 +1,5 @@
 import { contribute, lazyWithPreload } from '@/plugin-host/core';
-import { PROVIDER_TYPE_INFO } from '@/lib/providers';
+import { PROVIDER_TYPE_INFO } from '@/plugins/providers/domain/providers';
 import {
   providerAuthMethods,
   providerForms,
@@ -65,7 +65,7 @@ export const providerContributions = [
     kind: 'discovery',
     label: 'providerModels.actions.discover',
     async discover(accountId, signal) {
-      const { discoverProviderModels } = await import('@/lib/provider-model-catalog');
+      const { discoverProviderModels } = await import('@/plugins/providers/services/provider-model-catalog');
       return (await discoverProviderModels(accountId, signal)).models;
     },
   }),

@@ -16,6 +16,7 @@ pub const MAX_ID_BYTES: usize = 256;
 pub const MAX_CONTENT_REF_BYTES: usize = 512;
 pub const MAX_TEXT_BYTES: usize = 128 * 1024;
 pub const MAX_ITEMS: usize = 200;
+pub const MAX_INPUT_IDS: usize = 50;
 pub const MAX_TOOLS: usize = 128;
 pub const MAX_SEGMENTS: usize = 64;
 pub const MAX_APPROVALS: usize = 32;
@@ -69,6 +70,7 @@ impl SessionProvider {
 pub enum SessionModelOverrideSource {
     User,
     Auto,
+    Inherited,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -320,6 +322,8 @@ pub enum SessionItem {
     UserMessage {
         item_id: String,
         message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        input_ids: Vec<String>,
         text: String,
         content: Vec<SessionContent>,
         status: ItemStatus,
@@ -423,12 +427,14 @@ pub enum RunProgress {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStartupPhase {
+    WaitingForState,
     PreparingWorkspace,
     NamingWorktree,
     CreatingWorktree,
     RunningSetup,
     ProvisioningEnvironment,
     PreparingContext,
+    MemoryFlushing,
     StartingModel,
 }
 
@@ -578,12 +584,49 @@ impl SessionFacts {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum SessionInputReceipt {
+    Pending {
+        input_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        queued: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cancelled: Option<bool>,
+    },
+    Consumed {
+        input_id: String,
+        message_id: String,
+    },
+}
+
+pub fn valid_input_ids(ids: &[String]) -> bool {
+    let mut unique = HashSet::with_capacity(ids.len().min(MAX_INPUT_IDS));
+    ids.len() <= MAX_INPUT_IDS && ids.iter().all(|id| valid_id(id) && unique.insert(id))
+}
+
+fn valid_input_receipts(receipts: &[SessionInputReceipt]) -> bool {
+    let mut ids = HashSet::with_capacity(receipts.len().min(MAX_INPUT_IDS));
+    receipts.len() <= MAX_INPUT_IDS && receipts.iter().all(|receipt| {
+        let (input_id, valid) = match receipt {
+            SessionInputReceipt::Pending { input_id, queued, cancelled } => {
+                (input_id, queued.is_none_or(|value| value) && cancelled.is_none_or(|value| value))
+            }
+            SessionInputReceipt::Consumed { input_id, message_id } => (input_id, valid_id(message_id)),
+        };
+        valid && valid_id(input_id) && ids.insert(input_id)
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionView {
     pub session_key: String,
     pub endpoint_session_id: Option<String>,
     pub ownership: Option<SessionSourceBinding>,
     pub model_state: Option<SessionModelState>,
+    /// Targeted native read results, independent of the transcript window and Host watermark.
+    /// Not retained in SessionState; absence is not evidence that an input was rejected.
+    pub input_receipts: Option<Vec<SessionInputReceipt>>,
     pub goal: SessionGoalView,
     pub identity: SessionIdentity,
     pub epoch: u64,
@@ -609,6 +652,8 @@ impl Serialize for SessionView {
             endpoint_session_id: Option<&'a str>,
             ownership: Option<&'a SessionSourceBinding>,
             model_state: Option<&'a SessionModelState>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            input_receipts: Option<&'a Vec<SessionInputReceipt>>,
             goal: &'a SessionGoalView,
             identity: &'a SessionIdentity,
             epoch: u64,
@@ -627,6 +672,7 @@ impl Serialize for SessionView {
             endpoint_session_id: self.endpoint_session_id.as_deref(),
             ownership: self.ownership.as_ref(),
             model_state: self.model_state.as_ref(),
+            input_receipts: self.input_receipts.as_ref(),
             goal: &self.goal,
             identity: &self.identity,
             epoch: self.epoch,
@@ -655,6 +701,7 @@ impl<'de> Deserialize<'de> for SessionView {
             endpoint_session_id: Option<String>,
             ownership: Option<SessionSourceBinding>,
             model_state: Option<SessionModelState>,
+            input_receipts: Option<Vec<SessionInputReceipt>>,
             goal: SessionGoalView,
             identity: SessionIdentity,
             epoch: u64,
@@ -674,6 +721,7 @@ impl<'de> Deserialize<'de> for SessionView {
             endpoint_session_id: wire.endpoint_session_id,
             ownership: wire.ownership,
             model_state: wire.model_state,
+            input_receipts: wire.input_receipts,
             goal: wire.goal,
             identity: wire.identity,
             epoch: wire.epoch,
@@ -726,6 +774,7 @@ impl SessionView {
                 .model_state
                 .as_ref()
                 .is_some_and(|model_state| !valid_session_model_state(model_state))
+            || self.input_receipts.as_deref().is_some_and(|receipts| !valid_input_receipts(receipts))
             || self.goal.validate().is_err()
             || !valid_identity(&self.identity)
             || !valid_epoch(self.epoch)
@@ -984,12 +1033,14 @@ fn public_delta_item(item: &SessionItem) -> SessionItem {
         SessionItem::UserMessage {
             item_id,
             message_id,
+            input_ids,
             text,
             content,
             status,
         } => SessionItem::UserMessage {
             item_id: item_id.clone(),
             message_id: message_id.clone(),
+            input_ids: input_ids.clone(),
             text: text.clone(),
             content: content.iter().map(public_delta_content).collect(),
             status: *status,
@@ -1572,6 +1623,7 @@ impl SessionState {
             endpoint_session_id: self.endpoint_session_id.clone(),
             ownership: None,
             model_state: None,
+            input_receipts: None,
             goal: self.goal.clone(),
             identity: self.identity.clone(),
             epoch: self.epoch,
@@ -3845,12 +3897,15 @@ fn valid_item(item: &SessionItem) -> bool {
         SessionItem::UserMessage {
             item_id,
             message_id,
+            input_ids,
             text,
             content,
             ..
         } => {
             valid_id(item_id)
                 && message_id.as_deref().is_none_or(valid_id)
+                && valid_input_ids(input_ids)
+                && (input_ids.is_empty() || message_id.is_some())
                 && valid_payload_text(text, MAX_TEXT_BYTES)
                 && content.len() <= MAX_SEGMENTS
                 && content.iter().all(valid_content)

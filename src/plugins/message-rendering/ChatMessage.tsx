@@ -3,7 +3,7 @@ import type { ChatUserMessageItem } from '@/plugins/message-rendering/chat-rende
 import { MessageShell } from '@/plugins/message-rendering/chat-message-shell';
 import { UserMessageBody } from '@/plugins/message-rendering/user-message-body';
 import { useLargeTextContent } from '@/plugins/message-rendering/large-text-loader';
-import { ChatImageLightbox } from '@/plugins/chat/components/ChatImageLightbox';
+import { ChatImageLightbox } from '@/plugins/message-rendering/ChatImageLightbox';
 import {
   UserMessageMedia,
   UserMessageMetaBar,

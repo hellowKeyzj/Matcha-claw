@@ -1,3 +1,5 @@
+import { decodeOpenClawSandboxUrl } from '@/types/openclaw-runtime-surface';
+
 // Native independent-origin proxy; untrusted documents remain in its opaque inner frame.
 export type SandboxMessage = (data: unknown, ports: readonly MessagePort[]) => void;
 
@@ -19,11 +21,9 @@ export class SandboxChannel {
   private readyTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(readonly frame: HTMLIFrameElement, sandboxUrl: string) {
-    this.url = new URL(sandboxUrl);
-    if (!['http:', 'https:'].includes(this.url.protocol) || this.url.username || this.url.password
-      || this.url.hash || this.url.pathname !== '/mcp-app-sandbox'
-      || [...this.url.searchParams.keys()].some((key) => key !== 'csp')
-      || this.url.origin === window.location.origin) throw new Error('Invalid isolated sandbox');
+    const url = decodeOpenClawSandboxUrl(sandboxUrl);
+    if (!url || url.origin === window.location.origin) throw new Error('Invalid isolated sandbox');
+    this.url = url;
     this.nonce = window.location.protocol === 'file:'
       ? Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, '0')).join('')
       : null;

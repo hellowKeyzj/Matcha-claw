@@ -73,7 +73,10 @@ impl Request {
             && self.input.session_identity == self.scope.identity
             && self.input.session_key == self.scope.identity.session_key
             && self.scope.identity.endpoint.is_local_provider()
-            && valid_endpoint_session_id(self.input.endpoint_session_id.as_deref()))
+            && valid_endpoint_session_id(self.input.endpoint_session_id.as_deref())
+            && self.input.input_ids.as_deref().is_none_or(|ids| {
+                !ids.is_empty() && crate::state::valid_input_ids(ids)
+            }))
         .then_some(())
         .ok_or(DecodeError::Invalid)?;
 
@@ -118,7 +121,7 @@ impl Request {
             window,
             self.input.endpoint_session_id,
             self.input.include_canonical.unwrap_or(true),
-        )
+        )?.with_input_ids(self.input.input_ids.unwrap_or_default())
     }
 
     pub(crate) fn identity(&self) -> &Identity {
@@ -159,6 +162,8 @@ struct Input {
     offset: Option<usize>,
     #[serde(default)]
     include_canonical: Option<bool>,
+    #[serde(default)]
+    input_ids: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

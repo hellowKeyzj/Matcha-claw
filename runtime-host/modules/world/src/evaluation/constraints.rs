@@ -169,6 +169,9 @@ pub(super) fn validate_oracle(oracle: &OracleSpec) -> Result<(), ConstraintFailu
     match oracle {
         OracleSpec::Program { implementation, .. } => {
             let valid_entry = match &implementation.entrypoint {
+                Entrypoint::Builtin { registration, revision } => {
+                    !registration.trim().is_empty() && revision.0 > 0
+                }
                 Entrypoint::Native {
                     registration,
                     host_build,

@@ -47,12 +47,12 @@ import {
   TaskCenterToolbar,
 } from '@/plugins/tasks/components/task-center/surface';
 import { useCronStore } from '@/plugins/tasks/stores/cron';
-import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { agentScope as createAgentScope, buildCapabilityScopeKey, buildRuntimeEndpointKey, runtimeInstanceScope, type RuntimeEndpointRef } from '@/types/desktop/runtime-address';
 import { useSkillsStore } from '@/plugins/skills/stores/skills';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
-import { hostChannelsFetchSnapshot } from '@/lib/channel-runtime';
-import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/lib/provider-models';
+import { hostChannelsFetchSnapshot } from '@/plugins/channels/channel-runtime';
+import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/plugins/providers/services/provider-models';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { formatRelativeTime, cn } from '@/lib/utils';
 import { toast } from 'sonner';

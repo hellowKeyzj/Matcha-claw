@@ -1,6 +1,6 @@
 import { isSessionOwnership, type SessionOwnership } from '../../../../../src/types/desktop/session-ownership';
 import type { SessionGoalView } from '../../../../../src/types/session-goal';
-import { tryDecodeSessionGoalView } from '../../../../../src/types/session/snapshot';
+import { tryDecodeSessionGoalView, type SessionInputReceipt } from '../../../../../src/types/session/snapshot';
 
 const MAX_SESSION_KEY_BYTES = 4096;
 const MAX_ID_BYTES = 256;
@@ -10,6 +10,7 @@ const MAX_ITEMS = 200;
 const MAX_TOOLS = 128;
 const MAX_SEGMENTS = 64;
 const MAX_APPROVALS = 32;
+const MAX_INPUT_IDS = 50;
 const MAX_CHANGE_COUNT = 16;
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 export type SessionIdentity = Readonly<{
@@ -33,7 +34,7 @@ export type SessionModelIdentity = Readonly<{
 export type SessionModelState = Readonly<{
   selected?: SessionModelIdentity;
   active?: SessionModelIdentity;
-  overrideSource?: 'user' | 'auto';
+  overrideSource?: 'user' | 'auto' | 'inherited';
   selectionId?: string;
 }>;
 
@@ -42,6 +43,7 @@ export type SessionView = Readonly<{
   ownership: SessionOwnership | null;
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
+  inputReceipts?: SessionInputReceipt[];
   goal: SessionGoalView;
   identity: SessionIdentity;
   epoch: number;
@@ -75,12 +77,14 @@ export type ToolView = Readonly<{
 export type ApprovalView = Readonly<{ approvalId: string; runId?: string | null; phase: string }>;
 export type RuntimeActivity = 'compacting';
 export type RuntimeStartupPhase =
+  | 'waiting_for_state'
   | 'preparing_workspace'
   | 'naming_worktree'
   | 'creating_worktree'
   | 'running_setup'
   | 'provisioning_environment'
   | 'preparing_context'
+  | 'memory_flushing'
   | 'starting_model';
 export type RuntimeRunProgress = Readonly<
   | { kind: 'startup'; phase: RuntimeStartupPhase }
@@ -197,15 +201,16 @@ export function decodeSessionContentLoadResponse(value: unknown): SessionContent
 
 export function decodeSessionView(value: unknown): SessionView | null {
   if (!isRecord(value)
-    || !hasExactKeys(value, [
+    || !hasAllowedKeys(value, [
       'sessionKey', 'ownership', 'endpointSessionId', 'modelState', 'goal', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals',
       'runtime', 'window', 'completeness',
-    ])
+    ], ['inputReceipts'])
     || typeof value.sessionKey !== 'string'
     || !isSessionKey(value.sessionKey)
     || (value.ownership !== null && !isSessionOwnership(value.ownership))
     || !isNullableSessionKey(value.endpointSessionId)
     || !isNullableSessionModelState(value.modelState)
+    || (Object.hasOwn(value, 'inputReceipts') && !isInputReceipts(value.inputReceipts))
     || !tryDecodeSessionGoalView(value.goal)
     || !isSessionIdentity(value.identity)
     || value.identity.sessionKey !== value.sessionKey
@@ -334,6 +339,27 @@ function isFact(value: unknown, isValue: (value: unknown) => boolean): boolean {
     && isGaps(value.incomplete.gaps);
 }
 
+export function isSessionInputIds(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= MAX_INPUT_IDS
+    && value.every(isId) && new Set(value).size === value.length;
+}
+
+function isInputReceipts(value: unknown): boolean {
+  return Array.isArray(value) && value.length <= MAX_INPUT_IDS && value.every(isInputReceipt)
+    && new Set(value.map((receipt) => receipt.inputId)).size === value.length;
+}
+
+function isInputReceipt(value: unknown): value is SessionInputReceipt {
+  if (!isRecord(value) || !isId(value.inputId)) return false;
+  if (value.state === 'pending') {
+    return hasAllowedKeys(value, ['state', 'inputId'], ['queued', 'cancelled'])
+      && (!Object.hasOwn(value, 'queued') || value.queued === true)
+      && (!Object.hasOwn(value, 'cancelled') || value.cancelled === true);
+  }
+  return value.state === 'consumed' && hasExactKeys(value, ['state', 'inputId', 'messageId'])
+    && isId(value.messageId);
+}
+
 function isItems(value: unknown): boolean {
   return Array.isArray(value) && value.length <= MAX_ITEMS && value.every(isItem);
 }
@@ -349,9 +375,11 @@ function isApprovals(value: unknown): boolean {
 function isItem(value: unknown): boolean {
   if (!isRecord(value) || typeof value.kind !== 'string') return false;
   if (value.kind === 'userMessage') {
-    return hasExactKeys(value, ['kind', 'itemId', 'messageId', 'text', 'content', 'status'])
+    return hasAllowedKeys(value, ['kind', 'itemId', 'messageId', 'text', 'content', 'status'], ['inputIds'])
       && isId(value.itemId)
       && isNullableId(value.messageId)
+      && (!Object.hasOwn(value, 'inputIds') || isSessionInputIds(value.inputIds)
+        && (value.inputIds.length === 0 || value.messageId !== null))
       && isText(value.text)
       && isSegments(value.content)
       && isItemStatus(value.status);
@@ -482,12 +510,14 @@ function isRunProgress(value: unknown): boolean {
 }
 
 function isRunStartupPhase(value: unknown): boolean {
-  return value === 'preparing_workspace'
+  return value === 'waiting_for_state'
+    || value === 'preparing_workspace'
     || value === 'naming_worktree'
     || value === 'creating_worktree'
     || value === 'running_setup'
     || value === 'provisioning_environment'
     || value === 'preparing_context'
+    || value === 'memory_flushing'
     || value === 'starting_model';
 }
 
@@ -530,7 +560,7 @@ function isNullableSessionModelState(value: unknown): boolean {
     && hasAllowedKeys(value, [], ['selected', 'active', 'overrideSource', 'selectionId'])
     && (value.selected === undefined || isSessionModelIdentity(value.selected))
     && (value.active === undefined || isSessionModelIdentity(value.active))
-    && (value.overrideSource === undefined || value.overrideSource === 'user' || value.overrideSource === 'auto')
+    && (value.overrideSource === undefined || value.overrideSource === 'user' || value.overrideSource === 'auto' || value.overrideSource === 'inherited')
     && (value.selectionId === undefined || isId(value.selectionId))
   );
 }

@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import i18n from '@/i18n';
 import { MediaCapabilitiesPanel } from '@/plugins/providers/components/MediaCapabilitiesPanel';
-import type { CapabilityRouting } from '@/lib/capability-routing';
-import type { ProviderModel } from '@/lib/provider-model-catalog';
+import type { CapabilityRouting } from '@/plugins/providers/services/capability-routing';
+import type { ProviderModel } from '@/plugins/providers/services/provider-model-catalog';
 
 const routingState = vi.hoisted(() => ({
   routing: {} as CapabilityRouting,

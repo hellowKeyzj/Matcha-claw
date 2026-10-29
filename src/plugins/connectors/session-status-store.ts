@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { readSessionConnectorStatuses, setSessionMcpServerEnabled } from '@/lib/connectors-call';
+import { readSessionConnectorStatuses, setSessionMcpServerEnabled } from './services/client';
 import type { SessionConnectorStatus, SessionConnectorStatusResultType as ConnectorResultType } from '@/types/connectors-observation';
 import {
   buildSessionIdentityKey,

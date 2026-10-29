@@ -18,7 +18,7 @@ import {
   hostWikiRunLint,
   hostWikiUpdateLintConfig,
 } from '@/lib/host-api';
-import { fetchSelectableProviderModels } from '@/lib/provider-models';
+import { fetchSelectableProviderModels } from '@/plugins/providers/services/provider-models';
 import type { ModelCatalogEntry } from '@/types/subagent';
 import type { WikiLintConfig, WikiLintFinding, WikiLintFixReceipt, WikiLintState } from '@/types/wiki-capabilities';
 import { WikiEmpty, WikiIconButton, WikiPanel, WikiPanelHeader, WikiSurface } from '@/plugins/wiki/components/WikiChrome';

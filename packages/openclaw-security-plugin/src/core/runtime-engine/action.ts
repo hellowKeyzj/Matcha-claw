@@ -17,19 +17,22 @@ function toAuditItem(input: ApplyBeforeToolCallDecisionInput): SecurityAuditItem
 }
 
 export function applyBeforeToolCallDecision(input: ApplyBeforeToolCallDecisionInput): BeforeToolCallGuardOutcome {
-  const auditItem = toAuditItem(input);
+  const auditItems = [toAuditItem(input)];
+  if (input.decision.requiresApproval) {
+    return { params: input.decision.nextParams, requiresApproval: true, auditItems };
+  }
   if (input.decision.auditAction === "block") {
     return {
       block: true,
       blockReason: input.decision.blockReason ?? "Blocked by security-core",
-      auditItem,
+      auditItems,
     };
   }
   if (input.decision.nextParams) {
     return {
       params: input.decision.nextParams,
-      auditItem,
+      auditItems,
     };
   }
-  return { auditItem };
+  return { auditItems };
 }

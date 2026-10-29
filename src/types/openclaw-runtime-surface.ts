@@ -56,6 +56,7 @@ export type OpenClawRuntimeSurfaceDescriptor = OpenClawMcpAppSurfaceDescriptor |
 export interface OpenClawSandboxCsp {
   connectDomains?: string[];
   resourceDomains?: string[];
+  mediaDomains?: string[];
   frameDomains?: string[];
   baseUriDomains?: string[];
   blockDescendantFrames?: boolean;
@@ -181,7 +182,7 @@ export function decodeOpenClawRuntimeSurfaceDescriptor(value: unknown): OpenClaw
 export function decodeOpenClawMcpAppViewResult(value: unknown): OpenClawMcpAppViewResult | null {
   return record(value) && keys(value, ['sessionIdentity', 'viewId', 'html', 'sandboxUrl', 'toolInput', 'toolResult', 'readOnly', 'messageSupported', 'updateModelContextSupported'], ['csp'])
     && isOpenClawSurfaceSessionIdentity(value.sessionIdentity) && text(value.viewId, 128)
-    && html(value.html) && sandboxUrl(value.sandboxUrl) && json(value.toolInput) && json(value.toolResult)
+    && html(value.html) && decodeOpenClawSandboxUrl(value.sandboxUrl) && json(value.toolInput) && json(value.toolResult)
     && typeof value.readOnly === 'boolean' && typeof value.messageSupported === 'boolean' && typeof value.updateModelContextSupported === 'boolean'
     && value.readOnly === !value.messageSupported && (!value.updateModelContextSupported || value.messageSupported)
     && (value.csp === undefined || sandboxCsp(value.csp)) ? value as unknown as OpenClawMcpAppViewResult : null;
@@ -189,7 +190,7 @@ export function decodeOpenClawMcpAppViewResult(value: unknown): OpenClawMcpAppVi
 export function decodeOpenClawCanvasViewResult(value: unknown): OpenClawCanvasViewResult | null {
   return record(value) && keys(value, ['sessionIdentity', 'documentId', 'html', 'sandboxUrl'])
     && isOpenClawSurfaceSessionIdentity(value.sessionIdentity) && documentId(value.documentId)
-    && html(value.html) && sandboxUrl(value.sandboxUrl) ? value as unknown as OpenClawCanvasViewResult : null;
+    && html(value.html) && decodeOpenClawSandboxUrl(value.sandboxUrl) ? value as unknown as OpenClawCanvasViewResult : null;
 }
 export function decodeOpenClawMcpAppResult<T extends OpenClawMcpAppOperationId>(operationId: T, value: unknown): OpenClawMcpAppResults[T] | null {
   if (operationId === 'mcp.app.view') return decodeOpenClawMcpAppViewResult(value) as OpenClawMcpAppResults[T] | null;
@@ -217,17 +218,39 @@ function listResult(value: Record<string, unknown>, field: string): boolean {
     && (value.nextCursor === undefined || text(value.nextCursor));
 }
 function sandboxCsp(value: unknown): boolean {
-  return record(value) && keys(value, [], ['connectDomains', 'resourceDomains', 'frameDomains', 'baseUriDomains', 'blockDescendantFrames'])
+  return record(value) && keys(value, [], ['connectDomains', 'resourceDomains', 'mediaDomains', 'frameDomains', 'baseUriDomains', 'blockDescendantFrames'])
     && Object.entries(value).every(([key, item]) => key === 'blockDescendantFrames' ? typeof item === 'boolean'
-      : Array.isArray(item) && item.every((domain) => text(domain, 2048)));
+      : Array.isArray(item) && item.every((domain) => key === 'mediaDomains' ? sandboxMediaSource(domain) : text(domain, 2048)));
 }
-function sandboxUrl(value: unknown): boolean {
-  if (!text(value, 12 * 1024)) return false;
+function sandboxMediaSource(value: unknown): boolean {
+  if (!text(value, 2048)) return false;
+  if (value === 'https:' || value === 'blob:') return true;
   try {
     const url = new URL(value);
-    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password && !url.hash
-      && url.pathname === '/mcp-app-sandbox' && [...url.searchParams.keys()].every((key) => key === 'csp');
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password
+      && url.pathname === '/' && !url.search && !url.hash
+      && (/^\[[0-9A-Fa-f:.]+\]$/u.test(url.hostname) || /^(?:\*\.)?[A-Za-z0-9.-]+$/u.test(url.hostname));
   } catch { return false; }
+}
+export function decodeOpenClawSandboxUrl(value: unknown): URL | null {
+  if (!text(value, 12 * 1024)) return null;
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash
+      || url.pathname !== '/mcp-app-sandbox') return null;
+    const seen = new Set<string>();
+    for (const [key, value] of url.searchParams) {
+      if (seen.has(key)) return null;
+      if (key === 'csp') {
+        if (!value || value.length > 6832 || /[^A-Za-z0-9_-]/u.test(value)) return null;
+      } else if (key === 'v') {
+        // OpenClaw versions the public shell and security headers with SHA-256 hex.
+        if (value.length !== 64 || /[^0-9a-f]/u.test(value)) return null;
+      } else return null;
+      seen.add(key);
+    }
+    return url.search && !seen.size ? null : url;
+  } catch { return null; }
 }
 function html(value: unknown): boolean { return typeof value === 'string' && new TextEncoder().encode(value).length <= 2 * 1024 * 1024; }
 function documentId(value: unknown): value is string { return text(value, 256) && value !== '.' && value !== '..' && /^[A-Za-z0-9._-]+$/.test(value); }

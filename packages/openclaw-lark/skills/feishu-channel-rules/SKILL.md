@@ -1,11 +1,10 @@
 ---
 name: feishu-channel-rules
 description: |
-  Lark/Feishu channel output rules. Always active in Lark conversations.
-alwaysActive: true
+  Lark/Feishu channel output formatting guidance. Loads when the agent is replying through the Feishu channel.
 ---
 
-# Lark Output Rules
+# Feishu Channel Output Guidance
 
 ## Writing Style
 

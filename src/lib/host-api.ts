@@ -1831,7 +1831,7 @@ function bindSessionIdentityInput<T extends { sessionIdentity: SessionIdentity }
   };
 }
 
-export async function hostSessionObserve(payload: { sessionIdentity: SessionIdentity; leaseId: string; limit?: number }, options?: SessionCapabilityOptions): Promise<SessionObservationResult> {
+export async function hostSessionObserve(payload: { sessionIdentity: SessionIdentity; leaseId: string; limit?: number; inputIds?: string[] }, options?: SessionCapabilityOptions): Promise<SessionObservationResult> {
   const traceId = options?.traceId ?? createSessionTraceId('session.observe');
   const result = await sessionIdentityCapabilityExecute<unknown>({
     capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
@@ -1862,6 +1862,7 @@ export async function hostSessionWindowFetch(
     limit?: number;
     offset?: number;
     includeCanonical?: boolean;
+    inputIds?: string[];
   },
 ): Promise<HostSessionWindowResult> {
   return sessionIdentityCapabilityExecute<HostSessionWindowResult>({
@@ -2060,6 +2061,7 @@ export async function hostSessionLoad(
     endpointSessionId?: string;
     sessionIdentity: SessionIdentity;
     limit?: number;
+    inputIds?: string[];
   },
   options?: SessionCapabilityOptions,
 ): Promise<HostSessionLoadResult> {

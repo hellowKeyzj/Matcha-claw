@@ -11,16 +11,16 @@ import {
   hostChannelsDeleteConfig,
   hostChannelsDisconnect,
   hostChannelsFetchSnapshot,
-} from '@/lib/channel-runtime';
+} from './channel-runtime';
 import {
   isChannelRuntimeConnected,
   pickChannelRuntimeStatus,
   type ChannelRuntimeAccountSnapshot,
   type ChannelRuntimeSummarySnapshot,
-} from '@/lib/channel-status';
+} from './channel-status';
 import { CHANNEL_NAMES, type Channel, type ChannelType } from '@/types/channel';
 import { buildCapabilityScopeKey, runtimeInstanceScope, type RuntimeInstanceScope } from '@/types/desktop/runtime-address';
-import { useRuntimeEndpointsStore, selectManagementEndpoint } from '@/stores/runtime-endpoints';
+import { useRuntimeEndpointsStore, selectManagementEndpoint } from '@/plugins/runtime/directory';
 
 interface FetchChannelsOptions {
   silent?: boolean;

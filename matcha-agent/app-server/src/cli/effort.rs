@@ -71,6 +71,64 @@ impl Capabilities {
     }
 }
 
+fn arguments(
+    config: &Config,
+    paths: &Paths,
+    agent_id: &str,
+    level: Option<Level>,
+) -> rpc::Result<Vec<String>> {
+    let agent = config
+        .agents
+        .get(agent_id)
+        .ok_or_else(|| rpc::Error::not_found("Agent"))?;
+    let model = super::projection::model(config, agent)?;
+    let settings = super::projection::settings(paths, agent_id, agent)?;
+    let settings = serde_json::to_string(&settings)
+        .map_err(|source| rpc::Error::internal("native_settings_encode").with_source(source))?;
+    let mut args = vec![
+        "--effort-capabilities".into(),
+        model.clone().unwrap_or_else(|| "default".into()),
+        "--settings".into(),
+        settings,
+    ];
+    if let Some(level) = level {
+        args.extend(["--effort".into(), level.as_str().into()]);
+    }
+    Ok(args)
+}
+
+pub(crate) async fn prepare(
+    config: &Config,
+    paths: &Paths,
+    agent_id: &str,
+    level: Option<Level>,
+    protocol: Option<ProviderKind>,
+) -> rpc::Result<super::process::Launch> {
+    let args = arguments(config, paths, agent_id, level)?;
+    let mut launch = super::projection::launch(config, paths, agent_id, args).await?;
+    route(&mut launch.env, protocol);
+    Ok(launch)
+}
+
+fn route(
+    environment: &mut std::collections::BTreeMap<String, String>,
+    protocol: Option<ProviderKind>,
+) {
+    if let Some(protocol) = protocol {
+        // Draft routing changes only this read-only child, never Provider facts or credentials.
+        for selector in SELECTOR_ENVS {
+            environment.insert(selector.into(), "0".into());
+        }
+        environment.insert("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST".into(), "1".into());
+        if let Some(selector) = protocol.selector() {
+            environment.insert(selector.into(), "1".into());
+        }
+        for name in ["OPENAI_MODEL", "GEMINI_MODEL", "GROK_MODEL"] {
+            environment.remove(name);
+        }
+    }
+}
+
 pub(crate) async fn query(
     config: &Config,
     paths: &Paths,
@@ -78,43 +136,55 @@ pub(crate) async fn query(
     level: Option<Level>,
     protocol: Option<ProviderKind>,
 ) -> rpc::Result<Capabilities> {
+    inspect(&prepare(config, paths, agent_id, level, protocol).await?).await
+}
+
+pub(crate) fn ensure_current(
+    expected: &super::process::Launch,
+    config: &Config,
+    paths: &Paths,
+    agent_id: &str,
+    level: Option<Level>,
+    protocol: Option<ProviderKind>,
+) -> rpc::Result<()> {
     let agent = config
         .agents
         .get(agent_id)
         .ok_or_else(|| rpc::Error::not_found("Agent"))?;
-    let model = super::projection::model(config, agent)?;
-    let mut args = vec![
-        "--effort-capabilities".into(),
-        model.clone().unwrap_or_else(|| "default".into()),
-    ];
-    if let Some(level) = level {
-        args.extend(["--effort".into(), level.as_str().into()]);
-    }
-    let mut launch = super::projection::launch(config, paths, agent_id, args).await?;
-    if let Some(protocol) = protocol {
-        // Draft routing changes only this read-only child, never Provider facts or credentials.
-        for selector in SELECTOR_ENVS {
-            launch.env.insert(selector.into(), "0".into());
-        }
-        launch
-            .env
-            .insert("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST".into(), "1".into());
-        if let Some(selector) = protocol.selector() {
-            launch.env.insert(selector.into(), "1".into());
-        }
-        for name in ["OPENAI_MODEL", "GEMINI_MODEL", "GROK_MODEL"] {
-            launch.env.remove(name);
-        }
-        let model_env = match protocol {
-            ProviderKind::Openai | ProviderKind::OpenaiResponses => Some("OPENAI_MODEL"),
-            ProviderKind::Gemini => Some("GEMINI_MODEL"),
-            ProviderKind::Grok => Some("GROK_MODEL"),
-            _ => None,
-        };
-        if let (Some(name), Some(model)) = (model_env, model) {
-            launch.env.insert(name.into(), model);
+    let mut environment = super::projection::provider_environment(config, agent)?;
+    // prepare adds these Server-owned paths after resolving the provider environment.
+    for name in [
+        "WEIXIN_STATE_DIR",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS",
+    ] {
+        if let Some(value) = expected.env.get(name) {
+            environment.insert(name.into(), value.clone());
         }
     }
+    route(&mut environment, protocol);
+    let mut args = config.cli.args.clone();
+    args.extend(arguments(config, paths, agent_id, level)?);
+    if expected.command != config.cli.command
+        || expected.args != args
+        || expected.env != environment
+        || expected.cwd != paths.workspace(agent_id)?
+    {
+        return Err(rpc::Error::unavailable(
+            "thinking_instance_changed",
+            "The native configuration changed while reading thinking; retry the read",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn inspect(launch: &super::process::Launch) -> rpc::Result<Capabilities> {
+    let launch = super::process::Launch {
+        command: launch.command.clone(),
+        args: launch.args.clone(),
+        env: launch.env.clone(),
+        cwd: launch.cwd.clone(),
+    };
     let output = super::command::run_bounded(launch, 16 * 1024, CONTROL_WINDOW).await?;
     let mut lines = output.stdout.lines();
     let line = lines

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { boardExecute } from '@/lib/board-api';
+import { boardExecute } from '../board-api';
 import { subscribeBrowserRecovery, subscribeHostEvent } from '@/lib/host-events';
 import {
   boardIdentityKey,

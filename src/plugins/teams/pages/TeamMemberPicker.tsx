@@ -1,7 +1,7 @@
 import { useId, useMemo, useState } from 'react';
 import { Check, Crown, RefreshCw, Search, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { AgentAvatar } from '@/components/common/AgentAvatar';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';

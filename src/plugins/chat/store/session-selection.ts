@@ -1,7 +1,7 @@
 import type { RuntimeEndpointRef } from '@/types/desktop/runtime-address';
 import { isCronSessionKey } from '@/plugins/chat/store/cron-session-utils';
 import { buildRuntimeScopeKey, sameRuntimeEndpointScope } from '@/plugins/chat/store/session-identity';
-import { readSessionsFromState } from '@/plugins/chat/store/session-helpers';
+import { readSessionsFromState } from '@/plugins/chat/session-catalog';
 import { buildCurrentConversationFromSessionRecord, createDraftCurrentConversation } from '@/plugins/chat/store/session-runtime-graph';
 import { isOrdinarySessionCandidate } from '@/plugins/chat/store/types';
 import type { ChatCurrentConversation, ChatSession, ChatSessionRuntimeEndpointTarget, ChatSessionRuntimeGraph, ChatStoreState } from '@/plugins/chat/store/types';

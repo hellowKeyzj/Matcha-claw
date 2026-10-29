@@ -618,10 +618,11 @@ interface types {
     record expression-annotation { field: list<string>, result-type: value-type, nullable: bool, optional: bool, effects: list<effect> }
     record source-requirement { binding: definition-ref, required: list<source-capability> }
     record definition-ir { reference: definition-ref, body-hash: string, body: definition-body, scope: string, valid-time: valid-time, annotations: list<expression-annotation>, policy-refs: list<policy-ref>, source-requirements: list<source-requirement> }
+    record entrypoint-builtin { registration: string, revision: u64 }
     record entrypoint-native { registration: string, host-build: string }
     record entrypoint-wasm { %world: string, %interface: string }
     record entrypoint-process { executable: string, protocol: contract-ref }
-    variant entrypoint { native(entrypoint-native), wasm(entrypoint-wasm), process(entrypoint-process) }
+    variant entrypoint { builtin(entrypoint-builtin), native(entrypoint-native), wasm(entrypoint-wasm), process(entrypoint-process) }
     record implementation-ref { install-id: string, package-digest: string, artifact-id: string, artifact-digest: string, entrypoint: entrypoint, contracts: list<contract-ref>, config-digest: string, dependency-lock: string, checkpoint-format: option<string> }
     variant dependency-target { definition(definition-ref), contract(contract-ref), implementation(implementation-ref), config(string), unit(unit), schema(schema-ref), policy(policy-ref) }
     enum dependency-use { %type, body, %interface, schema, source-capability, policy, unit, provider, compiler-pass, config }

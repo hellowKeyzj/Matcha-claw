@@ -1,7 +1,7 @@
 /**
  * Chat store facade.
  *
- * Runtime implementation lives in `src/stores/chat/store.ts`.
+ * Runtime implementation lives in `src/plugins/chat/store/store.ts`.
  * This file only re-exports store entry and public types.
  */
 export { useChatStore } from '@/plugins/chat/store/store';
@@ -12,7 +12,6 @@ export {
 export { selectCurrentChatSendGate } from '@/plugins/chat/store/selectors';
 
 export type {
-  AttachedFileMeta,
   ContentBlock,
   ChatSession,
   ChatSessionHistoryStatus,

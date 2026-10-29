@@ -11,7 +11,7 @@ interface MonacoDiffViewerProps {
 
 const MonacoDiffViewerInner = lazy(async () => {
   const [{ DiffEditor, languageForPath }, { useSettingsStore }, { useResolvedTheme }] = await Promise.all([
-    import('@/lib/monaco/loader'),
+    import('./monaco/loader'),
     import('@/plugins/settings/store'),
     import('@/lib/use-resolved-theme'),
   ]);

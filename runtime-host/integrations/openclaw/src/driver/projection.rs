@@ -345,12 +345,14 @@ fn run_progress(progress: CanonicalRunProgress) -> RunProgress {
 
 fn run_startup_phase(phase: ChatStatusPhase) -> RunStartupPhase {
     match phase {
+        ChatStatusPhase::WaitingForState => RunStartupPhase::WaitingForState,
         ChatStatusPhase::PreparingWorkspace => RunStartupPhase::PreparingWorkspace,
         ChatStatusPhase::NamingWorktree => RunStartupPhase::NamingWorktree,
         ChatStatusPhase::CreatingWorktree => RunStartupPhase::CreatingWorktree,
         ChatStatusPhase::RunningSetup => RunStartupPhase::RunningSetup,
         ChatStatusPhase::ProvisioningEnvironment => RunStartupPhase::ProvisioningEnvironment,
         ChatStatusPhase::PreparingContext => RunStartupPhase::PreparingContext,
+        ChatStatusPhase::MemoryFlushing => RunStartupPhase::MemoryFlushing,
         ChatStatusPhase::StartingModel => RunStartupPhase::StartingModel,
     }
 }
@@ -468,6 +470,7 @@ const fn session_error_kind(kind: crate::session::protocol::SessionErrorKind) ->
         crate::session::protocol::SessionErrorKind::Timeout => "timeout",
         crate::session::protocol::SessionErrorKind::RateLimit => "rate_limit",
         crate::session::protocol::SessionErrorKind::ContextLength => "context_length",
+        crate::session::protocol::SessionErrorKind::StateContention => "state_contention",
         crate::session::protocol::SessionErrorKind::Unknown => "unknown",
     }
 }

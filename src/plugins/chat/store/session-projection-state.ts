@@ -4,7 +4,7 @@ import type { ChatSessionRuntimeState, ChatStoreState } from '@/plugins/chat/sto
 import type { SessionRenderProjectionCache } from '@/plugins/chat/store/session-render-projection';
 import { getCronSessionBaseKey } from '@/plugins/chat/store/cron-session-utils';
 
-export type SessionProjectionState = Omit<SessionView, 'modelState'> & {
+export type SessionProjectionState = Omit<SessionView, 'modelState' | 'inputReceipts'> & {
   runtimeNotice?: ChatSessionRuntimeState['runtimeNotice'] | null;
   retiredItemIds?: ReadonlySet<string>;
   recordKey?: string;

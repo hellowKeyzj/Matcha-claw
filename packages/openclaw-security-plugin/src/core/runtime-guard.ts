@@ -1,14 +1,9 @@
-import type { BeforeToolCallResult, SecurityCoreRuntimeConfig, SecurityPreset } from "./types.js";
+import type { BeforeToolCallResult, SecurityAuditItem, SecurityCoreRuntimeConfig, SecurityPreset } from "./types.js";
 import type { RuntimeDetection } from "./runtime-engine/types.js";
 import { applyBeforeToolCallDecision } from "./runtime-engine/action.js";
 import { buildToolCallText, detectBeforeToolCall } from "./runtime-engine/detector.js";
 import { decideBeforeToolCall } from "./runtime-engine/decision.js";
-import {
-  hasConfirmFlag,
-  isAllowlisted,
-  normalizeToolParams,
-  stripConfirmFlag,
-} from "./runtime-engine/shared.js";
+import { isAllowlisted, normalizeToolParams } from "./runtime-engine/shared.js";
 
 function logDetectionIfNeeded(params: {
   runtimeConfig: { logDetections: boolean };
@@ -51,38 +46,26 @@ export async function evaluateBeforeToolCall(params: {
     logger,
   } = params;
 
-  const toolParams = normalizeToolParams(rawToolParams);
-  const confirmed = hasConfirmFlag(toolParams);
-  const strippedParams = stripConfirmFlag(toolParams);
-
-  if (!runtimeConfig.runtimeGuardEnabled) {
+  if (!runtimeConfig.runtimeGuardEnabled || !hasBeforeToolChecksEnabled(runtimeConfig)) {
     return;
   }
-  if (!hasBeforeToolChecksEnabled(runtimeConfig)) {
-    if (confirmed) {
-      return { params: strippedParams };
-    }
-    return;
-  }
-
   if (isAllowlisted(toolName, sessionKey, runtimeConfig)) {
-    if (confirmed) {
-      return { params: strippedParams };
-    }
     return;
   }
 
-  const detection = detectBeforeToolCall({
+  const toolParams = normalizeToolParams(rawToolParams);
+  const detections = detectBeforeToolCall({
     toolName,
     toolParams,
     fullText: buildToolCallText(toolParams),
     runtimeConfig,
   });
-  if (detection) {
+  let nextParams = toolParams;
+  let requiresApproval = false;
+  const auditItems: SecurityAuditItem[] = [];
+  for (const detection of detections) {
     const decision = decideBeforeToolCall({
-      toolName,
-      strippedParams,
-      confirmed,
+      toolParams: nextParams,
       runtimeConfig,
       detection,
     });
@@ -92,16 +75,21 @@ export async function evaluateBeforeToolCall(params: {
       detection,
       effectiveAction: decision.effectiveAction,
     });
-    return applyBeforeToolCallDecision({
-      toolName,
-      preset,
-      agentId,
-      decision,
-    });
+    const result = applyBeforeToolCallDecision({ toolName, preset, agentId, decision });
+    auditItems.push(...result.auditItems);
+    if (result.block) {
+      return { ...result, auditItems };
+    }
+    nextParams = result.params ?? nextParams;
+    requiresApproval ||= result.requiresApproval === true;
   }
 
-  if (confirmed) {
-    return { params: strippedParams };
+  if (auditItems.length > 0) {
+    return {
+      ...(nextParams !== toolParams || requiresApproval ? { params: nextParams } : {}),
+      requiresApproval,
+      auditItems,
+    };
   }
   return;
 }

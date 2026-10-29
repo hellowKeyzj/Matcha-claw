@@ -1,6 +1,5 @@
 import type { ToolActivityRenderer } from './tool-renderers/types';
 import type { TFunction } from 'i18next';
-import { isControlledSessionRenderTool } from '@/plugins/chat/store/session-render-projection';
 import type {
   SessionRenderAssistantBubbleToolResult,
   SessionRenderToolCard,
@@ -140,14 +139,14 @@ export function buildToolActivityViewModel(tool: SessionRenderToolCard, t: TFunc
   return withRuntimeSurface(buildToolActivityViewModelFromRegistry(tool, t, renderers), tool, sessionIdentity);
 }
 
-export function buildCanvasActivityViewModel(item: SessionRenderAssistantBubbleToolResult, t: TFunction<'chat'>, tool?: SessionRenderToolCard, sessionIdentity?: SessionIdentity): ToolActivityViewModel | null {
+export function buildCanvasActivityViewModel(item: SessionRenderAssistantBubbleToolResult, t: TFunction<'chat'>, tool?: SessionRenderToolCard, sessionIdentity?: SessionIdentity, toolIsImmutable = false): ToolActivityViewModel | null {
   if (item.preview.kind !== 'canvas') {
     return null;
   }
 
   const rawText = item.rawText?.trim() ?? '';
   const preview = tool && isOpenClawTool(tool) ? readMcpAppPreview(tool.details) : undefined;
-  const runtimeSurface = tool && isControlledSessionRenderTool(tool)
+  const runtimeSurface = tool && toolIsImmutable
     ? preview && isOpenClawSurfaceSessionIdentity(sessionIdentity) ? bindRuntimeSurface(preview, sessionIdentity, tool.toolCallId) : undefined
     : tool ? buildToolRuntimeSurface(tool, sessionIdentity) : undefined;
   const title = preview?.title ?? (item.preview.title?.trim() || item.toolName);

@@ -54,7 +54,7 @@ const FeishuBitableAppTableViewSchema = Type.Union([
     action: Type.Literal('list'),
     app_token: Type.String({ description: '多维表格 token' }),
     table_id: Type.String({ description: '数据表 ID' }),
-    page_size: Type.Optional(Type.Number({ description: '每页数量，默认 50，最大 100' })),
+    page_size: Type.Optional(Type.Number({ description: '每页数量，默认 50，最大 100', minimum: 1, maximum: 100 })),
     page_token: Type.Optional(Type.String({ description: '分页标记' })),
   }),
 
@@ -132,7 +132,7 @@ export function registerFeishuBitableAppTableViewTool(api: OpenClawPluginApi): v
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.trace(() =>
+              log.info(
                 `create: app_token=${p.app_token}, table_id=${p.table_id}, view_name=${p.view_name}, view_type=${p.view_type ?? 'grid'}`,
               );
 
@@ -168,7 +168,7 @@ export function registerFeishuBitableAppTableViewTool(api: OpenClawPluginApi): v
             // GET
             // -----------------------------------------------------------------
             case 'get': {
-              log.trace(() => `get: app_token=${p.app_token}, table_id=${p.table_id}, view_id=${p.view_id}`);
+              log.info(`get: app_token=${p.app_token}, table_id=${p.table_id}, view_id=${p.view_id}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table_view.get',
@@ -198,7 +198,7 @@ export function registerFeishuBitableAppTableViewTool(api: OpenClawPluginApi): v
             // LIST
             // -----------------------------------------------------------------
             case 'list': {
-              log.trace(() => `list: app_token=${p.app_token}, table_id=${p.table_id}`);
+              log.info(`list: app_token=${p.app_token}, table_id=${p.table_id}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table_view.list',
@@ -235,7 +235,7 @@ export function registerFeishuBitableAppTableViewTool(api: OpenClawPluginApi): v
             // PATCH
             // -----------------------------------------------------------------
             case 'patch': {
-              log.trace(() =>
+              log.info(
                 `patch: app_token=${p.app_token}, table_id=${p.table_id}, view_id=${p.view_id}, view_name=${p.view_name}`,
               );
 

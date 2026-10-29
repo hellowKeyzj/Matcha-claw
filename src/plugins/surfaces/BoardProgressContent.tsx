@@ -5,7 +5,7 @@ import { hostOpenClawProgressCardRequest } from '@/lib/host-api';
 import { subscribeBrowserRecovery, subscribeHostEvent } from '@/lib/host-events';
 import { getOrBuildMarkdownBody } from '@/plugins/message-rendering/md-pipeline';
 import { useChatStore } from '@/plugins/chat/store';
-import { findSessionRecordKey } from '@/plugins/chat/store/session-identity';
+import { selectSessionRuntimeByIdentity } from '@/plugins/chat/session-status';
 import { isRunActive } from '@/types/session/runtime-state';
 import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
 import type { BoardIdentity, BoardWidget } from '@/types/board';
@@ -20,10 +20,7 @@ function ProgressCardContent({ sessionIdentity, title }: { sessionIdentity: Sess
   const [card, setCard] = useState<OpenClawProgressCard | null>();
   const [error, setError] = useState<LoadError | null>(null);
   const retry = useRef(() => {});
-  const runtime = useChatStore((state) => {
-    const key = findSessionRecordKey(state, sessionIdentity);
-    return key ? state.loadedSessions[key]?.runtime : undefined;
-  });
+  const runtime = useChatStore((state) => selectSessionRuntimeByIdentity(state, sessionIdentity));
   const markdown = card?.markdown;
   const html = useMemo(() => {
     if (!markdown) return '';

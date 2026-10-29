@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { X } from 'lucide-react';
-import { AgentAvatar } from '@/components/common/AgentAvatar';
-import { buildTemplateAvatarSeed } from '@/lib/agent-avatar';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
+import { buildTemplateAvatarSeed } from '@/plugins/agents/presentation/agent-avatar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';

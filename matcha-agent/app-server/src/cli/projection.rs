@@ -24,6 +24,43 @@ pub async fn environment(
         .agents
         .get(agent_id)
         .ok_or_else(|| Error::not_found("agent"))?;
+    let mut environment = provider_environment(config, agent)?;
+    let runtime = paths.runtime(agent_id)?;
+    let workspace = paths.workspace(agent_id)?;
+    tokio::fs::create_dir_all(&runtime)
+        .await
+        .map_err(|source| {
+            Error::new(
+                -32005,
+                "native_runtime_create",
+                "Creating the Agent's native runtime directory failed",
+            )
+            .with_source(source)
+        })?;
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .map_err(|source| {
+            Error::new(
+                -32005,
+                "native_workspace_create",
+                "Creating the Agent's workspace failed",
+            )
+            .with_source(source)
+        })?;
+    write_settings(config, paths, agent_id).await?;
+    environment.insert(
+        "WEIXIN_STATE_DIR".into(),
+        path_string(runtime.join("channels").join("weixin"))?,
+    );
+    environment.insert("CLAUDE_CONFIG_DIR".into(), path_string(runtime)?);
+    environment.insert("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS".into(), "1".into());
+    Ok(environment)
+}
+
+pub(super) fn provider_environment(
+    config: &Config,
+    agent: &AgentConfig,
+) -> rpc::Result<BTreeMap<String, String>> {
     let provider = provider(config, agent)?;
     let removed = managed_env_names();
     let sources = crate::provider::configured_sources(config)?;
@@ -174,6 +211,7 @@ pub async fn environment(
         if let Some(base_url) = provider.base_url {
             environment.insert(provider.kind.base_url_env().into(), base_url);
         }
+        // Default/background fallback only; explicit native request models remain authoritative.
         if let Some(model) = agent.model.as_ref().or(provider.model.as_ref()) {
             let name = match provider.kind {
                 ProviderKind::Openai | ProviderKind::OpenaiResponses => Some("OPENAI_MODEL"),
@@ -186,35 +224,6 @@ pub async fn environment(
             }
         }
     }
-    let runtime = paths.runtime(agent_id)?;
-    let workspace = paths.workspace(agent_id)?;
-    tokio::fs::create_dir_all(&runtime)
-        .await
-        .map_err(|source| {
-            Error::new(
-                -32005,
-                "native_runtime_create",
-                "Creating the Agent's native runtime directory failed",
-            )
-            .with_source(source)
-        })?;
-    tokio::fs::create_dir_all(&workspace)
-        .await
-        .map_err(|source| {
-            Error::new(
-                -32005,
-                "native_workspace_create",
-                "Creating the Agent's workspace failed",
-            )
-            .with_source(source)
-        })?;
-    write_settings(config, paths, agent_id).await?;
-    environment.insert(
-        "WEIXIN_STATE_DIR".into(),
-        path_string(runtime.join("channels").join("weixin"))?,
-    );
-    environment.insert("CLAUDE_CONFIG_DIR".into(), path_string(runtime)?);
-    environment.insert("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS".into(), "1".into());
     Ok(environment)
 }
 
@@ -315,6 +324,35 @@ pub(crate) async fn launch(
         env,
         cwd: paths.workspace(agent_id)?,
     })
+}
+
+pub(super) fn connection_identity(
+    agent: &AgentConfig,
+    environment: &BTreeMap<String, String>,
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let mut identity = Sha256::new();
+    let provider = agent.provider.as_deref().unwrap_or_default();
+    identity.update((provider.len() as u64).to_le_bytes());
+    identity.update(provider.as_bytes());
+    for name in managed_env_names() {
+        if matches!(
+            name,
+            "ANTHROPIC_MODEL" | "OPENAI_MODEL" | "GEMINI_MODEL" | "GROK_MODEL"
+        ) {
+            continue;
+        }
+        let value = environment.get(&env_name(name.into()));
+        identity.update((name.len() as u64).to_le_bytes());
+        identity.update(name.as_bytes());
+        identity.update([u8::from(value.is_some())]);
+        if let Some(value) = value {
+            identity.update((value.len() as u64).to_le_bytes());
+            identity.update(value.as_bytes());
+        }
+    }
+    identity.finalize().into()
 }
 
 pub(super) fn model(config: &Config, agent: &AgentConfig) -> rpc::Result<Option<String>> {

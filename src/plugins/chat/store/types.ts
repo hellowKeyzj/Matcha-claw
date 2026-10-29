@@ -25,20 +25,6 @@ import type {
 } from '@/types/session/snapshot';
 import type { GatewayTransportIssue } from '@/types/session/runtime-state';
 
-/** Metadata for chat attachments backed by a local file or Gateway media record. */
-export interface AttachedFileMeta {
-  fileName: string;
-  mimeType: string;
-  fileSize: number;
-  preview: string | null;
-  previewStatus?: 'unavailable';
-  attachmentStatus?: SessionRenderAttachedFile['attachmentStatus'];
-  filePath?: string;
-  gatewayUrl?: string;
-  mediaReference?: string;
-  source?: 'user-upload' | 'tool-result' | 'message-ref';
-}
-
 export type ChatAttachedFile = SessionRenderAttachedFile;
 
 /** Content block inside a message */
@@ -156,12 +142,14 @@ export interface ChatSessionImageGenerationRuntimeState {
 }
 
 export type ChatSessionRunStartupPhase =
+  | 'waiting_for_state'
   | 'preparing_workspace'
   | 'naming_worktree'
   | 'creating_worktree'
   | 'running_setup'
   | 'provisioning_environment'
   | 'preparing_context'
+  | 'memory_flushing'
   | 'starting_model';
 
 export type ChatSessionRunProgress =

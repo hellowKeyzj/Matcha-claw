@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { buildCapabilityScopeKey } from '@/types/desktop/runtime-address';
-import { waitForSubagentMutation } from '@/lib/subagent-call';
+import { waitForSubagentMutation } from '@/plugins/agents/services/subagent-call';
 import {
   createSessionTraceId,
   logSessionTrace,

@@ -22,13 +22,13 @@ import {
 } from './openaiShared.js'
 import {
   anthropicMessagesToOpenAI,
-  resolveOpenAIModel,
   adaptOpenAIStreamToAnthropic,
   anthropicToolsToOpenAI,
   anthropicToolChoiceToOpenAI,
 } from '@ant/model-provider'
 import { isChatGPTAuthEnabled } from './chatgptAuth.js'
 import { getAPIProvider } from '../../../utils/model/providers.js'
+import { normalizeModelStringForAPI } from '../../../utils/model/configs.js'
 import { isEffortLevel, resolveAdapterEffort, traceEffort } from '../../../utils/effort.js'
 import {
   adaptResponsesStreamToAnthropic,
@@ -207,7 +207,7 @@ export async function* queryModelOpenAI(
 > {
   try {
     // 1. Resolve model name
-    const openaiModel = resolveOpenAIModel(options.model)
+    const openaiModel = normalizeModelStringForAPI(options.model)
 
     // 2. Normalize messages using shared preprocessing
     const messagesForAPI = normalizeMessagesForAPI(messages, tools)

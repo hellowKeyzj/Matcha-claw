@@ -14,7 +14,7 @@ import {
   isSessionRuntimeEndpointStarting,
   supportsSessionChat,
   useRuntimeEndpointsStore,
-} from '@/stores/runtime-endpoints';
+} from '@/plugins/runtime/directory';
 import { executeStoreAbortRun } from '@/plugins/chat/store/abort-handlers';
 import {
   buildApprovalResolvedPatch,
@@ -57,7 +57,8 @@ import {
 import { applySessionDelta as applySessionDeltaProjection, getSessionMeta, getSessionProjectionWatermark, getSessionRuntime, patchSessionMeta } from '@/plugins/chat/store/store-state-helpers';
 import { logSessionTrace, summarizeError } from '@/lib/session-trace';
 import { reconcileSessionDirectory } from '@/plugins/chat/store/session-directory';
-import { buildRuntimeScopeKey, findSessionRecordKey, resolveSessionOperationTarget, sameRuntimeEndpointScope } from '@/plugins/chat/store/session-identity';
+import { buildRuntimeScopeKey, resolveSessionOperationTarget, sameRuntimeEndpointScope } from '@/plugins/chat/store/session-identity';
+import { findSessionRecordKey } from '@/plugins/chat/session-catalog';
 import {
   assertRuntimeEndpointRef,
   buildSessionIdentityKey,

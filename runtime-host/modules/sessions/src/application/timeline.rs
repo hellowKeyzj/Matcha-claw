@@ -213,6 +213,7 @@ pub struct Command {
     window: WindowRequest,
     endpoint_session_id: Option<String>,
     include_canonical: bool,
+    input_ids: Vec<String>,
 }
 
 impl Command {
@@ -237,6 +238,7 @@ impl Command {
             window,
             endpoint_session_id,
             include_canonical,
+            input_ids: Vec::new(),
         })
     }
 
@@ -277,6 +279,18 @@ impl Command {
         }
         self.endpoint_session_id = Some(endpoint_session_id);
         Some(self)
+    }
+
+    pub fn with_input_ids(mut self, input_ids: Vec<String>) -> Option<Self> {
+        if !crate::state::valid_input_ids(&input_ids) {
+            return None;
+        }
+        self.input_ids = input_ids;
+        Some(self)
+    }
+
+    pub fn input_ids(&self) -> &[String] {
+        &self.input_ids
     }
 
     pub const fn include_canonical(&self) -> bool {

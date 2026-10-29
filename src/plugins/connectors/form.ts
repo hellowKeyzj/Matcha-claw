@@ -1,4 +1,4 @@
-import type { ExternalConnectorKind, ExternalConnectorSecretRef, ExternalConnectorSpec, ExternalConnectorSummary, ExternalConnectorPatch, ExternalMcpServerProgramDescriptor } from './store';
+import type { ExternalConnectorKind, ExternalConnectorSecretRef, ExternalConnectorSpec, ExternalConnectorSummary, ExternalConnectorPatch, ExternalMcpServerProgramDescriptor } from './types';
 
 export type PrivateField = 'command' | 'args' | 'cwd' | 'env' | 'headers' | 'config';
 

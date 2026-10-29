@@ -1,7 +1,7 @@
-import { useLayoutStore } from '@/stores/layout';
+import { useLayoutStore } from '@/app/layout/store';
 import { ChatWorkspaceHost } from './ChatWorkspaceHost';
 
 export default function ChatPage() {
-  const takeoverMode = useLayoutStore((state) => state.chatTakeoverMode);
-  return <ChatWorkspaceHost takeoverMode={takeoverMode} />;
+  const viewportTakeover = useLayoutStore((state) => state.viewportTakeover);
+  return <ChatWorkspaceHost takeoverMode={viewportTakeover ? 'artifact-workbench' : 'none'} />;
 }

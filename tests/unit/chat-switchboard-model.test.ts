@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildRuntimeEndpointKey, buildSessionIdentityKey, type RuntimeEndpointRef, type SessionIdentity } from '../../src/types/desktop/runtime-address';
-import { buildAgentSessionSwitchboardModel } from '@/components/layout/agent-session-switchboard-model';
+import { buildAgentSessionSwitchboardModel } from '@/plugins/chat/agent-session-switchboard-model';
 import type { AgentSessionsPaneSessionEntry } from '@/plugins/chat/store/selectors';
 import type { ChatSession, ChatSessionRuntimeEndpointNode } from '@/plugins/chat/store/types';
 

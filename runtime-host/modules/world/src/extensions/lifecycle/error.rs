@@ -38,7 +38,6 @@ pub(crate) enum LifecycleError {
     Wasm(crate::extensions::wasm::WasmError),
     Process(std::sync::Arc<crate::extensions::process::ProcessError>),
     Source(crate::sources::connectors::SourceError),
-    Identity(crate::identity::IdentityError),
     Native {
         node: NodeId,
         cause: crate::extensions::invocation::NativePrepareFailure,
@@ -70,25 +69,15 @@ impl LifecycleError {
             Self::Source(error) => return HostFailure::Source(error.failure.clone()),
             Self::Wasm(error) => return error.host_failure(),
             Self::Process(error) => return error.host_failure(),
-            Self::Identity(error) => {
-                return HostFailure::Operation(match error {
-                    crate::identity::IdentityError::Rejected(reason) => {
-                        OperationFailure::Identity(reason.clone())
-                    }
-                    crate::identity::IdentityError::Store(error) => {
-                        OperationFailure::Commit(error.reason.clone())
-                    }
-                    crate::identity::IdentityError::Fact(error) => {
-                        OperationFailure::Fact(error.reason.clone())
-                    }
-                });
-            }
             Self::Native { node, cause } => {
                 use crate::extensions::invocation::NativePrepareFailure;
                 let reason = match cause {
                     NativePrepareFailure::Configuration => world_protocol::bindings::BindingFailure::ConfigurationChanged { node_id: node.clone() },
                     NativePrepareFailure::Entrypoint => world_protocol::bindings::BindingFailure::TrustBoundary { node_id: node.clone() },
-                    NativePrepareFailure::Artifact | NativePrepareFailure::HostBuild => world_protocol::bindings::BindingFailure::DigestMismatch,
+                    NativePrepareFailure::Artifact => world_protocol::bindings::BindingFailure::DigestMismatch,
+                    NativePrepareFailure::Implementation => return HostFailure::Operation(OperationFailure::Lifecycle(
+                        LifecycleFailure::PrepareFailed { node_id: node.clone() },
+                    )),
                 };
                 return HostFailure::Binding(reason);
             }
@@ -166,7 +155,6 @@ impl std::error::Error for LifecycleError {
             Self::Wasm(error) => Some(error),
             Self::Process(error) => Some(error.as_ref()),
             Self::Source(error) => Some(error),
-            Self::Identity(error) => Some(error),
             Self::PreparationTask(error) => Some(error),
             Self::PrepareNode { cause, .. } | Self::Cleanup { cause, .. } => Some(cause.as_ref()),
             _ => None,
@@ -290,7 +278,6 @@ impl From<LifecycleError> for crate::owner::Error {
             ),
             error @ (LifecycleError::Wasm(_)
             | LifecycleError::Process(_)
-            | LifecycleError::Identity(_)
             | LifecycleError::Native { .. }
             | LifecycleError::Cancelled
             | LifecycleError::Deadline

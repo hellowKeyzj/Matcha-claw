@@ -1,4 +1,4 @@
-import type { AttachedFileMeta } from '@/plugins/chat/store';
+import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 import type {
   SessionAssistantTurnItem,
   SessionRenderUserMessageItem,

@@ -2,7 +2,7 @@ import type { ComponentType } from 'react';
 import { defineExtensionPoint } from '@/plugin-host/core';
 import type { AppConnectorManifest } from '@/types/desktop/app-plugin';
 import type { ConnectorFormState, PrivateField } from './form';
-import type { ExternalConnectorKind, ExternalConnectorPatch, ExternalConnectorSpec, ExternalConnectorSummary, ExternalMcpServerProgramDescriptor } from './store';
+import type { ExternalConnectorKind, ExternalConnectorPatch, ExternalConnectorSpec, ExternalConnectorSummary, ExternalMcpServerProgramDescriptor } from './types';
 
 export interface ConnectorTransportFieldsProps {
   form: ConnectorFormState;

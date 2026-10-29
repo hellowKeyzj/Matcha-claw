@@ -15,9 +15,9 @@ import {
   type BillingPlan,
   type PaymentOrder,
   type PaymentOrderResult,
-} from '@/lib/billing';
-import type { CloudUser } from '@/lib/account';
-import type { SubscriptionProgress, SubscriptionQuotaProgress, SubscriptionSummary } from '@/lib/subscription';
+} from '../api/billing';
+import type { CloudUser } from '../api/account';
+import type { SubscriptionProgress, SubscriptionQuotaProgress, SubscriptionSummary } from '../api/subscription';
 import { cn } from '@/lib/utils';
 import { useAccountStore } from '../stores/account';
 import { useSubscriptionStore } from '../stores/subscription';

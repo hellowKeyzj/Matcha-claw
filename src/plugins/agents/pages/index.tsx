@@ -4,7 +4,8 @@ import { Plus, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
-import { AgentPage, AgentPageSection, AgentResourceGrid } from '@/components/common/AgentPage';
+import { AgentPage } from '@/plugins/agents/workbench';
+import { AgentPageSection, AgentResourceGrid } from '@/components/common/AgentResource';
 import { LoadingState } from '@/components/common/LoadingSpinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { invokeIpc } from '@/lib/api-client';
@@ -18,14 +19,14 @@ import {
   getSubagentTemplateCatalog,
 } from '@/plugins/agents/services/subagent-template-catalog';
 import { useChatStore } from '@/plugins/chat/store';
-import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { agentScope, buildCapabilityScopeKey } from '@/types/desktop/runtime-address';
 import { buildAgentSkillConfigKey, useAgentSkillConfigStore } from '@/plugins/agents/stores/agent-skill-config';
 import { buildAgentToolConfigKey, useAgentToolConfigStore } from '@/plugins/agents/stores/agent-tool-config';
 import { getSubagentManagementScope, useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import type { SubagentCloudPackage, SubagentSummary, SubagentTemplateCatalogResult, SubagentTemplateDetail } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
-import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/lib/provider-models';
+import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/plugins/providers/services/provider-models';
 import { SubagentCard } from '@/plugins/agents/pages/components/SubagentCard';
 import { SubagentDeleteDialog } from '@/plugins/agents/pages/components/SubagentDeleteDialog';
 import { SubagentFormDialog } from '@/plugins/agents/pages/components/SubagentFormDialog';

@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useContributions } from '@/plugin-host/react';
-import { hostSecurityApplyRemediation, hostSecurityPreviewRemediation, hostSecurityRollbackRemediation } from '@/lib/security-runtime';
+import { hostSecurityApplyRemediation, hostSecurityPreviewRemediation, hostSecurityRollbackRemediation } from './security-runtime';
 import { useSecuritySupportStore, type RemediationActionItem } from './security-support-store';
 import { securityChecks, type SecuritySectionProps } from './extensions';
 

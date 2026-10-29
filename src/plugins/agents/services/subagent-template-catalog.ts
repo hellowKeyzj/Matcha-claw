@@ -1,4 +1,4 @@
-import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
+import { SUBAGENT_TARGET_FILES } from '@/plugins/agents/subagent-files';
 import { hostOpenClawGetSubagentTemplate, hostOpenClawGetSubagentTemplateCatalog } from '@/lib/host-api';
 import type {
   SubagentTargetFile,

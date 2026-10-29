@@ -1,9 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import {
-  applyAssistantPresentationToItems,
-  type ChatAssistantTurnItem,
-} from '@/plugins/message-rendering/chat-render-item-model';
-import { getOrBuildAssistantMarkdownBody } from '@/lib/chat-markdown-body';
+import { applyAssistantPresentationToItems } from '@/plugins/chat/render-item-projection';
+import type { ChatAssistantTurnItem } from '@/plugins/message-rendering/chat-render-item-model';
+import { getOrBuildAssistantMarkdownBody } from '@/plugins/message-rendering/assistant-markdown-body';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 
 function decorateItems() {

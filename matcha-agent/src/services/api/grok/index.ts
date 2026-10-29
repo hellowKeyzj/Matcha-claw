@@ -23,9 +23,9 @@ import {
   anthropicToolsToOpenAI,
   anthropicToolChoiceToOpenAI,
   adaptOpenAIStreamToAnthropic,
-  resolveGrokModel,
 } from '@ant/model-provider'
 import { normalizeMessagesForAPI } from '../../../utils/messages.js'
+import { normalizeModelStringForAPI } from '../../../utils/model/configs.js'
 import type { SDKAssistantMessageError } from '../../../entrypoints/agentSdkTypes.js'
 import { toolToAPISchema } from '../../../utils/api.js'
 import { logForDebugging } from '../../../utils/debug.js'
@@ -60,7 +60,7 @@ export async function* queryModelGrok(
   void
 > {
   try {
-    const grokModel = resolveGrokModel(options.model)
+    const grokModel = normalizeModelStringForAPI(options.model)
     const messagesForAPI = normalizeMessagesForAPI(messages, tools)
 
     const toolSchemas = await Promise.all(

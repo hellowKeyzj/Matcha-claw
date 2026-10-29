@@ -10,7 +10,7 @@ import {
   hostProviderCancelOAuth,
   hostProviderStartOAuth,
   hostProviderSubmitOAuthCode,
-} from '@/lib/provider-projection';
+} from '@/plugins/providers/services/provider-projection';
 import { useProviderStore } from '../stores/providers';
 import type { ProviderOAuthOwnerProps, ProviderOAuthPanelProps, ProviderOAuthStartRequest } from '../extensions';
 

@@ -292,7 +292,9 @@ function getAllToolScopes(): string[] {
 /**
  * 掩码敏感信息（appSecret）
  */
-function maskSecret(secret: string | undefined, locale: DoctorLocale): string {
+function maskSecret(secret: unknown, locale: DoctorLocale): string {
+  // Unresolved SecretRef objects (e.g. { source: 'env' }) reach CLI commands as-is.
+  if (typeof secret !== 'string') return '(SecretRef)';
   if (!secret) return T[locale].notSet;
   if (secret.length <= 4) return '****';
   return secret.slice(0, 4) + '****';

@@ -2,7 +2,7 @@ import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatInit } from '@/plugins/chat/useChatInit';
 import { useChatStore } from '@/plugins/chat/store';
-import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { createEmptySessionRecord } from '@/plugins/chat/store/store-state-helpers';
 import { buildRuntimeScopeKey, buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
 import {

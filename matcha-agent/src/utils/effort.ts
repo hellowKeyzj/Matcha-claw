@@ -1,7 +1,7 @@
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import type { BetaOutputConfig } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import { createHash } from 'crypto'
-import { resolveOpenAIModel } from '@ant/model-provider'
+import { normalizeModelStringForAPI } from './model/configs.js'
 import { getSessionId } from 'src/bootstrap/state.js'
 import { logForDebugging } from './debug.js'
 import { isUltrathinkEnabled } from './thinking.js'
@@ -43,7 +43,7 @@ function effortSupport(model: string): { supported: boolean; source: string } {
   if (provider === 'openai' && isChatGPTAuthMode()) return { supported: true, source: 'chatgpt_responses_contract' }
   if (provider === 'gemini' || provider === 'grok') return { supported: false, source: 'provider_route_unsupported' }
   if (provider === 'openai') {
-    const override = get3PModelCapabilityOverride(resolveOpenAIModel(model), 'effort')
+    const override = get3PModelCapabilityOverride(normalizeModelStringForAPI(model), 'effort')
     return { supported: override === true, source: override === undefined ? 'capability_unknown' : 'model_capability_override' }
   }
 
@@ -86,7 +86,7 @@ export function modelSupportsEffort(model: string): boolean {
 // Generic completions need explicit capability facts for extended levels.
 // Other routes retain their existing max/xhigh defaults.
 export function modelSupportsMaxEffort(_model: string): boolean {
-  const model = getAPIProvider() === 'openai' && !isChatGPTAuthMode() ? resolveOpenAIModel(_model) : _model
+  const model = getAPIProvider() === 'openai' && !isChatGPTAuthMode() ? normalizeModelStringForAPI(_model) : _model
   const supported3P = get3PModelCapabilityOverride(model, 'max_effort')
   if (supported3P !== undefined) {
     return supported3P
@@ -95,7 +95,7 @@ export function modelSupportsMaxEffort(_model: string): boolean {
 }
 
 export function modelSupportsXhighEffort(_model: string): boolean {
-  const model = getAPIProvider() === 'openai' && !isChatGPTAuthMode() ? resolveOpenAIModel(_model) : _model
+  const model = getAPIProvider() === 'openai' && !isChatGPTAuthMode() ? normalizeModelStringForAPI(_model) : _model
   const supported3P = get3PModelCapabilityOverride(model, 'xhigh_effort')
   if (supported3P !== undefined) {
     return supported3P
@@ -232,7 +232,7 @@ export function traceEffort(
     logForDebugging(`[thinking] ${JSON.stringify({
       reason, provider, protocol,
       sessionHash: hash(getSessionId()),
-      modelHash: hash(provider === 'openai' && !responses ? resolveOpenAIModel(model) : model),
+      modelHash: hash(provider === 'openai' && !responses ? normalizeModelStringForAPI(model) : model),
       requestHash: details.requestId ? hash(details.requestId) : undefined,
       requested: safeLevel(requested),
       level: safeLevel(details.level === undefined ? requested : details.level),

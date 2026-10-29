@@ -29,7 +29,7 @@ vi.mock('@/lib/host-api', () => ({
 
 describe('runtime session list', () => {
   it('projects only the verified native catalog identity into a chat session', async () => {
-    const { listSessions } = await import('@/services/runtime/session-runtime');
+    const { listSessions } = await import('@/plugins/chat/session-runtime');
 
     await expect(listSessions({ endpoint: sessionIdentity.endpoint })).resolves.toEqual([{
       key: buildSessionIdentityKey(sessionIdentity),
@@ -46,7 +46,7 @@ describe('runtime session list', () => {
   });
 
   it('does not synthesize catalog metadata while preserving the native model state', async () => {
-    const { listSessions } = await import('@/services/runtime/session-runtime');
+    const { listSessions } = await import('@/plugins/chat/session-runtime');
 
     const [session] = await listSessions({ endpoint: sessionIdentity.endpoint });
 

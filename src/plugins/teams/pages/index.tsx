@@ -11,10 +11,12 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { invokeIpc } from '@/lib/api-client';
-import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
-import { isRuntimeEndpointReady, selectManagementEndpoint, selectManagementRuntime, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { RuntimeScopeSelector } from '@/plugins/runtime/RuntimeScopeSelector';
+import { isRuntimeEndpointReady, selectManagementEndpoint, selectManagementRuntime, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { agentScope, buildCapabilityScopeKey, buildRuntimeEndpointKey, runtimeEndpointsEqual, runtimeInstanceScope } from '@/types/desktop/runtime-address';
-import { pickLocalArchive, pickLocalDirectory, pickLocalSkillSource, readLocalSkillImport } from '@/services/local-path-picker';
+import { pickLocalDirectory } from '@/lib/local-path-picker';
+import { pickLocalArchive } from '@/plugins/teams/services/archive-picker';
+import { pickLocalSkillSource, readLocalSkillImport } from '@/plugins/skills/services/local-import';
 import {
   planTeamDependencies,
   validateTeamSkillPackage,
@@ -22,7 +24,7 @@ import {
   type TeamDependencyPreparationPlan,
   type TeamRoleBindingRecord,
   type TeamRunListItem,
-} from '@/services/openclaw/team-runtime-client';
+} from '@/plugins/teams/services/team-runtime-client';
 import {
   isClawHubDependencySource,
   isLocalDependencySource,
@@ -32,7 +34,9 @@ import {
 } from '@/plugins/teams/pages/dependency-source';
 import { useSkillsStore } from '@/plugins/skills/stores/skills';
 import { getSubagentManagementScope, useSubagentsStore } from '@/plugins/agents/stores/subagents';
-import { resolveTeamRuntimeScope, useTeamsStore, type ManualTeamCandidate, type ManualTeamMemberProvisionRecord, type TeamMeta, type TeamSkillCandidate, type TeamSkillCreationPlan } from '@/plugins/teams/store';
+import { resolveTeamRuntimeScope, useTeamsStore } from '@/plugins/teams/store';
+import type { ManualTeamCandidate, ManualTeamMemberProvisionRecord, TeamSkillCandidate, TeamSkillCreationPlan } from '@/plugins/teams/types/team-creation';
+import type { TeamMeta } from '@/plugins/teams/types/team';
 import type { SubagentSummary } from '@/types/subagent';
 import { useTranslation } from 'react-i18next';
 import { ManualTeamCreationProgress } from '@/plugins/teams/pages/ManualTeamCreationProgress';

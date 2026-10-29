@@ -1,5 +1,5 @@
 import { subscribeHostEvent } from '@/lib/host-events';
-import { decodeGatewayChannelStatusUpdates } from '@/lib/channel-status';
+import { decodeGatewayChannelStatusUpdates } from './channel-status';
 import { useChannelsStore } from './store';
 
 export function subscribeChannelHostEvents(): () => void {

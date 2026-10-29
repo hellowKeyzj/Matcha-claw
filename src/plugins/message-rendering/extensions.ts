@@ -3,9 +3,9 @@ import type MarkdownIt from 'markdown-it';
 import { defineExtensionPoint } from '@/plugin-host/core';
 import type { SessionIdentity } from '@/types/desktop/runtime-address';
 import type { SessionAssistantTurnSegment, SessionRenderToolCard } from '@/types/session/tool-card';
-import type { AttachedFileMeta } from '@/plugins/chat/store';
+import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 import type { ToolActivityDisclosure, ToolActivityRenderer } from './tool-renderers/types';
-import type { ToolSlot } from './chat-tool-groups';
+import type { ToolSlot } from './tool-groups';
 import type { MessageLightboxState } from './chat-message-parts';
 
 export interface MarkdownExtension {
@@ -26,6 +26,7 @@ export interface MessagePartProps {
   latestBrowserTools?: ReadonlySet<SessionRenderToolCard>;
   sessionIdentity?: SessionIdentity;
   toolSessionIdentity?: SessionIdentity;
+  toolIsImmutable?: boolean;
   endpointSessionId?: string | null;
   onBodyClick: () => void;
   onPreview: (item: MessageLightboxState) => void;

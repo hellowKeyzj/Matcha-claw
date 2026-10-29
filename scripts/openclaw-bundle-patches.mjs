@@ -3,11 +3,13 @@ import path from 'node:path';
 
 import { safeRmSync } from './lib/safe-delete.mjs';
 import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
+import { patchOpenClawFilesystem } from './openclaw-filesystem-patches.mjs';
+import { patchOpenClawTaskTools } from './openclaw-task-tools-patches.mjs';
 import { patchOpenClawSearch } from './openclaw-search-patches.mjs';
 import { patchOpenClawBoard } from './openclaw-board-patches.mjs';
 import { patchOpenClawWorldInvestigation } from './openclaw-world-investigation-patches.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'provider-config-debug-trace', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'owned-stdin-stop']);
+const DEFAULT_PATCH_IDS = Object.freeze(['plugin-capture-no-follow-cleanup', 'strip-bundled-channel-plugins', 'matcha-sealed-skills', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-task-tools', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'owned-stdin-stop']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -196,16 +198,15 @@ function patchMatchaSealedSkills(openclawDir) {
   const loaderFile = locateSingleJavaScriptFile(distDir, patchId, {
     fileNamePrefix: 'workspace-skill-loader-',
     markers: [
-      'function loadSkillEntries(workspaceDir, opts)',
-      'const managedSkills = workspaceOnly ? [] : loadSkills({',
-      'for (const record of managedSkills) mergeRecord(record);',
+      'function loadLocalSkillTiers(workspaceDir, opts)',
+      'function mergeSkillTiers(tiers, opts,',
     ],
   });
   const workspaceFile = locateSingleJavaScriptFile(distDir, patchId, {
     fileNamePrefix: 'workspace-',
     markers: [
       'async function loadWorkspaceBootstrapFiles(dir',
-      'async function readWorkspaceFileWithGuards(params)',
+      'const access = getAgentWorkspaceAccess(resolvedDir);',
       'setWorkspaceFileSourceIdentity(file, loaded.sourceIdentity);',
     ],
   });
@@ -500,15 +501,15 @@ function patchSealedSkillContext(distDir, readFile, transcriptWriteContextFile, 
   });
   const builtinFile = locate('builtin-openclaw-', ['async function prepareEmbeddedAttemptSessionBoundary(input) {', 'function createCacheTrace(params) {', 'function createAnthropicPayloadLogger(params) {']);
   edit(builtinFile, ['matchaSealedSkillKeys', 'hydrateMatchaSealedSkills', 'isMatchaSealedModelContext', 'markMatchaSealedModelMessages'], [
-    ['\t\tcomputerContextEpoch,\n\t\tskillInstructionDeliveryCache,', '\t\tcomputerContextEpoch,\n\t\tmatchaSealedSkillKeys: matchaSealedSkillKeys(params.skillsSnapshot?.resolvedSkills),\n\t\tskillInstructionDeliveryCache,'],
+    ['\t\t\t\tcomputerContextEpoch,\n\t\t\t\tskillInstructionDeliveryCache,', '\t\t\t\tcomputerContextEpoch,\n\t\t\t\tmatchaSealedSkillKeys: matchaSealedSkillKeys(params.skillsSnapshot?.resolvedSkills),\n\t\t\t\tskillInstructionDeliveryCache,'],
     ['\t\tabortSignal: runAbortSignal,\n\t\tactiveSession,\n\t\tappendOnlyRuntimeContext:', '\t\tabortSignal: runAbortSignal,\n\t\tactiveSession,\n\t\tmatchaSealedAllowedKeys: toolBase.matchaSealedSkillKeys,\n\t\tappendOnlyRuntimeContext:'],
-    ['return await baseConvertToLlm(input.appendOnlyRuntimeContext ? normalized : relocateCurrentRuntimeContextCarrierToTail(normalized));', `const requestMessages = await hydrateMatchaSealedSkills(normalized, input.matchaSealedAllowedKeys, input.abortSignal, attempt.runId);
+    ['const converted = await baseConvertToLlm(input.appendOnlyRuntimeContext ? normalized : relocateCurrentRuntimeContextCarrierToTail(normalized));', `const requestMessages = await hydrateMatchaSealedSkills(normalized, input.matchaSealedAllowedKeys, input.abortSignal, attempt.runId);
 			const converted = await baseConvertToLlm(input.appendOnlyRuntimeContext ? requestMessages : relocateCurrentRuntimeContextCarrierToTail(requestMessages));
-			return markMatchaSealedModelMessages(converted, attempt.runId);`],
+		markMatchaSealedModelMessages(converted, attempt.runId);`],
     ['const recordStage = (stage, payload = {}) => {', 'const recordStage = (stage, payload = {}) => {\n\t\tif (isMatchaSealedModelContext(payload, params.runId)) return;'],
-    ['const nextOnPayload = (payload) => {\n\t\t\t\tconst redactedPayload', 'const nextOnPayload = (payload) => {\n\t\t\t\tif (isMatchaSealedModelContext(context, params.runId)) return;\n\t\t\t\tconst redactedPayload']
+    ['const nextOnPayload = (payload) => {\n\t\t\tconst redactedPayload', 'const nextOnPayload = (payload) => {\n\t\t\tif (isMatchaSealedModelContext(context, params.runId)) return options?.onPayload?.(payload, model);\n\t\t\tconst redactedPayload']
   ]);
-  const resourceFile = locate('resource-loader-', ['function estimateMessageTokenPressure(message) {', 'const projectReplacement = (result, summary) => buildSessionContext(', 'summary: capCompactionSummary(compactionResult.summary)']);
+  const resourceFile = locate('settings-manager-', ['function estimateMessageTokenPressure(message) {', 'const projectReplacement = (result, summary) => buildSessionContext(', 'summary: capCompactionSummary(compactionResult.summary)']);
   edit(resourceFile, ['matchaSealedSkillTokenPressure', 'collectMatchaSealedSkillRefs', 'withMatchaSealedCompactionDetails'], [
     ['let tokens = MESSAGE_BOUNDARY_OVERHEAD_TOKENS;', 'let tokens = MESSAGE_BOUNDARY_OVERHEAD_TOKENS + matchaSealedSkillTokenPressure(message);'],
     ['const projectReplacement = (result, summary) => buildSessionContext(', `const matchaSealedRefs = collectMatchaSealedSkillRefs(buildSessionContext(pathEntries).messages);
@@ -525,7 +526,7 @@ function patchSealedSkillContext(distDir, readFile, transcriptWriteContextFile, 
   edit(sessionFile, ['createMatchaSealedSkillCarry'], [
     ['\t\tyield message;\n\t}\n}\n/** Build model context', '\t\tyield message;\n\t\tif (hydrated.type === "compaction") {\n\t\t\tconst carry = createMatchaSealedSkillCarry(hydrated.details, message.timestamp);\n\t\t\tif (carry) yield carry;\n\t\t}\n\t}\n}\n/** Build model context']
   ]);
-  const diagnosticFile = locate('attempt.model-diagnostic-events-', ['function createModelObserver(params) {']);
+  const diagnosticFile = locate('session-boundary-prompt-cache-key-', ['function createModelObserver(params) {']);
   edit(diagnosticFile, ['isMatchaSealedModelContext'], [
     ['contentCapture: ctx.contentCapture,', 'contentCapture: isMatchaSealedModelContext(streamContext, ctx.runId) ? void 0 : ctx.contentCapture,']
   ]);
@@ -537,9 +538,16 @@ function patchSealedSkillContext(distDir, readFile, transcriptWriteContextFile, 
   return changed;
 }
 
-function patchSealedSkillLoader(filePath, patchId) {
+function patchSealedSkillLoader(loaderFile, patchId) {
+  const distDir = path.dirname(loaderFile);
+  const filePath = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'plugin-skills-',
+    markers: ['function createSkillEntry(record)', 'function loadWorkspaceSkillSourceEntries(plan, config)'],
+  });
   let source = readText(filePath);
-  let changed = false;
+  source = ensureNamedImport(source, filePath, locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'frontmatter-', markers: ['function resolveSkillKey('],
+  }), 'resolveSkillKey', 'resolveSkillKey', patchId).source;
   const helper = `
 const MATCHA_SEALED_SKILL_SOURCE = "matcha-sealed";
 const MATCHA_SEALED_SKILL_EXTENSION = ".matcha-skillpkg";
@@ -557,14 +565,6 @@ function matchaSealedSkillPackageFingerprint(dir) {
   } catch {
     return "";
   }
-}
-function resolveLoadedSkillRecordKey(record) {
-  return resolveSkillKey(record.skill, {
-    metadata: resolveSkillEntryMetadata({
-      frontmatter: record.frontmatter,
-      skillDir: record.skill.baseDir
-    })
-  });
 }
 function loadMatchaSealedSkillRecords(dir) {
   if (!process.env.MATCHA_SEALED_ENDPOINT || !process.env.MATCHA_SEALED_TOKEN || process.env.MATCHA_SEALED_RUNTIME !== "openclaw") return [];
@@ -603,7 +603,7 @@ function loadMatchaSealedSkillRecords(dir) {
     if (typeof descriptor.userInvocable === "boolean") frontmatter["user-invocable"] = String(descriptor.userInvocable);
     if (typeof descriptor.disableModelInvocation === "boolean") frontmatter["disable-model-invocation"] = String(descriptor.disableModelInvocation);
     const invocation = resolveSkillInvocationPolicy(frontmatter);
-    records.push({
+    records.push(createSkillEntry({
       skill: {
         name,
         displayName: name,
@@ -626,135 +626,55 @@ function loadMatchaSealedSkillRecords(dir) {
       frontmatter,
       invocation,
       rejectHardlinks: true
-    });
+    }));
   }
   return records;
 }
 `;
   if (!source.includes('function loadMatchaSealedSkillRecords(')) {
-    source = replaceOnce(
-      source,
-      '//#region src/skills/runtime/snapshot-config-fingerprint.ts',
-      `${helper}\n//#region src/skills/runtime/snapshot-config-fingerprint.ts`,
-      patchId,
-    );
-    changed = true;
-  } else if (!source.includes('function resolveLoadedSkillRecordKey(')) {
-    source = replaceOnce(
-      source,
-      'function loadMatchaSealedSkillRecords(dir) {',
-      `function resolveLoadedSkillRecordKey(record) {
-  return resolveSkillKey(record.skill, {
-    metadata: resolveSkillEntryMetadata({
-      frontmatter: record.frontmatter,
-      skillDir: record.skill.baseDir
-    })
-  });
-}
-function loadMatchaSealedSkillRecords(dir) {`,
-      patchId,
-    );
-    changed = true;
+    source = replaceOnce(source, 'function loadWorkspaceSkillSourceEntries(plan, config) {', helper + '\nfunction loadWorkspaceSkillSourceEntries(plan, config) {', patchId);
+    source += '\nexport { matchaSealedSkillPackageFingerprint };\n';
   }
-  if (source.includes('metadata: JSON.stringify({ skillKey })')) {
-    source = source.replaceAll(
-      'metadata: JSON.stringify({ skillKey })',
-      'metadata: JSON.stringify({ openclaw: { skillKey } })',
-    );
-    changed = true;
-  }
-  const syntheticSourceInfo = `sourceInfo: createSyntheticSourceInfo(filePath, {
-          source: MATCHA_SEALED_SKILL_SOURCE,
-          scope: "project",
-          origin: "top-level",
-          baseDir
-        })`;
-  const literalSourceInfo = `sourceInfo: {
-          path: filePath,
-          source: MATCHA_SEALED_SKILL_SOURCE,
-          scope: "project",
-          origin: "top-level",
-          baseDir
-        }`;
-  if (source.includes(syntheticSourceInfo)) {
-    source = source.replaceAll(syntheticSourceInfo, literalSourceInfo);
-    changed = true;
-  }
-  const fingerprintNeedle = `process.env.OPENCLAW_STATE_DIR,
-			getSkillsSnapshotVersion(workspaceDir)`;
-  const fingerprintReplacement = `process.env.OPENCLAW_STATE_DIR,
-			getSkillsSnapshotVersion(workspaceDir),
-			matchaSealedSkillPackageFingerprint(opts?.managedSkillsDir ?? path.join(CONFIG_DIR, "skills"))`;
-  const fingerprintPatch = replaceOptionalOnce(source, fingerprintNeedle, fingerprintReplacement, patchId);
-  source = fingerprintPatch.source;
-  changed ||= fingerprintPatch.changed;
-  const managedOnly = `	const managedSkills = workspaceOnly ? [] : loadSkills({
-		dir: managedSkillsDir,
-		source: "openclaw-managed"
-	});`;
-  const buggyManagedAndSealed = `${managedOnly}
-	const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir);`;
-  const managedFilteredSealed = `${managedOnly}
-	const managedSkillKeys = new Set(managedSkills.map((record) => resolveSkillKey(record.skill, record)));
-	const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir).filter((record) => !managedSkillKeys.has(resolveSkillKey(record.skill, record)));`;
-  if (source.includes(managedFilteredSealed)) {
-    source = replaceOnce(source, managedFilteredSealed, managedOnly, patchId);
-    changed = true;
-  } else if (source.includes(buggyManagedAndSealed)) {
-    source = replaceOnce(source, buggyManagedAndSealed, managedOnly, patchId);
-    changed = true;
-  }
-  const workspaceSkillsCompact = `	const workspaceSkills = loadSkills({ dir: workspaceSkillsDir, source: "openclaw-workspace" });`;
-  const workspaceSkillsBlock = `	const workspaceSkills = loadSkills({
-		dir: workspaceSkillsDir,
-		source: "openclaw-workspace"
-	});`;
-  const allOrdinaryFilteredSealed = `	const ordinarySkillKeys = new Set([
-		...bundledSkills,
-		...custodianSkills,
-		...extraSkills,
-		...managedSkills,
-		...workshopSkills,
-		...personalAgentsSkills,
-		...projectAgentsSkills,
-		...workspaceSkills
-	].map(resolveLoadedSkillRecordKey));
-	const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir).filter((record) => !ordinarySkillKeys.has(resolveLoadedSkillRecordKey(record)));`;
-  if (!source.includes(allOrdinaryFilteredSealed)) {
-    if (source.includes(workspaceSkillsBlock)) {
-      source = replaceOnce(source, workspaceSkillsBlock, `${workspaceSkillsBlock}\n${allOrdinaryFilteredSealed}`, patchId);
-    } else {
-      source = replaceOnce(source, workspaceSkillsCompact, `${workspaceSkillsCompact}\n${allOrdinaryFilteredSealed}`, patchId);
-    }
-    changed = true;
-  }
-  const buggyOrder = `for (const record of managedSkills) mergeRecord(record);
-	for (const record of sealedSkills) mergeRecord(record);`;
-  const managedOrder = 'for (const record of managedSkills) mergeRecord(record);';
-  if (source.includes(buggyOrder)) {
-    source = replaceOnce(source, buggyOrder, managedOrder, patchId);
-    changed = true;
-  }
-  const oldExpectedOrder = `for (const record of sealedSkills) mergeRecord(record);
-	for (const record of managedSkills) mergeRecord(record);`;
-  if (source.includes(oldExpectedOrder)) {
-    source = replaceOnce(source, oldExpectedOrder, managedOrder, patchId);
-    changed = true;
-  }
-  const extraMerge = 'for (const record of extraSkills) mergeRecord(record);';
-  const sealedBeforeExtra = `for (const record of sealedSkills) mergeRecord(record);
-	${extraMerge}`;
-  if (!source.includes(sealedBeforeExtra)) {
-    source = replaceOnce(source, extraMerge, sealedBeforeExtra, patchId);
-    changed = true;
-  }
+  const needle = `	return [
+		"extra",
+		"bundled",
+		"workshop",
+		"managed",
+		"personal",
+		"workspace"
+	].flatMap((tier) => grouped.get(tier) ?? []).map(createSkillEntry);`;
+  const replacement = `	const ordinary = [
+		"extra",
+		"bundled",
+		"workshop",
+		"managed",
+		"personal",
+		"workspace"
+	].flatMap((tier) => grouped.get(tier) ?? []).map(createSkillEntry);
+	const ordinaryKeys = new Set(ordinary.map((entry) => resolveSkillKey(entry)));
+	const sealed = plan.roots.some((root) => root.tier === "managed")
+		? loadMatchaSealedSkillRecords(plan.managedSkillsDir).filter((entry) => !ordinaryKeys.has(resolveSkillKey(entry))) : [];
+	return [...sealed, ...ordinary];`;
+  if (!source.includes(replacement)) source = replaceOnce(source, needle, replacement, patchId);
+  const changed = source !== readText(filePath);
   if (changed) writeText(filePath, source);
-  return changed;
+  const before = readText(loaderFile);
+  let loader = ensureNamedImport(before, loaderFile, filePath, 'matchaSealedSkillPackageFingerprint', 'matchaSealedSkillPackageFingerprint', patchId).source;
+  const configFile = locateSingleJavaScriptFile(distDir, patchId, { fileNamePrefix: 'utils-', markers: ['let CONFIG_DIR = resolveConfigDir();', 'function pinConfigDir('] });
+  loader = ensureNamedImport(loader, loaderFile, configFile, 'CONFIG_DIR', 'CONFIG_DIR', patchId).source;
+  const fingerprint = 'getSkillsSourceVersion(workspaceDir),\n\t\tmatchaSealedSkillPackageFingerprint(opts?.managedSkillsDir ?? path.join(CONFIG_DIR, "skills"))';
+  if (!loader.includes(fingerprint)) loader = replaceOnce(loader, 'getSkillsSourceVersion(workspaceDir)\n\t]);', fingerprint + '\n\t]);', patchId);
+  if (loader !== before) writeText(loaderFile, loader);
+  return changed || loader !== before;
 }
 
 function patchSealedAgentBootstrap(filePath, sessionAccessorFile, patchId) {
   let source = readText(filePath);
   let changed = false;
+  if (!source.includes('import fsSync from "node:fs";')) {
+    source = 'import fsSync from "node:fs";\n' + source;
+    changed = true;
+  }
   const importPatch = ensureNamedImport(
     source,
     filePath,
@@ -844,7 +764,7 @@ function encodeMatchaSealedAgentPath(pathValue) {
 function matchaSealedAgentPackageKeys(dir) {
   let entries;
   try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
+    entries = fsSync.readdirSync(dir, { withFileTypes: true });
   } catch {
     return [];
   }
@@ -854,7 +774,7 @@ function matchaSealedAgentPackageKeys(dir) {
     if (!entry.isFile() || entry.name.startsWith(".") || !entry.name.endsWith(MATCHA_SEALED_AGENT_EXTENSION)) continue;
     let wire;
     try {
-      wire = JSON.parse(fs.readFileSync(path.join(dir, entry.name), "utf8"));
+      wire = JSON.parse(fsSync.readFileSync(path.join(dir, entry.name), "utf8"));
     } catch {
       continue;
     }
@@ -898,30 +818,33 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
   );
   source = replaceOnce(
     source,
-    `async function loadWorkspaceBootstrapFiles(dir) {
+    `async function loadWorkspaceBootstrapFiles(dir, names) {
 	const resolvedDir = resolveUserPath(dir);`,
-    `async function loadWorkspaceBootstrapFiles(dir) {
+    `async function loadWorkspaceBootstrapFiles(dir, names) {
 	const resolvedDir = resolveUserPath(dir);
-	const sealedAgentKeys = matchaSealedAgentPackageKeys(resolvedDir);`,
+	const sealedAgentKeys = getAgentWorkspaceAccess(resolvedDir) ? [] : matchaSealedAgentPackageKeys(resolvedDir);`,
     patchId,
   );
   source = replaceOnce(
     source,
     `	for (const entry of entries) {
-		if ((entry.name === DEFAULT_MEMORY_FILENAME || entry.name === "USER.md") && !await exactWorkspaceEntryExists(resolvedDir, entry.name)) continue;`,
+		if (!access && (entry.name === DEFAULT_MEMORY_FILENAME || entry.name === "USER.md") && !await exactWorkspaceEntryExists(resolvedDir, entry.name).catch(() => true)) continue;`,
     `	for (const entry of entries) {
-		const entryExists = await exactWorkspaceEntryExists(resolvedDir, entry.name);
+		const entryExists = access || await exactWorkspaceEntryExists(resolvedDir, entry.name).catch(() => true);
 		const optionalRootBootstrapFile = entry.name === DEFAULT_MEMORY_FILENAME || entry.name === DEFAULT_USER_FILENAME;
 		if (optionalRootBootstrapFile && !entryExists && sealedAgentKeys.length === 0) continue;`,
     patchId,
   );
   source = replaceOnce(
     source,
-    `		} else if (isRootFileMissingFailure(loaded)) result.push({
-			name: entry.name,
-			path: entry.filePath,
-			missing: true
-		});`,
+    `		} else if (isRootFileMissingFailure(loaded)) {
+			if (entry.name === DEFAULT_MEMORY_FILENAME || entry.name === "USER.md") continue;
+			result.push({
+				name: entry.name,
+				path: entry.filePath,
+				missing: true
+			});
+		}`,
     `		} else if (isRootFileMissingFailure(loaded)) {
 			let sealedFile;
 			if (matchaSealedAgentFilenames().has(entry.name)) {
@@ -947,7 +870,7 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
   let entries;`,
     `function matchaSealedAgentPackageKeys(dir) {
   try {
-    const agentsStat = fs.lstatSync(path.join(dir, DEFAULT_AGENTS_FILENAME));
+    const agentsStat = fsSync.lstatSync(path.join(dir, DEFAULT_AGENTS_FILENAME));
     if (!agentsStat.isFile() || agentsStat.isSymbolicLink()) throw new Error("Invalid agent source: AGENTS.md must be a regular, non-symlink file");
     return [];
   } catch (error) {
@@ -979,8 +902,8 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
   changed ||= bindingPatch.changed;
   const workspaceSignaturePatch = replaceOptionalOnce(
     source,
-    'async function loadWorkspaceBootstrapFiles(dir) {',
-    'async function loadWorkspaceBootstrapFiles(dir, sessionKey) {',
+    'async function loadWorkspaceBootstrapFiles(dir, names) {',
+    'async function loadWorkspaceBootstrapFiles(dir, names, sessionKey) {',
     patchId,
   );
   source = workspaceSignaturePatch.source;
@@ -988,7 +911,7 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
   const sealedAgentWorkspaceSeedPatch = replaceOptionalOnce(
     source,
     `const userPath = path.join(dir, DEFAULT_USER_FILENAME);
-	const isBrandNewWorkspace = await (async () => {`,
+	const isBrandNewWorkspace = (await Promise.all([`,
     `const userPath = path.join(dir, DEFAULT_USER_FILENAME);
 	if (matchaSealedAgentPackageKeys(dir).length > 0) return {
 		dir,
@@ -1000,7 +923,7 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
 		bootstrapPending: false,
 		identityPathCreated: false
 	};
-	const isBrandNewWorkspace = await (async () => {`,
+	const isBrandNewWorkspace = (await Promise.all([`,
     patchId,
   );
   source = sealedAgentWorkspaceSeedPatch.source;
@@ -1021,7 +944,7 @@ function patchBootstrapCacheSessionKey(filePath, patchId) {
   const patch = replaceOptionalOnce(
     source,
     'const files = await loadWorkspaceBootstrapFiles(params.workspaceDir);',
-    'const files = await loadWorkspaceBootstrapFiles(params.workspaceDir, params.sessionKey);',
+    'const files = await loadWorkspaceBootstrapFiles(params.workspaceDir, void 0, params.sessionKey);',
     patchId,
   );
   if (patch.changed) writeText(filePath, patch.source);
@@ -1116,77 +1039,18 @@ function mergeMatchaPackageMeteringInit(init) {
   return changed;
 }
 
-function patchOpencodeGoSessionHeader(openclawDir) {
-  const patchId = 'opencode-go-session-header';
-  const distDir = path.join(openclawDir, 'dist');
-  const streamFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'stream-',
-    markers: ['function createOpencodeGoAttributionWrapper(baseStreamFn, sourceApi)'],
-  });
-  const extraParamsFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'extra-params-',
-    markers: ['const providerStreamBase = agent.streamFn;'],
-  });
-  const attemptFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'builtin-openclaw-',
-    markers: ['preparedExtraParams: effectiveExtraParams,', 'sessionId: attempt.sessionId,'],
-  });
-  const compactionFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'compact-',
-    markers: ['...preparedRuntimeExtraParams ? { preparedExtraParams: preparedRuntimeExtraParams } : {},'],
-  });
-  const original = readText(streamFile);
-  let source = original;
-  const needle = `		const api = sourceApi ?? model.api;
-		if (model.provider !== "opencode-go" || api !== "anthropic-messages") return baseStreamFn(model, context, options);`;
-  const replacement = `		if (model.provider !== "opencode-go") return baseStreamFn(model, context, options);
-		const endpoint = URL.parse(model.baseUrl);
-		if (endpoint?.origin === "https://opencode.ai" && ["/zen/go", "/zen/go/v1"].includes(endpoint.pathname.replace(/\\/+$/, ""))) {
-			const sessionId = options?.sessionId?.trim();
-			if (sessionId) {
-				const headers = new Headers(options?.headers);
-				headers.set("x-opencode-session", sessionId);
-				options = { ...options, headers: Object.fromEntries(headers) };
-			}
-		}
-		const api = sourceApi ?? model.api;
-		if (api !== "anthropic-messages") return baseStreamFn(model, context, options);`;
-  if (!source.includes(replacement)) source = replaceOnce(source, needle, replacement, patchId);
-  // Thread the admitted session to the provider wrapper, which runs before the
-  // embedded base stream enriches options. Header policy stays in the Go plugin.
-  const edits = [[streamFile, original, source]];
-  for (const [file, before, after] of [
-    [attemptFile, 'preparedExtraParams: effectiveExtraParams,', 'sessionId: attempt.sessionId,\n\t\tpreparedExtraParams: effectiveExtraParams,'],
-    [compactionFile, '...preparedRuntimeExtraParams ? { preparedExtraParams: preparedRuntimeExtraParams } : {},', 'sessionId: params.sessionId,\n\t\t\t...preparedRuntimeExtraParams ? { preparedExtraParams: preparedRuntimeExtraParams } : {},'],
-    [extraParamsFile, 'agent.streamFn = pluginWrappedStreamFn ?? providerStreamBase;', `agent.streamFn = pluginWrappedStreamFn ?? providerStreamBase;
-	if (provider === "opencode-go" && options?.sessionId && agent.streamFn) {
-		const sessionStreamFn = agent.streamFn;
-		const sessionId = options.sessionId;
-		agent.streamFn = (model, context, streamOptions) => sessionStreamFn(model, context, streamOptions?.sessionId ? streamOptions : { ...streamOptions, sessionId });
-	}`],
-  ]) {
-    const current = readText(file);
-    edits.push([file, current, current.includes(after) ? current : replaceOnce(current, before, after, patchId)]);
-  }
-  const changed = edits.filter(([, before, after]) => before !== after);
-  for (const [file, , after] of changed) writeText(file, after);
-  return changed.length > 0
-    ? { status: 'applied', detail: changed.map(([file]) => path.basename(file)).join(', ') }
-    : { status: 'clean', detail: 'already patched' };
-}
-
 function patchMatchaMcpSessionServerId(openclawDir) {
   const patchId = 'matcha-mcp-session-server-id';
   const filePath = locateSingleJavaScriptFile(path.join(openclawDir, 'dist'), patchId, {
-    fileNamePrefix: 'store-writer-state-',
+    fileNamePrefix: 'store-entry-shape-',
     markers: [
       'function projectCanonicalSessionEntryShape(value) {',
-      'const icon = typeof canonicalValue.icon',
-      'function normalizePersistedSessionEntryShape(value, options = {})',
+      'setOptionalField("icon", typeof canonicalValue.icon',
+      'function stripRuntimeOnlySessionSkillsFields(entry)',
     ],
   });
   const source = readText(filePath);
-  const needle = '\tconst icon = typeof canonicalValue.icon';
+  const needle = '\tsetOptionalField("icon", typeof canonicalValue.icon';
   const replacement = `\tconst serverOverrides = canonicalValue.toolOverrides?.mcpServers;
 \tif (serverOverrides && Object.hasOwn(serverOverrides, "matcha-teamrun")) {
 \t\tconst mcpServers = { ...serverOverrides };
@@ -1208,7 +1072,7 @@ function patchMcpServerStatusMethod(openclawDir) {
   const patchId = 'mcp-server-status-method';
   const distDir = path.join(openclawDir, 'dist');
   const methodScopesFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'method-scopes-',
+    fileNamePrefix: 'core-method-policy-',
     markers: [
       'const CORE_GATEWAY_METHOD_SPECS = [',
       '"tools.effective",',
@@ -1218,9 +1082,9 @@ function patchMcpServerStatusMethod(openclawDir) {
   const toolsEffectiveFile = locateSingleJavaScriptFile(distDir, patchId, {
     fileNamePrefix: 'tools-effective-',
     markers: [
-      'const defaultToolsEffectiveDependencies = {',
-      'peekSessionMcpRuntime,',
-      'function createToolsEffectiveHandlers(dependencies = defaultToolsEffectiveDependencies)',
+      'const toolsEffectiveHandlers = {',
+      'function resolveTrustedToolsEffectiveContext(params)',
+      'const runtime = peekSessionMcpRuntime({',
     ],
   });
   const sessionAccessorFile = locateSingleJavaScriptFile(distDir, patchId, {
@@ -1263,9 +1127,6 @@ function patchMcpServerStatusHandler(filePath, sessionAccessorFile, patchId) {
 
   const helper = `const MCP_SERVER_STATUS_DEFAULT_LIMIT = 100;
 const MCP_SERVER_STATUS_MAX_LIMIT = 100;
-function mcpServerStatusRuntimeLookup(sessionKey) {
-\treturn sessionKey.includes(":") ? { sessionKey } : { sessionId: sessionKey, sessionKey };
-}
 function countMcpCatalogToolsByServer(tools) {
 \tconst counts = /* @__PURE__ */ new Map();
 \tfor (const tool of tools) {
@@ -1328,25 +1189,18 @@ function readMcpSessionUpdateParams(rawParams, respond) {
 \treturn { sessionKey, serverName, enabled: rawParams.enabled };
 }
 function resolveMcpSessionContext(sessionKey, respond, dependencies) {
-\tconst loaded = dependencies.loadGatewaySessionEntryReadOnly(sessionKey);
-\tif (!loaded.entry) {
-\t\trespond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, 'unknown session key "' + sessionKey + '"'));
-\t\treturn;
-\t}
-\tconst canonicalKey = loaded.canonicalKey ?? sessionKey;
-\tconst agentId = dependencies.resolveSessionAgentId({ sessionKey: canonicalKey, config: loaded.cfg });
-\tconst workspaceDir = normalizeOptionalString(loaded.entry.spawnedWorkspaceDir) ?? dependencies.resolveAgentWorkspaceDir(loaded.cfg, agentId);
-\treturn { cfg: loaded.cfg, entry: loaded.entry, sessionId: loaded.entry.sessionId, sessionKey, workspaceDir, toolOverrides: loaded.entry.toolOverrides };
+\treturn dependencies.resolveTrustedToolsEffectiveContext({ sessionKey, respond });
 }
 function mcpSessionConfigSummary(context, dependencies) {
 \treturn dependencies.resolveSessionMcpConfigSummary({
 \t\tworkspaceDir: context.workspaceDir,
 \t\tcfg: context.cfg,
-\t\t...(context.toolOverrides ? { toolOverrides: context.toolOverrides } : {})
+\t\t...(context.toolOverrides ? { toolOverrides: context.toolOverrides } : {}),
+\t\ttoolDenylist: context.capabilityProfile.policy.explicitToolDenylist
 \t});
 }
 function projectMcpSessionServers(context, runtime, dependencies, offset, limit) {
-\tconst summary = mcpSessionConfigSummary(context, dependencies);
+\tconst summary = mcpSessionConfigSummary({ ...context, workspaceDir: runtime?.workspaceDir ?? context.workspaceDir }, dependencies);
 \tconst catalog = runtime?.retiredCatalog ?? runtime?.peekCatalog?.() ?? null;
 \tconst catalogServers = catalog?.servers && typeof catalog.servers === "object" && !Array.isArray(catalog.servers) ? catalog.servers : {};
 \tconst toolCounts = countMcpCatalogToolsByServer(Array.isArray(catalog?.tools) ? catalog.tools : []);
@@ -1376,7 +1230,7 @@ async function handleMcpServerStatusListRequest(params) {
 \tif (!parsed) return;
 \tconst context = resolveMcpSessionContext(parsed.sessionKey, params.respond, params.dependencies);
 \tif (!context) return;
-\tconst runtime = params.dependencies.peekSessionMcpRuntime(mcpServerStatusRuntimeLookup(parsed.sessionKey));
+\tconst runtime = params.dependencies.peekSessionMcpRuntime({ sessionId: context.sessionId, sessionKey: context.sessionKey });
 \tparams.respond(true, projectMcpSessionServers(context, runtime, params.dependencies, parsed.offset, parsed.limit), void 0);
 }
 async function handleMcpSessionServersUpdateRequest(params) {
@@ -1384,922 +1238,41 @@ async function handleMcpSessionServersUpdateRequest(params) {
 	if (!parsed) return;
 	const context = resolveMcpSessionContext(parsed.sessionKey, params.respond, params.dependencies);
 	if (!context) return;
-	const summary = mcpSessionConfigSummary(context, params.dependencies);
+	const summary = mcpSessionConfigSummary({
+		...context,
+		toolOverrides: { ...context.toolOverrides, mcpServers: { ...context.toolOverrides?.mcpServers, [parsed.serverName]: true } }
+	}, params.dependencies);
 	if (!summary.serverNames.includes(parsed.serverName)) {
 		rejectMcpSessionControlRequest(params.respond, 'unknown MCP server "' + parsed.serverName + '"');
 		return;
 	}
-	const existing = context.entry.toolOverrides ?? {};
-	const mcpServers = { ...(existing.mcpServers ?? {}), [parsed.serverName]: parsed.enabled };
-	const toolOverrides = { ...existing, mcpServers };
-	await patchSessionEntryCore({ sessionKey: parsed.sessionKey }, () => ({ toolOverrides }), { skipMaintenance: true });
+	await patchSessionEntryCore({ sessionKey: parsed.sessionKey }, (entry) => ({
+		toolOverrides: { ...entry.toolOverrides, mcpServers: { ...entry.toolOverrides?.mcpServers, [parsed.serverName]: parsed.enabled } }
+	}), { skipMaintenance: true });
 	params.respond(true, { serverName: parsed.serverName, enabled: parsed.enabled, effectiveNextRun: true }, void 0);
 }
 `;
-  const helperTarget = 'async function handleToolsEffectiveRequest(params) {';
-  const helperReplacement = `${helper}\n${helperTarget}`;
-  const helperPatch = source.includes('const MCP_SERVER_STATUS_DEFAULT_LIMIT = 100;')
-    ? replaceBlockOnce(source, 'const MCP_SERVER_STATUS_DEFAULT_LIMIT = 100;', helperTarget, helperReplacement, patchId)
-    : replaceOptionalOnce(source, helperTarget, helperReplacement, patchId);
-  source = helperPatch.source;
-  changed ||= helperPatch.changed;
-
-  const handlersNeedle = `function createToolsEffectiveHandlers(dependencies = defaultToolsEffectiveDependencies) {
-\treturn { "tools.effective": async ({ params, respond, context }) => {
-\t\tawait handleToolsEffectiveRequest({
-\t\t\trawParams: params,
-\t\t\trespond,
-\t\t\tcontext,
-\t\t\tdependencies
-\t\t});
-\t} };
-}`;
-  const handlersReplacement = `function createToolsEffectiveHandlers(dependencies = defaultToolsEffectiveDependencies) {
-\treturn {
-\t\t"tools.effective": async ({ params, respond, context }) => {
-\t\t\tawait handleToolsEffectiveRequest({
-\t\t\t\trawParams: params,
-\t\t\t\trespond,
-\t\t\t\tcontext,
-\t\t\t\tdependencies
-\t\t\t});
-\t\t},
-\t\t"mcpServerStatus/list": async ({ params, respond }) => {
-\t\t\tawait handleMcpServerStatusListRequest({
-\t\t\t\trawParams: params,
-\t\t\t\trespond,
-\t\t\t\tdependencies
-\t\t\t});
-\t\t},
-\t\t"mcpSessionServers/update": async ({ params, respond }) => {
-\t\t\tawait handleMcpSessionServersUpdateRequest({
-\t\t\t\trawParams: params,
-\t\t\t\trespond,
-\t\t\t\tdependencies
-\t\t\t});
-\t\t}
-\t};
-}`;
-  const handlersPatch = replaceOptionalOnce(source, handlersNeedle, handlersReplacement, patchId);
-  source = handlersPatch.source;
-  changed ||= handlersPatch.changed;
-
-  const existingHandlersNeedle = `\t\t"mcpServerStatus/list": async ({ params, respond }) => {
-\t\t\tawait handleMcpServerStatusListRequest({
-\t\t\t\trawParams: params,
-\t\t\t\trespond,
-\t\t\t\tdependencies
-\t\t\t});
-\t\t}
-\t};`;
-  const existingHandlersReplacement = `\t\t"mcpServerStatus/list": async ({ params, respond }) => {
-\t\t\tawait handleMcpServerStatusListRequest({
-\t\t\t\trawParams: params,
-\t\t\t\trespond,
-\t\t\t\tdependencies
-\t\t\t});
-\t\t},
-\t\t"mcpSessionServers/update": async ({ params, respond }) => {
-\t\t\tawait handleMcpSessionServersUpdateRequest({
-\t\t\t\trawParams: params,
-\t\t\t\trespond,
-\t\t\t\tdependencies
-\t\t\t});
-\t\t}
-\t};`;
-  const existingHandlersPatch = replaceOptionalOnce(source, existingHandlersNeedle, existingHandlersReplacement, patchId);
-  source = existingHandlersPatch.source;
-  changed ||= existingHandlersPatch.changed;
-
-  if (changed) writeText(filePath, source);
-  return changed;
-}
-
-function patchProviderConfigDebugTrace(openclawDir) {
-  const patchId = 'provider-config-debug-trace';
-  const distDir = path.join(openclawDir, 'dist');
-  const reloadFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'server-reload-managed-',
-    markers: [
-      'function startGatewayConfigReloader(opts)',
-      'function createGatewayActiveWorkTracker(options)',
-      'function createGatewayReloadHandlers(params)',
-      'config reload failed: ${String(err)}',
-    ],
-  });
-  const runtimeReloadFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'server-start-',
-    markers: [
-      'const reloadAttachedGatewayPlugins = async (params) => {',
-      'const nextPluginLookUpTable = loadPluginLookUpTable({',
-      'await params.commitRuntime(() => {',
-      'const nextServices = await startPluginServices({',
-    ],
-  });
-  const configMethodsFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'config-',
-    markers: [
-      'async function respondWithConfigRestartWrite(params)',
-      'const changedPaths = diffGatewayReloadPaths(snapshot.config, validatedConfig, listConfigReloadRefinementPrefixes());',
-      'context?.logGateway?.info(`config.patch write',
-    ],
-  });
-  const servicesFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'services-',
-    markers: [
-      'async function startPluginServices(params)',
-      'const stopService = async (entry, failures, deadline, beforeStop) => {',
-      'plugin service replacement cleanup failed',
-    ],
-  });
-  const taskMaintenanceFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'task-registry.maintenance-',
-    markers: [
-      'function findTaskSessionEntry(task, context)',
-      'function getInspectableActiveTaskRestartBlockers()',
-      'taskRegistryMaintenanceRuntime.resolveStorePath(void 0, { agentId })',
-    ],
-  });
-  const pathsFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'paths-',
-    markers: [
-      'var SessionStoreAgentIdRequiredError = class extends Error',
-      'function resolveSessionStorePathCore(store, opts)',
-    ],
-  });
-  const changed = [
-    [reloadFile, patchProviderConfigReloadTrace(reloadFile, patchId)],
-    [runtimeReloadFile, patchProviderConfigRuntimeReloadTrace(runtimeReloadFile, patchId)],
-    [configMethodsFile, patchProviderConfigMethodsTrace(configMethodsFile, patchId)],
-    [servicesFile, patchProviderConfigServicesTrace(servicesFile, patchId)],
-    [taskMaintenanceFile, patchProviderConfigTaskTrace(taskMaintenanceFile, patchId)],
-    [pathsFile, patchProviderConfigSessionPathTrace(pathsFile, patchId)],
-  ].filter(([, changed]) => changed).map(([file]) => path.basename(file));
-  return changed.length > 0
-    ? { status: 'applied', detail: changed.join(', ') }
-    : { status: 'clean', detail: 'already patched' };
-}
-
-function buildProviderTraceHelper(name, sourceName) {
-  return [
-    `function ${name}(${sourceName ? '' : 'source, '}phase, details = () => ({})) {`,
-    '\tif (process.env.MATCHACLAW_TRACE !== "1") return;',
-    '\tconst suffix = Object.entries(details()).filter(([, value]) => value !== void 0).map(([key, value]) => `${key}=${String(value)}`).join(" ");',
-    `\tconsole.warn(\`[startup-trace] source=${sourceName || '${source}'} phase=\${phase}\${suffix ? " detail=" + suffix : ""}\`);`,
-    '}',
-  ].join('\n');
-}
-
-function replaceProviderTraceHelper(source, needle, helper, patchId, after = true) {
-  const name = helper.match(/^function (\w+)\(/)[1];
-  const existing = source.match(new RegExp(`function ${name}\\([^\\n]*\\) \\{[\\s\\S]*?\\n\\}`));
-  if (existing) {
-    const traceHelper = helper.slice(0, helper.indexOf('\n}') + 2);
-    return replaceOptionalOnce(source, existing[0], traceHelper, patchId);
+  const helperTarget = 'const toolsEffectiveHandlers = { "tools.effective":';
+  const dependencies = `const matchaMcpSessionDependencies = { resolveTrustedToolsEffectiveContext, resolveSessionMcpConfigSummary, peekSessionMcpRuntime };`;
+  if (!source.includes('const MCP_SERVER_STATUS_DEFAULT_LIMIT = 100;')) {
+    source = replaceOnce(source, helperTarget, `${helper}\n${dependencies}\n${helperTarget}`, patchId);
+    changed = true;
   }
-  return replaceOptionalOnce(source, needle, after ? `${needle}\n${helper}` : `${helper}\n${needle}`, patchId);
-}
-
-function replaceProviderTraceOnce(source, needle, replacement, patchId) {
-  if (source.includes(replacement)) return { source, changed: false };
-  // Upgrade the previously injected eager call in place, without retaining a second runtime path.
-  const previous = replacement.replace(/\(\) => \(([\s\S]*?)\)\);/g, '$1);');
-  return replaceOptionalOnce(source, source.includes(previous) ? previous : needle, replacement, patchId);
-}
-
-function patchProviderConfigReloadTrace(filePath, patchId) {
-  let source = readText(filePath);
-  let changed = false;
-  const helper = [
-    buildProviderTraceHelper('matchaProviderDebugTrace'),
-    'function matchaProviderDebugError(error) {',
-    '\treturn {',
-    '\t\terror_name: error instanceof Error ? error.name : typeof error,',
-    '\t\tmessage_len: error instanceof Error ? error.message.length : String(error).length',
-    '\t};',
-    '}',
-  ].join('\n');
-  const helperNeedle = `const WATCHER_RECREATE_BACKOFF_MS = [
-\t500,
-\t2e3,
-\t5e3
-];`;
-  let helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId);
-  if (!helperPatch.changed && !source.includes('function matchaProviderDebugTrace(')) {
-    helperPatch = replaceProviderTraceHelper(source, 'const WATCHER_RECREATE_MAX_RETRIES = 3;', helper, patchId);
+  const handlers = `Object.assign(toolsEffectiveHandlers, {
+	"mcpServerStatus/list": async ({ params, respond }) => {
+		await handleMcpServerStatusListRequest({ rawParams: params, respond, dependencies: matchaMcpSessionDependencies });
+	},
+	"mcpSessionServers/update": async ({ params, respond }) => {
+		await handleMcpSessionServersUpdateRequest({ rawParams: params, respond, dependencies: matchaMcpSessionDependencies });
+	}
+});`;
+  if (!source.includes(handlers)) {
+    source = replaceOnce(source, 'export { toolsEffectiveHandlers };', `${handlers}\nexport { toolsEffectiveHandlers };`, patchId);
+    changed = true;
   }
-  source = helperPatch.source;
-  changed ||= helperPatch.changed;
-
-  const planNeedle = `\t\t\tconst plan = buildGatewayReloadPlan(changedPaths, {
-\t\t\t\tnoopPaths: pluginInstallTimestampNoopPaths,
-\t\t\t\tforceChangedPaths: pluginInstallWholeRecordPaths,
-\t\t\t\tcandidateConfig: nextConfig,
-\t\t\t\tcandidateCompareConfig: nextCompareConfig,
-\t\t\t\tpreviousCompareConfig: currentCompareConfig,
-\t\t\t\tpreviousConfig: currentConfig
-\t\t\t});`;
-  const planReplacement = `${planNeedle}
-\t\t\tmatchaProviderDebugTrace("openclaw-config-reload", "plan", () => ({
-\t\t\t\tchanged_paths: changedPaths.length,
-\t\t\t\tnoop_paths: pluginInstallTimestampNoopPaths.length,
-\t\t\t\tplugin_whole_record_paths: pluginInstallWholeRecordPaths.length,
-\t\t\t\treload_plugins: Boolean(plan.reloadPlugins),
-\t\t\t\trestart_gateway: Boolean(plan.restartGateway),
-\t\t\t\trestart_channels: plan.restartChannels?.size ?? 0,
-\t\t\t\trestart_channel_accounts: plan.restartChannelAccounts?.size ?? 0,
-\t\t\t\tdispose_mcp_runtimes: Boolean(plan.disposeMcpRuntimes),
-\t\t\t\thot_reasons: plan.hotReasons?.length ?? 0,
-\t\t\t\trestart_reasons: plan.restartReasons?.length ?? 0
-\t\t\t}));`;
-  const planPatch = replaceProviderTraceOnce(source, planNeedle, planReplacement, patchId);
-  source = planPatch.source;
-  changed ||= planPatch.changed;
-
-  const writeNeedle = `\t\t\tlastAppliedWriteHash = event.persistedHash;
-\t\t\tscheduleAfter(0);`;
-  const writeReplacement = `\t\t\tlastAppliedWriteHash = event.persistedHash;
-\t\t\tmatchaProviderDebugTrace("openclaw-config-reload", "write-observed", () => ({
-\t\t\t\tafter_write: event.afterWrite?.mode ?? "none",
-\t\t\t\tpersisted_hash_present: typeof event.persistedHash === "string",
-\t\t\t\tapplication: Boolean(application),
-\t\t\t\tpending_in_process: Boolean(pendingInProcessConfig)
-\t\t\t}));
-\t\t\tscheduleAfter(0);`;
-  const writePatch = replaceProviderTraceOnce(source, writeNeedle, writeReplacement, patchId);
-  source = writePatch.source;
-  changed ||= writePatch.changed;
-
-  const failureNeedle = `\t\t\t} catch (err) {
-\t\t\t\tconst superseded = err instanceof GatewayConfigReloadSupersededError;
-\t\t\t\tif (!(superseded && attemptedCandidate !== null && watcherIntentCandidate === attemptedCandidate)) settleApplication(attemptedCandidate, superseded ? "superseded" : "failed");
-\t\t\t\tif (superseded) opts.log.info(\`config reload superseded: \${String(err)}\`);
-\t\t\t\telse opts.log.error(\`config reload failed: \${String(err)}\`);
-\t\t\t} finally {`;
-  const failureReplacement = `\t\t\t} catch (err) {
-\t\t\t\tconst superseded = err instanceof GatewayConfigReloadSupersededError;
-\t\t\t\tif (!(superseded && attemptedCandidate !== null && watcherIntentCandidate === attemptedCandidate)) settleApplication(attemptedCandidate, superseded ? "superseded" : "failed");
-\t\t\t\tmatchaProviderDebugTrace("openclaw-config-reload", superseded ? "superseded" : "failed", () => ({
-\t\t\t\t\tcandidate: attemptedCandidate !== null,
-\t\t\t\t\tpending_in_process: Boolean(pendingInProcessConfig),
-\t\t\t\t\twatcher_intent: Boolean(watcherIntentCandidate),
-\t\t\t\t\t...matchaProviderDebugError(err)
-\t\t\t\t}));
-\t\t\t\tif (superseded) opts.log.info(\`config reload superseded: \${String(err)}\`);
-\t\t\t\telse opts.log.error(\`config reload failed: \${String(err)}\`);
-\t\t\t} finally {`;
-  const failurePatch = replaceProviderTraceOnce(source, failureNeedle, failureReplacement, patchId);
-  source = failurePatch.source;
-  changed ||= failurePatch.changed;
-
-  const activeCountsNeedle = `\t\tconst getActiveCounts = () => {
-\t\t\tconst queueSize = getTotalQueueSize();
-\t\t\tconst pendingReplies = getTotalPendingReplies();
-\t\t\tconst embeddedRuns = getActiveEmbeddedRunCount();
-\t\t\tconst backgroundExecSessions = getActiveBackgroundExecSessionCount();
-\t\t\tconst rootRequests = getActiveGatewayRootWorkCount({ excludeCurrent: true });
-\t\t\tconst activeTasks = getInspectableActiveTaskRestartBlockers().length;
-\t\t\treturn {
-\t\t\t\tqueueSize,
-\t\t\t\tpendingReplies,
-\t\t\t\tembeddedRuns,
-\t\t\t\tbackgroundExecSessions,
-\t\t\t\trootRequests,
-\t\t\t\tactiveTasks,
-\t\t\t\ttotalActive: queueSize + pendingReplies + embeddedRuns + backgroundExecSessions + rootRequests + activeTasks
-\t\t\t};
-\t\t};`;
-  const activeCountsReplacement = `\t\tconst getActiveCounts = () => {
-\t\t\tconst queueSize = getTotalQueueSize();
-\t\t\tconst pendingReplies = getTotalPendingReplies();
-\t\t\tconst embeddedRuns = getActiveEmbeddedRunCount();
-\t\t\tconst backgroundExecSessions = getActiveBackgroundExecSessionCount();
-\t\t\tconst rootRequests = getActiveGatewayRootWorkCount({ excludeCurrent: true });
-\t\t\tlet activeTasks = 0;
-\t\t\ttry {
-\t\t\t\tactiveTasks = getInspectableActiveTaskRestartBlockers().length;
-\t\t\t} catch (err) {
-\t\t\t\tmatchaProviderDebugTrace("openclaw-active-work", "task-blockers-failed", () => (matchaProviderDebugError(err)));
-\t\t\t\tthrow err;
-\t\t\t}
-\t\t\tconst totalActive = queueSize + pendingReplies + embeddedRuns + backgroundExecSessions + rootRequests + activeTasks;
-\t\t\tif (totalActive > 0) matchaProviderDebugTrace("openclaw-active-work", "counts", () => ({
-\t\t\t\tqueue_size: queueSize,
-\t\t\t\tpending_replies: pendingReplies,
-\t\t\t\tembedded_runs: embeddedRuns,
-\t\t\t\tbackground_exec_sessions: backgroundExecSessions,
-\t\t\t\troot_requests: rootRequests,
-\t\t\t\tactive_tasks: activeTasks,
-\t\t\t\ttotal_active: totalActive
-\t\t\t}));
-\t\t\treturn {
-\t\t\t\tqueueSize,
-\t\t\t\tpendingReplies,
-\t\t\t\tembeddedRuns,
-\t\t\t\tbackgroundExecSessions,
-\t\t\t\trootRequests,
-\t\t\t\tactiveTasks,
-\t\t\t\ttotalActive
-\t\t\t};
-\t\t};`;
-  const activeCountsPatch = replaceProviderTraceOnce(source, activeCountsNeedle, activeCountsReplacement, patchId);
-  source = activeCountsPatch.source;
-  changed ||= activeCountsPatch.changed;
-
-  const taskBlockersNeedle = `\t\tconst formatTaskBlockers = () => {
-\t\t\tconst blockers = getInspectableActiveTaskRestartBlockers();
-\t\t\tif (blockers.length === 0) return null;`;
-  const taskBlockersReplacement = `\t\tconst formatTaskBlockers = () => {
-\t\t\tlet blockers;
-\t\t\ttry {
-\t\t\t\tblockers = getInspectableActiveTaskRestartBlockers();
-\t\t\t} catch (err) {
-\t\t\t\tmatchaProviderDebugTrace("openclaw-active-work", "task-blockers-format-failed", () => (matchaProviderDebugError(err)));
-\t\t\t\tthrow err;
-\t\t\t}
-\t\t\tif (blockers.length === 0) return null;`;
-  const taskBlockersPatch = replaceProviderTraceOnce(source, taskBlockersNeedle, taskBlockersReplacement, patchId);
-  source = taskBlockersPatch.source;
-  changed ||= taskBlockersPatch.changed;
-
-  const channelCheckNeedle = `\t\t\tconst initial = getActiveCounts();
-\t\t\tif (initial.totalActive <= 0) return false;
-\t\t\tconst channelIds = [...new Set(channels)];`;
-  const channelCheckReplacement = `\t\t\tconst initial = getActiveCounts();
-\t\t\tconst channelIds = [...new Set(channels)];
-\t\t\tmatchaProviderDebugTrace("openclaw-active-work", "channel-reload-check", () => ({
-\t\t\t\tchannels: channelIds.length,
-\t\t\t\tpublication_pending: Boolean(publicationPending),
-\t\t\t\ttotal_active: initial.totalActive,
-\t\t\t\tactive_tasks: initial.activeTasks
-\t\t\t}));
-\t\t\tif (initial.totalActive <= 0) return false;`;
-  const channelCheckPatch = replaceProviderTraceOnce(source, channelCheckNeedle, channelCheckReplacement, patchId);
-  source = channelCheckPatch.source;
-  changed ||= channelCheckPatch.changed;
-
-  const hotStartNeedle = `\t\tconst applyHotReload = async (plan, nextConfig, publication) => {
-\t\t\tassertIrreversibleReloadPlanHasRecoveryOwner(plan, restartRecoveryAvailable);`;
-  const hotStartReplacement = `\t\tconst applyHotReload = async (plan, nextConfig, publication) => {
-\t\t\tmatchaProviderDebugTrace("openclaw-hot-reload", "start", () => ({
-\t\t\t\tchanged_paths: plan.changedPaths?.length ?? 0,
-\t\t\t\treload_plugins: Boolean(plan.reloadPlugins),
-\t\t\t\trestart_gateway: Boolean(plan.restartGateway),
-\t\t\t\trestart_channels: plan.restartChannels?.size ?? 0,
-\t\t\t\trestart_channel_accounts: plan.restartChannelAccounts?.size ?? 0,
-\t\t\t\tdispose_mcp_runtimes: Boolean(plan.disposeMcpRuntimes)
-\t\t\t}));
-\t\t\tassertIrreversibleReloadPlanHasRecoveryOwner(plan, restartRecoveryAvailable);`;
-  const hotStartPatch = replaceProviderTraceOnce(source, hotStartNeedle, hotStartReplacement, patchId);
-  source = hotStartPatch.source;
-  changed ||= hotStartPatch.changed;
-
-  const recoveryNeedle = `\t\t\tconst scheduleRecoveryRestart = (surface, err) => {
-\t\t\t\tconst detail = err === void 0 ? "" : \`: \${formatErrorMessage(err)}\`;`;
-  const recoveryReplacement = `\t\t\tconst scheduleRecoveryRestart = (surface, err) => {
-\t\t\t\tmatchaProviderDebugTrace("openclaw-hot-reload", "recovery-restart", () => ({
-\t\t\t\t\tsurface_len: String(surface).length,
-\t\t\t\t\truntime_committed: runtimeCommitted,
-\t\t\t\t\trecovery_available: restartRecoveryAvailable,
-\t\t\t\t\t...matchaProviderDebugError(err)
-\t\t\t\t}));
-\t\t\t\tconst detail = err === void 0 ? "" : \`: \${formatErrorMessage(err)}\`;`;
-  const recoveryPatch = replaceProviderTraceOnce(source, recoveryNeedle, recoveryReplacement, patchId);
-  source = recoveryPatch.source;
-  changed ||= recoveryPatch.changed;
 
   if (changed) writeText(filePath, source);
   return changed;
-}
-
-function patchProviderConfigMethodsTrace(filePath, patchId) {
-  let source = readText(filePath);
-  let changed = false;
-  const helper = [
-    buildProviderTraceHelper('matchaConfigMethodTrace', 'openclaw-config-method'),
-    'function matchaConfigPatchTopKeys(value) {',
-    '\treturn value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).join(",") : "";',
-    '}',
-  ].join('\n');
-  const helperNeedle = 'function clearConfigSchemaResponseCache() {';
-  const helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId, false);
-  source = helperPatch.source;
-  changed ||= helperPatch.changed;
-
-  const applicationNeedle = `\tif (params.writeResult.application) {
-\t\tconst outcome = await params.writeResult.application;
-\t\tif (outcome !== "applied") {`;
-  const applicationReplacement = `\tif (params.writeResult.application) {
-\t\tmatchaConfigMethodTrace("application-wait", () => ({
-\t\t\tmode: params.mode,
-\t\t\tchanged_paths: params.changedPaths?.length ?? 0
-\t\t}));
-\t\tconst outcome = await params.writeResult.application;
-\t\tmatchaConfigMethodTrace("application-outcome", () => ({
-\t\t\tmode: params.mode,
-\t\t\toutcome,
-\t\t\tchanged_paths: params.changedPaths?.length ?? 0
-\t\t}));
-\t\tif (outcome !== "applied") {`;
-  const applicationPatch = replaceProviderTraceOnce(source, applicationNeedle, applicationReplacement, patchId);
-  source = applicationPatch.source;
-  changed ||= applicationPatch.changed;
-
-  const patchNeedle = `\t\tconst changedPaths = diffGatewayReloadPaths(snapshot.config, validatedConfig, listConfigReloadRefinementPrefixes());
-\t\tcontext?.logGateway?.info(\`config.patch write \${formatControlPlaneActor(actor)} changedPaths=\${summarizeChangedPaths(changedPaths)} restartReason=config.patch\`);`;
-  const patchReplacement = `\t\tconst changedPaths = diffGatewayReloadPaths(snapshot.config, validatedConfig, listConfigReloadRefinementPrefixes());
-\t\tmatchaConfigMethodTrace("patch-ready", () => ({
-\t\t\ttop_keys: matchaConfigPatchTopKeys(normalizedPatch),
-\t\t\treplace_paths: replacePaths.length,
-\t\t\tchanged_paths: changedPaths.length,
-\t\t\tawait_runtime: shouldAwaitGatewayConfigApplication({
-\t\t\t\tchangedPaths,
-\t\t\t\tpreviousConfig: snapshot.config,
-\t\t\t\tnextConfig: validatedConfig
-\t\t\t})
-\t\t}));
-\t\tcontext?.logGateway?.info(\`config.patch write \${formatControlPlaneActor(actor)} changedPaths=\${summarizeChangedPaths(changedPaths)} restartReason=config.patch\`);`;
-  const patchPatch = replaceProviderTraceOnce(source, patchNeedle, patchReplacement, patchId);
-  source = patchPatch.source;
-  changed ||= patchPatch.changed;
-
-  if (changed) writeText(filePath, source);
-  return changed;
-}
-
-function patchProviderConfigRuntimeReloadTrace(filePath, patchId) {
-  let source = readText(filePath);
-  let changed = false;
-  const helper = [
-    buildProviderTraceHelper('matchaProviderRuntimeReloadTrace', 'openclaw-plugin-runtime-reload'),
-    'function matchaProviderRuntimeReloadError(error) {',
-    '\treturn {',
-    '\t\terror_name: error instanceof Error ? error.name : typeof error,',
-    '\t\tmessage_len: error instanceof Error ? error.message.length : String(error).length',
-    '\t};',
-    '}',
-  ].join('\n');
-  const helperNeedle = 'import "./sessions-dovo0Bf5.mjs";';
-  const helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId);
-  source = helperPatch.source;
-  changed ||= helperPatch.changed;
-
-  const startNeedle = `\tconst reloadAttachedGatewayPlugins = async (params) => {
-\t\tconst [{ loadPluginLookUpTable }, { listAmbientOnlyConfiguredChannelIds }, { prepareGatewayPluginLoad }, { startPluginServices, PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS }] = await Promise.all([`;
-  const startReplacement = `\tconst reloadAttachedGatewayPlugins = async (params) => {
-\t\tmatchaProviderRuntimeReloadTrace("start", () => ({
-\t\t\tnext_has_plugins: Boolean(params.nextConfig?.plugins),
-\t\t\tsource_has_plugins: Boolean(params.sourceConfig?.plugins)
-\t\t}));
-\t\tconst [{ loadPluginLookUpTable }, { listAmbientOnlyConfiguredChannelIds }, { prepareGatewayPluginLoad }, { startPluginServices, PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS }] = await Promise.all([`;
-  const startPatch = replaceProviderTraceOnce(source, startNeedle, startReplacement, patchId);
-  source = startPatch.source;
-  changed ||= startPatch.changed;
-
-  const lookupNeedle = `\t\tconst nextAmbientAutostartSuppressedChannelIds = ambientEnvTriggers === "suppress" ? new Set(listAmbientOnlyConfiguredChannelIds({`;
-  const lookupReplacement = `\t\tmatchaProviderRuntimeReloadTrace("lookup-loaded", () => ({
-\t\t\tplugins: nextPluginLookUpTable?.pluginIds?.size ?? nextPluginLookUpTable?.pluginIds?.length ?? 0,
-\t\t\tmanifests: nextPluginLookUpTable?.manifestRegistry?.plugins?.size ?? nextPluginLookUpTable?.manifestRegistry?.plugins?.length ?? 0
-\t\t}));
-\t\tconst nextAmbientAutostartSuppressedChannelIds = ambientEnvTriggers === "suppress" ? new Set(listAmbientOnlyConfiguredChannelIds({`;
-  const lookupPatch = replaceProviderTraceOnce(source, lookupNeedle, lookupReplacement, patchId);
-  source = lookupPatch.source;
-  changed ||= lookupPatch.changed;
-
-  const beforeNeedle = `\t\ttry {
-\t\t\tawait params.beforeReplace(beforeChannelIds);`;
-  const beforeReplacement = `\t\ttry {
-\t\t\tmatchaProviderRuntimeReloadTrace("before-replace", () => ({ channels: beforeChannelIds.size }));
-\t\t\tawait params.beforeReplace(beforeChannelIds);`;
-  const beforePatch = replaceProviderTraceOnce(source, beforeNeedle, beforeReplacement, patchId);
-  source = beforePatch.source;
-  changed ||= beforePatch.changed;
-
-  const stopNeedle = `\t\t\t\tawait previousServices.stop({
-\t\t\t\t\tstrict: true,
-\t\t\t\t\tdeadlineAtMs: Date.now() + PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS
-\t\t\t\t});`;
-  const stopReplacement = `\t\t\t\tmatchaProviderRuntimeReloadTrace("previous-services-stop", () => ({}));
-\t\t\t\tawait previousServices.stop({
-\t\t\t\t\tstrict: true,
-\t\t\t\t\tdeadlineAtMs: Date.now() + PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS
-\t\t\t\t});
-\t\t\t\tmatchaProviderRuntimeReloadTrace("previous-services-stopped", () => ({}));`;
-  const stopPatch = replaceProviderTraceOnce(source, stopNeedle, stopReplacement, patchId);
-  source = stopPatch.source;
-  changed ||= stopPatch.changed;
-
-  const commitNeedle = `\t\t\tawait params.commitRuntime(() => {`;
-  const commitReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("commit-runtime-start", () => ({}));
-\t\t\tawait params.commitRuntime(() => {`;
-  const commitPatch = replaceProviderTraceOnce(source, commitNeedle, commitReplacement, patchId);
-  source = commitPatch.source;
-  changed ||= commitPatch.changed;
-
-  const publishNeedle = `\t\t\tif (!replacement.claim.publish(() => {`;
-  const publishReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("publish-start", () => ({}));
-\t\t\tif (!replacement.claim.publish(() => {`;
-  const publishPatch = replaceProviderTraceOnce(source, publishNeedle, publishReplacement, patchId);
-  source = publishPatch.source;
-  changed ||= publishPatch.changed;
-
-  const loadNeedle = `\t\t\t\tloaded = prepareGatewayPluginLoad({`;
-  const loadReplacement = `\t\t\t\tmatchaProviderRuntimeReloadTrace("prepare-load-start", () => ({}));
-\t\t\t\tloaded = prepareGatewayPluginLoad({`;
-  const loadPatch = replaceProviderTraceOnce(source, loadNeedle, loadReplacement, patchId);
-  source = loadPatch.source;
-  changed ||= loadPatch.changed;
-
-  const replaceNeedle = `\t\t\t\treplaceAttachedPluginRuntime(loaded);
-\t\t\t\treleaseChannelStarts("published");`;
-  const replaceReplacement = `\t\t\t\tmatchaProviderRuntimeReloadTrace("prepare-load-finished", () => ({}));
-\t\t\t\treplaceAttachedPluginRuntime(loaded);
-\t\t\t\tmatchaProviderRuntimeReloadTrace("runtime-replaced", () => ({}));
-\t\t\t\treleaseChannelStarts("published");`;
-  const replacePatch = replaceProviderTraceOnce(source, replaceNeedle, replaceReplacement, patchId);
-  source = replacePatch.source;
-  changed ||= replacePatch.changed;
-
-  const discoveryNeedle = `\t\t\tawait refreshAttachedGatewayDiscovery(loaded.pluginRegistry, replacement.claim);`;
-  const discoveryReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("discovery-refresh-start", () => ({}));
-\t\t\tawait refreshAttachedGatewayDiscovery(loaded.pluginRegistry, replacement.claim);
-\t\t\tmatchaProviderRuntimeReloadTrace("discovery-refresh-finished", () => ({}));`;
-  const discoveryPatch = replaceProviderTraceOnce(source, discoveryNeedle, discoveryReplacement, patchId);
-  source = discoveryPatch.source;
-  changed ||= discoveryPatch.changed;
-
-  const servicesNeedle = `\t\t\tconst nextServices = await startPluginServices({`;
-  const servicesReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("services-start", () => ({}));
-\t\t\tconst nextServices = await startPluginServices({`;
-  const servicesPatch = replaceProviderTraceOnce(source, servicesNeedle, servicesReplacement, patchId);
-  source = servicesPatch.source;
-  changed ||= servicesPatch.changed;
-
-  const servicesDoneNeedle = `\t\t\tif (!await replacement.claim.waitForUnblocked() || !pluginRuntimeGeneration.publishServices(replacement.claim, nextServices)) await nextServices.stop({`;
-  const servicesDoneReplacement = `\t\t\tmatchaProviderRuntimeReloadTrace("services-started", () => ({}));
-\t\t\tif (!await replacement.claim.waitForUnblocked() || !pluginRuntimeGeneration.publishServices(replacement.claim, nextServices)) await nextServices.stop({`;
-  const servicesDonePatch = replaceProviderTraceOnce(source, servicesDoneNeedle, servicesDoneReplacement, patchId);
-  source = servicesDonePatch.source;
-  changed ||= servicesDonePatch.changed;
-
-  const catchNeedle = `\t\t} catch (error) {
-\t\t\treplacement.reject();
-\t\t\trecoverFromReplacementTeardown?.(error);
-\t\t\tthrow error;
-\t\t} finally {`;
-  const catchReplacement = `\t\t} catch (error) {
-\t\t\tmatchaProviderRuntimeReloadTrace("failed", () => (matchaProviderRuntimeReloadError(error)));
-\t\t\treplacement.reject();
-\t\t\trecoverFromReplacementTeardown?.(error);
-\t\t\tthrow error;
-\t\t} finally {`;
-  const catchPatch = replaceProviderTraceOnce(source, catchNeedle, catchReplacement, patchId);
-  source = catchPatch.source;
-  changed ||= catchPatch.changed;
-
-  const doneNeedle = `\t\treturn { activeChannels: listAttachedChannelIds() };`;
-  const doneReplacement = `\t\tconst activeChannels = listAttachedChannelIds();
-\t\tmatchaProviderRuntimeReloadTrace("finished", () => ({ channels: activeChannels.size }));
-\t\treturn { activeChannels };`;
-  const donePatch = replaceProviderTraceOnce(source, doneNeedle, doneReplacement, patchId);
-  source = donePatch.source;
-  changed ||= donePatch.changed;
-
-  if (changed) writeText(filePath, source);
-  return changed;
-}
-
-function patchProviderConfigServicesTrace(filePath, patchId) {
-  let source = readText(filePath);
-  let changed = false;
-  const helper = [
-    buildProviderTraceHelper('matchaPluginServiceTrace', 'openclaw-plugin-services'),
-    'function matchaPluginServiceError(error) {',
-    '\treturn {',
-    '\t\terror_name: error instanceof Error ? error.name : typeof error,',
-    '\t\tmessage_len: error instanceof Error ? error.message.length : String(error).length',
-    '\t};',
-    '}',
-  ].join('\n');
-  const helperNeedle = 'async function startPluginServices(params) {';
-  const helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId, false);
-  source = helperPatch.source;
-  changed ||= helperPatch.changed;
-
-  const stopNeedle = `\tconst stopService = async (entry, failures, deadline, beforeStop) => {
-\t\tentry.stopping = true;
-\t\ttry {`;
-  const stopReplacement = `\tconst stopService = async (entry, failures, deadline, beforeStop) => {
-\t\tentry.stopping = true;
-\t\tmatchaPluginServiceTrace("stop-start", () => ({
-\t\t\tplugin_id: entry.pluginId,
-\t\t\tservice_id: entry.id,
-\t\t\thas_deadline: deadline !== void 0,
-\t\t\tstartup_pending: Boolean(entry.startup)
-\t\t}));
-\t\ttry {`;
-  const stopPatch = replaceProviderTraceOnce(source, stopNeedle, stopReplacement, patchId);
-  source = stopPatch.source;
-  changed ||= stopPatch.changed;
-
-  const stopDoneNeedle = `\t\tawait runBeforeDeadline(cleanup, deadline, entry.startup ? "plugin service startup settlement" : "plugin service stop");`;
-  const stopDoneReplacement = `${stopDoneNeedle}
-\t\tmatchaPluginServiceTrace("stop-done", () => ({
-\t\t\tplugin_id: entry.pluginId,
-\t\t\tservice_id: entry.id
-\t\t}));`;
-  const stopDonePatch = replaceProviderTraceOnce(source, stopDoneNeedle, stopDoneReplacement, patchId);
-  source = stopDonePatch.source;
-  changed ||= stopDonePatch.changed;
-
-  const stopFailedNeedle = `\t} catch (err) {
-\t\tlog.warn(\`plugin service stop failed (\${entry.id}): \${String(err)}\`);`;
-  const stopFailedReplacement = `\t} catch (err) {
-\t\tmatchaPluginServiceTrace("stop-failed", () => ({
-\t\t\tplugin_id: entry.pluginId,
-\t\t\tservice_id: entry.id,
-\t\t\t...matchaPluginServiceError(err)
-\t\t}));
-\t\tlog.warn(\`plugin service stop failed (\${entry.id}): \${String(err)}\`);`;
-  const stopFailedPatch = replaceProviderTraceOnce(source, stopFailedNeedle, stopFailedReplacement, patchId);
-  source = stopFailedPatch.source;
-  changed ||= stopFailedPatch.changed;
-
-  const handleStopNeedle = `\tstop: (options) => {
-\t\tstopRequested = true;
-\t\tconst strict = options?.strict === true;
-\t\tconst deadline = strict ? options.deadlineAtMs : void 0;`;
-  const handleStopReplacement = `\tstop: (options) => {
-\t\tstopRequested = true;
-\t\tconst strict = options?.strict === true;
-\t\tconst deadline = strict ? options.deadlineAtMs : void 0;
-\t\tmatchaPluginServiceTrace("handle-stop", () => ({
-\t\t\tstrict,
-\t\t\tservice_count: ownedServices.length,
-\t\t\thas_deadline: deadline !== void 0
-\t\t}));`;
-  const handleStopPatch = replaceProviderTraceOnce(source, handleStopNeedle, handleStopReplacement, patchId);
-  source = handleStopPatch.source;
-  changed ||= handleStopPatch.changed;
-
-  const aggregateNeedle = `\t\tif (failures.length > 0) throw new AggregateError(failures, strict ? "plugin service replacement cleanup failed" : "multiple diagnostics exporters failed to stop");`;
-  const aggregateReplacement = `\t\tif (failures.length > 0) {
-\t\t\tmatchaPluginServiceTrace("handle-stop-failed", () => ({
-\t\t\t\tstrict,
-\t\t\t\tfailures: failures.length
-\t\t\t}));
-\t\t\tthrow new AggregateError(failures, strict ? "plugin service replacement cleanup failed" : "multiple diagnostics exporters failed to stop");
-\t\t}`;
-  const aggregatePatch = replaceProviderTraceOnce(source, aggregateNeedle, aggregateReplacement, patchId);
-  source = aggregatePatch.source;
-  changed ||= aggregatePatch.changed;
-
-  const startNeedle = `\tconst startService = async (entry, config, strict = false, index = ownedServices.length) => {
-\t\tconst service = entry.service;`;
-  const startReplacement = `\tconst startService = async (entry, config, strict = false, index = ownedServices.length) => {
-\t\tconst service = entry.service;
-\t\tmatchaPluginServiceTrace("start-service", () => ({
-\t\t\tplugin_id: entry.pluginId,
-\t\t\tservice_id: service.id,
-\t\t\tstrict
-\t\t}));`;
-  const startPatch = replaceProviderTraceOnce(source, startNeedle, startReplacement, patchId);
-  source = startPatch.source;
-  changed ||= startPatch.changed;
-
-  const startDoneNeedle = `\t\tawait (params.startupTrace ? params.startupTrace.measure(traceName, invokeStart) : invokeStart());
-\t\treturn true;`;
-  const startDoneReplacement = `\t\tawait (params.startupTrace ? params.startupTrace.measure(traceName, invokeStart) : invokeStart());
-\t\tmatchaPluginServiceTrace("start-service-done", () => ({
-\t\t\tplugin_id: entry.pluginId,
-\t\t\tservice_id: service.id
-\t\t}));
-\t\treturn true;`;
-  const startDonePatch = replaceProviderTraceOnce(source, startDoneNeedle, startDoneReplacement, patchId);
-  source = startDonePatch.source;
-  changed ||= startDonePatch.changed;
-
-  const startFailedNeedle = `\t} catch (err) {
-\t\tserviceContext.serviceHealth?.reportFailure(err);`;
-  const startFailedReplacement = `\t} catch (err) {
-\t\tmatchaPluginServiceTrace("start-service-failed", () => ({
-\t\t\tplugin_id: entry.pluginId,
-\t\t\tservice_id: service.id,
-\t\t\tstrict,
-\t\t\t...matchaPluginServiceError(err)
-\t\t}));
-\t\tserviceContext.serviceHealth?.reportFailure(err);`;
-  const startFailedPatch = replaceProviderTraceOnce(source, startFailedNeedle, startFailedReplacement, patchId);
-  source = startFailedPatch.source;
-  changed ||= startFailedPatch.changed;
-
-  if (changed) writeText(filePath, source);
-  return changed;
-}
-
-function patchProviderConfigTaskTrace(filePath, patchId) {
-  let source = readText(filePath);
-  let changed = false;
-  const helper = [
-    buildProviderTraceHelper('matchaTaskDebugTrace', 'task-registry-maintenance'),
-    'function matchaTaskDebugError(error) {',
-    '\treturn {',
-    '\t\terror_name: error instanceof Error ? error.name : typeof error,',
-    '\t\tmessage_len: error instanceof Error ? error.message.length : String(error).length',
-    '\t};',
-    '}',
-    'function matchaTaskDebugLen(value) {',
-    '\treturn typeof value === "string" ? value.length : 0;',
-    '}',
-  ].join('\n');
-  const helperNeedle = 'const SWEEP_YIELD_BATCH_SIZE = 25;';
-  const helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId);
-  source = helperPatch.source;
-  changed ||= helperPatch.changed;
-
-  const sessionNeedle = `function findTaskSessionEntry(task, context) {
-\tconst childSessionKey = task.childSessionKey?.trim();
-\tif (!childSessionKey) return;
-\tconst agentId = taskRegistryMaintenanceRuntime.parseAgentSessionKey(childSessionKey)?.agentId;
-\treturn findSessionEntryByKey(getSessionEntryLookup(taskRegistryMaintenanceRuntime.resolveStorePath(void 0, { agentId }), context), childSessionKey);
-}`;
-  const sessionReplacement = `function findTaskSessionEntry(task, context) {
-\tconst childSessionKey = task.childSessionKey?.trim();
-\tif (!childSessionKey) return;
-\tconst agentId = taskRegistryMaintenanceRuntime.parseAgentSessionKey(childSessionKey)?.agentId;
-\tmatchaTaskDebugTrace("session-entry.lookup", () => ({
-\t\ttask_id_len: matchaTaskDebugLen(task.taskId),
-\t\truntime: task.runtime ?? "none",
-\t\tchild_session_key_len: childSessionKey.length,
-\t\tagent_id_present: Boolean(agentId?.trim()),
-\t\tagent_id_len: matchaTaskDebugLen(agentId)
-\t}));
-\tlet storePath;
-\ttry {
-\t\tstorePath = taskRegistryMaintenanceRuntime.resolveStorePath(void 0, { agentId });
-\t} catch (error) {
-\t\tmatchaTaskDebugTrace("session-entry.store-path-failed", () => ({
-\t\t\ttask_id_len: matchaTaskDebugLen(task.taskId),
-\t\t\truntime: task.runtime ?? "none",
-\t\t\tchild_session_key_len: childSessionKey.length,
-\t\t\tagent_id_present: Boolean(agentId?.trim()),
-\t\t\t...matchaTaskDebugError(error)
-\t\t}));
-\t\tthrow error;
-\t}
-\ttry {
-\t\treturn findSessionEntryByKey(getSessionEntryLookup(storePath, context), childSessionKey);
-\t} catch (error) {
-\t\tmatchaTaskDebugTrace("session-entry.lookup-failed", () => ({
-\t\t\ttask_id_len: matchaTaskDebugLen(task.taskId),
-\t\t\truntime: task.runtime ?? "none",
-\t\t\tchild_session_key_len: childSessionKey.length,
-\t\t\tagent_id_present: Boolean(agentId?.trim()),
-\t\t\t...matchaTaskDebugError(error)
-\t\t}));
-\t\tthrow error;
-\t}
-}`;
-  const sessionPatch = replaceProviderTraceOnce(source, sessionNeedle, sessionReplacement, patchId);
-  source = sessionPatch.source;
-  changed ||= sessionPatch.changed;
-
-  const blockersNeedle = `function getInspectableActiveTaskRestartBlockers() {
-\ttaskRegistryMaintenanceRuntime.ensureTaskRegistryReady();
-\tconst candidates = taskRegistryMaintenanceRuntime.listTaskRecords(isTaskRestartBlocker);
-\tconst blockers = [];
-\tfor (const task of reconcileTaskRecordsForOperatorInspection(candidates)) {
-\t\tif (!isTaskRestartBlocker(task)) continue;
-\t\tconst blocker = {
-\t\t\ttaskId: task.taskId,
-\t\t\tstatus: task.status,
-\t\t\truntime: task.runtime
-\t\t};
-\t\tif (task.taskKind) blocker.taskKind = task.taskKind;
-\t\tif (task.runId) blocker.runId = task.runId;
-\t\tif (task.label) blocker.label = task.label;
-\t\tif (task.task) blocker.title = task.task;
-\t\tblockers.push(blocker);
-\t}
-\treturn blockers;
-}`;
-  const blockersReplacement = `function getInspectableActiveTaskRestartBlockers() {
-\ttaskRegistryMaintenanceRuntime.ensureTaskRegistryReady();
-\tconst candidates = taskRegistryMaintenanceRuntime.listTaskRecords(isTaskRestartBlocker);
-\tmatchaTaskDebugTrace("restart-blockers.candidates", () => ({ count: candidates.length }));
-\tlet reconciled;
-\ttry {
-\t\treconciled = reconcileTaskRecordsForOperatorInspection(candidates);
-\t} catch (error) {
-\t\tmatchaTaskDebugTrace("restart-blockers.reconcile-failed", () => ({
-\t\t\tcandidate_count: candidates.length,
-\t\t\t...matchaTaskDebugError(error)
-\t\t}));
-\t\tthrow error;
-\t}
-\tconst blockers = [];
-\tfor (const task of reconciled) {
-\t\tif (!isTaskRestartBlocker(task)) continue;
-\t\tconst blocker = {
-\t\t\ttaskId: task.taskId,
-\t\t\tstatus: task.status,
-\t\t\truntime: task.runtime
-\t\t};
-\t\tif (task.taskKind) blocker.taskKind = task.taskKind;
-\t\tif (task.runId) blocker.runId = task.runId;
-\t\tif (task.label) blocker.label = task.label;
-\t\tif (task.task) blocker.title = task.task;
-\t\tblockers.push(blocker);
-\t}
-\tmatchaTaskDebugTrace("restart-blockers.result", () => ({ count: blockers.length }));
-\treturn blockers;
-}`;
-  const blockersPatch = replaceProviderTraceOnce(source, blockersNeedle, blockersReplacement, patchId);
-  source = blockersPatch.source;
-  changed ||= blockersPatch.changed;
-
-  if (changed) writeText(filePath, source);
-  return changed;
-}
-
-function patchProviderConfigSessionPathTrace(filePath, patchId) {
-  let source = readText(filePath);
-  let changed = false;
-  const helper = [
-    buildProviderTraceHelper('matchaSessionPathTrace', 'session-paths'),
-  ].join('\n');
-  const helperNeedle = `var SessionStoreAgentIdRequiredError = class extends Error {
-\tconstructor() {
-\t\tsuper("Session store path requires an explicit agent id.");
-\t\tthis.name = "SessionStoreAgentIdRequiredError";
-\t}
-};`;
-  const helperPatch = replaceProviderTraceHelper(source, helperNeedle, helper, patchId);
-  source = helperPatch.source;
-  changed ||= helperPatch.changed;
-
-  const defaultNeedle = `\tif (!store) {
-\t\tif (!opts?.agentId?.trim()) throw new SessionStoreAgentIdRequiredError();`;
-  const defaultReplacement = `\tif (!store) {
-\t\tif (!opts?.agentId?.trim()) {
-\t\t\tmatchaSessionPathTrace("store-path.failed", () => ({
-\t\t\t\tstore_present: false,
-\t\t\t\ttemplate: false,
-\t\t\t\tagent_id_present: false
-\t\t\t}));
-\t\t\tthrow new SessionStoreAgentIdRequiredError();
-\t\t}`;
-  const defaultPatch = replaceProviderTraceOnce(source, defaultNeedle, defaultReplacement, patchId);
-  source = defaultPatch.source;
-  changed ||= defaultPatch.changed;
-
-  const templateNeedle = `\tif (store.includes("{agentId}")) {
-\t\tif (!opts?.agentId?.trim()) throw new SessionStoreAgentIdRequiredError();`;
-  const templateReplacement = `\tif (store.includes("{agentId}")) {
-\t\tif (!opts?.agentId?.trim()) {
-\t\t\tmatchaSessionPathTrace("store-path.failed", () => ({
-\t\t\t\tstore_present: true,
-\t\t\t\ttemplate: true,
-\t\t\t\tagent_id_present: false
-\t\t\t}));
-\t\t\tthrow new SessionStoreAgentIdRequiredError();
-\t\t}`;
-  const templatePatch = replaceProviderTraceOnce(source, templateNeedle, templateReplacement, patchId);
-  source = templatePatch.source;
-  changed ||= templatePatch.changed;
-
-  if (changed) writeText(filePath, source);
-  return changed;
-}
-
-function patchExplicitSessionModelPatch(openclawDir) {
-  const patchId = 'explicit-session-model-patch';
-  const distDir = path.join(openclawDir, 'dist');
-  const sessionsPatchFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'sessions-patch-',
-    markers: [
-      'function resolveSessionPatchModelSelection(params)',
-      'if ("model" in patch) {',
-      'applyModelOverrideWithAuthProfileCompatibility({',
-      'markLiveSwitchPending: raw !== null',
-    ],
-  });
-  return patchExplicitSessionModelSelection(sessionsPatchFile, patchId)
-    ? { status: 'applied', detail: path.basename(sessionsPatchFile) }
-    : { status: 'clean', detail: 'already patched' };
-}
-
-function patchExplicitSessionModelSelection(filePath, patchId) {
-  let source = readText(filePath);
-  if (source.includes('selection = { ...resolved, isDefault: false };')) return false;
-  const pattern = /(\n[\t ]*if \(!resolved\.ok\) return invalid\(resolved\.error\);\n)([\t ]*)selection = resolved;/g;
-  const matches = [...source.matchAll(pattern)];
-  if (matches.length !== 1) {
-    throw new Error(`${patchId}: expected one session model patch selection target, found ${matches.length}`);
-  }
-  source = source.replace(pattern, '$1$2selection = { ...resolved, isDefault: false };');
-  writeText(filePath, source);
-  return true;
 }
 
 function patchAgentDeleteCleanupIdentityString(openclawDir) {
@@ -2314,17 +1287,21 @@ function patchAgentDeleteCleanupIdentityString(openclawDir) {
     ],
   });
   const journalFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'openclaw-agent-db-lease-',
+    fileNamePrefix: 'agent-deletion-journal-',
     markers: [
       'function parseCleanupPaths(value)',
       'Invalid agent deletion cleanup path journal.',
       'function readAgentDeletionJournal(',
     ],
   });
+  const journalFiles = [journalFile, ...[
+    'state/openclaw-state-read.worker.js',
+    'infra/sqlite-readonly-location.worker.js',
+  ].map((file) => path.join(distDir, file))];
   const changed = [
     [agentsFile, patchAgentDeleteCleanupIdentity(agentsFile, patchId)],
-    [journalFile, patchAgentDeletionJournalCleanupIdentity(journalFile, patchId)],
-  ].filter(([, changed]) => changed).map(([file]) => path.basename(file));
+    ...journalFiles.map((file) => [file, patchAgentDeletionJournalCleanupIdentity(file, patchId)]),
+  ].filter(([, changed]) => changed).map(([file]) => path.relative(distDir, file));
   return changed.length > 0
     ? { status: 'applied', detail: changed.join(', ') }
     : { status: 'clean', detail: 'already patched' };
@@ -2354,26 +1331,26 @@ async function statAgentCleanupPath(cleanupPath) {`;
 
 function patchAgentDeletionJournalCleanupIdentity(filePath, patchId) {
   let source = readText(filePath);
-  const replacement = `function parseCleanupPaths(value) {
-\tconst parsed = JSON.parse(value);
-\tif (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "object" && entry !== null && typeof entry.path === "string" && typeof entry.canonicalPath === "string" && typeof entry.parentPath === "string" && (entry.kind === "target" || entry.kind === "symlink") && (entry.dev === null || typeof entry.dev === "number" || typeof entry.dev === "string") && (entry.ino === null || typeof entry.ino === "number" || typeof entry.ino === "string") && typeof entry.coversDescendants === "boolean" && typeof entry.done === "boolean" && (entry.note === void 0 || typeof entry.note === "string") && Array.isArray(entry.sourcePaths) && entry.sourcePaths.every((sourcePath) => typeof sourcePath === "string"))) throw new Error("Invalid agent deletion cleanup path journal.");
-\treturn parsed.map((entry) => ({
-\t\t...entry,
-\t\tdev: entry.dev === null ? null : String(entry.dev),
-\t\tino: entry.ino === null ? null : String(entry.ino)
-\t}));
-}
-function readAgentDeletionJournal(agentId, options = {}) {`;
-  const patch = replaceBlockOnce(
-    source,
-    'function parseCleanupPaths(value) {',
-    '\nfunction readAgentDeletionJournal(agentId, options = {}) {',
-    replacement,
-    patchId,
-  );
-  source = patch.source;
-  if (patch.changed) writeText(filePath, source);
-  return patch.changed;
+  const start = source.indexOf('function parseCleanupPaths(value) {');
+  const end = source.indexOf('\n/** Read the journal through an already validated shared-state connection. */', start);
+  if (start < 0 || end < 0 || source.indexOf('function parseCleanupPaths(value) {', start + 1) >= 0) throw new Error(`${patchId}: journal parser boundary missing`);
+  const before = source.slice(start, end);
+  let parser = before;
+  for (const field of ['dev', 'ino']) {
+    const needle = `(entry.${field} === null || typeof entry.${field} === "number")`;
+    const replacement = `(entry.${field} === null || typeof entry.${field} === "number" || typeof entry.${field} === "string")`;
+    if (!parser.includes(replacement)) parser = replaceOnce(parser, needle, replacement, patchId);
+  }
+  const normalized = `return parsed.map((entry) => ({
+		...entry,
+		dev: entry.dev === null ? null : String(entry.dev),
+		ino: entry.ino === null ? null : String(entry.ino)
+	}));`;
+  if (!parser.includes(normalized)) parser = replaceOnce(parser, 'return parsed;', normalized, patchId);
+  if (parser === before) return false;
+  source = source.slice(0, start) + parser + source.slice(end);
+  writeText(filePath, source);
+  return true;
 }
 
 function patchChannelPairingApprovalExport(openclawDir) {
@@ -2382,7 +1359,7 @@ function patchChannelPairingApprovalExport(openclawDir) {
   const targetFile = path.join(distDir, 'plugin-sdk', 'channel-pairing.js');
   const producerFile = locateSingleJavaScriptFile(distDir, patchId, {
     fileNamePrefix: 'pairing-store-',
-    markers: ['async function approveChannelPairingCode(params)', 'function resolveChannelPairingRequest(params)'],
+    markers: ['async function approveChannelPairingCode(params)', 'async function resolveChannelPairingRequest(params, selector, approve)'],
   });
   const alias = resolveExportAlias(producerFile, 'approveChannelPairingCode', patchId);
   const exportLine = `export { ${alias} as approveChannelPairingCode } from "${relativeImportSpecifier(targetFile, producerFile)}";`;
@@ -2390,162 +1367,6 @@ function patchChannelPairingApprovalExport(openclawDir) {
   if (source.includes(exportLine)) return { status: 'clean', detail: 'already patched' };
   writeText(targetFile, `${source.trimEnd()}\n${exportLine}\n`);
   return { status: 'applied', detail: path.basename(targetFile) };
-}
-
-const MATCHA_CHAT_STAGE_HELPER = `function createMatchaChatStageTrace(log, runId, sessionKey) {
-	if (process.env.MATCHACLAW_TRACE !== "1") return () => {};
-	const startedAtMs = performance.now();
-	const runHash = matchaChatRedactIdentifier(runId, { len: 12 });
-	const sessionHash = matchaChatRedactIdentifier(sessionKey, { len: 12 });
-	const emitted = new Set();
-	return (stage, state = "none", agentRunId) => {
-		if (!["ack_sent", "dispatch_entered", "inbound_entered", "followup_deferred", "followup_adopted", "embedded_entered", "lane_wait", "lane_admitted", "model_call_started", "agent_started", "agent_terminal", "dispatch_returned", "dispatch_failed", "post_dispatch_completed", "finalize_entered", "finalize_completed", "publication_import_entered", "publication_import_returned", "publication_entered", "publication_replacement_wait", "publication_owner_wait", "publication_returned", "admission_entered", "admission_ticket_returned", "admission_returned", "inbound_claim_entered", "inbound_claim_returned", "before_dispatch_entered", "before_dispatch_returned", "reply_dispatch_entered", "reply_dispatch_returned", "resolver_import_entered", "resolver_import_returned", "workspace_entered", "workspace_returned", "remote_media_entered", "remote_media_returned", "media_understanding_entered", "media_understanding_returned", "session_init_entered", "session_init_returned", "prepared_reply_entered", "prepared_reply_returned", "agent_preflight_entered", "compaction_entered", "compaction_returned", "user_commit_entered", "user_commit_returned", "projection_retry_entered", "projection_retry_returned", "baseline_entered", "baseline_returned"].includes(stage) || emitted.has(stage)) return;
-		emitted.add(stage);
-		const safeState = ["none", "queued", "inline", "completed", "failed", "cancelled", "unknown", "client-retry", "retry", "reconcile", "terminal"].includes(state) ? state : "unknown";
-		const elapsedMs = Math.max(0, Math.round(performance.now() - startedAtMs));
-		const agentRunHash = agentRunId === void 0 ? "-" : matchaChatRedactIdentifier(agentRunId, { len: 12 });
-		log.info(\`[matcha-chat-stage] runHash=\${runHash} sessionHash=\${sessionHash} stage=\${stage} elapsedMs=\${elapsedMs} state=\${safeState} agentRunHash=\${agentRunHash}\`);
-	};
-}`;
-
-function patchChatDispatchDiagnostics(openclawDir) {
-  const patchId = 'chat-dispatch-diagnostics';
-  const distDir = path.join(openclawDir, 'dist');
-  const hashFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'node-crypto-',
-    markers: ['function redactIdentifier(value, opts)', 'function sha256HexPrefixCore(input, length)'],
-  });
-  const gatewayFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'chat-send-handler-',
-    markers: ['function startChatDispatch(params)', 'function createChatSendDispatchErrorLifecycle(params)'],
-  });
-  const agentFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'agent-runner.runtime-',
-    markers: ['async function runEmbeddedFallbackCandidate(params)', 'const agentTurnTimingLog = createSubsystemLogger('],
-  });
-  const dispatchFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'dispatch-from-config-',
-    markers: ['async function gatherDispatchRequest(params, messageAuditTerminal', 'async function prepareDispatchOperation(state)'],
-  });
-  const resolverFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'get-reply-',
-    markers: ['async function getReplyFromConfig(ctx, opts, configOverride)', 'const traceGetReplyPhase ='],
-  });
-  const publicationFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'prepared-model-runtime-',
-    markers: ['var PreparedReplyDispatchPublicationOwner = class', 'const pendingOwner = this.host.getPendingOwnerPublication(agentId);'],
-  });
-  const plans = [
-    {
-      file: gatewayFile,
-      hashImport: true,
-      replacements: [
-        ['function startChatDispatch(params) {', `${MATCHA_CHAT_STAGE_HELPER}\nfunction startChatDispatch(params) {`],
-        ['\t\trespond(true, ackPayload, void 0, { runId: clientRunId });\n\t\tcontext.recordClientActivity?.(client);', '\t\tconst matchaChatStage = createMatchaChatStageTrace(context.logGateway, clientRunId, sessionKey);\n\t\trespond(true, ackPayload, void 0, { runId: clientRunId });\n\t\tmatchaChatStage("ack_sent");\n\t\tcontext.recordClientActivity?.(client);'],
-        ['\t\tstartChatDispatch({\n\t\t\tadmissionStartedAt,', '\t\tstartChatDispatch({\n\t\t\tmatchaChatStage,\n\t\t\tadmissionStartedAt,'],
-        ['\tlet agentRunStarted = false;\n\tlet replyDispatchRun;', '\tconst matchaChatStage = params.matchaChatStage;\n\tmatchaChatStage("dispatch_entered");\n\tlet agentRunStarted = false;\n\tlet replyDispatchRun;'],
-        ['\t\tretainWorkAdmission: retainGatewayWorkAdmission\n\t});', '\t\tretainWorkAdmission: retainGatewayWorkAdmission,\n\t\tmatchaChatStage\n\t});'],
-        ['\t\tonAdopted: async () => {},\n\t\tonDeferred: () => {', '\t\tonAdopted: async () => { params.matchaChatStage("followup_adopted"); },\n\t\tonDeferred: () => {'],
-        ['\t\t\tif (enqueued) lateFollowup.recordQueued();\n\t\t\treturn enqueued;', '\t\t\tif (enqueued) lateFollowup.recordQueued();\n\t\t\tparams.matchaChatStage("followup_deferred", enqueued ? "queued" : "inline");\n\t\t\treturn enqueued;'],
-        ['\t\tclassifyFailure: classifyDispatchFailure,\n\t\tcontext,', '\t\tclassifyFailure: classifyDispatchFailure,\n\t\tmatchaChatStage,\n\t\tcontext,'],
-        ['\t\t\tphase: "post-ack"\n\t\t});\n\t\tif (isQueuedFollowupEnqueued()) {', '\t\t\tphase: "post-ack"\n\t\t});\n\t\tparams.matchaChatStage("dispatch_failed", failureDisposition);\n\t\tif (isQueuedFollowupEnqueued()) {'],
-        ['\t\tconst dispatchInbound = () => {\n\t\t\tassertWorkspaceRunOwnership?.();', '\t\tconst dispatchInbound = () => {\n\t\t\tmatchaChatStage("inbound_entered");\n\t\t\tassertWorkspaceRunOwnership?.();'],
-        ['\t\t\t\t\tprepareAssistantTranscriptMessage: replyDispatch.prepareAssistantTranscriptMessage,', '\t\t\t\t\tmatchaChatStage,\n\t\t\t\t\tprepareAssistantTranscriptMessage: replyDispatch.prepareAssistantTranscriptMessage,'],
-        ['async function waitForAcceptedChatSendRetry(scope, error, abortSignal) {\n\tif (!isSessionTranscriptProjectionUnavailableError(error)) throw error;', 'async function waitForAcceptedChatSendRetry(scope, error, abortSignal, matchaChatStage) {\n\tif (!isSessionTranscriptProjectionUnavailableError(error)) throw error;\n\tmatchaChatStage?.("projection_retry_entered");'],
-        ['\t\tsessionId: error.sessionId\n\t}, abortSignal);', '\t\tsessionId: error.sessionId\n\t}, abortSignal);\n\tmatchaChatStage?.("projection_retry_returned");'],
-        ['\t\t\t}, error, activeRunAbort.controller.signal)', '\t\t\t}, error, activeRunAbort.controller.signal, matchaChatStage)'],
-        ['\t\t\t\t\tonAgentRunStart: (runId, _identity, options) => {\n\t\t\t\t\t\treplyDispatchRun = options;', '\t\t\t\t\tonAgentRunTerminalOutcome: (outcome) => matchaChatStage("agent_terminal", outcome),\n\t\t\t\t\tonAgentRunStart: (runId, _identity, options) => {\n\t\t\t\t\t\tmatchaChatStage("agent_started", "none", runId);\n\t\t\t\t\t\treplyDispatchRun = options;'],
-        ['\t})).then(async (dispatchResult) => {\n\t\tif (acceptedMessageInjection) return;', '\t})).then(async (dispatchResult) => {\n\t\tmatchaChatStage("dispatch_returned");\n\t\tif (acceptedMessageInjection) return;'],
-        ['\t\t\tconst runtimeCancelled = runtimeClassification === "cancellation";', '\t\t\tif (runtimeClassification) matchaChatStage("agent_terminal", runtimeClassification === "success" ? "completed" : runtimeClassification === "cancellation" ? "cancelled" : "failed");\n\t\t\tconst runtimeCancelled = runtimeClassification === "cancellation";'],
-        ['\t\temitServerTiming("post-dispatch-completed", { postDispatchMs: roundedChatSendTimingMs(performance.now() - postDispatchStartedAtMs) }, dispatchStartedAtMs);', '\t\temitServerTiming("post-dispatch-completed", { postDispatchMs: roundedChatSendTimingMs(performance.now() - postDispatchStartedAtMs) }, dispatchStartedAtMs);\n\t\tmatchaChatStage("post_dispatch_completed");'],
-        ['\t\t\tawait dispatchErrorLifecycle.finalize();\n\t\t\temitSessionsChanged(context, {', '\t\t\tmatchaChatStage("finalize_entered");\n\t\t\tawait dispatchErrorLifecycle.finalize();\n\t\t\tmatchaChatStage("finalize_completed");\n\t\t\temitSessionsChanged(context, {'],
-      ],
-    },
-    {
-      file: agentFile,
-      hashImport: true,
-      replacements: [
-        ['async function runEmbeddedFallbackCandidate(params) {\n\tconst turn = params.turn;', `${MATCHA_CHAT_STAGE_HELPER}\nasync function runEmbeddedFallbackCandidate(params) {\n\tconst turn = params.turn;\n\tconst matchaChatStage = turn.opts?.matchaChatStage ?? createMatchaChatStageTrace(agentTurnTimingLog, params.runId, turn.sessionKey);\n\tmatchaChatStage("embedded_entered");`],
-        ['\t\t\t\tonExecutionPhase: (info) => {\n\t\t\t\t\tif (info.phase === "model_call_started"', '\t\t\t\tonExecutionPhase: (info) => {\n\t\t\t\t\tif (info.phase === "model_call_started") matchaChatStage("model_call_started");\n\t\t\t\t\tif (info.phase === "model_call_started"'],
-        ['\t\t\t\tonLaneWait: ({ waiting }) => {\n\t\t\t\t\tconst replyOperation = turn.replyOperation;', '\t\t\t\tonLaneWait: ({ waiting }) => {\n\t\t\t\t\tmatchaChatStage(waiting ? "lane_wait" : "lane_admitted");\n\t\t\t\t\tconst replyOperation = turn.replyOperation;'],
-        ['async function runReplyAgent(params) {', 'async function runReplyAgent(params) {\n\tparams.opts?.matchaChatStage?.("agent_preflight_entered");'],
-        ['\tactiveSessionEntry = await traceAgentPhase("reply.preflight_compaction",', '\topts?.matchaChatStage?.("compaction_entered");\n\tactiveSessionEntry = await traceAgentPhase("reply.preflight_compaction",'],
-        ['\t\tonCompactionNotice: sendDirectCompactionNotice\n\t}));\n\tsetActiveSessionEntry(activeSessionEntry);', '\t\tonCompactionNotice: sendDirectCompactionNotice\n\t}));\n\topts?.matchaChatStage?.("compaction_returned");\n\tsetActiveSessionEntry(activeSessionEntry);'],
-        ['\t\tconst result = await admitUserTurnWithRecovery(...args);\n\t\tactiveSessionEntry = getActiveSessionEntry();', '\t\topts?.matchaChatStage?.("user_commit_entered");\n\t\tconst result = await admitUserTurnWithRecovery(...args);\n\t\topts?.matchaChatStage?.("user_commit_returned");\n\t\tactiveSessionEntry = getActiveSessionEntry();'],
-      ],
-    },
-    {
-      file: dispatchFile,
-      replacements: [
-        ['\t\t\tconst { loadPublishedGatewayReplyDispatchRuntime } = await loadPreparedModelRuntime();', '\t\t\tparams.replyOptions?.matchaChatStage?.("publication_import_entered");\n\t\t\tconst { loadPublishedGatewayReplyDispatchRuntime } = await loadPreparedModelRuntime();\n\t\t\tparams.replyOptions?.matchaChatStage?.("publication_import_returned");'],
-        ['\t\t\t\tagentId: preparedReplyDispatchAgentId,\n\t\t\t\tabortSignal: params.replyOptions?.abortSignal', '\t\t\t\tagentId: preparedReplyDispatchAgentId,\n\t\t\t\tmatchaChatStage: params.replyOptions?.matchaChatStage,\n\t\t\t\tabortSignal: params.replyOptions?.abortSignal'],
-        ['\tconst admissionTicket = params.replyOptions?.[REPLY_ADMISSION_TICKET];', '\tparams.replyOptions?.matchaChatStage?.("admission_entered");\n\tconst admissionTicket = params.replyOptions?.[REPLY_ADMISSION_TICKET];'],
-        ['\tconst preDispatchAcquisition = await state.ensureDispatchReplyOperation("pre_dispatch", Boolean(pluginOwnedBinding));', '\tparams.replyOptions?.matchaChatStage?.("admission_ticket_returned");\n\tconst preDispatchAcquisition = await state.ensureDispatchReplyOperation("pre_dispatch", Boolean(pluginOwnedBinding));\n\tparams.replyOptions?.matchaChatStage?.("admission_returned");'],
-        ['\t\t\tconst targetedClaimOutcome = hookRunner?.runInboundClaimForPluginOutcome ? await (async () => {', '\t\t\tparams.replyOptions?.matchaChatStage?.("inbound_claim_entered");\n\t\t\tconst targetedClaimOutcome = hookRunner?.runInboundClaimForPluginOutcome ? await (async () => {'],
-        ['\t\t\t})();\n\t\t\tif (isPreDispatchOperationAborted()) return {', '\t\t\t})();\n\t\t\tparams.replyOptions?.matchaChatStage?.("inbound_claim_returned");\n\t\t\tif (isPreDispatchOperationAborted()) return {'],
-        ['\t\tconst beforeDispatchResult = await traceReplyPhase("reply.before_dispatch_hooks",', '\t\tparams.replyOptions?.matchaChatStage?.("before_dispatch_entered");\n\t\tconst beforeDispatchResult = await traceReplyPhase("reply.before_dispatch_hooks",'],
-        ['\t\t}, pluginSubagentRequester), trackDispatchLifecycleWork)));\n\t\tif (beforeDispatchResult?.handled)', '\t\t}, pluginSubagentRequester), trackDispatchLifecycleWork)));\n\t\tparams.replyOptions?.matchaChatStage?.("before_dispatch_returned");\n\t\tif (beforeDispatchResult?.handled)'],
-        ['\tconst result = await runReplyDispatchHook(state, { shouldSendToolSummaries });', '\tstate.params.replyOptions?.matchaChatStage?.("reply_dispatch_entered");\n\tconst result = await runReplyDispatchHook(state, { shouldSendToolSummaries });\n\tstate.params.replyOptions?.matchaChatStage?.("reply_dispatch_returned");'],
-        ['\tconst replyResolver = params.replyResolver ?? (await state.traceReplyPhase("reply.load_reply_resolver", () => loadGetReplyFromConfigRuntime())).getReplyFromConfig;', '\tparams.replyOptions?.matchaChatStage?.("resolver_import_entered");\n\tconst replyResolver = params.replyResolver ?? (await state.traceReplyPhase("reply.load_reply_resolver", () => loadGetReplyFromConfigRuntime())).getReplyFromConfig;\n\tparams.replyOptions?.matchaChatStage?.("resolver_import_returned");'],
-      ],
-    },
-    {
-      file: resolverFile,
-      replacements: [
-        ['\tconst workspaceDir = (await traceGetReplyPhase("reply.ensure_workspace",', '\topts?.matchaChatStage?.("workspace_entered");\n\tconst workspaceDir = (await traceGetReplyPhase("reply.ensure_workspace",'],
-        ['\t}))).dir;', '\t}))).dir;\n\topts?.matchaChatStage?.("workspace_returned");'],
-        ['\tif (!isFastTestEnv && !inboundMediaWasAlreadyStaged && normalizeOptionalString(finalized.MediaRemoteHost) && hasInboundMedia(finalized)) await traceGetReplyPhase("reply.stage_remote_media_pre_understanding",', '\topts?.matchaChatStage?.("remote_media_entered");\n\tif (!isFastTestEnv && !inboundMediaWasAlreadyStaged && normalizeOptionalString(finalized.MediaRemoteHost) && hasInboundMedia(finalized)) await traceGetReplyPhase("reply.stage_remote_media_pre_understanding",'],
-        ['\tconst mediaUnderstandingRequested = !isFastTestEnv && hasInboundMediaForUnderstanding(finalized);', '\topts?.matchaChatStage?.("remote_media_returned");\n\tconst mediaUnderstandingRequested = !isFastTestEnv && hasInboundMediaForUnderstanding(finalized);'],
-        ['\t\t\tconst mediaResult = await traceGetReplyPhase("reply.apply_media_understanding",', '\t\t\topts?.matchaChatStage?.("media_understanding_entered");\n\t\t\tconst mediaResult = await traceGetReplyPhase("reply.apply_media_understanding",'],
-        ['\t\t\tif (mediaResult?.extractedFileImages.length)', '\t\t\topts?.matchaChatStage?.("media_understanding_returned");\n\t\t\tif (mediaResult?.extractedFileImages.length)'],
-        ['\t\tsessionState = useFastTestBootstrap ? initFastReplySessionState({', '\t\topts?.matchaChatStage?.("session_init_entered");\n\t\tsessionState = useFastTestBootstrap ? initFastReplySessionState({'],
-        ['\t\t\tsignal: internalOptsWithSkillFilter?.abortSignal\n\t\t}));', '\t\t\tsignal: internalOptsWithSkillFilter?.abortSignal\n\t\t}));\n\t\topts?.matchaChatStage?.("session_init_returned");'],
-        ['\t\tconst baselineEntry = await traceGetReplyPhase("reply.capture_session_diff_baseline",', '\t\topts?.matchaChatStage?.("baseline_entered");\n\t\tconst baselineEntry = await traceGetReplyPhase("reply.capture_session_diff_baseline",'],
-        ['\t\tsessionState.sessionEntry = baselineEntry;', '\t\topts?.matchaChatStage?.("baseline_returned");\n\t\tsessionState.sessionEntry = baselineEntry;'],
-        ['\tconst replyResult = await traceGetReplyPhase("reply.run_prepared_reply",', '\topts?.matchaChatStage?.("prepared_reply_entered");\n\tconst replyResult = await traceGetReplyPhase("reply.run_prepared_reply",'],
-        ['\tif (profilerEnabled) logResolverTiming("completed", "prepared_reply");', '\topts?.matchaChatStage?.("prepared_reply_returned");\n\tif (profilerEnabled) logResolverTiming("completed", "prepared_reply");'],
-      ],
-    },
-    {
-      file: publicationFile,
-      replacements: [
-        ['\t\tthis.load = async ({ agentId, abortSignal }) => {\n\t\t\tfor (;;) {', '\t\tthis.load = async ({ agentId, abortSignal, matchaChatStage }) => {\n\t\t\tmatchaChatStage?.("publication_entered");\n\t\t\tfor (;;) {'],
-        ['\t\t\t\tif (replacement) {\n\t\t\t\t\tawait racePromiseWithAbortSignal(replacement, abortSignal);', '\t\t\t\tif (replacement) {\n\t\t\t\t\tmatchaChatStage?.("publication_replacement_wait");\n\t\t\t\t\tawait racePromiseWithAbortSignal(replacement, abortSignal);'],
-        ['\t\t\t\tif (pendingOwner) {\n\t\t\t\t\tawait racePromiseWithAbortSignal(pendingOwner, abortSignal);', '\t\t\t\tif (pendingOwner) {\n\t\t\t\t\tmatchaChatStage?.("publication_owner_wait");\n\t\t\t\t\tawait racePromiseWithAbortSignal(pendingOwner, abortSignal);'],
-        ['\t\t\t\treturn matches[0];', '\t\t\t\tmatchaChatStage?.("publication_returned");\n\t\t\t\treturn matches[0];'],
-      ],
-    },
-  ];
-  const sources = plans.map(({ file }) => readText(file));
-  const patched = sources.map((source) => source.includes('matchaChatStage') || source.includes('matchaChatRedactIdentifier') || source.includes('[matcha-chat-stage]'));
-  const imports = sources.map((source, index) => {
-    if (!plans[index].hashImport) return;
-    const result = ensureNamedImport(source, plans[index].file, hashFile, 'redactIdentifier', 'matchaChatRedactIdentifier', patchId).source;
-    return result.split('\n').find((line) => line.startsWith('import { ') && line.includes(' as matchaChatRedactIdentifier }'));
-  });
-  if (patched.some(Boolean)) {
-    if (!patched.every(Boolean)) throw new Error(`${patchId}: incomplete diagnostics patch`);
-    for (const [index, plan] of plans.entries()) {
-      let original = sources[index];
-      for (const expected of [...(plan.hashImport ? [imports[index]] : []), ...plan.replacements.map(([, replacement]) => replacement)]) {
-        if (!expected || original.split(expected).length - 1 !== 1) throw new Error(`${patchId}: incomplete or changed diagnostics patch in ${path.basename(plan.file)} at anchor ${plan.replacements.findIndex(([, replacement]) => replacement === expected)}`);
-      }
-      for (const [needle, replacement] of plan.replacements) original = original.replace(replacement, needle);
-      for (const [needle] of plan.replacements) {
-        if (original.split(needle).length - 1 !== 1) throw new Error(`${patchId}: changed original diagnostics anchor`);
-      }
-    }
-    return { status: 'clean', detail: 'already patched' };
-  }
-  if (sources[0].includes('onAgentRunTerminalOutcome')) throw new Error(`${patchId}: existing terminal observer requires composition`);
-  const updates = plans.map((plan, index) => {
-    let source = sources[index];
-    if (source.includes('matchaChatStage') || source.includes('matchaChatRedactIdentifier') || source.includes('[matcha-chat-stage]')) throw new Error(`${patchId}: incomplete diagnostics patch`);
-    for (const [needle, replacement] of plan.replacements) source = replaceOnce(source, needle, replacement, patchId);
-    return plan.hashImport ? ensureNamedImport(source, plan.file, hashFile, 'redactIdentifier', 'matchaChatRedactIdentifier', patchId).source : source;
-  });
-  for (const [index, plan] of plans.entries()) writeText(plan.file, updates[index]);
-  return { status: 'applied', detail: plans.map(({ file }) => path.basename(file)).join(', ') };
 }
 
 function patchOwnedStdinStop(openclawDir) {
@@ -2558,8 +1379,7 @@ function patchOwnedStdinStop(openclawDir) {
   const cleanup = `\tlet cleanupOwnedStdin = () => {};
 \tconst cleanupSignals = () => {
 \t\tcleanupOwnedStdin();`;
-  const binding = `\tprocess.on("SIGUSR1", onSigusr1);
-\tconst ownedStdinStop = process.env.MATCHACLAW_OPENCLAW_OWNED_STDIN === "1" && params.ownsProcessLifecycle === true;
+  const binding = `\tconst ownedStdinStop = process.env.MATCHACLAW_OPENCLAW_OWNED_STDIN === "1" && params.ownsProcessLifecycle === true;
 \tdelete process.env.MATCHACLAW_OPENCLAW_OWNED_STDIN;
 \tif (ownedStdinStop) {
 \t\tconst input = process.stdin;
@@ -2596,12 +1416,16 @@ function patchOwnedStdinStop(openclawDir) {
     throw new Error(`${patchId}: incomplete or changed owned stdin stop patch`);
   }
   source = replaceOnce(source, '\tconst cleanupSignals = () => {', cleanup, patchId);
-  source = replaceOnce(source, '\tprocess.on("SIGUSR1", onSigusr1);\n\ttry {', binding, patchId);
+  source = replaceOnce(source, '\ttry {\n\t\treleaseHostLifeline = installGatewayHostLifeline(', binding + '\n\t\treleaseHostLifeline = installGatewayHostLifeline(', patchId);
   writeText(targetFile, source);
   return { status: 'applied', detail: path.basename(targetFile) };
 }
 
 const OPENCLAW_PATCHES = Object.freeze([
+  {
+    id: 'plugin-capture-no-follow-cleanup',
+    apply: patchOpenClawFilesystem,
+  },
   {
     id: 'strip-bundled-channel-plugins',
     apply: stripBundledChannelPlugins,
@@ -2609,10 +1433,6 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'matcha-sealed-skills',
     apply: patchMatchaSealedSkills,
-  },
-  {
-    id: 'opencode-go-session-header',
-    apply: patchOpencodeGoSessionHeader,
   },
   {
     id: 'matcha-mcp-session-server-id',
@@ -2623,20 +1443,16 @@ const OPENCLAW_PATCHES = Object.freeze([
     apply: patchMcpServerStatusMethod,
   },
   {
-    id: 'provider-config-debug-trace',
-    apply: patchProviderConfigDebugTrace,
-  },
-  {
-    id: 'explicit-session-model-patch',
-    apply: patchExplicitSessionModelPatch,
-  },
-  {
     id: 'agent-delete-cleanup-identity-string',
     apply: patchAgentDeleteCleanupIdentityString,
   },
   {
     id: 'channel-pairing-approval-export',
     apply: patchChannelPairingApprovalExport,
+  },
+  {
+    id: 'native-task-tools',
+    apply: patchOpenClawTaskTools,
   },
   {
     id: 'native-searxng-search',
@@ -2653,10 +1469,6 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'owned-stdin-stop',
     apply: patchOwnedStdinStop,
-  },
-  {
-    id: 'chat-dispatch-diagnostics',
-    apply: patchChatDispatchDiagnostics,
   },
 ]);
 
@@ -2681,6 +1493,8 @@ export function applyOpenClawBundlePatches(openclawDir, options = {}) {
     throw new Error(`openclaw package not found: ${openclawDir}`);
   }
 
+  const pkg = JSON.parse(readText(path.join(openclawDir, 'package.json')));
+  if (pkg.name !== 'openclaw' || pkg.version !== '2026.10.8') throw new Error('OpenClaw bundle patches require openclaw@2026.10.8');
   const results = [];
   for (const patch of selectOpenClawPatches(patchIds)) {
     const result = patch.apply(openclawDir);

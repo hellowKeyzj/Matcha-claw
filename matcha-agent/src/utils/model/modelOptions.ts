@@ -1,6 +1,5 @@
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { getInitialMainLoopModel } from '../../bootstrap/state.js'
-import { resolveOpenAIModel } from '@ant/model-provider'
 import {
   isClaudeAISubscriber,
   isMaxSubscriber,
@@ -343,7 +342,7 @@ function getOpusPlanOption(): ModelOption {
 }
 
 function getChatGPTCodexModelOptions(): ModelOption[] {
-  const defaultModel = resolveOpenAIModel(getDefaultMainLoopModel())
+  const defaultModel = getDefaultMainLoopModel()
   return [
     {
       value: null,

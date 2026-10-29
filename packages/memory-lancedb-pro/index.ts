@@ -4,9 +4,9 @@
  */
 
 import type { MemoryPluginApi as OpenClawPluginApi } from "./src/plugin-api.js";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join, dirname, basename, win32 as winPath } from "node:path";
-import { readFile, readdir, writeFile, mkdir, appendFile, unlink, stat } from "node:fs/promises";
+import { readFile, readdir, writeFile, mkdir, appendFile, stat } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -673,7 +673,7 @@ export function getExtensionApiImportSpecifiers(
 }
 
 /**
- * Layer 1: 新 SDK API — api.runtime.agent.runEmbeddedPiAgent (4.22+)
+ * Layer 1: 新 SDK API — api.runtime.agent.runEmbeddedAgent
  * Layer 2: 舊 extensionAPI.js dynamic import（4.24-4.26 SDK 仍保留）
  * Layer 3: CLI fallback
  *
@@ -683,9 +683,9 @@ export function getExtensionApiImportSpecifiers(
 export async function loadEmbeddedPiRunner(api: OpenClawPluginApi): Promise<EmbeddedPiRunner> {
   // Layer 1: 嘗試新 SDK API (with circuit breaker)
   if (!isLayer1CircuitOpen()) {
-    const newApi = ((api as unknown as { runtime?: { agent?: Record<string, unknown> } }).runtime?.agent);
-    if (typeof newApi?.runEmbeddedPiAgent === "function") {
-      const runner = newApi.runEmbeddedPiAgent.bind(newApi);
+    const newApi = api.runtime?.agent;
+    if (typeof newApi?.runEmbeddedAgent === "function") {
+      const runner = newApi.runEmbeddedAgent.bind(newApi);
       // Bug 2 fix: 將 Layer 1 結果寫入 cache，避免後續並發呼叫時 Layer 2 覆蓋掉 Layer 1
       embeddedPiRunnerPromise ??= Promise.resolve(runner as EmbeddedPiRunner);
       return embeddedPiRunnerPromise;
@@ -1435,10 +1435,6 @@ async function generateReflectionText(params: {
     params.toolErrorSignals ?? []
   );
   const promptHash = sha256Hex(prompt);
-  const tempSessionFile = join(
-    tmpdir(),
-    `memory-reflection-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`
-  );
   let reflectionText: string | null = null;
   const errors: string[] = [];
   const retryState = { count: 0 };
@@ -1454,7 +1450,7 @@ async function generateReflectionText(params: {
       retryState,
       onLog: onRetryLog,
       execute: async () => {
-        const runEmbeddedPiAgent = await loadEmbeddedPiRunner(params.api);
+        const runEmbeddedAgent = await loadEmbeddedPiRunner(params.api);
         const cfg = params.cfg as Record<string, unknown>;
         const llmConfig = cfg?.llm as Record<string, unknown> | undefined;
         const modelRefFromConfig = llmConfig?.model;
@@ -1473,11 +1469,11 @@ async function generateReflectionText(params: {
         const embeddedTimeoutMs = Math.max(params.timeoutMs + 5000, 15000);
 
         return await withTimeout(
-          runEmbeddedPiAgent({
+          runEmbeddedAgent({
             sessionId: `reflection-${Date.now()}`,
             sessionKey: "temp:memory-reflection",
             agentId: params.agentId,
-            sessionFile: tempSessionFile,
+            sessionPersistence: "detached",
             workspaceDir: params.workspaceDir,
             config: params.cfg,
             prompt,
@@ -1514,8 +1510,6 @@ async function generateReflectionText(params: {
     // F1 fix: report Layer 1 runner execution failure to open circuit breaker
     reportLayer1Failure();
     errors.push(`embedded: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
-  } finally {
-    await unlink(tempSessionFile).catch(() => { });
   }
 
   if (reflectionText) {
@@ -4102,6 +4096,16 @@ const memoryLanceDBProPlugin = {
             return;
           }
 
+          const previousSessionMemory = context.previousSessionMemory as
+            | { status: "available"; content: string | null }
+            | { status: "unavailable"; reason: string }
+            | undefined;
+          if (previousSessionMemory?.status === "unavailable") {
+            throw new Error(previousSessionMemory.reason);
+          }
+          let conversation = previousSessionMemory?.status === "available" && previousSessionMemory.content
+            ? redactSecrets(previousSessionMemory.content.split("\n").slice(-reflectionMessageCount).join("\n"))
+            : null;
           const sessionEntry = (context.previousSessionEntry || context.sessionEntry || {}) as Record<string, unknown>;
           const currentSessionId = typeof sessionEntry.sessionId === "string" ? sessionEntry.sessionId : "unknown";
           let currentSessionFile = typeof sessionEntry.sessionFile === "string" ? sessionEntry.sessionFile : undefined;
@@ -4127,7 +4131,7 @@ const memoryLanceDBProPlugin = {
             `memory-reflection: command:${action} hook start; sessionKey=${sessionKey || "(none)"}; source=${commandSource || "(unknown)"}; sessionId=${currentSessionId}; sessionFile=${currentSessionFile || "(none)"}`
           );
 
-          if (!currentSessionFile || currentSessionFile.includes(".reset.")) {
+          if (!previousSessionMemory && (!currentSessionFile || currentSessionFile.includes(".reset."))) {
             const searchDirs = resolveReflectionSessionSearchDirs({
               context,
               cfg,
@@ -4150,7 +4154,7 @@ const memoryLanceDBProPlugin = {
             }
           }
 
-          if (!currentSessionFile) {
+          if (!previousSessionMemory && !currentSessionFile) {
             const searchDirs = resolveReflectionSessionSearchDirs({
               context,
               cfg,
@@ -4164,7 +4168,9 @@ const memoryLanceDBProPlugin = {
             return;
           }
 
-          const conversation = await readSessionConversationWithResetFallback(currentSessionFile, reflectionMessageCount);
+          if (!previousSessionMemory && currentSessionFile) {
+            conversation = await readSessionConversationWithResetFallback(currentSessionFile, reflectionMessageCount);
+          }
           if (!conversation) {
             api.logger.warn(
               `memory-reflection: command:${action} conversation empty/unusable for session ${currentSessionId}; file=${currentSessionFile}`

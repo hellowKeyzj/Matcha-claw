@@ -84,6 +84,9 @@ impl Body {
                 stream.thinking.clear();
             }
         }
+        let stream = self.streams.entry(run.to_owned()).or_default();
+        stream.final_content = message.final_content_identity();
+        stream.terminal_observed = true;
         if self.finish_observed(run, message, cache)? { return Some(()); }
         if outcome == TerminalOutcome::Completed && self.history_applied_for_run(run)
         {
@@ -208,10 +211,6 @@ impl Body {
             if !self.retired.contains(id) { self.retired.push(id.clone()); }
             if !stream.anchors.contains(id) { stream.anchors.push(id.clone()); }
         }
-        if outcome == TerminalOutcome::Completed && self.durable_owns(message) {
-            if !thinking.is_empty() { self.chunk(run, AssistantTurnChunkKind::Thinking, &thinking, true)?; }
-            return Some(());
-        }
         let id = if let Some(id) = message.display_item_id().or_else(|| message.identity_message_id())
             && !self.items.iter().any(|item| item.item_id() == id)
         { id.to_owned() } else {
@@ -234,6 +233,7 @@ impl Body {
             let stream = self.streams.get_mut(run)?;
             stream.provisional.retain(|entry| entry.id != id);
             stream.provisional.push(Provisional::new(id, message));
+            self.reconcile_terminals()?;
         }
         if super::super::trace::enabled() {
             super::super::trace::log_unscoped("runtime.openclaw.body.final.result", || serde_json::json!({ "commitState": "candidate_only",
@@ -351,6 +351,7 @@ impl Body {
         let retired_before = super::super::trace::enabled().then_some(self.retired.len());
         let run = marker.run_id.clone();
         self.terminal_marker.as_mut()?.history_applied = true;
+        if let Some(stream) = self.streams.get_mut(&run) { stream.inferred = None; }
         self.retire_terminal(&run)?;
         let checked = self.check();
         if super::super::trace::enabled() {

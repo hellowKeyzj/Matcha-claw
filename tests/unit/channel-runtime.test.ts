@@ -15,7 +15,7 @@ describe('channel runtime client', () => {
   });
 
   it('reports probe as unavailable without submitting a generic job', async () => {
-    const { hostChannelsProbe } = await import('@/lib/channel-runtime');
+    const { hostChannelsProbe } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsProbe()).rejects.toThrow('Channel probe is unavailable');
     expect(hostApiFetchMock).not.toHaveBeenCalled();
@@ -23,7 +23,7 @@ describe('channel runtime client', () => {
 
   it('applies non-QR configuration through the named configure endpoint', async () => {
     hostApiFetchMock.mockResolvedValue({ outcome: 'confirmed' });
-    const { hostChannelsActivate } = await import('@/lib/channel-runtime');
+    const { hostChannelsActivate } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsActivate({
       channelType: 'wecom',
@@ -48,7 +48,7 @@ describe('channel runtime client', () => {
 
   it('applies direct QR configuration through the configure endpoint', async () => {
     hostApiFetchMock.mockResolvedValue({ outcome: 'confirmed' });
-    const { hostChannelsConfigure } = await import('@/lib/channel-runtime');
+    const { hostChannelsConfigure } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsConfigure({
       channelType: 'openclaw-weixin',
@@ -73,7 +73,7 @@ describe('channel runtime client', () => {
 
   it('omits a blank agent id from activation bodies', async () => {
     hostApiFetchMock.mockResolvedValue({ outcome: 'confirmed' });
-    const { hostChannelsActivate } = await import('@/lib/channel-runtime');
+    const { hostChannelsActivate } = await import('@/plugins/channels/channel-runtime');
 
     await hostChannelsActivate({
       channelType: 'feishu',
@@ -90,7 +90,7 @@ describe('channel runtime client', () => {
     ['unknown', 'Channel configuration outcome is unknown'],
   ] as const)('surfaces a non-confirmed configure outcome: %s', async (outcome, error) => {
     hostApiFetchMock.mockResolvedValue({ outcome });
-    const { hostChannelsActivate } = await import('@/lib/channel-runtime');
+    const { hostChannelsActivate } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsActivate({
       channelType: 'feishu',
@@ -107,7 +107,7 @@ describe('channel runtime client', () => {
       sessionKey: 'login-session-1',
     };
     hostApiFetchMock.mockResolvedValue(progress);
-    const { hostChannelsActivate } = await import('@/lib/channel-runtime');
+    const { hostChannelsActivate } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsActivate({
       channelType: 'whatsapp',
@@ -137,7 +137,7 @@ describe('channel runtime client', () => {
       sessionKey: 'login-session-connected',
     };
     hostApiFetchMock.mockResolvedValue(progress);
-    const { hostChannelsActivate } = await import('@/lib/channel-runtime');
+    const { hostChannelsActivate } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsActivate({
       channelType: 'openclaw-weixin',
@@ -173,7 +173,7 @@ describe('channel runtime client', () => {
       sessionKey: 'login-session-2',
     };
     hostApiFetchMock.mockResolvedValue(progress);
-    const { hostChannelsLoginWait } = await import('@/lib/channel-runtime');
+    const { hostChannelsLoginWait } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsLoginWait('openclaw-weixin', 'wechat-main', {
       sessionKey: 'login-session-1',
@@ -199,7 +199,7 @@ describe('channel runtime client', () => {
 
   it('cancels a QR session through the named session owner', async () => {
     hostApiFetchMock.mockResolvedValue({ outcome: 'cancelled' });
-    const { hostChannelsCancelSession } = await import('@/lib/channel-runtime');
+    const { hostChannelsCancelSession } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsCancelSession('whatsapp', 'main')).resolves.toEqual({ outcome: 'cancelled' });
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/login', {
@@ -214,7 +214,7 @@ describe('channel runtime client', () => {
       .mockResolvedValueOnce({ outcome: 'progress', channel: 'qqbot', sessionKey: 'auth-session-1', qrDataUrl: 'data:image/png;base64,qr' })
       .mockResolvedValueOnce({ outcome: 'connected', channel: 'qqbot', sessionKey: 'auth-session-1' })
       .mockResolvedValueOnce({ outcome: 'cancelled', channel: 'qqbot', sessionKey: 'auth-session-1' });
-    const { hostChannelsCancelAuthorization, hostChannelsStartAuthorization, hostChannelsWaitAuthorization } = await import('@/lib/channel-runtime');
+    const { hostChannelsCancelAuthorization, hostChannelsStartAuthorization, hostChannelsWaitAuthorization } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsStartAuthorization({
       channelType: 'qqbot',
@@ -262,7 +262,7 @@ describe('channel runtime client', () => {
       start: 1, end: 2, revision: 3,
       detail: { operation: 'deleteConfig', channel: 'wecom', accountId: 'backup', phase: 'complete', outcome: 'confirmed', reply: null, configFinalization: null },
     });
-    const { hostChannelsDeleteConfig } = await import('@/lib/channel-runtime');
+    const { hostChannelsDeleteConfig } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsDeleteConfig('wecom', 'backup')).resolves.toEqual({
       outcome: 'confirmed',
@@ -277,7 +277,7 @@ describe('channel runtime client', () => {
     hostApiFetchMock
       .mockResolvedValueOnce({ requests: [{ id: 'request-1', status: 'pending' }] })
       .mockResolvedValueOnce({ outcome: 'confirmed' });
-    const { hostChannelsApprovePairingRequest, hostChannelsListPairingRequests } = await import('@/lib/channel-runtime');
+    const { hostChannelsApprovePairingRequest, hostChannelsListPairingRequests } = await import('@/plugins/channels/channel-runtime');
 
     await expect(hostChannelsListPairingRequests('feishu', 'default')).resolves.toEqual({
       success: true,

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { ChatApprovalDock, ChatErrorBanner, ChatRuntimeStatusDock } from '@/plugins/chat/components/ChatRuntimeDock';
-import { ChatImageLightbox } from '@/plugins/chat/components/ChatImageLightbox';
+import { ChatImageLightbox } from '@/plugins/message-rendering/ChatImageLightbox';
 import type { ApprovalItem } from '@/plugins/chat/store';
 
 vi.mock('react-i18next', () => ({

@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Search } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { AgentPageToolbar } from '@/components/common/AgentPage';
+import { AgentPageToolbar } from '@/components/common/AgentResource';
 import { AgentViewToggle } from '@/components/common/AgentViewToggle';
 import { Input } from '@/components/ui/input';
 

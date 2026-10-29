@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isGatewayPreparing } from '@/lib/gateway-status';
+import { isGatewayPreparing } from '@/plugins/runtime/gateway-status';
 import type { GatewayStatus } from '@/types/gateway';
 
 function status(overrides: Partial<GatewayStatus>): GatewayStatus {

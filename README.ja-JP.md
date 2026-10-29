@@ -209,7 +209,7 @@ MatchaClawには、Electron、OpenClaw Gateway、またはTelegramなどのチ�
 - `host:port`のみの値はHTTPとして扱われます。
 - プロキシ設定を保存すると、Electronのネットワーク設定が即座に再適用され、ゲートウェイが自動的に再起動されます。
 - MatchaClawはTelegramが有効な場合、プロキシをOpenClawのTelegramチャネル設定にも同期します。
-- Windowsパッケージ版の `openclaw` CLI/TUI は、同梱 `resources/bin/node.exe` を優先して実行し（未同梱時は `ELECTRON_RUN_AS_NODE` にフォールバック）、端末入力の安定性を確保します。
+- OpenClaw `2026.10.8`、Electron `44.10.0` に固定しており、内蔵の Node `24.22.1` は OpenClaw の要件を満たします。パッケージ版の `openclaw` CLI/TUI は Gateway／doctor と同じく、`ELECTRON_RUN_AS_NODE=1` で MatchaClaw の Electron 実行ファイルを使い、システムの Node.js は使いません。Windows cmd／Git Bash でも `resources/bin/node.exe` を優先する分岐は廃止しています。
 
 ---
 
@@ -303,7 +303,7 @@ AI を開発ワークフローに統合できます。エージェントを使�
 
 ### 前提条件
 
-- **Node.js**: 22以上（LTS推奨）
+- **Node.js**: 開発／OpenClaw の直接実行には `>=24.22.1 <25 || >=26.12.1` が必要です。製品同梱の OpenClaw は MatchaClaw の Electron ランタイムを使います。
 - **パッケージマネージャー**: pnpm 9以上（推奨）またはnpm
 - **Linux（Ubuntu/Debian）**: Electron を実行する前に、必要なシステムライブラリをインストールしてください:
   ```bash

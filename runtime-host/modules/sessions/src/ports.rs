@@ -148,6 +148,7 @@ pub struct SessionObserveCommand {
     /// Receive resource ID, not a message-routing or native authorization token.
     pub lease_id: String,
     pub window: WindowRequest,
+    pub input_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug)]

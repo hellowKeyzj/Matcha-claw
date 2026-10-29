@@ -886,8 +886,31 @@ pub struct StateVersion {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct GatewayAuth {
+    pub method: Option<GatewayAuthMethod>,
     pub role: String,
     pub scopes: Vec<String>,
+    pub session_cap: Option<GatewaySessionCap>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GatewayAuthMethod {
+    None,
+    Token,
+    Password,
+    Tailscale,
+    DeviceToken,
+    BootstrapToken,
+    TrustedProxy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewaySessionCap {
+    Write,
+    Suggest,
+    View,
+    None,
 }
 
 impl fmt::Debug for GatewayAuth {
@@ -1471,8 +1494,10 @@ impl HelloWire {
             },
             snapshot: self.snapshot.into_public(),
             auth: GatewayAuth {
+                method: self.auth.method,
                 role: self.auth.role,
                 scopes: self.auth.scopes,
+                session_cap: self.auth.session_cap,
             },
             policy: GatewayPolicy {
                 max_payload: self.policy.max_payload,
@@ -1588,6 +1613,7 @@ struct SnapshotWire {
     config_path: Option<String>,
     state_dir: Option<String>,
     session_defaults: Option<SessionDefaultsWire>,
+    control_ui_identity_url: Option<String>,
     auth_mode: Option<AuthModeWire>,
     update_available: Option<UpdateAvailableWire>,
     applied_config_hash: Option<Option<String>>,
@@ -1609,6 +1635,10 @@ impl SnapshotWire {
         self.presence.iter().all(PresenceWire::is_valid)
             && self.config_path.as_deref().is_none_or(valid_string)
             && self.state_dir.as_deref().is_none_or(valid_string)
+            && self
+                .control_ui_identity_url
+                .as_deref()
+                .is_none_or(valid_string)
             && self
                 .applied_config_hash
                 .as_ref()
@@ -1798,11 +1828,13 @@ impl DeviceTokenWire {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct AuthWire {
+    method: Option<GatewayAuthMethod>,
     device_token: Option<SecretWire>,
     recovery_migration_allowed: Option<bool>,
     recovery_scope: Option<String>,
     role: String,
     scopes: Vec<String>,
+    session_cap: Option<GatewaySessionCap>,
     issued_at_ms: Option<u64>,
     device_tokens: Option<Vec<DeviceTokenWire>>,
 }

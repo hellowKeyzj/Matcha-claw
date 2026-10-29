@@ -28,12 +28,14 @@ export type SessionRunPhase =
 
 export type SessionRuntimeActivity = 'compacting';
 export type SessionRunStartupPhase =
+  | 'waiting_for_state'
   | 'preparing_workspace'
   | 'naming_worktree'
   | 'creating_worktree'
   | 'running_setup'
   | 'provisioning_environment'
   | 'preparing_context'
+  | 'memory_flushing'
   | 'starting_model';
 export type SessionRunProgress =
   | { kind: 'startup'; phase: SessionRunStartupPhase }

@@ -27,8 +27,8 @@ const hostChannelsValidateCredentialsMock = vi.fn();
 const hostChannelsWaitAuthorizationMock = vi.fn();
 const invokeIpcMock = vi.fn();
 
-vi.mock('@/lib/channel-runtime', async (importOriginal) => ({
-  ...await importOriginal<typeof import('@/lib/channel-runtime')>(),
+vi.mock('@/plugins/channels/channel-runtime', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/plugins/channels/channel-runtime')>(),
   hostChannelsActivate: (...args: unknown[]) => hostChannelsActivateMock(...args),
   hostChannelsConfigure: (...args: unknown[]) => hostChannelsConfigureMock(...args),
   hostChannelsApprovePairingRequest: (...args: unknown[]) => hostChannelsApprovePairingRequestMock(...args),

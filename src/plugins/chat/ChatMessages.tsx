@@ -15,7 +15,7 @@ import type { GatewayTransportIssue } from '@/types/session/runtime-state';
 import { runtimeEndpointsEqual, sessionIdentitiesEqual, type SessionIdentity } from '@/types/desktop/runtime-address';
 import type { SessionRenderItem } from '@/types/session/render-item';
 import type { SessionWindowStateSnapshot } from '@/types/session/snapshot';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { isGatewayOperational } from '@/plugins/runtime/gateway-status';
 import { hostSessionWindowFetch } from '@/lib/host-api';
 import { toast } from 'sonner';
 import { logSessionTrace, summarizeIdentifier, summarizeSessionIdentity, isSessionTraceEnabled, summarizeRenderItems } from '@/lib/session-trace';
@@ -33,7 +33,8 @@ import { useChatQuestions } from '@/plugins/chat/useChatQuestions';
 import { useSessionQuestions } from '@/plugins/chat/useSessionQuestions';
 import { SessionQuestionDock } from '@/plugins/chat/components/SessionQuestionDock';
 import { ChatQuestionDock } from '@/plugins/chat/components/ChatQuestionDock';
-import { applyAssistantPresentationToItems, type ChatAssistantCatalogAgent, type ChatAssistantPresentation, type ChatRenderItem } from '@/plugins/message-rendering/chat-render-item-model';
+import { applyAssistantPresentationToItems } from '@/plugins/chat/render-item-projection';
+import type { ChatAssistantCatalogAgent, ChatAssistantPresentation, ChatRenderItem } from '@/plugins/message-rendering/chat-render-item-model';
 import { buildChatSessionMarkdownExport, downloadMarkdownFile } from '@/plugins/chat/session-markdown-export';
 import { ChatArtifacts, type ChatArtifactSlots, type ChatArtifactViewportContent } from '@/plugins/chat/ChatArtifacts';
 import { selectChatSelection, selectChatSession, useChatAgent, useChatRuntime } from '@/plugins/chat/chat-session';
@@ -570,7 +571,7 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
         {({ viewportPane, sidePanel }) => children({
           viewportPane, sidePanel, headerProps, input,
           isEmptyState: liveView.isEmptyState && chatQuestions.questions.length === 0 && !chatQuestions.error && sessionQuestions.questions.length === 0 && !sessionQuestions.error,
-          emptyState: <WelcomeScreen input={input} />,
+          emptyState: <WelcomeScreen />,
         })}
       </ChatArtifacts>
     </AssistantPendingLabelProvider>

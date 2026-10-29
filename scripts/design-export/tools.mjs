@@ -335,6 +335,6 @@ export const toolsScenarios = [
 
 export async function seedTools(context) {
   if (!toolsScenarios.some((scenario) => scenario.id === context.scenarioId)) return;
-  const { useRuntimeEndpointsStore } = await import('/src/stores/runtime-endpoints.ts');
+  const { useRuntimeEndpointsStore } = await import('/src/plugins/runtime/directory.ts');
   useRuntimeEndpointsStore.setState({ managementEndpoint: endpoint(context.scenarioId.includes('-native-') ? 'matcha-agent' : 'openclaw') });
 }

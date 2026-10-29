@@ -1,3 +1,4 @@
+import { MESSAGE_LAYOUT_TOKENS } from '@/plugins/message-rendering/message-layout-tokens';
 import { isTraceEnabled } from '@/lib/trace-logger';
 import {
   forwardRef,
@@ -30,9 +31,10 @@ import type {
   ChatUserMessageItem,
 } from '@/plugins/message-rendering/chat-render-item-model';
 import { ChatMessage } from '@/plugins/message-rendering/ChatMessage';
-import { ChatAssistantTurn } from '@/plugins/message-rendering/ChatAssistantTurn';
+import { ChatAssistantTurn } from '@/plugins/chat/components/ChatAssistantTurn';
 import { useToolActivityDisclosure } from '@/plugins/message-rendering/useToolActivityDisclosure';
-import { buildToolGroupPlan, isCoveredToolOnlyItem, selectLatestBrowserTools, type ToolGroupPlan, type ToolSlot } from '@/plugins/message-rendering/chat-tool-groups';
+import { buildToolGroupPlan, isCoveredToolOnlyItem, selectLatestBrowserTools } from '@/plugins/chat/tool-group-plan';
+import type { ToolGroupPlan, ToolSlot } from '@/plugins/message-rendering/tool-groups';
 import type { SessionRenderToolCard } from '@/types/session/tool-card';
 import type { ToolActivityDisclosure } from '@/plugins/message-rendering/tool-renderers/types';
 import { MessageShell, type MessageAvatarSlot } from '@/plugins/message-rendering/chat-message-shell';
@@ -44,11 +46,8 @@ import { FailureScreen } from '@/plugins/chat/components/ChatStates';
 import { AssistantPendingIndicator } from '@/plugins/chat/components/AssistantPendingIndicator';
 import type { ChatSessionPending } from '@/plugins/chat/store/types';
 import type { ChatArtifactGroup } from '@/plugins/chat/artifacts';
-import type {
-  AttachedFileMeta,
-  ChatSessionRuntimeState,
-  ChatSessionViewportState,
-} from '@/plugins/chat/store';
+import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
+import type { ChatSessionRuntimeState, ChatSessionViewportState } from '@/plugins/chat/store';
 import {
   buildSessionIdentityKey,
   type SessionIdentity,
@@ -281,22 +280,22 @@ function renderChatItem(input: {
       <div
         data-testid="chat-execution-graph-rail"
         className={cn(
-          CHAT_LAYOUT_TOKENS.messageShell,
-          CHAT_LAYOUT_TOKENS.messageShellAssistantColumns,
+          MESSAGE_LAYOUT_TOKENS.messageShell,
+          MESSAGE_LAYOUT_TOKENS.messageShellAssistantColumns,
         )}
       >
         <div
           aria-hidden="true"
           className={cn(
-            CHAT_LAYOUT_TOKENS.messageAvatar,
-            CHAT_LAYOUT_TOKENS.messageAvatarAssistantOrder,
+            MESSAGE_LAYOUT_TOKENS.messageAvatar,
+            MESSAGE_LAYOUT_TOKENS.messageAvatarAssistantOrder,
             'pointer-events-none opacity-0',
           )}
         />
         <div
           className={cn(
-            CHAT_LAYOUT_TOKENS.messageContentColumn,
-            CHAT_LAYOUT_TOKENS.messageContentAssistantOrder,
+            MESSAGE_LAYOUT_TOKENS.messageContentColumn,
+            MESSAGE_LAYOUT_TOKENS.messageContentAssistantOrder,
           )}
         >
           <ExecutionGraphCard

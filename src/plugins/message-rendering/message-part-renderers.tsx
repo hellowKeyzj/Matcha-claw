@@ -12,7 +12,7 @@ export function ThinkingPart({ segment, showThinking, collapseVersion }: Message
   );
 }
 
-export function ToolPart({ segment, toolSlot, collapseVersion, toolSessionIdentity, disclosure, latestBrowserTools, onOpenToolSurface, onRuntimeSendMessage, onRuntimeOpenLink }: MessagePartProps) {
+export function ToolPart({ segment, toolSlot, collapseVersion, toolSessionIdentity, toolIsImmutable, disclosure, latestBrowserTools, onOpenToolSurface, onRuntimeSendMessage, onRuntimeOpenLink }: MessagePartProps) {
   if (segment.kind !== 'tool') return null;
   const tool = segment.tool;
   const result = tool.result;
@@ -32,6 +32,7 @@ export function ToolPart({ segment, toolSlot, collapseVersion, toolSessionIdenti
         <AssistantEmbeddedToolResults
           embeddedToolResults={[embedded]}
           sourceTool={tool}
+          sourceToolIsImmutable={toolIsImmutable}
           collapseVersion={collapseVersion}
           sessionIdentity={toolSessionIdentity}
           onOpenToolSurface={onOpenToolSurface}

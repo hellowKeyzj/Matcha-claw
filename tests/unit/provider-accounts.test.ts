@@ -21,7 +21,7 @@ describe('provider accounts helper', () => {
       .mockResolvedValueOnce({ hasKey: true })
       .mockResolvedValueOnce({ hasKey: true });
 
-    const { fetchProviderSnapshot } = await import('../../src/lib/provider-accounts');
+    const { fetchProviderSnapshot } = await import('../../src/plugins/providers/services/provider-accounts');
     await expect(fetchProviderSnapshot()).resolves.toEqual({
       credentials: [{
         id: 'acc-1', vendorId: 'openai', label: 'OpenAI', authMode: 'api_key', enabled: true,
@@ -75,12 +75,12 @@ describe('provider accounts helper', () => {
       accounts: [{ id: 'acc-1', provider: 'openai', label: 'OpenAI', enabled: true, authMode: 'apiKey', credentialReference: 'credential:v1:acc-1', revision: 1, apiKey: 'secret-canary' }],
     });
 
-    const { fetchProviderSnapshot } = await import('../../src/lib/provider-accounts');
+    const { fetchProviderSnapshot } = await import('../../src/plugins/providers/services/provider-accounts');
     await expect(fetchProviderSnapshot()).resolves.toEqual({ credentials: [], statuses: [], vendors: [], revisions: {} });
   });
 
   it('normalizeProviderSnapshot 严格保留无私密字段的 vendor metadata', async () => {
-    const { normalizeProviderSnapshot } = await import('../../src/lib/provider-accounts');
+    const { normalizeProviderSnapshot } = await import('../../src/plugins/providers/services/provider-accounts');
     const validVendor = {
       id: 'openai',
       name: 'OpenAI',
@@ -106,7 +106,7 @@ describe('provider accounts helper', () => {
   });
 
   it('buildProviderCredentialId keeps Z.AI global on the OpenClaw zai key alias', async () => {
-    const { buildProviderCredentialId } = await import('../../src/lib/provider-accounts');
+    const { buildProviderCredentialId } = await import('../../src/plugins/providers/services/provider-accounts');
     expect(buildProviderCredentialId('zai-global', null, [])).toBe('zai');
     expect(buildProviderCredentialId('zai', null, [{
       id: 'zai' as never,
@@ -123,7 +123,7 @@ describe('provider accounts helper', () => {
   });
 
   it('public provider account projection keeps account mutations on the revision contract', async () => {
-    const projection = await import('../../src/lib/provider-projection');
+    const projection = await import('../../src/plugins/providers/services/provider-projection');
     expect(Object.keys(projection)).toEqual(expect.arrayContaining([
       'hostProviderCreateAccount',
       'hostProviderUpdateAccount',

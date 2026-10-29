@@ -5,7 +5,7 @@ import {
   type CapabilityKey,
   type CapabilityRouting,
   type ModelRoute,
-} from '@/lib/capability-routing';
+} from '@/plugins/providers/services/capability-routing';
 import { refreshProviderPostMutationProjections } from '@/plugins/providers/stores/provider-post-mutation-refresh';
 
 interface CapabilityRoutingState {

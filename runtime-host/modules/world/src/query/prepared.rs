@@ -4,7 +4,6 @@ use tokio_util::sync::CancellationToken;
 use world_protocol::{
     api::PackageConfigView,
     bindings::{BindingNode, ImplementationRef, SlotKind},
-    ids::Digest,
     package::PackageLimits,
     slots::{self, ResolveQueryRequest, ResolveQueryResult},
 };
@@ -21,10 +20,10 @@ pub(crate) struct PreparedProjection { proof: NativeProof }
 pub(crate) struct PreparedReconcile { proof: NativeProof }
 
 impl PreparedProjection {
-    pub(crate) fn prepare(node: &BindingNode, config: PackageConfigView, artifact: ArtifactLease, host_build: &Digest) -> Result<Self, NativePrepareFailure> {
+    pub(crate) fn prepare(node: &BindingNode, config: PackageConfigView, artifact: ArtifactLease) -> Result<Self, NativePrepareFailure> {
         let contract = slots::projection_contract().map_err(|_| NativePrepareFailure::Entrypoint)?;
         if !node.implementation.contracts.contains(&contract) { return Err(NativePrepareFailure::Entrypoint); }
-        Ok(Self { proof: NativeProof::prepare(node, config, artifact, host_build, slots::PROJECTION_REGISTRATION, SlotKind::Projection)? })
+        Ok(Self { proof: NativeProof::prepare(node, config, artifact, slots::PROJECTION_REGISTRATION, SlotKind::Projection)? })
     }
     pub fn implementation(&self) -> &ImplementationRef { self.proof.implementation() }
     pub fn config(&self) -> &PackageConfigView { self.proof.config() }
@@ -36,10 +35,10 @@ impl PreparedProjection {
 }
 
 impl PreparedReconcile {
-    pub(crate) fn prepare(node: &BindingNode, config: PackageConfigView, artifact: ArtifactLease, host_build: &Digest) -> Result<Self, NativePrepareFailure> {
+    pub(crate) fn prepare(node: &BindingNode, config: PackageConfigView, artifact: ArtifactLease) -> Result<Self, NativePrepareFailure> {
         let contract = slots::reconcile_contract().map_err(|_| NativePrepareFailure::Entrypoint)?;
         if !node.implementation.contracts.contains(&contract) { return Err(NativePrepareFailure::Entrypoint); }
-        Ok(Self { proof: NativeProof::prepare(node, config, artifact, host_build, slots::RECONCILE_REGISTRATION, SlotKind::Reconcile)? })
+        Ok(Self { proof: NativeProof::prepare(node, config, artifact, slots::RECONCILE_REGISTRATION, SlotKind::Reconcile)? })
     }
     pub fn implementation(&self) -> &ImplementationRef { self.proof.implementation() }
     pub fn config(&self) -> &PackageConfigView { self.proof.config() }
@@ -120,7 +119,6 @@ impl PreparedResolver {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, NativePrepareFailure> {
         let contract = slots::slot_contract(SlotKind::Resolver)
             .map_err(|_| NativePrepareFailure::Entrypoint)?;
@@ -131,7 +129,6 @@ impl PreparedResolver {
             node,
             config,
             artifact,
-            host_build,
             slots::RESOLVER_REGISTRATION,
             SlotKind::Resolver,
         )?;

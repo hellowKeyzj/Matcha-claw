@@ -6,8 +6,8 @@ const hostChannelsDeleteConfigMock = vi.hoisted(() => vi.fn());
 const hostChannelsConnectMock = vi.hoisted(() => vi.fn());
 const hostChannelsDisconnectMock = vi.hoisted(() => vi.fn());
 
-vi.mock('@/lib/channel-runtime', async (importOriginal) => ({
-  ...await importOriginal<typeof import('@/lib/channel-runtime')>(),
+vi.mock('@/plugins/channels/channel-runtime', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/plugins/channels/channel-runtime')>(),
   hostChannelsFetchSnapshot: (...args: unknown[]) => hostChannelsFetchSnapshotMock(...args),
   hostChannelsProbe: (...args: unknown[]) => hostChannelsProbeMock(...args),
   hostChannelsDeleteConfig: (...args: unknown[]) => hostChannelsDeleteConfigMock(...args),

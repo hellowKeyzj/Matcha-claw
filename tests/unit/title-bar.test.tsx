@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
-import { TitleBar } from '@/components/layout/TitleBar';
+import { TitleBar } from '@/app/layout/TitleBar';
 import { createPluginHost } from '@/plugin-host/core';
 import { PluginHostProvider } from '@/plugin-host/react';
 import { applicationShellPlugin } from '@/app/extensions';

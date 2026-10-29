@@ -20,6 +20,7 @@ pub mod ids;
 pub mod learning;
 pub mod lifecycle;
 pub mod materials;
+pub mod native;
 pub mod operation;
 pub mod package;
 pub mod process;

@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react';
 import { User } from 'lucide-react';
-import { AgentAvatar } from '@/components/common/AgentAvatar';
-import type { AgentAvatarStyle } from '@/lib/agent-avatar';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
+import type { AgentAvatarStyle } from '@/types/subagent';
 import { cn } from '@/lib/utils';
-import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
+import { MESSAGE_LAYOUT_TOKENS } from '@/plugins/message-rendering/message-layout-tokens';
 
 export type MessageAvatarSlot = 'visible' | 'placeholder';
 
@@ -31,18 +31,18 @@ export function MessageShell({
   return (
     <div
       className={cn(
-        CHAT_LAYOUT_TOKENS.messageShell,
+        MESSAGE_LAYOUT_TOKENS.messageShell,
         isUser
-          ? CHAT_LAYOUT_TOKENS.messageShellUserColumns
-          : CHAT_LAYOUT_TOKENS.messageShellAssistantColumns,
+          ? MESSAGE_LAYOUT_TOKENS.messageShellUserColumns
+          : MESSAGE_LAYOUT_TOKENS.messageShellAssistantColumns,
       )}
     >
       <div
         className={cn(
-          CHAT_LAYOUT_TOKENS.messageAvatar,
+          MESSAGE_LAYOUT_TOKENS.messageAvatar,
           isUser
-            ? CHAT_LAYOUT_TOKENS.messageAvatarUserOrder
-            : CHAT_LAYOUT_TOKENS.messageAvatarAssistantOrder,
+            ? MESSAGE_LAYOUT_TOKENS.messageAvatarUserOrder
+            : MESSAGE_LAYOUT_TOKENS.messageAvatarAssistantOrder,
           !isUser && assistantAvatarSlot === 'placeholder'
             ? 'pointer-events-none opacity-0'
             : 'border border-border/60 bg-card text-foreground shadow-sm',
@@ -73,10 +73,10 @@ export function MessageShell({
 
       <div
         className={cn(
-          CHAT_LAYOUT_TOKENS.messageContentColumn,
+          MESSAGE_LAYOUT_TOKENS.messageContentColumn,
           isUser
-            ? CHAT_LAYOUT_TOKENS.messageContentUserOrder
-            : CHAT_LAYOUT_TOKENS.messageContentAssistantOrder,
+            ? MESSAGE_LAYOUT_TOKENS.messageContentUserOrder
+            : MESSAGE_LAYOUT_TOKENS.messageContentAssistantOrder,
         )}
       >
         {children}

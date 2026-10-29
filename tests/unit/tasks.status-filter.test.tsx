@@ -14,7 +14,7 @@ import i18n from '@/i18n';
 
 const listTaskSnapshotMock = vi.fn();
 
-vi.mock('@/services/openclaw/task-manager-client', () => ({
+vi.mock('@/plugins/tasks/services/task-manager-client', () => ({
   listTaskSnapshot: (...args: unknown[]) => listTaskSnapshotMock(...args),
 }));
 

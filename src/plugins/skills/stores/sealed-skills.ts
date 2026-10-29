@@ -1,11 +1,11 @@
 import { create } from 'zustand';
 import { useAccountStore } from '@/plugins/account/stores/account';
 import { hostApiFetch } from '@/lib/host-api';
-import { waitForSkillsMutation, requireSkillsScope, selectedSkillsScope } from '@/lib/skills';
+import { waitForSkillsMutation, requireSkillsScope, selectedSkillsScope } from '../services/client';
 import { buildCapabilityScopeKey, runtimeScopeQuery, type RuntimeScope } from '@/types/desktop/runtime-address';
 import { AppError, normalizeAppError } from '@/lib/error-model';
-import { sealedSkillMutationError } from '@/lib/sealed-skills-error';
-import { runCloudPackageOperation } from '@/lib/cloud-package-call';
+import { sealedSkillMutationError } from '../services/sealed-error';
+import { runCloudPackageOperation } from '@/plugins/account/api/cloud-package-call';
 import type { CloudPackageDownloadInput } from '@/types/cloud-package-operation';
 import type { CallReceipt } from '@/types/call-log';
 import type { SealedSkillCatalogIssue, SealedSkillCloudPackage, SealedSkillMetadata } from '@/types/skill';

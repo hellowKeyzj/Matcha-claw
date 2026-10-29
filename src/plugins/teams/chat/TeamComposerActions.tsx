@@ -4,7 +4,7 @@ import { ArrowUpRight, GitBranch, Loader2, Play } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import type { ChatComposerContentProps } from '@/plugins/chat/extensions';
-import { isRuntimeEndpointReady, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { isRuntimeEndpointReady, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { buildSessionIdentityKey, runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
 import type { TeamDesignTarget } from '@/types/team-design';
 import { resolveTeamRuntimeScope, useTeamsStore } from '../store';

@@ -11,7 +11,7 @@ import type { ChatStoreState } from '@/plugins/chat/store/types';
 import {
   buildSessionOperationTarget,
   type SessionOperationTarget,
-} from '@/services/runtime/session-operation-target';
+} from '@/plugins/runtime/session-operation-target';
 
 export function buildRuntimeScopeKey(endpoint: RuntimeEndpointRef): string {
   return buildRuntimeEndpointKey(endpoint);
@@ -56,25 +56,6 @@ export function buildSessionIdentityRecordIndex(
     if (identity) index[buildSessionIdentityKey(identity)] = recordKey;
   }
   return index;
-}
-
-export function findSessionRecordKey(
-  state: Pick<ChatStoreState, 'loadedSessions'> & Partial<Pick<ChatStoreState, 'sessionRecordKeyByIdentityKey'>>,
-  identity: SessionIdentity,
-): string | null {
-  const identityKey = buildSessionIdentityKey(identity);
-  const indexedRecordKey = state.sessionRecordKeyByIdentityKey?.[identityKey];
-  const indexedIdentity = indexedRecordKey && state.loadedSessions[indexedRecordKey]?.meta.sessionIdentity;
-  if (indexedRecordKey && indexedIdentity && buildSessionIdentityKey(indexedIdentity) === identityKey) {
-    return indexedRecordKey;
-  }
-  for (const recordKey of Object.keys(state.loadedSessions)) {
-    const recordIdentity = state.loadedSessions[recordKey].meta.sessionIdentity;
-    if (recordIdentity && buildSessionIdentityKey(recordIdentity) === identityKey) {
-      return recordKey;
-    }
-  }
-  return null;
 }
 
 export function resolveSessionOperationTarget(state: ChatStoreState, recordKey: string): SessionOperationTarget {

@@ -7,7 +7,6 @@
  */
 
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/core';
-import { isTraceEnabled } from '../../../core/lark-logger';
 import { getEnabledLarkAccounts } from '../../../core/accounts';
 import { resolveAnyEnabledToolsConfig } from '../../../core/tools-config';
 import { extractMcpUrlFromConfig, setMcpEndpointOverride } from '../shared';
@@ -20,20 +19,20 @@ import { registerUpdateDocTool } from './update';
  */
 export function registerFeishuMcpDocTools(api: OpenClawPluginApi): void {
   if (!api.config) {
-    if (isTraceEnabled()) api.logger.debug?.('feishu_doc: No config available, skipping');
+    api.logger.debug?.('feishu_doc: No config available, skipping');
     return;
   }
 
   const accounts = getEnabledLarkAccounts(api.config);
   if (accounts.length === 0) {
-    if (isTraceEnabled()) api.logger.debug?.('feishu_doc: No Feishu accounts configured, skipping');
+    api.logger.debug?.('feishu_doc: No Feishu accounts configured, skipping');
     return;
   }
 
   // 沿用现有 doc 开关：若所有账户都关闭 doc 工具，则 MCP doc 工具也不注册
   const toolsCfg = resolveAnyEnabledToolsConfig(accounts);
   if (!toolsCfg.doc) {
-    if (isTraceEnabled()) api.logger.debug?.('feishu_doc: doc tool disabled in all accounts');
+    api.logger.debug?.('feishu_doc: doc tool disabled in all accounts');
     return;
   }
 
@@ -47,6 +46,6 @@ export function registerFeishuMcpDocTools(api: OpenClawPluginApi): void {
   if (registerCreateDocTool(api)) registered.push('feishu_create_doc');
   if (registerUpdateDocTool(api)) registered.push('feishu_update_doc');
   if (registered.length > 0) {
-    if (isTraceEnabled()) api.logger.debug?.(`feishu_doc: Registered ${registered.join(', ')}`);
+    api.logger.debug?.(`feishu_doc: Registered ${registered.join(', ')}`);
   }
 }

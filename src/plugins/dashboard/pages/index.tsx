@@ -11,13 +11,13 @@ import {
   Loader2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { RuntimeScopeSelector } from '@/components/common/RuntimeScopeSelector';
+import { RuntimeScopeSelector } from '@/plugins/runtime/RuntimeScopeSelector';
 import {
   isRuntimeEndpointReady,
   selectManagementRuntime,
   supportsRuntimeEndpointCapabilityFamily,
   useRuntimeEndpointsStore,
-} from '@/stores/runtime-endpoints';
+} from '@/plugins/runtime/directory';
 import { runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
 import { useDashboardUsageStore } from '../stores/dashboard-usage';
 import { useDashboardUiStore } from '../stores/dashboard-ui';

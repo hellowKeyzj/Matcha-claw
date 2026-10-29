@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { annotateMarkdownSource, isMarkdownBodySelection } from '@/lib/wiki-selection';
+import { annotateMarkdownSource, isMarkdownBodySelection } from '@/plugins/wiki/wiki-selection';
 import { handleMarkdownCodeBlockCopy } from '@/plugins/message-rendering/markdown-code-blocks';
 import { getOrBuildMarkdownBody } from '@/plugins/message-rendering/md-pipeline';
 import { useMarkdownExtensions } from '@/plugins/message-rendering/use-renderers';

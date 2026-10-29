@@ -4,10 +4,11 @@ import {
   getSessionItems,
   getSessionMeta,
   patchSessionRecord,
-  reconcileSessionItems,
 } from '@/plugins/chat/store/store-state-helpers';
-import { getSessionTextModel, type SessionTextModel } from '@/plugins/chat/store/session-presentation';
-import type { AttachedFileMeta, ChatSendAttachment, ChatStoreState, ChatSessionMetaState } from '@/plugins/chat/store/types';
+import { reconcileSessionMessageItems } from '@/plugins/chat/store/session-presentation';
+import type { SessionIdentity } from '@/types/desktop/runtime-address';
+import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
+import type { ChatSendAttachment, ChatStoreState, ChatSessionMetaState } from '@/plugins/chat/store/types';
 import { buildSessionIdentityRecordIndex } from '@/plugins/chat/store/session-identity';
 import type {
   SessionAssistantTurnItem,
@@ -347,7 +348,7 @@ function mergeHydratedAttachmentItem(
 export function reconcileHydratedAttachmentItems(
   currentItems: SessionRenderItem[],
   hydratedItems: SessionRenderItem[],
-  normalizeUserText: SessionTextModel['user'] = getSessionTextModel().user,
+  identity?: SessionIdentity,
 ): SessionRenderItem[] {
   if (currentItems === hydratedItems) {
     return currentItems;
@@ -373,7 +374,7 @@ export function reconcileHydratedAttachmentItems(
     return nextItem;
   });
 
-  return changed ? reconcileSessionItems(currentItems, nextItems, normalizeUserText) : currentItems;
+  return changed ? reconcileSessionMessageItems(identity, currentItems, nextItems) : currentItems;
 }
 
 export function buildHydratedAttachmentItemsPatch(
@@ -385,7 +386,7 @@ export function buildHydratedAttachmentItemsPatch(
   const nextItems = reconcileHydratedAttachmentItems(
     currentItems,
     hydratedItems,
-    getSessionTextModel(getSessionMeta(state, sessionKey).sessionIdentity ?? undefined).user,
+    getSessionMeta(state, sessionKey).sessionIdentity ?? undefined,
   );
   if (currentItems === nextItems) {
     return state;

@@ -2,6 +2,7 @@
 //! No WASI, filesystem, network, process access or package/native-code loader.
 mod error;
 mod execution;
+mod resources;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -19,6 +20,7 @@ use wasmtime::component::{Component, InstancePre, Linker};
 
 pub use error::{ExecutionError, FailureKind, InvocationError, Resource, Stage};
 pub use execution::{CallControl, CallFuture, CallState, CleanupFuture, ExecutionLimits};
+pub use resources::EngineResources;
 
 /// Reuse this Wasmtime version for generated owner bindings; not a business API.
 pub use wasmtime;

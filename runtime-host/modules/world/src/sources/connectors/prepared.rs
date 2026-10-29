@@ -2,14 +2,14 @@ use world_protocol::{
     api::PackageConfigView,
     bindings::{BindingNode, Entrypoint, ImplementationRef, SlotKind},
     failure::FailureStage,
-    ids::{Digest, ProviderId},
+    ids::ProviderId,
     package::PackageLimits,
     sources::{self, SourceFailure},
 };
 
 use super::SourceError;
 use crate::extensions::invocation::InvocationLease;
-use crate::extensions::{invocation::NativeProof, package::ArtifactLease};
+use crate::extensions::{invocation::{NativePrepareFailure, NativeProof}, package::ArtifactLease};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -152,16 +152,41 @@ impl PreparedSource {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, SourceError> {
+        let native_failure = |cause| {
+            let failure = match cause {
+                NativePrepareFailure::Artifact | NativePrepareFailure::Implementation => {
+                    world_protocol::lifecycle::LifecycleFailure::PrepareFailed {
+                        node_id: node.id.clone(),
+                    }
+                }
+                NativePrepareFailure::Configuration => {
+                    world_protocol::lifecycle::LifecycleFailure::MissingConfiguration {
+                        install_id: node.implementation.install_id.clone(),
+                    }
+                }
+                NativePrepareFailure::Entrypoint => {
+                    world_protocol::lifecycle::LifecycleFailure::PrepareFailed {
+                        node_id: node.id.clone(),
+                    }
+                }
+            };
+            SourceError::caused_by(
+                SourceFailure::Lifecycle { failure },
+                FailureStage::Prepare,
+                NativeCause(cause),
+            )
+        };
         let reject = || SourceError::new(SourceFailure::ProtocolViolation, FailureStage::Prepare);
-        let Entrypoint::Native { registration, .. } = &node.implementation.entrypoint else {
-            return Err(reject());
+        let registration = match &node.implementation.entrypoint {
+            Entrypoint::Builtin { registration, .. } => registration,
+            Entrypoint::Native { .. } => return Err(native_failure(NativePrepareFailure::Implementation)),
+            _ => return Err(native_failure(NativePrepareFailure::Entrypoint)),
         };
         let driver = match registration.as_str() {
             sources::POSTGRES_REGISTRATION => Driver::Postgres,
             sources::HTTP_JSON_REGISTRATION => Driver::HttpJson,
-            _ => return Err(reject()),
+            _ => return Err(native_failure(NativePrepareFailure::Implementation)),
         };
         let contract = sources::read_contract().map_err(|cause| {
             SourceError::caused_by(SourceFailure::InternalFault, FailureStage::Prepare, cause)
@@ -194,35 +219,10 @@ impl PreparedSource {
             node,
             config,
             artifact,
-            host_build,
             registration,
             SlotKind::Connector,
         )
-        .map_err(|cause| {
-            use crate::extensions::invocation::NativePrepareFailure;
-            let failure = match cause {
-                NativePrepareFailure::Artifact | NativePrepareFailure::HostBuild => {
-                    world_protocol::lifecycle::LifecycleFailure::PrepareFailed {
-                        node_id: node.id.clone(),
-                    }
-                }
-                NativePrepareFailure::Configuration => {
-                    world_protocol::lifecycle::LifecycleFailure::MissingConfiguration {
-                        install_id: node.implementation.install_id.clone(),
-                    }
-                }
-                NativePrepareFailure::Entrypoint => {
-                    world_protocol::lifecycle::LifecycleFailure::PrepareFailed {
-                        node_id: node.id.clone(),
-                    }
-                }
-            };
-            SourceError::caused_by(
-                SourceFailure::Lifecycle { failure },
-                FailureStage::Prepare,
-                NativeCause(cause),
-            )
-        })?;
+        .map_err(native_failure)?;
         Ok(Self {
             proof,
             driver,
@@ -248,7 +248,7 @@ impl SourceError {
             crate::extensions::invocation::NativePrepareFailure::Artifact => "artifact",
             crate::extensions::invocation::NativePrepareFailure::Configuration => "configuration",
             crate::extensions::invocation::NativePrepareFailure::Entrypoint => "entrypoint",
-            crate::extensions::invocation::NativePrepareFailure::HostBuild => "host_build",
+            crate::extensions::invocation::NativePrepareFailure::Implementation => "implementation",
         })
     }
 }

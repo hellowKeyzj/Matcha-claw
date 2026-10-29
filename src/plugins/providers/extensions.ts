@@ -1,8 +1,8 @@
 import type { ComponentType, ReactNode } from 'react';
 import { defineExtensionPoint } from '@/plugin-host/core';
-import type { ProviderAuthMode, ProviderCredential, ProviderTypeInfo, ProviderVendorInfo, ProviderWithKeyInfo } from '@/lib/providers';
-import type { ProviderModelDraft } from '@/lib/provider-model-catalog';
-import type { hostProviderStartOAuth } from '@/lib/provider-projection';
+import type { ProviderAuthMode, ProviderCredential, ProviderTypeInfo, ProviderVendorInfo, ProviderWithKeyInfo } from '@/plugins/providers/domain/providers';
+import type { ProviderModelDraft } from '@/plugins/providers/services/provider-model-catalog';
+import type { hostProviderStartOAuth } from '@/plugins/providers/services/provider-projection';
 
 export interface ProviderVendorContribution {
   info: ProviderTypeInfo;

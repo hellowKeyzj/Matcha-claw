@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { collectDiagnosticsArchive, exportDiagnosticsArchive } from '@/lib/diagnostics-archive';
+import { collectDiagnosticsArchive, exportDiagnosticsArchive } from './services/diagnostics-archive';
 
 export default function DiagnosticsSection({ active }: SettingsSectionProps) {
   const { t } = useTranslation('settings');

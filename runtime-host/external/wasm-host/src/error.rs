@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::Arc};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {
@@ -57,10 +57,11 @@ pub enum FailureKind {
 }
 
 /// Display/Debug are safe summaries. Inspect `cause()` only in private diagnostics.
+#[derive(Clone)]
 pub struct ExecutionError {
     stage: Stage,
     kind: FailureKind,
-    cause: Option<wasmtime::Error>,
+    cause: Option<Arc<wasmtime::Error>>,
 }
 
 impl ExecutionError {
@@ -76,7 +77,7 @@ impl ExecutionError {
         Self {
             stage,
             kind,
-            cause: Some(cause),
+            cause: Some(Arc::new(cause)),
         }
     }
 
@@ -118,7 +119,7 @@ impl ExecutionError {
         self.kind
     }
     pub fn cause(&self) -> Option<&wasmtime::Error> {
-        self.cause.as_ref()
+        self.cause.as_deref()
     }
 }
 

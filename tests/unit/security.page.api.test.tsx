@@ -18,7 +18,7 @@ import {
   hostSecurityScanSkills,
   SECURITY_EMERGENCY_OUTCOME_UNKNOWN_MESSAGE,
   resolveSecurityEmergencyOutcome,
-} from '@/lib/security-runtime';
+} from '@/plugins/security/security-runtime';
 import { useSecuritySupportStore } from '@/plugins/security/security-support-store';
 
 const { toastSuccessMock, toastErrorMock } = vi.hoisted(() => ({

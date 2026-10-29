@@ -4,7 +4,7 @@ import {
   persistProviderModels,
   type ProviderModel,
   type ProviderModelDraft,
-} from '@/lib/provider-model-catalog';
+} from '@/plugins/providers/services/provider-model-catalog';
 import { refreshProviderPostMutationProjections } from '@/plugins/providers/stores/provider-post-mutation-refresh';
 
 let inflightRefreshTask: Promise<void> | null = null;

@@ -5,7 +5,7 @@ pub(crate) use history::{decode_complete_text, decode_event_message, decode_tota
 pub use history::{HistoryError, decode_window, direction};
 pub use model::{
     ActivityPosition, DisplayPosition, StreamFallback, StreamFallbackSource,
-    Direction, HistoryKind, InFlightRun, InputReceipt, LargeTextFacts, Message, MessageContent, MessageRole,
+    Direction, HistoryKind, InFlightRun, LargeTextFacts, Message, MessageContent, MessageRole,
     MessageToolDeliveryMedia, OmittedContentKind, PageMetadata, PageRequest, PendingInput,
     PendingInputState, RunState, SessionState, SessionWindow, WindowRange, window_range,
 };

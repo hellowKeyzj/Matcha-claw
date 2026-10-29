@@ -2,7 +2,6 @@ use world_protocol::{
     api::PackageConfigView,
     bindings::{BindingNode, ImplementationRef, SlotKind},
     compiler::{CompileFailure, CompileRequest, CompilerPassRequest, CompilerPassResult, TypedIr},
-    ids::Digest,
     package::PackageLimits,
     slots,
 };
@@ -23,7 +22,6 @@ impl PreparedCompiler {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, NativePrepareFailure> {
         let contract = slots::slot_contract(SlotKind::Compiler)
             .map_err(|_| NativePrepareFailure::Entrypoint)?;
@@ -31,7 +29,7 @@ impl PreparedCompiler {
             return Err(NativePrepareFailure::Entrypoint);
         }
         Ok(Self { proof: NativeProof::prepare(
-            node, config, artifact, host_build, COMPILER_REGISTRATION, SlotKind::Compiler,
+            node, config, artifact, COMPILER_REGISTRATION, SlotKind::Compiler,
         )? })
     }
 
@@ -63,7 +61,6 @@ impl PreparedSchema {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, NativePrepareFailure> {
         let contract = slots::slot_contract(SlotKind::Schema)
             .map_err(|_| NativePrepareFailure::Entrypoint)?;
@@ -74,7 +71,6 @@ impl PreparedSchema {
             node,
             config,
             artifact,
-            host_build,
             slots::SCHEMA_REGISTRATION,
             SlotKind::Schema,
         )?;

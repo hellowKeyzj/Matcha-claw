@@ -31,9 +31,9 @@ import { streamGeminiGenerateContent } from './client.js'
 import { rethrowInvestigationAdmission } from '../investigation.js'
 import { currentInvestigationScope } from '../../../world/investigation.js'
 import { getModelMaxOutputTokens } from '../../../utils/context.js'
+import { normalizeModelStringForAPI } from '../../../utils/model/configs.js'
 import {
   anthropicMessagesToGemini,
-  resolveGeminiModel,
   adaptGeminiStreamToAnthropic,
   anthropicToolsToGemini,
   anthropicToolChoiceToGemini,
@@ -52,7 +52,7 @@ export async function* queryModelGemini(
   void
 > {
   try {
-    const geminiModel = resolveGeminiModel(options.model)
+    const geminiModel = normalizeModelStringForAPI(options.model)
     const messagesForAPI = normalizeMessagesForAPI(messages, tools)
 
     const toolSchemas = await Promise.all(

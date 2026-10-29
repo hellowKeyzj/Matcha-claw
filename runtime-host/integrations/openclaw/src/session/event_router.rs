@@ -249,7 +249,7 @@ impl EventRouter {
         self.actor(identity, generation).sync_approvals(&approvals, epoch)
     }
 
-    pub(crate) fn history(&mut self, identity: SessionIdentity, generation: u64, window: SessionWindow, page: PageRequest, epoch: GatewayEpoch, host_epoch: u64) -> Result<Option<SessionSync>, RuntimeOperationFailure> {
+    pub(crate) fn history(&mut self, identity: SessionIdentity, generation: u64, mut window: SessionWindow, page: PageRequest, epoch: GatewayEpoch, host_epoch: u64) -> Result<Option<SessionSync>, RuntimeOperationFailure> {
         let mut page_actor;
         let actor = if matches!(page.direction(), Direction::Latest) {
             self.actor(&identity, generation)
@@ -278,6 +278,7 @@ impl EventRouter {
                 "retiredItemHashes": retired.iter().take(200).map(|id| sessions_module::trace::fingerprint(id)).collect::<Vec<_>>() }));
         }
         view.session_key = identity.session_key;
+        view.input_receipts = window.take_input_receipts();
         Ok(Some(SessionSync { view, source_epoch: Some(epoch.as_u64()), source_branch: window.state().active_leaf_entry_id().map(str::to_owned), cut: SessionSyncCut::Snapshot, replay_baseline: None, terminal_runs: actor.terminal_runs(), retired_item_ids: actor.retired_item_ids(), retired_tool_ids: actor.retired_tool_ids(), retired_approval_ids: actor.retired_approval_ids() }))
     }
 

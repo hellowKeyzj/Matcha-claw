@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { hostFileReadBinary, hostFileReadText, type WorkspaceFileContext } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
 import { useContributions } from '@/plugin-host/react';
-import { AppPluginManager } from '@/plugin-host/AppPluginManager';
+import { AppPluginManager } from '@/plugins/application-plugins/AppPluginManager';
 import { fileFormats, fileReaders, findFileReader, resolveFilePreviewTarget, type FilePreviewMode, type FileReaderContribution } from './extensions';
 import { resolveWorkspaceRelativePath, type ArtifactPreviewTarget } from './types';
 import { confirmAndOpenArtifactPath, openArtifactPathExternally, revealArtifactPathInFileManager, shouldOfferDirectOpenFallback } from './open-file-utils';

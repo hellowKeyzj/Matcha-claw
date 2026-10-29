@@ -162,7 +162,7 @@ export const chatScenarios = [
   scene('empty', '聊天 · 空会话'),
   scene('empty-draft', '聊天 · 新对话空态'),
   scene('conversation', '聊天 · 完整会话', [], 'src/plugins/chat/ChatMessages.tsx', '工作台方案已整理'),
-  scene('streaming', '聊天 · 流式输出与思考', [], 'src/plugins/message-rendering/ChatAssistantTurn.tsx', '正在整理交付清单'),
+  scene('streaming', '聊天 · 流式输出与思考', [], 'src/plugins/chat/components/ChatAssistantTurn.tsx', '正在整理交付清单'),
   scene('tools', '聊天 · 工具调用与文件产物', [], 'src/plugins/message-rendering/ExecutionGraphCard.tsx', '工作台方案已整理'),
   { ...scene('tools-expanded', '聊天 · 工具调用列表', [], 'src/plugins/message-rendering/chat-message-parts.tsx'), prepare: async (page) => {
     await page.locator('[data-compact-rail="tool-group"] > button').first().click();

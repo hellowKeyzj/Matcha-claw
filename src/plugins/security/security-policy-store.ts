@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import {
   hostSecurityReadPolicy,
   hostSecurityWritePolicy,
-} from '@/lib/security-runtime';
+} from './security-runtime';
 import {
   createSessionTraceId,
   logSessionTrace,

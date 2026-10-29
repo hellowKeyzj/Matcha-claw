@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
-import type { AttachedFileMeta } from '@/plugins/chat/store';
-import { buildArtifactPreviewTargetFromAttachedFile, buildArtifactPreviewTargetFromPath, DIRECTORY_MIME_TYPE, type ArtifactPreviewTarget } from '@/plugins/files/types';
+import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
+import { buildArtifactPreviewTargetFromPath, DIRECTORY_MIME_TYPE } from '@/plugins/files/types';
 import { builtinFileFormats, type FileFormatContribution } from '@/plugins/files/file-types';
 import { builtinFileReaders } from '@/plugins/files/plugin';
 import { fileFormats, fileReaders, findFileReader, type FileReaderContribution } from '@/plugins/files/extensions';
@@ -148,13 +148,4 @@ export function useArtifactRefExtractor(): (text: string) => AttachedFileMeta[] 
   const formats = useContributions(fileFormats);
   const readers = useContributions(fileReaders);
   return useMemo(() => createArtifactRefExtractor(formats, readers), [formats, readers]);
-}
-
-export function shouldKeepAssistantAttachmentVisible(
-  file: AttachedFileMeta,
-  supportsPreview: (file: ArtifactPreviewTarget) => boolean,
-): boolean {
-  if (file.mimeType.toLowerCase() === DIRECTORY_MIME_TYPE) return true;
-  const target = buildArtifactPreviewTargetFromAttachedFile(file);
-  return !!target && supportsPreview(target);
 }

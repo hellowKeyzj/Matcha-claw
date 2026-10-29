@@ -90,7 +90,7 @@ async function expand(
     try {
       await batchResolveNames(senderIds);
     } catch (err) {
-      log.warn('batchResolveNames failed (best-effort)', {
+      log.debug('batchResolveNames failed (best-effort)', {
         error: err instanceof Error ? err.message : String(err),
       });
     }

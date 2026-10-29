@@ -1,5 +1,7 @@
 import type { SessionRenderItem } from '@/types/session/render-item';
-import { getSessionTextModel, type SessionTextModel } from '@/plugins/chat/store/session-presentation';
+import type { SessionInputReceipt, SessionWireItem } from '@/types/session/snapshot';
+import type { SessionTextModel } from '@/plugins/chat/store/session-presentation';
+import type { ChatSessionRecord } from '@/plugins/chat/store/types';
 import { isControlledSessionRenderItem } from '@/plugins/chat/store/session-render-projection';
 import { buildSessionItemReconciliationSignature } from '@/plugins/chat/store/session-render-signature';
 
@@ -7,6 +9,39 @@ export { buildItemRenderFingerprint } from '@/plugins/chat/store/session-render-
 
 export function isPendingUserItem(item: SessionRenderItem): boolean {
   return item.kind === 'user-message' && (item.status === 'pending' || item.status === 'sending');
+}
+
+export function pendingSessionInputIds(record: ChatSessionRecord): string[] {
+  return [...new Set(record.items.flatMap((item) => item.kind === 'user-message'
+    && isPendingUserItem(item) && item.clientId && !item.messageId ? [item.clientId] : []))].sort().slice(0, 50);
+}
+
+export function bindSessionInputReceipts(
+  current: SessionRenderItem[],
+  next: SessionRenderItem[],
+  receipts: readonly SessionInputReceipt[] = [],
+  sourceItems: readonly SessionWireItem[] = [],
+): SessionRenderItem[] {
+  const messageIds = new Map<string, string>();
+  for (const receipt of receipts) {
+    if (receipt.state === 'consumed') messageIds.set(receipt.inputId, receipt.messageId);
+  }
+  for (const item of sourceItems) {
+    if (item.kind !== 'userMessage' || !item.messageId) continue;
+    for (const inputId of item.inputIds ?? []) messageIds.set(inputId, item.messageId);
+  }
+  const pending = new Map(next.filter(isPendingUserItem).map((item) => [item.key, item]));
+  let changed = false;
+  const bound = current.map((previous) => {
+    const item = pending.get(previous.key) ?? previous;
+    if (item !== previous) changed = true;
+    if (item.kind !== 'user-message' || !isPendingUserItem(item) || !item.clientId || item.messageId) return item;
+    const messageId = messageIds.get(item.clientId);
+    if (!messageId) return item;
+    changed = true;
+    return { ...item, messageId };
+  });
+  return changed ? bound : current;
 }
 
 function isAuthoritativeUserItem(item: SessionRenderItem): boolean {
@@ -113,7 +148,7 @@ function userTextMatches(
 function isUserConfirmedByAuthoritativeItems(
   pending: SessionRenderItem,
   confirmationState: UserConfirmationState,
-  normalizeUserText: SessionTextModel['user'],
+  normalizeUserText: SessionTextModel['user'] | null,
 ): boolean {
   if (pending.kind !== 'user-message') {
     return false;
@@ -128,6 +163,7 @@ function isUserConfirmedByAuthoritativeItems(
     }
   }
 
+  if (!normalizeUserText) return false;
   while (confirmationState.consumedNewAuthoritativeIndexes.has(
     confirmationState.nextSequentialNewAuthoritativeIndex,
   )) {
@@ -149,7 +185,7 @@ function isUserConfirmedByAuthoritativeItems(
 function dropReconciledOptimisticItems(
   currentItems: SessionRenderItem[],
   nextItems: SessionRenderItem[],
-  normalizeUserText: SessionTextModel['user'],
+  normalizeUserText: SessionTextModel['user'] | null,
 ): SessionRenderItem[] {
   const confirmationState = createUserConfirmationState(currentItems, nextItems);
   const pendingItems = currentItems.filter((item) => (
@@ -192,7 +228,7 @@ function dropReconciledOptimisticItems(
 export function reconcileSessionItems(
   currentItems: SessionRenderItem[],
   nextItems: SessionRenderItem[],
-  normalizeUserText: SessionTextModel['user'] = getSessionTextModel().user,
+  normalizeUserText: SessionTextModel['user'] | null = (text) => text,
 ): SessionRenderItem[] {
   if (currentItems === nextItems) {
     return currentItems;
@@ -225,7 +261,7 @@ export function reconcileSessionItems(
     return currentItem;
   });
   const receiptConfirmationState = createUserConfirmationState(currentItems, canonicalNextItems);
-  const preservedReceipts = currentItems.filter((item) => (
+  const preservedReceipts = normalizeUserText ? currentItems.filter((item) => (
     item.kind === 'user-message'
     && item.rendererReceiptRunId
     && !canonicalNextItems.some((nextItem) => nextItem.key === item.key)
@@ -242,7 +278,7 @@ export function reconcileSessionItems(
         && nextItem.createdAt === item.createdAt
       )
     ))
-  ));
+  )) : [];
   if (preservedReceipts.length > 0) {
     changed = true;
   }

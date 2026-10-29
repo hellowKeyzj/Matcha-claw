@@ -15,7 +15,7 @@ import {
 import { selectCurrentChatSendGate } from '@/plugins/chat/store/selectors';
 import { resolveChatSendGateForPayload } from '@/plugins/chat/store/send-gate';
 import { currentSessionSend, linkSessionSend, markSessionSendUnknown } from '@/plugins/chat/store/send-state';
-import { startSessionSend, confirmSessionSend, removeSessionSend } from '@/plugins/chat/store/session-presentation';
+import { startSessionSend, confirmSessionSend, removeSessionSend, getSessionInputIds } from '@/plugins/chat/store/session-presentation';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -314,14 +314,19 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     attachments,
   } = params;
   const trimmed = params.intent ? text : text.trim();
-  if (params.intent && !text.trim()) return { accepted: false, reason: 'empty' };
+  if (params.intent && !text.trim()) return { accepted: false, reason: 'empty', dispatch: 'not-dispatched' };
   if (params.intent && attachments?.some(isUnsupportedGoalStartAttachment)) {
-    return { accepted: false, reason: 'goal-attachments' };
+    return { accepted: false, reason: 'goal-attachments', dispatch: 'not-dispatched' };
   }
   const traceId = createSessionTraceId('send-boundary');
   const readableSendAttachments = readableAttachments(attachments);
   const attachmentCount = readableSendAttachments?.length ?? 0;
-  const transportPayload = resolveChatSendTransportPayload(trimmed, readableSendAttachments ?? []);
+  let transportPayload: ReturnType<typeof resolveChatSendTransportPayload>;
+  try {
+    transportPayload = resolveChatSendTransportPayload(trimmed, readableSendAttachments ?? []);
+  } catch (error) {
+    return { accepted: false, reason: 'error', error: String(error), dispatch: 'not-dispatched' };
+  }
   const stateBeforeSend = get();
   const gate = resolveChatSendGateForPayload(selectCurrentChatSendGate(stateBeforeSend), {
     text,
@@ -341,7 +346,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       messageLength: trimmed.length,
       attachmentCount,
     }));
-    return { accepted: false, reason: gate.reason, error: gate.error };
+    return { accepted: false, reason: gate.reason, error: gate.error, dispatch: 'not-dispatched' };
   }
   if (gate.kind !== 'session') {
     logSessionTrace('send.rejected', traceId, () => ({
@@ -349,7 +354,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       currentSessionKey: summarizeIdentifier(stateBeforeSend.currentSessionKey),
       gateKind: gate.kind,
     }));
-    return { accepted: false, reason: 'missing-session' };
+    return { accepted: false, reason: 'missing-session', dispatch: 'not-dispatched' };
   }
   const { sessionKey, endpointSessionId, sessionIdentity } = gate;
   const currentSessionKey = sessionKey;
@@ -407,6 +412,9 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
     await get().syncPendingApprovals(currentSessionKey);
     if (!isCurrent()) return { accepted: false, reason: 'error', error: 'Send result superseded', outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments) };
     finalizeStoreSendFailure({ set, get, sessionKey: currentSessionKey, error });
+    if (getSessionInputIds(get().loadedSessions[currentSessionKey]).length) {
+      void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: 'send_receipt' });
+    }
     return { accepted: false, reason: 'error', error, outcome: 'unknown', attachmentReselectionRequired: attachmentReselectionRequired(attachments) };
   };
   beginMutating();
@@ -502,8 +510,9 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         get().applySessionDelta(sendResult.projection.delta);
       }
     }
-    if (params.intent || sendResult.outcome === 'succeeded' && sendResult.status !== 'started') {
-      void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: 'manual_refresh' });
+    const needsInputReceipt = getSessionInputIds(get().loadedSessions[currentSessionKey]).length > 0;
+    if (needsInputReceipt || params.intent || sendResult.outcome === 'succeeded' && sendResult.status !== 'started') {
+      void get().loadHistory({ sessionKey: currentSessionKey, mode: 'quiet', scope: 'background', reason: needsInputReceipt ? 'send_receipt' : 'manual_refresh' });
     }
     return { accepted: true };
   } catch (error) {
@@ -519,9 +528,8 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
         accepted: false,
         reason: 'error',
         error: 'Send result superseded',
-        ...(params.intent || isRecoverableChatSendTimeout(String(error)) || hasTimeoutSignal(error)
-          ? { outcome: 'unknown' as const, attachmentReselectionRequired: attachmentReselectionRequired(attachments) }
-          : {}),
+        outcome: 'unknown',
+        attachmentReselectionRequired: attachmentReselectionRequired(attachments),
       };
     }
     const errorMsg = String(error);
@@ -529,27 +537,7 @@ export async function executeStoreSend(params: ExecuteStoreSendParams): Promise<
       errorName: error instanceof Error ? error.name : typeof error,
       timeoutSignal: hasTimeoutSignal(error),
     }));
-    if (params.intent || isRecoverableChatSendTimeout(errorMsg) || hasTimeoutSignal(error)) return reconcileUnknown(errorMsg);
-    removeOptimisticSendItems({
-      set,
-      sessionKey: currentSessionKey,
-      clientId: clientMessageId,
-      generation: sendGeneration,
-      identityKey,
-      error: errorMsg,
-    });
-    finalizeStoreSendFailure({
-      set,
-      get,
-      sessionKey: currentSessionKey,
-      error: errorMsg,
-    });
-    return {
-      accepted: false,
-      reason: 'error',
-      error: errorMsg,
-      attachmentReselectionRequired: attachmentReselectionRequired(attachments),
-    };
+    return reconcileUnknown(errorMsg);
   } finally {
     finishMutating();
   }

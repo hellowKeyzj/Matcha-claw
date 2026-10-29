@@ -37,6 +37,7 @@ pub(super) async fn read(
         command.direction(),
         command.limit(),
         command.offset(),
+        (!command.input_ids().is_empty()).then_some(command.input_ids()),
     )
     .await?;
     let mut groups = Vec::new();
@@ -103,7 +104,25 @@ pub(super) async fn read(
             );
             return Err(Failure::InvalidReadback);
         }
-        items.push(message.item);
+        let mut item = message.item;
+        if let SessionItem::UserMessage {
+            message_id: Some(message_id),
+            input_ids,
+            ..
+        } = &mut item
+        {
+            if let Some(input) = page
+                .input_messages
+                .iter()
+                .find(|input| input.message_id == *message_id)
+            {
+                if sessions_module::state::valid_input_ids(std::slice::from_ref(&input.request_id))
+                {
+                    input_ids.push(input.request_id.clone());
+                }
+            }
+        }
+        items.push(item);
         for tool in message.tools {
             projection::merge_tool(&mut tools, tool).inspect_err(|error| {
                 error.trace("timeline.merge_tool", None, record.session_id.as_str());
@@ -115,6 +134,7 @@ pub(super) async fn read(
         .inspect_err(|error| error.trace("timeline.state", None, record.session_id.as_str()))?
         .view();
     view.endpoint_session_id = Some(record.session_id.as_str().to_owned());
+    view.input_receipts = page.input_receipts;
     view.goal = sessions_module::goal::SessionGoalView::Unsupported;
     view.model_state = record
         .model
@@ -192,8 +212,16 @@ pub(super) async fn history(
             .and_then(|limit| usize::try_from(limit).ok())
             .unwrap_or(200)
             .min(200);
-        let (page, _) =
-            history::window(client, id, agent, timeline::Direction::Latest, limit, None).await?;
+        let (page, _) = history::window(
+            client,
+            id,
+            agent,
+            timeline::Direction::Latest,
+            limit,
+            None,
+            None,
+        )
+        .await?;
         let mut messages = Vec::new();
         for row in page.messages {
             let role = match row.get("type").and_then(Value::as_str) {

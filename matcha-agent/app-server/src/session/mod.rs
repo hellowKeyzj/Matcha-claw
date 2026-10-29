@@ -11,6 +11,7 @@ mod observation;
 mod record;
 mod retirement;
 mod run;
+mod selection;
 mod title;
 mod thinking;
 
@@ -385,7 +386,7 @@ impl Sessions {
         let session = self.session(session_id).await.map_err(not_sent)?;
         let execution = session.data.lock().await;
         execution.record.mutable().map_err(not_sent)?;
-        if execution.closing || execution.idle.handing_off() {
+        if execution.closing || execution.idle.handing_off() || execution.launching {
             return Err(not_sent(rpc::Error::unavailable(
                 "native_instance_handoff",
                 "The native CLI instance is handing off; the control request was not sent",

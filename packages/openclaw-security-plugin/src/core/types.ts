@@ -113,11 +113,10 @@ export type SecurityAuditQueryResult = {
 export type BeforeToolCallResult = {
   block: true;
   blockReason: string;
-  auditItem: SecurityAuditItem;
-} | {
-  params: Record<string, unknown>;
-  auditItem?: SecurityAuditItem;
+  auditItems: SecurityAuditItem[];
 } | {
   block?: false;
-  auditItem?: SecurityAuditItem;
+  params?: Record<string, unknown>;
+  requiresApproval?: boolean;
+  auditItems: SecurityAuditItem[];
 } | void;

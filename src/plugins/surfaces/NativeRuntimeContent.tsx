@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, us
 import { useTranslation } from 'react-i18next';
 import { Loader2 } from 'lucide-react';
 import { hostOpenClawCanvasRequest, hostOpenClawMcpAppRequest } from '@/lib/host-api';
-import { boardExecute } from '@/lib/board-api';
+import { boardExecute } from './board-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { cn } from '@/lib/utils';
 import { buildSessionIdentityKey } from '@/types/desktop/runtime-address';

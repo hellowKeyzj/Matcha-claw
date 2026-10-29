@@ -3,7 +3,7 @@ import {
   runtimeEndpointBadgeVariant,
   runtimeEndpointStatusLabel,
   useRuntimeEndpointsStore,
-} from '@/stores/runtime-endpoints';
+} from '@/plugins/runtime/directory';
 import { buildRuntimeEndpointKey } from '../../src/types/desktop/runtime-address';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
+import { SUBAGENT_TARGET_FILES } from '@/plugins/agents/subagent-files';
 
 describe('subagent target files', () => {
   it('should only include the 4 editable md files', () => {

@@ -8,13 +8,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
-import { buildProviderCredentialId } from '@/lib/provider-accounts';
-import { CUSTOM_MEDIA_CONTRACTS, getCustomMediaContract } from '@/lib/custom-media-provider-contracts';
+import { buildProviderCredentialId } from '@/plugins/providers/services/provider-accounts';
+import { CUSTOM_MEDIA_CONTRACTS, getCustomMediaContract } from '@/plugins/providers/domain/custom-media-provider-contracts';
 import {
   normalizeProviderApiKeyInput,
   type ProviderCredential,
   type ProviderTypeInfo,
-} from '@/lib/providers';
+} from '@/plugins/providers/domain/providers';
 import { cn } from '@/lib/utils';
 import { useContributions } from '@/plugin-host/react';
 import {

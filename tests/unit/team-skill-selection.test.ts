@@ -6,7 +6,7 @@ vi.mock('@/lib/host-api', () => ({
   hostApiFetchDecoded: (...args: unknown[]) => hostApiFetchDecodedMock(...args),
 }));
 
-import { decodeDependencyPlan, decodeValidation, materializeTeamSkillSelection } from '@/services/team-skill-selection';
+import { decodeDependencyPlan, decodeValidation, materializeTeamSkillSelection } from '@/plugins/teams/services/team-skill-selection';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
 
 const selectionId = `teamskill:v1:${'a'.repeat(64)}`;

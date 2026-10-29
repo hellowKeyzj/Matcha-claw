@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
-import { MainLayout } from '@/components/layout/MainLayout';
+import { MainLayout } from '@/app/layout/MainLayout';
 import { useChatStore } from '@/plugins/chat/store';
-import { useLayoutStore } from '@/stores/layout';
+import { useLayoutStore } from '@/app/layout/store';
 import { useSettingsStore } from '@/plugins/settings/store';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import i18n from '@/i18n';
@@ -57,8 +57,8 @@ describe('main layout chat workspace host', () => {
     useLayoutStore.setState({
       sidebarVisible: true,
       sidebarWidth: 256,
-      chatTakeoverMode: 'none',
-      chatWindowRightDockLayout: null,
+      viewportTakeover: false,
+      viewportRightDockLayout: null,
     });
 
     useSubagentsStore.setState({
@@ -131,7 +131,7 @@ describe('main layout chat workspace host', () => {
 
   it('lets artifact workbench takeover hide the app sidebar and agent sessions pane', () => {
     useLayoutStore.setState({
-      chatTakeoverMode: 'artifact-workbench',
+      viewportTakeover: true,
     });
 
     render(
@@ -153,7 +153,7 @@ describe('main layout chat workspace host', () => {
 
   it('sizes the chat route from the right dock layout base and dock widths', () => {
     useLayoutStore.setState({
-      chatWindowRightDockLayout: {
+      viewportRightDockLayout: {
         phase: 'open',
         dockWidth: 726,
         baseWidth: 1200,

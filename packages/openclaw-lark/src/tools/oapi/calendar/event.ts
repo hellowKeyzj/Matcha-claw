@@ -274,11 +274,7 @@ const FeishuCalendarEventSchema = Type.Union([
         description: 'Calendar ID (optional; primary calendar used if omitted)',
       }),
     ),
-    page_size: Type.Optional(
-      Type.Number({
-        description: '每页数量',
-      }),
-    ),
+    page_size: Type.Optional(Type.Number({ description: '每页数量', minimum: 1, maximum: 100 })),
     page_token: Type.Optional(
       Type.String({
         description: '分页标记',
@@ -317,11 +313,7 @@ const FeishuCalendarEventSchema = Type.Union([
     end_time: Type.String({
       description: "查询结束时间（ISO 8601 / RFC 3339 格式（包含时区），例如 '2024-01-01T00:00:00+08:00'）",
     }),
-    page_size: Type.Optional(
-      Type.Number({
-        description: '每页数量',
-      }),
-    ),
+    page_size: Type.Optional(Type.Number({ description: '每页数量', minimum: 1, maximum: 1000 })),
     page_token: Type.Optional(
       Type.String({
         description: '分页标记',
@@ -343,11 +335,7 @@ const FeishuCalendarEventSchema = Type.Union([
         description: 'Calendar ID (optional; primary calendar used if omitted)',
       }),
     ),
-    page_size: Type.Optional(
-      Type.Number({
-        description: '每页数量',
-      }),
-    ),
+    page_size: Type.Optional(Type.Number({ description: '每页数量', minimum: 1, maximum: 1000 })),
     page_token: Type.Optional(
       Type.String({
         description: '分页标记',
@@ -514,7 +502,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
     const data = primaryRes.data as CalendarPrimaryData | undefined;
     const cid = data?.calendars?.[0]?.calendar?.calendar_id;
     if (cid) {
-      log.trace(() => `resolveCalendarId: primary() returned calendar_id=${cid}`);
+      log.info(`resolveCalendarId: primary() returned calendar_id=${cid}`);
       return cid;
     }
     return null;
@@ -562,7 +550,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                   received_end: p.end_time,
                 });
 
-              log.trace(() =>
+              log.info(
                 `create: summary=${p.summary}, start_time=${p.start_time} -> ts=${startTs}, end_time=${p.end_time} -> ts=${endTs}, user_open_id=${p.user_open_id ?? 'MISSING'}, attendees=${JSON.stringify(p.attendees ?? [])}, vchat=${p.vchat?.vc_type ?? 'auto'}, location=${p.location?.name ?? 'none'}`,
               );
 
@@ -634,7 +622,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                 }
               }
 
-              log.trace(() => `allAttendees=${JSON.stringify(allAttendees)}`);
+              log.info(`allAttendees=${JSON.stringify(allAttendees)}`);
               let attendeeError: string | undefined;
 
               const operateId = p.user_open_id ?? p.attendees?.find((a) => a.type === 'user')?.id;
@@ -670,7 +658,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                     { as: 'user' },
                   );
                   assertLarkOk(attendeeRes);
-                  log.trace(() => `attendee API response: ${JSON.stringify(attendeeRes.data)}`);
+                  log.info(`attendee API response: ${JSON.stringify(attendeeRes.data)}`);
                 } catch (attendeeErr) {
                   attendeeError = formatLarkError(attendeeErr);
                   log.info(`attendee add FAILED: ${attendeeError}`);
@@ -736,7 +724,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
 
               const calendarId = await resolveCalendarIdOrFail(p.calendar_id, client);
 
-              log.trace(() =>
+              log.info(
                 `list: calendar_id=${calendarId}, start_time=${startTs}, end_time=${endTs} (using instance_view)`,
               );
 
@@ -776,7 +764,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
 
               const calendarId = await resolveCalendarIdOrFail(p.calendar_id, client);
 
-              log.trace(() => `get: calendar_id=${calendarId}, event_id=${p.event_id}`);
+              log.info(`get: calendar_id=${calendarId}, event_id=${p.event_id}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event.get',
@@ -835,7 +823,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
               if (p.description) updateData.description = p.description;
               if (p.location) updateData.location = { name: p.location };
 
-              log.trace(() =>
+              log.info(
                 `patch: calendar_id=${calendarId}, event_id=${p.event_id}, fields=${Object.keys(updateData).join(',')}`,
               );
 
@@ -868,7 +856,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
 
               const calendarId = await resolveCalendarIdOrFail(p.calendar_id, client);
 
-              log.trace(() =>
+              log.info(
                 `delete: calendar_id=${calendarId}, event_id=${p.event_id}, notify=${p.need_notification ?? true}`,
               );
 
@@ -904,7 +892,12 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
 
               const calendarId = await resolveCalendarIdOrFail(p.calendar_id, client);
 
-              log.trace(() => `search: calendar_id=${calendarId}, query=${p.query}, page_size=${p.page_size ?? 50}`);
+              // 钳制 page_size 到 [1,100]（飞书文档：calendar-event search 最大值 100）
+              let ps = p.page_size;
+              if (ps === undefined || ps === null) ps = 20;
+              ps = Math.min(100, Math.max(1, Math.trunc(ps)));
+
+              log.info(`search: calendar_id=${calendarId}, query=${p.query}, page_size=${ps}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event.search',
@@ -913,7 +906,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                     {
                       path: { calendar_id: calendarId },
                       params: {
-                        page_size: p.page_size,
+                        page_size: ps,
                         page_token: p.page_token,
                       },
                       data: {
@@ -945,7 +938,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
 
               const calendarId = await resolveCalendarIdOrFail(p.calendar_id, client);
 
-              log.trace(() => `reply: calendar_id=${calendarId}, event_id=${p.event_id}, rsvp=${p.rsvp_status}`);
+              log.info(`reply: calendar_id=${calendarId}, event_id=${p.event_id}, rsvp=${p.rsvp_status}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event.reply',
@@ -993,7 +986,12 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                   received_end: p.end_time,
                 });
 
-              log.trace(() => `instances: calendar_id=${calendarId}, event_id=${p.event_id}, start=${startTs}, end=${endTs}`);
+              log.info(`instances: calendar_id=${calendarId}, event_id=${p.event_id}, start=${startTs}, end=${endTs}`);
+
+              // 钳制 page_size 到 [1,1000]（宽松上限，instances 文档未明确范围）
+              let ps = p.page_size;
+              if (ps === undefined || ps === null) ps = 50;
+              ps = Math.min(1000, Math.max(1, Math.trunc(ps)));
 
               const res = await client.invoke(
                 'feishu_calendar_event.instances',
@@ -1004,7 +1002,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                       params: {
                         start_time: startTs as any,
                         end_time: endTs as any,
-                        page_size: p.page_size,
+                        page_size: ps,
                         page_token: p.page_token,
                       },
                     },
@@ -1044,7 +1042,7 @@ export function registerFeishuCalendarEventTool(api: OpenClawPluginApi): void {
                   received_end: p.end_time,
                 });
 
-              log.trace(() => `instance_view: calendar_id=${calendarId}, start=${startTs}, end=${endTs}`);
+              log.info(`instance_view: calendar_id=${calendarId}, start=${startTs}, end=${endTs}`);
 
               const res = await client.invoke(
                 'feishu_calendar_event.instance_view',

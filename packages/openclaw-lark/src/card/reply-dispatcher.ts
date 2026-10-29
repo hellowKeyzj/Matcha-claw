@@ -24,7 +24,7 @@ import { type TypingIndicatorState, addTypingIndicator, removeTypingIndicator } 
 import { splitReasoningText, stripReasoningTags } from './builder';
 import { isCardTableLimitError } from './card-error';
 import type { CreateFeishuReplyDispatcherParams, FeishuReplyDispatcherResult } from './reply-dispatcher-types';
-import { expandAutoMode, resolveReplyMode, shouldUseCard } from './reply-mode';
+import { expandAutoMode, resolveReplyMode, resolveStreamingFlags, shouldUseCard } from './reply-mode';
 import { StreamingCardController } from './streaming-card-controller';
 import { UnavailableGuard } from './unavailable-guard';
 
@@ -50,25 +50,28 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   // ---- Reply mode resolution ----
   const chatType = params.chatType;
   const effectiveReplyMode = resolveReplyMode({ feishuCfg, chatType });
+  const streamingFlags = resolveStreamingFlags(feishuCfg);
   const replyMode = expandAutoMode({
     mode: effectiveReplyMode,
-    streaming: feishuCfg?.streaming,
+    streaming: streamingFlags.streaming,
     chatType,
   });
   const useStreamingCards = replyMode === 'streaming';
 
   // ---- Block streaming for static mode ----
-  const enableBlockStreaming = feishuCfg?.blockStreaming === true && !useStreamingCards;
+  const enableBlockStreaming = streamingFlags.blockStreaming && !useStreamingCards;
   const { toolUseDisplay } = params;
 
   const resolvedFooter = resolveFooterConfig(feishuCfg?.footer);
 
-  log.trace('reply mode resolved', {
+  log.info('reply mode resolved', {
     effectiveReplyMode,
     replyMode,
     chatType,
+    streamingRaw: feishuCfg?.streaming ?? null,
+    streamingFlags,
   });
-  log.trace('footer config resolved', {
+  log.info('footer config resolved', {
     accountId: account.accountId,
     sessionKey,
     chatType,
@@ -141,17 +144,17 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       if (typingStopped && typingState) {
         await removeTypingIndicator({ cfg, state: typingState, accountId });
         typingState = null;
-        log.trace('removed typing indicator (raced with stop)');
+        log.info('removed typing indicator (raced with stop)');
         return;
       }
-      log.trace('added typing indicator reaction');
+      log.info('added typing indicator reaction');
     },
     stop: async () => {
       typingStopped = true;
       if (!typingState) return;
       await removeTypingIndicator({ cfg, state: typingState, accountId });
       typingState = null;
-      log.trace('removed typing indicator reaction');
+      log.info('removed typing indicator reaction');
     },
     onStartError: (err) => {
       logTypingFailure({
@@ -186,10 +189,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     },
 
     deliver: async (payload: ReplyPayload, meta?: { kind?: string }) => {
-      log.debug('deliver called', () => ({
+      log.debug('deliver called', {
         textPreview: payload.text?.slice(0, 100),
         kind: meta?.kind,
-      }));
+      });
 
       if (shouldSkip('deliver.entry')) return;
 
@@ -249,7 +252,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       if (text.trim()) {
         if (shouldUseCard(text)) {
           const chunks = core.channel.text.chunkTextWithMode(text, textChunkLimit, chunkMode);
-          log.trace('deliver: sending card chunks', {
+          log.info('deliver: sending card chunks', {
             count: chunks.length,
             chatId,
           });
@@ -310,7 +313,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           }
         } else {
           const chunks = core.channel.text.chunkTextWithMode(text, textChunkLimit, chunkMode);
-          log.trace('deliver: sending text chunks', {
+          log.info('deliver: sending text chunks', {
             count: chunks.length,
             chatId,
           });
@@ -337,9 +340,9 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       for (const mediaUrl of payloadMediaUrls) {
         if (!mediaUrl?.trim()) continue;
         try {
-          log.trace('deliver: sending media via static path', () => ({
+          log.info('deliver: sending media via static path', {
             mediaUrl: mediaUrl.slice(0, 80),
-          }));
+          });
           await sendMediaLark({
             cfg,
             to: chatId,

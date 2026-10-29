@@ -7,7 +7,7 @@ import {
   isSessionRuntimeEndpointReady,
   isSessionRuntimeEndpointStarting,
   supportsSessionChat,
-} from '@/stores/runtime-endpoints';
+} from '@/plugins/runtime/directory';
 import type { RuntimeEndpointSummary } from '@/types/runtime-topology';
 import type {
   ChatCurrentConversation,

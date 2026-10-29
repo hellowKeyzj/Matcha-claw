@@ -13,7 +13,7 @@ import { useSettingsStore } from '@/plugins/settings/store';
 import { useAccountStore } from '@/plugins/account/stores/account';
 import { useLicenseStore } from '@/plugins/account/stores/license';
 import { useRuntimeHostStore } from '@/plugins/runtime/store';
-import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { useUpdateStore } from '@/plugins/settings/update/store';
 import i18n from '@/i18n';
 

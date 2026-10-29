@@ -6,11 +6,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { invokeIpc } from '@/lib/api-client';
-import { requestConnectorOAuth } from '@/lib/connectors-call';
-import { selectManagementEndpoint, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { requestConnectorOAuth } from './services/client';
+import { selectManagementEndpoint, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { runtimeEndpointsEqual, type RuntimeInstanceScope } from '@/types/desktop/runtime-address';
 import type { McpOAuthAction, McpOAuthReceipt, McpOAuthState } from '@/types/connectors-oauth';
-import type { ExternalConnectorSummary } from './store';
+import type { ExternalConnectorSummary } from './types';
 
 const STATUS_LABELS: Record<McpOAuthState, string> = {
   'authorization-required': '需要授权，请点击登录。',

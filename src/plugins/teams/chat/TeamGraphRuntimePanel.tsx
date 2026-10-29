@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Copy, Loader2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import { useTeamRunLabels } from '@/hooks/use-team-run-labels';
+import { useTeamRunLabels } from '@/plugins/teams/hooks/use-team-run-labels';
 import { useTeamsStore } from '@/plugins/teams/store';
 import { useChatStore } from '@/plugins/chat/store';
 import { sessionIdentitiesEqual } from '@/types/desktop/runtime-address';

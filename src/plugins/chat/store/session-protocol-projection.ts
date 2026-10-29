@@ -1,7 +1,7 @@
 import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
 import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
 import { currentSessionSend, recordSendTerminals } from '@/plugins/chat/store/send-state';
-import { getSessionMessageReplacementIndex, getSessionTextModel, prepareSessionProjectionItems, projectSessionMessages, sessionTerminalRunIds } from '@/plugins/chat/store/session-presentation';
+import { getSessionMessageReplacementIndex, reconcileSessionMessageItems, prepareSessionProjectionItems, projectSessionMessages, sessionTerminalRunIds } from '@/plugins/chat/store/session-presentation';
 import type { ApprovalItem, ChatSessionRuntimeState, ChatSessionViewportState, ChatStoreState } from '@/plugins/chat/store/types';
 import { deriveSessionImageGenerationPendingStateFromItems, type SessionRenderItem } from '@/types/session/render-item';
 import type { SessionDelta, SessionFact, SessionView, SessionWireItem, SessionWireRuntime, SessionWireTool, SessionWireWindow } from '@/types/session/snapshot';
@@ -11,7 +11,6 @@ import { getCronSessionBaseKey } from '@/plugins/chat/store/cron-session-utils';
 import { createSessionTraceId, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity, summarizeSessionChanges, summarizeWireItem, summarizeRenderItem } from '@/lib/session-trace';
 import { reconcileSessionDirectory } from '@/plugins/chat/store/session-directory';
 import { getSessionRecord, patchSessionMeta, patchSessionRecord } from '@/plugins/chat/store/session-record-projection';
-import { reconcileSessionItems } from '@/plugins/chat/store/session-item-reconciliation';
 import { projectControlledSessionViewItems } from '@/plugins/chat/store/session-render-projection';
 import { adoptSessionProjectionFact } from '@/plugins/chat/store/session-projection-facts';
 import { factValue, projectionStore, windowStore, renderProjectionStore, type SessionProjectionState } from '@/plugins/chat/store/session-projection-state';
@@ -281,7 +280,8 @@ function applyDecodedSessionView(
         ? [...terminalRunIds, wireRuntime.activeRunId] : terminalRunIds, observedTerminalRunIds);
     const send = currentSessionSend(current);
     const nextSend = send?.identityKey === buildSessionIdentityKey(view.identity) ? recordSendTerminals(send, terminals) : send;
-    const reconciledItems = reconcileSessionItems(current.items, projectedItems, getSessionTextModel(view.identity).user);
+    const reconciledItems = reconcileSessionMessageItems(nextIdentity ?? undefined, current.items, projectedItems, undefined,
+      buildSessionIdentityKey(nextIdentity!) === buildSessionIdentityKey(view.identity) ? factValue(view.items) ?? [] : []);
     const messages = projectSessionMessages(messageRecord, reconciledItems, {
       identityKey: buildSessionIdentityKey(view.identity),
       runtime: wireRuntime ? projectionRuntime(current.runtime, view.runtime, reconciledItems, view.runtimeNotice ?? null) : null,
@@ -394,6 +394,15 @@ export function applySessionView(
   const store = projectionStore(input.get);
   const projectionKey = buildSessionIdentityKey(view.identity);
   const previous = store.get(projectionKey);
+  const { inputReceipts, ...timelineView } = view;
+  input.set((state) => {
+    const current = getSessionRecord(state, recordKey);
+    if (!current.meta.sessionIdentity || buildSessionIdentityKey(current.meta.sessionIdentity) !== projectionKey) return state;
+    const items = reconcileSessionMessageItems(current.meta.sessionIdentity, current.items, current.items,
+      inputReceipts, factValue(view.items) ?? []);
+    return items === current.items ? state : { loadedSessions: patchSessionRecord(state, recordKey, { items }) };
+  });
+  view = timelineView;
   if (options.windowOnly) {
     view = adoptProjectionView(view);
     const items = factValue(view.items);
@@ -420,7 +429,7 @@ export function applySessionView(
       const projectedItems = projectControlledSessionViewItems(display, renderProjectionStore(input.get), displayProjectionKey(input.get(), view.identity));
       const reconcileStartedAt = timing ? performance.now() : 0;
       if (timing) timing.projectionElapsedMs += reconcileStartedAt - projectionStartedAt;
-      const items = reconcileSessionItems(current.items, projectedItems, getSessionTextModel(display.identity).user);
+      const items = reconcileSessionMessageItems(current.meta.sessionIdentity ?? identity ?? undefined, current.items, projectedItems);
       const traceStartedAt = timing ? performance.now() : 0;
       if (timing) timing.reconcileElapsedMs += traceStartedAt - reconcileStartedAt;
       if (traceId) logSessionTrace('session.view.window.assembly', traceId, () => ({

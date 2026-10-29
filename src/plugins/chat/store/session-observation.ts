@@ -1,12 +1,13 @@
-import { observeChatSession, releaseChatSession } from '@/services/runtime/session-runtime';
+import { observeChatSession, releaseChatSession } from '@/plugins/chat/session-runtime';
 import { isSessionTraceEnabled, logSessionTrace, summarizeError, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
 import { assertSessionIdentity, buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
 import type { SessionView } from '@/types/session/snapshot';
 import { CHAT_HISTORY_FULL_LIMIT, CHAT_HISTORY_LOADING_TIMEOUT_MS } from '@/plugins/chat/store/history-constants';
 import { executeHistoryLoad, type HistoryLoadExecutionDeps } from '@/plugins/chat/store/history-load-execution';
-import { findSessionRecordKey } from '@/plugins/chat/store/session-identity';
+import { findSessionRecordKey } from '@/plugins/chat/session-catalog';
 import { buildCurrentConversationFromSessionRecord } from '@/plugins/chat/store/session-runtime-graph';
 import type { StoreSessionRunCache } from '@/plugins/chat/store/session-run-cache';
+import { getSessionInputIds } from '@/plugins/chat/store/session-presentation';
 import { applySessionView, getSessionMeta, patchSessionMeta } from '@/plugins/chat/store/store-state-helpers';
 import type { ChatStoreActions } from '@/plugins/chat/store/types';
 
@@ -22,6 +23,8 @@ type Observation = {
   requestSequence: number;
   request?: Promise<SessionView | null>;
   historyTask?: Promise<void>;
+  historyInputIds?: readonly string[];
+  refreshRequested?: boolean;
   watermark?: { epoch: number; seq: number };
 };
 
@@ -34,10 +37,11 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
     await releaseChatSession({ sessionIdentity: identity, leaseId });
   };
 
-  const observeHistory: NonNullable<HistoryLoadExecutionDeps['observeHistory']> = (identity, options) => {
+  const observeHistory: NonNullable<HistoryLoadExecutionDeps['observeHistory']> = (identity, options, inputIds) => {
     const observation = observations.get(buildSessionIdentityKey(identity));
     if (!observation) return Promise.resolve(null);
     if (observation.request) return observation.request;
+    observation.historyInputIds = inputIds;
     const key = buildSessionIdentityKey(identity);
     const recordKey = findSessionRecordKey(get(), identity);
     const generation = recordKey ? getSendGeneration(recordKey) : null;
@@ -50,7 +54,9 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
       }));
       let result: Awaited<ReturnType<typeof observeChatSession>>;
       try {
-        result = await observeChatSession({ sessionIdentity: identity, leaseId: observation.leaseId, limit: CHAT_HISTORY_FULL_LIMIT }, options);
+        result = await observeChatSession({ sessionIdentity: identity, leaseId: observation.leaseId, limit: CHAT_HISTORY_FULL_LIMIT,
+          ...(inputIds.length ? { inputIds } : {}),
+        }, options);
       } catch (error) {
         if (isSessionTraceEnabled()) logSessionTrace('session.observe.error', options.traceId, () => ({
           identity: summarizeSessionIdentity(identity), leaseHash: summarizeIdentifier(observation.leaseId).hash,
@@ -149,7 +155,14 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
     const isOpenClaw = recordIdentity?.endpoint.kind === 'native-runtime' && recordIdentity.endpoint.runtimeAdapterId === 'openclaw';
     const observation = isOpenClaw ? observations.get(buildSessionIdentityKey(recordIdentity)) : undefined;
     if (isOpenClaw && !observation && request.reason === 'same_session_refresh') return Promise.resolve();
-    if (observation?.historyTask) return observation.historyTask;
+    const inputIds = getSessionInputIds(get().loadedSessions[normalizedSessionKey]);
+    if (observation?.historyTask) {
+      if (request.reason === 'send_receipt' && inputIds.some((id) => !observation.historyInputIds?.includes(id))) {
+        observation.refreshRequested = true;
+      }
+      return observation.historyTask;
+    }
+    if (observation) observation.historyInputIds = inputIds;
     const task = executeHistoryLoad({
       set,
       get,
@@ -159,8 +172,12 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
         observeHistory,
         isObservationCurrent: () => observations.get(buildSessionIdentityKey(recordIdentity!)) === observation
           && getSendGeneration(normalizedSessionKey) === generation,
-        onObservedViewApplied: (view: SessionView) => {
-          if (observations.get(buildSessionIdentityKey(view.identity)) === observation) observation.watermark = { epoch: view.epoch, seq: view.seq };
+        onObservedViewCovered: (view: SessionView) => {
+          if (observations.get(buildSessionIdentityKey(view.identity)) === observation
+            && (!observation.watermark || view.epoch > observation.watermark.epoch
+              || view.epoch === observation.watermark.epoch && view.seq > observation.watermark.seq)) {
+            observation.watermark = { epoch: view.epoch, seq: view.seq };
+          }
         },
       } : {}),
     }, {
@@ -169,7 +186,19 @@ export function createSessionObservation({ set, get, historyRuntime, getSendGene
     });
     if (observation) {
       observation.historyTask = task;
-      void task.finally(() => { if (observation.historyTask === task) observation.historyTask = undefined; }).catch(() => undefined);
+      void task.finally(() => {
+        if (observation.historyTask !== task) return;
+        observation.historyTask = undefined;
+        const refresh = observation.refreshRequested;
+        const queriedInputIds = observation.historyInputIds ?? inputIds;
+        observation.historyInputIds = undefined;
+        observation.refreshRequested = false;
+        if (refresh && observations.get(buildSessionIdentityKey(recordIdentity!)) === observation
+          && get().loadedSessions[normalizedSessionKey]?.meta.sessionIdentity === recordIdentity
+          && getSessionInputIds(get().loadedSessions[normalizedSessionKey]).some((id) => !queriedInputIds.includes(id))) {
+          void loadHistory({ sessionKey: normalizedSessionKey, mode: 'quiet', scope: 'background', reason: 'send_receipt' });
+        }
+      }).catch(() => undefined);
     }
     historyRuntime.setHistoryLoadInFlight(normalizedSessionKey, task);
     void task.then(

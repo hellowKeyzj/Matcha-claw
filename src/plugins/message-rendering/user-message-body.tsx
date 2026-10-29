@@ -1,5 +1,5 @@
 import { memo, type ReactNode } from 'react';
-import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
+import { MESSAGE_LAYOUT_TOKENS } from '@/plugins/message-rendering/message-layout-tokens';
 
 interface UserMessageBodyProps {
   text: string;
@@ -11,7 +11,7 @@ export const UserMessageBody = memo(function UserMessageBody({
   loadMoreButton,
 }: UserMessageBodyProps) {
   return (
-    <div className={CHAT_LAYOUT_TOKENS.userBubble}>
+    <div className={MESSAGE_LAYOUT_TOKENS.userBubble}>
       <p className="whitespace-pre-wrap break-words text-[14px] leading-[1.58]">{text}</p>
       {loadMoreButton}
     </div>

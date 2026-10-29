@@ -58,14 +58,26 @@ pub(super) async fn read(
     session_id: &str,
     offset: usize,
     limit: usize,
+    input_ids: Option<&[String]>,
 ) -> rpc::Result<Value> {
     super::validate_uuid(session_id)?;
+    let requested: HashMap<_, _> =
+        super::record::input_runs(database, session_id, &[], input_ids.unwrap_or_default())
+            .await?
+            .into_iter()
+            .map(|run| (run.message_id.clone(), run))
+            .collect();
+    let targeted = input_ids.is_some();
     let runtime = runtime.to_owned();
     let workspace = workspace.to_owned();
-    let session_id = session_id.to_owned();
+    let native_id = session_id.to_owned();
     let mut page = tokio::task::spawn_blocking(move || -> rpc::Result<Value> {
-        let Some((_, transcript, chain)) = locate_sync(&runtime, &workspace, &session_id)? else {
-            return Ok(json!({ "messages": [], "total": 0, "nextOffset": null }));
+        let Some((_, transcript, chain)) = locate_sync(&runtime, &workspace, &native_id)? else {
+            let mut page = json!({ "messages": [], "total": 0, "nextOffset": null });
+            if targeted {
+                page["inputReceipts"] = json!([]);
+            }
+            return Ok(page);
         };
         let total = chain.len();
         let start = offset.min(total);
@@ -74,11 +86,36 @@ pub(super) async fn read(
             .iter()
             .map(|&index| &transcript.messages[index].value)
             .collect();
-        Ok(json!({
+        let mut page = json!({
             "messages": messages,
             "total": total,
             "nextOffset": (end < total).then_some(end),
-        }))
+        });
+        if targeted {
+            let observed: HashSet<_> = chain.iter()
+                .map(|&index| &transcript.messages[index].value)
+                .filter(|message| message["type"] == "user" && message["isSidechain"] != true)
+                .filter_map(|message| message["uuid"].as_str())
+                .filter(|uuid| requested.contains_key(*uuid))
+                .collect();
+            let receipts: Vec<_> = requested.into_values().filter_map(|run| {
+                let input_id = run.request_id?;
+                if observed.contains(run.message_id.as_str()) {
+                    Some(json!({"state":"consumed","inputId":input_id,"messageId":run.message_id}))
+                } else if run.status == super::run::Status::Queued {
+                    Some(json!({"state":"pending","inputId":input_id,"queued":true}))
+                } else if run.status == super::run::Status::Cancelled && matches!(
+                    run.reason.as_deref(),
+                    Some("cancelled_before_send" | "session_closed_before_send" | "server_shutdown_before_send")
+                ) {
+                    Some(json!({"state":"pending","inputId":input_id,"cancelled":true}))
+                } else {
+                    None
+                }
+            }).collect();
+            page["inputReceipts"] = json!(receipts);
+        }
+        Ok(page)
     })
     .await
     .map_err(|error| rpc::Error::internal("history_read_task").with_source(error))??;
@@ -90,7 +127,14 @@ pub(super) async fn read(
         .filter_map(|message| message["uuid"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
     page["managedInputMessageIds"] =
-        json!(super::record::managed_input_message_ids(database, candidates).await?);
+        json!(super::record::managed_input_message_ids(database, &candidates).await?);
+    let mut inputs = Vec::new();
+    for run in super::record::input_runs(database, session_id, &candidates, &[]).await? {
+        if let Some(request_id) = run.request_id {
+            inputs.push(json!({"requestId":request_id,"messageId":run.message_id}));
+        }
+    }
+    page["inputMessages"] = json!(inputs);
     Ok(page)
 }
 

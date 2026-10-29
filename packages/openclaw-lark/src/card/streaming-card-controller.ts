@@ -11,15 +11,19 @@
  * detection to UnavailableGuard.
  */
 
-import { readFile } from 'node:fs/promises';
 import { resolveDefaultAgentId } from 'openclaw/plugin-sdk/agent-runtime';
+import { resolveStorePath } from 'openclaw/plugin-sdk/session-store-runtime';
 import type { ReplyPayload } from 'openclaw/plugin-sdk/core';
 import { SILENT_REPLY_TOKEN } from 'openclaw/plugin-sdk/reply-runtime';
 import { extractLarkApiCode } from '../core/api-error';
 import { larkLogger } from '../core/lark-logger';
-import { LarkClient } from '../core/lark-client';
 import { registerShutdownHook } from '../core/shutdown-hooks';
 import { sendCardFeishu, updateCardFeishu } from '../messaging/outbound/send';
+import {
+  directReadSessionEntryViaSqlite,
+  getSessionEntryCompat,
+  resolveSqlitePathFromStorePath,
+} from './session-store-compat';
 import {
   STREAMING_ELEMENT_ID,
   buildCardContent,
@@ -80,6 +84,29 @@ interface TerminalCardContentInput {
 // StreamingCardController
 // ---------------------------------------------------------------------------
 
+/** 从会话条目提取页脚指标；只要存在任一指标字段即返回，否则返回 undefined。 */
+function extractFooterSessionMetrics(entry: Record<string, unknown>): FooterSessionMetrics | undefined {
+  const metrics: FooterSessionMetrics = {
+    inputTokens: typeof entry.inputTokens === 'number' ? entry.inputTokens : undefined,
+    outputTokens: typeof entry.outputTokens === 'number' ? entry.outputTokens : undefined,
+    cacheRead: typeof entry.cacheRead === 'number' ? entry.cacheRead : undefined,
+    cacheWrite: typeof entry.cacheWrite === 'number' ? entry.cacheWrite : undefined,
+    totalTokens: typeof entry.totalTokens === 'number' ? entry.totalTokens : undefined,
+    totalTokensFresh: typeof entry.totalTokensFresh === 'boolean' ? entry.totalTokensFresh : undefined,
+    contextTokens: typeof entry.contextTokens === 'number' ? entry.contextTokens : undefined,
+    model: typeof entry.model === 'string' ? entry.model : undefined,
+  };
+  const hasAny = Object.values(metrics).some((v) => v !== undefined);
+  return hasAny ? metrics : undefined;
+}
+
+/**
+ * v6+：直读会话库（绕开 9.7 SDK 的复制快照机制）与 SDK 兜底统一收敛到
+ * `session-store-compat.ts` 兼容层：直读双路径探测表名（10.4+ `session_nodes` /
+ * 9.x~10.3 `session_entries`），SDK 读取探测异步 API（10.4+ `getSessionEntryAsync` /
+ * ≤10.3 同步 `getSessionEntry`）。
+ */
+
 export class StreamingCardController {
   // ---- Explicit state machine ----
   private phase: CardPhase = 'idle';
@@ -122,6 +149,10 @@ export class StreamingCardController {
   private dispatchFullyComplete = false;
   private cardCreationPromise: Promise<void> | null = null;
   private disposeShutdownHook: (() => void) | null = null;
+  // v9：footer 回填生命周期控制。宿主 shutdown/插件卸载时统一 abort 未完成回填，
+  // 避免"卸载后仍跑 30 秒"的迟到卡片更新与误报警。
+  private readonly footerBackfillControllers = new Set<AbortController>();
+  private disposeFooterMetricsHook: (() => void) | null = null;
   private readonly dispatchStartTime = Date.now();
 
   // ---- Injected dependencies ----
@@ -136,33 +167,28 @@ export class StreamingCardController {
     return footer.tokens || footer.cache || footer.context || footer.model;
   }
 
-  private async getFooterSessionMetrics(): Promise<FooterSessionMetrics | undefined> {
+  private async getFooterSessionMetrics(opts?: {
+    maxAttempts?: number;
+    intervalMs?: number;
+    signal?: AbortSignal;
+  }): Promise<FooterSessionMetrics | undefined> {
+    const signal = opts?.signal;
+    // v9：delay 可被 signal 打断——shutdown 钩子 abort 后立即停止轮询，
+    // 不再等满 5.2s/30s 窗口。
+    const delay = (ms: number) =>
+      new Promise<void>((resolve) => {
+        if (signal?.aborted) return resolve();
+        const t = setTimeout(resolve, ms);
+        signal?.addEventListener('abort', () => {
+          clearTimeout(t);
+          resolve();
+        }, { once: true });
+      });
+    const FOOTER_METRICS_POLL_ATTEMPTS = 13; // 13 × 400ms ≈ 5.2s 窗口
+    const FOOTER_METRICS_POLL_INTERVAL_MS = 400;
+    const maxAttempts = opts?.maxAttempts ?? FOOTER_METRICS_POLL_ATTEMPTS;
+    const intervalMs = opts?.intervalMs ?? FOOTER_METRICS_POLL_INTERVAL_MS;
     try {
-      // 2026.9.x hosts expose the storage-neutral `getSessionEntry` identity
-      // API on `runtime.agent.session`; `loadSessionStore` (whole-store JSON
-      // read) only exists on older hosts and no longer reads the SQLite-backed
-      // store, so prefer the identity lookup and keep the legacy read as a
-      // fallback for pre-9.x runtimes.
-      const runtime = LarkClient.runtime as {
-        agent?: {
-          session?: {
-            resolveStorePath?: (storePath?: string, opts?: { agentId?: string }) => string;
-            getSessionEntry?: (params: {
-              agentId?: string;
-              sessionKey: string;
-              storePath?: string;
-            }) => Record<string, unknown> | undefined;
-            loadSessionStore?: (storePath: string) => Record<string, Record<string, unknown>>;
-          };
-        };
-        channel?: {
-          session?: {
-            resolveStorePath?: (storePath?: string, opts?: { agentId?: string }) => string;
-          };
-        };
-      } | null;
-      if (!runtime) return undefined;
-
       const cfgWithSession = this.deps.cfg as { sessions?: { store?: string }; session?: { store?: string } };
       const sessionStorePath = cfgWithSession.sessions?.store ?? cfgWithSession.session?.store;
       const key = this.deps.sessionKey.trim().toLowerCase();
@@ -177,125 +203,191 @@ export class StreamingCardController {
       // segment with the resolved default agent ID.
       // TODO: remove once the SDK preserves the original agent ID during the
       // request→store key round-trip.
-      const defaultAgentId = resolveDefaultAgentId(this.deps.cfg as Record<string, unknown>);
-      const fallbackKey = key.replace(/^(agent):[^:]+:/, `$1:${defaultAgentId}:`);
-      const candidateKeys = fallbackKey !== key ? [key, fallbackKey] : [key];
-
-      const sessionApi = runtime.agent?.session;
-      if (sessionApi?.resolveStorePath && (sessionApi.getSessionEntry || sessionApi.loadSessionStore)) {
-        const storePath = sessionApi.resolveStorePath(sessionStorePath, { agentId: this.deps.agentId });
-
-        let entry: Record<string, unknown> | undefined;
-        let matchedKey: string | undefined;
-        if (sessionApi.getSessionEntry) {
-          for (const candidate of candidateKeys) {
-            const val = sessionApi.getSessionEntry({
-              agentId: this.deps.agentId,
-              sessionKey: candidate,
-              storePath,
-            });
-            if (val && typeof val === 'object') {
-              entry = val;
-              matchedKey = candidate;
-              break;
-            }
-          }
-        } else {
-          const store = sessionApi.loadSessionStore!(storePath);
-          for (const candidate of candidateKeys) {
-            const val = store[candidate];
-            if (val && typeof val === 'object') {
-              entry = val as Record<string, unknown>;
-              matchedKey = candidate;
-              break;
-            }
-          }
-        }
-
-        if (!entry) {
-          log.debug('footer metrics lookup: session entry missing', {
-            sessionKey: this.deps.sessionKey,
-            candidateKeys,
-            storePath,
-            source: 'runtime.agent.session',
-          });
-          return undefined;
-        }
-
-        const metrics: FooterSessionMetrics = {
-          inputTokens: typeof entry.inputTokens === 'number' ? entry.inputTokens : undefined,
-          outputTokens: typeof entry.outputTokens === 'number' ? entry.outputTokens : undefined,
-          cacheRead: typeof entry.cacheRead === 'number' ? entry.cacheRead : undefined,
-          cacheWrite: typeof entry.cacheWrite === 'number' ? entry.cacheWrite : undefined,
-          totalTokens: typeof entry.totalTokens === 'number' ? entry.totalTokens : undefined,
-          totalTokensFresh: typeof entry.totalTokensFresh === 'boolean' ? entry.totalTokensFresh : undefined,
-          contextTokens: typeof entry.contextTokens === 'number' ? entry.contextTokens : undefined,
-          model: typeof entry.model === 'string' ? entry.model : undefined,
-        };
-        log.debug('footer metrics lookup: session entry found', {
-          sessionKey: this.deps.sessionKey,
-          matchedKey,
-          storePath,
-          source: 'runtime.agent.session',
+      let defaultAgentId: string | undefined;
+      try {
+        defaultAgentId = resolveDefaultAgentId(this.deps.cfg as Record<string, unknown>);
+      } catch (err) {
+        // v7：explicit 多 Agent 归属下 resolveDefaultAgentId 必然抛 AgentSelectionRequiredError
+        // （它只认唯一 Agent 或 default:true，不读 agents.defaults.systemAgent.agentId=main）。
+        // 回退到当前会话路由的 agentId，保证 footer 读取不被中止。
+        defaultAgentId = this.deps.agentId;
+        log.warn('footer metrics: resolveDefaultAgentId failed, falling back to session agentId', {
+          agentId: this.deps.agentId,
+          error: String(err),
         });
-        return metrics;
       }
+      const fallbackKey = defaultAgentId
+        ? key.replace(/^(agent):[^:]+:/, `$1:${defaultAgentId}:`)
+        : key;
+      const candidateKeys = Array.from(new Set([key, fallbackKey]));
 
-      const channelSession = runtime.channel?.session;
-      if (!channelSession?.resolveStorePath) {
-        return undefined;
-      }
-
-      const storePath = channelSession.resolveStorePath(sessionStorePath, { agentId: this.deps.agentId });
-      const raw = await readFile(storePath, 'utf8');
-      const parsed: unknown = JSON.parse(raw);
-      const store =
-        parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-          ? (parsed as Record<string, Record<string, unknown>>)
-          : {};
-
-      let entry: Record<string, unknown> | undefined;
-      let matchedKey: string | undefined;
-      for (const candidate of candidateKeys) {
-        const val = store[candidate];
-        if (val && typeof val === 'object') {
-          entry = val as Record<string, unknown>;
-          matchedKey = candidate;
-          break;
-        }
-      }
-
-      if (!entry) {
-        log.debug('footer metrics lookup: session entry missing', {
-          sessionKey: this.deps.sessionKey,
-          candidateKeys,
-          storePath,
-          source: 'channel.session.file',
-        });
-        return undefined;
-      }
-
-      const metrics: FooterSessionMetrics = {
-        inputTokens: typeof entry.inputTokens === 'number' ? entry.inputTokens : undefined,
-        outputTokens: typeof entry.outputTokens === 'number' ? entry.outputTokens : undefined,
-        cacheRead: typeof entry.cacheRead === 'number' ? entry.cacheRead : undefined,
-        cacheWrite: typeof entry.cacheWrite === 'number' ? entry.cacheWrite : undefined,
-        totalTokens: typeof entry.totalTokens === 'number' ? entry.totalTokens : undefined,
-        totalTokensFresh: typeof entry.totalTokensFresh === 'boolean' ? entry.totalTokensFresh : undefined,
-        contextTokens: typeof entry.contextTokens === 'number' ? entry.contextTokens : undefined,
-        model: typeof entry.model === 'string' ? entry.model : undefined,
-      };
-      log.debug('footer metrics lookup: session entry found', {
+      // v2 加固：多作用域（本 agent / 默认 agent / 不限定）+ 多路径（配置路径 / 默认路径）+ 短重试。
+      // 9.7 宿主可能按默认 agent 写入会话，或指标落盘略晚于完成回调，逐项兜底。
+      // v4 加固：服务器实测（小七实证）确认——9.7 宿主在卡片定稿后才把 model/tokens
+      // 等指标写入会话条目（定稿时字段为空，落库后才有值）。因此重试窗口从 ~0.8s
+      // 加长到 ~5s（每 400ms 轮询），确保卡片发送前能等到宿主落库。
+      // v8 削峰：组合去重。v7 回退后 defaultAgentId === this.deps.agentId（相同），
+      // 两个 storePath 推导也可能相同——Set 去重把每轮 3×2×2=12 组合降到最少 2 组合，
+      // 全 miss 的最坏路径开库/SDK 探测量随之下一个数量级。
+      const agentScopes = Array.from(new Set([this.deps.agentId, defaultAgentId, undefined]));
+      const storePaths = Array.from(
+        new Set([
+          resolveStorePath(sessionStorePath, { agentId: this.deps.agentId }),
+          resolveStorePath(undefined, { agentId: this.deps.agentId }),
+        ]),
+      );
+      log.debug('footer metrics: probing session store', {
         sessionKey: this.deps.sessionKey,
-        matchedKey,
-        storePath,
-        source: 'channel.session.file',
+        agentId: this.deps.agentId,
+        defaultAgentId,
+        storePaths,
+        candidateKeys,
+        maxAttempts,
+        intervalMs,
+        cwd: process.cwd(),
       });
-      return metrics;
+
+      // v8 削峰：每轮 SDK 只探测主组合一次（其余组合仅直读）。
+      // 直读与 SDK 读同一底层数据（主库 vs 快照副本）——数据未落库时 SDK 必 miss，
+      // 原实现每组合都调 SDK 造成最坏路径 720 次快照复制；降为每轮 1 次（≤60 次），
+      // 仍保留 SDK 内部路径推导差异的兜底能力。
+      let sdkProbeDone = false;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (signal?.aborted) return undefined; // v9：shutdown 中止
+        for (const agentId of agentScopes) {
+          for (const storePath of storePaths) {
+            for (const candidate of candidateKeys) {
+              // v6：直读优先。9.7 的 getSessionEntry 内部复制源库做只读快照，
+              // 宿主高频写活库时快照不稳定（did not stabilize after 10 attempts）→ 返回 undefined。
+              // node:sqlite 直读主库（SQLite 并发读安全）稳定，先试直读再走 SDK 兜底。
+              const directEntry = directReadSessionEntryViaSqlite(storePath, candidate);
+              if (directEntry) {
+                const directMetrics = extractFooterSessionMetrics(directEntry);
+                if (directMetrics) {
+                  log.debug('footer metrics lookup: direct sqlite hit', {
+                    sessionKey: this.deps.sessionKey,
+                    matchedKey: candidate,
+                    agentId: agentId ?? '(default)',
+                    storePath,
+                    sqlitePath: resolveSqlitePathFromStorePath(storePath),
+                    attempt,
+                  });
+                  return directMetrics;
+                }
+              }
+              if (!sdkProbeDone && storePath === storePaths[0] && candidate === candidateKeys[0]) {
+                sdkProbeDone = true;
+                let entry: Record<string, unknown> | undefined;
+                try {
+                  entry = await getSessionEntryCompat(
+                    agentId === undefined
+                      ? { storePath, sessionKey: candidate }
+                      : { agentId, storePath, sessionKey: candidate },
+                  );
+                } catch {
+                  continue; // 该作用域不可读，跳过
+                }
+                if (!entry) continue;
+                const metrics = extractFooterSessionMetrics(entry);
+                if (metrics) {
+                  log.debug('footer metrics lookup: session entry found', {
+                    sessionKey: this.deps.sessionKey,
+                    matchedKey: candidate,
+                    agentId: agentId ?? '(default)',
+                    storePath,
+                    attempt,
+                  });
+                  return metrics;
+                }
+              }
+            }
+          }
+        }
+        if (attempt < maxAttempts - 1) await delay(intervalMs);
+      }
+      log.warn('footer metrics lookup: session entry missing', {
+        sessionKey: this.deps.sessionKey,
+        candidateKeys,
+        agentScopes,
+        storePaths,
+        maxAttempts,
+      });
+      return undefined;
     } catch (err) {
       log.warn('footer metrics lookup failed', { error: String(err), sessionKey: this.deps.sessionKey });
       return undefined;
     }
+  }
+
+  /**
+   * v5：卡片先发、指标后补。
+   * 9.7 宿主在回复交付收尾阶段（晚于插件 onComplete/onIdle）才通过
+   * recordReplyUsageState() 把用量写入会话库，因此 finalize 时同步读必为空。
+   * 这里用后台任务继续长轮询（最长 ~15s），拿到指标后重建卡片并更新已发送的卡片。
+   */
+  private scheduleFooterMetricsBackfill(params: {
+    logTag: string;
+    cardId: string | null | undefined;
+    messageId: string;
+    isCardKit: boolean;
+    build: (metrics: FooterSessionMetrics | undefined) => ReturnType<typeof buildCardContent>;
+  }): void {
+    // v9：接入生命周期。每次回填创建 AbortController 并登记；首次使用时懒注册
+    // shutdown 钩子，宿主关闭时统一 abort 所有未完成回填。正常结束（命中/超时）
+    // 在 finally 中自动移除登记。
+    const controller = new AbortController();
+    this.footerBackfillControllers.add(controller);
+    if (!this.disposeFooterMetricsHook) {
+      this.disposeFooterMetricsHook = registerShutdownHook('streaming-card:footer-metrics', async () => {
+        for (const c of this.footerBackfillControllers) c.abort();
+      });
+    }
+    void (async () => {
+      try {
+        log.debug(`footer metrics backfill: started (${params.logTag})`, {
+          messageId: params.messageId,
+          cardId: params.cardId ?? null,
+          isCardKit: params.isCardKit,
+        });
+        const metrics = await this.getFooterSessionMetrics({
+          maxAttempts: 60,
+          intervalMs: 500,
+          signal: controller.signal,
+        });
+        if (!metrics) {
+          // v9：新会话/无指标属正常现象（首轮无落库），降 debug；真正异常由
+          // lookup failed / backfill failed / resolveDefaultAgentId 失败三条 warn 覆盖。
+          log.debug(`footer metrics backfill: not available after polling (${params.logTag})`);
+          return;
+        }
+        const card = params.build(metrics);
+        if (params.isCardKit && params.cardId) {
+          const sequence = this.cardKit.cardKitSequence + 1;
+          this.cardKit.cardKitSequence = sequence;
+          await updateCardKitCard({
+            cfg: this.deps.cfg,
+            cardId: params.cardId,
+            card: toCardKit2(card),
+            sequence,
+            accountId: this.deps.accountId,
+          });
+        } else {
+          await updateCardFeishu({
+            cfg: this.deps.cfg,
+            messageId: params.messageId,
+            card: card as unknown as Record<string, unknown>,
+            accountId: this.deps.accountId,
+          });
+        }
+        log.debug(`footer metrics backfill: card updated (${params.logTag})`, {
+          matchedKey: this.deps.sessionKey,
+        });
+      } catch (err) {
+        log.warn(`footer metrics backfill failed (${params.logTag})`, { error: String(err) });
+      } finally {
+        this.footerBackfillControllers.delete(controller);
+      }
+    })();
   }
 
   constructor(deps: StreamingCardDeps) {
@@ -430,7 +522,7 @@ export class StreamingCardController {
       return false;
     }
     this.phase = to;
-    log.trace('phase transition', { from, to, source, reason });
+    log.info('phase transition', { from, to, source, reason });
     if (TERMINAL_PHASES.has(to)) {
       this._terminalReason = reason ?? null;
       this.onEnterTerminalPhase();
@@ -631,7 +723,10 @@ export class StreamingCardController {
     if (this.cardCreationPromise) await this.cardCreationPromise;
 
     const errorEffectiveCardId = this.cardKit.cardKitCardId ?? this.cardKit.originalCardKitCardId;
-    const footerMetrics = this.needsFooterMetrics() ? await this.getFooterSessionMetrics() : undefined;
+    // v5：只快速读一次（不阻塞卡片定稿），拿不到则异步补 footer
+    const footerMetrics = this.needsFooterMetrics()
+      ? await this.getFooterSessionMetrics({ maxAttempts: 1 })
+      : undefined;
     const toolUseDisplay = this.computeToolUseDisplay();
     try {
       if (this.cardKit.cardMessageId) {
@@ -668,6 +763,29 @@ export class StreamingCardController {
             accountId: this.deps.accountId,
           });
         }
+        // v5：主卡片已定稿，若快速读未命中则后台补 footer
+        if (this.needsFooterMetrics() && !footerMetrics && this.cardKit.cardMessageId) {
+          this.scheduleFooterMetricsBackfill({
+            logTag: 'onError',
+            cardId: errorEffectiveCardId,
+            messageId: this.cardKit.cardMessageId,
+            isCardKit: !!errorEffectiveCardId,
+            build: (m) =>
+              buildCardContent('complete', {
+                text: terminalContent.text,
+                reasoningText: terminalContent.reasoningText,
+                reasoningElapsedMs: this.reasoning.reasoningElapsedMs || undefined,
+                toolUseSteps: toolUseDisplay?.steps,
+                toolUseTitleSuffix: this.computeToolUseTitleSuffix(toolUseDisplay),
+                toolUseElapsedMs: this.visibleToolUseElapsedMs,
+                showToolUse: this.deps.toolUseDisplay.showToolUse,
+                elapsedMs: this.elapsed(),
+                isError: true,
+                footer: this.deps.resolvedFooter,
+                footerMetrics: m,
+              }),
+          });
+        }
       }
     } catch {
       // Ignore update failures during error handling
@@ -699,7 +817,7 @@ export class StreamingCardController {
         if (idleEffectiveCardId) {
           const seqBeforeClose = this.cardKit.cardKitSequence;
           this.cardKit.cardKitSequence += 1;
-          log.trace('onIdle: closing streaming mode', {
+          log.info('onIdle: closing streaming mode', {
             seqBefore: seqBeforeClose,
             seqAfter: this.cardKit.cardKitSequence,
           });
@@ -731,7 +849,10 @@ export class StreamingCardController {
           },
           this.imageResolver,
         );
-        const footerMetrics = this.needsFooterMetrics() ? await this.getFooterSessionMetrics() : undefined;
+        // v5：只快速读一次（不阻塞卡片定稿），拿不到则异步补 footer
+        const footerMetrics = this.needsFooterMetrics()
+          ? await this.getFooterSessionMetrics({ maxAttempts: 1 })
+          : undefined;
 
         const completeCard = buildCardContent('complete', {
           text: terminalContent.text,
@@ -749,7 +870,7 @@ export class StreamingCardController {
         if (idleEffectiveCardId) {
           const seqBeforeUpdate = this.cardKit.cardKitSequence;
           this.cardKit.cardKitSequence += 1;
-          log.trace('onIdle: updating final card', {
+          log.info('onIdle: updating final card', {
             seqBefore: seqBeforeUpdate,
             seqAfter: this.cardKit.cardKitSequence,
           });
@@ -772,6 +893,28 @@ export class StreamingCardController {
           elapsedMs: this.elapsed(),
           isCardKit: !!idleEffectiveCardId,
         });
+        // v5：主卡片已定稿，若快速读未命中则后台补 footer
+        if (this.needsFooterMetrics() && !footerMetrics && this.cardKit.cardMessageId) {
+          this.scheduleFooterMetricsBackfill({
+            logTag: 'onIdle',
+            cardId: idleEffectiveCardId,
+            messageId: this.cardKit.cardMessageId,
+            isCardKit: !!idleEffectiveCardId,
+            build: (m) =>
+              buildCardContent('complete', {
+                text: terminalContent.text,
+                reasoningText: terminalContent.reasoningText,
+                reasoningElapsedMs: this.reasoning.reasoningElapsedMs || undefined,
+                toolUseSteps: idleToolUseDisplay?.steps,
+                toolUseTitleSuffix: this.computeToolUseTitleSuffix(idleToolUseDisplay),
+                toolUseElapsedMs: this.visibleToolUseElapsedMs,
+                showToolUse: this.deps.toolUseDisplay.showToolUse,
+                elapsedMs: this.elapsed(),
+                footer: this.deps.resolvedFooter,
+                footerMetrics: m,
+              }),
+          });
+        }
       }
     } catch (err) {
       log.warn('final card update failed', { error: String(err) });
@@ -813,7 +956,10 @@ export class StreamingCardController {
         },
         this.imageResolver,
       );
-      const footerMetrics = this.needsFooterMetrics() ? await this.getFooterSessionMetrics() : undefined;
+      // v5：只快速读一次（不阻塞卡片定稿），拿不到则异步补 footer
+      const footerMetrics = this.needsFooterMetrics()
+        ? await this.getFooterSessionMetrics({ maxAttempts: 1 })
+        : undefined;
       if (effectiveCardId) {
         const abortCardContent = buildCardContent('complete', {
           text: terminalContent.text,
@@ -830,6 +976,29 @@ export class StreamingCardController {
         });
         await this.closeStreamingAndUpdate(effectiveCardId, abortCardContent, 'abortCard');
         log.info('abortCard completed', { effectiveCardId });
+        // v5：主卡片已定稿，若快速读未命中则后台补 footer
+        if (this.needsFooterMetrics() && !footerMetrics && this.cardKit.cardMessageId) {
+          this.scheduleFooterMetricsBackfill({
+            logTag: 'abortCard',
+            cardId: effectiveCardId,
+            messageId: this.cardKit.cardMessageId,
+            isCardKit: true,
+            build: (m) =>
+              buildCardContent('complete', {
+                text: terminalContent.text,
+                reasoningText: terminalContent.reasoningText,
+                reasoningElapsedMs: this.reasoning.reasoningElapsedMs || undefined,
+                toolUseSteps: abortToolUseDisplay?.steps,
+                toolUseTitleSuffix: this.computeToolUseTitleSuffix(abortToolUseDisplay),
+                toolUseElapsedMs: this.visibleToolUseElapsedMs,
+                showToolUse: this.deps.toolUseDisplay.showToolUse,
+                elapsedMs,
+                isAborted: true,
+                footer: this.deps.resolvedFooter,
+                footerMetrics: m,
+              }),
+          });
+        }
       } else if (this.cardKit.cardMessageId) {
         // IM fallback: 卡片不是通过 CardKit 发的，用 im.message.patch 更新
         const abortCard = buildCardContent('complete', {
@@ -854,6 +1023,29 @@ export class StreamingCardController {
         log.info('abortCard completed (IM fallback)', {
           messageId: this.cardKit.cardMessageId,
         });
+        // v5：主卡片已定稿，若快速读未命中则后台补 footer
+        if (this.needsFooterMetrics() && !footerMetrics) {
+          this.scheduleFooterMetricsBackfill({
+            logTag: 'abortCard-im',
+            cardId: undefined,
+            messageId: this.cardKit.cardMessageId,
+            isCardKit: false,
+            build: (m) =>
+              buildCardContent('complete', {
+                text: terminalContent.text,
+                reasoningText: terminalContent.reasoningText,
+                reasoningElapsedMs: this.reasoning.reasoningElapsedMs || undefined,
+                toolUseSteps: abortToolUseDisplay?.steps,
+                toolUseTitleSuffix: this.computeToolUseTitleSuffix(abortToolUseDisplay),
+                toolUseElapsedMs: this.visibleToolUseElapsedMs,
+                showToolUse: this.deps.toolUseDisplay.showToolUse,
+                elapsedMs,
+                isAborted: true,
+                footer: this.deps.resolvedFooter,
+                footerMetrics: m,
+              }),
+          });
+        }
       }
     } catch (err) {
       log.warn('abortCard failed', { error: String(err) });
@@ -889,7 +1081,7 @@ export class StreamingCardController {
           });
 
           if (this.isStaleCreate(epoch)) {
-            log.trace('ensureCardCreated: stale epoch after createCardEntity, bailing out', {
+            log.info('ensureCardCreated: stale epoch after createCardEntity, bailing out', {
               epoch,
               phase: this.phase,
             });
@@ -901,7 +1093,7 @@ export class StreamingCardController {
             this.cardKit.originalCardKitCardId = cId;
             this.cardKit.cardKitSequence = 1;
             this.disposeShutdownHook = registerShutdownHook(`streaming-card:${cId}`, () => this.abortCard());
-            log.trace('created CardKit entity', {
+            log.info('created CardKit entity', {
               cardId: cId,
               initialSequence: this.cardKit.cardKitSequence,
             });
@@ -917,7 +1109,7 @@ export class StreamingCardController {
             });
 
             if (this.isStaleCreate(epoch)) {
-              log.trace('ensureCardCreated: stale epoch after sendCardByCardId, bailing out', {
+              log.info('ensureCardCreated: stale epoch after sendCardByCardId, bailing out', {
                 epoch,
                 phase: this.phase,
               });
@@ -933,7 +1125,7 @@ export class StreamingCardController {
               this.disposeShutdownHook = null;
               return;
             }
-            log.trace('sent CardKit card', { messageId: result.messageId });
+            log.info('sent CardKit card', { messageId: result.messageId });
           } else {
             throw new Error('card.create returned empty card_id');
           }
@@ -961,7 +1153,7 @@ export class StreamingCardController {
           });
 
           if (this.isStaleCreate(epoch)) {
-            log.trace('ensureCardCreated: stale epoch after IM fallback send, bailing out', {
+            log.info('ensureCardCreated: stale epoch after IM fallback send, bailing out', {
               epoch,
               phase: this.phase,
             });
@@ -1128,7 +1320,7 @@ export class StreamingCardController {
         accountId: this.deps.accountId,
       });
     } catch (err) {
-      log.warn('updateToolUseStatus failed', { error: String(err) });
+      log.debug('updateToolUseStatus failed', { error: String(err) });
     }
   }
 
@@ -1150,7 +1342,7 @@ export class StreamingCardController {
   ): Promise<void> {
     const seqBeforeClose = this.cardKit.cardKitSequence;
     this.cardKit.cardKitSequence += 1;
-    log.trace(() => `${label}: closing streaming mode`, {
+    log.info(`${label}: closing streaming mode`, {
       seqBefore: seqBeforeClose,
       seqAfter: this.cardKit.cardKitSequence,
     });
@@ -1163,7 +1355,7 @@ export class StreamingCardController {
     });
     const seqBeforeUpdate = this.cardKit.cardKitSequence;
     this.cardKit.cardKitSequence += 1;
-    log.trace(() => `${label}: updating card`, {
+    log.info(`${label}: updating card`, {
       seqBefore: seqBeforeUpdate,
       seqAfter: this.cardKit.cardKitSequence,
     });

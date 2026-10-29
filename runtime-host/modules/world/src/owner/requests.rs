@@ -18,7 +18,7 @@ use crate::{
     extensions::invocation::CallBudget,
     store::{CommitRequest, StoreFuture, WorldStore, WorldTransaction},
 };
-use super::{Shared, WorldHandle, ready_for, ready_for_operation, resources};
+use super::{Shared, WorldHandle, readable_for, ready_for, ready_for_maintenance, ready_for_operation, resources};
 use super::super::{Error, ExecutionContext, RunRecord, RunSpec, head, ledger, operation::{self, SignedRequest}, queries, resources::Resources, run, uploads, workflows};
 
 enum Authentication {
@@ -39,12 +39,31 @@ pub(super) use super::super::ledger::operation_id;
 
 pub(super) async fn command(shared: Arc<Shared>, signed: SignedRequest, input: CommandEnvelope, target: WorldHandle) -> Result<CommandResult, Error> {
     if signed.binding.world() != &input.world { return Err(AuthorizationFailure::RequestDigestMismatch.into()); }
-    let store = ready_for(&shared, &input.world).await?;
+    let (store, maintenance) = command_store(&shared, &input.world, &input.command).await?;
     let resources = resources(&shared, &store, &input.world)?;
     if matches!(&input.command, WorldCommand::BeginUpload(_) | WorldCommand::UploadChunk(_) | WorldCommand::SealUpload(_) | WorldCommand::AbortUpload(_)) {
-        return uploads::run(store, resources, shared.ingress.clone(), signed, input).await;
+        return uploads::run(store, resources, shared.ingress.clone(), signed, input, maintenance).await;
     }
     submit(shared, store, resources, Authentication::Service(signed), input, target).await.map(|(result, _)| result)
+}
+
+fn package_maintenance(command: &WorldCommand) -> bool {
+    matches!(command, WorldCommand::UpgradePackage(_) | WorldCommand::GrantPackage(_)
+        | WorldCommand::ConfigurePackage(_) | WorldCommand::EnablePackage(_)
+        | WorldCommand::ReplacePackageTrustPolicy(_) | WorldCommand::Activate(_)
+        | WorldCommand::BeginUpload(_) | WorldCommand::UploadChunk(_)
+        | WorldCommand::SealUpload(_) | WorldCommand::AbortUpload(_))
+}
+
+async fn command_store(shared: &Shared, world: &WorldRef, command: &WorldCommand) -> Result<(WorldStore, bool), Error> {
+    if package_maintenance(command) { ready_for_maintenance(shared, world).await }
+    else { ready_for(shared, world).await.map(|store| (store, false)) }
+}
+
+fn package_metadata(query: &WorldQuery) -> bool {
+    matches!(query, WorldQuery::Discover(_) | WorldQuery::Packages(_) | WorldQuery::PackageTrustPolicy(_)
+        | WorldQuery::PackageConfig(_) | WorldQuery::Contributions(_) | WorldQuery::Bindings(_)
+        | WorldQuery::BindingHead(_) | WorldQuery::ActivationPlan(_) | WorldQuery::UploadStatus(_))
 }
 
 async fn authenticate(shared: &Shared, tx: &WorldTransaction<'_>, authentication: Authentication, impact: &ActualImpact, now: &Timestamp) -> Result<VerifiedInvocation, Error> {
@@ -414,10 +433,11 @@ pub(super) fn query(shared: Arc<Shared>, signed: SignedRequest, input: QueryEnve
         if signed.binding.world() != &input.world { return Err(AuthorizationFailure::RequestDigestMismatch.into()); }
         if let WorldQuery::Objects(request) | WorldQuery::Relations(request) = &input.query { crate::api::query::validate_query_request(request).map_err(query_input_error)?; }
         if let WorldQuery::DrainStatus(key) | WorldQuery::BackupStatus(key) | WorldQuery::RestoreStatus(key) | WorldQuery::DeleteStatus(key) = &input.query {
-            let store = ready_for_operation(&shared, &input.world).await?;
+            let (store, _) = readable_for(&shared, &input.world).await?;
             return operation::status(&store, shared.ingress.clone(), signed, key.clone()).await.map(QueryResult::Operation);
         }
-        let store = ready_for(&shared, &input.world).await?;
+        let store = if package_metadata(&input.query) { readable_for(&shared, &input.world).await?.0 }
+            else { ready_for(&shared, &input.world).await? };
         let resources = resources(&shared, &store, &input.world)?;
         let cancel = shared.cancellation.child_token();
         match &input.query {
@@ -491,12 +511,12 @@ pub(super) async fn cancel(shared: &Shared, signed: SignedRequest, request: Canc
 
 pub(super) async fn operation(shared: Arc<Shared>, signed: SignedRequest, input: OperationRequest, target: WorldHandle) -> Result<OperationResponse, Error> {
     match input {
-        OperationRequest::Status(key) => { let store = ready_for_operation(&shared, &key.world).await?; operation::status(&store, shared.ingress.clone(), signed, key).await.map(OperationResponse::Status) }
-        OperationRequest::Result(key) => { let store = ready_for_operation(&shared, &key.world).await?; operation::status(&store, shared.ingress.clone(), signed, key).await.map(OperationResponse::Result) }
+        OperationRequest::Status(key) => { let (store, _) = readable_for(&shared, &key.world).await?; operation::status(&store, shared.ingress.clone(), signed, key).await.map(OperationResponse::Status) }
+        OperationRequest::Result(key) => { let (store, _) = readable_for(&shared, &key.world).await?; operation::status(&store, shared.ingress.clone(), signed, key).await.map(OperationResponse::Result) }
         OperationRequest::Cancel(request) => cancel(&shared, signed, request).await.map(OperationResponse::Cancel),
         OperationRequest::Resume(request) => {
             if signed.binding.world() != &request.key.world { return Err(AuthorizationFailure::RequestDigestMismatch.into()); }
-            let store = ready_for_operation(&shared, &request.key.world).await?;
+            let (store, _) = readable_for(&shared, &request.key.world).await?;
             let binding = signed.binding.clone();
             let batch = operation::batch(&store, &binding).await?.receipt_access()?;
             let current = shared.clone();
@@ -527,12 +547,15 @@ pub(super) async fn operation(shared: Arc<Shared>, signed: SignedRequest, input:
                 AdmissionCommit::Replayed(_) => return Err(AuthorizationFailure::Replay.into()),
             };
             if !inspected.execute { return Ok(OperationResponse::Resume(inspected.operation)); }
+            if !package_maintenance(&inspected.input.command) {
+                ready_for_operation(&shared, &request.key.world).await?;
+            }
             let proof = workflows::archive::resume_intent(&store, &shared.authority, &request.key.world,
                 &inspected.operation.operation_id, &inspected.run.id, &inspected.input.command).await?;
             let batch = if let Some(proof) = proof {
                 operation::batch(&store, &binding).await?.resume_world_mutation(&proof)?
             } else {
-                ready_for(&shared, &request.key.world).await?;
+                command_store(&shared, &request.key.world, &inspected.input.command).await?;
                 admission_batch(&store, &binding).await?
             };
             let resources = resources(&shared, &store, &request.key.world)?;

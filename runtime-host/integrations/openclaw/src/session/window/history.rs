@@ -4,7 +4,7 @@ use crate::session::protocol::{ChatHistoryResult, HistoryRole};
 
 use super::model::{
     ActivityPosition, DisplayPosition, StreamFallback, StreamFallbackSource,
-    Direction, HistoryKind, InFlightRun, InputReceipt, Message, MessageContent, MessageRole,
+    Direction, HistoryKind, InFlightRun, Message, MessageContent, MessageRole,
     MessageToolDeliveryMedia, OmittedContentKind, PageMetadata, PageRequest, PendingInput,
     PendingInputState, RunState, SessionState, SessionWindow, WindowRange, window_range,
 };
@@ -249,7 +249,7 @@ pub fn decode_window(payload: Value, request: PageRequest) -> Result<SessionWind
         session_key,
         native_session_id,
         state,
-    ))
+    ).with_input_receipts(envelope.as_ref().map(decode_input_receipts).transpose()?.flatten()))
 }
 
 fn decode_native_session_id(envelope: &Map<String, Value>) -> Result<Option<String>, HistoryError> {
@@ -388,13 +388,12 @@ fn bound_source_window(
 }
 
 fn empty_session_state() -> SessionState {
-    SessionState::new(Vec::new(), Vec::new(), None, None, None)
+    SessionState::new(Vec::new(), None, None, None)
 }
 
 fn decode_session_state(envelope: &Map<String, Value>) -> Result<SessionState, HistoryError> {
     let state = SessionState::new(
         decode_pending_inputs(envelope)?,
-        decode_input_receipts(envelope)?,
         decode_in_flight_run(envelope)?,
         decode_delta_cursor(envelope)?,
         optional_bool(envelope, "completeSnapshot")?,
@@ -466,36 +465,45 @@ fn decode_pending_input_state(value: &Value) -> Result<PendingInputState, Histor
     }
 }
 
-fn decode_input_receipts(envelope: &Map<String, Value>) -> Result<Vec<InputReceipt>, HistoryError> {
-    let mut receipts = Vec::new();
-    append_input_receipts(envelope, "inputReceipts", false, &mut receipts)?;
-    append_input_receipts(envelope, "inputConsumptions", true, &mut receipts)?;
-    Ok(receipts)
-}
-
-fn append_input_receipts(
-    envelope: &Map<String, Value>,
-    field: &'static str,
-    consumed: bool,
-    receipts: &mut Vec<InputReceipt>,
-) -> Result<(), HistoryError> {
-    let Some(value) = envelope.get(field) else {
-        return Ok(());
-    };
-    let values = value
-        .as_array()
-        .ok_or_else(|| payload_error(field, "expected_array", value_kind(value)))?;
+fn decode_input_receipts(envelope: &Map<String, Value>) -> Result<Option<Vec<sessions_module::state::SessionInputReceipt>>, HistoryError> {
+    use sessions_module::state::{MAX_INPUT_IDS, SessionInputReceipt, valid_input_ids};
+    let Some(value) = envelope.get("inputReceipts") else { return Ok(None); };
+    let values = value.as_array().ok_or_else(|| payload_error("inputReceipts", "expected_array", value_kind(value)))?;
+    if values.len() > MAX_INPUT_IDS { return Err(payload_error("inputReceipts", "too_many", "array")); }
+    let mut ids = Vec::with_capacity(values.len());
+    let mut receipts = Vec::with_capacity(values.len());
     for value in values {
-        let object = value
-            .as_object()
-            .ok_or_else(|| payload_error(field, "expected_object", value_kind(value)))?;
-        receipts.push(InputReceipt::new(
-            optional_bounded_id(object, "inputId")?,
-            optional_bounded_id(object, "runId")?,
-            consumed,
-        ));
+        let object = value.as_object().ok_or_else(|| payload_error("inputReceipts[]", "expected_object", value_kind(value)))?;
+        let input_id = required_bounded_id(object, "runId")?;
+        ids.push(input_id.clone());
+        let receipt = match object.get("state").and_then(Value::as_str) {
+            Some("pending") => {
+                if object.keys().any(|key| !matches!(key.as_str(), "runId" | "state" | "queued" | "cancelled")) {
+                    return Err(payload_error("inputReceipts[]", "unknown_field", "object"));
+                }
+                let queued = optional_bool(object, "queued")?;
+                let cancelled = optional_bool(object, "cancelled")?;
+                if queued == Some(false) || cancelled == Some(false) {
+                    return Err(payload_error("inputReceipts[]", "expected_true", "boolean"));
+                }
+                SessionInputReceipt::Pending { input_id, queued, cancelled }
+            }
+            Some("consumed") => {
+                if object.keys().any(|key| !matches!(key.as_str(), "runId" | "state" | "consumedByEventId")) {
+                    return Err(payload_error("inputReceipts[]", "unknown_field", "object"));
+                }
+                let message_id = required_bounded_id(object, "consumedByEventId")?;
+                if !valid_input_ids(std::slice::from_ref(&message_id)) {
+                    return Err(payload_error("consumedByEventId", "invalid", "string"));
+                }
+                SessionInputReceipt::Consumed { input_id, message_id }
+            }
+            _ => return Err(payload_error("inputReceipts[].state", "unsupported_state", "unknown")),
+        };
+        receipts.push(receipt);
     }
-    Ok(())
+    if !valid_input_ids(&ids) { return Err(payload_error("inputReceipts[].runId", "invalid_or_duplicate", "string")); }
+    Ok(Some(receipts))
 }
 
 fn decode_in_flight_run(
@@ -823,17 +831,26 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
         .transpose()?;
     let stream_fallback = fallback.map(|fallback| decode_stream_fallback(index, fallback)).transpose()?;
     let display_position = native.and_then(|meta| meta.get("transcriptPosition")).and_then(decode_display_position);
-    let is_imported = native.map(|meta| ["importedFrom", "cliSessionId", "externalId"].into_iter()
+    let canonical_position = native.and_then(|meta| meta.get("transcriptPosition")).is_some_and(|position|
+        position.get("source").and_then(Value::as_str).is_some_and(|source| !source.trim_matches(projection_whitespace).is_empty() && source.trim_matches(projection_whitespace).encode_utf16().count() <= 128)
+            && position.get("rawSeq").and_then(Value::as_u64).is_some_and(|seq| seq <= MAX_SAFE_SEQUENCE));
+    let is_imported = !canonical_position && native.map(|meta| ["importedFrom", "cliSessionId", "externalId"].into_iter()
         .try_fold(false, |imported, field| projection_string(meta, index, field).map(|value| imported || value.is_some())))
         .transpose()?.unwrap_or(false);
     let steer_target_run_id = native.map(|meta| projection_string(meta, index, "steerTargetRunId")).transpose()?.flatten();
     let metadata_run = native.map(|meta| projection_string(meta, index, "runId")).transpose()?.flatten().and_then(normalize_run);
     let envelope_run = envelope.map(|envelope| projection_string(envelope, index, "runId")).transpose()?.flatten().and_then(normalize_run);
-    let persisted_run = native.map(|meta| projection_string(meta, index, "idempotencyKey")).transpose()?.flatten()
+    let idempotency_key = native.map(|meta| projection_string(meta, index, "idempotencyKey")).transpose()?.flatten()
         .or(projection_string(message, index, "idempotencyKey")?)
         .or(envelope.map(|envelope| projection_string(envelope, index, "idempotencyKey")).transpose()?.flatten())
-        .or(envelope.map(|envelope| projection_string(envelope, index, "clientRunId")).transpose()?.flatten())
-        .and_then(normalize_run);
+        .or(envelope.map(|envelope| projection_string(envelope, index, "clientRunId")).transpose()?.flatten());
+    let input_id = (role == MessageRole::User && identity_message_id.is_some() && !is_imported)
+        .then(|| native.and_then(|meta| meta.get("idempotencyKey")).and_then(Value::as_str)
+            .or_else(|| message.get("idempotencyKey").and_then(Value::as_str))
+            .and_then(|key| key.strip_suffix(":user")))
+        .flatten().map(str::to_owned)
+        .filter(|id| sessions_module::state::valid_input_ids(std::slice::from_ref(id)));
+    let persisted_run = idempotency_key.clone().and_then(normalize_run);
     let has_send_identity = persisted_run.is_some();
     let cli_assistant = role == MessageRole::Assistant && projection_string(message, index, "api")?
         .is_some_and(|api| api.eq_ignore_ascii_case("cli"));
@@ -842,9 +859,9 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
             (!run.trim().is_empty()).then(|| run.trim().to_owned())
         } else { Some(run) }
     });
-    let optimistic = native.is_some_and(|meta| meta.keys().all(|field| field == "idempotencyKey"));
     let identity_run_id = if role == MessageRole::Assistant {
-        metadata_run.or(envelope_run).or_else(|| (cli_assistant || mirror_origin.is_none() || optimistic).then_some(persisted_run).flatten())
+        metadata_run.or(envelope_run).or_else(|| stream_fallback.as_ref().and_then(|fallback| fallback.run_id.clone()).and_then(normalize_run))
+            .or_else(|| (cli_assistant || mirror_origin.is_none()).then_some(persisted_run).flatten())
     } else { metadata_run.or(persisted_run).or(envelope_run) };
     let run_id = identity_run_id.clone().or(projection_string(message, index, "runId")?.and_then(normalize_run))
         .or_else(|| (role == MessageRole::Assistant).then(|| stream_fallback.as_ref().and_then(|fallback| fallback.run_id.clone())).flatten());
@@ -875,6 +892,8 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
         }
     }
     let after_sequence = match envelope.and_then(|envelope| envelope.get("afterSequence")) {
+        None if role == MessageRole::Assistant && identity_message_id.is_none() && identity_sequence.is_none() =>
+            fallback.and_then(|fallback| fallback.get("afterSequence")).and_then(Value::as_u64).map(|seq| Some(seq)),
         None => None,
         Some(Value::Null) => Some(None),
         Some(value) => Some(Some(value.as_u64().ok_or_else(|| message_error(index, "afterSequence", "expected_u64", value_kind(value)))?)),
@@ -890,6 +909,11 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
             "number",
         ));
     }
+    let stop_reason = projection_string(message, index, "stopReason")?;
+    let final_content = final_content_identity(message, role, is_imported, true);
+    let tool_continuation = message.get("content").and_then(Value::as_array).is_some_and(|blocks|
+        blocks.iter().any(|block| matches!(block.get("type").and_then(Value::as_str), Some("toolCall" | "toolUse" | "functionCall"))))
+        || (stop_reason.as_deref() == Some("toolUse") && final_content_identity(message, role, is_imported, false).is_none());
     let created_at = optional_created_at_message(message, index)?;
     let updated_at = optional_u64_message(message, index, "updatedAt")?;
     Ok(Message::new(
@@ -905,6 +929,8 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
         created_at,
         updated_at,
     ).with_display(display_position, stream_fallback).with_imported(is_imported)
+        .with_content_identity(idempotency_key, stop_reason, final_content, tool_continuation)
+        .with_input_id(input_id)
         .with_identity(identity_message_id, identity_run_id, identity_sequence, after_sequence)
         .with_steer_target_run_id(steer_target_run_id)
         .with_projection_state(None, mirror_origin, run_terminal)
@@ -917,6 +943,42 @@ fn decode_message(index: usize, value: &Value, envelope: Option<&Map<String, Val
             terminal_reply_signature(message, run_terminal, hidden_control_reply),
         )
         .with_hidden_control_reply(hidden_control_reply).with_truncated(truncated))
+}
+
+fn final_content_identity(message: &Map<String, Value>, role: MessageRole, imported: bool, terminal: bool) -> Option<super::model::FinalContent> {
+    use sha2::{Digest, Sha256};
+    let original = message.get("content")?;
+    let stripped = original.as_array().filter(|_| terminal).map(|blocks| blocks.iter().filter(|block|
+        block.get("openclawStatusNotice").and_then(Value::as_bool) != Some(true)).cloned().collect::<Vec<_>>());
+    let filtered = stripped.as_ref().filter(|blocks| !blocks.is_empty() && original.as_array().is_some_and(|original| original.len() != blocks.len()))
+        .map(|blocks| Value::Array(blocks.clone()));
+    let content = filtered.as_ref().unwrap_or(original);
+    let trim = |text: &str| text.trim_matches(projection_whitespace).to_owned();
+    let mut texts = Vec::new();
+    let native = message.get("__openclaw");
+    let media = native.and_then(|native| native.get("media"));
+    let mut nontext = media.and_then(Value::as_array).is_some_and(|media| !media.is_empty());
+    for block in content.as_array().map(Vec::as_slice).unwrap_or(std::slice::from_ref(content)) {
+        if block.is_object() && !block.get("type").and_then(Value::as_str).is_some_and(|kind| TEXT_BLOCK_TYPES.contains(&kind)) {
+            nontext |= !matches!(block.get("type").and_then(Value::as_str), Some("thinking" | "reasoning" | "redacted_thinking"));
+            continue;
+        }
+        if let Some(text) = block.as_str().or_else(|| block.get("text").and_then(Value::as_str)) {
+            let text = trim(text);
+            if !text.is_empty() { texts.push(text); }
+        }
+    }
+    let text = if texts.is_empty() && filtered.is_none() {
+        message.get("text").and_then(Value::as_str).map(trim).unwrap_or_default()
+    } else { texts.join("\n") };
+    if text.is_empty() && !nontext { return None; }
+    let other = serde_json::json!([
+        match role { MessageRole::Assistant => "assistant", MessageRole::User => "user", MessageRole::System => "system", MessageRole::ToolResult => "toolresult" },
+        if nontext { content.clone() } else { Value::Null },
+        media.unwrap_or(&Value::Null),
+        if imported { serde_json::json!([native.and_then(|native| native.get("importedFrom")), native.and_then(|native| native.get("cliSessionId")), native.and_then(|native| native.get("externalId"))]) } else { Value::Null },
+    ]);
+    Some(super::model::FinalContent { text: Sha256::digest(text.as_bytes()).into(), other: Sha256::digest(serde_json::to_vec(&other).ok()?).into(), text_only: !nontext })
 }
 
 fn terminal_reply_signature(message: &Map<String, Value>, run_terminal: bool, hidden: bool) -> Option<String> {
@@ -947,6 +1009,11 @@ fn terminal_reply_signature(message: &Map<String, Value>, run_terminal: bool, hi
         _ => Vec::new(),
     };
     (!content.is_empty()).then(|| serde_json::to_string(&content).ok()).flatten()
+}
+
+fn projection_whitespace(ch: char) -> bool {
+    matches!(ch, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}'
+        | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
 fn projection_string(object: &Map<String, Value>, index: usize, field: &'static str) -> Result<Option<String>, HistoryError> {

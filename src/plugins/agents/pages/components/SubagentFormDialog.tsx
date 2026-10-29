@@ -1,4 +1,4 @@
-import { AgentAvatar } from '@/components/common/AgentAvatar';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
 import { LoadingState } from '@/components/common/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -8,8 +8,7 @@ import {
   AGENT_AVATAR_PICKER_OPTION_COUNT,
   buildAvatarPickerSeeds,
   DEFAULT_AGENT_AVATAR_STYLE,
-  type AgentAvatarStyle,
-} from '@/lib/agent-avatar';
+} from '@/plugins/agents/presentation/agent-avatar';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
 import { hasSubagentNameConflict } from '@/plugins/agents/domain/workspace';
@@ -25,7 +24,7 @@ import { RefreshCw, X } from 'lucide-react';
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { SubagentFilesPreview } from '@/plugins/agents/pages/components/SubagentFilesPreview';
-import type { SubagentTargetFile } from '@/types/subagent';
+import type { AgentAvatarStyle, SubagentTargetFile } from '@/types/subagent';
 
 interface SubagentFormDialogProps extends Omit<AgentEditorOwnerProps, 'name' | 'activeTab' | 'initialSnapshot' | 'children'> {
   title: string;

@@ -1,5 +1,6 @@
 use super::{
     model::{valid_agent_id, valid_uuid},
+    normalization::{self, UserPresentation},
     rpc::Failure,
 };
 use platform::endpoint::runtime_address::RuntimeEndpoint;
@@ -167,7 +168,23 @@ fn message_with_event(
     let mut content = Vec::new();
     let mut tools = Vec::new();
     let mut text = String::new();
+    let mut user_content = blocks.is_empty();
+    let mut native_text = false;
     for (index, block) in blocks.iter().enumerate() {
+        if kind == "user" {
+            match normalization::user_presentation(row, block) {
+                UserPresentation::Hidden => continue,
+                UserPresentation::System(value) => {
+                    if native_text && !text.is_empty() && !value.is_empty() {
+                        text.push_str(prefix("\n", MAX_TEXT_BYTES.saturating_sub(text.len())));
+                    }
+                    text.push_str(prefix(&value, MAX_TEXT_BYTES.saturating_sub(text.len())));
+                    native_text = true;
+                    continue;
+                }
+                UserPresentation::Content => user_content = true,
+            }
+        }
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 let value = block
@@ -261,6 +278,9 @@ fn message_with_event(
             }),
         }
     }
+    if kind == "user" && !user_content && !native_text {
+        return Ok(None);
+    }
     let item = match kind {
         "assistant" => SessionItem::AssistantTurn {
             item_id: uuid.to_owned(),
@@ -270,9 +290,10 @@ fn message_with_event(
             segments: content,
             text,
         },
-        "user" => SessionItem::UserMessage {
+        "user" if user_content => SessionItem::UserMessage {
             item_id: uuid.to_owned(),
             message_id: Some(uuid.to_owned()),
+            input_ids: Vec::new(),
             status,
             content,
             text,

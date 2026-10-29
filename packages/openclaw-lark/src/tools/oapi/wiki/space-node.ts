@@ -44,12 +44,7 @@ const FeishuWikiSpaceNodeSchema = Type.Union([
         description: 'parent_node_token',
       }),
     ),
-    page_size: Type.Optional(
-      Type.Integer({
-        description: 'page_size',
-        minimum: 1,
-      }),
-    ),
+    page_size: Type.Optional(Type.Integer({ description: 'page_size', minimum: 1, maximum: 50 })),
     page_token: Type.Optional(
       Type.String({
         description: 'page_token',
@@ -215,7 +210,7 @@ export function registerFeishuWikiSpaceNodeTool(api: OpenClawPluginApi): boolean
             // LIST NODES
             // -----------------------------------------------------------------
             case 'list': {
-              log.trace(() =>
+              log.info(
                 `list: space_id=${p.space_id}, parent=${p.parent_node_token ?? '(root)'}, page_size=${p.page_size ?? 50}`,
               );
 
@@ -251,7 +246,7 @@ export function registerFeishuWikiSpaceNodeTool(api: OpenClawPluginApi): boolean
             // GET NODE
             // -----------------------------------------------------------------
             case 'get': {
-              log.trace(() => `get: token=${p.token}, obj_type=${p.obj_type ?? 'wiki'}`);
+              log.info(`get: token=${p.token}, obj_type=${p.obj_type ?? 'wiki'}`);
 
               const res = await client.invoke(
                 'feishu_wiki_space_node.get',
@@ -280,7 +275,7 @@ export function registerFeishuWikiSpaceNodeTool(api: OpenClawPluginApi): boolean
             // CREATE NODE
             // -----------------------------------------------------------------
             case 'create': {
-              log.trace(() =>
+              log.info(
                 `create: space_id=${p.space_id}, obj_type=${p.obj_type}, parent=${p.parent_node_token ?? '(root)'}, title=${p.title ?? '(empty)'}, node_type=${p.node_type}, original_node_token=${p.origin_node_token ?? '(empty)'}`,
               );
 
@@ -315,7 +310,7 @@ export function registerFeishuWikiSpaceNodeTool(api: OpenClawPluginApi): boolean
             // MOVE NODE
             // -----------------------------------------------------------------
             case 'move': {
-              log.trace(() =>
+              log.info(
                 `move: space_id=${p.space_id}, node_token=${p.node_token}, target_parent=${p.target_parent_token ?? '(root)'}`,
               );
 
@@ -349,7 +344,7 @@ export function registerFeishuWikiSpaceNodeTool(api: OpenClawPluginApi): boolean
             // COPY NODE
             // -----------------------------------------------------------------
             case 'copy': {
-              log.trace(() =>
+              log.info(
                 `copy: space_id=${p.space_id}, node_token=${p.node_token}, target_space=${p.target_space_id ?? '(same)'}, target_parent=${p.target_parent_token ?? '(root)'}`,
               );
 

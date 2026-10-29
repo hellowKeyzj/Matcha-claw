@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { patchWorldStorageSource, prepareWorldWorkerArchive } from './openclaw-world-worker-patches.mjs';
 
 const PATCH_ID = 'native-world-investigation';
 const RUNTIME_FILE = 'matcha-world-investigation.mjs';
@@ -273,11 +274,34 @@ export function bindMatchaWorldPendingOwner(identity) {
   if (!current) return () => {};
   assertMatchaWorldAdmissionOpen();
   if (current.pendingOwner || identity.runId !== current.params.idempotencyKey || identity.sessionId !== current.params.sessionId || identity.sessionKey !== current.params.sessionKey || identity.lifecycleGeneration !== getAgentEventLifecycleGeneration()) reject("request_conflict");
+  identity.assertCurrent();
   const owner = { ...identity, finished: false };
   current.pendingOwner = owner;
-  return () => { owner.finished = true; };
+  let complete;
+  const settled = new Promise(resolve => { complete = resolve; });
+  let finished = false;
+  current.children.add(settled);
+  return error => {
+    if (finished) return;
+    finished = true;
+    if (error) current.toolDrainUnknown = true;
+    else owner.finished = true;
+    current.children.delete(settled);
+    complete();
+  };
 }
-export function bindMatchaWorldWorkerCancellation(store, claim, operationalRunInstance, source, delegatedAuthority, assertRunActive) {
+export function matchaWorldPendingCustody() {
+  const current = execution.getStore();
+  if (!current) return;
+  assertMatchaWorldAdmissionOpen();
+  return { requestDigest: current.receipt.requestDigest, nativeInstanceId: String(getAgentEventLifecycleGeneration()) };
+}
+export function confirmMatchaWorldStaging(input, receipt) {
+  if (input.worldInvestigationJson == null) return;
+  const current = execution.getStore();
+  if (!current || input.worldInvestigationJson !== JSON.stringify(current.receipt) || receipt.worldInvestigationJson !== input.worldInvestigationJson || receipt.inputId !== input.inputId) reject("request_conflict");
+}
+export function bindMatchaWorldWorkerCancellation(claim, operationalRunInstance, source, delegatedAuthority, assertRunActive, isClaimCurrent) {
   const current = execution.getStore();
   if (!current) return () => {};
   assertMatchaWorldAdmissionOpen();
@@ -286,10 +310,12 @@ export function bindMatchaWorldWorkerCancellation(store, claim, operationalRunIn
   const params = structuredClone(current.params);
   const owner = current.pendingOwner;
   const requestDigest = current.receipt.requestDigest;
-  if (!store.validateTurnClaim(claim) || getActiveAgentRunDelegatedAuthority(operationalRunInstance) !== delegatedAuthority || operationalRunInstance.runId !== claim.runId || !context || context.delegatedAuthority !== delegatedAuthority || context.agentId !== source.agentId || context.sessionKey !== source.sessionKey || context.sessionId !== claim.sessionId || context.lifecycleGeneration !== delegatedAuthority.lifecycleGeneration || params.idempotencyKey !== claim.runId || params.agentId !== source.agentId || params.sessionKey !== source.sessionKey || params.sessionId !== claim.sessionId || !owner || owner.finished || owner.runId !== claim.runId || owner.sessionKey !== params.sessionKey || owner.sessionId !== claim.sessionId || owner.lifecycleGeneration !== delegatedAuthority.lifecycleGeneration || owner.lifecycleGeneration !== getAgentEventLifecycleGeneration()) reject("execution_not_current");
+  if (!isClaimCurrent() || getActiveAgentRunDelegatedAuthority(operationalRunInstance) !== delegatedAuthority || operationalRunInstance.runId !== claim.runId || !context || context.delegatedAuthority !== delegatedAuthority || context.agentId !== source.agentId || context.sessionKey !== source.sessionKey || context.sessionId !== claim.sessionId || context.lifecycleGeneration !== delegatedAuthority.lifecycleGeneration || params.idempotencyKey !== claim.runId || params.agentId !== source.agentId || params.sessionKey !== source.sessionKey || params.sessionId !== claim.sessionId || !owner || owner.finished || owner.runId !== claim.runId || owner.sessionKey !== params.sessionKey || owner.sessionId !== claim.sessionId || owner.lifecycleGeneration !== delegatedAuthority.lifecycleGeneration || owner.lifecycleGeneration !== getAgentEventLifecycleGeneration()) reject("execution_not_current");
   const pending = Object.freeze({ ...owner });
   const databaseOptions = toDatabaseOptions(scope(params));
-  const originalDatabase = getOpenClawAgentDatabaseIfOpen(databaseOptions);
+  owner.assertCurrent();
+  const originalDatabase = openOpenClawAgentDatabase(databaseOptions);
+  owner.assertCurrent();
   if (!originalDatabase || originalDatabase.path !== pending.databasePath) reject("unknown");
   const exactReceipt = database => {
     if (database !== originalDatabase) reject("unknown");
@@ -385,28 +411,6 @@ export function stageMatchaWorldInvestigation() {
   const current = execution.getStore();
   if (current) current.stageAttempted = true;
   return current ? JSON.stringify(current.receipt) : null;
-}
-export function promoteMatchaWorldInvestigation(database, pending, anchor) {
-  const row = database.db.prepare("SELECT * FROM session_pending_inputs WHERE input_id = ?").get(pending.inputId);
-  if (!row?.world_investigation_json) return false;
-  if (!anchor || row.consumed_event_id != null && row.consumed_event_id !== anchor.entryId) reject("request_conflict");
-  const receipt = JSON.parse(row.world_investigation_json);
-  if (row.consumed_event_id != null) return true;
-  const current = execution.getStore();
-  if (!current || receipt.requestDigest !== current.receipt.requestDigest || row.run_id !== current.params.idempotencyKey || anchor.entryId !== row.input_id) reject("request_conflict");
-  receipt.transcriptAnchor = { agentId: anchor.agentId, sessionId: anchor.sessionId, entryId: anchor.entryId };
-  receipt.nativeInstanceId = String(getAgentEventLifecycleGeneration());
-  const changed = database.db.prepare("UPDATE session_pending_inputs SET consumed_event_id = ?, world_investigation_json = ? WHERE input_id = ? AND world_investigation_json = ? AND consumed_event_id IS NULL").run(anchor.entryId, JSON.stringify(receipt), row.input_id, row.world_investigation_json);
-  if (Number(changed.changes) !== 1) reject("request_conflict");
-  current.receipt = receipt;
-  return true;
-}
-export function assertMatchaWorldRetained(database, sessionKey, sessionId) {
-  if (!hasPrivateColumn(database.db)) return;
-  const rows = sessionId
-    ? database.db.prepare("SELECT world_investigation_json FROM session_pending_inputs WHERE session_id = ? AND world_investigation_json IS NOT NULL").all(sessionId)
-    : database.db.prepare("SELECT world_investigation_json FROM session_pending_inputs WHERE session_key = ? AND world_investigation_json IS NOT NULL").all(sessionKey);
-  if (rows.some(row => JSON.parse(row.world_investigation_json).settledAtMs == null)) reject("unsettled_input_retained");
 }
 export function matchaWorldHookCorrelation(runId) {
   const current = execution.getStore();
@@ -836,26 +840,32 @@ export function patchOpenClawWorldInvestigation(openclawDir) {
     const line = `import { ${names.join(', ')} } from "./${RUNTIME_FILE}";`;
     return source.includes(line) ? source : `${line}\n${source}`;
   };
-  const maintenance = target('openclaw-agent-db-maintenance-', ['function ensureSessionPendingInputsSchema(db) {']);
   const database = target('openclaw-agent-db-', ['function runOpenClawAgentWriteTransaction(', 'function openOpenClawAgentDatabase(']);
   const readonly = target('openclaw-agent-db-readonly-', ['function withOpenClawAgentDatabaseReadOnly(']);
-  const sqliteScope = target('session-accessor.sqlite-scope-', ['function resolveSqliteTranscriptScope(', 'function toDatabaseOptions(']);
+  const sqliteScope = target('session-accessor.sqlite-scope-', ['function resolveSqliteTranscriptScope(']);
+  const sqliteHelpers = target('session-accessor.sqlite-scope-helpers-', ['function toDatabaseOptions(']);
   const events = target('agent-events-', ['function getAgentEventLifecycleGeneration()']);
   const runRegistry = target('agent-run-registry-', ['function getAgentRunContext(runId)', 'function getActiveAgentRunDelegatedAuthority(operationalRunInstance)']);
-  const runtime = [nativeImport(database, ['runOpenClawAgentWriteTransaction', 'getOpenClawAgentDatabaseIfOpen']), nativeImport(readonly, ['withOpenClawAgentDatabaseReadOnly']), nativeImport(sqliteScope, ['resolveSqliteTranscriptScope', 'toDatabaseOptions']), nativeImport(events, ['getAgentEventLifecycleGeneration']), nativeImport(runRegistry, ['getAgentRunContext', 'getActiveAgentRunDelegatedAuthority']), RUNTIME].join('\n');
+  const runtime = [nativeImport(database, ['runOpenClawAgentWriteTransaction', 'getOpenClawAgentDatabaseIfOpen', 'openOpenClawAgentDatabase']), nativeImport(readonly, ['withOpenClawAgentDatabaseReadOnly']), nativeImport(sqliteScope, ['resolveSqliteTranscriptScope']), nativeImport(sqliteHelpers, ['toDatabaseOptions']), nativeImport(events, ['getAgentEventLifecycleGeneration']), nativeImport(runRegistry, ['getAgentRunContext', 'getActiveAgentRunDelegatedAuthority']), RUNTIME].join('\n');
   updates.set(path.join(dist, RUNTIME_FILE), runtime);
-  patch(maintenance, source => replaceOnce(source,
-    '\t\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "consumed_event_id TEXT");',
-    '\t\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "consumed_event_id TEXT");\n\t\tensureColumn(db, SESSION_PENDING_INPUTS_TABLE, "world_investigation_json TEXT");'));
-  const accessor = target('session-accessor-', ['async function stageSessionPendingInput(scope, options)', 'function appendTranscriptMessageInTransaction(database, resolved, options)']);
+  const accessor = target('session-accessor-', ['function stageSessionPendingInput(scope, options)', 'async function stagePreparedPendingInput(']);
   patch(accessor, source => {
-    source = addImport(source, ['stageMatchaWorldInvestigation', 'promoteMatchaWorldInvestigation', 'bindMatchaWorldPendingOwner']);
-    source = replaceOnce(source, '\t\t\t\tstate: "queued",\n\t\t\t\taccepted_at: Date.now()', '\t\t\t\tstate: "queued",\n\t\t\t\tworld_investigation_json: stageMatchaWorldInvestigation(),\n\t\t\t\taccepted_at: Date.now()');
-    source = replaceOnce(source, '\t\tlet finished = false;\n\t\tconst owner = {', '\t\tconst finishMatchaWorldOwner = bindMatchaWorldPendingOwner({ inputId, sessionId: scope.sessionId, sessionKey: resolved.sessionKey, databasePath: database.path, runId: options.runId, idempotencyKey, lifecycleGeneration, messageJson });\n\t\tlet finished = false;\n\t\tconst owner = {');
-    source = replaceOnce(source, '\t\t\t\t}, databaseOptions);\n\t\t\t}\n\t\t};\n\t\tregisterSessionPendingInputOwner(owner);', '\t\t\t\t}, databaseOptions);\n\t\t\t\tfinishMatchaWorldOwner();\n\t\t\t}\n\t\t};\n\t\tregisterSessionPendingInputOwner(owner);');
-    source = replaceOnce(source, '\t\t\tconsumeSessionPendingInput(database, pending);', '\t\t\tif (!promoteMatchaWorldInvestigation(database, pending, anchor)) consumeSessionPendingInput(database, pending);');
-    return replaceOnce(source, '\t\telse consumeSessionPendingInput(database, pending);', '\t\telse if (!promoteMatchaWorldInvestigation(database, pending, anchor)) consumeSessionPendingInput(database, pending);');
+    source = addImport(source, ['stageMatchaWorldInvestigation', 'bindMatchaWorldPendingOwner', 'matchaWorldPendingCustody', 'confirmMatchaWorldStaging']);
+    source = replaceOnce(source, '\t\t\t\t\t\t\treturn receipt;', '\t\t\t\t\t\t\tconfirmMatchaWorldStaging(input, receipt);\n\t\t\t\t\t\t\treturn receipt;');
+    source = replaceOnce(source, '\tlet completion;\n\tconst assertPrepared', '\tlet completion;\n\tlet finishMatchaWorldOwner = () => {};\n\tconst assertPrepared');
+    source = replaceOnce(source, '\t\t\t\tif (owner) releaseSessionPendingInputOwner(owner);\n\t\t\t}, (error) => {', '\t\t\t\tif (owner) releaseSessionPendingInputOwner(owner);\n\t\t\t\tfinishMatchaWorldOwner();\n\t\t\t}, (error) => {');
+    source = replaceOnce(source, '\t\t\t\tif (owner && !hasSqliteWorkerOutcomeUnknown(error)) releaseSessionPendingInputOwner(owner);\n\t\t\t\tthrow error;', '\t\t\t\tif (owner && !hasSqliteWorkerOutcomeUnknown(error)) releaseSessionPendingInputOwner(owner);\n\t\t\t\tfinishMatchaWorldOwner(error);\n\t\t\t\tthrow error;');
+    source = replaceOnce(source, '\t\tstore.bindCustody(() => {\n\t\t\tfinished = true;', '\t\tstore.bindCustody(() => {\n\t\t\tfinishMatchaWorldOwner(new Error("World pending input custody was revoked"));\n\t\t\tfinished = true;');
+    source = replaceOnce(source, '\t\towner = {\n\t\t\tagentId: scope.agentId,', '\t\towner = {\n\t\t\tmatchaWorld: matchaWorldPendingCustody(),\n\t\t\tagentId: scope.agentId,');
+    source = replaceOnce(source, '\t\tretained = true;\n\t\treturn Object.assign(ownerReceipt(owner), completionMethods);', '\t\tfinishMatchaWorldOwner = bindMatchaWorldPendingOwner({ inputId, sessionId: scope.sessionId, sessionKey: store.sessionKey, databasePath: store.path, assertCurrent: store.assertCurrent, runId: options.runId, idempotencyKey: identity.idempotencyKey, lifecycleGeneration, messageJson });\n\t\tretained = true;\n\t\treturn Object.assign(ownerReceipt(owner), completionMethods);');
+    return replaceOnce(source, '\t\t\tkind: "stage",\n\t\t\texpected: snapshot,', '\t\t\tkind: "stage",\n\t\t\tworldInvestigationJson: stageMatchaWorldInvestigation(),\n\t\t\texpected: snapshot,');
   });
+  const pendingKernel = target('session-pending-input-operations.kernel-', ['function mutatePendingInput(']);
+  patch(pendingKernel, source => patchWorldStorageSource(source, ['mutatePendingInput']));
+  const pendingStorage = target('session-accessor.sqlite-pending-inputs-', ['function consumeSessionPendingInput(']);
+  patch(pendingStorage, source => patchWorldStorageSource(source, ['captureSessionPendingInputWorkerCustody', 'writeSessionInputCompletion', 'resolveSessionPendingInputAppend', 'consumeSessionPendingInput', 'deleteSessionPendingInputs']));
+  const transcriptAppend = target('session-accessor.sqlite-transcript-message-append-', ['function appendTranscriptMessageInTransaction(']);
+  patch(transcriptAppend, source => patchWorldStorageSource(source, ['appendTranscriptMessageInTransaction']));
   const sessions = target('sessions-', ['const ChatSendParamsSchema = closedObject({', 'const ChatAbortParamsSchema = closedObject({']);
   patch(sessions, source => {
     source = replaceOnce(source, 'const ChatSendParamsSchema = closedObject({', `const MatchaWorldDecimalSchema = Type.String({ pattern: "^(0|[1-9][0-9]*)$", maxLength: 20 });
@@ -886,25 +896,22 @@ const ChatSendParamsSchema = closedObject({
   patch(send, source => {
     source = addImport(source, ['currentMatchaWorldInvestigation', 'withMatchaWorldChatSend', 'bindMatchaWorldAbort', 'deferMatchaWorldAck', 'finishMatchaWorldInvestigation', 'trackMatchaWorldChild', 'joinMatchaWorldChildren', 'recordMatchaWorldTerminal', 'beginMatchaWorldDispatch', 'closeMatchaWorldAdmission']);
     source = replaceOnce(source, '\tconst dispatch = replyDispatch.runAgentMediaTranscript(', '\tbeginMatchaWorldDispatch();\n\tconst dispatch = replyDispatch.runAgentMediaTranscript(');
-    source = replaceOnce(source, '\tconst cleanupAdmittedRun = () => {\n\t\tactiveRunAbort.cleanup();', '\tconst cleanupAdmittedRun = () => {\n    if (currentMatchaWorldInvestigation() && !currentMatchaWorldInvestigation().receipt.accepted) closeMatchaWorldAdmission();\n\t\tactiveRunAbort.cleanup();');
     source = replaceOnce(source,
-      'async function handleChatSendWithOptions({ params, respond, context, client, sessionMutationAuthorization, sessionMutationCommitGuard }, onAdmissionOwned, externalAuthorityAdmission, options) {',
-      `async function handleChatSendWithOptions(input, onAdmissionOwned, externalAuthorityAdmission, options) {
-  return withMatchaWorldChatSend(input.params, input.respond, respond => handleChatSendWithOptionsAdmitted({ ...input, respond }, onAdmissionOwned, externalAuthorityAdmission, options));
+      'async function handleChatSendWithOptions(handlerOptions, onAdmissionOwned, externalAuthorityAdmission, options) {',
+      `async function handleChatSendWithOptions(handlerOptions, onAdmissionOwned, externalAuthorityAdmission, options) {
+  return withMatchaWorldChatSend(handlerOptions.params, handlerOptions.respond, respond => handleChatSendWithOptionsAdmitted({ ...handlerOptions, respond }, onAdmissionOwned, externalAuthorityAdmission, options));
 }
-async function handleChatSendWithOptionsAdmitted({ params, respond, context, client, sessionMutationAuthorization, sessionMutationCommitGuard }, onAdmissionOwned, externalAuthorityAdmission, options) {`);
+async function handleChatSendWithOptionsAdmitted(handlerOptions, onAdmissionOwned, externalAuthorityAdmission, options) {`);
     source = replaceOnce(source,
-      '\tconst { activeRunAbort, admittedSessionId, chatSendTraceAttributes, finishAbortedChatSend, interruptedActiveRun, lifecycleGeneration, messageInjectionTarget, restartSafeAdmission } = admitted.value;',
-      '\tconst { activeRunAbort, admittedSessionId, chatSendTraceAttributes, finishAbortedChatSend, interruptedActiveRun, lifecycleGeneration, messageInjectionTarget, restartSafeAdmission } = admitted.value;\n\tbindMatchaWorldAbort(() => activeRunAbort.controller.abort(new Error("World investigation expired or cancelled")));\n\tif (currentMatchaWorldInvestigation() && (admittedSessionId !== params.sessionId || preparedSession.value.agentId !== params.agentId || sessionKey !== params.sessionKey || messageInjectionTarget)) throw new Error("World investigation native target changed");');
+      '\t\tconst { activeRunAbort, admittedSessionId, chatSendTraceAttributes, finishAbortedChatSend, interruptedActiveRun, lifecycleGeneration, messageInjectionTarget, restartSafeAdmission } = admission;',
+      '\t\tconst { activeRunAbort, admittedSessionId, chatSendTraceAttributes, finishAbortedChatSend, interruptedActiveRun, lifecycleGeneration, messageInjectionTarget, restartSafeAdmission } = admission;\n\t\tbindMatchaWorldAbort(() => activeRunAbort.controller.abort(new Error("World investigation expired or cancelled")));\n\t\tif (currentMatchaWorldInvestigation() && (admittedSessionId !== p.sessionId || session.agentId !== p.agentId || sessionKey !== p.sessionKey || messageInjectionTarget)) throw new Error("World investigation native target changed");');
+    // 10.8 stages every ordinary displayed user turn natively; the old operator-UI expansion is obsolete.
     source = replaceOnce(source,
-      '\t\tif (entry?.sessionId && isOperatorUiClient(clientInfo) && !isInternalTextSlashCommandTurn && !normalizedRequest.value.goalOperation) {',
-      '\t\tif (entry?.sessionId && (currentMatchaWorldInvestigation() || isOperatorUiClient(clientInfo)) && !isInternalTextSlashCommandTurn && !normalizedRequest.value.goalOperation) {');
+      '\t\t\trespond(true, ackPayload, void 0, { runId: clientRunId });',
+      '\t\t\tif (currentMatchaWorldInvestigation()) deferMatchaWorldAck(ackPayload, respond);\n\t\t\telse respond(true, ackPayload, void 0, { runId: clientRunId });');
     source = replaceOnce(source,
-      '\t\trespond(true, ackPayload, void 0, { runId: clientRunId });',
-      '\t\tif (currentMatchaWorldInvestigation()) deferMatchaWorldAck(ackPayload, respond);\n\t\telse respond(true, ackPayload, void 0, { runId: clientRunId });');
-    source = replaceOnce(source,
-      '\tconst handleError = async (err) => {\n\t\tconst errorMessage = String(err);',
-      '\tconst handleError = async (err) => {\n    recordMatchaWorldTerminal({ status: activeRunAbort.controller.signal.aborted ? "interrupted" : "failed", error: String(err), source: "dispatch_rejection" });\n\t\tconst errorMessage = String(err);');
+      '\tconst handleError = async (err) => {\n\t\tconst errorMessage = formatChatSendError(err);',
+      '\tconst handleError = async (err) => {\n    recordMatchaWorldTerminal({ status: activeRunAbort.controller.signal.aborted ? "interrupted" : "failed", error: String(err), source: "dispatch_rejection" });\n\t\tconst errorMessage = formatChatSendError(err);');
     source = replaceOnce(source,
       '\t\t\tconst runtimeCancelled = runtimeClassification === "cancellation";',
       '\t\t\trecordMatchaWorldTerminal({ status: runtimeClassification === "success" ? "completed" : runtimeClassification === "cancellation" ? "cancelled" : runtimeClassification === "failure" || runtimeClassification === "timeout" ? "failed" : "unknown", runtimeOutcome: runtimeOutcome ?? null, recordedOutcome: recordedOutcome ?? null, source: "native_terminal" });\n\t\t\tconst runtimeCancelled = runtimeClassification === "cancellation";');
@@ -912,8 +919,8 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
       '\t\t\tawait dispatchErrorLifecycle.finalize();',
       '\t\t\tif (currentMatchaWorldInvestigation() && !currentMatchaWorldInvestigation().receipt.accepted) closeMatchaWorldAdmission();\n\t\t\tawait dispatchErrorLifecycle.finalize();\n      if (currentMatchaWorldInvestigation() && !currentMatchaWorldInvestigation().receipt.accepted) closeMatchaWorldAdmission(true);\n      await joinMatchaWorldChildren();\n      finishMatchaWorldInvestigation(clientRunId, { ...(currentMatchaWorldInvestigation()?.terminal ?? { status: "unknown" }), acceptedMessageInjection, queued: queuedFollowup.isEnqueued() });');
     source = replaceOnce(source,
-      '\trunWithGatewayIndependentRootWorkContinuation(async () => {\n\t\tconst admission = await beginSessionWorkAdmission({',
-      '\ttrackMatchaWorldChild(() => runWithGatewayIndependentRootWorkContinuation(async () => {\n\t\tconst admission = await beginSessionWorkAdmission({');
+      '\trunWithGatewayIndependentRootWorkContinuation(async () => {\n\t\tconst retryAfter = turn && await turn.released ? turn.settled : void 0;',
+      '\ttrackMatchaWorldChild(() => runWithGatewayIndependentRootWorkContinuation(async () => {\n\t\tconst retryAfter = turn && await turn.released ? turn.settled : void 0;');
     return replaceOnce(source,
       '\t\tparams.context.logGateway.warn(`dashboard session title generation failed: ${formatForLog(err)}`);\n\t});',
       '\t\tparams.context.logGateway.warn(`dashboard session title generation failed: ${formatForLog(err)}`);\n\t}));');
@@ -922,8 +929,8 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
   patch(selection, source => {
     source = addImport(source, ['prepareMatchaWorldAttempt']);
     source = replaceOnce(source,
-      '}, (prepared) => pluginAttempt.runWithHostScope(() => {',
-      '}, (prepared) => pluginAttempt.runWithHostScope(() => prepareMatchaWorldAttempt(prepared, harness, selection.builtIn, () => {');
+      '}, (prepared) => pluginAttempt.runWithHostScope(async () => {',
+      '}, (prepared) => pluginAttempt.runWithHostScope(() => prepareMatchaWorldAttempt(prepared, harness, selection.builtIn, async () => {');
     return replaceOnce(source, '\t\t\t})));', '\t\t\t}))));');
   });
   const beforeTool = target('agent-tools.before-tool-call-', ['function wrapToolWithBeforeToolCallHook(tool, ctx, options = {})', 'const buildToolContext = (identity) => ({']);
@@ -931,9 +938,9 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
     source = addImport(source, ['matchaWorldHookCorrelation', 'assertMatchaWorldTool', 'withMatchaWorldTool']);
     source = replaceOnce(source, '\t\tconst buildToolContext = (identity) => ({\n\t\t\ttoolName,', '\t\tconst buildToolContext = (identity) => ({\n\t\t\t...(matchaWorldHookCorrelation(args.ctx?.runId) ? { worldInvestigation: matchaWorldHookCorrelation(args.ctx?.runId) } : {}),\n\t\t\ttoolName,');
     source = replaceOnce(source, '\t\t\tlet preparedParams;', '\t\t\tassertMatchaWorldTool(toolName);\n\t\t\tlet preparedParams;');
-    return replaceOnce(source, '\t\t\t\t\tconst invoke = () => execute(...args);', '\t\t\t\t\tconst invoke = () => withMatchaWorldTool(toolName, toolCallId, () => execute(...args));');
+    return replaceOnce(source, '\t\t\t\t\tconst invoke = () => liveness.run(() => execute(...args));', '\t\t\t\t\tconst invoke = () => withMatchaWorldTool(toolName, toolCallId, () => liveness.run(() => execute(...args)));');
   });
-  const core = target('agent-core-', ['async function runLoop(state, newMessages, initialConfig, signal, emit, streamFn, runtime)']);
+  const core = target('agent-core-', ['async function runLoop(state, newMessages, initialConfig, signal, emit, streamFn, runtime, initialPromptContext = [])']);
   patch(core, source => {
     source = addImport(source, ['admitMatchaWorldStep']);
     return replaceOnce(source, '\t\twhile (hasMoreToolCalls || pendingMessages.length > 0) {', '\t\twhile (hasMoreToolCalls || pendingMessages.length > 0) {\n\t\t\tadmitMatchaWorldStep("loop");');
@@ -952,10 +959,11 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
     source = replaceOnce(source, '\t\t\tlocalServiceLease?.release();\n\t\t\tthrow remediatedError;', '\t\t\tlocalServiceLease?.release();\n\t\t\tworldModel.fail("model_fetch_failed");\n\t\t\tthrow remediatedError;');
     return replaceOnce(source, '\t\tlet response = result.response;', '\t\tlet response = worldModel.observe(result.response);');
   });
-  const chat = target('chat-', ['const chatHandlers = {', 'function handleDirectExternalChatSend(options, onAdmissionOwned)']);
+  const chat = target('chat-', ['const chatHandlers = {', '...chatMessageGetHandlers,']);
   patch(chat, source => {
     source = addImport(source, ['inspectMatchaWorldInvestigation', 'releaseMatchaWorldInvestigation', 'settleMatchaWorldInvestigation', 'MatchaWorldInvestigationError']);
-    return replaceOnce(source, '\t"chat.send": handleDirectExternalChatSend,', `  "chat.run.getByRequest": async ({ params, respond }) => {
+    return replaceOnce(source, 'const chatHandlers = {', `const chatHandlers = {
+  "chat.run.getByRequest": async ({ params, respond }) => {
     try { respond(true, inspectMatchaWorldInvestigation(params)); }
     catch (error) {
       if (!(error instanceof MatchaWorldInvestigationError)) throw error;
@@ -982,9 +990,9 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
       respond(false, undefined, { code: error.code, message: error.message, details: error.worldInvestigation });
     }
   },
-\t"chat.send": handleDirectExternalChatSend,`);
+`);
   });
-  const methodScopes = target('method-scopes-', ['const CORE_GATEWAY_METHOD_SPECS =', 'function listCoreGatewayHandlerMethodNames()']);
+  const methodScopes = target('core-method-policy-', ['const CORE_GATEWAY_METHOD_SPECS =', 'function listCoreGatewayHandlerMethodNames()']);
   patch(methodScopes, source => {
     // Preserve the preceding search patch's whole-file seal across this known edit.
     const stamp = source.match(/^\/\/ matcha-native-searxng-v3 sha256=([a-f0-9]{64})\n/);
@@ -997,40 +1005,37 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
       '\t\t"chat.run.getByRequest",\n\t\t"chat",\n\t\t"operator.read",\n\t\t"2026.9"\n\t],\n\t[\n\t\t"chat.run.releaseInvestigation",\n\t\t"chat",\n\t\t"operator.write",\n\t\t"2026.9"\n\t],\n\t[\n\t\t"chat.run.settleInvestigation",\n\t\t"chat",\n\t\t"operator.write",\n\t\t"2026.9"\n\t],\n\t[\n\t\t"chat.abort",\n\t\t"chat-abort",');
     return stamp ? next.replace(stamp[0], `// matcha-native-searxng-v3 sha256=${digest(next.slice(stamp[0].length))}\n`) : next;
   });
-  const sessionPolicy = target('session-method-policy-', ['const SESSION_TARGET_FIELDS_BY_METHOD = new Map([']);
-  patch(sessionPolicy, source => {
-    source = replaceOnce(source, '\t["chat.abort", ["sessionKey"]],', '\t["chat.run.getByRequest", ["sessionKey"]],\n\t["chat.run.releaseInvestigation", ["sessionKey"]],\n\t["chat.run.settleInvestigation", ["sessionKey"]],\n\t["chat.abort", ["sessionKey"]],');
-    return replaceOnce(source, '\t"chat.abort",', '\t"chat.run.getByRequest",\n\t"chat.run.releaseInvestigation",\n\t"chat.run.settleInvestigation",\n\t"chat.abort",');
-  });
+  const sessionPolicy = target('session-method-policy-', ['const SESSION_TARGET_POLICY_BY_METHOD =']);
+  patch(sessionPolicy, source => replaceOnce(source, '\t["chat.abort", {', '\t["chat.run.getByRequest", { fields: ["sessionKey"], required: true }],\n\t["chat.run.releaseInvestigation", { fields: ["sessionKey"], required: true }],\n\t["chat.run.settleInvestigation", { fields: ["sessionKey"], required: true }],\n\t["chat.abort", {'));
   const ownership = target('registry-runtime-session-ownership-', ['const PLUGIN_GATEWAY_SESSION_MUTATION_METHODS =']);
   patch(ownership, source => replaceOnce(source, '\t"chat.abort",', '\t"chat.run.releaseInvestigation",\n\t"chat.run.settleInvestigation",\n\t"chat.abort",'));
   const abort = target('chat-abort-handler-', ['async function handleChatAbortRequestWithLifecycle(', 'const authorizeRunTarget = (target) => {']);
   patch(abort, source => {
     source = addImport(source, ['cancelAuthorizedMatchaWorldTarget']);
-    source = replaceOnce(source, '\tconst { sessionKey: rawSessionKey, runId, preserveSideRuns } = params;', `\tconst originalRespond = respond;
+    source = replaceOnce(source, '\tconst { params, respond, context, client, sessionMutationAuthorization } = options;', `\tconst { params, respond: originalRespond, context, client, sessionMutationAuthorization } = options;
   let worldCancellation;
-  respond = (ok, payload, error, extra) => originalRespond(ok, ok && worldCancellation ? { ...payload, ...worldCancellation } : payload, error, extra);
-\tconst { sessionKey: rawSessionKey, runId, preserveSideRuns } = params;`);
+  const respond = (ok, payload, error, extra) => originalRespond(ok, ok && worldCancellation ? { ...payload, ...worldCancellation } : payload, error, extra);`);
     source = replaceOnce(source, '\tif (!runId) {', '\tif ((params.requestId !== undefined || params.requestDigest !== undefined) && (!runId || !params.sessionId || !params.requestId || !params.requestDigest || params.requestId !== runId)) { respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "World cancellation requires one exact input")); return; }\n\tif (!runId) {');
     source = replaceOnce(source, '\tconst authorizeRunTarget = (target) => {', `  const commitWorldCancellation = (target = {}) => {
     sessionMutationAuthorization?.assertCurrent();
     worldCancellation = cancelAuthorizedMatchaWorldTarget({ agentId: target.agentId ?? abortAgentId, sessionKey: target.sessionKey ?? canonicalAbortSessionKey, sessionId: target.sessionId ?? params.sessionId ?? abortSessionEntry?.sessionId, runId }, params) ?? worldCancellation;
   };
 \tconst authorizeRunTarget = (target) => {`);
-    source = replaceOnce(source, '\t\t\twritePreRegisteredChatAbort({', '\t\t\tcommitWorldCancellation({ ...pendingChatMatch.payload, sessionKey: pendingChatMatch.sessionKey });\n\t\t\twritePreRegisteredChatAbort({');
-    source = replaceOnce(source, '\t\t\twritePreRegisteredAgentAbort({', '\t\t\tcommitWorldCancellation({ ...pendingAgentPayload, sessionKey: pendingAgentMatch.sessionKey });\n\t\t\twritePreRegisteredAgentAbort({');
-    source = replaceOnce(source, '\t\t\tif (!authorizeRunTarget(queued)) return;', '\t\t\tif (!authorizeRunTarget(queued)) return;\n      commitWorldCancellation(queued);');
-    source = replaceOnce(source, '\tif (!authorizeRunTarget(active)) return;', '\tif (!authorizeRunTarget(active)) return;\n  commitWorldCancellation(active);');
-    source = replaceOnce(source, '\t\trespondWithWorkerRuns([]);', '\t\tcommitWorldCancellation({ sessionId: workerSessionId });\n\t\trespondWithWorkerRuns([]);');
-    return replaceOnce(source, '\t\tif (!workerSessionId || !asWorkerInferenceControl(context.workerEnvironmentService)?.hasInferenceForSession(workerSessionId, runId)) {', `\t\tif (!workerSessionId || !asWorkerInferenceControl(context.workerEnvironmentService)?.hasInferenceForSession(workerSessionId, runId)) {
+    source = replaceOnce(source, '\t\t\tawait respondWithWorkerRuns(writePreRegisteredChatAbort({', '\t\t\tcommitWorldCancellation({ ...pendingChatMatch.payload, sessionKey: pendingChatMatch.sessionKey });\n\t\t\tawait respondWithWorkerRuns(writePreRegisteredChatAbort({');
+    source = replaceOnce(source, '\t\t\t\t\treturn aborted = writePreRegisteredAgentAbort({', '\t\t\t\t\tcommitWorldCancellation({ ...pendingAgentPayload, sessionKey: pendingAgentMatch.sessionKey });\n\t\t\t\t\treturn aborted = writePreRegisteredAgentAbort({');
+    source = replaceOnce(source, '\t\t\tif (!discardPendingInput && !authorizeRunTarget(queued)) return;', '\t\t\tif (!discardPendingInput && !authorizeRunTarget(queued)) return;\n      commitWorldCancellation(queued);');
+    source = replaceOnce(source, '\tif (!discardPendingInput && !authorizeRunTarget(active)) return;', '\tif (!discardPendingInput && !authorizeRunTarget(active)) return;\n  commitWorldCancellation(active);');
+    source = replaceOnce(source, '\t\t\tawait workerCancellation?.cancel({', '\t\t\tcommitWorldCancellation({ sessionId: workerTarget?.sessionId ?? params.sessionId });\n\t\t\tawait workerCancellation?.cancel({');
+    return replaceOnce(source, '\t\tif (!workerCancellation?.runIds.length) {', `\t\tif (!workerCancellation?.runIds.length) {
       if (params.requestId !== undefined || params.requestDigest !== undefined) {
         if (!requester.isAdmin) { respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unauthorized")); return; }
+        assertCurrent();
         commitWorldCancellation({ sessionId: params.sessionId });
         respond(true, { ok: true, aborted: false, runIds: [], cancellationRequested: true });
         return;
       }`);
   });
-  const abortRuntime = target('chat-abort-runtime-', ['function prepareChatSessionAbort(params, selectedRunId) {']);
+  const abortRuntime = target('chat-abort-runtime-', ['function prepareChatSessionAbort(params, workerCancellation, selectedRunId) {']);
   patch(abortRuntime, source => {
     source = addImport(source, ['cancelAuthorizedMatchaWorldTarget']);
     source = replaceOnce(source, '\t\tparams.onControllerTargets?.(authorizedRuns);', `\t\tparams.onControllerTargets?.(authorizedRuns);
@@ -1041,31 +1046,20 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
         cancelAuthorizedMatchaWorldTarget({ agentId: entry.agentId ?? params.agentId, sessionKey: target.sessionKey ?? entry.sessionKey ?? params.sessionKey, sessionId: entry.sessionId ?? params.sessionId, runId: target.runId });
       }
     }`);
-    return replaceOnce(source, '\t\t\t\t\tsessionAbort = {\n\t\t\t\t\t\tok: true,\n\t\t\t\t\t\tvalue: {', `\t\t\t\t\tif (plan.canCascade) {
+    return replaceOnce(source, '\t\t\t\t\tsessionAbort = {\n\t\t\t\t\t\tok: true,\n\t\t\t\t\t\tvalue: plan', `\t\t\t\t\tif (plan.canCascade) {
 \t\t\t\t\t\tassertCurrent();
 \t\t\t\t\t\tcancelAuthorizedMatchaWorldTarget({ agentId: params.agentId, sessionKey: params.sessionKey, sessionId: params.sessionId, runId: entry.runId });
 \t\t\t\t\t}
-\t\t\t\t\tsessionAbort = {\n\t\t\t\t\t\tok: true,\n\t\t\t\t\t\tvalue: {`);
+\t\t\t\t\tsessionAbort = {\n\t\t\t\t\t\tok: true,\n\t\t\t\t\t\tvalue: plan`);
   });
   const entryStore = target('session-accessor.sqlite-entry-store-', ['function deleteSessionEntryRows(database, sessionKey, options = {})', 'function deleteLegacySessionEntryRows(']);
-  patch(entryStore, source => {
-    source = addImport(source, ['assertMatchaWorldRetained']);
-    source = replaceOnce(source, '\tif (!owner || !ownsInput || owner.databasePath !== database.path || owner.sessionId !== scope.sessionId || owner.sessionKey !== scope.sessionKey || row && (row.input_id !== owner.inputId || row.consumed_event_id != null || row.state !== "queued" || row.lifecycle_generation !== owner.lifecycleGeneration))', '\tconst worldRetainedConsumption = !!(row?.world_investigation_json && owner && !owner.sources && row.input_id === owner.inputId && row.consumed_event_id === row.input_id && row.message_json === owner.messageJson && row.lifecycle_generation === owner.lifecycleGeneration);\n\tif (!owner || !ownsInput || owner.databasePath !== database.path || owner.sessionId !== scope.sessionId || owner.sessionKey !== scope.sessionKey || row && (row.input_id !== owner.inputId || !worldRetainedConsumption && (row.consumed_event_id != null || row.state !== "queued") || row.lifecycle_generation !== owner.lifecycleGeneration))');
-    source = replaceOnce(source, '\tif (row) assertPendingInputOwnerCurrent(owner);', '\tif (row && !worldRetainedConsumption) assertPendingInputOwnerCurrent(owner);');
-    source = replaceOnce(source, '\t\talreadyPromoted: !row,', '\t\talreadyPromoted: !row || worldRetainedConsumption,');
-    source = replaceOnce(source, 'function deleteSessionEntryRows(database, sessionKey, options = {}) {', 'function deleteSessionEntryRows(database, sessionKey, options = {}) {\n  assertMatchaWorldRetained(database, sessionKey);');
-    source = replaceOnce(source, 'function deleteSessionPendingInputs(database, sessionKey) {', 'function deleteSessionPendingInputs(database, sessionKey) {\n  assertMatchaWorldRetained(database, sessionKey);');
-    return replaceOnce(source, 'function deleteLegacySessionEntryRows(database, legacyKeys, sessionKey, options = {}) {', 'function deleteLegacySessionEntryRows(database, legacyKeys, sessionKey, options = {}) {\n  for (const key of legacyKeys) assertMatchaWorldRetained(database, key);');
-  });
+  patch(entryStore, source => patchWorldStorageSource(source, ['deleteSessionEntryRows', 'deleteLegacySessionEntryRows']));
   const lifecycleState = target('session-accessor.sqlite-lifecycle-state-', ['function deleteSqliteSessionStateRows(database, sessionId) {']);
-  patch(lifecycleState, source => replaceOnce(addImport(source, ['assertMatchaWorldRetained']),
-    'function deleteSqliteSessionStateRows(database, sessionId) {',
-    'function deleteSqliteSessionStateRows(database, sessionId) {\n  assertMatchaWorldRetained(database, undefined, sessionId);'));
+  patch(lifecycleState, source => patchWorldStorageSource(source, ['deleteSqliteSessionStateRows']));
   const dashboardTitle = target('dashboard-session-title-', ['async function maybeGenerateSessionTitle(params) {']);
   patch(dashboardTitle, source => {
     source = addImport(source, ['trackMatchaWorldChild']);
-    source = replaceOnce(source, '\t\tconst generation = generateDashboardSessionTitle({', '\t\tconst generation = trackMatchaWorldChild(() => generateDashboardSessionTitle({');
-    return replaceOnce(source, '\t\t\t...params.worktree ? { timeoutMs: WORKTREE_SESSION_TITLE_ATTEMPT_TIMEOUT_MS } : {}\n\t\t});', '\t\t\t...params.worktree ? { timeoutMs: WORKTREE_SESSION_TITLE_ATTEMPT_TIMEOUT_MS } : {}\n\t\t}));');
+    return replaceOnce(source, 'async function generateDashboardSessionTitle(params) {', 'function generateDashboardSessionTitle(params) {\n  return trackMatchaWorldChild(() => generateMatchaWorldDashboardSessionTitle(params));\n}\nasync function generateMatchaWorldDashboardSessionTitle(params) {');
   });
   const maintenanceRun = target('run-', ['function scheduleSessionMaintenance(request, afterOwnerSettles) {']);
   patch(maintenanceRun, source => {
@@ -1079,8 +1073,8 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
     source = addImport(source, ['currentMatchaWorldInvestigation', 'assertMatchaWorldDeferredOwner', 'trackMatchaWorldChild', 'assertMatchaWorldAdmissionOpen']);
     source = replaceOnce(source, 'function scheduleDeferredTurnMaintenance(params) {', 'function scheduleDeferredTurnMaintenance(params) {\n  assertMatchaWorldAdmissionOpen();');
     source = replaceOnce(source, '\tif (activeRun) {\n\t\tconst supersededParams', '\tif (activeRun) {\n    assertMatchaWorldDeferredOwner(activeRun.matchaWorldOwner);\n\t\tconst supersededParams');
-    source = replaceOnce(source, '\t\tpromise: trackedPromise,\n\t\trerunRequested: false,', '\t\tpromise: trackedPromise,\n    matchaWorldOwner: currentMatchaWorldInvestigation(),\n\t\trerunRequested: false,');
-    return replaceOnce(source, '\treturn trackedPromise;\n}', '\treturn trackMatchaWorldChild(() => trackedPromise);\n}');
+    source = replaceOnce(source, '\t\tpromise: maintenance.track(completion.promise),', '\t\tpromise: maintenance.track(completion.promise),\n    matchaWorldOwner: currentMatchaWorldInvestigation(),');
+    return replaceOnce(source, '\treturn state.promise;\n}', '\treturn trackMatchaWorldChild(() => state.promise);\n}');
   });
   const hookHelpers = target('lifecycle-hook-helpers-', ['function runAgentHarnessLlmInputHook(params) {', 'function runAgentHarnessAgentEndHook(params) {']);
   patch(hookHelpers, source => {
@@ -1092,100 +1086,91 @@ async function handleChatSendWithOptionsAdmitted({ params, respond, context, cli
     source = replaceOnce(source, '\texecuteAgentHarnessAgentEndHook({\n\t\t...params,\n\t\tunrefTimeout: true\n\t});', '\ttrackMatchaWorldChild(() => executeAgentHarnessAgentEndHook({\n\t\t...params,\n\t\tunrefTimeout: true\n\t}));');
     return source;
   });
-  const sideEffects = target('context-engine-lifecycle-', ['function createSkillExperienceReviewScheduler(deps) {']);
+  const sideEffects = target('agent-end-side-effects-', ['function createSkillExperienceReviewScheduler(deps) {']);
   patch(sideEffects, source => {
-    source = addImport(source, ['createMatchaWorldDeferredChild']);
-    source = replaceOnce(source, '\t\t\tpending.timer = void 0;\n\t\t\tPromise.resolve(deps.isSystemActive())', '\t\t\tpending.timer = void 0;\n      if (pending.matchaWorldChild?.expired()) { pendingBySession.delete(key); pending.matchaWorldChild.finish(); return; }\n\t\t\tPromise.resolve(deps.isSystemActive())');
+    source = addImport(source, ['createMatchaWorldDeferredChild', 'trackMatchaWorldChild', 'assertMatchaWorldUnsupported']);
+    source = replaceOnce(source, '\timport("./library-DYsZQEh1.mjs").then(', '\ttrackMatchaWorldChild(() => import("./library-DYsZQEh1.mjs").then(');
+    source = replaceOnce(source, '\t\tlog$1.warn(`skill experience review scheduling failed: ${formatErrorMessage(error)}`);\n\t});', '\t\tlog$1.warn(`skill experience review scheduling failed: ${formatErrorMessage(error)}`);\n\t}));');
+    source = replaceOnce(source, '\trunWithGatewayDetachedWorkContinuation(async () => {', '\ttrackMatchaWorldChild(() => runWithGatewayDetachedWorkContinuation(async () => {\n    assertMatchaWorldUnsupported("unmetered_workshop_archive");');
+    source = replaceOnce(source, '\t\tlog$1.warn(`unused skill archive failed: ${formatErrorMessage(error)}`);\n\t});', '\t\tlog$1.warn(`unused skill archive failed: ${formatErrorMessage(error)}`);\n\t}));');
+    source = replaceOnce(source, '\t\t\tpending.timer = void 0;\n\t\t\t(async () => {', '\t\t\tpending.timer = void 0;\n      if (pending.matchaWorldChild?.expired()) { pendingBySession.delete(key); pending.matchaWorldChild.finish(); return; }\n\t\t\t(async () => {');
     source = replaceOnce(source, '\t\t\t\t\tawait deps.runReview(pending.candidate);', '\t\t\t\t\tif (pending.matchaWorldChild) await pending.matchaWorldChild.run(() => deps.runReview(pending.candidate));\n          else await deps.runReview(pending.candidate);');
     source = replaceOnce(source, '\t\t\t\t\treviewInFlight = false;', '\t\t\t\t\treviewInFlight = false;\n          pending.matchaWorldChild?.finish();');
     source = replaceOnce(source, '\t\t\t\tif (pendingBySession.get(key) === pending && pending.generation === generation) pendingBySession.delete(key);', '\t\t\t\tif (pendingBySession.get(key) === pending && pending.generation === generation) { pendingBySession.delete(key); pending.matchaWorldChild?.finish(); }');
-    source = replaceOnce(source, '\t\t\t\tpendingBySession.delete(key);\n\t\t\t\treturn;', '\t\t\t\tpendingBySession.delete(key);\n        existing.matchaWorldChild?.finish();\n\t\t\t\treturn;');
+    source = replaceOnce(source, '\t\tif (pending?.timer) clearTimer(pending.timer);\n\t\tpendingBySession.delete(key);', '\t\tif (pending?.timer) clearTimer(pending.timer);\n    pending?.matchaWorldChild?.finish();\n\t\tpendingBySession.delete(key);');
     source = replaceOnce(source, '\t\t\t\t\tpendingBySession.delete(oldest[0]);', '\t\t\t\t\tpendingBySession.delete(oldest[0]);\n          oldest[1].matchaWorldChild?.finish();');
     source = replaceOnce(source, '\t\t\tpending.candidate = candidate;', '\t\t\tpending.matchaWorldChild?.finish();\n      pending.matchaWorldChild = createMatchaWorldDeferredChild();\n\t\t\tpending.candidate = candidate;');
     return replaceOnce(source, '\t\t\tfor (const pending of pendingBySession.values()) if (pending.timer) clearTimer(pending.timer);', '\t\t\tfor (const pending of pendingBySession.values()) { if (pending.timer) clearTimer(pending.timer); pending.matchaWorldChild?.finish(); }');
   });
-  const isolated = target('isolated-completion-', ['async function runCliIsolatedCompletion(params) {', 'const pending = harness.runIsolatedCompletionV2({']);
+  const isolated = target('isolated-completion-', ['async function runCliIsolatedCompletion(request, provider, modelProvider) {', 'const pending = harness.runIsolatedCompletionV2({']);
   patch(isolated, source => {
     source = addImport(source, ['assertMatchaWorldUnsupported', 'assertMatchaWorldReleased', 'awaitMatchaWorldRelease', 'assertMatchaWorldModelTransport']);
-    source = replaceOnce(source, 'async function runCliIsolatedCompletion(params) {', 'async function runCliIsolatedCompletion(params) {\n  assertMatchaWorldUnsupported("isolated_cli");');
-    source = replaceOnce(source, '\t\t\tconst harness = await resolveHarness(runtime);', '\t\t\tconst harness = await resolveHarness(runtime);\n      if (harness.id !== "openclaw") assertMatchaWorldUnsupported("isolated_plugin_harness");');
+    source = replaceOnce(source, 'async function runCliIsolatedCompletion(request, provider, modelProvider) {', 'async function runCliIsolatedCompletion(request, provider, modelProvider) {\n  assertMatchaWorldUnsupported("isolated_cli");');
+    source = replaceOnce(source, '\t\t\tconst harness = selection.builtIn ? (await import("./builtin-openclaw-B0xIjhzK.mjs")).createOpenClawAgentHarness() : selection.harness;', '\t\t\tconst harness = selection.builtIn ? (await import("./builtin-openclaw-B0xIjhzK.mjs")).createOpenClawAgentHarness() : selection.harness;\n      if (!selection.builtIn) assertMatchaWorldUnsupported("isolated_plugin_harness");');
     source = replaceOnce(source, '\t\t\t\t\t\t\tmodelMaxTokens = model?.maxTokens;', '\t\t\t\t\t\t\tassertMatchaWorldUnsupported("isolated_harness_auth");\n\t\t\t\t\t\t\tmodelMaxTokens = model?.maxTokens;');
     source = replaceOnce(source, '\t\t\t\t\t\t\tmodelMaxTokens = authorization.model.maxTokens;', '\t\t\t\t\t\t\tawait awaitMatchaWorldRelease();\n              assertMatchaWorldModelTransport(authorization.model);\n\t\t\t\t\t\t\tmodelMaxTokens = authorization.model.maxTokens;');
     source = replaceOnce(source, '\t\t\t\t\t\tconst pending = harness.runIsolatedCompletionV2({', '\t\t\t\t\t\tassertMatchaWorldReleased();\n\t\t\t\t\t\tconst pending = harness.runIsolatedCompletionV2({');
-    return replaceOnce(source, '\t\t\t\tresult = await harness.runIsolatedCompletion(prepareIsolatedHostAuthorization(harness, harnessParams));', '\t\t\t\tawait awaitMatchaWorldRelease();\n\t\t\t\tassertMatchaWorldModelTransport(authorization.model);\n\t\t\t\tresult = await harness.runIsolatedCompletion(prepareIsolatedHostAuthorization(harness, harnessParams));');
+    return replaceOnce(source, '\t\t\t\tresult = await harness.runIsolatedCompletion(prepareIsolatedHostAuthorization(harness, {', '\t\t\t\t\tawait awaitMatchaWorldRelease();\n\t\t\t\t\tassertMatchaWorldModelTransport(authorization.model);\n\t\t\t\tresult = await harness.runIsolatedCompletion(prepareIsolatedHostAuthorization(harness, {');
   });
-  const embedded = target('embedded-agent-', ['async function runEmbeddedAgentViaCliBackend(params, dispatch) {', 'function prepareNativeSessionRuntime(runParams, harness, admission) {']);
+  const embedded = target('embedded-agent-', ['async function runEmbeddedAgentViaCliBackendIfEligible(params) {', 'async function prepareNativeSessionRuntime(runParams, harness, admission, assertCallerCurrent) {']);
   patch(embedded, source => {
     source = addImport(source, ['assertMatchaWorldUnsupported']);
-    source = replaceOnce(source, 'async function runEmbeddedAgentViaCliBackend(params, dispatch) {', 'async function runEmbeddedAgentViaCliBackend(params, dispatch) {\n  assertMatchaWorldUnsupported("embedded_cli");');
+    source = replaceOnce(source, '\tconst eligibility = resolveEmbeddedCliBackendDispatchEligibility(params);\n\tif (!eligibility) return;', '\tconst eligibility = resolveEmbeddedCliBackendDispatchEligibility(params);\n\tif (!eligibility) return;\n  assertMatchaWorldUnsupported("embedded_cli");');
     source = replaceOnce(source, '\tif (!admission || !pinnedHarnessId || !harness.resolveSessionRuntimeOwnership) return;', '\tif (!admission || !pinnedHarnessId || !harness.resolveSessionRuntimeOwnership) return;\n  assertMatchaWorldUnsupported("native_session_owner");');
     return replaceOnce(source, 'async function executeQueuedContextEngineCompaction(input) {', 'async function executeQueuedContextEngineCompaction(input) {\n  assertMatchaWorldUnsupported("unmetered_compaction");');
   });
-  const followup = target('agent-runner.runtime-', ['function createFollowupRunner(initialDefaults) {']);
+  const followup = target('agent-runner-run-', ['function createFollowupRunner(initialDefaults) {']);
   patch(followup, source => {
     source = addImport(source, ['assertMatchaWorldRecoveryNotUnscoped', 'recordMatchaWorldToolDrain']);
     source = replaceOnce(source, '\tif (pendingToolTasks.size > 0) await drainPendingToolTasks({\n\t\ttasks: pendingToolTasks,\n\t\tonTimeout: logVerbose\n\t});', '\tif (pendingToolTasks.size > 0) recordMatchaWorldToolDrain(await drainPendingToolTasks({\n\t\ttasks: pendingToolTasks,\n\t\tonTimeout: logVerbose\n\t}));');
     return replaceOnce(source, '\tconst executeFollowup = async (queued) => {', '\tconst executeFollowup = async (queued) => {\n    assertMatchaWorldRecoveryNotUnscoped({ agentId: queued.run.agentId, sessionKey: queued.run.sessionKey, sessionId: queued.run.sessionId, requestId: queued.messageId });');
   });
-  const recovery = target('main-session-restart-recovery-', ['const sourceRunId = normalizeOptionalString(params.entry.restartRecoveryDeliverySourceRunId);']);
+  const recovery = target('main-session-restart-recovery-', ['const claimedSourceRunId = normalizeOptionalString(params.entry.restartRecoveryDeliverySourceRunId);']);
   patch(recovery, source => replaceOnce(addImport(source, ['assertMatchaWorldRecoveryNotUnscoped']),
-    '\tconst sourceRunId = normalizeOptionalString(params.entry.restartRecoveryDeliverySourceRunId);',
-    '\tconst sourceRunId = normalizeOptionalString(params.entry.restartRecoveryDeliverySourceRunId);\n  assertMatchaWorldRecoveryNotUnscoped({ agentId: params.agentId, sessionKey: params.sessionKey, sessionId: params.entry.sessionId, requestId: sourceRunId });'));
+    '\tconst claimedSourceRunId = normalizeOptionalString(params.entry.restartRecoveryDeliverySourceRunId);',
+    '\tconst claimedSourceRunId = normalizeOptionalString(params.entry.restartRecoveryDeliverySourceRunId);\n  assertMatchaWorldRecoveryNotUnscoped({ agentId: params.agentId, sessionKey: params.sessionKey, sessionId: params.entry.sessionId, requestId: claimedSourceRunId });'));
   const pluginBootstrap = target('server-plugin-bootstrap-', ['function prepareGatewayPluginLoad(params) {']);
   patch(pluginBootstrap, source => replaceOnce(addImport(source, ['readMatchaWorldProjection']), 'function prepareGatewayPluginLoad(params) {', 'function prepareGatewayPluginLoad(params) {\n  if (process.env.MATCHA_WORLD_PROJECTION) readMatchaWorldProjection();'));
   const workerOwners = target('placement-turn-claim-events-', ['function bindWorkerTurnOwner(', 'function getWorkerTurnExecutionIdentityCapability(store, claim)']);
   patch(workerOwners, source => {
     source = addImport(source, ['bindMatchaWorldWorkerCancellation']);
-    source = replaceOnce(source, '\tconst owners = workerTurnOwners.get(path) ?? /* @__PURE__ */ new Map();\n\tconst assertActive = () => {', `\tlet commitWorldCancellationIntent;
-\ttry {
-\t\tcommitWorldCancellationIntent = bindMatchaWorldWorkerCancellation(store, claim, operationalRunInstance, source, delegatedAuthority, assertRunActive);
-\t} catch (error) {
-\t\tscope?.release();
-\t\tthrow error;
-\t}
-\tconst owners = workerTurnOwners.get(path) ?? /* @__PURE__ */ new Map();
-\tconst assertActive = () => {`);
-    return replaceOnce(source, '\tconst capability = Object.freeze({ async run(callback) {', '\tconst capability = Object.freeze({ commitWorldCancellationIntent, async run(callback) {');
+    source = replaceOnce(source, '\tconst authority = claimAuthority;\n\tclaim = authority.claim;', `\tconst authority = claimAuthority;
+\tclaim = authority.claim;
+  let commitWorldCancellationIntent;
+  try {
+    commitWorldCancellationIntent = bindMatchaWorldWorkerCancellation(claim, operationalRunInstance, sessionTarget, runAuthority, assertRunActive, () => authority.isCurrent());
+  } catch (error) {
+    approvalLifetime.abort();
+    authority.release();
+    scope?.release();
+    throw error;
+  }`);
+    return replaceOnce(source, '\tconst capability = Object.freeze({\n\t\tsessionTarget,', '\tconst capability = Object.freeze({\n    commitWorldCancellationIntent,\n\t\tsessionTarget,');
   });
   const workerService = target('service-', ['function createWorkerInferenceManager(options) {', 'function createWorkerEnvironmentService(options) {']);
   patch(workerService, source => {
     source = addImport(source, ['MatchaWorldInvestigationError']);
-    source = replaceOnce(source, '\tstore.recoverPending(terminalError("provider-error"));\n\tconst processFence = (entry) => {', `\tstore.recoverPending(terminalError("provider-error"));
-\tconst captureWorldCancellationIntent = (claim) => {
+    source = replaceOnce(source, '\tconst processFence = (entry) => {', `\tconst captureWorldCancellationIntent = (claim) => {
 \t\tconst capability = options.getExecutionIdentityCapability?.(claim);
 \t\tif (typeof capability?.commitWorldCancellationIntent !== "function") throw new MatchaWorldInvestigationError("unknown");
 \t\treturn capability.commitWorldCancellationIntent;
 \t};
 \tconst processFence = (entry) => {`);
-    source = replaceOnce(source, '\t\tif (revalidationError) {\n\t\t\tentry.abortReason = revalidationError;\n\t\t\tentry.controller.abort();', '\t\tif (revalidationError) {\n\t\t\tentry.commitWorldCancellationIntent();\n\t\t\tentry.abortReason = revalidationError;\n\t\t\tentry.controller.abort();');
-    source = replaceOnce(source, '\tconst abortEntry = (entry, reason) => {\n\t\tif (!entry.abortReason)', '\tconst abortEntry = (entry, reason) => {\n\t\tentry.commitWorldCancellationIntent();\n\t\tif (!entry.abortReason)');
-    source = replaceOnce(source, '\t\tconst claim = params.identity.turnClaim;\n\t\tconst claimKey = serializeWorkerSessionTurnClaim(claim);', '\t\tconst claim = params.identity.turnClaim;\n\t\tconst commitWorldCancellationIntent = captureWorldCancellationIntent(claim);\n\t\tconst claimKey = serializeWorkerSessionTurnClaim(claim);');
-    source = replaceOnce(source, '\t\tconst entry = {\n\t\t\tclaimKey,\n\t\t\tidentity: params.identity,', '\t\tconst entry = {\n\t\t\tclaimKey,\n\t\t\tcommitWorldCancellationIntent,\n\t\t\tidentity: params.identity,');
-    source = replaceOnce(source, '\t\t} else try {\n\t\t\tstore.cancelPending({', '\t\t} else {\n\t\t\tcaptureWorldCancellationIntent(params.identity.turnClaim)();\n\t\t\ttry {\n\t\t\tstore.cancelPending({');
-    source = replaceOnce(source, '\t\t\t\toutcome: terminalError("cancelled")\n\t\t\t});\n\t\t} catch {\n\t\t\treturn {\n\t\t\t\tok: false,\n\t\t\t\treason: "provider-error"\n\t\t\t};\n\t\t}\n\t\treturn {', '\t\t\t\toutcome: terminalError("cancelled")\n\t\t\t});\n\t\t\t} catch {\n\t\t\t\treturn {\n\t\t\t\t\tok: false,\n\t\t\t\t\treason: "provider-error"\n\t\t\t\t};\n\t\t\t}\n\t\t}\n\t\treturn {');
+    source = replaceOnce(source, '\tconst abortEntry = (entry, reason) => {\n\t\tentry.abortReason ??= reason;', '\tconst abortEntry = (entry, reason) => {\n\t\tentry.commitWorldCancellationIntent();\n\t\tentry.abortReason ??= reason;');
+    source = replaceOnce(source, '\t\tconst serialized = stableStringify(params.request);\n\t\tconst claimKey = serializeWorkerSessionTurnClaim(params.identity.turnClaim);', '\t\tconst serialized = stableStringify(params.request);\n\t\tconst commitWorldCancellationIntent = captureWorldCancellationIntent(params.identity.turnClaim);\n\t\tconst claimKey = serializeWorkerSessionTurnClaim(params.identity.turnClaim);');
+    source = replaceOnce(source, '\t\tconst entry = {\n\t\t\tclaimKey,\n\t\t\tstoreKey: inferenceTurnKey(params.request),', '\t\tconst entry = {\n\t\t\tclaimKey,\n      commitWorldCancellationIntent,\n\t\t\tstoreKey: inferenceTurnKey(params.request),');
+    source = replaceOnce(source, '\t\t\t\t\tif (failure) throw authorityFailure ? authorityFailure.error : new WorkerInferenceAuthorityError(failure);', '\t\t\t\t\tif (failure) throw authorityFailure ? authorityFailure.error : new WorkerInferenceAuthorityError(failure);\n          captureWorldCancellationIntent(params.identity.turnClaim)();');
     return replaceOnce(source, '\tconst inference = createWorkerInferenceManager({\n\t\texecute: options.executeInference,', '\tconst inference = createWorkerInferenceManager({\n\t\tgetExecutionIdentityCapability: (claim) => options.placementStore?.getExecutionIdentityCapability?.(claim),\n\t\texecute: options.executeInference,');
   });
-  // The independent worker is minified and cannot import the main-process scope.
-  const worker = path.join(dist, 'worker', 'worker.mjs');
-  patch(worker, source => {
-    const retained = `function assertMatchaWorldWorkerRetained(database, field, value) {
-  if (!database.db.prepare("PRAGMA table_info(session_pending_inputs)").all().some(column => column.name === "world_investigation_json")) return;
-  const query = field === "session_id" ? "SELECT world_investigation_json FROM session_pending_inputs WHERE session_id = ? AND world_investigation_json IS NOT NULL" : "SELECT world_investigation_json FROM session_pending_inputs WHERE session_key = ? AND world_investigation_json IS NOT NULL";
-  if (database.db.prepare(query).all(value).some(row => JSON.parse(row.world_investigation_json).settledAtMs == null)) throw new Error("World investigation input is not settled");
-}
-`;
-    source = replaceOnce(source, 'function deleteSqliteSessionStateRows(Ot,Zt){', `${retained}function deleteSqliteSessionStateRows(Ot,Zt){assertMatchaWorldWorkerRetained(Ot,"session_id",Zt);`);
-    source = replaceOnce(source, 'function deleteSessionEntryRows(Ot,Zt,_n={}){', 'function deleteSessionEntryRows(Ot,Zt,_n={}){assertMatchaWorldWorkerRetained(Ot,"session_key",Zt);');
-    source = replaceOnce(source, 'function deleteLegacySessionEntryRows(Ot,Zt,_n,Dn={}){', 'function deleteLegacySessionEntryRows(Ot,Zt,_n,Dn={}){for(const key of Zt)assertMatchaWorldWorkerRetained(Ot,"session_key",key);');
-    source = replaceOnce(source, 'function deleteSessionPendingInputs(Ot,Zt){', 'function deleteSessionPendingInputs(Ot,Zt){assertMatchaWorldWorkerRetained(Ot,"session_key",Zt);');
-    return replaceOnce(source, 'function consumeSessionPendingInput(Ot,Zt){', 'function consumeSessionPendingInput(Ot,Zt){if(Ot.db.prepare("PRAGMA table_info(session_pending_inputs)").all().some(column=>column.name==="world_investigation_json")&&Ot.db.prepare("SELECT world_investigation_json FROM session_pending_inputs WHERE input_id = ?").get(Zt.inputId)?.world_investigation_json)throw new Error("World input promotion requires its original atomic transcript owner");');
-  });
-  // All source anchors are checked before any product file is written.
+  const worker = prepareWorldWorkerArchive(openclawDir);
+  for (const [file, source] of worker.updates) updates.set(file, source);
+  // All source anchors and the native worker archive identity are checked before any product file is written.
   let changed = 0;
   for (const [file, source] of updates) {
-    if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === source) continue;
+    if (fs.existsSync(file) && (Buffer.isBuffer(source) ? fs.readFileSync(file).equals(source) : fs.readFileSync(file, 'utf8') === source)) continue;
     fs.writeFileSync(file, source);
     changed += 1;
   }
+  if (worker.obsolete) fs.unlinkSync(worker.obsolete);
   return { status: changed ? 'applied' : 'clean', detail: `${changed} World investigation product files` };
 }

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { collectDiagnosticsArchive, exportDiagnosticsArchive } from '@/lib/diagnostics-archive';
+import { collectDiagnosticsArchive, exportDiagnosticsArchive } from '@/plugins/settings/services/diagnostics-archive';
 import { hostApiFetchDecoded } from '@/lib/host-api';
 
 vi.mock('@/lib/host-api', () => ({

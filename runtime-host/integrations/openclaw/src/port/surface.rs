@@ -333,6 +333,7 @@ fn project_csp(value: &Value) -> SurfaceResult {
     for field in [
         "connectDomains",
         "resourceDomains",
+        "mediaDomains",
         "frameDomains",
         "baseUriDomains",
     ] {
@@ -341,9 +342,10 @@ fn project_csp(value: &Value) -> SurfaceResult {
                 .as_array()
                 .ok_or(OpenClawSurfaceFailure::InvalidResponse)?;
             if domains.iter().any(|domain| {
-                !domain
-                    .as_str()
-                    .is_some_and(|domain| valid_text(domain, 2048))
+                !domain.as_str().is_some_and(|domain| {
+                    valid_text(domain, 2048)
+                        && (field != "mediaDomains" || sandbox_media_source(domain))
+                })
             }) {
                 return Err(OpenClawSurfaceFailure::InvalidResponse);
             }
@@ -357,6 +359,38 @@ fn project_csp(value: &Value) -> SurfaceResult {
         result.insert("blockDescendantFrames".into(), value.clone());
     }
     Ok(Value::Object(result))
+}
+
+fn sandbox_media_source(value: &str) -> bool {
+    if matches!(value, "https:" | "blob:") {
+        return true;
+    }
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none_or(str::is_empty)
+        && url.fragment().is_none_or(str::is_empty)
+        && url.host_str().is_some_and(|host| {
+            if let Some(ipv6) = host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+            {
+                !ipv6.is_empty()
+                    && ipv6
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() || matches!(byte, b':' | b'.'))
+            } else {
+                let domain = host.strip_prefix("*.").unwrap_or(host);
+                !domain.is_empty()
+                    && domain
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+            }
+        })
 }
 
 fn surface_html(native: &Map<String, Value>) -> Result<&str, OpenClawSurfaceFailure> {
@@ -427,19 +461,33 @@ fn sandbox_url(
     {
         return Err(invalid);
     }
-    let mut queries = resolved.query_pairs();
-    if let Some((key, value)) = queries.next() {
-        if key != "csp"
-            || value.is_empty()
-            || value.len() > 6832
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-            || queries.next().is_some()
-        {
-            return Err(invalid);
+    let mut csp_seen = false;
+    let mut version_seen = false;
+    for (key, value) in resolved.query_pairs() {
+        match key.as_ref() {
+            "csp"
+                if !csp_seen
+                    && !value.is_empty()
+                    && value.len() <= 6832
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+                    }) =>
+            {
+                csp_seen = true;
+            }
+            // OpenClaw hashes the public shell and its security headers with SHA-256.
+            "v" if !version_seen
+                && value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) =>
+            {
+                version_seen = true;
+            }
+            _ => return Err(invalid),
         }
-    } else if resolved.query().is_some() {
+    }
+    if resolved.query().is_some() && !csp_seen && !version_seen {
         return Err(invalid);
     }
     Ok(resolved.into())

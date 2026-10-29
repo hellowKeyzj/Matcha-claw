@@ -1,8 +1,8 @@
 import { createStore, useStore } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
-import { configurePlugin, operatePlugin } from '@/lib/plugins';
+import { configurePlugin, operatePlugin } from './plugin-client';
 
-import { selectManagementEndpoint, selectManagementAgentScope, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { selectManagementEndpoint, selectManagementAgentScope, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { buildCapabilityScopeKey, runtimeInstanceScope, runtimeScopeQuery } from '@/types/desktop/runtime-address';
 import { isPluginCatalog, isPluginScope, type PluginCatalogItem, type PluginScope } from '@/types/plugins';
 export type { PluginCatalogItem } from '@/types/plugins';
@@ -492,7 +492,7 @@ export async function prewarmPluginsData(): Promise<void> {
 
 export async function prefetchPluginsData(): Promise<void> {
   const [{ isGatewayOperational }, { useGatewayStore }] = await Promise.all([
-    import('@/lib/gateway-status'),
+    import('@/plugins/runtime/gateway-status'),
     import('@/plugins/runtime/store'),
   ]);
   if (isGatewayOperational(useGatewayStore.getState().status)) await prewarmPluginsData();

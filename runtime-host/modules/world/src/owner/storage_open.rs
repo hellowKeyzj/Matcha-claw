@@ -9,6 +9,7 @@ use super::{Shared, Storage, WorldHandle, closed, initialize, locate, publish_re
 use super::super::{Error, queries};
 
 pub(super) async fn open(shared: &Arc<Shared>, storage_id: String, target: WorldHandle) -> Result<Vec<WorldRef>, Error> {
+    let _retry = shared.startup_retry.lock().await;
     if shared.closing.load(Ordering::Acquire) { return Err(closed()); }
     let store = shared.stores.reopen(&storage_id).await?;
     let worlds = store.worlds(&shared.authority).await?;
@@ -16,14 +17,20 @@ pub(super) async fn open(shared: &Arc<Shared>, storage_id: String, target: World
     for world in &worlds {
         if shared.startup_failures.lock().expect("world startup failures poisoned").contains_key(world) {
             let current = locate(shared, &store, world).await?;
-            super::initialize_world(shared, &current, world, true).await?;
+            if let Err(error) = super::initialize_world(shared, &current, world, true).await {
+                super::record_initialization_diagnostic(shared, "storage_open", error);
+            }
         }
     }
-    if let Err(error) = initialize(shared, &store, target, None).await {
-        shared.storage.send_replace(Storage::Failed { error: error.clone(), store: Some(store) });
-        return Err(error);
+    match initialize(shared, &store, target, None).await {
+        Ok(()) => publish_ready(shared, store.clone())?,
+        Err(error) => {
+            shared.storage.send_replace(Storage::Failed { error: error.clone(), store: Some(store.clone()) });
+            if worlds.iter().any(|world| !shared.startup_reports.lock().expect("world startup reports poisoned").contains_key(world)) {
+                return Err(error);
+            }
+        }
     }
-    publish_ready(shared, store.clone())?;
     let mut accessible = Vec::new();
     for world in worlds {
         let current = locate(shared, &store, &world).await?;

@@ -1,4 +1,4 @@
-import { boardExecute } from '@/lib/board-api';
+import { boardExecute } from './board-api';
 import { decodeBoardOperation, type BoardIdentity, type BoardOperation, type BoardWidget } from '@/types/board';
 import { isRecord, type SandboxChannel } from '@/plugins/surfaces/sandbox-channel';
 import type { ContentActions } from '@/plugins/surfaces/content-security';

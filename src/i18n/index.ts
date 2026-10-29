@@ -1,78 +1,10 @@
-import i18n from 'i18next';
+import i18n, { type Resource, type ResourceKey } from 'i18next';
 import { initReactI18next } from 'react-i18next';
 import {
     SUPPORTED_LANGUAGE_CODES,
     resolveSupportedLanguage,
     type SupportedLanguageCode,
 } from './language';
-
-// EN
-import enCommon from './locales/en/common.json';
-import enSettings from './locales/en/settings.json';
-import enDashboard from './locales/en/dashboard.json';
-import enWiki from './locales/en/wiki.json';
-import enChat from './locales/en/chat.json';
-import enChannels from './locales/en/channels.json';
-import enSkills from './locales/en/skills.json';
-import enCron from './locales/en/cron.json';
-import enSubagents from './locales/en/subagents.json';
-import enSubagentTemplates from './locales/en/subagent-templates.json';
-import enTeams from './locales/en/teams.json';
-import enTasks from './locales/en/tasks.json';
-import enSecurity from './locales/en/security.json';
-import enPlugins from './locales/en/plugins.json';
-import enWorld from './locales/en/world.json';
-
-// ZH
-import zhCommon from './locales/zh/common.json';
-import zhSettings from './locales/zh/settings.json';
-import zhDashboard from './locales/zh/dashboard.json';
-import zhWiki from './locales/zh/wiki.json';
-import zhChat from './locales/zh/chat.json';
-import zhChannels from './locales/zh/channels.json';
-import zhSkills from './locales/zh/skills.json';
-import zhCron from './locales/zh/cron.json';
-import zhSubagents from './locales/zh/subagents.json';
-import zhSubagentTemplates from './locales/zh/subagent-templates.json';
-import zhTeams from './locales/zh/teams.json';
-import zhTasks from './locales/zh/tasks.json';
-import zhSecurity from './locales/zh/security.json';
-import zhPlugins from './locales/zh/plugins.json';
-import zhWorld from './locales/zh/world.json';
-
-// JA
-import jaCommon from './locales/ja/common.json';
-import jaSettings from './locales/ja/settings.json';
-import jaDashboard from './locales/ja/dashboard.json';
-import jaWiki from './locales/ja/wiki.json';
-import jaChat from './locales/ja/chat.json';
-import jaChannels from './locales/ja/channels.json';
-import jaSkills from './locales/ja/skills.json';
-import jaCron from './locales/ja/cron.json';
-import jaSubagents from './locales/ja/subagents.json';
-import jaSubagentTemplates from './locales/ja/subagent-templates.json';
-import jaTeams from './locales/ja/teams.json';
-import jaTasks from './locales/ja/tasks.json';
-import jaSecurity from './locales/ja/security.json';
-import jaPlugins from './locales/ja/plugins.json';
-import jaWorld from './locales/ja/world.json';
-
-// RU
-import ruCommon from './locales/ru/common.json';
-import ruSettings from './locales/ru/settings.json';
-import ruDashboard from './locales/ru/dashboard.json';
-import ruWiki from './locales/ru/wiki.json';
-import ruChat from './locales/ru/chat.json';
-import ruChannels from './locales/ru/channels.json';
-import ruSkills from './locales/ru/skills.json';
-import ruCron from './locales/ru/cron.json';
-import ruSubagents from './locales/ru/subagents.json';
-import ruSubagentTemplates from './locales/ru/subagent-templates.json';
-import ruTeams from './locales/ru/teams.json';
-import ruTasks from './locales/ru/tasks.json';
-import ruSecurity from './locales/ru/security.json';
-import ruPlugins from './locales/ru/plugins.json';
-import ruWorld from './locales/ru/world.json';
 
 export const SUPPORTED_LANGUAGES = [
     { code: 'en', label: 'English' },
@@ -83,76 +15,18 @@ export const SUPPORTED_LANGUAGES = [
 
 export type LanguageCode = SupportedLanguageCode;
 
-const resources = {
-    en: {
-        common: enCommon,
-        settings: enSettings,
-        dashboard: enDashboard,
-        wiki: enWiki,
-        chat: enChat,
-        channels: enChannels,
-        skills: enSkills,
-        cron: enCron,
-        subagents: enSubagents,
-        subagentTemplates: enSubagentTemplates,
-        teams: enTeams,
-        tasks: enTasks,
-        security: enSecurity,
-        plugins: enPlugins,
-        world: enWorld,
-    },
-    zh: {
-        common: zhCommon,
-        settings: zhSettings,
-        dashboard: zhDashboard,
-        wiki: zhWiki,
-        chat: zhChat,
-        channels: zhChannels,
-        skills: zhSkills,
-        cron: zhCron,
-        subagents: zhSubagents,
-        subagentTemplates: zhSubagentTemplates,
-        teams: zhTeams,
-        tasks: zhTasks,
-        security: zhSecurity,
-        plugins: zhPlugins,
-        world: zhWorld,
-    },
-    ja: {
-        common: jaCommon,
-        settings: jaSettings,
-        dashboard: jaDashboard,
-        wiki: jaWiki,
-        chat: jaChat,
-        channels: jaChannels,
-        skills: jaSkills,
-        cron: jaCron,
-        subagents: jaSubagents,
-        subagentTemplates: jaSubagentTemplates,
-        teams: jaTeams,
-        tasks: jaTasks,
-        security: jaSecurity,
-        plugins: jaPlugins,
-        world: jaWorld,
-    },
-    ru: {
-        common: ruCommon,
-        settings: ruSettings,
-        dashboard: ruDashboard,
-        wiki: ruWiki,
-        chat: ruChat,
-        channels: ruChannels,
-        skills: ruSkills,
-        cron: ruCron,
-        subagents: ruSubagents,
-        subagentTemplates: ruSubagentTemplates,
-        teams: ruTeams,
-        tasks: ruTasks,
-        security: ruSecurity,
-        plugins: ruPlugins,
-        world: ruWorld,
-    },
-};
+const localeResources = import.meta.glob<ResourceKey>([
+    './locales/*/*.json',
+    '../plugins/*/locales/*/*.json',
+], { eager: true, import: 'default' });
+
+const resources: Resource = {};
+for (const [path, translations] of Object.entries(localeResources)) {
+    const [language, fileName] = path.split('/').slice(-2);
+    const name = fileName.slice(0, -'.json'.length);
+    const namespace = name === 'subagent-templates' ? 'subagentTemplates' : name;
+    (resources[language] ??= {})[namespace] = translations;
+}
 
 i18n
     .use(initReactI18next)
@@ -162,7 +36,7 @@ i18n
         fallbackLng: 'en',
         supportedLngs: [...SUPPORTED_LANGUAGE_CODES],
         defaultNS: 'common',
-        ns: ['common', 'settings', 'dashboard', 'wiki', 'chat', 'channels', 'skills', 'cron', 'subagents', 'subagentTemplates', 'teams', 'tasks', 'security', 'plugins', 'world'],
+        ns: Object.keys(resources.en),
         interpolation: {
             escapeValue: false, // React already escapes
         },

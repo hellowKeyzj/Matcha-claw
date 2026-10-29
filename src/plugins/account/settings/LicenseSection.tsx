@@ -7,7 +7,7 @@ import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/componen
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { clearLicense, fetchStoredLicenseKey, revalidateLicense, validateLicense } from '@/lib/license';
+import { clearLicense, fetchStoredLicenseKey, revalidateLicense, validateLicense } from '../api/license';
 import { useLicenseStore } from '../stores/license';
 
 export function LicenseSection() {

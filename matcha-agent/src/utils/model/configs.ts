@@ -3,6 +3,10 @@ import type { APIProvider } from './providers.js'
 
 export type ModelConfig = Record<APIProvider, ModelName>
 
+export function normalizeModelStringForAPI(model: string): string {
+  return model.replace(/\[(1|2)m\]/gi, '')
+}
+
 // @[MODEL LAUNCH]: Add a new CLAUDE_*_CONFIG constant here. Double check the correct model strings
 // here since the pattern may change.
 

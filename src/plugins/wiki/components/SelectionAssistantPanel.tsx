@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { waitForCall } from '@/lib/call-log-await';
 import { hostWikiApplySelection, hostWikiCallResult, hostWikiCancelSelection, hostWikiGenerateSelection, hostWikiReadFile, hostWikiSelectionTask } from '@/lib/host-api';
 import { delay } from '@/lib/utils';
-import { buildWordDiff, normalizeSelectionReplacement } from '@/lib/wiki-selection';
+import { buildWordDiff, normalizeSelectionReplacement } from '../wiki-selection';
 import { useWikiProjectsStore } from '@/plugins/wiki/wiki-projects';
 import type { WikiSelectionApplyReceipt, WikiSelectionIntent, WikiSelectionReference, WikiSelectionSnapshot, WikiSelectionTask, WikiSelectionTurn } from '@/types/wiki-selection';
 import { resolveWikiMarkdownImage } from '@/plugins/wiki/wiki-media';

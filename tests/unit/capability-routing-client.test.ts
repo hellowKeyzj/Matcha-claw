@@ -23,7 +23,7 @@ describe('capability routing client', () => {
       },
     });
 
-    const { fetchCapabilityRouting } = await import('@/lib/capability-routing');
+    const { fetchCapabilityRouting } = await import('@/plugins/providers/services/capability-routing');
     await expect(fetchCapabilityRouting()).resolves.toEqual({
       revision: 3,
       routing: {
@@ -40,7 +40,7 @@ describe('capability routing client', () => {
   it('represents absent desired routing without inventing a revision', async () => {
     hostApiFetchMock.mockResolvedValue({ routing: null });
 
-    const { fetchCapabilityRouting } = await import('@/lib/capability-routing');
+    const { fetchCapabilityRouting } = await import('@/plugins/providers/services/capability-routing');
     await expect(fetchCapabilityRouting()).resolves.toEqual({ revision: null, routing: {} });
   });
 
@@ -56,14 +56,14 @@ describe('capability routing client', () => {
       },
     });
 
-    const { fetchCapabilityRouting } = await import('@/lib/capability-routing');
+    const { fetchCapabilityRouting } = await import('@/plugins/providers/services/capability-routing');
     await expect(fetchCapabilityRouting()).rejects.toThrow('Provider routing response is invalid');
   });
 
   it('rejects an invalid routing list response', async () => {
     hostApiFetchMock.mockResolvedValue({ routing: {} });
 
-    const { fetchCapabilityRouting } = await import('@/lib/capability-routing');
+    const { fetchCapabilityRouting } = await import('@/plugins/providers/services/capability-routing');
     await expect(fetchCapabilityRouting()).rejects.toThrow('Provider routing response is invalid');
   });
 
@@ -79,7 +79,7 @@ describe('capability routing client', () => {
       },
     });
 
-    const { fetchCapabilityRouting } = await import('@/lib/capability-routing');
+    const { fetchCapabilityRouting } = await import('@/plugins/providers/services/capability-routing');
     await expect(fetchCapabilityRouting()).rejects.toThrow('Provider routing response is invalid');
   });
 
@@ -102,7 +102,7 @@ describe('capability routing client', () => {
       commit: 'committed',
     });
 
-    const { persistCapabilityRouting } = await import('@/lib/capability-routing');
+    const { persistCapabilityRouting } = await import('@/plugins/providers/services/capability-routing');
     const result = await persistCapabilityRouting(routing, 5);
     expect(result).toMatchObject({
       success: true,
@@ -137,7 +137,7 @@ describe('capability routing client', () => {
   it('does not treat rejected desired state as a persisted routing', async () => {
     hostApiFetchMock.mockResolvedValue({ success: false, error: 'Provider routing request was rejected' });
 
-    const { persistCapabilityRouting } = await import('@/lib/capability-routing');
+    const { persistCapabilityRouting } = await import('@/plugins/providers/services/capability-routing');
     await expect(persistCapabilityRouting({}, 1)).resolves.toEqual({
       success: false,
       revision: 1,

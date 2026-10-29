@@ -6,7 +6,7 @@ import { useChatStore } from '@/plugins/chat/store';
 import { executeSessionThinkingSelection } from '@/plugins/chat/store/session-initialization';
 import type { ChatCurrentConversation } from '@/plugins/chat/store/types';
 import type { ComposerThinkingSelection } from '@/plugins/chat/composer-drafts';
-import { buildCapabilityScopeKey, sessionScope, type AgentScope, type SessionIdentity } from '@/types/desktop/runtime-address';
+import { agentScope, buildCapabilityScopeKey, sessionScope, type AgentScope, type SessionIdentity } from '@/types/desktop/runtime-address';
 import type { SessionThinkingResult } from '@/types/session-thinking';
 import type { ThinkingPickerState } from '@/plugins/chat/components/ChatModelPicker';
 
@@ -30,20 +30,28 @@ export function useChatThinking({
 }): ThinkingPickerState | null {
   const { t } = useTranslation('chat');
   const draft = conversation?.kind === 'draft';
-  const target = useMemo(() => identity ? sessionScope(identity) : scope, [identity, scope]);
   const endpoint = identity?.endpoint ?? scope?.endpoint;
   const runtime = endpoint?.kind === 'native-runtime' && endpoint.runtimeInstanceId === 'local'
     && (endpoint.runtimeAdapterId === 'openclaw' || endpoint.runtimeAdapterId === 'matcha-agent') ? endpoint.runtimeAdapterId : null;
+  const agentId = identity?.agentId ?? scope?.agentId;
+  const sessionKey = identity?.sessionKey;
+  const target = useMemo(() => {
+    if (!runtime || !agentId) return null;
+    const endpoint = { kind: 'native-runtime' as const, runtimeAdapterId: runtime, runtimeInstanceId: 'local' };
+    return sessionKey === undefined ? agentScope(endpoint, agentId) : sessionScope({ endpoint, agentId, sessionKey });
+  }, [agentId, runtime, sessionKey]);
   const scopeKey = target ? buildCapabilityScopeKey(target) : '';
   const modelHint = draft || pendingConfiguration ? modelSelectionId : undefined;
-  const modelKey = JSON.stringify([modelReference, modelHint]);
+  const modelKey = JSON.stringify([modelHint ?? modelReference, modelHint !== undefined]);
   const preview = draft || modelHint !== undefined;
   const owner = useMemo(() => ({ recordKey, scopeKey, draft }), [draft, recordKey, scopeKey]);
-  const request = useMemo(() => ({ owner, conversation, identity, modelKey, ready, modelSwitching, preview }), [conversation, identity, modelKey, modelSwitching, owner, preview, ready]);
+  const request = useMemo(() => ({ owner, modelKey, ready, modelSwitching }), [modelKey, modelSwitching, owner, ready]);
   const operationRef = useRef<{ request: typeof request; sequence: number; switching: boolean } | null>(null);
   const [state, setState] = useState<{
     request: typeof request; result: SessionThinkingResult | null; switching: boolean; writeResult?: SessionThinkingResult;
   }>({ request, result: null, switching: false });
+  const writing = state.request === request && state.switching;
+  const readBlocked = initializationBusy && (draft || pendingConfiguration) && !writing;
 
   useLayoutEffect(() => {
     operationRef.current = { request, sequence: 0, switching: false };
@@ -52,7 +60,7 @@ export function useChatThinking({
 
   useEffect(() => {
     const operation = operationRef.current;
-    if (!ready || !target || !runtime || modelSwitching || operation?.request !== request || operation.switching) return;
+    if (!ready || !target || !runtime || modelSwitching || readBlocked || operation?.request !== request || operation.switching) return;
     const traceId = createSessionTraceId('thinking-read');
     const sequence = ++operation.sequence;
     let cancelled = false;
@@ -85,14 +93,16 @@ export function useChatThinking({
         setState({ request, result: { runtime, outcome: 'unavailable' }, switching: false });
       });
     return () => { cancelled = true; };
-  }, [draft, modelHint, modelKey, modelSwitching, preview, ready, request, runtime, scopeKey, target]);
+  }, [draft, modelHint, modelKey, modelSwitching, preview, readBlocked, ready, request, runtime, scopeKey, target]);
 
   // The conversation owns the last result; the request determines whether it is current.
   const result = state.request.owner === owner ? state.result : null;
   const snapshot = result?.outcome === 'available' || result?.outcome === 'confirmed' ? result : null;
   const isCurrentRequest = state.request === request;
-  const intended = pendingSelection?.runtime === runtime ? pendingSelection : undefined;
   const switching = isCurrentRequest && state.switching;
+  const writeResult = isCurrentRequest ? state.writeResult : undefined;
+  const pendingIntent = pendingSelection?.runtime === runtime ? pendingSelection : undefined;
+  const intended = draft || !switching && !writeResult ? pendingIntent : undefined;
   const loading = ready && (!isCurrentRequest || !result);
   const options = useMemo(() => (snapshot?.options ?? []).map((level) => ({
     id: JSON.stringify(level), label: level, level,
@@ -103,8 +113,8 @@ export function useChatThinking({
     ? intended.level ?? (snapshot?.level === null ? snapshot.effectiveLevel : undefined)
     : snapshot?.effectiveLevel ?? snapshot?.level;
   const currentOption = incompatible ? undefined : options.find((option) => option.level === level);
-  const canReset = Boolean(intended) || snapshot?.level != null || !draft && modelHint !== undefined;
-  const disabled = !ready || initializationBusy || modelSwitching || switching || loading || options.length === 0 && !canReset;
+  const canReset = Boolean(pendingIntent) || snapshot?.level != null || !draft && modelHint !== undefined;
+  const disabled = !ready || initializationBusy && !switching || options.length === 0 && !canReset;
 
   useEffect(() => {
     logSessionTrace('thinking.picker.state', createSessionTraceId('thinking-intent'), () => ({
@@ -118,7 +128,7 @@ export function useChatThinking({
 
   const selectLevel = useCallback((level: string | null) => {
     const operation = operationRef.current;
-    if (disabled || !runtime || operation?.request !== request || operation.switching) return;
+    if (disabled || loading || switching || modelSwitching || !runtime || operation?.request !== request || operation.switching) return;
     const selection: ComposerThinkingSelection = { runtime, level };
     if (draft || pendingConfiguration) {
       setState((current) => current.request === request ? { ...current, writeResult: undefined } : current);
@@ -145,17 +155,15 @@ export function useChatThinking({
       if (!isCurrent()) return;
       setState((current) => ({ ...current, switching: false, writeResult: { runtime, outcome: 'unknown' } }));
     }).finally(() => { operation.switching = false; });
-  }, [disabled, draft, identity, incompatible, onSelectIntent, pendingConfiguration, recordKey, request, runtime, snapshot?.level]);
+  }, [disabled, draft, identity, incompatible, loading, modelSwitching, onSelectIntent, pendingConfiguration, recordKey, request, runtime, snapshot?.level, switching]);
 
   const onSelect = useCallback((id: string) => {
     const option = options.find((candidate) => candidate.id === id);
     if (option) selectLevel(option.level);
   }, [options, selectLevel]);
-  const onReset = useCallback(() => selectLevel(null), [selectLevel]);
 
-  const writeResult = isCurrentRequest ? state.writeResult : undefined;
-  if (!runtime || !snapshot && !intended && (!isCurrentRequest || !result)) return null;
-  if (isCurrentRequest && !intended && !canReset && (result?.outcome === 'unsupported' || writeResult?.outcome === 'unsupported'
+  if (!runtime || !snapshot && !pendingIntent && (!isCurrentRequest || !result)) return null;
+  if (isCurrentRequest && !pendingIntent && !canReset && (result?.outcome === 'unsupported' || writeResult?.outcome === 'unsupported'
     || snapshot && options.length === 0)) return null;
   return {
     currentId: currentOption?.id ?? null,
@@ -163,6 +171,5 @@ export function useChatThinking({
       : intended?.level === null ? t('input.thinkingReset')
         : currentOption?.label ?? level ?? t('input.thinkingPickLevel'),
     options, loading, switching, disabled, onSelect,
-    ...(canReset ? { onReset } : {}),
   };
 }

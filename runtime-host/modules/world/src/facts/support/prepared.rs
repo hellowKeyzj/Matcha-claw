@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use world_protocol::{
     api::PackageConfigView,
     bindings::{BindingNode, ImplementationRef, SlotKind},
-    ids::Digest,
     package::PackageLimits,
     provenance::{ProvenanceFailure, ProvenanceLimit, SupportDeltaProposal, SupportSnapshot},
     slots,
@@ -23,7 +22,6 @@ impl PreparedProvenance {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, NativePrepareFailure> {
         let contract = slots::slot_contract(SlotKind::Provenance)
             .map_err(|_| NativePrepareFailure::Entrypoint)?;
@@ -32,7 +30,7 @@ impl PreparedProvenance {
         }
         Ok(Self {
             proof: NativeProof::prepare(
-                node, config, artifact, host_build,
+                node, config, artifact,
                 slots::PROVENANCE_REGISTRATION, SlotKind::Provenance,
             )?,
         })

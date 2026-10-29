@@ -13,7 +13,6 @@ import type { TSchema } from '@sinclair/typebox';
 import { createToolContext, formatToolResult, registerTool } from '../helpers';
 import { handleInvokeErrorWithAutoAuth } from '../oapi/helpers';
 import { getUserAgent } from '../../core/version';
-import { isTraceEnabled } from '../../core/lark-logger';
 import { mcpDomain } from '../../core/domains';
 import type { LarkBrand } from '../../core/types';
 
@@ -242,8 +241,8 @@ export function registerMcpTool<T extends Record<string, unknown>>(
       async execute(toolCallId, params) {
         const p = params as T;
         try {
-          log.debug(() => `Calling ${config.mcpToolName} (toolCallId: ${toolCallId})`);
-          const startTime = isTraceEnabled() ? Date.now() : undefined;
+          log.debug?.(`Calling ${config.mcpToolName} (toolCallId: ${toolCallId})`);
+          const startTime = Date.now();
 
           // 执行参数验证
           config.validate?.(p);
@@ -267,9 +266,8 @@ export function registerMcpTool<T extends Record<string, unknown>>(
             },
           );
 
-          if (startTime !== undefined) {
-            log.debug(() => `${config.mcpToolName} succeeded in ${Date.now() - startTime}ms`);
-          }
+          const duration = Date.now() - startTime;
+          log.debug?.(`${config.mcpToolName} succeeded in ${duration}ms`);
 
           // MCP tools/call 返回值已经是 { content: [{ type, text }] } 格式，
           // 直接透传 content，避免被 formatToolResult 再包一层

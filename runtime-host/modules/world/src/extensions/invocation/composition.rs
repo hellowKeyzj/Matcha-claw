@@ -529,7 +529,7 @@ where
                     return Err(invalid());
                 }
             }
-            (Entrypoint::Native { .. } | Entrypoint::Wasm { .. }, None) => {}
+            (Entrypoint::Builtin { .. } | Entrypoint::Native { .. } | Entrypoint::Wasm { .. }, None) => {}
             _ => return Err(invalid()),
         }
         let prepared = prepare(

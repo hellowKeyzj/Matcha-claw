@@ -118,7 +118,7 @@ pub(crate) fn run(
                 prepared,
             )
             .await?;
-        ctx.owner.maintain(ctx.operation.world.clone()).await?;
+        ctx.owner.repair_startup(ctx.operation.world.clone()).await?;
         Ok(CommandResult::Accepted(ctx.operation))
     })
 }
@@ -325,7 +325,7 @@ fn migrate_owned(
                 request.migration.clone(),
                 request.implementation.clone(),
                 config,
-                ctx.resources.preparation.engine(),
+                ctx.resources.preparation.engine_resources(),
                 ctx.resources.preparation.execution_policy(),
                 ctx.resources.preparation.artifact_limit(),
                 limits,

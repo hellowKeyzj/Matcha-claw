@@ -15,6 +15,6 @@ unit_enum!(world_protocol::bindings::CompositionFailurePolicy, CompositionFailur
 record!(world_protocol::bindings::Composition, Composition; binding_id, nodes, mode, order, wiring, merge, failure);
 record!(world_protocol::bindings::ActivationLock, ActivationLock; world, id, digest, nodes, edges, compositions, roots, trusted_roots);
 
-variant!(world_protocol::bindings::Entrypoint, Entrypoint; units []; tuples []; records [Native { registration, host_build } => EntrypointNative, Wasm { world, interface } => EntrypointWasm, Process { executable, protocol } => EntrypointProcess]);
+variant!(world_protocol::bindings::Entrypoint, Entrypoint; units []; tuples []; records [Builtin { registration, revision } => EntrypointBuiltin, Native { registration, host_build } => EntrypointNative, Wasm { world, interface } => EntrypointWasm, Process { executable, protocol } => EntrypointProcess]);
 record!(world_protocol::bindings::ImplementationRef, ImplementationRef; install_id, package_digest, artifact_id, artifact_digest, entrypoint, contracts, config_digest, dependency_lock, checkpoint_format);
 unit_enum!(world_protocol::bindings::PublicationConflictReason, PublicationConflictReason; EmptyScope, ResolutionMismatch, RollbackUnproven);

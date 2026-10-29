@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { clearUiTelemetry, getUiTelemetrySnapshot } from '@/lib/telemetry';
-import { getOrBuildAssistantMarkdownBody, peekAssistantMarkdownBody, prewarmAssistantMarkdownBody } from '@/lib/chat-markdown-body';
+import { getOrBuildAssistantMarkdownBody, peekAssistantMarkdownBody, prewarmAssistantMarkdownBody } from '@/plugins/message-rendering/assistant-markdown-body';
 import {
   buildMarkdownCacheKey,
   getOrBuildMarkdownBody,

@@ -4,14 +4,14 @@ import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { Download, Lock, Puzzle, RefreshCw, Search, Upload, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { AgentResourceCard, AgentResourceFooter, AgentResourceGrid, AgentResourceIcon, AgentResourcePill } from '@/components/common/AgentPage';
+import { AgentResourceCard, AgentResourceFooter, AgentResourceGrid, AgentResourceIcon, AgentResourcePill } from '@/components/common/AgentResource';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { DropdownMenuItem } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { AppError } from '@/lib/error-model';
-import { sealedSkillErrorMessage } from '@/lib/sealed-skills-error';
-import { requireSkillsScope } from '@/lib/skills';
+import { sealedSkillErrorMessage } from '../services/sealed-error';
+import { requireSkillsScope } from '../services/client';
 import type { Skill } from '@/types/skill';
 import type { SkillOwnerProps, SkillPackageMenuProps } from '../extensions';
 import {

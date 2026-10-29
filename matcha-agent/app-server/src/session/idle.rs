@@ -114,19 +114,8 @@ impl Sessions {
             return;
         }
         let ready = matches!(prepared, Ok(Preparation::Ready));
-        let closed = cli.close().await;
-        self.cleanup_result(&session, cli.instance_id(), &closed)
-            .await;
-        let joined = match session.consumer.lock().await.take() {
-            Some(task) => task
-                .await
-                .map_err(|error| rpc::Error::internal("session_consumer_task").with_source(error)),
-            None => Err(rpc::Error::internal("session_consumer_missing")),
-        };
+        let closed = self.stop_instance(&session, &cli).await;
         let mut execution = session.data.lock().await;
-        if let Err(error) = &joined {
-            execution.fault(error.clone());
-        }
         let transcript = async {
             let path = history::locate(
                 &execution.record.runtime,
@@ -152,7 +141,6 @@ impl Sessions {
         }
         let safe = ready
             && closed.is_ok()
-            && joined.is_ok()
             && transcript.is_ok()
             && execution.storage_fault.is_none()
             && !execution.record.native_cleanup_failed
@@ -161,7 +149,7 @@ impl Sessions {
             "native_sleep_safe"
         } else if !ready {
             "native_sleep_prepare_unconfirmed"
-        } else if closed.is_err() || joined.is_err() {
+        } else if closed.is_err() {
             "native_sleep_cleanup_unconfirmed"
         } else if transcript.is_err() {
             "native_sleep_transcript_unconfirmed"
@@ -173,7 +161,6 @@ impl Sessions {
         let cause = prepared
             .err()
             .or_else(|| closed.as_ref().err().cloned())
-            .or_else(|| joined.as_ref().err().cloned())
             .or_else(|| transcript.err())
             .or_else(|| execution.storage_fault.clone());
         let mut context = json!({
@@ -181,7 +168,7 @@ impl Sessions {
             "agentId": execution.record.agent_id,
             "instanceId": cli.instance_id(),
             "stage": if ready { "ready_acknowledged" } else { "prepare_unknown" },
-            "cleanupComplete": closed.is_ok() && joined.is_ok(),
+            "cleanupComplete": closed.is_ok(),
             "outcomeUnknown": !safe,
         });
         if let Some(cause) = cause {

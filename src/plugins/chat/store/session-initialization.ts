@@ -188,12 +188,28 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
   let key = gate.kind === 'draft' ? `${gate.runtimeScopeKey}:agent:${gate.agentId}:draft` : gate.sessionKey;
   const sourceKey = key;
   let snapshot = readComposerDraftSnapshot(key);
+  const submission = !intent && payload.operationId ? useComposerDraftStore.getState().submissions[key] : undefined;
+  const ownsSubmission = Boolean(submission && submission.operationId === payload.operationId);
   const initialization = useComposerDraftStore.getState().initializations[key];
   if (activeComposerSends.has(key) || gate.kind === 'session' && modelSelections.has(buildSessionIdentityKey(gate.sessionIdentity))
     || initialization?.kind === 'creating') return { accepted: false, reason: 'active', dispatch: 'not-dispatched' };
   if (initialization?.kind === 'createUnknown') return { accepted: false, reason: 'error', error: initialization.error, dispatch: 'not-dispatched' };
-  if (gate.kind === 'session' && !initialization) return input.send();
-  const operationId = initialization?.operationId ?? payload.operationId ?? crypto.randomUUID();
+  if (gate.kind === 'session' && !initialization) {
+    if (ownsSubmission && !useComposerDraftStore.getState().takeSubmission(key, payload.operationId!)) {
+      return { accepted: false, reason: 'active', dispatch: 'not-dispatched' };
+    }
+    try {
+      const result = await input.send();
+      if (ownsSubmission) useComposerDraftStore.getState().settleSubmission(key, payload.operationId!, result);
+      return result;
+    } catch (error) {
+      if (ownsSubmission) useComposerDraftStore.getState().settleSubmission(key, payload.operationId!, {
+        accepted: false, reason: 'error', outcome: 'unknown', error: String(error),
+      });
+      throw error;
+    }
+  }
+  const operationId = ownsSubmission ? payload.operationId! : initialization?.operationId ?? payload.operationId ?? crypto.randomUUID();
   let retired = false;
   let phase: 'create' | 'permission' | 'model' | 'thinking' | 'send' = 'create';
   let identity: SessionIdentity | null = gate.kind === 'session' ? gate.sessionIdentity : null;
@@ -207,7 +223,9 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
   });
   const isCurrent = () => !retired && input.get().currentConversation === conversation
     && (identity === null || input.get().loadedSessions[key]?.meta.sessionIdentity === identity);
-  const sameRevision = () => useComposerDraftStore.getState().revisions[key] === snapshot.revision
+  const sameRevision = () => (ownsSubmission
+    ? useComposerDraftStore.getState().submissions[key]?.operationId === operationId
+    : useComposerDraftStore.getState().revisions[key] === snapshot.revision)
     && useComposerDraftStore.getState().configurations[key]?.revision === snapshot.configuration?.revision;
   const fail = (error: string, outcome: 'unsupported' | 'unavailable' | 'rejected' | 'unknown' = 'unknown'): ChatSendResult => {
     const current = useComposerDraftStore.getState().initializations[key];
@@ -215,10 +233,15 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
       useComposerDraftStore.getState().setInitialization(key, { ...current, outcome, error });
     }
     if (isCurrent()) input.set({ error });
-    return { accepted: false, reason: 'error', error, dispatch: 'not-dispatched', ...(identity ? { sessionRecordKey: key } : {}) };
+    const result: ChatSendResult = { accepted: false, reason: 'error', error, dispatch: 'not-dispatched', ...(identity ? { sessionRecordKey: key } : {}) };
+    if (ownsSubmission) useComposerDraftStore.getState().settleSubmission(key, operationId, result);
+    return result;
   };
   activeComposerSends.add(sourceKey);
   try {
+    if (ownsSubmission && !useComposerDraftStore.getState().takeSubmission(key, operationId)) {
+      return { accepted: false, reason: 'active', dispatch: 'not-dispatched' };
+    }
     if (gate.kind === 'draft') {
       useComposerDraftStore.getState().setInitialization(key, { kind: 'creating', operationId });
       const created = await input.create({ key, operationId, snapshot, isCurrent: () => isCurrent() && sameRevision() });
@@ -239,7 +262,7 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
       if (retired || !selectedCreated || !identity || !sessionIdentitiesEqual(identity, created.sessionIdentity)) {
         return fail('Conversation changed before session configuration', 'unavailable');
       }
-      snapshot = readComposerDraftSnapshot(key);
+      if (!ownsSubmission) snapshot = readComposerDraftSnapshot(key);
     } else {
       if (initialization?.kind !== 'pending' || !sessionIdentitiesEqual(initialization.sessionIdentity, gate.sessionIdentity)) {
         return fail('Session initialization target changed');
@@ -304,14 +327,17 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
     const thinkingSelection = useComposerDraftStore.getState().configurations[key]?.thinkingSelection;
     if (thinkingSelection) {
       phase = 'thinking';
-      const result = await applySessionThinkingSelection(identity, thinkingSelection, () => isCurrent() && sameRevision(), true);
+      const result = await applySessionThinkingSelection(identity, thinkingSelection, () => isCurrent() && sameRevision(), initialization?.kind === 'pending');
       if (!isCurrent() || !sameRevision()) return fail('Composer changed during thinking configuration', 'unavailable');
       if (result.outcome !== 'confirmed' && result.outcome !== 'available') return fail(`Session thinking ${result.outcome}`, result.outcome);
       useComposerDraftStore.getState().confirmConfiguration(key, configuration!.revision, 'thinkingSelection');
     }
     if (!isCurrent() || !sameRevision()) return fail('Composer changed before sending', 'unavailable');
     phase = 'send';
-    const result = await input.send();
+    const result = await input.send().catch((error): ChatSendResult => {
+      if (!ownsSubmission) throw error;
+      return { accepted: false, reason: 'error', outcome: 'unknown', error: String(error) };
+    });
     if (result.accepted || result.outcome === 'unknown') {
       const current = useComposerDraftStore.getState().initializations[key];
       if (current?.operationId === operationId) {
@@ -320,11 +346,22 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
           ...current, outcome: 'unavailable', error: 'Composer changed during send',
         });
       }
-      if (result.accepted && gate.kind === 'draft' && !intent) useComposerDraftStore.getState().settleDraft(key, snapshot.revision);
-    } else fail(result.error ?? 'Session send was not accepted', 'rejected');
+      if (result.accepted && gate.kind === 'draft' && !intent && !ownsSubmission) useComposerDraftStore.getState().settleDraft(key, snapshot.revision);
+    } else {
+      const current = useComposerDraftStore.getState().initializations[key];
+      if (current?.kind === 'pending' && current.operationId === operationId) {
+        useComposerDraftStore.getState().setInitialization(key, { ...current, outcome: 'rejected', error: result.error ?? 'Session send was not accepted' });
+      }
+    }
+    if (ownsSubmission) useComposerDraftStore.getState().settleSubmission(key, operationId, result);
     return { ...result, sessionRecordKey: key };
   } catch (error) {
-    if (phase === 'send') throw error;
+    if (phase === 'send') {
+      if (ownsSubmission) useComposerDraftStore.getState().settleSubmission(key, operationId, {
+        accepted: false, reason: 'error', outcome: 'unknown', error: String(error),
+      });
+      throw error;
+    }
     return fail(error instanceof Error ? error.message : String(error));
   } finally {
     unsubscribe();

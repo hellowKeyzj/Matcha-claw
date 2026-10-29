@@ -52,7 +52,7 @@ const FeishuBitableAppTableSchema = Type.Union([
   Type.Object({
     action: Type.Literal('list'),
     app_token: Type.String({ description: '多维表格 token' }),
-    page_size: Type.Optional(Type.Number({ description: '每页数量，默认 50，最大 100' })),
+    page_size: Type.Optional(Type.Number({ description: '每页数量，默认 50，最大 100', minimum: 1, maximum: 100 })),
     page_token: Type.Optional(Type.String({ description: '分页标记' })),
   }),
 
@@ -147,7 +147,7 @@ export function registerFeishuBitableAppTableTool(api: OpenClawPluginApi): void 
             // CREATE
             // -----------------------------------------------------------------
             case 'create': {
-              log.trace(() =>
+              log.info(
                 `create: app_token=${p.app_token}, table_name=${p.table.name}, fields_count=${p.table.fields?.length ?? 0}`,
               );
 
@@ -201,7 +201,7 @@ export function registerFeishuBitableAppTableTool(api: OpenClawPluginApi): void 
             // LIST
             // -----------------------------------------------------------------
             case 'list': {
-              log.trace(() => `list: app_token=${p.app_token}, page_size=${p.page_size ?? 50}`);
+              log.info(`list: app_token=${p.app_token}, page_size=${p.page_size ?? 50}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table.list',
@@ -237,7 +237,7 @@ export function registerFeishuBitableAppTableTool(api: OpenClawPluginApi): void 
             // PATCH
             // -----------------------------------------------------------------
             case 'patch': {
-              log.trace(() => `patch: app_token=${p.app_token}, table_id=${p.table_id}, name=${p.name}`);
+              log.info(`patch: app_token=${p.app_token}, table_id=${p.table_id}, name=${p.name}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table.patch',
@@ -275,7 +275,7 @@ export function registerFeishuBitableAppTableTool(api: OpenClawPluginApi): void 
                 });
               }
 
-              log.trace(() => `batch_create: app_token=${p.app_token}, tables_count=${p.tables.length}`);
+              log.info(`batch_create: app_token=${p.app_token}, tables_count=${p.tables.length}`);
 
               const res = await client.invoke(
                 'feishu_bitable_app_table.batch_create',

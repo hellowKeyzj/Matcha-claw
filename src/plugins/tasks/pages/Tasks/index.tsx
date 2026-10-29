@@ -9,6 +9,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { useSearchParams } from 'react-router-dom';
+import { useShallow } from 'zustand/react/shallow';
 import { toast } from 'sonner';
 import { StableScrollArea } from '@/components/scroll';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -21,9 +22,8 @@ import { TaskCenterEmptyState, TaskCenterStatusFilter, TaskCenterSurface, TaskCe
 import { Select } from '@/components/ui/select';
 import { DatePicker } from '@/components/ui/date-picker';
 import { LoadingState } from '@/components/common/LoadingSpinner';
-import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { isRuntimeEndpointReady, isRuntimeEndpointStarting, selectManagementEndpoint, selectManagementRuntime, supportsRuntimeEndpointCapabilityFamily, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { buildRuntimeEndpointKey, buildSessionIdentityKey, runtimeEndpointsEqual, type RuntimeEndpointRef, type SessionIdentity } from '@/types/desktop/runtime-address';
-import { buildSessionRecordKey } from '@/plugins/chat/store/session-identity';
 import { readTaskSnapshot, useTaskCenterStore } from '@/plugins/tasks/stores/task-center-store';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { useIdleReady } from '@/lib/idle-ready';
@@ -32,10 +32,10 @@ import { cn } from '@/lib/utils';
 import { AppError } from '@/lib/error-model';
 import { decodeTaskFailure } from '@/types/desktop/task-failure';
 import { Cron } from '@/plugins/tasks/pages/Cron';
-import { TaskManagementUnavailableError, type Task } from '@/services/openclaw/task-manager-client';
+import { TaskManagementUnavailableError, type Task } from '@/plugins/tasks/services/task-manager-client';
 import { useChatStore } from '@/plugins/chat/store';
-import { readSessionsFromState } from '@/plugins/chat/store/session-helpers';
-import { useTeamsStore } from '@/plugins/teams/store';
+import { readSessionsFromState } from '@/plugins/chat/session-catalog';
+import { readTeamSessionRoles, selectTeamSessionRoles, useTeamSessionProjection } from '@/plugins/teams/session-projection';
 
 function statusVariant(status: string): 'default' | 'secondary' | 'destructive' | 'success' {
   if (status === 'completed') return 'success';
@@ -66,7 +66,6 @@ type TaskDeleteTarget = {
   sourceTeamKey: string | null;
 };
 type TaskQuerySession = { key: string; sessionIdentity: SessionIdentity };
-type TaskTeamState = Pick<ReturnType<typeof useTeamsStore.getState>, 'teams' | 'rolesByTeamId' | 'runListByTeamId' | 'designByRunId'>;
 
 const TASK_POLLING_FAST_MS = 5_000;
 const TASK_POLLING_NORMAL_MS = 20_000;
@@ -132,23 +131,15 @@ function taskViewKey(task: ScopedTask): string {
   return `${task.scopeKey ?? task.sourceSessionKey ?? task.sourceTeamKey ?? 'task'}:${task.id}`;
 }
 
-function resolveTaskQuerySessions(endpoint: RuntimeEndpointRef | null, filter: TaskCenterScopeFilter, sessions: ReturnType<typeof readSessionsFromState>, teamState: TaskTeamState): TaskQuerySession[] {
+function resolveTaskQuerySessions(endpoint: RuntimeEndpointRef | null, filter: TaskCenterScopeFilter, sessions: ReturnType<typeof readSessionsFromState>, teamRoles: ReturnType<typeof readTeamSessionRoles>): TaskQuerySession[] {
   if (!endpoint) return [];
   if (filter.type === 'agent') return sessions.filter((session) => session.sessionIdentity.agentId === filter.agentId
     && runtimeEndpointsEqual(session.sessionIdentity.endpoint, endpoint));
-  const team = teamState.teams.find((team) => team.id === filter.teamId);
-  if (!team) return [];
-  const runId = team.activeRunId;
-  const roles = runId
-    ? teamState.designByRunId[runId]?.snapshot?.roles
-      ?? teamState.runListByTeamId[team.id]?.find((run) => run.runId === runId)?.sessions
-      ?? teamState.rolesByTeamId[team.id]?.filter((role) => role.runId === runId)
-    : teamState.rolesByTeamId[team.id];
-  const role = roles?.find((role) => role.roleId === 'leader') ?? roles?.[0];
+  const role = teamRoles.find((role) => role.roleId === 'leader') ?? teamRoles[0];
   if (!role || !runtimeEndpointsEqual(role.sessionIdentity.endpoint, endpoint)) return [];
   const identity = role.sessionIdentity;
   const session = sessions.find((session) => buildSessionIdentityKey(session.sessionIdentity) === buildSessionIdentityKey(identity));
-  return [{ key: session?.key ?? buildSessionRecordKey(identity), sessionIdentity: identity }];
+  return [{ key: session?.key ?? buildSessionIdentityKey(identity), sessionIdentity: identity }];
 }
 
 function taskQueryKey(endpointKey: string, filter: TaskCenterScopeFilter, sessions: TaskQuerySession[]): string {
@@ -207,10 +198,7 @@ export function TasksPage() {
   const sessionCatalogStatus = useChatStore((state) => state.sessionCatalogStatus);
   const endpointSessionsLoadedAt = useChatStore((state) => state.sessionCatalogLoadedAtByRuntimeScopeKey[endpointKey]);
   const loadSessions = useChatStore((state) => state.loadSessions);
-  const teams = useTeamsStore((state) => state.teams);
-  const rolesByTeamId = useTeamsStore((state) => state.rolesByTeamId);
-  const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
-  const designByRunId = useTeamsStore((state) => state.designByRunId);
+  const teams = useTeamSessionProjection((state) => state.teams);
   const deleteTaskById = useTaskCenterStore((state) => state.deleteTaskById);
   const [mutating, setMutating] = useState(false);
 
@@ -222,6 +210,8 @@ export function TasksPage() {
     type: 'agent',
     agentId: preferredAgentId,
   }));
+  const teamRoles = useTeamSessionProjection(useShallow((state) => scopeFilter.type === 'team'
+    ? selectTeamSessionRoles(state, scopeFilter.teamId) : []));
   const [scopedTasks, setScopedTasks] = useState(() => createIdleResourceState<ScopedTask[]>([]));
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [statsWindow, setStatsWindow] = useState<TaskStatsWindow>('all');
@@ -237,9 +227,8 @@ export function TasksPage() {
   const [taskListScrollTop, setTaskListScrollTop] = useState(0);
   const [taskListViewportHeight, setTaskListViewportHeight] = useState(0);
   const scopedTasksRequestSeqRef = useRef(0);
-  const querySessions = useMemo(() => resolveTaskQuerySessions(selectedEndpoint, scopeFilter, sessions, {
-    teams, rolesByTeamId, runListByTeamId, designByRunId,
-  }), [selectedEndpoint, scopeFilter, sessions, teams, rolesByTeamId, runListByTeamId, designByRunId]);
+  const querySessions = useMemo(() => resolveTaskQuerySessions(selectedEndpoint, scopeFilter, sessions, teamRoles),
+    [selectedEndpoint, scopeFilter, sessions, teamRoles]);
   const queryKey = taskQueryKey(endpointKey, scopeFilter, querySessions);
   const agentAvailable = scopeFilter.type !== 'agent' || agentIds.includes(scopeFilter.agentId);
   const requestContext = useMemo(() => ({ queryKey, agentAvailable }), [queryKey, agentAvailable]);
@@ -260,7 +249,7 @@ export function TasksPage() {
     const currentRuntime = selectManagementRuntime(runtimeState);
     if (!endpoint || buildRuntimeEndpointKey(endpoint) !== endpointKey || !currentRuntime
       || !isRuntimeEndpointReady(currentRuntime) || !supportsRuntimeEndpointCapabilityFamily(currentRuntime, 'task')) return false;
-    const currentSessions = resolveTaskQuerySessions(endpoint, scopeFilter, readSessionsFromState(useChatStore.getState()), useTeamsStore.getState());
+    const currentSessions = resolveTaskQuerySessions(endpoint, scopeFilter, readSessionsFromState(useChatStore.getState()), scopeFilter.type === 'team' ? readTeamSessionRoles(scopeFilter.teamId) : []);
     return taskQueryKey(endpointKey, scopeFilter, currentSessions) === requestContext.queryKey
       && (scopeFilter.type !== 'agent' || currentRuntime.agents.some((agent) => agent.agentId === scopeFilter.agentId)) === requestContext.agentAvailable;
   }, [endpointKey, requestContext, scopeFilter]);
@@ -300,7 +289,7 @@ export function TasksPage() {
 
     try {
       const chatState = useChatStore.getState();
-      const scopedSessions = resolveTaskQuerySessions(selectedEndpoint, scopeFilter, readSessionsFromState(chatState), useTeamsStore.getState());
+      const scopedSessions = resolveTaskQuerySessions(selectedEndpoint, scopeFilter, readSessionsFromState(chatState), scopeFilter.type === 'team' ? readTeamSessionRoles(scopeFilter.teamId) : []);
       if (scopeFilter.type === 'team') {
         const activeSession = scopedSessions[0];
         if (!activeSession) throw new Error('The selected Team has no session identity in this runtime; team tasks cannot be queried');

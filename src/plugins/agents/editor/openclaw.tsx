@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/lib/provider-models';
+import { resolveModelCatalogEntry, resolveModelRuntimeReference } from '@/plugins/providers/services/provider-models';
 import { cn } from '@/lib/utils';
 import { formatWorkspacePathForDisplay } from '@/plugins/files/types';
 import { buildSubagentWorkspacePath } from '../domain/workspace';

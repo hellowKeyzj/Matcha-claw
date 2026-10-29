@@ -1107,8 +1107,7 @@ pub(super) async fn import(
         decode::<ParseCheckpoint>(step.checkpoint.clone())?
     } else {
         let implementation = crate::extensions::lifecycle::select_materials(
-            &ctx.store, &ctx.admission, &ctx.resources.inventory,
-            &ctx.resources.preparation, ctx.deadline,
+            &ctx.store, &ctx.admission, &ctx.resources.inventory, ctx.deadline,
         ).await?;
         let fingerprint = implementation.implementation.artifact_digest.clone();
         charge(ctx, BudgetDimension::Steps, 1)?;

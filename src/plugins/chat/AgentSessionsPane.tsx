@@ -1,17 +1,18 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Check, ChevronDown, ChevronRight, Pencil, Plus, Trash2, X } from 'lucide-react';
-import { AgentAvatar } from '@/components/common/AgentAvatar';
-import type { AgentAvatarStyle } from '@/lib/agent-avatar';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
+import type { AgentAvatarStyle } from '@/types/subagent';
 import { cn } from '@/lib/utils';
 import { createSessionTraceId, isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
-import { useTeamRunLabels } from '@/hooks/use-team-run-labels';
+import { useTeamRunLabels } from '@/plugins/teams/hooks/use-team-run-labels';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import {
   resolveTeamRoleChatTargetFromProbe,
   selectTeamRoleChatTargetIndex,
-  useTeamsStore,
-} from '@/plugins/teams/store';
+} from '@/plugins/teams/session-ownership';
+import { useTeamSessionProjection } from '@/plugins/teams/session-projection';
+import { useTeamSessionNavigation } from '@/plugins/teams/session-navigation';
 import { useChatStore, type ChatSession } from '@/plugins/chat/store';
 import { selectAgentSessionsPaneState } from '@/plugins/chat/store/selectors';
 import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
@@ -39,7 +40,7 @@ import {
   type AgentSessionSwitchboardTeamResult,
   type AgentSessionSwitchboardTeamRoleResult,
   type AgentSessionSwitchboardTeamRunResult,
-} from '@/components/layout/agent-session-switchboard-model';
+} from '@/plugins/chat/agent-session-switchboard-model';
 
 const SESSION_BUCKET_COLLAPSE_STORAGE_KEY = 'layout:session-time-bucket-collapsed';
 const RUNTIME_SYMBOLS: Readonly<Record<string, string>> = {
@@ -1009,14 +1010,14 @@ const TeamContents = memo(function TeamContents(props: Pick<TeamListSectionProps
   'expandedTeamIds' | 'expandedTeamRunIds' | 'onToggleTeam' | 'onToggleRun' | 'onPick'>) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const teams = useTeamsStore((state) => state.teams);
-  const runListByTeamId = useTeamsStore((state) => state.runListByTeamId);
+  const teams = useTeamSessionProjection((state) => state.teams);
+  const runListByTeamId = useTeamSessionProjection((state) => state.runListByTeamId);
   const runLabels = useTeamRunLabels();
-  const index = useTeamsStore(selectTeamRoleChatTargetIndex);
-  const createRun = useTeamsStore((state) => state.createRun);
-  const setActiveRun = useTeamsStore((state) => state.setActiveRun);
-  const syncRunList = useTeamsStore((state) => state.syncRunList);
-  const refreshSnapshot = useTeamsStore((state) => state.refreshSnapshot);
+  const index = useTeamSessionProjection(selectTeamRoleChatTargetIndex);
+  const createRun = useTeamSessionNavigation((state) => state.createRun);
+  const setActiveRun = useTeamSessionNavigation((state) => state.setActiveRun);
+  const syncRunList = useTeamSessionNavigation((state) => state.syncRunList);
+  const refreshSnapshot = useTeamSessionNavigation((state) => state.refreshSnapshot);
   const openSessionIdentity = useChatStore((state) => state.openSessionIdentity);
   const teamInputs = useMemo<AgentSessionSwitchboardTeamInput[]>(() => teams.map((team) => ({
     teamId: team.id, teamName: team.name, activeRunId: team.activeRunId,
@@ -1094,7 +1095,7 @@ export const AgentSessionsPane = memo(function AgentSessionsPane() {
       avatarStyle: managementCatalog ? metadata?.avatarStyle : undefined,
     };
   }));
-  const teamIdentityLabel = useTeamsStore((state) => {
+  const teamIdentityLabel = useTeamSessionProjection((state) => {
     if (currentConversation?.kind !== 'session') return '';
     const target = resolveTeamRoleChatTargetFromProbe(selectTeamRoleChatTargetIndex(state), {
       sessionIdentity: currentConversation.sessionIdentity, sessionKey: currentSessionKey,

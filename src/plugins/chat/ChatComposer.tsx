@@ -8,7 +8,7 @@ import { selectCurrentChatSendGate, selectRuntimeAgentScope } from '@/plugins/ch
 import { hasPendingSessionSend } from '@/plugins/chat/store/session-presentation';
 import { currentSessionSend } from '@/plugins/chat/store/send-state';
 import { isRunActive } from '@/plugins/chat/store/types';
-import { supportsSessionGoal } from '@/stores/runtime-endpoints';
+import { supportsSessionGoal } from '@/plugins/runtime/directory';
 import { useGatewayStore } from '@/plugins/runtime/store';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { getProviderAccountRuntimeReport, useProviderStore } from '@/plugins/providers/stores/providers';
@@ -26,10 +26,10 @@ import { hostApiFetch, hostCapabilityDescribe } from '@/lib/host-api';
 import { toast } from 'sonner';
 import { createSessionTraceId, logSessionTrace, summarizeError, summarizeIdentifier, summarizeSessionIdentity, isSessionTraceEnabled } from '@/lib/session-trace';
 import { buildChatContextUsageViewModel } from '@/plugins/chat/context-usage';
-import { resolveModelCatalogEntry } from '@/lib/provider-models';
-import { providerDiagnosticError } from '@/lib/provider-projection-errors';
+import { resolveModelCatalogEntry } from '@/plugins/providers/services/provider-models';
+import { providerDiagnosticError } from '@/plugins/providers/domain/provider-projection-errors';
 import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { isGatewayOperational } from '@/plugins/runtime/gateway-status';
 import { selectChatComposerFacts, selectChatSelection, selectChatSession, useChatAgent, useChatRuntime } from '@/plugins/chat/chat-session';
 
 type ChatSkillPreviewState = {
@@ -324,7 +324,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
       options: modelOptions,
       loading: modelsLoading,
       switching: modelSwitching,
-      disabled: activeRun || sessionSendPending || modelSwitching || thinkingPicker?.switching || !currentChatRuntimeAvailable || composerInitializationBusy || (currentDraftScope
+      disabled: activeRun || sessionSendPending || !currentChatRuntimeAvailable || composerInitializationBusy && !thinkingPicker?.switching || (currentDraftScope
         ? !draftConfigurationReady || draftConfigurationCapability?.modelSelection !== true : !modelSelectionAvailable),
     };
   }, [activeRun, availableModels, composerConfiguration?.modelSelectionId, composerInitializationBusy, currentChatRuntimeAvailable, currentDraftScope, currentSession.meta.modelState, currentSessionModelId, draftAgentModel, draftModelEntry, draftConfigurationCapability, draftConfigurationReady, isMatchaModelSession, modelOptions, modelSelectionAvailable, modelSwitching, modelsLoading, sessionSendPending, t, thinkingPicker]);
@@ -356,9 +356,10 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
   const handleSendMessage = useCallback(async (
     text: string,
     attachments?: Parameters<typeof sendMessage>[1],
+    operationId?: string,
   ) => {
     viewportPaneRef.current?.prepareCurrentLatestBottomAlign();
-    return sendMessage(text, attachments);
+    return sendMessage(text, attachments, undefined, operationId);
   }, [sendMessage, viewportPaneRef]);
   const handleSelectModel = useCallback(async (modelSelectionId: string) => {
     const traceId = createSessionTraceId('model-selection');
@@ -370,7 +371,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
       currentModelSelectionId: summarizeIdentifier(currentModelSelectionId),
       activeRun: Boolean(activeRun),
     }));
-    if (!normalizedModelSelectionId || !modelPicker || modelPicker.disabled || modelPicker.loading
+    if (!normalizedModelSelectionId || !modelPicker || modelPicker.disabled || modelPicker.loading || modelPicker.switching || thinkingPicker?.switching
       || !modelPicker.options.some((model) => model.id === normalizedModelSelectionId && !model.disabled)) return;
     if (currentConversation?.kind === 'draft' || composerInitialization?.kind === 'pending') {
       setModelSelection(currentComposerDraftKey, normalizedModelSelectionId);
@@ -399,7 +400,7 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
       if (modelSelectionOperationRef.current === operation) modelSelectionOperationRef.current = null;
       setModelSelectionOperation((current) => current === operation ? null : current);
     }
-  }, [activeRun, composerInitialization?.kind, currentComposerDraftKey, currentConversation?.kind, currentSessionConversation, currentSessionModelId, currentSessionRecordKey, loadSessions, modelPicker, modelSelectionOwner, setModelSelection, t]);
+  }, [activeRun, composerInitialization?.kind, currentComposerDraftKey, currentConversation?.kind, currentSessionConversation, currentSessionModelId, currentSessionRecordKey, loadSessions, modelPicker, modelSelectionOwner, setModelSelection, t, thinkingPicker?.switching]);
   const handlePreviewSkill = useCallback(async (skill: {
     id: string;
     name: string;

@@ -344,7 +344,7 @@ impl sessions_module::ports::SessionObservation for OpenClawObservation {
         Box::pin(async move {
             if command.identity() != &self.identity { return Err(sessions_module::ports::RuntimeOperationFailure::TargetRejected); }
             let page = crate::session::adapters::timeline::openclaw_page_request(&command).map_err(|_| sessions_module::ports::RuntimeOperationFailure::TargetRejected)?;
-            self.client.sync_observation(&self.identity, self.generation.load(Ordering::Acquire), page, epoch).await
+            self.client.sync_observation(&self.identity, self.generation.load(Ordering::Acquire), page, epoch, command.input_ids()).await
         })
     }
 
@@ -408,10 +408,11 @@ impl OpenClawSessionGateway {
         Ok(Arc::new(OpenClawObservation { client: Arc::clone(&self.client), identity, generation: Arc::new(AtomicU64::new(generation)) }))
     }
 
-    pub(crate) async fn history_for_identity(&self, identity: &sessions_module::state::SessionIdentity, page: PageRequest, cursor: Option<String>) -> Result<SessionWindow, OpenClawSessionError> {
+    pub(crate) async fn history_for_identity(&self, identity: &sessions_module::state::SessionIdentity, page: PageRequest, cursor: Option<String>, input_ids: &[String]) -> Result<SessionWindow, OpenClawSessionError> {
         validate_observation_identity(identity).map_err(|_| OpenClawSessionError::TargetRejected)?;
         let key = SessionKey::try_new(identity.session_key.clone()).map_err(|_| OpenClawSessionError::TargetRejected)?;
-        let params = ChatHistoryParams::new(key).try_for_agent(identity.agent_id.clone()).map_err(|_| OpenClawSessionError::TargetRejected)?;
+        let params = ChatHistoryParams::new(key).try_for_agent(identity.agent_id.clone())
+            .and_then(|params| params.try_with_input_run_ids(input_ids.to_vec())).map_err(|_| OpenClawSessionError::TargetRejected)?;
         if matches!(page.direction(), window::Direction::Latest) && page.limit() > 0 {
             let mut params = params.try_with_limit(page.limit() as u64).map_err(|_| OpenClawSessionError::TargetRejected)?;
             if let Some(cursor) = cursor { params = params.try_with_cursor(cursor).map_err(|_| OpenClawSessionError::TargetRejected)?; }
@@ -428,7 +429,9 @@ impl OpenClawSessionGateway {
         let requested = window::window_range(total, page);
         if requested.start() == requested.end() {
             let empty_page = PageRequest::new(page.direction(), 0, page.offset()).ok_or(OpenClawSessionError::TargetRejected)?;
-            return window::decode_window(count_payload, empty_page).map_err(|error| OpenClawSessionError::Protocol(Some(error)));
+            let mut window = window::decode_window(count_payload, empty_page).map_err(|error| OpenClawSessionError::Protocol(Some(error)))?;
+            window.retain_input_receipts(input_ids);
+            return Ok(window);
         }
         let mut end = requested.end();
         for attempt in 0..2 {
@@ -438,6 +441,7 @@ impl OpenClawSessionGateway {
             let payload = operation.history_payload(read_params).await.map_err(OpenClawSessionError::from)?;
             total = window::decode_total_messages(&payload).map_err(|error| OpenClawSessionError::Protocol(Some(error)))?;
             let mut window = window::decode_window(payload, page).map_err(|error| OpenClawSessionError::Protocol(Some(error)))?;
+            window.retain_input_receipts(input_ids);
             let requested = window::window_range(total, page);
             let range = window.range();
             let covered = if requested.start() == requested.end() {
@@ -506,12 +510,15 @@ impl OpenClawSessionGateway {
         params: ChatHistoryParams,
         request: PageRequest,
     ) -> Result<SessionWindow, OpenClawSessionError> {
+        let input_ids = params.input_run_ids().to_vec();
         let payload = SessionOperation::new(Arc::clone(&self.client))
             .history_payload(params)
             .await
             .map_err(OpenClawSessionError::from)?;
-        window::decode_window(payload, request)
-            .map_err(|error| OpenClawSessionError::Protocol(Some(error)))
+        let mut window = window::decode_window(payload, request)
+            .map_err(|error| OpenClawSessionError::Protocol(Some(error)))?;
+        window.retain_input_receipts(&input_ids);
+        Ok(window)
     }
 
     pub fn replay_source_page(

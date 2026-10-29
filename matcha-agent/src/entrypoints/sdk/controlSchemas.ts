@@ -11,6 +11,7 @@ import { z } from 'zod/v4'
 import { AcceptedCorrelationSchema, InvestigationUsageSchema } from '../../world/investigation.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { TodoListSchema } from '../../utils/todo/types.js'
+import { SettingsSchema } from '../../utils/settings/types.js'
 import {
   AccountInfoSchema,
   AgentDefinitionSchema,
@@ -97,7 +98,22 @@ export const SDKControlInitializeResponseSchema = lazySchema(() =>
 )
 
 export const SDKControlPrepareToSleepRequestSchema = lazySchema(() =>
-  z.strictObject({ subtype: z.literal('prepare_to_sleep') }),
+  z.strictObject({
+    subtype: z.literal('prepare_to_sleep'),
+    replayState: z.strictObject({
+      model: z.string().nullable(),
+      permissionMode: PermissionModeSchema(),
+      effort: SDKControlSetEffortRequestSchema().shape.effort,
+      initialization: z.strictObject({
+        systemPrompt: z.string().nullable(),
+        appendSystemPrompt: z.string().nullable(),
+      }).optional(),
+      search: z.strictObject({
+        webSearchAdapter: SettingsSchema().shape.webSearchAdapter.unwrap().nullable(),
+        searxng: SettingsSchema().shape.searxng.unwrap().nullable(),
+      }).optional(),
+    }).optional(),
+  }),
 )
 
 export const SDKControlPrepareToSleepResponseSchema = lazySchema(() =>

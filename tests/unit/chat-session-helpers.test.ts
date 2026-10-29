@@ -1,17 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildTaskBridgeState,
-  normalizeAutomaticSessionTitle,
   normalizeTaskSessionKey,
   parseSessionUpdatedAtMs,
-  readSessionsFromState,
   resolvePreferredSessionKeyForAgent,
-  resolveSessionListLabel,
   resolveSessionThinkingLevelFromList,
   shouldKeepMissingCurrentSession,
   shouldRetainLocalSessionRecord,
-  stripAutomaticWorkingDirectoryTitlePrefix,
 } from '@/plugins/chat/store/session-helpers';
+import {
+  normalizeAutomaticSessionTitle,
+  readSessionsFromState,
+  resolveSessionListLabel,
+  stripAutomaticWorkingDirectoryTitlePrefix,
+} from '@/plugins/chat/session-catalog';
 import type { RawMessage } from './helpers/timeline-fixtures';
 import { buildRenderItemsFromMessages } from './helpers/timeline-fixtures';
 import { createViewportWindowState } from '@/plugins/chat/store/viewport-state';

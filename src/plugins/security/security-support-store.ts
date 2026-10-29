@@ -3,7 +3,7 @@ import { hostApiFetch } from '@/lib/host-api';
 import {
   hostSecurityFetchRuleCatalog,
   hostSecurityReadAudit,
-} from '@/lib/security-runtime';
+} from './security-runtime';
 
 export type AuditItem = {
   ts: number;

@@ -1,5 +1,5 @@
 import type { TeamGraphEdgeRecord, TeamGraphNodeRecord, TeamRoleBindingRecord, TeamScriptReviewRule } from '@/types/team-design';
-import type { TeamWebhookAuthProjection } from '@/services/openclaw/team-runtime-client';
+import type { TeamWebhookAuthProjection } from '@/plugins/teams/services/team-runtime-client';
 import type { TeamRunGraphCanvasLabels } from '@/plugins/teams/pages/TeamRunGraphCanvas';
 
 export type TeamGraphCanvasNodeKind = 'start' | 'work' | 'review' | 'human_decision' | 'script_review' | 'join' | 'end';

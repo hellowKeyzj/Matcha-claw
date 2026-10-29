@@ -7,7 +7,7 @@ import type { TaskSnapshotEvent } from './task-snapshot';
 
 export type SessionCatalogKind = 'main' | 'subsession' | 'session' | 'automation';
 export type SessionCatalogTitleSource = 'user' | 'assistant' | 'none';
-export type SessionModelOverrideSource = 'user' | 'auto';
+export type SessionModelOverrideSource = 'user' | 'auto' | 'inherited';
 export type SessionModelIdentity = {
   provider?: string;
   model: string;
@@ -168,6 +168,7 @@ export type SessionWireItem =
     kind: 'userMessage';
     itemId: string;
     messageId: string | null;
+    inputIds?: string[];
     text: string;
     content: SessionWireContent[];
     status: SessionWireItemStatus;
@@ -218,12 +219,14 @@ export type SessionWireApproval = {
 
 export type SessionWireRuntimeActivity = 'compacting';
 export type SessionWireRunStartupPhase =
+  | 'waiting_for_state'
   | 'preparing_workspace'
   | 'naming_worktree'
   | 'creating_worktree'
   | 'running_setup'
   | 'provisioning_environment'
   | 'preparing_context'
+  | 'memory_flushing'
   | 'starting_model';
 export type SessionWireRunProgress =
   | { kind: 'startup'; phase: SessionWireRunStartupPhase }
@@ -278,10 +281,15 @@ export type SessionWireWindow = {
   isAtLatest: boolean;
 };
 
+export type SessionInputReceipt =
+  | { state: 'pending'; inputId: string; queued?: true; cancelled?: true }
+  | { state: 'consumed'; inputId: string; messageId: string };
+
 export type SessionView = {
   sessionKey: string;
   endpointSessionId: string | null;
   modelState: SessionModelState | null;
+  inputReceipts?: SessionInputReceipt[];
   goal: SessionGoalView;
   ownership: SessionOwnership | null;
   identity: SessionWireIdentity;
@@ -369,6 +377,7 @@ const MAX_ITEMS = 200;
 const MAX_TOOLS = 128;
 const MAX_SEGMENTS = 64;
 const MAX_APPROVALS = 32;
+const MAX_INPUT_IDS = 50;
 const MAX_CHANGE_COUNT = 16;
 const MAX_MISSING_FACTS = 16;
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
@@ -486,7 +495,7 @@ function decodeModelState(value: unknown): SessionModelState | null {
   const active = value.active === undefined ? undefined : decodeModelIdentity(value.active);
   if ((value.selected !== undefined && !selected)
     || (value.active !== undefined && !active)
-    || (value.overrideSource !== undefined && value.overrideSource !== 'user' && value.overrideSource !== 'auto')
+    || (value.overrideSource !== undefined && value.overrideSource !== 'user' && value.overrideSource !== 'auto' && value.overrideSource !== 'inherited')
     || (value.selectionId !== undefined && !isNonEmptyIdentifier(value.selectionId))) return null;
   return {
     ...(selected ? { selected } : {}),
@@ -616,17 +625,45 @@ function decodeContent(value: unknown): SessionWireContent | null {
   }
 }
 
+function isInputIds(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= MAX_INPUT_IDS
+    && value.every((id) => isNonEmptyIdentifier(id)) && new Set(value).size === value.length;
+}
+
+function decodeInputReceipt(value: unknown): SessionInputReceipt | null {
+  if (!isRecord(value) || !isNonEmptyIdentifier(value.inputId)) return null;
+  if (value.state === 'pending'
+    && hasAllowedKeys(value, ['state', 'inputId'], ['queued', 'cancelled'])
+    && (!Object.hasOwn(value, 'queued') || value.queued === true)
+    && (!Object.hasOwn(value, 'cancelled') || value.cancelled === true)) {
+    return { ...value } as SessionInputReceipt;
+  }
+  return value.state === 'consumed' && hasExactKeys(value, ['state', 'inputId', 'messageId'])
+    && isNonEmptyIdentifier(value.messageId)
+    ? { state: 'consumed', inputId: value.inputId, messageId: value.messageId } : null;
+}
+
+function decodeInputReceipts(value: unknown): SessionInputReceipt[] | null {
+  if (!Array.isArray(value) || value.length > MAX_INPUT_IDS) return null;
+  const receipts = value.map(decodeInputReceipt);
+  if (receipts.some((receipt) => receipt === null)
+    || new Set(receipts.map((receipt) => receipt!.inputId)).size !== receipts.length) return null;
+  return receipts as SessionInputReceipt[];
+}
+
 function decodeItem(value: unknown): SessionWireItem | null {
   if (!isRecord(value) || typeof value.kind !== 'string') return null;
-  if (value.kind === 'userMessage' && hasExactKeys(value, ['kind', 'itemId', 'messageId', 'text', 'content', 'status'])
+  if (value.kind === 'userMessage' && hasAllowedKeys(value, ['kind', 'itemId', 'messageId', 'text', 'content', 'status'], ['inputIds'])
     && isNonEmptyIdentifier(value.itemId)
     && (value.messageId === null || isNonEmptyIdentifier(value.messageId))
+    && (!Object.hasOwn(value, 'inputIds') || isInputIds(value.inputIds)
+      && (value.inputIds.length === 0 || value.messageId !== null))
     && isPayloadText(value.text)
     && Array.isArray(value.content)
     && value.content.length <= MAX_SEGMENTS
     && value.content.every((item) => decodeContent(item) !== null)
     && isItemStatus(value.status)) {
-    return { kind: 'userMessage', itemId: value.itemId, messageId: value.messageId, text: value.text, content: value.content.map((item) => decodeContent(item)!), status: value.status };
+    return { kind: 'userMessage', itemId: value.itemId, messageId: value.messageId, ...(value.inputIds === undefined ? {} : { inputIds: [...value.inputIds as string[]] }), text: value.text, content: value.content.map((item) => decodeContent(item)!), status: value.status };
   }
   if (value.kind === 'assistantTurn' && hasExactKeys(value, ['kind', 'itemId', 'runId', 'messageId', 'status', 'segments', 'text'])
     && isNonEmptyIdentifier(value.itemId)
@@ -759,12 +796,14 @@ function isRunProgress(value: unknown): value is SessionWireRunProgress {
 }
 
 function isRunStartupPhase(value: unknown): value is SessionWireRunStartupPhase {
-  return value === 'preparing_workspace'
+  return value === 'waiting_for_state'
+    || value === 'preparing_workspace'
     || value === 'naming_worktree'
     || value === 'creating_worktree'
     || value === 'running_setup'
     || value === 'provisioning_environment'
     || value === 'preparing_context'
+    || value === 'memory_flushing'
     || value === 'starting_model';
 }
 
@@ -883,9 +922,10 @@ function isRecoveryReason(value: unknown): value is SessionRecoveryReason {
 }
 
 function decodeView(value: unknown): SessionView | null {
-  if (!isRecord(value) || !hasExactKeys(value, ['sessionKey', 'endpointSessionId', 'modelState', 'goal', 'ownership', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'])) return null;
+  if (!isRecord(value) || !hasAllowedKeys(value, ['sessionKey', 'endpointSessionId', 'modelState', 'goal', 'ownership', 'identity', 'epoch', 'seq', 'cursor', 'items', 'tools', 'approvals', 'runtime', 'window', 'completeness'], ['inputReceipts'])) return null;
   const identity = decodeIdentity(value.identity);
   const modelState = value.modelState === null ? null : decodeModelState(value.modelState);
+  const inputReceipts = Object.hasOwn(value, 'inputReceipts') ? decodeInputReceipts(value.inputReceipts) : undefined;
   const goal = tryDecodeSessionGoalView(value.goal);
   const items = decodeFact(value.items, (facts) => Array.isArray(facts) && facts.length <= MAX_ITEMS && facts.every((item) => decodeItem(item) !== null) ? facts.map((item) => decodeItem(item)!) : null);
   const tools = decodeFact(value.tools, (facts) => Array.isArray(facts) && facts.length <= MAX_TOOLS && facts.every((item) => decodeTool(item) !== null) ? facts.map((item) => decodeTool(item)!) : null);
@@ -896,13 +936,14 @@ function decodeView(value: unknown): SessionView | null {
   if (!identity || !isNonEmptyIdentifier(value.sessionKey, MAX_SESSION_KEY_BYTES)
     || (value.endpointSessionId !== null && !isNonEmptyIdentifier(value.endpointSessionId, MAX_SESSION_KEY_BYTES))
     || (value.modelState !== null && !modelState)
+    || inputReceipts === null
     || (value.ownership !== null && !isSessionOwnership(value.ownership))
     || identity.sessionKey !== value.sessionKey
     || !isSafeInteger(value.epoch) || value.epoch < 1 || value.epoch > MAX_SAFE_INTEGER
     || !isSafeInteger(value.seq) || value.seq < 0 || value.seq > MAX_SAFE_INTEGER
     || !isSafeInteger(value.cursor) || value.cursor < 0 || value.cursor > MAX_SAFE_INTEGER
     || !goal || !items || !tools || !approvals || !runtime || !window || !completeness) return null;
-  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, modelState, goal, ownership: value.ownership, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
+  return { sessionKey: value.sessionKey, endpointSessionId: value.endpointSessionId, modelState, ...(inputReceipts === undefined ? {} : { inputReceipts }), goal, ownership: value.ownership, identity, epoch: value.epoch, seq: value.seq, cursor: value.cursor, items, tools, approvals, runtime, window, completeness };
 }
 
 function decodeDelta(value: unknown): SessionDelta | null {

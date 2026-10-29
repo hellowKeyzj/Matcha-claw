@@ -5,9 +5,9 @@ import {
   PROVIDER_TYPE_INFO,
   getProviderDocsUrl,
   normalizeProviderApiKeyInput,
-} from '@/lib/providers';
+} from '@/plugins/providers/domain/providers';
 import { hostApiFetch } from '@/lib/host-api';
-import { buildProviderCredentialId, buildProviderListItems, fetchProviderSnapshot } from '@/lib/provider-accounts';
+import { buildProviderCredentialId, buildProviderListItems, fetchProviderSnapshot } from '@/plugins/providers/services/provider-accounts';
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: vi.fn(),

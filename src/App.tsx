@@ -7,7 +7,7 @@ import { Component, Suspense, useEffect, useLayoutEffect, useMemo, useState } fr
 import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import i18n from './i18n';
-import { MainLayout } from './components/layout/MainLayout';
+import { MainLayout } from './app/layout/MainLayout';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useSettingsStore } from '@/plugins/settings/store';
 import { useGatewayStore } from '@/plugins/runtime/store';
@@ -16,7 +16,7 @@ import { useAccountGate } from '@/plugins/account/useAccountGate';
 import { applicationLifecycle, type ApplicationLifecycleProps } from '@/app/extensions';
 import { ApplicationRoutes } from '@/app/routes';
 import { useContributions } from '@/plugin-host/react';
-import { prepareToolchain } from './lib/toolchain';
+import { prepareToolchain } from './app/toolchain';
 import { applyResolvedTheme, useResolvedTheme } from './lib/use-resolved-theme';
 import { isTraceEnabled, startupTrace } from '@/lib/trace-logger';
 

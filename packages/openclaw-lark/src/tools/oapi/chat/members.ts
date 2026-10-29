@@ -24,12 +24,7 @@ const ChatMembersSchema = Type.Object({
   member_id_type: Type.Optional(
     StringEnum(['open_id', 'union_id', 'user_id']),
   ),
-  page_size: Type.Optional(
-    Type.Integer({
-      description: '分页大小（默认20）',
-      minimum: 1,
-    }),
-  ),
+  page_size: Type.Optional(Type.Integer({ description: '分页大小（默认20）', minimum: 1, maximum: 100 })),
   page_token: Type.Optional(
     Type.String({
       description: '分页标记。首次请求无需填写',
@@ -73,7 +68,7 @@ export function registerChatMembersTool(api: OpenClawPluginApi): boolean {
         try {
           const client = toolClient();
 
-          log.trace(() => `chat_members: chat_id="${p.chat_id}", page_size=${p.page_size ?? 20}`);
+          log.info(`chat_members: chat_id="${p.chat_id}", page_size=${p.page_size ?? 20}`);
 
           const res = await client.invoke(
             'feishu_chat_members.default',

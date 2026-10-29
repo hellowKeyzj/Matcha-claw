@@ -1,25 +1,8 @@
 import {
-  resolveGeminiModel,
-  resolveGrokModel,
-  resolveOpenAIModel,
-} from '@ant/model-provider'
-import { getMainLoopModel } from './model/model.js'
-import { getAPIProvider } from './model/providers.js'
-
-function resolveProviderModel(anthropicModel: string): string {
-  switch (getAPIProvider()) {
-    case 'openai':
-    case 'openaiResponses':
-      return resolveOpenAIModel(anthropicModel)
-    case 'gemini':
-      return resolveGeminiModel(anthropicModel)
-    case 'grok':
-      return resolveGrokModel(anthropicModel)
-    default:
-      return anthropicModel
-  }
-}
+  getMainLoopModel,
+  normalizeModelStringForAPI,
+} from './model/model.js'
 
 export function getRealModelName(): string {
-  return resolveProviderModel(getMainLoopModel())
+  return normalizeModelStringForAPI(getMainLoopModel())
 }

@@ -245,7 +245,7 @@ pub async fn project_session_runtime(
         sources.insert(source, secret.clone().into_private_string());
     }
     let provider = provider_config(kind, base_url.as_deref(), env);
-    let receipt = project(
+    project(
         client,
         Projection {
             providers: BTreeMap::from([(id.clone(), provider)]),
@@ -254,13 +254,6 @@ pub async fn project_session_runtime(
         },
     )
     .await?;
-    // A byte-identical session projection is reusable; the Server rejects changes while live.
-    if receipt.requires_restart && receipt.changed {
-        return Err(ProjectionFailure::new(ProjectionFailureKind::Remote {
-            code: -32002,
-            kind: ProjectionRemoteKind::Conflict,
-        }));
-    }
     Ok(id)
 }
 

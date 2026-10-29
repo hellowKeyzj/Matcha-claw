@@ -3,7 +3,6 @@ use tokio_util::sync::CancellationToken;
 use world_protocol::{
     api::PackageConfigView,
     bindings::{BindingNode, ImplementationRef, SlotKind},
-    ids::Digest,
     package::PackageLimits,
     slots::{self, ContextRequest, ContextResult},
 };
@@ -26,7 +25,6 @@ impl PreparedContext {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, NativePrepareFailure> {
         let contract = slots::slot_contract(SlotKind::Context)
             .map_err(|_| NativePrepareFailure::Entrypoint)?;
@@ -37,7 +35,6 @@ impl PreparedContext {
             node,
             config,
             artifact,
-            host_build,
             slots::CONTEXT_REGISTRATION,
             SlotKind::Context,
         )?;

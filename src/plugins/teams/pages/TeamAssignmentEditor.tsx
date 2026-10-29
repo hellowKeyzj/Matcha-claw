@@ -1,6 +1,6 @@
 import { useId, useState } from 'react';
 import { Bot, Maximize2, Minimize2 } from 'lucide-react';
-import { AgentAvatar } from '@/components/common/AgentAvatar';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
 import type { TeamAssignmentEditorProps } from '@/plugins/teams/pages/team-node-editor-types';
 
 export function TeamAssignmentEditor({

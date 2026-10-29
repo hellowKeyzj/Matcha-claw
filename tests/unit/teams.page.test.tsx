@@ -4,7 +4,8 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { TeamsPage } from '@/plugins/teams/pages';
 import { TeamChat } from '@/plugins/teams/pages/TeamChat';
 import { useRuntimeHostStore } from '@/plugins/runtime/store';
-import { useTeamsStore, type TeamMeta } from '@/plugins/teams/store';
+import { useTeamsStore } from '@/plugins/teams/store';
+import type { TeamMeta } from '@/plugins/teams/types/team';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { capabilityExecuteMock, hostApiFetchMock, resetGatewayClientMocks } from './helpers/mock-gateway-client';
 import i18n from '@/i18n';
@@ -31,7 +32,7 @@ vi.mock('@/lib/host-api', async (importOriginal) => {
   };
 });
 
-vi.mock('@/services/local-path-picker', () => ({
+vi.mock('@/lib/local-path-picker', () => ({
   pickLocalArchive: vi.fn(),
   pickLocalDirectory: vi.fn(),
   pickLocalSkillSource: (...args: unknown[]) => pickLocalSkillSourceMock(...args),

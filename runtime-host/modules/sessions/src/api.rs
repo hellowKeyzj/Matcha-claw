@@ -28,7 +28,7 @@ use super::{
     session_catalog::{SessionCatalogCommand, SessionCatalogOutcome},
     session_history::{SessionHistoryCommand, SessionHistoryOutcome},
     session_permission::{SessionPermissionCommand, SessionPermissionOutcome},
-    thinking::{SessionThinkingCommand, SessionThinkingOutcome},
+    thinking::{SessionThinkingAction, SessionThinkingCommand, SessionThinkingOutcome},
     state::{SessionIdentity, SessionSourceBinding, SessionView},
     timeline::{
         Command as SessionTimelineCommand, ContentCommand as SessionContentCommand,
@@ -105,8 +105,16 @@ impl SessionHandle {
         &self,
         command: SessionThinkingCommand,
     ) -> Result<SessionThinkingOutcome, ()> {
-        self.request_command(|reply| SessionCommand::Thinking { command, reply })
-            .await
+        match command.action {
+            SessionThinkingAction::Get => {
+                self.request_query(|reply| SessionQuery::Thinking { command, reply })
+                    .await
+            }
+            SessionThinkingAction::Set { .. } => {
+                self.request_command(|reply| SessionCommand::SetThinking { command, reply })
+                    .await
+            }
+        }
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionView>, ()> {

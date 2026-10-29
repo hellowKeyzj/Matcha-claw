@@ -144,11 +144,7 @@ const FeishuTaskTaskSchema = Type.Union([
   // LIST
   Type.Object({
     action: Type.Literal('list'),
-    page_size: Type.Optional(
-      Type.Number({
-        description: '每页数量（默认 50，最大 100）。',
-      }),
-    ),
+    page_size: Type.Optional(Type.Number({ description: '每页数量（默认 50，最大 100）。', minimum: 1, maximum: 100 })),
     page_token: Type.Optional(
       Type.String({
         description: '分页标记',
@@ -450,7 +446,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
             // CREATE TASK
             // -----------------------------------------------------------------
             case 'create': {
-              log.trace(() => `create: summary=${p.summary}`);
+              log.info(`create: summary=${p.summary}`);
 
               const taskData: any = {
                 summary: p.summary,
@@ -472,7 +468,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
                   timestamp: dueTs,
                   is_all_day: p.due.is_all_day ?? false,
                 };
-                log.trace(() => `create: due time converted: ${p.due?.timestamp} -> ${dueTs}ms`);
+                log.info(`create: due time converted: ${p.due.timestamp} -> ${dueTs}ms`);
               }
 
               // Handle start time conversion
@@ -524,7 +520,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
             // GET TASK
             // -----------------------------------------------------------------
             case 'get': {
-              log.trace(() => `get: task_guid=${p.task_guid}`);
+              log.info(`get: task_guid=${p.task_guid}`);
 
               const authType = p.auth_type || 'user';
               const res = await client.invoke(
@@ -554,7 +550,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
             // LIST TASKS
             // -----------------------------------------------------------------
             case 'list': {
-              log.trace(() => `list: page_size=${p.page_size ?? 50}, completed=${p.completed ?? false}`);
+              log.info(`list: page_size=${p.page_size ?? 50}, completed=${p.completed ?? false}`);
 
               const authType = p.auth_type || 'user';
               const res = await client.invoke(
@@ -590,7 +586,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
             // PATCH TASK
             // -----------------------------------------------------------------
             case 'patch': {
-              log.trace(() => `patch: task_guid=${p.task_guid}`);
+              log.info(`patch: task_guid=${p.task_guid}`);
 
               const updateData: any = {};
 
@@ -713,7 +709,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
                 });
               }
 
-              log.trace(() => `add_members: task_guid=${p.task_guid}, members_count=${p.members.length}`);
+              log.info(`add_members: task_guid=${p.task_guid}, members_count=${p.members.length}`);
 
               const memberData = p.members.map((m) => ({
                 id: m.id,
@@ -773,7 +769,7 @@ export function registerFeishuTaskTaskTool(api: OpenClawPluginApi): void {
                     app_secret: client.sdk.appSecret,
                   },
                 },
-              );
+              );;
               const token = (tatRes as any)?.tenant_access_token ?? "";
 
               const res = await client.invokeByPath(

@@ -60,6 +60,87 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
+pub(crate) enum UserPresentation {
+    Content,
+    Hidden,
+    System(String),
+}
+
+// Classify each native block before display, never discard a meta tool result.
+pub(crate) fn user_presentation(row: &Value, block: &Value) -> UserPresentation {
+    if block["type"] == "tool_result" {
+        return UserPresentation::Content;
+    }
+    if ["isVisibleInTranscriptOnly", "isSynthetic"]
+        .iter()
+        .any(|key| row.get(*key).is_some_and(truthy))
+        || (row.get("isMeta").is_some_and(truthy)
+            && row.pointer("/origin/kind").and_then(Value::as_str) != Some("channel"))
+    {
+        return UserPresentation::Hidden;
+    }
+    let Some(text) = block["text"].as_str().filter(|_| block["type"] == "text") else {
+        return UserPresentation::Content;
+    };
+    if trim(text) == "(no content)"
+        || text.contains("<local-command-caveat>")
+        || tag(text, "tick").is_some()
+    {
+        return UserPresentation::Hidden;
+    }
+    for (stdout, stderr) in [
+        ("local-command-stdout", "local-command-stderr"),
+        ("bash-stdout", "bash-stderr"),
+    ] {
+        if text.starts_with(&format!("<{stdout}")) || text.starts_with(&format!("<{stderr}")) {
+            let output = [tag(text, stdout), tag(text, stderr)]
+                .into_iter()
+                .flatten()
+                .map(|value| {
+                    if stdout == "bash-stdout" {
+                        tag(value, "persisted-output").unwrap_or(value)
+                    } else {
+                        value
+                    }
+                })
+                .map(trim)
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            return UserPresentation::System(output);
+        }
+    }
+    if text.contains("<bash-input>") {
+        return tag(text, "bash-input").map_or(UserPresentation::Hidden, |input| {
+            UserPresentation::System(format!("! {input}"))
+        });
+    }
+    if text.contains("<command-message>") {
+        return tag(text, "command-message").map_or(UserPresentation::Hidden, |command| {
+            let text = if tag(text, "skill-format") == Some("true") {
+                format!("Skill({command})")
+            } else {
+                let args = tag(text, "command-args").unwrap_or_default();
+                if args.is_empty() {
+                    format!("/{command}")
+                } else {
+                    format!("/{command} {args}")
+                }
+            };
+            UserPresentation::System(text)
+        });
+    }
+    UserPresentation::Content
+}
+
+fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    text.split_once(&format!("<{name}>"))?
+        .1
+        .split_once(&format!("</{name}>"))
+        .map(|(value, _)| value)
+        .filter(|value| !value.is_empty())
+}
+
 fn initial_replay(row: &Value) -> bool {
     if [
         "isMeta",
@@ -214,8 +295,18 @@ pub(crate) fn messages(raw: &Value, managed_input: bool) -> Result<Vec<Message<'
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         native.insert("content".to_owned(), Value::Array(vec![block]));
+        let mut normalized: Map<String, Value> = row
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| !matches!(key.as_str(), "message" | "content"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        normalized.insert("uuid".to_owned(), Value::String(uuid));
+        normalized.insert("message".to_owned(), Value::Object(native));
+        normalized.insert("parent_tool_use_id".to_owned(), parent.clone());
         messages.push(Message {
-            row: json!({"type":kind,"uuid":uuid,"message":native,"parent_tool_use_id":parent}),
+            row: Value::Object(normalized),
             source: Source {
                 raw,
                 block_index: Some(index),

@@ -1,10 +1,10 @@
 import { useMarkdownExtensions } from './use-renderers';
 import { useCallback, useEffect, memo, useMemo } from 'react';
 import { invokeIpc } from '@/lib/api-client';
-import { getOrBuildAssistantMarkdownBody, renderStreamingAssistantMarkdownBody } from '@/lib/chat-markdown-body';
+import { getOrBuildAssistantMarkdownBody, renderStreamingAssistantMarkdownBody } from '@/plugins/message-rendering/assistant-markdown-body';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity, summarizeText } from '@/lib/session-trace';
 import { cn } from '@/lib/utils';
-import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
+import { MESSAGE_LAYOUT_TOKENS } from '@/plugins/message-rendering/message-layout-tokens';
 import { decodeFileHintHref } from '@/plugins/message-rendering/md-pipeline';
 import { handleMarkdownCodeBlockCopy } from '@/plugins/message-rendering/markdown-code-blocks';
 import { useLargeTextContent } from '@/plugins/message-rendering/large-text-loader';
@@ -122,7 +122,7 @@ export const AssistantMessageBody = memo(function AssistantMessageBody({
     <div
       data-chat-body-mode={isStreaming ? 'streaming' : 'settled'}
       className={cn(
-        CHAT_LAYOUT_TOKENS.assistantSurface,
+        MESSAGE_LAYOUT_TOKENS.assistantSurface,
         'relative',
       )}
     >

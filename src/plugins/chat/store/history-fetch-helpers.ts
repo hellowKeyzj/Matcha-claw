@@ -261,6 +261,7 @@ interface FetchHistoryWindowInput {
   sessionIdentity: SessionIdentity;
   sessions: ChatSession[];
   limit: number;
+  inputIds?: string[];
   timeoutMs?: number;
   traceId?: string | null;
 }
@@ -292,6 +293,7 @@ export async function fetchHistoryWindow(
       ...(endpointSessionId ? { endpointSessionId } : {}),
       sessionIdentity,
       limit,
+      ...(input.inputIds?.length ? { inputIds: input.inputIds } : {}),
     }, { timeoutMs, traceId });
     logSessionTrace('history.transport.response', traceId, () => ({
       rawType: rawView && typeof rawView === 'object' ? 'object' : typeof rawView,

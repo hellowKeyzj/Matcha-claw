@@ -254,7 +254,7 @@ pub enum SessionCommand {
         command: SessionPermissionCommand,
         reply: oneshot::Sender<SessionPermissionOutcome>,
     },
-    Thinking {
+    SetThinking {
         command: SessionThinkingCommand,
         reply: oneshot::Sender<SessionThinkingOutcome>,
     },
@@ -324,7 +324,7 @@ impl SessionCommand {
             Self::Permission { reply, .. } => {
                 let _ = reply.send(SessionPermissionOutcome::Unavailable);
             }
-            Self::Thinking { command, reply } => {
+            Self::SetThinking { command, reply } => {
                 let _ = reply.send(SessionThinkingOutcome::Unavailable(command.runtime()));
             }
             Self::ConfigurePrivateResolver { reply, .. } => {
@@ -382,7 +382,7 @@ impl SessionCommand {
             Self::GoalCompleted { command, .. } => {
                 CommandRoute::KeyedControl(session_identity_lane_key(&command.identity))
             }
-            Self::Thinking { command, .. } => CommandRoute::Keyed(match &command.scope {
+            Self::SetThinking { command, .. } => CommandRoute::Keyed(match &command.scope {
                 ThinkingScope::Session { identity } => session_identity_lane_key(identity),
                 ThinkingScope::Agent { endpoint, agent_id } => {
                     serde_json::to_string(&("agent", endpoint, agent_id))

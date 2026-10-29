@@ -23,12 +23,12 @@ import {
   type CapabilityKey,
   type ModelRoute,
   type ModelRouteRef,
-} from '@/lib/capability-routing';
+} from '@/plugins/providers/services/capability-routing';
 import { useCapabilityRoutingStore } from '@/plugins/providers/stores/capability-routing';
 import { useProviderModelCatalogStore } from '@/plugins/providers/stores/provider-model-catalog';
-import type { ProviderModel } from '@/lib/provider-model-catalog';
+import type { ProviderModel } from '@/plugins/providers/services/provider-model-catalog';
 import { getProviderAccountRuntimeReport, useProviderStore, type ProviderSnapshot } from '@/plugins/providers/stores/providers';
-import { providerDiagnosticError } from '@/lib/provider-projection-errors';
+import { providerDiagnosticError } from '@/plugins/providers/domain/provider-projection-errors';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 

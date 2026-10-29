@@ -41,6 +41,7 @@ pub(in crate::composition::host) struct OwnerRuntimeTasks {
     pub(in crate::composition::host) organization: organization::OrganizationRuntime,
     world: Arc<tokio::sync::Mutex<world::WorldRuntime>>,
     world_quiesce: Arc<Mutex<Option<world::QuiesceOutcome>>>,
+    world_preparation: Option<world::PreparationPorts>,
     session: SessionHandle,
     session_terminal: Arc<super::super::ports::organization::OrganizationSessionTerminal>,
     shutdown_stage: OwnerShutdownStage,
@@ -129,6 +130,11 @@ impl OwnerRuntimeTasks {
                 return Err(OwnerRuntimeShutdownError::World);
             }
             self.dispose_module_scope("world").await;
+        }
+        if let Some(preparation) = &self.world_preparation {
+            if preparation.shutdown().await.is_err() {
+                record_join_failure(&self.join_failures, "world-epoch-clock");
+            }
         }
         self.check_joins()?;
         if self.shutdown_stage == OwnerShutdownStage::Closed {
@@ -771,7 +777,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     #[cfg(unix)]
     let containment = foundation::process::ProcessContainment::guardian(world_guardian)
         .map_err(world::Error::preparation_failed);
-    let prepared = containment.and_then(|containment| {
+    let resources = containment.and_then(|containment| {
         super::super::ports::world_resources::prepare(
             &runtime_state_dir,
             wiki.handle().clone(),
@@ -780,10 +786,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             containment,
         )
     });
-    let (resources, world_epoch_clock) = match prepared {
-        Ok((resources, clock)) => (Ok(resources), Some(clock)),
-        Err(error) => (Err(error), None),
-    };
+    let world_preparation = resources.as_ref().ok().map(|resources| resources.preparation.clone());
     let locator = storage_catalog
         .as_ref()
         .map_err(Clone::clone)
@@ -813,8 +816,6 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     let world_runtime = Arc::new(tokio::sync::Mutex::new(world_runtime));
     let world_quiesce = Arc::new(Mutex::new(None));
     let mut world_scope = ModuleScope::new("world");
-    let mut epoch_clock = world_epoch_clock;
-    let failures = Arc::clone(&join_failures);
     let runtime = Arc::clone(&world_runtime);
     let settled = Arc::clone(&world_quiesce);
     world_scope.register_effect_disposer(
@@ -827,11 +828,6 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
                 .checked_quiesce(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
                 .await;
             *settled.lock().expect("world shutdown state poisoned") = Some(outcome);
-            if let Some(clock) = epoch_clock.as_mut() {
-                if clock.cancel_and_join().await.is_err() {
-                    record_join_failure(&failures, "world-epoch-clock");
-                }
-            }
         },
     );
     Ok(RuntimeOwners {
@@ -874,6 +870,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             organization: organization_runtime,
             world: world_runtime,
             world_quiesce,
+            world_preparation,
             session: session_handle.clone(),
             session_terminal,
             shutdown_stage: OwnerShutdownStage::Running,

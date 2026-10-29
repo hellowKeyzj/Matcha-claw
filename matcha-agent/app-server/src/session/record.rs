@@ -113,6 +113,7 @@ pub(super) async fn prepare_database(database: &Database) -> rpc::Result<()> {
              CREATE INDEX IF NOT EXISTS managed_runs_session ON managed_runs(session_id,created_at_ms,run_id);
              CREATE INDEX IF NOT EXISTS managed_runs_by_status ON managed_runs(session_id,status,created_at_ms,run_id);
              CREATE UNIQUE INDEX IF NOT EXISTS managed_runs_request ON managed_runs(session_id,json_extract(record,'$.run.requestId')) WHERE json_extract(record,'$.run.requestId') IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS managed_runs_message ON managed_runs(session_id,json_extract(record,'$.run.messageId'));
              CREATE TABLE IF NOT EXISTS managed_input_messages (
                 message_id TEXT PRIMARY KEY NOT NULL,
                 agent_id TEXT NOT NULL, source_session_id TEXT NOT NULL
@@ -455,7 +456,7 @@ pub(super) async fn save_run(events: &Events, record: &run::Record) -> rpc::Resu
 
 pub(super) async fn managed_input_message_ids(
     database: &Database,
-    candidates: Vec<String>,
+    candidates: &[String],
 ) -> rpc::Result<Vec<String>> {
     if candidates.is_empty() {
         return Ok(Vec::new());
@@ -469,6 +470,51 @@ pub(super) async fn managed_input_message_ids(
         statement.query_map([encoded], |row| row.get(0))
             .map_err(|error| sqlite_error("run_input_read", error))?
             .map(|row| row.map_err(|error| sqlite_error("run_input_read", error)))
+            .collect()
+    }).await
+}
+
+pub(super) async fn input_runs(
+    database: &Database,
+    session_id: &str,
+    message_ids: &[String],
+    request_ids: &[String],
+) -> rpc::Result<Vec<run::Run>> {
+    if message_ids.is_empty() && request_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let session_id = session_id.to_owned();
+    let messages = encode(&message_ids)?;
+    let requests = encode(&request_ids)?;
+    database.call(move |connection| {
+        assert_live_session(connection, &session_id)?;
+        let mut statement = connection.prepare(
+            "WITH selected AS (
+                SELECT run_id,record FROM managed_runs INDEXED BY managed_runs_message
+                WHERE session_id=?1 AND json_extract(record,'$.run.messageId') IN (SELECT value FROM json_each(?2))
+                UNION
+                SELECT run_id,record FROM managed_runs INDEXED BY managed_runs_request
+                WHERE session_id=?1 AND json_extract(record,'$.run.requestId') IN (SELECT value FROM json_each(?3))
+                AND json_extract(record,'$.run.requestId') IS NOT NULL
+             )
+             SELECT json_extract(selected.record,'$.run'),
+                EXISTS(SELECT 1 FROM managed_runs other INDEXED BY managed_runs_message
+                    WHERE other.session_id=?1 AND json_extract(other.record,'$.run.messageId')=json_extract(selected.record,'$.run.messageId')
+                    AND other.run_id<>selected.run_id)
+             FROM selected",
+        ).map_err(|error| sqlite_error("run_input_read", error))?;
+        statement.query_map(params![session_id, messages, requests], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+        }).map_err(|error| sqlite_error("run_input_read", error))?
+            .map(|row| {
+                let (encoded, conflict) = row.map_err(|error| sqlite_error("run_input_read", error))?;
+                let run: run::Run = serde_json::from_str(&encoded)
+                    .map_err(|error| storage("run_record_decode").with_source(error))?;
+                if conflict || run.session_id != session_id {
+                    return Err(storage("run_input_identity_conflict"));
+                }
+                Ok(run)
+            })
             .collect()
     }).await
 }

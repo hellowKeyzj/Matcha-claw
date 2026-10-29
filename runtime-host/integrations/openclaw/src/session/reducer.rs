@@ -846,7 +846,7 @@ impl SessionReducerActor {
         if key.as_str() != self.session_key.as_str() { return Err(Failure::TargetRejected); }
         let identity = SessionIdentity::new(key.as_str().to_owned(), SessionProvider::OpenClaw, agent.to_owned()).ok_or(Failure::TargetRejected)?;
         let view = SessionView {
-            session_key: identity.session_key.clone(), endpoint_session_id: self.native_session_id.clone(), ownership: None, model_state: None, goal: self.goal.clone(), identity,
+            session_key: identity.session_key.clone(), endpoint_session_id: self.native_session_id.clone(), ownership: None, model_state: None, input_receipts: None, goal: self.goal.clone(), identity,
             epoch, seq: 0, cursor: 0,
             items: SessionFact::Incomplete { facts: body.items.clone(), gaps: vec![MissingFact::BoundedHistory] },
             tools: SessionFact::Incomplete { facts: cache.tools.clone(), gaps: vec![MissingFact::BoundedHistory] },
@@ -982,9 +982,8 @@ impl SessionReducerActor {
                     self.clear_active_run(&run_id);
                     return produce_changes_debugged("chat_yielded", event, source_epoch, Vec::new());
                 }
-                let text = chat.delta_text.as_deref().filter(|_| chat.replace).or(chat.message_text.as_deref());
                 let assistant_changes = self.assistant_snapshot_changes(
-                    run_id.clone(), None, text, chat.message_thinking.as_deref(),
+                    run_id.clone(), None, chat.message_text.as_deref(), chat.message_thinking.as_deref(),
                 );
 
                 let result = chat.terminal_outcome().and_then(|_| {
@@ -1039,46 +1038,10 @@ impl SessionReducerActor {
 
     ) -> Option<CanonicalIngressResult> {
         let chat = event.chat.as_ref()?;
-        let run_id = chat.run_id.clone();
-        let snapshot = chat.message_text.as_deref();
-        let (text, replace) = match chat.delta_text.as_deref() {
-            Some(delta) if chat.replace => (Some(delta), true),
-            Some(delta) => match self.body.stream_text(run_id.as_str()) {
-                None => (snapshot.or(Some(delta)), true),
-                Some(current) => match snapshot {
-                    Some(snapshot) if !snapshot.strip_prefix(current).is_some_and(|suffix|
-                        suffix.encode_utf16().count() == delta.encode_utf16().count()) => (Some(snapshot), true),
-                    _ => (Some(delta), false),
-                },
-            },
-            None => (snapshot, true),
-        };
-        if super::trace::enabled() {
-            super::trace::log_unscoped("runtime.openclaw.reducer.chat_text_selection", || serde_json::json!({
-                "sourceEpoch": source_epoch.map(GatewayEpoch::as_u64), "nativeCursor": event.gateway_sequence, "chatSequence": chat.sequence,
-                "runHash": sessions_module::trace::fingerprint(run_id.as_str()), "replace": replace,
-                "selectedText": text.map(sessions_module::trace::text_shape),
-                "baseline": self.body.stream_text(run_id.as_str()).map(sessions_module::trace::text_shape) }));
-        }
-        let mut changes = self.assistant_snapshot_changes(
-            run_id.clone(), None, text.filter(|_| replace), chat.message_thinking.as_deref(),
+        let changes = self.assistant_snapshot_changes(
+            chat.run_id.clone(), None, chat.message_text.as_deref(), chat.message_thinking.as_deref(),
         );
-        if !replace && let Some(text) = text {
-            changes.push(CanonicalSessionChange::AssistantTurnChunk {
-                run_id, message_id: None, kind: AssistantTurnChunkKind::Text,
-                text: text.to_owned(), replace: false, status: AssistantTurnStatus::Streaming,
-            });
-        }
-        if changes.is_empty() {
-            return produce_debugged("chat_passthrough", event, source_epoch);
-        }
-        produce_changes_debugged(
-            if chat.message_text.is_some() || chat.message_thinking.is_some() { "chat_snapshot" } else { "chat_delta_text" },
-            event,
-            source_epoch,
-
-            changes,
-        )
+        produce_changes_debugged("chat_snapshot", event, source_epoch, changes)
     }
 
     fn reduce_message_activity(

@@ -197,6 +197,10 @@ pub(crate) async fn retry_startup(
     report.blocked_channels = recovery.blocked_channels.clone();
     recover_retirements(root, &world, bindings, &recovery, deadline, report).await;
     let unresolved = report.unresolved_graphs();
+    // A replaced head may release an obsolete failure, never a required run/release
+    // pin, a pending retirement or an indeterminate graph holding its original custody.
+    report.blocked_graphs.retain(|id, _| selected.contains_key(id) || unresolved.contains(id)
+        || recovery.retirements.iter().any(|(retiring, _, _)| retiring == id));
     for (id, heads) in selected {
         if unresolved.contains(&id) {
             continue;

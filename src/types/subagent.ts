@@ -1,8 +1,7 @@
 import type { CloudPackageVersion } from '@/types/cloud-package';
-import type { AgentAvatarStyle } from '@/lib/agent-avatar';
-import type { SUBAGENT_TARGET_FILES } from '@/constants/subagent-files';
 
-export type SubagentTargetFile = (typeof SUBAGENT_TARGET_FILES)[number];
+export type SubagentTargetFile = 'AGENTS.md' | 'SOUL.md' | 'USER.md' | 'MEMORY.md';
+export type AgentAvatarStyle = 'pixelArt' | 'bottts' | 'botttsNeutral';
 
 export interface AgentIdentitySummary {
   name?: string;

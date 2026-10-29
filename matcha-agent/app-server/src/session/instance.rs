@@ -158,6 +158,33 @@ impl Sessions {
         })
     }
 
+    pub(super) async fn join_consumer(&self, session: &Session) -> rpc::Result<()> {
+        if let Some(task) = session.consumer.lock().await.take()
+            && let Err(error) = task.await
+        {
+            let failure = rpc::Error::internal("session_consumer_task").with_source(error);
+            self.cleanup_result(session, "consumer", &Err(failure.clone()))
+                .await;
+            return Err(failure);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn stop_instance(&self, session: &Session, cli: &Cli) -> rpc::Result<()> {
+        // Keep the durable consumer draining until the owned reader has joined.
+        let closed = cli.close().await;
+        self.cleanup_result(session, cli.instance_id(), &closed)
+            .await;
+        let joined = self.join_consumer(session).await;
+        match (closed, joined) {
+            (Err(primary), Err(cleanup)) => {
+                Err(primary.with_data(json!({"cleanupFailure":cleanup})))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            _ => Ok(()),
+        }
+    }
+
     pub(super) async fn start_instance(
         &self,
         session: &Arc<Session>,
@@ -180,6 +207,30 @@ impl Sessions {
         let _search_guard = self.search_guard().await;
         // The launch spec may predate a concurrent search projection commit.
         spec.config.search = self.0.config.checked_snapshot().await?.search;
+        let provider = spec
+            .agent
+            .provider
+            .as_ref()
+            .map(|id| {
+                crate::provider::ProviderConfig::parse(
+                    spec.config
+                        .providers
+                        .get(id)
+                        .ok_or_else(|| rpc::Error::not_found("Provider"))?,
+                )
+            })
+            .transpose()?;
+        let model = spec
+            .agent
+            .provider
+            .as_deref()
+            .filter(|id| id.starts_with("host-account-") || id.starts_with("host-session-"))
+            .and(spec.agent.model.clone().or_else(|| {
+                provider
+                    .as_ref()
+                    .and_then(|provider| provider.model.clone())
+            }));
+        let provider = provider.map(|provider| provider.kind);
         let (cli, receiver) = match Cli::start(spec, self.0.diagnostics.clone()).await {
             Ok(started) => started,
             Err(error) => {
@@ -229,6 +280,7 @@ impl Sessions {
             }
             started?;
             let initialize = cli.initialized().await?;
+            cli.confirm_selection(model.as_deref(), provider).await?;
             let mut execution = session.data.lock().await;
             if execution.closing
                 || execution

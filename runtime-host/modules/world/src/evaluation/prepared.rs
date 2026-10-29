@@ -3,7 +3,6 @@ use tokio_util::sync::CancellationToken;
 use world_protocol::{
     api::{PackageConfigView, package_config_digest},
     bindings::{BindingNode, ImplementationRef, SlotKind},
-    ids::Digest,
     package::PackageLimits,
     slots::{self, OracleFailure, OracleRequest, OracleResult},
     value::Value,
@@ -24,7 +23,6 @@ impl PreparedEvaluation {
         node: &BindingNode,
         config: PackageConfigView,
         artifact: ArtifactLease,
-        host_build: &Digest,
     ) -> Result<Self, NativePrepareFailure> {
         let expected = slots::slot_port(SlotKind::Evaluation)
             .map_err(|_| NativePrepareFailure::Entrypoint)?;
@@ -40,7 +38,7 @@ impl PreparedEvaluation {
         let Value::Boolean { value: enabled } = &field.value else { return Err(NativePrepareFailure::Configuration); };
         if field.name != "enabled" { return Err(NativePrepareFailure::Configuration); }
         let enabled = *enabled;
-        let proof = NativeProof::prepare(node, config, artifact, host_build,
+        let proof = NativeProof::prepare(node, config, artifact,
             slots::EVALUATION_REGISTRATION, SlotKind::Evaluation)?;
         Ok(Self { proof, enabled })
     }

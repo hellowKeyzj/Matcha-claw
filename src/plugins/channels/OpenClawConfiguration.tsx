@@ -9,11 +9,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Separator } from '@/components/ui/separator';
 import { useChannelsStore } from './store';
 import { useGatewayStore } from '@/plugins/runtime/store';
-import { useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import { runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
-import { channelErrorCode, logChannelTrace, hostChannelsActivate, hostChannelsConfigure, hostChannelsCancelAuthorization, hostChannelsCancelSession, hostChannelsLoginWait, hostChannelsReadConfig, hostChannelsStartAuthorization, hostChannelsValidateCredentials, hostChannelsWaitAuthorization } from '@/lib/channel-runtime';
+import { channelErrorCode, logChannelTrace, hostChannelsActivate, hostChannelsConfigure, hostChannelsCancelAuthorization, hostChannelsCancelSession, hostChannelsLoginWait, hostChannelsReadConfig, hostChannelsStartAuthorization, hostChannelsValidateCredentials, hostChannelsWaitAuthorization } from './channel-runtime';
 import { isTraceEnabled } from '@/lib/trace-logger';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { isGatewayOperational } from '@/plugins/runtime/gateway-status';
 import { useDelayedFlag } from '@/lib/use-delayed-flag';
 import { invokeIpc } from '@/lib/api-client';
 import { cn } from '@/lib/utils';

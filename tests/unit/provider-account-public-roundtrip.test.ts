@@ -3,15 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const fetchProviderSnapshotMock = vi.hoisted(() => vi.fn());
 const hostProviderUpdateAccountMock = vi.hoisted(() => vi.fn());
 
-vi.mock('@/lib/provider-accounts', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/lib/provider-accounts')>();
+vi.mock('@/plugins/providers/services/provider-accounts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/plugins/providers/services/provider-accounts')>();
   return {
     ...actual,
     fetchProviderSnapshot: (...args: unknown[]) => fetchProviderSnapshotMock(...args),
   };
 });
 
-vi.mock('@/lib/provider-projection', () => ({
+vi.mock('@/plugins/providers/services/provider-projection', () => ({
   hostProviderCreateAccount: vi.fn(),
   hostProviderDeleteAccount: vi.fn(),
   hostProviderUpdateAccount: (...args: unknown[]) => hostProviderUpdateAccountMock(...args),
@@ -22,7 +22,7 @@ vi.mock('@/lib/telemetry', () => ({
   startUiTiming: vi.fn(() => () => 1),
 }));
 
-import { normalizeProviderSnapshot } from '@/lib/provider-accounts';
+import { normalizeProviderSnapshot } from '@/plugins/providers/services/provider-accounts';
 import { useProviderStore } from '@/plugins/providers/stores/providers';
 
 describe('provider account public round trip', () => {

@@ -72,9 +72,8 @@ vi.mock('../src/core/lark-client', () => ({
     },
   },
 }));
-vi.mock('../src/core/lark-logger', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/core/lark-logger')>()),
-  larkLogger: () => ({ trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
+vi.mock('../src/core/lark-logger', () => ({
+  larkLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
 }));
 vi.mock('../src/messaging/outbound/send', () => ({
   sendMessageFeishu: vi.fn(),
@@ -93,6 +92,7 @@ vi.mock('../src/card/card-error', () => ({
 vi.mock('../src/card/reply-mode', () => ({
   resolveReplyMode: () => replyModeState.mode,
   expandAutoMode: ({ mode }: { mode: string }) => mode,
+  resolveStreamingFlags: () => ({ streaming: false, blockStreaming: false }),
   shouldUseCard: () => false,
 }));
 vi.mock('../src/card/streaming-card-controller', () => ({

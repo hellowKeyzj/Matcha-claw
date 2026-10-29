@@ -9,13 +9,8 @@ import {
   createLoadingResourceStatusState,
   createReadyResourceStatusState,
 } from '@/lib/resource-state';
-import {
-  isTrulyEmptyNonMainSession,
-  parseSessionUpdatedAtMs,
-  readSessionsFromState,
-  shouldKeepMissingCurrentSession,
-  shouldRetainLocalSessionRecord,
-} from '@/plugins/chat/store/session-helpers';
+import { isTrulyEmptyNonMainSession, parseSessionUpdatedAtMs, shouldKeepMissingCurrentSession, shouldRetainLocalSessionRecord } from '@/plugins/chat/store/session-helpers';
+import { readSessionsFromState } from '@/plugins/chat/session-catalog';
 import { resumeActiveStoreSend } from '@/plugins/chat/store/send-handlers';
 import { executeViewportWindowLoad } from '@/plugins/chat/store/history-load-execution';
 import {
@@ -38,14 +33,8 @@ import {
   resetSessionProjection,
   resolveSessionRecord,
 } from '@/plugins/chat/store/store-state-helpers';
-import {
-  buildRuntimeScopeKey,
-  buildSessionRecordKey,
-  findAgentScope,
-  findSessionRecordKey,
-  resolveSessionOperationTarget,
-  sameRuntimeEndpointScope,
-} from '@/plugins/chat/store/session-identity';
+import { buildRuntimeScopeKey, buildSessionRecordKey, findAgentScope, resolveSessionOperationTarget, sameRuntimeEndpointScope } from '@/plugins/chat/store/session-identity';
+import { findSessionRecordKey } from '@/plugins/chat/session-catalog';
 import {
   createDraftCurrentConversation,
   findPreferredSessionForAgent,
@@ -73,7 +62,7 @@ import {
 } from '@/lib/session-trace';
 import { isSessionOwnership } from '@/types/desktop/session-ownership';
 import { useComposerDraftStore, type ComposerDraftSnapshot } from '@/plugins/chat/composer-drafts';
-import { isSessionRuntimeEndpointReady, isSessionRuntimeEndpointStarting, supportsSessionChat, useRuntimeEndpointsStore } from '@/stores/runtime-endpoints';
+import { isSessionRuntimeEndpointReady, isSessionRuntimeEndpointStarting, supportsSessionChat, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import type { StoreHistoryCache } from '@/plugins/chat/store/history-cache';
 import {
   sessionIdentitiesEqual,
@@ -1486,7 +1475,10 @@ function selectNewSessionDraft(input: CreateStoreSessionActionsInput, scope: Age
   const key = `${conversation.runtimeScopeKey}:agent:${conversation.agentId}:draft`;
   const composer = useComposerDraftStore.getState();
   const initialization = composer.initializations[key];
-  if (initialization?.kind === 'createUnknown') composer.setInitialization(key, null);
+  if (initialization?.kind === 'createUnknown') {
+    composer.setInitialization(key, null);
+    composer.settleSubmission(key, initialization.operationId, { accepted: false, reason: 'error', dispatch: 'not-dispatched' });
+  }
   clearHistoryPoll();
   clearErrorRecoveryTimer();
   input.set((state) => ({

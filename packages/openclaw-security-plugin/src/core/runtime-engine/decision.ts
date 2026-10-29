@@ -1,7 +1,6 @@
 import type { SecurityGuardAction } from "../types.js";
 import type { DecideBeforeToolCallInput, RuntimeDecision } from "./types.js";
 import {
-  isExecStyleTool,
   redactToolParams,
   resolveActionForSeverity,
   severityToRisk,
@@ -57,33 +56,12 @@ function resolveDestructiveDecision(input: DecideBeforeToolCallInput): RuntimeDe
   }
 
   if (effectiveAction === "confirm") {
-    if (!input.confirmed) {
-      return {
-        ...base,
-        auditAction: "block",
-        auditDecision: "confirm-required",
-        blockReason: `Blocked by security-core: ${detection.reason}. Waiting for approval flow; do not auto-retry the same tool call.`,
-      };
-    }
-
-    const nextParams = isExecStyleTool(input.toolName)
-      ? {
-          ...input.strippedParams,
-          ask: "always",
-          _security_core: {
-            reason: detection.reason,
-            severity: detection.severity,
-            category: detection.category,
-            pattern: detection.pattern,
-          },
-        }
-      : input.strippedParams;
-
     return {
       ...base,
-      auditAction: "allow",
-      auditDecision: "confirm-approved",
-      nextParams,
+      auditAction: "block",
+      auditDecision: "confirm-required",
+      requiresApproval: true,
+      nextParams: input.toolParams,
     };
   }
 
@@ -129,39 +107,17 @@ function resolveSecretDecision(input: DecideBeforeToolCallInput): RuntimeDecisio
       ...base,
       auditAction: "allow",
       auditDecision: "redact",
-      nextParams: redactToolParams(input.strippedParams, detection.redactionPatterns),
+      nextParams: redactToolParams(input.toolParams, detection.redactionPatterns),
     };
   }
 
   if (effectiveAction === "confirm") {
-    if (input.confirmed) {
-      const redactedParams = redactToolParams(input.strippedParams, detection.redactionPatterns);
-      const nextParams = isExecStyleTool(input.toolName)
-        ? {
-            ...redactedParams,
-            ask: "always",
-            _security_core: {
-              reason: "secret-confirm-redact",
-              severity: detection.severity,
-              hitNames: detection.hitNames,
-            },
-          }
-        : {
-            ...redactedParams,
-            _clawguardian_confirmed: detection.hitNames[0] ?? "secret",
-          };
-      return {
-        ...base,
-        auditAction: "allow",
-        auditDecision: "confirm-approved-redact",
-        nextParams,
-      };
-    }
     return {
       ...base,
       auditAction: "block",
       auditDecision: "confirm-required",
-      blockReason: "Blocked by security-core: secret payload. Waiting for approval/redaction flow; do not auto-retry the same tool call.",
+      requiresApproval: true,
+      nextParams: redactToolParams(input.toolParams, detection.redactionPatterns),
     };
   }
 

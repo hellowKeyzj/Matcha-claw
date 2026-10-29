@@ -97,16 +97,16 @@ pub(super) async fn thinking(
             ));
         }
     }
-    let _guard = sessions.agent_guard(&input.agent_id).await;
+    let guard = sessions.agent_guard(&input.agent_id).await;
     let mut snapshot = config.checked_snapshot().await?;
     let agent = snapshot
         .agents
         .get_mut(&input.agent_id)
         .ok_or_else(|| rpc::Error::not_found("Agent"))?;
-    if let Some(model) = input.model {
-        agent.model = Some(model);
+    if let Some(model) = &input.model {
+        agent.model = Some(model.clone());
     }
-    let capabilities = effort::query(
+    let launch = effort::prepare(
         &snapshot,
         config.paths(),
         &input.agent_id,
@@ -114,6 +114,25 @@ pub(super) async fn thinking(
         input.protocol,
     )
     .await?;
+    drop(guard);
+    let capabilities = effort::inspect(&launch).await?;
+    let _guard = sessions.agent_guard(&input.agent_id).await;
+    let mut current = config.checked_snapshot().await?;
+    let agent = current
+        .agents
+        .get_mut(&input.agent_id)
+        .ok_or_else(|| rpc::Error::not_found("Agent"))?;
+    if let Some(model) = input.model {
+        agent.model = Some(model);
+    }
+    effort::ensure_current(
+        &launch,
+        &current,
+        config.paths(),
+        &input.agent_id,
+        None,
+        input.protocol,
+    )?;
     Ok(capabilities.view(None))
 }
 

@@ -311,9 +311,9 @@ async function main() {
   const agencyZhRoot = process.env.MATCHACLAW_AGENCY_AGENTS_ZH_DIR
     ? resolve(process.env.MATCHACLAW_AGENCY_AGENTS_ZH_DIR)
     : resolve(projectRoot, '../_tmp_agency_agents_zh');
-  const localeEnPath = resolve(projectRoot, 'src/i18n/locales/en/subagent-templates.json');
-  const localeZhPath = resolve(projectRoot, 'src/i18n/locales/zh/subagent-templates.json');
-  const localeJaPath = resolve(projectRoot, 'src/i18n/locales/ja/subagent-templates.json');
+  const localeEnPath = resolve(projectRoot, 'src/plugins/agents/locales/en/subagent-templates.json');
+  const localeZhPath = resolve(projectRoot, 'src/plugins/agents/locales/zh/subagent-templates.json');
+  const localeJaPath = resolve(projectRoot, 'src/plugins/agents/locales/ja/subagent-templates.json');
 
   const baseEntries = resolveTemplateBaseData(templateRoot);
   const sourcePathByTemplateId = readCatalogSourcePathMap(catalogPath);

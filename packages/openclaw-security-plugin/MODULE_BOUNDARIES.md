@@ -38,7 +38,7 @@ packages/openclaw-security-plugin/
 ## 职责划分
 
 - `adapters/*`：框架适配层。仅负责把 OpenClaw 插件接口映射到应用层，不承载安全策略决策。
-- `application/*`：应用编排层。负责 hook 注册、gateway method 注册、运行时状态与流程编排。
+- `application/*`：应用编排层。负责 hook/trusted tool policy 注册、gateway method 注册、运行时状态与流程编排。工具 guard 以 `runtime-guard` trusted policy 在原生审批前校验/脱敏参数；审批交给 runner 的 `requireApproval`，`onResolution` 只记审计，不改变参数或执行授权。
 - `core/*`：领域内核层。负责策略模型、规则决策、运行时拦截判定（与具体插件框架解耦）。
 - `core/runtime-engine/*`：运行时规则引擎三层，分别承载检测、决策与动作物化，`runtime-guard.ts` 仅保留编排职责。
 - `infrastructure/*`：基础设施与用例实现，承载安全动作、启动审计、监控采集。

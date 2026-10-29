@@ -33,9 +33,9 @@ impl Sessions {
     pub(super) async fn get_thinking(&self, session_id: &str) -> rpc::Result<Value> {
         let session = self.session(session_id).await?;
         let agent_id = session.data.lock().await.record.agent_id.clone();
-        let _guard = self.agent_guard(&agent_id).await;
+        let guard = self.agent_guard(&agent_id).await;
         self.accepting()?;
-        let _closing = session.close_guard.lock().await;
+        let closing = session.close_guard.lock().await;
         let snapshot = self.0.config.snapshot().await;
         let execution = session.data.lock().await;
         readable(&execution)?;
@@ -44,16 +44,38 @@ impl Sessions {
         let control = cli.as_ref().map(Cli::admit).transpose()?;
         let config = self.thinking_config(snapshot, &execution)?;
         drop(execution);
-        let capabilities = if let Some(control) = &control {
+        if let Some(control) = &control {
             let response =
                 control_request(control, json!({"subtype":"get_settings"}), false).await?;
-            effort::readback(&response)?
-        } else {
-            effort::query(&config, self.0.config.paths(), &agent_id, level, None).await?
-        };
+            let capabilities = effort::readback(&response)?;
+            let execution = session.data.lock().await;
+            readable(&execution)?;
+            current_instance(&execution, cli.as_ref(), false)?;
+            return Ok(capabilities.view(level));
+        }
+        let launch =
+            effort::prepare(&config, self.0.config.paths(), &agent_id, level, None).await?;
+        drop(closing);
+        drop(guard);
+        let capabilities = effort::inspect(&launch).await?;
+        let _guard = self.agent_guard(&agent_id).await;
+        self.accepting()?;
+        let _closing = session.close_guard.lock().await;
+        let snapshot = self.0.config.snapshot().await;
         let execution = session.data.lock().await;
         readable(&execution)?;
-        current_instance(&execution, cli.as_ref(), false)?;
+        current_instance(&execution, None, false)?;
+        let current_level = execution.record.effort;
+        let current = self.thinking_config(snapshot, &execution)?;
+        drop(execution);
+        effort::ensure_current(
+            &launch,
+            &current,
+            self.0.config.paths(),
+            &agent_id,
+            current_level,
+            None,
+        )?;
         Ok(capabilities.view(level))
     }
 

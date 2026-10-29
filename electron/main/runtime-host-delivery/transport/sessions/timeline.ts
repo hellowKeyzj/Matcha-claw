@@ -1,6 +1,6 @@
 import type { RuntimeHostDeliveryIssuer } from '../../issuer';
 import { hasExactKeys, isRecord, isSafeNonNegativeInteger, sendLoopbackJson } from '../client';
-import { decodeSessionView, sameSessionIdentity, type SessionIdentity } from './session-contract';
+import { decodeSessionView, isSessionInputIds, sameSessionIdentity, type SessionIdentity } from './session-contract';
 import { isBoundedId, isTimelineIdentity, isTimelineScope } from './timeline-contract';
 import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, traceHeader } from './trace';
 const UNAVAILABLE = { success: false, error: 'Session timeline is unavailable' } as const;
@@ -16,6 +16,7 @@ type TimelineRequest = Readonly<{
     sessionKey: string;
     sessionIdentity: SessionIdentity;
     endpointSessionId?: string;
+    inputIds?: string[];
     mode?: Direction;
     limit?: number;
     offset?: number;
@@ -107,9 +108,10 @@ function isRequest(value: unknown, operation: TimelineRequest['operationId']): v
 function isInput(value: unknown, operation: TimelineRequest['operationId']): value is TimelineRequest['input'] {
   if (!isRecord(value) || !isTimelineIdentity(value.sessionIdentity) || typeof value.sessionKey !== 'string' || !value.sessionKey) return false;
   const allowed = operation === 'sessions.load'
-    ? ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'limit']
-    : ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'mode', 'limit', 'offset', 'includeCanonical'];
+    ? ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'limit', 'inputIds']
+    : ['sessionKey', 'sessionIdentity', 'endpointSessionId', 'mode', 'limit', 'offset', 'includeCanonical', 'inputIds'];
   if (!Object.keys(value).every((key) => allowed.includes(key))) return false;
+  if (Object.hasOwn(value, 'inputIds') && (!isSessionInputIds(value.inputIds) || value.inputIds.length === 0)) return false;
   if (value.limit !== undefined && (!isSafeNonNegativeInteger(value.limit) || value.limit > 200)) return false;
   if (value.endpointSessionId !== undefined && !isBoundedId(value.endpointSessionId)) return false;
   if (operation === 'sessions.load') {

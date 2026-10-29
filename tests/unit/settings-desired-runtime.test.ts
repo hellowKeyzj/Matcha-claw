@@ -34,7 +34,7 @@ describe('settings desired runtime helper', () => {
         proxyBypassRules: '',
       })
       .mockResolvedValueOnce({ desired: { revision: 1, outcome: 'confirmed' } });
-    const { hostSettingsPutPatch } = await import('@/lib/settings-runtime');
+    const { hostSettingsPutPatch } = await import('@/plugins/settings/settings-runtime');
 
     await expect(hostSettingsPutPatch({
       browserMode: 'relay',
@@ -57,7 +57,7 @@ describe('settings desired runtime helper', () => {
   });
 
   it('propagates IPC and desired transport failures without a local fallback', async () => {
-    const { hostSettingsPutPatch } = await import('@/lib/settings-runtime');
+    const { hostSettingsPutPatch } = await import('@/plugins/settings/settings-runtime');
     const input = { browserMode: 'off' as const, launchAtStartup: false, gatewayAutoStart: true, proxyEnabled: false, proxyServer: '', proxyBypassRules: '' };
 
     hostApiFetchMock.mockResolvedValueOnce({

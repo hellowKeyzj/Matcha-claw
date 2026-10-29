@@ -4,6 +4,7 @@ use crate::protocol::{
     budget::Budget,
     ids::*,
     materials::BlobRef,
+    native,
     package::*,
     schema,
     slots::*,
@@ -520,10 +521,9 @@ pub fn source(
 pub fn native_identity(
     version: Version,
     target: &str,
-    host_executable: &[u8],
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native identity requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native identity requires a target".into());
     }
     use crate::protocol::identity::{IdentityFailure, IdentityProposal, IdentityResolveRequest};
     finish(
@@ -555,10 +555,7 @@ pub fn native_identity(
             request: "schemas/request.json",
             result: "schemas/result.json",
         }],
-        Entrypoint::Native {
-            registration: crate::protocol::identity::SOURCE_KEY_REGISTRATION.into(),
-            host_build: schema::hash(host_executable)?,
-        },
+        builtin_entrypoint(crate::protocol::identity::SOURCE_KEY_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Identity).into(),
         Vec::new(),
         Vec::new(),
@@ -568,10 +565,9 @@ pub fn native_identity(
 pub fn native_schema(
     version: Version,
     target: &str,
-    host_executable: &[u8],
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native schema requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native schema requires a target".into());
     }
     use crate::protocol::compiler::{CompileFailure, CompileRequest, TypedIr};
     finish(
@@ -598,10 +594,7 @@ pub fn native_schema(
             request: "schemas/request.json",
             result: "schemas/result.json",
         }],
-        Entrypoint::Native {
-            registration: SCHEMA_REGISTRATION.into(),
-            host_build: schema::hash(host_executable)?,
-        },
+        builtin_entrypoint(SCHEMA_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Schema).into(),
         Vec::new(),
         Vec::new(),
@@ -611,10 +604,9 @@ pub fn native_schema(
 pub fn native_compiler(
     version: Version,
     target: &str,
-    host_executable: &[u8],
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native compiler requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native compiler requires a target".into());
     }
     use crate::protocol::compiler::{CompileFailure, CompilerPassRequest, CompilerPassResult};
     finish(
@@ -638,10 +630,7 @@ pub fn native_compiler(
             request: "schemas/request.json",
             result: "schemas/result.json",
         }],
-        Entrypoint::Native {
-            registration: COMPILER_REGISTRATION.into(),
-            host_build: schema::hash(host_executable)?,
-        },
+        builtin_entrypoint(COMPILER_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Compiler).into(),
         Vec::new(),
         Vec::new(),
@@ -651,10 +640,9 @@ pub fn native_compiler(
 pub fn native_policy(
     version: Version,
     target: &str,
-    host_executable: &[u8],
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native policy requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native policy requires a target".into());
     }
     finish(
         "current-policy",
@@ -677,10 +665,7 @@ pub fn native_policy(
             request: "schemas/request.json",
             result: "schemas/result.json",
         }],
-        Entrypoint::Native {
-            registration: POLICY_REGISTRATION.into(),
-            host_build: schema::hash(host_executable)?,
-        },
+        builtin_entrypoint(POLICY_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Policy).into(),
         Vec::new(),
         Vec::new(),
@@ -690,10 +675,9 @@ pub fn native_policy(
 pub fn native_provenance(
     version: Version,
     target: &str,
-    host_executable: &[u8],
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native provenance requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native provenance requires a target".into());
     }
     use crate::protocol::provenance::{ProvenanceFailure, SupportDeltaProposal, SupportSnapshot};
     finish(
@@ -706,7 +690,7 @@ pub fn native_provenance(
         ]),
         None, target, ArtifactRuntime::Native, Some(SlotKind::Provenance),
         vec![ContractFiles { reference: slot_contract(SlotKind::Provenance)?, request: "schemas/request.json", result: "schemas/result.json" }],
-        Entrypoint::Native { registration: PROVENANCE_REGISTRATION.into(), host_build: schema::hash(host_executable)? },
+        builtin_entrypoint(PROVENANCE_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Provenance).into(), Vec::new(), Vec::new(),
     )
 }
@@ -714,10 +698,9 @@ pub fn native_provenance(
 pub fn native_action(
     version: Version,
     target: &str,
-    host_executable: &[u8],
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native action requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native action requires a target".into());
     }
     finish(
         "plan-action", version,
@@ -729,7 +712,7 @@ pub fn native_action(
         ]),
         None, target, ArtifactRuntime::Native, Some(SlotKind::Action),
         vec![ContractFiles { reference: slot_contract(SlotKind::Action)?, request: "schemas/request.json", result: "schemas/result.json" }],
-        Entrypoint::Native { registration: ACTION_REGISTRATION.into(), host_build: schema::hash(host_executable)? },
+        builtin_entrypoint(ACTION_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Action).into(), Vec::new(), Vec::new(),
     )
 }
@@ -737,10 +720,9 @@ pub fn native_action(
 pub fn native_evaluation(
     version: Version,
     target: &str,
-    host_executable: &[u8],
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native evaluation requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native evaluation requires a target".into());
     }
     finish(
         "field-oracle", version,
@@ -752,7 +734,7 @@ pub fn native_evaluation(
         ]),
         None, target, ArtifactRuntime::Native, Some(SlotKind::Evaluation),
         vec![ContractFiles { reference: evaluation_contract()?, request: "schemas/request.json", result: "schemas/result.json" }],
-        Entrypoint::Native { registration: EVALUATION_REGISTRATION.into(), host_build: schema::hash(host_executable)? },
+        builtin_entrypoint(EVALUATION_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Evaluation).into(),
         vec![ConfigField {
             name: "enabled".into(), value_type: ValueType::Boolean, required: true,
@@ -763,10 +745,10 @@ pub fn native_evaluation(
 }
 
 pub fn native_projection(
-    version: Version, target: &str, host_executable: &[u8],
+    version: Version, target: &str,
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native projection requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native projection requires a target".into());
     }
     finish(
         "assertion-projection", version,
@@ -778,16 +760,16 @@ pub fn native_projection(
         ]),
         None, target, ArtifactRuntime::Native, Some(SlotKind::Projection),
         vec![ContractFiles { reference: projection_contract()?, request: "schemas/request.json", result: "schemas/result.json" }],
-        Entrypoint::Native { registration: PROJECTION_REGISTRATION.into(), host_build: schema::hash(host_executable)? },
+        builtin_entrypoint(PROJECTION_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Projection).into(), Vec::new(), Vec::new(),
     )
 }
 
 pub fn native_reconcile(
-    version: Version, target: &str, host_executable: &[u8],
+    version: Version, target: &str,
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native reconcile requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native reconcile requires a target".into());
     }
     finish(
         "assertion-reconcile", version,
@@ -799,16 +781,16 @@ pub fn native_reconcile(
         ]),
         None, target, ArtifactRuntime::Native, Some(SlotKind::Reconcile),
         vec![ContractFiles { reference: reconcile_contract()?, request: "schemas/request.json", result: "schemas/result.json" }],
-        Entrypoint::Native { registration: RECONCILE_REGISTRATION.into(), host_build: schema::hash(host_executable)? },
+        builtin_entrypoint(RECONCILE_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Reconcile).into(), Vec::new(), Vec::new(),
     )
 }
 
 pub fn native_abstraction(
-    version: Version, target: &str, host_executable: &[u8],
+    version: Version, target: &str,
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native abstraction requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native abstraction requires a target".into());
     }
     use crate::protocol::abstraction::{AbstractionContract, AbstractionFailure, AbstractionRequest};
     finish(
@@ -821,16 +803,16 @@ pub fn native_abstraction(
         ]),
         None, target, ArtifactRuntime::Native, Some(SlotKind::Abstraction),
         vec![ContractFiles { reference: slot_contract(SlotKind::Abstraction)?, request: "schemas/request.json", result: "schemas/result.json" }],
-        Entrypoint::Native { registration: ABSTRACTION_REGISTRATION.into(), host_build: schema::hash(host_executable)? },
+        builtin_entrypoint(ABSTRACTION_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Abstraction).into(), Vec::new(), Vec::new(),
     )
 }
 
 pub fn native_agent_bridge(
-    version: Version, target: &str, host_executable: &[u8],
+    version: Version, target: &str,
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native agent bridge requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native agent bridge requires a target".into());
     }
     finish(
         "query-bridge", version,
@@ -842,16 +824,16 @@ pub fn native_agent_bridge(
         ]),
         None, target, ArtifactRuntime::Native, Some(SlotKind::AgentBridge),
         vec![ContractFiles { reference: slot_contract(SlotKind::AgentBridge)?, request: "schemas/request.json", result: "schemas/result.json" }],
-        Entrypoint::Native { registration: AGENT_BRIDGE_REGISTRATION.into(), host_build: schema::hash(host_executable)? },
+        builtin_entrypoint(AGENT_BRIDGE_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::AgentBridge).into(), Vec::new(), Vec::new(),
     )
 }
 
 pub fn native_storage(
-    version: Version, target: &str, host_executable: &[u8],
+    version: Version, target: &str,
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native storage requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native storage requires a target".into());
     }
     finish(
         "postgres-storage", version,
@@ -863,7 +845,7 @@ pub fn native_storage(
         ]),
         None, target, ArtifactRuntime::Native, Some(SlotKind::Storage),
         vec![ContractFiles { reference: slot_contract(SlotKind::Storage)?, request: "schemas/request.json", result: "schemas/result.json" }],
-        Entrypoint::Native { registration: STORAGE_REGISTRATION.into(), host_build: schema::hash(host_executable)? },
+        builtin_entrypoint(STORAGE_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Storage).into(), Vec::new(), Vec::new(),
     )
 }
@@ -871,10 +853,9 @@ pub fn native_storage(
 pub fn native_resolver(
     version: Version,
     target: &str,
-    host_executable: &[u8],
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native resolver requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native resolver requires a target".into());
     }
     finish(
         "query-resolver",
@@ -907,10 +888,7 @@ pub fn native_resolver(
             request: "schemas/request.json",
             result: "schemas/result.json",
         }],
-        Entrypoint::Native {
-            registration: RESOLVER_REGISTRATION.into(),
-            host_build: schema::hash(host_executable)?,
-        },
+        builtin_entrypoint(RESOLVER_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Resolver).into(),
         Vec::new(),
         Vec::new(),
@@ -920,10 +898,9 @@ pub fn native_resolver(
 pub fn native_context(
     version: Version,
     target: &str,
-    host_executable: &[u8],
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native context requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native context requires a target".into());
     }
     finish(
         "world-view-context",
@@ -956,10 +933,7 @@ pub fn native_context(
             request: "schemas/request.json",
             result: "schemas/result.json",
         }],
-        Entrypoint::Native {
-            registration: CONTEXT_REGISTRATION.into(),
-            host_build: schema::hash(host_executable)?,
-        },
+        builtin_entrypoint(CONTEXT_REGISTRATION)?,
         crate::protocol::component::slot_world(SlotKind::Context).into(),
         Vec::new(),
         Vec::new(),
@@ -970,11 +944,10 @@ pub fn native_source(
     kind: NativeSourceKind,
     version: Version,
     target: &str,
-    host_executable: &[u8],
     requested_access: &[RequestedAccess],
 ) -> Result<BuiltPackage, Error> {
-    if host_executable.is_empty() || target.is_empty() {
-        return Err("native source requires an actual host executable and target".into());
+    if target.is_empty() {
+        return Err("native source requires a target".into());
     }
     if !requested_access
         .iter()
@@ -1045,7 +1018,6 @@ pub fn native_source(
             });
         }
     }
-    let host_build = schema::hash(host_executable)?;
     finish(
         name,
         version,
@@ -1055,14 +1027,17 @@ pub fn native_source(
         ArtifactRuntime::Native,
         Some(SlotKind::Connector),
         contracts,
-        Entrypoint::Native {
-            registration: registration.into(),
-            host_build,
-        },
+        builtin_entrypoint(registration)?,
         crate::protocol::component::slot_world(SlotKind::Connector).into(),
         Vec::new(),
         requested_access.to_vec(),
     )
+}
+
+fn builtin_entrypoint(registration: &str) -> Result<Entrypoint, Error> {
+    Ok(native::implementation(registration)
+        .ok_or("unknown built-in implementation registration")?
+        .entrypoint())
 }
 
 struct ContractFiles {
@@ -1279,7 +1254,24 @@ fn finish(
         target: target.into(),
         path: path.map(str::to_owned),
         digest: match &entrypoint {
-            Entrypoint::Native { host_build, .. } => host_build.clone(),
+            Entrypoint::Builtin { registration, .. } => {
+                let implementation = native::implementation(registration)
+                    .ok_or("unknown built-in implementation registration")?;
+                if runtime != ArtifactRuntime::Native
+                    || path.is_some()
+                    || slot != Some(implementation.slot)
+                    || entrypoint != implementation.entrypoint()
+                {
+                    return Err("built-in artifact does not match its implementation descriptor".into());
+                }
+                implementation.digest()?
+            }
+            Entrypoint::Native { .. } => {
+                return Err("legacy Native entrypoints cannot be generated; use a built-in descriptor".into());
+            }
+            _ if runtime == ArtifactRuntime::Native => {
+                return Err("native artifacts require a built-in implementation descriptor".into());
+            }
             _ => blob(path.ok_or("non-native artifact path missing")?)?.digest,
         },
         entrypoint,

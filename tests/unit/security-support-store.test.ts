@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const hostSecurityFetchRuleCatalogMock = vi.fn();
 const hostSecurityReadAuditMock = vi.fn();
 
-vi.mock('@/lib/security-runtime', () => ({
+vi.mock('@/plugins/security/security-runtime', () => ({
   hostSecurityFetchRuleCatalog: (...args: unknown[]) => hostSecurityFetchRuleCatalogMock(...args),
   hostSecurityReadAudit: (...args: unknown[]) => hostSecurityReadAuditMock(...args),
 }));

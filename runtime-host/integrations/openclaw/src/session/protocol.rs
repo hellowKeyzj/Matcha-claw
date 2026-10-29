@@ -22,7 +22,7 @@ const DEFAULT_CHAT_HISTORY_LIMIT: usize = 200;
 const MAX_CHAT_HISTORY_LIMIT: u64 = 1_000;
 const MAX_CHAT_HISTORY_MAX_CHARS: u64 = 500_000;
 const MAX_HISTORY_MESSAGE_BYTES: usize = 128 * 1024;
-const MAX_HISTORY_RESPONSE_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_HISTORY_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_SESSION_UPDATE_TEXT_BYTES: usize = 128 * 1024;
 const MAX_SESSION_UPDATE_STOP_REASON_BYTES: usize = 256;
 const MAX_SESSION_ACTIVITY_TEXT_BYTES: usize = 16 * 1024;
@@ -391,6 +391,8 @@ pub struct ChatHistoryParams {
     offset: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_chars: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    input_run_ids: Vec<String>,
 }
 
 impl fmt::Debug for ChatHistoryParams {
@@ -413,6 +415,7 @@ impl ChatHistoryParams {
             limit: None,
             offset: None,
             max_chars: None,
+            input_run_ids: Vec::new(),
         }
     }
 
@@ -434,6 +437,16 @@ impl ChatHistoryParams {
         self.agent_id = Some(AgentId::try_new(agent_id)?);
         Ok(self)
     }
+
+    pub fn try_with_input_run_ids(mut self, input_run_ids: Vec<String>) -> Result<Self, ValidationError> {
+        if !sessions_module::state::valid_input_ids(&input_run_ids) {
+            return Err(ValidationError("chat history input run IDs are invalid"));
+        }
+        self.input_run_ids = input_run_ids;
+        Ok(self)
+    }
+
+    pub(crate) fn input_run_ids(&self) -> &[String] { &self.input_run_ids }
 
     pub fn try_with_cursor(mut self, cursor: String) -> Result<Self, ValidationError> {
         if self.offset.is_some() || cursor.is_empty() || cursor.len() > 8192 {
@@ -483,11 +496,14 @@ impl<'de> Deserialize<'de> for ChatHistoryParams {
             offset: OptionalHistoryBound,
             #[serde(default)]
             max_chars: OptionalHistoryBound,
+            #[serde(default)]
+            input_run_ids: Vec<String>,
         }
 
         let raw = RawParams::deserialize(deserializer)?;
         let mut params = Self::new(raw.session_key);
         params.agent_id = raw.agent_id;
+        params = params.try_with_input_run_ids(raw.input_run_ids).map_err(D::Error::custom)?;
         if let Some(cursor) = raw.cursor { params = params.try_with_cursor(cursor).map_err(D::Error::custom)?; }
         let params = match raw.limit {
             OptionalHistoryBound::Value(limit) => params.try_with_limit(limit),
@@ -1366,6 +1382,9 @@ impl SessionDescribeRow {
                 SessionModelOverrideSource::Auto => {
                     sessions_module::state::SessionModelOverrideSource::Auto
                 }
+                SessionModelOverrideSource::Inherited => {
+                    sessions_module::state::SessionModelOverrideSource::Inherited
+                }
             }),
             selection_id: None,
         })
@@ -1387,6 +1406,7 @@ impl fmt::Debug for SessionDescribeRow {
 pub enum SessionModelOverrideSource {
     User,
     Auto,
+    Inherited,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -1634,6 +1654,9 @@ impl SessionSummary {
                 }
                 SessionModelOverrideSource::Auto => {
                     sessions_module::state::SessionModelOverrideSource::Auto
+                }
+                SessionModelOverrideSource::Inherited => {
+                    sessions_module::state::SessionModelOverrideSource::Inherited
                 }
             }),
             selection_id: None,
@@ -1955,6 +1978,9 @@ impl<'de> Deserialize<'de> for PeerSessionCreateResult {
                         SessionModelOverrideSource::Auto => {
                             sessions_module::state::SessionModelOverrideSource::Auto
                         }
+                        SessionModelOverrideSource::Inherited => {
+                            sessions_module::state::SessionModelOverrideSource::Inherited
+                        }
                     }),
                 selection_id: None,
             }
@@ -2025,24 +2051,28 @@ pub enum ChatState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChatStatusPhase {
+    WaitingForState,
     PreparingWorkspace,
     NamingWorktree,
     CreatingWorktree,
     RunningSetup,
     ProvisioningEnvironment,
     PreparingContext,
+    MemoryFlushing,
     StartingModel,
 }
 
 impl ChatStatusPhase {
     fn parse(value: Option<&Value>) -> Option<Self> {
         match value.and_then(Value::as_str)? {
+            "waiting_for_state" => Some(Self::WaitingForState),
             "preparing_workspace" => Some(Self::PreparingWorkspace),
             "naming_worktree" => Some(Self::NamingWorktree),
             "creating_worktree" => Some(Self::CreatingWorktree),
             "running_setup" => Some(Self::RunningSetup),
             "provisioning_environment" => Some(Self::ProvisioningEnvironment),
             "preparing_context" => Some(Self::PreparingContext),
+            "memory_flushing" => Some(Self::MemoryFlushing),
             "starting_model" => Some(Self::StartingModel),
             _ => None,
         }
@@ -2097,6 +2127,7 @@ pub struct ChatEvent {
     pub status_retry: Option<ChatStatusRetry>,
     pub delta_text: Option<String>,
     pub replace: bool,
+    pub(super) reconstructed_append: bool,
     pub message_text: Option<String>,
     pub message_thinking: Option<String>,
     pub final_message: Option<super::window::Message>,
@@ -2152,6 +2183,7 @@ pub enum SessionErrorKind {
     Timeout,
     RateLimit,
     ContextLength,
+    StateContention,
     Unknown,
 }
 
@@ -2162,6 +2194,7 @@ impl SessionErrorKind {
             "timeout" => Some(Self::Timeout),
             "rate_limit" => Some(Self::RateLimit),
             "context_length" => Some(Self::ContextLength),
+            "state_contention" => Some(Self::StateContention),
             "unknown" => Some(Self::Unknown),
             _ => None,
         }
@@ -2272,6 +2305,7 @@ fn decode_chat_event(payload: Value) -> Result<ChatEvent, ProtocolError> {
             .get("replace")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        reconstructed_append: false,
         message_text,
         message_thinking,
         final_message,
@@ -2311,16 +2345,13 @@ fn message_content_thinking(message: &Value) -> Option<String> {
 }
 
 fn message_content_blocks(message: &Value, block_type: &str, text_key: &str, delta_snapshot: bool) -> Option<String> {
-    let is_blank = |text: &str| text.chars().all(|ch| matches!(ch,
-        '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}'
-        | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'));
     let content = message.get("content")?;
     if block_type == "text"
         && let Some(text) = content.as_str()
     {
-        return (!delta_snapshot || !is_blank(text)).then(|| text.to_owned());
+        return Some(text.to_owned());
     }
-    let text = content
+    let texts = content
         .as_array()?
         .iter()
         .filter_map(|block| {
@@ -2330,10 +2361,9 @@ fn message_content_blocks(message: &Value, block_type: &str, text_key: &str, del
             }
             object.get(text_key).and_then(Value::as_str)
         })
-        .filter(|text| !delta_snapshot || !is_blank(text))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let text = if delta_snapshot { text } else { text.trim_end().to_owned() };
+        .collect::<Vec<_>>();
+    if delta_snapshot { return (!texts.is_empty()).then(|| texts.join("\n")); }
+    let text = texts.join("\n").trim_end().to_owned();
     (!text.is_empty()).then_some(text)
 }
 

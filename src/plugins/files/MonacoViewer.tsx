@@ -10,7 +10,7 @@ interface MonacoViewerProps {
 
 const MonacoViewerInner = lazy(async () => {
   const [{ Editor, languageForPath }, { useSettingsStore }, { useResolvedTheme }] = await Promise.all([
-    import('@/lib/monaco/loader'),
+    import('./monaco/loader'),
     import('@/plugins/settings/store'),
     import('@/lib/use-resolved-theme'),
   ]);

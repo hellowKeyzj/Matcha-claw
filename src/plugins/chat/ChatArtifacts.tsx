@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
-import { useChatStore, type AttachedFileMeta } from '@/plugins/chat/store';
+import { useChatStore } from '@/plugins/chat/store';
+import type { AttachedFileMeta } from '@/plugins/message-rendering/attachments';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { agentScope, buildSessionIdentityKey, runtimeEndpointsEqual } from '@/types/desktop/runtime-address';
 import { ChatSidePanel, type ChatSidePanelPresentation } from '@/plugins/chat/components/ChatSidePanel';
@@ -15,7 +16,7 @@ import type { GeneratedFile } from '@/plugins/files/generated-files';
 import { useFilePreviewSupport } from '@/plugins/files/extensions';
 import { type ArtifactPreviewTarget, buildArtifactPreviewTargetFromAttachedFile, buildArtifactPreviewTargetFromGeneratedFile, DIRECTORY_MIME_TYPE } from '@/plugins/files/types';
 import { Button } from '@/components/ui/button';
-import { pickLocalDirectory } from '@/services/local-path-picker';
+import { pickLocalDirectory } from '@/lib/local-path-picker';
 import { invokeIpc } from '@/lib/api-client';
 import { toast } from 'sonner';
 import { selectChatSelection, useChatAgent } from '@/plugins/chat/chat-session';

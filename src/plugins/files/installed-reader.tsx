@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { hostAppPluginBundle, hostAppPluginRuntimeStatus } from '@/lib/host-api';
-import { SandboxFrame } from '@/plugin-host/SandboxFrame';
+import { SandboxFrame } from '@/plugins/application-plugins/SandboxFrame';
 
 export type InstalledReaderInput = {
   fileName: string;

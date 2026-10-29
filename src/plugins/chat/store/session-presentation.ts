@@ -1,8 +1,9 @@
 import type { SessionIdentity } from '@/types/desktop/runtime-address';
 import type { SessionRenderItem } from '@/types/session/render-item';
-import type { SessionWireItem } from '@/types/session/snapshot';
+import type { SessionInputReceipt, SessionWireItem } from '@/types/session/snapshot';
 import * as openclaw from '@/plugins/chat/store/openclaw-session';
 import * as matcha from '@/plugins/chat/store/matcha-session';
+import { reconcileSessionItems } from '@/plugins/chat/store/session-item-reconciliation';
 import type { ChatSessionAbortState, ChatSessionPending, ChatSessionRecord, ChatSessionRuntimeState, ChatSessionSendAdmission, ChatSessionSendState } from '@/plugins/chat/store/types';
 
 export type SessionMessageState = Pick<ChatSessionRecord, 'items' | 'runtime'> & {
@@ -25,6 +26,8 @@ export interface SessionTextModel {
 
 export interface SessionMessageModel {
   text: SessionTextModel;
+  reconcileItems(current: SessionRenderItem[], next: SessionRenderItem[], receipts?: readonly SessionInputReceipt[], sourceItems?: readonly SessionWireItem[]): SessionRenderItem[];
+  inputIds(record: ChatSessionRecord): string[];
   startSend(record: ChatSessionRecord, send: ChatSessionSendState, sessionKey: string): SessionMessageState;
   confirmSend(record: ChatSessionRecord, send: ChatSessionSendState, runId: string, admission: ChatSessionSendAdmission, retainReceipt: boolean, nextSend: ChatSessionSendState | null): SessionMessageState;
   removeSend(record: ChatSessionRecord, clientId: string): SessionMessageState;
@@ -65,6 +68,14 @@ export function getSessionTextModel(identity?: SessionIdentity): SessionTextMode
 function messageModel(record: ChatSessionRecord): SessionMessageModel {
   if (!record.meta.sessionIdentity) throw new Error('Session identity is unavailable');
   return sessionModel(record.meta.sessionIdentity);
+}
+
+export function reconcileSessionMessageItems(identity: SessionIdentity | undefined, current: SessionRenderItem[], next: SessionRenderItem[], receipts?: readonly SessionInputReceipt[], sourceItems?: readonly SessionWireItem[]): SessionRenderItem[] {
+  return identity ? sessionModel(identity).reconcileItems(current, next, receipts, sourceItems) : reconcileSessionItems(current, next);
+}
+
+export function getSessionInputIds(record: ChatSessionRecord | undefined): string[] {
+  return record?.meta.sessionIdentity ? messageModel(record).inputIds(record) : [];
 }
 
 export function startSessionSend(record: ChatSessionRecord, send: ChatSessionSendState, sessionKey: string): SessionMessageState {

@@ -65,6 +65,11 @@ const REQUIRED_PLUGIN_MIRRORS = [
     dir: 'matchaclaw-media',
     scanSdkImports: true,
   },
+  {
+    pluginId: 'world-tools',
+    dir: 'world-tools',
+    scanSdkImports: true,
+  },
 ];
 
 function fail(message, details = []) {

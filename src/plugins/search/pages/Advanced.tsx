@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { fetchNetworkSearchLogs } from '@/lib/network-search';
+import { fetchNetworkSearchLogs } from '../network-search';
 import type { SearchConfig, SearchSnapshot } from '@/types/network-search';
 import { SearchSelect } from './SearchSelect';
 import { SEARCH_LANGUAGES } from './languages';

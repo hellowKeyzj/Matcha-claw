@@ -25,7 +25,6 @@
 import type { OpenClawConfig } from 'openclaw/plugin-sdk/core';
 import type { FeishuMediaInfo, MessageContext } from '../types';
 import type { LarkAccount } from '../../core/types';
-import { isTraceEnabled } from '../../core/lark-logger';
 import { getMessageFeishu } from '../outbound/fetch';
 import type { PermissionError } from './permission';
 import { PERMISSION_ERROR_COOLDOWN_MS, permissionErrorNotifiedAt } from './permission';
@@ -59,7 +58,7 @@ export async function resolveSenderInfo(params: {
   // pre-bot-support behavior of only resolving names for `sender_type === 'user'`.
   const senderType = ctx.rawSender?.sender_type;
   if (!ctx.senderIsBot && senderType !== 'user') {
-    if (isTraceEnabled()) log(`sender_type is "${senderType ?? 'undefined'}", skipping name resolution`);
+    log(`sender_type is "${senderType ?? 'undefined'}", skipping name resolution`);
     return { ctx };
   }
   const senderResult = ctx.senderIsBot
@@ -67,7 +66,7 @@ export async function resolveSenderInfo(params: {
     : await resolveUserName({ account, openId: ctx.senderId, log });
   if (senderResult.name) {
     ctx = { ...ctx, senderName: senderResult.name };
-    if (isTraceEnabled()) log(`sender resolved: ${senderResult.name}`);
+    log(`sender resolved: ${senderResult.name}`);
   } else if (senderResult.permissionError) {
     log(`sender resolve failed: permission error code=${senderResult.permissionError.code}`);
   }
@@ -171,7 +170,7 @@ export async function resolveMedia(params: {
   });
 
   if (mediaList.length > 0) {
-    if (isTraceEnabled()) log(`media resolved: ${mediaList.length} attachment(s)`);
+    log(`media resolved: ${mediaList.length} attachment(s)`);
   }
 
   return {
@@ -268,7 +267,7 @@ export async function resolveQuotedContent(params: {
     });
     if (!quotedMsg) return undefined;
 
-    if (isTraceEnabled()) log(`feishu[${account.accountId}]: fetched quoted message: ${quotedMsg.content?.slice(0, 100)}`);
+    log(`feishu[${account.accountId}]: fetched quoted message: ${quotedMsg.content?.slice(0, 100)}`);
 
     // Build quoted text with message_id prefix so AI can correlate
     // file_key / image_key with the source message for resource download.

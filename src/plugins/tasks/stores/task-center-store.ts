@@ -9,8 +9,8 @@ import {
   updateTask,
   type TaskListSnapshot,
   type TaskScope,
-} from '@/services/openclaw/task-manager-client';
-import { useTaskSnapshotStore } from '@/plugins/chat/store/task-snapshot-store';
+} from '@/plugins/tasks/services/task-manager-client';
+import { reportTaskCenterSnapshot as reportChatTaskCenterSnapshot } from '@/plugins/chat/task-snapshots';
 import { logRendererDebug } from '@/lib/debug-logging';
 
 interface TaskCenterState {
@@ -94,7 +94,7 @@ function scopeKeyForOptions(sessionKey: string, teamKey?: string): string {
 }
 
 function reportTaskCenterSnapshot(sessionKey: string, sessionIdentity: SessionIdentity, snapshot: TaskListSnapshot): void {
-  useTaskSnapshotStore.getState().reportTaskCenterSnapshot({
+  reportChatTaskCenterSnapshot({
     sessionKey: sessionIdentity.sessionKey,
     recordKey: sessionKey,
     ...(snapshot.scope ? { scope: snapshot.scope } : {}),

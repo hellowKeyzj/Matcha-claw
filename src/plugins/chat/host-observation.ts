@@ -1,5 +1,5 @@
 import { subscribeHostEvent } from '@/lib/host-events';
-import { isGatewayOperational } from '@/lib/gateway-status';
+import { isGatewayOperational } from '@/plugins/runtime/gateway-status';
 import { useGatewayStore } from '@/plugins/runtime/store';
 import { useChatStore } from './store';
 import { useTaskSnapshotStore } from './store/task-snapshot-store';

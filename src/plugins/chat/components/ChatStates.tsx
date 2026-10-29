@@ -1,14 +1,10 @@
-import type { ReactNode } from 'react';
 import { AlertCircle, MessageSquareText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-export function WelcomeScreen({ input }: { input: ReactNode }) {
+export function WelcomeScreen() {
   const { t } = useTranslation('chat');
   return (
-    <section
-      data-testid="chat-welcome-screen"
-      className="mx-auto my-auto w-full min-w-0 max-w-[44rem] py-8 text-left"
-    >
+    <section data-testid="chat-welcome-screen">
       <div className="mb-7 flex items-center gap-2.5 text-foreground">
         <MessageSquareText aria-hidden="true" className="h-6 w-6" strokeWidth={1.5} />
         <span className="text-sm font-semibold tracking-[-0.01em]">MatchaClaw</span>
@@ -16,7 +12,6 @@ export function WelcomeScreen({ input }: { input: ReactNode }) {
       <h2 className="max-w-xl text-balance text-[2rem] font-semibold leading-tight tracking-[-0.035em] text-foreground md:text-[2.25rem]">
         {t('welcome.title')}
       </h2>
-      <div className="mt-7 w-full">{input}</div>
     </section>
   );
 }

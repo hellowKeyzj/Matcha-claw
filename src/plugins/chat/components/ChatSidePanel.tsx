@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useContributions } from '@/plugin-host/react';
 import { chatSidePanels, type ChatPanelProps } from '../extensions';
-import type { ChatSidePanelMode } from '@/components/layout/chat-workspace-layout';
+import type { ChatSidePanelMode } from '@/app/layout/workspace';
 import type { ChatSidePanelTab } from '../useChatSidePanelController';
 
 export interface ChatSidePanelPresentation extends Omit<ChatPanelProps, 'sessionIdentity'> {

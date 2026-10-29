@@ -3,7 +3,7 @@ use std::sync::Arc;
 use foundation::execution::OwnedTask;
 use tokio::{sync::oneshot, time::Instant};
 use tokio_util::sync::CancellationToken;
-use wasm_host::{CallControl, Engine};
+use wasm_host::{CallControl, EngineResources};
 use world_protocol::{
     api::PackageConfigView,
     bindings::{ImplementationRef, StateBinding},
@@ -96,7 +96,7 @@ pub(crate) async fn prepare_migration(
     request: StateMigration,
     implementation: ImplementationRef,
     config: PackageConfigView,
-    engine: Engine,
+    engine: Arc<EngineResources>,
     policy: ExecutionPolicy,
     artifact_limit: usize,
     limits: StateLimits,
@@ -253,14 +253,23 @@ pub(crate) async fn prepare_migration(
     let (send, receive) = oneshot::channel();
     let (task, _) = OwnedTask::spawn(move |task_cancel| async move {
         let work = async {
-            let prepared = PreparedStateMigration::prepare(
-                engine,
-                task_implementation,
-                task_config,
-                artifact,
-                artifact_limit,
-                &external_cancel,
-            )?;
+            let preparation_cancel = external_cancel.clone();
+            let prepared = tokio::task::spawn_blocking(move || {
+                if preparation_cancel.is_cancelled() {
+                    return Err(crate::extensions::wasm::WasmError::Cancelled);
+                }
+                let engine = engine.prepare_engine().map_err(crate::extensions::wasm::WasmError::from)?;
+                PreparedStateMigration::prepare(
+                    engine,
+                    task_implementation,
+                    task_config,
+                    artifact,
+                    artifact_limit,
+                    &preparation_cancel,
+                )
+            })
+            .await
+            .map_err(|cause| crate::owner::Error::internal(world_protocol::failure::FailureStage::Prepare).caused(cause))??;
             let control = CallControl::new(CancellationToken::new(), deadline.into_std());
             let call = prepared.migrate(input, policy, control.clone());
             tokio::pin!(call);

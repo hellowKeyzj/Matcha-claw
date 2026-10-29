@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { isTraceEnabled, startupTrace } from '@/lib/trace-logger';
-import { fetchLicenseGate, type LicenseGateSnapshot } from '@/lib/license';
+import { fetchLicenseGate, type LicenseGateSnapshot } from '../api/license';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { useAccountStore } from './account';
 

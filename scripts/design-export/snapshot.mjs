@@ -332,7 +332,7 @@ export async function exportSnapshot(page, { id, title, group, route, sources, o
   await page.evaluate(async () => {
     const editors = [...document.querySelectorAll('.monaco-diff-editor')].filter((element) => element.getClientRects().length);
     if (!editors.length) return;
-    const moduleUrl = new URL('/src/lib/monaco/loader.ts', location.href);
+    const moduleUrl = new URL('/src/plugins/files/monaco/loader.ts', location.href);
     if (moduleUrl.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(moduleUrl.hostname)) {
       throw new Error('拒绝从非本地 Renderer 读取 Monaco 状态');
     }

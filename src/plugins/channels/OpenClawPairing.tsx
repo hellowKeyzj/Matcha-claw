@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
-import { hostChannelsListPairingRequests, hostChannelsApprovePairingRequest, type ChannelPairingRequest } from '@/lib/channel-runtime';
+import { hostChannelsListPairingRequests, hostChannelsApprovePairingRequest, type ChannelPairingRequest } from './channel-runtime';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';

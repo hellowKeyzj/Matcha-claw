@@ -1,13 +1,14 @@
 import { Fragment, Suspense, useCallback, useMemo, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { AgentPage, AgentPageSection } from '@/components/common/AgentPage';
+import { AgentPage } from '@/plugins/agents/workbench';
+import { AgentPageSection } from '@/components/common/AgentResource';
 import { AgentViewToggle } from '@/components/common/AgentViewToggle';
 import { LoadingState } from '@/components/common/LoadingSpinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { selectedSkillsScope } from '@/lib/skills';
+import { selectedSkillsScope } from './services/client';
 import { useContributions } from '@/plugin-host/react';
-import { useRuntimeEndpointsStore, selectManagementEndpoint, selectManagementAgentScope } from '@/stores/runtime-endpoints';
+import { useRuntimeEndpointsStore, selectManagementEndpoint, selectManagementAgentScope } from '@/plugins/runtime/directory';
 import { buildCapabilityScopeKey, runtimeInstanceScope } from '@/types/desktop/runtime-address';
 import { skillSources, skillTransfers, type SkillOwnerProps, type SkillSourceView, type SkillViewProps } from './extensions';
 import { SkillGatewayBanner } from './presentation';

@@ -6,17 +6,17 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import type { ProviderCredential } from '@/plugins/providers/stores/providers';
-import type { ProviderVendorInfo } from '@/lib/providers';
+import type { ProviderVendorInfo } from '@/plugins/providers/domain/providers';
 import {
   type ModelCapability,
   type ProviderModel,
   type ProviderModelDraft,
-} from '@/lib/provider-model-catalog';
+} from '@/plugins/providers/services/provider-model-catalog';
 import {
   filterAllowedModelCapabilities,
   MODEL_CAPABILITIES,
   resolveProviderModelCapabilities,
-} from '@/lib/provider-model-capabilities';
+} from '@/plugins/providers/domain/provider-model-capabilities';
 import { cn } from '@/lib/utils';
 import { useContributions } from '@/plugin-host/react';
 import { providerModelSources, type ProviderModelSourceContribution } from '../extensions';

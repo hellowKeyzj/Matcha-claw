@@ -4,7 +4,6 @@ use world_protocol::{
     abstraction::{AbstractionContract, AbstractionRequest},
     api::PackageConfigView,
     bindings::{BindingNode, ImplementationRef, SlotKind},
-    ids::Digest,
     package::PackageLimits,
     slots,
 };
@@ -18,10 +17,10 @@ pub(crate) struct PreparedAbstraction {
 }
 
 impl PreparedAbstraction {
-    pub(crate) fn prepare(node: &BindingNode, config: PackageConfigView, artifact: ArtifactLease, host_build: &Digest) -> Result<Self, NativePrepareFailure> {
+    pub(crate) fn prepare(node: &BindingNode, config: PackageConfigView, artifact: ArtifactLease) -> Result<Self, NativePrepareFailure> {
         let contract = slots::slot_contract(SlotKind::Abstraction).map_err(|_| NativePrepareFailure::Entrypoint)?;
         if !node.implementation.contracts.contains(&contract) { return Err(NativePrepareFailure::Entrypoint); }
-        Ok(Self { proof: NativeProof::prepare(node, config, artifact, host_build, slots::ABSTRACTION_REGISTRATION, SlotKind::Abstraction)? })
+        Ok(Self { proof: NativeProof::prepare(node, config, artifact, slots::ABSTRACTION_REGISTRATION, SlotKind::Abstraction)? })
     }
 
     pub fn implementation(&self) -> &ImplementationRef { self.proof.implementation() }

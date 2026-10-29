@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ComponentProps, ReactNode } from 'react';
-import type { LicenseGateSnapshot } from '@/lib/license';
+import type { LicenseGateSnapshot } from '@/plugins/account/api/license';
 import App from '@/App';
 import { applicationShellPlugin } from '@/app/extensions';
 import { createPluginHost } from '@/plugin-host/core';
@@ -117,11 +117,11 @@ vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
 }));
 
-vi.mock('@/lib/toolchain', () => ({
+vi.mock('@/app/toolchain', () => ({
   prepareToolchain: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('@/components/layout/MainLayout', async () => {
+vi.mock('@/app/layout/MainLayout', async () => {
   const { Outlet } = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
   return {
     MainLayout: () => (
