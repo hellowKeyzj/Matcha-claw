@@ -1,11 +1,11 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import {
   isRemoteFleetCredentialWriteError,
   isRemoteFleetCredentialWriteInput,
   type RemoteFleetCredentialWriteAdapter,
   type RemoteFleetCredentialWriteInput,
   type RemoteFleetCredentialWriteReceipt,
-} from '../../main/ipc/fleet-private';
+} from '../../main/runtime-host-delivery/transport/fleet-credentials';
 import {
   isFleetMutationRequest,
   type FleetTransport,
@@ -24,7 +24,6 @@ import {
   type FleetRegistrationRoute,
   type FleetRegistrationStepReceipt,
 } from '../../main/runtime-host-delivery/transport/fleet-registration';
-import { parseJsonBody, sendJson } from '../route-utils';
 
 const INVALID = {
   success: false,
@@ -62,70 +61,60 @@ type MutationBuildResult =
   | Readonly<{ kind: 'unavailable' }>;
 
 export async function handleFleetRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: FleetTransport,
   credentialWriteAdapter?: RemoteFleetCredentialWriteAdapter,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   const route = classifyRoute(url.pathname, req.method);
-  if (!route) return false;
+  if (!route) return undefined;
 
   if (route.kind === 'read') {
     if (!route.request) {
-      sendJson(res, 503, UNAVAILABLE);
-      return true;
+      return jsonResult(503, UNAVAILABLE);
     }
     try {
       const response = await transport.read(route.request);
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNAVAILABLE);
+      return jsonResult(503, UNAVAILABLE);
     }
-    return true;
   }
 
   let body: unknown;
   try {
-    body = await parseJsonBody<unknown>(req);
+    body = await req.readJson<unknown>();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
 
   if (route.kind === 'credential') {
-    return await handleCredentialWrite(body, res, credentialWriteAdapter);
+    return await handleCredentialWrite(body, credentialWriteAdapter);
   }
 
   if (url.pathname === '/api/remote-fleet/register-connection' || url.pathname === '/api/remote-fleet/register-environment') {
-    await handleRegistrationRoute(url.pathname, body, res, transport);
-    return true;
+    return handleRegistrationRoute(url.pathname, body, transport);
   }
   const mutation = buildMutationRequest(url.pathname, body);
   if (mutation.kind === 'invalid') {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   if (mutation.kind === 'unavailable') {
-    sendJson(res, 503, UNAVAILABLE);
-    return true;
+    return jsonResult(503, UNAVAILABLE);
   }
   if (!isFleetMutationRequest(mutation.request)) {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
 
   try {
     const response = await transport.mutate(mutation.request);
-    sendJson(
-      res,
+    return jsonResult(
       response.status,
       response.status === 200 ? projectFleetMutationResponse(url.pathname, mutation.request, response.body) : response.body,
     );
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }
 
 function projectFleetMutationResponse(pathname: string, request: FleetMutationRequest, body: unknown): unknown {
@@ -248,41 +237,35 @@ function readIdentifier(value: unknown): string | undefined {
 async function handleRegistrationRoute(
   pathname: string,
   body: unknown,
-  res: ServerResponse,
   transport: FleetTransport,
-): Promise<void> {
+): Promise<HostApiRouteResult> {
   const route: FleetRegistrationRoute = pathname === '/api/remote-fleet/register-connection'
     ? 'register-connection'
     : 'register-environment';
   const plan = buildFleetRegistrationPlan(route, body);
   if (plan.status === 'rejected') {
-    sendJson(res, 400, { success: false, error: plan.rejection?.message ?? INVALID.error });
-    return;
+    return jsonResult(400, { success: false, error: plan.rejection?.message ?? INVALID.error });
   }
 
   const step = plan.sequence[0];
   if (!step) {
-    sendJson(res, 503, UNAVAILABLE);
-    return;
+    return jsonResult(503, UNAVAILABLE);
   }
 
   try {
     const mutation = await transport.mutate(step.request);
     const outcome = mutation.status === 200 ? readRegistrationMutationOutcome(mutation.body) : null;
     if (!outcome) {
-      sendJson(res, 503, UNAVAILABLE);
-      return;
+      return jsonResult(503, UNAVAILABLE);
     }
 
     const facts = await readRegistrationFacts(route, transport);
     if (!facts) {
-      sendJson(res, 503, UNAVAILABLE);
-      return;
+      return jsonResult(503, UNAVAILABLE);
     }
     const projection = projectFleetRegistration(plan, facts);
     if (!isRegistrationProjection(projection)) {
-      sendJson(res, 503, { success: false, error: projection.message });
-      return;
+      return jsonResult(503, { success: false, error: projection.message });
     }
 
     const receipt = completeFleetRegistrationReceipt(plan, [{
@@ -291,12 +274,11 @@ async function handleRegistrationRoute(
       outcome,
     }], projection);
     if (receipt.status === 'rejected') {
-      sendJson(res, 503, { success: false, error: receipt.rejection?.message ?? UNAVAILABLE.error });
-      return;
+      return jsonResult(503, { success: false, error: receipt.rejection?.message ?? UNAVAILABLE.error });
     }
-    sendJson(res, 200, toFleetRegistrationLegacyResponse(receipt, projection));
+    return jsonResult(200, toFleetRegistrationLegacyResponse(receipt, projection));
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
 }
 
@@ -467,32 +449,27 @@ function isStringArray(value: unknown): value is readonly string[] {
 
 async function handleCredentialWrite(
   body: unknown,
-  res: ServerResponse,
   credentialWriteAdapter: RemoteFleetCredentialWriteAdapter | undefined,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (!isRemoteFleetCredentialWriteInput(body)) {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   if (!credentialWriteAdapter) {
-    sendJson(res, 503, UNAVAILABLE);
-    return true;
+    return jsonResult(503, UNAVAILABLE);
   }
   try {
     const receipt = await credentialWriteAdapter(body);
     if (!isCredentialWriteReceipt(receipt, body)) {
-      sendJson(res, 503, UNAVAILABLE);
-      return true;
+      return jsonResult(503, UNAVAILABLE);
     }
-    sendJson(res, 200, receipt);
+    return jsonResult(200, receipt);
   } catch (error) {
     if (isRemoteFleetCredentialWriteError(error)) {
-      sendJson(res, error.status, { success: false, error: error.message });
+      return jsonResult(error.status, { success: false, error: error.message });
     } else {
-      sendJson(res, 503, UNAVAILABLE);
+      return jsonResult(503, UNAVAILABLE);
     }
   }
-  return true;
 }
 
 function isCredentialWriteReceipt(

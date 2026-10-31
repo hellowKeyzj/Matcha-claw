@@ -30,7 +30,7 @@ vi.mock('../../electron/api/server', () => ({
   getHostApiToken: () => hoisted.getHostApiTokenMock(),
   waitForHostApiReady: () => hoisted.waitForHostApiReadyMock(),
 }));
-vi.mock('../../electron/main/e2e-fixture-loader', () => ({
+vi.mock('../../electron/testing/fixture-loader', () => ({
   handleE2EHostApiFetch: (...args: unknown[]) => hoisted.handleE2EHostApiFetchMock(...args),
 }));
 
@@ -66,7 +66,7 @@ describe('host API IPC boundary', () => {
       headers: new Headers({ 'content-type': 'application/json' }),
       json: vi.fn(async () => ({ success: true })),
     });
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    const { registerHostApiProxyHandlers } = await import('../../electron/api/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
@@ -85,7 +85,7 @@ describe('host API IPC boundary', () => {
     ['GET', '/api/runtime-host/restart'],
     ['POST', '/internal/runtime-host/shell-actions'],
   ])('rejects unsupported public method or internal path %s %s before any loopback request', async (method, path) => {
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    const { registerHostApiProxyHandlers } = await import('../../electron/api/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
@@ -105,7 +105,7 @@ describe('host API IPC boundary', () => {
       headers: new Headers({ 'content-type': 'application/json' }),
       json: vi.fn(async () => ({ sampledAt: 'now' })),
     });
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    const { registerHostApiProxyHandlers } = await import('../../electron/api/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
@@ -144,7 +144,7 @@ describe('host API IPC boundary', () => {
       headers: new Headers({ 'content-type': 'application/json' }),
       json: vi.fn(async () => ({ ready: true })),
     });
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    const { registerHostApiProxyHandlers } = await import('../../electron/api/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
@@ -174,7 +174,7 @@ describe('host API IPC boundary', () => {
 
   it('classifies renderer abort while waiting for Host API readiness', async () => {
     hoisted.waitForHostApiReadyMock.mockReturnValue(new Promise<void>(() => undefined));
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    const { registerHostApiProxyHandlers } = await import('../../electron/api/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const fetchHandler = hoisted.handlers.get('hostapi:fetch');
@@ -200,7 +200,7 @@ describe('host API IPC boundary', () => {
   it('classifies timeout while waiting for Host API readiness', async () => {
     vi.useFakeTimers();
     hoisted.waitForHostApiReadyMock.mockReturnValue(new Promise<void>(() => undefined));
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    const { registerHostApiProxyHandlers } = await import('../../electron/api/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
@@ -220,7 +220,7 @@ describe('host API IPC boundary', () => {
   });
 
   it('rejects unimplemented methods before the proxy request', async () => {
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    const { registerHostApiProxyHandlers } = await import('../../electron/api/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
@@ -240,7 +240,7 @@ describe('host API IPC boundary', () => {
     hoisted.proxyAwareFetchMock.mockRejectedValue(
       new Error('upstream rejected Authorization: Bearer private-token at /private/native/path'),
     );
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    const { registerHostApiProxyHandlers } = await import('../../electron/api/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
@@ -262,7 +262,7 @@ describe('host API IPC boundary', () => {
     hoisted.proxyAwareFetchMock.mockImplementation((_url, init) => new Promise((_resolve, reject) => {
       (init as { signal: AbortSignal }).signal.addEventListener('abort', () => reject(new Error('raw timeout /private/native/path')));
     }));
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    const { registerHostApiProxyHandlers } = await import('../../electron/api/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const handler = hoisted.handlers.get('hostapi:fetch');
@@ -285,7 +285,7 @@ describe('host API IPC boundary', () => {
     hoisted.proxyAwareFetchMock.mockImplementation((_url, init) => new Promise((_resolve, reject) => {
       (init as { signal: AbortSignal }).signal.addEventListener('abort', () => reject(new Error('raw abort /private/native/path')));
     }));
-    const { registerHostApiProxyHandlers } = await import('../../electron/main/ipc/hostapi-proxy-ipc');
+    const { registerHostApiProxyHandlers } = await import('../../electron/api/ipc/hostapi-proxy-ipc');
     registerHostApiProxyHandlers(Promise.resolve(undefined));
 
     const fetchHandler = hoisted.handlers.get('hostapi:fetch');

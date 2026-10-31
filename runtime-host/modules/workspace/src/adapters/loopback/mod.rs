@@ -14,6 +14,7 @@ use crate::api::WorkspaceHandle;
 pub(crate) mod binary;
 pub(crate) mod directory;
 pub(crate) mod media;
+pub(crate) mod session_images;
 pub(crate) mod text;
 pub(crate) mod write;
 
@@ -50,7 +51,9 @@ pub fn descriptor(dependencies: Dependencies) -> ModuleDescriptor {
                 RoutePath::ExactWithQuery(binary::AUTHORIZATION_ENDPOINT),
                 RoutePath::ExactWithQuery(directory::AUTHORIZATION_ENDPOINT),
                 RoutePath::ExactWithQuery(write::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(write::binary::AUTHORIZATION_ENDPOINT),
                 RoutePath::ExactWithQuery(media::AUTHORIZATION_ENDPOINT),
+                RoutePath::ExactWithQuery(session_images::AUTHORIZATION_ENDPOINT),
             ],
             head_plan,
             move |request| route(dependencies.clone(), request),
@@ -62,11 +65,19 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
     let path = pathname(&head.path);
     let max_bytes = match path {
         write::AUTHORIZATION_ENDPOINT => WORKSPACE_WRITE_REQUEST_BYTES,
-        media::AUTHORIZATION_ENDPOINT => WORKSPACE_MEDIA_REQUEST_BYTES,
+        media::AUTHORIZATION_ENDPOINT | write::binary::AUTHORIZATION_ENDPOINT => {
+            WORKSPACE_MEDIA_REQUEST_BYTES
+        }
         text::AUTHORIZATION_ENDPOINT
         | binary::AUTHORIZATION_ENDPOINT
-        | directory::AUTHORIZATION_ENDPOINT => DEFAULT_REQUEST_BYTES,
+        | directory::AUTHORIZATION_ENDPOINT
+        | session_images::AUTHORIZATION_ENDPOINT => DEFAULT_REQUEST_BYTES,
         _ => return None,
+    };
+    let timeout_response = if path == session_images::AUTHORIZATION_ENDPOINT {
+        session_images::unavailable_response as fn() -> Response
+    } else {
+        timeout_response
     };
     Some(RouteHeadPlan::new(
         body_policy_for_method(head.method.as_str(), max_bytes),
@@ -86,7 +97,11 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
             write::AUTHORIZATION_ENDPOINT => {
                 write::handler::handle(request, dependencies).await
             }
+            write::binary::AUTHORIZATION_ENDPOINT => write::binary::handle(request, dependencies).await,
             media::AUTHORIZATION_ENDPOINT => media::handler::handle(request, dependencies).await,
+            session_images::AUTHORIZATION_ENDPOINT => {
+                session_images::handle(request, dependencies).await
+            }
             _ => Response::not_found(),
         })
         .into()

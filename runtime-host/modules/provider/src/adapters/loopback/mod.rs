@@ -12,15 +12,23 @@ use tokio::sync::Mutex;
 use crate::{ProviderHandle, ProviderRecoveryStore};
 
 mod accounts;
+mod media;
 mod models;
 mod recovery;
 mod routing;
+mod text;
 
 const DEFAULT_REQUEST_BYTES: usize = 64 * 1024;
 const SHORT_DEADLINE: Duration = Duration::from_secs(5);
 const TIMEOUT_ERROR: &str = "Runtime Host request deadline exceeded";
 const PATHS: &[RoutePath] = &[
     RoutePath::ExactWithQuery(accounts::ENDPOINT),
+    RoutePath::ExactWithQuery(media::ENDPOINT),
+    RoutePath::ExactWithQuery(media::MODELS_ENDPOINT),
+    RoutePath::ExactWithQuery(media::SUBMIT_ENDPOINT),
+    RoutePath::ExactWithQuery(media::QUERY_ENDPOINT),
+    RoutePath::ExactWithQuery(media::COLLECT_ENDPOINT),
+    RoutePath::ExactWithQuery(text::ENDPOINT),
     RoutePath::ExactWithQuery(models::ENDPOINT),
     RoutePath::ExactWithQuery(models::SELECTABLE_ENDPOINT),
     RoutePath::ExactWithQuery(models::DISCOVERY_RESULT_ENDPOINT),
@@ -81,6 +89,12 @@ fn head_plan(head: &RequestHead) -> Option<RouteHeadPlan> {
 
 fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
     Box::pin(async move {
+        if is_media_route(pathname(request.path())) {
+            return media::handle(request, dependencies.verifier, dependencies.provider).await;
+        }
+        if pathname(request.path()) == text::ENDPOINT {
+            return text::handle(request, dependencies.verifier, dependencies.provider).await;
+        }
         match pathname(request.path()) {
             path if path == accounts::ENDPOINT || path.starts_with(accounts::ACCOUNT_PREFIX) => {
                 accounts::handle(request, dependencies.verifier, dependencies.provider).await
@@ -101,7 +115,15 @@ fn route(dependencies: Dependencies, request: Request) -> RouteFuture {
 }
 
 fn body_policy_for_method(method: &str, path: &str) -> BodyPolicy {
-    if method == "GET" || path == recovery::ACKNOWLEDGE_ENDPOINT {
+    if method == "POST" && matches!(path, media::ENDPOINT | media::SUBMIT_ENDPOINT) {
+        BodyPolicy::Required {
+            max_bytes: crate::media::MAX_REQUEST_BYTES,
+        }
+    } else if method == "POST" && path == text::ENDPOINT {
+        BodyPolicy::Required {
+            max_bytes: text::MAX_REQUEST_BYTES,
+        }
+    } else if method == "GET" || path == recovery::ACKNOWLEDGE_ENDPOINT {
         BodyPolicy::Empty
     } else if method == "POST" && post_body_required(path) {
         BodyPolicy::Required {
@@ -115,9 +137,21 @@ fn body_policy_for_method(method: &str, path: &str) -> BodyPolicy {
 }
 
 fn post_body_required(path: &str) -> bool {
+    is_media_route(path)
+        || matches!(
+            path,
+            accounts::ENDPOINT | text::ENDPOINT | models::ENDPOINT | routing::ENDPOINT
+        )
+}
+
+fn is_media_route(path: &str) -> bool {
     matches!(
         path,
-        accounts::ENDPOINT | models::ENDPOINT | routing::ENDPOINT
+        media::ENDPOINT
+            | media::MODELS_ENDPOINT
+            | media::SUBMIT_ENDPOINT
+            | media::QUERY_ENDPOINT
+            | media::COLLECT_ENDPOINT
     )
 }
 
@@ -130,6 +164,8 @@ fn timeout_response() -> Response {
 
 fn is_route(path: &str) -> bool {
     path == accounts::ENDPOINT
+        || is_media_route(path)
+        || path == text::ENDPOINT
         || path.starts_with(accounts::ACCOUNT_PREFIX)
         || path == models::ENDPOINT
         || path == models::SELECTABLE_ENDPOINT

@@ -1,20 +1,17 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import type { RuntimeHostApiContext } from '../context';
-import { readRuntimeHostStatusProjection } from './app';
-import { sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 export async function handleRuntimeHostProcessRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: RuntimeHostApiContext,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/runtime-host/status' && req.method === 'GET') {
-    const status = await readRuntimeHostStatusProjection(ctx.runtimeHost);
+    const status = await ctx.runtimeStatus.readHost();
     if (status) {
-      sendJson(res, 200, status);
+      return jsonResult(200, status);
     } else {
-      sendJson(res, 503, {
+      return jsonResult(503, {
         status: 'error',
         hostLifecycle: 'ready',
         runtimeLifecycle: 'ready',
@@ -22,25 +19,21 @@ export async function handleRuntimeHostProcessRoutes(
         error: 'Runtime Host status observation is unavailable.',
       });
     }
-    return true;
   }
 
   if (url.pathname === '/api/runtime-host/restart' && req.method === 'POST') {
     const admission = ctx.runtimeHost.admitRestart();
-    sendJson(res, admission.accepted ? 202 : 503, admission);
-    return true;
+    return jsonResult(admission.accepted ? 202 : 503, admission);
   }
 
   if (url.pathname === '/api/runtime-host/restart' && req.method === 'GET') {
     const restartId = url.searchParams.get('restartId');
     if (!restartId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(restartId)) {
-      sendJson(res, 400, { error: 'Invalid Runtime Host restart identity' });
-      return true;
+      return jsonResult(400, { error: 'Invalid Runtime Host restart identity' });
     }
     const restart = ctx.runtimeHost.readRestart(restartId);
-    sendJson(res, restart ? 200 : 404, restart ?? { error: 'Runtime Host restart result is missing or expired' });
-    return true;
+    return jsonResult(restart ? 200 : 404, restart ?? { error: 'Runtime Host restart result is missing or expired' });
   }
 
-  return false;
+  return undefined;
 }

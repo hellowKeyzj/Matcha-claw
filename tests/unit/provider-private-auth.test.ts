@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CallRecord } from '../../src/types/call-log';
 import type { ProviderCallDetail } from '../../src/types/call-log/provider';
 import { waitForCallRecord } from '../../src/types/call-log/wait';
-import type { ProviderPrivateCredentialResolver } from '../../electron/main/ipc/provider-private-auth';
-import { clearPrivateAccountTransactions } from '../../electron/main/ipc/provider-private-auth/account-transactions';
+import type { PrivateCredentialResolver } from '../../electron/api/private-credentials';
+import { clearPrivateAccountTransactions } from '../../electron/main/providers/account-transactions';
+import { createProviderPrivateAuth, createProviderPrivateCredentialAdapter } from '../../electron/main/providers/private-auth';
+import { drainWorldSourceCredentials, resolveWorldSourceCredential } from '../../electron/main/world/source-credentials';
 
 const handlers = new Map<string, (event: unknown, input: unknown) => Promise<unknown>>();
 const state = vi.hoisted(() => ({
@@ -112,11 +114,11 @@ vi.mock('node:fs/promises', () => {
 
 vi.mock('../../electron/utils/paths', () => ({}));
 
-vi.mock('../../electron/services/providers/oauth/openai-codex-oauth', () => ({
+vi.mock('../../electron/main/providers/oauth/openai-codex-oauth', () => ({
   loginOpenAICodexOAuth: vi.fn(),
 }));
 
-vi.mock('../../electron/services/providers/oauth/device-oauth-providers', () => ({
+vi.mock('../../electron/main/providers/oauth/device-oauth-providers', () => ({
   loginMiniMaxPortalOAuth: vi.fn(),
   loginQwenPortalOAuth: vi.fn(),
 }));
@@ -157,7 +159,7 @@ function terminalAccountCall(
 }
 
 async function ownerTransactionRequest(
-  resolver: ProviderPrivateCredentialResolver,
+  resolver: PrivateCredentialResolver,
   transactionId: string,
   operation: 'claim' | 'settle',
   settlement?: 'retained' | 'rejected' | 'unknown',
@@ -220,11 +222,14 @@ afterEach(() => {
 describe('Provider private auth Main ownership', () => {
   it('restores a replaced vault entry when Rust explicitly rejects the account', async () => {
     state.files.set(privateStorePath, JSON.stringify({ 'credential:v1:openai-main': Buffer.from('{"kind":"apiKey","provider":"openai","key":"old"}').toString('base64') }));
-    const { registerProviderPrivateAuthHandlers, startProviderPrivateCredentialResolver } = await import('../../electron/main/ipc/provider-private-auth');
+    const { registerProviderPrivateAuthHandlers } = await import('../../electron/api/ipc/provider-private-auth');
+    const { startPrivateCredentialResolver } = await import('../../electron/api/private-credentials');
     const execute = vi.fn().mockResolvedValue({ status: 202, body: receipt });
     const observer = vi.fn();
-    registerProviderPrivateAuthHandlers(() => null, Promise.resolve({ transport: { execute }, awaitProviderCall: observer }), new AbortController().signal);
-    const resolver = await startProviderPrivateCredentialResolver(state.openClaw);
+    const provider = createProviderPrivateAuth(() => null, Promise.resolve({ transport: { execute }, awaitProviderCall: observer }), new AbortController().signal);
+    registerProviderPrivateAuthHandlers(provider);
+    const credentialAdapter = await createProviderPrivateCredentialAdapter(state.openClaw);
+    const resolver = await startPrivateCredentialResolver(credentialAdapter.resolve, resolveWorldSourceCredential);
     try {
       await expect(handlers.get('providers:storeAccount')?.({}, { account, apiKey: 'new' })).resolves.toEqual(receipt);
       expect(observer).not.toHaveBeenCalled();
@@ -234,16 +239,26 @@ describe('Provider private auth Main ownership', () => {
       expect([...state.files.values()].join()).toContain(Buffer.from('{"kind":"apiKey","provider":"openai","key":"old"}').toString('base64'));
       expect([...state.files.values()].join()).not.toContain(Buffer.from('{"kind":"apiKey","provider":"openai","key":"new"}').toString('base64'));
     } finally {
-      await resolver.close();
+      try {
+        await resolver.close();
+        await credentialAdapter.drainCredentials();
+        await drainWorldSourceCredentials();
+        await credentialAdapter.closeTransactions();
+      } finally {
+        await credentialAdapter.close();
+      }
     }
   });
 
   it('keeps a possibly committed vault mutation when transport outcome is unknown', async () => {
-    const { registerProviderPrivateAuthHandlers, startProviderPrivateCredentialResolver } = await import('../../electron/main/ipc/provider-private-auth');
+    const { registerProviderPrivateAuthHandlers } = await import('../../electron/api/ipc/provider-private-auth');
+    const { startPrivateCredentialResolver } = await import('../../electron/api/private-credentials');
     const execute = vi.fn().mockResolvedValue({ status: 202, body: receipt });
     const observer = vi.fn();
-    registerProviderPrivateAuthHandlers(() => null, Promise.resolve({ transport: { execute }, awaitProviderCall: observer }), new AbortController().signal);
-    const resolver = await startProviderPrivateCredentialResolver(state.openClaw);
+    const provider = createProviderPrivateAuth(() => null, Promise.resolve({ transport: { execute }, awaitProviderCall: observer }), new AbortController().signal);
+    registerProviderPrivateAuthHandlers(provider);
+    const credentialAdapter = await createProviderPrivateCredentialAdapter(state.openClaw);
+    const resolver = await startPrivateCredentialResolver(credentialAdapter.resolve, resolveWorldSourceCredential);
     try {
       await expect(handlers.get('providers:storeAccount')?.({}, { account, apiKey: 'new' })).resolves.toEqual(receipt);
       expect(observer).not.toHaveBeenCalled();
@@ -255,19 +270,29 @@ describe('Provider private auth Main ownership', () => {
       }), undefined, () => () => {})).resolves.toMatchObject({ status: 'unknown', detail: { persisted: 'unknown', commit: 'unknown' } });
       expect([...state.files.values()].join()).toContain(Buffer.from('{"kind":"apiKey","provider":"openai","key":"new"}').toString('base64'));
     } finally {
-      await resolver.close();
+      try {
+        await resolver.close();
+        await credentialAdapter.drainCredentials();
+        await drainWorldSourceCredentials();
+        await credentialAdapter.closeTransactions();
+      } finally {
+        await credentialAdapter.close();
+      }
     }
   });
 
   it('applies, resolves, and deletes the OpenClaw private credential over the loopback authority', async () => {
-    const { registerProviderPrivateAuthHandlers, startProviderPrivateCredentialResolver } = await import('../../electron/main/ipc/provider-private-auth');
+    const { registerProviderPrivateAuthHandlers } = await import('../../electron/api/ipc/provider-private-auth');
+    const { startPrivateCredentialResolver } = await import('../../electron/api/private-credentials');
     const execute = vi.fn().mockResolvedValue({ status: 202, body: receipt });
     const observer = vi.fn();
-    registerProviderPrivateAuthHandlers(() => null, Promise.resolve({ transport: { execute }, awaitProviderCall: observer }), new AbortController().signal);
+    const provider = createProviderPrivateAuth(() => null, Promise.resolve({ transport: { execute }, awaitProviderCall: observer }), new AbortController().signal);
+    registerProviderPrivateAuthHandlers(provider);
     await expect(handlers.get('providers:storeAccount')?.({}, { account, apiKey: 'secret-canary' })).resolves.toEqual(receipt);
     expect(observer).not.toHaveBeenCalled();
 
-    const resolver = await startProviderPrivateCredentialResolver(state.openClaw);
+    const credentialAdapter = await createProviderPrivateCredentialAdapter(state.openClaw);
+    const resolver = await startPrivateCredentialResolver(credentialAdapter.resolve, resolveWorldSourceCredential);
     try {
       const transactionId = execute.mock.calls[0][0].input.privateTransactionId;
       await ownerTransactionRequest(resolver, transactionId, 'claim');
@@ -316,7 +341,14 @@ describe('Provider private auth Main ownership', () => {
       expect(remove.status).toBe(204);
       expect([...state.files.values()].join()).not.toContain('secret-canary');
     } finally {
-      await resolver.close();
+      try {
+        await resolver.close();
+        await credentialAdapter.drainCredentials();
+        await drainWorldSourceCredentials();
+        await credentialAdapter.closeTransactions();
+      } finally {
+        await credentialAdapter.close();
+      }
     }
   });
 
@@ -339,7 +371,7 @@ describe('Provider private auth Main ownership', () => {
 
   it('projects the existing browser flow to manual code and confirmed success events', async () => {
     const token = deferred<{ access: string; refresh: string; expires: number; accountId: string }>();
-    const { loginOpenAICodexOAuth } = await import('../../electron/services/providers/oauth/openai-codex-oauth');
+    const { loginOpenAICodexOAuth } = await import('../../electron/main/providers/oauth/openai-codex-oauth');
     vi.mocked(loginOpenAICodexOAuth).mockImplementation(async ({ onManualCodeRequired }) => {
       onManualCodeRequired?.({
         authorizationUrl: 'https://auth.example/authorize',
@@ -347,13 +379,14 @@ describe('Provider private auth Main ownership', () => {
       });
       return await token.promise;
     });
-    const { registerProviderPrivateAuthHandlers } = await import('../../electron/main/ipc/provider-private-auth');
+    const { registerProviderPrivateAuthHandlers } = await import('../../electron/api/ipc/provider-private-auth');
     const { events, getMainWindow } = createEventSink();
     const browserAccount = { ...account, id: 'confirmed-openai', authMode: 'oauthBrowser' as const };
-    registerProviderPrivateAuthHandlers(getMainWindow, Promise.resolve({
+    const provider = createProviderPrivateAuth(getMainWindow, Promise.resolve({
       transport: { execute: vi.fn().mockResolvedValue({ status: 202, body: receipt }) },
       awaitProviderCall: (accepted) => waitForCallRecord(accepted, 'provider', async () => terminalAccountCall(browserAccount), undefined, () => () => {}),
     }), new AbortController().signal);
+    registerProviderPrivateAuthHandlers(provider);
 
     await expect(handlers.get('providers:startOAuth')?.({}, {
       flowId: 'browser-flow',
@@ -418,12 +451,12 @@ describe('Provider private auth Main ownership', () => {
 
   it('projects device codes through the same flow before its completion event', async () => {
     const token = deferred<{ access: string; refresh: string; expires: number }>();
-    const { loginMiniMaxPortalOAuth } = await import('../../electron/services/providers/oauth/device-oauth-providers');
+    const { loginMiniMaxPortalOAuth } = await import('../../electron/main/providers/oauth/device-oauth-providers');
     vi.mocked(loginMiniMaxPortalOAuth).mockImplementation(async ({ note }) => {
       await note('Open https://auth.example/device?user_code=MINIMAX-123 to approve access.');
       return await token.promise;
     });
-    const { registerProviderPrivateAuthHandlers } = await import('../../electron/main/ipc/provider-private-auth');
+    const { registerProviderPrivateAuthHandlers } = await import('../../electron/api/ipc/provider-private-auth');
     const { events, getMainWindow } = createEventSink();
     const deviceAccount = {
       ...account,
@@ -432,10 +465,11 @@ describe('Provider private auth Main ownership', () => {
       label: 'MiniMax',
       authMode: 'oauthDevice' as const,
     };
-    registerProviderPrivateAuthHandlers(getMainWindow, Promise.resolve({
+    const provider = createProviderPrivateAuth(getMainWindow, Promise.resolve({
       transport: { execute: vi.fn().mockResolvedValue({ status: 202, body: receipt }) },
       awaitProviderCall: (accepted) => waitForCallRecord(accepted, 'provider', async () => terminalAccountCall(deviceAccount), undefined, () => () => {}),
     }), new AbortController().signal);
+    registerProviderPrivateAuthHandlers(provider);
 
     await expect(handlers.get('providers:startOAuth')?.({}, {
       flowId: 'device-flow',
@@ -498,23 +532,24 @@ describe('Provider private auth Main ownership', () => {
   });
 
   it('maps a rejected provider account result to its stable public OAuth error', async () => {
-    const { loginOpenAICodexOAuth } = await import('../../electron/services/providers/oauth/openai-codex-oauth');
+    const { loginOpenAICodexOAuth } = await import('../../electron/main/providers/oauth/openai-codex-oauth');
     vi.mocked(loginOpenAICodexOAuth).mockResolvedValue({
       access: 'access-canary',
       refresh: 'refresh-canary',
       expires: 1_800_000_000_000,
       accountId: 'native-account-canary',
     });
-    const { registerProviderPrivateAuthHandlers } = await import('../../electron/main/ipc/provider-private-auth');
+    const { registerProviderPrivateAuthHandlers } = await import('../../electron/api/ipc/provider-private-auth');
     const { events, getMainWindow } = createEventSink();
     const browserAccount = { ...account, authMode: 'oauthBrowser' as const };
-    registerProviderPrivateAuthHandlers(getMainWindow, Promise.resolve({
+    const provider = createProviderPrivateAuth(getMainWindow, Promise.resolve({
       transport: { execute: vi.fn().mockResolvedValue({ status: 202, body: receipt }) },
       awaitProviderCall: (accepted) => waitForCallRecord(accepted, 'provider', async () => ({
         ...terminalAccountCall(browserAccount, { outcome: 'rejected', persisted: null, commit: null }),
         status: 'rejected',
       }), undefined, () => () => {}),
     }), new AbortController().signal);
+    registerProviderPrivateAuthHandlers(provider);
 
     await handlers.get('providers:startOAuth')?.({}, {
       flowId: 'rejected-flow',
@@ -534,12 +569,13 @@ describe('Provider private auth Main ownership', () => {
   });
 
   it('redacts native OAuth failures behind a fixed public error', async () => {
-    const { loginOpenAICodexOAuth } = await import('../../electron/services/providers/oauth/openai-codex-oauth');
+    const { loginOpenAICodexOAuth } = await import('../../electron/main/providers/oauth/openai-codex-oauth');
     vi.mocked(loginOpenAICodexOAuth).mockRejectedValue(new Error('native failure access-canary refresh-canary'));
-    const { registerProviderPrivateAuthHandlers } = await import('../../electron/main/ipc/provider-private-auth');
+    const { registerProviderPrivateAuthHandlers } = await import('../../electron/api/ipc/provider-private-auth');
     const { events, getMainWindow } = createEventSink();
     const browserAccount = { ...account, authMode: 'oauthBrowser' as const };
-    registerProviderPrivateAuthHandlers(getMainWindow, Promise.resolve({ transport: { execute: vi.fn() }, awaitProviderCall: vi.fn() }), new AbortController().signal);
+    const provider = createProviderPrivateAuth(getMainWindow, Promise.resolve({ transport: { execute: vi.fn() }, awaitProviderCall: vi.fn() }), new AbortController().signal);
+    registerProviderPrivateAuthHandlers(provider);
 
     await handlers.get('providers:startOAuth')?.({}, {
       flowId: 'failed-flow',
@@ -558,15 +594,16 @@ describe('Provider private auth Main ownership', () => {
 
   it('does not project a terminal legacy event after cancellation wins the flow gate', async () => {
     const token = deferred<{ access: string; refresh: string; expires: number; accountId: string }>();
-    const { loginOpenAICodexOAuth } = await import('../../electron/services/providers/oauth/openai-codex-oauth');
+    const { loginOpenAICodexOAuth } = await import('../../electron/main/providers/oauth/openai-codex-oauth');
     vi.mocked(loginOpenAICodexOAuth).mockImplementation(async () => await token.promise);
-    const { registerProviderPrivateAuthHandlers } = await import('../../electron/main/ipc/provider-private-auth');
+    const { registerProviderPrivateAuthHandlers } = await import('../../electron/api/ipc/provider-private-auth');
     const { events, getMainWindow } = createEventSink();
     const browserAccount = { ...account, authMode: 'oauthBrowser' as const };
-    registerProviderPrivateAuthHandlers(getMainWindow, Promise.resolve({
+    const provider = createProviderPrivateAuth(getMainWindow, Promise.resolve({
       transport: { execute: vi.fn().mockResolvedValue({ status: 202, body: receipt }) },
       awaitProviderCall: (accepted) => waitForCallRecord(accepted, 'provider', async () => terminalAccountCall(browserAccount), undefined, () => () => {}),
     }), new AbortController().signal);
+    registerProviderPrivateAuthHandlers(provider);
 
     await handlers.get('providers:startOAuth')?.({}, {
       flowId: 'cancelled-flow',

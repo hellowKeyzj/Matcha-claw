@@ -1,7 +1,6 @@
 use std::fmt;
 
 use crate::{OpenClawConstructionError, parent_callback::ParentCallbackConfigError};
-use ::diagnostics::DiagnosticsArchiveError;
 
 use matcha_agent::peer::ConstructionError as MatchaConstructionError;
 
@@ -59,7 +58,6 @@ impl std::error::Error for RuntimeLifecycleFailure {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConstructionError {
-    Diagnostics(DiagnosticsArchiveError),
     CallLog(platform::call::CallLogError),
     ParentCallback(ParentCallbackConfigError),
     TeamSkillSelection,
@@ -70,7 +68,6 @@ pub enum ConstructionError {
     ExternalConnectors,
     Fleet,
     Wiki,
-    Search,
     Settings,
     Security,
     RuntimeState,
@@ -83,7 +80,6 @@ pub enum ConstructionError {
 impl fmt::Display for ConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Diagnostics(error) => error.fmt(formatter),
             Self::CallLog(error) => error.fmt(formatter),
             Self::ParentCallback(error) => error.fmt(formatter),
             Self::TeamSkillSelection => {
@@ -106,7 +102,6 @@ impl fmt::Display for ConstructionError {
             }
             Self::Fleet => formatter.write_str("Fleet owner could not be constructed"),
             Self::Wiki => formatter.write_str("wiki owner could not be constructed"),
-            Self::Search => formatter.write_str("network search owner could not be constructed"),
             Self::Settings => formatter.write_str("settings owner could not be constructed"),
             Self::Security => formatter.write_str("security owner could not be constructed"),
             Self::RuntimeState => {
@@ -127,7 +122,6 @@ impl fmt::Display for ConstructionError {
 impl std::error::Error for ConstructionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Diagnostics(error) => Some(error),
             Self::CallLog(error) => Some(error),
             Self::ParentCallback(error) => Some(error),
             Self::ProviderMigration(error) => Some(error),
@@ -138,7 +132,6 @@ impl std::error::Error for ConstructionError {
             | Self::ExternalConnectors
             | Self::Fleet
             | Self::Wiki
-            | Self::Search
             | Self::Settings
             | Self::Security
             | Self::RuntimeState

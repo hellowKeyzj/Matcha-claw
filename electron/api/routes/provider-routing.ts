@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import type { ProviderRoutingTransport } from '../../main/runtime-host-delivery/transport/providers/routing';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 const LIST_REQUEST = {
   id: 'provider.routing' as const,
@@ -20,42 +19,36 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleProviderRoutingRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: ProviderRoutingTransport,
-): Promise<boolean> {
-  if (url.pathname !== '/api/provider-routing') return false;
+): Promise<HostApiRouteResult> {
+  if (url.pathname !== '/api/provider-routing') return undefined;
   if (req.method === 'GET') {
     if ([...url.searchParams].length !== 0) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(res, transport.execute(LIST_REQUEST), UNAVAILABLE);
-    return true;
+    return deliver(transport.execute(LIST_REQUEST), UNAVAILABLE);
   }
-  if (req.method !== 'POST') return false;
+  if (req.method !== 'POST') return undefined;
 
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
-  await deliver(res, transport.execute(body), UNAVAILABLE);
-  return true;
+  return deliver(transport.execute(body), UNAVAILABLE);
 }
 
 async function deliver(
-  res: ServerResponse,
   responsePromise: Promise<{ status: number; body: unknown }>,
   unavailable: typeof UNAVAILABLE,
-): Promise<void> {
+): Promise<HostApiRouteResult> {
   try {
     const response = await responsePromise;
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, unavailable);
+    return jsonResult(503, unavailable);
   }
 }

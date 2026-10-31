@@ -1,5 +1,5 @@
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
-import { markdownExtensions, messageParts, toolRenderers, type MessagePartProps } from './extensions';
+import { imagePreviewActions, markdownExtensions, messageParts, toolRenderers, type MessagePartProps } from './extensions';
 
 const ThinkingPart = lazyWithPreload<MessagePartProps>(() => import('./message-part-renderers').then((module) => ({ default: module.ThinkingPart })));
 const ToolPart = lazyWithPreload<MessagePartProps>(() => import('./message-part-renderers').then((module) => ({ default: module.ToolPart })));
@@ -9,7 +9,7 @@ const MediaPart = lazyWithPreload<MessagePartProps>(() => import('./message-part
 export const messageRenderingPlugin = definePlugin({
   id: 'message-rendering',
   requires: ['app-shell'],
-  extensionPoints: [toolRenderers, messageParts, markdownExtensions],
+  extensionPoints: [toolRenderers, messageParts, markdownExtensions, imagePreviewActions],
   contributes: [
     contribute(toolRenderers, { id: 'openclaw', priority: -1, load: () => import('./tool-renderers/builtins').then((module) => module.OPENCLAW_TOOL_ACTIVITY_RENDERER) }),
     ...['file', 'shell', 'web', 'search', 'skill', 'agent'].map((name) => contribute(toolRenderers, {

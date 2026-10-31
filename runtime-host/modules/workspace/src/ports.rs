@@ -68,6 +68,28 @@ pub trait WorkspaceOps: Send + Sync {
         mime_type: &'a str,
     ) -> WorkspaceFuture<'a, WorkspaceMediaReceipt, WorkspaceMediaFailure>;
 
+    fn list_session_images<'a>(
+        &'a self,
+        session_key: &'a str,
+        agent_id: &'a str,
+        cursor: Option<&'a str>,
+    ) -> WorkspaceFuture<
+        'a,
+        crate::session_images::SessionImagePage,
+        crate::session_images::SessionImageFailure,
+    >;
+
+    fn read_session_image<'a>(
+        &'a self,
+        session_key: &'a str,
+        agent_id: &'a str,
+        reference: &'a str,
+    ) -> WorkspaceFuture<
+        'a,
+        crate::session_images::SessionImageData,
+        crate::session_images::SessionImageFailure,
+    >;
+
     fn workspace_runtime_ready(&self) -> bool;
 }
 
@@ -102,6 +124,12 @@ pub trait WorkspaceBinding: Send + Sync {
         &'a self,
         relative_path: &'a str,
         content: &'a str,
+    ) -> WorkspaceFuture<'a, WorkspaceWriteReceipt, WorkspaceWriteFailure>;
+
+    fn write_binary<'a>(
+        &'a self,
+        relative_path: &'a str,
+        content: &'a [u8],
     ) -> WorkspaceFuture<'a, WorkspaceWriteReceipt, WorkspaceWriteFailure>;
 
     fn prepare_media<'a>(

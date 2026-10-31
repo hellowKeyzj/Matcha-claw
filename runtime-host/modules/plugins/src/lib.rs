@@ -180,9 +180,9 @@ impl PluginsModule {
         self.operations.get_or_init(operations::Operations::spawn)
     }
 
-    pub async fn stop_operations(&self) {
+    pub async fn stop_operations(&self) -> bool {
         // Initializing the task here also seals admission when shutdown precedes the first mutation.
-        self.operations().stop().await;
+        self.operations().stop().await
     }
 
     async fn begin(&self, command: &'static str, detail: &call::Detail) -> Result<Option<CallContext<call::Detail>>, ()> {

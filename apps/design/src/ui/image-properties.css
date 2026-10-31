@@ -1,0 +1,22 @@
+.image-property-section, .image-adjustments { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.image-property-section { padding-top: 12px; border-top: 1px solid var(--border); }
+.image-property-section h3, .image-toggle-field { font-size: 13px; font-weight: 500; }
+.image-adjustments > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.image-toggle-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.image-size-row, .image-rotation-row { display: flex; align-items: flex-end; gap: 8px; }
+.image-size-row > .image-number-field, .image-rotation-row > .image-number-field { flex: 1; min-width: 0; }
+.image-size-row > .icon, .image-rotation-row .icon { height: 36px; width: 30px; flex-shrink: 0; }
+.image-property-section button[aria-pressed="true"] { background: var(--selected); color: var(--focus); }
+.image-number-field { min-width: 0; }
+.image-number-field input { font-variant-numeric: tabular-nums; }
+.image-range-field { display: flex; flex-direction: column; gap: 5px; }
+.image-range-field > .field { flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; }
+.image-range-field > .field > input { width: 72px; height: 30px; padding: 4px 6px; }
+.image-range-field > input[type="range"] { height: 18px; touch-action: none; }
+.image-color-field { min-width: 0; }
+.image-color-field > summary { display: flex; align-items: center; gap: 8px; min-height: 32px; cursor: pointer; list-style: none; }
+.image-color-field > summary::-webkit-details-marker { display: none; }
+.image-color-field > summary > span:first-child { flex: 1; color: var(--muted); }
+.image-color-field > summary > .ic-color-swatch { width: 24px; height: 24px; flex-shrink: 0; }
+.image-color-field > summary > span:last-child { font-variant-numeric: tabular-nums; }
+.image-color-controls { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; }

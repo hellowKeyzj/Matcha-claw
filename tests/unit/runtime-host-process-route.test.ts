@@ -1,6 +1,7 @@
 import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { handleRuntimeHostProcessRoutes } from '../../electron/api/routes/runtime-host-process';
+import { RuntimeStatusProjection } from '../../electron/main/runtime-host-delivery/status';
 
 function createRequest(method: string) {
   return Object.assign(Readable.from([]), { method, headers: {} });
@@ -45,7 +46,7 @@ describe('Runtime Host process routes', () => {
       createRequest('GET') as never,
       fixture.raw as never,
       new URL('http://localhost/api/runtime-host/status'),
-      { runtimeHost: { command } } as never,
+      { runtimeHost: { command }, runtimeStatus: new RuntimeStatusProjection({ command }) } as never,
     )).resolves.toBe(true);
 
     expect(command).toHaveBeenCalledWith({ name: 'host.health' });
@@ -65,7 +66,7 @@ describe('Runtime Host process routes', () => {
       createRequest('GET') as never,
       fixture.raw as never,
       new URL('http://localhost/api/runtime-host/status'),
-      { runtimeHost: { command } } as never,
+      { runtimeHost: { command }, runtimeStatus: new RuntimeStatusProjection({ command }) } as never,
     )).resolves.toBe(true);
 
     expect(command).toHaveBeenCalledWith({ name: 'host.health' });

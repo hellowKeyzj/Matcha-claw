@@ -13,6 +13,7 @@ import { useGatewayStore } from '@/plugins/runtime/store';
 import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
 import { getProviderAccountRuntimeReport, useProviderStore } from '@/plugins/providers/stores/providers';
 import { useComposerDraftStore } from '@/plugins/chat/composer-drafts';
+import { CHAT_COMPOSER_STAGE_EVENT, type ComposerStageRequest } from './composer-actions';
 import { agentScope, buildCapabilityScopeKey, buildSessionIdentityKey, runtimeEndpointsEqual, runtimeInstanceScope, sessionIdentitiesEqual, sessionScope } from '@/types/desktop/runtime-address';
 import { getSessionApprovalStatus } from '@/plugins/chat/store/store-state-helpers';
 import { ChatInput, type ChatInputHandle } from '@/plugins/chat/ChatInput';
@@ -73,6 +74,22 @@ export const ChatComposer = memo(function ChatComposer({ isActive, composerRef, 
   const { t } = useTranslation('chat');
   const focusComposer = useCallback(() => composerRef.current?.focus(), [composerRef]);
   const { currentConversation, currentSessionRecordKey, currentComposerDraftKey, currentWorkspaceIdentity, connectorSessionIdentity, currentAgentId } = useChatStore(useShallow(selectChatSelection));
+  useLayoutEffect(() => {
+    if (!isActive) return;
+    const stage = (event: Event) => {
+      const detail = (event as CustomEvent<ComposerStageRequest>).detail;
+      const current = selectChatSelection(useChatStore.getState());
+      const input = composerRef.current;
+      if (input && currentWorkspaceIdentity && current.currentWorkspaceIdentity
+        && detail.draftKey === currentComposerDraftKey && detail.draftKey === current.currentComposerDraftKey
+        && sessionIdentitiesEqual(detail.identity, currentWorkspaceIdentity)
+        && sessionIdentitiesEqual(detail.identity, current.currentWorkspaceIdentity)) {
+        detail.accept(() => input.stagePrompt(detail.identity, detail.draftKey, detail.request, detail.source, detail.signal));
+      }
+    };
+    window.addEventListener(CHAT_COMPOSER_STAGE_EVENT, stage);
+    return () => window.removeEventListener(CHAT_COMPOSER_STAGE_EVENT, stage);
+  }, [composerRef, currentComposerDraftKey, currentWorkspaceIdentity, isActive]);
   const currentSessionConversation = currentConversation?.kind === 'session' ? currentConversation : null;
   const currentConversationEndpoint = currentConversation?.endpoint ?? null;
   const facts = useChatStore(useShallow(selectChatComposerFacts));

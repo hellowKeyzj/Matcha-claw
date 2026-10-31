@@ -74,6 +74,7 @@ interface UseChatWindowDockControllerOptions {
   chatLayoutRef: RefObject<HTMLDivElement | null>;
   openPanel: () => void;
   closePanel: () => void;
+  requestClose?: () => Promise<AbortSignal | null>;
   setPanelWidth: (width: number) => void;
 }
 
@@ -236,6 +237,7 @@ export function useChatWindowDockController({
   chatLayoutRef,
   openPanel,
   closePanel,
+  requestClose,
   setPanelWidth,
 }: UseChatWindowDockControllerOptions) {
   const [dockState, setDockState] = useState<ChatWindowDockState>(() => createClosedDockState(preferredWidth));
@@ -250,6 +252,7 @@ export function useChatWindowDockController({
   const artifactWorkbenchFullscreenRef = useRef(artifactWorkbenchFullscreen);
   const openPanelRef = useRef(openPanel);
   const closePanelRef = useRef(closePanel);
+  const requestCloseRef = useRef(requestClose);
   const setPanelWidthRef = useRef(setPanelWidth);
 
   enabledRef.current = enabled && !inline;
@@ -260,6 +263,7 @@ export function useChatWindowDockController({
   artifactWorkbenchFullscreenRef.current = artifactWorkbenchFullscreen;
   openPanelRef.current = openPanel;
   closePanelRef.current = closePanel;
+  requestCloseRef.current = requestClose;
   setPanelWidthRef.current = setPanelWidth;
 
   const commitDockState = useCallback((nextState: ChatWindowDockState) => {
@@ -405,6 +409,10 @@ export function useChatWindowDockController({
   }, [chatLayoutRef, commitDockState, setWindowRightDockWidth]);
 
   const closeSidePanel = useCallback(async (options?: { flush?: boolean }) => {
+    const request = requestCloseRef.current;
+    const approval = options?.flush !== false && request ? await request() : undefined;
+    const isCurrentClose = () => approval !== null && !approval?.aborted && requestCloseRef.current === request;
+    if (!mountedRef.current || !isCurrentClose()) return;
     if (inlineRef.current) {
       closePanelRef.current();
       return;
@@ -488,7 +496,7 @@ export function useChatWindowDockController({
     try {
       if (windowDockActive) {
         await waitForNextPaint();
-        if (!mountedRef.current || transitionSeqRef.current !== seq || dockStateRef.current.phase !== 'closing') {
+        if (!mountedRef.current || transitionSeqRef.current !== seq || dockStateRef.current.phase !== 'closing' || !isCurrentClose()) {
           return;
         }
         await setWindowRightDockWidth(0, closeDockOptions);
@@ -498,7 +506,10 @@ export function useChatWindowDockController({
       if (mountedRef.current && (transitionSeqRef.current === seq || dockStateRef.current.phase === 'closing')) {
         const closedState = createClosedDockState(preferredWidthRef.current);
         clearRightDockLayout();
-        if (flush) {
+        if (!isCurrentClose()) {
+          commitDockState(closedState);
+          if (panelOpenRef.current && (enabledRef.current || inlineRef.current)) void openSidePanel({ flush: false });
+        } else if (flush) {
           flushSync(() => {
             commitDockState(closedState);
             closePanelRef.current();
@@ -509,7 +520,7 @@ export function useChatWindowDockController({
         }
       }
     }
-  }, [chatLayoutRef, commitDockState, setWindowRightDockWidth]);
+  }, [chatLayoutRef, commitDockState, openSidePanel, setWindowRightDockWidth]);
 
   const toggleSidePanel = useCallback(() => {
     const currentState = dockStateRef.current;
@@ -642,7 +653,8 @@ export function useChatWindowDockController({
 
   return useMemo(() => {
     const phase: ChatWindowDockPhase = artifactWorkbenchFullscreen ? 'closed'
-      : inline ? enabled && panelOpen ? 'open' : 'closed' : dockState.phase;
+      : inline ? enabled && panelOpen ? 'open' : 'closed'
+      : enabled && panelOpen && dockState.phase === 'closed' ? 'opening' : dockState.phase;
     const sidePanelMounted = phase !== 'closed';
     const sidePanelWidth = inline || phase === 'closed'
       ? renderWidth

@@ -104,6 +104,10 @@ export class UseElectron extends Ability {
     return this.borrowedBrowsing;
   }
 
+  get outputDirectory(): string {
+    return this.evidenceRoot;
+  }
+
   private get logPath(): string {
     return join(this.evidenceRoot, 'electron.log');
   }

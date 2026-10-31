@@ -103,20 +103,15 @@ impl OwnerSpec for BoardOwner {
                     let _ = shared.lifecycle.events.send(delivery);
                 }
             }
-            BoardOwnerCommand::Close { .. } => unreachable!(),
         }
     }
 
     async fn handle_global_command(
-        shared: Self::Shared,
+        _shared: Self::Shared,
         _global: &mut Self::GlobalState,
-        command: Self::Command,
+        _command: Self::Command,
     ) {
-        let BoardOwnerCommand::Close { reply } = command else {
-            unreachable!()
-        };
-        shared.lifecycle.finish();
-        let _ = reply.send(());
+        unreachable!()
     }
     async fn handle_direct_query(_shared: Self::Shared, query: Self::Query) {
         match query {}

@@ -118,8 +118,16 @@ impl DedupRuns {
             cancellation.cancel();
         }
         for project_id in project_ids {
-            if self.pause(&project_id).await.is_err() {
-                eprintln!("[wiki:dedup] shutdown queue persistence failed");
+            if let Err(failure) = self.pause(&project_id).await {
+                let reason = match &failure {
+                    WikiFailure::Io { message, .. } | WikiFailure::StateUnavailable { message } => {
+                        message.as_str()
+                    }
+                    _ => "queue storage unavailable",
+                };
+                eprintln!(
+                    "[wiki:dedup] shutdown queue persistence failed for project {project_id}: {reason}; check project storage permissions and free space before reopening"
+                );
             }
         }
     }

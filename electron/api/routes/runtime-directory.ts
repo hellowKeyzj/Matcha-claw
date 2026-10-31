@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RuntimeEndpointDirectoryTransport } from '../../main/runtime-host-delivery/transport/runtime-directory';
-import { sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 const UNAVAILABLE = {
   success: false,
@@ -8,31 +7,28 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleRuntimeDirectoryRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: RuntimeEndpointDirectoryTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (req.method === 'GET') {
     const read = readRuntimeDirectoryRoute(url.pathname, transport);
-    if (!read) return false;
+    if (!read) return undefined;
     try {
       const response = await read();
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNAVAILABLE);
+      return jsonResult(503, UNAVAILABLE);
     }
-    return true;
   }
 
   if (req.method === 'POST'
     && (url.pathname === '/api/runtime-connectors/connect' || url.pathname === '/api/runtime-connectors/disconnect')) {
     const response = await transport.rejectLegacyConnectorLifecycle();
-    sendJson(res, response.status, response.body);
-    return true;
+    return jsonResult(response.status, response.body);
   }
 
-  return false;
+  return undefined;
 }
 
 function readRuntimeDirectoryRoute(pathname: string, transport: RuntimeEndpointDirectoryTransport) {

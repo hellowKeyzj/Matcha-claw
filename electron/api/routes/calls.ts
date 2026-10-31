@@ -1,30 +1,26 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { CallLogTransport } from '../../main/runtime-host-delivery/transport/call-log';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 export async function handleCallRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: CallLogTransport,
-): Promise<boolean> {
-  if (req.method !== 'POST') return false;
+): Promise<HostApiRouteResult> {
+  if (req.method !== 'POST') return undefined;
   const operation = url.pathname === '/api/calls/list' ? 'list'
     : url.pathname === '/api/calls/get' ? 'get'
       : url.pathname === '/api/calls/history' ? 'history' : null;
-  if (!operation) return false;
+  if (!operation) return undefined;
   let body: unknown;
   try {
-    body = await parseJsonBody<unknown>(req);
+    body = await req.readJson<unknown>();
   } catch {
-    sendJson(res, 400, { success: false, error: 'Call log input is invalid' });
-    return true;
+    return jsonResult(400, { success: false, error: 'Call log input is invalid' });
   }
   try {
     const response = await transport[operation](body);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, { success: false, error: 'Call log is unavailable' });
+    return jsonResult(503, { success: false, error: 'Call log is unavailable' });
   }
-  return true;
 }

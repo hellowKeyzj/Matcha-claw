@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AgentsTransport } from '../runtime-host-delivery/products/agents';
 import type { SealedSkillsTransport } from '../runtime-host-delivery/transport/skills/sealed';
 import type { CallLogTransport } from '../runtime-host-delivery/transport/call-log';
+import type { SealedResourceAuthorizationTransport, SealedResourceCloudPackagesResponse } from '../runtime-host-delivery/transport/sealed-resource';
 import { isSkillsCallReceipt, isSkillsRuntimeScope } from '../runtime-host-delivery/transport/skills/management';
 import { waitForCallRecord, type SubscribeCalls } from '../../../src/types/call-log/wait';
 import type { CloudPackageOperationErrorCode, CloudPackageOperationRequests, CloudPackageOperationResults, CloudPackageOperationKind } from '../../../src/types/cloud-package-operation';
@@ -116,6 +117,13 @@ export async function executePackageOperation<K extends CloudPackageOperationKin
     }
   }
   throw new Error('Invalid cloud package operation kind');
+}
+
+export async function listInstalledPackages(
+  transport: Pick<SealedResourceAuthorizationTransport, 'listCloudPackages'>,
+): Promise<SealedResourceCloudPackagesResponse> {
+  const result = await transport.listCloudPackages();
+  return { status: result.status, body: { packages: result.body.packages.map(({ packageVersionId, packageType, packageSha256, fileName }) => ({ packageVersionId, packageType, packageSha256, fileName })) } };
 }
 
 export async function readPackageInstallOutcome(

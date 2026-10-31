@@ -10,11 +10,12 @@ path = "src/lib.rs"
 
 [dependencies]
 arc-swap = "1.7"
+base64.workspace = true
 connectors = { version = "0.1.0", path = "../connectors" }
 foundation = { version = "0.1.0", path = "../../foundation" }
 platform = { version = "0.1.0", path = "../../platform" }
 runtime-directory = { version = "0.1.0", path = "../runtime-directory" }
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }
 serde.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 tokio-util.workspace = true

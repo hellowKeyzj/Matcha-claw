@@ -91,6 +91,170 @@ DP-xxx 或 `none`
 
 ## 6. 当前归档案例
 
+## Case: 设计插件修复停在局部补丁与错误验证结论
+
+### Status
+
+archived
+
+### Linked pattern
+
+DP-001；既有 P4/P6/P7 与 `CODING_CONSTITUTION.md` §26 已覆盖，属于执行未遵守，不新增同义规则。
+
+### Source incident
+
+2026-10-30，设计插件 v1.0.3 的问题修复中，用户再次要求按完整责任边界修改，而非在上一轮补丁上追加条件。
+
+### Symptom
+
+生成预校验重复读素材且并发检查跨 await；退役仅删实例记录；MCP 首次目录仍阻塞初始化；将 npm tarball 和局部编译误报为插件打包及整链通过。
+
+### Surface path
+
+设计工具 → utility host／worker → Provider 媒体；独立 Matcha MCP → 应用插件目录；根打包命令 → 插件 ZIP validator。
+
+### Real minimum loop
+
+生成在异步前占位、只准备一次、校验后记账；停用等待真实 handler 退出并完整清理；MCP 无需等待可选 HTTP 即可握手；实际 ZIP 经安装端同款 validator 验证。
+
+### Wrong path taken
+
+用假快照预校验，后续再次准备；以删除 Map 代替资源退出；另加首次目录请求而保留观察任务；未核命令实际产物及完整编译结果就概括成功。
+
+### Missed first probe
+
+未核对容量检查至占位之间的 await、`calls.done` 与上层取消的差异、dispose 失败后的 writer 安全边界，以及 pnpm 内建 `pack` 与同名脚本的区别。
+
+### Root cause
+
+将局部 diff 缩小与编译／打包动作完成误当作目标语义闭合，遗漏状态责任方、失败时序及验证证据的适用范围。
+
+### Root cause boundary
+
+插件生成 owner、Host／worker 实例生命周期、MCP 目录观察任务及根打包入口，不是 UI、公共 SDK 或 Provider 凭据 owner。
+
+### Correct first-round plan
+
+读双方协议和真实完成信号，冻结单一路径及失败终态；复用既有长请求 transport 与 ZIP validator；类型、编译、工件和实机验收分开记录。
+
+### Fix boundary
+
+生成同步登记后执行一次准备；退役用单实例 pending／failed，清理失败明确要求重启，禁止旧新 writer 并存；MCP 由唯一观察任务首次加载及更新；媒体签名与发送复用同一串行化字节；根命令显式 `run pack`。[VERIFY: apps/design/src/backend/generation.ts:118-145,227-238] [VERIFY: electron/main/app-plugins/host.ts:60-95] [VERIFY: electron/main/app-plugins/worker.ts:25-54] [VERIFY: runtime-host/host/src/mcp/app_plugins.rs:16-25,54-92] [VERIFY: electron/main/app-plugins/media.ts:14-21] [VERIFY: runtime-host/modules/provider/src/adapters/loopback/media.rs:61-74] [VERIFY: package.json]
+
+### Verification closure
+
+本轮命令、原始日志、工件摘要与未验边界单独记录于 [verification.md](../../.scratch/design-final-form-20261030/verification.md)。类型／lint／ZIP 构建不能证明 v1.0.3 已安装，也不证明并发、清理故障、慢网关、真实取消或收费模型链已运行恢复。
+
+### Reusable rule
+
+执行既有 final-form 和 P4/P6/P7：以真实状态 owner、完成信号及实际产物收口，失败、超时和未验项不得被局部成功覆盖。
+
+### Applies to
+
+跨进程插件生命周期、并发 admission、动态目录及构建分发的修复。
+
+### Does not apply to
+
+不改变状态与执行链的单点文案修改。
+
+### 2026-10-31 同类纠偏
+
+用户再次质疑补丁式修复。实际源码发现外部 MCP 回执被强转为通用 JSON 事件，Editor／Workbench 分别解析，后者还用解析异常决定刷新 generations。现由 Design 协议入口一次校验并产生 `document/completed/failed` 更新，两组件只处理各自业务；删除原始回执强转与重复 parser，不改公共 SDK、不增第二 store。另沿 Search→native restore→service stop→Host joins 核对，确认还原的普通错误会在服务成功停止后仍触发 owner panic；只在 Search shutdown 分类为安全诊断，保留真实停止未确认／join 失败，显式业务操作的错误响应不变。[VERIFY: apps/design/src/ui/api.ts:5-41,69-77,92-110] [VERIFY: apps/design/src/ui/Editor.tsx:22-43,92-108] [VERIFY: runtime-host/modules/search/src/owner.rs:242-248,781-788] [VERIFY: runtime-host/external/searxng/src/process.rs:104-120]
+
+不因“小 diff”判定为补丁：Chat contexts 进入已有草稿生命周期、FFmpeg 原链增加 `apad`、媒体 scope 全链合同及插件退役 fence 保留。Design 改后 noEmit／lint／真实 api＋React Editor 驻内存检查、Search 窄 cargo check／rustfmt 均通过；验证环境曾在模块隔离、脚本转义及缺 iframe 前提处失败，均不计业务通过。真实外部宿主、native 还原故障及桌面关停未运行，完整证据见[本次记录](../../.scratch/design-canvas-20261030/verification.md#2026-10-31-工程质量复核与结构纠偏)。
+
+### 2026-10-31 第3组定向复核
+
+再次沿真实 producer、native 文件合同和 Main 读取入口复核：managed 原图票据是 `v1.<payload>.<HMAC>`，不能复用 transcript 的 connection/token 语法；Design 默认保存位置不能假设 `assets/` 已存在；Main binary 入口必须在 JSON 解析前限制 wire；媒体归集 hook 的相同调度分支不需要两份镜像状态。分别在原票据 parser、保存默认路径、原 bounded body reader 和原 hook 收口，不增加 fallback、mkdir 重试或新 owner。最终类型／lint 通过，但 Cargo 曾触发资源硬限，真实 Gateway 原件及 Workspace 写入未验，不能据此认领第3组业务完成。证据与失败边界见[第3组台账](../../.scratch/design-accio-third-20261031/README.md#2026-10-31-final-form定向复核)。
+
+同日用户报告连续切会话后工具栏残留；当前源码核实 `ChatInputToolbar` 与新增 `ComposerPromptEnhancement` 在同一父节点使用完全相同的 key。仅将两处 key 分别加 `toolbar:`、`prompt-enhancement:` 前缀，保留原 draft/session 身份后缀、scopeKey 与卸载清理；不删会话重置、不加 DOM 清理补丁、不转查 HTTP。Renderer noEmit 与定向 lint 通过；未启动应用复现或重跑连续切会话，截图与现场现象来自用户，不能写成本轮实测恢复。[VERIFY: src/plugins/chat/ChatInput.tsx:1870-1908] [VERIFY: src/plugins/chat/components/ComposerPromptEnhancement.tsx:22-29]
+
+### 2026-10-31 两批交互结构纠偏
+
+用户再次质疑补丁式修改。本轮限定原diff，核实组附件虽归draft store，ChatInput仍用effect复制到本地state并在删除时双写；复制失败也同时保存在CopyState与Workbench error，底部重试成功不会清副本。现删除组附件projection effect／projectedGroupIdsRef／双删，直接从contexts派生展示，失败恢复仅将独立附件写回本地；复制错误只归原CopyState，不按错误字符串反推来源。[VERIFY: src/plugins/chat/ChatInput.tsx:510-524,1160-1174,1248-1255,1304-1307,1592-1606] [VERIFY: apps/design/src/ui/useCanvasTransfers.ts:177-204,216-232,354-355] [VERIFY: apps/design/src/ui/Editor.tsx:451,513]
+
+同一边界另核实fit／focus错误套用5%手动缩放下限、reducer将可选视频参考当成必需、UI重复固化可选人物照片约束；分别在原Canvas fit／focus、Design纯reducer及业务prompt producer收口，不在Chat解释Design JSON，不加框架或兼容层。[VERIFY: apps/design/src/ui/Canvas.tsx:265-278,524-539] [VERIFY: apps/design/src/backend/compose.ts:27-30,121-134] [VERIFY: apps/design/src/ui/Generation.tsx:164] [VERIFY: apps/design/src/backend/generation-instructions.ts:49]
+
+稳定源码Design／Renderer noEmit、六文件no-fix lint及win32-x64 build通过；保留首次Editor JSX闭合失败与修复后复验。既有tests仍5通过／8失败，失败case名和首诊断与改前逐字一致，未改测试求绿。当前实际安装仍是旧12工具版，未pack／安装、发模型请求或执行新代码真实业务；构建不算实机验收。原始日志、当前工件hash与限制见[本轮台账](../../.scratch/design-interaction-20261031/README.md#2026-10-31-工程质量定向纠偏)。
+
+### 2026-10-31 原提示词忠实性纠偏
+
+用户追问增强提示词来源，确认先前仅参考机制、正文为自行编写后，明确要求直接用Accio原文。静态追到提取包本地默认`xfo.PROMPT_ENHANCE_SYSTEM_PROMPT`与`xza/Sza`最终规则，增强组件现逐字保留1642字符原文，删除旧JSON rewrite与摘要伪领域增强路径。不将单prompt桥冒称原system/user两消息，不复制候选增强器平台或更改服务端。原文逐字比较、定向lint及Renderer noEmit通过，未调用模型；来源hash、必要适配及未验限制见[本轮台账](../../.scratch/design-interaction-20261031/README.md#2026-10-31-直接复用-accio-原增强提示词)。这是既有参考忠实与§26的执行纠偏，不新增同义规则。[VERIFY: src/plugins/chat/components/ComposerPromptEnhancement.tsx]
+
+### Archive note
+
+规则已存在且足够明确；保留事故卡，下一次在入口边界冻结及最终结果报告阶段触发，不扩写长期规范。
+
+## Case: 参考画板迁移被误做成独立三栏编辑器
+
+### Status
+
+archived
+
+### Linked pattern
+
+DP-001；已有完整链路、原始参考和用户结果验收规则覆盖，本次承认未遵守，不新增同义规则。
+
+### Source incident
+
+2026-10-30，Accio 画板迁移为可安装 Matcha 应用插件，用户指出呈现位置、使用方式与前端精美程度偏离原版。
+
+### Symptom
+
+实现新增独立设计导航、创建表单和三栏工作台；原参考是在会话工作区内打开，采用画布、浮动工具栏及选区上下文操作。
+
+### Surface path
+
+安装贡献 → Renderer 工作区入口 → 应用 iframe → 插件编辑器 → 后台文档／生成工具。
+
+### Real minimum loop
+
+对照原版入口、工作区容器、空态、选中态及生成操作，在真实 Matcha 相同尺寸工作区操作并比较截图；后台导出成功只证明后台，不证明前端一致。
+
+### Wrong path taken
+
+先按业务工具清单重建通用编辑器，把功能数量和编译、原生导出验证误作整套参考迁移的主要完成依据。
+
+### Missed first probe
+
+实现前未把原版 use-embedded-canvas、ImageCanvas 与画板 CSS 的容器、工具顺序和交互状态对应到 Matcha 现有 Chat 扩展链。
+
+### Root cause
+
+将“自有编辑器和通用插件平台”的技术选择误解为可以自行重设计产品体验。
+
+### Root cause boundary
+
+Renderer 安装贡献落点及插件 UI，不是 Rust Provider、插件后台 owner 或 MCP 动态分发。
+
+### Correct first-round plan
+
+从原始参考恢复入口和状态转换，复用现有聊天工作区承载；先冻结体验不变量，再并行改通用承载与插件 UI。
+
+### Fix boundary
+
+保留可信插件后台和模型边界，撤去设计独立导航，以原版工作区画板作为唯一产品入口；不靠新 Dock、文件 reader 伪装应用或远端 Accio 服务补洞。
+
+### Verification closure
+
+2026-10-30 实际登录 profile 已安装 v1.0.2，独立设计链接为 0，右侧画板成功激活；实测导入、撤销／重做、关闭重开、追加既有草稿并聚焦。半像素坐标导出多 1px 已归因至后台 bounds 取整并修复，真实 PNG/JPG 与多图 ZIP 各项均保持 2560×1600，生成记录为空，验收副本已撤回。随后用户提供新版 Accio 截图，证明仅复刻提取包本地 ImageCanvas 仍不足：点阵画布、垂直工具、图层标签、预览进入画板与源图缩略图同步等仍有差距。v1.0.3 源码已补对应交互、原位蒙版与四语言资源，真实窗口验收另记，不将源码当成已安装结果。图文草稿实现中进一步发现：Main 原发送预算是16附件／单5 MiB／总20 MiB，Matcha native model adapter 只接受四种图片 MIME 和 PDF，JSON 附件会 Unsupported。最终精确参数走可查看／移除的 composer context，发送时附入原文本，参考图片由插件投影为支持的 MIME，不扩服务端、不伪装 PDF、不堆进可编辑输入框；暂存成功不等于模型消费成功。[VERIFY: electron/api/routes/sessions.ts:35-37] [VERIFY: runtime-host/integrations/matcha-agent/src/session/adapters/model.rs:55-75] [VERIFY: src/types/desktop/app-plugin-sdk.ts] [VERIFY: apps/design/src/ui/Editor.tsx] OCR、云模板、收费模型及外部互操作仍未闭环，不能宣称完全一致。
+
+### Reusable rule
+
+迁移技术承载不授权重设计用户路径；入口、布局、操作和视觉均属于用户指定参考的验收合同。
+
+### Applies to
+
+参考应用迁移、插件化改造及已有产品 UI 的跨框架实现。
+
+### Does not apply to
+
+用户明确授权的新设计，或不改变交互的局部文案修改。
+
+### Archive note
+
+既有规则已清楚，问题是执行失败；在入口理解和截图验收阶段核原参考，不扩写项目规范。
+
 ## Case: 热切模型暴露内部命令误分类与乐观输入残留
 
 ### Status

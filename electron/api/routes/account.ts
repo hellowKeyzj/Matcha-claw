@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { CloudAccountApiContext } from '../context';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiResponse, type HostApiRouteResult } from '../execution';
 
 const INVALID_LOGIN = {
   success: false,
@@ -55,114 +54,102 @@ type AccountVerifyCodeRequest = {
 };
 
 export async function handleAccountRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: CloudAccountApiContext,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/account/public-settings' && req.method === 'GET') {
-    return sendCloudAccountResult(res, ctx, (service) => service.getPublicSettings());
+    return sendCloudAccountResult(ctx, (service) => service.getPublicSettings());
   }
 
   if (url.pathname === '/api/account/session' && req.method === 'GET') {
-    return sendCloudAccountResult(res, ctx, (service) => service.getSession());
+    return sendCloudAccountResult(ctx, (service) => service.getSession());
   }
 
   if (url.pathname === '/api/account/login' && req.method === 'POST') {
     let body: unknown;
     try {
-      body = await parseJsonBody<unknown>(req);
+      body = await req.readJson<unknown>();
     } catch {
-      sendJson(res, 400, INVALID_LOGIN);
-      return true;
+      return jsonResult(400, INVALID_LOGIN);
     }
     const request = toLoginRequest(body);
     if (!request) {
-      sendJson(res, 400, INVALID_LOGIN);
-      return true;
+      return jsonResult(400, INVALID_LOGIN);
     }
-    return sendCloudAccountResult(res, ctx, (service) => service.login(request));
+    return sendCloudAccountResult(ctx, (service) => service.login(request));
   }
 
   if (url.pathname === '/api/account/login/2fa' && req.method === 'POST') {
     let body: unknown;
     try {
-      body = await parseJsonBody<unknown>(req);
+      body = await req.readJson<unknown>();
     } catch {
-      sendJson(res, 400, INVALID_TWO_FACTOR);
-      return true;
+      return jsonResult(400, INVALID_TWO_FACTOR);
     }
     const request = toTwoFactorLoginRequest(body);
     if (!request) {
-      sendJson(res, 400, INVALID_TWO_FACTOR);
-      return true;
+      return jsonResult(400, INVALID_TWO_FACTOR);
     }
-    return sendCloudAccountResult(res, ctx, (service) => service.login2FA(request));
+    return sendCloudAccountResult(ctx, (service) => service.login2FA(request));
   }
 
   if (url.pathname === '/api/account/register' && req.method === 'POST') {
     let body: unknown;
     try {
-      body = await parseJsonBody<unknown>(req);
+      body = await req.readJson<unknown>();
     } catch {
-      sendJson(res, 400, INVALID_REGISTER);
-      return true;
+      return jsonResult(400, INVALID_REGISTER);
     }
     const request = toRegisterRequest(body);
     if (!request) {
-      sendJson(res, 400, INVALID_REGISTER);
-      return true;
+      return jsonResult(400, INVALID_REGISTER);
     }
-    return sendCloudAccountResult(res, ctx, (service) => service.register(request));
+    return sendCloudAccountResult(ctx, (service) => service.register(request));
   }
 
   if (url.pathname === '/api/account/send-verify-code' && req.method === 'POST') {
     let body: unknown;
     try {
-      body = await parseJsonBody<unknown>(req);
+      body = await req.readJson<unknown>();
     } catch {
-      sendJson(res, 400, INVALID_VERIFY_CODE);
-      return true;
+      return jsonResult(400, INVALID_VERIFY_CODE);
     }
     const request = toVerifyCodeRequest(body);
     if (!request) {
-      sendJson(res, 400, INVALID_VERIFY_CODE);
-      return true;
+      return jsonResult(400, INVALID_VERIFY_CODE);
     }
-    return sendCloudAccountResult(res, ctx, (service) => service.sendVerifyCode(request));
+    return sendCloudAccountResult(ctx, (service) => service.sendVerifyCode(request));
   }
 
   if (url.pathname === '/api/account/refresh' && req.method === 'POST') {
-    return sendCloudAccountResult(res, ctx, (service) => service.refreshSession());
+    return sendCloudAccountResult(ctx, (service) => service.refreshSession());
   }
 
   if (url.pathname === '/api/account/logout' && req.method === 'POST') {
-    return sendCloudAccountResult(res, ctx, async (service) => {
+    return sendCloudAccountResult(ctx, async (service) => {
       await service.logout();
       return { success: true };
     });
   }
 
-  return false;
+  return undefined;
 }
 
 async function sendCloudAccountResult(
-  res: ServerResponse,
   ctx: CloudAccountApiContext,
   execute: (service: NonNullable<CloudAccountApiContext['cloudAccountService']>) => Promise<unknown>,
-): Promise<true> {
+): Promise<HostApiResponse> {
   const service = ctx.cloudAccountService;
   if (!service) {
-    sendJson(res, 503, UNAVAILABLE);
-    return true;
+    return jsonResult(503, UNAVAILABLE);
   }
 
   try {
-    sendJson(res, 200, await execute(service));
+    return jsonResult(200, await execute(service));
   } catch (error) {
-    sendJson(res, statusCodeForServiceError(error), BAD_GATEWAY);
+    return jsonResult(statusCodeForServiceError(error), BAD_GATEWAY);
   }
-  return true;
 }
 
 function toLoginRequest(value: unknown): AccountLoginRequest | null {

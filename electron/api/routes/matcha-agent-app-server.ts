@@ -1,12 +1,11 @@
 import { traceDebug, isTraceEnabled } from '../../utils/trace-logger';
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import {
   MATCHA_AGENT_RUNTIME_ENDPOINT,
   type RuntimeLifecycleResponse,
   type RuntimeStateProjection,
 } from '../../main/runtime-host-delivery/transport/runtime-control';
 import type { RuntimeHostTransportContext } from '../context';
-import { sendJson } from '../route-utils';
 
 const STATUS_UNAVAILABLE = 'Matcha Agent app server status is unavailable';
 const RESTART_UNAVAILABLE = 'Matcha Agent app server restart failed';
@@ -52,11 +51,10 @@ type MatchaLifecycle =
   | 'shutDown';
 
 export async function handleMatchaAgentAppServerRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: RuntimeHostTransportContext<'runtimeControlTransport'>,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/matcha-agent/app-server/status' && req.method === 'GET') {
     const startedAtMs = isTraceEnabled() ? Date.now() : 0;
     traceMatchaStatusRoute('matcha-agent-status-request-start', () => ({}));
@@ -67,46 +65,41 @@ export async function handleMatchaAgentAppServerRoutes(
         traceMatchaStatusRoute('matcha-agent-status-unavailable', () => ({
           durationMs: Date.now() - startedAtMs,
         }));
-        sendJson(res, 503, { success: false, error: STATUS_UNAVAILABLE });
-        return true;
+        return jsonResult(503, { success: false, error: STATUS_UNAVAILABLE });
       }
       traceMatchaStatusRoute('matcha-agent-status-response', () => ({
         durationMs: Date.now() - startedAtMs,
         ...(summarizeMatchaStatusTrace(status) ?? {}),
       }));
-      sendJson(res, 200, status);
+      return jsonResult(200, status);
     } catch (error) {
       traceMatchaStatusRoute('matcha-agent-status-error', () => ({
         durationMs: Date.now() - startedAtMs,
         errorName: error instanceof Error ? error.name : typeof error,
       }));
-      sendJson(res, 503, { success: false, error: STATUS_UNAVAILABLE });
+      return jsonResult(503, { success: false, error: STATUS_UNAVAILABLE });
     }
-    return true;
   }
 
   if (url.pathname === '/api/matcha-agent/app-server/restart' && req.method === 'POST') {
     try {
       const response = await ctx.runtimeHostTransports.runtimeControlTransport.lifecycleRestart(MATCHA_AGENT_RUNTIME_ENDPOINT);
       if (response.status === 503) {
-        sendJson(res, 503, { success: false, error: RESTART_UNKNOWN });
-        return true;
+        return jsonResult(503, { success: false, error: RESTART_UNKNOWN });
       }
       if (response.status !== 202) {
-        sendJson(res, 500, { success: false, error: RESTART_UNAVAILABLE });
-        return true;
+        return jsonResult(500, { success: false, error: RESTART_UNAVAILABLE });
       }
-      sendJson(res, 202, response.body);
+      return jsonResult(202, response.body);
     } catch {
-      sendJson(res, 500, {
+      return jsonResult(500, {
         success: false,
         error: RESTART_UNAVAILABLE,
       });
     }
-    return true;
   }
 
-  return false;
+  return undefined;
 }
 
 function readMatchaStatus(body: RuntimeLifecycleResponse): {

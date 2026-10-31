@@ -28,7 +28,6 @@ export const MAIN_API_ALLOWED_ROUTE_FILES = Object.freeze([
   'security-policy.ts',
   'security.ts',
   'sealed-skills.ts',
-  'sessions.ts',
   'settings.ts',
   'skill-bundle.ts',
   'skills.ts',
@@ -50,6 +49,7 @@ export const MAIN_API_ALLOWED_ROUTE_FILES = Object.freeze([
   'provider-models.ts',
   'provider-routing.ts',
   'provider-recovery.ts',
+  'provider-text.ts',
   'security-emergency.ts',
   'team-approvals.ts',
   'team-decision.ts',
@@ -65,6 +65,7 @@ export const MAIN_API_ALLOWED_ROUTE_FILES = Object.freeze([
   'team-webhook-auth.ts',
   'usage.ts',
   'wiki.ts',
+  'world.ts',
 ]);
 
 export const HOSTAPI_PROXY_WEBSOCKET_EXACT_ROUTES = Object.freeze([
@@ -92,6 +93,7 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/app-plugins/build',
   '/api/app-plugins/development',
   '/api/app-plugins/runtime-status',
+  '/api/app-plugins/call',
   '/api/billing/checkout-info',
   '/api/billing/plans',
   '/api/billing/orders',
@@ -159,6 +161,7 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/files/read-text',
   '/api/files/list-dir',
   '/api/files/write-text',
+  '/api/files/write-binary',
   '/api/license/gate',
   '/api/license/stored-key',
   '/api/license/validate',
@@ -212,6 +215,7 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/providers/recovery',
   '/api/providers/recovery/acknowledge',
   '/api/providers/recovery/open-backup',
+  '/api/providers/text/generate',
   '/api/external-connectors',
   '/api/external-connectors/mcp-server-programs',
   '/api/external-connectors/status',
@@ -370,10 +374,10 @@ export const MAIN_OWNED_EXACT_ROUTES = Object.freeze([
   '/api/remote-fleet/revoke-agent',
 ]);
 
-type HostApiAllowedRequest = readonly [method: string, pathname: string, dependency?: 'main'];
+type HostApiAllowedRequest = readonly [method: string, pathname: string, dependency?: 'main' | 'runtime', entry?: 'http'];
 
 const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freeze([
-  ['GET', '/api/events'],
+  ['GET', '/api/events', 'runtime', 'http'],
   ['GET', '/api/account/public-settings', 'main'],
   ['GET', '/api/account/session', 'main'],
   ['POST', '/api/account/login', 'main'],
@@ -393,6 +397,7 @@ const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freez
   ['POST', '/api/app-plugins/build', 'main'],
   ['POST', '/api/app-plugins/development', 'main'],
   ['POST', '/api/app-plugins/runtime-status', 'main'],
+  ['POST', '/api/app-plugins/call', 'main'],
   ['GET', '/api/billing/checkout-info', 'main'],
   ['GET', '/api/billing/plans', 'main'],
   ['POST', '/api/billing/orders', 'main'],
@@ -460,6 +465,7 @@ const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freez
   ['POST', '/api/files/read-text'],
   ['POST', '/api/files/list-dir'],
   ['POST', '/api/files/write-text'],
+  ['POST', '/api/files/write-binary'],
   ['GET', '/api/license/gate', 'main'],
   ['GET', '/api/license/stored-key', 'main'],
   ['POST', '/api/license/validate', 'main'],
@@ -515,6 +521,7 @@ const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freez
   ['GET', '/api/providers/recovery'],
   ['POST', '/api/providers/recovery/acknowledge'],
   ['POST', '/api/providers/recovery/open-backup'],
+  ['POST', '/api/providers/text/generate'],
   ['GET', '/api/external-connectors'],
   ['GET', '/api/external-connectors/mcp-server-programs'],
   ['GET', '/api/external-connectors/status'],
@@ -660,7 +667,7 @@ const HOST_API_ALLOWED_REQUESTS: readonly HostApiAllowedRequest[] = Object.freez
   ['GET', '/api/remote-fleet/metrics'],
   ['GET', '/api/remote-fleet/snapshot'],
   ['GET', '/api/remote-fleet/terminal/sessions'],
-  ['POST', '/api/remote-fleet/runtime-agent/ingress'],
+  ['POST', '/api/remote-fleet/runtime-agent/ingress', 'runtime', 'http'],
   ['POST', '/api/remote-fleet/drain-endpoint'],
   ['POST', '/api/remote-fleet/install-agent'],
   ['POST', '/api/remote-fleet/probe'],
@@ -691,6 +698,10 @@ const HOST_API_ALLOWED_DYNAMIC_REQUESTS: readonly HostApiAllowedRequest[] = Obje
   ['GET', '/api/provider-accounts/:accountId/has-api-key'],
 ] as const);
 
+const exactRequests = new Map(
+  HOST_API_ALLOWED_REQUESTS.map((request) => [`${request[0]} ${request[1]}`, request]),
+);
+
 export function getMainApiBoundarySnapshot() {
   return {
     allowedRouteFiles: [...MAIN_API_ALLOWED_ROUTE_FILES],
@@ -714,12 +725,11 @@ export function isHostApiProxyWebSocketRoute(pathname: string): boolean {
   return HOSTAPI_PROXY_WEBSOCKET_EXACT_ROUTES.includes(pathname);
 }
 
-export function getHostApiRequestDependency(method: string, pathname: string): 'main' | 'runtime' | null {
+export function getHostApiRequestDependency(method: string, pathname: string, entry: 'http' | 'ipc' = 'http'): 'main' | 'runtime' | null {
   const normalizedMethod = method.toUpperCase();
-  const request = HOST_API_ALLOWED_REQUESTS.find(
-    ([allowedMethod, allowedPathname]) =>
-      allowedMethod === normalizedMethod && allowedPathname === pathname,
-  ) ?? HOST_API_ALLOWED_DYNAMIC_REQUESTS.find(
+  const exact = exactRequests.get(`${normalizedMethod} ${pathname}`);
+  if (exact) return exact[3] === 'http' && entry === 'ipc' ? null : exact[2] ?? 'runtime';
+  const request = HOST_API_ALLOWED_DYNAMIC_REQUESTS.find(
     ([allowedMethod, template]) =>
       allowedMethod === normalizedMethod && isSafeDynamicRoute(pathname, template),
   );

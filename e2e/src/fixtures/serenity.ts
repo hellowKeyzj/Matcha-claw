@@ -36,6 +36,7 @@ import { WorldRules } from '../abilities/world-rules.ability.js';
 import { WorldPackageTrust } from '../abilities/world-package-trust.ability.js';
 import { WorldMaterialsSetup } from '../abilities/world-materials-setup.ability.js';
 import { WorldStorage } from '../abilities/world-storage.ability.js';
+import { WorldArchive } from '../abilities/world-archive.ability.js';
 
 type ElectronWorkerFixtures = { sharedElectron: UseElectron };
 type ElectronTestFixtures = { electronEvidence: void };
@@ -90,7 +91,7 @@ export const test = serenityTest.extend<ElectronTestFixtures, ElectronWorkerFixt
       new WorldPackageSetup(sharedElectron), new WorldOrderSetup(sharedElectron), new WorldOrderAccess(sharedElectron),
       new WorldSources(sharedElectron), new WorldActions(sharedElectron), new WorldViews(sharedElectron),
       new WorldRules(sharedElectron), new WorldPackageTrust(sharedElectron), new WorldMaterialsSetup(sharedElectron),
-      new WorldStorage(sharedElectron), TakeNotes.usingAnEmptyNotepad(),
+      new WorldStorage(sharedElectron), new WorldArchive(sharedElectron), TakeNotes.usingAnEmptyNotepad(),
     )));
   },
 

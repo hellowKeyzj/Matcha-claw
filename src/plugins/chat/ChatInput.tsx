@@ -7,7 +7,7 @@
  * larger local files keep their source path for prompt-side reads.
  */
 import { memo, useId, useState, useRef, useEffect, useLayoutEffect, useImperativeHandle, useCallback, useMemo, type ReactNode, type Ref, type RefObject, type CSSProperties, type SetStateAction } from 'react';
-import { createPortal } from 'react-dom';
+import { createPortal, flushSync } from 'react-dom';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Send, Square, X, FileText, Film, Music, FileArchive, File, Loader2, ImageIcon, AlertCircle, Target } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -15,6 +15,7 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   buildSessionIdentityKey,
   buildCapabilityScopeKey,
+  sessionIdentitiesEqual,
   type AgentScope,
   type RuntimeInstanceScope,
   type SessionIdentity,
@@ -26,17 +27,23 @@ import { useTranslation } from 'react-i18next';
 import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
 import { ChatImageLightbox } from '@/plugins/message-rendering/ChatImageLightbox';
 import { ChatInputStatus, ChatInputToolbar } from '@/plugins/chat/components/ChatInputToolbar';
+import { ComposerContextChip } from '@/plugins/chat/components/ComposerContextChip';
+import { ComposerPromptEnhancement } from '@/plugins/chat/components/ComposerPromptEnhancement';
 import type { ModelPickerState } from '@/plugins/chat/components/ChatModelPicker';
 import { AgentSkillManagerDialog, type AgentSkillPreviewState } from '@/plugins/chat/components/AgentSkillManagerDialog';
 import type { AgentSkillOption } from '@/plugins/chat/components/AgentSkillConfigPanel';
 import { collectDroppedFiles } from '@/plugins/chat/collect-dropped-files';
-import type { ChatSendAttachment, ChatSendResult } from '@/plugins/chat/store';
+import { useChatStore, type ChatSendAttachment, type ChatSendResult } from '@/plugins/chat/store';
+import { selectChatSelection } from '@/plugins/chat/chat-session';
+import type { AppComposeRequest, AppComposeSource, AppComposeAttachmentRemovalRequest } from '@/types/desktop/app-plugin-sdk';
+import { hostAppPluginCall } from '@/lib/host-api';
+import { toast } from 'sonner';
 import { CHAT_INLINE_ATTACHMENT_MAX_BYTES } from '@/plugins/chat/store/types';
 import { resolveChatSendGateForPayload, type ChatSendGate } from '@/plugins/chat/store/send-gate';
 import { isDirectoryAttachment, isReadableChatAttachment, isUnsupportedGoalStartAttachment } from '@/plugins/chat/store/send-transport';
 import type { ChatContextUsageViewModel } from '@/plugins/chat/context-usage';
 import type { PermissionPickerState } from '@/plugins/chat/useChatPermissions';
-import { useComposerDraftStore, readComposerDraftSnapshot, clampComposerDraftSelection, type ComposerMode, type ComposerDraftSelection, type ComposerSkill } from '@/plugins/chat/composer-drafts';
+import { useComposerDraftStore, readComposerDraftSnapshot, clampComposerDraftSelection, composerPromptSnapshotsEqual, type ComposerPromptSnapshot, type ComposerMode, type ComposerDraftSelection, type ComposerSkill, type ComposerContext } from '@/plugins/chat/composer-drafts';
 import type { SessionRunPhase } from '@/types/session/runtime-state';
 import { createSessionTraceId, isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
 
@@ -100,6 +107,9 @@ interface SkillManagerState {
 
 const STAGE_BUFFER_CONCURRENCY = 3;
 const STAGE_BUFFER_MAX_BYTES = CHAT_INLINE_ATTACHMENT_MAX_BYTES;
+const STAGE_BUFFER_MAX_ATTACHMENTS = 16;
+const STAGE_BUFFER_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+type BufferAttachment = { name: string; mimeType: string; size: number; data: string | globalThis.File };
 const QUICK_PHRASE_STORAGE_KEY = 'matchaclaw:chat:quick-phrases';
 
 interface QuickPhrase {
@@ -109,10 +119,12 @@ interface QuickPhrase {
 
 const DEFAULT_QUICK_PHRASES: QuickPhrase[] = [];
 const EMPTY_SKILLS: ReturnType<typeof useSkillsStore.getState>['skills'] = [];
+const EMPTY_CONTEXTS: ComposerContext[] = [];
 
 export interface ChatInputHandle {
   replaceText: (text: string) => void;
   focus: () => void;
+  stagePrompt: (identity: SessionIdentity, draftKey: string, request: AppComposeRequest, source: AppComposeSource, signal?: AbortSignal) => Promise<void>;
 }
 
 interface ChatInputProps {
@@ -459,14 +471,17 @@ export const ChatInput = memo(function ChatInput({
     if (onDraftChange) onDraftChange(update);
     else setUncontrolledInput(update);
   }, [onDraftChange]);
-  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
-  const committedAttachmentsRef = useRef(attachments);
+  const [independentAttachments, setIndependentAttachments] = useState<FileAttachment[]>([]);
   const ownedStagedAttachmentIdsRef = useRef(new Set<string>());
   const canceledStagingKeysRef = useRef(new Set<string>());
   const mountedRef = useRef(true);
   const sessionIdentityKey = sessionIdentity ? buildSessionIdentityKey(sessionIdentity) : null;
   const composerScope = useMemo(() => ({ draftKey, sessionIdentityKey }), [draftKey, sessionIdentityKey]);
+  const independentAttachmentScopeRef = useRef(composerScope);
   const currentScopeRef = useRef<typeof composerScope | null>(null);
+  const promptEnhancementScopeRef = useRef<typeof composerScope | null>(null);
+  const [promptEnhancementScope, setPromptEnhancementScope] = useState<typeof composerScope | null>(null);
+  const promptEnhancementBusy = promptEnhancementScope === composerScope;
   type SendOperation = {
     scope: typeof composerScope;
     attachmentIds: ReadonlySet<string>;
@@ -489,6 +504,21 @@ export const ChatInput = memo(function ChatInput({
   const [slashEnd, setSlashEnd] = useState(-1);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [selectedSkills, setSelectedSkills] = useState<SelectedSkill[]>([]);
+  const [localContexts, setLocalContexts] = useState<ComposerContext[]>([]);
+  const composeMutationRef = useRef<{ contextId?: string } | null>(null);
+  const [composeBusy, setComposeBusy] = useState(false);
+  const storedContexts = useComposerDraftStore((state) => draftKey ? state.contexts[draftKey] ?? EMPTY_CONTEXTS : EMPTY_CONTEXTS);
+  const contexts = draftKey ? storedContexts : localContexts;
+  const groupAttachments = useMemo<FileAttachment[]>(() => contexts.flatMap((context) => (
+    context.group?.attachments.map((attachment) => ({ ...attachment, status: 'ready' as const })) ?? []
+  )), [contexts]);
+  const attachments = useMemo(() => [...independentAttachments, ...groupAttachments], [groupAttachments, independentAttachments]);
+  const committedAttachmentsRef = useRef(attachments);
+  useLayoutEffect(() => { inputRevisionRef.current += 1; }, [attachments, selectedSkills, localContexts, goal?.mode]);
+  const setContexts = useCallback((update: SetStateAction<ComposerContext[]>) => {
+    if (draftKey) useComposerDraftStore.getState().setContexts(draftKey, update);
+    else setLocalContexts(update);
+  }, [draftKey]);
   const [quickPhrases, setQuickPhrases] = useState<QuickPhrase[]>(() => loadQuickPhrases());
   const [quickPhraseOpen, setQuickPhraseOpen] = useState(false);
   const [quickPhraseAddOpen, setQuickPhraseAddOpen] = useState(false);
@@ -500,6 +530,7 @@ export const ChatInput = memo(function ChatInput({
     src: string;
     fileName: string;
     filePath?: string;
+    sessionIdentity?: SessionIdentity;
   } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composerRootRef = useRef<HTMLDivElement>(null);
@@ -679,16 +710,6 @@ export const ChatInput = memo(function ChatInput({
     textareaRef.current?.focus();
   }, [closeComposerPopovers, goal]);
 
-  useImperativeHandle(ref, () => ({
-    focus: () => textareaRef.current?.focus({ preventScroll: true }),
-    replaceText: (text) => {
-      const selection: ComposerDraftSelection = { start: text.length, end: text.length, direction: 'none' };
-      setInputAndSelection(text, selection);
-      closeComposerPopovers();
-      setReuseSelection(selection);
-    },
-  }), [closeComposerPopovers, setInputAndSelection]);
-
   useLayoutEffect(() => {
     if (!reuseSelection) return;
     textareaRef.current?.focus({ preventScroll: true });
@@ -854,6 +875,8 @@ export const ChatInput = memo(function ChatInput({
     const idsToRelease = ownedOnly
       ? uniqueIds.filter((id) => ownedStagedAttachmentIdsRef.current.has(id))
       : uniqueIds;
+    useComposerDraftStore.getState().invalidateAttachmentContexts(uniqueIds);
+    setLocalContexts((current) => current.filter((context) => !context.stagedAttachmentIds?.some((id) => uniqueIds.includes(id))));
     if (idsToRelease.length === 0) {
       return;
     }
@@ -873,6 +896,9 @@ export const ChatInput = memo(function ChatInput({
 
   useLayoutEffect(() => {
     currentScopeRef.current = composerScope;
+    composeMutationRef.current = null;
+    setComposeBusy(false);
+    setLocalContexts([]);
     const operation = sendOperationRef.current;
     if (operation && operation.scope !== composerScope && operation.handoffScope !== composerScope) {
       const initialization = draftKey ? useComposerDraftStore.getState().initializations[draftKey] : null;
@@ -881,11 +907,14 @@ export const ChatInput = memo(function ChatInput({
         operation.handoffScope = composerScope;
       } else operation.retired = true;
     }
-    const retainedIds = new Set(committedAttachmentsRef.current
+    const retainIndependentAttachments = independentAttachmentScopeRef.current === composerScope
+      || operation && !operation.retired && operation.scope === independentAttachmentScopeRef.current && operation.handoffScope === composerScope;
+    independentAttachmentScopeRef.current = composerScope;
+    const retainedIds = new Set(retainIndependentAttachments ? committedAttachmentsRef.current
       .filter((attachment) => attachment.status !== 'staging')
-      .map((attachment) => attachment.stagedAttachmentId));
+      .map((attachment) => attachment.stagedAttachmentId) : []);
     releaseStagedAttachmentIds([...ownedStagedAttachmentIdsRef.current].filter((id) => !retainedIds.has(id)));
-    setAttachments((current) => {
+    setIndependentAttachments((current) => {
       const retained = current.filter((attachment) => attachment.status !== 'staging' && retainedIds.has(attachment.stagedAttachmentId));
       return retained.length === current.length ? current : retained;
     });
@@ -908,6 +937,7 @@ export const ChatInput = memo(function ChatInput({
       ownedStagedAttachmentIds.clear();
       canceledStagingKeys.clear();
       if (stagedAttachmentIds.length > 0) {
+        useComposerDraftStore.getState().invalidateAttachmentContexts(stagedAttachmentIds);
         void invokeIpc('dialog:releaseStagedAttachments', stagedAttachmentIds).catch(() => undefined);
       }
     };
@@ -946,7 +976,7 @@ export const ChatInput = memo(function ChatInput({
           attachment.fileSize,
         );
       });
-      setAttachments((prev) => isCurrentScope() ? [...prev, ...stagingAttachments] : prev);
+      setIndependentAttachments((prev) => isCurrentScope() ? [...prev, ...stagingAttachments] : prev);
       await waitForAttachmentPlaceholderFrame();
       if (!isCurrentScope()) {
         releaseStagedAttachmentIds(stagedAttachmentIdsFromResult);
@@ -965,7 +995,7 @@ export const ChatInput = memo(function ChatInput({
           : { ...stagingAttachments[i], status: 'error', error: 'Attachment removed' });
       }
       if (isCurrentScope()) {
-        setAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
+        setIndependentAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
           updatesByTempId.get(attachment.stagedAttachmentId) ?? attachment
         )) : prev);
       }
@@ -979,7 +1009,7 @@ export const ChatInput = memo(function ChatInput({
       }
       const failedIds = new Set(tempIds);
       if (isCurrentScope()) {
-        setAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
+        setIndependentAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
           failedIds.has(attachment.stagedAttachmentId)
             ? { ...attachment, status: 'error', error: String(err) }
             : attachment
@@ -998,7 +1028,7 @@ export const ChatInput = memo(function ChatInput({
       const fileName = filePath.split(/[\\/]/).pop() || 'file';
       return buildStagingAttachment(tempIds[index], fileName, 'application/octet-stream', 0);
     });
-    setAttachments((prev) => isCurrentScope() ? [...prev, ...stagingAttachments] : prev);
+    setIndependentAttachments((prev) => isCurrentScope() ? [...prev, ...stagingAttachments] : prev);
 
     try {
       const result = await invokeIpc<{ attachments?: DialogStagedAttachmentPayload[] }>(
@@ -1029,7 +1059,7 @@ export const ChatInput = memo(function ChatInput({
           : { ...stagingAttachments[i], status: 'error', error: 'Attachment removed' });
       }
       if (isCurrentScope()) {
-        setAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
+        setIndependentAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
           updatesByTempId.get(attachment.stagedAttachmentId) ?? attachment
         )) : prev);
       }
@@ -1039,7 +1069,7 @@ export const ChatInput = memo(function ChatInput({
       }
       const failedIds = new Set(tempIds);
       if (isCurrentScope()) {
-        setAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
+        setIndependentAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
           failedIds.has(attachment.stagedAttachmentId)
             ? { ...attachment, status: 'error', error: String(err) }
             : attachment
@@ -1050,95 +1080,246 @@ export const ChatInput = memo(function ChatInput({
 
   // ── Stage browser File objects (paste / drag-drop) ─────────────
 
-  const stageBufferFiles = useCallback(async (files: globalThis.File[]) => {
-    if (!isCurrentScope() || files.length === 0) {
-      return;
-    }
-
+  const stageBufferAttachments = useCallback(async (files: BufferAttachment[], compose?: {
+    signal?: AbortSignal;
+    assertCurrent: () => void;
+    commit: (stagedAttachmentIds: readonly string[], attachments: FileAttachment[]) => void;
+    replaceAttachmentIds?: readonly string[];
+    attachmentOwner: 'input' | 'group';
+  }) => {
+    if (!compose && (!isCurrentScope() || files.length === 0)) return;
+    const assertCurrent = () => {
+      compose?.signal?.throwIfAborted();
+      compose?.assertCurrent();
+      if (!isCurrentScope()) throw new Error(t('input.composeSessionChanged'));
+    };
+    const replacedIds = new Set(compose?.replaceAttachmentIds ?? []);
+    const assertBudget = (current: FileAttachment[]) => {
+      const inline = current.filter((attachment) => !replacedIds.has(attachment.stagedAttachmentId) && !isDirectoryAttachment(attachment) && attachment.fileSize <= STAGE_BUFFER_MAX_BYTES);
+      if (inline.length > STAGE_BUFFER_MAX_ATTACHMENTS) throw new Error(t('common:appFrame.attachmentCountLimit'));
+      if (inline.reduce((total, attachment) => total + attachment.fileSize, 0) > STAGE_BUFFER_MAX_TOTAL_BYTES) {
+        throw new Error(t('common:appFrame.attachmentTotalLimit'));
+      }
+    };
+    assertCurrent();
     const queue = files.map((file) => ({
       file,
-      tempId: crypto.randomUUID(),
-      fallback: buildStagingAttachment(
-        '',
-        file.name,
-        file.type || 'application/octet-stream',
-        file.size,
-      ),
+      placeholder: buildStagingAttachment(crypto.randomUUID(), file.name, file.mimeType, file.size),
     }));
-    const placeholders = queue.map(({ file, tempId }) => (
-      buildStagingAttachment(
-        tempId,
-        file.name,
-        file.type || 'application/octet-stream',
-        file.size,
-      )
-    ));
-    setAttachments((prev) => isCurrentScope() ? [...prev, ...placeholders] : prev);
-
-    const results = await mapWithConcurrency(
-      queue,
-      STAGE_BUFFER_CONCURRENCY,
-      async ({ file, tempId, fallback }) => {
+    const placeholders = queue.map(({ placeholder }) => placeholder);
+    const tempIds = new Set(placeholders.map((attachment) => attachment.stagedAttachmentId));
+    const stagedIds: string[] = [];
+    let committed = false;
+    const rollback = () => {
+      if (committed) return;
+      tempIds.forEach((id) => canceledStagingKeysRef.current.add(id));
+      releaseStagedAttachmentIds(stagedIds, true);
+      if (mountedRef.current) setIndependentAttachments((current) => current.filter((attachment) => !tempIds.has(attachment.stagedAttachmentId)));
+    };
+    const originalAttachments = committedAttachmentsRef.current;
+    if (compose) assertBudget([...originalAttachments, ...placeholders]);
+    const addPlaceholders = () => setIndependentAttachments((current) => isCurrentScope() ? [...current, ...placeholders] : current);
+    // Compose reserves its send budget before another request can stage or send this batch.
+    if (compose) flushSync(addPlaceholders);
+    else addPlaceholders();
+    compose?.signal?.addEventListener('abort', rollback, { once: true });
+    try {
+      const results = await mapWithConcurrency(queue, STAGE_BUFFER_CONCURRENCY, async ({ file, placeholder }) => {
+        let stagedAttachmentId: string | undefined;
         try {
-          if (!isCurrentScope()) throw new Error('Attachment removed');
-          if (file.size > STAGE_BUFFER_MAX_BYTES) {
-            throw new Error('tooLarge');
-          }
-          const base64 = await readFileAsBase64(file);
-          if (!isCurrentScope()) throw new Error('Attachment removed');
+          assertCurrent();
+          if (file.size > STAGE_BUFFER_MAX_BYTES) throw new Error('tooLarge');
+          const base64 = typeof file.data === 'string' ? file.data : await readFileAsBase64(file.data);
+          assertCurrent();
           const staged = await invokeIpc<DialogStagedAttachmentPayload>('dialog:stageRendererBufferAttachment', {
-            base64,
-            fileName: file.name,
-            mimeType: file.type || 'application/octet-stream',
+            base64, fileName: file.name, mimeType: file.mimeType,
           });
-          const stagedAttachmentId = staged.stagedAttachmentId;
-          if (!stagedAttachmentId) {
-            throw new Error('Missing staged attachment id');
+          stagedAttachmentId = staged.stagedAttachmentId;
+          if (!stagedAttachmentId) throw new Error(t('input.composeAttachmentFailed'));
+          assertCurrent();
+          if (!registerStagedAttachment(stagedAttachmentId, placeholder.stagedAttachmentId)) {
+            throw new Error(t('input.composeAttachmentFailed'));
           }
-          if (!registerStagedAttachment(stagedAttachmentId, tempId)) {
-            return {
-              tempId,
-              attachment: {
-                ...fallback,
-                stagedAttachmentId: tempId,
-                status: 'error' as const,
-                error: 'Attachment removed',
-              },
-            };
-          }
-          return { tempId, attachment: { ...staged, stagedAttachmentId, status: 'ready' as const } };
+          stagedIds.push(stagedAttachmentId);
+          return { tempId: placeholder.stagedAttachmentId, attachment: { ...staged, stagedAttachmentId, status: 'ready' as const } };
         } catch (err) {
-          return {
-            tempId,
-            attachment: {
-              ...fallback,
-              stagedAttachmentId: tempId,
-              status: 'error' as const,
-              error: String(err),
-            },
-          };
+          if (stagedAttachmentId) releaseStagedAttachmentIds([stagedAttachmentId]);
+          return { tempId: placeholder.stagedAttachmentId, attachment: { ...placeholder, status: 'error' as const, error: String(err) } };
         }
-      },
-    );
-
-    if (!isCurrentScope()) {
-      return;
+      });
+      assertCurrent();
+      if (compose) {
+        if (results.some(({ tempId, attachment }) => attachment.status !== 'ready'
+          || canceledStagingKeysRef.current.has(tempId) || !ownedStagedAttachmentIdsRef.current.has(attachment.stagedAttachmentId))) {
+          throw new Error(t('input.composeAttachmentFailed'));
+        }
+        const currentAttachments = committedAttachmentsRef.current;
+        const original = currentAttachments.filter((attachment) => !tempIds.has(attachment.stagedAttachmentId));
+        if (original.length !== originalAttachments.length || original.some((attachment, index) => attachment !== originalAttachments[index])) throw new Error(t('input.composeChanged'));
+        const currentIds = new Set(currentAttachments.map((attachment) => attachment.stagedAttachmentId));
+        if ([...tempIds].some((id) => !currentIds.has(id))) throw new Error(t('input.composeAttachmentFailed'));
+        assertBudget(currentAttachments);
+      }
+      const updates = new Map<string, FileAttachment>(results.map(({ tempId, attachment }) => [tempId, attachment]));
+      const commit = () => {
+        assertCurrent();
+        setIndependentAttachments((current) => isCurrentScope() ? current.flatMap((attachment) => {
+          const updated = updates.get(attachment.stagedAttachmentId);
+          if (!updated) return [attachment];
+          return compose?.attachmentOwner === 'group' ? [] : [updated];
+        }) : current);
+        compose?.commit(results.map(({ attachment }) => attachment.stagedAttachmentId), results.map(({ attachment }) => attachment));
+        committed = true;
+      };
+      if (compose) flushSync(commit);
+      else commit();
+    } catch (error) {
+      rollback();
+      if (compose) throw error;
+    } finally {
+      compose?.signal?.removeEventListener('abort', rollback);
+      tempIds.forEach((id) => canceledStagingKeysRef.current.delete(id));
     }
-    const updatesByTempId = new Map<string, FileAttachment>(
-      results.map((result) => [result.tempId, result.attachment] as const),
-    );
-    setAttachments((prev) => isCurrentScope() ? prev.map((attachment) => (
-      updatesByTempId.get(attachment.stagedAttachmentId) ?? attachment
-    )) : prev);
-  }, [isCurrentScope, registerStagedAttachment]);
+  }, [isCurrentScope, registerStagedAttachment, releaseStagedAttachmentIds, t]);
+
+  const stageBufferFiles = useCallback((files: globalThis.File[]) => stageBufferAttachments(files.map((file) => ({
+    name: file.name, mimeType: file.type || 'application/octet-stream', size: file.size, data: file,
+  }))), [stageBufferAttachments]);
+
+  const stagePrompt = useCallback(async (identity: SessionIdentity, requestedDraftKey: string, request: AppComposeRequest, source: AppComposeSource, signal?: AbortSignal) => {
+    if (composeMutationRef.current || sendOperationRef.current) throw new Error(t('input.composeChanged'));
+    const mutation = {};
+    const revision = draftKey ? useComposerDraftStore.getState().revisions[draftKey] : undefined;
+    const assertCurrent = () => {
+      signal?.throwIfAborted();
+      const current = selectChatSelection(useChatStore.getState());
+      if (!isCurrentScope() || !draftKey || draftKey !== requestedDraftKey || current.currentComposerDraftKey !== draftKey
+        || !sessionIdentity || !current.currentWorkspaceIdentity || !sessionIdentitiesEqual(identity, sessionIdentity)
+        || !sessionIdentitiesEqual(identity, current.currentWorkspaceIdentity)) throw new Error(t('input.composeSessionChanged'));
+      if (useComposerDraftStore.getState().revisions[draftKey] !== revision || sendOperationRef.current) throw new Error(t('input.composeChanged'));
+    };
+    assertCurrent();
+    const previous = request.context?.groupKey ? useComposerDraftStore.getState().contexts[requestedDraftKey]?.find((context) => (
+      context.group && context.group.key === request.context?.groupKey && context.group.source.pluginId === source.pluginId
+    )) : undefined;
+    const replacedIds = previous?.stagedAttachmentIds ?? [];
+    composeMutationRef.current = mutation;
+    setComposeBusy(true);
+    try {
+      await stageBufferAttachments((request.attachments ?? []).map((attachment) => ({
+        name: attachment.name, mimeType: attachment.mimeType, data: attachment.data,
+        size: attachment.data.length / 4 * 3 - (attachment.data.endsWith('==') ? 2 : attachment.data.endsWith('=') ? 1 : 0),
+      })), { signal, assertCurrent, replaceAttachmentIds: replacedIds, attachmentOwner: request.context?.groupKey ? 'group' : 'input', commit: (stagedAttachmentIds, stagedAttachments) => {
+        assertCurrent();
+        if (!request.context?.groupKey) setInput((current) => request.textMode === 'replace' || !current.trim() ? request.text : `${current}\n\n${request.text}`);
+        if (request.context) {
+          const context: ComposerContext = {
+            id: previous?.id ?? crypto.randomUUID(), name: request.context.name, text: request.context.text,
+            ...(request.context.attachmentIndices?.length ? {
+              stagedAttachmentIds: request.context.attachmentIndices.map((index) => stagedAttachmentIds[index]),
+            } : {}),
+            ...(request.context.groupKey ? { group: { key: request.context.groupKey, source: { ...source }, prompt: request.text,
+              attachments: (request.context.attachmentIndices ?? []).map((index) => stagedAttachments[index]),
+              ...(request.context.attachmentRemoval ? { attachmentRemoval: request.context.attachmentRemoval } : {}) } } : {}),
+          };
+          setContexts((current) => previous ? current.map((item) => item === previous ? context : item) : [...current, context]);
+          if (context.group) stagedAttachmentIds.forEach((id) => ownedStagedAttachmentIdsRef.current.delete(id));
+        }
+        closeComposerPopovers();
+      } });
+      if (isCurrentScope()) textareaRef.current?.focus({ preventScroll: true });
+    } finally {
+      if (composeMutationRef.current === mutation) {
+        composeMutationRef.current = null;
+        setComposeBusy(false);
+      }
+    }
+  }, [closeComposerPopovers, draftKey, isCurrentScope, sessionIdentity, setContexts, setInput, stageBufferAttachments, t]);
+
+  useImperativeHandle(ref, () => ({
+    focus: () => textareaRef.current?.focus({ preventScroll: true }),
+    replaceText: (text) => {
+      const selection: ComposerDraftSelection = { start: text.length, end: text.length, direction: 'none' };
+      setInputAndSelection(text, selection);
+      closeComposerPopovers();
+      setReuseSelection(selection);
+    },
+    stagePrompt,
+  }), [closeComposerPopovers, setInputAndSelection, stagePrompt]);
 
   // ── Attachment management ──────────────────────────────────────
 
-  const removeAttachment = useCallback((stagedAttachmentId: string) => {
-    canceledStagingKeysRef.current.add(stagedAttachmentId);
-    setAttachments((prev) => prev.filter((attachment) => attachment.stagedAttachmentId !== stagedAttachmentId));
-    releaseStagedAttachmentIds([stagedAttachmentId], true);
-  }, [releaseStagedAttachmentIds]);
+  const removeContext = useCallback((context: ComposerContext) => {
+    if (!isCurrentScope()) return;
+    if (composeMutationRef.current?.contextId === context.id) {
+      composeMutationRef.current = null;
+      setComposeBusy(false);
+    }
+    setContexts((current) => current.filter((item) => item.id !== context.id));
+  }, [isCurrentScope, setContexts]);
+
+  const removeAttachment = useCallback(async (stagedAttachmentId: string) => {
+    const context = contexts.find((item) => item.group && item.stagedAttachmentIds?.includes(stagedAttachmentId));
+    if (!context?.group) {
+      canceledStagingKeysRef.current.add(stagedAttachmentId);
+      setIndependentAttachments((prev) => prev.filter((attachment) => attachment.stagedAttachmentId !== stagedAttachmentId));
+      releaseStagedAttachmentIds([stagedAttachmentId], true);
+      return;
+    }
+    if (!context.group.attachmentRemoval) { removeContext(context); return; }
+    if (composeMutationRef.current || sendOperationRef.current || !draftKey || !isCurrentScope()) return;
+    const mutation = { contextId: context.id };
+    const revision = useComposerDraftStore.getState().revisions[draftKey];
+    const attachmentSnapshot = committedAttachmentsRef.current;
+    const ids = context.stagedAttachmentIds!;
+    const attachmentIndex = ids.indexOf(stagedAttachmentId);
+    const request: AppComposeAttachmentRemovalRequest = {
+      context: { name: context.name, text: context.text }, attachmentIndex,
+      remainingAttachmentIndices: ids.flatMap((_, index) => index === attachmentIndex ? [] : [index]),
+    };
+    composeMutationRef.current = mutation;
+    setComposeBusy(true);
+    try {
+      const result = await hostAppPluginCall({
+        id: context.group.source.pluginId, digest: context.group.source.digest,
+        name: context.group.attachmentRemoval.tool, arguments: { ...request },
+      });
+      const current = selectChatSelection(useChatStore.getState());
+      const drafts = useComposerDraftStore.getState();
+      if (!isCurrentScope() || current.currentComposerDraftKey !== draftKey || composeMutationRef.current !== mutation
+        || drafts.revisions[draftKey] !== revision || !drafts.contexts[draftKey]?.includes(context)
+        || committedAttachmentsRef.current !== attachmentSnapshot) throw new Error(t('input.composeChanged'));
+      const content = result.structuredContent;
+      if (result.isError) throw new Error(typeof content?.error === 'string' ? content.error
+        : result.content.flatMap((part) => typeof part.text === 'string' ? [part.text] : []).join('\n') || t('common:appFrame.requestFailed'));
+      if (!content || Object.keys(content).some((key) => key !== 'context') || !Object.hasOwn(content, 'context')) throw new Error(t('common:appFrame.invalidResult'));
+      const replacement = content.context;
+      let next: ComposerContext | null = null;
+      if (replacement !== null) {
+        if (!replacement || typeof replacement !== 'object' || Array.isArray(replacement)) throw new Error(t('common:appFrame.invalidResult'));
+        const value = replacement as Record<string, unknown>;
+        const indices = value.attachmentIndices;
+        if (Object.keys(value).some((key) => !['name', 'text', 'attachmentIndices'].includes(key))
+          || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 120
+          || typeof value.text !== 'string' || !value.text.trim() || new TextEncoder().encode(value.text).byteLength > 32 * 1024
+          || !Array.isArray(indices) || indices.length > request.remainingAttachmentIndices.length
+          || indices.some((index, position) => !Number.isSafeInteger(index) || !request.remainingAttachmentIndices.includes(index)
+            || position > 0 && index <= indices[position - 1])) throw new Error(t('common:appFrame.invalidResult'));
+        next = { ...context, name: value.name, text: value.text, stagedAttachmentIds: indices.map((index: number) => ids[index]),
+          group: { ...context.group, attachments: indices.map((index: number) => context.group!.attachments[index]) } };
+      }
+      setContexts((items) => next ? items.map((item) => item === context ? next : item) : items.filter((item) => item !== context));
+    } catch (error) {
+      if (isCurrentScope() && composeMutationRef.current === mutation) toast.error(t('input.composeEditFailed', {
+        error: error instanceof Error ? error.message : t('common:appFrame.requestFailed'),
+      }));
+    } finally {
+      if (composeMutationRef.current === mutation) {
+        composeMutationRef.current = null;
+        setComposeBusy(false);
+      }
+    }
+  }, [contexts, draftKey, isCurrentScope, releaseStagedAttachmentIds, removeContext, setContexts, t]);
 
   const openAttachment = useCallback((attachment: FileAttachment) => {
     if (attachment.status !== 'ready' || !isPreviewableImageAttachment(attachment)) {
@@ -1149,14 +1330,15 @@ export const ChatInput = memo(function ChatInput({
       src: attachment.preview!,
       fileName: attachment.fileName,
       filePath: attachment.sourcePath,
+      sessionIdentity: sessionIdentity ?? undefined,
     });
-  }, []);
+  }, [sessionIdentity]);
 
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
   const hasFailedAttachments = attachments.some((a) => a.status === 'error');
   const readableAttachmentCount = attachments.filter(isReadableChatAttachment).length;
   const payloadGate = resolveChatSendGateForPayload(sendGate, {
-    text: input,
+    text: [input, ...contexts.map((context) => context.text)].join('\n'),
     attachmentCount: readableAttachmentCount,
     selectedSkillCount: selectedSkills.length,
   });
@@ -1170,9 +1352,47 @@ export const ChatInput = memo(function ChatInput({
     && allReady
     && !sendPending
     && !disabled
+    && !promptEnhancementBusy
+    && !composeBusy
     && (editingGoal || !approvalWaiting)
     && (editingGoal || !imageGenerationActive);
   const canStop = sending && !stopping && !disabled && !!onStop;
+  const promptEnhancementDisabled = disabled || sending || sendPending || approvalWaiting || Boolean(goal?.busy || goal?.unknown);
+  const handlePromptEnhancementBusyChange = useCallback((busy: boolean) => {
+    if (busy) {
+      if (!isCurrentScope()) return;
+      promptEnhancementScopeRef.current = composerScope;
+      setPromptEnhancementScope(composerScope);
+      closeComposerPopovers();
+    } else {
+      if (promptEnhancementScopeRef.current === composerScope) promptEnhancementScopeRef.current = null;
+      setPromptEnhancementScope((current) => current === composerScope ? null : current);
+    }
+  }, [closeComposerPopovers, composerScope, isCurrentScope]);
+  const readPromptSnapshot = useCallback((): ComposerPromptSnapshot | null => {
+    if (promptEnhancementDisabled || !isCurrentScope() || !textareaRef.current) return null;
+    if (draftKey) {
+      const current = selectChatSelection(useChatStore.getState());
+      if (current.currentComposerDraftKey !== draftKey || sessionIdentity && (!current.currentWorkspaceIdentity
+        || !sessionIdentitiesEqual(sessionIdentity, current.currentWorkspaceIdentity))) return null;
+      const drafts = useComposerDraftStore.getState();
+      if ((drafts.contexts[draftKey] ?? EMPTY_CONTEXTS) !== contexts
+        || usesStoredDraft && (drafts.drafts[draftKey] ?? '') !== textareaRef.current.value) return null;
+    }
+    return {
+      scope: composerScope, identity: sessionIdentity, draftKey, inputRevision: inputRevisionRef.current,
+      revision: draftKey ? useComposerDraftStore.getState().revisions[draftKey] : undefined,
+      text: textareaRef.current.value,
+    };
+  }, [composerScope, contexts, draftKey, isCurrentScope, promptEnhancementDisabled, sessionIdentity, usesStoredDraft]);
+  const replacePromptText = useCallback((snapshot: ComposerPromptSnapshot, text: string): boolean => {
+    if (!composerPromptSnapshotsEqual(snapshot, readPromptSnapshot())) return false;
+    const selection: ComposerDraftSelection = { start: text.length, end: text.length, direction: 'none' };
+    flushSync(() => setInputAndSelection(text, selection));
+    closeComposerPopovers();
+    setReuseSelection(selection);
+    return true;
+  }, [closeComposerPopovers, readPromptSnapshot, setInputAndSelection]);
   const modelPickerDisabled = !modelPicker
     || modelPicker.disabled
     || modelPicker.loading
@@ -1265,11 +1485,14 @@ export const ChatInput = memo(function ChatInput({
 
   const handleSend = useCallback(async () => {
     const pendingOperation = sendOperationRef.current;
-    if (!canSend || !isCurrentScope() || pendingOperation && (pendingOperation.scope === composerScope
+    if (!canSend || composeMutationRef.current || promptEnhancementScopeRef.current === composerScope || !isCurrentScope() || pendingOperation && (pendingOperation.scope === composerScope
       || attachments.some((attachment) => pendingOperation.attachmentIds.has(attachment.stagedAttachmentId)))) return;
     const readyAttachments = attachments.filter((attachment) => attachment.status === 'ready');
     const rawText = input.trim();
-    const textToSend = goal?.mode ? input : buildSkillPrefixedMessage(rawText, selectedSkills);
+    const prompt = goal?.mode ? input : buildSkillPrefixedMessage(rawText, selectedSkills);
+    const textToSend = contexts.length ? `${prompt}\n\n${contexts.map((context) => (
+      `--- ${context.name} ---\n${context.group?.prompt ? `${context.group.prompt}\n\n` : ''}${context.text}\n--- /${context.name} ---`
+    )).join('\n\n')}` : prompt;
     const attachmentsToSend = readyAttachments.length > 0
       ? readyAttachments.map(({ stagedAttachmentId, entryKind, fileName, mimeType, fileSize, preview, sourcePath }) => ({
           stagedAttachmentId,
@@ -1281,15 +1504,16 @@ export const ChatInput = memo(function ChatInput({
           ...(sourcePath ? { sourcePath } : {}),
         })) as ChatSendAttachment[]
       : undefined;
+    const groupIds = new Set(contexts.flatMap((context) => context.group ? context.stagedAttachmentIds ?? [] : []));
     const stagedIdsToSend = readyAttachments
       .map((attachment) => attachment.stagedAttachmentId)
-      .filter((id) => ownedStagedAttachmentIdsRef.current.has(id));
+      .filter((id) => ownedStagedAttachmentIdsRef.current.has(id) || groupIds.has(id));
     const sentAttachmentIds = new Set(readyAttachments.map((attachment) => attachment.stagedAttachmentId));
     const inputRevision = inputRevisionRef.current;
     const drafts = useComposerDraftStore.getState();
     const draftRevision = draftKey ? drafts.revisions[draftKey] : undefined;
     const ownsDraftSnapshot = draftKey && onDraftChange && (drafts.drafts[draftKey] ?? '') === input;
-    const operationId = !goal?.mode && ownsDraftSnapshot ? crypto.randomUUID() : undefined;
+    const operationId = !goal?.mode?.goalId && ownsDraftSnapshot ? crypto.randomUUID() : undefined;
     if (operationId && !drafts.prepareSubmission(draftKey!, {
       operationId, snapshot: readComposerDraftSnapshot(draftKey!), skills: selectedSkills,
       attachments: attachmentsToSend ?? [], ownedAttachmentIds: stagedIdsToSend, status: 'prepared',
@@ -1309,7 +1533,7 @@ export const ChatInput = memo(function ChatInput({
         const send = goal?.mode ? goal.onSubmit(textToSend, attachmentsToSend) : onSend(textToSend, attachmentsToSend, operationId);
         operation.initializationId = draftKey ? useComposerDraftStore.getState().initializations[draftKey]?.operationId ?? null : null;
         if (operationId && useComposerDraftStore.getState().submissions[draftKey!]?.status !== 'prepared') {
-          setAttachments((current) => current.filter((attachment) => !sentAttachmentIds.has(attachment.stagedAttachmentId)));
+          setIndependentAttachments((current) => current.filter((attachment) => !sentAttachmentIds.has(attachment.stagedAttachmentId)));
           setSelectedSkills((current) => current.filter((skill) => !selectedSkills.includes(skill)));
           closeMention();
           closeSlash();
@@ -1330,8 +1554,8 @@ export const ChatInput = memo(function ChatInput({
           if (retainAttachments) {
             const retainedIds = new Set(stagedIdsToSend.filter((id) => !canceledStagingKeysRef.current.has(id)
               && committedAttachmentsRef.current.some((attachment) => attachment.stagedAttachmentId === id)));
-            retainedIds.forEach((id) => ownedStagedAttachmentIdsRef.current.add(id));
-            releaseStagedAttachmentIds(stagedIdsToSend.filter((id) => !retainedIds.has(id)));
+            retainedIds.forEach((id) => { if (!groupIds.has(id)) ownedStagedAttachmentIdsRef.current.add(id); });
+            releaseStagedAttachmentIds(stagedIdsToSend.filter((id) => !groupIds.has(id) && !retainedIds.has(id)));
           } else releaseStagedAttachmentIds(stagedIdsToSend);
         } else if (result.outcome !== 'unknown') {
           // An unknown receipt can precede Main's materialization completion.
@@ -1348,6 +1572,7 @@ export const ChatInput = memo(function ChatInput({
       }
       if (!ownsSend()) return;
       setSelectedSkills((current) => isCurrentScope() ? current.filter((skill) => !selectedSkills.includes(skill)) : current);
+      setContexts((current) => isCurrentScope() ? current.filter((context) => !contexts.includes(context)) : current);
       if (!inputUnchanged) return;
       closeMention();
       closeSlash();
@@ -1357,23 +1582,25 @@ export const ChatInput = memo(function ChatInput({
       if (current && current.operationId === operationId && current.status === 'prepared') {
         useComposerDraftStore.getState().removeSubmission(draftKey!, operationId!);
         retainAttachments = ownsSend();
-        if (retainAttachments) stagedIdsToSend.forEach((id) => ownedStagedAttachmentIdsRef.current.add(id));
-        else releaseStagedAttachmentIds(stagedIdsToSend);
+        if (retainAttachments) stagedIdsToSend.forEach((id) => { if (!groupIds.has(id)) ownedStagedAttachmentIdsRef.current.add(id); });
+        else releaseStagedAttachmentIds(stagedIdsToSend.filter((id) => !groupIds.has(id)));
       }
       if (mountedRef.current) {
-        if (!retainAttachments) setAttachments((current) => current.filter((attachment) => !sentAttachmentIds.has(attachment.stagedAttachmentId)));
+        if (!retainAttachments) setIndependentAttachments((current) => current.filter((attachment) => !sentAttachmentIds.has(attachment.stagedAttachmentId)));
         setPendingSend((current) => current === operation ? null : current);
       }
       if (sendOperationRef.current === operation) sendOperationRef.current = null;
     }
-  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, composerScope, draftKey, goal, input, isCurrentScope, onDraftChange, onSend, releaseStagedAttachmentIds, selectedSkills, setInput]);
+  }, [attachments, canSend, closeMention, closeQuickPhrase, closeSlash, composerScope, contexts, draftKey, goal, input, isCurrentScope, onDraftChange, onSend, releaseStagedAttachmentIds, selectedSkills, setContexts, setInput]);
 
   const restoreFailedSubmission = useCallback(() => {
-    if (!draftKey || !submission || submission.status !== 'failed' || input || goal?.mode || attachments.length || selectedSkills.length) return;
+    if (!draftKey || !submission || submission.status !== 'failed' || input
+      || goal?.mode && goal.mode.id !== submission.snapshot.mode?.id || attachments.length || selectedSkills.length || contexts.length) return;
     const drafts = useComposerDraftStore.getState();
     if (!drafts.restoreSubmission(draftKey, submission.operationId)) return;
-    submission.ownedAttachmentIds.forEach((id) => ownedStagedAttachmentIdsRef.current.add(id));
-    setAttachments(submission.attachments.map((attachment) => ({
+    const groupIds = new Set(submission.snapshot.contexts?.flatMap((context) => context.group ? context.stagedAttachmentIds ?? [] : []));
+    submission.ownedAttachmentIds.filter((id) => !groupIds.has(id)).forEach((id) => ownedStagedAttachmentIdsRef.current.add(id));
+    setIndependentAttachments(submission.attachments.filter((attachment) => !groupIds.has(attachment.stagedAttachmentId)).map((attachment) => ({
       ...attachment,
       status: submission.attachmentReselectionRequired && !isDirectoryAttachment(attachment) && attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES ? 'error' : 'ready',
       ...(submission.attachmentReselectionRequired && !isDirectoryAttachment(attachment) && attachment.fileSize <= CHAT_INLINE_ATTACHMENT_MAX_BYTES
@@ -1381,10 +1608,10 @@ export const ChatInput = memo(function ChatInput({
     })));
     setSelectedSkills(submission.skills);
     drafts.removeSubmission(draftKey, submission.operationId);
-  }, [attachments.length, draftKey, goal?.mode, input, selectedSkills.length, submission, t]);
+  }, [attachments.length, contexts.length, draftKey, goal?.mode, input, selectedSkills.length, submission, t]);
   useEffect(() => {
     if (submission?.status === 'failed' && !pendingSend && draftKey
-      && !submission.attachments.length && !submission.skills.length
+      && !submission.attachments.length && !submission.skills.length && !submission.snapshot.contexts?.length
       && useComposerDraftStore.getState().revisions[draftKey] === submission.revision) restoreFailedSubmission();
   }, [draftKey, pendingSend, restoreFailedSubmission, submission]);
 
@@ -1573,10 +1800,11 @@ export const ChatInput = memo(function ChatInput({
                 <p className="text-destructive">{submission.error || t('input.submissionFailed')}</p>
                 <p className="max-h-24 overflow-y-auto whitespace-pre-wrap">{submission.snapshot.draft}</p>
                 {submission.skills.length ? <p>{submission.skills.map((skill) => skill.name).join(' / ')}</p> : null}
+                {submission.snapshot.contexts?.length ? <p>{submission.snapshot.contexts.map((context) => context.name).join(' / ')}</p> : null}
                 {submission.attachments.length ? <p>{submission.attachments.map((attachment) => attachment.fileName).join(' / ')}</p> : null}
                 {submission.attachmentReselectionRequired ? <p>{t('input.attachmentReselectionRequired')}</p> : null}
                 <div className="flex gap-3">
-                  <Button type="button" variant="link" className="h-auto p-0 text-xs" disabled={submission.status === 'unknown' || Boolean(input || goal?.mode || attachments.length || selectedSkills.length)} onClick={restoreFailedSubmission}>{t('reuseMessage')}</Button>
+                  <Button type="button" variant="link" className="h-auto p-0 text-xs" disabled={submission.status === 'unknown' || Boolean(input || goal?.mode && goal.mode.id !== submission.snapshot.mode?.id || attachments.length || selectedSkills.length || contexts.length)} onClick={restoreFailedSubmission}>{t('reuseMessage')}</Button>
                   <Button type="button" variant="link" className="h-auto p-0 text-xs" onClick={() => {
                     useComposerDraftStore.getState().discardSubmission(draftKey!, submission.operationId);
                   }}>{t('input.remove')}</Button>
@@ -1595,14 +1823,23 @@ export const ChatInput = memo(function ChatInput({
                   {!goal.supported ? <p role="status" className="text-xs text-muted-foreground">{t('goal.errors.unsupported')}</p> : null}
                 </div>
               ) : null}
-              {attachments.length > 0 && (
-                <div className="mb-3 flex flex-wrap gap-2">
+              {(attachments.length > 0 || contexts.length > 0) && (
+                <div className="mb-3 flex flex-wrap items-center gap-2">
                   {attachments.map((attachment) => (
                     <AttachmentChip
                       key={attachment.stagedAttachmentId}
                       attachment={attachment}
                       onActivate={() => openAttachment(attachment)}
-                      onRemove={() => removeAttachment(attachment.stagedAttachmentId)}
+                      onRemove={() => { void removeAttachment(attachment.stagedAttachmentId); }}
+                    />
+                  ))}
+                  {contexts.map((context) => (
+                    <ComposerContextChip
+                      key={context.id}
+                      context={context}
+                      onRemove={() => removeContext(context)}
+                      busy={composeBusy}
+                      onPromptChange={(prompt) => setContexts((current) => current.map((item) => item === context && item.group ? { ...item, group: { ...item.group, prompt } } : item))}
                     />
                   ))}
                 </div>
@@ -1673,7 +1910,8 @@ export const ChatInput = memo(function ChatInput({
                 }}
                 onPaste={handlePaste}
                 placeholder={placeholderText}
-                disabled={disabled || Boolean(goal?.mode && goal.busy)}
+                disabled={disabled || promptEnhancementBusy || Boolean(goal?.mode && goal.busy)}
+                aria-busy={promptEnhancementBusy}
                 className={cn(
                   CHAT_LAYOUT_TOKENS.inputTextarea,
                   'placeholder:text-muted-foreground',
@@ -1751,7 +1989,7 @@ export const ChatInput = memo(function ChatInput({
             <ChatInputStatus contextUsage={contextUsage} imageGenerationActive={!sending && imageGenerationActive} />
             <div className="chat-input-toolbar w-full min-w-0">
               <ChatInputToolbar
-                key={`${draftKey ?? ''}:${sessionIdentityKey ?? ''}`}
+                key={`toolbar:${draftKey ?? ''}:${sessionIdentityKey ?? ''}`}
                 composerAnchorName={composerAnchorName}
                 scopeKey={`${draftKey ?? ''}:${sessionIdentityKey ?? ''}`}
                 sessionIdentity={sessionIdentity}
@@ -1776,6 +2014,16 @@ export const ChatInput = memo(function ChatInput({
                 quickPhraseOpen={quickPhraseOpen}
                 onToggleQuickPhrase={toggleQuickPhrase}
                 onAttachFiles={stageSelectedDialogAttachments}
+              />
+              <ComposerPromptEnhancement
+                key={`prompt-enhancement:${draftKey ?? ''}:${sessionIdentityKey ?? ''}`}
+                text={input}
+                disabled={promptEnhancementDisabled}
+                busy={promptEnhancementBusy}
+                onBusyChange={handlePromptEnhancementBusyChange}
+                contexts={contexts}
+                readSnapshot={readPromptSnapshot}
+                replaceText={replacePromptText}
               />
 
               <Button
@@ -1969,7 +2217,7 @@ export const ChatInput = memo(function ChatInput({
               size="sm"
               className="h-auto p-0 text-xs"
               onClick={() => {
-                setAttachments((prev) => prev.filter((att) => att.status !== 'error'));
+                setIndependentAttachments((prev) => prev.filter((att) => att.status !== 'error'));
                 void stageSelectedDialogAttachments();
               }}
             >
@@ -1982,6 +2230,7 @@ export const ChatInput = memo(function ChatInput({
             src={lightboxAttachment.src}
             fileName={lightboxAttachment.fileName}
             filePath={lightboxAttachment.filePath}
+            sessionIdentity={lightboxAttachment.sessionIdentity}
             onClose={() => setLightboxAttachment(null)}
           />
         )}

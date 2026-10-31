@@ -106,9 +106,15 @@ export function useChatGoals(identity: SessionIdentity | null, recordKey: string
   const submit = useCallback(async (text: string, attachments?: ChatSendAttachment[]): Promise<ChatSendResult> => {
     const drafts = useComposerDraftStore.getState();
     const mode = drafts.modes[draftKey];
-    if (!enabled || !mode || currentState().busy || currentState().unknown) return { accepted: false, reason: 'error' };
-    const draftRevision = drafts.revisions[draftKey];
-    const pending: PendingOperation = { operationId: crypto.randomUUID(), issuedAtMs: Date.now(), action: mode.goalId ? 'edit' : 'start', draftId: mode.id, draftRevision };
+    if (!enabled || !mode || currentState().busy || currentState().unknown) return { accepted: false, reason: 'error', dispatch: 'not-dispatched' };
+    const prepared = !mode.goalId ? drafts.submissions[draftKey] : undefined;
+    const submission = prepared?.status === 'prepared' && prepared.snapshot.mode?.id === mode.id ? prepared : undefined;
+    if (prepared && !submission || submission && !drafts.takeSubmission(draftKey, submission.operationId)) {
+      return { accepted: false, reason: 'active', dispatch: 'not-dispatched' };
+    }
+    const draftRevision = useComposerDraftStore.getState().revisions[draftKey];
+    const pending: PendingOperation = { operationId: submission?.operationId ?? crypto.randomUUID(), issuedAtMs: Date.now(), action: mode.goalId ? 'edit' : 'start', draftId: mode.id, draftRevision };
+    let key = draftKey;
     let result: ChatSendResult;
     if (mode.goalId) {
       const outcome = await mutate(mode.goalId, { action: 'edit', objective: text }, pending, mode.id);
@@ -121,12 +127,17 @@ export function useChatGoals(identity: SessionIdentity | null, recordKey: string
       } catch {
         result = { accepted: false, reason: 'error', outcome: 'unknown' };
       }
-      const meta = result.sessionRecordKey ? useChatStore.getState().loadedSessions[result.sessionRecordKey]?.meta : null;
-      const sendTarget = meta?.sessionIdentity && meta.endpointSessionId && result.sessionRecordKey
-        ? { identity: meta.sessionIdentity, endpointSessionId: meta.endpointSessionId, recordKey: result.sessionRecordKey } : target;
+      key = result.sessionRecordKey ?? (submission ? Object.entries(useComposerDraftStore.getState().submissions)
+        .find(([, current]) => current.operationId === pending.operationId)?.[0] : undefined) ?? draftKey;
+      // Typed payload/gate rejections happen before dispatch; native failures use reason: 'error'.
+      if (!result.accepted && !result.outcome && result.reason !== 'error') result = { ...result, dispatch: 'not-dispatched' };
+      if (submission) useComposerDraftStore.getState().settleSubmission(key, pending.operationId, result);
+      const meta = useChatStore.getState().loadedSessions[key]?.meta;
+      const sendTarget = meta?.sessionIdentity && meta.endpointSessionId
+        ? { identity: meta.sessionIdentity, endpointSessionId: meta.endpointSessionId, recordKey: key } : target;
       publish(mode.id, { busy: false, error: result.accepted ? null : goalSendError(result), unknown: !result.accepted && result.outcome === 'unknown', pending: { ...pending, ...(sendTarget ? { target: sendTarget } : {}) } });
     }
-    const key = result.sessionRecordKey ?? draftKey;
+    key = result.sessionRecordKey ?? key;
     const operationState = statesRef.current[mode.id];
     if (result.accepted && operationState?.pending?.operationId === pending.operationId) {
       useComposerDraftStore.getState().settleDraft(key, draftRevision, mode.id);

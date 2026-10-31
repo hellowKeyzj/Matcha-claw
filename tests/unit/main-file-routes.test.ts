@@ -12,7 +12,7 @@ vi.mock('../../electron/api/route-utils', () => ({
   sendJson: (...args: unknown[]) => sendJsonMock(...args),
 }));
 
-vi.mock('../../electron/main/ipc/dialog-attachment-staging', () => ({
+vi.mock('../../electron/main/attachments/staging', () => ({
   copyStagedAttachment: (...args: unknown[]) => copyStagedAttachmentMock(...args),
 }));
 

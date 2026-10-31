@@ -1,12 +1,20 @@
 import { create } from 'zustand';
 import type { SetStateAction } from 'react';
-import type { SessionIdentity } from '@/types/desktop/runtime-address';
+import { sessionIdentitiesEqual, type SessionIdentity } from '@/types/desktop/runtime-address';
 import type { SessionPermissionSelection } from '@/types/session-permission';
 import type { ThinkingRuntime } from '@/types/session-thinking';
+import type { AppComposeSource } from '@/types/desktop/app-plugin-sdk';
 import { invokeIpc } from '@/lib/api-client';
 import type { ChatSendAttachment, ChatSendResult } from './store/types';
 
 export type ComposerSkill = { id: string; name: string; icon: string; filePath?: string; baseDir?: string };
+export type ComposerContext = {
+  id: string;
+  name: string;
+  text: string;
+  stagedAttachmentIds?: readonly string[];
+  group?: { key: string; source: AppComposeSource; prompt: string; attachments: ChatSendAttachment[]; attachmentRemoval?: { tool: string } };
+};
 export type ComposerSubmission = {
   operationId: string;
   snapshot: ComposerDraftSnapshot;
@@ -18,6 +26,21 @@ export type ComposerSubmission = {
   error?: string;
   attachmentReselectionRequired?: boolean;
 };
+
+export type ComposerPromptSnapshot = {
+  scope: object;
+  identity: SessionIdentity | null;
+  draftKey: string | undefined;
+  revision: number | undefined;
+  inputRevision: number;
+  text: string;
+};
+
+export function composerPromptSnapshotsEqual(expected: ComposerPromptSnapshot, current: ComposerPromptSnapshot | null): boolean {
+  return current !== null && current.scope === expected.scope && current.draftKey === expected.draftKey
+    && current.revision === expected.revision && current.inputRevision === expected.inputRevision && current.text === expected.text
+    && (expected.identity === null ? current.identity === null : current.identity !== null && sessionIdentitiesEqual(expected.identity, current.identity));
+}
 
 export type ComposerDraftSelection = {
   start: number;
@@ -43,6 +66,7 @@ export type ComposerInitialization =
 export type ComposerDraftSnapshot = {
   revision: number | undefined;
   draft: string;
+  contexts?: ComposerContext[];
   selection?: ComposerDraftSelection;
   mode?: ComposerMode;
   configuration?: ComposerConfiguration;
@@ -52,6 +76,7 @@ type ComposerDraftState = {
   modes: Record<string, ComposerMode>;
   setMode: (key: string, mode: ComposerMode | null) => void;
   drafts: Record<string, string>;
+  contexts: Record<string, ComposerContext[]>;
   revisions: Record<string, number>;
   selections: Record<string, ComposerDraftSelection>;
   configurations: Record<string, ComposerConfiguration>;
@@ -70,6 +95,8 @@ type ComposerDraftState = {
   setInitialization: (key: string, initialization: ComposerInitialization | null) => void;
   promoteDraft: (from: string, to: string, snapshot: ComposerDraftSnapshot, initialization: Extract<ComposerInitialization, { kind: 'pending' }>) => void;
   setDraft: (key: string, update: SetStateAction<string>) => void;
+  setContexts: (key: string, update: SetStateAction<ComposerContext[]>) => void;
+  invalidateAttachmentContexts: (ids: readonly string[]) => void;
   settleDraft: (key: string, revision: number | undefined, modeId?: string) => void;
   clearDraft: (key: string) => void;
   clearAgentDrafts: (agentId: string, runtimeScopeKey: string) => void;
@@ -82,6 +109,7 @@ export function readComposerDraftSnapshot(key: string): ComposerDraftSnapshot {
   return {
     revision: state.revisions[key],
     draft: state.drafts[key] ?? '',
+    contexts: state.contexts[key],
     selection: state.selections[key],
     mode: state.modes[key],
     configuration: state.configurations[key],
@@ -114,10 +142,15 @@ function releaseSubmissionAttachments(ids: string[]): void {
   if (ids.length) void invokeIpc('dialog:releaseStagedAttachments', ids).catch(() => undefined);
 }
 
+function groupAttachmentIds(contexts: readonly ComposerContext[] | undefined): string[] {
+  return contexts?.flatMap((context) => context.group ? context.stagedAttachmentIds ?? [] : []) ?? [];
+}
+
 let draftRevision = 0;
 
 export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
   drafts: {},
+  contexts: {},
   revisions: {},
   selections: {},
   modes: {},
@@ -136,12 +169,14 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       || state.revisions[key] !== submission.snapshot.revision) return false;
     set((current) => {
       const drafts = { ...current.drafts };
+      const contexts = { ...current.contexts };
       const selections = { ...current.selections };
       delete drafts[key];
+      delete contexts[key];
       delete selections[key];
       const revision = ++draftRevision;
       return {
-        drafts, selections, revisions: { ...current.revisions, [key]: revision },
+        drafts, contexts, selections, revisions: { ...current.revisions, [key]: revision },
         submissions: { ...current.submissions, [key]: { ...submission, status: 'sending', revision } },
       };
     });
@@ -180,15 +215,20 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
     const state = get();
     const submission = state.submissions[key];
     if (!submission || submission.operationId !== operationId || submission.status === 'sending') return;
-    releaseSubmissionAttachments(submission.ownedAttachmentIds);
+    const draftIds = new Set(groupAttachmentIds(state.contexts[key]));
+    releaseSubmissionAttachments(submission.ownedAttachmentIds.filter((id) => !draftIds.has(id)));
     state.removeSubmission(key, operationId);
   },
   restoreSubmission: (key, operationId) => {
     const state = get();
     const submission = state.submissions[key];
-    if (submission?.operationId !== operationId || submission.status !== 'failed' || state.drafts[key] || state.modes[key]) return false;
+    if (submission?.operationId !== operationId || submission.status !== 'failed' || state.drafts[key] || state.contexts[key]?.length
+      || state.modes[key] && state.modes[key].id !== submission.snapshot.mode?.id) return false;
+    const contexts = submission.snapshot.contexts?.filter((context) => !context.stagedAttachmentIds?.some((id) => !submission.ownedAttachmentIds.includes(id)));
     set((current) => ({
       drafts: { ...current.drafts, [key]: submission.snapshot.draft },
+      contexts: { ...current.contexts, ...(contexts?.length ? { [key]: contexts } : {}) },
+      modes: { ...current.modes, ...(submission.snapshot.mode ? { [key]: submission.snapshot.mode } : {}) },
       selections: { ...current.selections, ...(submission.snapshot.selection ? { [key]: submission.snapshot.selection } : {}) },
       revisions: { ...current.revisions, [key]: ++draftRevision },
     }));
@@ -251,6 +291,7 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
     set((state) => {
       if (state.initializations[from]?.operationId !== initialization.operationId) return state;
       const drafts = { ...state.drafts };
+      const contexts = { ...state.contexts };
       const revisions = { ...state.revisions };
       const selections = { ...state.selections };
       const modes = { ...state.modes };
@@ -260,10 +301,11 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       const submission = submissions[from];
       const submitted = submission?.operationId === initialization.operationId && submission.status === 'sending';
       const promoted = submitted ? {
-        draft: state.drafts[from], revision: state.revisions[from], selection: state.selections[from],
+        draft: state.drafts[from], contexts: state.contexts[from], revision: state.revisions[from], selection: state.selections[from],
         mode: state.modes[from], configuration: state.configurations[from],
       } : snapshot;
       if (promoted.draft) drafts[to] = promoted.draft;
+      if (promoted.contexts?.length) contexts[to] = promoted.contexts;
       if (promoted.revision !== undefined) revisions[to] = promoted.revision;
       if (promoted.selection) selections[to] = promoted.selection;
       if (promoted.mode) modes[to] = promoted.mode;
@@ -274,13 +316,14 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       }
       if (submitted || state.revisions[from] === snapshot.revision) {
         delete drafts[from];
+        delete contexts[from];
         delete revisions[from];
         delete selections[from];
         delete modes[from];
         delete configurations[from];
       }
       delete initializations[from];
-      return { drafts, revisions, selections, modes, configurations, initializations, submissions };
+      return { drafts, contexts, revisions, selections, modes, configurations, initializations, submissions };
     });
   },
   setMode: (key, mode) => {
@@ -315,17 +358,59 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       };
     });
   },
+  setContexts: (key, update) => {
+    if (!key) return;
+    set((state) => {
+      const current = state.contexts[key] ?? [];
+      const next = typeof update === 'function' ? update(current) : update;
+      if (next === current || !next.length && !current.length) return state;
+      const contexts = { ...state.contexts };
+      if (next.length) contexts[key] = next;
+      else delete contexts[key];
+      const retained = new Set(groupAttachmentIds(next));
+      releaseSubmissionAttachments(groupAttachmentIds(current).filter((id) => !retained.has(id)));
+      return { contexts, revisions: { ...state.revisions, [key]: ++draftRevision } };
+    });
+  },
+  invalidateAttachmentContexts: (ids) => {
+    if (!ids.length) return;
+    const removed = new Set(ids);
+    set((state) => {
+      const contexts = { ...state.contexts };
+      const revisions = { ...state.revisions };
+      let changed = false;
+      for (const [key, current] of Object.entries(contexts)) {
+        const next = current.filter((context) => context.group || !context.stagedAttachmentIds?.some((id) => removed.has(id)));
+        if (next.length === current.length) continue;
+        if (next.length) contexts[key] = next;
+        else delete contexts[key];
+        revisions[key] = ++draftRevision;
+        changed = true;
+      }
+      return changed ? { contexts, revisions } : state;
+    });
+  },
   settleDraft: (key, revision, modeId) => {
     const state = get();
     if (modeId !== undefined && state.modes[key]?.id !== modeId) return;
     if (state.revisions[key] !== revision) return;
     if (modeId !== undefined) state.clearDraft(key);
-    else state.setDraft(key, '');
+    else set((current) => {
+      const drafts = { ...current.drafts };
+      const contexts = { ...current.contexts };
+      const selections = { ...current.selections };
+      releaseSubmissionAttachments(groupAttachmentIds(current.contexts[key]));
+      delete drafts[key];
+      delete contexts[key];
+      delete selections[key];
+      return { drafts, contexts, selections, revisions: { ...current.revisions, [key]: ++draftRevision } };
+    });
   },
   clearDraft: (key) => {
     if (!key) return;
     set((state) => {
       const drafts = { ...state.drafts };
+      const contexts = { ...state.contexts };
       const revisions = { ...state.revisions };
       const selections = { ...state.selections };
       const modes = { ...state.modes };
@@ -333,16 +418,18 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       const initializations = { ...state.initializations };
       const submissions = { ...state.submissions };
       if (submissions[key]?.status !== 'sending') {
-        releaseSubmissionAttachments(submissions[key]?.ownedAttachmentIds ?? []);
+        const ids = new Set([...(submissions[key]?.ownedAttachmentIds ?? []), ...groupAttachmentIds(state.contexts[key])]);
+        releaseSubmissionAttachments([...ids]);
         delete submissions[key];
-      }
+      } else releaseSubmissionAttachments(groupAttachmentIds(state.contexts[key]));
       delete drafts[key];
+      delete contexts[key];
       revisions[key] = ++draftRevision;
       delete selections[key];
       delete modes[key];
       delete configurations[key];
       delete initializations[key];
-      return { drafts, revisions, selections, modes, configurations, initializations, submissions };
+      return { drafts, contexts, revisions, selections, modes, configurations, initializations, submissions };
     });
   },
   clearAgentDrafts: (agentId, runtimeScopeKey) => {
@@ -351,6 +438,7 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
     set((state) => {
       const keys = new Set([
         ...Object.keys(state.drafts),
+        ...Object.keys(state.contexts),
         ...Object.keys(state.selections),
         ...Object.keys(state.modes),
         ...Object.keys(state.revisions),
@@ -360,6 +448,7 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       ].filter((key) => key.startsWith(`${runtimeScopeKey}:agent:`) && key.toLowerCase().includes(prefix)));
       if (keys.size === 0) return state;
       const drafts = { ...state.drafts };
+      const contexts = { ...state.contexts };
       const revisions = { ...state.revisions };
       const selections = { ...state.selections };
       const modes = { ...state.modes };
@@ -368,17 +457,19 @@ export const useComposerDraftStore = create<ComposerDraftState>((set, get) => ({
       const submissions = { ...state.submissions };
       for (const key of keys) {
         if (submissions[key]?.status !== 'sending') {
-          releaseSubmissionAttachments(submissions[key]?.ownedAttachmentIds ?? []);
+          const ids = new Set([...(submissions[key]?.ownedAttachmentIds ?? []), ...groupAttachmentIds(state.contexts[key])]);
+          releaseSubmissionAttachments([...ids]);
           delete submissions[key];
-        }
+        } else releaseSubmissionAttachments(groupAttachmentIds(state.contexts[key]));
         delete drafts[key];
+        delete contexts[key];
         delete revisions[key];
         delete selections[key];
         delete modes[key];
         delete configurations[key];
         delete initializations[key];
       }
-      return { drafts, revisions, selections, modes, configurations, initializations, submissions };
+      return { drafts, contexts, revisions, selections, modes, configurations, initializations, submissions };
     });
   },
   setSelection: (key, selection) => {

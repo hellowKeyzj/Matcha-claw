@@ -94,7 +94,7 @@ describe('dialog ipc', () => {
   });
 
   it('does not register arbitrary path text file read/write channels', async () => {
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     expect(registeredHandlers.has('dialog:readTextFile')).toBe(false);
@@ -104,7 +104,7 @@ describe('dialog ipc', () => {
   });
 
   it('registers only Main-owned attachment staging channels', async () => {
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     expect(registeredHandlers.has('dialog:stageOpenAttachments')).toBe(true);
@@ -122,7 +122,7 @@ describe('dialog ipc', () => {
     mkdirMock.mockResolvedValue(undefined);
     statMock.mockResolvedValue({ isFile: () => true, size: content.length });
     readFileMock.mockResolvedValue(content);
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:stageRendererBufferAttachment');
@@ -141,7 +141,7 @@ describe('dialog ipc', () => {
       preview: `data:image/png;base64,${content.toString('base64')}`,
     });
 
-    const { consumeStagedAttachment } = await import('../../electron/main/ipc/dialog-attachment-staging');
+    const { consumeStagedAttachment } = await import('../../electron/main/attachments/staging');
     await expect(consumeStagedAttachment('attachment-id')).resolves.toEqual(content);
     expect(unlinkMock).toHaveBeenCalledWith(stagedPath);
     await expect(consumeStagedAttachment('attachment-id')).rejects.toThrow('unavailable');
@@ -154,7 +154,7 @@ describe('dialog ipc', () => {
     mkdirMock.mockResolvedValue(undefined);
     statMock.mockResolvedValue({ isFile: () => true, size: content.length });
     readFileMock.mockResolvedValue(content);
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const stageHandler = registeredHandlers.get('dialog:stageRendererBufferAttachment');
@@ -168,7 +168,7 @@ describe('dialog ipc', () => {
     await expect(releaseHandler?.({}, ['attachment-id', 'attachment-id', 'missing-id'])).resolves.toBeUndefined();
     expect(unlinkMock).toHaveBeenCalledWith(stagedPath);
     await expect(releaseHandler?.({}, ['attachment-id'])).resolves.toBeUndefined();
-    const { consumeStagedAttachment } = await import('../../electron/main/ipc/dialog-attachment-staging');
+    const { consumeStagedAttachment } = await import('../../electron/main/attachments/staging');
     await expect(consumeStagedAttachment('attachment-id')).rejects.toThrow('unavailable');
   });
 
@@ -180,7 +180,7 @@ describe('dialog ipc', () => {
     mkdirMock.mockResolvedValue(undefined);
     statMock.mockResolvedValue({ isFile: () => true, size: content.length });
     readFileMock.mockResolvedValue(content);
-    const { stageRendererBufferAttachment, copyStagedAttachment } = await import('../../electron/main/ipc/dialog-attachment-staging');
+    const { stageRendererBufferAttachment, copyStagedAttachment } = await import('../../electron/main/attachments/staging');
 
     await stageRendererBufferAttachment({
       base64: content.toString('base64'),
@@ -203,7 +203,7 @@ describe('dialog ipc', () => {
     mkdirMock.mockResolvedValue(undefined);
     statMock.mockResolvedValue({ isFile: () => true, size: content.length });
     readFileMock.mockResolvedValue(content);
-    const { stageRendererBufferAttachment, consumeStagedAttachment } = await import('../../electron/main/ipc/dialog-attachment-staging');
+    const { stageRendererBufferAttachment, consumeStagedAttachment } = await import('../../electron/main/attachments/staging');
 
     await stageRendererBufferAttachment({
       base64: content.toString('base64'),
@@ -229,7 +229,7 @@ describe('dialog ipc', () => {
     realpathMock.mockImplementation((path: string) => Promise.resolve(
       path === stagedPath ? escapedPath : path,
     ));
-    const { stageRendererBufferAttachment, consumeStagedAttachment } = await import('../../electron/main/ipc/dialog-attachment-staging');
+    const { stageRendererBufferAttachment, consumeStagedAttachment } = await import('../../electron/main/attachments/staging');
 
     await expect(stageRendererBufferAttachment({
       base64: content.toString('base64'),
@@ -248,7 +248,7 @@ describe('dialog ipc', () => {
     statMock.mockResolvedValueOnce({ isFile: () => true, size: content.length })
       .mockRejectedValueOnce(new Error('stat failure'));
     readFileMock.mockResolvedValue(content);
-    const { stageRendererBufferAttachment, consumeStagedAttachment } = await import('../../electron/main/ipc/dialog-attachment-staging');
+    const { stageRendererBufferAttachment, consumeStagedAttachment } = await import('../../electron/main/attachments/staging');
 
     await stageRendererBufferAttachment({
       base64: content.toString('base64'),
@@ -268,7 +268,7 @@ describe('dialog ipc', () => {
     mkdirMock.mockResolvedValue(undefined);
     statMock.mockResolvedValue({ isFile: () => true, size: content.length });
     readFileMock.mockResolvedValueOnce(content).mockRejectedValueOnce(new Error('read failure'));
-    const { stageRendererBufferAttachment, consumeStagedAttachment } = await import('../../electron/main/ipc/dialog-attachment-staging');
+    const { stageRendererBufferAttachment, consumeStagedAttachment } = await import('../../electron/main/attachments/staging');
 
     await stageRendererBufferAttachment({
       base64: content.toString('base64'),
@@ -282,7 +282,7 @@ describe('dialog ipc', () => {
   });
 
   it('rejects malformed renderer buffer staging requests before writing', async () => {
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:stageRendererBufferAttachment');
@@ -315,7 +315,7 @@ describe('dialog ipc', () => {
       }
       return { isFile: () => true, isDirectory: () => false, size: 4 };
     });
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:stageDroppedAttachments');
@@ -352,7 +352,7 @@ describe('dialog ipc', () => {
     const result = { canceled: false, filePaths: ['/tmp/selected.txt'] };
     fromWebContentsMock.mockReturnValue(owner);
     showOpenDialogMock.mockResolvedValue(result);
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:open');
@@ -370,7 +370,7 @@ describe('dialog ipc', () => {
   it.each(['absent', 'destroyed'])('rejects when the sender window is %s without opening a native dialog', async (ownerState) => {
     const sender = { id: 23 };
     fromWebContentsMock.mockReturnValue(ownerState === 'absent' ? null : { isDestroyed: () => true });
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:open');
@@ -384,7 +384,7 @@ describe('dialog ipc', () => {
   it('uses the E2E open-dialog result without opening a native dialog', async () => {
     const result = { canceled: false, filePaths: ['C:\\mock\\notes.txt'] };
     getE2EDialogOpenResultMock.mockResolvedValue(result);
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:open');
@@ -402,7 +402,7 @@ describe('dialog ipc', () => {
       preview: null,
     }];
     getE2EDialogStagedAttachmentsMock.mockResolvedValue(attachments);
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:stageOpenAttachments');
@@ -421,7 +421,7 @@ describe('dialog ipc', () => {
     showOpenDialogMock.mockResolvedValue({ canceled: false, filePaths: [sourcePath] });
     statMock.mockResolvedValue({ isFile: () => true, size: previewBuffer.length });
     readFileMock.mockResolvedValue(previewBuffer);
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:stageOpenAttachments');
@@ -446,7 +446,7 @@ describe('dialog ipc', () => {
 
   it('does not stage files when attachment selection is canceled', async () => {
     showOpenDialogMock.mockResolvedValue({ canceled: true, filePaths: [] });
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:stageOpenAttachments');
@@ -460,7 +460,7 @@ describe('dialog ipc', () => {
   it('reports notFound when a selected attachment path is no longer a file', async () => {
     showOpenDialogMock.mockResolvedValue({ canceled: false, filePaths: ['/tmp/missing.png'] });
     statMock.mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }));
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:stageOpenAttachments');
@@ -472,7 +472,7 @@ describe('dialog ipc', () => {
   it('reads text only from the file selected in the same dialog call', async () => {
     showOpenDialogMock.mockResolvedValue({ canceled: false, filePaths: ['/tmp/selected.json'] });
     readFileMock.mockResolvedValue('{"ok":true}');
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:readSelectedTextFile');
@@ -488,7 +488,7 @@ describe('dialog ipc', () => {
     const content = '---\nname: Web Search\ndescription: Search the web\n---\n';
     statMock.mockResolvedValue({ isFile: () => true, isDirectory: () => false, size: content.length });
     readFileMock.mockResolvedValue(content);
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:readSkillImport');
@@ -513,7 +513,7 @@ describe('dialog ipc', () => {
       isFile: () => true,
     }]);
     readFileMock.mockResolvedValue(manifest);
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:readSkillImport');
@@ -529,7 +529,7 @@ describe('dialog ipc', () => {
 
   it('writes text only to the file selected in the same save dialog call', async () => {
     showSaveDialogMock.mockResolvedValue({ canceled: false, filePath: '/tmp/export.json' });
-    const { registerDialogHandlers } = await import('../../electron/main/ipc/dialog-ipc');
+    const { registerDialogHandlers } = await import('../../electron/api/ipc/dialog-ipc');
     registerDialogHandlers();
 
     const handler = registeredHandlers.get('dialog:writeSelectedTextFile');

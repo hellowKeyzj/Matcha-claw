@@ -7,6 +7,7 @@ pub mod media;
 mod domain;
 mod owner;
 pub mod ports;
+pub mod session_images;
 
 use std::sync::Arc;
 

@@ -75,6 +75,7 @@ pub(crate) fn spawn(
     mut receiver: watch::Receiver<Result<Option<WatchedProject>, ()>>,
 ) -> OwnedTask<()> {
     OwnedTask::spawn(|cancellation| async move {
+        let mut failed = false;
         let mut generation = control.generation();
         let (mut current, mut initialization_failed) = match initial_project(&wiki).await {
             Ok(project) => (project, false),
@@ -89,14 +90,14 @@ pub(crate) fn spawn(
             tokio::select! {
                 _ = cancellation.cancelled() => {
                     if let Some(task) = session.as_mut() {
-                        let _ = task.cancel_and_join().await;
+                        failed |= crate::call::report_task_exit(task.cancel_and_join().await);
                     }
                     break;
                 }
                 changed = receiver.changed() => {
                     if changed.is_err() {
                         if let Some(task) = session.as_mut() {
-                            let _ = task.cancel_and_join().await;
+                            failed |= crate::call::report_task_exit(task.cancel_and_join().await);
                         }
                         break;
                     }
@@ -107,7 +108,7 @@ pub(crate) fn spawn(
                     generation = control.generation();
                     if session.as_ref().is_some() {
                         if let Some(task) = session.as_mut() {
-                            let _ = task.cancel_and_join().await;
+                            failed |= crate::call::report_task_exit(task.cancel_and_join().await);
                         }
                         session = None;
                     }
@@ -133,7 +134,7 @@ pub(crate) fn spawn(
                     }
                     if session.as_ref().is_some_and(OwnedTask::is_finished) {
                         if let Some(task) = session.as_mut() {
-                            let _ = task.join().await;
+                            failed |= crate::call::report_task_exit(task.join().await);
                         }
                         session = None;
                         if !cancellation.is_cancelled() && control.generation() == generation {
@@ -145,6 +146,7 @@ pub(crate) fn spawn(
                 }
             }
         }
+        assert!(!failed, "Wiki source watcher task failed");
     })
     .0
 }
@@ -181,7 +183,7 @@ fn spawn_project_session(
                 eprintln!("[wiki] source watcher stopped: {error:?}");
             }
         });
-        let _ = join.await;
+        join.await.expect("Wiki source watcher blocking task failed");
     })
     .0
 }

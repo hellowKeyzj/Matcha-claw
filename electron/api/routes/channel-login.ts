@@ -1,9 +1,8 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type {
   ChannelLoginRequest,
   ChannelLoginTransport,
 } from '../../main/runtime-host-delivery/transport/channels/login';
-import { parseJsonBody, sendJson } from '../route-utils';
 import { isProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
@@ -14,38 +13,34 @@ const MAX_CONFIG_DEPTH = 8;
 const MAX_CONFIG_PROPERTIES = 128;
 
 export async function handleChannelLoginRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: ChannelLoginTransport,
-): Promise<boolean> {
-  if (url.pathname !== '/api/channels/login' || req.method !== 'POST') return false;
+): Promise<HostApiRouteResult> {
+  if (url.pathname !== '/api/channels/login' || req.method !== 'POST') return undefined;
 
   const traceId = readChannelTrace(req.headers);
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
     beginChannelTrace('route.invalid', traceId)?.(400, { outcome: 'rejected' });
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   if (!isRequest(body)) {
     beginChannelTrace('route.invalid', traceId)?.(400, { outcome: 'rejected' });
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
 
   const finish = beginChannelTrace(() => `route.login.${body.action}`, traceId);
   try {
     const response = await transport.login(body, traceId);
     finish?.(response.status, response.body);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch (error) {
     finish?.(503, UNKNOWN, channelTraceError(error));
-    sendJson(res, 503, UNKNOWN);
+    return jsonResult(503, UNKNOWN);
   }
-  return true;
 }
 
 function isRequest(value: unknown): value is ChannelLoginRequest {

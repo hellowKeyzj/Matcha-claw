@@ -9,6 +9,11 @@ mod bundle;
 mod output;
 mod zip;
 
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+
 use getrandom::fill;
 use serde::Serialize;
 
@@ -191,8 +196,16 @@ impl DiagnosticsArchiveReceipt {
 
 #[derive(Clone)]
 pub struct DiagnosticsArchiveProducer {
-    root: DiagnosticsArchiveRoot,
+    root: Arc<Mutex<ArchiveRoot>>,
     recorder: RuntimeFlightRecorder,
+}
+
+enum ArchiveRoot {
+    Pending {
+        state_root: PathBuf,
+        app_log_dir: PathBuf,
+    },
+    Ready(DiagnosticsArchiveRoot),
 }
 
 /// A single admitted archive request bound to the Host state observed at admission time.
@@ -211,8 +224,45 @@ impl DiagnosticsArchiveProducer {
         recorder: RuntimeFlightRecorder,
     ) -> Result<Self, DiagnosticsArchiveError> {
         root.is_available()
-            .then_some(Self { root, recorder })
+            .then_some(Self {
+                root: Arc::new(Mutex::new(ArchiveRoot::Ready(root))),
+                recorder,
+            })
             .ok_or(DiagnosticsArchiveError::InvalidRoot)
+    }
+
+    /// Defers filesystem provisioning to the first blocking collection or download effect.
+    pub fn from_paths(
+        state_root: PathBuf,
+        app_log_dir: PathBuf,
+        recorder: RuntimeFlightRecorder,
+    ) -> Self {
+        Self {
+            root: Arc::new(Mutex::new(ArchiveRoot::Pending {
+                state_root,
+                app_log_dir,
+            })),
+            recorder,
+        }
+    }
+
+    fn root(&self) -> Result<DiagnosticsArchiveRoot, DiagnosticsArchiveError> {
+        let mut root = self
+            .root
+            .lock()
+            .map_err(|_| DiagnosticsArchiveError::OutputUnavailable)?;
+        let provisioned = match &*root {
+            ArchiveRoot::Ready(root) => return Ok(root.clone()),
+            ArchiveRoot::Pending {
+                state_root,
+                app_log_dir,
+            } => DiagnosticsArchiveRoot::provision(state_root, app_log_dir.clone())?,
+        };
+        if !provisioned.is_available() {
+            return Err(DiagnosticsArchiveError::InvalidRoot);
+        }
+        *root = ArchiveRoot::Ready(provisioned.clone());
+        Ok(provisioned)
     }
 
     pub fn admit(&self, state: HostState) -> DiagnosticsArchiveAdmission {
@@ -223,7 +273,10 @@ impl DiagnosticsArchiveProducer {
     }
 
     pub fn download(&self, archive_id: &str) -> Result<Vec<u8>, DiagnosticsArchiveError> {
-        self.root.read(archive_id)
+        if !output::is_archive_id(archive_id) {
+            return Err(DiagnosticsArchiveError::ArchiveNotFound);
+        }
+        self.root()?.read(archive_id)
     }
 
     fn produce(
@@ -235,16 +288,17 @@ impl DiagnosticsArchiveProducer {
         if cancellation.is_cancelled() {
             return Ok(cancelled(archive_id));
         }
-        if !self.root.is_available() {
+        let root = self.root()?;
+        if !root.is_available() {
             return Err(DiagnosticsArchiveError::OutputUnavailable);
         }
-        let Ok((entries, image)) = self.encode(state) else {
+        let Ok((entries, image)) = self.encode(&root, state) else {
             return Ok(failed(archive_id));
         };
         if cancellation.is_cancelled() {
             return Ok(cancelled(archive_id));
         }
-        if self.root.publish(&archive_id, &image).is_err() {
+        if root.publish(&archive_id, &image).is_err() {
             return Ok(failed(archive_id));
         }
         if !cancellation.is_cancelled() {
@@ -254,21 +308,25 @@ impl DiagnosticsArchiveProducer {
                 image.len() as u64,
             ));
         }
-        Ok(match self.root.discard(&archive_id) {
+        Ok(match root.discard(&archive_id) {
             Ok(()) => cancelled(archive_id),
             Err(_) => failed(archive_id),
         })
     }
 
     /// Encodes the bundle in memory so a request that exceeds the archive bound never reaches disk.
-    fn encode(&self, state: &HostState) -> Result<(usize, Vec<u8>), DiagnosticsArchiveError> {
+    fn encode(
+        &self,
+        root: &DiagnosticsArchiveRoot,
+        state: &HostState,
+    ) -> Result<(usize, Vec<u8>), DiagnosticsArchiveError> {
         let host_state = serde_json::to_vec_pretty(&ArchiveHostState::new(
             state,
             self.recorder.archive_snapshot(),
         ))
         .map_err(|_| DiagnosticsArchiveError::OutputUnavailable)?;
-        let app_log_root = self.root.app_log_root();
-        let entries = bundle::collect(self.root.state_root(), app_log_root.as_deref(), host_state);
+        let app_log_root = root.app_log_root();
+        let entries = bundle::collect(root.state_root(), app_log_root.as_deref(), host_state);
         let image = zip::encode(&entries)?;
         (image.len() as u64 <= ARCHIVE_BYTE_LIMIT)
             .then_some((entries.len(), image))

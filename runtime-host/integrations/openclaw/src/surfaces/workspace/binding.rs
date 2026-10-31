@@ -87,6 +87,14 @@ impl OpenClawWorkspaceBinding {
         Ok(WorkspaceTextReceipt { name: text.name, content: text.content, size: text.size })
     }
 
+    pub fn write_binary(
+        &self,
+        relative_path: &str,
+        content: &[u8],
+    ) -> Result<(String, u64), WorkspaceWriteFailure> {
+        self.files.write_binary(relative_path, content).map_err(WorkspaceWriteFailure::from)
+    }
+
     pub fn prepare_media(
         &self,
         session_key: &str,

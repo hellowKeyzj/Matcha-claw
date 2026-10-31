@@ -4,7 +4,6 @@ import { chmod, lstat, mkdir, readFile, rename, rmdir, unlink, writeFile } from 
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import { getRuntimeHostStateDir } from '../../utils/paths';
-import { APP_PLUGIN_TOOLS } from './agent-tools';
 
 const executeFile = promisify(execFile);
 const DESCRIPTOR_NAME = 'app-plugin-agent.json';
@@ -44,7 +43,7 @@ export async function publishAppPluginMcp(input: {
       await chmod(directory, 0o700);
     }
     const discovery = join(directory, 'discovery.json');
-    const contents = JSON.stringify({ identity, port: input.port, token: input.token, tools: APP_PLUGIN_TOOLS });
+    const contents = JSON.stringify({ identity, port: input.port, token: input.token });
     await writeFile(discovery, contents, { flag: 'wx', mode: 0o600 });
     published.push({ path: discovery, contents });
     const descriptor = JSON.stringify({ discovery });

@@ -58,9 +58,10 @@ impl GatewayControlSupervisor {
         self.task.is_finished()
     }
 
-    pub async fn dispose(mut self) {
-        let _ = self.task.cancel_and_join().await;
+    pub async fn dispose(mut self) -> bool {
+        let failed = self.task.cancel_and_join().await.is_err();
         self.client.close_control_connection().await;
+        failed || self.client.control_join_failed.load(Ordering::Acquire)
     }
 }
 
@@ -86,16 +87,21 @@ impl ControlDispatcher {
         decode(response).map_err(|_| GatewayClientError::RpcFailed)
     }
 
-    async fn close(&self) {
+    async fn close(&self) -> bool {
         let expires_at = Instant::now() + CLOSE_DEADLINE;
         self.dispatcher.disconnect(expires_at).await;
         let mut receive_task = self.receive_task.lock().await;
-        if let Some(task) = receive_task.as_mut() {
-            if timeout_at(expires_at, task.join()).await.is_err() {
-                let _ = task.cancel_and_join().await;
+        let failed = if let Some(task) = receive_task.as_mut() {
+            match timeout_at(expires_at, task.join()).await {
+                Ok(Ok(())) => false,
+                Ok(Err(_)) => true,
+                Err(_) => task.cancel_and_join().await.is_err(),
             }
-        }
+        } else {
+            false
+        };
         receive_task.take();
+        failed
     }
 }
 
@@ -353,6 +359,7 @@ pub struct GatewayClient {
     control_readiness_sequence: Arc<AtomicU64>,
     control_supervisor: Arc<StdMutex<Option<GatewayControlSupervisor>>>,
     control_supervisor_started: Arc<AtomicBool>,
+    control_join_failed: Arc<AtomicBool>,
     control_ready_trace_emitted: Arc<AtomicBool>,
     live_goal_capability: Arc<AtomicBool>,
     state_dir: Option<CanonicalStateDir>,
@@ -411,6 +418,7 @@ impl GatewayClient {
             control_readiness_sequence: Arc::new(AtomicU64::new(0)),
             control_supervisor: Arc::new(StdMutex::new(None)),
             control_supervisor_started: Arc::new(AtomicBool::new(false)),
+            control_join_failed: Arc::new(AtomicBool::new(false)),
             control_ready_trace_emitted: Arc::new(AtomicBool::new(false)),
             live_goal_capability: Arc::new(AtomicBool::new(false)),
             state_dir,
@@ -989,7 +997,9 @@ impl GatewayClient {
             }
         };
         if let Some(control) = control {
-            control.close().await;
+            if control.close().await {
+                self.control_join_failed.store(true, Ordering::Release);
+            }
         }
     }
 
@@ -1411,7 +1421,9 @@ impl GatewayClient {
     }
 
     async fn mark_control_reconnecting_if_current(&self, current: &Arc<ControlDispatcher>) {
-        current.close().await;
+        if current.close().await {
+            self.control_join_failed.store(true, Ordering::Release);
+        }
         let mut state = self.control_state.lock().await;
         let instance_id = state.instance_id().to_owned();
         if let GatewayControlConnectionState::Ready { control, .. } = &*state {

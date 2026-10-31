@@ -1,9 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, open, readdir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AppPluginCatalog, InstalledAppPlugin } from '../../../src/types/desktop/app-plugin';
 import { logger } from '../../utils/logger';
 import { MAX_APP_PLUGIN_ZIP_BYTES, requireDigest, requireObject, requirePluginId, validateAppPluginManifest } from './package';
+import type { AppPluginPackageWorker } from './package-client';
+import type { PackageResults, StoredPackageRequest } from './package-contract';
 
 const MAX_CATALOG_BYTES = 16 * 1024 * 1024;
 export const MAX_INSTALLED_APP_PLUGINS = 128;
@@ -82,7 +84,7 @@ function readCatalog(value: unknown): AppPluginCatalog {
 }
 
 export class AppPluginStorage {
-  constructor(private readonly rootDir: string) {}
+  constructor(private readonly rootDir: string, private readonly packageWorker: AppPluginPackageWorker) {}
 
   async load(): Promise<AppPluginCatalog> {
     await requireDirectory(this.rootDir);
@@ -123,7 +125,12 @@ export class AppPluginStorage {
     }
   }
 
-  async readPackage(id: string, digest: string): Promise<Buffer> {
+  readPackage(id: string, digest: string): Promise<Buffer>;
+  readPackage(id: string, digest: string, request: Extract<StoredPackageRequest, { operation: 'read' }>): Promise<PackageResults['read']>;
+  readPackage(id: string, digest: string, request: Extract<StoredPackageRequest, { operation: 'files' }>): Promise<PackageResults['files']>;
+  readPackage(id: string, digest: string, request: Extract<StoredPackageRequest, { operation: 'source' }>): Promise<PackageResults['source']>;
+  readPackage(id: string, digest: string, request: Extract<StoredPackageRequest, { operation: 'html' }>): Promise<PackageResults['html']>;
+  async readPackage(id: string, digest: string, request: StoredPackageRequest = { operation: 'verify' }): Promise<Buffer | PackageResults[StoredPackageRequest['operation']]> {
     requirePluginId(id);
     requireDigest(digest);
     const parent = join(this.rootDir, 'versions', id);
@@ -133,8 +140,16 @@ export class AppPluginStorage {
       if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('App plugin version directory is invalid.');
     }
     const bytes = await readBoundedFile(join(version, 'package.zip'), MAX_APP_PLUGIN_ZIP_BYTES);
-    if (createHash('sha256').update(bytes).digest('hex') !== digest) throw new Error('App plugin package integrity check failed.');
-    return bytes;
+    switch (request.operation) {
+      case 'read': return this.packageWorker.process({ operation: 'read', bytes, expectedDigest: digest });
+      case 'files': return this.packageWorker.process({ operation: 'files', bytes, expectedDigest: digest });
+      case 'source': return this.packageWorker.process({ ...request, bytes, expectedDigest: digest });
+      case 'html': return this.packageWorker.process({ ...request, bytes, expectedDigest: digest });
+      case 'verify': {
+        const verified = await this.packageWorker.process({ operation: 'verify', bytes, expectedDigest: digest });
+        return Buffer.from(verified.buffer, verified.byteOffset, verified.byteLength);
+      }
+    }
   }
 
   async publish(catalog: AppPluginCatalog): Promise<void> {

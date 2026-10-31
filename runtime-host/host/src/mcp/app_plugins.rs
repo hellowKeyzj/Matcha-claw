@@ -1,187 +1,112 @@
-use std::{
-    collections::BTreeSet,
-    fs::File,
-    io::{self, Read},
-    path::{Path, PathBuf},
-    time::Duration,
+use std::{path::PathBuf, sync::Arc, time::Duration};
+
+use platform::mcp::{
+    CallToolResult, CapabilityCatalog, CapabilityProvider, ProviderRegistration,
+    ReadResourceFuture, Registry, ToolCallError, ToolResultFuture,
 };
+use serde_json::{Map, Value};
 
-use platform::mcp::{ToolCallError, ToolCallFuture, ToolCallOutcome, ToolProvider};
-use serde::{Deserialize, Deserializer};
-use serde_json::{Map, Value, json};
-use zeroize::Zeroizing;
-
-const MAX_METADATA_BYTES: u64 = 64 * 1024;
-const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
-const TOOL_NAMES: [&str; 6] = [
-    "app_plugins_sdk",
-    "app_plugins_list",
-    "app_plugins_inspect",
-    "app_plugins_build",
-    "app_plugins_install",
-    "app_plugins_status",
-];
+mod gateway;
+use gateway::Gateway;
 
 pub(super) struct AppPlugins {
-    discovery: PathBuf,
-    tools: Vec<Value>,
-    client: reqwest::Client,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Descriptor {
-    discovery: PathBuf,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Discovery {
-    identity: String,
-    port: u16,
-    #[serde(deserialize_with = "secret")]
-    token: Zeroizing<String>,
-    tools: Vec<Value>,
-}
-
-fn secret<'de, D: Deserializer<'de>>(decoder: D) -> Result<Zeroizing<String>, D::Error> {
-    String::deserialize(decoder).map(Zeroizing::new)
+    watch: tokio::task::JoinHandle<()>,
 }
 
 impl AppPlugins {
-    pub(super) fn open(state_dir: &Path) -> Result<Option<Self>, ()> {
-        let bytes = match read_metadata(&state_dir.join("app-plugin-agent.json")) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(()),
-        };
-        let descriptor: Descriptor = serde_json::from_slice(&bytes).map_err(|_| ())?;
-        if !descriptor.discovery.is_absolute()
-            || descriptor
-                .discovery
-                .as_os_str()
-                .as_encoded_bytes()
-                .contains(&0)
-        {
-            return Err(());
-        }
-        let discovery = Discovery::read(&descriptor.discovery)?;
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(60))
-            .build()
-            .map_err(|_| ())?;
-        Ok(Some(Self {
-            discovery: descriptor.discovery,
-            tools: discovery.tools,
-            client,
-        }))
-    }
-
-    async fn call_gateway(&self, name: &str, arguments: &Map<String, Value>) -> ToolCallOutcome {
-        let body = serde_json::to_vec(&json!({ "name": name, "arguments": arguments }))
-            .map_err(|_| unavailable())?;
-        if body.len() > MAX_REQUEST_BYTES {
-            return Err(ToolCallError::ExecutionText(
-                "App plugin tool input exceeds 32 MiB.".into(),
-            ));
-        }
-        let discovery = Discovery::read(&self.discovery).map_err(|_| unavailable())?;
-        let authorization = Zeroizing::new(format!("Bearer {}", discovery.token.as_str()));
-        let response = self
-            .client
-            .post(format!("http://127.0.0.1:{}/tools/call", discovery.port))
-            .header(reqwest::header::AUTHORIZATION, authorization.as_str())
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| unavailable())?;
-        let successful = response.status().is_success();
-        let bytes = response.bytes().await.map_err(|_| unavailable())?;
-        let mut body: Value = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
-        if !successful {
-            return Err(ToolCallError::ExecutionText(
-                body.get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("App plugin tool failed.")
-                    .to_owned(),
-            ));
-        }
-        body.as_object_mut()
-            .and_then(|body| body.remove("result"))
-            .ok_or_else(unavailable)
+    pub(super) fn attach(state_dir: PathBuf, registry: &Registry) -> Result<Self, ()> {
+        let gateway = Arc::new(Gateway::new(state_dir)?);
+        let registration = registry
+            .register(gateway.clone(), CapabilityCatalog::default())
+            .map_err(|error| {
+                eprintln!("runtime-host mcp: {error}");
+            })?;
+        let watch = tokio::spawn(observe(gateway, registration));
+        Ok(Self { watch })
     }
 }
 
-impl ToolProvider for AppPlugins {
-    fn tools(&self) -> Vec<Value> {
-        self.tools.clone()
+impl Drop for AppPlugins {
+    fn drop(&mut self) {
+        self.watch.abort();
     }
+}
 
-    fn call<'a>(
+impl CapabilityProvider for Gateway {
+    fn call_tool<'a>(
         &'a self,
         name: &'a str,
         arguments: &'a Map<String, Value>,
-    ) -> Option<ToolCallFuture<'a>> {
-        self.tools
-            .iter()
-            .any(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
-            .then(|| Box::pin(self.call_gateway(name, arguments)) as ToolCallFuture<'a>)
+    ) -> ToolResultFuture<'a> {
+        Box::pin(async move {
+            match self.call(name, arguments).await {
+                Err(ToolCallError::ExecutionText(text)) => Ok(CallToolResult::error(text)),
+                result => result,
+            }
+        })
+    }
+
+    fn read_resource<'a>(&'a self, uri: &'a str) -> ReadResourceFuture<'a> {
+        Box::pin(self.read(uri))
     }
 }
 
-impl Discovery {
-    fn read(path: &Path) -> Result<Self, ()> {
-        let bytes = read_metadata(path).map_err(|_| ())?;
-        let discovery: Self = serde_json::from_slice(&bytes).map_err(|_| ())?;
-        if uuid::Uuid::parse_str(&discovery.identity).is_err()
-            || discovery.port == 0
-            || discovery.token.len() != 64
-            || !discovery
-                .token
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            || discovery.tools.len() != TOOL_NAMES.len()
-        {
-            return Err(());
-        }
-        let mut names = BTreeSet::new();
-        for tool in &discovery.tools {
-            let name = tool.get("name").and_then(Value::as_str).ok_or(())?;
-            if !TOOL_NAMES.contains(&name)
-                || !names.insert(name)
-                || !tool.get("description").is_some_and(Value::is_string)
-                || tool
-                    .get("inputSchema")
-                    .and_then(|schema| schema.get("type"))
-                    .and_then(Value::as_str)
-                    != Some("object")
-            {
-                return Err(());
+async fn observe(gateway: Arc<Gateway>, registration: ProviderRegistration) {
+    let mut current: Option<(String, String)> = None;
+    let mut reported_unavailable = false;
+    loop {
+        let discovery = gateway.discovery();
+        let response = match &discovery {
+            Ok(discovery) => {
+                let revision = current
+                    .as_ref()
+                    .filter(|(identity, _)| identity == &discovery.identity)
+                    .map(|(_, revision)| revision.as_str());
+                gateway.catalog(discovery, revision).await
+            }
+            Err(_) => Err(()),
+        };
+        match (discovery, response) {
+            (Ok(discovery), Ok(Some(catalog))) => {
+                current = publish(&registration, discovery.identity, catalog);
+                reported_unavailable = false;
+            }
+            (Ok(_), Ok(None)) => {
+                reported_unavailable = false;
+                continue;
+            }
+            (Err(error), _)
+                if error.kind() == std::io::ErrorKind::NotFound && current.is_none() => {}
+            _ => {
+                if !reported_unavailable {
+                    eprintln!(
+                        "runtime-host mcp: app plugin catalog unavailable; dynamic capabilities withdrawn"
+                    );
+                    reported_unavailable = true;
+                }
+                let _ = registration.replace(CapabilityCatalog::default());
+                current = None;
             }
         }
-        Ok(discovery)
+        // Missing/failed gateways are rediscovered; calls and their side effects are never retried.
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
-fn read_metadata(path: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
-    let file = File::open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::ErrorKind::InvalidData.into());
+fn publish(
+    registration: &ProviderRegistration,
+    identity: String,
+    catalog: gateway::Catalog,
+) -> Option<(String, String)> {
+    match registration.replace(CapabilityCatalog {
+        tools: catalog.tools,
+        resources: catalog.resources,
+    }) {
+        Ok(()) => Some((identity, catalog.revision)),
+        Err(error) => {
+            eprintln!("runtime-host mcp: {error}; app plugin catalog rejected");
+            let _ = registration.replace(CapabilityCatalog::default());
+            None
+        }
     }
-    let mut bytes = Zeroizing::new(Vec::new());
-    file.take(MAX_METADATA_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_METADATA_BYTES {
-        return Err(io::ErrorKind::InvalidData.into());
-    }
-    Ok(bytes)
-}
-
-fn unavailable() -> ToolCallError {
-    ToolCallError::ExecutionText(
-        "App plugin gateway is unavailable or returned invalid data; no success was confirmed."
-            .into(),
-    )
 }

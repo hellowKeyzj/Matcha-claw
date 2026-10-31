@@ -2,49 +2,58 @@ import { app, session, type BrowserWindow } from 'electron';
 import type { Server } from 'node:http';
 import { join } from 'node:path';
 import { ApplicationPluginOwner } from './app-plugins/owner';
+import { AppPluginPackageWorker } from './app-plugins/package-client';
+import { AppPluginHost, type AppPluginHostOptions } from './app-plugins/host';
+import { collectPluginVideo, generatePluginMedia, generatePluginText, listPluginMediaModels, queryPluginVideo, submitPluginVideo } from './app-plugins/media';
 import { startAppPluginAgentGateway } from './app-plugins/agent-gateway';
 import type { RuntimeHostApiDependencies } from '../api/context';
+import { createHostApiDispatcher } from '../api/dispatcher';
 import {
   registerRuntimeIpcHandlers,
   registerStaticIpcHandlers,
-} from './ipc-handlers';
-import { createTray } from './tray';
-import { createMenu } from './menu';
-import { appUpdater, registerE2EUpdateHandlers, registerUpdateHandlers } from './updater';
+} from '../api/ipc/register';
+import { createTray } from './desktop/tray';
+import { createMenu } from './desktop/menu';
+import { appUpdater } from './updates/updater';
+import { registerE2EUpdateHandlers, registerUpdateHandlers } from '../api/ipc/update-ipc';
 import { logger } from '../utils/logger';
-import { warmupNetworkOptimization } from '../utils/uv-env';
+import { warmupNetworkOptimization } from './network/optimization';
 import type { HostEventBus } from '../api/event-bus';
 import { startHostApiServer, waitForHostApiServerListening } from '../api/server';
-import { registerHostEventBridge, registerMainEventBridge } from './host-event-bridge';
-import { RendererSessionObservationRegistry } from './renderer-event-routes';
+import { registerHostEventBridge, registerMainEventBridge } from '../api/events/host-event-bridge';
+import { RendererSessionObservationRegistry } from './sessions/observations';
+import { RuntimeStatusProjection } from './runtime-host-delivery/status';
 import { observationRequest } from './runtime-host-delivery/transport/sessions/observation';
-import { createMainWindow, loadMainWindowContent } from './main-window';
-import { isQuitting } from './app-state';
-import { applyLaunchAtStartupSetting } from './launch-at-startup';
+import { createMainWindow, loadMainWindowContent } from './desktop/main-window';
+import { isQuitting } from './lifecycle/state';
+import { applyLaunchAtStartupSetting } from './settings/launch-at-startup';
 import {
   type DirectRuntimeHost,
   type DirectRuntimeHostDeliveryError,
   type DirectRuntimeHostDeliveryErrorCode,
 } from './runtime-host-delivery/direct-host';
-import { createRuntimeHostDelivery, type RuntimeHostDelivery } from './runtime-host-delivery/delivery';
+import { createRuntimeHostDelivery, type RuntimeHostDelivery } from './composition/runtime';
 import { RuntimeHostLifecycleOwner } from './runtime-host-delivery/lifecycle-owner';
 import { createCloudAccountClient } from './cloud-account/client';
 import { createCloudAccountService, type CloudAccountRuntime } from './cloud-account/service';
 import { createCloudProviderSync } from './cloud-account/provider-sync';
-import { createProviderCallObserver } from './ipc/provider-call-observation';
-import { createCallSubscriber } from './call-observation';
-import { createDiagnosticsExportDependencies } from './ipc/diagnostics-export-ipc';
+import { createProviderCallObserver } from './providers/call-observation';
+import { createCallSubscriber } from '../api/events/call-observation';
+import { createDiagnosticsExportDependencies } from '../api/ipc/diagnostics-export-ipc';
 import {
   createRuntimeHostTransportBundle,
   type RuntimeHostTransportBundle,
-} from './runtime-host-delivery/transport/bundle';
+} from './composition/transports';
 import {
   createProviderCredentialStatusTransport,
-  registerProviderPrivateAuthHandlers,
+  createProviderPrivateAuth,
   type ProviderPrivateAccountDependencies,
-} from './ipc/provider-private-auth';
-import { createFleetCredentialWriteAdapter } from './ipc/fleet-private';
-import { registerWorldPrivateHandlers } from './world/private-ipc';
+} from './providers/private-auth';
+import { registerProviderPrivateAuthHandlers } from '../api/ipc/provider-private-auth';
+import { createFleetCredentialWriteAdapter } from './fleet/credentials';
+import { registerWorldPrivateHandlers } from '../api/ipc/world-private';
+import { createWorldPrivateOperations } from './world/private-operations';
+import { createChannelAuthorization } from './channels/authorization';
 import { composeLicenseService } from './license/composition';
 
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
@@ -201,6 +210,7 @@ export function bootstrapMainApplication(deps: {
   if (isE2EMode) {
     registerE2EUpdateHandlers();
   } else {
+    appUpdater.configureUpdateSource();
     registerUpdateHandlers(appUpdater, mainWindow);
   }
   const stopMainEvents = registerMainEventBridge({
@@ -210,12 +220,60 @@ export function bootstrapMainApplication(deps: {
   const licenseService = composeLicenseService({
     onGateChanged: (snapshot) => deps.hostEventBus.emit('license:gate-changed', snapshot),
   });
+  const appPluginRoot = join(app.getPath('userData'), 'app-plugins');
+  const appPluginPackages = new AppPluginPackageWorker();
   const appPlugins = new ApplicationPluginOwner({
-    rootDir: join(app.getPath('userData'), 'app-plugins'),
-    onChanged: (event) => deps.hostEventBus.emit('app-plugins:changed', event),
+    rootDir: appPluginRoot, packageWorker: appPluginPackages,
+    onChanged: async (event, catalog) => {
+      const retired = appPluginHost.changed(catalog);
+      void appPluginAgentGateway.then((gateway) => gateway.changed(), () => undefined);
+      deps.hostEventBus.emit('app-plugins:changed', event);
+      await retired;
+    },
+  });
+  const generateText: AppPluginHostOptions['generateText'] = async (request, signal) => {
+    await apiRuntime;
+    signal.throwIfAborted();
+    if (!delivery) throw new Error('Model delivery is unavailable.');
+    return generatePluginText(delivery.issuer, delivery.runtimeHostTransportPort, request, signal);
+  };
+  const appPluginHost = new AppPluginHost({
+    rootDir: appPluginRoot, owner: appPlugins, packageWorker: appPluginPackages,
+    publish: (event) => deps.hostEventBus.emit('app-plugins:runtime', event),
+    list: async (request, signal) => {
+      await apiRuntime;
+      signal.throwIfAborted();
+      if (!delivery) throw new Error('Model delivery is unavailable.');
+      return listPluginMediaModels(delivery.issuer, delivery.runtimeHostTransportPort, request, signal);
+    },
+    submitVideo: async (request, signal) => {
+      await apiRuntime;
+      signal.throwIfAborted();
+      if (!delivery) throw new Error('Model delivery is unavailable.');
+      return submitPluginVideo(delivery.issuer, delivery.runtimeHostTransportPort, request, signal);
+    },
+    queryVideo: async (request, signal) => {
+      await apiRuntime;
+      signal.throwIfAborted();
+      if (!delivery) throw new Error('Model delivery is unavailable.');
+      return queryPluginVideo(delivery.issuer, delivery.runtimeHostTransportPort, request, signal);
+    },
+    collectVideo: async (request, signal) => {
+      await apiRuntime;
+      signal.throwIfAborted();
+      if (!delivery) throw new Error('Model delivery is unavailable.');
+      return collectPluginVideo(delivery.issuer, delivery.runtimeHostTransportPort, request, signal);
+    },
+    generateText,
+    generate: async (request, signal) => {
+      await apiRuntime;
+      signal.throwIfAborted();
+      if (!delivery) throw new Error('Model delivery is unavailable.');
+      return generatePluginMedia(delivery.issuer, delivery.runtimeHostTransportPort, request, signal);
+    },
   });
   const appPluginAgentGateway = startAppPluginAgentGateway({
-    owner: appPlugins,
+    owner: appPlugins, host: appPluginHost,
     root: join(app.getPath('userData'), 'app-plugin-agent'),
   });
   const appPluginGatewaySettled = appPluginAgentGateway.then(() => undefined, () => {
@@ -230,6 +288,7 @@ export function bootstrapMainApplication(deps: {
   let startedRuntimeHost: DirectRuntimeHost | undefined;
   let directRuntimeHost: RuntimeHostLifecycleOwner | undefined;
   let transportBundle: RuntimeHostTransportBundle | undefined;
+  let channelAuthorization: ReturnType<typeof createChannelAuthorization> | undefined;
   let runtimeReady = false;
   const subscriptions: (() => void)[] = [stopMainEvents];
   const assertStarting = () => {
@@ -257,6 +316,7 @@ export function bootstrapMainApplication(deps: {
       assertStarting();
       const runtimeHost = new RuntimeHostLifecycleOwner(startedRuntimeHost, delivery.launchRuntimeHost);
       directRuntimeHost = runtimeHost;
+      const runtimeStatus = new RuntimeStatusProjection(runtimeHost);
       const bundle = createRuntimeHostTransportBundle({
         issuer: delivery.issuer,
         runtimeHostTransportPort: delivery.runtimeHostTransportPort,
@@ -269,6 +329,7 @@ export function bootstrapMainApplication(deps: {
       });
       transportBundle = bundle;
       const transports = bundle.hostApiTransports;
+      channelAuthorization = createChannelAuthorization(transports.channelCatalogTransport.apply, shutdown.signal);
       sessionObservers.setNativeRelease(async (identity, leaseId) => {
         const response = await transports.sessionObservationTransport.release(observationRequest(identity, leaseId, 'sessions.release'));
         if (response.status !== 200) throw new Error('Session observation release is unavailable');
@@ -294,6 +355,7 @@ export function bootstrapMainApplication(deps: {
       );
       subscriptions.push(registerHostEventBridge({
         runtimeHost,
+        runtimeStatus,
         hostEventBus: deps.hostEventBus,
         getMainWindow: deps.getMainWindow,
         sessionObservers,
@@ -307,8 +369,11 @@ export function bootstrapMainApplication(deps: {
       const result = {
         api: {
           runtimeHost,
+          runtimeStatus,
+          channelAuthorization,
           runtimeHostTransports: transports,
           providerCredentialStatusTransport: createProviderCredentialStatusTransport(),
+          generatePluginText: generateText,
           credentialWriteAdapter: createFleetCredentialWriteAdapter(transports.fleetCredentialsTransport),
           runtimeHostTransportPort: delivery.runtimeHostTransportPort,
         },
@@ -345,11 +410,24 @@ export function bootstrapMainApplication(deps: {
   const cloudAccountService = createCloudAccountService(cloudAccountClient, accountRuntime);
   const apiRuntime = runtimeSetup.then(({ api }) => api);
   void apiRuntime.catch(() => undefined);
-  registerStaticIpcHandlers(deps.getMainWindow, apiRuntime, sessionObservers);
-  const providerAuth = runtimeSetup.then((runtime) => runtime.providerAuth);
-  void providerAuth.catch(() => undefined);
-  const drainProviderAuth = registerProviderPrivateAuthHandlers(deps.getMainWindow, providerAuth, shutdown.signal);
-  const drainWorldPrivate = registerWorldPrivateHandlers(
+  const apiContext = {
+    licenseService,
+    cloudAccountService,
+    appPlugins,
+    appPluginHost,
+    appPluginAgentGateway,
+    eventBus: deps.hostEventBus,
+    sessionObservers,
+    runtime: apiRuntime,
+    signal: shutdown.signal,
+  };
+  const dispatchHostApi = createHostApiDispatcher(apiContext);
+  registerStaticIpcHandlers(deps.getMainWindow, dispatchHostApi, apiRuntime, sessionObservers, shutdown.signal);
+  const providerAuthRuntime = runtimeSetup.then((runtime) => runtime.providerAuth);
+  void providerAuthRuntime.catch(() => undefined);
+  const providerAuth = createProviderPrivateAuth(deps.getMainWindow, providerAuthRuntime, shutdown.signal);
+  registerProviderPrivateAuthHandlers(providerAuth);
+  const worldPrivate = createWorldPrivateOperations(
     runtimeSetup.then(({ api }) => api.runtimeHostTransports.worldTransport), shutdown.signal,
     apiRuntime.then(({ runtimeHost }) => runtimeHost),
     {
@@ -365,18 +443,10 @@ export function bootstrapMainApplication(deps: {
       },
     },
   );
+  registerWorldPrivateHandlers(worldPrivate);
   let server: Server | undefined;
   const startup = (async () => {
-    server = startHostApiServer({
-      licenseService,
-      cloudAccountService,
-      appPlugins,
-      appPluginAgentGateway,
-      eventBus: deps.hostEventBus,
-      sessionObservers,
-      runtime: apiRuntime,
-      signal: shutdown.signal,
-    });
+    server = startHostApiServer(apiContext, undefined, dispatchHostApi);
     const listening = waitForHostApiServerListening(server);
     const [{ api }] = await Promise.all([runtimeSetup, listening]);
     assertStarting();
@@ -405,7 +475,7 @@ export function bootstrapMainApplication(deps: {
       });
       void serverClosed?.catch(() => undefined);
       const appPluginsClosed = appPluginAgentGateway.then((gateway) => gateway.close(), () => undefined)
-        .finally(() => appPlugins.close());
+        .finally(() => appPluginHost.close()).finally(() => appPlugins.close()).finally(() => appPluginPackages.close());
       void appPluginsClosed.catch(() => undefined);
       shutdownStage = 'startup';
       await Promise.allSettled([runtimeSetup, startup]);
@@ -422,9 +492,11 @@ export function bootstrapMainApplication(deps: {
         }
       } finally {
         shutdownStage = 'provider-auth';
-        await drainProviderAuth();
+        await providerAuth.drain();
         shutdownStage = 'world-private';
-        await drainWorldPrivate();
+        await worldPrivate.drain();
+        shutdownStage = 'channel-authorization';
+        await channelAuthorization?.drain();
         for (const unsubscribe of subscriptions) unsubscribe();
         try {
           shutdownStage = 'runtime-host';
@@ -449,7 +521,7 @@ export function bootstrapMainApplication(deps: {
   const forceClose = (): Promise<void> => {
     shutdown.abort();
     forceCloseTask ??= (async () => {
-      const results = await Promise.allSettled([...heldRuntimeHosts].map((host) => host.forceKill()));
+      const results = await Promise.allSettled([appPluginHost.forceClose(), appPlugins.close(), appPluginPackages.forceClose(), ...[...heldRuntimeHosts].map((host) => host.forceKill())]);
       const failures = results.filter((result) => result.status === 'rejected');
       if (failures.length > 0) {
         throw new AggregateError(failures.map((result) => result.reason), 'Runtime-host force confirmation failed');

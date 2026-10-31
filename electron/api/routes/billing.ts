@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { CloudAccountApiContext } from '../context';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiResponse, type HostApiRouteResult } from '../execution';
 
 const INVALID_ORDER = {
   success: false,
@@ -32,76 +31,68 @@ type CreatePaymentOrderRequest = {
 };
 
 export async function handleBillingRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: CloudAccountApiContext,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/billing/checkout-info' && req.method === 'GET') {
-    return sendBillingResult(res, ctx, (service) => service.getCheckoutInfo());
+    return sendBillingResult(ctx, (service) => service.getCheckoutInfo());
   }
 
   if (url.pathname === '/api/billing/plans' && req.method === 'GET') {
-    return sendBillingResult(res, ctx, (service) => service.getPlans());
+    return sendBillingResult(ctx, (service) => service.getPlans());
   }
 
   if (url.pathname === '/api/billing/orders' && req.method === 'POST') {
     let body: unknown;
     try {
-      body = await parseJsonBody<unknown>(req);
+      body = await req.readJson<unknown>();
     } catch {
-      sendJson(res, 400, INVALID_ORDER);
-      return true;
+      return jsonResult(400, INVALID_ORDER);
     }
     const request = toCreatePaymentOrderRequest(body);
     if (!request) {
-      sendJson(res, 400, INVALID_ORDER);
-      return true;
+      return jsonResult(400, INVALID_ORDER);
     }
-    return sendBillingResult(res, ctx, (service) => service.createPaymentOrder(request));
+    return sendBillingResult(ctx, (service) => service.createPaymentOrder(request));
   }
 
   if (url.pathname === '/api/billing/orders/verify' && req.method === 'POST') {
     let body: unknown;
     try {
-      body = await parseJsonBody<unknown>(req);
+      body = await req.readJson<unknown>();
     } catch {
-      sendJson(res, 400, INVALID_VERIFY);
-      return true;
+      return jsonResult(400, INVALID_VERIFY);
     }
     if (!isRecord(body) || !isNonEmptyString(body.outTradeNo)) {
-      sendJson(res, 400, INVALID_VERIFY);
-      return true;
+      return jsonResult(400, INVALID_VERIFY);
     }
     const outTradeNo = body.outTradeNo;
-    return sendBillingResult(res, ctx, (service) => service.verifyPaymentOrder(outTradeNo));
+    return sendBillingResult(ctx, (service) => service.verifyPaymentOrder(outTradeNo));
   }
 
   const orderId = matchOrderId(url.pathname);
   if (orderId !== null && req.method === 'GET') {
-    return sendBillingResult(res, ctx, (service) => service.getPaymentOrder(orderId));
+    return sendBillingResult(ctx, (service) => service.getPaymentOrder(orderId));
   }
 
-  return false;
+  return undefined;
 }
 
 async function sendBillingResult(
-  res: ServerResponse,
   ctx: CloudAccountApiContext,
   execute: (service: NonNullable<CloudAccountApiContext['cloudAccountService']>) => Promise<unknown>,
-): Promise<true> {
+): Promise<HostApiResponse> {
   const service = ctx.cloudAccountService;
   if (!service) {
-    sendJson(res, 503, UNAVAILABLE);
-    return true;
+    return jsonResult(503, UNAVAILABLE);
   }
 
   try {
-    sendJson(res, 200, await execute(service));
+    return jsonResult(200, await execute(service));
   } catch (error) {
-    sendJson(res, statusCodeForServiceError(error), BAD_GATEWAY);
+    return jsonResult(statusCodeForServiceError(error), BAD_GATEWAY);
   }
-  return true;
 }
 
 function toCreatePaymentOrderRequest(value: unknown): CreatePaymentOrderRequest | null {

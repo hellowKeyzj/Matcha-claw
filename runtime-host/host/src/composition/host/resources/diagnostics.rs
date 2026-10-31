@@ -2,11 +2,7 @@ use std::path::PathBuf;
 
 use platform::state_dir::CanonicalStateDir;
 
-use crate::composition::host::ConstructionError;
-use ::diagnostics::{
-    DiagnosticsArchiveProducer, DiagnosticsArchiveRoot, RuntimeFlightRecorder,
-    RuntimeStartupDiagnostics,
-};
+use ::diagnostics::{DiagnosticsArchiveProducer, RuntimeFlightRecorder, RuntimeStartupDiagnostics};
 
 pub(in crate::composition::host) struct RuntimeDiagnostics {
     pub(in crate::composition::host) observation: RuntimeFlightRecorder,
@@ -24,14 +20,14 @@ pub(in crate::composition::host) fn prepare_runtime_diagnostics(
     }
 }
 
-pub(in crate::composition::host) fn provision_diagnostics_archive(
+pub(in crate::composition::host) fn prepare_diagnostics_archive(
     diagnostics_state_root: &CanonicalStateDir,
     app_log_dir: PathBuf,
     runtime_observation: RuntimeFlightRecorder,
-) -> Result<DiagnosticsArchiveProducer, ConstructionError> {
-    let diagnostics_root =
-        DiagnosticsArchiveRoot::provision(diagnostics_state_root.as_path(), app_log_dir)
-            .map_err(ConstructionError::Diagnostics)?;
-    DiagnosticsArchiveProducer::new_with_recorder(diagnostics_root, runtime_observation)
-        .map_err(ConstructionError::Diagnostics)
+) -> DiagnosticsArchiveProducer {
+    DiagnosticsArchiveProducer::from_paths(
+        diagnostics_state_root.as_path().to_path_buf(),
+        app_log_dir,
+        runtime_observation,
+    )
 }

@@ -1,3 +1,4 @@
+mod artifacts;
 pub mod auth;
 pub mod capability;
 pub mod client;

@@ -1,0 +1,9 @@
+.hsv-color-picker { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.hsv-color-plane { position: relative; display: block; width: 100%; min-height: 160px; max-height: 276px; aspect-ratio: 4 / 3; padding: 0; border: 1px solid var(--border); border-radius: 12px; cursor: crosshair; touch-action: none; }
+.hsv-color-thumb { position: absolute; width: 14px; height: 14px; border: 2px solid #fff; border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 0 1px #0006; pointer-events: none; }
+.hsv-color-hue-row { display: flex; align-items: center; gap: 12px; padding-right: 8px; }
+.hsv-color-preview { flex-shrink: 0; width: 30px; height: 30px; border: 1px solid var(--border); border-radius: 50%; }
+.hsv-color-hue { position: relative; flex: 1; min-width: 0; height: 30px; min-height: 30px; padding: 0; border: 0; background: transparent; touch-action: none; }
+.hsv-color-hue:hover { background: transparent; }
+.hsv-color-hue::before { content: ''; position: absolute; left: 0; right: 0; top: 8px; height: 14px; border: 1px solid var(--border); border-radius: 999px; background: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
+.hsv-color-plane:disabled, .hsv-color-hue:disabled { cursor: default; }

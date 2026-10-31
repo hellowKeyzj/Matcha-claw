@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type { ChannelCatalogTransport } from '../../main/runtime-host-delivery/transport/channels/catalog';
-import { parseJsonBody, sendJson } from '../route-utils';
 import { isProductRuntimeScope, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
@@ -24,21 +23,19 @@ type ApplyRequest = Readonly<{
 }>;
 
 export async function handleChannelConfigureRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: ChannelCatalogTransport,
-): Promise<boolean> {
-  if (url.pathname !== '/api/channels/configure' || req.method !== 'POST') return false;
+): Promise<HostApiRouteResult> {
+  if (url.pathname !== '/api/channels/configure' || req.method !== 'POST') return undefined;
 
   const traceId = readChannelTrace(req.headers);
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
     beginChannelTrace('route.invalid', traceId)?.(400, { outcome: 'rejected' });
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
 
   const finish = beginChannelTrace(() => isApplyRequest(body) ? 'route.configure.apply' : 'route.configure.form', traceId);
@@ -46,8 +43,7 @@ export async function handleChannelConfigureRoutes(
     if (isFormRequest(body)) {
       const response = await transport.form(body.channel, traceId, body.scope);
       finish?.(response.status, response.body);
-      sendJson(res, response.status, response.body);
-      return true;
+      return jsonResult(response.status, response.body);
     }
     if (isApplyRequest(body)) {
       const response = await transport.apply({
@@ -58,18 +54,15 @@ export async function handleChannelConfigureRoutes(
         ...(body.scope === undefined ? {} : { scope: body.scope }),
       }, traceId);
       finish?.(response.status, response.body);
-      sendJson(res, response.status, response.body);
-      return true;
+      return jsonResult(response.status, response.body);
     }
   } catch (error) {
     finish?.(503, UNAVAILABLE, channelTraceError(error));
-    sendJson(res, 503, UNAVAILABLE);
-    return true;
+    return jsonResult(503, UNAVAILABLE);
   }
 
   finish?.(400, { outcome: 'rejected' });
-  sendJson(res, 400, INVALID);
-  return true;
+  return jsonResult(400, INVALID);
 }
 
 function isFormRequest(value: unknown): value is FormRequest {

@@ -127,10 +127,14 @@ fn remember(correlations: &mut Vec<String>, correlation: &str) {
 
 fn load_policy(path: &Path) -> Result<PersistedDesired, ()> {
     cleanup_temporary(path)?;
-    if !path.exists() {
-        return Ok(PersistedDesired::default());
-    }
-    if fs::metadata(path).map_err(|_| ())?.len() > POLICY_STATE_MAX_BYTES {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PersistedDesired::default());
+        }
+        Err(_) => return Err(()),
+    };
+    if metadata.len() > POLICY_STATE_MAX_BYTES {
         return Err(());
     }
     let mut state: PersistedDesired =
@@ -321,10 +325,14 @@ fn trim_receipts(receipts: &mut Vec<PersistedReceipt>) {
 
 fn load_receipts(path: &Path) -> Result<PersistedReceipts, ()> {
     cleanup_temporary(path)?;
-    if !path.exists() {
-        return Ok(PersistedReceipts::default());
-    }
-    if fs::metadata(path).map_err(|_| ())?.len() > RECEIPT_STATE_MAX_BYTES {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PersistedReceipts::default());
+        }
+        Err(_) => return Err(()),
+    };
+    if metadata.len() > RECEIPT_STATE_MAX_BYTES {
         return Err(());
     }
     serde_json::from_slice(&fs::read(path).map_err(|_| ())?).map_err(|_| ())
@@ -353,31 +361,7 @@ fn persist<T: Serialize>(path: &Path, state: &T, max_bytes: u64) -> Result<(), (
     file.write_all(&bytes).map_err(|_| ())?;
     file.sync_all().map_err(|_| ())?;
     drop(file);
-    replace_file(&temporary, path)
-}
-
-fn replace_file(source: &Path, destination: &Path) -> Result<(), ()> {
-    if cfg!(windows) {
-        let backup = destination.with_extension("bak");
-        let _ = fs::remove_file(&backup);
-        if destination.exists() {
-            fs::rename(destination, &backup).map_err(|_| ())?;
-        }
-        match fs::rename(source, destination) {
-            Ok(()) => {
-                let _ = fs::remove_file(&backup);
-                Ok(())
-            }
-            Err(_) => {
-                if backup.exists() {
-                    let _ = fs::rename(&backup, destination);
-                }
-                Err(())
-            }
-        }
-    } else {
-        fs::rename(source, destination).map_err(|_| ())
-    }
+    fs::rename(&temporary, path).map_err(|_| ())
 }
 
 #[cfg(test)]

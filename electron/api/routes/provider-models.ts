@@ -1,4 +1,3 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import type {
   ProviderModelCapability,
   ProviderModelsTransport,
@@ -7,7 +6,7 @@ import {
   isProviderModelAccountIdentifier,
   isProviderModelCapability,
 } from '../../main/runtime-host-delivery/transport/providers/models';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 const INVALID = {
   success: false,
@@ -19,38 +18,31 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleProviderModelsRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: ProviderModelsTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/provider-models' && req.method === 'GET') {
     if ([...url.searchParams].length !== 0) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(res, transport.read(), UNAVAILABLE);
-    return true;
+    return deliver(transport.read(), UNAVAILABLE);
   }
 
   if (url.pathname === '/api/provider-models/selectable' && req.method === 'GET') {
     const capability = parseCapability(url);
     if (!capability) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(res, transport.readSelectable(capability), UNAVAILABLE);
-    return true;
+    return deliver(transport.readSelectable(capability), UNAVAILABLE);
   }
 
   if (url.pathname === '/api/provider-models/discover' && req.method === 'GET') {
     const accountId = parseAccountId(url);
     if (!accountId) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(res, transport.discover(accountId), UNAVAILABLE);
-    return true;
+    return deliver(transport.discover(accountId), UNAVAILABLE);
   }
 
   if (url.pathname === '/api/provider-models/discovery-result' && req.method === 'GET') {
@@ -58,24 +50,20 @@ export async function handleProviderModelsRoutes(
     const accountId = url.searchParams.get('accountId');
     if ([...url.searchParams].length !== 2 || !callId || !/^[a-f0-9]{32}$/.test(callId)
       || !isProviderModelAccountIdentifier(accountId)) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(res, transport.readDiscoveryResult(callId, accountId), UNAVAILABLE);
-    return true;
+    return deliver(transport.readDiscoveryResult(callId, accountId), UNAVAILABLE);
   }
 
-  if (url.pathname !== '/api/provider-models' || req.method !== 'POST') return false;
+  if (url.pathname !== '/api/provider-models' || req.method !== 'POST') return undefined;
 
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
-  await deliver(res, transport.execute(body), UNAVAILABLE);
-  return true;
+  return deliver(transport.execute(body), UNAVAILABLE);
 }
 
 function parseCapability(url: URL): ProviderModelCapability | null {
@@ -93,14 +81,13 @@ function parseAccountId(url: URL): string | null {
 }
 
 async function deliver(
-  res: ServerResponse,
   responsePromise: Promise<{ status: number; body: unknown }>,
   unavailable: typeof UNAVAILABLE,
-): Promise<void> {
+): Promise<HostApiRouteResult> {
   try {
     const response = await responsePromise;
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, unavailable);
+    return jsonResult(503, unavailable);
   }
 }

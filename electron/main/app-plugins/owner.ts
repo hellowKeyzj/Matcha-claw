@@ -8,18 +8,17 @@ import type {
 import { logger } from '../../utils/logger';
 import {
   AppPluginError,
-  buildAppPluginPackage,
-  decodeAppPluginPackage,
-  readAppPluginPackage,
   requireDigest,
   requireObject,
   requirePluginId,
 } from './package';
+import type { AppPluginPackageWorker } from './package-client';
 import { AppPluginStorage, MAX_INSTALLED_APP_PLUGINS } from './storage';
 
 export interface ApplicationPluginOwnerOptions {
   readonly rootDir: string;
-  readonly onChanged: (event: { revision: number }) => void;
+  readonly packageWorker: AppPluginPackageWorker;
+  readonly onChanged: (event: { revision: number }, catalog: AppPluginCatalog) => void | Promise<void>;
 }
 
 export class ApplicationPluginOwner {
@@ -30,16 +29,18 @@ export class ApplicationPluginOwner {
   private closed = false;
 
   constructor(private readonly options: ApplicationPluginOwnerOptions) {
-    this.storage = new AppPluginStorage(options.rootDir);
+    this.storage = new AppPluginStorage(options.rootDir, options.packageWorker);
   }
 
   list(): Promise<AppPluginCatalog> {
+    if (this.closed) return Promise.reject(new AppPluginError('closed', 'App plugin owner is closing.'));
+    if (this.catalog) return Promise.resolve(structuredClone(this.catalog));
     return this.enqueue(async () => structuredClone(await this.load()));
   }
 
   inspect(packageBase64: string): Promise<AppPluginInspection> {
     return this.enqueue(async () => {
-      const { manifest, digest } = decodeAppPluginPackage(packageBase64);
+      const { manifest, digest } = await this.options.packageWorker.process({ operation: 'inspect', packageBase64 });
       return { manifest, digest };
     });
   }
@@ -50,13 +51,7 @@ export class ApplicationPluginOwner {
     return this.enqueue(async () => {
       requireObject(input, ['id', 'digest']);
       const installed = this.requireCurrent(await this.load(), input.id, input.digest);
-      const contents = readAppPluginPackage(await this.storage.readPackage(input.id, input.digest));
-      if (JSON.stringify(contents.manifest) !== JSON.stringify(installed.manifest)) throw new Error('Installed app plugin manifest does not match its package.');
-      const files: Record<string, string> = Object.create(null);
-      for (const reader of contents.manifest.contributes.readers ?? []) {
-        files[reader.entry] = Buffer.from(contents.files.get(reader.entry)!).toString('utf8');
-      }
-      return { manifest: contents.manifest, digest: contents.digest, files };
+      return this.storage.readPackage(input.id, input.digest, { operation: 'source', expectedManifest: installed.manifest });
     });
   }
 
@@ -67,7 +62,7 @@ export class ApplicationPluginOwner {
       if (input.expectedDigest !== undefined) requireDigest(input.expectedDigest);
       if (input.onlyIfNew !== undefined && typeof input.onlyIfNew !== 'boolean') throw new AppPluginError('invalid_package', 'Invalid app plugin creation condition.');
       if (input.origin !== 'manual' && input.origin !== 'agent') throw new AppPluginError('invalid_package', 'Invalid plugin installation origin.');
-      const contents = decodeAppPluginPackage(input.packageBase64);
+      const contents = await this.options.packageWorker.process({ operation: 'import', packageBase64: input.packageBase64 });
       if (contents.digest !== input.digest) throw new AppPluginError('conflict', 'Package changed after inspection. Inspect it again before importing.');
       const catalog = await this.load();
       const previous = catalog.plugins.find((plugin) => plugin.manifest.id === contents.manifest.id);
@@ -94,10 +89,10 @@ export class ApplicationPluginOwner {
           installedAt: previous.installedAt,
         } } : {}),
       };
-      await this.storage.stage(contents.manifest.id, contents.digest, contents.bytes);
-      await this.commit([...catalog.plugins.filter((plugin) => plugin.manifest.id !== contents.manifest.id), installed]);
-      await this.storage.prune(contents.manifest.id, contents.digest, installed.previous?.digest)
-        .catch(() => logger.warn('[AppPlugins] Could not prune retained package versions'));
+      await this.storage.stage(contents.manifest.id, contents.digest, Buffer.from(contents.bytes.buffer, contents.bytes.byteOffset, contents.bytes.byteLength));
+      await this.commit([...catalog.plugins.filter((plugin) => plugin.manifest.id !== contents.manifest.id), installed],
+        () => this.storage.prune(contents.manifest.id, contents.digest, installed.previous?.digest)
+          .catch(() => logger.warn('[AppPlugins] Could not prune retained package versions')));
       return structuredClone(installed);
     });
   }
@@ -105,8 +100,7 @@ export class ApplicationPluginOwner {
   build(input: { manifest: AppPluginManifest; files: Record<string, string> }): Promise<AppPluginBuild> {
     return this.enqueue(async () => {
       requireObject(input, ['manifest', 'files']);
-      const { manifest, digest, bytes } = buildAppPluginPackage(input);
-      return { manifest, digest, packageBase64: bytes.toString('base64') };
+      return this.options.packageWorker.process({ operation: 'build', input });
     });
   }
 
@@ -114,12 +108,13 @@ export class ApplicationPluginOwner {
     return this.enqueue(async () => {
       const installed = this.requireCurrent(await this.load(), id, digest);
       if (!installed.enabled) throw new AppPluginError('conflict', 'This app plugin is disabled.');
-      if (typeof entry !== 'string' || !installed.manifest.contributes.readers?.some((reader) => reader.entry === entry)) {
-        throw new AppPluginError('invalid_package', 'The requested reader entry is not declared by this plugin.');
+      const isReader = installed.manifest.contributes.readers?.some((reader) => reader.entry === entry);
+      const isApplication = installed.manifest.contributes.applications?.some((application) => application.entry === entry);
+      if (typeof entry !== 'string' || (!isReader && !isApplication)) {
+        throw new AppPluginError('invalid_package', 'The requested HTML entry is not declared by this plugin.');
       }
-      const contents = readAppPluginPackage(await this.storage.readPackage(id, digest));
-      if (JSON.stringify(contents.manifest) !== JSON.stringify(installed.manifest)) throw new Error('Installed app plugin manifest does not match its package.');
-      return { html: Buffer.from(contents.files.get(entry)!).toString('utf8') };
+      const contents = await this.storage.readPackage(id, digest, { operation: 'html', entry, expectedManifest: installed.manifest });
+      return { html: contents.html };
     });
   }
 
@@ -141,8 +136,8 @@ export class ApplicationPluginOwner {
       requireObject(input, ['id', 'digest']);
       const catalog = await this.load();
       this.requireCurrent(catalog, input.id, input.digest);
-      await this.commit(catalog.plugins.filter((plugin) => plugin.manifest.id !== input.id));
-      await this.storage.remove(input.id).catch(() => logger.warn('[AppPlugins] Could not remove uninstalled package files'));
+      await this.commit(catalog.plugins.filter((plugin) => plugin.manifest.id !== input.id),
+        () => this.storage.remove(input.id).catch(() => logger.warn('[AppPlugins] Could not remove uninstalled package files')));
     });
   }
 
@@ -153,12 +148,12 @@ export class ApplicationPluginOwner {
       const current = this.requireCurrent(catalog, input.id, input.digest);
       const previous = current.previous;
       if (!previous) throw new AppPluginError('conflict', 'This app plugin has no retained previous version.');
-      const contents = readAppPluginPackage(await this.storage.readPackage(input.id, previous.digest));
+      const contents = await this.storage.readPackage(input.id, previous.digest, { operation: 'read' });
       if (JSON.stringify(contents.manifest) !== JSON.stringify(previous.manifest)) throw new Error('Retained plugin manifest does not match its package.');
       const restored: InstalledAppPlugin = { ...previous, enabled: current.enabled };
-      await this.commit(catalog.plugins.map((plugin) => plugin.manifest.id === input.id ? restored : plugin));
-      await this.storage.prune(input.id, restored.digest)
-        .catch(() => logger.warn('[AppPlugins] Could not prune rolled-back package version'));
+      await this.commit(catalog.plugins.map((plugin) => plugin.manifest.id === input.id ? restored : plugin),
+        () => this.storage.prune(input.id, restored.digest)
+          .catch(() => logger.warn('[AppPlugins] Could not prune rolled-back package version')));
       return structuredClone(restored);
     });
   }
@@ -191,13 +186,22 @@ export class ApplicationPluginOwner {
     return installed;
   }
 
-  private async commit(plugins: readonly InstalledAppPlugin[]): Promise<void> {
+  private async commit(plugins: readonly InstalledAppPlugin[], cleanup?: () => Promise<void>): Promise<void> {
     const revision = (await this.load()).revision + 1;
     if (!Number.isSafeInteger(revision)) throw new Error('App plugin catalog revision limit reached.');
     const catalog = { revision, plugins };
     await this.storage.publish(catalog);
     this.catalog = catalog;
-    try { this.options.onChanged({ revision }); }
-    catch { logger.warn('[AppPlugins] Catalog committed but change notification failed'); }
+    try {
+      await this.options.onChanged({ revision }, structuredClone(catalog));
+    } catch (cause) {
+      const message = `App plugin catalog revision ${revision} was committed, but change notification or application cleanup failed. Refresh installed plugins before retrying.`;
+      const error = cause instanceof AppPluginError
+        ? new AppPluginError(cause.code, `${message} ${cause.message}`) : new Error(message);
+      error.cause = cause;
+      throw error;
+    } finally {
+      await cleanup?.();
+    }
   }
 }

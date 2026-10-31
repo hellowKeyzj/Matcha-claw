@@ -548,7 +548,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         session_handle.clone(),
     ));
 
-    let (board, mut board_task) = board::spawn_owner(
+    let (board, board_task) = board::spawn_owner(
         &owner_runtime_system,
         board::BoardOwnerInput {
             admission: admission.clone(),
@@ -558,20 +558,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     open_claw
         .gateway
         .set_board_event_sink(Some(board.event_sink()));
-    let mut board_scope = ModuleScope::new("board");
-    let board_shutdown = board.clone();
-    let board_failures = Arc::clone(&join_failures);
-    board_scope.register_effect_disposer(
-        ScopedEffectKind::OwnerTask,
-        "owner-task",
-        move || async move {
-            let closed = board_shutdown.close().await;
-            let joined = board_task.drain_and_join().await;
-            if closed.is_err() || joined.is_err() {
-                record_join_failure(&board_failures, "board");
-            }
-        },
-    );
+    let mut board_scope = module_scope("board", board_task);
     let board_gateway = Arc::clone(&open_claw.gateway);
     board_scope.register_event_subscription("openclaw-board-events", move || async move {
         board_gateway.set_board_event_sink(None);
@@ -714,22 +701,6 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
             runtime: search_runtime,
             directory: Arc::new(peer_handle.clone()),
         },
-    )
-    .map_err(|_| ConstructionError::Search)?;
-    let mut search_task = search_task;
-    let mut search_scope = ModuleScope::new("search");
-    let search_shutdown = search.clone();
-    let search_failures = Arc::clone(&join_failures);
-    search_scope.register_effect_disposer(
-        ScopedEffectKind::OwnerTask,
-        "owner-task",
-        move || async move {
-            let stopped = search_shutdown.shutdown().await;
-            let joined = search_task.drain_and_join().await;
-            if stopped.is_err() || joined.is_err() {
-                record_join_failure(&search_failures, "search");
-            }
-        },
     );
     let (diagnostics, diagnostics_task) = ::diagnostics::spawn_owner(
         &owner_runtime_system,
@@ -857,7 +828,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
                 module_scope("workspace", workspace_task),
                 module_scope("wiki", wiki_task),
                 module_scope("toolchain", toolchain_task),
-                search_scope,
+                module_scope("search", search_task),
                 module_scope("platform-tools", platform_tools_task),
                 route_only_scope("plugins"),
                 route_only_scope("sealed-resource"),

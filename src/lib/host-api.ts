@@ -1,6 +1,7 @@
 import { invokeIpc } from '@/lib/api-client';
 import type { CallReceipt } from '@/types/call-log';
 import type { AppPluginCatalog, AppPluginInspection, InstalledAppPlugin } from '@/types/desktop/app-plugin';
+import type { AppPluginCall, AppToolResult, AppWebviewApi } from '@/types/desktop/app-plugin-sdk';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
 import { decodeSecurityCallDetail } from '@/types/call-log/security';
 import { waitForCall } from './call-log-await';
@@ -169,6 +170,42 @@ export interface WriteTextFileResult {
   name?: string;
   size?: number;
   error?: FilePreviewError;
+}
+
+export interface WorkspaceSessionImage {
+  reference: string;
+  name: string;
+  mimeType?: string;
+  readable: boolean;
+}
+
+export interface WorkspaceSessionImagePage {
+  items: WorkspaceSessionImage[];
+  nextCursor?: string;
+  omittedOversized: boolean;
+}
+
+export interface WorkspaceSessionImageData {
+  name: string;
+  mimeType: string;
+  data: string;
+}
+
+const SESSION_IMAGES_FAILURE_MESSAGES = {
+  unsupported: 'Session images are unsupported',
+  cursorInvalid: 'Session image cursor is invalid',
+  invalidReference: 'Session image reference is invalid',
+  tooLarge: 'Session image exceeds the limit',
+  unavailable: 'Session images are unavailable',
+} as const;
+
+export type WorkspaceSessionImagesErrorCode = keyof typeof SESSION_IMAGES_FAILURE_MESSAGES;
+
+export class WorkspaceSessionImagesError extends Error {
+  constructor(readonly code: WorkspaceSessionImagesErrorCode) {
+    super(SESSION_IMAGES_FAILURE_MESSAGES[code]);
+    this.name = 'WorkspaceSessionImagesError';
+  }
 }
 
 export interface FileThumbnailResult {
@@ -365,6 +402,15 @@ export function hostAppPluginImport(packageBase64: string, digest: string): Prom
 
 export function hostAppPluginBundle(id: string, digest: string, entry: string): Promise<{ html: string }> {
   return hostAppPluginRequest('bundle', { id, digest, entry });
+}
+
+export function hostAppPluginCall(input: AppPluginCall): Promise<AppToolResult> {
+  return hostAppPluginRequest('call', input);
+}
+
+export async function hostWriteClipboardImage(input: Parameters<AppWebviewApi['writeClipboardImage']>[0]): Promise<void> {
+  const result = await invokeIpc<{ outcome: 'written' | 'denied' | 'invalid-image' | 'write-failed' }>('shell:writeClipboardImage', input);
+  if (result.outcome !== 'written') throw new Error(`clipboard:${result.outcome}`);
 }
 
 export function hostAppPluginRuntimeStatus(input: {
@@ -1016,7 +1062,7 @@ type WorkspaceFileRequest = {
 };
 
 function workspaceFileInput(
-  payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; includeHidden?: boolean },
+  payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; data?: string; includeHidden?: boolean },
   includeHiddenDefault: boolean,
 ): Record<string, unknown> {
   return {
@@ -1025,13 +1071,14 @@ function workspaceFileInput(
     relativePath: payload.relativePath,
     ...(payload.maxBytes === undefined ? {} : { maxBytes: payload.maxBytes }),
     ...(payload.content === undefined ? {} : { content: payload.content }),
+    ...(payload.data === undefined ? {} : { data: payload.data }),
     ...(includeHiddenDefault ? { includeHidden: payload.includeHidden ?? false } : {}),
   };
 }
 
 function workspaceFilePayload(
   operationId: string,
-  payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; includeHidden?: boolean },
+  payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; data?: string; includeHidden?: boolean },
 ) {
   return buildCapabilityExecutePayload({
     id: WORKSPACE_FILE_CAPABILITY_ID,
@@ -1181,9 +1228,9 @@ function isWorkspaceWriteResponse(value: unknown): value is { name: string; size
 async function workspaceFileFetch<TResult>(
   path: string,
   operationId: string,
-  payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; includeHidden?: boolean },
+  payload: WorkspaceFileRequest & { maxBytes?: number; content?: string; data?: string; includeHidden?: boolean },
   decode: (value: unknown) => TResult | null,
-  options?: { timeoutMs?: number },
+  options?: { timeoutMs?: number; unknownOnFailure?: boolean },
 ): Promise<TResult | FilePreviewError> {
   try {
     const result = decode(await hostApiFetch<unknown>(path, {
@@ -1191,9 +1238,12 @@ async function workspaceFileFetch<TResult>(
       body: JSON.stringify(workspaceFilePayload(operationId, payload)),
       timeoutMs: options?.timeoutMs,
     }));
-    return result ?? 'unavailable';
+    return result ?? (options?.unknownOnFailure ? 'outcomeUnknown' : 'unavailable');
   } catch (error) {
-    return workspaceFailure(error instanceof Error ? error.message : error);
+    const message = error instanceof Error ? error.message : error;
+    const failure = workspaceFailure(message);
+    return options?.unknownOnFailure && failure === 'unavailable' && message !== 'Workspace write is unavailable'
+      ? 'outcomeUnknown' : failure;
   }
 }
 
@@ -1212,6 +1262,15 @@ export async function hostFileWriteText(
   const result = await workspaceFileFetch('/api/files/write-text', 'files.writeText', payload, (value) => (
     isWorkspaceWriteResponse(value) ? { ok: true, name: value.name, size: value.size } : null
   ));
+  return typeof result === 'string' ? { ok: false, error: result } : result;
+}
+
+export async function hostFileWriteBinary(
+  payload: WorkspaceFileRequest & { data: string },
+): Promise<WriteTextFileResult> {
+  const result = await workspaceFileFetch('/api/files/write-binary', 'files.writeBinary', payload, (value) => (
+    isWorkspaceWriteResponse(value) ? { ok: true, name: value.name, size: value.size } : null
+  ), { unknownOnFailure: true });
   return typeof result === 'string' ? { ok: false, error: result } : result;
 }
 
@@ -1239,6 +1298,84 @@ function workspaceMediaPayload(
       ...input,
     },
   });
+}
+
+async function requestSessionImages(
+  operationId: 'media.listSessionImages' | 'media.readSessionImage',
+  identity: SessionIdentity,
+  input: Record<string, unknown>,
+): Promise<unknown> {
+  let result: unknown;
+  try {
+    result = await hostCapabilityExecute<unknown>(workspaceMediaPayload(operationId, identity, {
+      agentId: identity.agentId,
+      ...input,
+    }), {
+      decodeFailure: (status, value) => {
+        if (!isRecord(value) || value.success !== false || typeof value.error !== 'string') return null;
+        if (status === 503 && hasExactKeys(value, ['success', 'error'])
+          && value.error === SESSION_IMAGES_FAILURE_MESSAGES.unavailable) {
+          return new WorkspaceSessionImagesError('unavailable');
+        }
+        if (status !== 422 || !hasExactKeys(value, ['success', 'code', 'error'])
+          || typeof value.code !== 'string' || value.code === 'unavailable'
+          || !Object.hasOwn(SESSION_IMAGES_FAILURE_MESSAGES, value.code)) return null;
+        const code = value.code as WorkspaceSessionImagesErrorCode;
+        return value.error === SESSION_IMAGES_FAILURE_MESSAGES[code]
+          ? new WorkspaceSessionImagesError(code) : null;
+      },
+    });
+  } catch {
+    throw new WorkspaceSessionImagesError('unavailable');
+  }
+  if (result instanceof WorkspaceSessionImagesError) throw result;
+  return result;
+}
+
+export async function hostListSessionImages(
+  identity: SessionIdentity,
+  cursor?: string,
+): Promise<WorkspaceSessionImagePage> {
+  const result = await requestSessionImages('media.listSessionImages', identity,
+    cursor === undefined ? {} : { cursor });
+  if (!isRecord(result) || !hasAllowedKeys(result, ['items', 'omittedOversized'], ['nextCursor'])
+    || !Array.isArray(result.items) || result.items.length > 4
+    || !result.items.every(isWorkspaceSessionImage)
+    || typeof result.omittedOversized !== 'boolean'
+    || (result.nextCursor !== undefined && !isSessionImageText(result.nextCursor, 256))) {
+    throw new WorkspaceSessionImagesError('unavailable');
+  }
+  return {
+    items: result.items,
+    omittedOversized: result.omittedOversized,
+    ...(result.nextCursor === undefined ? {} : { nextCursor: result.nextCursor }),
+  };
+}
+
+export async function hostReadSessionImage(
+  identity: SessionIdentity,
+  reference: string,
+): Promise<WorkspaceSessionImageData> {
+  const result = await requestSessionImages('media.readSessionImage', identity, { reference });
+  if (!isRecord(result) || !hasExactKeys(result, ['name', 'mimeType', 'data'])
+    || !isSessionImageText(result.name, 4096) || !isSessionImageMimeType(result.mimeType)
+    || typeof result.data !== 'string') throw new WorkspaceSessionImagesError('unavailable');
+  return { name: result.name, mimeType: result.mimeType, data: result.data };
+}
+
+function isWorkspaceSessionImage(value: unknown): value is WorkspaceSessionImage {
+  return isRecord(value) && hasAllowedKeys(value, ['reference', 'name', 'readable'], ['mimeType'])
+    && isSessionImageText(value.reference, 8192) && isSessionImageText(value.name, 4096)
+    && typeof value.readable === 'boolean'
+    && (value.mimeType === undefined || isSessionImageText(value.mimeType, 255));
+}
+
+function isSessionImageText(value: unknown, maximum: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximum && !value.includes('\0');
+}
+
+function isSessionImageMimeType(value: unknown): value is string {
+  return isSessionImageText(value, 255) && /^image\/[A-Za-z0-9.+-]+$/.test(value);
 }
 
 function stagedFilePayload(value: unknown): StagedFilePayload {

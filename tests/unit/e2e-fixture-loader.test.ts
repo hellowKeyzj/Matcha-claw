@@ -6,7 +6,7 @@ afterEach(() => {
 
 describe('E2E fixture loader', () => {
   it('does not replace sealed Electron and Rust delivery boundaries', async () => {
-    const loader = await import('../../electron/main/e2e-fixture-loader');
+    const loader = await import('../../electron/testing/fixture-loader');
 
     await expect(loader.handleE2EHostApiFetch({
       method: 'POST',

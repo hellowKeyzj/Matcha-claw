@@ -276,7 +276,7 @@ fn is_runtime_scope(value: &Value) -> bool {
         return false;
     };
     match kind {
-        "app" | "provider-routing" => has_exact_keys(object, &["kind"]),
+        "app" | "provider-routing" | "provider-media" => has_exact_keys(object, &["kind"]),
         "runtime-instance" => {
             has_exact_keys(object, &["kind", "endpoint"])
                 && object.get("endpoint").is_some_and(is_runtime_endpoint)

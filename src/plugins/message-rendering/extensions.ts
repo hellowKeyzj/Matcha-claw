@@ -66,6 +66,19 @@ export interface MarkdownContribution {
   readonly load: () => Promise<MarkdownExtension>;
 }
 
+export interface ImagePreviewActionProps {
+  readonly src: string;
+  readonly fileName: string;
+  readonly sessionIdentity?: SessionIdentity;
+  readonly onClose: () => void;
+}
+
+export interface ImagePreviewAction {
+  readonly id: string;
+  readonly component: ComponentType<ImagePreviewActionProps>;
+}
+
+export const imagePreviewActions = defineExtensionPoint<ImagePreviewAction>('message-rendering.image-preview-actions');
 export const toolRenderers = defineExtensionPoint<ToolRendererContribution>('message-rendering.tools');
 export const messageParts = defineExtensionPoint<MessagePartRenderer>('message-rendering.parts');
 export const markdownExtensions = defineExtensionPoint<MarkdownContribution>('message-rendering.markdown');

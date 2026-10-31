@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const applyLaunchAtStartupSettingMock = vi.hoisted(() => vi.fn());
 
-vi.mock('../../electron/main/launch-at-startup', () => ({
+vi.mock('../../electron/main/settings/launch-at-startup', () => ({
   applyLaunchAtStartupSetting: (...args: unknown[]) => applyLaunchAtStartupSettingMock(...args),
 }));
 
-import { createSettingsDesiredTransport } from '../../electron/main/runtime-host-delivery/products/settings/desired';
+import { createSettingsDesiredTransport } from '../../electron/main/settings/desired';
 import { createSecurityPolicyTransport } from '../../electron/main/runtime-host-delivery/transport/security/policy';
 
 function buildRustSecurityPolicy() {

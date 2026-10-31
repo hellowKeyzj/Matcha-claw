@@ -18,7 +18,7 @@ export const ChatMessage = memo(function ChatMessage({
   endpointSessionId,
   onReuseMessage,
 }: ChatMessageProps) {
-  const [lightboxImg, setLightboxImg] = useState<MessageLightboxState | null>(null);
+  const [lightboxImg, setLightboxImg] = useState<(MessageLightboxState & { sessionIdentity?: SessionIdentity }) | null>(null);
   const largeTextContent = useLargeTextContent({
     initialText: item.text,
     itemKey: item.key,
@@ -47,7 +47,7 @@ export const ChatMessage = memo(function ChatMessage({
         <UserMessageMedia
           images={item.images}
           attachedFiles={item.attachedFiles}
-          onPreview={setLightboxImg}
+          onPreview={(preview) => setLightboxImg({ ...preview, sessionIdentity })}
         />
 
         {hasText && (
@@ -69,6 +69,7 @@ export const ChatMessage = memo(function ChatMessage({
           src={lightboxImg.src}
           fileName={lightboxImg.fileName}
           filePath={lightboxImg.filePath}
+          sessionIdentity={lightboxImg.sessionIdentity}
           onClose={() => setLightboxImg(null)}
         />
       )}

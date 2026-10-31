@@ -45,6 +45,11 @@ pub fn file_descriptor(scope: Value) -> Value {
                 "Write workspace text file",
                 "workspace-file",
             ),
+            operation(
+                "files.writeBinary",
+                "Write workspace binary file",
+                "workspace-file",
+            ),
         ],
     )
 }
@@ -83,6 +88,16 @@ pub fn media_descriptor(scope: Value) -> Value {
             operation(
                 "media.stageBuffer",
                 "Stage workspace media buffer",
+                "workspace-media",
+            ),
+            operation(
+                "media.listSessionImages",
+                "List session images",
+                "workspace-media",
+            ),
+            operation(
+                "media.readSessionImage",
+                "Read session image",
                 "workspace-media",
             ),
         ],

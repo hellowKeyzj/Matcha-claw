@@ -109,8 +109,8 @@ export default defineConfig(({ command, mode }) => ({
               '@electron/e2e-fixture-loader': resolve(
                 __dirname,
                 mode === 'e2e'
-                  ? 'electron/main/e2e-fixture-loader.ts'
-                  : 'electron/main/e2e-fixture-loader.noop.ts',
+                  ? 'electron/testing/fixture-loader.ts'
+                  : 'electron/testing/fixture-loader.noop.ts',
               ),
             },
           },
@@ -126,6 +126,28 @@ export default defineConfig(({ command, mode }) => ({
                 ...qrTerminalExternal,
               ],
             },
+          },
+        },
+      },
+      {
+        entry: 'electron/main/app-plugins/worker.ts',
+        vite: {
+          build: {
+            outDir: mode === 'e2e' ? 'e2e/.cache/app/dist-electron/main/extensions' : 'dist-electron/main/extensions',
+            emptyOutDir: false,
+            watch: command === 'serve' ? {} : undefined,
+            rollupOptions: { output: { entryFileNames: 'worker.js', format: 'cjs' } },
+          },
+        },
+      },
+      {
+        entry: 'electron/main/app-plugins/package-worker.ts',
+        vite: {
+          build: {
+            outDir: mode === 'e2e' ? 'e2e/.cache/app/dist-electron/main/extensions' : 'dist-electron/main/extensions',
+            emptyOutDir: false,
+            watch: command === 'serve' ? {} : undefined,
+            rollupOptions: { output: { entryFileNames: 'package-worker.js', format: 'cjs' } },
           },
         },
       },

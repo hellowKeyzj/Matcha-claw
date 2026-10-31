@@ -1,20 +1,21 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import { dialog } from 'electron';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
-import { copyStagedAttachment } from '../../main/ipc/dialog-attachment-staging';
+import { copyStagedAttachment } from '../../main/attachments/staging';
 import type { FileApiContext } from '../context';
 import type { WorkspaceBinaryTransport } from '../../main/runtime-host-delivery/transport/workspace/read-binary';
 import type { WorkspaceDirectoryTransport } from '../../main/runtime-host-delivery/transport/workspace/read-directory';
 import type { WorkspaceTextTransport } from '../../main/runtime-host-delivery/transport/workspace/read-text';
 import type { WorkspaceWriteTransport } from '../../main/runtime-host-delivery/transport/workspace/write-text';
-import { parseJsonBody, sendJson } from '../route-utils';
+import type { WorkspaceWriteBinaryTransport } from '../../main/runtime-host-delivery/transport/workspace/write-binary';
+import { HostApiBodyTooLarge, jsonResult, parseJsonBytes, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 export type WorkspaceFileRouteDeps = Readonly<{
   workspaceTextTransport?: WorkspaceTextTransport;
   workspaceBinaryTransport?: WorkspaceBinaryTransport;
   workspaceDirectoryTransport?: WorkspaceDirectoryTransport;
   workspaceWriteTransport?: WorkspaceWriteTransport;
+  workspaceWriteBinaryTransport?: WorkspaceWriteBinaryTransport;
 }>;
 
 const UNAVAILABLE = {
@@ -22,85 +23,98 @@ const UNAVAILABLE = {
   '/api/files/binary': { success: false, error: 'Workspace binary is unavailable' },
   '/api/files/list-dir': { success: false, error: 'Workspace directory is unavailable' },
   '/api/files/write-text': { success: false, error: 'Workspace write is unavailable' },
+  '/api/files/write-binary': { success: false, error: 'Workspace write is unavailable' },
 } as const;
 
 export async function handleFileRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   deps?: FileApiContext | WorkspaceFileRouteDeps,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/files/read-text' && req.method === 'POST') {
     const transports = getWorkspaceTransports(deps);
     if (!transports?.workspaceTextTransport) {
-      sendJson(res, 503, UNAVAILABLE['/api/files/read-text']);
-      return true;
+      return jsonResult(503, UNAVAILABLE['/api/files/read-text']);
     }
     try {
-      const response = await transports.workspaceTextTransport.read(await parseJsonBody<unknown>(req));
-      sendJson(res, response.status, response.body);
+      const response = await transports.workspaceTextTransport.read(await req.readJson<unknown>());
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNAVAILABLE['/api/files/read-text']);
+      return jsonResult(503, UNAVAILABLE['/api/files/read-text']);
     }
-    return true;
   }
 
   if (url.pathname === '/api/files/binary' && req.method === 'POST') {
     const transports = getWorkspaceTransports(deps);
     if (!transports?.workspaceBinaryTransport) {
-      sendJson(res, 503, UNAVAILABLE['/api/files/binary']);
-      return true;
+      return jsonResult(503, UNAVAILABLE['/api/files/binary']);
     }
     try {
-      const response = await transports.workspaceBinaryTransport.execute(await parseJsonBody<unknown>(req));
-      sendJson(res, response.status, response.body);
+      const response = await transports.workspaceBinaryTransport.execute(await req.readJson<unknown>());
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNAVAILABLE['/api/files/binary']);
+      return jsonResult(503, UNAVAILABLE['/api/files/binary']);
     }
-    return true;
   }
 
   if (url.pathname === '/api/files/list-dir' && req.method === 'POST') {
     const transports = getWorkspaceTransports(deps);
     if (!transports?.workspaceDirectoryTransport) {
-      sendJson(res, 503, UNAVAILABLE['/api/files/list-dir']);
-      return true;
+      return jsonResult(503, UNAVAILABLE['/api/files/list-dir']);
     }
     try {
-      const response = await transports.workspaceDirectoryTransport.list(await parseJsonBody<unknown>(req));
-      sendJson(res, response.status, response.body);
+      const response = await transports.workspaceDirectoryTransport.list(await req.readJson<unknown>());
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNAVAILABLE['/api/files/list-dir']);
+      return jsonResult(503, UNAVAILABLE['/api/files/list-dir']);
     }
-    return true;
   }
 
   if (url.pathname === '/api/files/write-text' && req.method === 'POST') {
     const transports = getWorkspaceTransports(deps);
     if (!transports?.workspaceWriteTransport) {
-      sendJson(res, 503, UNAVAILABLE['/api/files/write-text']);
-      return true;
+      return jsonResult(503, UNAVAILABLE['/api/files/write-text']);
     }
     try {
-      const response = await transports.workspaceWriteTransport.write(await parseJsonBody<unknown>(req));
-      sendJson(res, response.status, response.body);
+      const response = await transports.workspaceWriteTransport.write(await req.readJson<unknown>());
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNAVAILABLE['/api/files/write-text']);
+      return jsonResult(503, UNAVAILABLE['/api/files/write-text']);
     }
-    return true;
+  }
+
+  if (url.pathname === '/api/files/write-binary' && req.method === 'POST') {
+    const transports = getWorkspaceTransports(deps);
+    if (!transports?.workspaceWriteBinaryTransport) {
+      return jsonResult(503, UNAVAILABLE['/api/files/write-binary']);
+    }
+    let request: unknown;
+    try {
+      request = parseJsonBytes(await req.readBytes(70 * 1024 * 1024, true));
+    } catch (error) {
+      if (error instanceof HostApiBodyTooLarge) {
+        return jsonResult(413, { success: false, error: 'Workspace write content exceeds the limit' });
+      }
+      return jsonResult(503, UNAVAILABLE['/api/files/write-binary']);
+    }
+    try {
+      const response = await transports.workspaceWriteBinaryTransport.write(request);
+      return jsonResult(response.status, response.body);
+    } catch {
+      return jsonResult(422, { success: false, error: 'Workspace write outcome is unknown' });
+    }
   }
 
   if (url.pathname === '/api/files/save-image' && req.method === 'POST') {
     try {
-      const body = await parseJsonBody<{
+      const body = await req.readJson<{
         base64?: string;
         mimeType?: string;
         filePath?: string;
         defaultFileName: string;
-      }>(req);
+      }>();
       if (body.filePath && (typeof body.filePath !== 'string' || !isOpaqueStagedAttachmentId(body.filePath))) {
-        sendJson(res, 400, { success: false, error: 'Image source unavailable' });
-        return true;
+        return jsonResult(400, { success: false, error: 'Image source unavailable' });
       }
       const ext = body.defaultFileName.includes('.')
         ? body.defaultFileName.split('.').pop()!
@@ -113,8 +127,7 @@ export async function handleFileRoutes(
         ],
       });
       if (result.canceled || !result.filePath) {
-        sendJson(res, 200, { success: false });
-        return true;
+        return jsonResult(200, { success: false });
       }
       if (body.filePath) {
         await copyStagedAttachment(body.filePath, result.filePath);
@@ -122,17 +135,15 @@ export async function handleFileRoutes(
         const fsP = await import('node:fs/promises');
         await fsP.writeFile(result.filePath, Buffer.from(body.base64, 'base64'));
       } else {
-        sendJson(res, 400, { success: false, error: 'No image data provided' });
-        return true;
+        return jsonResult(400, { success: false, error: 'No image data provided' });
       }
-      sendJson(res, 200, { success: true, savedPath: basename(result.filePath.replaceAll('\\', '/')) });
+      return jsonResult(200, { success: true, savedPath: basename(result.filePath.replaceAll('\\', '/')) });
     } catch {
-      sendJson(res, 500, { success: false, error: 'Image save failed.' });
+      return jsonResult(500, { success: false, error: 'Image save failed.' });
     }
-    return true;
   }
 
-  return false;
+  return undefined;
 }
 
 function getWorkspaceTransports(

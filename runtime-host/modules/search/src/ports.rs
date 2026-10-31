@@ -7,6 +7,13 @@ use crate::{RuntimeSearchPhase, SearchError, SearchVerification};
 pub type RuntimeSearchFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, SearchError>> + Send + 'a>>;
 
+pub type SearchLifecycleFuture<'a> = Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+
+pub trait SearchLifecycleSource: Send {
+    fn wait_ready(&mut self) -> SearchLifecycleFuture<'_>;
+    fn changed(&mut self) -> SearchLifecycleFuture<'_>;
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeSearchProjection {
     pub base_url: String,

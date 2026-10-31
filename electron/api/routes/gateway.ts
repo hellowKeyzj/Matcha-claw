@@ -1,22 +1,20 @@
 import { traceDebug } from '../../utils/trace-logger';
-import type { IncomingMessage, ServerResponse } from 'http';
 import { RuntimeHostControlError } from '../../main/runtime-host-delivery/control';
 import type { RuntimeHostApiContext, RuntimeHostTransportContext } from '../context';
-import { readGatewayStatusProjection, unavailableGatewayStatus } from './app';
-import { sendJson } from '../route-utils';
+import { unavailableGatewayStatus } from '../../main/runtime-host-delivery/status';
+import { jsonResult, type HostApiRequest, type HostApiResponse, type HostApiRouteResult } from '../execution';
 
 const GATEWAY_CONTROL_UI_UNAVAILABLE = 'Gateway control UI URL is unavailable';
 
 type GatewayApiContext = RuntimeHostApiContext & RuntimeHostTransportContext<'runtimeControlTransport'>;
 
 export async function handleGatewayRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: GatewayApiContext,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/gateway/status' && req.method === 'GET') {
-    const status = await readGatewayStatusProjection(ctx.runtimeHost)
+    const status = await ctx.runtimeStatus.readGateway()
       .then((projection) => projection ?? unavailableGatewayStatus());
     traceDebug(() => ['[startup-trace]', {
       source: 'api.gateway',
@@ -28,14 +26,13 @@ export async function handleGatewayRoutes(
       transportState: status.transportState,
       portReachable: status.portReachable,
     }]);
-    sendJson(res, 200, status);
-    return true;
+    return jsonResult(200, status);
   }
 
   if (url.pathname === '/api/gateway/health' && req.method === 'GET') {
-    const status = await readGatewayStatusProjection(ctx.runtimeHost)
+    const status = await ctx.runtimeStatus.readGateway()
       .then((projection) => projection ?? unavailableGatewayStatus());
-    sendJson(res, 200, {
+    return jsonResult(200, {
       ok: status.healthSummary !== 'unresponsive',
       status: status.healthSummary,
       detail: status.gatewayReady ? undefined : 'gateway control channel not ready',
@@ -44,41 +41,35 @@ export async function handleGatewayRoutes(
       lastError: status.lastError,
       updatedAt: status.updatedAt,
     });
-    return true;
   }
 
   if (url.pathname === '/api/gateway/start' && req.method === 'POST') {
-    await handleLifecycleMutation(ctx, res, 'start');
-    return true;
+    return handleLifecycleMutation(ctx, 'start');
   }
 
   if (url.pathname === '/api/gateway/stop' && req.method === 'POST') {
-    await handleLifecycleMutation(ctx, res, 'stop');
-    return true;
+    return handleLifecycleMutation(ctx, 'stop');
   }
 
   if (url.pathname === '/api/gateway/restart' && req.method === 'POST') {
-    await handleLifecycleMutation(ctx, res, 'restart');
-    return true;
+    return handleLifecycleMutation(ctx, 'restart');
   }
 
   if (url.pathname === '/api/gateway/repair' && req.method === 'POST') {
-    await handleLifecycleMutation(ctx, res, 'repair');
-    return true;
+    return handleLifecycleMutation(ctx, 'repair');
   }
 
   if (url.pathname === '/api/gateway/repair' && req.method === 'GET') {
     try {
       const response = await ctx.runtimeHostTransports.runtimeControlTransport.repairStatus();
       if (response.status === 200) {
-        sendJson(res, 200, response.body.result);
+        return jsonResult(200, response.body.result);
       } else {
-        sendJson(res, 503, { success: false, error: 'Gateway repair status is unavailable' });
+        return jsonResult(503, { success: false, error: 'Gateway repair status is unavailable' });
       }
     } catch {
-      sendJson(res, 503, { success: false, error: 'Gateway repair status is unavailable' });
+      return jsonResult(503, { success: false, error: 'Gateway repair status is unavailable' });
     }
-    return true;
   }
 
   if (url.pathname === '/api/gateway/control-ui' && req.method === 'GET') {
@@ -86,53 +77,48 @@ export async function handleGatewayRoutes(
       const response = await ctx.runtimeHostTransports.runtimeControlTransport.controlUiUrl();
       const controlUi = response.status === 200 ? readControlUiResult(response.body) : null;
       if (!controlUi) {
-        sendJson(res, 503, { success: false, error: GATEWAY_CONTROL_UI_UNAVAILABLE });
-        return true;
+        return jsonResult(503, { success: false, error: GATEWAY_CONTROL_UI_UNAVAILABLE });
       }
-      sendJson(res, 200, { success: true, ...controlUi });
+      return jsonResult(200, { success: true, ...controlUi });
     } catch {
-      sendJson(res, 503, { success: false, error: GATEWAY_CONTROL_UI_UNAVAILABLE });
+      return jsonResult(503, { success: false, error: GATEWAY_CONTROL_UI_UNAVAILABLE });
     }
-    return true;
   }
 
-  return false;
+  return undefined;
 }
 
 async function handleLifecycleMutation(
   ctx: GatewayApiContext,
-  res: ServerResponse,
   operation: 'start' | 'stop' | 'restart' | 'repair',
-): Promise<void> {
+): Promise<HostApiResponse> {
   try {
     const transport = ctx.runtimeHostTransports.runtimeControlTransport;
     const response = await transport[
       operation === 'start' ? 'lifecycleStart' : operation === 'stop' ? 'lifecycleStop' : operation === 'repair' ? 'lifecycleRepair' : 'lifecycleRestart'
     ]();
     if (response.status === 202) {
-      sendJson(res, 202, response.body);
+      return jsonResult(202, response.body);
     } else {
-      sendLifecycleFailure(res, operation, undefined, response.status);
+      return sendLifecycleFailure(operation, undefined, response.status);
     }
   } catch (error) {
-    sendLifecycleFailure(res, operation, error, undefined);
+    return sendLifecycleFailure(operation, error, undefined);
   }
 }
 
 function sendLifecycleFailure(
-  res: ServerResponse,
   operation: 'start' | 'stop' | 'restart' | 'repair',
   error: unknown,
   status: number | undefined,
-): void {
+): HostApiResponse {
   if (status === 409) {
-    sendJson(res, 409, { success: false, error: `Gateway ${operation} is busy` });
-    return;
+    return jsonResult(409, { success: false, error: `Gateway ${operation} is busy` });
   }
   const unknown = status === 503
     || error instanceof RuntimeHostControlError && error.delivery === 'unknown-delivery';
   const unavailable = status === 400 || status === 401 || status === 422;
-  sendJson(res, unknown || unavailable ? 503 : 500, {
+  return jsonResult(unknown || unavailable ? 503 : 500, {
     success: false,
     error: `Gateway ${operation} ${unknown ? 'outcome is unknown' : unavailable ? 'is unavailable' : 'failed'}`,
   });

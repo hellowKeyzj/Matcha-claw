@@ -242,8 +242,9 @@ export class RuntimeHostControlClient {
   private readonly readyHandlers = new Set<() => void>();
   private readonly disconnectHandlers = new Set<(error: RuntimeHostControlError) => void>();
   private readonly safeEventHandlers = new Set<(event: RuntimeHostSafeEvent) => void>();
-  private bufferedFrame = Buffer.alloc(0);
-  private expectedFrameBytes: number | undefined;
+  private readonly frameHeader = Buffer.alloc(4);
+  private frameBody: Buffer | undefined;
+  private frameOffset = 0;
   private disconnectError: RuntimeHostControlError | undefined;
   private isReady = false;
   private isClosed = false;
@@ -349,27 +350,27 @@ export class RuntimeHostControlClient {
       return;
     }
 
-    const input = Buffer.from(chunk);
     let offset = 0;
-    while (offset < input.length && !this.isClosed) {
-      if (this.expectedFrameBytes === undefined) {
-        offset = this.appendFrameBytes(input, offset, 4);
-        if (this.bufferedFrame.length < 4) return;
+    while (offset < chunk.length && !this.isClosed) {
+      if (this.frameBody === undefined) {
+        offset = this.copyFrameBytes(chunk, offset, this.frameHeader);
+        if (this.frameOffset < 4) return;
 
-        const bodyBytes = this.bufferedFrame.readUInt32BE(0);
+        const bodyBytes = this.frameHeader.readUInt32BE(0);
         if (bodyBytes === 0 || bodyBytes > MAX_RUNTIME_HOST_CONTROL_FRAME_BYTES) {
           this.disconnect('protocol-invalid');
           return;
         }
-        this.expectedFrameBytes = 4 + bodyBytes;
+        this.frameBody = Buffer.allocUnsafe(bodyBytes);
+        this.frameOffset = 0;
       }
 
-      offset = this.appendFrameBytes(input, offset, this.expectedFrameBytes);
-      if (this.bufferedFrame.length < this.expectedFrameBytes) return;
+      offset = this.copyFrameBytes(chunk, offset, this.frameBody);
+      if (this.frameOffset < this.frameBody.length) return;
 
-      const body = this.bufferedFrame.subarray(4);
-      this.bufferedFrame = Buffer.alloc(0);
-      this.expectedFrameBytes = undefined;
+      const body = this.frameBody;
+      this.frameBody = undefined;
+      this.frameOffset = 0;
       const message = decodeIncomingMessage(body);
       if (!message) {
         this.disconnect('protocol-invalid');
@@ -399,15 +400,11 @@ export class RuntimeHostControlClient {
     this.stdout.removeListener('error', this.handleOutputDisconnect);
   };
 
-  private appendFrameBytes(input: Buffer, offset: number, totalFrameBytes: number): number {
-    const missingBytes = totalFrameBytes - this.bufferedFrame.length;
-    const availableBytes = input.length - offset;
-    const copiedBytes = Math.min(missingBytes, availableBytes);
+  private copyFrameBytes(input: Uint8Array, offset: number, target: Buffer): number {
+    const copiedBytes = Math.min(target.length - this.frameOffset, input.length - offset);
     if (copiedBytes > 0) {
-      this.bufferedFrame = Buffer.concat([
-        this.bufferedFrame,
-        input.subarray(offset, offset + copiedBytes),
-      ]);
+      target.set(input.subarray(offset, offset + copiedBytes), this.frameOffset);
+      this.frameOffset += copiedBytes;
     }
     return offset + copiedBytes;
   }
@@ -466,8 +463,8 @@ export class RuntimeHostControlClient {
     const error = new RuntimeHostControlError(kind, 'not-delivered');
     this.isClosed = true;
     this.disconnectError = error;
-    this.bufferedFrame = Buffer.alloc(0);
-    this.expectedFrameBytes = undefined;
+    this.frameBody = undefined;
+    this.frameOffset = 0;
     this.stdout.removeListener('data', this.handleOutputData);
     this.stdout.removeListener('end', this.handleOutputDisconnect);
 

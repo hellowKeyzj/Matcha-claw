@@ -4817,10 +4817,11 @@ pub(crate) fn read_json<T: DeserializeOwned + Default>(
     path: impl AsRef<Path>,
 ) -> Result<T, WikiFailure> {
     let path = path.as_ref();
-    if !path.exists() {
-        return Ok(T::default());
-    }
-    let bytes = std::fs::read(path).map_err(|error| WikiFailure::io(path_text(path), error))?;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(error) => return Err(WikiFailure::io(path_text(path), error)),
+    };
     serde_json::from_slice(&bytes).map_err(|error| WikiFailure::state(error.to_string()))
 }
 

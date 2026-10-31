@@ -13,6 +13,7 @@ use crate::{
         WorkspaceWriteFailure, WorkspaceWriteReceipt,
     },
     ports::WorkspaceBinding,
+    session_images::{SessionImageData, SessionImageFailure, SessionImagePage},
 };
 
 pub(crate) struct WorkspaceCommand {
@@ -55,6 +56,13 @@ pub(crate) enum WorkspaceOperation {
         agent_id: String,
         relative_path: String,
         content: String,
+        reply: oneshot::Sender<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>>,
+    },
+    WriteBinary {
+        endpoint: RuntimeEndpoint,
+        agent_id: String,
+        relative_path: String,
+        content: Vec<u8>,
         reply: oneshot::Sender<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>>,
     },
     PrepareMedia {
@@ -103,6 +111,20 @@ pub(crate) enum WorkspaceOperation {
         paths: Vec<WorkspaceMediaPath>,
         reply: oneshot::Sender<Result<Vec<WorkspaceMediaReceipt>, WorkspaceMediaFailure>>,
     },
+    ListSessionImages {
+        endpoint: RuntimeEndpoint,
+        session_key: String,
+        agent_id: String,
+        cursor: Option<String>,
+        reply: oneshot::Sender<Result<SessionImagePage, SessionImageFailure>>,
+    },
+    ReadSessionImage {
+        endpoint: RuntimeEndpoint,
+        session_key: String,
+        agent_id: String,
+        reference: String,
+        reply: oneshot::Sender<Result<SessionImageData, SessionImageFailure>>,
+    },
     StageBufferMedia {
         endpoint: RuntimeEndpoint,
         session_key: String,
@@ -144,7 +166,8 @@ impl WorkspaceOperation {
             | Self::ReadBinary { endpoint, agent_id, .. }
             | Self::StatFile { endpoint, agent_id, .. }
             | Self::ListDirectory { endpoint, agent_id, .. }
-            | Self::WriteText { endpoint, agent_id, .. } => (endpoint, WorkspaceSelection::Agent(agent_id)),
+            | Self::WriteText { endpoint, agent_id, .. }
+            | Self::WriteBinary { endpoint, agent_id, .. } => (endpoint, WorkspaceSelection::Agent(agent_id)),
             Self::PrepareMedia { endpoint, session_key, .. }
             | Self::ResolveMedia { endpoint, session_key, .. }
             | Self::ThumbnailMedia { endpoint, session_key, .. }
@@ -152,6 +175,8 @@ impl WorkspaceOperation {
             | Self::ThumbnailMediaGateway { endpoint, session_key, .. }
             | Self::ThumbnailsMedia { endpoint, session_key, .. }
             | Self::StagePathsMedia { endpoint, session_key, .. }
+            | Self::ListSessionImages { endpoint, session_key, .. }
+            | Self::ReadSessionImage { endpoint, session_key, .. }
             | Self::StageBufferMedia { endpoint, session_key, .. } => (endpoint, WorkspaceSelection::Session(session_key)),
         }
     }
@@ -160,7 +185,9 @@ impl WorkspaceOperation {
         !matches!(self, Self::ResolveMedia { .. }
             | Self::ThumbnailMediaReference { .. }
             | Self::ThumbnailMediaGateway { .. }
-            | Self::StageBufferMedia { .. })
+            | Self::StageBufferMedia { .. }
+            | Self::ListSessionImages { .. }
+            | Self::ReadSessionImage { .. })
     }
 }
 

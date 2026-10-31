@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { TeamSkillTransport } from '../../main/runtime-host-delivery/transport/teams/skill';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import { isProductRuntimeScope, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
@@ -26,23 +25,20 @@ type TeamSkillRequest =
     }>;
 
 export async function handleTeamSkillRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: TeamSkillTransport,
-): Promise<boolean> {
-  if (url.pathname !== '/api/team/skill' || req.method !== 'POST') return false;
+): Promise<HostApiRouteResult> {
+  if (url.pathname !== '/api/team/skill' || req.method !== 'POST') return undefined;
 
   let request: unknown;
   try {
-    request = await parseJsonBody<unknown>(req);
+    request = await req.readJson<unknown>();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   if (!isRequest(request)) {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
 
   try {
@@ -53,11 +49,10 @@ export async function handleTeamSkillRoutes(
         : request.operation === 'team.skill.dependency-plan'
           ? await transport.dependencyPlan(request.selectionId, request.scope, request.sourceAgentId)
           : await transport.materialize(request.selectionId, request.teamId, request.idempotencyKey, request.scope, request.sourceAgentId);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }
 
 function isRequest(value: unknown): value is TeamSkillRequest {

@@ -1,16 +1,20 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AppPluginDevelopment, AppPluginKind, AppPluginManifest } from '../../../src/types/desktop/app-plugin';
+import { appPluginHasKind } from '../../../src/types/desktop/app-plugin';
+import { appPluginResources, appResourceUri, appToolName } from '../../../src/types/desktop/app-plugin-sdk';
+import type { AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import type { AppPluginHost } from './host';
 import { sendJson } from '../../api/route-utils';
 import { APP_PLUGIN_TOOLS, callAppPluginTool, type AppPluginToolOperations } from './agent-tools';
 import { publishAppPluginMcp } from './mcp-projection';
 import type { ApplicationPluginOwner } from './owner';
-import { AppPluginError, requireDigest, requireObject, requirePluginId } from './package';
+import { AppPluginError, MAX_APP_PLUGIN_ZIP_BYTES, requireDigest, requireObject, requirePluginId } from './package';
 
 const GRANT_LIFETIME_MS = 30 * 60 * 1000;
 const MAX_GRANTS = 128;
 const MAX_OBSERVATIONS = 128;
-const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
+const MAX_REQUEST_BYTES = Math.max(2 * MAX_APP_PLUGIN_ZIP_BYTES, 4 * Math.ceil(MAX_APP_PLUGIN_ZIP_BYTES / 3) + 64 * 1024);
 
 export interface AppPluginRuntimeStatusInput {
   pluginId: string;
@@ -24,6 +28,7 @@ export interface AppPluginRuntimeStatusInput {
 export interface AppPluginAgentGateway {
   createDevelopment(input: { kind: AppPluginKind; pluginId?: string }): AppPluginDevelopment;
   reportRuntimeStatus(input: AppPluginRuntimeStatusInput): Promise<void>;
+  changed(): void;
   close(): Promise<void>;
 }
 
@@ -43,9 +48,8 @@ type ReaderObservation = Omit<AppPluginRuntimeStatusInput, 'message'> & {
 };
 
 function assertScope(manifest: AppPluginManifest, grant: DevelopmentGrant): void {
-  const readers = !!manifest.contributes.readers?.length;
-  const connectors = !!manifest.contributes.connectors?.length;
-  if (grant.development.kind === 'reader' ? !readers || connectors : !connectors || readers) {
+  const kinds = (['reader', 'connector', 'application'] as const).filter((kind) => appPluginHasKind(manifest, kind));
+  if (kinds.length !== 1 || kinds[0] !== grant.development.kind) {
     throw new AppPluginError('invalid_package', 'Development is authorized for one plugin kind only; mixed or other-kind packages are not allowed.');
   }
   const id = grant.development.pluginId ?? grant.boundId;
@@ -58,7 +62,7 @@ async function readRequest(req: IncomingMessage): Promise<unknown> {
   for await (const value of req) {
     const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
     size += chunk.length;
-    if (size > MAX_REQUEST_BYTES) throw new AppPluginError('invalid_package', 'App plugin tool input exceeds 32 MiB.');
+    if (size > MAX_REQUEST_BYTES) throw new AppPluginError('invalid_package', 'App plugin tool input exceeds the package request limit.');
     chunks.push(chunk);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; } catch {
@@ -68,9 +72,22 @@ async function readRequest(req: IncomingMessage): Promise<unknown> {
 
 export async function startAppPluginAgentGateway(input: {
   owner: ApplicationPluginOwner;
+  host: AppPluginHost;
   root: string;
 }): Promise<AppPluginAgentGateway> {
-  const { owner } = input;
+  const { owner, host } = input;
+  const catalogIdentity = randomUUID();
+  const catalogWaiters = new Set<() => void>();
+  const requests = new Set<AbortController>();
+  const notifyChanged = () => { for (const wake of catalogWaiters) wake(); };
+  const waitForCatalogChange = (revision: string | null, signal: AbortSignal) => {
+    let wake = () => undefined as void;
+    const promise = new Promise<void>((resolve) => { wake = resolve; });
+    const timer = revision === null ? undefined : setTimeout(wake, 25_000);
+    if (revision !== null) catalogWaiters.add(wake);
+    signal.addEventListener('abort', wake, { once: true });
+    return { promise, close() { clearTimeout(timer); catalogWaiters.delete(wake); signal.removeEventListener('abort', wake); } };
+  };
   const token = randomBytes(32).toString('hex');
   const expectedToken = Buffer.from(`Bearer ${token}`);
   const grants = new Map<string, DevelopmentGrant>();
@@ -164,6 +181,8 @@ export async function startAppPluginAgentGateway(input: {
         pluginId, installed: true, digest: plugin.digest, enabled: plugin.enabled,
         runtime: !plugin.enabled ? 'not-mounted' : readers.length ? 'see-reader-observations' : 'not-observed',
         readers,
+        applications: plugin.manifest.contributes.applications ?? [],
+        tools: plugin.manifest.contributes.tools ?? [],
         connectors: (plugin.manifest.contributes.connectors ?? []).map((connector) => ({ id: connector.id, runtime: 'not-observed', configurationOnly: true })),
         observation: 'Installation and enabled configuration do not prove rendering correctness or a connected MCP service.',
       };
@@ -176,24 +195,76 @@ export async function startAppPluginAgentGateway(input: {
       sendJson(res, 403, { error: 'App plugin gateway authorization failed.' });
       return;
     }
-    if (closed || req.method !== 'POST' || req.url !== '/tools/call') {
-      sendJson(res, closed ? 503 : 404, { error: 'App plugin tool endpoint unavailable.' });
-      return;
-    }
-    if (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
-      sendJson(res, 415, { error: 'App plugin tools require application/json.' });
-      return;
-    }
+    if (closed) { sendJson(res, 503, { error: 'App plugin gateway is closing.' }); return; }
+    if (requests.size >= 128) { sendJson(res, 429, { error: 'Too many app plugin gateway requests.' }); return; }
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const controller = new AbortController();
+    const abort = () => controller.abort(new Error('App plugin caller disconnected.'));
+    requests.add(controller);
+    req.once('aborted', abort);
+    res.once('close', abort);
     try {
-      const body = requireObject(await readRequest(req), ['name', 'arguments']);
-      if (typeof body.name !== 'string' || !APP_PLUGIN_TOOLS.some((tool) => tool.name === body.name)) {
-        throw new AppPluginError('invalid_package', 'Unknown app plugin tool.');
+      if (req.method === 'GET' && url.pathname === '/catalog') {
+        const revision = url.searchParams.get('revision');
+        const wake = waitForCatalogChange(revision, controller.signal);
+        let catalog;
+        try {
+          catalog = await owner.list();
+          if (revision === `${catalogIdentity}:${catalog.revision}`) {
+            await wake.promise;
+            catalog = await owner.list();
+          }
+        } finally { wake.close(); }
+        if (controller.signal.aborted) return;
+        const current = `${catalogIdentity}:${catalog.revision}`;
+        if (revision === current) { res.writeHead(204); res.end(); return; }
+        const enabled = catalog.plugins.filter((plugin) => plugin.enabled);
+        sendJson(res, 200, { revision: current, tools: [...APP_PLUGIN_TOOLS,
+          ...enabled.flatMap((plugin) => (plugin.manifest.contributes.tools ?? []).map((tool) => ({ ...tool, name: appToolName(plugin.manifest.id, tool.name) })))],
+        resources: enabled.flatMap((plugin) => appPluginResources(plugin.manifest)) });
+        return;
       }
-      const result = await callAppPluginTool(body.name, body.arguments, operations);
-      sendJson(res, 200, { result });
+      if (req.method !== 'POST' || !['/tools/call', '/resources/read'].includes(url.pathname)) {
+        sendJson(res, 404, { error: 'App plugin endpoint unavailable.' }); return;
+      }
+      if (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+        sendJson(res, 415, { error: 'App plugin requests require application/json.' }); return;
+      }
+      const value = await readRequest(req);
+      if (url.pathname === '/resources/read') {
+        const body = requireObject(value, ['uri']);
+        const plugins = (await owner.list()).plugins.filter((plugin) => plugin.enabled);
+        for (const plugin of plugins) for (const application of plugin.manifest.contributes.applications ?? []) {
+          if (body.uri !== appResourceUri(plugin.manifest.id, application.id)) continue;
+          const { html } = await owner.bundle(plugin.manifest.id, plugin.digest, application.entry);
+          sendJson(res, 200, { result: { contents: [{ uri: body.uri, mimeType: 'text/html;profile=mcp-app', text: html }] } });
+          return;
+        }
+        throw new AppPluginError('not_found', 'Application resource is not available.');
+      }
+      const body = requireObject(value, ['name', 'arguments']);
+      if (typeof body.name !== 'string') throw new AppPluginError('invalid_package', 'Tool name must be a string.');
+      let result: AppToolResult;
+      if (APP_PLUGIN_TOOLS.some((tool) => tool.name === body.name)) {
+        const value = await callAppPluginTool(body.name, body.arguments, operations);
+        result = { content: [{ type: 'text', text: JSON.stringify(value) }] };
+      } else {
+        const plugins = (await owner.list()).plugins.filter((plugin) => plugin.enabled);
+        const match = plugins.flatMap((plugin) => (plugin.manifest.contributes.tools ?? []).map((tool) => ({ plugin, tool })))
+          .find(({ plugin, tool }) => appToolName(plugin.manifest.id, tool.name) === body.name);
+        if (!match) throw new AppPluginError('not_found', 'App plugin tool is not available.');
+        result = await host.call({ id: match.plugin.manifest.id, digest: match.plugin.digest, name: match.tool.name,
+          arguments: body.arguments as Record<string, unknown> }, controller.signal);
+      }
+      if (!controller.signal.aborted) sendJson(res, 200, { result });
     } catch (error) {
       const expected = error instanceof AppPluginError;
-      sendJson(res, expected ? 400 : 500, { error: expected ? error.message : 'App plugin tool failed; no installation success was confirmed.' });
+      const status = expected ? { invalid_package: 400, conflict: 409, not_found: 404, closed: 503, busy: 429 }[error.code] : 500;
+      if (!controller.signal.aborted) sendJson(res, status, { error: expected ? error.message : 'App plugin operation failed; external effects may already have occurred.' });
+    } finally {
+      requests.delete(controller);
+      req.off('aborted', abort);
+      res.off('close', abort);
     }
   };
   const server = createServer({ requestTimeout: 60_000, headersTimeout: 10_000, maxHeaderSize: 8 * 1024 }, (req, res) => {
@@ -206,7 +277,7 @@ export async function startAppPluginAgentGateway(input: {
   });
   const closeServer = () => new Promise<void>((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
-    server.closeIdleConnections();
+    server.closeAllConnections();
   });
   const address = server.address();
   if (!address || typeof address === 'string') {
@@ -224,7 +295,7 @@ export async function startAppPluginAgentGateway(input: {
     createDevelopment(developmentInput) {
       ensureOpen();
       const value = requireObject(developmentInput, ['kind', 'pluginId']);
-      if (value.kind !== 'reader' && value.kind !== 'connector') throw new AppPluginError('invalid_package', 'Development requires reader or connector kind.');
+      if (value.kind !== 'reader' && value.kind !== 'connector' && value.kind !== 'application') throw new AppPluginError('invalid_package', 'Development requires reader, connector or application kind.');
       if (value.pluginId !== undefined) requirePluginId(value.pluginId);
       for (const [id, grant] of grants) {
         if (!grant.busy && Date.parse(grant.development.expiresAt) <= Date.now()) grants.delete(id);
@@ -276,9 +347,12 @@ export async function startAppPluginAgentGateway(input: {
       ensureOpen();
       observation.pending = false;
     },
+    changed: notifyChanged,
     close() {
       if (!closing) {
         closed = true;
+        for (const request of requests) request.abort();
+        notifyChanged();
         grants.clear();
         observations.clear();
         closing = closeServer().finally(retire);

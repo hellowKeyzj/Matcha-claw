@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { CloudAccountApiContext } from '../context';
-import { sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiResponse, type HostApiRouteResult } from '../execution';
 
 const UNAVAILABLE = {
   success: false,
@@ -12,49 +11,45 @@ const BAD_GATEWAY = {
 } as const;
 
 export async function handleSubscriptionRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: CloudAccountApiContext,
-): Promise<boolean> {
-  if (req.method !== 'GET') return false;
+): Promise<HostApiRouteResult> {
+  if (req.method !== 'GET') return undefined;
 
   if (url.pathname === '/api/subscription/summary') {
-    return sendSubscriptionResult(res, ctx, (service) => service.getSubscriptionSummary());
+    return sendSubscriptionResult(ctx, (service) => service.getSubscriptionSummary());
   }
 
   if (url.pathname === '/api/subscription/active') {
-    return sendSubscriptionResult(res, ctx, (service) => service.getActiveSubscriptions());
+    return sendSubscriptionResult(ctx, (service) => service.getActiveSubscriptions());
   }
 
   if (url.pathname === '/api/subscription/progress') {
-    return sendSubscriptionResult(res, ctx, (service) => service.getSubscriptionProgress());
+    return sendSubscriptionResult(ctx, (service) => service.getSubscriptionProgress());
   }
 
   if (url.pathname === '/api/subscription/platform-quotas') {
-    return sendSubscriptionResult(res, ctx, (service) => service.getPlatformQuotas());
+    return sendSubscriptionResult(ctx, (service) => service.getPlatformQuotas());
   }
 
-  return false;
+  return undefined;
 }
 
 async function sendSubscriptionResult(
-  res: ServerResponse,
   ctx: CloudAccountApiContext,
   execute: (service: NonNullable<CloudAccountApiContext['cloudAccountService']>) => Promise<unknown>,
-): Promise<true> {
+): Promise<HostApiResponse> {
   const service = ctx.cloudAccountService;
   if (!service) {
-    sendJson(res, 503, UNAVAILABLE);
-    return true;
+    return jsonResult(503, UNAVAILABLE);
   }
 
   try {
-    sendJson(res, 200, await execute(service));
+    return jsonResult(200, await execute(service));
   } catch (error) {
-    sendJson(res, statusCodeForServiceError(error), BAD_GATEWAY);
+    return jsonResult(statusCodeForServiceError(error), BAD_GATEWAY);
   }
-  return true;
 }
 
 function statusCodeForServiceError(error: unknown): 401 | 502 {

@@ -133,6 +133,7 @@ struct Pending {
 #[derive(Default)]
 pub(crate) struct Operations {
     closed: bool,
+    failed: bool,
     pending: Vec<Pending>,
     pub results: crate::result::Results,
 }
@@ -154,6 +155,7 @@ impl Operations {
             if self.pending[index].task.is_finished() {
                 let mut completed = self.pending.swap_remove(index);
                 if completed.task.join().await.is_err() {
+                    self.failed = true;
                     eprintln!("[skills-call] operation join failed");
                 }
             } else {
@@ -254,16 +256,18 @@ impl Operations {
         Ok(())
     }
 
-    pub async fn stop(&mut self) {
+    pub async fn stop(&mut self) -> bool {
         self.closed = true;
         for operation in &self.pending {
             operation.task.cancel();
         }
         for mut operation in self.pending.drain(..) {
             if operation.task.join().await.is_err() {
+                self.failed = true;
                 eprintln!("[skills-call] shutdown join failed");
             }
         }
         self.results.clear().await;
+        self.failed
     }
 }

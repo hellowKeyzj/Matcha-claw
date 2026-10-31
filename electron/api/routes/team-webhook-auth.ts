@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { TeamWebhookAuthTransport } from '../../main/runtime-host-delivery/transport/teams/webhook-auth';
-import { sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 const UNAVAILABLE = {
   success: false,
@@ -8,25 +7,22 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleTeamWebhookAuthRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport?: TeamWebhookAuthTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname !== '/api/runtime-host/team-webhook-auth' || req.method !== 'GET') {
-    return false;
+    return undefined;
   }
 
   if (!transport) {
-    sendJson(res, 503, UNAVAILABLE);
-    return true;
+    return jsonResult(503, UNAVAILABLE);
   }
 
   try {
     const response = await transport.read();
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }

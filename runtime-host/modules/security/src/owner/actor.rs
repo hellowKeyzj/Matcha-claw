@@ -80,18 +80,18 @@ impl SecurityGlobalState {
             .map_err(|_| ())
     }
 
-    async fn recover_pending(&self, shared: &SecurityShared) {
-        self.serialize_effect(async {
-            let Ok(Some((revision, desired))) = self.policy_delivery.pending() else {
-                return;
+    async fn recover_pending(&self, shared: &SecurityShared) -> Result<(), ()> {
+        let policy_recovery = self.serialize_effect(async {
+            let Some((revision, desired)) = self.policy_delivery.pending()? else {
+                return Ok(());
             };
             let outcome = self.apply_policy_sync_effect(shared, desired).await;
-            let _ = self
-                .policy_delivery
-                .settle(SecurityPolicyDeliverySettlement { revision, outcome });
+            self.policy_delivery
+                .settle(SecurityPolicyDeliverySettlement { revision, outcome })
         })
         .await;
-        let _ = self.operation_receipts.recover_pending();
+        let operation_recovery = self.operation_receipts.recover_pending();
+        policy_recovery.and(operation_recovery)
     }
 
     async fn replace_policy(
@@ -368,8 +368,7 @@ impl OwnerSpec for SecurityOwner {
                 }, effect).await;
             }
             SecurityCommand::RecoverPending { reply } => {
-                state.recover_pending(&shared).await;
-                let _ = reply.send(());
+                let _ = reply.send(state.recover_pending(&shared).await);
             }
             SecurityCommand::Emergency { correlation, call } => {
                 if call.running().await.is_err() {

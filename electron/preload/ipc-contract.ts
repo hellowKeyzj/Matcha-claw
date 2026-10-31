@@ -16,6 +16,7 @@ export const SHELL_INVOKE_CHANNELS = [
   'window:setRightDockWidth',
   'window:syncTrafficLightPosition',
   'shell:openExternal',
+  'shell:writeClipboardImage',
   'shell:openResourcePath',
   'shell:openChromeExtensions',
   'shell:showAppLogsDirectory',

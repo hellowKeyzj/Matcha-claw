@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createSignalQuitHandler } from '@electron/main/signal-quit';
+import { createSignalQuitHandler } from '@electron/main/lifecycle/signals';
 
 describe('signal quit handler', () => {
   it('logs and requests quit when signal is received', () => {

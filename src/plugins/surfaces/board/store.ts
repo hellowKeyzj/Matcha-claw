@@ -89,8 +89,8 @@ export const useBoardStore = create<BoardState>((set, get) => {
             const snapshot = await boardExecute(current.identity, { method: 'board.get' });
             if (observation !== current) throw failureError(closedFailure);
             if (generation !== current.generation) continue;
-            result = snapshot.revision < current.revision ? get().snapshot ?? undefined : snapshot;
-            if (!result) throw failureError({ code: 'stale', message: 'Board snapshot is out of date; refresh to read the current revision' });
+            if (snapshot.revision < current.revision) throw failureError({ code: 'stale', message: 'Board snapshot is out of date; refresh to read the current revision' });
+            result = snapshot;
             applySnapshot(current, result);
             failure = null;
           } catch (error) {
@@ -131,7 +131,10 @@ export const useBoardStore = create<BoardState>((set, get) => {
       const result = await boardExecute<M>(current.identity, operation);
       if (observation !== current || generation !== current.generation) throw failureError(closedFailure);
       if (operation.method === 'board.update' || operation.method === 'board.widget.put' || operation.method === 'board.widget.grant') {
-        applySnapshot(current, result as BoardSnapshot);
+        const receipt = result as BoardSnapshot;
+        current.revision = Math.max(current.revision, receipt.revision);
+        await refresh();
+        if (observation !== current || generation !== current.generation) throw failureError(closedFailure);
       }
       return result;
     } catch (error) {

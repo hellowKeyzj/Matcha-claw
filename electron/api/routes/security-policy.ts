@@ -1,9 +1,8 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type {
   SecurityPolicyRequest,
   SecurityPolicyTransport,
 } from '../../main/runtime-host-delivery/transport/security/policy';
-import { parseJsonBody, sendJson } from '../route-utils';
 
 const INVALID = {
   success: false,
@@ -15,40 +14,35 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleSecurityPolicyRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: SecurityPolicyTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/security/policy/current' && req.method === 'GET') {
     try {
       const policy = await transport.read();
-      sendJson(res, policy ? 200 : 503, policy ?? UNAVAILABLE);
+      return jsonResult(policy ? 200 : 503, policy ?? UNAVAILABLE);
     } catch {
-      sendJson(res, 503, UNAVAILABLE);
+      return jsonResult(503, UNAVAILABLE);
     }
-    return true;
   }
-  if (url.pathname !== '/api/security/policy' || req.method !== 'POST') return false;
+  if (url.pathname !== '/api/security/policy' || req.method !== 'POST') return undefined;
 
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   if (!isRequest(body)) {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   try {
     const response = await transport.submit(body);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }
 
 function isRequest(value: unknown): value is SecurityPolicyRequest {

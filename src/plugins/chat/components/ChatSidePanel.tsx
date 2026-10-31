@@ -1,4 +1,4 @@
-import { memo, Suspense, useMemo, type CSSProperties } from 'react';
+import { memo, Suspense, useMemo, useState, type CSSProperties } from 'react';
 import { PanelRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -9,7 +9,8 @@ import { chatSidePanels, type ChatPanelProps } from '../extensions';
 import type { ChatSidePanelMode } from '@/app/layout/workspace';
 import type { ChatSidePanelTab } from '../useChatSidePanelController';
 
-export interface ChatSidePanelPresentation extends Omit<ChatPanelProps, 'sessionIdentity'> {
+export interface ChatSidePanelPresentation extends Omit<ChatPanelProps, 'sessionIdentity' | 'registerCloseHandler'> {
+  registerCloseHandler: (id: string, handler: Parameters<NonNullable<ChatPanelProps['registerCloseHandler']>>[0]) => () => void;
   mode: ChatSidePanelMode;
   activeTab: ChatSidePanelTab;
   artifactWorkbenchFullscreen: boolean;
@@ -26,6 +27,11 @@ export const ChatSidePanel = memo(function ChatSidePanel(props: ChatSidePanelPro
   const { t } = useTranslation('chat');
   const contributions = useContributions(chatSidePanels);
   const panels = useMemo(() => [...contributions].sort((left, right) => left.order - right.order), [contributions]);
+  const [retainedPanels, setRetainedPanels] = useState<readonly string[]>([]);
+  const nextRetainedPanels = panels.filter((panel) => panel.keepMounted && (panel.id === activeTab || retainedPanels.includes(panel.id))).map((panel) => panel.id);
+  if (nextRetainedPanels.length !== retainedPanels.length || nextRetainedPanels.some((id, index) => id !== retainedPanels[index])) {
+    setRetainedPanels(nextRetainedPanels);
+  }
   const compactTopTabs = Math.max(0, width - 24 - 8 - 32) / panels.length < 78;
   const panelStyle = { ['--chat-side-panel-width' as string]: `${width}px` } as CSSProperties;
 
@@ -70,8 +76,8 @@ export const ChatSidePanel = memo(function ChatSidePanel(props: ChatSidePanelPro
             </Button>
           </div>
         </div>
-        {panels.map(({ id, component: Content }) => (
-          <TabsContent key={id} value={id} className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
+        {panels.filter((panel) => panel.id === activeTab || (panel.keepMounted && retainedPanels.includes(panel.id))).map(({ id, keepMounted, component: Content }) => (
+          <TabsContent key={id} value={id} forceMount={keepMounted ? true : undefined} hidden={id !== activeTab} inert={id !== activeTab} className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=active]:flex-col">
             <Suspense fallback={null}><Content
               sessionIdentity={props.sessionIdentity}
               width={width}
@@ -79,6 +85,7 @@ export const ChatSidePanel = memo(function ChatSidePanel(props: ChatSidePanelPro
               layout={props.layout}
               onLayoutChange={props.onLayoutChange}
               onClose={onClose}
+              registerCloseHandler={(handler) => props.registerCloseHandler(id, handler)}
               onSendMessage={props.onSendMessage}
               onOpenLink={props.onOpenLink}
             /></Suspense>

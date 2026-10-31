@@ -158,6 +158,20 @@ impl WorkspaceFiles {
         })
     }
 
+    pub(super) fn write_binary(
+        &self,
+        relative_path: &str,
+        content: &[u8],
+    ) -> Result<(String, u64), WorkspaceFileError> {
+        if content.len() > MAX_BINARY_BYTES {
+            return Err(WorkspaceFileError::TooLarge);
+        }
+        let path = RelativePath::try_new(relative_path)?;
+        let workspace = self.workspace.as_ref().map_err(|error| *error)?;
+        platform::write_file(workspace, path.components(), content)?;
+        Ok((path.into_string(), content.len() as u64))
+    }
+
 }
 
 impl fmt::Debug for WorkspaceFiles {

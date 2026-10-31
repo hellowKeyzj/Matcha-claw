@@ -1,0 +1,18 @@
+.ic-dialog-storyboard.ic-creative-popover { width: 400px; height: 560px; }
+.ic-dialog-storyboard .ic-prompt { flex: 0 0 auto; }
+.ic-dialog-storyboard .ic-prompt textarea { min-height: 66px; }
+.ic-dialog-angle { max-height: min(620px, 100%); }
+.ic-independent-references { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
+.ic-independent-reference { display: flex; flex-direction: column; align-items: center; width: 64px; gap: 3px; }
+.ic-independent-reference > .button-row { gap: 2px; flex-wrap: nowrap; }
+.ic-reference-add { flex-direction: column; min-width: 80px; min-height: 56px; max-width: 100%; padding: 6px; border-style: dashed; border-radius: 8px; color: var(--muted); white-space: normal; }
+.ic-storyboard-editor { border-top: 1px solid var(--border); }
+.ic-storyboard-scenes { display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.ic-storyboard-scenes .scene-input { min-width: 0; padding-bottom: 0; }
+.ic-storyboard-scenes .scene-title { flex-wrap: wrap; }
+.ic-scene-handle { min-height: 28px; padding: 4px 8px; border: 0; border-radius: 8px; color: var(--muted); background: var(--control); cursor: grab; }
+.ic-scene-handle:active { cursor: grabbing; }
+.ic-scene-actions { display: flex; gap: 2px; margin-left: auto; }
+.ic-storyboard-scenes textarea { min-height: 66px; max-height: 160px; background: var(--control); }
+.ic-angle-presets { display: flex; flex-direction: column; gap: 8px; }
+.ic-dialog-storyboard footer .primary { white-space: normal; }

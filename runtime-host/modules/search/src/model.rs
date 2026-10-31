@@ -318,6 +318,12 @@ impl SearchError {
             message: "Native runtime search failed; check the runtime session and retry",
         }
     }
+    pub(crate) const fn initializing() -> Self {
+        Self {
+            status: 503,
+            message: "Network search is initializing; wait for configuration loading to finish",
+        }
+    }
     pub(crate) const fn conflict() -> Self {
         Self {
             status: 409,

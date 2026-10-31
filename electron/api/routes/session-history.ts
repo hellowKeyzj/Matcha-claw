@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { RuntimeHostTransportContext } from '../context';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 const UNAVAILABLE = {
   success: false,
@@ -10,28 +9,26 @@ const UNAVAILABLE = {
 type SessionHistoryRouteDeps = RuntimeHostTransportContext<'sessionHistoryTransport'>;
 
 export async function handleSessionHistoryRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   deps: SessionHistoryRouteDeps,
-): Promise<boolean> {
-  if (req.method !== 'POST') return false;
+): Promise<HostApiRouteResult> {
+  if (req.method !== 'POST') return undefined;
 
-  if (url.pathname !== '/api/sessions/history') return false;
+  if (url.pathname !== '/api/sessions/history') return undefined;
   const transport = deps.runtimeHostTransports.sessionHistoryTransport;
 
   let request: unknown;
   try {
-    request = await parseJsonBody<unknown>(req);
+    request = await req.readJson<unknown>();
   } catch {
     request = undefined;
   }
 
   try {
     const response = await transport.read(request);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }

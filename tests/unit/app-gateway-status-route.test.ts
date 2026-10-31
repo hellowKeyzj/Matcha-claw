@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import {
-  handleAppRoutes,
-  readGatewayStatusProjection,
-  readRuntimeHostStatusProjection,
-} from '../../electron/api/routes/app';
+import { handleAppRoutes } from '../../electron/api/routes/app';
+import { RuntimeStatusProjection } from '../../electron/main/runtime-host-delivery/status';
 import { handleGatewayRoutes } from '../../electron/api/routes/gateway';
 import { PORTS } from '../../electron/utils/config';
 
@@ -126,7 +123,7 @@ describe('app gateway status delivery', () => {
   it('uses one runtime snapshot command and preserves the public status DTO', async () => {
     const command = vi.fn().mockResolvedValue(succeeded(runtimeSnapshot()));
 
-    await expect(readGatewayStatusProjection({ command } as never)).resolves.toEqual({
+    await expect(new RuntimeStatusProjection({ command }).readGateway()).resolves.toEqual({
       processState: 'running',
       port: PORTS.OPENCLAW_GATEWAY,
       gatewayReady: true,
@@ -148,7 +145,7 @@ describe('app gateway status delivery', () => {
       heartbeatEnabled: null,
     })));
 
-    await expect(readGatewayStatusProjection({ command } as never)).resolves.toEqual({
+    await expect(new RuntimeStatusProjection({ command }).readGateway()).resolves.toEqual({
       processState: 'running',
       port: PORTS.OPENCLAW_GATEWAY,
       gatewayReady: true,
@@ -170,7 +167,7 @@ describe('app gateway status delivery', () => {
       openClawLifecycle: 'failed',
     })));
 
-    await expect(readRuntimeHostStatusProjection({ command } as never)).resolves.toMatchObject({
+    await expect(new RuntimeStatusProjection({ command }).readHost()).resolves.toMatchObject({
       status: 'running',
       hostLifecycle: 'ready',
       runtimeLifecycle: 'ready',
@@ -198,7 +195,7 @@ describe('app gateway status delivery', () => {
       control: { ready: false, phase: 'unavailable', retryable: false },
     })));
 
-    await expect(readGatewayStatusProjection({ command: degradedCommand } as never)).resolves.toEqual({
+    await expect(new RuntimeStatusProjection({ command: degradedCommand }).readGateway()).resolves.toEqual({
       processState: 'control_connecting',
       port: PORTS.OPENCLAW_GATEWAY,
       gatewayReady: false,
@@ -212,7 +209,7 @@ describe('app gateway status delivery', () => {
       },
       updatedAt: 1_725_000_000_100,
     });
-    await expect(readGatewayStatusProjection({ command: unavailableCommand } as never)).resolves.toEqual({
+    await expect(new RuntimeStatusProjection({ command: unavailableCommand }).readGateway()).resolves.toEqual({
       processState: 'error',
       port: PORTS.OPENCLAW_GATEWAY,
       gatewayReady: false,
@@ -225,7 +222,7 @@ describe('app gateway status delivery', () => {
       },
       updatedAt: 1_725_000_000_100,
     });
-    const unavailable = await readGatewayStatusProjection({ command: unavailableCommand } as never);
+    const unavailable = await new RuntimeStatusProjection({ command: unavailableCommand }).readGateway();
     expect(unavailable).not.toHaveProperty('lastRpcSuccessAt');
     expect(unavailable).not.toHaveProperty('lastRpcFailureAt');
     expect(unavailable).not.toHaveProperty('lastRpcFailureMethod');
@@ -243,8 +240,11 @@ describe('app gateway status delivery', () => {
     const firstCommand = vi.fn().mockResolvedValue(succeeded(runtimeSnapshot()));
     const failedCommand = vi.fn().mockRejectedValue(new Error('gateway observation timed out'));
 
-    const first = await readGatewayStatusProjection({ command: firstCommand } as never);
-    await expect(readGatewayStatusProjection({ command: failedCommand } as never)).resolves.toEqual(first);
+    const runtimeHost = { command: firstCommand };
+    const runtimeStatus = new RuntimeStatusProjection(runtimeHost);
+    const first = await runtimeStatus.readGateway();
+    runtimeHost.command = failedCommand;
+    await expect(runtimeStatus.readGateway()).resolves.toEqual(first);
     expectRuntimeSnapshotOnly(firstCommand);
     expectRuntimeSnapshotOnly(failedCommand);
   });
@@ -253,8 +253,11 @@ describe('app gateway status delivery', () => {
     const firstCommand = vi.fn().mockResolvedValue(succeeded(runtimeSnapshot()));
     const timedOutCommand = vi.fn().mockResolvedValue({ kind: 'timed-out' });
 
-    const first = await readGatewayStatusProjection({ command: firstCommand } as never);
-    await expect(readGatewayStatusProjection({ command: timedOutCommand } as never)).resolves.toEqual(first);
+    const runtimeHost = { command: firstCommand };
+    const runtimeStatus = new RuntimeStatusProjection(runtimeHost);
+    const first = await runtimeStatus.readGateway();
+    runtimeHost.command = timedOutCommand;
+    await expect(runtimeStatus.readGateway()).resolves.toEqual(first);
     expectRuntimeSnapshotOnly(firstCommand);
     expectRuntimeSnapshotOnly(timedOutCommand);
   });
@@ -264,7 +267,7 @@ describe('app gateway status delivery', () => {
       extra: { path: 'E:/private/runtime-host', token: 'private-token' },
     })));
 
-    await expect(readGatewayStatusProjection({ command } as never)).resolves.toBeNull();
+    await expect(new RuntimeStatusProjection({ command }).readGateway()).resolves.toBeNull();
     expectRuntimeSnapshotOnly(command);
   });
 
@@ -307,13 +310,15 @@ describe('app gateway status delivery', () => {
     })));
     const transport = runtimeControlTransport();
     const fixture = jsonResponse();
+    const runtimeHost = { command };
 
     await expect(handleGatewayRoutes(
       request('GET'),
       fixture.raw,
       new URL(`http://127.0.0.1${pathname}`),
       {
-        runtimeHost: { command },
+        runtimeHost,
+        runtimeStatus: new RuntimeStatusProjection(runtimeHost),
         runtimeHostTransports: { runtimeControlTransport: transport },
       } as never,
     )).resolves.toBe(true);
@@ -326,6 +331,7 @@ describe('app gateway status delivery', () => {
 
   it('keeps the SSE headers and gateway:status event contract', async () => {
     const command = vi.fn(() => Promise.resolve(succeeded(runtimeSnapshot())));
+    const runtimeHost = { command };
     const eventBus = { addSseClient: vi.fn() };
     const response = sseResponse();
 
@@ -333,7 +339,7 @@ describe('app gateway status delivery', () => {
       request('GET'),
       response.raw,
       new URL('http://127.0.0.1/api/events'),
-      { eventBus, runtimeHost: { command } } as never,
+      { eventBus, runtimeHost, runtimeStatus: new RuntimeStatusProjection(runtimeHost) } as never,
     )).resolves.toBe(true);
 
     expect(response.raw.writeHead).toHaveBeenCalledWith(200, {
@@ -352,10 +358,13 @@ describe('app gateway status delivery', () => {
 
   it('falls back to host health for SSE runtime-host status when snapshot observation fails', async () => {
     const seedCommand = vi.fn().mockResolvedValue(succeeded(runtimeSnapshot()));
-    await readGatewayStatusProjection({ command: seedCommand } as never);
+    const runtimeHost = { command: seedCommand };
+    const runtimeStatus = new RuntimeStatusProjection(runtimeHost);
+    await runtimeStatus.readGateway();
     const command = vi.fn((command: { name: string }) => command.name === 'host.health'
       ? Promise.resolve(succeeded(hostHealth()))
       : Promise.reject(new Error('gateway observation timed out')));
+    runtimeHost.command = command;
     const eventBus = { addSseClient: vi.fn() };
     const response = sseResponse();
 
@@ -363,7 +372,7 @@ describe('app gateway status delivery', () => {
       request('GET'),
       response.raw,
       new URL('http://127.0.0.1/api/events'),
-      { eventBus, runtimeHost: { command } } as never,
+      { eventBus, runtimeHost, runtimeStatus } as never,
     )).resolves.toBe(true);
 
     expect(response.writes[1]).toContain('event: gateway:status\n');

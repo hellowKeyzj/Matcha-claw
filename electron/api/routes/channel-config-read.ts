@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type { ChannelConfigReadTransport } from '../../main/runtime-host-delivery/transport/channels/config-read';
-import { parseJsonBody, sendJson } from '../route-utils';
 import { isProductRuntimeScope, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { beginChannelTrace, channelTraceError, readChannelTrace } from '../../main/runtime-host-delivery/transport/channels/trace';
 
@@ -14,26 +13,23 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleChannelConfigReadRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: ChannelConfigReadTransport,
-): Promise<boolean> {
-  if (url.pathname !== '/api/channels/config/read' || req.method !== 'POST') return false;
+): Promise<HostApiRouteResult> {
+  if (url.pathname !== '/api/channels/config/read' || req.method !== 'POST') return undefined;
 
   const traceId = readChannelTrace(req.headers);
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
     beginChannelTrace('route.config_read.invalid', traceId)?.(400, INVALID);
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   if (!isRequest(body)) {
     beginChannelTrace('route.config_read.invalid', traceId)?.(400, INVALID);
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
 
   const finish = beginChannelTrace('route.config_read', traceId);
@@ -42,16 +38,15 @@ export async function handleChannelConfigReadRoutes(
     if (projection) {
       const response = { success: true, values: projection.values, agentId: projection.agentId };
       finish?.(200, response);
-      sendJson(res, 200, response);
+      return jsonResult(200, response);
     } else {
       finish?.(503, UNAVAILABLE);
-      sendJson(res, 503, UNAVAILABLE);
+      return jsonResult(503, UNAVAILABLE);
     }
   } catch (error) {
     finish?.(503, UNAVAILABLE, channelTraceError(error));
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }
 
 function isRequest(value: unknown): value is { channel: string; accountId?: string; scope?: ProductRuntimeScope } {

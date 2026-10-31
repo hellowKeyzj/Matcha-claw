@@ -66,11 +66,6 @@ impl BoardModule {
         self.handle.subscribe_events()
     }
 
-    /// Reject new requests, finish accepted identity lanes, then close all subscription resources.
-    pub async fn close(&self) -> Result<(), BoardFailure> {
-        self.handle.close().await
-    }
-
     pub fn descriptor(&self, verifier: Arc<Mutex<CapabilityDecisionVerifier>>) -> ModuleDescriptor {
         ModuleDescriptor::with_capabilities(
             ModuleId::new("board"),

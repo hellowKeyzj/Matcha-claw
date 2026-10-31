@@ -36,6 +36,7 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) 
         .with_agent_plugins(Arc::new(matcha_agent::plugins::Plugins::new(matcha_agent.native_client())))
         .with_call_recorder(calls.recorder());
     let plugins = plugins_handle.clone();
+    let plugins_failures = owners.tasks.join_failures();
     owners
         .tasks
         .module_scope_mut("plugins")
@@ -44,7 +45,12 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) 
             foundation::lifecycle::ScopedEffectKind::OwnerTask,
             "owner-task",
             move || async move {
-                plugins.stop_operations().await;
+                if plugins.stop_operations().await {
+                    plugins_failures
+                        .lock()
+                        .expect("owner join failure state lock poisoned")
+                        .push("plugins");
+                }
             },
         );
     let skills_adapter = Arc::new(openclaw::skill::OpenClawSkillsPort::new(
@@ -66,6 +72,7 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) 
         skills_handle = skills_handle.with_sealed_skill_factory(factory);
     }
     let skills = skills_handle.clone();
+    let skills_failures = owners.tasks.join_failures();
     owners
         .tasks
         .module_scope_mut("skills")
@@ -74,7 +81,12 @@ pub(super) fn build_handles(input: HostHandleInput, owners: &mut RuntimeOwners) 
             foundation::lifecycle::ScopedEffectKind::OwnerTask,
             "owner-task",
             move || async move {
-                skills.stop_operations().await;
+                if skills.stop_operations().await {
+                    skills_failures
+                        .lock()
+                        .expect("owner join failure state lock poisoned")
+                        .push("skills");
+                }
             },
         );
     let cron_handle = owners.cron.clone();

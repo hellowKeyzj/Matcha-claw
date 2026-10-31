@@ -78,8 +78,13 @@ export class WorldStorage extends Ability {
       || !/^\/world_[a-z0-9_]+$/.test(url.pathname) || !url.username || !url.password) {
       throw new Error('World storage E2E accepts only an owned loopback world_* database fixture');
     }
+    const port = process.env.E2E_WORLD_STORAGE_PORT;
+    if (port !== undefined) {
+      if (!/^[1-9][0-9]{0,4}$/.test(port) || Number(port) > 65535) throw new Error('Dedicated World storage port is invalid');
+      url.port = port;
+    }
     this.database = createHash('sha256').update([url.hostname, url.port, url.pathname, url.username].join('\n')).digest('hex');
-    this.connection = connection;
+    this.connection = port === undefined ? connection : url.href;
   }
 
   private async facts(world?: WorldRef): Promise<Facts> {

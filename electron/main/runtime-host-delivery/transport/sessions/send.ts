@@ -87,16 +87,11 @@ function e2eAttachmentShape(request: SessionSendRequest): NonNullable<
   return {
     count: contentLengths.length,
     contentLengths,
-    canonicalBase64: request.input.attachments.every(
-      (attachment) => canonicalBase64DecodedBytes(attachment.content) !== null,
-    ),
+    // Request validation already established canonical content and safe file names.
+    canonicalBase64: true,
     mimeLengths: request.input.attachments.map((attachment) => attachment.mimeType.length),
     fileNameLengths: request.input.attachments.map((attachment) => attachment.fileName.length),
-    fileNamesSafe: request.input.attachments.every(
-      (attachment) => !attachment.fileName.includes('/')
-        && !attachment.fileName.includes('\\')
-        && !hasControlCharacter(attachment.fileName),
-    ),
+    fileNamesSafe: true,
     agentIdLength: request.scope.identity.agentId.length,
     requestRunIdentityLength: request.input.runId?.length ?? request.input.idempotencyKey?.length ?? 0,
   };
@@ -276,20 +271,31 @@ function isSessionSendRequest(value: unknown): value is SessionSendRequest {
       || !isGoalObjective(value.input.message)))
     || (value.input.runId === undefined && value.input.idempotencyKey === undefined)
     || !Array.isArray(value.input.attachments)
-    || value.input.attachments.length > MAX_ATTACHMENTS
-    || !value.input.attachments.every(isSessionSendAttachment)
-    || value.input.attachments
-      .map(decodedAttachmentBytes)
-      .some((bytes) => bytes === null)
-    || value.input.attachments
-      .map(decodedAttachmentBytes)
-      .some((bytes) => bytes !== null && bytes > MAX_ATTACHMENT_DECODED_BYTES)
-    || value.input.attachments
-      .map(decodedAttachmentBytes)
-      .reduce<number>((total, bytes) => total + (bytes ?? 0), 0) > MAX_TOTAL_ATTACHMENT_DECODED_BYTES) {
+    || value.input.attachments.length > MAX_ATTACHMENTS) {
     return false;
   }
-  return true;
+  let totalBytes = 0;
+  return value.input.attachments.every((attachment: unknown) => {
+    if (!isRecord(attachment)
+      || !hasExactKeys(attachment, ['mimeType', 'fileName', 'content'])
+      || typeof attachment.mimeType !== 'string'
+      || attachment.mimeType.length === 0
+      || attachment.mimeType.length > 255
+      || hasControlCharacter(attachment.mimeType)
+      || typeof attachment.fileName !== 'string'
+      || attachment.fileName.length === 0
+      || attachment.fileName.length > 255
+      || attachment.fileName.includes('/')
+      || attachment.fileName.includes('\\')
+      || hasControlCharacter(attachment.fileName)
+      || typeof attachment.content !== 'string') {
+      return false;
+    }
+    const bytes = canonicalBase64DecodedBytes(attachment.content);
+    if (bytes === null || bytes > MAX_ATTACHMENT_DECODED_BYTES) return false;
+    totalBytes += bytes;
+    return totalBytes <= MAX_TOTAL_ATTACHMENT_DECODED_BYTES;
+  });
 }
 
 function isSessionScope(value: unknown): value is SessionSendRequest['scope'] {
@@ -304,27 +310,6 @@ function hasControlCharacter(value: string): boolean {
     const codePoint = character.codePointAt(0) ?? 0;
     return codePoint < 32 || codePoint === 127;
   });
-}
-
-function isSessionSendAttachment(value: unknown): value is SessionSendAttachment {
-  return isRecord(value)
-    && hasExactKeys(value, ['mimeType', 'fileName', 'content'])
-    && typeof value.mimeType === 'string'
-    && value.mimeType.length > 0
-    && value.mimeType.length <= 255
-    && !hasControlCharacter(value.mimeType)
-    && typeof value.fileName === 'string'
-    && value.fileName.length > 0
-    && value.fileName.length <= 255
-    && !value.fileName.includes('/')
-    && !value.fileName.includes('\\')
-    && !hasControlCharacter(value.fileName)
-    && typeof value.content === 'string'
-    && canonicalBase64DecodedBytes(value.content) !== null;
-}
-
-function decodedAttachmentBytes(value: unknown): number | null {
-  return isSessionSendAttachment(value) ? canonicalBase64DecodedBytes(value.content) : null;
 }
 
 function canonicalBase64DecodedBytes(value: string): number | null {

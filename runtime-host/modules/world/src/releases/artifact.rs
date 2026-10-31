@@ -304,6 +304,7 @@ pub(super) async fn persist_artifact(
     Ok(manifest.clone())
 }
 
+/// Checks immutable history; current execution compatibility is checked by validate_outputs.
 pub(crate) fn validate_manifest(manifest: &ArtifactManifest) -> Result<(), Error> {
     if !required_targets(&manifest.targets)
         || manifest.ir_version != crate::compiler::IR_VERSION
@@ -320,8 +321,9 @@ pub(crate) fn validate_manifest(manifest: &ArtifactManifest) -> Result<(), Error
         let contract = world_protocol::compiler::artifact_contract(*target)
             .map_err(|_| invalid("contract"))?;
         if outputs.next().is_some()
-            || output.contract != contract
-            || output.schema_digest != contract.schema_digest
+            || output.contract.id != contract.id
+            || output.contract.version != contract.version
+            || output.schema_digest != output.contract.schema_digest
             || output.content.byte_size == 0
         {
             return Err(invalid("outputs").into());
@@ -414,5 +416,93 @@ fn number(value: u64) -> Result<i64, Error> {
 fn invalid(field: &str) -> CompileFailure {
     CompileFailure::ArtifactInvalid {
         field: FieldPath(vec![field.into()]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use world_protocol::{compiler::DependencyGraph, ids::*, materials::BlobRef};
+
+    fn seal(manifest: &mut ArtifactManifest) {
+        manifest.digest = canonical_digest(&(
+            "world.artifact.v1", &manifest.world, &manifest.id, &manifest.release_id,
+            &manifest.activation_lock_id, &manifest.config_digest, &manifest.model_digest,
+            &manifest.targets, &manifest.ir_version, &manifest.outputs, &manifest.dependencies,
+        )).unwrap();
+    }
+
+    fn manifest() -> ArtifactManifest {
+        let digest = canonical_digest(&"fixture").unwrap();
+        let targets = vec![CompileTarget::QueryPlan, CompileTarget::Validator,
+            CompileTarget::ActionManifest, CompileTarget::ToolCatalog];
+        let outputs = targets.iter().map(|&kind| {
+            let contract = world_protocol::compiler::artifact_contract(kind).unwrap();
+            ArtifactOutput {
+                kind, definition: None, schema_digest: contract.schema_digest.clone(), contract,
+                content: BlobRef { digest: digest.clone(), byte_size: 1 },
+            }
+        }).collect();
+        let mut manifest = ArtifactManifest {
+            world: WorldRef { tenant_id: "test".parse().unwrap(), world_id: "history".parse().unwrap() },
+            id: "artifact".parse().unwrap(), release_id: "release".parse().unwrap(),
+            activation_lock_id: "lock".parse().unwrap(), config_digest: digest.clone(),
+            model_digest: digest.clone(), digest, targets, outputs,
+            ir_version: crate::compiler::IR_VERSION.into(), dependencies: DependencyGraph { edges: vec![] },
+        };
+        seal(&mut manifest);
+        manifest
+    }
+
+    #[test]
+    fn historical_schema_is_readable_but_not_current_execution_compatible() {
+        let mut manifest = manifest();
+        assert!(validate_manifest(&manifest).is_ok());
+        let historical = canonical_digest(&"historical-query-plan-schema").unwrap();
+        manifest.outputs[0].contract.schema_digest = historical.clone();
+        manifest.outputs[0].schema_digest = historical;
+        seal(&mut manifest);
+        assert!(validate_manifest(&manifest).is_ok());
+        let output = &manifest.outputs[0];
+        let bytes = br#"{"irVersion":"matcha.world-ir/1","ir":{"irVersion":"matcha.world-ir/1","world":{"tenantId":"test","worldId":"history"},"definitions":[],"dependencies":{"edges":[]}}}"#.to_vec();
+        use sha2::{Digest as _, Sha256};
+        let content_digest = Digest::try_new(format!("sha256:{:x}", Sha256::digest(&bytes))).unwrap();
+        let generated = world_protocol::compiler::GeneratedArtifact {
+            kind: output.kind, definition: None, contract: output.contract.clone(),
+            schema_digest: output.schema_digest.clone(), relative_path: None, bytes, content_digest,
+        };
+        let mut current = generated.clone();
+        current.contract = world_protocol::compiler::artifact_contract(current.kind).unwrap();
+        current.schema_digest = current.contract.schema_digest.clone();
+        assert!(crate::compiler::validate_outputs(&[current]).is_ok());
+        assert!(crate::compiler::validate_outputs(&[generated]).is_err());
+    }
+
+    #[test]
+    fn historical_manifest_still_requires_identity_consistency_and_integrity() {
+        let original = manifest();
+        let mut inconsistent = original.clone();
+        inconsistent.outputs[0].schema_digest = canonical_digest(&"different-schema").unwrap();
+        seal(&mut inconsistent);
+        assert!(validate_manifest(&inconsistent).is_err());
+        let mut wrong_contract = original.clone();
+        wrong_contract.outputs[0].contract.id = "wrong-contract".parse().unwrap();
+        seal(&mut wrong_contract);
+        assert!(validate_manifest(&wrong_contract).is_err());
+        let mut wrong_version = original.clone();
+        wrong_version.outputs[0].contract.version = "2.0.0".into();
+        seal(&mut wrong_version);
+        assert!(validate_manifest(&wrong_version).is_err());
+        let mut duplicate = original.clone();
+        duplicate.outputs[1] = duplicate.outputs[0].clone();
+        seal(&mut duplicate);
+        assert!(validate_manifest(&duplicate).is_err());
+        let mut empty = original.clone();
+        empty.outputs[0].content.byte_size = 0;
+        seal(&mut empty);
+        assert!(validate_manifest(&empty).is_err());
+        let mut tampered = original;
+        tampered.outputs[0].content.byte_size += 1;
+        assert!(validate_manifest(&tampered).is_err());
     }
 }

@@ -1,15 +1,14 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import type {
   ProviderCredentialStatusResponse,
   ProviderCredentialStatusTransport,
-} from '../../main/ipc/provider-private-auth';
+} from '../../main/providers/private-auth';
 import type {
   ProviderAccountsListRequest,
   ProviderAccountsTransport,
 } from '../../main/runtime-host-delivery/transport/providers/accounts';
 import { isProviderAccountIdentifier } from '../../main/runtime-host-delivery/transport/providers/accounts';
 import { isRecord } from '../../main/runtime-host-delivery/transport/client';
-import { sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 const INVALID = {
   success: false,
@@ -36,20 +35,18 @@ function isHasApiKeyResponse(value: unknown): value is ProviderCredentialStatusR
 }
 
 export async function handleProviderAccountsRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: ProviderAccountsTransport,
   statusTransport: ProviderCredentialStatusTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/provider-accounts' && req.method === 'GET') {
     try {
       const response = await transport.execute(LIST_REQUEST);
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNAVAILABLE);
+      return jsonResult(503, UNAVAILABLE);
     }
-    return true;
   }
 
   const hasApiKeyMatch = url.pathname.match(/^\/api\/provider-accounts\/([^/]+)\/has-api-key$/);
@@ -58,25 +55,22 @@ export async function handleProviderAccountsRoutes(
     try {
       accountId = decodeURIComponent(hasApiKeyMatch[1]);
     } catch {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
     if (!isProviderAccountIdentifier(accountId)) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
     try {
       const response = await statusTransport.hasApiKey(accountId);
       if (!isHasApiKeyResponse(response)) {
-        sendJson(res, 503, UNAVAILABLE);
+        return jsonResult(503, UNAVAILABLE);
       } else {
-        sendJson(res, 200, response);
+        return jsonResult(200, response);
       }
     } catch {
-      sendJson(res, 503, UNAVAILABLE);
+      return jsonResult(503, UNAVAILABLE);
     }
-    return true;
   }
 
-  return false;
+  return undefined;
 }

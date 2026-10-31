@@ -3,7 +3,8 @@ import { Check, Duration, Task, Wait } from '@serenity-js/core';
 import { Attribute, Click, Enter, Select, isEnabled, isVisible } from '@serenity-js/web';
 import {
   ConfirmWorkspaceOriginals, ReadMissingWorkspaceOperation, ReadRenderedWorkspaceTask, ReadWorkspaceCatalogs,
-  ReadWorkspaceObjectsDecodeFailures, ReadWorkspaceOperation, ReadWorkspaceSession, ReadWorkspaceTask, RememberWorkspaceOriginals, ReachOriginalWorkspaceTask,
+  ReadCurrentWorldPrerequisites, ReadWorkspaceObjectsDecodeFailures, ReadWorkspaceOperation, ReadWorkspaceSession, ReadWorkspaceTask,
+  RememberWorkspaceOriginals, ReachOriginalWorkspaceTask, SelectAccessibleWorld,
 } from '../interactions/world-workspace.interaction.js';
 import { AccountPage } from '../pages/account.page.js';
 import { WorldWorkspacePage } from '../pages/world-workspace.page.js';
@@ -21,18 +22,24 @@ import { StartAtSignIn } from './account.task.js';
 import { EnterChat } from './chat.task.js';
 
 const ready = () => Ensure.that(WorkspaceState(), equals({ status: 'ready', errors: [] }));
-export const OpenExistingWorldWorkspace = () => Task.where('#actor enters the existing local/personal World through normal sidebar navigation',
+export const OpenExistingWorldWorkspace = () => Task.where('#actor selects the sole accessible World through normal sidebar navigation',
   StartAtSignIn(), EnterChat(),
   Check.whether(AccountPage.expandSidebar, isVisible()).andIfSo(Click.on(AccountPage.expandSidebar)),
   Wait.upTo(Duration.ofSeconds(45)).until(WorldWorkspacePage.navigationGroup, isEnabled()),
   Check.whether(Attribute.called('aria-expanded').of(WorldWorkspacePage.navigationGroup), equals('false')).andIfSo(Click.on(WorldWorkspacePage.navigationGroup)),
   Click.on(WorldWorkspacePage.modelNavigation),
   Wait.upTo(Duration.ofSeconds(45)).until(WorldWorkspacePage.modelHeading, isVisible()),
-  Check.whether(WorldWorkspacePage.tenant, isVisible()).andIfSo().otherwise(Click.on(WorldWorkspacePage.worldSelector)),
-  Enter.theValue('local').into(WorldWorkspacePage.tenant), Enter.theValue('personal').into(WorldWorkspacePage.world),
-  Wait.upTo(Duration.ofSeconds(45)).until(WorldWorkspacePage.open, isEnabled()), Click.on(WorldWorkspacePage.open),
+  Check.whether(Attribute.called('aria-expanded').of(WorldWorkspacePage.worldSelector), equals('false'))
+    .andIfSo(Click.on(WorldWorkspacePage.worldSelector)),
+  Wait.upTo(Duration.ofSeconds(45)).until(WorldWorkspacePage.availableWorlds.count(), equals(1)),
+  Wait.upTo(Duration.ofSeconds(45)).until(WorldWorkspacePage.availableWorlds.first(), isEnabled()),
+  SelectAccessibleWorld(),
+  Wait.upTo(Duration.ofSeconds(45)).until(Attribute.called('aria-expanded').of(WorldWorkspacePage.worldSelector), equals('false')),
   Wait.upTo(Duration.ofSeconds(45)).until(WorkspaceOpeningSettled(), equals(true)),
   Wait.upTo(Duration.ofSeconds(45)).until(WorldWorkspacePage.refresh, isEnabled()), ready(),
+);
+export const InspectCurrentWorldPrerequisites = () => Task.where('#actor reads the selected World’s actual business prerequisites without changing them',
+  ReadCurrentWorldPrerequisites(), ready(),
 );
 export const OpenWorldWorkspace = () => Task.where('#actor enters the existing World and remembers its original workspace facts',
   OpenExistingWorldWorkspace(), RememberWorkspaceOriginals(),

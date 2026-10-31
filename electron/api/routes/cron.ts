@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type { CronTransport } from '../../main/runtime-host-delivery/transport/cron';
-import { parseJsonBody, sendJson } from '../route-utils';
 import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
@@ -20,16 +19,14 @@ const INVALID_SESSION_KEY = (sessionKey: string) => ({
 type CronOperation = 'create' | 'update' | 'remove' | 'toggle' | 'result';
 
 export async function handleCronRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: CronTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/cron/session-history' && req.method === 'GET') {
     const sessionKey = url.searchParams.get('sessionKey')?.trim() || '';
     if (!isCronSessionKey(sessionKey)) {
-      sendJson(res, 400, INVALID_SESSION_KEY(sessionKey));
-      return true;
+      return jsonResult(400, INVALID_SESSION_KEY(sessionKey));
     }
 
     const rawLimit = Number(url.searchParams.get('limit') || '200');
@@ -38,41 +35,37 @@ export async function handleCronRoutes(
       : 200;
     try {
       const response = await transport.history(sessionKey, limit, readRuntimeScopeQuery(url.searchParams));
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNAVAILABLE);
+      return jsonResult(503, UNAVAILABLE);
     }
-    return true;
   }
 
   if (url.pathname === '/api/cron/jobs' && req.method === 'GET') {
     try {
       const response = await transport.list(readRuntimeScopeQuery(url.searchParams));
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNAVAILABLE);
+      return jsonResult(503, UNAVAILABLE);
     }
-    return true;
   }
 
   const operation = resolveMutation(url.pathname, req.method);
-  if (!operation) return false;
+  if (!operation) return undefined;
 
   let request: unknown;
   try {
-    request = await parseJsonBody<unknown>(req);
+    request = await req.readJson<unknown>();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
 
   try {
     const response = await transport[operation](request);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }
 
 function isCronSessionKey(value: string): boolean {

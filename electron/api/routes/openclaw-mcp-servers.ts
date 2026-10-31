@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import type { OpenClawMcpServersTransport } from '../../main/runtime-host-delivery/transport/connectors/openclaw-mcp-servers';
-import { sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const UNAVAILABLE = {
@@ -11,18 +10,16 @@ const UNAVAILABLE = {
 type Operation = 'openClawMcpServers.list';
 
 export async function handleOpenClawMcpServersRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: OpenClawMcpServersTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/openclaw/mcp-servers' && req.method === 'GET') {
-    await deliver(transport, res, createRequest('openClawMcpServers.list', { kind: 'list' }, readRuntimeScopeQuery(url.searchParams)));
-    return true;
+    return deliver(transport, createRequest('openClawMcpServers.list', { kind: 'list' }, readRuntimeScopeQuery(url.searchParams)));
   }
 
 
-  return false;
+  return undefined;
 }
 
 function createRequest(operationId: Operation, input: Record<string, unknown>, scope?: unknown) {
@@ -38,14 +35,13 @@ function createRequest(operationId: Operation, input: Record<string, unknown>, s
 
 async function deliver(
   transport: OpenClawMcpServersTransport,
-  res: ServerResponse,
   request: unknown,
-): Promise<void> {
+): Promise<HostApiRouteResult> {
   try {
     const response = await transport.execute(request);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
 }
 

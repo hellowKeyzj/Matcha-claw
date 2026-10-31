@@ -8419,6 +8419,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
+ "foundation",
  "libc",
  "rcgen",
  "rustls",
@@ -8766,6 +8767,7 @@ name = "provider"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "base64 0.22.1",
  "connectors",
  "foundation",
  "platform",

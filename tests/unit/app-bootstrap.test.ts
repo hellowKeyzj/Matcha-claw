@@ -53,13 +53,19 @@ const hoisted = vi.hoisted(() => ({
   startHostApiServerMock: vi.fn(),
   waitForHostApiServerListeningMock: vi.fn(),
   createProviderCredentialStatusTransportMock: vi.fn(),
+  createProviderPrivateAuthMock: vi.fn(),
   registerProviderPrivateAuthHandlersMock: vi.fn(),
+  createWorldPrivateOperationsMock: vi.fn(),
+  registerWorldPrivateHandlersMock: vi.fn(),
+  createChannelAuthorizationMock: vi.fn(),
+  startAppPluginAgentGatewayMock: vi.fn(),
   waitForGatewayControlReadyMock: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
   app: {
     isPackaged: false,
+    getPath: () => 'C:/matchaclaw',
   },
   session: {
     defaultSession: {
@@ -70,20 +76,23 @@ vi.mock('electron', () => ({
   },
 }));
 
-vi.mock('../../electron/main/ipc-handlers', () => ({
+vi.mock('../../electron/api/ipc/register', () => ({
   registerRuntimeIpcHandlers: (...args: unknown[]) => hoisted.registerRuntimeIpcHandlersMock(...args),
   registerStaticIpcHandlers: (...args: unknown[]) => hoisted.registerStaticIpcHandlersMock(...args),
 }));
-vi.mock('../../electron/main/tray', () => ({
+vi.mock('../../electron/main/desktop/tray', () => ({
   createTray: (...args: unknown[]) => hoisted.createTrayMock(...args),
 }));
-vi.mock('../../electron/main/menu', () => ({
+vi.mock('../../electron/main/desktop/menu', () => ({
   createMenu: (...args: unknown[]) => hoisted.createMenuMock(...args),
 }));
-vi.mock('../../electron/main/updater', () => ({
+vi.mock('../../electron/main/updates/updater', () => ({
   appUpdater: {
     checkForUpdates: (...args: unknown[]) => hoisted.checkForUpdatesMock(...args),
+    configureUpdateSource: vi.fn(),
   },
+}));
+vi.mock('../../electron/api/ipc/update-ipc', () => ({
   registerE2EUpdateHandlers: (...args: unknown[]) => hoisted.registerE2EUpdateHandlersMock(...args),
   registerUpdateHandlers: (...args: unknown[]) => hoisted.registerUpdateHandlersMock(...args),
 }));
@@ -96,10 +105,10 @@ vi.mock('../../electron/utils/logger', () => ({
     error: (...args: unknown[]) => hoisted.loggerWarnMock(...args),
   },
 }));
-vi.mock('../../electron/utils/uv-env', () => ({
+vi.mock('../../electron/main/network/optimization', () => ({
   warmupNetworkOptimization: (...args: unknown[]) => hoisted.warmupNetworkOptimizationMock(...args),
 }));
-vi.mock('../../electron/main/host-event-bridge', () => ({
+vi.mock('../../electron/api/events/host-event-bridge', () => ({
   registerMainEventBridge: (...args: unknown[]) => hoisted.registerMainEventBridgeMock(...args),
   registerHostEventBridge: (...args: unknown[]) => hoisted.registerHostEventBridgeMock(...args),
 }));
@@ -108,21 +117,21 @@ vi.mock('../../electron/api/server', () => ({
   waitForHostApiServerListening: (...args: unknown[]) =>
     hoisted.waitForHostApiServerListeningMock(...args),
 }));
-vi.mock('../../electron/main/main-window', () => ({
+vi.mock('../../electron/main/desktop/main-window', () => ({
   createMainWindow: (...args: unknown[]) => hoisted.createMainWindowMock(...args),
   loadMainWindowContent: (...args: unknown[]) => hoisted.loadMainWindowContentMock(...args),
 }));
-vi.mock('../../electron/main/app-state', () => ({
+vi.mock('../../electron/main/lifecycle/state', () => ({
   isQuitting: (...args: unknown[]) => hoisted.isQuittingMock(...args),
 }));
-vi.mock('../../electron/main/runtime-host-delivery/delivery', () => ({
+vi.mock('../../electron/main/composition/runtime', () => ({
   createRuntimeHostDelivery: (...args: unknown[]) => hoisted.createRuntimeHostDeliveryMock(...args),
 }));
-vi.mock('../../electron/main/runtime-host-delivery/transport/bundle', () => ({
+vi.mock('../../electron/main/composition/transports', () => ({
   createRuntimeHostTransportBundle: (...args: unknown[]) =>
     hoisted.createRuntimeHostTransportBundleMock(...args),
 }));
-vi.mock('../../electron/main/ipc/diagnostics-export-ipc', () => ({
+vi.mock('../../electron/api/ipc/diagnostics-export-ipc', () => ({
   createDiagnosticsExportDependencies: (...args: unknown[]) =>
     hoisted.createDiagnosticsExportDependenciesMock(...args),
 }));
@@ -138,17 +147,32 @@ vi.mock('../../electron/main/license/composition', () => ({
 vi.mock('../../electron/main/cloud-account/provider-sync', () => ({
   createCloudProviderSync: (...args: unknown[]) => hoisted.createCloudProviderSyncMock(...args),
 }));
-vi.mock('../../electron/main/launch-at-startup', () => ({
+vi.mock('../../electron/main/settings/launch-at-startup', () => ({
   applyLaunchAtStartupSetting: (...args: unknown[]) =>
     hoisted.applyLaunchAtStartupSettingMock(...args),
 }));
-vi.mock('../../electron/main/ipc/provider-private-auth', () => ({
+vi.mock('../../electron/main/providers/private-auth', () => ({
+  createProviderPrivateAuth: (...args: unknown[]) => hoisted.createProviderPrivateAuthMock(...args),
   createProviderCredentialStatusTransport: (...args: unknown[]) =>
     hoisted.createProviderCredentialStatusTransportMock(...args),
+}));
+vi.mock('../../electron/api/ipc/provider-private-auth', () => ({
   registerProviderPrivateAuthHandlers: (...args: unknown[]) =>
     hoisted.registerProviderPrivateAuthHandlersMock(...args),
 }));
-vi.mock('../../electron/main/gateway-control-ready-probe', () => ({
+vi.mock('../../electron/main/world/private-operations', () => ({
+  createWorldPrivateOperations: (...args: unknown[]) => hoisted.createWorldPrivateOperationsMock(...args),
+}));
+vi.mock('../../electron/api/ipc/world-private', () => ({
+  registerWorldPrivateHandlers: (...args: unknown[]) => hoisted.registerWorldPrivateHandlersMock(...args),
+}));
+vi.mock('../../electron/main/channels/authorization', () => ({
+  createChannelAuthorization: (...args: unknown[]) => hoisted.createChannelAuthorizationMock(...args),
+}));
+vi.mock('../../electron/main/app-plugins/agent-gateway', () => ({
+  startAppPluginAgentGateway: (...args: unknown[]) => hoisted.startAppPluginAgentGatewayMock(...args),
+}));
+vi.mock('../../electron/main/runtime-host-delivery/gateway-control-ready-probe', () => ({
   GatewayControlReadinessBudgetError: class GatewayControlReadinessBudgetError extends Error {},
   waitForGatewayControlReady: (...args: unknown[]) =>
     hoisted.waitForGatewayControlReadyMock(...args),
@@ -206,8 +230,7 @@ function createRuntimeHostTransportBundleFixture() {
     sessionPermissionTransport: { get: vi.fn(), set: vi.fn() },
     securityEmergencyTransport: { run: vi.fn() },
     channelStatusTransport: { read: vi.fn() },
-    channelCatalogTransport: { read: vi.fn() },
-    channelAuthorizationTransport: { authorize: vi.fn() },
+    channelCatalogTransport: { read: vi.fn(), apply: vi.fn() },
     channelConfigReadTransport: { read: vi.fn() },
     channelCredentialsTransport: { validate: vi.fn() },
     channelDeleteConfigTransport: { deleteConfig: vi.fn() },
@@ -269,6 +292,7 @@ function createRuntimeHostTransportBundleFixture() {
     pluginsTransport: { execute: vi.fn() },
     usageTransport: { read: vi.fn() },
     sessionHistoryTransport: { read: vi.fn() },
+    worldTransport: { request: vi.fn() },
   };
   return {
     hostApiTransports,
@@ -354,7 +378,39 @@ beforeEach(() => {
     getE2ESavePath: vi.fn(),
   });
   hoisted.createProviderCredentialStatusTransportMock.mockReturnValue({ hasApiKey: vi.fn() });
-  hoisted.registerProviderPrivateAuthHandlersMock.mockReturnValue(vi.fn().mockResolvedValue(undefined));
+  hoisted.createProviderPrivateAuthMock.mockReturnValue({
+    storeAccount: vi.fn(),
+    deleteAccount: vi.fn(),
+    startOAuth: vi.fn(),
+    submitOAuthCode: vi.fn(),
+    cancelOAuth: vi.fn(),
+    drain: vi.fn().mockResolvedValue(undefined),
+  });
+  hoisted.createWorldPrivateOperationsMock.mockImplementation((runtime: Promise<unknown>, _signal: AbortSignal, control: Promise<unknown>) => {
+    void runtime.catch(() => undefined);
+    void control.catch(() => undefined);
+    return {
+      prepareEvaluation: vi.fn(),
+      commitEvaluation: vi.fn(),
+      evaluationStatus: vi.fn(),
+      prepareAccess: vi.fn(),
+      commitAccess: vi.fn(),
+      openStorage: vi.fn(),
+      transferStorage: vi.fn(),
+      storageStatus: vi.fn(),
+      configureStorage: vi.fn(),
+      configureConnection: vi.fn(),
+      drain: vi.fn().mockResolvedValue(undefined),
+    };
+  });
+  hoisted.createChannelAuthorizationMock.mockReturnValue({
+    authorize: vi.fn(),
+    drain: vi.fn().mockResolvedValue(undefined),
+  });
+  hoisted.startAppPluginAgentGatewayMock.mockResolvedValue({
+    changed: vi.fn(),
+    close: vi.fn().mockResolvedValue(undefined),
+  });
   hoisted.waitForGatewayControlReadyMock.mockResolvedValue(undefined);
   hoisted.registerMainEventBridgeMock.mockReturnValue(vi.fn());
   hoisted.registerHostEventBridgeMock.mockReturnValue(vi.fn());
@@ -406,7 +462,10 @@ describe('bootstrapMainApplication', () => {
     await app.ready;
     const bundle = readCreatedTransportBundle();
 
-    expect(hoisted.createRuntimeHostDeliveryMock).toHaveBeenCalledWith(context.deps.hostEventBus);
+    expect(hoisted.createRuntimeHostDeliveryMock).toHaveBeenCalledWith(context.deps.hostEventBus, {
+      signal: expect.any(AbortSignal),
+      onSpawn: expect.any(Function),
+    });
     expect(hoisted.createRuntimeHostTransportBundleMock).toHaveBeenCalledWith({
       issuer: context.deliveryIssuer,
       runtimeHostTransportPort: 34_101,
@@ -440,6 +499,24 @@ describe('bootstrapMainApplication', () => {
     const hostApiContext = hoisted.startHostApiServerMock.mock.calls[0][0] as HostApiServerContext;
     const runtime = await hostApiContext.runtime;
     expect(runtime.runtimeHostTransports).toBe(bundle.hostApiTransports);
+    expect(bundle.hostApiTransports).not.toHaveProperty('channelAuthorizationTransport');
+    expect(hoisted.createChannelAuthorizationMock).toHaveBeenCalledWith(
+      bundle.hostApiTransports.channelCatalogTransport.apply,
+      hostApiContext.signal,
+    );
+    expect(runtime.channelAuthorization).toBe(hoisted.createChannelAuthorizationMock.mock.results[0].value);
+    expect(hoisted.createWorldPrivateOperationsMock).toHaveBeenCalledWith(
+      expect.any(Promise), hostApiContext.signal, expect.any(Promise), {
+        getMainWindow: context.deps.getMainWindow,
+        authorizeInitialImport: expect.any(Function),
+        validateStorageBootstrap: expect.any(Function),
+      },
+    );
+    await expect(hoisted.createWorldPrivateOperationsMock.mock.calls[0][0]).resolves.toBe(bundle.hostApiTransports.worldTransport);
+    await expect(hoisted.createWorldPrivateOperationsMock.mock.calls[0][2]).resolves.toBe(runtime.runtimeHost);
+    expect(hoisted.registerWorldPrivateHandlersMock).toHaveBeenCalledWith(
+      hoisted.createWorldPrivateOperationsMock.mock.results[0].value,
+    );
     for (const key of Object.keys(bundle.hostApiTransports)) {
       expect(hostApiContext).not.toHaveProperty(key);
       expect(runtime).not.toHaveProperty(key);
@@ -492,15 +569,22 @@ describe('bootstrapMainApplication', () => {
       bundle.hostApiTransports.fleetCredentialsTransport,
       expect.objectContaining({ transport: expect.objectContaining({ download: expect.any(Function) }) }),
     );
-    expect(hoisted.registerProviderPrivateAuthHandlersMock).toHaveBeenCalledWith(
+    expect(hoisted.createProviderPrivateAuthMock).toHaveBeenCalledOnce();
+    expect(hoisted.createProviderPrivateAuthMock).toHaveBeenCalledWith(
       context.deps.getMainWindow,
       expect.any(Promise),
       hostApiContext.signal,
     );
-    await expect(hoisted.registerProviderPrivateAuthHandlersMock.mock.calls[0][1]).resolves.toEqual({
+    await expect(hoisted.createProviderPrivateAuthMock.mock.calls[0][1]).resolves.toEqual({
       transport: bundle.hostApiTransports.providerAccountsTransport,
       awaitProviderCall: hoisted.createCloudProviderSyncMock.mock.calls[0][0].awaitProviderCall,
     });
+    expect(hoisted.registerProviderPrivateAuthHandlersMock).toHaveBeenCalledWith(
+      hoisted.createProviderPrivateAuthMock.mock.results[0].value,
+    );
+    expect(hoisted.registerProviderPrivateAuthHandlersMock.mock.calls[0][0]).toBe(
+      hoisted.createProviderPrivateAuthMock.mock.results[0].value,
+    );
     expect(hoisted.createDiagnosticsExportDependenciesMock).toHaveBeenCalledWith(
       bundle.hostApiTransports.diagnosticsArchiveTransport,
     );
@@ -509,6 +593,7 @@ describe('bootstrapMainApplication', () => {
         command: expect.any(Function),
         onRestart: expect.any(Function),
       }),
+      runtimeStatus: runtime.runtimeStatus,
       hostEventBus: context.deps.hostEventBus,
       getMainWindow: context.deps.getMainWindow,
       sessionObservers: hostApiContext.sessionObservers,
@@ -519,13 +604,17 @@ describe('bootstrapMainApplication', () => {
       mainWindow: context.mainWindow,
       ready: expect.any(Promise),
       close: expect.any(Function),
+      forceClose: expect.any(Function),
+      readShutdownStage: expect.any(Function),
     });
     expect(hoisted.loadMainWindowContentMock).toHaveBeenCalledWith(context.mainWindow);
     expect(readE2EStartupOutcome()).toBeUndefined();
 
     const licenseService = hoisted.composeLicenseServiceMock.mock.results[0].value;
     const accountService = hoisted.createCloudAccountServiceMock.mock.results[0].value;
-    const drainProviderAuth = hoisted.registerProviderPrivateAuthHandlersMock.mock.results[0].value;
+    const drainProviderAuth = hoisted.createProviderPrivateAuthMock.mock.results[0].value.drain;
+    const drainWorldPrivate = hoisted.createWorldPrivateOperationsMock.mock.results[0].value.drain;
+    const drainChannelAuthorization = hoisted.createChannelAuthorizationMock.mock.results[0].value.drain;
     const server = hoisted.startHostApiServerMock.mock.results[0].value;
     const closeObservers = vi.spyOn(hostApiContext.sessionObservers, 'close');
     let resolveLicenseDisposal!: () => void;
@@ -556,6 +645,11 @@ describe('bootstrapMainApplication', () => {
     expect(accountService.close).toHaveBeenCalledOnce();
     expect(drainProviderAuth).toHaveBeenCalledOnce();
     expect(accountService.close.mock.invocationCallOrder[0]).toBeLessThan(drainProviderAuth.mock.invocationCallOrder[0]);
+    expect(drainWorldPrivate).toHaveBeenCalledOnce();
+    expect(drainChannelAuthorization).toHaveBeenCalledOnce();
+    expect(drainProviderAuth.mock.invocationCallOrder[0]).toBeLessThan(drainWorldPrivate.mock.invocationCallOrder[0]);
+    expect(drainWorldPrivate.mock.invocationCallOrder[0]).toBeLessThan(drainChannelAuthorization.mock.invocationCallOrder[0]);
+    expect(drainChannelAuthorization.mock.invocationCallOrder[0]).toBeLessThan(context.directRuntimeHost.stop.mock.invocationCallOrder[0]);
     expect(drainProviderAuth.mock.invocationCallOrder[0]).toBeLessThan(
       hoisted.registerMainEventBridgeMock.mock.results[0].value.mock.invocationCallOrder[0],
     );

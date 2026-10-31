@@ -1,52 +1,24 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AppPluginManifest } from '../../../src/types/desktop/app-plugin';
+import type { AppPluginCall } from '../../../src/types/desktop/app-plugin-sdk';
 import type { MainHostApiContext } from '../context';
-import { AppPluginError, requireDigest, requireObject, requirePluginId } from '../../main/app-plugins/package';
+import { AppPluginError, MAX_APP_PLUGIN_ZIP_BYTES, requireDigest, requireObject, requirePluginId } from '../../main/app-plugins/package';
 import type { AppPluginRuntimeStatusInput } from '../../main/app-plugins/agent-gateway';
-import { sendJson } from '../route-utils';
+import { HostApiBodyTooLarge, jsonResult, type HostApiRequest, type HostApiResponse, type HostApiRouteResult } from '../execution';
 
-const operations = new Set(['inspect', 'import', 'enabled', 'uninstall', 'rollback', 'bundle', 'build', 'development', 'runtime-status']);
+const operations = new Set(['inspect', 'import', 'enabled', 'uninstall', 'rollback', 'bundle', 'build', 'development', 'runtime-status', 'call']);
+const MAX_BASE64_BYTES = 4 * Math.ceil(MAX_APP_PLUGIN_ZIP_BYTES / 3);
 
-function readBody(req: IncomingMessage, maximum: number): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const cleanup = () => {
-      req.off('data', onData);
-      req.off('end', onEnd);
-      req.off('error', onError);
-      req.off('aborted', onAborted);
-    };
-    const fail = (error: Error) => {
-      cleanup();
-      req.resume();
-      reject(error);
-    };
-    const onError = () => fail(new AppPluginError('invalid_package', 'App plugin request could not be read.'));
-    const onAborted = () => fail(new AppPluginError('invalid_package', 'App plugin request was interrupted.'));
-    const onData = (chunk: Buffer | string) => {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      size += bytes.length;
-      if (size > maximum) {
-        fail(new AppPluginError('invalid_package', 'App plugin request body is too large.'));
-        return;
-      }
-      chunks.push(bytes);
-    };
-    const onEnd = () => {
-      cleanup();
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-      catch { reject(new AppPluginError('invalid_package', 'App plugin request JSON is invalid.')); }
-    };
-    if (Number(req.headers['content-length']) > maximum) {
-      fail(new AppPluginError('invalid_package', 'App plugin request body is too large.'));
-      return;
-    }
-    req.on('data', onData);
-    req.once('end', onEnd);
-    req.once('error', onError);
-    req.once('aborted', onAborted);
-  });
+async function readBody(req: HostApiRequest, maximum: number): Promise<unknown> {
+  let bytes: Uint8Array;
+  try {
+    bytes = await req.readBytes(maximum, true);
+  } catch (error) {
+    const message = error instanceof HostApiBodyTooLarge ? 'App plugin request body is too large.'
+      : req.signal.aborted ? 'App plugin request was interrupted.' : 'App plugin request could not be read.';
+    throw new AppPluginError('invalid_package', message);
+  }
+  try { return JSON.parse(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8')); }
+  catch { throw new AppPluginError('invalid_package', 'App plugin request JSON is invalid.'); }
 }
 
 function requireString(value: unknown, maximum: number): asserts value is string {
@@ -69,34 +41,34 @@ function readRuntimeStatus(value: unknown): AppPluginRuntimeStatusInput {
 }
 
 export async function handleAppPluginRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
-  ctx: Pick<MainHostApiContext, 'appPlugins' | 'appPluginAgentGateway'>,
-): Promise<boolean> {
+  ctx: Pick<MainHostApiContext, 'appPlugins' | 'appPluginAgentGateway' | 'appPluginHost'>,
+): Promise<HostApiRouteResult> {
   if (req.method === 'GET' && url.pathname === '/api/app-plugins') {
-    try { sendJson(res, 200, await ctx.appPlugins.list()); }
-    catch (error) { sendFailure(res, error); }
-    return true;
+    try {
+      const result = await ctx.appPlugins.list();
+      return req.signal.aborted ? null : jsonResult(200, result);
+    } catch (error) { return sendFailure(req, error); }
   }
   const operation = url.pathname.startsWith('/api/app-plugins/') ? url.pathname.slice('/api/app-plugins/'.length) : '';
-  if (req.method !== 'POST' || !operations.has(operation)) return false;
+  if (req.method !== 'POST' || !operations.has(operation)) return undefined;
   try {
-    const maximum = operation === 'build' ? 32 * 1024 * 1024
-      : operation === 'inspect' || operation === 'import' ? 12 * 1024 * 1024 : 64 * 1024;
+    const maximum = operation === 'build' || operation === 'call' ? 2 * MAX_APP_PLUGIN_ZIP_BYTES
+      : operation === 'inspect' || operation === 'import' ? MAX_BASE64_BYTES + 64 * 1024 : 64 * 1024;
     const value = await readBody(req, maximum);
     const owner = ctx.appPlugins;
     let result: unknown;
     switch (operation) {
       case 'inspect': {
         const body = requireObject(value, ['packageBase64']);
-        requireString(body.packageBase64, 12 * 1024 * 1024);
+        requireString(body.packageBase64, MAX_BASE64_BYTES);
         result = await owner.inspect(body.packageBase64);
         break;
       }
       case 'import': {
         const body = requireObject(value, ['packageBase64', 'digest']);
-        requireString(body.packageBase64, 12 * 1024 * 1024);
+        requireString(body.packageBase64, MAX_BASE64_BYTES);
         requireDigest(body.digest);
         // Origin is authority supplied by this manual route, never by request JSON.
         result = await owner.importPackage({ packageBase64: body.packageBase64, digest: body.digest, origin: 'manual' });
@@ -140,9 +112,13 @@ export async function handleAppPluginRoutes(
       }
       case 'development': {
         const body = requireObject(value, ['kind', 'pluginId']);
-        if (body.kind !== 'reader' && body.kind !== 'connector') throw new AppPluginError('invalid_package', 'Unknown app plugin development kind.');
+        if (body.kind !== 'reader' && body.kind !== 'connector' && body.kind !== 'application') throw new AppPluginError('invalid_package', 'Unknown app plugin development kind.');
         if (body.pluginId !== undefined) requirePluginId(body.pluginId);
         result = (await ctx.appPluginAgentGateway).createDevelopment({ kind: body.kind, pluginId: body.pluginId as string | undefined });
+        break;
+      }
+      case 'call': {
+        result = await ctx.appPluginHost.call(value as AppPluginCall, req.signal);
         break;
       }
       case 'runtime-status': {
@@ -153,18 +129,17 @@ export async function handleAppPluginRoutes(
         break;
       }
     }
-    sendJson(res, 200, result);
+    return req.signal.aborted ? null : jsonResult(200, result);
   } catch (error) {
-    sendFailure(res, error);
+    return sendFailure(req, error);
   }
-  return true;
 }
 
-function sendFailure(res: ServerResponse, error: unknown): void {
+function sendFailure(req: HostApiRequest, error: unknown): HostApiResponse | null {
+  if (req.signal.aborted) return null;
   if (error instanceof AppPluginError) {
     const status = { invalid_package: 400, conflict: 409, not_found: 404, closed: 503, busy: 429 }[error.code];
-    sendJson(res, status, { success: false, code: error.code, error: error.message });
-    return;
+    return jsonResult(status, { success: false, code: error.code, error: error.message });
   }
-  sendJson(res, 500, { success: false, error: 'App plugin operation failed. Please try again.' });
+  return jsonResult(500, { success: false, error: 'App plugin operation failed. Please try again.' });
 }

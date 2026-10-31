@@ -1,11 +1,10 @@
 import { traceDebug, isTraceEnabled } from '../../utils/trace-logger';
-import type { IncomingMessage, ServerResponse } from 'http';
 import { dialog } from 'electron';
 import type { SealedSkillsTransport } from '../../main/runtime-host-delivery/transport/skills/sealed';
 import { isSkillsRuntimeScope, type SkillsManagementTransport } from '../../main/runtime-host-delivery/transport/skills/management';
 import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 import { hasExactKeys, isRecord } from '../../main/runtime-host-delivery/transport/client';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 const INVALID = { outcome: 'rejected' } as const;
 const UNKNOWN = { outcome: 'unknown' } as const;
@@ -13,35 +12,31 @@ const UNKNOWN = { outcome: 'unknown' } as const;
 type SealedSkillsRouteOperation = 'export' | 'install' | 'uninstall' | 'status' | 'installLocal';
 
 export async function handleSealedSkillsRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: SealedSkillsTransport,
   _skillsManagementTransport: SkillsManagementTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   const operation = routeOperation(url.pathname, req.method);
-  if (!operation) return false;
+  if (!operation) return undefined;
 
   if (operation === 'status') {
     try {
       const response = await transport.readStatus(readRuntimeScopeQuery(url.searchParams));
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNKNOWN);
+      return jsonResult(503, UNKNOWN);
     }
-    return true;
   }
 
   if (operation === 'installLocal') {
     let request: unknown;
-    try { request = await parseJsonBody(req); } catch {
-      sendJson(res, 400, INVALID);
-      return true;
+    try { request = await req.readJson(); } catch {
+      return jsonResult(400, INVALID);
     }
     if (!isRecord(request) || !(hasExactKeys(request, [])
       || (hasExactKeys(request, ['scope']) && isSkillsRuntimeScope(request.scope)))) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
     try {
       const result = await dialog.showOpenDialog({
@@ -50,20 +45,18 @@ export async function handleSealedSkillsRoutes(
       });
       const packagePath = result.filePaths[0];
       if (result.canceled || !packagePath) {
-        sendJson(res, 200, { outcome: 'canceled' });
-        return true;
+        return jsonResult(200, { outcome: 'canceled' });
       }
       const response = await transport.install({ packagePath, ...(Object.hasOwn(request, 'scope') ? { scope: request.scope } : {}) });
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNKNOWN);
+      return jsonResult(503, UNKNOWN);
     }
-    return true;
   }
 
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
     if (operation === 'export') {
       traceDebug(() => ['[startup-trace]', {
@@ -72,8 +65,7 @@ export async function handleSealedSkillsRoutes(
         detail: 'invalid-json',
       }]);
     }
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   const exportSkillKey = operation === 'export' && isTraceEnabled() ? skillKeyFromBody(body) : null;
   if (operation === 'export') {
@@ -97,7 +89,7 @@ export async function handleSealedSkillsRoutes(
         ...(exportSkillKey ? { skillKey: exportSkillKey } : {}),
       }]);
     }
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
     if (operation === 'export') {
       traceDebug(() => ['[startup-trace]', {
@@ -107,9 +99,8 @@ export async function handleSealedSkillsRoutes(
         ...(exportSkillKey ? { skillKey: exportSkillKey } : {}),
       }]);
     }
-    sendJson(res, 503, UNKNOWN);
+    return jsonResult(503, UNKNOWN);
   }
-  return true;
 }
 
 function routeOperation(pathname: string, method: string | undefined): SealedSkillsRouteOperation | undefined {

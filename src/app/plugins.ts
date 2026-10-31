@@ -1,6 +1,6 @@
 import { createPluginHost } from '@/plugin-host/core';
 import { observeInstalledAppPlugins } from '@/plugins/application-plugins/installed';
-import { applicationPluginsPlugin } from '@/plugins/application-plugins/plugin';
+import { applicationPluginsPlugin, createInstalledApplicationPlugin } from '@/plugins/application-plugins/plugin';
 import { applicationShellPlugin } from './extensions';
 import { runtimePlugin } from '@/plugins/runtime/plugin';
 import { accountPlugin } from '@/plugins/account/plugin';
@@ -58,10 +58,11 @@ export function observeApplicationPluginPackages(): () => void {
   return observeInstalledAppPlugins(applicationPluginsHost, (record) => {
     const reader = createInstalledReaderPlugin(record);
     const connector = createInstalledConnectorPlugin(record);
+    const application = createInstalledApplicationPlugin(record);
     return {
       id: `installed:${record.manifest.id}`,
-      requires: [...(reader.requires ?? []), ...(connector.requires ?? [])],
-      contributes: [...(reader.contributes ?? []), ...(connector.contributes ?? [])],
+      requires: [...new Set([...(reader.requires ?? []), ...(connector.requires ?? []), ...(application.requires ?? [])])],
+      contributes: [...(reader.contributes ?? []), ...(connector.contributes ?? []), ...(application.contributes ?? [])],
     };
   });
 }

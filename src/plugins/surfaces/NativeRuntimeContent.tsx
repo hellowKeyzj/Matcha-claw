@@ -26,7 +26,7 @@ function sourceKey(source: RuntimeContentSource): string {
   if (source.kind === 'board') return JSON.stringify([
     'board', buildSessionIdentityKey(source.identity), source.widget.name, source.widget.revision,
     source.widget.instanceId, source.widget.grantState, source.widget.viewGeneration,
-    source.widget.viewTicket, source.widget.sandboxUrl,
+    source.widget.frameUrl?.split(/[?#]/u, 1)[0], source.widget.sandboxUrl, source.widget.sandboxOrigin,
   ]);
   const descriptor = source.descriptor;
   return JSON.stringify([descriptor.kind, buildSessionIdentityKey(descriptor.sessionIdentity),
@@ -41,6 +41,7 @@ const ContentFrame = forwardRef<RuntimeContentHandle, Props>(function ContentFra
   const snapshotReady = useRef(false);
   const retired = useRef(false);
   const observedWidget = useRef(props.source.kind === 'board' ? props.source.widget : null);
+  const renewBoard = useRef<((widget: Extract<RuntimeContentSource, { kind: 'board' }>['widget']) => void) | null>(null);
   const [incarnation, setIncarnation] = useState(0);
   const latest = useRef(props);
   useLayoutEffect(() => {
@@ -51,7 +52,7 @@ const ContentFrame = forwardRef<RuntimeContentHandle, Props>(function ContentFra
     if (retired.current && changed && widget) {
       retired.current = false;
       queueMicrotask(() => setIncarnation((value) => value + 1));
-    }
+    } else if (changed && widget) renewBoard.current?.(widget);
   }, [props]);
   const [view, setView] = useState<{ incarnation: number; status: 'ready' | 'error'; error?: string } | null>(null);
   const status = view?.incarnation === incarnation ? view.status : 'loading';
@@ -73,11 +74,17 @@ const ContentFrame = forwardRef<RuntimeContentHandle, Props>(function ContentFra
     let alive = true;
     let channel: SandboxChannel | null = null;
     let expiresAt = source.kind === 'mcp-app' ? source.descriptor.expiresAtMs : undefined;
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+    let renewalTimer: ReturnType<typeof setTimeout> | undefined;
+    let boardBridge: ReturnType<typeof createBoardBridge> | null = null;
     const current = () => alive && !abort.signal.aborted && (expiresAt === undefined || Date.now() < expiresAt);
     const refresh = () => { void Promise.resolve(latest.current.onRefresh?.()).catch(() => {}); };
     const close = () => {
       alive = false;
       abort.abort();
+      clearTimeout(expiryTimer);
+      clearTimeout(renewalTimer);
+      renewBoard.current = null;
       snapshotReady.current = false;
       channelRef.current = null;
       for (const cleanup of cleanups.splice(0).reverse()) cleanup();
@@ -92,15 +99,13 @@ const ContentFrame = forwardRef<RuntimeContentHandle, Props>(function ContentFra
     };
     const height = (value: number) => { if (current()) latest.current.onHeightChange?.(value); };
     const lease = (expiry: number, renew: boolean) => {
-      expiresAt = expiry;
       const remaining = expiry - Date.now();
       if (remaining <= 0) throw new Error(message('leaseExpired', 'Native content lease expired.'));
-      const expiryTimer = setTimeout(() => revoke(message('leaseExpired', 'Native content lease expired.')), Math.min(remaining, 2_147_483_647));
-      cleanups.push(() => clearTimeout(expiryTimer));
-      if (renew && remaining > 15_000) {
-        const renewalTimer = setTimeout(refresh, remaining - 15_000);
-        cleanups.push(() => clearTimeout(renewalTimer));
-      }
+      expiresAt = expiry;
+      clearTimeout(expiryTimer);
+      clearTimeout(renewalTimer);
+      expiryTimer = setTimeout(() => revoke(message('leaseExpired', 'Native content lease expired.')), Math.min(remaining, 2_147_483_647));
+      if (renew && remaining > 15_000) renewalTimer = setTimeout(refresh, remaining - 15_000);
     };
     let authorize = async () => { if (!current()) throw new Error('Content authority expired'); };
     const actions = createContentActions(frame, () => latest.current, current, () => authorize(), (text) =>
@@ -111,15 +116,26 @@ const ContentFrame = forwardRef<RuntimeContentHandle, Props>(function ContentFra
       let event;
       try { event = decodeBoardChangedEvent(payload); } catch { return; }
       if (buildSessionIdentityKey(event.identity) === buildSessionIdentityKey(source.identity)
-        && (!event.widget || event.widget === source.widget.name)) revoke(message('boardChanged', 'Board content changed.'), false);
+        && event.widget === source.widget.name) revoke(message('boardChanged', 'Board content changed.'), false);
     }));
+    if (source.kind === 'board' && source.widget.contentKind !== 'mcp-app') renewBoard.current = (widget) => {
+      try {
+        if (!current()) throw new Error('Board view expired');
+        if (boardBridge && !boardBridge.updateDocument(boardDocument(source.identity, widget))) {
+          revoke(message('authorityChanged', 'Native content authority changed.'), false);
+          queueMicrotask(() => setIncarnation((value) => value + 1));
+        }
+      } catch {
+        revoke(message('authorityChanged', 'Native content authority changed.'));
+      }
+    };
     const setup = async () => {
       let html: string;
       let sandboxUrl: string;
       let strict = false;
+      let boardView: ReturnType<typeof boardDocument> | null = null;
       let mcpPayload: Awaited<ReturnType<typeof hostOpenClawMcpAppRequest<'mcp.app.view'>>> | null = null;
       let mcpDescriptor: OpenClawMcpAppSurfaceDescriptor | null = null;
-      let boardTicket: string | null = null;
       if (source.kind === 'board') {
         const { identity, widget } = source;
         if (widget.contentKind === 'mcp-app') {
@@ -135,14 +151,9 @@ const ContentFrame = forwardRef<RuntimeContentHandle, Props>(function ContentFra
         } else {
           const document = boardDocument(identity, widget);
           lease(document.expiresAtMs, true);
-          boardTicket = document.ticket;
           html = await fetchBoardDocument(document.url, abort.signal);
           sandboxUrl = document.sandboxUrl;
-          authorize = async () => {
-            if (!current()) throw new Error('Board view expired');
-            await boardExecute(identity, { method: 'board.prompt.authorize', ticket: document.ticket });
-            if (!current()) throw new Error('Board view expired');
-          };
+          boardView = document;
         }
       } else {
         const descriptor = decodeOpenClawRuntimeSurfaceDescriptor(source.descriptor);
@@ -180,9 +191,20 @@ const ContentFrame = forwardRef<RuntimeContentHandle, Props>(function ContentFra
       } else {
         let promptPort: MessagePort | null = null;
         cleanups.push(() => promptPort?.close());
-        if (source.kind === 'board' && boardTicket) cleanups.push(createBoardBridge({ channel: connectedChannel,
-          identity: source.identity, ticket: boardTicket, actions, current,
-          revoke: () => revoke(message('authorityChanged', 'Native content authority changed.')) }));
+        if (source.kind === 'board' && boardView) {
+          boardBridge = createBoardBridge({ channel: connectedChannel,
+            identity: source.identity, document: boardView, actions, current,
+            onAdopted: (adopted) => {
+              try { lease(adopted.expiresAtMs, true); }
+              catch { revoke(message('leaseExpired', 'Native content lease expired.')); }
+            },
+            revoke: () => revoke(message('authorityChanged', 'Native content authority changed.')) });
+          authorize = boardBridge.checkAuthority;
+          cleanups.push(boardBridge.dispose);
+          const latestSource = latest.current.source;
+          if (latestSource.kind === 'board') renewBoard.current?.(latestSource.widget);
+          if (!current()) return;
+        }
         cleanups.push(connectedChannel.subscribe((data, ports) => {
           if (!isRecord(data)) return;
           if (data.type === 'openclaw:widget-prompt-offer') {

@@ -18,9 +18,6 @@ pub(crate) enum BoardOwnerCommand {
         reply: oneshot::Sender<Result<BoardSubscription, BoardFailure>>,
     },
     Publish(BoardDelivery),
-    Close {
-        reply: oneshot::Sender<()>,
-    },
 }
 
 impl BoardOwnerCommand {
@@ -30,7 +27,6 @@ impl BoardOwnerCommand {
                 CommandRoute::Keyed(identity.clone())
             }
             Self::Publish(delivery) => CommandRoute::Keyed(delivery.event.identity().clone()),
-            Self::Close { .. } => CommandRoute::Shutdown,
         }
     }
 }

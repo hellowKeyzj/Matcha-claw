@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type { ChannelCatalogTransport } from '../../main/runtime-host-delivery/transport/channels/catalog';
-import { parseJsonBody, sendJson } from '../route-utils';
 import { isProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
@@ -13,33 +12,29 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleChannelCatalogRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: ChannelCatalogTransport,
-): Promise<boolean> {
-  if (url.pathname !== '/api/channels/catalog' || req.method !== 'POST') return false;
+): Promise<HostApiRouteResult> {
+  if (url.pathname !== '/api/channels/catalog' || req.method !== 'POST') return undefined;
 
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   if (!isEmptyObject(body)
     && !(isRecord(body) && Object.keys(body).length === 1 && isProductRuntimeScope(body.scope))) {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
 
   try {
     const response = await transport.read(isRecord(body) ? body.scope : undefined);
-    sendJson(res, response.status === 200 ? 200 : 503, response.status === 200 ? response.body : UNAVAILABLE);
+    return jsonResult(response.status === 200 ? 200 : 503, response.status === 200 ? response.body : UNAVAILABLE);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

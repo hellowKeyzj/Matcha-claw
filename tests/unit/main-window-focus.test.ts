@@ -3,7 +3,7 @@ import {
   consumeMainWindowReady,
   createMainWindowFocusState,
   requestSecondInstanceFocus,
-} from '../../electron/main/main-window-focus';
+} from '../../electron/main/desktop/main-window-focus';
 
 describe('main window focus coordination', () => {
   it('主窗口未就绪时会延迟 second-instance 焦点请求', () => {

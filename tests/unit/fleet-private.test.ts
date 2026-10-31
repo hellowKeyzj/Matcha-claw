@@ -164,7 +164,7 @@ describe('Fleet private credential adapter', () => {
 
   it('registers the Renderer IPC handler on the private channel', async () => {
     const write = vi.fn().mockResolvedValue(receipt);
-    const { registerFleetPrivateHandlers } = await import('../../electron/main/ipc/fleet-private');
+    const { registerFleetPrivateHandlers } = await import('../../electron/api/ipc/fleet-private');
 
     registerFleetPrivateHandlers({ write });
     await expect(handlers.get('fleet:writeCredential')?.({}, input)).resolves.toMatchObject({

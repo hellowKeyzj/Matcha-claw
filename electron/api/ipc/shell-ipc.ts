@@ -1,0 +1,336 @@
+import { clipboard, ClipboardItem, ipcMain, nativeImage, shell, type BrowserWindow } from 'electron';
+import { Blob } from 'node:buffer';
+import { crc32 } from 'node:zlib';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
+import { expandPath, getLogsDir, getResourcesDir } from '../../utils/paths';
+import { logger } from '../../utils/logger';
+
+const CHROME_EXTENSIONS_URL = 'chrome://extensions/';
+let windowsChromeClipboardQueue: Promise<void> = Promise.resolve();
+
+function isAllowedExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+function resolveResourcePath(path: string): { success: true; resolvedPath: string } | { success: false; error: string; rawPath: string } {
+  const rawPath = typeof path === 'string' ? path.trim() : '';
+  if (!rawPath) {
+    return { success: false, error: 'empty_path', rawPath };
+  }
+  if (isAbsolute(rawPath)) {
+    return { success: false, error: 'absolute_path_not_supported', rawPath };
+  }
+
+  const resourcesDir = resolvePath(getResourcesDir());
+  const resolvedPath = resolvePath(resourcesDir, rawPath);
+  const relativePath = relative(resourcesDir, resolvedPath);
+  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    return { success: false, error: 'resource_path_outside_resources', rawPath };
+  }
+  if (!existsSync(resolvedPath)) {
+    return { success: false, error: 'not_found', rawPath };
+  }
+
+  return { success: true, resolvedPath };
+}
+
+function getChromeLaunchCommands(): Array<{ command: string; args: string[] }> {
+  const homeDir = process.env.USERPROFILE ?? process.env.HOME ?? '';
+
+  if (process.platform === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA ?? '';
+    const programFiles = process.env.PROGRAMFILES ?? 'C:\\Program Files';
+    const programFilesX86 = process.env['PROGRAMFILES(X86)'] ?? 'C:\\Program Files (x86)';
+    const candidates = [
+      `${localAppData}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${localAppData}\\Google\\Chrome SxS\\Application\\chrome.exe`,
+      `${programFiles}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${programFilesX86}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${localAppData}\\Chromium\\Application\\chrome.exe`,
+      `${programFiles}\\Chromium\\Application\\chrome.exe`,
+      `${programFilesX86}\\Chromium\\Application\\chrome.exe`,
+      'chrome.exe',
+      'chrome',
+      'chromium.exe',
+      'chromium',
+    ];
+
+    return candidates.map((command) => ({
+      command,
+      args: [CHROME_EXTENSIONS_URL],
+    }));
+  }
+
+  if (process.platform === 'darwin') {
+    const candidates = [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      `${homeDir}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
+      '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+      `${homeDir}/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary`,
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      `${homeDir}/Applications/Chromium.app/Contents/MacOS/Chromium`,
+      'google-chrome',
+      'chromium',
+    ];
+
+    return candidates.map((command) => ({
+      command,
+      args: [CHROME_EXTENSIONS_URL],
+    }));
+  }
+
+  const candidates = [
+    'google-chrome',
+    'google-chrome-stable',
+    'chromium',
+    'chromium-browser',
+  ];
+
+  return candidates.map((command) => ({
+    command,
+    args: [CHROME_EXTENSIONS_URL],
+  }));
+}
+
+function escapePowerShellSingleQuotedString(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+async function openChromeInternalPageOnWindows(chromePath: string, targetUrl: string): Promise<void> {
+  const escapedChromePath = escapePowerShellSingleQuotedString(chromePath);
+  const escapedTargetUrl = escapePowerShellSingleQuotedString(targetUrl);
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms
+$chromePath = '${escapedChromePath}'
+$targetUrl = '${escapedTargetUrl}'
+$shell = New-Object -ComObject WScript.Shell
+$clipboardText = $null
+$hasClipboardText = $false
+try {
+  $clipboardText = Get-Clipboard -Raw -Format Text -ErrorAction Stop
+  $hasClipboardText = $true
+} catch {
+}
+try {
+  $null = Start-Process -FilePath $chromePath -ArgumentList '--new-window', 'about:blank' -PassThru
+  Start-Sleep -Milliseconds 1200
+  if (-not ($shell.AppActivate('Google Chrome') -or $shell.AppActivate('Chrome'))) {
+    throw 'chrome_window_activate_failed'
+  }
+  Start-Sleep -Milliseconds 150
+  Set-Clipboard -Value $targetUrl
+  Start-Sleep -Milliseconds 100
+  [System.Windows.Forms.SendKeys]::SendWait('^l')
+  Start-Sleep -Milliseconds 80
+  [System.Windows.Forms.SendKeys]::SendWait('^v')
+  Start-Sleep -Milliseconds 80
+  [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+  Start-Sleep -Milliseconds 120
+} finally {
+  if ($hasClipboardText) {
+    Set-Clipboard -Value $clipboardText
+  }
+}
+`.trim();
+
+  const child = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    {
+      windowsHide: true,
+      stdio: 'ignore',
+    },
+  );
+
+  await new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`powershell exited with code ${String(code)}`));
+    });
+  });
+}
+
+async function openChromeExtensionsPage(): Promise<void> {
+  const launchCommands = getChromeLaunchCommands();
+  let lastError: unknown = null;
+
+  for (const { command, args } of launchCommands) {
+    if ((command.includes('/') || command.includes('\\')) && !existsSync(command)) {
+      continue;
+    }
+
+    try {
+      if (process.platform === 'win32') {
+        const operation = windowsChromeClipboardQueue.then(() => openChromeInternalPageOnWindows(command, CHROME_EXTENSIONS_URL));
+        windowsChromeClipboardQueue = operation.then(() => undefined, () => undefined);
+        await operation;
+        return;
+      }
+
+      const child = spawn(command, args, {
+        detached: true,
+        stdio: 'ignore',
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', () => resolve());
+        child.once('error', reject);
+      });
+
+      child.unref();
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw new Error(
+    `Unable to open ${CHROME_EXTENSIONS_URL}. Chrome executable not found or failed to launch.${lastError instanceof Error ? ` ${lastError.message}` : ''}`,
+  );
+}
+
+function decodeClipboardPng(value: unknown): Electron.NativeImage | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const request = value as Record<string, unknown>;
+  const maximumBytes = 20 * 1024 * 1024;
+  if (Object.keys(request).some((key) => key !== 'data' && key !== 'mimeType') || request.mimeType !== 'image/png'
+    || typeof request.data !== 'string' || !request.data.length || request.data.length > 4 * Math.ceil(maximumBytes / 3)
+    || request.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(request.data)) return null;
+  const bytes = Buffer.from(request.data, 'base64');
+  if (bytes.length > maximumBytes || bytes.toString('base64') !== request.data || bytes.length < 57
+    || bytes.readBigUInt64BE(0) !== 0x89504e470d0a1a0an || bytes.readUInt32BE(8) !== 13 || bytes.toString('ascii', 12, 16) !== 'IHDR') return null;
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  if (!width || !height || width > 16384 || height > 16384 || width * height > 67_108_864) return null;
+  let hasImageData = false;
+  let hasEnd = false;
+  for (let offset = 8; offset < bytes.length;) {
+    if (offset + 12 > bytes.length) return null;
+    const length = bytes.readUInt32BE(offset);
+    const end = offset + 12 + length;
+    if (end > bytes.length || crc32(bytes.subarray(offset + 4, end - 4)) !== bytes.readUInt32BE(end - 4)) return null;
+    const type = bytes.toString('ascii', offset + 4, offset + 8);
+    if ((type === 'IHDR' && offset !== 8) || ['acTL', 'fcTL', 'fdAT'].includes(type)) return null;
+    if (type === 'IDAT') hasImageData = true;
+    if (type === 'IEND') {
+      if (length || end !== bytes.length || !hasImageData) return null;
+      hasEnd = true;
+    }
+    offset = end;
+  }
+  if (!hasEnd) return null;
+  const image = nativeImage.createFromBuffer(bytes);
+  const size = image.getSize();
+  return !image.isEmpty() && size.width === width && size.height === height ? image : null;
+}
+
+export function registerShellHandlers(getMainWindow: () => BrowserWindow | null): void {
+  ipcMain.handle('shell:writeClipboardImage', async (event, request: unknown) => {
+    const window = getMainWindow();
+    const isTrustedCaller = () => window && !window.isDestroyed() && !window.webContents.isDestroyed() && window.isFocused()
+      && event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame;
+    if (!isTrustedCaller()) return { outcome: 'denied' };
+    try {
+      const image = decodeClipboardPng(request);
+      if (!image) return { outcome: 'invalid-image' };
+      const png = image.toPNG();
+      if (!png.length || png.length > 20 * 1024 * 1024) return { outcome: 'invalid-image' };
+      const item = new ClipboardItem({ 'image/png': new Blob([new Uint8Array(png)], { type: 'image/png' }) });
+      if (!isTrustedCaller()) return { outcome: 'denied' };
+      await clipboard.write([item]);
+      return { outcome: 'written' };
+    } catch {
+      return { outcome: 'write-failed' };
+    }
+  });
+
+  ipcMain.handle('shell:openExternal', async (_, url: string) => {
+    if (!isAllowedExternalUrl(url)) {
+      throw new Error('Blocked openExternal for disallowed URL');
+    }
+    try {
+      await shell.openExternal(url);
+    } catch {
+      throw new Error('Unable to open external browser');
+    }
+  });
+
+  ipcMain.handle('shell:openChromeExtensions', async () => {
+    await openChromeExtensionsPage();
+  });
+
+  ipcMain.handle('shell:showAppLogsDirectory', async () => {
+    const logsDirectory = getLogsDir();
+    if (!existsSync(logsDirectory)) {
+      return { success: false, outcome: 'unavailable' as const };
+    }
+    shell.showItemInFolder(logsDirectory);
+    return { success: true, outcome: 'opened' as const };
+  });
+
+  ipcMain.handle('shell:openResourcePath', async (_, path: string) => {
+    const result = resolveResourcePath(path);
+    if (!result.success) {
+      logger.warn(`[shell:openResourcePath] ${result.error}: "${result.rawPath}"`);
+      return result;
+    }
+    const openResult = await shell.openPath(result.resolvedPath);
+    if (openResult) {
+      return { success: false, error: openResult, rawPath: path, resolvedPath: result.resolvedPath };
+    }
+    return { success: true, resolvedPath: result.resolvedPath };
+  });
+
+  ipcMain.handle('shell:showItemInFolder', async (_, path: string) => {
+    const rawPath = typeof path === 'string' ? path.trim() : '';
+    if (!rawPath) {
+      return { success: false, error: 'empty_path' };
+    }
+
+    const decodedPath = (() => {
+      try {
+        return decodeURIComponent(rawPath);
+      } catch {
+        return rawPath;
+      }
+    })();
+    const expandedPath = expandPath(decodedPath);
+    if (!isAbsolute(expandedPath)) {
+      logger.warn(`[shell:showItemInFolder] relative path rejected: "${rawPath}"`);
+      return { success: false, error: 'relative_path_not_supported', rawPath };
+    }
+    const resolvedPath = resolvePath(expandedPath);
+    if (!existsSync(resolvedPath)) {
+      logger.warn(`[shell:showItemInFolder] target not found: raw="${rawPath}" resolved="${resolvedPath}"`);
+      return { success: false, error: 'not_found', rawPath, resolvedPath };
+    }
+    shell.showItemInFolder(resolvedPath);
+    return { success: true, resolvedPath, source: 'absolute' };
+  });
+
+  ipcMain.handle('shell:openPath', async (_, path: string) => {
+    const rawPath = typeof path === 'string' ? path.trim() : '';
+    if (!rawPath) {
+      return 'Path is empty';
+    }
+    const decodedPath = (() => {
+      try {
+        return decodeURIComponent(rawPath);
+      } catch {
+        return rawPath;
+      }
+    })();
+    return await shell.openPath(resolvePath(expandPath(decodedPath)));
+  });
+}

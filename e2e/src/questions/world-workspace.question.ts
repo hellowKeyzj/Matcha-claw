@@ -3,6 +3,9 @@ import { Attribute, Selected, Text } from '@serenity-js/web';
 import { WorldWorkspacePage } from '../pages/world-workspace.page.js';
 
 type WorkspaceNotes = {
+  currentWorldPrerequisites: { world: { tenantId: string; worldId: string }; status: string; activeRelease: string;
+    activeReleaseHead: unknown; incarnation: string; activationLock: string; scopes: string[]; slots: string[];
+    catalogs: Record<string, number>; catalogEntries: Record<string, unknown[]>; tasks: unknown[]; packages: unknown[]; trustPolicy: unknown; unchanged: boolean };
   workspaceCatalogs: { rounds: number; complete: boolean; definitions: string[]; materials: string[];
     connections: Array<{ name: string; configured: boolean }>; proposals: string[]; actions: string[]; pending: string[]; evaluations: string[] };
   workspaceOriginal: { exact: boolean; taskId: string; scope: string };
@@ -17,6 +20,7 @@ type WorkspaceNotes = {
 };
 const normalize = (values: string[]) => values.map(value => value.replace(/\s+/g, ' ').trim());
 const sorted = (values: string[]) => [...values].sort();
+export const CurrentWorldPrerequisites = () => notes<WorkspaceNotes>().get('currentWorldPrerequisites');
 export const WorkspaceCatalogs = () => notes<WorkspaceNotes>().get('workspaceCatalogs');
 export const WorkspaceOriginal = () => notes<WorkspaceNotes>().get('workspaceOriginal');
 export const WorkspaceUnchanged = () => notes<WorkspaceNotes>().get('workspaceUnchanged');

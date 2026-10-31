@@ -8,6 +8,7 @@ use tokio::sync::oneshot;
 use crate::{
     application::commands::{WorkspaceCommand, WorkspaceOperation, WorkspaceOwnerKey, WorkspaceQuery},
     owner::actor::WorkspaceShared,
+    session_images::{SessionImageData, SessionImageFailure, SessionImagePage},
     call::{self, Detail, Operation, Outcome, RecordedCall},
     domain::model::{
         ResolvedWorkspaceMedia, WorkspaceBinaryFailure, WorkspaceBinaryReceipt,
@@ -125,6 +126,25 @@ impl WorkspaceHandle {
     ) -> Result<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>, ()> {
         self.request_command(Operation::WriteText, 1, |reply| {
             WorkspaceOperation::WriteText {
+                endpoint,
+                agent_id,
+                relative_path,
+                content,
+                reply,
+            }
+        })
+        .await
+    }
+
+    pub(crate) async fn write_binary(
+        &self,
+        endpoint: RuntimeEndpoint,
+        agent_id: String,
+        relative_path: String,
+        content: Vec<u8>,
+    ) -> Result<Result<WorkspaceWriteReceipt, WorkspaceWriteFailure>, ()> {
+        self.request_command(Operation::WriteBinary, 1, |reply| {
+            WorkspaceOperation::WriteBinary {
                 endpoint,
                 agent_id,
                 relative_path,
@@ -277,6 +297,44 @@ impl WorkspaceHandle {
                 base64,
                 file_name,
                 mime_type,
+                reply,
+            }
+        })
+        .await
+    }
+
+    pub(crate) async fn list_session_images(
+        &self,
+        endpoint: RuntimeEndpoint,
+        session_key: String,
+        agent_id: String,
+        cursor: Option<String>,
+    ) -> Result<Result<SessionImagePage, SessionImageFailure>, ()> {
+        self.request_command(Operation::ListSessionImages, 1, |reply| {
+            WorkspaceOperation::ListSessionImages {
+                endpoint,
+                session_key,
+                agent_id,
+                cursor,
+                reply,
+            }
+        })
+        .await
+    }
+
+    pub(crate) async fn read_session_image(
+        &self,
+        endpoint: RuntimeEndpoint,
+        session_key: String,
+        agent_id: String,
+        reference: String,
+    ) -> Result<Result<SessionImageData, SessionImageFailure>, ()> {
+        self.request_command(Operation::ReadSessionImage, 1, |reply| {
+            WorkspaceOperation::ReadSessionImage {
+                endpoint,
+                session_key,
+                agent_id,
+                reference,
                 reply,
             }
         })

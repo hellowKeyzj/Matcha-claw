@@ -259,7 +259,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
     requestCollapse();
     collapse();
   }, [collapse]);
-  const [lightboxImg, setLightboxImg] = useState<MessageLightboxState | null>(null);
+  const [lightboxImg, setLightboxImg] = useState<(MessageLightboxState & { sessionIdentity?: SessionIdentity }) | null>(null);
   const [validatedDerivedPaths, setValidatedDerivedPaths] = useState<Record<string, boolean>>({});
   const [derivedGatewayPreviews, setDerivedGatewayPreviews] = useState<Record<string, DerivedGatewayPreview>>({});
 
@@ -492,7 +492,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           toolIsImmutable={segment.kind === 'tool' && isControlledSessionRenderTool(segment.tool)}
           endpointSessionId={endpointSessionId}
           onBodyClick={handleBodyClick}
-          onPreview={setLightboxImg}
+          onPreview={(preview) => setLightboxImg({ ...preview, sessionIdentity })}
           onOpenFile={onOpenAttachedArtifact}
           onOpenToolSurface={openToolSurface}
           onRuntimeSendMessage={onRuntimeSendMessage}
@@ -517,7 +517,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           <AssistantMessageMedia
             images={[]}
             attachedFiles={visibleDerivedAttachedFiles}
-            onPreview={setLightboxImg}
+            onPreview={(preview) => setLightboxImg({ ...preview, sessionIdentity })}
             onOpenFile={onOpenAttachedArtifact}
           />
         ) : null}
@@ -529,6 +529,7 @@ export const ChatAssistantTurn = memo(function ChatAssistantTurn({
           src={lightboxImg.src}
           fileName={lightboxImg.fileName}
           filePath={lightboxImg.filePath}
+          sessionIdentity={lightboxImg.sessionIdentity}
           onClose={() => setLightboxImg(null)}
         />
       )}

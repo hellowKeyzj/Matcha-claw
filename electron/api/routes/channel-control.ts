@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type { ChannelControlTransport } from '../../main/runtime-host-delivery/transport/channels/control';
-import { parseJsonBody, sendJson } from '../route-utils';
 import { isProductRuntimeScope, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
@@ -20,34 +19,30 @@ type RequestBody = Readonly<{
 }>;
 
 export async function handleChannelControlRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: ChannelControlTransport,
-): Promise<boolean> {
-  if (url.pathname !== '/api/channels/control' || req.method !== 'POST') return false;
+): Promise<HostApiRouteResult> {
+  if (url.pathname !== '/api/channels/control' || req.method !== 'POST') return undefined;
 
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   if (!isRequest(body)) {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
 
   try {
     const response = await transport.control(body);
-    sendJson(res, response.status,
+    return jsonResult(response.status,
       (body.action === 'connect' && response.status === 200)
         || (body.action === 'disconnect' && response.status === 202) ? response.body : UNAVAILABLE);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }
 
 function isRequest(value: unknown): value is RequestBody {

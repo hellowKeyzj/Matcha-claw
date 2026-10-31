@@ -6,10 +6,10 @@ use std::{
 };
 
 use chrono::Local;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::actor::write_json;
+use super::actor::{read_json, write_json};
 
 use crate::{
     application::commands::{WikiSourceTaskRunPlan, WikiStagedImportSource},
@@ -3540,15 +3540,6 @@ struct FileChange {
     kind: String,
     relative_path: String,
     revision: String,
-}
-
-fn read_json<T: DeserializeOwned + Default>(path: impl AsRef<Path>) -> Result<T, WikiFailure> {
-    let path = path.as_ref();
-    if !path.exists() {
-        return Ok(T::default());
-    }
-    let bytes = std::fs::read(path).map_err(|error| WikiFailure::io(path_text(path), error))?;
-    serde_json::from_slice(&bytes).map_err(|error| WikiFailure::state(error.to_string()))
 }
 
 fn path_text(path: &Path) -> String {

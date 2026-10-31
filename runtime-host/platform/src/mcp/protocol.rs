@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
-pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodeError {
@@ -156,8 +156,21 @@ pub fn decode_request(payload: &[u8]) -> Result<Request, DecodeError> {
     Ok(Request { id, method, params })
 }
 
-pub fn encode_result(id: Option<&RequestId>, result: Value) -> Option<Vec<u8>> {
-    id.map(|id| encode_message(id, "result", result))
+pub fn encode_result(id: Option<&RequestId>, result: impl Serialize) -> Option<Vec<u8>> {
+    #[derive(Serialize)]
+    struct Response<'a, T> {
+        id: &'a RequestId,
+        jsonrpc: &'static str,
+        result: T,
+    }
+    id.map(|id| {
+        serde_json::to_vec(&Response {
+            id,
+            jsonrpc: "2.0",
+            result,
+        })
+        .expect("MCP JSON-RPC results are serializable")
+    })
 }
 
 pub fn encode_error(id: Option<&RequestId>, code: i32, message: &'static str) -> Option<Vec<u8>> {

@@ -16,7 +16,7 @@ use runtime_host::{
     HostInput, MatchaAgentInput, OpenClawInput, RuntimeObservationConfig, open_organization_store,
 };
 use serde::Deserialize;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const BOOTSTRAP_VERSION: u8 = 1;
 
@@ -411,11 +411,9 @@ fn non_empty(value: String) -> Result<String, BootstrapError> {
 }
 
 fn runtime_secret() -> Result<String, BootstrapError> {
-    let mut bytes = [0_u8; 48];
-    getrandom::fill(&mut bytes).map_err(|_| BootstrapError)?;
-    let encoded = URL_SAFE_NO_PAD.encode(bytes);
-    bytes.zeroize();
-    Ok(encoded)
+    let mut bytes = Zeroizing::new([0_u8; 48]);
+    getrandom::fill(&mut *bytes).map_err(|_| BootstrapError)?;
+    Ok(URL_SAFE_NO_PAD.encode(&*bytes))
 }
 
 #[derive(Clone, Copy, Debug)]

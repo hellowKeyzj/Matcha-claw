@@ -7,12 +7,15 @@ export interface WorkspaceCallDetail {
     | 'files.stat'
     | 'files.listDir'
     | 'files.writeText'
+    | 'files.writeBinary'
     | 'media.prepare'
     | 'media.resolve'
     | 'media.thumbnail'
     | 'media.thumbnails'
     | 'media.stagePaths'
-    | 'media.stageBuffer';
+    | 'media.stageBuffer'
+    | 'media.listSessionImages'
+    | 'media.readSessionImage';
   itemCount: number;
   outcome:
     | 'completed'
@@ -24,6 +27,8 @@ export interface WorkspaceCallDetail {
     | 'tooLarge'
     | 'binary'
     | 'outcomeUnknown'
+    | 'unsupported'
+    | 'cursorInvalid'
     | null;
 }
 
@@ -36,13 +41,13 @@ declare module '../call-log' {
 export type WorkspaceCallSummary = CallDetailByModule['workspace'];
 
 const operations: readonly WorkspaceCallDetail['operation'][] = [
-  'files.readText', 'files.readBinary', 'files.stat', 'files.listDir', 'files.writeText',
+  'files.readText', 'files.readBinary', 'files.stat', 'files.listDir', 'files.writeText', 'files.writeBinary',
   'media.prepare', 'media.resolve', 'media.thumbnail', 'media.thumbnails',
-  'media.stagePaths', 'media.stageBuffer',
+  'media.stagePaths', 'media.stageBuffer', 'media.listSessionImages', 'media.readSessionImage',
 ];
 const outcomes: readonly WorkspaceCallDetail['outcome'][] = [
   null, 'completed', 'invalidPath', 'invalidReference', 'unavailable', 'notFile',
-  'notDirectory', 'tooLarge', 'binary', 'outcomeUnknown',
+  'notDirectory', 'tooLarge', 'binary', 'outcomeUnknown', 'unsupported', 'cursorInvalid',
 ];
 
 export function decodeWorkspaceCallDetail(value: unknown): WorkspaceCallDetail | null {

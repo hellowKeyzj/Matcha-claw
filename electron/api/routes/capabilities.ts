@@ -1,4 +1,3 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   validateRuntimeScope,
   type RuntimeScope,
@@ -6,8 +5,7 @@ import {
 import { isBrowserRequestInput } from '../../../src/types/openclaw-browser';
 import { isOpenClawSurfaceCapabilityRequest } from '../../main/runtime-host-delivery/transport/openclaw-gateway';
 import type { RuntimeHostTransportContext } from '../context';
-import { dispatchSessionCapability, type SessionCapabilityRouteDeps } from './sessions';
-import { SESSION_PAGE_HEADER } from '../../main/renderer-event-routes';
+import { dispatchSessionCapability, type SessionCapabilityDeps } from '../../main/sessions/capabilities';
 import {
   isSessionTraceEnabled,
   logSessionTrace,
@@ -15,7 +13,7 @@ import {
   summarizeIdentifier,
 } from '../../main/runtime-host-delivery/transport/sessions/trace';
 import { isTeamRuntimeCapabilityRequest } from './team-runtime-capability';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type { TaskManagerTransport } from '../../main/runtime-host-delivery/transport/task-manager';
 import { logger } from '../../utils/logger';
 import { decodeTaskFailure, decodeTaskFailureResponse, taskFailureResponse, type TaskFailure } from '../../../src/types/desktop/task-failure';
@@ -24,7 +22,7 @@ import {
   isOpenClawQuestionListInput,
   isOpenClawQuestionResolveInput,
 } from '../../../src/types/openclaw-question';
-import type { SessionPage } from '../../main/renderer-event-routes';
+import type { SessionPage } from '../../main/sessions/observations';
 import { decodeSessionQuestionRequest, SESSION_QUESTION_INVALID } from '../../main/runtime-host-delivery/transport/sessions/questions';
 import { isNativePolicyRequest } from '../../../src/types/native-policy';
 import {
@@ -99,12 +97,13 @@ const OPENCLAW_QUESTION_UNAVAILABLE = {
   success: false,
   error: 'OpenClaw question request is unavailable',
 } as const;
-type CapabilityRouteContext = SessionCapabilityRouteDeps
+type CapabilityRouteContext = SessionCapabilityDeps
   & RuntimeHostTransportContext<
     | 'capabilityDirectoryTransport'
     | 'providerRoutingTransport'
     | 'taskManagerTransport'
     | 'workspaceMediaTransport'
+    | 'workspaceSessionImagesTransport'
     | 'agentsTransport'
     | 'cronTransport'
     | 'pluginsTransport'
@@ -133,44 +132,39 @@ const taskDispatch: Readonly<Record<TaskOperation, keyof TaskManagerTransport>> 
 };
 
 export async function handleCapabilityRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   deps: CapabilityRouteContext,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/capabilities/list' && req.method === 'GET') {
     try {
       const response = await deps.runtimeHostTransports.capabilityDirectoryTransport.list();
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, CAPABILITY_DIRECTORY_UNAVAILABLE);
+      return jsonResult(503, CAPABILITY_DIRECTORY_UNAVAILABLE);
     }
-    return true;
   }
 
   if (url.pathname === '/api/capabilities/describe' && req.method === 'POST') {
     let body: unknown;
     try {
-      body = await parseJsonBody<unknown>(req);
+      body = await req.readJson<unknown>();
     } catch {
-      sendJson(res, 500, CAPABILITY_REQUEST_FAILED);
-      return true;
+      return jsonResult(500, CAPABILITY_REQUEST_FAILED);
     }
     if (!isCapabilityDescribeRequest(body)) {
-      sendJson(res, 404, CAPABILITY_NOT_AVAILABLE);
-      return true;
+      return jsonResult(404, CAPABILITY_NOT_AVAILABLE);
     }
     try {
       const response = await deps.runtimeHostTransports.capabilityDirectoryTransport.describe(body);
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, CAPABILITY_DIRECTORY_UNAVAILABLE);
+      return jsonResult(503, CAPABILITY_DIRECTORY_UNAVAILABLE);
     }
-    return true;
   }
 
   if (url.pathname !== '/api/capabilities/execute' || req.method !== 'POST') {
-    return false;
+    return undefined;
   }
 
   const traceId = readTraceHeader(req.headers);
@@ -184,22 +178,24 @@ export async function handleCapabilityRoutes(
   let body: unknown;
   trace('parse.start');
   try {
-    body = await parseJsonBody<unknown>(req);
+    body = await req.readJson<unknown>();
     trace('parse.end', () => ({ outcome: 'parsed' }));
   } catch {
     trace('parse.end', () => ({ outcome: 'failed', status: 500 }));
-    sendJson(res, 500, CAPABILITY_REQUEST_FAILED);
-    return true;
+    return jsonResult(500, CAPABILITY_REQUEST_FAILED);
   }
 
   if (isRecord(body) && body.id === 'workspace.media') {
     try {
-      const response = await deps.runtimeHostTransports.workspaceMediaTransport.execute(body);
-      sendJson(res, response.status, response.body);
+      const transport = body.operationId === 'media.listSessionImages' || body.operationId === 'media.readSessionImage'
+        ? deps.runtimeHostTransports.workspaceSessionImagesTransport
+        : deps.runtimeHostTransports.workspaceMediaTransport;
+      const response = await transport.execute(body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, { success: false, error: 'Workspace media is unavailable' });
+      return jsonResult(503, { success: false, error: body.operationId === 'media.listSessionImages' || body.operationId === 'media.readSessionImage'
+        ? 'Session images are unavailable' : 'Workspace media is unavailable' });
     }
-    return true;
   }
 
   if (isRecord(body) && isSubagentConfigurationCapabilityId(body.id)) {
@@ -211,112 +207,90 @@ export async function handleCapabilityRoutes(
         status: response.status,
         contract: summarizeSubagentConfigurationResponse(response.body),
       }));
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
       logSessionTrace('capability.subagent.configuration.failure', traceId);
-      sendJson(res, 503, SUBAGENT_CONFIGURATION_UNAVAILABLE);
+      return jsonResult(503, SUBAGENT_CONFIGURATION_UNAVAILABLE);
     }
-    return true;
   }
 
-  const sessionController = new AbortController();
-  const cancelSessionObservation = (): void => {
-    if (res.closed && !res.writableFinished) sessionController.abort();
-  };
-  res.once('close', cancelSessionObservation);
-  cancelSessionObservation();
   try {
     trace('session-dispatch.start');
     const sessionResponse = await dispatchSessionCapability(body, deps, readTraceHeader(req.headers),
-      deps.sessionObservers.resolve(req.headers[SESSION_PAGE_HEADER.toLowerCase()]), sessionController.signal);
+      req.sessionPage, req.signal);
     trace('session-dispatch.end', () => ({
-      outcome: sessionController.signal.aborted ? 'aborted' : sessionResponse ? 'handled' : 'unhandled',
+      outcome: req.signal.aborted ? 'aborted' : sessionResponse ? 'handled' : 'unhandled',
       status: sessionResponse?.status ?? null,
     }));
     if (sessionResponse) {
-      if (!sessionController.signal.aborted) sendJson(res, sessionResponse.status, sessionResponse.body);
-      return true;
+      return req.signal.aborted ? null : jsonResult(sessionResponse.status, sessionResponse.body);
     }
   } catch {
     trace('session-dispatch.end', () => ({
-      outcome: sessionController.signal.aborted ? 'aborted' : 'failed',
-      status: sessionController.signal.aborted ? null : 500,
+      outcome: req.signal.aborted ? 'aborted' : 'failed',
+      status: req.signal.aborted ? null : 500,
     }));
-    if (!sessionController.signal.aborted) sendJson(res, 500, CAPABILITY_REQUEST_FAILED);
-    return true;
-  } finally {
-    res.removeListener('close', cancelSessionObservation);
+    return req.signal.aborted ? null : jsonResult(500, CAPABILITY_REQUEST_FAILED);
   }
 
   if (isRecord(body) && body.id === 'scheduler.cron') {
     const jobId = decodeCronTriggerJobId(body);
     if (!jobId) {
-      sendJson(res, 400, CRON_TRIGGER_INVALID);
-      return true;
+      return jsonResult(400, CRON_TRIGGER_INVALID);
     }
 
     try {
       const response = await deps.runtimeHostTransports.cronTransport.trigger(body);
       const result = decodeCronTriggerResult(response.body);
       if (result) {
-        sendJson(res, 200, result);
+        return jsonResult(200, result);
       } else if (response.status === 422) {
-        sendJson(res, 200, { success: true, result: { outcome: 'failed' } });
+        return jsonResult(200, { success: true, result: { outcome: 'failed' } });
       } else if (response.status === 409) {
-        sendJson(res, 200, { success: true, result: { outcome: 'outcome-unknown' } });
+        return jsonResult(200, { success: true, result: { outcome: 'outcome-unknown' } });
       } else {
-        sendJson(res, 503, CRON_SERVICE_UNAVAILABLE);
+        return jsonResult(503, CRON_SERVICE_UNAVAILABLE);
       }
     } catch {
-      sendJson(res, 503, CRON_SERVICE_UNAVAILABLE);
+      return jsonResult(503, CRON_SERVICE_UNAVAILABLE);
     }
-    return true;
   }
 
   if (!isRecord(body)) {
-    sendJson(res, 404, CAPABILITY_NOT_AVAILABLE);
-    return true;
+    return jsonResult(404, CAPABILITY_NOT_AVAILABLE);
   }
 
   if (body.id === 'security.nativePolicy') {
     if (!isNativePolicyRequest(body)) {
-      sendJson(res, 400, NATIVE_POLICY_INVALID);
-      return true;
+      return jsonResult(400, NATIVE_POLICY_INVALID);
     }
     try {
       const response = await deps.runtimeHostTransports.nativePolicyTransport.execute(body);
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, body.operationId.endsWith('.set') || body.operationId === 'nativePolicy.result'
+      return jsonResult(503, body.operationId.endsWith('.set') || body.operationId === 'nativePolicy.result'
         ? NATIVE_POLICY_OUTCOME_UNKNOWN : NATIVE_POLICY_UNAVAILABLE);
     }
-    return true;
   }
 
   if (body.id === 'session.question') {
-    const response = await executeSessionQuestionCapability(body, deps,
-      deps.sessionObservers.resolve(req.headers[SESSION_PAGE_HEADER.toLowerCase()]));
-    sendJson(res, response.status, response.body);
-    return true;
+    const response = await executeSessionQuestionCapability(body, deps, req.sessionPage);
+    return jsonResult(response.status, response.body);
   }
 
   if (body.id === 'openclaw.browser') {
     const response = await executeOpenClawBrowserCapability(body, deps);
-    sendJson(res, response.status, response.body);
-    return true;
+    return jsonResult(response.status, response.body);
   }
 
   if (body.id === 'openclaw.mcpApp' || body.id === 'openclaw.canvas' || body.id === 'openclaw.progress') {
     const response = await executeOpenClawSurfaceCapability(body, deps);
-    sendJson(res, response.status, response.body);
-    return true;
+    return jsonResult(response.status, response.body);
   }
 
   if (body.id === 'openclaw.question') {
-    const response = await executeOpenClawQuestionCapability(body, deps,
-      deps.sessionObservers.resolve(req.headers[SESSION_PAGE_HEADER.toLowerCase()]));
-    sendJson(res, response.status, response.body);
-    return true;
+    const response = await executeOpenClawQuestionCapability(body, deps, req.sessionPage);
+    return jsonResult(response.status, response.body);
   }
 
   if (body.id === 'team.runtime') {
@@ -324,8 +298,7 @@ export async function handleCapabilityRoutes(
     logSessionTrace('electron.team.runtime.request', traceId, () => summarizeTeamRuntimeRequest(body));
     if (!isTeamRuntimeCapabilityRequest(body)) {
       logSessionTrace('electron.team.runtime.request-invalid', traceId, () => summarizeTeamRuntimeRequest(body));
-      sendJson(res, 400, TEAM_RUNTIME_REQUEST_INVALID);
-      return true;
+      return jsonResult(400, TEAM_RUNTIME_REQUEST_INVALID);
     }
     try {
       logSessionTrace('electron.team.runtime.transport.request', traceId, () => summarizeTeamRuntimeRequest(body));
@@ -338,12 +311,11 @@ export async function handleCapabilityRoutes(
         status: response.status,
         contract: response.status === 202 ? 'admission' : response.status === 200 ? 'operation-result' : 'unavailable',
       }));
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
       logSessionTrace('electron.team.runtime.failure', traceId);
-      sendJson(res, 503, TEAM_RUNTIME_UNAVAILABLE);
+      return jsonResult(503, TEAM_RUNTIME_UNAVAILABLE);
     }
-    return true;
   }
 
   if (body.id === 'skill.management') {
@@ -352,40 +324,35 @@ export async function handleCapabilityRoutes(
     try {
       const response = await deps.runtimeHostTransports.skillsManagementTransport.execute(body, traceId);
       logSessionTrace('skill.open-path.main.response', traceId, () => ({ status: response.status }));
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
       logSessionTrace('skill.open-path.main.failed', traceId);
-      sendJson(res, 503, { outcome: 'unknown' });
+      return jsonResult(503, { outcome: 'unknown' });
     }
-    return true;
   }
 
   if (body.id === 'plugin.runtime') {
     const response = await executePluginRuntimeCapability(body, deps);
-    sendJson(res, response.status, response.body);
-    return true;
+    return jsonResult(response.status, response.body);
   }
 
   if (body.id === 'provider.routing') {
     if (!isProviderRoutingRequest(body)) {
-      sendJson(res, 400, PROVIDER_ROUTING_INVALID);
-      return true;
+      return jsonResult(400, PROVIDER_ROUTING_INVALID);
     }
     if (!deps.runtimeHostTransports.providerRoutingTransport) {
-      sendJson(res, 503, PROVIDER_ROUTING_UNAVAILABLE);
-      return true;
+      return jsonResult(503, PROVIDER_ROUTING_UNAVAILABLE);
     }
     try {
       const response = await deps.runtimeHostTransports.providerRoutingTransport.execute(body);
       if (!isProviderRoutingResponse(response.body, response.status, body.operationId)) {
-        sendJson(res, 503, PROVIDER_ROUTING_UNAVAILABLE);
+        return jsonResult(503, PROVIDER_ROUTING_UNAVAILABLE);
       } else {
-        sendJson(res, response.status, response.body);
+        return jsonResult(response.status, response.body);
       }
     } catch {
-      sendJson(res, 503, PROVIDER_ROUTING_UNAVAILABLE);
+      return jsonResult(503, PROVIDER_ROUTING_UNAVAILABLE);
     }
-    return true;
   }
 
 
@@ -393,27 +360,24 @@ export async function handleCapabilityRoutes(
     const operation = isTaskOperation(body.operationId) ? body.operationId : undefined;
     const fail = (status: 400 | 503, failure: TaskFailure) => {
       logger.warn('[TaskManager] Capability request failed', { operation, status, ...failure });
-      sendJson(res, status, taskFailureResponse(failure));
+      return jsonResult(status, taskFailureResponse(failure));
     };
     if (!operation || !isTaskCapabilityRequest(body, operation)) {
-      fail(400, { stage: 'task_request', code: 'invalid_params', delivery: 'notSent' });
-      return true;
+      return fail(400, { stage: 'task_request', code: 'invalid_params', delivery: 'notSent' });
     }
     try {
       const response = await deps.runtimeHostTransports.taskManagerTransport[taskDispatch[operation]](body);
       if (!isTaskManagerResponse(response.body, response.status, operation)) {
-        fail(503, { stage: 'response', code: 'protocol', delivery: 'responseReceived' });
+        return fail(503, { stage: 'response', code: 'protocol', delivery: 'responseReceived' });
       } else {
-        sendJson(res, response.status, decodeTaskFailureResponse(response.body) ?? response.body);
+        return jsonResult(response.status, decodeTaskFailureResponse(response.body) ?? response.body);
       }
     } catch {
-      fail(503, { stage: 'transport', code: 'transport', delivery: 'unknown' });
+      return fail(503, { stage: 'transport', code: 'transport', delivery: 'unknown' });
     }
-    return true;
   }
 
-  sendJson(res, 404, CAPABILITY_NOT_AVAILABLE);
-  return true;
+  return jsonResult(404, CAPABILITY_NOT_AVAILABLE);
 }
 
 const CAPABILITY_REJECTED = { outcome: 'rejected' } as const;

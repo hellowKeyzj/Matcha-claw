@@ -102,12 +102,10 @@ where
         return Err(ControlError::Transport("connector credential resolver"));
     }
 
-    runtime
-        .handles
-        .security
-        .recover_pending()
-        .await
-        .map_err(|_| ControlError::Transport("security emergency recovery"))?;
+    if runtime.handles.security.recover_pending().await.is_err() {
+        let _ = shutdown_runtime(&mut runtime).await;
+        return Err(ControlError::Transport("security emergency recovery"));
+    }
     let install_plan = prepare_module_install(InstallModulesInput {
         handles: &runtime.handles,
         verifier: Arc::clone(&verifier),

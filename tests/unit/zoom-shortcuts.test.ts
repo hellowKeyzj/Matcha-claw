@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { getZoomShortcutAction, registerZoomShortcuts } from '../../electron/main/zoom-shortcuts';
+import { getZoomShortcutAction, registerZoomShortcuts } from '../../electron/main/desktop/zoom-shortcuts';
 
 describe('zoom shortcuts', () => {
   it('matches Windows-friendly zoom key variants', () => {

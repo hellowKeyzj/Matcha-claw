@@ -1,0 +1,334 @@
+import type { BrowserWindow } from 'electron';
+import type { WorldHint } from '../../../src/types/world';
+import { decodeBoardChangedEvent, decodeBoardCommandEvent } from '../../../src/types/board';
+import type { HostEventBus } from '../event-bus';
+import type { DirectRuntimeHostExit } from '../../main/runtime-host-delivery/direct-host';
+import type { RuntimeHostLifecycle } from '../../main/runtime-host-delivery/lifecycle-owner';
+import type { SessionDelta } from '../../main/runtime-host-delivery/transport/sessions/session-contract';
+import { isSessionIdentity } from '../../main/runtime-host-delivery/transport/sessions/session-contract';
+import {
+  type RuntimeStatusProjection,
+  unavailableGatewayStatus,
+} from '../../main/runtime-host-delivery/status';
+import type { RendererSessionObservationRegistry } from '../../main/sessions/observations';
+import type { SessionEventsTransport } from '../../main/runtime-host-delivery/transport/sessions/events';
+import { isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionChanges, summarizeSessionIdentity } from '../../main/runtime-host-delivery/transport/sessions/trace';
+
+type HostEventName =
+  | 'gateway:status'
+  | 'gateway:error'
+  | 'gateway:notification'
+  | 'session.delta'
+  | 'session.resync'
+  | 'sessions:catalog-changed'
+  | 'task:snapshot'
+  | 'gateway:channel-status'
+  | 'gateway:exit'
+  | 'runtime-host:status'
+  | 'runtime-host:error'
+  | 'runtime-host:restart'
+  | 'runtime-host:disconnected'
+  | 'package:changed'
+  | 'app-plugins:changed'
+  | 'app-plugins:runtime'
+  | 'license:gate-changed'
+  | 'team:event'
+  | 'team:changed'
+  | 'matcha-agent:status'
+  | 'openclaw:cli-installed'
+  | 'oauth:code'
+  | 'oauth:start'
+  | 'oauth:success'
+  | 'oauth:error'
+  | 'openclaw:lifecycle'
+  | 'openclaw:questions-changed'
+  | 'openclaw:cron'
+  | 'cron:changed'
+  | 'call:changed'
+  | 'calls:resync'
+  | 'world:changed'
+  | 'world:resync-required';
+
+type EmitHostEvent = (eventName: HostEventName, payload: unknown) => void;
+
+type RuntimeHostBridge = Pick<
+  RuntimeHostLifecycle,
+  'onDisconnect' | 'onExit' | 'onRestart' | 'onSafeEvent'
+>;
+
+export function emitHostEvent(
+  eventBus: HostEventBus,
+  mainWindow: BrowserWindow | null,
+  eventName: HostEventName,
+  payload: unknown,
+): void {
+  eventBus.emit(eventName, payload);
+  sendRendererHostEvent(mainWindow, eventName, payload);
+}
+
+function sendRendererHostEvent(
+  mainWindow: BrowserWindow | null,
+  eventName: HostEventName,
+  payload: unknown,
+): void {
+  mainWindow?.webContents.send('host:event', { eventName, payload });
+}
+
+export function registerMainEventBridge(deps: {
+  hostEventBus: HostEventBus;
+  getMainWindow: () => BrowserWindow | null;
+}): () => void {
+  const unsubscribers = (['package:changed', 'app-plugins:changed', 'app-plugins:runtime', 'license:gate-changed'] as const).map((eventName) =>
+    deps.hostEventBus.on(eventName, (payload) => {
+      sendRendererHostEvent(deps.getMainWindow(), eventName, payload);
+    }),
+  );
+  return () => { for (const unsubscribe of unsubscribers) unsubscribe(); };
+}
+
+export function registerHostEventBridge(deps: {
+  runtimeHost: RuntimeHostBridge;
+  runtimeStatus: RuntimeStatusProjection;
+  hostEventBus: HostEventBus;
+  getMainWindow: () => BrowserWindow | null;
+  sessionObservers: RendererSessionObservationRegistry;
+  sessionEvents?: SessionEventsTransport;
+  resyncSessions: () => Promise<void>;
+}): () => void {
+  let disposed = false;
+  const unsubscribers: Array<() => void> = [];
+  const emit: EmitHostEvent = (eventName, payload) => {
+    if (!disposed) emitHostEvent(deps.hostEventBus, deps.getMainWindow(), eventName, payload);
+  };
+
+  const publishRuntimeHostStatus = async (): Promise<void> => {
+    const status = await deps.runtimeStatus.readHost();
+    if (status) {
+      emit('runtime-host:status', status);
+      return;
+    }
+    emit('runtime-host:error', { status: 'error', message: 'Runtime Host is unavailable.' });
+  };
+
+  const publishGatewayStatus = async (
+    options: { readonly freshness?: 'reuse-pending' | 'fresh' } = {},
+  ): Promise<void> => {
+    const status = await deps.runtimeStatus.readGateway(options)
+      .then((projection) => projection ?? unavailableGatewayStatus());
+    emit('gateway:status', status);
+  };
+
+  if (deps.sessionEvents) {
+    unsubscribers.push(
+      deps.sessionEvents.onConnected(() => { void deps.resyncSessions(); }),
+      deps.sessionEvents.onResync((event) => {
+        deps.sessionObservers.publish(event.identity, 'session.resync', event);
+      }),
+      deps.sessionEvents.onDelta((delta) => {
+        publishSessionDelta(delta, deps.sessionObservers);
+      }),
+    );
+  }
+
+  for (const eventName of [
+    'gateway:error',
+    'gateway:notification',
+    'task:snapshot',
+    'gateway:channel-status',
+    'gateway:exit',
+    'team:event',
+  ] as const) {
+    unsubscribers.push(deps.hostEventBus.on(eventName, (payload) => {
+      sendRendererHostEvent(deps.getMainWindow(), eventName, payload);
+    }));
+  }
+
+  unsubscribers.push(deps.hostEventBus.on('gateway:lifecycle', () => {
+    void publishGatewayStatus();
+  }));
+
+  unsubscribers.push(deps.runtimeHost.onSafeEvent((event) => {
+    switch (event.type) {
+      case 'world.changed': {
+        const payload = { kind: 'changed', world: event.world, incarnation: event.incarnation,
+          resource: event.resource, revision: event.revision } satisfies WorldHint;
+        emit('world:changed', payload);
+        return;
+      }
+      case 'world.resync-required': {
+        const payload = { kind: 'resync_required', world: event.world, incarnation: event.incarnation } satisfies WorldHint;
+        emit('world:resync-required', payload);
+        return;
+      }
+      case 'board:changed': {
+        const payload = decodeBoardChangedEvent({ identity: event.identity, revision: event.revision,
+          ...(event.widget === undefined ? {} : { widget: event.widget }) });
+        if (isSessionIdentity(payload.identity)) deps.sessionObservers.publish(payload.identity, 'board:changed', payload);
+        return;
+      }
+      case 'board:command': {
+        const payload = decodeBoardCommandEvent({ identity: event.identity, command: event.command });
+        if (isSessionIdentity(payload.identity)) deps.sessionObservers.publish(payload.identity, 'board:command', payload);
+        return;
+      }
+      case 'board:resync':
+        deps.sessionObservers.publishHint('board:resync');
+        return;
+      case 'openclaw.progress.changed':
+        deps.sessionObservers.publishHint('openclaw:progress-changed');
+        return;
+      case 'call.changed':
+        emit('call:changed', { callId: event.callId, revision: event.revision });
+        return;
+      case 'calls.resync':
+        emit('calls:resync', {});
+        return;
+      case 'organization.changed':
+        emit('team:changed', {});
+        return;
+      case 'sessions.catalogChanged':
+        emit('sessions:catalog-changed', { endpoint: event.endpoint });
+        return;
+      case 'openclaw.lifecycle':
+        emit('openclaw:lifecycle', {
+          active: event.hasRun || event.hasMessage || event.hasSessionActivity,
+        });
+        void publishRuntimeHostStatus();
+        void publishGatewayStatus();
+        return;
+      case 'openclaw.questions.changed':
+        emit('openclaw:questions-changed', {});
+        return;
+      case 'openclaw.runtime':
+        void publishRuntimeHostStatus();
+        void publishGatewayStatus({ freshness: 'fresh' });
+        return;
+      case 'matcha.lifecycle':
+        emit('matcha-agent:status', {
+          processState: event.lifecycle,
+          port: null,
+          pid: null,
+          ready: event.ready,
+          lastError: null,
+          updatedAt: event.observedAtMs,
+        });
+        return;
+      case 'cron.changed':
+        emit('cron:changed', { endpoint: event.endpoint });
+        return;
+      case 'openclaw.cron.execution':
+        emit('openclaw:cron', {
+          jobId: event.jobId,
+          runId: event.runId,
+          status: event.status,
+        });
+        return;
+    }
+  }));
+  unsubscribers.push(deps.runtimeHost.onDisconnect(() => {
+    deps.sessionObservers.publishHint('board:resync');
+    emit('runtime-host:disconnected', {});
+  }));
+  unsubscribers.push(deps.runtimeHost.onExit((exit) => {
+    emitHostExit(emit, exit);
+  }));
+  unsubscribers.push(deps.runtimeHost.onRestart((restart) => {
+    emit('runtime-host:restart', restart);
+    void deps.resyncSessions();
+    void publishRuntimeHostStatus();
+    void publishGatewayStatus();
+  }));
+  void publishRuntimeHostStatus();
+  void publishGatewayStatus();
+  return () => {
+    disposed = true;
+    for (const unsubscribe of unsubscribers) unsubscribe();
+  };
+}
+
+
+function publishSessionDelta(
+  delta: SessionDelta,
+  observers: RendererSessionObservationRegistry,
+): void {
+  if (isSessionTraceEnabled()) logSessionTrace('electron.session.delta.publish', 'session-delta-boundary', {
+    identity: summarizeSessionIdentity(delta.identity),
+    sessionKey: summarizeIdentifier(delta.sessionKey),
+    runId: summarizeIdentifier(sessionDeltaRunId(delta)),
+    epoch: delta.epoch,
+    seq: delta.seq,
+    cursor: delta.cursor,
+    changeKinds: delta.changes.map((change) => change.kind),
+    changeCount: delta.changes.length,
+    textLength: sessionDeltaTextLength(delta.changes),
+    mappedChanges: summarizeSessionChanges(delta.changes),
+  });
+  observers.publish(delta.identity, 'session.delta', delta);
+  observers.terminal(delta);
+}
+
+function sessionDeltaTextLength(changes: readonly unknown[]): number {
+  return changes.reduce<number>((total, change) => {
+    if (!isRecord(change)) return total;
+    if (change.kind === 'messageDelta') return total + publicTextLength(change.text);
+    if (change.kind === 'itemsReplaced' && Array.isArray(change.items)) {
+      return total + change.items.reduce<number>((length, item) => length + sessionItemTextLength(item), 0);
+    }
+    if (change.kind !== 'messageUpdated' && change.kind !== 'messageReplaced') return total;
+    return total + sessionItemTextLength(change.item);
+  }, 0);
+}
+
+function sessionItemTextLength(item: unknown): number {
+  if (!isRecord(item)) return 0;
+  if (item.kind === 'userMessage') return itemTextOrSegmentsLength(item, 'content');
+  if (item.kind === 'assistantTurn') return itemTextOrSegmentsLength(item, 'segments');
+  if (item.kind === 'system') return publicTextLength(item.text);
+  return 0;
+}
+
+function itemTextOrSegmentsLength(
+  item: Record<string, unknown>,
+  segmentsKey: 'content' | 'segments',
+): number {
+  const segmentsLength = publicSegmentsTextLength(item[segmentsKey]);
+  return segmentsLength > 0 ? segmentsLength : publicTextLength(item.text);
+}
+
+function publicSegmentsTextLength(segments: unknown): number {
+  if (!Array.isArray(segments)) return 0;
+  return segments.reduce((total, segment) => {
+    if (!isRecord(segment)) return total;
+    if (segment.kind !== 'text' && segment.kind !== 'thinking' && segment.kind !== 'largeText') return total;
+    return total + publicTextLength(segment.text);
+  }, 0);
+}
+
+function publicTextLength(value: unknown): number {
+  return typeof value === 'string' ? value.length : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sessionDeltaRunId(delta: SessionDelta): string | undefined {
+  if (delta.runId) return delta.runId;
+  for (const change of delta.changes) {
+    if ('runId' in change && typeof change.runId === 'string') return change.runId;
+  }
+  return undefined;
+}
+
+function emitHostExit(emit: EmitHostEvent, exit: DirectRuntimeHostExit): void {
+  if (exit.kind === 'exited' && exit.code === 0 && exit.signal === null) {
+    emit('runtime-host:status', {
+      status: 'stopped',
+      hostLifecycle: 'shutDown',
+      runtimeLifecycle: 'shutDown',
+      updatedAt: Date.now(),
+    });
+    return;
+  }
+  emit('runtime-host:error', { message: 'Runtime Host is unavailable.' });
+}

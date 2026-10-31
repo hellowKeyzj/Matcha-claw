@@ -15,7 +15,7 @@ pub enum SecurityCommand {
         call: SecurityCall,
     },
     RecoverPending {
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), ()>>,
     },
     Emergency {
         correlation: String,

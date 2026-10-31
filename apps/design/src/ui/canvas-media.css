@@ -1,0 +1,26 @@
+.canvas-annotation { position: absolute; inset: 0; pointer-events: none; }
+.canvas-annotation .annotation-image { clip-path: var(--annotation-clip, none); }
+.ic-crop-editor { position: absolute; inset: 0; pointer-events: none; }
+.ic-crop-toolbar { position: absolute; z-index: 1; top: 72px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: max-content; max-width: calc(100% - 32px); padding: 6px 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--ink); box-shadow: 0 2px 8px #00000012; pointer-events: auto; }
+.ic-crop-toolbar select { width: auto; height: 30px; padding: 3px 8px; }
+.ic-crop-size { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ic-crop-image { position: absolute; top: 0; left: 0; overflow: visible; transform-origin: 0 0; touch-action: none; }
+.ic-crop-window { fill: transparent; stroke: var(--focus); stroke-width: 1; cursor: move; }
+.ic-crop-grid { stroke: #fff9; stroke-width: 1; }
+.ic-crop-handle { fill: #fff; stroke: var(--focus); stroke-width: 1; }
+.ic-crop-handle:focus-visible, .ic-crop-window:focus-visible { outline: none; stroke: var(--ink); stroke-width: 2; }
+.ic-crop-handle-n, .ic-crop-handle-s { cursor: ns-resize; }
+.ic-crop-handle-e, .ic-crop-handle-w { cursor: ew-resize; }
+.ic-crop-handle-ne, .ic-crop-handle-sw { cursor: nesw-resize; }
+.ic-crop-handle-nw, .ic-crop-handle-se { cursor: nwse-resize; }
+.ic-inline-video { position: absolute; top: 0; left: 0; transform-origin: 0 0; pointer-events: none; }
+.ic-inline-video-controls { position: absolute; top: 100%; left: 0; display: flex; align-items: center; gap: 3px; width: max-content; margin-top: 6px; padding: 3px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--ink); }
+.ic-inline-video-controls input { min-width: 0; height: 24px; padding: 0; }
+.ic-inline-video-seek { width: 120px; }
+.ic-inline-video-volume { width: 48px; }
+.ic-inline-video-error { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: max-content; max-width: calc(100% - 24px); padding: 6px 8px; border-radius: 8px; color: var(--ink); background: var(--surface); pointer-events: none; }
+@container (max-width: 620px) {
+  .ic-crop-toolbar { left: 72px; right: 12px; transform: none; width: auto; max-width: none; }
+  .ic-crop-toolbar .annotation-hint { flex: 1 1 100%; }
+}
+@container (max-width: 420px) { .ic-crop-toolbar { top: 112px; } }

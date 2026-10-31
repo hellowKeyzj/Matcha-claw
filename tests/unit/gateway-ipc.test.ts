@@ -22,7 +22,7 @@ describe('gateway IPC', () => {
       result: { health: { ok: true, lifecycle: 'ready' } },
     };
     const command = vi.fn().mockResolvedValue(outcome);
-    const { registerGatewayHandlers } = await import('../../electron/main/ipc/gateway-ipc');
+    const { registerGatewayHandlers } = await import('../../electron/api/ipc/gateway-ipc');
 
     registerGatewayHandlers({ command });
 

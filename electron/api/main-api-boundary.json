@@ -29,7 +29,6 @@
     "security-policy.ts",
     "security.ts",
     "sealed-skills.ts",
-    "sessions.ts",
     "settings.ts",
     "skill-bundle.ts",
     "skills.ts",
@@ -51,6 +50,7 @@
     "provider-models.ts",
     "provider-routing.ts",
     "provider-recovery.ts",
+    "provider-text.ts",
     "security-emergency.ts",
     "team-approvals.ts",
     "team-decision.ts",
@@ -65,7 +65,8 @@
     "team-trigger.ts",
     "team-webhook-auth.ts",
     "usage.ts",
-    "wiki.ts"
+    "wiki.ts",
+    "world.ts"
   ],
   "hostapiProxyWebsocketExactRoutes": [
     "/api/remote-fleet/terminal/stream"
@@ -91,6 +92,7 @@
     "/api/app-plugins/build",
     "/api/app-plugins/development",
     "/api/app-plugins/runtime-status",
+    "/api/app-plugins/call",
     "/api/billing/checkout-info",
     "/api/billing/plans",
     "/api/billing/orders",
@@ -138,6 +140,10 @@
     "/api/search/verify",
     "/api/search/stop",
     "/api/search/logs",
+    "/api/world/query",
+    "/api/world/command",
+    "/api/world/operation",
+    "/api/world/peer",
     "/api/settings",
     "/api/settings/desired",
     "/api/settings/desired/projection",
@@ -154,6 +160,7 @@
     "/api/files/read-text",
     "/api/files/list-dir",
     "/api/files/write-text",
+    "/api/files/write-binary",
     "/api/license/gate",
     "/api/license/stored-key",
     "/api/license/validate",
@@ -207,6 +214,7 @@
     "/api/providers/recovery",
     "/api/providers/recovery/acknowledge",
     "/api/providers/recovery/open-backup",
+    "/api/providers/text/generate",
     "/api/external-connectors",
     "/api/external-connectors/mcp-server-programs",
     "/api/external-connectors/status",
@@ -446,6 +454,10 @@
       "/api/app-plugins/runtime-status"
     ],
     [
+      "POST",
+      "/api/app-plugins/call"
+    ],
+    [
       "GET",
       "/api/billing/checkout-info"
     ],
@@ -634,6 +646,22 @@
       "/api/search/logs"
     ],
     [
+      "POST",
+      "/api/world/query"
+    ],
+    [
+      "POST",
+      "/api/world/command"
+    ],
+    [
+      "POST",
+      "/api/world/operation"
+    ],
+    [
+      "POST",
+      "/api/world/peer"
+    ],
+    [
       "GET",
       "/api/settings"
     ],
@@ -696,6 +724,10 @@
     [
       "POST",
       "/api/files/write-text"
+    ],
+    [
+      "POST",
+      "/api/files/write-binary"
     ],
     [
       "GET",
@@ -916,6 +948,10 @@
     [
       "POST",
       "/api/providers/recovery/open-backup"
+    ],
+    [
+      "POST",
+      "/api/providers/text/generate"
     ],
     [
       "GET",

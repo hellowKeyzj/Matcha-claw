@@ -40,7 +40,7 @@ afterEach(() => {
 
 describe('uv mirror environment', () => {
   it('writes a managed uv.toml under ~/.openclaw/matchaclaw and exposes it via UV_CONFIG_FILE', async () => {
-    const { getUvMirrorEnv } = await import('@electron/utils/uv-env');
+    const { getUvMirrorEnv } = await import('@electron/main/network/optimization');
 
     const env = await getUvMirrorEnv();
 

@@ -1,0 +1,391 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "matcha.design",
+  "name": "Matcha 设计",
+  "version": "1.0.4",
+  "description": "会话工作区画板：自由画布、图层、文字、图片编辑、用户自带素材、模型生成、多镜头生成与合成及本地导出。每个会话独立保存。",
+  "main": "main.cjs",
+  "contributes": {
+    "applications": [{ "id": "editor", "name": "设计画板", "entry": "editor.html", "placement": "chat-panel", "imageEditor": { "label": "画布编辑", "tool": "image_open", "translations": { "en": "Edit on canvas", "ja": "キャンバスで編集", "ru": "Редактировать на холсте" } } }],
+    "tools": [
+      {
+        "name": "documents_list",
+        "description": "List saved design documents with their IDs, dimensions and current revisions. With sessionIdentity, return only that exact runtime endpoint, agent and session's workspace.",
+        "inputSchema": {
+          "type": "object", "properties": { "sessionIdentity": { "$ref": "#/$defs/sessionIdentity" } }, "additionalProperties": false,
+          "$defs": {
+            "identity": { "type": "string", "pattern": "^[^\\u0000]*[^\\s\\u0000][^\\u0000]*$" },
+            "sessionIdentity": {
+              "type": "object", "additionalProperties": false, "required": ["endpoint", "agentId", "sessionKey"],
+              "properties": {
+                "agentId": { "$ref": "#/$defs/identity" }, "sessionKey": { "$ref": "#/$defs/identity" },
+                "endpoint": { "oneOf": [
+                  { "type": "object", "additionalProperties": false, "required": ["kind", "runtimeAdapterId", "runtimeInstanceId"], "properties": { "kind": { "const": "native-runtime" }, "runtimeAdapterId": { "$ref": "#/$defs/identity" }, "runtimeInstanceId": { "$ref": "#/$defs/identity" } } },
+                  { "type": "object", "additionalProperties": false, "required": ["kind", "protocolId", "connectorId", "endpointId"], "properties": { "kind": { "const": "protocol-connector" }, "protocolId": { "$ref": "#/$defs/identity" }, "connectorId": { "$ref": "#/$defs/identity" }, "endpointId": { "$ref": "#/$defs/identity" } } }
+                ] }
+              }
+            }
+          }
+        },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "document_create",
+        "description": "Open or create the free-canvas workspace for a complete sessionIdentity. Repeated calls preserve the existing document and edits. Without sessionIdentity, explicitly create a new document. Empty export dimensions default to 1024 × 1024 pixels; content may extend beyond them.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false,
+          "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 200 }, "width": { "type": "number", "minimum": 1, "maximum": 32768 }, "height": { "type": "number", "minimum": 1, "maximum": 32768 }, "sessionIdentity": { "$ref": "#/$defs/sessionIdentity" } },
+          "$defs": {
+            "identity": { "type": "string", "pattern": "^[^\\u0000]*[^\\s\\u0000][^\\u0000]*$" },
+            "sessionIdentity": {
+              "type": "object", "additionalProperties": false, "required": ["endpoint", "agentId", "sessionKey"],
+              "properties": {
+                "agentId": { "$ref": "#/$defs/identity" }, "sessionKey": { "$ref": "#/$defs/identity" },
+                "endpoint": { "oneOf": [
+                  { "type": "object", "additionalProperties": false, "required": ["kind", "runtimeAdapterId", "runtimeInstanceId"], "properties": { "kind": { "const": "native-runtime" }, "runtimeAdapterId": { "$ref": "#/$defs/identity" }, "runtimeInstanceId": { "$ref": "#/$defs/identity" } } },
+                  { "type": "object", "additionalProperties": false, "required": ["kind", "protocolId", "connectorId", "endpointId"], "properties": { "kind": { "const": "protocol-connector" }, "protocolId": { "$ref": "#/$defs/identity" }, "connectorId": { "$ref": "#/$defs/identity" }, "endpointId": { "$ref": "#/$defs/identity" } } }
+                ] }
+              }
+            }
+          }
+        },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "image_open",
+        "description": "Import actual image bytes and insert them to the right of the complete sessionIdentity's saved design workspace. Opens or creates that exact session document idempotently without requiring the editor UI. Returns the document and inserted layerId; does not call a paid model. data is raw padded base64, not a data URL.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["sessionIdentity", "name", "mimeType", "data"],
+          "properties": { "sessionIdentity": { "$ref": "#/$defs/sessionIdentity" }, "name": { "type": "string", "minLength": 1, "maxLength": 200 }, "mimeType": { "enum": ["image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml"] }, "data": { "type": "string", "minLength": 1 } },
+          "$defs": {
+            "identity": { "type": "string", "pattern": "^[^\\u0000]*[^\\s\\u0000][^\\u0000]*$" },
+            "sessionIdentity": {
+              "type": "object", "additionalProperties": false, "required": ["endpoint", "agentId", "sessionKey"],
+              "properties": {
+                "agentId": { "$ref": "#/$defs/identity" }, "sessionKey": { "$ref": "#/$defs/identity" },
+                "endpoint": { "oneOf": [
+                  { "type": "object", "additionalProperties": false, "required": ["kind", "runtimeAdapterId", "runtimeInstanceId"], "properties": { "kind": { "const": "native-runtime" }, "runtimeAdapterId": { "$ref": "#/$defs/identity" }, "runtimeInstanceId": { "$ref": "#/$defs/identity" } } },
+                  { "type": "object", "additionalProperties": false, "required": ["kind", "protocolId", "connectorId", "endpointId"], "properties": { "kind": { "const": "protocol-connector" }, "protocolId": { "$ref": "#/$defs/identity" }, "connectorId": { "$ref": "#/$defs/identity" }, "endpointId": { "$ref": "#/$defs/identity" } } }
+                ] }
+              }
+            }
+          }
+        },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "document_get",
+        "description": "Read a complete design document. Use its revision for subsequent edits, history operations or export.",
+        "inputSchema": { "type": "object", "additionalProperties": false, "required": ["documentId"], "properties": { "documentId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" } } },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "document_edit",
+        "description": "Atomically apply an ordered edit batch at expectedRevision. Revision conflicts never overwrite newer edits. Reorder supplies every layer ID in bottom-to-top order. An inserted layer requires all geometry, visibility and type-specific fields. Image-only crop, flipX/flipY, lockAspectRatio, adjustments, stroke and shadow persist in this same document history without rewriting asset bytes. Optional nested objects replace the complete previous value, require all their fields and cannot be null; omitted fields remain unchanged in a patch and have no stored defaults. Crop uses a half-open rectangle in original asset pixels and must fit the source dimensions.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["documentId", "expectedRevision", "edits"],
+          "properties": {
+            "documentId": { "$ref": "#/$defs/id" }, "expectedRevision": { "type": "integer", "minimum": 0 },
+            "edits": { "type": "array", "minItems": 1, "maxItems": 1024, "items": {
+              "oneOf": [
+                { "type": "object", "additionalProperties": false, "required": ["type", "layer"], "properties": { "type": { "const": "insert" }, "layer": { "$ref": "#/$defs/layer" }, "source": { "const": "session-media", "description": "Automatic session media intake; records the immutable asset as consumed even after layer removal or undo." } }, "allOf": [{ "if": { "required": ["source"], "properties": { "source": {} } }, "then": { "properties": { "layer": { "type": "object", "properties": { "type": { "enum": ["image", "video"] } } } } } }] },
+                { "type": "object", "additionalProperties": false, "required": ["type", "id", "changes"], "properties": { "type": { "const": "patch" }, "id": { "$ref": "#/$defs/id" }, "changes": { "$ref": "#/$defs/patch" } } },
+                { "type": "object", "additionalProperties": false, "required": ["type", "ids"], "properties": { "type": { "enum": ["remove", "reorder"] }, "ids": { "$ref": "#/$defs/ids" } } },
+                { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "canvas" }, "name": { "type": "string", "minLength": 1, "maxLength": 200 }, "width": { "type": "number", "minimum": 1, "maximum": 32768 }, "height": { "type": "number", "minimum": 1, "maximum": 32768 }, "background": { "type": ["string", "null"], "maxLength": 500 } } }
+              ]
+            } }
+          },
+          "$defs": {
+            "id": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" },
+            "ids": { "type": "array", "maxItems": 2048, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+            "crop": {
+              "type": "object", "additionalProperties": false, "required": ["x", "y", "width", "height"],
+              "description": "Half-open rectangle in original asset pixels; preserves the original asset bytes. Must fit the source asset dimensions.",
+              "properties": { "x": { "type": "number", "minimum": 0, "maximum": 32768 }, "y": { "type": "number", "minimum": 0, "maximum": 32768 }, "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 32768 }, "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 32768 } }
+            },
+            "adjustments": {
+              "type": "object", "additionalProperties": false, "required": ["blur", "brightness", "contrast", "hue", "saturation", "invert"],
+              "properties": { "blur": { "type": "number", "minimum": 0, "maximum": 100 }, "brightness": { "type": "number", "minimum": -100, "maximum": 100 }, "contrast": { "type": "number", "minimum": -100, "maximum": 100 }, "hue": { "type": "number", "minimum": -100, "maximum": 100 }, "saturation": { "type": "number", "minimum": -100, "maximum": 100 }, "invert": { "type": "boolean" } }
+            },
+            "stroke": {
+              "type": "object", "additionalProperties": false, "required": ["color", "width", "opacity"],
+              "properties": { "color": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" }, "width": { "type": "number", "minimum": 0, "maximum": 32768 }, "opacity": { "type": "number", "minimum": 0, "maximum": 1 } }
+            },
+            "shadow": {
+              "type": "object", "additionalProperties": false, "required": ["color", "blur", "offsetX", "offsetY", "opacity"],
+              "properties": { "color": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" }, "blur": { "type": "number", "minimum": 0, "maximum": 32768 }, "offsetX": { "type": "number", "minimum": -1000000, "maximum": 1000000 }, "offsetY": { "type": "number", "minimum": -1000000, "maximum": 1000000 }, "opacity": { "type": "number", "minimum": 0, "maximum": 1 } }
+            },
+            "patch": {
+              "type": "object", "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string", "maxLength": 200 },
+                "x": { "type": "number", "minimum": -1000000, "maximum": 1000000 }, "y": { "type": "number", "minimum": -1000000, "maximum": 1000000 },
+                "width": { "type": "number", "minimum": 0.01, "maximum": 32768 }, "height": { "type": "number", "minimum": 0.01, "maximum": 32768 },
+                "rotation": { "type": "number", "minimum": -360000, "maximum": 360000 }, "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+                "visible": { "type": "boolean" }, "locked": { "type": "boolean" }, "assetId": { "$ref": "#/$defs/id" },
+                "crop": { "$ref": "#/$defs/crop" }, "flipX": { "type": "boolean" }, "flipY": { "type": "boolean" }, "lockAspectRatio": { "type": "boolean" },
+                "adjustments": { "$ref": "#/$defs/adjustments" }, "stroke": { "$ref": "#/$defs/stroke" }, "shadow": { "$ref": "#/$defs/shadow" },
+                "text": { "type": "string", "maxLength": 100000 }, "fontFamily": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "fontSize": { "type": "number", "minimum": 0.1, "maximum": 4096 }, "fontStyle": { "enum": ["normal", "bold", "italic", "bold italic"] },
+                "fill": { "type": "string", "minLength": 1, "maxLength": 500 }, "align": { "enum": ["left", "center", "right"] }, "lineHeight": { "type": "number", "minimum": 0.1, "maximum": 20 }
+              }
+            },
+            "layer": {
+              "type": "object", "additionalProperties": false,
+              "required": ["id", "type", "name", "x", "y", "width", "height", "rotation", "opacity", "visible", "locked"],
+              "properties": {
+                "id": { "$ref": "#/$defs/id" }, "type": { "enum": ["image", "video", "text"] }, "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "x": { "type": "number", "minimum": -1000000, "maximum": 1000000 }, "y": { "type": "number", "minimum": -1000000, "maximum": 1000000 },
+                "width": { "type": "number", "minimum": 0.01, "maximum": 32768 }, "height": { "type": "number", "minimum": 0.01, "maximum": 32768 },
+                "rotation": { "type": "number", "minimum": -360000, "maximum": 360000 }, "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+                "visible": { "type": "boolean" }, "locked": { "type": "boolean" }, "assetId": { "$ref": "#/$defs/id" },
+                "crop": { "$ref": "#/$defs/crop" }, "flipX": { "type": "boolean" }, "flipY": { "type": "boolean" }, "lockAspectRatio": { "type": "boolean" },
+                "adjustments": { "$ref": "#/$defs/adjustments" }, "stroke": { "$ref": "#/$defs/stroke" }, "shadow": { "$ref": "#/$defs/shadow" },
+                "text": { "type": "string", "maxLength": 100000 }, "fontFamily": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "fontSize": { "type": "number", "minimum": 0.1, "maximum": 4096 }, "fontStyle": { "enum": ["normal", "bold", "italic", "bold italic"] },
+                "fill": { "type": "string", "minLength": 1, "maxLength": 500 }, "align": { "enum": ["left", "center", "right"] }, "lineHeight": { "type": "number", "minimum": 0.1, "maximum": 20 }
+              },
+              "allOf": [{
+                "if": { "properties": { "type": { "const": "text" } }, "required": ["type"] },
+                "then": { "required": ["text", "fontFamily", "fontSize", "fontStyle", "fill", "align", "lineHeight"], "properties": { "text": {}, "fontFamily": {}, "fontSize": {}, "fontStyle": {}, "fill": {}, "align": {}, "lineHeight": {}, "assetId": false } },
+                "else": { "required": ["assetId"], "properties": { "assetId": { "type": "string" }, "text": false, "fontFamily": false, "fontSize": false, "fontStyle": false, "fill": false, "align": false, "lineHeight": false } }
+              }, {
+                "if": { "properties": { "type": { "const": "image" } }, "required": ["type"] },
+                "then": { "properties": { "crop": {}, "flipX": {}, "flipY": {}, "lockAspectRatio": {}, "adjustments": {}, "stroke": {}, "shadow": {} } },
+                "else": { "properties": { "crop": false, "flipX": false, "flipY": false, "lockAspectRatio": false, "adjustments": false, "stroke": false, "shadow": false } }
+              }]
+            }
+          }
+        },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "document_undo",
+        "description": "Undo the last saved edit without overwriting a newer revision.",
+        "inputSchema": { "type": "object", "additionalProperties": false, "required": ["documentId", "expectedRevision"], "properties": { "documentId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" }, "expectedRevision": { "type": "integer", "minimum": 0 } } },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "document_redo",
+        "description": "Redo a previously undone edit at the current revision.",
+        "inputSchema": { "type": "object", "additionalProperties": false, "required": ["documentId", "expectedRevision"], "properties": { "documentId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" }, "expectedRevision": { "type": "integer", "minimum": 0 } } },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "asset_import",
+        "description": "Import actual image or video bytes. data is plain base64, not a data URL. Use the returned asset ID in matching image/video layers or use an image asset as a generation reference.",
+        "inputSchema": { "type": "object", "additionalProperties": false, "required": ["name", "mimeType", "data"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 200 }, "mimeType": { "type": "string", "minLength": 1, "maxLength": 100 }, "data": { "type": "string", "minLength": 1 } } },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "asset_read",
+        "description": "Read a stored asset's metadata and actual bytes as plain base64.",
+        "inputSchema": { "type": "object", "additionalProperties": false, "required": ["assetId"], "properties": { "assetId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" } } },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "document_export",
+        "description": "Render a saved revision to a persisted PNG, JPEG or WebP asset without an open UI. Export uses actual visible content bounds, including rotation and content beyond the empty canvas size. Supply one layer ID to export that image alone; export individual images separately for a ZIP. Omit layerIds to render all visible content. Read the returned asset ID to download actual bytes for local export; no hosted sharing link is created.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["documentId", "expectedRevision", "format"],
+          "properties": {
+            "documentId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" }, "expectedRevision": { "type": "integer", "minimum": 0 },
+            "format": { "enum": ["png", "jpeg", "webp"] }, "scale": { "type": "number", "minimum": 0.01, "maximum": 8 },
+            "layerIds": { "type": "array", "maxItems": 2048, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" } }, "background": { "type": "string", "minLength": 1, "maxLength": 500 }
+          }
+        },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "media_models",
+        "description": "List configured media models for kind through Matcha's existing model boundary. Returns the models.list DTO: models with canonical selectionId, name and supported limits (maxImages, maxCount, mask, pixelSize, optional sizes/durationsSeconds and storyboard:false), plus optional defaultSelectionId. Use these actual capabilities before generation; no provider URL, credentials or native task handle is exposed.",
+        "inputSchema": { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "enum": ["image", "video"] } } },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "generate",
+        "description": "Generate images or videos with Matcha's configured media model; no provider credentials are exposed. Image editing actions require actual source image layers. Source layers use their effective crop as PNG input when cropped; uncropped PNG/JPEG/WebP inputs retain their bytes, while SVG/GIF are rasterized to PNG for model input. Original downloads remain unchanged. remove-background, upscale, erase, white, watermark, resize, translate, edit-text, angle and erase-text require exactly one explicit sourceLayerIds entry; submit separate requests for multiple images. angle requires one of the nine anglePreset values and preserves subject identity while changing camera view or framing. erase-text removes text throughout the image and reconstructs the background; unlike watermark it does not preserve original product text. Neither requires OCR, marked images or annotations. Only video/storyboard accept ordered independent referenceAssetIds, appended after sourceLayerIds; their combined count must be at most 16 and within the selected model's actual maxImages. No distinct ultra upscale execution is available. Logo placement requires 1–15 product source layers plus an independent logoAssetId, sent after the originals; material optionally describes the physical application process. model-display optionally accepts modelAssetId after at most 15 product references; otherwise the source limit is 16. Recolor requires 1–8 colors with integer opacity percentages. resize requires aspectRatio; resize/upscale compute exact target pixels from the effective cropped source and reject size. translate requires targetLanguage. edit-text requires markedAssetId: the same-size PNG with red OCR boxes and markers returned by text_extract, plus its sourceAssetId as expectedSourceAssetId, exact sourceCrop as expectedSourceCrop (null if uncropped), and 1–200 textEdits; a changed source is rejected before model execution, and an empty edited string removes that text. It cannot mix annotation, logo or model references. For edit/erase only, annotationAssetId is a same-size PNG showing purple rectangles or brush marks; include expectedSourceAssetId and expectedSourceCrop from the marked source; send exactly one original first and the annotation second. Marks only locate regions and must not appear in results; pixel-identical preservation elsewhere is not guaranteed. storyboard generates each scene independently in script order, then composes one MP4 locally with FFmpeg; cross-shot subject or style consistency is not guaranteed. May incur provider charges. Cancellation stops local waiting, not a guaranteed upstream stop, undo or refund. Outputs and failed/interrupted/cancelled records are persisted; never automatically retry an unknown paid outcome.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["documentId", "action", "prompt"],
+          "properties": {
+            "documentId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" },
+            "action": { "enum": ["image", "edit", "remove-background", "upscale", "erase", "product-scene", "recolor", "model-display", "logo", "video", "storyboard", "white", "watermark", "resize", "translate", "edit-text", "angle", "erase-text"] },
+            "prompt": { "type": "string", "maxLength": 20000 },
+            "sourceLayerIds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" } },
+            "referenceAssetIds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" }, "description": "Ordered independent image assets, appended after source layers. Only video/storyboard; combined source and reference count cannot exceed 16 or the selected model's actual maxImages." },
+            "anglePreset": { "enum": ["front", "back", "god", "side", "three-quarter-left", "three-quarter-right", "low-angle", "face-closeup", "environment"], "description": "Required only for angle. Changes only the camera view or framing while preserving subject identity and details." },
+            "logoAssetId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$", "description": "Independent logo image required only for logo placement; sent after all original product images." },
+            "material": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S", "description": "Optional physical logo application process, such as embroidery, engraving or printing. Only valid for logo; not required for older requests." },
+            "modelAssetId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$", "description": "Optional independent person/model image only for model-display; sent after at most 15 product source images." },
+            "annotationAssetId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$", "description": "Same-size PNG with purple rectangle or brush marks. Only edit/erase with exactly one explicit source image; original first, annotation second. Marks must not remain in outputs." },
+            "markedAssetId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$", "description": "Same-size marked PNG returned by text_extract, with red OCR boxes and markers; only for edit-text and sent after the original." },
+            "expectedSourceAssetId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$", "description": "Required for edit-text or annotated edit/erase: immutable source asset ID when the marked image was created. Execution rejects a changed source image before any paid model request." },
+            "expectedSourceCrop": { "description": "Required for edit-text or annotated edit/erase: exact source crop when the marked image was created, or null if uncropped. A changed crop is rejected before model execution.", "anyOf": [{ "type": "null" }, { "type": "object", "additionalProperties": false, "required": ["x", "y", "width", "height"], "properties": { "x": { "type": "number", "minimum": 0, "maximum": 32768 }, "y": { "type": "number", "minimum": 0, "maximum": 32768 }, "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 32768 }, "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 32768 } } }] },
+            "textEdits": { "type": "array", "minItems": 1, "maxItems": 200, "description": "Only for edit-text. Markers must be unique after trimming; original is nonempty, edited may be empty to remove text.", "items": { "type": "object", "additionalProperties": false, "required": ["marker", "original", "edited"], "properties": { "marker": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "\\S" }, "original": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" }, "edited": { "type": "string", "maxLength": 2000 } } } },
+            "colors": { "type": "array", "minItems": 1, "maxItems": 8, "description": "Required only for recolor; opacity is an integer percentage, not layer opacity.", "items": { "type": "object", "additionalProperties": false, "required": ["hex", "opacity"], "properties": { "hex": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }, "opacity": { "type": "integer", "minimum": 0, "maximum": 100 } } } },
+            "aspectRatio": { "enum": ["1:1", "4:5", "5:4", "9:16", "16:9", "4:3", "3:4", "2:3", "3:2", "21:9"], "description": "Required only for resize; target pixel dimensions are computed from the source." },
+            "targetLanguage": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "\\S", "description": "Required only for translate." },
+            "selectionId": { "type": "string", "minLength": 1, "maxLength": 500, "description": "Optional canonical model-selection:v1:* ID; omit to use the configured media route." },
+            "size": { "type": "string", "minLength": 1, "maxLength": 100 }, "durationSeconds": { "type": "number", "minimum": 1, "maximum": 120 }, "count": { "type": "integer", "minimum": 1, "maximum": 8 },
+            "scenes": { "type": "array", "minItems": 1, "maxItems": 24, "items": { "type": "object", "additionalProperties": false, "required": ["prompt"], "properties": { "prompt": { "type": "string", "minLength": 1, "maxLength": 20000, "pattern": "\\S" }, "durationSeconds": { "type": "number", "minimum": 1, "maximum": 120 } } } }
+          },
+          "allOf": [{
+            "if": { "properties": { "action": { "enum": ["video", "storyboard"] } }, "required": ["action"] },
+            "then": { "properties": { "referenceAssetIds": {} } }, "else": { "properties": { "referenceAssetIds": false } }
+          }, {
+            "if": { "properties": { "action": { "const": "angle" } }, "required": ["action"] },
+            "then": { "required": ["anglePreset"], "properties": { "anglePreset": {} } }, "else": { "properties": { "anglePreset": false } }
+          }, {
+            "anyOf": [
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 0 }, "referenceAssetIds": { "type": "array", "maxItems": 16 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 1 }, "referenceAssetIds": { "type": "array", "maxItems": 15 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 2 }, "referenceAssetIds": { "type": "array", "maxItems": 14 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 3 }, "referenceAssetIds": { "type": "array", "maxItems": 13 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 4 }, "referenceAssetIds": { "type": "array", "maxItems": 12 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 5 }, "referenceAssetIds": { "type": "array", "maxItems": 11 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 6 }, "referenceAssetIds": { "type": "array", "maxItems": 10 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 7 }, "referenceAssetIds": { "type": "array", "maxItems": 9 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 8 }, "referenceAssetIds": { "type": "array", "maxItems": 8 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 9 }, "referenceAssetIds": { "type": "array", "maxItems": 7 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 10 }, "referenceAssetIds": { "type": "array", "maxItems": 6 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 11 }, "referenceAssetIds": { "type": "array", "maxItems": 5 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 12 }, "referenceAssetIds": { "type": "array", "maxItems": 4 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 13 }, "referenceAssetIds": { "type": "array", "maxItems": 3 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 14 }, "referenceAssetIds": { "type": "array", "maxItems": 2 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 15 }, "referenceAssetIds": { "type": "array", "maxItems": 1 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 16 }, "referenceAssetIds": { "type": "array", "maxItems": 0 } } }
+            ]
+          }, {
+            "if": { "properties": { "action": { "const": "logo" } }, "required": ["action"] },
+            "then": { "required": ["sourceLayerIds", "logoAssetId"], "properties": { "sourceLayerIds": { "type": "array", "minItems": 1, "maxItems": 15 }, "logoAssetId": { "type": "string" } } },
+            "else": { "properties": { "logoAssetId": false, "material": false } }
+          }, {
+            "if": { "required": ["annotationAssetId"], "properties": { "annotationAssetId": { "type": "string" } } },
+            "then": { "required": ["sourceLayerIds", "expectedSourceAssetId", "expectedSourceCrop"], "properties": { "action": { "enum": ["edit", "erase"] }, "sourceLayerIds": { "type": "array", "minItems": 1, "maxItems": 1 }, "expectedSourceAssetId": {}, "expectedSourceCrop": {} } }
+          }, {
+            "if": { "properties": { "action": { "enum": ["remove-background", "upscale", "erase", "white", "watermark", "resize", "translate", "edit-text", "angle", "erase-text"] } }, "required": ["action"] },
+            "then": { "required": ["sourceLayerIds"], "properties": { "sourceLayerIds": { "type": "array", "minItems": 1, "maxItems": 1 } } }
+          }, {
+            "if": { "required": ["modelAssetId"], "properties": { "modelAssetId": { "type": "string" } } },
+            "then": { "properties": { "action": { "const": "model-display" }, "sourceLayerIds": { "type": "array", "maxItems": 15 } } }
+          }, {
+            "if": { "properties": { "action": { "const": "recolor" } }, "required": ["action"] },
+            "then": { "required": ["colors"], "properties": { "colors": {} } }, "else": { "properties": { "colors": false } }
+          }, {
+            "if": { "properties": { "action": { "const": "resize" } }, "required": ["action"] },
+            "then": { "required": ["aspectRatio"], "properties": { "aspectRatio": {} } }, "else": { "properties": { "aspectRatio": false } }
+          }, {
+            "if": { "properties": { "action": { "enum": ["resize", "upscale"] } }, "required": ["action"] },
+            "then": { "properties": { "size": false } }
+          }, {
+            "if": { "properties": { "action": { "const": "translate" } }, "required": ["action"] },
+            "then": { "required": ["targetLanguage"], "properties": { "targetLanguage": {} } }, "else": { "properties": { "targetLanguage": false } }
+          }, {
+            "if": { "properties": { "action": { "const": "edit-text" } }, "required": ["action"] },
+            "then": { "required": ["markedAssetId", "expectedSourceAssetId", "expectedSourceCrop", "textEdits"], "properties": { "markedAssetId": {}, "expectedSourceAssetId": {}, "expectedSourceCrop": {}, "textEdits": {}, "annotationAssetId": false, "logoAssetId": false, "modelAssetId": false } },
+            "else": { "properties": { "markedAssetId": false, "textEdits": false }, "allOf": [{ "if": { "required": ["annotationAssetId"], "properties": { "annotationAssetId": {} } }, "then": { "properties": { "expectedSourceAssetId": {}, "expectedSourceCrop": {} } }, "else": { "properties": { "expectedSourceAssetId": false, "expectedSourceCrop": false } } }] }
+          }, {
+            "if": { "properties": { "action": { "const": "storyboard" } }, "required": ["action"] },
+            "then": { "required": ["scenes"], "properties": { "scenes": {}, "count": { "const": 1 } } }, "else": { "properties": { "scenes": false } }
+          }, {
+            "if": { "properties": { "action": { "enum": ["image", "edit", "product-scene", "recolor", "model-display", "logo", "video"] } }, "required": ["action"] },
+            "then": { "properties": { "prompt": { "type": "string", "minLength": 1, "pattern": "\\S" } } }
+          }]
+        },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "compose_edit",
+        "description": "Purely update a Design draft operation after removing one attachment. Does not invoke models, mutate documents or load media. Indices refer to the current ordered attachment list; remainingAttachmentIndices must equal that list minus attachmentIndex. Returns context:null for an inseparable or no-longer-valid operation, otherwise the updated opaque context and retained old indices. Only for the application composer.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["context", "attachmentIndex", "remainingAttachmentIndices"],
+          "properties": {
+            "context": { "type": "object", "additionalProperties": false, "required": ["name", "text"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 120 }, "text": { "type": "string", "minLength": 1, "maxLength": 32768 } } },
+            "attachmentIndex": { "type": "integer", "minimum": 0, "maximum": 15 },
+            "remainingAttachmentIndices": { "type": "array", "maxItems": 15, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 15 } }
+          }
+        },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["app"] } }
+      },
+      {
+        "name": "text_extract",
+        "description": "Recognize actual text in one image layer with the configured image-understanding model. Returns texts (at most 128 regions with server-assigned markers and original text up to 2000 characters), a same-size PNG marked with red boxes/numbers, and sourceLayerId/sourceAssetId/sourceCrop (null if uncropped). Cropped layers are recognized and marked at the effective crop size. No readable text returns an empty texts array and still returns the marked PNG. Use markedAsset.id, sourceAssetId as expectedSourceAssetId, sourceCrop as expectedSourceCrop, and the returned originals in edit-text; do not invent markers. May incur provider charges; closing the editor does not cancel accepted work.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["documentId", "layerId"],
+          "properties": {
+            "documentId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" }, "layerId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" },
+            "selectionId": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S", "description": "Optional canonical model-selection:v1:* ID; omit to use the configured image-understanding route." }
+          }
+        },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "recommendations",
+        "description": "Analyze actual images and return grounded generation directions in language, not generated media or a stock template library. Canvas source layers precede ordered independent reference assets; duplicate effective image inputs (asset plus crop) are rejected. product-scene accepts 1–16 canvas sources, analyzes the first and accepts no independent references; scene-video requires exactly one combined image; multi-shot analyzes 1–4 combined images and returns plain-text multi-shot directions for action video, not editable storyboard scenes or local composition. Returns at most 8 candidates with server-assigned id, title (200), description (2000) and prompt (8000 characters); an empty candidates array is normal. Nonempty results are cached only in the active instance by document, ordered asset IDs and source crop rectangles, kind and language; refresh bypasses that cache. May incur model charges; dismissing a recommendation does not revoke accepted model work.",
+        "inputSchema": {
+          "type": "object", "additionalProperties": false, "required": ["documentId", "sourceLayerIds", "kind", "language"],
+          "properties": {
+            "documentId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" },
+            "sourceLayerIds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" } },
+            "referenceAssetIds": { "type": "array", "maxItems": 4, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" } },
+            "kind": { "enum": ["product-scene", "scene-video", "multi-shot"] }, "language": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "\\S" }, "refresh": { "type": "boolean" }
+          },
+          "anyOf": [
+            { "properties": { "sourceLayerIds": { "type": "array", "minItems": 1 } } },
+            { "required": ["referenceAssetIds"], "properties": { "referenceAssetIds": { "type": "array", "minItems": 1 } } }
+          ],
+          "allOf": [{
+            "if": { "properties": { "kind": { "const": "product-scene" } }, "required": ["kind"] },
+            "then": { "properties": { "sourceLayerIds": { "type": "array", "minItems": 1 }, "referenceAssetIds": { "type": "array", "maxItems": 0 } } }
+          }, {
+            "if": { "properties": { "kind": { "const": "scene-video" } }, "required": ["kind"] },
+            "then": { "anyOf": [
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 1 }, "referenceAssetIds": { "type": "array", "maxItems": 0 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 0 }, "referenceAssetIds": { "type": "array", "maxItems": 1 } } }
+            ] }
+          }, {
+            "if": { "properties": { "kind": { "const": "multi-shot" } }, "required": ["kind"] },
+            "then": { "anyOf": [
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 0 }, "referenceAssetIds": { "type": "array", "maxItems": 4 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 1 }, "referenceAssetIds": { "type": "array", "maxItems": 3 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 2 }, "referenceAssetIds": { "type": "array", "maxItems": 2 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 3 }, "referenceAssetIds": { "type": "array", "maxItems": 1 } } },
+              { "properties": { "sourceLayerIds": { "type": "array", "maxItems": 4 }, "referenceAssetIds": { "type": "array", "maxItems": 0 } } }
+            ] }
+          }]
+        },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "templates",
+        "description": "List, save or remove local design templates using user-supplied assets. Save requires an already imported image asset and creates a template in product-scene, model or logo-technique; no licensed stock library is included and no remote catalog, image download or model generation is performed.",
+        "inputSchema": {
+          "type": "object",
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["action"], "properties": { "action": { "const": "list" }, "category": { "$ref": "#/$defs/category" } } },
+            { "type": "object", "additionalProperties": false, "required": ["action", "template"], "properties": { "action": { "const": "save" }, "template": { "type": "object", "additionalProperties": false, "required": ["category", "title", "description", "prompt", "assetId"], "properties": { "category": { "$ref": "#/$defs/category" }, "title": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" }, "description": { "type": "string", "maxLength": 2000 }, "prompt": { "type": "string", "minLength": 1, "maxLength": 8000, "pattern": "\\S" }, "assetId": { "$ref": "#/$defs/id" } }, "allOf": [{ "if": { "required": ["category"], "properties": { "category": { "const": "logo-technique" } } }, "then": { "properties": { "prompt": { "type": "string", "maxLength": 2000 } } } }] } } },
+            { "type": "object", "additionalProperties": false, "required": ["action", "templateId"], "properties": { "action": { "const": "remove" }, "templateId": { "$ref": "#/$defs/id" } } }
+          ],
+          "$defs": {
+            "id": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" },
+            "category": { "enum": ["product-scene", "model", "logo-technique"] }
+          }
+        },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "generation_cancel",
+        "description": "Request local cancellation of one generation belonging to documentId and wait for its actual terminal record. Stops local waiting and propagates cancellation, but does not guarantee an upstream task stop, undo or refund. An already committed/completed operation stays completed; saved outputs are retained. Never automatically retry an unknown paid outcome.",
+        "inputSchema": { "type": "object", "additionalProperties": false, "required": ["documentId", "generationId"], "properties": { "documentId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" }, "generationId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" } } },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      },
+      {
+        "name": "generations_list",
+        "description": "List persisted generation records and outputs for a document, including running, failed, interrupted and locally cancelled work.",
+        "inputSchema": { "type": "object", "additionalProperties": false, "required": ["documentId"], "properties": { "documentId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$" } } },
+        "_meta": { "ui": { "resourceUri": "ui://app-plugins/matcha.design/editor", "visibility": ["model", "app"] } }
+      }
+    ]
+  }
+}

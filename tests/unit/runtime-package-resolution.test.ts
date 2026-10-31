@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveModulePathWithFallbacks } from '../../electron/utils/runtime-package-resolution';
+import { resolveModulePathWithFallbacks } from '../../electron/main/providers/openclaw/sdk';
 
 describe('runtime package resolution', () => {
   it('returns the first resolver hit', () => {

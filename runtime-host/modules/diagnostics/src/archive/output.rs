@@ -660,7 +660,7 @@ fn is_regular_directory(path: &Path) -> bool {
     fs::canonicalize(path).is_ok_and(|canonical| canonical == path)
 }
 
-fn is_archive_id(value: &str) -> bool {
+pub(super) fn is_archive_id(value: &str) -> bool {
     value.len() == 32
         && value
             .bytes()

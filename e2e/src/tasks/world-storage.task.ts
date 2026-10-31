@@ -44,6 +44,20 @@ export const EnableOrRestoreWorldStorage = () => Task.where('#actor connects onc
   ),
 );
 
+export const ConnectDedicatedWorldStorage = () => Task.where('#actor connects the owned database through normal settings without replacing its identity or authorization',
+  StartAtSignIn(), EnterChat(),
+  Check.whether(AccountPage.expandSidebar, isVisible()).andIfSo(Click.on(AccountPage.expandSidebar)),
+  Wait.upTo(Duration.ofSeconds(45)).until(WorldStoragePage.navigationGroup, isEnabled()),
+  Check.whether(Attribute.called('aria-expanded').of(WorldStoragePage.navigationGroup), equals('false'))
+    .andIfSo(Click.on(WorldStoragePage.navigationGroup)),
+  Click.on(WorldStoragePage.settingsNavigation),
+  Wait.upTo(Duration.ofSeconds(45)).until(WorldStoragePage.settingsHeading, isVisible()),
+  Click.on(WorldStoragePage.storageTab),
+  Wait.upTo(Duration.ofSeconds(45)).until(WorldStoragePage.heading, isVisible()),
+  ConnectWorldStorage(),
+  Ensure.that(WorldStorageConnectionIsEmpty(), equals(true)),
+);
+
 export const ReconnectWorldStorage = () => Task.where('#actor reconnects the same dedicated storage once and reads exact identity, authorization and journal invariants',
   ConnectWorldStorage(), RequireReadyStorageUi(), ConfirmWorldStorageRepeated(), Log.the(WorldStorageRepeated()),
   Ensure.that(WorldStorageIdentityMatches(), equals(true)),

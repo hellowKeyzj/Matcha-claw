@@ -2,6 +2,8 @@ import { Readable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { handlePackageRoutes } from '../../electron/api/routes/packages';
 import { CloudAccountClientError } from '../../electron/main/cloud-account/client';
+import { confirmPackageInstall } from '../../electron/main/cloud-account/package-confirmation';
+import { exportSealedSkillPackage } from '../../electron/main/cloud-account/package-export';
 
 function incoming(body: unknown, method = 'POST') {
   return Object.assign(Readable.from([JSON.stringify(body)]), { method, headers: { 'content-type': 'application/json' } });
@@ -33,7 +35,20 @@ describe('packages host API route', () => {
       admitPackageOperation: vi.fn().mockReturnValue(operationReceipt),
     };
     const sealedSkillsTransport = { exportCloud: vi.fn().mockResolvedValue({ status: 202, body: receipt }) };
-    const ctx = { cloudAccountService, runtimeHostTransports: { sealedSkillsTransport } };
+    const ctx = {
+      cloudAccountService: Object.assign(cloudAccountService, {
+        exportSealedSkillPackage: (request: Parameters<typeof exportSealedSkillPackage>[0]) => {
+          const reserved = cloudAccountService.reserveSkillExport();
+          return exportSealedSkillPackage(request, {
+            fetchKey: cloudAccountService.fetchSealedCloudKey,
+            exportCloud: sealedSkillsTransport.exportCloud,
+            bind: (callId) => cloudAccountService.bindSkillExport(reserved, callId),
+            release: () => cloudAccountService.releaseSkillExport(reserved),
+          });
+        },
+      }),
+      runtimeHostTransports: { sealedSkillsTransport },
+    };
     expect(await route('/api/packages/upload/sealed-skill', { skillKey: 'skill:openclaw:calendar' }, ctx)).toEqual({ statusCode: 202, body: receipt });
     const result = await route('/api/packages/upload/sealed-skill/confirm', { callId: receipt.callId }, ctx);
     expect(sealedSkillsTransport.exportCloud).toHaveBeenCalledWith({ skillKey: 'skill:openclaw:calendar', cloudPublicKey: 'cloud-public-key', cloudKeyId: 'cloud-key' });
@@ -85,7 +100,16 @@ describe('packages host API route', () => {
       detail: packageType === 'skill' ? { access: 'write', outcome: 'accepted', skillKey: 'vendor/calendar' }
         : { endpoint: 'openclaw:local', outcome: 'packageInstalled', agentId: 'calendar' },
     } }) };
-    const ctx = { cloudAccountService, runtimeHostTransports: { agentsTransport, sealedSkillsTransport, callLogTransport } };
+    const ctx = {
+      cloudAccountService: Object.assign(cloudAccountService, {
+        confirmPackageInstall: (callId: string) => confirmPackageInstall(callId, {
+          readCall: callLogTransport.get,
+          readAgentResult: agentsTransport.result,
+          acknowledge: cloudAccountService.acknowledgePackageInstall,
+        }),
+      }),
+      runtimeHostTransports: { agentsTransport, sealedSkillsTransport, callLogTransport },
+    };
     expect(await route('/api/packages/install', { packageVersionId: 'version-calendar', packageType }, ctx)).toEqual({ statusCode: 202, body: operationReceipt });
     expect(cloudAccountService.admitPackageOperation).toHaveBeenCalledWith('install', { packageVersionId: 'version-calendar', packageType });
     expect(agentsTransport.execute).not.toHaveBeenCalled();

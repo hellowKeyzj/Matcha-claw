@@ -118,8 +118,8 @@ impl SkillsModule {
         self
     }
 
-    pub async fn stop_operations(&self) {
-        self.operations.lock().await.stop().await;
+    pub async fn stop_operations(&self) -> bool {
+        self.operations.lock().await.stop().await
     }
 
     pub(crate) async fn submit_operation<F>(

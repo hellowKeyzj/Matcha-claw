@@ -96,8 +96,8 @@ impl WikiHandle {
         self.drain_call_workflows().await;
     }
 
-    pub(crate) async fn drain_call_workflows(&self) {
-        self.workflows.shutdown().await;
+    pub(crate) async fn drain_call_workflows(&self) -> bool {
+        self.workflows.shutdown().await
     }
 
     pub async fn status(&self) -> Result<WikiStatusReceipt, WikiFailure> {

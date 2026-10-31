@@ -196,6 +196,30 @@ impl workspace_module::WorkspaceOps for OpenClawDriver {
         })
     }
 
+    fn list_session_images<'a>(
+        &'a self,
+        session_key: &'a str,
+        agent_id: &'a str,
+        cursor: Option<&'a str>,
+    ) -> WorkspaceFuture<'a, workspace_module::session_images::SessionImagePage, workspace_module::session_images::SessionImageFailure> {
+        Box::pin(async move {
+            crate::session::operation::SessionOperation::new(self.gateway.client())
+                .list_session_images(session_key, agent_id, cursor).await
+        })
+    }
+
+    fn read_session_image<'a>(
+        &'a self,
+        session_key: &'a str,
+        agent_id: &'a str,
+        reference: &'a str,
+    ) -> WorkspaceFuture<'a, workspace_module::session_images::SessionImageData, workspace_module::session_images::SessionImageFailure> {
+        Box::pin(async move {
+            crate::session::operation::SessionOperation::new(self.gateway.client())
+                .read_session_image(session_key, agent_id, reference).await
+        })
+    }
+
     fn workspace_runtime_ready(&self) -> bool {
         self.owner().snapshot().phase()
             == foundation::process::supervision::SupervisorPhase::Running
@@ -282,6 +306,22 @@ impl workspace_module::WorkspaceBinding for WorkspaceBinding {
             workspace
                 .write_text(&relative_path, &content)
                 .map(workspace_write_receipt)
+                .map_err(workspace_write_failure)
+        })
+    }
+
+    fn write_binary<'a>(
+        &'a self,
+        relative_path: &'a str,
+        content: &'a [u8],
+    ) -> WorkspaceFuture<'a, WorkspaceWriteReceipt, DriverWorkspaceWriteFailure> {
+        let workspace = self.workspace.clone();
+        let relative_path = relative_path.to_owned();
+        let content = content.to_owned();
+        blocking(DriverWorkspaceWriteFailure::OutcomeUnknown, move || {
+            workspace
+                .write_binary(&relative_path, &content)
+                .map(|(name, size)| WorkspaceWriteReceipt::new(name, size))
                 .map_err(workspace_write_failure)
         })
     }

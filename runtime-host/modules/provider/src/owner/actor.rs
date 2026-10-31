@@ -206,15 +206,22 @@ impl ProviderOwner {
         match command {
             ProviderCommand::ConfigurePrivateResolver { resolver, reply } => {
                 // Before routes/ready: reconcile only this freshly reloaded canonical inventory.
-                if self.cascade.reload().is_ok() {
-                    let _ = resolver
-                        .recover_account_credentials(self.cascade.accounts())
-                        .await;
+                if self.cascade.reload().is_err() {
+                    let _ = reply.send(Err(()));
+                    return;
+                }
+                if resolver
+                    .recover_account_credentials(self.cascade.accounts())
+                    .await
+                    .is_err()
+                {
+                    let _ = reply.send(Err(()));
+                    return;
                 }
                 self.accounts.set_private_resolver(resolver.clone());
                 self.models.set_private_resolver(resolver);
                 self.update_snapshot();
-                let _ = reply.send(());
+                let _ = reply.send(Ok(()));
             }
             ProviderCommand::ReplaceAccount {
                 draft,
@@ -593,6 +600,11 @@ impl ProviderOwner {
             }
             ProviderQuery::TextGenerationModelLimits { .. }
             | ProviderQuery::GenerateText { .. }
+            | ProviderQuery::GenerateMedia { .. }
+            | ProviderQuery::ListMediaModels { .. }
+            | ProviderQuery::SubmitVideo { .. }
+            | ProviderQuery::QueryVideo { .. }
+            | ProviderQuery::CollectVideo { .. }
             | ProviderQuery::PrepareGenerationBinding { .. }
             | ProviderQuery::RestoreGenerationBinding { .. }
             | ProviderQuery::CountBoundInput { .. }
@@ -845,6 +857,86 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
             )
             .await;
         }
+        ProviderQuery::GenerateMedia {
+            request,
+            cancellation,
+            reply,
+        } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = crate::media::generate(
+                snapshot.models.media_client.as_ref(),
+                &snapshot.models.private_resolver,
+                &snapshot.accounts,
+                &snapshot.catalog,
+                snapshot.routing.as_ref(),
+                request,
+                cancellation,
+            )
+            .await;
+            let _ = reply.send(outcome);
+        }
+        ProviderQuery::ListMediaModels { request, reply } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = crate::media::list(
+                &snapshot.accounts,
+                &snapshot.catalog,
+                snapshot.routing.as_ref(),
+                request,
+            );
+            let _ = reply.send(outcome);
+        }
+        ProviderQuery::SubmitVideo {
+            request,
+            cancellation,
+            reply,
+        } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = crate::media::submit_video(
+                snapshot.models.media_client.as_ref(),
+                &snapshot.models.private_resolver,
+                &snapshot.accounts,
+                &snapshot.catalog,
+                snapshot.routing.as_ref(),
+                request,
+                cancellation,
+            )
+            .await;
+            let _ = reply.send(outcome);
+        }
+        ProviderQuery::QueryVideo {
+            request,
+            cancellation,
+            reply,
+        } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = crate::media::query_video(
+                snapshot.models.media_client.as_ref(),
+                &snapshot.models.private_resolver,
+                &snapshot.accounts,
+                &snapshot.catalog,
+                request,
+                cancellation,
+            )
+            .await;
+            let _ = reply.send(outcome);
+        }
+        ProviderQuery::CollectVideo {
+            request,
+            cancellation,
+            reply,
+        } => {
+            let snapshot = shared.snapshot.load_full();
+            let outcome = crate::media::collect_video(
+                snapshot.models.media_client.as_ref(),
+                &snapshot.models.private_resolver,
+                &snapshot.accounts,
+                &snapshot.catalog,
+                request,
+                cancellation,
+            )
+            .await;
+            let _ = reply.send(outcome);
+        }
         ProviderQuery::PrepareGenerationBinding { request, reply } => {
             let snapshot = shared.snapshot.load_full();
             let outcome = snapshot.models.prepare_generation_binding(
@@ -918,6 +1010,7 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
         }
         ProviderQuery::GenerateText {
             request,
+            selection_id,
             cancellation,
             diagnostic_trace,
             stream,
@@ -940,6 +1033,7 @@ async fn handle_provider_snapshot_query(shared: &ProviderShared, mut query: Prov
                         &snapshot.catalog,
                         snapshot.routing.as_ref(),
                         request,
+                        selection_id.as_deref(),
                         cancellation,
                         provider_call_hash.as_deref(),
                         stream

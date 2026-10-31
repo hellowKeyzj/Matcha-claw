@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type { ChannelPairingTransport } from '../../main/runtime-host-delivery/transport/channels/pairing';
-import { parseJsonBody, sendJson } from '../route-utils';
 import { isProductRuntimeScope, readRuntimeScopeQuery, type ProductRuntimeScope } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = {
@@ -13,37 +12,33 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleChannelPairingRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: ChannelPairingTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   const pairingChannel = readPairingChannel(url.pathname);
   if (pairingChannel && req.method === 'GET') {
     try {
       const response = await transport.list(pairingChannel, url.searchParams.get('accountId') ?? undefined, readRuntimeScopeQuery(url.searchParams));
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNAVAILABLE);
+      return jsonResult(503, UNAVAILABLE);
     }
-    return true;
   }
 
-  if (url.pathname !== '/api/channels/pairing' || req.method !== 'POST') return false;
+  if (url.pathname !== '/api/channels/pairing' || req.method !== 'POST') return undefined;
 
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
 
   try {
     if (isListRequest(body)) {
       const response = await transport.list(body.channel, body.accountId, body.scope);
-      sendJson(res, response.status, response.body);
-      return true;
+      return jsonResult(response.status, response.body);
     }
     if (isApprovalRequest(body)) {
       const response = await transport.approve({
@@ -52,16 +47,13 @@ export async function handleChannelPairingRoutes(
         code: body.code,
         ...(body.scope === undefined ? {} : { scope: body.scope }),
       });
-      sendJson(res, response.status, response.body);
-      return true;
+      return jsonResult(response.status, response.body);
     }
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
-    return true;
+    return jsonResult(503, UNAVAILABLE);
   }
 
-  sendJson(res, 400, INVALID);
-  return true;
+  return jsonResult(400, INVALID);
 }
 
 function readPairingChannel(pathname: string): string | null {

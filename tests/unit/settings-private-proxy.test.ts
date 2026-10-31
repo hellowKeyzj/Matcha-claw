@@ -17,7 +17,7 @@ afterEach(() => {
 
 describe('Settings private proxy IPC', () => {
   it('normalizes a non-secret proxy endpoint and fixes the public reference to null', async () => {
-    const { splitSettingsProxyIntent } = await import('../../electron/main/ipc/settings-private-proxy');
+    const { splitSettingsProxyIntent } = await import('../../electron/main/settings/proxy-intent');
 
     await expect(splitSettingsProxyIntent({
       enabled: true,
@@ -32,7 +32,7 @@ describe('Settings private proxy IPC', () => {
   });
 
   it('keeps a disabled proxy non-secret and rejects credential-bearing endpoints', async () => {
-    const { splitSettingsProxyIntent } = await import('../../electron/main/ipc/settings-private-proxy');
+    const { splitSettingsProxyIntent } = await import('../../electron/main/settings/proxy-intent');
 
     await expect(splitSettingsProxyIntent({
       enabled: false,
@@ -57,7 +57,7 @@ describe('Settings private proxy IPC', () => {
   });
 
   it('allows an empty proxy endpoint only when disabled', async () => {
-    const { splitSettingsProxyIntent } = await import('../../electron/main/ipc/settings-private-proxy');
+    const { splitSettingsProxyIntent } = await import('../../electron/main/settings/proxy-intent');
 
     await expect(splitSettingsProxyIntent({
       enabled: false,
@@ -77,7 +77,7 @@ describe('Settings private proxy IPC', () => {
   });
 
   it('rejects malformed and control-character input', async () => {
-    const { splitSettingsProxyIntent } = await import('../../electron/main/ipc/settings-private-proxy');
+    const { splitSettingsProxyIntent } = await import('../../electron/main/settings/proxy-intent');
 
     await expect(splitSettingsProxyIntent({
       enabled: true,

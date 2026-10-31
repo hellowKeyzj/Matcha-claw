@@ -1,10 +1,9 @@
 import { app } from 'electron';
-import type { IncomingMessage, ServerResponse } from 'http';
 import type { RuntimeControlTransportResponse, RuntimeLogsResponse } from '../../main/runtime-host-delivery/transport/runtime-control';
-import { readGatewayStatusProjection, unavailableGatewayStatus } from './app';
+import { unavailableGatewayStatus } from '../../main/runtime-host-delivery/status';
 import { logger } from '../../utils/logger';
 import type { DiagnosticsApiContext, RuntimeHostTransportContext } from '../context';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 const DEFAULT_TAIL_LINES = 200;
 const MAX_OPENCLAW_LOG_ENTRIES = 1024;
@@ -182,78 +181,61 @@ function readElectronProcessMetrics() {
 }
 
 export async function handleDiagnosticsRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: DiagnosticsApiContext & RuntimeControlLogsContext,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/diagnostics/gateway-snapshot' && req.method === 'GET') {
-    const gateway = await readGatewayStatusProjection(ctx.runtimeHost)
+    const gateway = await ctx.runtimeStatus.readGateway()
       .then((status) => status ?? unavailableGatewayStatus());
     const logs = await readOpenClawLogTails(ctx);
-    sendJson(res, 200, {
+    return jsonResult(200, {
       capturedAt: Date.now(),
       gateway,
       matchaclawLogTail: await logger.readLogFile(DEFAULT_TAIL_LINES),
       ...logs,
     });
-    return true;
   }
 
   if (url.pathname === '/api/diagnostics/memory' && req.method === 'GET') {
-    sendJson(res, 200, {
+    return jsonResult(200, {
       sampledAt: new Date().toISOString(),
       mainProcess: readMainProcessMemoryUsage(),
       electronProcesses: readElectronProcessMetrics(),
     });
-    return true;
   }
 
   if (url.pathname === '/api/diagnostics/archive' && req.method === 'POST') {
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    res.once('close', abort);
-    try {
-      const response = await ctx.runtimeHostTransports.diagnosticsArchiveTransport.archive(controller.signal);
-      if (!controller.signal.aborted) sendJson(res, response.status, response.body);
-    } finally {
-      res.off('close', abort);
-    }
-    return true;
+    const response = await ctx.runtimeHostTransports.diagnosticsArchiveTransport.archive(req.signal);
+    return req.signal.aborted ? null : jsonResult(response.status, response.body);
   }
 
   if (url.pathname === '/api/diagnostics/archive/download' && req.method === 'POST') {
     let body: unknown;
     try {
-      body = await parseJsonBody<unknown>(req);
+      body = await req.readJson<unknown>();
     } catch {
       body = null;
     }
     const archiveId = decodeArchiveDownloadRequest(body);
     if (!archiveId) {
-      sendJson(res, 404, {
+      return jsonResult(404, {
         success: false,
         error: 'Diagnostics archive was not found',
       });
-      return true;
     }
     const response = await ctx.runtimeHostTransports.diagnosticsArchiveTransport.download(archiveId);
     if (response.status !== 200) {
-      sendJson(res, response.status, response.body);
-      return true;
+      return jsonResult(response.status, response.body);
     }
     if (!(response.body instanceof Uint8Array)) {
-      sendJson(res, 503, {
+      return jsonResult(503, {
         success: false,
         error: 'Diagnostics archive is unavailable',
       });
-      return true;
     }
-    res.statusCode = 200;
-    res.setHeader('Content-Type', 'application/zip');
-    res.end(Buffer.from(response.body));
-    return true;
+    return { kind: 'bytes', status: 200, body: response.body, contentType: 'application/zip' };
   }
 
-  return false;
+  return undefined;
 }

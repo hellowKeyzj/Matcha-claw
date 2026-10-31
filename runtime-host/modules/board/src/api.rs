@@ -1,7 +1,4 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 
 use foundation::execution::OwnerRuntimeHandle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, oneshot, watch};
@@ -19,7 +16,6 @@ pub(crate) struct BoardDelivery {
 
 #[derive(Clone)]
 pub(crate) struct BoardLifecycle {
-    pub(crate) closing: Arc<AtomicBool>,
     pub(crate) closed: watch::Sender<bool>,
     pub(crate) subscriptions: Arc<Semaphore>,
     pub(crate) events: broadcast::Sender<BoardDelivery>,
@@ -29,7 +25,6 @@ pub(crate) struct BoardLifecycle {
 impl BoardLifecycle {
     pub(crate) fn new() -> Self {
         Self {
-            closing: Arc::new(AtomicBool::new(false)),
             closed: watch::channel(false).0,
             subscriptions: Arc::new(Semaphore::new(SUBSCRIPTION_CAPACITY)),
             events: broadcast::channel(EVENT_CAPACITY).0,
@@ -38,7 +33,6 @@ impl BoardLifecycle {
     }
 
     pub(crate) fn finish(&self) {
-        self.closing.store(true, Ordering::Release);
         self.subscriptions.close();
         self.closed.send_replace(true);
     }
@@ -119,35 +113,8 @@ impl BoardHandle {
         ))
     }
 
-    pub(crate) async fn close(&self) -> Result<(), BoardFailure> {
-        if *self.lifecycle.closed.borrow() {
-            return Ok(());
-        }
-        let permit = match self.owner.reserve().await {
-            Ok(permit) => permit,
-            Err(_) if *self.lifecycle.closed.borrow() => return Ok(()),
-            Err(_) => return Err(BoardFailure::Unavailable),
-        };
-        if self.lifecycle.closing.swap(true, Ordering::AcqRel) {
-            drop(permit);
-            let mut closed = self.lifecycle.closed.subscribe();
-            closed
-                .wait_for(|closed| *closed)
-                .await
-                .map_err(|_| BoardFailure::Unavailable)?;
-            return Ok(());
-        }
-        self.lifecycle.subscriptions.close();
-        let (reply, response) = oneshot::channel();
-        if permit.send(BoardOwnerCommand::Close { reply }).is_err() {
-            self.lifecycle.finish();
-            return Err(BoardFailure::Unavailable);
-        }
-        response.await.map_err(|_| BoardFailure::Unavailable)
-    }
-
     fn admit(&self) -> Result<(), BoardFailure> {
-        if self.lifecycle.closing.load(Ordering::Acquire) {
+        if *self.lifecycle.closed.borrow() {
             Err(BoardFailure::Unavailable)
         } else {
             Ok(())

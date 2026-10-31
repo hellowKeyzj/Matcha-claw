@@ -54,6 +54,8 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
     setPanelLayout,
     openPanel,
     sidePanelInline,
+    registerCloseHandler,
+    requestClose,
   } = useChatSidePanelController(enabled, chatLayoutRef, sessionIdentity ?? undefined);
   const chatWindowDock = useChatWindowDockController({
     enabled,
@@ -65,6 +67,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
     chatLayoutRef,
     openPanel: openSidePanelDomain,
     closePanel: closeSidePanelDomain,
+    requestClose,
     setPanelWidth: setSidePanelWidth,
   });
   const openArtifacts = useCallback(() => setActiveSidePanelTab('artifacts'), [setActiveSidePanelTab]);
@@ -115,6 +118,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({ isActive, enabled, se
         content: panelContent,
         layout: panelLayout,
         onLayoutChange: setPanelLayout,
+        registerCloseHandler,
         onSendMessage: onRuntimeSendMessage,
         onOpenLink: onRuntimeOpenLink,
         artifactWorkbenchFullscreen,

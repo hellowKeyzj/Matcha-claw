@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WikiTransport } from '../../main/runtime-host-delivery/transport/wiki';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 const INVALID = { success: false, error: 'Wiki request is invalid' } as const;
 const UNAVAILABLE = { success: false, error: 'Wiki is unavailable' } as const;
@@ -74,11 +73,10 @@ const WIKI_ROUTES = {
 } as const satisfies Record<string, { method: 'GET' | 'POST'; action: keyof WikiTransport }>;
 
 export async function handleWikiRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: WikiTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   const route = WIKI_ROUTES[url.pathname as keyof typeof WIKI_ROUTES];
   if (url.pathname === '/api/wiki/source-watch-config' || url.pathname === '/api/wiki/search-config'
     || url.pathname === '/api/wiki/history/config' || url.pathname === '/api/wiki/lint/config'
@@ -95,19 +93,17 @@ export async function handleWikiRoutes(
               : url.pathname === '/api/wiki/embedding/reindex'
                 ? await transport.reindexState(projectId)
                 : await transport.sourceWatchConfig(projectId);
-        sendJson(res, response.status, response.body);
+        return jsonResult(response.status, response.body);
       } catch {
-        sendJson(res, 503, UNAVAILABLE);
+        return jsonResult(503, UNAVAILABLE);
       }
-      return true;
     }
     if (req.method === 'POST') {
       let body: unknown;
       try {
-        body = await parseJsonBody<unknown>(req);
+        body = await req.readJson<unknown>();
       } catch {
-        sendJson(res, 400, INVALID);
-        return true;
+        return jsonResult(400, INVALID);
       }
       try {
         const response = url.pathname === '/api/wiki/search-config'
@@ -119,15 +115,14 @@ export async function handleWikiRoutes(
               : url.pathname === '/api/wiki/embedding/reindex'
                 ? await transport.startReindex(body)
                 : await transport.updateSourceWatchConfig(body);
-        sendJson(res, response.status, response.body);
+        return jsonResult(response.status, response.body);
       } catch {
-        sendJson(res, 503, UNAVAILABLE);
+        return jsonResult(503, UNAVAILABLE);
       }
-      return true;
     }
-    return false;
+    return undefined;
   }
-  if (!route || req.method !== route.method) return false;
+  if (!route || req.method !== route.method) return undefined;
 
   try {
     if (route.method === 'GET') {
@@ -149,21 +144,18 @@ export async function handleWikiRoutes(
                   : route.action === 'questionTask' || route.action === 'selectionTask'
                     ? await transport[route.action](projectId, url.searchParams.get('taskId') ?? undefined)
                     : await (transport[route.action] as () => Promise<{ status: number; body: unknown }>)();
-      sendJson(res, response.status, response.body);
-      return true;
+      return jsonResult(response.status, response.body);
     }
 
     let body: unknown;
     try {
-      body = await parseJsonBody<unknown>(req);
+      body = await req.readJson<unknown>();
     } catch {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
     const response = await (transport[route.action] as (request: unknown) => Promise<{ status: number; body: unknown }>)(body);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }

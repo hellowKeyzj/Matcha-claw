@@ -260,6 +260,7 @@ impl RuntimeProcessScopes {
                 open_claw,
                 observation.clone(),
                 Arc::clone(&shutdown.open_claw),
+                Arc::clone(&shutdown.owner_joins),
             ),
             matcha: matcha_process_scope(
                 Arc::clone(&matcha),
@@ -389,12 +390,18 @@ fn open_claw_process_scope(
     open_claw: Arc<OpenClawDriver>,
     observation: ObservationSink,
     state: Arc<Mutex<SlotState>>,
+    join_failures: Arc<Mutex<Vec<&'static str>>>,
 ) -> ModuleScope {
     let mut scope = ModuleScope::new("openclaw");
     let control_supervisor_owner = Arc::clone(&open_claw);
     scope.register_event_subscription("gateway-control", move || async move {
         if let Some(supervisor) = control_supervisor_owner.take_control_supervisor() {
-            supervisor.dispose().await;
+            if supervisor.dispose().await {
+                join_failures
+                    .lock()
+                    .expect("owner join failure state lock poisoned")
+                    .push("openclaw-gateway-control");
+            }
         }
     });
     scope.register_process("process", move || async move {

@@ -1,34 +1,30 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import type { SkillBundleTransport } from '../../main/runtime-host-delivery/transport/skills/bundle';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 export async function handleSkillBundleRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: SkillBundleTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   const operation = url.pathname === '/api/subagents/skill-bundles/export'
     ? 'export'
     : url.pathname === '/api/subagents/skill-bundles/import'
       ? 'import'
       : undefined;
-  if (operation === undefined || req.method !== 'POST') return false;
+  if (operation === undefined || req.method !== 'POST') return undefined;
 
   let request: unknown;
   try {
-    request = await parseJsonBody(req);
+    request = await req.readJson();
   } catch {
-    sendJson(res, 400, { outcome: 'rejected' });
-    return true;
+    return jsonResult(400, { outcome: 'rejected' });
   }
   try {
     const response = operation === 'export'
       ? await transport.exportBundles(request)
       : await transport.importBundles(request);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, { outcome: 'unknown' });
+    return jsonResult(503, { outcome: 'unknown' });
   }
-  return true;
 }

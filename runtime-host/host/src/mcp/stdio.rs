@@ -1,7 +1,7 @@
 use std::{path::PathBuf, process::ExitCode, sync::Arc};
 
 use organization::TeamRunMcpFacade;
-use platform::mcp::{ToolCatalog, ToolProvider, run_stdio};
+use platform::mcp::{Registry, ToolCatalog, ToolProvider, run_stdio_registry};
 use wiki::WikiMcpFacade;
 
 use super::{Family, client::Client};
@@ -13,14 +13,7 @@ pub async fn run() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let app_plugins = match super::app_plugins::AppPlugins::open(&config.state_dir) {
-        Ok(provider) => provider,
-        Err(()) => {
-            eprintln!("runtime-host mcp: app plugin discovery is unavailable");
-            None
-        }
-    };
-    let Ok(client) = Client::new(config.state_dir) else {
+    let Ok(client) = Client::new(config.state_dir.clone()) else {
         return ExitCode::FAILURE;
     };
     let client = Arc::new(client);
@@ -33,15 +26,21 @@ pub async fn run() -> ExitCode {
         let client = Arc::clone(&client);
         Box::pin(async move { client.call(Family::Wiki, name, arguments).await })
     });
-    let mut providers: Vec<Box<dyn ToolProvider>> = vec![Box::new(team_run), Box::new(wiki)];
-    if let Some(app_plugins) = app_plugins {
-        providers.push(Box::new(app_plugins));
-    }
-    let catalog = ToolCatalog::new(providers);
+    let providers: Vec<Box<dyn ToolProvider>> = vec![Box::new(team_run), Box::new(wiki)];
+    let Ok(registry) = Registry::new(ToolCatalog::new(providers)) else {
+        eprintln!("runtime-host mcp: builtin tool catalog is invalid");
+        return ExitCode::FAILURE;
+    };
+    let Ok(app_plugins) = super::app_plugins::AppPlugins::attach(config.state_dir, &registry)
+    else {
+        eprintln!("runtime-host mcp: app plugin gateway client is unavailable");
+        return ExitCode::FAILURE;
+    };
     let Ok(mut input) = foundation::process::StdinReader::open() else {
         return ExitCode::FAILURE;
     };
-    let result = run_stdio(catalog, &mut input, tokio::io::stdout()).await;
+    let result = run_stdio_registry(registry, &mut input, tokio::io::stdout()).await;
+    drop(app_plugins);
     let closed = input.close();
     match (result, closed) {
         (Ok(()), Ok(())) => ExitCode::SUCCESS,

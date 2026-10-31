@@ -123,12 +123,14 @@ impl Operations {
         Ok((accepted.await?, receiver))
     }
 
-    pub(crate) async fn stop(&self) {
+    pub(crate) async fn stop(&self) -> bool {
         if let Some(mut task) = self.task.lock().await.take() {
             if task.cancel_and_join().await.is_err() {
                 eprintln!("[plugins-call] shutdown join failed");
+                return true;
             }
         }
+        false
     }
 }
 

@@ -45,7 +45,7 @@ describe('AppUpdater 错误事件兜底', () => {
   });
 
   it('autoUpdater 触发 error 时不会因未监听而抛出致命异常', async () => {
-    const { AppUpdater } = await import('../../electron/main/updater');
+    const { AppUpdater } = await import('../../electron/main/updates/updater');
     const updater = new AppUpdater();
 
     expect(() => {
@@ -57,7 +57,7 @@ describe('AppUpdater 错误事件兜底', () => {
   });
 
   it('uses prompt-first updater settings instead of automatic install on quit', async () => {
-    const { AppUpdater } = await import('../../electron/main/updater');
+    const { AppUpdater } = await import('../../electron/main/updates/updater');
     new AppUpdater();
 
     expect(mockAutoUpdater.autoDownload).toBe(false);
@@ -66,7 +66,7 @@ describe('AppUpdater 错误事件兜底', () => {
 
   it('ignores update-available events for versions older than the running app', async () => {
     electronMock.appVersion = '1.0.1';
-    const { AppUpdater } = await import('../../electron/main/updater');
+    const { AppUpdater } = await import('../../electron/main/updates/updater');
     const updater = new AppUpdater();
 
     mockAutoUpdater.emit('update-available', { version: '1.0.0' });

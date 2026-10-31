@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { isTraceEnabled, startupTrace } from '../../utils/trace-logger';
 import { executePackageOperation, PackageOperationError, type PackageOperationTransports } from './package-operations';
+import { confirmPackageInstall, type PackageInstallConfirmation } from './package-confirmation';
+import { exportSealedSkillPackage, type SealedSkillPackageExport, type SealedSkillPackageExportRequest } from './package-export';
 import type { CloudPackageOperationKind, CloudPackageOperationRequests, CloudPackageOperationReceipt, CloudPackageOperationResult, CloudPackageOperationError } from '../../../src/types/cloud-package-operation';
 import { clearCloudAccountSession, readCloudAccountSession, writeCloudAccountSession, type CloudAccountSession } from './session-store';
 import { CloudAccountClientError, removePackageDownload, type CloudAccountClient, type CloudPackageUpload } from './client';
@@ -50,13 +52,12 @@ export type CloudAccountService = Readonly<{
   bindPackageInstall(callId: string, prepared: PreparedPackageInstall): void;
   releasePackageInstall(prepared: PreparedPackageInstall): void;
   acknowledgePackageInstall(callId: string, confirmed: boolean): void;
+  confirmPackageInstall(callId: string): Promise<PackageInstallConfirmation>;
+  exportSealedSkillPackage(request: SealedSkillPackageExportRequest): Promise<SealedSkillPackageExport>;
   runtimeExited(): void;
   runtimeRestarted(): Promise<void>;
   admitPackageOperation<K extends CloudPackageOperationKind>(kind: K, request: CloudPackageOperationRequests[K]): CloudPackageOperationReceipt;
   readPackageOperation(operationId: string): CloudPackageOperationResult | undefined;
-  reserveSkillExport(): Readonly<{ epoch: number }>;
-  bindSkillExport(reservation: Readonly<{ epoch: number }>, callId: string): void;
-  releaseSkillExport(reservation: Readonly<{ epoch: number }>): void;
   close(): Promise<void>;
 }>;
 
@@ -669,6 +670,35 @@ export function createCloudAccountService(
     bindPackageInstall: (callId, prepared) => packages.bindPackageInstall(callId, prepared, runtime.then(({ operationTransports }) => operationTransports)),
     releasePackageInstall: (prepared) => packages.releasePackageInstall(prepared),
     acknowledgePackageInstall: (callId, confirmed) => packages.acknowledgePackageInstall(callId, confirmed),
+    confirmPackageInstall: async (callId) => {
+      const { operationTransports } = await runtime;
+      return confirmPackageInstall(callId, {
+        readCall: (request) => operationTransports.callLogTransport.get(request),
+        readAgentResult: (request) => operationTransports.agentsTransport.result(request),
+        acknowledge: (id, confirmed) => packages.acknowledgePackageInstall(id, confirmed),
+      });
+    },
+    exportSealedSkillPackage: (request) => {
+      if (closing || closed) throw new PackageOperationError('unavailable', 503, 'Cloud package operations are unavailable');
+      pruneSkillExports();
+      if (skillExports.size + skillExportReservations.size >= MAX_PENDING_INSTALLS) throw new PackageOperationError('queueFull', 409, 'Cloud skill export capacity is full; finish pending uploads before exporting another skill');
+      const reservation = { epoch };
+      skillExportReservations.add(reservation);
+      return exportSealedSkillPackage(request, {
+        fetchKey: () => withSession((session) => client.fetchSealedCloudKey(session.accessToken)),
+        exportCloud: async (input) => {
+          const { operationTransports } = await runtime;
+          return operationTransports.sealedSkillsTransport.exportCloud(input);
+        },
+        bind: (callId) => {
+          assertCurrent(reservation.epoch);
+          if (!skillExportReservations.delete(reservation)) throw new PackageOperationError('sessionChanged', 409, 'Cloud account session changed; sign in and check package status');
+          skillExports.set(callId, { epoch: reservation.epoch });
+          observeSkillExport(callId);
+        },
+        release: () => { skillExportReservations.delete(reservation); },
+      });
+    },
     runtimeExited: () => packages.runtimeExited(),
     runtimeRestarted: async () => {
       const restoring = packages.runtimeRestarted();
@@ -676,21 +706,6 @@ export function createCloudAccountService(
       await restoring;
     },
     admitPackageOperation,
-    reserveSkillExport: () => {
-      if (closing || closed) throw new PackageOperationError('unavailable', 503, 'Cloud package operations are unavailable');
-      pruneSkillExports();
-      if (skillExports.size + skillExportReservations.size >= MAX_PENDING_INSTALLS) throw new PackageOperationError('queueFull', 409, 'Cloud skill export capacity is full; finish pending uploads before exporting another skill');
-      const reservation = { epoch };
-      skillExportReservations.add(reservation);
-      return reservation;
-    },
-    bindSkillExport: (reservation, callId) => {
-      assertCurrent(reservation.epoch);
-      if (!skillExportReservations.delete(reservation)) throw new PackageOperationError('sessionChanged', 409, 'Cloud account session changed; sign in and check package status');
-      skillExports.set(callId, { epoch: reservation.epoch });
-      observeSkillExport(callId);
-    },
-    releaseSkillExport: (reservation) => { skillExportReservations.delete(reservation); },
     readPackageOperation: (operationId) => {
       prunePackageOperations();
       const entry = packageOperations.get(operationId);

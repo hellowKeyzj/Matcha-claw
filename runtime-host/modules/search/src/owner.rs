@@ -1,18 +1,11 @@
-use std::{
-    collections::HashSet,
-    path::PathBuf,
-    sync::{
-        Arc, RwLock,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 
 use foundation::execution::{CommandRoute, OwnerSpec, QueryRoute};
 use platform::endpoint::runtime_address::RuntimeEndpoint;
 use runtime_directory::RuntimeEndpointDirectorySource;
 use tokio::{
-    sync::oneshot,
+    sync::{oneshot, watch},
+    task::JoinHandle,
     time::{Instant, timeout},
 };
 
@@ -37,11 +30,28 @@ pub(crate) struct Shared {
     service: Arc<searxng::Service>,
     runtime: Arc<dyn RuntimeSearchPort>,
     directory: Arc<dyn RuntimeEndpointDirectorySource>,
-    snapshot: Arc<RwLock<SearchSnapshot>>,
-    shutdown_complete: Arc<AtomicBool>,
+    snapshot: watch::Sender<SnapshotState>,
+    stopping: watch::Sender<bool>,
+}
+
+enum SnapshotState {
+    Initializing,
+    Ready(SearchSnapshot),
+    Failed(SearchError),
+}
+
+impl SnapshotState {
+    fn snapshot(&self) -> Result<&SearchSnapshot, SearchError> {
+        match self {
+            Self::Initializing => Err(SearchError::initializing()),
+            Self::Ready(snapshot) => Ok(snapshot),
+            Self::Failed(error) => Err(*error),
+        }
+    }
 }
 
 pub(crate) enum Command {
+    Initialize(PathBuf),
     Replace {
         expected_revision: u64,
         config: SearchConfig,
@@ -51,7 +61,6 @@ pub(crate) enum Command {
         operation: Operation,
         reply: oneshot::Sender<Result<SearchSnapshot, SearchError>>,
     },
-    Shutdown(oneshot::Sender<Result<(), SearchError>>),
 }
 
 #[derive(Clone, Copy)]
@@ -73,35 +82,86 @@ pub(crate) enum Query {
 }
 
 pub(crate) struct SearchOwner {
-    shared: Shared,
-    store: Store,
+    pub shared: Shared,
+}
+
+#[derive(Default)]
+pub(crate) struct GlobalState {
+    store: Option<Store>,
+    initialization: Option<JoinHandle<Result<Store, SearchError>>>,
 }
 
 impl SearchOwner {
-    pub fn open(input: SearchOwnerInput) -> Result<Self, SearchError> {
-        let store = Store::open(&input.state_dir)?;
-        let saved = store.saved();
-        let snapshot = SearchSnapshot {
-            revision: saved.revision,
-            applied_revision: None,
-            config: saved.config.clone(),
-            service: SearchServiceState {
-                phase: SearchServicePhase::Stopped,
-                error: None,
-            },
-            engines: Vec::new(),
-            runtimes: Vec::new(),
-        };
-        Ok(Self {
+    pub fn new(input: SearchOwnerInput) -> Self {
+        Self {
             shared: Shared {
                 service: input.service,
                 runtime: input.runtime,
                 directory: input.directory,
-                snapshot: Arc::new(RwLock::new(snapshot)),
-                shutdown_complete: Arc::new(AtomicBool::new(false)),
+                snapshot: watch::channel(SnapshotState::Initializing).0,
+                stopping: watch::channel(false).0,
             },
-            store,
-        })
+        }
+    }
+}
+
+impl Shared {
+    pub fn begin_shutdown(&self) {
+        self.stopping.send_replace(true);
+    }
+
+    pub fn check_accepting(&self) -> Result<(), SearchError> {
+        if *self.stopping.borrow() {
+            Err(SearchError::unavailable())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn check_initialized(&self) -> Result<(), SearchError> {
+        self.snapshot.borrow().snapshot()?;
+        self.check_accepting()
+    }
+
+    pub async fn wait_initialized(&self) -> Result<(), SearchError> {
+        let mut snapshot = self.snapshot.subscribe();
+        let initialized = snapshot
+            .wait_for(|snapshot| !matches!(snapshot, SnapshotState::Initializing))
+            .await
+            .map_err(|_| SearchError::unavailable())?;
+        initialized.snapshot().map(|_| ())
+    }
+}
+
+async fn finish_initialization(shared: &Shared, global: &mut GlobalState) {
+    let Some(initialization) = global.initialization.as_mut() else {
+        return;
+    };
+    // Keep the join in actor state if its handler is cancelled while Store::open changes ACLs.
+    let result = initialization
+        .await
+        .unwrap_or_else(|_| Err(SearchError::storage()));
+    global.initialization = None;
+    match result {
+        Ok(store) => {
+            let saved = store.saved();
+            let snapshot = SearchSnapshot {
+                revision: saved.revision,
+                applied_revision: None,
+                config: saved.config.clone(),
+                service: SearchServiceState {
+                    phase: SearchServicePhase::Stopped,
+                    error: None,
+                },
+                engines: Vec::new(),
+                runtimes: Vec::new(),
+            };
+            global.store = Some(store);
+            shared.snapshot.send_replace(SnapshotState::Ready(snapshot));
+        }
+        Err(error) => {
+            shared.snapshot.send_replace(SnapshotState::Failed(error));
+        }
     }
 }
 
@@ -110,11 +170,11 @@ impl OwnerSpec for SearchOwner {
     type Query = Query;
     type Key = ();
     type Shared = Shared;
-    type GlobalState = Store;
+    type GlobalState = GlobalState;
     type LaneState = ();
 
-    fn split(self) -> (Shared, Store) {
-        (self.shared, self.store)
+    fn split(self) -> (Shared, GlobalState) {
+        (self.shared, GlobalState::default())
     }
     fn route_command(_: &Command) -> CommandRoute<()> {
         CommandRoute::Global
@@ -125,26 +185,35 @@ impl OwnerSpec for SearchOwner {
     fn open_lane(_: &Shared, _: &()) {}
     async fn handle_keyed_command(_: Shared, _: (), _: &mut (), _: Command) {}
     async fn handle_keyed_query(_: Shared, _: (), _: &mut (), _: Query) {}
-    async fn handle_global_query(_: Shared, _: &mut Store, _: Query) {}
-    async fn handle_exclusive_query(_: Shared, _: &mut Store, _: Query) {}
+    async fn handle_global_query(_: Shared, _: &mut GlobalState, _: Query) {}
+    async fn handle_exclusive_query(_: Shared, _: &mut GlobalState, _: Query) {}
 
-    async fn handle_global_command(shared: Shared, store: &mut Store, command: Command) {
+    async fn handle_global_command(shared: Shared, global: &mut GlobalState, command: Command) {
         let (result, reply) = match command {
+            Command::Initialize(path) => {
+                global.initialization =
+                    Some(tokio::task::spawn_blocking(move || Store::open(&path)));
+                finish_initialization(&shared, global).await;
+                return;
+            }
             Command::Replace {
                 expected_revision,
                 config,
                 reply,
             } => (
-                replace(&shared, store, expected_revision, config).await,
+                match initialized_store(&shared, global) {
+                    Ok(store) => replace(&shared, store, expected_revision, config).await,
+                    Err(error) => Err(error),
+                },
                 reply,
             ),
-            Command::Operate { operation, reply } => {
-                (operate(&shared, store, operation).await, reply)
-            }
-            Command::Shutdown(reply) => {
-                let _ = reply.send(shutdown(&shared).await);
-                return;
-            }
+            Command::Operate { operation, reply } => (
+                match initialized_store(&shared, global) {
+                    Ok(store) => operate(&shared, store, operation).await,
+                    Err(error) => Err(error),
+                },
+                reply,
+            ),
         };
         let _ = reply.send(result);
     }
@@ -155,7 +224,14 @@ impl OwnerSpec for SearchOwner {
                 let _ = reply.send(snapshot(&shared).await);
             }
             Query::Verify(request, reply) => {
-                let _ = reply.send(verify(&shared, request).await);
+                // Drain waits for Direct handlers before shutdown; drop the actual I/O future here.
+                let mut stopping = shared.stopping.subscribe();
+                let result = tokio::select! {
+                    biased;
+                    _ = stopping.wait_for(|stopping| *stopping) => Err(SearchError::unavailable()),
+                    result = verify(&shared, request) => result,
+                };
+                let _ = reply.send(result);
             }
             Query::Logs(reply) => {
                 let _ = reply.send(shared.service.logs());
@@ -163,30 +239,34 @@ impl OwnerSpec for SearchOwner {
         }
     }
 
-    async fn shutdown(shared: Shared, _: &mut Store, _: Vec<((), ())>) {
-        if !shared.shutdown_complete.load(Ordering::Acquire) {
-            if let Err(error) = shutdown(&shared).await {
-                panic!("[search] shutdown failed: {error}");
-            }
+    async fn shutdown(shared: Shared, global: &mut GlobalState, _: Vec<((), ())>) {
+        shared.begin_shutdown();
+        finish_initialization(&shared, global).await;
+        if let Err(error) = shutdown(&shared, global.store.is_some()).await {
+            panic!("[search] shutdown failed: {error}");
         }
     }
 }
 
-fn read_snapshot(shared: &Shared) -> SearchSnapshot {
-    shared
-        .snapshot
-        .read()
-        .expect("search snapshot lock poisoned")
-        .clone()
+fn initialized_store<'a>(
+    shared: &Shared,
+    global: &'a mut GlobalState,
+) -> Result<&'a mut Store, SearchError> {
+    shared.check_initialized()?;
+    global.store.as_mut().ok_or_else(SearchError::storage)
+}
+
+fn read_snapshot(shared: &Shared) -> Result<SearchSnapshot, SearchError> {
+    shared.snapshot.borrow().snapshot().cloned()
 }
 
 fn update(shared: &Shared, change: impl FnOnce(&mut SearchSnapshot)) {
-    change(
-        &mut shared
-            .snapshot
-            .write()
-            .expect("search snapshot lock poisoned"),
-    );
+    shared.snapshot.send_modify(|snapshot| {
+        let SnapshotState::Ready(snapshot) = snapshot else {
+            panic!("search store is initialized");
+        };
+        change(snapshot);
+    });
 }
 
 fn service_phase(shared: &Shared, phase: SearchServicePhase, error: Option<SearchError>) {
@@ -268,7 +348,7 @@ async fn replace(
             config.engines.extend(disabled);
         }
     }
-    let observed = read_snapshot(shared);
+    let observed = read_snapshot(shared)?;
     if config.categories.iter().any(|category| {
         !observed
             .engines
@@ -491,7 +571,7 @@ async fn restore_runtimes(shared: &Shared) -> Result<bool, SearchError> {
     let mut failure = None;
     let mut settled = true;
     let mut states = Vec::new();
-    let config = read_snapshot(shared).config;
+    let config = read_snapshot(shared)?.config;
     for endpoint in local_endpoints(shared, OBSERVE_DEADLINE).await? {
         let applied = timeout(
             NATIVE_DEADLINE,
@@ -539,7 +619,7 @@ async fn restore_runtimes(shared: &Shared) -> Result<bool, SearchError> {
 }
 
 async fn snapshot(shared: &Shared) -> Result<SearchSnapshot, SearchError> {
-    let mut snapshot = read_snapshot(shared);
+    let mut snapshot = read_snapshot(shared)?;
     let running = shared.service.is_running();
     if snapshot.service.phase == SearchServicePhase::Running && !running {
         snapshot.service = SearchServiceState {
@@ -621,7 +701,7 @@ async fn verify(
     {
         return Err(SearchError::invalid());
     }
-    let snapshot = read_snapshot(shared);
+    let snapshot = read_snapshot(shared)?;
     let engines = request
         .engines
         .as_ref()
@@ -698,14 +778,13 @@ async fn verify(
     })
 }
 
-async fn shutdown(shared: &Shared) -> Result<(), SearchError> {
-    let restored = restore_runtimes(shared).await;
-    let stopped = shared.service.stop().await.map_err(SearchError::from);
-    let result = stopped.and(restored.map(|_| ()));
-    shared
-        .shutdown_complete
-        .store(result.is_ok(), Ordering::Release);
-    result
+async fn shutdown(shared: &Shared, initialized: bool) -> Result<(), SearchError> {
+    if initialized && let Err(error) = restore_runtimes(shared).await {
+        eprintln!(
+            "[search] shutdown native projection restore failed: {error}; local service will still be stopped"
+        );
+    }
+    shared.service.stop().await.map_err(SearchError::from)
 }
 
 fn safe_verification(result: SearchVerification) -> Result<SearchVerification, SearchError> {

@@ -664,6 +664,7 @@ pub(crate) struct CallWorkflows {
 #[derive(Default)]
 struct WorkflowState {
     closed: bool,
+    failed: bool,
     tasks: Vec<OwnedTask<()>>,
 }
 
@@ -726,7 +727,7 @@ impl CallWorkflows {
         while index < state.tasks.len() {
             if state.tasks[index].is_finished() {
                 let mut task = state.tasks.swap_remove(index);
-                report_task_exit(task.join().await);
+                state.failed |= report_task_exit(task.join().await);
             } else {
                 index += 1;
             }
@@ -755,14 +756,17 @@ impl CallWorkflows {
         Ok(result)
     }
 
-    pub(crate) async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) -> bool {
         let mut state = self.state.lock().await;
         state.closed = true;
         self.cancellation.cancel();
         // Drain, rather than abandon a staged source or interrupt an in-flight commit.
+        let mut failed = state.failed;
         for task in &mut state.tasks {
-            report_task_exit(task.join().await);
+            failed |= report_task_exit(task.join().await);
         }
         state.tasks.clear();
+        state.failed = failed;
+        failed
     }
 }

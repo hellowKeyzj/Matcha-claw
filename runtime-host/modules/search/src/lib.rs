@@ -17,7 +17,10 @@ use tokio::sync::Mutex;
 pub use api::SearchModule;
 pub use model::*;
 pub use owner::SearchOwnerInput;
-pub use ports::{RuntimeSearchFuture, RuntimeSearchPort, RuntimeSearchProjection};
+pub use ports::{
+    RuntimeSearchFuture, RuntimeSearchPort, RuntimeSearchProjection, SearchLifecycleFuture,
+    SearchLifecycleSource,
+};
 
 const PROVIDES: &[CapabilityKey] = &[CapabilityKey::new("search")];
 const REQUIRES: &[CapabilityKey] = &[CapabilityKey::new("runtime.directory")];
@@ -43,11 +46,16 @@ impl SearchModule {
 pub fn spawn_owner(
     system: &OwnerRuntimeSystem,
     input: SearchOwnerInput,
-) -> Result<(SearchModule, OwnedTask<()>), SearchError> {
-    let owner = owner::SearchOwner::open(input)?;
+) -> (SearchModule, OwnedTask<()>) {
+    let path = input.state_dir.clone();
+    let owner = owner::SearchOwner::new(input);
+    let shared = owner.shared.clone();
     let (handle, task) = system.spawn_owner(
         owner,
         OwnerRuntimeConfig::new(16, LaneRetention::LowFrequency),
     );
-    Ok((SearchModule::new(handle), task))
+    handle
+        .try_send_command(owner::Command::Initialize(path))
+        .expect("new search owner accepts initialization");
+    (SearchModule::new(handle, shared), task)
 }

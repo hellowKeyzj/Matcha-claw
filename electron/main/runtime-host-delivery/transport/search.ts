@@ -18,6 +18,7 @@ export interface SearchTransport {
 }
 
 const SAFE_ERRORS = new Set([
+  'Network search is initializing; wait for configuration loading to finish',
   'Network search request is invalid',
   'Native runtime search verification is not supported; use an existing runtime tool session',
   'Network search is unavailable; prepare or restart the service',

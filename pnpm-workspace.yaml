@@ -1,6 +1,7 @@
 packages:
   - '.'
   - 'e2e'
+  - 'apps/*'
   - 'packages/memory-lancedb-pro'
   - 'packages/openclaw-lark'
   - 'runtime-host'

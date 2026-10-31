@@ -235,7 +235,7 @@ describe('main api boundary', () => {
       false
     );
     const transport = await readFile(
-      path.join(process.cwd(), 'electron', 'main', 'ipc', 'hostapi-proxy-ipc.ts'),
+      path.join(process.cwd(), 'electron', 'api', 'ipc', 'hostapi-proxy-ipc.ts'),
       'utf8'
     );
     expect(transport).toContain("'hostapi:fetch'");

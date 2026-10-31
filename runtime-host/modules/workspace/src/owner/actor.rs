@@ -17,6 +17,7 @@ use crate::{
         WorkspaceStatFailure, WorkspaceWriteFailure,
     },
     ports::{WorkspaceBinding, WorkspaceRequestAdmission, WorkspaceRuntimeDirectory},
+    session_images::SessionImageFailure,
 };
 
 pub struct WorkspaceOwnerInput {
@@ -232,6 +233,30 @@ impl OwnerSpec for WorkspaceOwner {
                     .await;
                 let _ = reply.send(result);
             }
+            WorkspaceOperation::WriteBinary {
+                endpoint,
+                relative_path,
+                content,
+                reply,
+                ..
+            } => {
+                let result = shared
+                    .execute(
+                        call,
+                        endpoint,
+                        WorkspaceWriteFailure::Unavailable,
+                        move |_| {
+                            Box::pin(async move {
+                                binding
+                                    .ok_or(WorkspaceWriteFailure::Unavailable)?
+                                    .write_binary(&relative_path, &content)
+                                    .await
+                            })
+                        },
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
             WorkspaceOperation::PrepareMedia {
                 endpoint,
                 session_key,
@@ -388,6 +413,55 @@ impl OwnerSpec for WorkspaceOwner {
                                     .ok_or(WorkspaceMediaFailure::Unavailable)?
                                     .stage_paths_media(&session_key, &paths)
                                     .await
+                            })
+                        },
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            WorkspaceOperation::ListSessionImages {
+                endpoint,
+                session_key,
+                agent_id,
+                cursor,
+                reply,
+            } => {
+                let result = shared
+                    .execute(
+                        call,
+                        endpoint,
+                        SessionImageFailure::Unavailable,
+                        move |ops| {
+                            Box::pin(async move {
+                                ops.list_session_images(&session_key, &agent_id, cursor.as_deref())
+                                    .await
+                            })
+                        },
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            WorkspaceOperation::ReadSessionImage {
+                endpoint,
+                session_key,
+                agent_id,
+                reference,
+                reply,
+            } => {
+                let result = shared
+                    .execute(
+                        call,
+                        endpoint,
+                        SessionImageFailure::Unavailable,
+                        move |ops| {
+                            Box::pin(async move {
+                                let image = ops
+                                    .read_session_image(&session_key, &agent_id, &reference)
+                                    .await?;
+                                if image.bytes.len() > 50 * 1024 * 1024 {
+                                    return Err(SessionImageFailure::TooLarge);
+                                }
+                                Ok(image)
                             })
                         },
                     )

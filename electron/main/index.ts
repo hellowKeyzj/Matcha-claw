@@ -3,26 +3,26 @@
  */
 import { app, BrowserWindow, dialog } from 'electron';
 import { logger } from '../utils/logger';
-import { isQuitting, setQuitting } from './app-state';
+import { isQuitting, setQuitting } from './lifecycle/state';
 import { HostEventBus } from '../api/event-bus';
 import { bootstrapMainApplication, type MainApplication } from './app-bootstrap';
 import { DirectRuntimeHostDeliveryError } from './runtime-host-delivery/direct-host';
-import { createMainWindow, loadMainWindowContent } from './main-window';
-import { destroyTray } from './tray';
+import { createMainWindow, loadMainWindowContent } from './desktop/main-window';
+import { destroyTray } from './desktop/tray';
 import {
   clearPendingSecondInstanceFocus,
   consumeMainWindowReady,
   createMainWindowFocusState,
   requestSecondInstanceFocus,
-} from './main-window-focus';
+} from './desktop/main-window-focus';
 import {
   createQuitLifecycleState,
   completeQuitCleanup,
   markQuitCleanupCompleted,
   requestQuitLifecycleAction,
-} from './quit-lifecycle';
-import { createSignalQuitHandler } from './signal-quit';
-import { acquireProcessInstanceFileLock } from './process-instance-lock';
+} from './lifecycle/quit';
+import { createSignalQuitHandler } from './lifecycle/signals';
+import { acquireProcessInstanceFileLock } from './lifecycle/instance-lock';
 import { configureE2EWorldBootstrap } from '@electron/e2e-fixture-loader';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.MatchaClaw.desktop';

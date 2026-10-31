@@ -1,6 +1,7 @@
 use platform::call::{CallContext, CallDetail, CallLogError, CallStatus};
 use serde::Serialize;
 
+use crate::session_images::SessionImageFailure;
 use crate::domain::model::{
     WorkspaceBinaryFailure, WorkspaceListFailure, WorkspaceMediaFailure, WorkspaceReadFailure,
     WorkspaceStatFailure, WorkspaceWriteFailure,
@@ -18,6 +19,8 @@ pub(crate) enum Operation {
     ListDirectory,
     #[serde(rename = "files.writeText")]
     WriteText,
+    #[serde(rename = "files.writeBinary")]
+    WriteBinary,
     #[serde(rename = "media.prepare")]
     PrepareMedia,
     #[serde(rename = "media.resolve")]
@@ -28,6 +31,10 @@ pub(crate) enum Operation {
     ThumbnailsMedia,
     #[serde(rename = "media.stagePaths")]
     StagePathsMedia,
+    #[serde(rename = "media.listSessionImages")]
+    ListSessionImages,
+    #[serde(rename = "media.readSessionImage")]
+    ReadSessionImage,
     #[serde(rename = "media.stageBuffer")]
     StageBufferMedia,
 }
@@ -40,12 +47,15 @@ impl Operation {
             Self::StatFile => "files.stat",
             Self::ListDirectory => "files.listDir",
             Self::WriteText => "files.writeText",
+            Self::WriteBinary => "files.writeBinary",
             Self::PrepareMedia => "media.prepare",
             Self::ResolveMedia => "media.resolve",
             Self::ThumbnailMedia => "media.thumbnail",
             Self::ThumbnailsMedia => "media.thumbnails",
             Self::StagePathsMedia => "media.stagePaths",
             Self::StageBufferMedia => "media.stageBuffer",
+            Self::ListSessionImages => "media.listSessionImages",
+            Self::ReadSessionImage => "media.readSessionImage",
         }
     }
 }
@@ -56,6 +66,8 @@ pub(crate) enum Outcome {
     Completed,
     InvalidPath,
     InvalidReference,
+    Unsupported,
+    CursorInvalid,
     Unavailable,
     NotFile,
     NotDirectory,
@@ -180,6 +192,18 @@ impl From<WorkspaceWriteFailure> for Outcome {
             WorkspaceWriteFailure::NotFile => Self::NotFile,
             WorkspaceWriteFailure::TooLarge => Self::TooLarge,
             WorkspaceWriteFailure::OutcomeUnknown => Self::OutcomeUnknown,
+        }
+    }
+}
+
+impl From<SessionImageFailure> for Outcome {
+    fn from(error: SessionImageFailure) -> Self {
+        match error {
+            SessionImageFailure::Unsupported => Self::Unsupported,
+            SessionImageFailure::CursorInvalid => Self::CursorInvalid,
+            SessionImageFailure::InvalidReference => Self::InvalidReference,
+            SessionImageFailure::TooLarge => Self::TooLarge,
+            SessionImageFailure::Unavailable => Self::Unavailable,
         }
     }
 }

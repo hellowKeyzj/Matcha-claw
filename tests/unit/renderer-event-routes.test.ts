@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RendererEventRouteRegistry } from '../../electron/main/renderer-event-routes';
+import { RendererEventRouteRegistry } from '../../electron/main/sessions/observations';
 
 const matchaBinding = {
   endpoint: {

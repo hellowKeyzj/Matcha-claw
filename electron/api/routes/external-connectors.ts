@@ -1,9 +1,8 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiResponse, type HostApiRouteResult } from '../execution';
 import { isConnectorOAuthScope, type ExternalConnectorsTransport } from '../../main/runtime-host-delivery/transport/connectors/external';
 import { validateSessionIdentity } from '../../../src/types/desktop/runtime-address';
 import { isConnectorOAuthInput } from '../../../src/types/connectors-oauth';
 import { isProductRuntimeScope, readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
-import { parseJsonBody, sendJson } from '../route-utils';
 
 const INVALID = {
   success: false,
@@ -28,171 +27,147 @@ type ExternalConnectorOperation =
   | 'externalConnectors.remove';
 
 export async function handleExternalConnectorsRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: ExternalConnectorsTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/external-connectors/session-status' && req.method === 'POST') {
-    const body = await parseLegacyBody(req, res);
-    if (!body) return true;
+    const [body, invalid] = await parseLegacyBody(req);
+    if (!body) return invalid;
     if (!hasExactKeys(body, ['sessionIdentity']) || validateSessionIdentity(body.sessionIdentity)) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(transport, res, createRequest('externalConnectors.sessionStatus', {
+    return deliver(transport, createRequest('externalConnectors.sessionStatus', {
       kind: 'sessionStatus',
       sessionIdentity: body.sessionIdentity,
     }));
-    return true;
   }
 
   if (url.pathname === '/api/external-connectors/session-mcp-server-enabled' && req.method === 'POST') {
-    const body = await parseLegacyBody(req, res);
-    if (!body) return true;
+    const [body, invalid] = await parseLegacyBody(req);
+    if (!body) return invalid;
     if (!hasExactKeys(body, ['sessionIdentity', 'serverId', 'enabled'])
       || validateSessionIdentity(body.sessionIdentity)
       || !isConnectorId(body.serverId)
       || typeof body.enabled !== 'boolean') {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(transport, res, createRequest('externalConnectors.sessionMcpServerEnabled', {
+    return deliver(transport, createRequest('externalConnectors.sessionMcpServerEnabled', {
       kind: 'sessionMcpServerEnabled',
       sessionIdentity: body.sessionIdentity,
       serverId: body.serverId,
       enabled: body.enabled,
     }));
-    return true;
   }
 
   if (url.pathname === '/api/external-connectors' && req.method === 'GET') {
-    await deliver(transport, res, createRequest('externalConnectors.list', { kind: 'list' }));
-    return true;
+    return deliver(transport, createRequest('externalConnectors.list', { kind: 'list' }));
   }
   if (url.pathname === '/api/external-connectors/mcp-server-programs' && req.method === 'GET') {
-    await deliver(transport, res, createRequest('externalConnectors.catalog', { kind: 'catalog' }));
-    return true;
+    return deliver(transport, createRequest('externalConnectors.catalog', { kind: 'catalog' }));
   }
   if (url.pathname === '/api/external-connectors/status' && req.method === 'GET') {
-    await deliver(transport, res, createRequest('externalConnectors.status', { kind: 'status' }, readRuntimeScopeQuery(url.searchParams)));
-    return true;
+    return deliver(transport, createRequest('externalConnectors.status', { kind: 'status' }, readRuntimeScopeQuery(url.searchParams)));
   }
 
   if (url.pathname === '/api/external-connectors' && req.method === 'POST') {
     let body: unknown;
     try {
-      body = await parseJsonBody(req);
+      body = await req.readJson();
     } catch {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(transport, res, body);
-    return true;
+    return deliver(transport, body);
   }
 
   if (url.pathname === '/api/external-connectors/get' && req.method === 'POST') {
-    const body = await parseLegacyBody(req, res);
-    if (!body) return true;
+    const [body, invalid] = await parseLegacyBody(req);
+    if (!body) return invalid;
     if (!hasExactKeys(body, ['connectorId']) || !isConnectorId(body.connectorId)) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(transport, res, createRequest('externalConnectors.get', {
+    return deliver(transport, createRequest('externalConnectors.get', {
       kind: 'get',
       connectorId: body.connectorId,
     }));
-    return true;
   }
 
   if (url.pathname === '/api/external-connectors/oauth' && req.method === 'POST') {
-    const body = await parseLegacyBody(req, res);
-    if (!body) return true;
+    const [body, invalid] = await parseLegacyBody(req);
+    if (!body) return invalid;
     const { scope, ...input } = body;
     if (Object.hasOwn(input, 'kind') || !isConnectorOAuthInput(input) || !isConnectorOAuthScope(scope, input.agentId)) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(transport, res, createRequest('externalConnectors.oauth', { kind: 'oauth', ...input }, scope));
-    return true;
+    return deliver(transport, createRequest('externalConnectors.oauth', { kind: 'oauth', ...input }, scope));
   }
 
   if (url.pathname === '/api/external-connectors/observation-result' && req.method === 'POST') {
-    const body = await parseLegacyBody(req, res);
-    if (!body) return true;
+    const [body, invalid] = await parseLegacyBody(req);
+    if (!body) return invalid;
     if (!(hasExactKeys(body, ['callId'])
       || (hasExactKeys(body, ['callId', 'scope']) && isProductRuntimeScope(body.scope))
       || (hasExactKeys(body, ['callId', 'scope', 'agentId']) && isConnectorOAuthScope(body.scope, body.agentId))
       || (hasExactKeys(body, ['callId', 'sessionIdentity']) && !validateSessionIdentity(body.sessionIdentity)))
       || typeof body.callId !== 'string' || !/^[a-f0-9]{32}$/.test(body.callId)) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(transport, res, createRequest('externalConnectors.observationResult', {
+    return deliver(transport, createRequest('externalConnectors.observationResult', {
       kind: 'observationResult', callId: body.callId,
       ...(body.sessionIdentity === undefined ? {} : { sessionIdentity: body.sessionIdentity }),
       ...(body.agentId === undefined ? {} : { agentId: body.agentId }),
     }, body.scope));
-    return true;
   }
 
   if (url.pathname === '/api/external-connectors/probe' && req.method === 'POST') {
-    const body = await parseLegacyBody(req, res);
-    if (!body) return true;
+    const [body, invalid] = await parseLegacyBody(req);
+    if (!body) return invalid;
     if (!(hasExactKeys(body, ['connectorId'])
       || (hasExactKeys(body, ['connectorId', 'scope']) && isProductRuntimeScope(body.scope))) || !isConnectorId(body.connectorId)) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(transport, res, createRequest('externalConnectors.probe', {
+    return deliver(transport, createRequest('externalConnectors.probe', {
       kind: 'probe',
       connectorId: body.connectorId,
     }, body.scope));
-    return true;
   }
 
   if (url.pathname === '/api/external-connectors/upsert' && req.method === 'POST') {
-    const body = await parseLegacyBody(req, res);
-    if (!body) return true;
+    const [body, invalid] = await parseLegacyBody(req);
+    if (!body) return invalid;
     if (!hasExactKeys(body, ['connector'])) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(transport, res, createRequest('externalConnectors.upsert', {
+    return deliver(transport, createRequest('externalConnectors.upsert', {
       kind: 'upsert',
       connector: body.connector,
     }));
-    return true;
   }
 
   if (url.pathname === '/api/external-connectors/update' && req.method === 'POST') {
-    const body = await parseLegacyBody(req, res);
-    if (!body) return true;
+    const [body, invalid] = await parseLegacyBody(req);
+    if (!body) return invalid;
     if (!hasExactKeys(body, ['connectorId', 'patch']) || !isConnectorId(body.connectorId) || !isRecord(body.patch)) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(transport, res, createRequest('externalConnectors.update', {
+    return deliver(transport, createRequest('externalConnectors.update', {
       kind: 'update', connectorId: body.connectorId, patch: body.patch,
     }));
-    return true;
   }
 
   if (url.pathname === '/api/external-connectors/remove' && req.method === 'POST') {
-    const body = await parseLegacyBody(req, res);
-    if (!body) return true;
+    const [body, invalid] = await parseLegacyBody(req);
+    if (!body) return invalid;
     if (!hasExactKeys(body, ['connectorId']) || !isConnectorId(body.connectorId)) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
-    await deliver(transport, res, createRequest('externalConnectors.remove', {
+    return deliver(transport, createRequest('externalConnectors.remove', {
       kind: 'remove',
       connectorId: body.connectorId,
     }));
-    return true;
   }
 
-  return false;
+  return undefined;
 }
 
 function createRequest(operationId: ExternalConnectorOperation, input: Record<string, unknown>, scope?: unknown) {
@@ -211,31 +186,30 @@ function createRequest(operationId: ExternalConnectorOperation, input: Record<st
   };
 }
 
-async function parseLegacyBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | null> {
+async function parseLegacyBody(
+  req: HostApiRequest,
+): Promise<readonly [Record<string, unknown>, null] | readonly [null, HostApiResponse]> {
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendJson(res, 400, INVALID);
-    return null;
+    return [null, jsonResult(400, INVALID)];
   }
   if (!isRecord(body)) {
-    sendJson(res, 400, INVALID);
-    return null;
+    return [null, jsonResult(400, INVALID)];
   }
-  return body;
+  return [body, null];
 }
 
 async function deliver(
   transport: ExternalConnectorsTransport,
-  res: ServerResponse,
   request: unknown,
-): Promise<void> {
+): Promise<HostApiRouteResult> {
   try {
     const response = await transport.execute(request);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
 }
 

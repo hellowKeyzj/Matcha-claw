@@ -46,7 +46,7 @@ describe('launch-at-startup integration', () => {
 
   it('uses login item settings on Windows', async () => {
     setPlatform('win32');
-    const { applyLaunchAtStartupSetting } = await import('@electron/main/launch-at-startup');
+    const { applyLaunchAtStartupSetting } = await import('@electron/main/settings/launch-at-startup');
 
     await applyLaunchAtStartupSetting(true);
     expect(setLoginItemSettingsMock).toHaveBeenCalledWith({
@@ -57,7 +57,7 @@ describe('launch-at-startup integration', () => {
 
   it('uses login item settings on macOS', async () => {
     setPlatform('darwin');
-    const { applyLaunchAtStartupSetting } = await import('@electron/main/launch-at-startup');
+    const { applyLaunchAtStartupSetting } = await import('@electron/main/settings/launch-at-startup');
 
     await applyLaunchAtStartupSetting(false);
     expect(setLoginItemSettingsMock).toHaveBeenCalledWith({
@@ -68,7 +68,7 @@ describe('launch-at-startup integration', () => {
 
   it('creates and removes Linux autostart desktop entry', async () => {
     setPlatform('linux');
-    const { applyLaunchAtStartupSetting } = await import('@electron/main/launch-at-startup');
+    const { applyLaunchAtStartupSetting } = await import('@electron/main/settings/launch-at-startup');
 
     const autostartPath = join(testHome, '.config', 'autostart', 'matchaclaw.desktop');
     await applyLaunchAtStartupSetting(true);
@@ -84,7 +84,7 @@ describe('launch-at-startup integration', () => {
 
   it('does not throw on unsupported platforms', async () => {
     setPlatform('freebsd');
-    const { applyLaunchAtStartupSetting } = await import('@electron/main/launch-at-startup');
+    const { applyLaunchAtStartupSetting } = await import('@electron/main/settings/launch-at-startup');
 
     await expect(applyLaunchAtStartupSetting(true)).resolves.toBe(false);
   });

@@ -1,12 +1,13 @@
 use serde_json::{Value, json};
 
 pub fn listed() -> Vec<serde_json::Value> {
-    vec![routing_descriptor()]
+    vec![routing_descriptor(), media_descriptor()]
 }
 
 pub fn describe(id: &str, scope: &serde_json::Value) -> Option<serde_json::Value> {
     let descriptor = match id {
         "provider.routing" => routing_descriptor(),
+        "provider.media" => media_descriptor(),
         _ => return None,
     };
     (descriptor.get("scope") == Some(scope)).then_some(descriptor)
@@ -31,6 +32,28 @@ pub fn routing_descriptor() -> Value {
         "policyScope": "provider.routing",
         "ownerModuleId": "environment",
         "routeOwnerId": "provider-routing",
+    })
+}
+
+fn media_descriptor() -> Value {
+    json!({
+        "id": "provider.media",
+        "kind": "provider-media",
+        "scopeKind": "provider-media",
+        "scope": { "kind": "provider-media" },
+        "targetKinds": ["provider-media"],
+        "supportLevel": "native",
+        "availability": "available",
+        "operations": [
+            operation("providerMedia.generate", "Generate media", "provider-media"),
+            operation("providerMedia.list", "List media models", "provider-media"),
+            operation("providerMedia.submitVideo", "Submit video", "provider-media"),
+            operation("providerMedia.queryVideo", "Query video", "provider-media"),
+            operation("providerMedia.collectVideo", "Collect video", "provider-media"),
+        ],
+        "policyScope": "provider.media",
+        "ownerModuleId": "provider",
+        "routeOwnerId": "runtime-host",
     })
 }
 

@@ -102,6 +102,70 @@ impl StateDirHandle {
         Ok(Some(file))
     }
 
+    /// Repairs permissions before reading from the same self-owned, single-link file.
+    pub fn open_private_regular_file_readonly(
+        &self,
+        name: &str,
+    ) -> Result<Option<std::fs::File>, StateDirError> {
+        let name = relative_name(name)?;
+        let descriptor =
+            unsafe { libc::openat(self._descriptor.as_raw_fd(), name.as_ptr(), FILE_OPEN_FLAGS) };
+        if descriptor == -1 {
+            return match io::Error::last_os_error().raw_os_error() {
+                Some(libc::ENOENT) => Ok(None),
+                _ => Err(StateDirError),
+            };
+        }
+        // SAFETY: openat returned a new owned descriptor without following links.
+        let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        let information = metadata(file.as_raw_fd())?;
+        if information.st_nlink != 1
+            || information.st_uid != unsafe { libc::geteuid() }
+            || information.st_mode & libc::S_IFMT != libc::S_IFREG
+        {
+            return Err(StateDirError);
+        }
+        verify_no_extended_acl(file.as_raw_fd())?;
+        if information.st_mode & 0o777 != TEMPORARY_MODE
+            && unsafe { libc::fchmod(file.as_raw_fd(), TEMPORARY_MODE) } == -1
+        {
+            return Err(StateDirError);
+        }
+        verify_owner_only(file.as_raw_fd(), libc::S_IFREG, TEMPORARY_MODE)?;
+        Ok(Some(file))
+    }
+
+    /// Publishes a complete private file atomically without replacing an existing name.
+    pub fn create_new_regular_file_bounded(
+        &self,
+        name: &str,
+        contents: &[u8],
+        byte_limit: usize,
+    ) -> Result<bool, StateDirError> {
+        if contents.len() > byte_limit {
+            return Err(StateDirError);
+        }
+        let target = relative_name(name)?;
+        let (temporary, temporary_name) = create_temporary_file(self)?;
+        let mut published = false;
+        let result = (|| {
+            verify_owner_only(temporary.as_raw_fd(), libc::S_IFREG, TEMPORARY_MODE)?;
+            write_all(&temporary, contents)?;
+            if unsafe { libc::fsync(temporary.as_raw_fd()) } != 0 {
+                return Err(StateDirError);
+            }
+            published = publish_new(self, &temporary_name, &target)?;
+            if published && unsafe { libc::fsync(self._descriptor.as_raw_fd()) } != 0 {
+                return Err(StateDirError);
+            }
+            Ok(published)
+        })();
+        if !published {
+            remove_temporary(self, &temporary_name)?;
+        }
+        result
+    }
+
     pub fn clone_descriptor(&self) -> Result<OwnedFd, StateDirError> {
         let descriptor =
             unsafe { libc::fcntl(self._descriptor.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
@@ -318,6 +382,41 @@ fn write_and_replace(
         return Err(StateDirError);
     }
     Ok(())
+}
+
+fn publish_new(
+    directory: &StateDirHandle,
+    source: &CStr,
+    target: &CStr,
+) -> Result<bool, StateDirError> {
+    let directory = directory._descriptor.as_raw_fd();
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::renameat2(
+            directory,
+            source.as_ptr(),
+            directory,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let result = unsafe {
+        libc::renameatx_np(
+            directory,
+            source.as_ptr(),
+            directory,
+            target.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result == 0 {
+        Ok(true)
+    } else if io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST) {
+        Ok(false)
+    } else {
+        Err(StateDirError)
+    }
 }
 
 fn write_all(file: &OwnedFd, contents: &[u8]) -> Result<(), StateDirError> {

@@ -1,15 +1,18 @@
-use std::{future::Future, io, pin::Pin, sync::Arc};
+use std::io;
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite},
     task::{AbortHandle, Id, JoinError, JoinSet},
 };
 
+use super::arguments::{require_exact_keys, required_string, strict_object};
+use super::registry::CatalogRevision;
+use super::transport::{extract_request_id, next_message, write_message};
 use super::{
-    DecodeError, Framing, RequestId, decode_request, detect_framing, encode_error, encode_result,
+    DecodeError, Framing, Registry, Request, RequestId, ResourceReadError, ToolCallError,
+    ToolCatalog, decode_request, encode_error, encode_result,
 };
-use crate::mcp::arguments::{require_exact_keys, required_string, strict_object};
 
 const SERVER_VERSION: &str = "0.0.0";
 const INVALID_REQUEST: &str = "Invalid Request";
@@ -19,63 +22,24 @@ const INVALID_PARAMS: &str = "Invalid params";
 const INTERNAL_ERROR: &str = "Internal error";
 const MAX_IN_FLIGHT: usize = 32;
 
-pub trait ToolProvider: Send + Sync {
-    fn tools(&self) -> Vec<Value>;
-    fn call<'a>(
-        &'a self,
-        name: &'a str,
-        arguments: &'a Map<String, Value>,
-    ) -> Option<ToolCallFuture<'a>>;
-}
-
-pub type ToolCallOutcome = Result<Value, ToolCallError>;
-pub type ToolCallFuture<'a> = Pin<Box<dyn Future<Output = ToolCallOutcome> + Send + 'a>>;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ToolCallError {
-    InvalidParams,
-    Internal,
-    Execution(Value),
-    ExecutionText(String),
-}
-
-pub struct ToolCatalog {
-    providers: Vec<Box<dyn ToolProvider>>,
-}
-
-impl ToolCatalog {
-    pub fn new(providers: Vec<Box<dyn ToolProvider>>) -> Self {
-        Self { providers }
-    }
-
-    fn tools(&self) -> Vec<Value> {
-        self.providers
-            .iter()
-            .flat_map(|provider| provider.tools())
-            .collect()
-    }
-
-    async fn call(&self, name: &str, arguments: &Map<String, Value>) -> ToolCallOutcome {
-        for provider in &self.providers {
-            if let Some(result) = provider.call(name, arguments) {
-                return result.await;
-            }
-        }
-        Err(ToolCallError::InvalidParams)
-    }
-}
-
 pub async fn run_stdio<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     catalog: ToolCatalog,
+    input: R,
+    output: W,
+) -> io::Result<()> {
+    let registry = Registry::new(catalog).map_err(io::Error::other)?;
+    run_stdio_registry(registry, input, output).await
+}
+
+pub async fn run_stdio_registry<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    registry: Registry,
     input: R,
     mut output: W,
 ) -> io::Result<()> {
     let mut calls = JoinSet::new();
-    let result = Server {
-        catalog: Arc::new(catalog),
-    }
-    .run(input, &mut output, &mut calls)
-    .await;
+    let result = Server { registry }
+        .run(input, &mut output, &mut calls)
+        .await;
     // Transport failure ends MCP waits, not effects already admitted by the Host owner.
     calls.abort_all();
     while calls.join_next().await.is_some() {}
@@ -83,7 +47,7 @@ pub async fn run_stdio<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 }
 
 struct Server {
-    catalog: Arc<ToolCatalog>,
+    registry: Registry,
 }
 
 struct PendingCall {
@@ -102,6 +66,9 @@ impl Server {
         let mut buffer = Vec::new();
         let mut pending = Vec::new();
         let mut eof = false;
+        let mut initialized_framing = None;
+        let mut changes = self.registry.subscribe();
+        let mut observed = *changes.borrow_and_update();
         loop {
             while let Some(completed) = calls.try_join_next_with_id() {
                 complete_call(completed, &mut pending, output).await?;
@@ -109,9 +76,13 @@ impl Server {
             if let Some((framing, payload, consumed)) = next_message(&buffer, eof) {
                 buffer.drain(..consumed);
                 let response = match payload {
-                    Ok(payload) => {
-                        self.handle_payload(payload, framing.clone(), calls, &mut pending)
-                    }
+                    Ok(payload) => self.handle_payload(
+                        payload,
+                        framing.clone(),
+                        calls,
+                        &mut pending,
+                        &mut initialized_framing,
+                    ),
                     Err(error) => encode_error(
                         Some(&RequestId::Null),
                         error.json_rpc_error_code(),
@@ -119,7 +90,7 @@ impl Server {
                     ),
                 };
                 if let Some(response) = response {
-                    write_response(output, framing, &response).await?;
+                    write_message(output, framing, &response).await?;
                 }
                 continue;
             }
@@ -139,6 +110,14 @@ impl Server {
                 Some(completed) = calls.join_next_with_id(), if !calls.is_empty() => {
                     complete_call(completed, &mut pending, output).await?;
                 }
+                changed = changes.changed() => {
+                    if changed.is_err() { return Err(io::Error::other("MCP catalog observation closed")); }
+                    let current = *changes.borrow_and_update();
+                    if let Some(framing) = &initialized_framing {
+                        notify_changes(output, framing.clone(), observed, current).await?;
+                    }
+                    observed = current;
+                }
             }
         }
     }
@@ -149,13 +128,13 @@ impl Server {
         framing: Framing,
         calls: &mut JoinSet<Option<Vec<u8>>>,
         pending: &mut Vec<PendingCall>,
+        initialized_framing: &mut Option<Framing>,
     ) -> Option<Vec<u8>> {
         let request = match decode_request(&payload) {
             Ok(request) => request,
             Err(error) => {
-                let id = extract_request_id(&payload);
                 return encode_error(
-                    id.as_ref(),
+                    extract_request_id(&payload).as_ref(),
                     error.json_rpc_error_code(),
                     decode_message(error),
                 );
@@ -180,18 +159,23 @@ impl Server {
             return encode_error(request.id(), -32600, INVALID_REQUEST);
         }
         let result = match request.method() {
-            "initialize" => Ok(initialize_result()),
-            "notifications/initialized" => Ok(Value::Null),
-            "tools/list" => Ok(json!({ "tools": self.catalog.tools() })),
-            "tools/call" => {
+            "initialize" => Ok(initialize_result(request.params())),
+            "notifications/initialized" => {
+                *initialized_framing = Some(framing);
+                Ok(Value::Null)
+            }
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(json!({ "tools": self.registry.tools() })),
+            "resources/list" => Ok(json!({ "resources": self.registry.resources() })),
+            "tools/call" | "resources/read" => {
                 if calls.len() == MAX_IN_FLIGHT {
                     return encode_error(request.id(), -32000, "Server busy");
                 }
-                let catalog = Arc::clone(&self.catalog);
+                let registry = self.registry.clone();
                 let request_id = request.id().cloned();
                 let task = calls.spawn(async move {
-                    match call_tool(&catalog, request.params()).await {
-                        Ok(value) => encode_result(request.id(), value),
+                    match execute(&registry, &request).await {
+                        Ok(response) => response,
                         Err((code, message)) => encode_error(request.id(), code, message),
                     }
                 });
@@ -209,6 +193,61 @@ impl Server {
             Err((code, message)) => encode_error(request.id(), code, message),
         }
     }
+}
+
+async fn execute(
+    registry: &Registry,
+    request: &Request,
+) -> Result<Option<Vec<u8>>, (i32, &'static str)> {
+    let params = strict_object(request.params()).map_err(|_| invalid_params())?;
+    if request.method() == "resources/read" {
+        require_exact_keys(params, &["uri", "_meta"]).map_err(|_| invalid_params())?;
+        let uri = required_string(params, "uri").map_err(|_| invalid_params())?;
+        let result = registry.read(uri).await.map_err(|error| match error {
+            ResourceReadError::InvalidParams => invalid_params(),
+            ResourceReadError::NotFound => (-32002, "Resource not found"),
+            ResourceReadError::Internal => internal_error(),
+        })?;
+        return Ok(encode_result(request.id(), result));
+    }
+    require_exact_keys(params, &["name", "arguments", "_meta"]).map_err(|_| invalid_params())?;
+    let name = required_string(params, "name").map_err(|_| invalid_params())?;
+    let arguments = strict_object(params.get("arguments")).map_err(|_| invalid_params())?;
+    let result = registry
+        .call(name, arguments)
+        .await
+        .map_err(|error| match error {
+            ToolCallError::InvalidParams => invalid_params(),
+            ToolCallError::Internal
+            | ToolCallError::Execution(_)
+            | ToolCallError::ExecutionText(_) => internal_error(),
+        })?;
+    Ok(encode_result(request.id(), result))
+}
+
+async fn notify_changes<W: AsyncWrite + Unpin>(
+    output: &mut W,
+    framing: Framing,
+    previous: CatalogRevision,
+    current: CatalogRevision,
+) -> io::Result<()> {
+    for (changed, method) in [
+        (
+            previous.tools != current.tools,
+            "notifications/tools/list_changed",
+        ),
+        (
+            previous.resources != current.resources,
+            "notifications/resources/list_changed",
+        ),
+    ] {
+        if changed {
+            let notification = serde_json::to_vec(&json!({"jsonrpc": "2.0", "method": method}))
+                .expect("MCP notification is serializable");
+            write_message(output, framing.clone(), &notification).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn complete_call<W: AsyncWrite + Unpin>(
@@ -230,7 +269,7 @@ async fn complete_call<W: AsyncWrite + Unpin>(
         Err(_) => encode_error(call.request_id.as_ref(), -32603, INTERNAL_ERROR),
     };
     if let Some(response) = response {
-        write_response(output, call.framing, &response).await?;
+        write_message(output, call.framing, &response).await?;
     }
     Ok(())
 }
@@ -250,112 +289,16 @@ fn cancellation_id(params: Option<&Value>) -> Option<RequestId> {
     }
 }
 
-async fn call_tool(
-    catalog: &ToolCatalog,
-    params: Option<&Value>,
-) -> Result<Value, (i32, &'static str)> {
-    let params = strict_object(params).map_err(|_| invalid_params())?;
-    require_exact_keys(params, &["name", "arguments"]).map_err(|_| invalid_params())?;
-    let name = required_string(params, "name").map_err(|_| invalid_params())?;
-    let arguments = strict_object(params.get("arguments")).map_err(|_| invalid_params())?;
-    let (result, is_error) = match catalog.call(name, arguments).await {
-        Ok(result) => (result, false),
-        Err(ToolCallError::Execution(result)) => (result, true),
-        Err(ToolCallError::ExecutionText(text)) => {
-            return Ok(json!({
-                "content": [{ "type": "text", "text": text }],
-                "isError": true,
-            }));
-        }
-        Err(ToolCallError::InvalidParams) => return Err(invalid_params()),
-        Err(ToolCallError::Internal) => return Err(internal_error()),
+fn initialize_result(params: Option<&Value>) -> Value {
+    let requested = params
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(Value::as_str);
+    let protocol_version = match requested {
+        Some("2025-06-18") => "2025-06-18",
+        Some("2025-11-25") => "2025-11-25",
+        _ => "2024-11-05",
     };
-    let mut response = json!({
-        "content": [{ "type": "text", "text": serde_json::to_string(&result).expect("closed MCP result is serializable") }]
-    });
-    if is_error {
-        response["isError"] = Value::Bool(true);
-    }
-    Ok(response)
-}
-
-fn next_message(
-    buffer: &[u8],
-    eof: bool,
-) -> Option<(Framing, Result<Vec<u8>, DecodeError>, usize)> {
-    let framing = match detect_framing(buffer) {
-        Ok(Some(framing)) => framing,
-        Ok(None) => {
-            return eof
-                .then_some((
-                    Framing::JsonLines,
-                    Err(DecodeError::MalformedHeader),
-                    buffer.len(),
-                ))
-                .filter(|_| !buffer.is_empty());
-        }
-        Err(error) => return Some((Framing::JsonLines, Err(error), buffer.len())),
-    };
-    match framing {
-        Framing::JsonLines => match buffer.iter().position(|byte| *byte == b'\n') {
-            Some(end) => Some((
-                Framing::JsonLines,
-                Ok(trim_line(&buffer[..end]).to_vec()),
-                end + 1,
-            )),
-            None if eof => Some((
-                Framing::JsonLines,
-                Ok(trim_line(buffer).to_vec()),
-                buffer.len(),
-            )),
-            None => None,
-        },
-        Framing::ContentLength { body_bytes } => {
-            let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
-            let total = header_end.checked_add(body_bytes)?;
-            if buffer.len() < total {
-                return eof.then_some((framing, Err(DecodeError::MalformedJson), buffer.len()));
-            }
-            Some((framing, Ok(buffer[header_end..total].to_vec()), total))
-        }
-    }
-}
-
-fn trim_line(line: &[u8]) -> &[u8] {
-    line.strip_suffix(b"\r").unwrap_or(line)
-}
-
-fn extract_request_id(payload: &[u8]) -> Option<RequestId> {
-    let value = serde_json::from_slice::<Value>(payload).ok()?;
-    match value.as_object()?.get("id")? {
-        Value::Null => Some(RequestId::Null),
-        Value::String(value) => Some(RequestId::String(value.clone())),
-        Value::Number(value) => Some(RequestId::Number(value.clone())),
-        _ => None,
-    }
-}
-
-async fn write_response<W: AsyncWrite + Unpin>(
-    output: &mut W,
-    framing: Framing,
-    response: &[u8],
-) -> io::Result<()> {
-    match framing {
-        Framing::JsonLines => {
-            output.write_all(response).await?;
-            output.write_all(b"\n").await?;
-        }
-        Framing::ContentLength { .. } => {
-            let header = format!("Content-Length: {}\r\n\r\n", response.len());
-            output.write_all(header.as_bytes()).await?;
-            output.write_all(response).await?;
-        }
-    }
-    output.flush().await
-}
-
-fn initialize_result() -> Value {
-    json!({ "protocolVersion": "2024-11-05", "capabilities": { "tools": {} }, "serverInfo": { "name": "matcha", "version": SERVER_VERSION } })
+    json!({ "protocolVersion": protocol_version, "capabilities": { "tools": {"listChanged": true}, "resources": {"listChanged": true} }, "serverInfo": { "name": "matcha", "version": SERVER_VERSION } })
 }
 
 const fn decode_message(error: DecodeError) -> &'static str {

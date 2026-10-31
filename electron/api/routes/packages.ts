@@ -1,22 +1,14 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import type { HostApiContext } from '../context';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type { CloudPackageListQuery } from '../../main/cloud-account/types';
-import { isSkillsCallReceipt, isSkillsRuntimeScope, type SkillsRuntimeScope } from '../../main/runtime-host-delivery/transport/skills/management';
+import { isSkillsRuntimeScope, type SkillsRuntimeScope } from '../../main/runtime-host-delivery/transport/skills/management';
 import { isCallId } from '../../../src/types/call-log/decode';
 import { isCloudPackageOperationId, type CloudPackageOperationRequests } from '../../../src/types/cloud-package-operation';
-import { PackageOperationError } from '../../main/cloud-account/package-operations';
+import { listInstalledPackages, PackageOperationError } from '../../main/cloud-account/package-operations';
 
 class InvalidPackageRequestError extends Error {}
 
 type PackageApiContext = Pick<HostApiContext, 'cloudAccountService' | 'runtimeHostTransports'>;
-
-type SkillInstallResult = Readonly<{
-  outcome: 'accepted' | 'rejected' | 'unknown' | 'notFound';
-  skillKey?: string;
-  reason?: string;
-  error?: string;
-}>;
 
 type SealedSkillPackageUploadRequest = Readonly<{
   skillKey?: unknown;
@@ -28,22 +20,19 @@ type SealedAgentPackageUploadRequest = Readonly<{
 }>;
 
 export async function handlePackageRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: PackageApiContext,
-): Promise<boolean> {
-  if (!url.pathname.startsWith('/api/packages/')) return false;
+): Promise<HostApiRouteResult> {
+  if (!url.pathname.startsWith('/api/packages/')) return undefined;
 
   if (req.method === 'GET' && url.pathname === '/api/packages/installed') {
-    const result = await ctx.runtimeHostTransports.sealedResourceAuthorizationTransport.listCloudPackages();
-    sendJson(res, result.status, { packages: result.body.packages.map(({ packageVersionId, packageType, packageSha256, fileName }) => ({ packageVersionId, packageType, packageSha256, fileName })) });
-    return true;
+    const result = await listInstalledPackages(ctx.runtimeHostTransports.sealedResourceAuthorizationTransport);
+    return jsonResult(result.status, result.body);
   }
 
   if (!ctx.cloudAccountService) {
-    sendJson(res, 503, { success: false, error: 'Cloud account service is unavailable' });
-    return true;
+    return jsonResult(503, { success: false, error: 'Cloud account service is unavailable' });
   }
 
   try {
@@ -53,92 +42,29 @@ export async function handlePackageRoutes(
         throw new InvalidPackageRequestError('Invalid cloud package operationId');
       }
       const result = ctx.cloudAccountService.readPackageOperation(body.operationId);
-      sendJson(res, result ? 200 : 404, result ?? { outcome: 'notFound' });
-      return true;
+      return jsonResult(result ? 200 : 404, result ?? { outcome: 'notFound' });
     }
     if (req.method === 'POST' && url.pathname === '/api/packages/install/confirm') {
       const body = await parsePackageJsonBody<Record<string, unknown>>(req);
       if (!isRecord(body) || Object.keys(body).length !== 1 || !isCallId(body.callId)) {
         throw new InvalidPackageRequestError('Invalid package install callId');
       }
-      const result = await ctx.runtimeHostTransports.callLogTransport.get({ callId: body.callId });
-      if (result.status !== 200 || !('module' in result.body)) {
-        sendJson(res, result.status, { install: { outcome: 'unknown' } });
-        return true;
-      }
-      const call = result.body;
-      if (call.callId === body.callId && call.module === 'subagents' && call.command === 'subagents.package.install'
-        && call.detail.endpoint === 'openclaw:local' && ['succeeded', 'failed', 'rejected', 'unknown'].includes(call.status)) {
-        const completed = await ctx.runtimeHostTransports.agentsTransport.result({
-          callId: body.callId, operationId: 'subagents.package.install', endpoint: runtimeEndpoint(),
-        });
-        if (completed.status !== 200 || !isRecord(completed.body) || completed.body.callId !== body.callId
-          || completed.body.operationId !== 'subagents.package.install' || !isRecord(completed.body.body)) {
-          sendJson(res, completed.status === 200 ? 502 : completed.status, { install: { outcome: 'unknown' } });
-          return true;
-        }
-        const install = agentInstallResult(completed.body.body);
-        if (install.outcome !== 'accepted') install.outcome = call.status === 'rejected' ? 'rejected' : 'unknown';
-        const confirmed = completed.body.status === 200 && call.status === 'succeeded'
-          && call.detail.outcome === 'packageInstalled' && install.outcome === 'accepted'
-          && install.agentId === call.detail.agentId;
-        if ((install.outcome === 'accepted' && !confirmed)
-          || (install.outcome !== 'accepted' && (call.status === 'succeeded' || completed.body.status === 200))) {
-          sendJson(res, 502, { install: { outcome: 'unknown' } });
-          return true;
-        }
-        ctx.cloudAccountService.acknowledgePackageInstall(body.callId, confirmed);
-        sendJson(res, 200, { install });
-        return true;
-      }
-      if (call.callId !== body.callId || call.module !== 'skills' || call.command !== 'sealedSkills.install'
-        || !['succeeded', 'failed', 'rejected', 'unknown'].includes(call.status)) {
-        sendJson(res, 409, { install: { outcome: 'unknown' } });
-        return true;
-      }
-      const confirmed = call.status === 'succeeded' && call.detail.access === 'write'
-        && call.detail.outcome === 'accepted' && typeof call.detail.skillKey === 'string';
-      const install: SkillInstallResult = confirmed
-        ? { outcome: 'accepted', skillKey: call.detail.skillKey }
-        : { outcome: call.status === 'failed' && call.detail.outcome === 'notFound' ? 'notFound'
-          : (call.status === 'failed' || call.status === 'rejected') && call.detail.outcome === 'rejected' ? 'rejected' : 'unknown' };
-      ctx.cloudAccountService.acknowledgePackageInstall(body.callId, confirmed);
-      sendJson(res, 200, { install });
-      return true;
+      const result = await ctx.cloudAccountService.confirmPackageInstall(body.callId);
+      return jsonResult(result.status, result.body);
     }
     if (req.method === 'GET' && url.pathname === '/api/packages/mine') {
-      sendJson(res, 200, await ctx.cloudAccountService.listOwnedPackages(packageListQuery(url)));
-      return true;
+      return jsonResult(200, await ctx.cloudAccountService.listOwnedPackages(packageListQuery(url)));
     }
     if (req.method === 'GET' && url.pathname === '/api/packages/market') {
-      sendJson(res, 200, await ctx.cloudAccountService.listMarketPackages(packageListQuery(url)));
-      return true;
+      return jsonResult(200, await ctx.cloudAccountService.listMarketPackages(packageListQuery(url)));
     }
     if (req.method === 'POST' && url.pathname === '/api/packages/upload') {
-      sendJson(res, 400, { success: false, error: 'Package upload requires a sealed skillKey or agentId' });
-      return true;
+      return jsonResult(400, { success: false, error: 'Package upload requires a sealed skillKey or agentId' });
     }
     if (req.method === 'POST' && url.pathname === '/api/packages/upload/sealed-skill') {
       const body = await parseSealedSkillPackageUploadRequest(req);
-      const reservation = ctx.cloudAccountService.reserveSkillExport();
-      try {
-        const cloudKey = await ctx.cloudAccountService.fetchSealedCloudKey();
-        const exported = await ctx.runtimeHostTransports.sealedSkillsTransport.exportCloud(compactObject({
-          skillKey: body.skillKey,
-          cloudPublicKey: cloudKey.publicKey,
-          cloudKeyId: cloudKey.keyId,
-          scope: body.scope,
-        }));
-        if (exported.status !== 202 || !isSkillsCallReceipt(exported.body)) {
-          sendJson(res, exported.status === 200 || exported.status === 202 ? 502 : exported.status, { success: false, error: runtimeExportError(exported.body, 'Skill package cloud export failed') });
-          return true;
-        }
-        ctx.cloudAccountService.bindSkillExport(reservation, exported.body.callId);
-        sendJson(res, 202, exported.body);
-        return true;
-      } finally {
-        ctx.cloudAccountService.releaseSkillExport(reservation);
-      }
+      const result = await ctx.cloudAccountService.exportSealedSkillPackage(body);
+      return jsonResult(result.status, result.body);
     }
     if (req.method === 'POST' && url.pathname === '/api/packages/upload/sealed-skill/confirm') {
       const body = await parsePackageJsonBody<Record<string, unknown>>(req);
@@ -146,88 +72,43 @@ export async function handlePackageRoutes(
         || (Object.hasOwn(body, 'scope') && !isSkillsRuntimeScope(body.scope))) {
         throw new InvalidPackageRequestError('Invalid package export callId');
       }
-      sendJson(res, 202, ctx.cloudAccountService.admitPackageOperation('confirmSealedSkillUpload', {
+      return jsonResult(202, ctx.cloudAccountService.admitPackageOperation('confirmSealedSkillUpload', {
         callId: body.callId, ...(body.scope === undefined ? {} : { scope: body.scope as SkillsRuntimeScope }),
       }));
-      return true;
     }
     if (req.method === 'POST' && url.pathname === '/api/packages/upload/sealed-agent') {
       const body = await parseSealedAgentPackageUploadRequest(req);
-      sendJson(res, 202, ctx.cloudAccountService.admitPackageOperation('uploadSealedAgent', body));
-      return true;
+      return jsonResult(202, ctx.cloudAccountService.admitPackageOperation('uploadSealedAgent', body));
     }
     const publishMatch = url.pathname.match(/^\/api\/packages\/([^/]+)\/publish$/);
     if (req.method === 'POST' && publishMatch) {
       let packageVersionId: string;
       try { packageVersionId = decodeURIComponent(publishMatch[1]).trim(); } catch { throw new InvalidPackageRequestError('Invalid packageVersionId'); }
       if (!isSkillKey(packageVersionId)) throw new InvalidPackageRequestError('Invalid packageVersionId');
-      sendJson(res, 200, await ctx.cloudAccountService.publishPackage(packageVersionId));
-      return true;
+      return jsonResult(200, await ctx.cloudAccountService.publishPackage(packageVersionId));
     }
     if (req.method === 'POST' && url.pathname === '/api/packages/download') {
       const body = await parsePackageDownloadRequest(req);
-      sendJson(res, 202, ctx.cloudAccountService.admitPackageOperation('download', body));
-      return true;
+      return jsonResult(202, ctx.cloudAccountService.admitPackageOperation('download', body));
     }
     if (req.method === 'POST' && url.pathname === '/api/packages/install') {
       const body = await parsePackageDownloadRequest(req, true);
-      sendJson(res, 202, ctx.cloudAccountService.admitPackageOperation('install', body));
-      return true;
+      return jsonResult(202, ctx.cloudAccountService.admitPackageOperation('install', body));
     }
   } catch (error) {
     if (error instanceof PackageOperationError) {
-      sendJson(res, error.status, { success: false, error: error.message, message: error.message, code: error.code });
-      return true;
+      return jsonResult(error.status, { success: false, error: error.message, message: error.message, code: error.code });
     }
     const code = isRecord(error) && (typeof error.code === 'string' || typeof error.code === 'number') ? error.code : undefined;
     const message = errorMessage(error);
-    sendJson(res, statusCodeForServiceError(error), {
+    return jsonResult(statusCodeForServiceError(error), {
       success: false, error: message, message: code === undefined ? message : `${code}: ${message}`,
       ...(code === undefined ? {} : { code }),
       ...(isRecord(error) && typeof error.reason === 'string' ? { reason: error.reason } : {}),
     });
-    return true;
   }
 
-  return false;
-}
-
-function runtimeEndpoint() {
-  return {
-    kind: 'native-runtime',
-    runtimeAdapterId: 'openclaw',
-    runtimeInstanceId: 'local',
-  } as const;
-}
-
-function agentInstallResult(value: unknown): { outcome: 'accepted' | 'rejected' | 'unknown'; agentId?: string; reason?: string; error?: string; compensation?: Record<string, unknown> } {
-  if (!isRecord(value)) return { outcome: 'unknown' };
-  if (value.outcome === 'rejected' || value.success === false) return {
-    outcome: 'rejected', ...installFailureDetail(value),
-    ...(typeof value.agentId === 'string' ? { agentId: value.agentId } : {}),
-    ...(isRecord(value.compensation) ? { compensation: {
-      outcome: value.compensation.outcome,
-      failedCount: value.compensation.failedCount,
-      purgeFailedCount: value.compensation.purgeFailedCount,
-    } } : {}),
-  };
-  if (value.success !== true || !isRecord(value.package)) return { outcome: 'unknown', ...installFailureDetail(value) };
-  const agentId = typeof value.package.agentId === 'string' ? value.package.agentId.trim() : '';
-  return agentId ? { outcome: 'accepted', agentId } : { outcome: 'unknown' };
-}
-
-function runtimeExportError(value: unknown, fallback: string): string {
-  if (!isRecord(value)) return fallback;
-  const detail = typeof value.reason === 'string' ? value.reason : typeof value.error === 'string' ? value.error : '';
-  if (!detail || detail.length > 256 || detail.includes('\\') || detail.includes('/')) return fallback;
-  return `${fallback}: ${detail}`;
-}
-
-function installFailureDetail(value: Record<string, unknown>): { reason?: string; error?: string } {
-  return {
-    ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
-    ...(typeof value.error === 'string' ? { error: value.error } : {}),
-  };
+  return undefined;
 }
 
 function packageListQuery(url: URL): CloudPackageListQuery {
@@ -239,15 +120,15 @@ function packageListQuery(url: URL): CloudPackageListQuery {
   }) as CloudPackageListQuery;
 }
 
-async function parsePackageJsonBody<T>(req: IncomingMessage): Promise<T> {
+async function parsePackageJsonBody<T>(req: HostApiRequest): Promise<T> {
   try {
-    return await parseJsonBody<T>(req);
+    return await req.readJson<T>();
   } catch {
     throw new InvalidPackageRequestError('Invalid package request body');
   }
 }
 
-async function parseSealedSkillPackageUploadRequest(req: IncomingMessage): Promise<{ skillKey: string; scope?: SkillsRuntimeScope }> {
+async function parseSealedSkillPackageUploadRequest(req: HostApiRequest): Promise<{ skillKey: string; scope?: SkillsRuntimeScope }> {
   const body = await parsePackageJsonBody<SealedSkillPackageUploadRequest>(req);
   if (!isRecord(body) || !Object.keys(body).every((key) => key === 'skillKey' || key === 'scope')
     || (Object.hasOwn(body, 'scope') && !isSkillsRuntimeScope(body.scope))) {
@@ -258,7 +139,7 @@ async function parseSealedSkillPackageUploadRequest(req: IncomingMessage): Promi
   return { skillKey, ...(body.scope === undefined ? {} : { scope: body.scope as SkillsRuntimeScope }) };
 }
 
-async function parseSealedAgentPackageUploadRequest(req: IncomingMessage): Promise<{ agentId: string }> {
+async function parseSealedAgentPackageUploadRequest(req: HostApiRequest): Promise<{ agentId: string }> {
   const body = await parsePackageJsonBody<SealedAgentPackageUploadRequest>(req);
   if (!isRecord(body) || Object.keys(body).length !== 1 || !Object.hasOwn(body, 'agentId')) throw new InvalidPackageRequestError('Invalid agent upload request');
   const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : '';
@@ -266,7 +147,7 @@ async function parseSealedAgentPackageUploadRequest(req: IncomingMessage): Promi
   return { agentId };
 }
 
-async function parsePackageDownloadRequest(req: IncomingMessage, allowRuntimeScope = false): Promise<CloudPackageOperationRequests['install']> {
+async function parsePackageDownloadRequest(req: HostApiRequest, allowRuntimeScope = false): Promise<CloudPackageOperationRequests['install']> {
   const body = await parsePackageJsonBody<Record<string, unknown>>(req);
   if (!isRecord(body) || !Object.hasOwn(body, 'packageVersionId')
     || !Object.keys(body).every((key) => ['packageVersionId', 'packageType', 'filename', 'clientVersion', 'installId', 'source'].includes(key) || (allowRuntimeScope && key === 'scope'))

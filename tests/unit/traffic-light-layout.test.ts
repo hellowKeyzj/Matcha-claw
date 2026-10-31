@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   getMacTrafficLightPosition,
   syncMacTrafficLightPosition,
-} from '../../electron/main/traffic-light-layout';
+} from '../../electron/main/desktop/traffic-light-layout';
 
 const originalPlatform = process.platform;
 

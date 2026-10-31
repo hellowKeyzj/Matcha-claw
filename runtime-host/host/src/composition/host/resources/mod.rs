@@ -6,7 +6,7 @@ mod runtime_roots;
 mod sealed_resources;
 
 pub(in crate::composition::host) use diagnostics::{
-    RuntimeDiagnostics, prepare_runtime_diagnostics, provision_diagnostics_archive,
+    RuntimeDiagnostics, prepare_diagnostics_archive, prepare_runtime_diagnostics,
 };
 pub(in crate::composition::host) use native_toolchain::provision_native_toolchain;
 pub(in crate::composition::host) use organization::{

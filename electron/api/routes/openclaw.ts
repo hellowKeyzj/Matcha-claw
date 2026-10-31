@@ -1,7 +1,6 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import { RuntimeHostControlError, type RuntimeHostControlOutcome } from '../../main/runtime-host-delivery/control';
 import type { RuntimeHostApiContext, RuntimeHostTransportContext } from '../context';
-import { parseJsonBody, sendJson } from '../route-utils';
 
 const ENVIRONMENT_STATUS_UNAVAILABLE = 'OpenClaw environment status is unavailable';
 const READINESS_UNAVAILABLE = 'OpenClaw readiness is unavailable';
@@ -148,286 +147,249 @@ type OpenClawApiContext = RuntimeHostApiContext & RuntimeHostTransportContext<
 >;
 
 export async function handleOpenClawRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: OpenClawApiContext,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/openclaw/status' && req.method === 'GET') {
-    await handleEnvironmentStatus(ctx, res);
-    return true;
+    return handleEnvironmentStatus(ctx);
   }
 
   if (url.pathname === '/api/openclaw/ready' && req.method === 'GET') {
-    await handleReadiness(ctx, res);
-    return true;
+    return handleReadiness(ctx);
   }
 
   if (url.pathname === '/api/openclaw/dir' && req.method === 'GET') {
-    await handleRuntimePath(ctx, res, 'openclawDirectory', DIRECTORY_UNAVAILABLE);
-    return true;
+    return handleRuntimePath(ctx, 'openclawDirectory', DIRECTORY_UNAVAILABLE);
   }
 
   if (url.pathname === '/api/openclaw/config-dir' && req.method === 'GET') {
-    await handleRuntimePath(ctx, res, 'configDirectory', CONFIG_DIRECTORY_UNAVAILABLE);
-    return true;
+    return handleRuntimePath(ctx, 'configDirectory', CONFIG_DIRECTORY_UNAVAILABLE);
   }
 
   if (url.pathname === '/api/openclaw/subagent-templates' && req.method === 'GET') {
-    await handleTemplateCatalog(ctx, res);
-    return true;
+    return handleTemplateCatalog(ctx);
   }
 
   const templateId = readSubagentTemplateId(url.pathname);
   if (req.method === 'GET' && templateId !== undefined) {
     if (templateId === null) {
-      sendJson(res, 400, { success: false, error: SUBAGENT_TEMPLATE_UNAVAILABLE });
-      return true;
+      return jsonResult(400, { success: false, error: SUBAGENT_TEMPLATE_UNAVAILABLE });
     }
-    await handleTemplateDetail(ctx, res, templateId);
-    return true;
+    return handleTemplateDetail(ctx, templateId);
   }
 
   if (url.pathname === '/api/openclaw/workspace-dir' && req.method === 'GET') {
-    await handleRuntimePath(ctx, res, 'workspaceDirectory', WORKSPACE_DIRECTORY_UNAVAILABLE);
-    return true;
+    return handleRuntimePath(ctx, 'workspaceDirectory', WORKSPACE_DIRECTORY_UNAVAILABLE);
   }
 
   if (url.pathname === '/api/openclaw/task-workspace-dirs' && req.method === 'GET') {
-    await handleRuntimePaths(ctx, res);
-    return true;
+    return handleRuntimePaths(ctx);
   }
 
   if (url.pathname === '/api/openclaw/skills-dir' && req.method === 'GET') {
-    await handleRuntimePath(ctx, res, 'skillsDirectory', SKILLS_DIRECTORY_UNAVAILABLE);
-    return true;
+    return handleRuntimePath(ctx, 'skillsDirectory', SKILLS_DIRECTORY_UNAVAILABLE);
   }
 
   if (url.pathname === '/api/openclaw/tool-permission-mode' && req.method === 'GET') {
-    await handleToolPermissionMode(ctx, res);
-    return true;
+    return handleToolPermissionMode(ctx);
   }
 
   if (url.pathname === '/api/openclaw/tool-permission-mode' && req.method === 'PUT') {
-    await handleToolPermissionModeUpdate(req, ctx, res);
-    return true;
+    return handleToolPermissionModeUpdate(req, ctx);
   }
 
   if (url.pathname === '/api/openclaw/cli-command' && req.method === 'GET') {
-    await handleCliCommand(ctx, res);
-    return true;
+    return handleCliCommand(ctx);
   }
 
   if (url.pathname === '/api/openclaw/runtime/snapshot' && req.method === 'GET') {
-    await handleRuntimeSnapshot(ctx, res);
-    return true;
+    return handleRuntimeSnapshot(ctx);
   }
 
   if (url.pathname === '/api/openclaw/lifecycle/status' && req.method === 'GET') {
-    await handleLifecycleStatus(ctx, res);
-    return true;
+    return handleLifecycleStatus(ctx);
   }
 
   if (url.pathname === '/api/openclaw/lifecycle/restart' && req.method === 'POST') {
-    await handleLifecycleRestart(ctx, res);
-    return true;
+    return handleLifecycleRestart(ctx);
   }
 
-  return false;
+  return undefined;
 }
 
-async function handleEnvironmentStatus(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
+async function handleEnvironmentStatus(ctx: OpenClawApiContext): Promise<HostApiRouteResult> {
   const status = await readEnvironmentStatus(ctx);
   if (!status) {
-    sendUnavailable(res, ENVIRONMENT_STATUS_UNAVAILABLE);
-    return;
+    return sendUnavailable(ENVIRONMENT_STATUS_UNAVAILABLE);
   }
-  sendJson(res, 200, status);
+  return jsonResult(200, status);
 }
 
-async function handleReadiness(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
+async function handleReadiness(ctx: OpenClawApiContext): Promise<HostApiRouteResult> {
   const status = await readEnvironmentStatus(ctx);
   if (!status) {
-    sendUnavailable(res, READINESS_UNAVAILABLE);
-    return;
+    return sendUnavailable(READINESS_UNAVAILABLE);
   }
-  sendJson(res, 200, status.packageExists);
+  return jsonResult(200, status.packageExists);
 }
 
 async function handleRuntimePath(
   ctx: OpenClawApiContext,
-  res: ServerResponse,
   key: Exclude<keyof RuntimePaths, 'taskWorkspaceDirectories'>,
   unavailable: string,
-): Promise<void> {
+): Promise<HostApiRouteResult> {
   try {
     const response = await ctx.runtimeHostTransports.openClawPlatformTransport.runtimePaths();
     const paths = response.status === 200 ? readRuntimePaths(response.body) : null;
     if (!paths) {
-      sendTransportFailure(res, unavailable, response.status);
-      return;
+      return sendTransportFailure(unavailable, response.status);
     }
-    sendJson(res, 200, paths[key]);
+    return jsonResult(200, paths[key]);
   } catch {
-    sendUnavailable(res, unavailable);
+    return sendUnavailable(unavailable);
   }
 }
 
-async function handleRuntimePaths(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
+async function handleRuntimePaths(ctx: OpenClawApiContext): Promise<HostApiRouteResult> {
   try {
     const response = await ctx.runtimeHostTransports.openClawPlatformTransport.runtimePaths();
     const paths = response.status === 200 ? readRuntimePaths(response.body) : null;
     if (!paths) {
-      sendTransportFailure(res, TASK_WORKSPACE_DIRECTORIES_UNAVAILABLE, response.status);
-      return;
+      return sendTransportFailure(TASK_WORKSPACE_DIRECTORIES_UNAVAILABLE, response.status);
     }
-    sendJson(res, 200, paths.taskWorkspaceDirectories);
+    return jsonResult(200, paths.taskWorkspaceDirectories);
   } catch {
-    sendUnavailable(res, TASK_WORKSPACE_DIRECTORIES_UNAVAILABLE);
+    return sendUnavailable(TASK_WORKSPACE_DIRECTORIES_UNAVAILABLE);
   }
 }
 
-async function handleCliCommand(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
+async function handleCliCommand(ctx: OpenClawApiContext): Promise<HostApiRouteResult> {
   try {
     const response = await ctx.runtimeHostTransports.openClawPlatformTransport.cliCommand();
     const command = response.status === 200 ? readCliCommand(response.body) : null;
     if (!command) {
-      sendTransportFailure(res, CLI_COMMAND_UNAVAILABLE, response.status);
-      return;
+      return sendTransportFailure(CLI_COMMAND_UNAVAILABLE, response.status);
     }
-    sendJson(res, 200, { success: true, command });
+    return jsonResult(200, { success: true, command });
   } catch {
-    sendUnavailable(res, CLI_COMMAND_UNAVAILABLE);
+    return sendUnavailable(CLI_COMMAND_UNAVAILABLE);
   }
 }
 
 async function handleToolPermissionMode(
   ctx: OpenClawApiContext,
-  res: ServerResponse,
-): Promise<void> {
+): Promise<HostApiRouteResult> {
   try {
     const response = await ctx.runtimeHostTransports.openClawPlatformTransport.toolPermissionMode();
     const mode = response.status === 200 ? readToolPermissionMode(response.body) : null;
     if (!mode) {
-      sendTransportFailure(res, TOOL_PERMISSION_MODE_UNAVAILABLE, response.status);
-      return;
+      return sendTransportFailure(TOOL_PERMISSION_MODE_UNAVAILABLE, response.status);
     }
-    sendJson(res, 200, { mode });
+    return jsonResult(200, { mode });
   } catch {
-    sendUnavailable(res, TOOL_PERMISSION_MODE_UNAVAILABLE);
+    return sendUnavailable(TOOL_PERMISSION_MODE_UNAVAILABLE);
   }
 }
 
 async function handleToolPermissionModeUpdate(
-  req: IncomingMessage,
+  req: HostApiRequest,
   ctx: OpenClawApiContext,
-  res: ServerResponse,
-): Promise<void> {
+): Promise<HostApiRouteResult> {
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendInvalidToolPermissionMode(res);
-    return;
+    return sendInvalidToolPermissionMode();
   }
   const mode = readToolPermissionModeInput(body);
   if (!mode) {
-    sendInvalidToolPermissionMode(res);
-    return;
+    return sendInvalidToolPermissionMode();
   }
 
   try {
     const response = await ctx.runtimeHostTransports.openClawPlatformTransport.setToolPermissionMode({ mode });
     if (response.status === 400) {
-      sendInvalidToolPermissionMode(res);
-      return;
+      return sendInvalidToolPermissionMode();
     }
     const result = response.status === 200 ? readToolPermissionModeUpdate(response.body) : null;
     if (!result) {
-      sendTransportFailure(res, TOOL_PERMISSION_MODE_UNAVAILABLE, response.status);
-      return;
+      return sendTransportFailure(TOOL_PERMISSION_MODE_UNAVAILABLE, response.status);
     }
-    sendJson(res, 200, { mode: result.mode });
+    return jsonResult(200, { mode: result.mode });
   } catch {
-    sendUnavailable(res, TOOL_PERMISSION_MODE_UNAVAILABLE);
+    return sendUnavailable(TOOL_PERMISSION_MODE_UNAVAILABLE);
   }
 }
 
-async function handleTemplateCatalog(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
+async function handleTemplateCatalog(ctx: OpenClawApiContext): Promise<HostApiRouteResult> {
   try {
     const response = await ctx.runtimeHostTransports.openClawPlatformTransport.subagentTemplateCatalog();
     const catalog = response.status === 200 ? readTemplateCatalog(response.body) : null;
     if (!catalog) {
-      sendUnavailable(res, SUBAGENT_TEMPLATES_UNAVAILABLE);
-      return;
+      return sendUnavailable(SUBAGENT_TEMPLATES_UNAVAILABLE);
     }
-    sendJson(res, 200, catalog);
+    return jsonResult(200, catalog);
   } catch {
-    sendUnavailable(res, SUBAGENT_TEMPLATES_UNAVAILABLE);
+    return sendUnavailable(SUBAGENT_TEMPLATES_UNAVAILABLE);
   }
 }
 
 async function handleTemplateDetail(
   ctx: OpenClawApiContext,
-  res: ServerResponse,
   templateId: string,
-): Promise<void> {
+): Promise<HostApiRouteResult> {
   try {
     const response = await ctx.runtimeHostTransports.openClawPlatformTransport.subagentTemplateDetail({ id: templateId });
     const detail = response.status === 200 ? readTemplateDetail(response.body, templateId) : null;
     if (!detail) {
-      sendUnavailable(res, SUBAGENT_TEMPLATE_UNAVAILABLE);
-      return;
+      return sendUnavailable(SUBAGENT_TEMPLATE_UNAVAILABLE);
     }
-    sendJson(res, 200, detail);
+    return jsonResult(200, detail);
   } catch {
-    sendUnavailable(res, SUBAGENT_TEMPLATE_UNAVAILABLE);
+    return sendUnavailable(SUBAGENT_TEMPLATE_UNAVAILABLE);
   }
 }
 
-async function handleRuntimeSnapshot(ctx: RuntimeHostApiContext, res: ServerResponse): Promise<void> {
+async function handleRuntimeSnapshot(ctx: RuntimeHostApiContext): Promise<HostApiRouteResult> {
   try {
     const snapshot = readRuntimeSnapshot(await ctx.runtimeHost.command({ name: 'host.runtime.snapshot' }));
     if (!snapshot) {
-      sendUnavailable(res, RUNTIME_SNAPSHOT_UNAVAILABLE);
-      return;
+      return sendUnavailable(RUNTIME_SNAPSHOT_UNAVAILABLE);
     }
-    sendJson(res, 200, snapshot);
+    return jsonResult(200, snapshot);
   } catch {
-    sendUnavailable(res, RUNTIME_SNAPSHOT_UNAVAILABLE);
+    return sendUnavailable(RUNTIME_SNAPSHOT_UNAVAILABLE);
   }
 }
 
-async function handleLifecycleStatus(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
+async function handleLifecycleStatus(ctx: OpenClawApiContext): Promise<HostApiRouteResult> {
   try {
     const response = await ctx.runtimeHostTransports.runtimeControlTransport.lifecycleStatus();
     const status = response.status === 200 ? readLifecycleStatus(response.body) : null;
     if (!status) {
-      sendUnavailable(res, LIFECYCLE_UNAVAILABLE);
-      return;
+      return sendUnavailable(LIFECYCLE_UNAVAILABLE);
     }
-    sendJson(res, 200, status);
+    return jsonResult(200, status);
   } catch {
-    sendUnavailable(res, LIFECYCLE_UNAVAILABLE);
+    return sendUnavailable(LIFECYCLE_UNAVAILABLE);
   }
 }
 
-async function handleLifecycleRestart(ctx: OpenClawApiContext, res: ServerResponse): Promise<void> {
+async function handleLifecycleRestart(ctx: OpenClawApiContext): Promise<HostApiRouteResult> {
   try {
     const response = await ctx.runtimeHostTransports.runtimeControlTransport.lifecycleRestart();
     if (response.status === 503) {
-      sendUnavailable(res, LIFECYCLE_RESTART_UNKNOWN);
-      return;
+      return sendUnavailable(LIFECYCLE_RESTART_UNKNOWN);
     }
     if (response.status !== 202) {
-      sendJson(res, 500, { success: false, error: LIFECYCLE_RESTART_FAILED });
-      return;
+      return jsonResult(500, { success: false, error: LIFECYCLE_RESTART_FAILED });
     }
-    sendJson(res, 202, response.body);
+    return jsonResult(202, response.body);
   } catch (error) {
     const unknown = error instanceof RuntimeHostControlError
       && error.delivery === 'unknown-delivery';
-    sendJson(res, unknown ? 503 : 500, {
+    return jsonResult(unknown ? 503 : 500, {
       success: false,
       error: unknown ? LIFECYCLE_RESTART_UNKNOWN : LIFECYCLE_RESTART_FAILED,
     });
@@ -788,19 +750,19 @@ function readSubagentTemplateId(pathname: string): string | null | undefined {
   return isTemplateId(id) ? id : null;
 }
 
-function sendUnavailable(res: ServerResponse, error: string): void {
-  sendJson(res, 503, { success: false, error });
+function sendUnavailable(error: string): HostApiRouteResult {
+  return jsonResult(503, { success: false, error });
 }
 
-function sendTransportFailure(res: ServerResponse, unavailable: string, status: number): void {
-  sendJson(res, status === 400 ? 400 : status === 500 ? 500 : 503, {
+function sendTransportFailure(unavailable: string, status: number): HostApiRouteResult {
+  return jsonResult(status === 400 ? 400 : status === 500 ? 500 : 503, {
     success: false,
     error: unavailable,
   });
 }
 
-function sendInvalidToolPermissionMode(res: ServerResponse): void {
-  sendJson(res, 400, {
+function sendInvalidToolPermissionMode(): HostApiRouteResult {
+  return jsonResult(400, {
     success: false,
     error: 'permission mode must be "default" or "fullAccess"',
   });

@@ -7,7 +7,7 @@ const hoisted = vi.hoisted(() => ({
   awaitProviderCall: vi.fn(),
 }));
 
-vi.mock('../../electron/main/ipc/provider-private-auth', () => ({
+vi.mock('../../electron/main/providers/private-auth', () => ({
   storeProviderPrivateAccount: (...args: unknown[]) => hoisted.storeProviderPrivateAccountMock(...args),
   deleteProviderPrivateAccount: (...args: unknown[]) => hoisted.deleteProviderPrivateAccountMock(...args),
 }));
@@ -59,16 +59,25 @@ describe('cloud provider sync', () => {
     vi.clearAllMocks();
     hoisted.storeProviderPrivateAccountMock.mockResolvedValue({ status: 'stored' });
     hoisted.deleteProviderPrivateAccountMock.mockResolvedValue({ status: 'deleted' });
-    hoisted.awaitProviderCall.mockResolvedValue({
-      command: 'providerModels.replace',
+    hoisted.awaitProviderCall.mockImplementation(async (receipt: { callId: string }, command: string) => ({
+      callId: receipt.callId,
+      module: 'provider',
+      command,
       status: 'succeeded',
-      detail: {
+      start: 1,
+      end: 2,
+      revision: 3,
+      detail: command === 'providerModels.discover' ? {
+        kind: 'discoverModels', phase: 'terminal', outcome: 'discovered', count: 1,
+        acceptedCount: null, persisted: null, commit: null,
+        accountId: 'matcha-cloud', accountRevision: null, diagnostic: null, native: null,
+      } : {
         kind: 'replaceModels', phase: 'terminal', outcome: 'stored', count: null,
         acceptedCount: null, persisted: 'confirmed', commit: 'committed',
         accountId: 'matcha-cloud', accountRevision: null, diagnostic: null,
         native: { changed: true, applied: 'confirmed', observed: 'matches', reports: [] },
       },
-    });
+    }));
   });
 
   it('stores the cloud gateway account and replaces discovered models', async () => {
@@ -77,9 +86,10 @@ describe('cloud provider sync', () => {
       execute: vi.fn().mockResolvedValue({ status: 404, body: { success: false, error: 'Provider account was not found' } }),
     };
     const providerModelsTransport = {
-      discover: vi.fn().mockResolvedValue({
+      discover: vi.fn().mockResolvedValue({ status: 202, body: { callId: 'b'.repeat(32), accepted: true } }),
+      readDiscoveryResult: vi.fn().mockResolvedValue({
         status: 200,
-        body: { models: [{ modelId: 'gpt-5.6', capabilities: ['chat'] }] },
+        body: { callId: 'b'.repeat(32), accountId: 'matcha-cloud', models: [{ modelId: 'gpt-5.6', capabilities: ['chat'] }] },
       }),
       execute: vi.fn().mockResolvedValue({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } }),
     };
@@ -94,7 +104,7 @@ describe('cloud provider sync', () => {
 
     expect(fetchClientBootstrap).toHaveBeenCalledWith('cloud-token');
     expect(hoisted.storeProviderPrivateAccountMock).toHaveBeenCalledWith(
-      { transport: providerAccountsTransport, awaitProviderCall: hoisted.awaitProviderCall },
+      { transport: providerAccountsTransport, awaitProviderCall: hoisted.awaitProviderCall, assertCurrent: expect.any(Function) },
       {
         id: 'matcha-cloud',
         provider: 'custom',
@@ -108,11 +118,18 @@ describe('cloud provider sync', () => {
       },
       'sk-live',
     );
-    expect(hoisted.awaitProviderCall).toHaveBeenCalledWith(
+    expect(hoisted.awaitProviderCall).toHaveBeenNthCalledWith(
+      1,
+      { callId: 'b'.repeat(32), accepted: true },
+      'providerModels.discover',
+    );
+    expect(hoisted.awaitProviderCall).toHaveBeenNthCalledWith(
+      2,
       { callId: 'a'.repeat(32), accepted: true },
       'providerModels.replace',
     );
     expect(providerModelsTransport.discover).toHaveBeenCalledWith('matcha-cloud');
+    expect(providerModelsTransport.readDiscoveryResult).toHaveBeenCalledWith('b'.repeat(32), 'matcha-cloud');
     expect(providerModelsTransport.execute).toHaveBeenCalledWith({
       id: 'provider.models',
       operationId: 'providerModels.replace',
@@ -151,7 +168,11 @@ describe('cloud provider sync', () => {
       }),
     };
     const providerModelsTransport = {
-      discover: vi.fn().mockResolvedValue({ status: 200, body: { models: [{ modelId: 'gpt-5.6', capabilities: ['chat'] }] } }),
+      discover: vi.fn().mockResolvedValue({ status: 202, body: { callId: 'b'.repeat(32), accepted: true } }),
+      readDiscoveryResult: vi.fn().mockResolvedValue({
+        status: 200,
+        body: { callId: 'b'.repeat(32), accountId: 'matcha-cloud', models: [{ modelId: 'gpt-5.6', capabilities: ['chat'] }] },
+      }),
       execute: vi.fn().mockResolvedValue({ status: 202, body: { callId: 'a'.repeat(32), accepted: true } }),
     };
     const { createCloudProviderSync } = await import('../../electron/main/cloud-account/provider-sync');
@@ -164,7 +185,7 @@ describe('cloud provider sync', () => {
     }).reconcile(session);
 
     expect(hoisted.storeProviderPrivateAccountMock).toHaveBeenCalledWith(
-      { transport: providerAccountsTransport, awaitProviderCall: hoisted.awaitProviderCall },
+      { transport: providerAccountsTransport, awaitProviderCall: hoisted.awaitProviderCall, assertCurrent: expect.any(Function) },
       expect.objectContaining({ endpoint: 'https://gateway.example.com/v2', revision: 4 }),
       'sk-live',
     );
@@ -196,11 +217,11 @@ describe('cloud provider sync', () => {
       fetchClientBootstrap: vi.fn(),
       providerAccountsTransport: providerAccountsTransport as never,
       awaitProviderCall: hoisted.awaitProviderCall,
-      providerModelsTransport: { discover: vi.fn(), execute: vi.fn() } as never,
+      providerModelsTransport: { discover: vi.fn(), readDiscoveryResult: vi.fn(), execute: vi.fn() } as never,
     }).reconcile(null);
 
     expect(hoisted.deleteProviderPrivateAccountMock).toHaveBeenCalledWith(
-      { transport: providerAccountsTransport, awaitProviderCall: hoisted.awaitProviderCall },
+      { transport: providerAccountsTransport, awaitProviderCall: hoisted.awaitProviderCall, assertCurrent: expect.any(Function) },
       'matcha-cloud',
       3,
     );

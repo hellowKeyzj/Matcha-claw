@@ -1,49 +1,43 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import type { ClawHubSkillInstallTransport } from '../../main/runtime-host-delivery/transport/skills/clawhub-install';
 import type { ClawHubSkillSearchTransport } from '../../main/runtime-host-delivery/transport/skills/clawhub-search';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 const SEARCH_INVALID = { success: false, error: 'ClawHub search request is invalid' } as const;
 const SEARCH_UNAVAILABLE = { success: false, error: 'ClawHub search is unavailable' } as const;
 
 export async function handleClawHubSkillRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   installTransport: ClawHubSkillInstallTransport,
   searchTransport: ClawHubSkillSearchTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/clawhub/search' && req.method === 'POST') {
     let request: unknown;
     try {
-      request = await parseJsonBody(req);
+      request = await req.readJson();
     } catch {
-      sendJson(res, 400, SEARCH_INVALID);
-      return true;
+      return jsonResult(400, SEARCH_INVALID);
     }
     try {
       const response = await searchTransport.search(request);
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, SEARCH_UNAVAILABLE);
+      return jsonResult(503, SEARCH_UNAVAILABLE);
     }
-    return true;
   }
 
-  if (url.pathname !== '/api/clawhub/skills/install' || req.method !== 'POST') return false;
+  if (url.pathname !== '/api/clawhub/skills/install' || req.method !== 'POST') return undefined;
 
   let request: unknown;
   try {
-    request = await parseJsonBody(req);
+    request = await req.readJson();
   } catch {
-    sendJson(res, 400, { outcome: 'rejected', slug: 'invalid' });
-    return true;
+    return jsonResult(400, { outcome: 'rejected', slug: 'invalid' });
   }
   try {
     const response = await installTransport.install(request);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, { outcome: 'unknown', slug: 'invalid' });
+    return jsonResult(503, { outcome: 'unknown', slug: 'invalid' });
   }
-  return true;
 }

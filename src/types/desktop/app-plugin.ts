@@ -1,4 +1,24 @@
-export type AppPluginKind = 'reader' | 'connector';
+export type AppPluginKind = 'reader' | 'connector' | 'application';
+
+export interface AppApplicationManifest {
+  readonly id: string;
+  readonly name: string;
+  readonly entry: string;
+  readonly placement?: 'page' | 'chat-panel' | 'both';
+  readonly imageEditor?: {
+    readonly label: string;
+    readonly tool: string;
+    readonly translations?: Readonly<Record<string, string>>;
+  };
+}
+
+export interface AppToolManifest {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Readonly<Record<string, unknown>>;
+  readonly outputSchema?: Readonly<Record<string, unknown>>;
+  readonly _meta?: Readonly<Record<string, unknown>>;
+}
 
 export interface AppReaderManifest {
   readonly id: string;
@@ -35,9 +55,13 @@ export interface AppPluginManifest {
   readonly name: string;
   readonly version: string;
   readonly description?: string;
+  readonly apiVersion?: 1;
+  readonly main?: string;
   readonly contributes: {
     readonly readers?: readonly AppReaderManifest[];
     readonly connectors?: readonly AppConnectorManifest[];
+    readonly applications?: readonly AppApplicationManifest[];
+    readonly tools?: readonly AppToolManifest[];
   };
 }
 
@@ -81,5 +105,9 @@ export function appConnectorSourceId(packageId: string, connectorId: string): st
 }
 
 export function appPluginHasKind(manifest: AppPluginManifest, kind: AppPluginKind): boolean {
-  return kind === 'reader' ? !!manifest.contributes.readers?.length : !!manifest.contributes.connectors?.length;
+  switch (kind) {
+    case 'reader': return !!manifest.contributes.readers?.length;
+    case 'connector': return !!manifest.contributes.connectors?.length;
+    case 'application': return !!manifest.main || !!manifest.contributes.applications?.length;
+  }
 }

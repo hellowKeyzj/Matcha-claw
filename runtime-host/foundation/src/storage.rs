@@ -1,5 +1,11 @@
 use std::{fmt, path::Path};
 
+#[cfg(windows)]
+use std::os::windows::io::BorrowedHandle;
+
+#[cfg(windows)]
+pub use platform::PrivateSecurityDescriptor;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrivateMode {
     Directory,
@@ -26,12 +32,32 @@ pub fn set_private_mode(path: &Path, mode: PrivateMode) -> Result<(), PrivateSto
 }
 
 #[cfg(windows)]
+pub fn set_private_mode_handle(
+    handle: BorrowedHandle<'_>,
+    mode: PrivateMode,
+) -> Result<(), PrivateStorageError> {
+    platform::set_private_mode_handle(handle, mode)
+}
+
+#[cfg(windows)]
+pub fn verify_private_mode_handle(
+    handle: BorrowedHandle<'_>,
+    mode: PrivateMode,
+) -> Result<(), PrivateStorageError> {
+    platform::verify_private_mode_handle(handle, mode)
+}
+
+#[cfg(windows)]
 mod platform {
     use std::{
         ffi::{OsStr, c_void},
         fs, io,
-        mem::size_of,
-        os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle},
+        mem::{offset_of, size_of},
+        os::windows::{
+            ffi::OsStrExt,
+            fs::OpenOptionsExt,
+            io::{AsHandle, AsRawHandle, BorrowedHandle},
+        },
         path::{Path, PathBuf},
         ptr::{addr_of, null_mut},
     };
@@ -81,10 +107,10 @@ mod platform {
         }
     }
 
-    struct SecurityDescriptor(S::PSECURITY_DESCRIPTOR);
+    pub struct PrivateSecurityDescriptor(S::PSECURITY_DESCRIPTOR);
 
-    impl SecurityDescriptor {
-        fn owner_only(mode: PrivateMode) -> Result<Self, PrivateStorageError> {
+    impl PrivateSecurityDescriptor {
+        pub fn owner_only(mode: PrivateMode) -> Result<Self, PrivateStorageError> {
             let sddl = match mode {
                 PrivateMode::Directory => DIRECTORY_SDDL,
                 PrivateMode::File => FILE_SDDL,
@@ -116,7 +142,7 @@ mod platform {
             Ok(Self(descriptor))
         }
 
-        fn attributes(&self) -> S::SECURITY_ATTRIBUTES {
+        pub fn attributes(&self) -> S::SECURITY_ATTRIBUTES {
             S::SECURITY_ATTRIBUTES {
                 nLength: size_of::<S::SECURITY_ATTRIBUTES>() as u32,
                 lpSecurityDescriptor: self.0,
@@ -148,7 +174,7 @@ mod platform {
         }
     }
 
-    impl Drop for SecurityDescriptor {
+    impl Drop for PrivateSecurityDescriptor {
         fn drop(&mut self) {
             // SAFETY: The descriptor is allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW or GetSecurityInfo.
             unsafe { F::LocalFree(self.0) };
@@ -163,7 +189,9 @@ mod platform {
                 None,
             ));
         }
-        provision_components(path)?;
+        if provision_components(path)? {
+            return Ok(());
+        }
         set_private_mode(path, PrivateMode::Directory)
     }
 
@@ -171,13 +199,21 @@ mod platform {
         path: &Path,
         mode: PrivateMode,
     ) -> Result<(), PrivateStorageError> {
-        let target = open_target(path, mode, FS::WRITE_DAC)?;
-        let handle = target.as_raw_handle() as F::HANDLE;
-        ensure_current_user_owns_target(handle)?;
-        let descriptor = SecurityDescriptor::owner_only(mode)?;
+        let target = open_target(path, FS::WRITE_DAC)?;
+        set_private_mode_handle(target.as_handle(), mode)
+    }
+
+    pub(super) fn set_private_mode_handle(
+        handle: BorrowedHandle<'_>,
+        mode: PrivateMode,
+    ) -> Result<(), PrivateStorageError> {
+        if target_private_mode_matches(handle, mode)? && mode == PrivateMode::File {
+            return Ok(());
+        }
+        let descriptor = PrivateSecurityDescriptor::owner_only(mode)?;
         let status = unsafe {
             A::SetSecurityInfo(
-                handle,
+                handle.as_raw_handle() as F::HANDLE,
                 A::SE_FILE_OBJECT,
                 S::PROTECTED_DACL_SECURITY_INFORMATION | S::DACL_SECURITY_INFORMATION,
                 null_mut(),
@@ -193,10 +229,10 @@ mod platform {
                 Some(io::Error::from_raw_os_error(status as i32)),
             ));
         }
-        verify_target_private_mode(handle, mode)
+        verify_private_mode_handle(handle, mode)
     }
 
-    fn provision_components(path: &Path) -> Result<(), PrivateStorageError> {
+    fn provision_components(path: &Path) -> Result<bool, PrivateStorageError> {
         let mut ancestors: Vec<PathBuf> = path
             .ancestors()
             .filter(|ancestor| !ancestor.as_os_str().is_empty())
@@ -204,8 +240,9 @@ mod platform {
             .collect();
         ancestors.reverse();
         let mut create_missing = false;
+        let mut target_created = false;
         for candidate in ancestors {
-            match fs::symlink_metadata(&candidate) {
+            let created = match fs::symlink_metadata(&candidate) {
                 Ok(metadata) => {
                     if metadata.file_type().is_symlink() || !metadata.is_dir() {
                         return Err(failure(
@@ -214,10 +251,11 @@ mod platform {
                             None,
                         ));
                     }
+                    false
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     create_missing = true;
-                    create_private_directory(&candidate)?;
+                    create_private_directory(&candidate)?
                 }
                 Err(error) => {
                     return Err(failure(
@@ -226,24 +264,27 @@ mod platform {
                         Some(error),
                     ));
                 }
-            }
+            };
             if create_missing {
                 verify_private_mode(&candidate, PrivateMode::Directory)?;
             }
+            if candidate == path {
+                target_created = created;
+            }
         }
-        Ok(())
+        Ok(target_created)
     }
 
-    fn create_private_directory(path: &Path) -> Result<(), PrivateStorageError> {
-        let descriptor = SecurityDescriptor::owner_only(PrivateMode::Directory)?;
+    fn create_private_directory(path: &Path) -> Result<bool, PrivateStorageError> {
+        let descriptor = PrivateSecurityDescriptor::owner_only(PrivateMode::Directory)?;
         let mut attributes = descriptor.attributes();
         let name = wide(path.as_os_str())?;
         if unsafe { FS::CreateDirectoryW(name.as_ptr(), &mut attributes) } != 0 {
-            return Ok(());
+            return Ok(true);
         }
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(F::ERROR_ALREADY_EXISTS as i32) {
-            validate_target(path, PrivateMode::Directory)
+            validate_target(path, PrivateMode::Directory).map(|()| false)
         } else {
             Err(failure(
                 "storage.private.create_directory",
@@ -254,25 +295,28 @@ mod platform {
     }
 
     fn validate_target(path: &Path, mode: PrivateMode) -> Result<(), PrivateStorageError> {
-        open_target(path, mode, 0).map(drop)
+        let target = open_target(path, 0)?;
+        validate_target_handle(target.as_handle(), mode)
     }
 
-    fn open_target(
-        path: &Path,
-        mode: PrivateMode,
-        additional_access: u32,
-    ) -> Result<fs::File, PrivateStorageError> {
+    fn open_target(path: &Path, additional_access: u32) -> Result<fs::File, PrivateStorageError> {
         // Keep validation and security changes on one object, without following or replacing it.
-        let target = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .access_mode(FS::FILE_READ_ATTRIBUTES | FS::READ_CONTROL | additional_access)
             .share_mode(FS::FILE_SHARE_READ | FS::FILE_SHARE_WRITE)
             .custom_flags(FS::FILE_FLAG_BACKUP_SEMANTICS | FS::FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
-            .map_err(|error| failure("storage.private.open", "OpenOptions::open", Some(error)))?;
+            .map_err(|error| failure("storage.private.open", "OpenOptions::open", Some(error)))
+    }
+
+    fn validate_target_handle(
+        handle: BorrowedHandle<'_>,
+        mode: PrivateMode,
+    ) -> Result<(), PrivateStorageError> {
         let mut attributes = FS::FILE_ATTRIBUTE_TAG_INFO::default();
         if unsafe {
             FS::GetFileInformationByHandleEx(
-                target.as_raw_handle() as F::HANDLE,
+                handle.as_raw_handle() as F::HANDLE,
                 FS::FileAttributeTagInfo,
                 (&mut attributes as *mut FS::FILE_ATTRIBUTE_TAG_INFO).cast(),
                 size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>() as u32,
@@ -300,67 +344,40 @@ mod platform {
                 None,
             ));
         }
-        Ok(target)
-    }
-
-    fn ensure_current_user_owns_target(handle: F::HANDLE) -> Result<(), PrivateStorageError> {
-        let mut owner = null_mut();
-        let mut descriptor = null_mut();
-        let status = unsafe {
-            A::GetSecurityInfo(
-                handle,
-                A::SE_FILE_OBJECT,
-                S::OWNER_SECURITY_INFORMATION,
-                &mut owner,
-                null_mut(),
-                null_mut(),
-                null_mut(),
-                &mut descriptor,
-            )
-        };
-        if status != F::ERROR_SUCCESS {
-            if !descriptor.is_null() {
-                // SAFETY: Descriptor ownership is returned by GetSecurityInfo.
-                unsafe { F::LocalFree(descriptor) };
-            }
-            return Err(failure(
-                "storage.private.owner",
-                "GetSecurityInfo",
-                Some(io::Error::from_raw_os_error(status as i32)),
-            ));
-        }
-        if descriptor.is_null() {
-            return Err(failure("storage.private.owner", "descriptor_null", None));
-        }
-        let _descriptor = SecurityDescriptor(descriptor);
-        if owner.is_null() {
-            return Err(failure("storage.private.owner", "owner_null", None));
-        }
-        if !owner_is_current_user(owner)? {
-            return Err(failure(
-                "storage.private.owner",
-                "EqualSid_current_user",
-                None,
-            ));
-        }
         Ok(())
     }
 
     fn verify_private_mode(path: &Path, mode: PrivateMode) -> Result<(), PrivateStorageError> {
-        let target = open_target(path, mode, 0)?;
-        verify_target_private_mode(target.as_raw_handle() as F::HANDLE, mode)
+        let target = open_target(path, 0)?;
+        verify_private_mode_handle(target.as_handle(), mode)
     }
 
-    fn verify_target_private_mode(
-        handle: F::HANDLE,
+    pub(super) fn verify_private_mode_handle(
+        handle: BorrowedHandle<'_>,
         mode: PrivateMode,
     ) -> Result<(), PrivateStorageError> {
+        if target_private_mode_matches(handle, mode)? {
+            Ok(())
+        } else {
+            Err(failure(
+                "storage.private.verify",
+                "private_mode_mismatch",
+                None,
+            ))
+        }
+    }
+
+    fn target_private_mode_matches(
+        handle: BorrowedHandle<'_>,
+        mode: PrivateMode,
+    ) -> Result<bool, PrivateStorageError> {
+        validate_target_handle(handle, mode)?;
         let mut owner = null_mut();
         let mut dacl = null_mut();
         let mut descriptor = null_mut();
         let status = unsafe {
             A::GetSecurityInfo(
-                handle,
+                handle.as_raw_handle() as F::HANDLE,
                 A::SE_FILE_OBJECT,
                 S::OWNER_SECURITY_INFORMATION | S::DACL_SECURITY_INFORMATION,
                 &mut owner,
@@ -384,9 +401,19 @@ mod platform {
         if descriptor.is_null() {
             return Err(failure("storage.private.verify", "descriptor_null", None));
         }
-        let descriptor = SecurityDescriptor(descriptor);
+        let descriptor = PrivateSecurityDescriptor(descriptor);
+        if unsafe { S::IsValidSecurityDescriptor(descriptor.0) } == 0 {
+            return Err(failure(
+                "storage.private.verify",
+                "descriptor_invalid",
+                None,
+            ));
+        }
         if owner.is_null() {
             return Err(failure("storage.private.verify", "owner_null", None));
+        }
+        if unsafe { S::IsValidSid(owner) } == 0 {
+            return Err(failure("storage.private.verify", "owner_sid_invalid", None));
         }
         if !owner_is_current_user(owner)? {
             return Err(failure(
@@ -397,9 +424,6 @@ mod platform {
         }
         let mut control = 0_u16;
         let mut revision = 0_u32;
-        if dacl.is_null() {
-            return Err(failure("storage.private.verify", "dacl_null", None));
-        }
         if unsafe { S::GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) }
             == 0
         {
@@ -409,15 +433,16 @@ mod platform {
                 Some(io::Error::last_os_error()),
             ));
         }
-        if control & S::SE_DACL_PROTECTED == 0 {
-            return Err(failure(
-                "storage.private.verify",
-                "dacl_not_protected",
-                None,
-            ));
+        if dacl.is_null() {
+            failure("storage.private.verify", "dacl_null", None);
+            return Ok(false);
+        }
+        if unsafe { S::IsValidAcl(dacl) } == 0 {
+            return Err(failure("storage.private.verify", "dacl_invalid", None));
         }
         if unsafe { (*dacl).AceCount } != 1 {
-            return Err(failure("storage.private.verify", "ace_count_not_one", None));
+            failure("storage.private.verify", "ace_count_not_one", None);
+            return Ok(false);
         }
 
         let mut raw_ace: *mut c_void = null_mut();
@@ -431,45 +456,58 @@ mod platform {
         if raw_ace.is_null() {
             return Err(failure("storage.private.verify", "ace_null", None));
         }
-        // SAFETY: GetAce returned the sole ACE from an OS-validated ACL.
-        let ace = unsafe { &*(raw_ace as *const S::ACCESS_ALLOWED_ACE) };
+        // SAFETY: GetAce returned an ACE header within the validated ACL.
+        let header = unsafe { &*raw_ace.cast::<S::ACE_HEADER>() };
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+            failure("storage.private.verify", "ace_type_not_allow", None);
+            return Ok(false);
+        }
+        let sid_offset = offset_of!(S::ACCESS_ALLOWED_ACE, SidStart);
+        if usize::from(header.AceSize) < sid_offset + 8 {
+            return Err(failure("storage.private.verify", "ace_size_invalid", None));
+        }
+        // SAFETY: The ACE type and minimum SID header size were checked before reading them.
+        let ace = unsafe { &*raw_ace.cast::<S::ACCESS_ALLOWED_ACE>() };
         let sid = addr_of!(ace.SidStart) as S::PSID;
-        if ace.Header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+        let sub_authority_count = unsafe { *sid.cast::<u8>().add(1) };
+        if usize::from(header.AceSize) != sid_offset + 8 + usize::from(sub_authority_count) * 4 {
             return Err(failure(
                 "storage.private.verify",
-                "ace_type_not_allow",
+                "ace_sid_size_invalid",
                 None,
             ));
+        }
+        if unsafe { S::IsValidSid(sid) } == 0 {
+            return Err(failure("storage.private.verify", "ace_sid_invalid", None));
+        }
+        if control & S::SE_DACL_PROTECTED == 0 {
+            failure("storage.private.verify", "dacl_not_protected", None);
+            return Ok(false);
         }
         if ace.Mask != FS::FILE_ALL_ACCESS {
-            return Err(failure(
-                "storage.private.verify",
-                "ace_mask_not_full_access",
-                None,
-            ));
+            failure("storage.private.verify", "ace_mask_not_full_access", None);
+            return Ok(false);
         }
         if !ace_inheritance_matches(u32::from(ace.Header.AceFlags), mode) {
-            return Err(failure(
-                "storage.private.verify",
-                "ace_inheritance_mismatch",
-                None,
-            ));
+            failure("storage.private.verify", "ace_inheritance_mismatch", None);
+            return Ok(false);
         }
         if unsafe { S::EqualSid(owner, sid) } == 0
             && unsafe { S::IsWellKnownSid(sid, S::WinCreatorOwnerRightsSid) } == 0
         {
-            return Err(failure("storage.private.verify", "ace_sid_not_owner", None));
+            failure("storage.private.verify", "ace_sid_not_owner", None);
+            return Ok(false);
         }
-        Ok(())
+        Ok(true)
     }
 
     fn ace_inheritance_matches(flags: S::ACE_FLAGS, mode: PrivateMode) -> bool {
         match mode {
-            PrivateMode::Directory => {
-                flags & (S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE)
-                    == (S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE)
+            PrivateMode::Directory => flags == S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE,
+            // Files cannot propagate ACEs; inheritance provenance does not change their access.
+            PrivateMode::File => {
+                flags & !(S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE | S::INHERITED_ACE) == 0
             }
-            PrivateMode::File => flags & (S::OBJECT_INHERIT_ACE | S::CONTAINER_INHERIT_ACE) == 0,
         }
     }
 

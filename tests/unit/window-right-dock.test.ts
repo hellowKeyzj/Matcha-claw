@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { saveWindowState, setWindowRightDockWidth } from '../../electron/main/window';
+import { saveWindowState, setWindowRightDockWidth } from '../../electron/main/desktop/window';
 
 const storeSetMock = vi.hoisted(() => vi.fn());
 const screenMock = vi.hoisted(() => ({

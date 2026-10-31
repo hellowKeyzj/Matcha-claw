@@ -1,10 +1,9 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import type { RuntimeControlTransportResponse, RuntimeLogsResponse } from '../../main/runtime-host-delivery/transport/runtime-control';
 import { logger } from '../../utils/logger';
 import { getOpenClawConfigDir } from '../../utils/paths';
 import type { RuntimeHostTransportContext } from '../context';
-import { sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiResponse, type HostApiRouteResult } from '../execution';
 
 const DEFAULT_TAIL_LINES = 100;
 const OPENCLAW_LOGS_UNAVAILABLE = 'OpenClaw logs are unavailable';
@@ -44,66 +43,58 @@ function getOpenClawLogDir(): string {
 }
 
 export async function handleMainLogRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (url.pathname === '/api/logs' && req.method === 'GET') {
-    sendJson(res, 200, { content: await logger.readLogFile(parseTailLines(url)) });
-    return true;
+    return jsonResult(200, { content: await logger.readLogFile(parseTailLines(url)) });
   }
 
   if (url.pathname === '/api/logs/dir' && req.method === 'GET') {
-    sendJson(res, 200, { dir: logger.getLogDir() });
-    return true;
+    return jsonResult(200, { dir: logger.getLogDir() });
   }
 
   if (url.pathname === '/api/logs/files' && req.method === 'GET') {
-    sendJson(res, 200, { files: await logger.listLogFiles() });
-    return true;
+    return jsonResult(200, { files: await logger.listLogFiles() });
   }
 
-  return false;
+  return undefined;
 }
 
 export async function handleLogRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: RuntimeHostTransportContext<'runtimeControlTransport'>,
-): Promise<boolean> {
-  if (await handleMainLogRoutes(req, res, url)) return true;
+): Promise<HostApiRouteResult> {
+  const mainResult = await handleMainLogRoutes(req, url);
+  if (mainResult !== undefined) return mainResult;
 
   if (url.pathname === '/api/openclaw/logs' && req.method === 'GET') {
-    await handleOpenClawLogs(res, url, ctx);
-    return true;
+    return handleOpenClawLogs(url, ctx);
   }
 
   if (url.pathname === '/api/openclaw/logs/dir' && req.method === 'GET') {
-    sendJson(res, 200, { dir: getOpenClawLogDir() });
-    return true;
+    return jsonResult(200, { dir: getOpenClawLogDir() });
   }
 
-  return false;
+  return undefined;
 }
 
 async function handleOpenClawLogs(
-  res: ServerResponse,
   url: URL,
   ctx: RuntimeHostTransportContext<'runtimeControlTransport'>,
-): Promise<void> {
+): Promise<HostApiResponse> {
   try {
     const cursor = parseCursor(url);
     const logs = decodeOpenClawLogs(await ctx.runtimeHostTransports.runtimeControlTransport.logs(
       cursor === undefined ? undefined : { cursor },
     ));
     if (!logs) {
-      sendOpenClawLogsUnavailable(res);
-      return;
+      return sendOpenClawLogsUnavailable();
     }
-    sendJson(res, 200, { content: renderOpenClawLogContent(logs, parseTailLines(url)) });
+    return jsonResult(200, { content: renderOpenClawLogContent(logs, parseTailLines(url)) });
   } catch {
-    sendOpenClawLogsUnavailable(res);
+    return sendOpenClawLogsUnavailable();
   }
 }
 
@@ -160,8 +151,8 @@ function renderOpenClawLogContent(snapshot: OpenClawLogSnapshot, tailLines: numb
   }).join('\n\n');
 }
 
-function sendOpenClawLogsUnavailable(res: ServerResponse): void {
-  sendJson(res, 503, { success: false, error: OPENCLAW_LOGS_UNAVAILABLE });
+function sendOpenClawLogsUnavailable(): HostApiResponse {
+  return jsonResult(503, { success: false, error: OPENCLAW_LOGS_UNAVAILABLE });
 }
 
 function isOpenClawLogSource(value: unknown): value is OpenClawLogSource {

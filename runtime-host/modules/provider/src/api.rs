@@ -71,7 +71,7 @@ impl ProviderHandle {
         self.send_command(ProviderCommand::ConfigurePrivateResolver { resolver, reply })
             .await
             .map_err(|_| ())?;
-        rx.await.map_err(|_| ())
+        rx.await.map_err(|_| ())?
     }
 
     pub async fn list_provider_accounts(&self) -> Result<ProviderAccountsDelivery, ()> {
@@ -429,6 +429,24 @@ impl ProviderHandle {
         request: ProviderTextGenerationRequest,
         cancellation: CancellationToken,
     ) -> Result<ProviderTextGenerationOutcome, ()> {
+        self.generate_text_with_selection(request, None, cancellation).await
+    }
+
+    pub(crate) async fn generate_selected_text_cancellable(
+        &self,
+        request: ProviderTextGenerationRequest,
+        selection_id: String,
+        cancellation: CancellationToken,
+    ) -> Result<ProviderTextGenerationOutcome, ()> {
+        self.generate_text_with_selection(request, Some(selection_id), cancellation).await
+    }
+
+    async fn generate_text_with_selection(
+        &self,
+        request: ProviderTextGenerationRequest,
+        selection_id: Option<String>,
+        cancellation: CancellationToken,
+    ) -> Result<ProviderTextGenerationOutcome, ()> {
         let call = ProviderCall::begin(
             self.recorder.as_ref(),
             ProviderCallKind::GenerateText,
@@ -456,6 +474,7 @@ impl ProviderHandle {
         self.send_query(ProviderQuery::GenerateText {
             call,
             request,
+            selection_id,
             cancellation,
             diagnostic_trace: platform::trace::enabled()
                 .then(current_session_trace)
@@ -503,6 +522,7 @@ impl ProviderHandle {
                 self.send_query(ProviderQuery::GenerateText {
                     call,
                     request,
+                    selection_id: None,
                     cancellation: cancellation.clone(),
                     diagnostic_trace: platform::trace::enabled().then(current_session_trace).flatten(),
                     stream: Some(stream),
@@ -530,6 +550,94 @@ impl ProviderHandle {
                     eprintln!("[provider] phase=provider-generation.reply-channel-failed streaming=true");
                     LlmClientError::StreamSink("provider owner unavailable".into())
                 })
+            } => outcome,
+        }
+    }
+
+    pub async fn generate_media_cancellable(
+        &self,
+        request: crate::media::Request,
+        cancellation: CancellationToken,
+    ) -> Result<crate::media::Output, crate::media::Failure> {
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(crate::media::Failure::Cancelled),
+            outcome = async {
+                let (reply, rx) = oneshot::channel();
+                self.send_query(ProviderQuery::GenerateMedia { request, cancellation: cancellation.clone(), reply })
+                    .await.map_err(|_| crate::media::Failure::OwnerUnavailable)?;
+                rx.await.map_err(|_| crate::media::Failure::OwnerUnavailable)?
+            } => outcome,
+        }
+    }
+
+    pub async fn list_media_models(
+        &self,
+        request: crate::media::ListRequest,
+    ) -> Result<crate::media::ListOutput, crate::media::Failure> {
+        let (reply, rx) = oneshot::channel();
+        self.send_query(ProviderQuery::ListMediaModels { request, reply })
+            .await
+            .map_err(|_| crate::media::Failure::OwnerUnavailable)?;
+        rx.await
+            .map_err(|_| crate::media::Failure::OwnerUnavailable)?
+    }
+
+    pub async fn submit_video_cancellable(
+        &self,
+        request: crate::media::Request,
+        cancellation: CancellationToken,
+    ) -> Result<crate::media::VideoTaskOutput, crate::media::Failure> {
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(crate::media::Failure::Cancelled),
+            outcome = async {
+                let (reply, rx) = oneshot::channel();
+                self.send_query(ProviderQuery::SubmitVideo { request, cancellation: cancellation.clone(), reply })
+                    .await.map_err(|_| crate::media::Failure::OwnerUnavailable)?;
+                rx.await.map_err(|_| crate::media::Failure::OwnerUnavailable)?
+            } => outcome,
+        }
+    }
+
+    pub async fn query_video_cancellable(
+        &self,
+        request: crate::media::VideoTaskRequest,
+        cancellation: CancellationToken,
+    ) -> Result<crate::media::VideoTaskOutput, crate::media::Failure> {
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(crate::media::Failure::Cancelled),
+            outcome = async {
+                let (reply, rx) = oneshot::channel();
+                self.send_query(ProviderQuery::QueryVideo { request, cancellation: cancellation.clone(), reply })
+                    .await.map_err(|_| crate::media::Failure::OwnerUnavailable)?;
+                rx.await.map_err(|_| crate::media::Failure::OwnerUnavailable)?
+            } => outcome,
+        }
+    }
+
+    pub async fn collect_video_cancellable(
+        &self,
+        request: crate::media::VideoTaskRequest,
+        cancellation: CancellationToken,
+    ) -> Result<crate::media::Output, crate::media::Failure> {
+        let cancellation = cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(crate::media::Failure::Cancelled),
+            outcome = async {
+                let (reply, rx) = oneshot::channel();
+                self.send_query(ProviderQuery::CollectVideo { request, cancellation: cancellation.clone(), reply })
+                    .await.map_err(|_| crate::media::Failure::OwnerUnavailable)?;
+                rx.await.map_err(|_| crate::media::Failure::OwnerUnavailable)?
             } => outcome,
         }
     }
@@ -755,7 +863,7 @@ pub(crate) struct ProviderAccountPrivateTransaction {
 pub(crate) enum ProviderCommand {
     ConfigurePrivateResolver {
         resolver: Resolver,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), ()>>,
     },
     ReplaceAccount {
         call: Option<ProviderCall>,
@@ -819,6 +927,30 @@ impl LlmStreamSink for ProviderStreamSink {
 }
 
 pub(crate) enum ProviderQuery {
+    ListMediaModels {
+        request: crate::media::ListRequest,
+        reply: oneshot::Sender<Result<crate::media::ListOutput, crate::media::Failure>>,
+    },
+    SubmitVideo {
+        request: crate::media::Request,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<crate::media::VideoTaskOutput, crate::media::Failure>>,
+    },
+    QueryVideo {
+        request: crate::media::VideoTaskRequest,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<crate::media::VideoTaskOutput, crate::media::Failure>>,
+    },
+    CollectVideo {
+        request: crate::media::VideoTaskRequest,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<crate::media::Output, crate::media::Failure>>,
+    },
+    GenerateMedia {
+        request: crate::media::Request,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<crate::media::Output, crate::media::Failure>>,
+    },
     PrepareGenerationBinding {
         request: crate::generation::BindingRequest,
         reply: oneshot::Sender<Result<crate::generation::Binding, crate::generation::Failure>>,
@@ -888,6 +1020,7 @@ pub(crate) enum ProviderQuery {
     GenerateText {
         call: Option<ProviderCall>,
         request: ProviderTextGenerationRequest,
+        selection_id: Option<String>,
         cancellation: CancellationToken,
         diagnostic_trace: Option<String>,
         stream: Option<mpsc::Sender<ProviderStreamMessage>>,
@@ -938,7 +1071,12 @@ impl ProviderQuery {
             | Self::GenerateBound { call, .. } => call.clone(),
             Self::PrepareGenerationBinding { .. }
             | Self::RestoreGenerationBinding { .. }
-            | Self::CountBoundInput { .. } => None,
+            | Self::CountBoundInput { .. }
+            | Self::GenerateMedia { .. }
+            | Self::ListMediaModels { .. }
+            | Self::SubmitVideo { .. }
+            | Self::QueryVideo { .. }
+            | Self::CollectVideo { .. } => None,
         }
     }
 
@@ -956,7 +1094,12 @@ impl ProviderQuery {
             | Self::GenerateBound { call, .. } => call.take(),
             Self::PrepareGenerationBinding { .. }
             | Self::RestoreGenerationBinding { .. }
-            | Self::CountBoundInput { .. } => None,
+            | Self::CountBoundInput { .. }
+            | Self::GenerateMedia { .. }
+            | Self::ListMediaModels { .. }
+            | Self::SubmitVideo { .. }
+            | Self::QueryVideo { .. }
+            | Self::CollectVideo { .. } => None,
         }
     }
 
@@ -972,7 +1115,12 @@ impl ProviderQuery {
             | Self::PrepareGenerationBinding { .. }
             | Self::RestoreGenerationBinding { .. }
             | Self::CountBoundInput { .. }
-            | Self::GenerateBound { .. } => QueryRoute::Direct,
+            | Self::GenerateBound { .. }
+            | Self::GenerateMedia { .. }
+            | Self::ListMediaModels { .. }
+            | Self::SubmitVideo { .. }
+            | Self::QueryVideo { .. }
+            | Self::CollectVideo { .. } => QueryRoute::Direct,
             Self::SelectSessionModel { .. } | Self::SelectMatchaSessionModelRuntime { .. } => {
                 QueryRoute::Global
             }

@@ -26,7 +26,6 @@ pub(crate) mod ports;
 mod provisioning;
 mod resources;
 mod search_lifecycle;
-mod session_catalog;
 mod session_ingress;
 #[allow(dead_code)]
 mod session_shutdown;
@@ -190,11 +189,11 @@ fn build_peer_runtime_stage(
         resources::fleet_private_root_path(&prepared.runtime_state_dir),
     )?;
     let provider_cascade = resources::provision_provider_cascade(&prepared.diagnostics_state_root)?;
-    let diagnostics = resources::provision_diagnostics_archive(
+    let diagnostics = resources::prepare_diagnostics_archive(
         &prepared.diagnostics_state_root,
         prepared.app_log_dir,
         prepared.runtime_observation.clone(),
-    )?;
+    );
     let organization = resources::provision_organization_owner(
         prepared.organization_store,
         prepared.diagnostics_state_root.as_path(),
@@ -408,7 +407,8 @@ fn wire_session_catalog(owners: &mut owners::RuntimeOwners, runtime: &PeerRuntim
     let lifecycle = runtime.matcha_runtime_driver.lifecycle_handle();
     let failures = owners.tasks.join_failures();
     let (mut task, _) = foundation::execution::OwnedTask::spawn(|cancellation| async move {
-        if let Err(error) = session_catalog::observe(client, changed, cancellation, lifecycle).await
+        if let Err(error) =
+            matcha_agent::session::observe_catalog(client, changed, cancellation, lifecycle).await
         {
             eprintln!("[matcha-session-catalog] observation stopped: {error}");
         }
@@ -562,7 +562,7 @@ impl Host {
                 .tasks
                 .module_scope_mut("search")
                 .expect("search module scope must exist"),
-            owners.search.clone(),
+            &owners.search,
             &admission,
             runtime.open_claw.owner().subscribe(),
             runtime.open_claw.control_readiness(),

@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'http';
 import type { SkillsManagementTransport } from '../../main/runtime-host-delivery/transport/skills/management';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const INVALID = { outcome: 'rejected' } as const;
@@ -9,38 +8,34 @@ const UNKNOWN = { outcome: 'unknown' } as const;
 type SkillsRouteOperation = Exclude<keyof SkillsManagementTransport, 'readStatus'> | 'status';
 
 export async function handleSkillsRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: SkillsManagementTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   const operation = routeOperation(url.pathname, req.method);
-  if (!operation) return false;
+  if (!operation) return undefined;
 
   if (operation === 'status') {
     try {
       const response = await transport.readStatus(readRuntimeScopeQuery(url.searchParams));
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     } catch {
-      sendJson(res, 503, UNKNOWN);
+      return jsonResult(503, UNKNOWN);
     }
-    return true;
   }
 
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   try {
     const response = await transport[operation](body);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNKNOWN);
+    return jsonResult(503, UNKNOWN);
   }
-  return true;
 }
 
 function routeOperation(pathname: string, method: string | undefined): SkillsRouteOperation | undefined {

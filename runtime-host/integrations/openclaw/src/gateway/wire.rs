@@ -689,6 +689,7 @@ pub struct GatewayError {
     pub(crate) mcp_app_view_expired: bool,
     pub(crate) browser_act_code: Option<&'static str>,
     pub(crate) board_error_reason: Option<&'static str>,
+    pub(crate) artifact_error_type: Option<&'static str>,
     pub(crate) code: String,
     pub(crate) message: String,
     #[cfg(test)]
@@ -1424,6 +1425,12 @@ impl ErrorWire {
             Some("unknown") => Some("unknown"),
             _ => None,
         };
+        let artifact_error_type = match details.as_ref().and_then(|details| details.get("type")).and_then(Value::as_str) {
+            Some("artifact_cursor_invalid") => Some("artifact_cursor_invalid"),
+            Some("artifact_not_found") => Some("artifact_not_found"),
+            Some("artifact_download_unsupported") => Some("artifact_download_unsupported"),
+            _ => None,
+        };
         #[cfg(not(test))]
         let _ = (details, retry_after_ms);
         GatewayError {
@@ -1433,6 +1440,7 @@ impl ErrorWire {
             mcp_app_view_expired,
             browser_act_code,
             board_error_reason,
+            artifact_error_type,
             code,
             message,
             #[cfg(test)]

@@ -115,6 +115,24 @@ impl WorkspaceOps for MatchaRuntimeDriver {
         })
     }
 
+    fn list_session_images<'a>(
+        &'a self,
+        _session_key: &'a str,
+        _agent_id: &'a str,
+        _cursor: Option<&'a str>,
+    ) -> WorkspaceFuture<'a, workspace_module::session_images::SessionImagePage, workspace_module::session_images::SessionImageFailure> {
+        Box::pin(async { Err(workspace_module::session_images::SessionImageFailure::Unsupported) })
+    }
+
+    fn read_session_image<'a>(
+        &'a self,
+        _session_key: &'a str,
+        _agent_id: &'a str,
+        _reference: &'a str,
+    ) -> WorkspaceFuture<'a, workspace_module::session_images::SessionImageData, workspace_module::session_images::SessionImageFailure> {
+        Box::pin(async { Err(workspace_module::session_images::SessionImageFailure::Unsupported) })
+    }
+
     fn workspace_runtime_ready(&self) -> bool {
         self.lifecycle_handle().snapshot().phase() == SupervisorPhase::Running
     }

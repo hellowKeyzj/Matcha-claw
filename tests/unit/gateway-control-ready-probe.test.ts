@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   GatewayControlReadinessBudgetError,
   waitForGatewayControlReady,
-} from '../../electron/main/gateway-control-ready-probe';
+} from '../../electron/main/runtime-host-delivery/gateway-control-ready-probe';
 
 const controlReadyBudgetMs = 60_000;
 

@@ -237,7 +237,8 @@ function isRuntimeScopeKind(value: unknown): value is RuntimeScope['kind'] {
     || value === 'session'
     || value === 'workspace'
     || value === 'team-run'
-    || value === 'provider-routing';
+    || value === 'provider-routing'
+    || value === 'provider-media';
 }
 
 function isCapabilitySupportLevel(value: unknown): boolean {

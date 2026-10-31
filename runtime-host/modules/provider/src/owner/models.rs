@@ -47,6 +47,7 @@ const GENERATION_IO_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) struct ProviderModelOwner {
     pub(super) private_resolver: Resolver,
     pub(super) llm_client: Option<LlmClient>,
+    pub(super) media_client: Option<reqwest::Client>,
 }
 
 impl ProviderModelOwner {
@@ -59,6 +60,13 @@ impl ProviderModelOwner {
                 .build()
                 .ok()
                 .map(LlmClient::new),
+            media_client: reqwest::Client::builder()
+                .connect_timeout(GENERATION_IO_TIMEOUT)
+                .read_timeout(Duration::from_secs(5 * 60))
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .build()
+                .ok(),
         }
     }
 
@@ -100,6 +108,7 @@ impl ProviderModelOwner {
         catalog: &ProviderModelCatalog,
         routing: Option<&ProviderRouting>,
         request: ProviderTextGenerationRequest,
+        selection_id: Option<&str>,
         cancellation: CancellationToken,
         provider_call_hash: Option<&str>,
         stream: Option<&mut dyn crate::llm_client::LlmStreamSink>,
@@ -118,20 +127,23 @@ impl ProviderModelOwner {
             ProviderRoutingCapability::Chat
         };
         session_trace("provider-generation.candidates-resolving", || trace(json!({
-            "selection": if request.model_ref.is_some() { "model_ref" } else { "routing" },
+            "selection": if selection_id.is_some() { "selection_id" } else if request.model_ref.is_some() { "model_ref" } else { "routing" },
             "capability": if capability == ProviderRoutingCapability::Chat { "Chat" } else { "ImageUnderstand" },
             "routingPresent": routing.is_some(),
             "routePresent": routing.is_some_and(|routing| routing.route(capability).is_some()),
             "accountCount": accounts.len(), "modelCount": catalog.models().len(),
         })));
-        let candidates = match self.resolve_text_generation_candidates(
-            runtime,
-            accounts,
-            catalog,
-            routing,
-            capability,
-            request.model_ref.as_deref(),
-        ) {
+        let resolved = match selection_id {
+            Some(selection_id) => Ok(catalog.selectable_for(provider_routing_model_capability(capability))
+                .into_iter().find(|model| model.selection_id() == selection_id)
+                .and_then(|model| accounts.iter()
+                    .find(|account| account.id() == model.account_id() && account.configuration().enabled())
+                    .map(|account| vec![(account, model, model.timeout_ms())]))),
+            None => self.resolve_text_generation_candidates(
+                runtime, accounts, catalog, routing, capability, request.model_ref.as_deref(),
+            ),
+        };
+        let candidates = match resolved {
             Ok(Some(candidates)) => candidates,
             Ok(None) => {
                 session_trace("provider-generation.candidates-failed", || trace(json!({ "reason": "no_candidate" })));
@@ -1255,7 +1267,7 @@ pub fn provider_execution_protocol(account: &ProviderAccount) -> Option<Provider
         .or_else(|| default_discovery_protocol(account.provider().as_str()))
 }
 
-pub(super) async fn provider_generation_credential(
+pub(crate) async fn provider_generation_credential(
     account: &ProviderAccount,
     private_resolver: &Resolver,
 ) -> Result<Option<LlmCredential>, ProviderTextGenerationUnavailableReason> {

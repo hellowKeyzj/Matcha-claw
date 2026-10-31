@@ -1,6 +1,5 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type { SecurityEmergencyTransport } from '../../main/runtime-host-delivery/transport/security/emergency';
-import { parseJsonBody, sendJson } from '../route-utils';
 
 const INVALID = {
   success: false,
@@ -12,31 +11,27 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleSecurityEmergencyRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: SecurityEmergencyTransport,
-): Promise<boolean> {
-  if (url.pathname !== '/api/security/emergency' || req.method !== 'POST') return false;
+): Promise<HostApiRouteResult> {
+  if (url.pathname !== '/api/security/emergency' || req.method !== 'POST') return undefined;
 
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   if (!isEmptyObject(body)) {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   try {
     const response = await transport.run();
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }
 
 function isEmptyObject(value: unknown): value is Record<string, never> {

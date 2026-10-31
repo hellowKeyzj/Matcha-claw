@@ -1,7 +1,8 @@
-import { constants, createPrivateKey, createPublicKey, generateKeyPairSync, privateDecrypt, randomUUID } from 'node:crypto';
+import { constants, createPrivateKey, createPublicKey, generateKeyPair, privateDecrypt, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { platform } from 'node:process';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import { app, safeStorage } from 'electron';
 import type { CloudPackageEnvelope } from './types';
 
@@ -9,6 +10,7 @@ const DEVICE_KEY_FILE = 'cloud-package-device-key.v1.json';
 const MAX_DEVICE_KEY_BYTES = 32 * 1024;
 const DEVICE_ENVELOPE_ALGORITHM = 'rsa-oaep-sha256';
 const AUTHORIZATION_KEY_BYTES = 32;
+const generateDeviceKeyPair = promisify(generateKeyPair);
 
 type CloudPackageDeviceKey = Readonly<{
   version: 1;
@@ -29,7 +31,7 @@ export async function getCloudPackageDevicePublicKey(): Promise<string> {
     deviceKeyInitialization = (async () => {
       const existing = await readCloudPackageDeviceKey();
       if (existing) return existing;
-      const generated = generateCloudPackageDeviceKey();
+      const generated = await generateCloudPackageDeviceKey();
       await writeCloudPackageDeviceKey(generated);
       return generated;
     })();
@@ -91,8 +93,8 @@ async function writeCloudPackageDeviceKey(key: CloudPackageDeviceKey): Promise<v
   await updateDeviceKeyFile(JSON.stringify({ version: 1, encrypted }));
 }
 
-function generateCloudPackageDeviceKey(): CloudPackageDeviceKey {
-  const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+async function generateCloudPackageDeviceKey(): Promise<CloudPackageDeviceKey> {
+  const { publicKey, privateKey } = await generateDeviceKeyPair('rsa', {
     modulusLength: 2048,
     publicKeyEncoding: { type: 'spki', format: 'pem' },
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },

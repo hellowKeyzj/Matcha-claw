@@ -1,6 +1,13 @@
 import { Interaction, notes } from '@serenity-js/core';
 import { WorldWorkspace } from '../abilities/world-workspace.ability.js';
 
+export const SelectAccessibleWorld = () => Interaction.where('#actor selects the sole World offered by the actual storage catalog, without guessing identifiers', async actor => {
+  await actor.abilityTo(WorldWorkspace).selectAccessibleWorld();
+});
+export const ReadCurrentWorldPrerequisites = () => Interaction.where('#actor reads current World business prerequisites without installing, granting or replaying commands', async actor => {
+  await notes().set('currentWorldPrerequisites', await actor.abilityTo(WorldWorkspace).inspectCurrentPrerequisites()).performAs(actor);
+});
+
 export const ReadWorkspaceCatalogs = (round: number) => Interaction.where(`#actor concurrently reads all six authorized directories to terminal cursors, round ${round} of 5`, async actor => {
   await notes().set('workspaceCatalogs', await actor.abilityTo(WorldWorkspace).readCatalogRound(round)).performAs(actor);
 });

@@ -30,7 +30,7 @@ describe('diagnostics export IPC', () => {
     getE2ESavePathMock.mockReset();
     getE2ESavePathMock.mockResolvedValue(null);
 
-    const { registerDiagnosticsExportHandler } = await import('../../electron/main/ipc/diagnostics-export-ipc');
+    const { registerDiagnosticsExportHandler } = await import('../../electron/api/ipc/diagnostics-export-ipc');
     registerDiagnosticsExportHandler({
       transport: { download: downloadMock },
       showSaveDialog: showSaveDialogMock,

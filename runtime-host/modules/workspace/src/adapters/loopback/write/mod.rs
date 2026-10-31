@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::{WorkspaceWriteFailure, WorkspaceWriteReceipt};
 
+pub(crate) mod binary;
 pub(crate) mod handler;
 
 const CAPABILITY_ID: &str = "workspace.file";

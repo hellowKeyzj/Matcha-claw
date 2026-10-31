@@ -237,6 +237,36 @@ impl workspace_module::WorkspaceBinding for Binding {
         })
     }
 
+    fn write_binary<'a>(
+        &'a self,
+        relative_path: &'a str,
+        content: &'a [u8],
+    ) -> WorkspaceFuture<'a, WorkspaceWriteReceipt, WorkspaceWriteFailure> {
+        Box::pin(async move {
+            if content.len() > 50 * 1024 * 1024 {
+                return Err(WorkspaceWriteFailure::TooLarge);
+            }
+            let path = relative_path.replace('\\', "/");
+            self.client
+                .write_file(&self.agent_id, &path, content)
+                .await
+                .map_err(|error| {
+                    if error.delivery() == Delivery::Unknown || error.code() == Some(-32006) {
+                        WorkspaceWriteFailure::OutcomeUnknown
+                    } else {
+                        match error.kind() {
+                            "invalid_params" | "workspace_link_forbidden" => {
+                                WorkspaceWriteFailure::InvalidPath
+                            }
+                            "workspace_not_file" => WorkspaceWriteFailure::NotFile,
+                            _ => WorkspaceWriteFailure::Unavailable,
+                        }
+                    }
+                })?;
+            Ok(WorkspaceWriteReceipt::new(name(&path), content.len() as u64))
+        })
+    }
+
     fn prepare_media<'a>(
         &'a self,
         _session_key: &'a str,

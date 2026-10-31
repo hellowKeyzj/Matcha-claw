@@ -1,12 +1,10 @@
-pub(crate) mod security;
-
 use std::{
     ffi::{OsStr, OsString},
     io,
     mem::{offset_of, size_of, size_of_val},
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
-        io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+        io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
     },
     path::{Component, Path, PathBuf, Prefix},
     ptr::{null, null_mut},
@@ -18,8 +16,10 @@ use windows_sys::{
     Win32::{Foundation as F, Storage::FileSystem as FS, System::IO::IO_STATUS_BLOCK},
 };
 
-use self::security::{SecurityDescriptor, ensure_owner_only, verify_owner_only};
 use super::{StateDirError, StateFileReplaceError};
+use foundation::storage::{
+    PrivateMode, PrivateSecurityDescriptor, set_private_mode_handle, verify_private_mode_handle,
+};
 
 static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
 
@@ -50,7 +50,8 @@ impl StateDirHandle {
             return Err(StateDirError);
         }
         let name = relative_name(name)?;
-        let security = SecurityDescriptor::owner_only()?;
+        let security =
+            PrivateSecurityDescriptor::owner_only(PrivateMode::File).map_err(|_| StateDirError)?;
         let mut object_name = unicode_string(&name);
         let attributes = OBJECT_ATTRIBUTES {
             Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
@@ -104,8 +105,8 @@ impl StateDirHandle {
         {
             return Err(StateDirError);
         }
-        ensure_owner_only(raw)?;
-        verify_owner_only(raw)?;
+        set_private_mode_handle(handle.as_handle(), PrivateMode::File)
+            .map_err(|_| StateDirError)?;
         let file = std::fs::File::from(handle);
         file.try_lock().map_err(|_| StateDirError)?;
         Ok(file)
@@ -116,6 +117,22 @@ impl StateDirHandle {
         &self,
         name: &str,
     ) -> Result<Option<std::fs::File>, StateDirError> {
+        self.open_regular_file_for_read(name, false)
+    }
+
+    /// Repairs a self-owned file's private ACL before reading from the same retained handle.
+    pub fn open_private_regular_file_readonly(
+        &self,
+        name: &str,
+    ) -> Result<Option<std::fs::File>, StateDirError> {
+        self.open_regular_file_for_read(name, true)
+    }
+
+    fn open_regular_file_for_read(
+        &self,
+        name: &str,
+        repair_permissions: bool,
+    ) -> Result<Option<std::fs::File>, StateDirError> {
         if name.contains(['\0', ':']) {
             return Err(StateDirError);
         }
@@ -123,7 +140,9 @@ impl StateDirHandle {
         let Some(handle) = open_relative(
             self.raw_handle(),
             &name,
-            FS::FILE_GENERIC_READ | FS::SYNCHRONIZE,
+            FS::FILE_GENERIC_READ
+                | FS::SYNCHRONIZE
+                | if repair_permissions { FS::WRITE_DAC } else { 0 },
             NFS::FILE_NON_DIRECTORY_FILE
                 | NFS::FILE_OPEN_REPARSE_POINT
                 | NFS::FILE_SYNCHRONOUS_IO_NONALERT,
@@ -148,8 +167,43 @@ impl StateDirHandle {
         {
             return Err(StateDirError);
         }
-        verify_owner_only(raw)?;
+        if repair_permissions {
+            set_private_mode_handle(handle.as_handle(), PrivateMode::File)
+        } else {
+            verify_private_mode_handle(handle.as_handle(), PrivateMode::File)
+        }
+        .map_err(|_| StateDirError)?;
         Ok(Some(std::fs::File::from(handle)))
+    }
+
+    /// Publishes a complete private file atomically without replacing an existing name.
+    pub fn create_new_regular_file_bounded(
+        &self,
+        name: &str,
+        contents: &[u8],
+        byte_limit: usize,
+    ) -> Result<bool, StateDirError> {
+        if contents.len() > byte_limit || name.contains(['\0', ':']) {
+            return Err(StateDirError);
+        }
+        let target = relative_name(name)?;
+        let mut temporary = create_temporary_file(self)?;
+        let result = (|| {
+            verify_private_mode_handle(temporary.as_handle(), PrivateMode::File)
+                .map_err(|_| StateDirError)?;
+            write_all(&temporary, contents)?;
+            if unsafe { FS::FlushFileBuffers(temporary.as_raw_handle() as F::HANDLE) } == 0 {
+                return Err(StateDirError);
+            }
+            rename_into_place(&temporary, self, &target, false)
+        })();
+        match result {
+            Ok(true) => Ok(true),
+            other => {
+                remove_file(&mut temporary)?;
+                other
+            }
+        }
     }
 
     pub fn replace_regular_file_bounded(
@@ -175,7 +229,7 @@ impl StateDirHandle {
         let mut temporary = create_temporary_file(self)?;
         if write_all(&temporary, contents).is_err()
             || unsafe { FS::FlushFileBuffers(temporary.as_raw_handle() as F::HANDLE) } == 0
-            || rename_into_place(&temporary, self, &target).is_err()
+            || rename_into_place(&temporary, self, &target, true).is_err()
         {
             return Err(StateFileReplaceError {
                 commit_unknown: false,
@@ -367,7 +421,8 @@ fn unicode_string(value: &[u16]) -> F::UNICODE_STRING {
 }
 
 fn create_temporary_file(state_dir: &StateDirHandle) -> Result<OwnedHandle, StateDirError> {
-    let security = security::SecurityDescriptor::owner_only()?;
+    let security =
+        PrivateSecurityDescriptor::owner_only(PrivateMode::File).map_err(|_| StateDirError)?;
     for _ in 0..128 {
         let sequence = NEXT_TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed);
         let name = relative_name(&format!(
@@ -444,7 +499,8 @@ fn rename_into_place(
     file: &OwnedHandle,
     state_dir: &StateDirHandle,
     target: &[u16],
-) -> Result<(), StateDirError> {
+    replace: bool,
+) -> Result<bool, StateDirError> {
     let header_length = offset_of!(NFS::FILE_RENAME_INFORMATION, FileName);
     let total_length = header_length
         .checked_add(size_of_val(target))
@@ -455,7 +511,7 @@ fn rename_into_place(
     // the trailing flexible array receives exactly target.len() UTF-16 code units.
     unsafe {
         let header = bytes.cast::<NFS::FILE_RENAME_INFORMATION>();
-        (*header).Anonymous.ReplaceIfExists = true;
+        (*header).Anonymous.ReplaceIfExists = replace;
         (*header).RootDirectory = state_dir.raw_handle();
         (*header).FileNameLength = size_of_val(target) as u32;
         bytes
@@ -464,7 +520,7 @@ fn rename_into_place(
             .copy_from_nonoverlapping(target.as_ptr(), target.len());
     }
     let mut status = IO_STATUS_BLOCK::default();
-    if unsafe {
+    let result = unsafe {
         NFS::NtSetInformationFile(
             file.as_raw_handle() as F::HANDLE,
             &mut status,
@@ -472,11 +528,13 @@ fn rename_into_place(
             total_length as u32,
             NFS::FileRenameInformation,
         )
-    } < 0
-    {
+    };
+    if !replace && result == F::STATUS_OBJECT_NAME_COLLISION {
+        Ok(false)
+    } else if result < 0 {
         Err(StateDirError)
     } else {
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -506,7 +564,8 @@ pub(super) fn provision(path: &Path) -> Result<(PathBuf, StateDirIdentity), Stat
     let parent = path.parent().ok_or(StateDirError)?;
     open_ancestor_components(parent)?;
 
-    let descriptor = SecurityDescriptor::owner_only()?;
+    let descriptor =
+        PrivateSecurityDescriptor::owner_only(PrivateMode::Directory).map_err(|_| StateDirError)?;
     let attributes = descriptor.attributes();
     let path_name = wide_path(path).map_err(|_| StateDirError)?;
     let created = if unsafe { FS::CreateDirectoryW(path_name.as_ptr(), &attributes) } != 0 {
@@ -521,11 +580,11 @@ pub(super) fn provision(path: &Path) -> Result<(PathBuf, StateDirIdentity), Stat
 
     let directory = open_directory(path)?;
     if created {
-        verify_owner_only(directory.as_raw_handle() as F::HANDLE)?;
+        verify_private_mode_handle(directory.as_handle(), PrivateMode::Directory)
     } else {
-        ensure_owner_only(directory.as_raw_handle() as F::HANDLE)?;
-        verify_owner_only(directory.as_raw_handle() as F::HANDLE)?;
+        set_private_mode_handle(directory.as_handle(), PrivateMode::Directory)
     }
+    .map_err(|_| StateDirError)?;
     let identity = identity(directory.as_raw_handle() as F::HANDLE)?;
     let path = canonical_path(directory.as_raw_handle() as F::HANDLE)?;
     Ok((path, identity))
@@ -535,7 +594,8 @@ pub(super) fn provision_private(path: &Path) -> Result<(PathBuf, StateDirIdentit
     validate_components(path)?;
     let mut root = PathBuf::new();
     let mut custody: Vec<OwnedHandle> = Vec::new();
-    let security = SecurityDescriptor::owner_only()?;
+    let security =
+        PrivateSecurityDescriptor::owner_only(PrivateMode::Directory).map_err(|_| StateDirError)?;
     let mut components = path.components().peekable();
     while let Some(component) = components.next() {
         let Component::Normal(name) = component else {
@@ -557,15 +617,18 @@ pub(super) fn provision_private(path: &Path) -> Result<(PathBuf, StateDirIdentit
         )?;
         let handle = directory.as_raw_handle() as F::HANDLE;
         if last {
-            if !created {
-                ensure_owner_only(handle)?;
+            if created {
+                verify_private_mode_handle(directory.as_handle(), PrivateMode::Directory)
+            } else {
+                set_private_mode_handle(directory.as_handle(), PrivateMode::Directory)
             }
-            verify_owner_only(handle)?;
+            .map_err(|_| StateDirError)?;
             let identity = identity(handle)?;
             return Ok((canonical_path(handle)?, identity));
         }
         if created {
-            verify_owner_only(handle)?;
+            verify_private_mode_handle(directory.as_handle(), PrivateMode::Directory)
+                .map_err(|_| StateDirError)?;
         }
         custody.push(directory);
     }
@@ -575,7 +638,7 @@ pub(super) fn provision_private(path: &Path) -> Result<(PathBuf, StateDirIdentit
 fn provision_directory_relative(
     parent: F::HANDLE,
     name: &OsStr,
-    security: &SecurityDescriptor,
+    security: &PrivateSecurityDescriptor,
     private: bool,
 ) -> Result<(OwnedHandle, bool), StateDirError> {
     let name: Vec<u16> = name.encode_wide().collect();
@@ -654,9 +717,11 @@ pub(super) fn open_existing(path: &Path) -> Result<(PathBuf, StateDirIdentity), 
         verify_attributes(directory.as_raw_handle() as F::HANDLE)?;
         custody.push(directory);
     }
-    let directory = custody.last().ok_or(StateDirError)?.as_raw_handle() as F::HANDLE;
-    verify_owner_only(directory)?;
-    Ok((canonical_path(directory)?, identity(directory)?))
+    let directory = custody.last().ok_or(StateDirError)?;
+    verify_private_mode_handle(directory.as_handle(), PrivateMode::Directory)
+        .map_err(|_| StateDirError)?;
+    let raw = directory.as_raw_handle() as F::HANDLE;
+    Ok((canonical_path(raw)?, identity(raw)?))
 }
 
 pub(super) fn open(
@@ -669,6 +734,8 @@ pub(super) fn open(
     if &identity(directory.as_raw_handle() as F::HANDLE)? != expected {
         return Err(StateDirError);
     }
+    verify_private_mode_handle(directory.as_handle(), PrivateMode::Directory)
+        .map_err(|_| StateDirError)?;
     Ok(StateDirHandle { _handle: directory })
 }
 

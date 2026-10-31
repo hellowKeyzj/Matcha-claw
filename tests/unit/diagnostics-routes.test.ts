@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { RuntimeStatusProjection } from '../../electron/main/runtime-host-delivery/status';
 
 const hoisted = vi.hoisted(() => ({
   sendJsonMock: vi.fn(),
@@ -40,6 +41,7 @@ describe('diagnostics routes', () => {
   function diagnosticsContextWithLogs(logs = vi.fn(), command = vi.fn()) {
     return {
       runtimeHost: { command },
+      runtimeStatus: new RuntimeStatusProjection({ command }),
       runtimeHostTransports: { diagnosticsArchiveTransport, runtimeControlTransport: { logs } },
     } as never;
   }

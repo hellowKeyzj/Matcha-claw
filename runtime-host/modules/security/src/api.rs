@@ -150,7 +150,8 @@ impl SecurityHandle {
         let (reply, reply_rx) = tokio::sync::oneshot::channel();
         self.owner.send_command(SecurityCommand::RecoverPending { reply }).await
             .map_err(|_| SecurityOwnerUnavailable)?;
-        reply_rx.await.map_err(|_| SecurityOwnerUnavailable)
+        reply_rx.await.map_err(|_| SecurityOwnerUnavailable)?
+            .map_err(|_| SecurityOwnerUnavailable)
     }
 
     pub(crate) async fn emergency(

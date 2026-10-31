@@ -22,13 +22,17 @@ export async function requestPluginDevelopment(kind: AppPluginKind, pluginId?: s
     throw new Error('开发会话未切换到请求的运行时和 Agent，未发送任务。');
   }
   const task = [
-    `开发并热安装一个应用${kind === 'reader' ? '文件阅读器' : 'MCP HTTP 连接器'}插件。`,
+    `开发并热安装一个${kind === 'reader' ? '文件阅读器' : kind === 'connector' ? 'MCP HTTP 连接器' : '网页应用'}插件。`,
     pluginId ? `只修改已授权的插件 ${pluginId}，不得更换插件 id。先用 list 的当前 digest 调 app_plugins_inspect({requestId,pluginId,digest}) 读取已安装 manifest/files，在原实现上修正并提升版本；不能靠猜测重写已有功能。` : '创建一个新插件，首次 build 会把本次授权绑定到该插件 id。',
     `本次用户开发授权 requestId=${development.requestId}，kind=${development.kind}，expiresAt=${development.expiresAt}。所有 build/install 必须携带此 requestId；不能创建或扩大授权。`,
     prompt?.trim() ? `用户要求：\n${prompt.trim()}` : '请先根据当前需要明确插件用途；要求不足时先询问用户，不凭空声称已完成。',
-    '先调用 app_plugins_sdk 获取当前 SDK，再调用 app_plugins_list 检查现有安装。按 SDK 写 manifest 和自包含 HTML/原生 JavaScript/CSS，connector 仅声明 MCP HTTP。',
-    '必须用 app_plugins_build({requestId,manifest,files}) 验证并打包，再用其返回的 packageBase64/digest 调 app_plugins_install。不得运行 npm、脚本、编译器或包代码，不使用任意文件、URL、命令代理代替这条链路。',
-    '安装后调用 app_plugins_status，区分 installed/enabled 与 reader 实际 mounted/self-reported ready/error；ready 也不能证明内容正确。无观测就如实说明并请用户在应用打开目标文件检查。安装失败可在同一授权 scope 修正，成功后授权已消费；不能继续任意改包，回退请通过应用管理界面。',
+    '先调用 app_plugins_sdk 获取当前 SDK，再调用 app_plugins_list 检查现有安装。reader 使用自包含 HTML/JavaScript/CSS，connector 仅声明 MCP HTTP；application 使用 main 与 apiVersion:1 注册后台工具，contributes.applications 声明自包含 HTML entry 和 placement，页面通过 window.matchaApp.call 的局部工具名调用，通过 subscribe 接收事件，不直接访问 Node、主 Renderer 或 Host token。',
+    kind === 'application'
+      ? '按 SDK 制作可安装包；网页入口首版需将资源与脚本自包含构建到 HTML。使用 app_plugins_build({requestId,manifest,files}) 验证并打包，再将返回的 packageBase64/digest 交给 app_plugins_install。build 不替你运行 npm 或编译器，不使用任意文件、URL、命令代理代替安装链。'
+      : '必须用 app_plugins_build({requestId,manifest,files}) 验证并打包，再用其返回的 packageBase64/digest 调 app_plugins_install。不得运行 npm、脚本、编译器或包代码，不使用任意文件、URL、命令代理代替这条链路。',
+    kind === 'application'
+      ? '安装后调用 app_plugins_status，区分 installed/enabled 与后台实际可调用、页面实际使用结果。请用户打开应用或聊天侧栏检查，不能以安装成功冒充功能正确；关闭页面不停止后台操作。安装失败可在同一授权 scope 修正，成功后授权已消费，回退请通过应用管理界面。'
+      : '安装后调用 app_plugins_status，区分 installed/enabled 与 reader 实际 mounted/self-reported ready/error；ready 也不能证明内容正确。无观测就如实说明并请用户在应用打开目标文件检查。安装失败可在同一授权 scope 修正，成功后授权已消费；不能继续任意改包，回退请通过应用管理界面。',
     '若固定工具未出现或返回授权/环境错误，报告具体阻塞，不用文字冒充打包、安装或运行成功。',
   ].join('\n\n');
   const result = await useChatStore.getState().sendMessage(task);

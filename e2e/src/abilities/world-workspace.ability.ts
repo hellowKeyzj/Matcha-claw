@@ -19,7 +19,11 @@ type CatalogEntry = {
 type WirePage<T> = { items: T[]; nextCursor: string | null };
 type TaskContract = Reference & { scope: string; goal: string; budget: Record<string, string | null> };
 type TaskSummary = { reference: Reference; scope: string; goal: string };
-type Description = { world: WorldRef; status: string; activeRelease: string; activeReleaseHead: unknown; incarnation: string };
+type Description = { world: WorldRef; status: string; activeRelease: string; activeReleaseHead: unknown; incarnation: string;
+  editingContext?: { activationLock: { id: string; nodes: { slot: string }[] }; scopes: { id: string; world: WorldRef }[] } };
+type CurrentPrerequisites = { world: WorldRef; status: string; activeRelease: string; activeReleaseHead: unknown; incarnation: string; activationLock: string;
+  scopes: string[]; slots: string[]; catalogs: Record<string, number>; catalogEntries: Record<string, unknown[]>; tasks: TaskSummary[];
+  packages: unknown[]; trustPolicy: unknown; unchanged: boolean };
 type Receipt = {
   accepted: { world: WorldRef; operationId: string; revision: string; incarnation: string };
   disclosure: { kind: 'full' | 'summary'; withheld?: string[] }; phase: string;
@@ -58,9 +62,27 @@ export class WorldWorkspace extends Ability {
   private taskPageIndex = 0;
   constructor(private readonly electron: UseElectron) { super(); }
 
+  async selectAccessibleWorld(): Promise<void> {
+    const list = this.electron.page.locator('main .world-workspace').getByRole('list', { name: /^(Accessible worlds|可访问的世界)$/, exact: true });
+    const buttons = list.getByRole('button');
+    await buttons.first().waitFor({ state: 'visible' });
+    if (await buttons.count() !== 1) throw new Error('World E2E requires one explicitly accessible World; no identity was guessed');
+    const selected = buttons.first();
+    const identity = await selected.locator(':scope > span').allTextContents();
+    if (identity.length !== 2 || identity.some(value => !value.trim())) throw new Error('Accessible World has no complete public identity');
+    this.currentWorld = { tenantId: identity[1].trim(), worldId: identity[0].trim() };
+    await selected.click();
+  }
+
+  private currentWorld?: WorldRef;
+  private get selectedWorld(): WorldRef {
+    if (!this.currentWorld) throw new Error('Select the actual accessible World before public readback');
+    return this.currentWorld;
+  }
+
   private async read(endpoint: 'query' | 'operation', kind: string, request: unknown) {
     const reply = await this.electron.fetchHostApi({ path: `/api/world/${endpoint}`, method: 'POST', timeoutMs: 10_000,
-      body: endpoint === 'query' ? { world, query: { kind, request } } : { kind, request } });
+      body: endpoint === 'query' ? { world: this.selectedWorld, query: { kind, request } } : { kind, request } });
     if (!reply.ok) throw new Error(`World ${kind} transport failed: ${reply.error.code}`);
     const body = reply.data.json as Envelope;
     if (!body || typeof body.success !== 'boolean') throw new Error(`World ${kind} returned no typed envelope`);
@@ -136,7 +158,33 @@ export class WorldWorkspace extends Ability {
     };
   }
 
+  async inspectCurrentPrerequisites(): Promise<CurrentPrerequisites> {
+    const before = await this.query<Description>('discover', { includeCapabilities: true });
+    requireEqual(before.world, this.selectedWorld, 'selected World');
+    if (before.status !== 'ready' || !before.activeRelease || !before.activeReleaseHead || !before.editingContext) {
+      throw new Error('Current World has no complete ready editing context');
+    }
+    const context = before.editingContext;
+    for (const scope of context.scopes) requireEqual(scope.world, this.selectedWorld, 'current scope World');
+    const [catalogs, packages, trustPolicy, tasks] = await Promise.all([
+      Promise.all(kinds.map(async kind => [kind, (await this.pages(kind, kind === 'definitions' ? { kind: null } : {})).flatMap(page => page.items)] as const)),
+      this.pages('packages', {}).then(pages => pages.flatMap(page => page.items)),
+      this.query('package_trust_policy', {}),
+      Promise.all(context.scopes.map(scope => this.pages<TaskSummary>('tasks', { scope: scope.id })))
+        .then(scopes => scopes.flat().flatMap(page => page.items)),
+    ]);
+    const after = await this.query<Description>('discover', { includeCapabilities: true });
+    requireEqual(after, before, 'current prerequisites unchanged by inspection');
+    return { world: before.world, status: before.status, activeRelease: before.activeRelease,
+      activeReleaseHead: before.activeReleaseHead, incarnation: before.incarnation,
+      activationLock: context.activationLock.id, scopes: context.scopes.map(scope => scope.id),
+      slots: context.activationLock.nodes.map(node => node.slot), catalogEntries: Object.fromEntries(catalogs),
+      catalogs: Object.fromEntries(catalogs.map(([kind, entries]) => [kind, entries.length])),
+      tasks, packages, trustPolicy, unchanged: true };
+  }
+
   async rememberOriginal() {
+    requireEqual(this.selectedWorld, world, 'historical Task and NoOp World; no cross-World replay');
     const input = JSON.parse(await readFile(resolve(repositoryRoot,
       '.scratch/world-implementation-2026-10-21/s06-task-noop-input-20261025-81b7c54e/task.ready.json'), 'utf8')) as TaskContract;
     const saved = JSON.parse(await readFile(resolve(repositoryRoot,

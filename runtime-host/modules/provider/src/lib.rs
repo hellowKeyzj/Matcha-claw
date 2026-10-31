@@ -6,6 +6,7 @@ pub mod capability;
 pub mod domain;
 pub mod generation;
 pub mod llm_client;
+pub mod media;
 mod owner;
 mod persistence;
 pub mod ports;

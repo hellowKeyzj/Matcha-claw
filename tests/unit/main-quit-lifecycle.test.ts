@@ -3,7 +3,7 @@ import {
   createQuitLifecycleState,
   markQuitCleanupCompleted,
   requestQuitLifecycleAction,
-} from '@electron/main/quit-lifecycle';
+} from '@electron/main/lifecycle/quit';
 
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
 
@@ -101,12 +101,12 @@ vi.mock('@electron/main/app-bootstrap', () => ({
   bootstrapMainApplication: (...args: unknown[]) => hoisted.bootstrapMainApplicationMock(...args),
 }));
 
-vi.mock('@electron/main/main-window', () => ({
+vi.mock('@electron/main/desktop/main-window', () => ({
   createMainWindow: vi.fn(),
   loadMainWindowContent: vi.fn(),
 }));
 
-vi.mock('@electron/main/process-instance-lock', () => ({
+vi.mock('@electron/main/lifecycle/instance-lock', () => ({
   acquireProcessInstanceFileLock: vi.fn(() => ({
     acquired: true,
     release: vi.fn(),

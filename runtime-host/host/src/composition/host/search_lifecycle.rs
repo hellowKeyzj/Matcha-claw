@@ -1,58 +1,73 @@
-use foundation::{execution::OwnedTask, lifecycle::ModuleScope};
+use foundation::{lifecycle::ModuleScope, process::supervision::SupervisorSnapshot};
+use search::ports::{SearchLifecycleFuture, SearchLifecycleSource};
 use tokio::sync::watch;
 
-use crate::composition::admission::{HostAdmission, HostPhase};
+use crate::composition::admission::{HostAdmission, HostPhase, HostState};
 
 pub(super) fn observe_runtime_changes(
     scope: &mut ModuleScope,
-    search: search::SearchModule,
+    search: &search::SearchModule,
     admission: &HostAdmission,
-    mut openclaw: watch::Receiver<foundation::process::supervision::SupervisorSnapshot>,
-    mut openclaw_readiness: watch::Receiver<u64>,
-    mut matcha: watch::Receiver<foundation::process::supervision::SupervisorSnapshot>,
+    openclaw: watch::Receiver<SupervisorSnapshot>,
+    openclaw_readiness: watch::Receiver<u64>,
+    matcha: watch::Receiver<SupervisorSnapshot>,
 ) {
-    let mut host = admission.subscribe();
-    let (mut task, _) = OwnedTask::spawn(|cancellation| async move {
-        loop {
-            match host.borrow_and_update().phase() {
-                HostPhase::Ready => break,
-                HostPhase::ShuttingDown | HostPhase::ShutDown => return,
-                _ => {}
-            }
-            tokio::select! {
-                _ = cancellation.cancelled() => return,
-                changed = host.changed() => if changed.is_err() { return; },
-            }
-        }
-        tokio::select! {
-            _ = cancellation.cancelled() => return,
-            result = search.start_saved() => {
-                if result.is_err() { eprintln!("[search] automatic startup failed"); }
-            }
-        }
-        loop {
-            let changed = tokio::select! {
-                _ = cancellation.cancelled() => return,
-                changed = host.changed() => {
-                    if changed.is_err() || matches!(host.borrow_and_update().phase(), HostPhase::ShuttingDown | HostPhase::ShutDown) { return; }
-                    continue;
+    search.observe_runtime_changes(
+        scope,
+        Box::new(HostLifecycleSource {
+            host: admission.subscribe(),
+            openclaw,
+            openclaw_readiness,
+            matcha,
+        }),
+    );
+}
+
+struct HostLifecycleSource {
+    host: watch::Receiver<HostState>,
+    openclaw: watch::Receiver<SupervisorSnapshot>,
+    openclaw_readiness: watch::Receiver<u64>,
+    matcha: watch::Receiver<SupervisorSnapshot>,
+}
+
+impl SearchLifecycleSource for HostLifecycleSource {
+    fn wait_ready(&mut self) -> SearchLifecycleFuture<'_> {
+        Box::pin(async move {
+            loop {
+                match self.host.borrow_and_update().phase() {
+                    HostPhase::Ready => return true,
+                    HostPhase::ShuttingDown | HostPhase::ShutDown => return false,
+                    _ => {}
                 }
-                changed = openclaw.changed() => changed,
-                changed = openclaw_readiness.changed() => changed,
-                changed = matcha.changed() => changed,
-            };
-            if changed.is_err() {
-                return;
-            }
-            tokio::select! {
-                _ = cancellation.cancelled() => return,
-                result = search.reconcile() => {
-                    if result.is_err() { eprintln!("[search] native integration reconciliation failed"); }
+                if self.host.changed().await.is_err() {
+                    return false;
                 }
             }
-        }
-    });
-    scope.register_event_subscription("search-runtime-lifecycle", move || async move {
-        let _ = task.cancel_and_join().await;
-    });
+        })
+    }
+
+    fn changed(&mut self) -> SearchLifecycleFuture<'_> {
+        Box::pin(async move {
+            loop {
+                if matches!(
+                    self.host.borrow().phase(),
+                    HostPhase::ShuttingDown | HostPhase::ShutDown
+                ) {
+                    return false;
+                }
+                let changed = tokio::select! {
+                    changed = self.host.changed() => {
+                        if changed.is_err() || matches!(self.host.borrow_and_update().phase(), HostPhase::ShuttingDown | HostPhase::ShutDown) {
+                            return false;
+                        }
+                        continue;
+                    }
+                    changed = self.openclaw.changed() => changed,
+                    changed = self.openclaw_readiness.changed() => changed,
+                    changed = self.matcha.changed() => changed,
+                };
+                return changed.is_ok();
+            }
+        })
+    }
 }

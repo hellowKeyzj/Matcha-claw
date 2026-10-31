@@ -1,10 +1,9 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import type {
   UsageHistoryEntry,
   UsageTransport,
   UsageTransportResponse,
 } from '../../main/runtime-host-delivery/transport/usage';
-import { sendJson } from '../route-utils';
 import { readRuntimeScopeQuery } from '../../main/runtime-host-delivery/transport/runtime-scope';
 
 const UNAVAILABLE = {
@@ -13,16 +12,15 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleRuntimeHostUsageRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: UsageTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   if (req.method !== 'GET') {
-    return false;
+    return undefined;
   }
   if (url.pathname !== '/api/runtime-host/usage/recent' && url.pathname !== '/api/runtime-host/usage/session-timeseries') {
-    return false;
+    return undefined;
   }
 
   const rawLimit = url.searchParams.get('limit');
@@ -36,14 +34,13 @@ export async function handleRuntimeHostUsageRoutes(
         scope: readRuntimeScopeQuery(url.searchParams),
       });
     if (response.status === 200 && isUsageEntries(response.body)) {
-      sendJson(res, 200, response.body.entries);
+      return jsonResult(200, response.body.entries);
     } else {
-      sendJson(res, response.status, response.body);
+      return jsonResult(response.status, response.body);
     }
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }
 
 function isUsageEntries(

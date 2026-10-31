@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../../electron/main/ipc/dialog-attachment-staging', () => ({
+vi.mock('../../electron/main/attachments/staging', () => ({
   consumeStagedAttachment: (...args: unknown[]) => consumeStagedAttachmentMock(...args),
   stageWorkspaceMediaAttachment: vi.fn(),
 }));

@@ -19,7 +19,7 @@ export interface SessionIdentity {
   readonly sessionKey: string;
 }
 
-export type RuntimeScope = AppScope | RuntimeInstanceScope | AgentScope | SessionScope | WorkspaceMediaSessionScope | WorkspaceScope | TeamRunScope | ProviderRoutingScope;
+export type RuntimeScope = AppScope | RuntimeInstanceScope | AgentScope | SessionScope | WorkspaceMediaSessionScope | WorkspaceScope | TeamRunScope | ProviderRoutingScope | ProviderMediaScope;
 export type RuntimeScopeKind = RuntimeScope['kind'];
 
 export interface AppScope {
@@ -64,6 +64,10 @@ export interface TeamRunScope {
 
 export interface ProviderRoutingScope {
   readonly kind: 'provider-routing';
+}
+
+export interface ProviderMediaScope {
+  readonly kind: 'provider-media';
 }
 
 export function nativeRuntimeEndpoint(input: Omit<NativeRuntimeEndpointRef, 'kind'>): NativeRuntimeEndpointRef {
@@ -183,6 +187,8 @@ export function buildCapabilityScopeKey(scope: RuntimeScope): string {
       });
     case 'provider-routing':
       return JSON.stringify({ type: 'runtime-scope', kind: 'provider-routing' });
+    case 'provider-media':
+      return JSON.stringify({ type: 'runtime-scope', kind: 'provider-media' });
   }
 }
 
@@ -279,6 +285,7 @@ export function validateRuntimeScope(input: unknown): string | null {
         ? null
         : 'RuntimeScope is invalid';
     case 'provider-routing':
+    case 'provider-media':
       return hasExactKeys(input, ['kind']) ? null : 'RuntimeScope is invalid';
     default:
       return 'RuntimeScope is invalid';
@@ -297,7 +304,8 @@ export function scopeContainsSessionIdentity(scope: RuntimeScope, identity: Sess
     case 'workspace':
     case 'team-run': return runtimeEndpointsEqual(scope.endpoint, identity.endpoint);
     case 'app':
-    case 'provider-routing': return false;
+    case 'provider-routing':
+    case 'provider-media': return false;
   }
 }
 

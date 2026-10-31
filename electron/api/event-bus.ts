@@ -39,6 +39,8 @@ export class HostEventBus {
       }
     }
 
+    if (this.clients.size === 0) return;
+
     const message = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
     for (const client of this.clients) {
       try {

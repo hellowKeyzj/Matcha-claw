@@ -30,7 +30,7 @@ describe('shell ipc', () => {
   });
 
   it('expands tilde paths before delegating shell:openPath', async () => {
-    const { registerShellHandlers } = await import('../../electron/main/ipc/shell-ipc');
+    const { registerShellHandlers } = await import('../../electron/api/ipc/shell-ipc');
     registerShellHandlers();
 
     const openPathHandler = registeredHandlers.get('shell:openPath');
@@ -42,7 +42,7 @@ describe('shell ipc', () => {
   });
 
   it('opens resource-relative paths from the bundled resources directory', async () => {
-    const { registerShellHandlers } = await import('../../electron/main/ipc/shell-ipc');
+    const { registerShellHandlers } = await import('../../electron/api/ipc/shell-ipc');
     registerShellHandlers();
 
     const openResourcePathHandler = registeredHandlers.get('shell:openResourcePath');
@@ -57,7 +57,7 @@ describe('shell ipc', () => {
   });
 
   it('rejects resource paths that escape the resources directory', async () => {
-    const { registerShellHandlers } = await import('../../electron/main/ipc/shell-ipc');
+    const { registerShellHandlers } = await import('../../electron/api/ipc/shell-ipc');
     registerShellHandlers();
 
     const openResourcePathHandler = registeredHandlers.get('shell:openResourcePath');

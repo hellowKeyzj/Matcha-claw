@@ -9,9 +9,9 @@ import {
   deleteProviderPrivateAccount,
   storeProviderPrivateAccount,
   type ProviderAccountIntent,
-} from '../ipc/provider-private-auth';
+} from '../providers/private-auth';
 import { decodeCallReceipt } from '../../../src/types/call-log/receipt';
-import type { createProviderCallObserver } from '../ipc/provider-call-observation';
+import type { createProviderCallObserver } from '../providers/private-auth';
 import { logger } from '../../utils/logger';
 
 const ACCOUNT_ID = 'matcha-cloud';
@@ -60,7 +60,9 @@ export function createCloudProviderSync(deps: SyncDependencies): CloudProviderSy
         assertCurrent();
         const bootstrap = session ? await fetchBootstrap(deps, session.accessToken, signals?.bootstrap) : null;
         assertCurrent();
-        active = await reconcileNow(currentDeps, session, bootstrap, active, assertCurrent);
+        const next = await reconcileNow(currentDeps, session, bootstrap, active, assertCurrent);
+        assertCurrent();
+        active = next;
       } catch {
         try { assertCurrent(); } catch { return; }
         logger.warn('Cloud provider sync failed');
@@ -174,8 +176,27 @@ async function replaceDiscoveredModels(deps: SyncDependencies, assertCurrent: ()
   assertCurrent();
   const discovery = await transport.discover(ACCOUNT_ID);
   assertCurrent();
-  if (discovery.status !== 200 || !isModelDiscovery(discovery.body)) {
+  if (discovery.status !== 202) {
     logger.warn(`Cloud provider model discovery failed: ${discovery.status}`);
+    return;
+  }
+  const receipt = decodeCallReceipt(discovery.body);
+  const discovered = await deps.awaitProviderCall(receipt, 'providerModels.discover');
+  assertCurrent();
+  if (discovered.callId !== receipt.callId || discovered.module !== 'provider'
+    || discovered.command !== 'providerModels.discover'
+    || discovered.detail.kind !== 'discoverModels' || discovered.detail.accountId !== ACCOUNT_ID) {
+    throw new Error('Cloud provider discovery call identity is invalid');
+  }
+  if (discovered.status !== 'succeeded' || discovered.detail.phase !== 'terminal'
+    || discovered.detail.outcome !== 'discovered' || discovered.detail.count === null) {
+    logger.warn('Cloud provider model discovery result was not confirmed');
+    return;
+  }
+  const result = await transport.readDiscoveryResult(receipt.callId, ACCOUNT_ID);
+  assertCurrent();
+  if (result.status !== 200 || !isModelDiscovery(result.body, receipt.callId, discovered.detail.count)) {
+    logger.warn(`Cloud provider model discovery result failed: ${result.status}`);
     return;
   }
   const replacement = await transport.execute({
@@ -183,13 +204,15 @@ async function replaceDiscoveredModels(deps: SyncDependencies, assertCurrent: ()
     operationId: 'providerModels.replace',
     scope: { kind: 'provider-model-catalog' },
     target: { kind: 'provider-models' },
-    input: { kind: 'replace', accountId: ACCOUNT_ID, models: discovery.body.models },
+    input: { kind: 'replace', accountId: ACCOUNT_ID, models: result.body.models },
   });
+  assertCurrent();
   if (replacement.status !== 202) {
     logger.warn(`Cloud provider model sync failed: ${replacement.status}`);
     return;
   }
   const call = await deps.awaitProviderCall(decodeCallReceipt(replacement.body), 'providerModels.replace');
+  assertCurrent();
   if (call.detail.kind !== 'replaceModels' || call.detail.accountId !== ACCOUNT_ID) {
     throw new Error('Cloud provider model call identity is invalid');
   }
@@ -252,8 +275,14 @@ function sameCloudProviderAccount(current: ProviderAccountIntent, next: Provider
     && current.authMode === next.authMode;
 }
 
-function isModelDiscovery(value: unknown): value is Readonly<{ models: readonly ModelDraft[] }> {
-  return isRecord(value) && Array.isArray(value.models) && value.models.every(isModelDraft);
+function isModelDiscovery(value: unknown, callId: string, count: number): value is Readonly<{ models: readonly ModelDraft[] }> {
+  return isRecord(value)
+    && Object.keys(value).length === 3
+    && value.callId === callId
+    && value.accountId === ACCOUNT_ID
+    && Array.isArray(value.models)
+    && value.models.length === count
+    && value.models.every(isModelDraft);
 }
 
 function isModelDraft(value: unknown): value is ModelDraft {

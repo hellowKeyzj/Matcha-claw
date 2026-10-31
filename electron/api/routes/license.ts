@@ -1,54 +1,44 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { HostApiContext } from '../context';
-import { parseJsonBody, sendJson } from '../route-utils';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 
 export async function handleLicenseRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   ctx: Pick<HostApiContext, 'licenseService'>,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   const pathname = url.pathname;
   if (!(req.method === 'GET' && (pathname === '/api/license/gate' || pathname === '/api/license/stored-key'))
     && !(req.method === 'POST' && (pathname === '/api/license/validate'
-      || pathname === '/api/license/revalidate' || pathname === '/api/license/clear'))) return false;
+      || pathname === '/api/license/revalidate' || pathname === '/api/license/clear'))) return undefined;
 
   let body: unknown;
   if (req.method === 'POST') {
     try {
-      body = await parseJsonBody<unknown>(req);
+      body = await req.readJson<unknown>();
     } catch {
-      sendJson(res, 400, { success: false, error: 'License request JSON is invalid' });
-      return true;
+      return jsonResult(400, { success: false, error: 'License request JSON is invalid' });
     }
   }
   if (pathname === '/api/license/validate'
     && (!body || typeof body !== 'object' || Array.isArray(body) || !('key' in body) || typeof body.key !== 'string')) {
-    sendJson(res, 400, { success: false, error: 'License key must be a string' });
-    return true;
+    return jsonResult(400, { success: false, error: 'License key must be a string' });
   }
 
   try {
     const service = ctx.licenseService;
     switch (pathname) {
       case '/api/license/gate':
-        sendJson(res, 200, await service.gate());
-        break;
+        return jsonResult(200, await service.gate());
       case '/api/license/stored-key':
-        sendJson(res, 200, await service.storedKey());
-        break;
+        return jsonResult(200, await service.storedKey());
       case '/api/license/validate':
-        sendJson(res, 200, await service.validate((body as { key: string }).key));
-        break;
+        return jsonResult(200, await service.validate((body as { key: string }).key));
       case '/api/license/revalidate':
-        sendJson(res, 200, await service.revalidate());
-        break;
+        return jsonResult(200, await service.revalidate());
       case '/api/license/clear':
-        sendJson(res, 200, await service.clear());
-        break;
+        return jsonResult(200, await service.clear());
     }
   } catch {
-    sendJson(res, 500, { success: false, error: 'License request failed. Please try again.' });
+    return jsonResult(500, { success: false, error: 'License request failed. Please try again.' });
   }
-  return true;
 }

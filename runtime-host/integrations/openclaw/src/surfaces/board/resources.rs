@@ -61,7 +61,7 @@ fn project_widget(
     {
         return Err(BoardFailure::Unknown);
     }
-    let resource_origin = match &claims.plugin_frame {
+    match &claims.plugin_frame {
         Some(plugin) => {
             if widget.content_kind != BoardWidgetContentKind::Plugin
                 || widget.content_owner != Some(BoardWidgetContentOwner::Registered)
@@ -82,15 +82,13 @@ fn project_widget(
             {
                 return Err(BoardFailure::Unknown);
             }
-            Some(scoped.origin().ascii_serialization())
         }
         None => {
             if widget.content_kind != BoardWidgetContentKind::Html {
                 return Err(BoardFailure::Unknown);
             }
-            None
         }
-    };
+    }
     let frame = trusted_url(gateway, frame_url)?;
     let path = format!(
         "/__openclaw__/board/{}/{}/index.html",
@@ -142,11 +140,7 @@ fn project_widget(
             _ => return Err(BoardFailure::Unknown),
         }
     }
-    validate_csp(
-        &csp.ok_or(BoardFailure::Unknown)?,
-        widget,
-        resource_origin.as_deref(),
-    )?;
+    validate_csp(&csp.ok_or(BoardFailure::Unknown)?, widget)?;
     widget.frame_url = Some(frame.into());
     widget.sandbox_url = Some(sandbox.into());
     widget.sandbox_origin = Some(sandbox_origin.origin().ascii_serialization());
@@ -154,19 +148,15 @@ fn project_widget(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct SandboxCsp {
     block_descendant_frames: bool,
     connect_domains: Option<Vec<String>>,
-    resource_domains: Option<Vec<String>>,
-    media_domains: Option<Vec<String>>,
+    frame_domains: Option<Vec<String>>,
+    base_uri_domains: Option<Vec<String>>,
 }
 
-fn validate_csp(
-    encoded: &str,
-    widget: &BoardWidget,
-    resource_origin: Option<&str>,
-) -> Result<(), BoardFailure> {
+fn validate_csp(encoded: &str, widget: &BoardWidget) -> Result<(), BoardFailure> {
     // Native limits decoded metadata to 5 KiB before constructing the HTTP header.
     if encoded.len() > 6_832 {
         return Err(BoardFailure::Unknown);
@@ -178,7 +168,7 @@ fn validate_csp(
         return Err(BoardFailure::Unknown);
     }
     let csp: SandboxCsp = serde_json::from_slice(&bytes).map_err(|_| BoardFailure::Unknown)?;
-    let expected_connect = if widget.grant_state == BoardGrantState::Granted {
+    let granted_connect = if widget.grant_state == BoardGrantState::Granted {
         widget
             .declared
             .as_ref()
@@ -190,32 +180,20 @@ fn validate_csp(
     } else {
         Vec::new()
     };
-    // Native widget CDNs and playback sources are not connect grants.
-    let mut expected_resources: Vec<String> = [
-        "https://cdnjs.cloudflare.com",
-        "https://cdn.jsdelivr.net",
-        "https://esm.sh",
-        "https://unpkg.com",
-        "https://fonts.googleapis.com",
-        "https://fonts.gstatic.com",
-        "https://fonts.bunny.net",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
-    let mut expected_media = vec!["https:".to_owned(), "blob:".to_owned()];
-    if let Some(origin) = resource_origin {
-        if !expected_resources.iter().any(|value| value == origin) {
-            expected_resources.push(origin.to_owned());
-        }
-        expected_media.push(origin.to_owned());
-    }
+    // Native HTTP CSP owns resource/media policy; only connect sources consume grants.
     if !csp.block_descendant_frames
-        || csp.connect_domains.unwrap_or_default() != expected_connect
-        || csp.resource_domains.unwrap_or_default() != expected_resources
-        || csp.media_domains.unwrap_or_default() != expected_media
+        || csp.frame_domains.is_some_and(|domains| !domains.is_empty())
+        || csp
+            .base_uri_domains
+            .is_some_and(|domains| !domains.is_empty())
     {
         return Err(BoardFailure::Unknown);
+    }
+    for domain in csp.connect_domains.unwrap_or_default() {
+        let domain = origin(&domain, true)?.origin().ascii_serialization();
+        if !granted_connect.contains(&domain) {
+            return Err(BoardFailure::Unknown);
+        }
     }
     Ok(())
 }

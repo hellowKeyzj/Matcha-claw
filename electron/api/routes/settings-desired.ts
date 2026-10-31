@@ -1,11 +1,10 @@
-import type { IncomingMessage, ServerResponse } from 'http';
+import { jsonResult, type HostApiRequest, type HostApiRouteResult } from '../execution';
 import { isCallId } from '../../../src/types/call-log/decode';
 import {
   normalizeSettingsProxyServer,
   type SettingsDesiredRequest,
   type SettingsDesiredTransport,
 } from '../../main/runtime-host-delivery/products/settings/desired';
-import { parseJsonBody, sendJson } from '../route-utils';
 
 const INVALID = {
   success: false,
@@ -17,42 +16,36 @@ const UNAVAILABLE = {
 } as const;
 
 export async function handleSettingsDesiredRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: HostApiRequest,
   url: URL,
   transport: SettingsDesiredTransport,
-): Promise<boolean> {
+): Promise<HostApiRouteResult> {
   const projection = url.pathname === '/api/settings/desired/projection';
-  if ((!projection && url.pathname !== '/api/settings/desired') || req.method !== 'POST') return false;
+  if ((!projection && url.pathname !== '/api/settings/desired') || req.method !== 'POST') return undefined;
 
   let body: unknown;
   try {
-    body = await parseJsonBody(req);
+    body = await req.readJson();
   } catch {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   if (projection) {
     if (!isRecord(body) || !hasExactKeys(body, ['callId']) || !isCallId(body.callId)) {
-      sendJson(res, 400, INVALID);
-      return true;
+      return jsonResult(400, INVALID);
     }
     const response = await transport.project(body.callId);
-    sendJson(res, response.status, response.body);
-    return true;
+    return jsonResult(response.status, response.body);
   }
   const request = normalizeRequest(body);
   if (!request) {
-    sendJson(res, 400, INVALID);
-    return true;
+    return jsonResult(400, INVALID);
   }
   try {
     const response = await transport.submit(request);
-    sendJson(res, response.status, response.body);
+    return jsonResult(response.status, response.body);
   } catch {
-    sendJson(res, 503, UNAVAILABLE);
+    return jsonResult(503, UNAVAILABLE);
   }
-  return true;
 }
 
 function normalizeRequest(value: unknown): SettingsDesiredRequest | null {

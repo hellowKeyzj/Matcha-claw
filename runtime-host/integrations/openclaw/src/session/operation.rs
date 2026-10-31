@@ -1,3 +1,5 @@
+#[path = "artifacts.rs"]
+pub(crate) mod artifacts;
 #[path = "content.rs"]
 pub(crate) mod content;
 #[path = "thinking.rs"]

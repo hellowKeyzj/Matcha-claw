@@ -1,7 +1,9 @@
-import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdtemp, mkdir, open, readFile, rename, rm, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { isTraceEnabled, startupTrace } from '../../utils/trace-logger';
 
 import type {
@@ -223,24 +225,50 @@ async function downloadCloudPackage(token: string, request: CloudPackageDownload
         payload.reason,
       );
     }
-    const bytes = Buffer.from(await response.arrayBuffer());
     const filename = downloadFilename(response, request);
-    const packagePath = await packageDownloadPath(request.destinationPath, filename);
+    const { packagePath, ownedDirectory } = await packageDownloadTarget(request.destinationPath, filename);
+    const temporary = join(dirname(packagePath), `.matcha-package-${randomUUID()}.tmp`);
+    let temporaryCreated = false;
     try {
       await mkdir(dirname(packagePath), { recursive: true });
-      await writeFile(packagePath, bytes);
+      const hash = createHash('sha256');
+      let bytes = 0;
+      const file = await open(temporary, 'wx');
+      temporaryCreated = true;
+      try {
+        const source = response.body ? Readable.fromWeb(response.body) : Readable.from([]);
+        const meter = new Transform({
+          transform(chunk: Buffer, _encoding, callback) {
+            hash.update(chunk);
+            bytes += chunk.byteLength;
+            callback(null, chunk);
+          },
+        });
+        await pipeline(source, meter, file.createWriteStream(), { signal: controller.signal });
+      } finally {
+        await file.close();
+      }
+      const packageSha256 = hash.digest('hex');
+      await rename(temporary, packagePath);
+      return {
+        packagePath,
+        packageVersionId: request.packageVersionId,
+        filename,
+        ...(response.headers.get('content-type') ? { contentType: response.headers.get('content-type') ?? undefined } : {}),
+        bytes,
+        packageSha256,
+      };
     } catch (error) {
-      await removePackageDownload(request, { packagePath });
+      try {
+        if (temporaryCreated) await rm(temporary, { force: true });
+      } finally {
+        if (ownedDirectory) await rmdir(ownedDirectory);
+      }
       throw error;
     }
-    return {
-      packagePath,
-      packageVersionId: request.packageVersionId,
-      filename,
-      ...(response.headers.get('content-type') ? { contentType: response.headers.get('content-type') ?? undefined } : {}),
-      bytes: bytes.length,
-      packageSha256: createHash('sha256').update(bytes).digest('hex'),
-    };
+  } catch (error) {
+    controller.abort();
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
@@ -253,10 +281,10 @@ export async function removePackageDownload(request: CloudPackageDownloadRequest
   await rmdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
 }
 
-async function packageDownloadPath(destinationPath: string | undefined, filename: string): Promise<string> {
-  if (destinationPath?.trim()) return destinationPath.trim();
-  const directory = await mkdtemp(join(tmpdir(), 'matcha-package-'));
-  return join(directory, filename);
+async function packageDownloadTarget(destinationPath: string | undefined, filename: string): Promise<{ packagePath: string; ownedDirectory?: string }> {
+  if (destinationPath?.trim()) return { packagePath: destinationPath.trim() };
+  const ownedDirectory = await mkdtemp(join(tmpdir(), 'matcha-package-'));
+  return { packagePath: join(ownedDirectory, filename), ownedDirectory };
 }
 
 function downloadFilename(response: Response, request: CloudPackageDownloadRequest): string {

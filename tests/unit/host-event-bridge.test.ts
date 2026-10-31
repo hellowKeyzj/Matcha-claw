@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { RendererEventRouteRegistry } from '../../electron/main/renderer-event-routes';
+import { RendererEventRouteRegistry } from '../../electron/main/sessions/observations';
+import { RuntimeStatusProjection } from '../../electron/main/runtime-host-delivery/status';
 
 import type {
   DirectRuntimeHostExit,
@@ -160,10 +161,11 @@ describe('host event bridge', () => {
     const runtimeHost = createRuntimeHost({});
     const eventBus = createEventBus();
     const send = vi.fn();
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => ({ webContents: { send } }) as never,
       rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
@@ -218,10 +220,11 @@ describe('host event bridge', () => {
     const runtimeHost = createRuntimeHost({});
     const eventBus = createEventBus();
     const send = vi.fn();
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => ({ webContents: { send } }) as never,
       rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
@@ -264,10 +267,11 @@ describe('host event bridge', () => {
     const runtimeHost = createRuntimeHost({});
     const eventBus = createEventBus();
     const send = vi.fn();
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => ({ webContents: { send } }) as never,
       rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
@@ -297,10 +301,11 @@ describe('host event bridge', () => {
     const runtimeHost = createRuntimeHost({});
     const eventBus = createEventBus();
     const send = vi.fn();
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => ({ webContents: { send } }) as never,
       rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
@@ -330,10 +335,11 @@ describe('host event bridge', () => {
   it('在 Rust child replacement 后投影已恢复的 runtime-host restart 事件', async () => {
     const runtimeHost = createRuntimeHost({});
     const eventBus = createEventBus();
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => null,
       rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
@@ -378,10 +384,11 @@ describe('host event bridge', () => {
       })],
     });
     const eventBus = createEventBus();
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => null,
       rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
@@ -442,10 +449,11 @@ describe('host event bridge', () => {
       agentId: 'agent-1',
       sessionKey: 'session-1',
     });
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => ({ webContents: { send } }) as never,
       rendererEventRoutes: routes,
@@ -477,10 +485,11 @@ describe('host event bridge', () => {
       agentId: 'agent-1',
       sessionKey: 'session-1',
     });
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => ({ webContents: { send } }) as never,
       rendererEventRoutes: routes,
@@ -514,10 +523,11 @@ describe('host event bridge', () => {
       agentId: 'agent-1',
       sessionKey: 'session-1',
     });
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => null,
       rendererEventRoutes: routes,
@@ -547,10 +557,11 @@ describe('host event bridge', () => {
       agentId: 'agent-1',
       sessionKey: 'session-1',
     });
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => null,
       rendererEventRoutes: routes,
@@ -588,10 +599,11 @@ describe('host event bridge', () => {
       agentId: 'agent-1',
       sessionKey: 'session-1',
     });
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => null,
       rendererEventRoutes: routes,
@@ -615,10 +627,11 @@ describe('host event bridge', () => {
       snapshot: succeeded({ health: { ok: true, lifecycle: 'ready', openClaw: { lifecycle: 'running' }, endpoint: 'secret' } }),
     });
     const eventBus = createEventBus();
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => null,
       rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,
@@ -637,10 +650,11 @@ describe('host event bridge', () => {
   it('仅在成功退出时投影 shutdown lifecycle', async () => {
     const runtimeHost = createRuntimeHost({});
     const eventBus = createEventBus();
-    const { registerHostEventBridge } = await import('../../electron/main/host-event-bridge');
+    const { registerHostEventBridge } = await import('../../electron/api/events/host-event-bridge');
 
     registerHostEventBridge({
       runtimeHost,
+      runtimeStatus: new RuntimeStatusProjection(runtimeHost),
       hostEventBus: eventBus as never,
       getMainWindow: () => null,
       rendererEventRoutes: { isMatchaRoute: () => false, release: vi.fn() } as never,

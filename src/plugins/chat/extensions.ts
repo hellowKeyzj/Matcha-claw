@@ -83,6 +83,7 @@ export interface ChatContentContribution<P> {
 export interface ChatPanelLayout {
   readonly position: 'left' | 'right' | 'top' | 'full';
   readonly fullscreen: boolean;
+  readonly composer?: 'dock';
 }
 
 export interface ChatPanelProps {
@@ -92,6 +93,7 @@ export interface ChatPanelProps {
   layout: ChatPanelLayout;
   onLayoutChange: (layout: Partial<ChatPanelLayout>) => void;
   onClose: () => void;
+  registerCloseHandler?: (handler: (signal: AbortSignal) => boolean | Promise<boolean>) => () => void;
   onSendMessage?: (text: string) => void | Promise<void>;
   onOpenLink?: (url: string) => void | Promise<void>;
 }
@@ -99,6 +101,7 @@ export interface ChatPanelProps {
 export interface ChatSidePanelContribution {
   readonly id: string;
   readonly order: number;
+  readonly keepMounted?: boolean;
   readonly icon: LucideIcon;
   readonly label: string;
   readonly defaultLabel?: string;
