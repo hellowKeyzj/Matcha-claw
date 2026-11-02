@@ -75,6 +75,34 @@ export const todoGetParameters = {
   properties: {},
 } as const
 
+export const taskOutputParameters = {
+  type: 'object',
+  description: String.raw`- Retrieves output from a running or completed task (background shell, agent, or remote session)
+- Takes a taskId parameter identifying the task
+- Returns the task output along with status information
+- Task IDs can be found using the /tasks command
+- Works with all task types: background shells, async agents, and remote sessions`,
+  additionalProperties: false,
+  required: ['taskId'],
+  properties: {
+    taskId: { type: 'string', description: 'Required. The ID of the background task.' },
+  },
+} as const
+
+export const taskStopParameters = {
+  type: 'object',
+  description: String.raw`
+- Stops a running background task by its ID
+- Takes a taskId parameter identifying the task to stop
+- Returns a success or failure status
+- Use this tool when you need to terminate a long-running task`,
+  additionalProperties: false,
+  required: ['taskId'],
+  properties: {
+    taskId: { type: 'string', description: 'Required. The ID of the background task to stop.' },
+  },
+} as const
+
 export const todoItemParameters = {
   type: 'object',
   description: 'One todo item in the replacement todo list.',

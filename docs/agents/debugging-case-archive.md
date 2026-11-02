@@ -1135,3 +1135,18 @@ open；原始动态视觉割裂尚未闭合。
 ### Evidence
 
 `.scratch/workspace-resize-20261101/verification-progress.json`、`no-screencast/result.json`、`no-screencast/browser-trace.json`、`no-screencast-check.log`、`whole-container/test-results/shared-electron-0/session.json`；失败 runner 输出为该 session 的 `tasks/bli4aj9t6.output`。无录屏 trace 属于 projection 构建，不能借作最新 quality 工件的整体验收。
+
+### 2026-11-02 续记：功能回归不能替代卡顿验收
+
+用户追问“什么叫验证通过，你是为了修什么改的代码”“那就证明啊”，指出三轮拖拽尺寸正确、页面身份／输入保留、浮层显隐恢复只验证功能，不证明原始卡顿改善。随后在同一真实 Electron 会话、固定2078×824 client、GPU关闭、同一系统鼠标轨迹下，交替加载只改变目标源码的 Renderer 工件，使用 DXGI 桌面像素及非零 LastPresentTime 检查可见更新；不用 rAF／IPC 回执代替呈现。
+
+- 六组旧hook／直接 ResizeObserver 同步对照：直接同步显著减小网页与分隔条的边缘误差，但三次可见位置更新中位间隔均由约17ms变为34ms；这是回退，不是修复完成。
+- 九组原版／下一帧调度／直接同步对照：两个完整的下一帧候选恢复约17ms，仍有约9–10px的边缘误差尾部，不能宣称原始跟手问题已解决。另一个候选run鼠标越出预设轨迹、拖拽提前停止，明确排除，不挑其有利数据。
+- 九组强制React同帧提交对照：中位恢复，但尾部停顿未改善，不落入ChatShell；布局后任务候选也出现约66ms尾部停顿，不采用。该轮第八组前丢失前台窗口，runner exit1；已完成七组证据保留，Electron正常exit0，不把部分采集洗成整轮通过。
+- 最终仅将 `ResizeObserver(() => { void sync(); })` 改为既有 `ResizeObserver(schedule)`，移除失真注释；保留事件驱动、单在途及latest补发、owner／generation隔离和显隐清理，不新增轮询、协议或布局owner。此改动目标是消除已测新增回退，不把“恢复基线”说成“修复原始卡顿”。
+
+最终落盘源码再做六组交替复验，三次最终版中位16.82–16.88ms、P95 33.94–34.13ms，三次原版中位16.86–16.89ms、P95 33.74–34.05ms；二者边缘误差P95均约9–10px。结论是直接RO造成的回退已消除，未证明相对原版更顺。最终Renderer类型、限定no-fix ESLint及实际源码构建exit0，浏览器chunk与已测候选逐字节一致；采集runner及Electron均exit0，PID已退出、专用锁不存在。不将这些通过项提升为原始卡顿修复。
+
+旧锁经用户明确授权删除后，后续专用profile均正常获锁／释放。性能对照固定缓存Main指纹；同期另一会话将共享OpenClaw降为9.3，故本次不证明其SDK兼容或automation授权链。原始上下割裂及整体丝滑目标仍OPEN。
+
+原始证据：`.scratch/workspace-resize-20261101/product-perf-ab-20261102/` 下 `measure-fixed-window/comparison.json`、`measure-candidate/{comparison,validity,environment-boundary}.json`、`measure-commit/comparison.json`、`measure-task/{failure,assessment}.json`；最终落盘工件与独立复验另见该目录 `final.json` 与 `measure-final/`。

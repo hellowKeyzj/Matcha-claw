@@ -592,12 +592,136 @@ const sizeAfter = getDirSize(OUTPUT);
 printLine(`   Removed ${cleanedCount} files/directories`);
 printLine(`   Size: ${formatSize(sizeBefore)} → ${formatSize(sizeAfter)} (saved ${formatSize(sizeBefore - sizeAfter)})`);
 
+// 7. Patch known broken packages
+//
+// Some packages in the ecosystem have transpiled CJS output that sets
+// `module.exports = exports.default` without ever assigning `exports.default`,
+// resulting in `module.exports = undefined`.  This causes a TypeError in
+// Node.js 22+ ESM interop when the translators try to call hasOwnProperty on
+// the undefined exports object.
+//
+// We also patch Windows child_process spawn sites in the bundled agent runtime
+// so shell/tool execution does not flash a console window for each tool call.
+// We patch these files in-place after the copy so the bundle is safe to run.
+function patchBrokenModules(nodeModulesDir) {
+  const rewritePatches = {
+    // node-domexception@1.0.0: transpiled index.js leaves module.exports = undefined.
+    // Node.js 18+ ships DOMException as a built-in global, so a simple shim works.
+    'node-domexception/index.js': [
+      `'use strict';`,
+      `// Shim: the original transpiled file sets module.exports = exports.default`,
+      `// (which is undefined), causing TypeError in Node.js 22+ ESM interop.`,
+      `// Node.js 18+ has DOMException as a built-in global.`,
+      `const dom = globalThis.DOMException ||`,
+      `  class DOMException extends Error {`,
+      `    constructor(msg, name) { super(msg); this.name = name || 'Error'; }`,
+      `  };`,
+      `module.exports = dom;`,
+      `module.exports.DOMException = dom;`,
+      `module.exports.default = dom;`,
+    ].join('\n'),
+  };
+  const replacePatches = [
+    {
+      rel: '@mariozechner/pi-coding-agent/dist/core/bash-executor.js',
+      search: `        const child = spawn(shell, [...args, command], {
+            detached: true,
+            env: getShellEnv(),
+            stdio: ["ignore", "pipe", "pipe"],
+        });`,
+      replace: `        const child = spawn(shell, [...args, command], {
+            detached: true,
+            env: getShellEnv(),
+            stdio: ["ignore", "pipe", "pipe"],
+            windowsHide: true,
+        });`,
+    },
+    {
+      rel: '@mariozechner/pi-coding-agent/dist/core/exec.js',
+      search: `        const proc = spawn(command, args, {
+            cwd,
+            shell: false,
+            stdio: ["ignore", "pipe", "pipe"],
+        });`,
+      replace: `        const proc = spawn(command, args, {
+            cwd,
+            shell: false,
+            stdio: ["ignore", "pipe", "pipe"],
+            windowsHide: true,
+        });`,
+    },
+  ];
+
+  let count = 0;
+  for (const [rel, content] of Object.entries(rewritePatches)) {
+    const target = path.join(nodeModulesDir, rel);
+    if (fs.existsSync(target)) {
+      fs.writeFileSync(target, content + '\n', 'utf8');
+      count++;
+    }
+  }
+  for (const { rel, search, replace } of replacePatches) {
+    const target = path.join(nodeModulesDir, rel);
+    if (!fs.existsSync(target)) continue;
+
+    const current = fs.readFileSync(target, 'utf8');
+    if (!current.includes(search)) {
+      printLine(`   ⚠️  Skipped patch for ${rel}: expected source snippet not found`);
+      continue;
+    }
+
+    const next = current.replace(search, replace);
+    if (next !== current) {
+      fs.writeFileSync(target, next, 'utf8');
+      count++;
+    }
+  }
+  if (count > 0) {
+    printLine(`   🩹 Patched ${count} broken module(s) in node_modules`);
+  }
+}
+
+function patchBundledRuntime(outputDir) {
+  // OpenClaw 9.3 hides canonical command spawns and uses native ConPTY; QMD is retired.
+  // Managed Chrome still spawns directly and needs its own Windows console flag.
+  const distDir = path.join(outputDir, 'dist');
+  const targets = fs.readdirSync(distDir)
+    .filter(name => /^chrome-.*\.mjs$/.test(name))
+    .map(name => {
+      const target = path.join(distDir, name);
+      return { target, source: fs.readFileSync(target, 'utf8') };
+    })
+    .filter(({ source }) => source.includes('//#region extensions/browser/src/browser/chrome.ts'));
+  if (targets.length !== 1) {
+    throw new Error(`OpenClaw chrome launcher patch: expected one owner, found ${targets.length}`);
+  }
+
+  const { target, source } = targets[0];
+  const search = `\t\tconst proc = spawn(preparedSpawn.command, preparedSpawn.args, {
+\t\t\tstdio: [
+\t\t\t\t"ignore",
+\t\t\t\t"ignore",
+\t\t\t\t"pipe"
+\t\t\t],
+\t\t\tenv: preparedSpawn.env
+\t\t});`;
+  const replace = search.replace('env: preparedSpawn.env', 'windowsHide: true,\n\t\t\tenv: preparedSpawn.env');
+  if (source.split(replace).length === 2 && !source.includes(search)) return;
+  if (source.split(search).length !== 2 || source.includes(replace)) {
+    throw new Error('OpenClaw chrome launcher patch: expected one spawn snippet');
+  }
+  fs.writeFileSync(target, source.replace(search, replace), 'utf8');
+  printLine('   🩹 Patched managed Chrome launcher windowsHide');
+}
+
+patchBrokenModules(outputNodeModules);
+patchBundledRuntime(OUTPUT);
 const selfImportPatch = patchExtensionOpenClawSelfImports(OUTPUT);
 if (selfImportPatch.specifiersPatched > 0) {
   printLine(`   🩹 Rewrote ${selfImportPatch.specifiersPatched} OpenClaw plugin-sdk self-import(s) in ${selfImportPatch.filesPatched} extension file(s)`);
 }
 
-// 7. Verify the bundle
+// 8. Verify the bundle
 const entryExists = fs.existsSync(path.join(OUTPUT, 'openclaw.mjs'));
 const distExists = fs.existsSync(path.join(OUTPUT, 'dist', 'entry.js'));
 

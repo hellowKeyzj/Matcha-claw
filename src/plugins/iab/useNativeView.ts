@@ -75,8 +75,7 @@ export function useNativeView(element: RefObject<HTMLDivElement | null>, visible
     };
     const tick = () => { frame = 0; void sync(); };
     const schedule = () => { if (!disposed && !document.hidden && !frame) frame = requestAnimationFrame(tick); };
-    // Observe after layout so native bounds do not wait for another animation frame.
-    const geometry = new ResizeObserver(() => { void sync(); });
+    const geometry = new ResizeObserver(schedule);
     geometry.observe(node);
     const observer = new MutationObserver(schedule);
     const observe = () => observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['open', 'aria-hidden', 'data-state', 'style', 'class'] });

@@ -3,13 +3,11 @@ import path from 'node:path';
 
 import { safeRmSync } from './lib/safe-delete.mjs';
 import { REMOVED_BUNDLED_CHANNEL_PLUGIN_IDS } from './openclaw-bundled-channels.mjs';
-import { patchOpenClawFilesystem } from './openclaw-filesystem-patches.mjs';
-import { patchOpenClawTaskTools } from './openclaw-task-tools-patches.mjs';
 import { patchOpenClawSearch } from './openclaw-search-patches.mjs';
 import { patchOpenClawBoard } from './openclaw-board-patches.mjs';
 import { patchOpenClawWorldInvestigation } from './openclaw-world-investigation-patches.mjs';
 
-const DEFAULT_PATCH_IDS = Object.freeze(['plugin-capture-no-follow-cleanup', 'strip-bundled-channel-plugins', 'matcha-sealed-skills', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-task-tools', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'owned-stdin-stop']);
+const DEFAULT_PATCH_IDS = Object.freeze(['strip-bundled-channel-plugins', 'matcha-sealed-skills', 'opencode-go-session-header', 'matcha-mcp-session-server-id', 'mcp-server-status-method', 'explicit-session-model-patch', 'agent-delete-cleanup-identity-string', 'channel-pairing-approval-export', 'native-searxng-search', 'native-board-view', 'native-world-investigation', 'owned-stdin-stop']);
 
 function printLine(message = '') {
   process.stdout.write(`${message}\n`);
@@ -198,15 +196,16 @@ function patchMatchaSealedSkills(openclawDir) {
   const loaderFile = locateSingleJavaScriptFile(distDir, patchId, {
     fileNamePrefix: 'workspace-skill-loader-',
     markers: [
-      'function loadLocalSkillTiers(workspaceDir, opts)',
-      'function mergeSkillTiers(tiers, opts,',
+      'function loadSkillEntries(workspaceDir, opts)',
+      'const managedSkills = workspaceOnly ? [] : loadSkills({',
+      'for (const record of managedSkills) mergeRecord(record);',
     ],
   });
   const workspaceFile = locateSingleJavaScriptFile(distDir, patchId, {
     fileNamePrefix: 'workspace-',
     markers: [
       'async function loadWorkspaceBootstrapFiles(dir',
-      'const access = getAgentWorkspaceAccess(resolvedDir);',
+      'async function readWorkspaceFileWithGuards(params)',
       'setWorkspaceFileSourceIdentity(file, loaded.sourceIdentity);',
     ],
   });
@@ -501,15 +500,15 @@ function patchSealedSkillContext(distDir, readFile, transcriptWriteContextFile, 
   });
   const builtinFile = locate('builtin-openclaw-', ['async function prepareEmbeddedAttemptSessionBoundary(input) {', 'function createCacheTrace(params) {', 'function createAnthropicPayloadLogger(params) {']);
   edit(builtinFile, ['matchaSealedSkillKeys', 'hydrateMatchaSealedSkills', 'isMatchaSealedModelContext', 'markMatchaSealedModelMessages'], [
-    ['\t\t\t\tcomputerContextEpoch,\n\t\t\t\tskillInstructionDeliveryCache,', '\t\t\t\tcomputerContextEpoch,\n\t\t\t\tmatchaSealedSkillKeys: matchaSealedSkillKeys(params.skillsSnapshot?.resolvedSkills),\n\t\t\t\tskillInstructionDeliveryCache,'],
+    ['\t\tcomputerContextEpoch,\n\t\tskillInstructionDeliveryCache,', '\t\tcomputerContextEpoch,\n\t\tmatchaSealedSkillKeys: matchaSealedSkillKeys(params.skillsSnapshot?.resolvedSkills),\n\t\tskillInstructionDeliveryCache,'],
     ['\t\tabortSignal: runAbortSignal,\n\t\tactiveSession,\n\t\tappendOnlyRuntimeContext:', '\t\tabortSignal: runAbortSignal,\n\t\tactiveSession,\n\t\tmatchaSealedAllowedKeys: toolBase.matchaSealedSkillKeys,\n\t\tappendOnlyRuntimeContext:'],
-    ['const converted = await baseConvertToLlm(input.appendOnlyRuntimeContext ? normalized : relocateCurrentRuntimeContextCarrierToTail(normalized));', `const requestMessages = await hydrateMatchaSealedSkills(normalized, input.matchaSealedAllowedKeys, input.abortSignal, attempt.runId);
+    ['return await baseConvertToLlm(input.appendOnlyRuntimeContext ? normalized : relocateCurrentRuntimeContextCarrierToTail(normalized));', `const requestMessages = await hydrateMatchaSealedSkills(normalized, input.matchaSealedAllowedKeys, input.abortSignal, attempt.runId);
 			const converted = await baseConvertToLlm(input.appendOnlyRuntimeContext ? requestMessages : relocateCurrentRuntimeContextCarrierToTail(requestMessages));
-		markMatchaSealedModelMessages(converted, attempt.runId);`],
+			return markMatchaSealedModelMessages(converted, attempt.runId);`],
     ['const recordStage = (stage, payload = {}) => {', 'const recordStage = (stage, payload = {}) => {\n\t\tif (isMatchaSealedModelContext(payload, params.runId)) return;'],
-    ['const nextOnPayload = (payload) => {\n\t\t\tconst redactedPayload', 'const nextOnPayload = (payload) => {\n\t\t\tif (isMatchaSealedModelContext(context, params.runId)) return options?.onPayload?.(payload, model);\n\t\t\tconst redactedPayload']
+    ['const nextOnPayload = (payload) => {\n\t\t\t\tconst redactedPayload', 'const nextOnPayload = (payload) => {\n\t\t\t\tif (isMatchaSealedModelContext(context, params.runId)) return;\n\t\t\t\tconst redactedPayload']
   ]);
-  const resourceFile = locate('settings-manager-', ['function estimateMessageTokenPressure(message) {', 'const projectReplacement = (result, summary) => buildSessionContext(', 'summary: capCompactionSummary(compactionResult.summary)']);
+  const resourceFile = locate('resource-loader-', ['function estimateMessageTokenPressure(message) {', 'const projectReplacement = (result, summary) => buildSessionContext(', 'summary: capCompactionSummary(compactionResult.summary)']);
   edit(resourceFile, ['matchaSealedSkillTokenPressure', 'collectMatchaSealedSkillRefs', 'withMatchaSealedCompactionDetails'], [
     ['let tokens = MESSAGE_BOUNDARY_OVERHEAD_TOKENS;', 'let tokens = MESSAGE_BOUNDARY_OVERHEAD_TOKENS + matchaSealedSkillTokenPressure(message);'],
     ['const projectReplacement = (result, summary) => buildSessionContext(', `const matchaSealedRefs = collectMatchaSealedSkillRefs(buildSessionContext(pathEntries).messages);
@@ -526,7 +525,7 @@ function patchSealedSkillContext(distDir, readFile, transcriptWriteContextFile, 
   edit(sessionFile, ['createMatchaSealedSkillCarry'], [
     ['\t\tyield message;\n\t}\n}\n/** Build model context', '\t\tyield message;\n\t\tif (hydrated.type === "compaction") {\n\t\t\tconst carry = createMatchaSealedSkillCarry(hydrated.details, message.timestamp);\n\t\t\tif (carry) yield carry;\n\t\t}\n\t}\n}\n/** Build model context']
   ]);
-  const diagnosticFile = locate('session-boundary-prompt-cache-key-', ['function createModelObserver(params) {']);
+  const diagnosticFile = locate('attempt.model-diagnostic-events-', ['function createModelObserver(params) {']);
   edit(diagnosticFile, ['isMatchaSealedModelContext'], [
     ['contentCapture: ctx.contentCapture,', 'contentCapture: isMatchaSealedModelContext(streamContext, ctx.runId) ? void 0 : ctx.contentCapture,']
   ]);
@@ -538,16 +537,9 @@ function patchSealedSkillContext(distDir, readFile, transcriptWriteContextFile, 
   return changed;
 }
 
-function patchSealedSkillLoader(loaderFile, patchId) {
-  const distDir = path.dirname(loaderFile);
-  const filePath = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'plugin-skills-',
-    markers: ['function createSkillEntry(record)', 'function loadWorkspaceSkillSourceEntries(plan, config)'],
-  });
+function patchSealedSkillLoader(filePath, patchId) {
   let source = readText(filePath);
-  source = ensureNamedImport(source, filePath, locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'frontmatter-', markers: ['function resolveSkillKey('],
-  }), 'resolveSkillKey', 'resolveSkillKey', patchId).source;
+  let changed = false;
   const helper = `
 const MATCHA_SEALED_SKILL_SOURCE = "matcha-sealed";
 const MATCHA_SEALED_SKILL_EXTENSION = ".matcha-skillpkg";
@@ -565,6 +557,14 @@ function matchaSealedSkillPackageFingerprint(dir) {
   } catch {
     return "";
   }
+}
+function resolveLoadedSkillRecordKey(record) {
+  return resolveSkillKey(record.skill, {
+    metadata: resolveSkillEntryMetadata({
+      frontmatter: record.frontmatter,
+      skillDir: record.skill.baseDir
+    })
+  });
 }
 function loadMatchaSealedSkillRecords(dir) {
   if (!process.env.MATCHA_SEALED_ENDPOINT || !process.env.MATCHA_SEALED_TOKEN || process.env.MATCHA_SEALED_RUNTIME !== "openclaw") return [];
@@ -603,7 +603,7 @@ function loadMatchaSealedSkillRecords(dir) {
     if (typeof descriptor.userInvocable === "boolean") frontmatter["user-invocable"] = String(descriptor.userInvocable);
     if (typeof descriptor.disableModelInvocation === "boolean") frontmatter["disable-model-invocation"] = String(descriptor.disableModelInvocation);
     const invocation = resolveSkillInvocationPolicy(frontmatter);
-    records.push(createSkillEntry({
+    records.push({
       skill: {
         name,
         displayName: name,
@@ -626,55 +626,135 @@ function loadMatchaSealedSkillRecords(dir) {
       frontmatter,
       invocation,
       rejectHardlinks: true
-    }));
+    });
   }
   return records;
 }
 `;
   if (!source.includes('function loadMatchaSealedSkillRecords(')) {
-    source = replaceOnce(source, 'function loadWorkspaceSkillSourceEntries(plan, config) {', helper + '\nfunction loadWorkspaceSkillSourceEntries(plan, config) {', patchId);
-    source += '\nexport { matchaSealedSkillPackageFingerprint };\n';
+    source = replaceOnce(
+      source,
+      '//#region src/skills/runtime/snapshot-config-fingerprint.ts',
+      `${helper}\n//#region src/skills/runtime/snapshot-config-fingerprint.ts`,
+      patchId,
+    );
+    changed = true;
+  } else if (!source.includes('function resolveLoadedSkillRecordKey(')) {
+    source = replaceOnce(
+      source,
+      'function loadMatchaSealedSkillRecords(dir) {',
+      `function resolveLoadedSkillRecordKey(record) {
+  return resolveSkillKey(record.skill, {
+    metadata: resolveSkillEntryMetadata({
+      frontmatter: record.frontmatter,
+      skillDir: record.skill.baseDir
+    })
+  });
+}
+function loadMatchaSealedSkillRecords(dir) {`,
+      patchId,
+    );
+    changed = true;
   }
-  const needle = `	return [
-		"extra",
-		"bundled",
-		"workshop",
-		"managed",
-		"personal",
-		"workspace"
-	].flatMap((tier) => grouped.get(tier) ?? []).map(createSkillEntry);`;
-  const replacement = `	const ordinary = [
-		"extra",
-		"bundled",
-		"workshop",
-		"managed",
-		"personal",
-		"workspace"
-	].flatMap((tier) => grouped.get(tier) ?? []).map(createSkillEntry);
-	const ordinaryKeys = new Set(ordinary.map((entry) => resolveSkillKey(entry)));
-	const sealed = plan.roots.some((root) => root.tier === "managed")
-		? loadMatchaSealedSkillRecords(plan.managedSkillsDir).filter((entry) => !ordinaryKeys.has(resolveSkillKey(entry))) : [];
-	return [...sealed, ...ordinary];`;
-  if (!source.includes(replacement)) source = replaceOnce(source, needle, replacement, patchId);
-  const changed = source !== readText(filePath);
+  if (source.includes('metadata: JSON.stringify({ skillKey })')) {
+    source = source.replaceAll(
+      'metadata: JSON.stringify({ skillKey })',
+      'metadata: JSON.stringify({ openclaw: { skillKey } })',
+    );
+    changed = true;
+  }
+  const syntheticSourceInfo = `sourceInfo: createSyntheticSourceInfo(filePath, {
+          source: MATCHA_SEALED_SKILL_SOURCE,
+          scope: "project",
+          origin: "top-level",
+          baseDir
+        })`;
+  const literalSourceInfo = `sourceInfo: {
+          path: filePath,
+          source: MATCHA_SEALED_SKILL_SOURCE,
+          scope: "project",
+          origin: "top-level",
+          baseDir
+        }`;
+  if (source.includes(syntheticSourceInfo)) {
+    source = source.replaceAll(syntheticSourceInfo, literalSourceInfo);
+    changed = true;
+  }
+  const fingerprintNeedle = `process.env.OPENCLAW_STATE_DIR,
+			getSkillsSnapshotVersion(workspaceDir)`;
+  const fingerprintReplacement = `process.env.OPENCLAW_STATE_DIR,
+			getSkillsSnapshotVersion(workspaceDir),
+			matchaSealedSkillPackageFingerprint(opts?.managedSkillsDir ?? path.join(CONFIG_DIR, "skills"))`;
+  const fingerprintPatch = replaceOptionalOnce(source, fingerprintNeedle, fingerprintReplacement, patchId);
+  source = fingerprintPatch.source;
+  changed ||= fingerprintPatch.changed;
+  const managedOnly = `	const managedSkills = workspaceOnly ? [] : loadSkills({
+		dir: managedSkillsDir,
+		source: "openclaw-managed"
+	});`;
+  const buggyManagedAndSealed = `${managedOnly}
+	const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir);`;
+  const managedFilteredSealed = `${managedOnly}
+	const managedSkillKeys = new Set(managedSkills.map((record) => resolveSkillKey(record.skill, record)));
+	const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir).filter((record) => !managedSkillKeys.has(resolveSkillKey(record.skill, record)));`;
+  if (source.includes(managedFilteredSealed)) {
+    source = replaceOnce(source, managedFilteredSealed, managedOnly, patchId);
+    changed = true;
+  } else if (source.includes(buggyManagedAndSealed)) {
+    source = replaceOnce(source, buggyManagedAndSealed, managedOnly, patchId);
+    changed = true;
+  }
+  const workspaceSkillsCompact = `	const workspaceSkills = loadSkills({ dir: workspaceSkillsDir, source: "openclaw-workspace" });`;
+  const workspaceSkillsBlock = `	const workspaceSkills = loadSkills({
+		dir: workspaceSkillsDir,
+		source: "openclaw-workspace"
+	});`;
+  const allOrdinaryFilteredSealed = `	const ordinarySkillKeys = new Set([
+		...bundledSkills,
+		...custodianSkills,
+		...extraSkills,
+		...managedSkills,
+		...workshopSkills,
+		...personalAgentsSkills,
+		...projectAgentsSkills,
+		...workspaceSkills
+	].map(resolveLoadedSkillRecordKey));
+	const sealedSkills = workspaceOnly ? [] : loadMatchaSealedSkillRecords(managedSkillsDir).filter((record) => !ordinarySkillKeys.has(resolveLoadedSkillRecordKey(record)));`;
+  if (!source.includes(allOrdinaryFilteredSealed)) {
+    if (source.includes(workspaceSkillsBlock)) {
+      source = replaceOnce(source, workspaceSkillsBlock, `${workspaceSkillsBlock}\n${allOrdinaryFilteredSealed}`, patchId);
+    } else {
+      source = replaceOnce(source, workspaceSkillsCompact, `${workspaceSkillsCompact}\n${allOrdinaryFilteredSealed}`, patchId);
+    }
+    changed = true;
+  }
+  const buggyOrder = `for (const record of managedSkills) mergeRecord(record);
+	for (const record of sealedSkills) mergeRecord(record);`;
+  const managedOrder = 'for (const record of managedSkills) mergeRecord(record);';
+  if (source.includes(buggyOrder)) {
+    source = replaceOnce(source, buggyOrder, managedOrder, patchId);
+    changed = true;
+  }
+  const oldExpectedOrder = `for (const record of sealedSkills) mergeRecord(record);
+	for (const record of managedSkills) mergeRecord(record);`;
+  if (source.includes(oldExpectedOrder)) {
+    source = replaceOnce(source, oldExpectedOrder, managedOrder, patchId);
+    changed = true;
+  }
+  const extraMerge = 'for (const record of extraSkills) mergeRecord(record);';
+  const sealedBeforeExtra = `for (const record of sealedSkills) mergeRecord(record);
+	${extraMerge}`;
+  if (!source.includes(sealedBeforeExtra)) {
+    source = replaceOnce(source, extraMerge, sealedBeforeExtra, patchId);
+    changed = true;
+  }
   if (changed) writeText(filePath, source);
-  const before = readText(loaderFile);
-  let loader = ensureNamedImport(before, loaderFile, filePath, 'matchaSealedSkillPackageFingerprint', 'matchaSealedSkillPackageFingerprint', patchId).source;
-  const configFile = locateSingleJavaScriptFile(distDir, patchId, { fileNamePrefix: 'utils-', markers: ['let CONFIG_DIR = resolveConfigDir();', 'function pinConfigDir('] });
-  loader = ensureNamedImport(loader, loaderFile, configFile, 'CONFIG_DIR', 'CONFIG_DIR', patchId).source;
-  const fingerprint = 'getSkillsSourceVersion(workspaceDir),\n\t\tmatchaSealedSkillPackageFingerprint(opts?.managedSkillsDir ?? path.join(CONFIG_DIR, "skills"))';
-  if (!loader.includes(fingerprint)) loader = replaceOnce(loader, 'getSkillsSourceVersion(workspaceDir)\n\t]);', fingerprint + '\n\t]);', patchId);
-  if (loader !== before) writeText(loaderFile, loader);
-  return changed || loader !== before;
+  return changed;
 }
 
 function patchSealedAgentBootstrap(filePath, sessionAccessorFile, patchId) {
   let source = readText(filePath);
   let changed = false;
-  if (!source.includes('import fsSync from "node:fs";')) {
-    source = 'import fsSync from "node:fs";\n' + source;
-    changed = true;
-  }
   const importPatch = ensureNamedImport(
     source,
     filePath,
@@ -764,7 +844,7 @@ function encodeMatchaSealedAgentPath(pathValue) {
 function matchaSealedAgentPackageKeys(dir) {
   let entries;
   try {
-    entries = fsSync.readdirSync(dir, { withFileTypes: true });
+    entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
     return [];
   }
@@ -774,7 +854,7 @@ function matchaSealedAgentPackageKeys(dir) {
     if (!entry.isFile() || entry.name.startsWith(".") || !entry.name.endsWith(MATCHA_SEALED_AGENT_EXTENSION)) continue;
     let wire;
     try {
-      wire = JSON.parse(fsSync.readFileSync(path.join(dir, entry.name), "utf8"));
+      wire = JSON.parse(fs.readFileSync(path.join(dir, entry.name), "utf8"));
     } catch {
       continue;
     }
@@ -818,33 +898,30 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
   );
   source = replaceOnce(
     source,
-    `async function loadWorkspaceBootstrapFiles(dir, names) {
+    `async function loadWorkspaceBootstrapFiles(dir) {
 	const resolvedDir = resolveUserPath(dir);`,
-    `async function loadWorkspaceBootstrapFiles(dir, names) {
+    `async function loadWorkspaceBootstrapFiles(dir) {
 	const resolvedDir = resolveUserPath(dir);
-	const sealedAgentKeys = getAgentWorkspaceAccess(resolvedDir) ? [] : matchaSealedAgentPackageKeys(resolvedDir);`,
+	const sealedAgentKeys = matchaSealedAgentPackageKeys(resolvedDir);`,
     patchId,
   );
   source = replaceOnce(
     source,
     `	for (const entry of entries) {
-		if (!access && (entry.name === DEFAULT_MEMORY_FILENAME || entry.name === "USER.md") && !await exactWorkspaceEntryExists(resolvedDir, entry.name).catch(() => true)) continue;`,
+		if ((entry.name === DEFAULT_MEMORY_FILENAME || entry.name === "USER.md") && !await exactWorkspaceEntryExists(resolvedDir, entry.name)) continue;`,
     `	for (const entry of entries) {
-		const entryExists = access || await exactWorkspaceEntryExists(resolvedDir, entry.name).catch(() => true);
+		const entryExists = await exactWorkspaceEntryExists(resolvedDir, entry.name);
 		const optionalRootBootstrapFile = entry.name === DEFAULT_MEMORY_FILENAME || entry.name === DEFAULT_USER_FILENAME;
 		if (optionalRootBootstrapFile && !entryExists && sealedAgentKeys.length === 0) continue;`,
     patchId,
   );
   source = replaceOnce(
     source,
-    `		} else if (isRootFileMissingFailure(loaded)) {
-			if (entry.name === DEFAULT_MEMORY_FILENAME || entry.name === "USER.md") continue;
-			result.push({
-				name: entry.name,
-				path: entry.filePath,
-				missing: true
-			});
-		}`,
+    `		} else if (isRootFileMissingFailure(loaded)) result.push({
+			name: entry.name,
+			path: entry.filePath,
+			missing: true
+		});`,
     `		} else if (isRootFileMissingFailure(loaded)) {
 			let sealedFile;
 			if (matchaSealedAgentFilenames().has(entry.name)) {
@@ -870,7 +947,7 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
   let entries;`,
     `function matchaSealedAgentPackageKeys(dir) {
   try {
-    const agentsStat = fsSync.lstatSync(path.join(dir, DEFAULT_AGENTS_FILENAME));
+    const agentsStat = fs.lstatSync(path.join(dir, DEFAULT_AGENTS_FILENAME));
     if (!agentsStat.isFile() || agentsStat.isSymbolicLink()) throw new Error("Invalid agent source: AGENTS.md must be a regular, non-symlink file");
     return [];
   } catch (error) {
@@ -902,8 +979,8 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
   changed ||= bindingPatch.changed;
   const workspaceSignaturePatch = replaceOptionalOnce(
     source,
-    'async function loadWorkspaceBootstrapFiles(dir, names) {',
-    'async function loadWorkspaceBootstrapFiles(dir, names, sessionKey) {',
+    'async function loadWorkspaceBootstrapFiles(dir) {',
+    'async function loadWorkspaceBootstrapFiles(dir, sessionKey) {',
     patchId,
   );
   source = workspaceSignaturePatch.source;
@@ -911,7 +988,7 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
   const sealedAgentWorkspaceSeedPatch = replaceOptionalOnce(
     source,
     `const userPath = path.join(dir, DEFAULT_USER_FILENAME);
-	const isBrandNewWorkspace = (await Promise.all([`,
+	const isBrandNewWorkspace = await (async () => {`,
     `const userPath = path.join(dir, DEFAULT_USER_FILENAME);
 	if (matchaSealedAgentPackageKeys(dir).length > 0) return {
 		dir,
@@ -923,7 +1000,7 @@ async function loadMatchaSealedAgentBootstrapFile(workspaceDir, agentKey, name) 
 		bootstrapPending: false,
 		identityPathCreated: false
 	};
-	const isBrandNewWorkspace = (await Promise.all([`,
+	const isBrandNewWorkspace = await (async () => {`,
     patchId,
   );
   source = sealedAgentWorkspaceSeedPatch.source;
@@ -944,7 +1021,7 @@ function patchBootstrapCacheSessionKey(filePath, patchId) {
   const patch = replaceOptionalOnce(
     source,
     'const files = await loadWorkspaceBootstrapFiles(params.workspaceDir);',
-    'const files = await loadWorkspaceBootstrapFiles(params.workspaceDir, void 0, params.sessionKey);',
+    'const files = await loadWorkspaceBootstrapFiles(params.workspaceDir, params.sessionKey);',
     patchId,
   );
   if (patch.changed) writeText(filePath, patch.source);
@@ -1039,18 +1116,77 @@ function mergeMatchaPackageMeteringInit(init) {
   return changed;
 }
 
+function patchOpencodeGoSessionHeader(openclawDir) {
+  const patchId = 'opencode-go-session-header';
+  const distDir = path.join(openclawDir, 'dist');
+  const streamFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'stream-',
+    markers: ['function createOpencodeGoAttributionWrapper(baseStreamFn, sourceApi)'],
+  });
+  const extraParamsFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'extra-params-',
+    markers: ['const providerStreamBase = agent.streamFn;'],
+  });
+  const attemptFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'builtin-openclaw-',
+    markers: ['preparedExtraParams: effectiveExtraParams,', 'sessionId: attempt.sessionId,'],
+  });
+  const compactionFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'compact-',
+    markers: ['...preparedRuntimeExtraParams ? { preparedExtraParams: preparedRuntimeExtraParams } : {},'],
+  });
+  const original = readText(streamFile);
+  let source = original;
+  const needle = `		const api = sourceApi ?? model.api;
+		if (model.provider !== "opencode-go" || api !== "anthropic-messages") return baseStreamFn(model, context, options);`;
+  const replacement = `		if (model.provider !== "opencode-go") return baseStreamFn(model, context, options);
+		const endpoint = URL.parse(model.baseUrl);
+		if (endpoint?.origin === "https://opencode.ai" && ["/zen/go", "/zen/go/v1"].includes(endpoint.pathname.replace(/\\/+$/, ""))) {
+			const sessionId = options?.sessionId?.trim();
+			if (sessionId) {
+				const headers = new Headers(options?.headers);
+				headers.set("x-opencode-session", sessionId);
+				options = { ...options, headers: Object.fromEntries(headers) };
+			}
+		}
+		const api = sourceApi ?? model.api;
+		if (api !== "anthropic-messages") return baseStreamFn(model, context, options);`;
+  if (!source.includes(replacement)) source = replaceOnce(source, needle, replacement, patchId);
+  // Thread the admitted session to the provider wrapper, which runs before the
+  // embedded base stream enriches options. Header policy stays in the Go plugin.
+  const edits = [[streamFile, original, source]];
+  for (const [file, before, after] of [
+    [attemptFile, 'preparedExtraParams: effectiveExtraParams,', 'sessionId: attempt.sessionId,\n\t\tpreparedExtraParams: effectiveExtraParams,'],
+    [compactionFile, '...preparedRuntimeExtraParams ? { preparedExtraParams: preparedRuntimeExtraParams } : {},', 'sessionId: params.sessionId,\n\t\t\t...preparedRuntimeExtraParams ? { preparedExtraParams: preparedRuntimeExtraParams } : {},'],
+    [extraParamsFile, 'agent.streamFn = pluginWrappedStreamFn ?? providerStreamBase;', `agent.streamFn = pluginWrappedStreamFn ?? providerStreamBase;
+	if (provider === "opencode-go" && options?.sessionId && agent.streamFn) {
+		const sessionStreamFn = agent.streamFn;
+		const sessionId = options.sessionId;
+		agent.streamFn = (model, context, streamOptions) => sessionStreamFn(model, context, streamOptions?.sessionId ? streamOptions : { ...streamOptions, sessionId });
+	}`],
+  ]) {
+    const current = readText(file);
+    edits.push([file, current, current.includes(after) ? current : replaceOnce(current, before, after, patchId)]);
+  }
+  const changed = edits.filter(([, before, after]) => before !== after);
+  for (const [file, , after] of changed) writeText(file, after);
+  return changed.length > 0
+    ? { status: 'applied', detail: changed.map(([file]) => path.basename(file)).join(', ') }
+    : { status: 'clean', detail: 'already patched' };
+}
+
 function patchMatchaMcpSessionServerId(openclawDir) {
   const patchId = 'matcha-mcp-session-server-id';
   const filePath = locateSingleJavaScriptFile(path.join(openclawDir, 'dist'), patchId, {
-    fileNamePrefix: 'store-entry-shape-',
+    fileNamePrefix: 'store-writer-state-',
     markers: [
       'function projectCanonicalSessionEntryShape(value) {',
-      'setOptionalField("icon", typeof canonicalValue.icon',
-      'function stripRuntimeOnlySessionSkillsFields(entry)',
+      'const icon = typeof canonicalValue.icon',
+      'function normalizePersistedSessionEntryShape(value, options = {})',
     ],
   });
   const source = readText(filePath);
-  const needle = '\tsetOptionalField("icon", typeof canonicalValue.icon';
+  const needle = '\tconst icon = typeof canonicalValue.icon';
   const replacement = `\tconst serverOverrides = canonicalValue.toolOverrides?.mcpServers;
 \tif (serverOverrides && Object.hasOwn(serverOverrides, "matcha-teamrun")) {
 \t\tconst mcpServers = { ...serverOverrides };
@@ -1072,7 +1208,7 @@ function patchMcpServerStatusMethod(openclawDir) {
   const patchId = 'mcp-server-status-method';
   const distDir = path.join(openclawDir, 'dist');
   const methodScopesFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'core-method-policy-',
+    fileNamePrefix: 'method-scopes-',
     markers: [
       'const CORE_GATEWAY_METHOD_SPECS = [',
       '"tools.effective",',
@@ -1082,9 +1218,9 @@ function patchMcpServerStatusMethod(openclawDir) {
   const toolsEffectiveFile = locateSingleJavaScriptFile(distDir, patchId, {
     fileNamePrefix: 'tools-effective-',
     markers: [
-      'const toolsEffectiveHandlers = {',
-      'function resolveTrustedToolsEffectiveContext(params)',
-      'const runtime = peekSessionMcpRuntime({',
+      'const defaultToolsEffectiveDependencies = {',
+      'peekSessionMcpRuntime,',
+      'function createToolsEffectiveHandlers(dependencies = defaultToolsEffectiveDependencies)',
     ],
   });
   const sessionAccessorFile = locateSingleJavaScriptFile(distDir, patchId, {
@@ -1127,6 +1263,9 @@ function patchMcpServerStatusHandler(filePath, sessionAccessorFile, patchId) {
 
   const helper = `const MCP_SERVER_STATUS_DEFAULT_LIMIT = 100;
 const MCP_SERVER_STATUS_MAX_LIMIT = 100;
+function mcpServerStatusRuntimeLookup(sessionKey) {
+\treturn sessionKey.includes(":") ? { sessionKey } : { sessionId: sessionKey, sessionKey };
+}
 function countMcpCatalogToolsByServer(tools) {
 \tconst counts = /* @__PURE__ */ new Map();
 \tfor (const tool of tools) {
@@ -1189,18 +1328,25 @@ function readMcpSessionUpdateParams(rawParams, respond) {
 \treturn { sessionKey, serverName, enabled: rawParams.enabled };
 }
 function resolveMcpSessionContext(sessionKey, respond, dependencies) {
-\treturn dependencies.resolveTrustedToolsEffectiveContext({ sessionKey, respond });
+\tconst loaded = dependencies.loadGatewaySessionEntryReadOnly(sessionKey);
+\tif (!loaded.entry) {
+\t\trespond(false, void 0, errorShape(ErrorCodes.INVALID_REQUEST, 'unknown session key "' + sessionKey + '"'));
+\t\treturn;
+\t}
+\tconst canonicalKey = loaded.canonicalKey ?? sessionKey;
+\tconst agentId = dependencies.resolveSessionAgentId({ sessionKey: canonicalKey, config: loaded.cfg });
+\tconst workspaceDir = normalizeOptionalString(loaded.entry.spawnedWorkspaceDir) ?? dependencies.resolveAgentWorkspaceDir(loaded.cfg, agentId);
+\treturn { cfg: loaded.cfg, entry: loaded.entry, sessionId: loaded.entry.sessionId, sessionKey, workspaceDir, toolOverrides: loaded.entry.toolOverrides };
 }
 function mcpSessionConfigSummary(context, dependencies) {
 \treturn dependencies.resolveSessionMcpConfigSummary({
 \t\tworkspaceDir: context.workspaceDir,
 \t\tcfg: context.cfg,
-\t\t...(context.toolOverrides ? { toolOverrides: context.toolOverrides } : {}),
-\t\ttoolDenylist: context.capabilityProfile.policy.explicitToolDenylist
+\t\t...(context.toolOverrides ? { toolOverrides: context.toolOverrides } : {})
 \t});
 }
 function projectMcpSessionServers(context, runtime, dependencies, offset, limit) {
-\tconst summary = mcpSessionConfigSummary({ ...context, workspaceDir: runtime?.workspaceDir ?? context.workspaceDir }, dependencies);
+\tconst summary = mcpSessionConfigSummary(context, dependencies);
 \tconst catalog = runtime?.retiredCatalog ?? runtime?.peekCatalog?.() ?? null;
 \tconst catalogServers = catalog?.servers && typeof catalog.servers === "object" && !Array.isArray(catalog.servers) ? catalog.servers : {};
 \tconst toolCounts = countMcpCatalogToolsByServer(Array.isArray(catalog?.tools) ? catalog.tools : []);
@@ -1230,7 +1376,7 @@ async function handleMcpServerStatusListRequest(params) {
 \tif (!parsed) return;
 \tconst context = resolveMcpSessionContext(parsed.sessionKey, params.respond, params.dependencies);
 \tif (!context) return;
-\tconst runtime = params.dependencies.peekSessionMcpRuntime({ sessionId: context.sessionId, sessionKey: context.sessionKey });
+\tconst runtime = params.dependencies.peekSessionMcpRuntime(mcpServerStatusRuntimeLookup(parsed.sessionKey));
 \tparams.respond(true, projectMcpSessionServers(context, runtime, params.dependencies, parsed.offset, parsed.limit), void 0);
 }
 async function handleMcpSessionServersUpdateRequest(params) {
@@ -1238,41 +1384,125 @@ async function handleMcpSessionServersUpdateRequest(params) {
 	if (!parsed) return;
 	const context = resolveMcpSessionContext(parsed.sessionKey, params.respond, params.dependencies);
 	if (!context) return;
-	const summary = mcpSessionConfigSummary({
-		...context,
-		toolOverrides: { ...context.toolOverrides, mcpServers: { ...context.toolOverrides?.mcpServers, [parsed.serverName]: true } }
-	}, params.dependencies);
+	const summary = mcpSessionConfigSummary(context, params.dependencies);
 	if (!summary.serverNames.includes(parsed.serverName)) {
 		rejectMcpSessionControlRequest(params.respond, 'unknown MCP server "' + parsed.serverName + '"');
 		return;
 	}
-	await patchSessionEntryCore({ sessionKey: parsed.sessionKey }, (entry) => ({
-		toolOverrides: { ...entry.toolOverrides, mcpServers: { ...entry.toolOverrides?.mcpServers, [parsed.serverName]: parsed.enabled } }
-	}), { skipMaintenance: true });
+	const existing = context.entry.toolOverrides ?? {};
+	const mcpServers = { ...(existing.mcpServers ?? {}), [parsed.serverName]: parsed.enabled };
+	const toolOverrides = { ...existing, mcpServers };
+	await patchSessionEntryCore({ sessionKey: parsed.sessionKey }, () => ({ toolOverrides }), { skipMaintenance: true });
 	params.respond(true, { serverName: parsed.serverName, enabled: parsed.enabled, effectiveNextRun: true }, void 0);
 }
 `;
-  const helperTarget = 'const toolsEffectiveHandlers = { "tools.effective":';
-  const dependencies = `const matchaMcpSessionDependencies = { resolveTrustedToolsEffectiveContext, resolveSessionMcpConfigSummary, peekSessionMcpRuntime };`;
-  if (!source.includes('const MCP_SERVER_STATUS_DEFAULT_LIMIT = 100;')) {
-    source = replaceOnce(source, helperTarget, `${helper}\n${dependencies}\n${helperTarget}`, patchId);
-    changed = true;
-  }
-  const handlers = `Object.assign(toolsEffectiveHandlers, {
-	"mcpServerStatus/list": async ({ params, respond }) => {
-		await handleMcpServerStatusListRequest({ rawParams: params, respond, dependencies: matchaMcpSessionDependencies });
-	},
-	"mcpSessionServers/update": async ({ params, respond }) => {
-		await handleMcpSessionServersUpdateRequest({ rawParams: params, respond, dependencies: matchaMcpSessionDependencies });
-	}
-});`;
-  if (!source.includes(handlers)) {
-    source = replaceOnce(source, 'export { toolsEffectiveHandlers };', `${handlers}\nexport { toolsEffectiveHandlers };`, patchId);
-    changed = true;
-  }
+  const helperTarget = 'async function handleToolsEffectiveRequest(params) {';
+  const helperReplacement = `${helper}\n${helperTarget}`;
+  const helperPatch = source.includes('const MCP_SERVER_STATUS_DEFAULT_LIMIT = 100;')
+    ? replaceBlockOnce(source, 'const MCP_SERVER_STATUS_DEFAULT_LIMIT = 100;', helperTarget, helperReplacement, patchId)
+    : replaceOptionalOnce(source, helperTarget, helperReplacement, patchId);
+  source = helperPatch.source;
+  changed ||= helperPatch.changed;
+
+  const handlersNeedle = `function createToolsEffectiveHandlers(dependencies = defaultToolsEffectiveDependencies) {
+\treturn { "tools.effective": async ({ params, respond, context }) => {
+\t\tawait handleToolsEffectiveRequest({
+\t\t\trawParams: params,
+\t\t\trespond,
+\t\t\tcontext,
+\t\t\tdependencies
+\t\t});
+\t} };
+}`;
+  const handlersReplacement = `function createToolsEffectiveHandlers(dependencies = defaultToolsEffectiveDependencies) {
+\treturn {
+\t\t"tools.effective": async ({ params, respond, context }) => {
+\t\t\tawait handleToolsEffectiveRequest({
+\t\t\t\trawParams: params,
+\t\t\t\trespond,
+\t\t\t\tcontext,
+\t\t\t\tdependencies
+\t\t\t});
+\t\t},
+\t\t"mcpServerStatus/list": async ({ params, respond }) => {
+\t\t\tawait handleMcpServerStatusListRequest({
+\t\t\t\trawParams: params,
+\t\t\t\trespond,
+\t\t\t\tdependencies
+\t\t\t});
+\t\t},
+\t\t"mcpSessionServers/update": async ({ params, respond }) => {
+\t\t\tawait handleMcpSessionServersUpdateRequest({
+\t\t\t\trawParams: params,
+\t\t\t\trespond,
+\t\t\t\tdependencies
+\t\t\t});
+\t\t}
+\t};
+}`;
+  const handlersPatch = replaceOptionalOnce(source, handlersNeedle, handlersReplacement, patchId);
+  source = handlersPatch.source;
+  changed ||= handlersPatch.changed;
+
+  const existingHandlersNeedle = `\t\t"mcpServerStatus/list": async ({ params, respond }) => {
+\t\t\tawait handleMcpServerStatusListRequest({
+\t\t\t\trawParams: params,
+\t\t\t\trespond,
+\t\t\t\tdependencies
+\t\t\t});
+\t\t}
+\t};`;
+  const existingHandlersReplacement = `\t\t"mcpServerStatus/list": async ({ params, respond }) => {
+\t\t\tawait handleMcpServerStatusListRequest({
+\t\t\t\trawParams: params,
+\t\t\t\trespond,
+\t\t\t\tdependencies
+\t\t\t});
+\t\t},
+\t\t"mcpSessionServers/update": async ({ params, respond }) => {
+\t\t\tawait handleMcpSessionServersUpdateRequest({
+\t\t\t\trawParams: params,
+\t\t\t\trespond,
+\t\t\t\tdependencies
+\t\t\t});
+\t\t}
+\t};`;
+  const existingHandlersPatch = replaceOptionalOnce(source, existingHandlersNeedle, existingHandlersReplacement, patchId);
+  source = existingHandlersPatch.source;
+  changed ||= existingHandlersPatch.changed;
 
   if (changed) writeText(filePath, source);
   return changed;
+}
+
+function patchExplicitSessionModelPatch(openclawDir) {
+  const patchId = 'explicit-session-model-patch';
+  const distDir = path.join(openclawDir, 'dist');
+  const sessionsPatchFile = locateSingleJavaScriptFile(distDir, patchId, {
+    fileNamePrefix: 'sessions-patch-',
+    markers: [
+      'function resolveSessionPatchModelSelection(params)',
+      'if ("model" in patch) {',
+      'applyModelOverrideWithAuthProfileCompatibility({',
+      'markLiveSwitchPending: raw !== null',
+    ],
+  });
+  return patchExplicitSessionModelSelection(sessionsPatchFile, patchId)
+    ? { status: 'applied', detail: path.basename(sessionsPatchFile) }
+    : { status: 'clean', detail: 'already patched' };
+}
+
+function patchExplicitSessionModelSelection(filePath, patchId) {
+  let source = readText(filePath);
+  if (source.includes('selection = { ...resolved, isDefault: false };')) return false;
+  const pattern = /(\n[\t ]*if \(!resolved\.ok\) return invalid\(resolved\.error\);\n)([\t ]*)selection = resolved;/g;
+  const matches = [...source.matchAll(pattern)];
+  if (matches.length !== 1) {
+    throw new Error(`${patchId}: expected one session model patch selection target, found ${matches.length}`);
+  }
+  source = source.replace(pattern, '$1$2selection = { ...resolved, isDefault: false };');
+  writeText(filePath, source);
+  return true;
 }
 
 function patchAgentDeleteCleanupIdentityString(openclawDir) {
@@ -1287,21 +1517,17 @@ function patchAgentDeleteCleanupIdentityString(openclawDir) {
     ],
   });
   const journalFile = locateSingleJavaScriptFile(distDir, patchId, {
-    fileNamePrefix: 'agent-deletion-journal-',
+    fileNamePrefix: 'openclaw-agent-db-lease-',
     markers: [
       'function parseCleanupPaths(value)',
       'Invalid agent deletion cleanup path journal.',
       'function readAgentDeletionJournal(',
     ],
   });
-  const journalFiles = [journalFile, ...[
-    'state/openclaw-state-read.worker.js',
-    'infra/sqlite-readonly-location.worker.js',
-  ].map((file) => path.join(distDir, file))];
   const changed = [
     [agentsFile, patchAgentDeleteCleanupIdentity(agentsFile, patchId)],
-    ...journalFiles.map((file) => [file, patchAgentDeletionJournalCleanupIdentity(file, patchId)]),
-  ].filter(([, changed]) => changed).map(([file]) => path.relative(distDir, file));
+    [journalFile, patchAgentDeletionJournalCleanupIdentity(journalFile, patchId)],
+  ].filter(([, changed]) => changed).map(([file]) => path.basename(file));
   return changed.length > 0
     ? { status: 'applied', detail: changed.join(', ') }
     : { status: 'clean', detail: 'already patched' };
@@ -1331,26 +1557,26 @@ async function statAgentCleanupPath(cleanupPath) {`;
 
 function patchAgentDeletionJournalCleanupIdentity(filePath, patchId) {
   let source = readText(filePath);
-  const start = source.indexOf('function parseCleanupPaths(value) {');
-  const end = source.indexOf('\n/** Read the journal through an already validated shared-state connection. */', start);
-  if (start < 0 || end < 0 || source.indexOf('function parseCleanupPaths(value) {', start + 1) >= 0) throw new Error(`${patchId}: journal parser boundary missing`);
-  const before = source.slice(start, end);
-  let parser = before;
-  for (const field of ['dev', 'ino']) {
-    const needle = `(entry.${field} === null || typeof entry.${field} === "number")`;
-    const replacement = `(entry.${field} === null || typeof entry.${field} === "number" || typeof entry.${field} === "string")`;
-    if (!parser.includes(replacement)) parser = replaceOnce(parser, needle, replacement, patchId);
-  }
-  const normalized = `return parsed.map((entry) => ({
-		...entry,
-		dev: entry.dev === null ? null : String(entry.dev),
-		ino: entry.ino === null ? null : String(entry.ino)
-	}));`;
-  if (!parser.includes(normalized)) parser = replaceOnce(parser, 'return parsed;', normalized, patchId);
-  if (parser === before) return false;
-  source = source.slice(0, start) + parser + source.slice(end);
-  writeText(filePath, source);
-  return true;
+  const replacement = `function parseCleanupPaths(value) {
+\tconst parsed = JSON.parse(value);
+\tif (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "object" && entry !== null && typeof entry.path === "string" && typeof entry.canonicalPath === "string" && typeof entry.parentPath === "string" && (entry.kind === "target" || entry.kind === "symlink") && (entry.dev === null || typeof entry.dev === "number" || typeof entry.dev === "string") && (entry.ino === null || typeof entry.ino === "number" || typeof entry.ino === "string") && typeof entry.coversDescendants === "boolean" && typeof entry.done === "boolean" && (entry.note === void 0 || typeof entry.note === "string") && Array.isArray(entry.sourcePaths) && entry.sourcePaths.every((sourcePath) => typeof sourcePath === "string"))) throw new Error("Invalid agent deletion cleanup path journal.");
+\treturn parsed.map((entry) => ({
+\t\t...entry,
+\t\tdev: entry.dev === null ? null : String(entry.dev),
+\t\tino: entry.ino === null ? null : String(entry.ino)
+\t}));
+}
+function readAgentDeletionJournal(agentId, options = {}) {`;
+  const patch = replaceBlockOnce(
+    source,
+    'function parseCleanupPaths(value) {',
+    '\nfunction readAgentDeletionJournal(agentId, options = {}) {',
+    replacement,
+    patchId,
+  );
+  source = patch.source;
+  if (patch.changed) writeText(filePath, source);
+  return patch.changed;
 }
 
 function patchChannelPairingApprovalExport(openclawDir) {
@@ -1359,7 +1585,7 @@ function patchChannelPairingApprovalExport(openclawDir) {
   const targetFile = path.join(distDir, 'plugin-sdk', 'channel-pairing.js');
   const producerFile = locateSingleJavaScriptFile(distDir, patchId, {
     fileNamePrefix: 'pairing-store-',
-    markers: ['async function approveChannelPairingCode(params)', 'async function resolveChannelPairingRequest(params, selector, approve)'],
+    markers: ['async function approveChannelPairingCode(params)', 'function resolveChannelPairingRequest(params)'],
   });
   const alias = resolveExportAlias(producerFile, 'approveChannelPairingCode', patchId);
   const exportLine = `export { ${alias} as approveChannelPairingCode } from "${relativeImportSpecifier(targetFile, producerFile)}";`;
@@ -1379,7 +1605,8 @@ function patchOwnedStdinStop(openclawDir) {
   const cleanup = `\tlet cleanupOwnedStdin = () => {};
 \tconst cleanupSignals = () => {
 \t\tcleanupOwnedStdin();`;
-  const binding = `\tconst ownedStdinStop = process.env.MATCHACLAW_OPENCLAW_OWNED_STDIN === "1" && params.ownsProcessLifecycle === true;
+  const binding = `\tprocess.on("SIGUSR1", onSigusr1);
+\tconst ownedStdinStop = process.env.MATCHACLAW_OPENCLAW_OWNED_STDIN === "1" && params.ownsProcessLifecycle === true;
 \tdelete process.env.MATCHACLAW_OPENCLAW_OWNED_STDIN;
 \tif (ownedStdinStop) {
 \t\tconst input = process.stdin;
@@ -1416,16 +1643,12 @@ function patchOwnedStdinStop(openclawDir) {
     throw new Error(`${patchId}: incomplete or changed owned stdin stop patch`);
   }
   source = replaceOnce(source, '\tconst cleanupSignals = () => {', cleanup, patchId);
-  source = replaceOnce(source, '\ttry {\n\t\treleaseHostLifeline = installGatewayHostLifeline(', binding + '\n\t\treleaseHostLifeline = installGatewayHostLifeline(', patchId);
+  source = replaceOnce(source, '\tprocess.on("SIGUSR1", onSigusr1);\n\ttry {', binding, patchId);
   writeText(targetFile, source);
   return { status: 'applied', detail: path.basename(targetFile) };
 }
 
 const OPENCLAW_PATCHES = Object.freeze([
-  {
-    id: 'plugin-capture-no-follow-cleanup',
-    apply: patchOpenClawFilesystem,
-  },
   {
     id: 'strip-bundled-channel-plugins',
     apply: stripBundledChannelPlugins,
@@ -1433,6 +1656,10 @@ const OPENCLAW_PATCHES = Object.freeze([
   {
     id: 'matcha-sealed-skills',
     apply: patchMatchaSealedSkills,
+  },
+  {
+    id: 'opencode-go-session-header',
+    apply: patchOpencodeGoSessionHeader,
   },
   {
     id: 'matcha-mcp-session-server-id',
@@ -1443,16 +1670,16 @@ const OPENCLAW_PATCHES = Object.freeze([
     apply: patchMcpServerStatusMethod,
   },
   {
+    id: 'explicit-session-model-patch',
+    apply: patchExplicitSessionModelPatch,
+  },
+  {
     id: 'agent-delete-cleanup-identity-string',
     apply: patchAgentDeleteCleanupIdentityString,
   },
   {
     id: 'channel-pairing-approval-export',
     apply: patchChannelPairingApprovalExport,
-  },
-  {
-    id: 'native-task-tools',
-    apply: patchOpenClawTaskTools,
   },
   {
     id: 'native-searxng-search',
@@ -1493,8 +1720,6 @@ export function applyOpenClawBundlePatches(openclawDir, options = {}) {
     throw new Error(`openclaw package not found: ${openclawDir}`);
   }
 
-  const pkg = JSON.parse(readText(path.join(openclawDir, 'package.json')));
-  if (pkg.name !== 'openclaw' || pkg.version !== '2026.10.8') throw new Error('OpenClaw bundle patches require openclaw@2026.10.8');
   const results = [];
   for (const patch of selectOpenClawPatches(patchIds)) {
     const result = patch.apply(openclawDir);
