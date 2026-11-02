@@ -25,6 +25,7 @@ import { createSessionObservation } from '@/plugins/chat/store/session-observati
 import { executeStoreSend } from '@/plugins/chat/store/send-handlers';
 import {
   executeCleanupEmptySession,
+  executeDeleteAgentSessions,
   executeDeleteSession,
   executeForgetAgentSessions,
   executeJumpViewportToLatest,
@@ -189,6 +190,7 @@ export const useChatStore: UseBoundStore<StoreApi<ChatStoreState>> = create<Chat
   let sessionRuntimeBootstrapSequence = 0;
   let sessionCatalogLoad: Promise<void> | null = null;
   let sessionCatalogDirty = false;
+  let sessionCatalogDeleteBatchDepth = 0;
   let sessionCatalogEventCleanup: (() => void) | null = null;
   import.meta.hot?.dispose(() => {
     sessionCatalogEventCleanup?.();
@@ -343,13 +345,14 @@ export const useChatStore: UseBoundStore<StoreApi<ChatStoreState>> = create<Chat
     },
     loadSessions: () => {
       sessionCatalogDirty = true;
+      if (sessionCatalogDeleteBatchDepth > 0) return Promise.resolve();
       if (!sessionCatalogLoad) {
         sessionCatalogLoad = Promise.resolve().then(async () => {
           try {
-            do {
+            while (sessionCatalogDirty && sessionCatalogDeleteBatchDepth === 0) {
               sessionCatalogDirty = false;
               await executeLoadSessions(sessionInput);
-            } while (sessionCatalogDirty);
+            }
           } finally {
             sessionCatalogLoad = null;
           }
@@ -376,6 +379,19 @@ export const useChatStore: UseBoundStore<StoreApi<ChatStoreState>> = create<Chat
       await executeNewSessionForScope(sessionInput, scope);
     },
     deleteSession: (key) => executeDeleteSession(sessionInput, key),
+    deleteAgentSessions: async (scope, identities) => {
+      sessionCatalogDeleteBatchDepth += 1;
+      try {
+        return await executeDeleteAgentSessions(sessionInput, scope, identities);
+      } finally {
+        sessionCatalogDeleteBatchDepth -= 1;
+        if (sessionCatalogDeleteBatchDepth === 0 && sessionCatalogDirty) {
+          await get().loadSessions().catch((error) => {
+            console.warn('[sessions.delete.catalog]', summarizeError(error));
+          });
+        }
+      }
+    },
     forgetAgentSessions: (agentId, endpoint) => {
       executeForgetAgentSessions(sessionInput, agentId, endpoint);
     },

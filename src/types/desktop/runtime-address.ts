@@ -1,23 +1,6 @@
-export interface NativeRuntimeEndpointRef {
-  readonly kind: 'native-runtime';
-  readonly runtimeAdapterId: string;
-  readonly runtimeInstanceId: string;
-}
-
-export interface ConnectorRuntimeEndpointRef {
-  readonly kind: 'protocol-connector';
-  readonly protocolId: string;
-  readonly connectorId: string;
-  readonly endpointId: string;
-}
-
-export type RuntimeEndpointRef = NativeRuntimeEndpointRef | ConnectorRuntimeEndpointRef;
-
-export interface SessionIdentity {
-  readonly endpoint: RuntimeEndpointRef;
-  readonly agentId: string;
-  readonly sessionKey: string;
-}
+import type { NativeRuntimeEndpointRef, ConnectorRuntimeEndpointRef, RuntimeEndpointRef, SessionIdentity } from '../../../sdk/app-plugins/src/identity';
+import { assertRuntimeEndpointRef, assertSessionIdentity, buildRuntimeEndpointKey, buildSessionIdentityKey, runtimeEndpointsEqual, sessionIdentitiesEqual, validateRuntimeEndpointRef, validateSessionIdentity } from '../../../sdk/app-plugins/src/identity';
+export * from '../../../sdk/app-plugins/src/identity';
 
 export type RuntimeScope = AppScope | RuntimeInstanceScope | AgentScope | SessionScope | WorkspaceMediaSessionScope | WorkspaceScope | TeamRunScope | ProviderRoutingScope | ProviderMediaScope;
 export type RuntimeScopeKind = RuntimeScope['kind'];
@@ -121,35 +104,6 @@ export function teamRunScope(endpoint: RuntimeEndpointRef, runId: string, teamId
   return { kind: 'team-run', endpoint, runId, ...(teamId === undefined ? {} : { teamId }) };
 }
 
-export function buildRuntimeEndpointKey(endpoint: RuntimeEndpointRef): string {
-  assertRuntimeEndpointRef(endpoint);
-  if (endpoint.kind === 'protocol-connector') {
-    return JSON.stringify({
-      type: 'runtime-endpoint',
-      kind: endpoint.kind,
-      protocolId: endpoint.protocolId,
-      connectorId: endpoint.connectorId,
-      endpointId: endpoint.endpointId,
-    });
-  }
-  return JSON.stringify({
-    type: 'runtime-endpoint',
-    kind: endpoint.kind,
-    runtimeAdapterId: endpoint.runtimeAdapterId,
-    runtimeInstanceId: endpoint.runtimeInstanceId,
-  });
-}
-
-export function buildSessionIdentityKey(identity: SessionIdentity): string {
-  assertSessionIdentity(identity);
-  return JSON.stringify({
-    type: 'session-identity',
-    endpoint: JSON.parse(buildRuntimeEndpointKey(identity.endpoint)),
-    agentId: identity.agentId,
-    sessionKey: identity.sessionKey,
-  });
-}
-
 export function buildCapabilityScopeKey(scope: RuntimeScope): string {
   assertRuntimeScope(scope);
   switch (scope.kind) {
@@ -197,59 +151,9 @@ export function runtimeScopeQuery(scope: RuntimeScope): string {
   return `scope=${encodeURIComponent(JSON.stringify(scope))}`;
 }
 
-export function runtimeEndpointsEqual(left: RuntimeEndpointRef, right: RuntimeEndpointRef): boolean {
-  return buildRuntimeEndpointKey(left) === buildRuntimeEndpointKey(right);
-}
-
-export function sessionIdentitiesEqual(left: SessionIdentity, right: SessionIdentity): boolean {
-  return buildSessionIdentityKey(left) === buildSessionIdentityKey(right);
-}
-
-export function assertRuntimeEndpointRef(input: unknown): asserts input is RuntimeEndpointRef {
-  const error = validateRuntimeEndpointRef(input);
-  if (error) throw new Error(error);
-}
-
 export function assertRuntimeScope(input: unknown): asserts input is RuntimeScope {
   const error = validateRuntimeScope(input);
   if (error) throw new Error(error);
-}
-
-export function assertSessionIdentity(input: unknown): asserts input is SessionIdentity {
-  const error = validateSessionIdentity(input);
-  if (error) throw new Error(error);
-}
-
-export function validateRuntimeEndpointRef(input: unknown): string | null {
-  if (!isRecord(input) || typeof input.kind !== 'string') {
-    return 'RuntimeEndpointRef is invalid';
-  }
-  if (input.kind === 'native-runtime') {
-    return hasExactKeys(input, ['kind', 'runtimeAdapterId', 'runtimeInstanceId'])
-      && isIdentity(input.runtimeAdapterId)
-      && isIdentity(input.runtimeInstanceId)
-      ? null
-      : 'RuntimeEndpointRef is invalid';
-  }
-  if (input.kind === 'protocol-connector') {
-    return hasExactKeys(input, ['kind', 'protocolId', 'connectorId', 'endpointId'])
-      && isIdentity(input.protocolId)
-      && isIdentity(input.connectorId)
-      && isIdentity(input.endpointId)
-      ? null
-      : 'RuntimeEndpointRef is invalid';
-  }
-  return 'RuntimeEndpointRef is invalid';
-}
-
-export function validateSessionIdentity(input: unknown): string | null {
-  if (!isRecord(input) || !hasExactKeys(input, ['endpoint', 'agentId', 'sessionKey'])) {
-    return 'SessionIdentity is invalid';
-  }
-  if (validateRuntimeEndpointRef(input.endpoint) || !isIdentity(input.agentId) || !isIdentity(input.sessionKey)) {
-    return 'SessionIdentity is invalid';
-  }
-  return null;
 }
 
 export function validateRuntimeScope(input: unknown): string | null {

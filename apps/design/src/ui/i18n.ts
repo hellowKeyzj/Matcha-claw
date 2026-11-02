@@ -1,7 +1,7 @@
 import { createInstance } from 'i18next';
 import { initReactI18next, useTranslation as useReactTranslation } from 'react-i18next';
-import type { AppWebviewApi } from '../../../../src/types/desktop/app-plugin-sdk';
-import { resolveSupportedLanguage, SUPPORTED_LANGUAGE_CODES } from '../../../../src/i18n/language';
+import type { AppWebviewApi } from '@matcha/app-plugins-sdk';
+import { resolveSupportedLanguage, SUPPORTED_LANGUAGE_CODES } from '@matcha/app-plugins-sdk';
 import zh from './locales/zh.json';
 import en from './locales/en.json';
 import ja from './locales/ja.json';

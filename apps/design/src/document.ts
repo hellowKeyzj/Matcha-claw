@@ -1,4 +1,4 @@
-import type { SessionIdentity } from '../../../src/types/desktop/runtime-address';
+import type { SessionIdentity } from '@matcha/app-plugins-sdk';
 
 export interface LayerProperties {
   id: string;

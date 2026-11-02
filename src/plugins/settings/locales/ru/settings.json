@@ -474,43 +474,49 @@
     "proxySaved": "Настройки прокси сохранены",
     "proxySaveFailed": "Не удалось сохранить настройки прокси",
     "browser": {
-      "title": "Browser",
-      "modeLabel": "Browser Mode",
-      "currentMode": "Current",
-      "modeSaving": "Applying browser mode and restarting Gateway...",
-      "modeSaved": "Browser mode saved",
-      "modeSaveFailed": "Failed to save browser mode",
+      "title": "Браузер",
+      "modeLabel": "Режим браузера",
+      "currentMode": "Текущий",
+      "modeSaving": "Применение режима браузера и перезапуск шлюза...",
+      "modeSaved": "Режим браузера сохранён",
+      "modeSaveFailed": "Не удалось сохранить режим браузера",
       "modes": {
+        "iab": {
+          "title": "Встроенный браузер",
+          "description": "Агент управляет встроенным браузером MatchaClaw без расширения"
+        },
         "relay": {
-          "title": "Browser Relay",
-          "description": "Подключение через расширение браузера"
+          "title": "Расширение Chrome",
+          "description": "Подключение к внешнему Chrome через расширение"
         },
         "native": {
-          "title": "Native Browser",
-          "description": "Расширение браузера не требуется"
+          "title": "Отдельный браузер",
+          "description": "Специальный браузер под управлением OpenClaw без расширения"
         },
         "off": {
-          "title": "Off",
-          "description": "Отключить функции браузера"
+          "title": "Выключено",
+          "description": "Отключить браузер для агента, сохранив ручную работу во встроенном браузере"
         }
       },
-      "nativeModeTitle": "Native Browser is active",
-      "nativeModeBody": "MatchaClaw uses OpenClaw's built-in browser plugin and does not rely on the Browser Relay extension path.",
-      "offModeTitle": "Browser capability is disabled",
-      "offModeBody": "Neither the native Browser plugin nor Browser Relay will be enabled.",
-      "copyChromeExtensions": "Copy chrome://extensions",
-      "openChromeExtensions": "Open chrome://extensions",
-      "revealExtensionDir": "Reveal extension directory",
-      "copyExtensionPath": "Copy extension path",
-      "absolutePathLabel": "Absolute path",
+      "iabModeTitle": "Встроенный браузер активен",
+      "iabModeBody": "Агент может работать со страницами во встроенном браузере MatchaClaw без установки расширения Chrome.",
+      "nativeModeTitle": "Отдельный браузер активен",
+      "nativeModeBody": "Агент использует специальный браузер под управлением OpenClaw, отдельно от встроенного браузера и вашего обычного Chrome. Расширение не требуется.",
+      "offModeTitle": "Браузер для агента отключён",
+      "offModeBody": "Автоматизация браузера для агента отключена. Вы по-прежнему можете открывать встроенный браузер и работать в нём вручную.",
+      "copyChromeExtensions": "Копировать chrome://extensions",
+      "openChromeExtensions": "Открыть chrome://extensions",
+      "revealExtensionDir": "Показать папку расширения",
+      "copyExtensionPath": "Копировать путь к расширению",
+      "absolutePathLabel": "Полный путь",
       "steps": {
-        "enableDevModeTitle": "Open Chrome Extensions and enable Developer mode",
-        "enableDevModeBody": "Open the Chrome extensions management page, then turn on the Developer mode toggle in the top-right corner.",
-        "openFolderTitle": "Open the extension folder",
-        "openFolderBody": "Find the directory that contains the browser extension files. In development you can use the repository path below; in packaged builds you can use Reveal extension directory.",
-        "installTitle": "Drag the extension folder into Chrome",
-        "installBody": "Drag the browser-relay folder onto the chrome://extensions page and Chrome will install it immediately.",
-        "installHint": "If drag and drop is inconvenient, click Load unpacked and select this extension directory instead."
+        "enableDevModeTitle": "Откройте страницу расширений Chrome и включите режим разработчика",
+        "enableDevModeBody": "Откройте страницу управления расширениями Chrome и включите режим разработчика в правом верхнем углу.",
+        "openFolderTitle": "Откройте папку расширения",
+        "openFolderBody": "Найдите папку с файлами расширения. В режиме разработки используйте путь к репозиторию ниже, а в установленном приложении — кнопку «Показать папку расширения».",
+        "installTitle": "Перетащите папку расширения в Chrome",
+        "installBody": "Перетащите папку browser-relay на страницу chrome://extensions, и Chrome установит расширение.",
+        "installHint": "Если перетаскивание неудобно, нажмите «Загрузить распакованное расширение» и выберите эту папку."
       }
     }
   },

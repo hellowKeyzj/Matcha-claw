@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "id": "example.reader",
+  "name": "Example Reader",
+  "version": "1.0.0",
+  "contributes": { "readers": [{ "id": "text", "name": "Example Text", "entry": "index.html", "extensions": [".example"], "contentType": "text", "source": "text" }] }
+}

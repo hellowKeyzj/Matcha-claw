@@ -27,8 +27,6 @@ function goalSendError(result: Extract<ChatSendResult, { accepted: false }>): Go
     case 'loading-history':
     case 'history-error':
       return 'missing-session';
-    case 'automation-session':
-      return 'unsupported';
   }
 }
 

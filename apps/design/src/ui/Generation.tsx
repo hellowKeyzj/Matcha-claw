@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
-import { isAppPixelSizeSupported, type AppMediaModelList } from '../../../../src/types/desktop/app-plugin-sdk';
+import { isAppPixelSizeSupported, type AppMediaModelList } from '@matcha/app-plugins-sdk';
 import type { AnglePreset, Asset, GenerationRecord, GenerationRequest, ImageLayer, Layer } from '../document';
 import type { LoadedAsset } from './useAssets';
 import { call, errorMessage, isExternalApp } from './api';

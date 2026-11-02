@@ -5,7 +5,7 @@ import { AppPluginError, MAX_APP_PLUGIN_ZIP_BYTES, requireDigest, requireObject,
 import type { AppPluginRuntimeStatusInput } from '../../main/app-plugins/agent-gateway';
 import { HostApiBodyTooLarge, jsonResult, type HostApiRequest, type HostApiResponse, type HostApiRouteResult } from '../execution';
 
-const operations = new Set(['inspect', 'import', 'enabled', 'uninstall', 'rollback', 'bundle', 'build', 'development', 'runtime-status', 'call']);
+const operations = new Set(['inspect', 'import', 'enabled', 'uninstall', 'rollback', 'bundle', 'build', 'development-list', 'development-status', 'development-bundle', 'development-call', 'development-observe', 'development-log', 'runtime-status', 'call']);
 const MAX_BASE64_BYTES = 4 * Math.ceil(MAX_APP_PLUGIN_ZIP_BYTES / 3);
 
 async function readBody(req: HostApiRequest, maximum: number): Promise<unknown> {
@@ -54,7 +54,7 @@ export async function handleAppPluginRoutes(
   const operation = url.pathname.startsWith('/api/app-plugins/') ? url.pathname.slice('/api/app-plugins/'.length) : '';
   if (req.method !== 'POST' || !operations.has(operation)) return undefined;
   try {
-    const maximum = operation === 'build' || operation === 'call' ? 2 * MAX_APP_PLUGIN_ZIP_BYTES
+    const maximum = operation === 'build' || operation === 'call' || operation === 'development-call' ? 2 * MAX_APP_PLUGIN_ZIP_BYTES
       : operation === 'inspect' || operation === 'import' ? MAX_BASE64_BYTES + 64 * 1024 : 64 * 1024;
     const value = await readBody(req, maximum);
     const owner = ctx.appPlugins;
@@ -110,11 +110,48 @@ export async function handleAppPluginRoutes(
         result = await owner.build({ manifest: body.manifest as AppPluginManifest, files: body.files as Record<string, string> });
         break;
       }
-      case 'development': {
-        const body = requireObject(value, ['kind', 'pluginId']);
-        if (body.kind !== 'reader' && body.kind !== 'connector' && body.kind !== 'application') throw new AppPluginError('invalid_package', 'Unknown app plugin development kind.');
-        if (body.pluginId !== undefined) requirePluginId(body.pluginId);
-        result = (await ctx.appPluginAgentGateway).createDevelopment({ kind: body.kind, pluginId: body.pluginId as string | undefined });
+      case 'development-list': {
+        requireObject(value, []);
+        result = { developments: (await ctx.appPluginAgentGateway).development.list() };
+        break;
+      }
+      case 'development-status': {
+        const body = requireObject(value, ['developmentId']);
+        requireString(body.developmentId, 128);
+        result = (await ctx.appPluginAgentGateway).development.status(body.developmentId);
+        break;
+      }
+      case 'development-bundle': {
+        const body = requireObject(value, ['developmentId', 'revision', 'entry']);
+        requireString(body.developmentId, 128);
+        requireString(body.entry, 200);
+        if (!Number.isSafeInteger(body.revision) || (body.revision as number) < 1) throw new AppPluginError('invalid_package', 'Invalid development revision.');
+        result = (await ctx.appPluginAgentGateway).development.bundle({ developmentId: body.developmentId, revision: body.revision as number, entry: body.entry });
+        break;
+      }
+      case 'development-call': {
+        const body = requireObject(value, ['developmentId', 'revision', 'name', 'arguments']);
+        requireString(body.developmentId, 128);
+        requireString(body.name, 64);
+        if (!Number.isSafeInteger(body.revision) || (body.revision as number) < 1 || !body.arguments || typeof body.arguments !== 'object' || Array.isArray(body.arguments)) {
+          throw new AppPluginError('invalid_package', 'Invalid development tool call.');
+        }
+        result = await (await ctx.appPluginAgentGateway).development.call({ developmentId: body.developmentId, revision: body.revision as number, name: body.name, arguments: body.arguments as Record<string, unknown> }, req.signal);
+        break;
+      }
+      case 'development-observe': {
+        const body = requireObject(value, ['developmentId', 'revision', 'commandId', 'result', 'error']);
+        requireString(body.developmentId, 128);
+        requireString(body.commandId, 128);
+        (await ctx.appPluginAgentGateway).development.observe(body as Parameters<Awaited<typeof ctx.appPluginAgentGateway>['development']['observe']>[0]);
+        result = { success: true };
+        break;
+      }
+      case 'development-log': {
+        const body = requireObject(value, ['developmentId', 'revision', 'level', 'message']);
+        requireString(body.developmentId, 128);
+        (await ctx.appPluginAgentGateway).development.log(body as Parameters<Awaited<typeof ctx.appPluginAgentGateway>['development']['log']>[0]);
+        result = { success: true };
         break;
       }
       case 'call': {

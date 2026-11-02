@@ -142,6 +142,7 @@ function buildInputFingerprint() {
     add(resolve(matchaAgentDir, input));
   }
   add(fileURLToPath(import.meta.url));
+  add(resolve(rootDir, 'resources/skills/preinstalled-skill-sources/app-plugin-create/SKILL.md'));
   add(bundledBunPath);
   return hash.digest('hex');
 }

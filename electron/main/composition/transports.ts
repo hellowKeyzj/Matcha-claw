@@ -2,6 +2,7 @@ import type { RuntimeHostDeliveryIssuer } from '../runtime-host-delivery/issuer'
 import type { RuntimeHostTransports } from '../runtime-host-delivery/transport/host-api-transports';
 import { createAgentsTransport } from '../runtime-host-delivery/products/agents';
 import { createSettingsDesiredTransport } from '../settings/desired';
+import type { SettingsBrowserMode } from '../runtime-host-delivery/products/settings/desired';
 import { createBoardTransport } from '../runtime-host-delivery/transport/board';
 import { createCapabilityDirectoryTransport } from '../runtime-host-delivery/transport/capabilities';
 import { createCronTransport } from '../runtime-host-delivery/transport/cron';
@@ -90,6 +91,7 @@ export type RuntimeHostTransportBundleInput = Readonly<{
   issuer: RuntimeHostDeliveryIssuer;
   runtimeHostTransportPort: number;
   reportE2ECronTrace?: CronE2ETraceReporter;
+  onBrowserModeChanging?: (mode: SettingsBrowserMode) => (accepted: boolean) => void;
 }>;
 
 export type RuntimeHostTransportBundle = ReturnType<typeof createRuntimeHostTransportBundle>;
@@ -145,7 +147,7 @@ export function createRuntimeHostTransportBundle(
     channelLoginTransport: createChannelLoginTransport(issuer, runtimeHostTransportPort),
     channelControlTransport: createChannelControlTransport(issuer, runtimeHostTransportPort),
     channelPairingTransport: createChannelPairingTransport(issuer, runtimeHostTransportPort),
-    settingsDesiredTransport: createSettingsDesiredTransport(issuer, runtimeHostTransportPort),
+    settingsDesiredTransport: createSettingsDesiredTransport(issuer, runtimeHostTransportPort, undefined, input.onBrowserModeChanging),
     securityPolicyTransport: createSecurityPolicyTransport(issuer, runtimeHostTransportPort),
     nativePolicyTransport: createNativePolicyTransport(issuer, runtimeHostTransportPort),
     securityRuleCatalogTransport: createSecurityRuleCatalogTransport(issuer, runtimeHostTransportPort),

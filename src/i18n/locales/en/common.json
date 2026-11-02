@@ -841,6 +841,8 @@
         }
     },
     "sidebar": {
+        "navigation": "Feature navigation",
+        "resizeSessions": "Resize session list",
         "chat": "Chat",
         "newChat": "New Chat",
         "cronTasks": "Cron Tasks",
@@ -879,8 +881,8 @@
         "teamLeader": "Leader session",
         "teamRoles": "Role sessions",
         "noAgentSessions": "No sessions",
-        "collapseMenu": "Collapse sidebar",
-        "expandMenu": "Expand sidebar",
+        "collapseMenu": "Collapse session list",
+        "expandMenu": "Expand session list",
         "dashboard": "Dashboard",
         "settings": "Settings",
         "devConsole": "Developer Console",
@@ -1041,6 +1043,7 @@
         "save": "Save",
         "cancel": "Cancel",
         "delete": "Delete",
+        "rename": "Rename",
         "edit": "Edit",
         "refresh": "Refresh",
         "close": "Close",
@@ -1086,6 +1089,27 @@
         "selectAgent": "Select agent"
     },
     "switchboard": {
+        "allAgents": "All agents",
+        "allTeams": "All teams",
+        "searchSessions": "Search sessions",
+        "searchPlaceholder": "Search sessions…",
+        "noSearchResults": "No matching sessions found",
+        "selectAgent": "Select agent",
+        "selectTeam": "Select team",
+        "addAgent": "Add agent",
+        "newSessionForAgent": "New session with {{name}}",
+        "agentSessionsAria": "Sessions for {{name}}",
+        "agentActionsAria": "More actions for {{name}}",
+        "deleteAllSessions": "Delete all ({{count}})",
+        "deleteAgentSessionsTitle": "Delete sessions for {{name}}",
+        "deleteAgentSessionsDescription": "This will delete {{count}} sessions for the current agent. This cannot be undone.",
+        "deleteAgentSessionsFailed": "Some sessions could not be deleted; others may already be deleted. Refresh the session list to check.",
+        "renameFailed": "Rename failed",
+        "deleteFailed": "Delete failed",
+        "deleteUnknown": "Deletion outcome unknown. Refresh the session list to check.",
+        "newSessionFailed": "Could not create session",
+        "newRun": "New run",
+        "newRunFailed": "Could not create run",
         "quickSwitch": "Quick switch",
         "runtime": "Runtime",
         "teamSession": "Team session",
@@ -1094,8 +1118,7 @@
             "teams": "Teams",
             "sessions": "Sessions"
         },
-        "normalSessions": "Normal",
-        "automationSessions": "Automation"
+        "normalSessions": "Normal"
     },
     "gateway": {
         "notRunning": "Gateway Not Running",

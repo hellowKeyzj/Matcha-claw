@@ -480,23 +480,29 @@
       "modeSaved": "ブラウザモードを保存しました",
       "modeSaveFailed": "ブラウザモードの保存に失敗しました",
       "modes": {
+        "iab": {
+          "title": "内蔵ブラウザ",
+          "description": "拡張機能なしで Agent が MatchaClaw の内蔵ブラウザを操作"
+        },
         "relay": {
-          "title": "Browser Relay",
-          "description": "拡張機能でブラウザに接続"
+          "title": "Chrome 拡張機能",
+          "description": "拡張機能で外部の Chrome に接続"
         },
         "native": {
-          "title": "Native Browser",
-          "description": "ブラウザ拡張機能は不要"
+          "title": "専用ブラウザ",
+          "description": "OpenClaw が管理する専用ブラウザを使用、拡張機能は不要"
         },
         "off": {
           "title": "オフ",
-          "description": "ブラウザ機能を無効化"
+          "description": "Agent のブラウザ操作を無効化。内蔵ブラウザは手動で利用可能"
         }
       },
-      "nativeModeTitle": "Native Browser を使用中",
-      "nativeModeBody": "MatchaClaw は OpenClaw 内蔵 browser プラグインを有効にし、Browser Relay 拡張経路は使いません。",
-      "offModeTitle": "ブラウザ機能は無効です",
-      "offModeBody": "Native Browser も Browser Relay も有効になりません。",
+      "iabModeTitle": "内蔵ブラウザを使用中",
+      "iabModeBody": "Agent が MatchaClaw の内蔵ブラウザでウェブページを操作します。Chrome 拡張機能のインストールは不要です。",
+      "nativeModeTitle": "専用ブラウザを使用中",
+      "nativeModeBody": "Agent は OpenClaw が管理する専用ブラウザを使用します。内蔵ブラウザや普段の Chrome とは独立しており、拡張機能は不要です。",
+      "offModeTitle": "Agent のブラウザ操作は無効です",
+      "offModeBody": "Agent のブラウザ自動操作は無効です。内蔵ブラウザは引き続き手動で開いて利用できます。",
       "copyChromeExtensions": "chrome://extensions をコピー",
       "openChromeExtensions": "chrome://extensions を開く",
       "revealExtensionDir": "拡張ディレクトリを表示",

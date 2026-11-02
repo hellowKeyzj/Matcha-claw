@@ -117,9 +117,15 @@ impl<'de> Deserialize<'de> for Timeout {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(transparent)]
 pub(crate) struct CommandInput(pub(crate) Value);
+
+impl std::fmt::Debug for CommandInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CommandInput(<redacted>)")
+    }
+}
 
 impl CommandInput {
     pub(crate) fn into_value(self) -> Value {

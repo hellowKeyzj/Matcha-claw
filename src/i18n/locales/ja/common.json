@@ -841,6 +841,8 @@
         }
     },
     "sidebar": {
+        "navigation": "機能ナビゲーション",
+        "resizeSessions": "セッション一覧の幅を調整",
         "chat": "チャット",
         "newChat": "新しいチャット",
         "cronTasks": "定期タスク",
@@ -876,8 +878,8 @@
         "deleteSessionDialogDeleting": "削除中...",
         "noSubagents": "Agentなし",
         "noAgentSessions": "セッションなし",
-        "collapseMenu": "サイドバーを折りたたむ",
-        "expandMenu": "サイドバーを展開",
+        "collapseMenu": "セッション一覧を折りたたむ",
+        "expandMenu": "セッション一覧を展開",
         "dashboard": "ダッシュボード",
         "settings": "設定",
         "devConsole": "開発者コンソール",
@@ -1038,6 +1040,7 @@
         "save": "保存",
         "cancel": "キャンセル",
         "delete": "削除",
+        "rename": "名前を変更",
         "edit": "編集",
         "refresh": "更新",
         "close": "閉じる",
@@ -1083,6 +1086,27 @@
         "selectAgent": "エージェントを選択"
     },
     "switchboard": {
+        "allAgents": "すべてのエージェント",
+        "allTeams": "すべてのチーム",
+        "searchSessions": "セッションを検索",
+        "searchPlaceholder": "セッションを検索…",
+        "noSearchResults": "一致するセッションが見つかりません",
+        "selectAgent": "エージェントを選択",
+        "selectTeam": "チームを選択",
+        "addAgent": "エージェントを追加",
+        "newSessionForAgent": "{{name}} と新しいセッションを開始",
+        "agentSessionsAria": "{{name}} のセッション",
+        "agentActionsAria": "{{name}} のその他の操作",
+        "deleteAllSessions": "すべて削除（{{count}}）",
+        "deleteAgentSessionsTitle": "{{name}} のセッションを削除",
+        "deleteAgentSessionsDescription": "現在のエージェントのセッションを {{count}} 件削除します。この操作は取り消せません。",
+        "deleteAgentSessionsFailed": "削除できなかったセッションがあります。一部は削除済みの可能性があるため、一覧を再読み込みして確認してください。",
+        "renameFailed": "名前を変更できませんでした",
+        "deleteFailed": "削除できませんでした",
+        "deleteUnknown": "削除結果を確認できません。セッション一覧を再読み込みして確認してください。",
+        "newSessionFailed": "会話を作成できませんでした",
+        "newRun": "新しい実行",
+        "newRunFailed": "実行を作成できませんでした",
         "quickSwitch": "クイック切替",
         "runtime": "ランタイム",
         "teamSession": "チーム会話",
@@ -1091,8 +1115,7 @@
             "teams": "Teams",
             "sessions": "Sessions"
         },
-        "normalSessions": "通常",
-        "automationSessions": "Automation"
+        "normalSessions": "通常"
     },
     "gateway": {
         "notRunning": "ゲートウェイが停止中",

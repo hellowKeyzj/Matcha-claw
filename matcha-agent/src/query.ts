@@ -468,6 +468,15 @@ async function* queryLoop(
     // is reassigned within an iteration (queryTracking, messages updates);
     // the rest are read-only between continue sites.
     let { toolUseContext } = state
+    if (toolUseContext.options.refreshTools) {
+      toolUseContext = {
+        ...toolUseContext,
+        options: {
+          ...toolUseContext.options,
+          tools: toolUseContext.options.refreshTools(),
+        },
+      }
+    }
     const {
       messages,
       autoCompactTracking,
@@ -1994,20 +2003,6 @@ async function* queryLoop(
       queryChainId: queryChainIdForAnalytics,
       queryDepth: queryTracking.depth,
     })
-
-    // Refresh tools between turns so newly-connected MCP servers become available
-    if (updatedToolUseContext.options.refreshTools) {
-      const refreshedTools = updatedToolUseContext.options.refreshTools()
-      if (refreshedTools !== updatedToolUseContext.options.tools) {
-        updatedToolUseContext = {
-          ...updatedToolUseContext,
-          options: {
-            ...updatedToolUseContext.options,
-            tools: refreshedTools,
-          },
-        }
-      }
-    }
 
     const toolUseContextWithQueryTracking = {
       ...updatedToolUseContext,

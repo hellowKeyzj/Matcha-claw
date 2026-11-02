@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AppPluginContext, AppTextModelRequest } from '../../../../src/types/desktop/app-plugin-sdk';
+import type { AppPluginContext, AppTextModelRequest } from '@matcha/app-plugins-sdk';
 import type { ExtractTextRequest, ExtractTextResult, RecommendationKind, RecommendationRequest, RecommendationResult } from '../analysis';
 import type { Asset, DesignDocument, ImageLayer } from '../document';
 import type { Assets } from './assets';

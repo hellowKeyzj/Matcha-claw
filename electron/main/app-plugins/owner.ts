@@ -13,6 +13,7 @@ import {
   requirePluginId,
 } from './package';
 import type { AppPluginPackageWorker } from './package-client';
+import type { PackageRequest, PackageResults } from './package-contract';
 import { AppPluginStorage, MAX_INSTALLED_APP_PLUGINS } from './storage';
 
 export interface ApplicationPluginOwnerOptions {
@@ -45,55 +46,27 @@ export class ApplicationPluginOwner {
     });
   }
 
-  inspectInstalledSource(input: { id: string; digest: string }): Promise<{
-    manifest: AppPluginManifest; digest: string; files: Record<string, string>;
-  }> {
-    return this.enqueue(async () => {
-      requireObject(input, ['id', 'digest']);
-      const installed = this.requireCurrent(await this.load(), input.id, input.digest);
-      return this.storage.readPackage(input.id, input.digest, { operation: 'source', expectedManifest: installed.manifest });
+  // Consumes the buffer; callers retaining a snapshot must pass one exclusive clone.
+  validate(bytes: Uint8Array): Promise<PackageResults['validate']> {
+    return this.enqueue(() => {
+      if (!(bytes instanceof Uint8Array)) throw new AppPluginError('invalid_package', 'App plugin package must be ZIP bytes.');
+      return this.options.packageWorker.process({ operation: 'validate', bytes });
     });
   }
 
-  importPackage(input: { packageBase64: string; digest: string; origin: 'manual' | 'agent'; onlyIfNew?: boolean; expectedDigest?: string }): Promise<InstalledAppPlugin> {
-    return this.enqueue(async () => {
-      requireObject(input, ['packageBase64', 'digest', 'origin', 'onlyIfNew', 'expectedDigest']);
-      requireDigest(input.digest);
-      if (input.expectedDigest !== undefined) requireDigest(input.expectedDigest);
-      if (input.onlyIfNew !== undefined && typeof input.onlyIfNew !== 'boolean') throw new AppPluginError('invalid_package', 'Invalid app plugin creation condition.');
-      if (input.origin !== 'manual' && input.origin !== 'agent') throw new AppPluginError('invalid_package', 'Invalid plugin installation origin.');
-      const contents = await this.options.packageWorker.process({ operation: 'import', packageBase64: input.packageBase64 });
-      if (contents.digest !== input.digest) throw new AppPluginError('conflict', 'Package changed after inspection. Inspect it again before importing.');
-      const catalog = await this.load();
-      const previous = catalog.plugins.find((plugin) => plugin.manifest.id === contents.manifest.id);
-      if (input.onlyIfNew && previous) throw new AppPluginError('conflict', 'New plugin development cannot replace an installed package.');
-      if (input.expectedDigest !== undefined && previous?.digest !== input.expectedDigest) {
-        throw new AppPluginError('conflict', 'App plugin changed since its source was inspected. Inspect the current version before installing.');
-      }
-      if (previous?.digest === contents.digest) return structuredClone(previous);
-      if (previous && [previous, previous.previous].some((version) => version
-        && version.manifest.version === contents.manifest.version && version.digest !== contents.digest)) {
-        throw new AppPluginError('conflict', 'This plugin version already has different contents. Build a new version before importing.');
-      }
-      if (!previous && catalog.plugins.length >= MAX_INSTALLED_APP_PLUGINS) throw new AppPluginError('busy', 'The installed app plugin limit has been reached. Uninstall a plugin first.');
-      const installed: InstalledAppPlugin = {
-        manifest: contents.manifest,
-        digest: contents.digest,
-        enabled: previous?.enabled ?? true,
-        origin: input.origin,
-        installedAt: new Date().toISOString(),
-        ...(previous ? { previous: {
-          manifest: previous.manifest,
-          digest: previous.digest,
-          origin: previous.origin,
-          installedAt: previous.installedAt,
-        } } : {}),
-      };
-      await this.storage.stage(contents.manifest.id, contents.digest, Buffer.from(contents.bytes.buffer, contents.bytes.byteOffset, contents.bytes.byteLength));
-      await this.commit([...catalog.plugins.filter((plugin) => plugin.manifest.id !== contents.manifest.id), installed],
-        () => this.storage.prune(contents.manifest.id, contents.digest, installed.previous?.digest)
-          .catch(() => logger.warn('[AppPlugins] Could not prune retained package versions')));
-      return structuredClone(installed);
+  importPackage(input: { packageBase64: string; digest: string; origin: 'manual' | 'agent'; onlyIfNew?: boolean }): Promise<InstalledAppPlugin> {
+    return this.enqueue(() => {
+      requireObject(input, ['packageBase64', 'digest', 'origin', 'onlyIfNew']);
+      return this.install({ operation: 'import', packageBase64: input.packageBase64 }, input);
+    });
+  }
+
+  // Revalidates and consumes bytes; pass one exclusive clone to retain a validated snapshot.
+  importBytes(input: { bytes: Uint8Array; digest: string; origin: 'manual' | 'agent'; onlyIfNew?: boolean }): Promise<InstalledAppPlugin> {
+    return this.enqueue(() => {
+      requireObject(input, ['bytes', 'digest', 'origin', 'onlyIfNew']);
+      if (!(input.bytes instanceof Uint8Array)) throw new AppPluginError('invalid_package', 'App plugin package must be ZIP bytes.');
+      return this.install({ operation: 'validate', bytes: input.bytes }, input);
     });
   }
 
@@ -170,6 +143,46 @@ export class ApplicationPluginOwner {
     const result = this.tail.then(operation);
     this.tail = result.then(() => { this.pending--; }, () => { this.pending--; });
     return result;
+  }
+
+  private async install(
+    request: Extract<PackageRequest, { operation: 'import' | 'validate' }>,
+    input: { digest: string; origin: 'manual' | 'agent'; onlyIfNew?: boolean },
+  ): Promise<InstalledAppPlugin> {
+    requireDigest(input.digest);
+    if (input.onlyIfNew !== undefined && typeof input.onlyIfNew !== 'boolean') throw new AppPluginError('invalid_package', 'Invalid app plugin creation condition.');
+    if (input.origin !== 'manual' && input.origin !== 'agent') throw new AppPluginError('invalid_package', 'Invalid plugin installation origin.');
+    const contents = request.operation === 'import'
+      ? await this.options.packageWorker.process({ operation: 'import', packageBase64: request.packageBase64 })
+      : await this.options.packageWorker.process({ operation: 'validate', bytes: request.bytes });
+    if (contents.digest !== input.digest) throw new AppPluginError('conflict', 'Package changed after inspection. Inspect it again before importing.');
+    const catalog = await this.load();
+    const previous = catalog.plugins.find((plugin) => plugin.manifest.id === contents.manifest.id);
+    if (input.onlyIfNew && previous) throw new AppPluginError('conflict', 'New plugin development cannot replace an installed package.');
+    if (previous?.digest === contents.digest) return structuredClone(previous);
+    if (previous && [previous, previous.previous].some((version) => version
+      && version.manifest.version === contents.manifest.version && version.digest !== contents.digest)) {
+      throw new AppPluginError('conflict', 'This plugin version already has different contents. Build a new version before importing.');
+    }
+    if (!previous && catalog.plugins.length >= MAX_INSTALLED_APP_PLUGINS) throw new AppPluginError('busy', 'The installed app plugin limit has been reached. Uninstall a plugin first.');
+    const installed: InstalledAppPlugin = {
+      manifest: contents.manifest,
+      digest: contents.digest,
+      enabled: previous?.enabled ?? true,
+      origin: input.origin,
+      installedAt: new Date().toISOString(),
+      ...(previous ? { previous: {
+        manifest: previous.manifest,
+        digest: previous.digest,
+        origin: previous.origin,
+        installedAt: previous.installedAt,
+      } } : {}),
+    };
+    await this.storage.stage(contents.manifest.id, contents.digest, Buffer.from(contents.bytes.buffer, contents.bytes.byteOffset, contents.bytes.byteLength));
+    await this.commit([...catalog.plugins.filter((plugin) => plugin.manifest.id !== contents.manifest.id), installed],
+      () => this.storage.prune(contents.manifest.id, contents.digest, installed.previous?.digest)
+        .catch(() => logger.warn('[AppPlugins] Could not prune retained package versions')));
+    return structuredClone(installed);
   }
 
   private async load(): Promise<AppPluginCatalog> {

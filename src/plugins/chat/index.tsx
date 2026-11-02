@@ -21,6 +21,7 @@ import { selectChatSelection, useChatRuntime } from '@/plugins/chat/chat-session
 import { ChatComposer } from '@/plugins/chat/ChatComposer';
 import { ChatMessages } from '@/plugins/chat/ChatMessages';
 import { ChatWorkspace } from '@/plugins/chat/ChatWorkspace';
+import { WorkspaceProvider } from '@/plugins/workspace/context';
 
 interface ChatProps { isActive?: boolean; }
 
@@ -28,7 +29,7 @@ export function Chat({ isActive = true }: ChatProps) {
   const { t } = useTranslation('chat');
   const location = useLocation();
   const navigate = useNavigate();
-  const { currentWorkspaceIdentity, connectorSessionIdentity } = useChatStore(useShallow(selectChatSelection));
+  const { currentWorkspaceIdentity, connectorSessionIdentity, currentComposerDraftKey } = useChatStore(useShallow(selectChatSelection));
   const { runtime: currentConversationRuntime } = useChatRuntime();
   const currentChatRuntimeAvailable = currentConversationRuntime.state === 'ready';
   const workspaceActive = isActive;
@@ -94,6 +95,7 @@ export function Chat({ isActive = true }: ChatProps) {
     await invokeIpc('shell:openExternal', url);
   }, [runtimeActionOwner]);
   return (
+    <WorkspaceProvider scopeKey={currentComposerDraftKey} sessionIdentity={currentWorkspaceIdentity}>
     <ChatComposer isActive={workspaceActive} composerRef={composerRef} viewportPaneRef={viewportPaneRef}>
       {(renderInput) => <ChatMessages isActive={workspaceActive} renderInput={renderInput} composerRef={composerRef} viewportPaneRef={viewportPaneRef}
         onRuntimeSendMessage={handleRuntimeSendMessage} onRuntimeOpenLink={handleRuntimeOpenLink}>
@@ -108,6 +110,7 @@ export function Chat({ isActive = true }: ChatProps) {
         />}
       </ChatMessages>}
     </ChatComposer>
+    </WorkspaceProvider>
   );
 }
 

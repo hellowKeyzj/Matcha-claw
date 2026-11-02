@@ -1,7 +1,9 @@
+export const NAVIGATION_RAIL_WIDTH = 56;
+
 export const CHAT_WORKSPACE_LAYOUT = {
   sidebarMinWidth: 200,
   sidebarMaxWidth: 420,
-  sidebarDefaultWidth: 256,
+  sidebarDefaultWidth: 264,
   sidePanelMinWidth: 260,
   sidePanelMaxWidth: 1600,
   sidePanelDefaultWidth: 640,

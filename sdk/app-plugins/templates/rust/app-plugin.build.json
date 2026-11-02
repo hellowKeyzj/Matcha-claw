@@ -1,0 +1,4 @@
+{
+  "html": { "index.html": "index.html" },
+  "assets": { "bin/backend.exe": "target/release/matcha-app-plugin-rust.exe" }
+}

@@ -17,6 +17,7 @@ import {
 } from './desktop/main-window-focus';
 import {
   createQuitLifecycleState,
+  cancelQuitCleanup,
   completeQuitCleanup,
   markQuitCleanupCompleted,
   requestQuitLifecycleAction,
@@ -246,7 +247,6 @@ if (gotTheLock) {
   });
 
   app.on('before-quit', async (event) => {
-    setQuitting();
     const action = requestQuitLifecycleAction(quitLifecycleState);
 
     if (action === 'allow-quit') {
@@ -259,6 +259,19 @@ if (gotTheLock) {
       return;
     }
 
+    try {
+      await application?.prepareQuit();
+    } catch (error) {
+      application?.cancelQuit();
+      cancelQuitCleanup(quitLifecycleState);
+      setQuitting(false);
+      logger.warn('Quit cancelled because browser data could not be saved:', error);
+      focusMainWindow();
+      hostEventBus.emit('iab:event', { type: 'quit-blocked' });
+      return;
+    }
+
+    setQuitting();
     hostEventBus.closeAll();
     destroyTray();
     for (const window of BrowserWindow.getAllWindows()) {

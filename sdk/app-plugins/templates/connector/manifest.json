@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "id": "example.connector",
+  "name": "Example Connector",
+  "version": "1.0.0",
+  "contributes": { "connectors": [{ "id": "service", "displayName": "Example Service", "kind": "mcp-http", "defaultTransport": "streamable-http" }] }
+}

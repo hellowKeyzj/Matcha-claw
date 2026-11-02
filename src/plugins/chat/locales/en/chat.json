@@ -414,6 +414,7 @@
         "permissionFullRequiresAccess": "Full access is not available for this session",
         "permissionLoading": "Loading permissions…",
         "permissionPending": "Switching permissions…",
+        "configurationCreateRejected": "The session could not be created. Your message was not sent. Check the runtime status before retrying.",
         "configurationCreateUnknown": "Session creation is unconfirmed. Do not send again.",
         "configurationOutcome": {
             "unsupported": "Configuration not applied: this operation is unsupported",

@@ -61,6 +61,11 @@ resources/bin
 *.key
 
 build/
+!/build/
+/build/*
+!/build/iab-guard-extension/
+!/build/iab-guard-extension/manifest.json
+!/build/iab-guard-extension/guard.js
 packages/memory-lancedb-pro/models/
 resources/wiki/models/
 resources/wiki/onnxruntime/
@@ -123,3 +128,5 @@ runtime-host_bak/
 src-tauri/
 /openclaw/
 design_web/
+build/
+.playwright-cli/

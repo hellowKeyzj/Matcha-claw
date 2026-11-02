@@ -128,7 +128,6 @@ export class AppPluginStorage {
   readPackage(id: string, digest: string): Promise<Buffer>;
   readPackage(id: string, digest: string, request: Extract<StoredPackageRequest, { operation: 'read' }>): Promise<PackageResults['read']>;
   readPackage(id: string, digest: string, request: Extract<StoredPackageRequest, { operation: 'files' }>): Promise<PackageResults['files']>;
-  readPackage(id: string, digest: string, request: Extract<StoredPackageRequest, { operation: 'source' }>): Promise<PackageResults['source']>;
   readPackage(id: string, digest: string, request: Extract<StoredPackageRequest, { operation: 'html' }>): Promise<PackageResults['html']>;
   async readPackage(id: string, digest: string, request: StoredPackageRequest = { operation: 'verify' }): Promise<Buffer | PackageResults[StoredPackageRequest['operation']]> {
     requirePluginId(id);
@@ -143,7 +142,6 @@ export class AppPluginStorage {
     switch (request.operation) {
       case 'read': return this.packageWorker.process({ operation: 'read', bytes, expectedDigest: digest });
       case 'files': return this.packageWorker.process({ operation: 'files', bytes, expectedDigest: digest });
-      case 'source': return this.packageWorker.process({ ...request, bytes, expectedDigest: digest });
       case 'html': return this.packageWorker.process({ ...request, bytes, expectedDigest: digest });
       case 'verify': {
         const verified = await this.packageWorker.process({ operation: 'verify', bytes, expectedDigest: digest });

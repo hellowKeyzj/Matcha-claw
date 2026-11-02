@@ -232,6 +232,7 @@ import {
   connectToServer,
   clearServerCache,
   fetchToolsForClient,
+  watchMcpToolChanges,
   areMcpConfigsEqual,
   reconnectMcpServerImpl,
 } from 'src/services/mcp/client.js'
@@ -1607,6 +1608,29 @@ function runHeadlessStreaming(
     configs: {},
   }
 
+  const toolChangeWatches = new WeakMap<object, Promise<void>>()
+  async function watchToolChanges(clients: MCPServerConnection[]): Promise<void> {
+    await Promise.all(clients.map(client => {
+      if (client.type !== 'connected' || !client.capabilities?.tools?.listChanged) return
+      let ready = toolChangeWatches.get(client.client)
+      if (!ready) {
+        ready = watchMcpToolChanges(client, nextTools => {
+          const current = [...getAppState().mcp.clients, ...sdkClients, ...dynamicMcpState.clients]
+            .find(candidate => candidate.name === client.name)
+          if (current?.type !== 'connected' || current.client !== client.client) return
+          const replace = (previous: Tools) => [...previous.filter(tool => tool.mcpInfo?.serverName !== client.name), ...nextTools]
+          setAppState(previous => ({ ...previous, mcp: { ...previous.mcp, tools: replace(previous.mcp.tools) } }))
+          if (sdkClients.some(candidate => candidate === client)) sdkTools = replace(sdkTools)
+          if (dynamicMcpState.clients.some(candidate => candidate === client)) {
+            dynamicMcpState = { ...dynamicMcpState, tools: replace(dynamicMcpState.tools) }
+          }
+        })
+        toolChangeWatches.set(client.client, ready)
+      }
+      return ready
+    }))
+  }
+
   // Shared tool assembly for ask() and the get_context_usage control request.
   // Closes over the mutable sdkTools/dynamicMcpState bindings so both call
   // sites see late-connecting servers.
@@ -1617,7 +1641,7 @@ function runHeadlessStreaming(
     )
     let allTools = uniqBy(
       mergeAndFilterTools(
-        [...tools, ...sdkTools, ...dynamicMcpState.tools],
+        [...tools.filter(tool => !tool.mcpInfo), ...sdkTools, ...dynamicMcpState.tools],
         assembledTools,
         appState.toolPermissionContext.mode,
       ),
@@ -2293,7 +2317,8 @@ function runHeadlessStreaming(
             reregisterChannelHandlerAfterReconnect(client)
           }
 
-          const allTools = buildAllTools(appState)
+          await watchToolChanges(allMcpClients)
+          const allTools = buildAllTools(getAppState())
 
           for (const uuid of batchUuids) {
             notifyCommandLifecycle(uuid, 'started')
@@ -2525,6 +2550,7 @@ function runHeadlessStreaming(
                   isMeta: cmd.isMeta,
                   cwd: cwd(),
                   tools: allTools,
+                  refreshTools: () => buildAllTools(getAppState()),
                   verbose: options.verbose,
                   mcpClients: allMcpClients,
                   thinkingConfig: options.thinkingConfig,

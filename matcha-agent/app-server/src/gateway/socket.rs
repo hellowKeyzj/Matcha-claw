@@ -22,14 +22,18 @@ const CLOSE_DEADLINE: Duration = Duration::from_secs(1);
 
 enum ReaderEnd {
     Stopped,
+    Shutdown,
     PeerClosed,
     Ended,
     Failed,
 }
 
-pub(super) struct Outbound {
-    message: Message,
-    after_send: Vec<oneshot::Sender<()>>,
+pub(super) enum Outbound {
+    Message {
+        message: Message,
+        after_send: Vec<oneshot::Sender<()>>,
+    },
+    Flush(oneshot::Sender<()>),
 }
 
 pub(super) struct Connection {
@@ -37,6 +41,7 @@ pub(super) struct Connection {
     pub(super) closed: CancellationToken,
     pub(super) streams: TaskTracker,
     pub(super) subscriptions: subscriptions::Subscriptions,
+    iab: crate::session::iab::Peer,
     initialized: AtomicBool,
     output: mpsc::Sender<Outbound>,
 }
@@ -71,7 +76,8 @@ pub(super) async fn serve(socket: WebSocket, gateway: Gateway) {
     // A slow socket retains one queued frame, not an unbounded copy of durable events.
     let (output, mut queued) = mpsc::channel::<Outbound>(1);
     let connection = Arc::new(Connection {
-        closed: gateway.shutdown.child_token(),
+        closed: CancellationToken::new(),
+        iab: gateway.sessions.iab_peer(),
         gateway,
         streams: TaskTracker::new(),
         subscriptions: subscriptions::Subscriptions::default(),
@@ -89,17 +95,27 @@ pub(super) async fn serve(socket: WebSocket, gateway: Gateway) {
                     None => break,
                 },
             };
+            let (message, after_send) = match outbound {
+                Outbound::Message {
+                    message,
+                    after_send,
+                } => (message, after_send),
+                Outbound::Flush(ready) => {
+                    let _ = ready.send(());
+                    continue;
+                }
+            };
             let sent = tokio::select! {
                 biased;
                 _ = writing.closed.cancelled() => break,
-                sent = writer.send(outbound.message) => sent,
+                sent = writer.send(message) => sent,
             };
             if sent.is_err() {
                 writing.closed.cancel();
                 writing.record("write", "socket_write_failed").await;
                 break;
             }
-            for ready in outbound.after_send {
+            for ready in after_send {
                 let _ = ready.send(());
             }
         }
@@ -111,6 +127,7 @@ pub(super) async fn serve(socket: WebSocket, gateway: Gateway) {
         tokio::select! {
             biased;
             _ = connection.closed.cancelled() => break ReaderEnd::Stopped,
+            _ = connection.gateway.connections_closed.cancelled() => break ReaderEnd::Shutdown,
             result = frames.join_next(), if !frames.is_empty() => {
                 if result.is_some_and(|result| result.is_err()) {
                     connection.record("request", "request_task_failed").await;
@@ -157,6 +174,33 @@ pub(super) async fn serve(socket: WebSocket, gateway: Gateway) {
             },
         }
     };
+    if matches!(read_ended, ReaderEnd::Shutdown) {
+        // Session drain may wake before its release reply reaches the writer queue.
+        // Stop admission, join accepted replies, then fence the FIFO before closing.
+        let replies = timeout(CLOSE_DEADLINE, async {
+            while let Some(result) = frames.join_next().await {
+                if result.is_err() {
+                    connection.record("request", "request_task_failed").await;
+                }
+            }
+            let (flushed, received) = oneshot::channel();
+            tokio::select! {
+                biased;
+                _ = connection.closed.cancelled() => return,
+                sent = connection.output.send(Outbound::Flush(flushed)) => {
+                    if sent.is_err() { return; }
+                },
+            }
+            let _ = received.await;
+        })
+        .await;
+        if replies.is_err() {
+            connection
+                .record("close", "socket_reply_flush_timeout")
+                .await;
+        }
+    }
+    connection.iab.close();
     connection.closed.cancel();
     match writer_task.await {
         Ok(writer) => match writer.reunite(reader) {
@@ -166,7 +210,7 @@ pub(super) async fn serve(socket: WebSocket, gateway: Gateway) {
                         ReaderEnd::PeerClosed => {
                             socket.flush().await.map_err(|_| "socket_close_failed")
                         }
-                        ReaderEnd::Stopped => {
+                        ReaderEnd::Stopped | ReaderEnd::Shutdown => {
                             socket.close().await.map_err(|_| "socket_close_failed")?;
                             loop {
                                 match socket.next().await {
@@ -272,6 +316,14 @@ impl Connection {
         let mut after_send = Vec::new();
         let result = if !params.is_object() && !params.is_array() {
             Err(rpc::Error::invalid("params must be an object or array"))
+        } else if self.gateway.shutdown.is_cancelled()
+            && (!self.initialized.load(Ordering::Acquire)
+                || !matches!(method.as_str(), "iab.lease.wait" | "iab.lease.release"))
+        {
+            Err(rpc::Error::unavailable(
+                "server_shutdown",
+                "The server is shutting down",
+            ))
         } else if method == "initialize" {
             self.initialize(params)
         } else if !self.initialized.load(Ordering::Acquire) {
@@ -282,6 +334,9 @@ impl Connection {
             ))
         } else {
             match method.as_str() {
+                "iab.lease.acquire" | "iab.lease.wait" | "iab.lease.release" => {
+                    self.iab.dispatch(&method, params).await
+                }
                 "server.shutdown" => self.shutdown(params, &mut after_send),
                 "events.replay" => subscriptions::replay(self, params).await,
                 "events.subscribe" => subscriptions::subscribe(self, params, &mut after_send).await,
@@ -398,7 +453,7 @@ impl Connection {
         tokio::select! {
             biased;
             _ = self.closed.cancelled() => Err(()),
-            result = self.output.send(Outbound { message, after_send }) => result.map_err(|_| ()),
+            result = self.output.send(Outbound::Message { message, after_send }) => result.map_err(|_| ()),
         }
     }
 

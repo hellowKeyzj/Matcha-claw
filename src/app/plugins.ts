@@ -7,6 +7,8 @@ import { accountPlugin } from '@/plugins/account/plugin';
 import { settingsPlugin } from '@/plugins/settings/plugin';
 import { navigationPlugin } from '@/plugins/navigation/plugin';
 import { chatPlugin } from '@/plugins/chat/plugin';
+import { workspacePlugin } from '@/plugins/workspace/plugin';
+import { iabPlugin } from '@/plugins/iab/plugin';
 import { messageRenderingPlugin } from '@/plugins/message-rendering/plugin';
 import { filesPlugin, createInstalledReaderPlugin } from '@/plugins/files/plugin';
 import { surfacesPlugin } from '@/plugins/surfaces/plugin';
@@ -28,6 +30,7 @@ import { searchPlugin } from '@/plugins/search/plugin';
 
 export const applicationPluginsHost = createPluginHost([
   applicationShellPlugin,
+  workspacePlugin,
   applicationPluginsPlugin,
   runtimePlugin,
   accountPlugin,
@@ -43,6 +46,7 @@ export const applicationPluginsHost = createPluginHost([
   connectorsPlugin,
   channelsPlugin,
   chatPlugin,
+  iabPlugin,
   teamsPlugin,
   tasksPlugin,
   wikiPlugin,

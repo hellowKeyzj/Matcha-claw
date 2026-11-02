@@ -27,6 +27,7 @@ pub(crate) struct PeerHandle {
     owner: OwnerRuntimeHandle<PeerCommand, PeerQuery>,
     admission: Arc<crate::composition::admission::HostAdmission>,
     open_claw: Arc<openclaw::driver::OpenClawDriver>,
+    matcha_agent: Arc<matcha_agent::driver::MatchaRuntimeDriver>,
     runtime_directory: Arc<crate::composition::runtime_ports::RuntimeDriverDirectory>,
 }
 
@@ -59,8 +60,13 @@ impl PeerHandle {
         admission: Arc<crate::composition::admission::HostAdmission>,
         runtime_directory: Arc<crate::composition::runtime_ports::RuntimeDriverDirectory>,
         open_claw: Arc<openclaw::driver::OpenClawDriver>,
+        matcha_agent: Arc<matcha_agent::driver::MatchaRuntimeDriver>,
     ) -> Self {
-        Self { owner, admission, runtime_directory, open_claw }
+        Self { owner, admission, runtime_directory, open_claw, matcha_agent }
+    }
+
+    pub(crate) fn matcha_client(&self) -> matcha_agent::client::Client {
+        self.matcha_agent.native_client()
     }
 
     pub(crate) async fn state(&self) -> Result<HostState, ()> {

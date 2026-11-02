@@ -1,5 +1,5 @@
 import type { ResourceStatusState } from '@/lib/resource-state';
-import type { HostSessionModelSelectionResult } from '@/lib/host-api';
+import type { HostSessionDeleteResult, HostSessionModelSelectionResult } from '@/lib/host-api';
 import type { SessionGoalOutcome, SessionGoalView, SessionSendIntent } from '@/types/session-goal';
 import type { SessionOwnership } from '@/types/desktop/session-ownership';
 import type {
@@ -69,6 +69,12 @@ export function isOrdinarySessionCandidate(
   session: { ownership: SessionOwnership | null; kind?: SessionCatalogKind | null },
 ): boolean {
   return session.ownership?.kind === 'ordinary' && session.kind !== 'automation';
+}
+
+export function isDeletableSession(
+  session: { ownership: SessionOwnership | null; kind?: SessionCatalogKind | null; preferred?: boolean },
+): boolean {
+  return isOrdinarySessionCandidate(session) && session.kind !== 'main' && !session.preferred;
 }
 
 export type ChatSessionHistoryStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -418,7 +424,6 @@ export type ChatSendRejectReason =
   | 'stopping'
   | 'missing-session'
   | 'missing-session-identity'
-  | 'automation-session'
   | 'goal-attachments'
   | 'error';
 
@@ -486,7 +491,8 @@ export interface ChatStoreActions {
   selectSessionRuntimeEndpoint: (endpoint: RuntimeEndpointRef) => void;
   newSession: (agentId?: string, traceId?: string | null) => Promise<void>;
   newSessionForScope: (scope: AgentScope) => Promise<void>;
-  deleteSession: (key: string) => Promise<void>;
+  deleteSession: (key: string) => Promise<HostSessionDeleteResult>;
+  deleteAgentSessions: (scope: AgentScope, identities: readonly SessionIdentity[]) => Promise<HostSessionDeleteResult>;
   forgetAgentSessions: (agentId: string, endpoint: RuntimeEndpointRef) => void;
   reconcileAgentSessionTombstones: (agentIds: readonly string[], endpoint: RuntimeEndpointRef) => void;
   renameSession: (key: string, label: string) => Promise<void>;

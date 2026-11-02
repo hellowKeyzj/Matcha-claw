@@ -3,6 +3,7 @@ import {
   hostSessionList,
   hostSessionLoad,
   hostSessionNew,
+  type HostSessionDeleteResult,
 } from '@/lib/host-api';
 import {
   createErrorResourceStatusState,
@@ -65,6 +66,8 @@ import { useComposerDraftStore, type ComposerDraftSnapshot } from '@/plugins/cha
 import { isSessionRuntimeEndpointReady, isSessionRuntimeEndpointStarting, supportsSessionChat, useRuntimeEndpointsStore } from '@/plugins/runtime/directory';
 import type { StoreHistoryCache } from '@/plugins/chat/store/history-cache';
 import {
+  buildSessionIdentityKey,
+  scopeContainsSessionIdentity,
   sessionIdentitiesEqual,
   type AgentScope,
   type RuntimeEndpointRef,
@@ -75,17 +78,13 @@ import type {
   ChatSessionRuntimeEndpointTarget,
   ChatStoreState,
 } from '@/plugins/chat/store/types';
-import { isOrdinarySessionCandidate, isRunActive } from '@/plugins/chat/store/types';
+import { isDeletableSession, isOrdinarySessionCandidate, isRunActive } from '@/plugins/chat/store/types';
 import { reconcileSessionDirectory } from '@/plugins/chat/store/session-directory';
 
 const SESSION_CATALOG_NOT_READY_RETRY_MS = 1200;
 const SESSION_CATALOG_ENDPOINT_TIMEOUT_MS = 30000;
 const SESSION_CATALOG_ENDPOINT_TIMEOUT_ERROR = 'Session catalog request timed out';
 const SESSION_DELETE_UNAVAILABLE_ERROR = 'Session delete is unavailable';
-
-type SessionDeleteReceipt = Readonly<{
-  outcome: 'succeeded' | 'target_rejected' | 'unknown';
-}>;
 
 let sessionCatalogRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionCatalogLoadSequence = 0;
@@ -659,7 +658,7 @@ async function executeLoadSessionsNow(
         kind: session.kind ?? currentMeta.kind,
         preferred: session.preferred ?? currentMeta.preferred,
         label: currentMeta.manualLabel === true ? currentMeta.label : explicitLabel,
-        titleSource: currentMeta.manualLabel === true ? currentMeta.titleSource : explicitLabel ? 'user' : session.titleSource ?? 'none',
+        titleSource: currentMeta.manualLabel === true ? currentMeta.titleSource : session.titleSource ?? 'none',
         displayName: normalizeCatalogString(session.displayName) ?? currentMeta.displayName ?? null,
         thinkingLevel: normalizeCatalogString(session.thinkingLevel) ?? currentMeta.thinkingLevel,
         modelState: session.modelState ?? currentMeta.modelState,
@@ -1149,112 +1148,159 @@ export function executeForgetAgentSessions(input: CreateStoreSessionActionsInput
   });
 }
 
-export async function executeDeleteSession(input: CreateStoreSessionActionsInput, key: string): Promise<void> {
-  const {
-    set,
-    get,
-    beginMutating,
-    finishMutating,
-    historyRuntime,
-  } = input;
-  beginMutating();
+async function refreshSessionCatalogAfterDelete(input: CreateStoreSessionActionsInput): Promise<void> {
   try {
-    const target = resolveOperationTarget(get(), key);
-    let receipt: SessionDeleteReceipt;
-    try {
-      receipt = await hostSessionDelete({
-        sessionIdentity: target.sessionIdentity,
-      }) as unknown as SessionDeleteReceipt;
-    } catch {
-      throw new Error(SESSION_DELETE_UNAVAILABLE_ERROR);
-    }
-    if (receipt.outcome !== 'succeeded') {
-      return;
-    }
+    await input.get().loadSessions();
+  } catch (error) {
+    console.warn('[session.delete.catalog]', summarizeError(error));
+  }
+}
 
-    useComposerDraftStore.getState().clearDraft(key);
-    const { currentSessionKey } = get();
-    const sessions = readSessionsFromState(get());
-    const remainingSessions = sessions.filter((session) => session.key !== key);
-    clearSessionHistoryFingerprints(historyRuntime, key);
+export async function executeDeleteSession(input: CreateStoreSessionActionsInput, key: string): Promise<HostSessionDeleteResult> {
+  input.beginMutating();
+  try {
+    const receipt = await executeSessionDelete(input, key);
+    if (receipt.outcome === 'succeeded') await refreshSessionCatalogAfterDelete(input);
+    return receipt;
+  } finally {
+    input.finishMutating();
+  }
+}
 
-    if (currentSessionKey === key) {
-      clearHistoryPoll();
-      clearErrorRecoveryTimer();
-      const next = remainingSessions.find((session) => isOrdinarySessionCandidate(session)
-        && sameRuntimeEndpointScope(session.sessionIdentity.endpoint, target.sessionIdentity.endpoint));
-      set((state) => {
-        const loadedSessions = removeSessionRecord(state, key);
-        const targetRuntime = findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), target.sessionIdentity.endpoint);
-        return {
-          ...reconcileSessionSelectionAfterRemoval(
-            { ...state, loadedSessions }, key,
-            next ? { kind: 'record', sessionKey: next.key } : createDraftCurrentConversation(
-              targetRuntime?.endpoint ?? target.sessionIdentity.endpoint,
-              targetRuntime?.defaultSessionPromptScope?.agentId ?? target.sessionIdentity.agentId,
-            ),
-            targetRuntime,
-          ),
-          ...reconcileSessionDirectory(state, loadedSessions, [key]),
-          loadedSessions,
-          sessionCatalogStatus: state.sessionCatalogStatus,
-          pendingApprovalsBySession: Object.fromEntries(
-            Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
-          ),
-          error: null,
-        };
-      });
-      if (next) {
-        const selectedState = get();
-        const isCurrent = () => isCurrentConversationSelection(get(), selectedState);
-        try {
-          const nextTarget = resolveOperationTarget(get(), next.key);
-          if (nextTarget.sessionIdentity.endpoint.kind !== 'native-runtime' || nextTarget.sessionIdentity.endpoint.runtimeAdapterId !== 'openclaw') {
-            const result = await requestSessionLifecycleView(nextTarget);
-            if (isCurrent()) {
-              applyBackendSessionView({
-                set,
-                get,
-                sessionKey: next.key,
-                view: result,
-              });
-            }
-          }
-        } catch (error) {
-          if (isCurrent()) {
-            set((state) => {
-              const loadedSessions = patchSessionMeta(state, next.key, {
-                historyStatus: 'error',
-              });
-              return {
-                ...buildSessionRuntimeProjectionPatch({ state, loadedSessions, changedRecordKeys: [next.key] }),
-                error: resolveSessionViewError(error).message,
-                loadedSessions,
-              };
-            });
-          }
-        }
-      }
-      await get().loadSessions();
-      return;
+export async function executeDeleteAgentSessions(
+  input: CreateStoreSessionActionsInput,
+  scope: AgentScope,
+  identities: readonly SessionIdentity[],
+): Promise<HostSessionDeleteResult> {
+  const targets = new Map<string, SessionIdentity>();
+  const snapshot = input.get();
+  for (const identity of identities) {
+    if (!scopeContainsSessionIdentity(scope, identity)) continue;
+    const key = findSessionRecordKey(snapshot, identity);
+    if (key && isDeletableSession(snapshot.loadedSessions[key].meta)) targets.set(buildSessionIdentityKey(identity), identity);
+  }
+  if (targets.size === 0) return { outcome: 'succeeded' };
+
+  let outcome: HostSessionDeleteResult['outcome'] = 'succeeded';
+  let deleted = false;
+  input.beginMutating();
+  try {
+    for (const identity of targets.values()) {
+      const state = input.get();
+      const key = findSessionRecordKey(state, identity);
+      if (!scopeContainsSessionIdentity(scope, identity) || !key || !isDeletableSession(state.loadedSessions[key].meta)) continue;
+      const receipt = await executeSessionDelete(input, key, targets);
+      if (receipt.outcome === 'unknown') return receipt;
+      if (receipt.outcome === 'target_rejected') outcome = receipt.outcome;
+      else deleted = true;
     }
+    return { outcome };
+  } finally {
+    if (deleted) await refreshSessionCatalogAfterDelete(input);
+    input.finishMutating();
+  }
+}
 
+async function executeSessionDelete(
+  input: CreateStoreSessionActionsInput,
+  key: string,
+  plannedSessions?: ReadonlyMap<string, SessionIdentity>,
+): Promise<HostSessionDeleteResult> {
+  const { set, get, historyRuntime } = input;
+  const target = resolveOperationTarget(get(), key);
+  let receipt: HostSessionDeleteResult;
+  try {
+    receipt = await hostSessionDelete({
+      sessionIdentity: target.sessionIdentity,
+    });
+  } catch {
+    throw new Error(SESSION_DELETE_UNAVAILABLE_ERROR);
+  }
+  if (receipt.outcome !== 'succeeded') {
+    return receipt;
+  }
+
+  sessionCatalogLoadSequence += 1;
+  useComposerDraftStore.getState().clearDraft(key);
+  const { currentSessionKey } = get();
+  const sessions = readSessionsFromState(get());
+  const remainingSessions = sessions.filter((session) => session.key !== key
+    && !plannedSessions?.has(buildSessionIdentityKey(session.sessionIdentity)));
+  clearSessionHistoryFingerprints(historyRuntime, key);
+
+  if (currentSessionKey === key) {
+    clearHistoryPoll();
+    clearErrorRecoveryTimer();
+    const next = remainingSessions.find((session) => isOrdinarySessionCandidate(session)
+      && sameRuntimeEndpointScope(session.sessionIdentity.endpoint, target.sessionIdentity.endpoint));
     set((state) => {
       const loadedSessions = removeSessionRecord(state, key);
+      const targetRuntime = findRuntimeTargetForEndpoint(readSessionRuntimeTargets(state), target.sessionIdentity.endpoint);
       return {
-        ...reconcileSessionSelectionAfterRemoval(state, key),
-        ...buildSessionRuntimeProjectionPatch({ state, loadedSessions, changedRecordKeys: [key] }),
+        ...reconcileSessionSelectionAfterRemoval(
+          { ...state, loadedSessions }, key,
+          next ? { kind: 'record', sessionKey: next.key } : createDraftCurrentConversation(
+            targetRuntime?.endpoint ?? target.sessionIdentity.endpoint,
+            targetRuntime?.defaultSessionPromptScope?.agentId ?? target.sessionIdentity.agentId,
+          ),
+          targetRuntime,
+        ),
+        ...reconcileSessionDirectory(state, loadedSessions, [key]),
         loadedSessions,
         sessionCatalogStatus: state.sessionCatalogStatus,
         pendingApprovalsBySession: Object.fromEntries(
           Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
         ),
+        error: null,
       };
     });
-    await get().loadSessions();
-  } finally {
-    finishMutating();
+    if (next) {
+      const selectedState = get();
+      const isCurrent = () => isCurrentConversationSelection(get(), selectedState);
+      try {
+        const nextTarget = resolveOperationTarget(get(), next.key);
+        if (nextTarget.sessionIdentity.endpoint.kind !== 'native-runtime' || nextTarget.sessionIdentity.endpoint.runtimeAdapterId !== 'openclaw') {
+          const result = await requestSessionLifecycleView(nextTarget);
+          if (isCurrent()) {
+            applyBackendSessionView({
+              set,
+              get,
+              sessionKey: next.key,
+              view: result,
+            });
+          }
+        }
+      } catch (error) {
+        if (isCurrent()) {
+          set((state) => {
+            const loadedSessions = patchSessionMeta(state, next.key, {
+              historyStatus: 'error',
+            });
+            return {
+              ...buildSessionRuntimeProjectionPatch({ state, loadedSessions, changedRecordKeys: [next.key] }),
+              error: resolveSessionViewError(error).message,
+              loadedSessions,
+            };
+          });
+        }
+      }
+    }
+    return receipt;
   }
+
+  set((state) => {
+    const loadedSessions = removeSessionRecord(state, key);
+    return {
+      ...reconcileSessionSelectionAfterRemoval(state, key),
+      ...buildSessionRuntimeProjectionPatch({ state, loadedSessions, changedRecordKeys: [key] }),
+      loadedSessions,
+      sessionCatalogStatus: state.sessionCatalogStatus,
+      pendingApprovalsBySession: Object.fromEntries(
+        Object.entries(state.pendingApprovalsBySession).filter(([sessionKey]) => sessionKey !== key),
+      ),
+    };
+  });
+  return receipt;
 }
 
 export async function executeRenameSession(
@@ -1475,9 +1521,11 @@ function selectNewSessionDraft(input: CreateStoreSessionActionsInput, scope: Age
   const key = `${conversation.runtimeScopeKey}:agent:${conversation.agentId}:draft`;
   const composer = useComposerDraftStore.getState();
   const initialization = composer.initializations[key];
-  if (initialization?.kind === 'createUnknown') {
+  if (initialization?.kind === 'createUnknown' || initialization?.kind === 'createRejected') {
     composer.setInitialization(key, null);
-    composer.settleSubmission(key, initialization.operationId, { accepted: false, reason: 'error', dispatch: 'not-dispatched' });
+    if (initialization.kind === 'createUnknown') {
+      composer.settleSubmission(key, initialization.operationId, { accepted: false, reason: 'error', dispatch: 'not-dispatched' });
+    }
   }
   clearHistoryPoll();
   clearErrorRecoveryTimer();

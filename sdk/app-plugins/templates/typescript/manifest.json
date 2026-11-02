@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "example.application",
+  "name": "Example Application",
+  "version": "1.0.0",
+  "main": "main.cjs",
+  "contributes": {
+    "applications": [{ "id": "main", "name": "Example Application", "entry": "index.html", "placement": "both" }],
+    "tools": [{ "name": "echo", "description": "Return the supplied text without external side effects.", "inputSchema": { "type": "object", "properties": { "text": { "type": "string", "maxLength": 2000 } }, "required": ["text"], "additionalProperties": false } }]
+  }
+}

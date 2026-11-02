@@ -92,7 +92,11 @@ fn prepare_settings_relay_plugin(
     plugins: &crate::native_config::plugins::PluginProjection,
     browser_mode: crate::native_config::settings::BrowserMode,
 ) -> Result<bool, ::settings::ports::SettingsRuntimeFailure> {
-    if browser_mode != crate::native_config::settings::BrowserMode::Relay {
+    if !matches!(
+        browser_mode,
+        crate::native_config::settings::BrowserMode::Iab
+            | crate::native_config::settings::BrowserMode::Relay
+    ) {
         return Ok(false);
     }
     let selected = ["browser-relay".to_owned()];

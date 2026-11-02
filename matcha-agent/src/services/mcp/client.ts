@@ -32,6 +32,7 @@ import {
   ListRootsRequestSchema,
   type ListToolsResult,
   ListToolsResultSchema,
+  ToolListChangedNotificationSchema,
   McpError,
   type PromptMessage,
   type ResourceLink,
@@ -115,6 +116,7 @@ import {
   runElicitationHooks,
   runElicitationResultHooks,
 } from './elicitationHandler.js'
+import { iabStdioEnv } from './iab-capability.js'
 import { buildMcpToolName } from './mcpStringUtils.js'
 import { normalizeNameForMCP } from './normalization.js'
 import { getLoggingSafeMcpBaseUrl } from './utils.js'
@@ -945,10 +947,10 @@ export const connectToServer = memoize(
         transport = new StdioClientTransport({
           command: finalCommand,
           args: finalArgs,
-          env: {
+          env: iabStdioEnv(name, finalCommand, finalArgs, {
             ...subprocessEnv(),
             ...stdioRef.env,
-          } as Record<string, string>,
+          }) as Record<string, string>,
           stderr: 'pipe', // prevents error output from the MCP server from printing to the UI
           cwd: getCwd(),
         })
@@ -1363,6 +1365,7 @@ export const connectToServer = memoize(
 
       // Enhanced close handler with connection drop context
       client.onclose = () => {
+        toolChangeDisposers.get(client)?.()
         const uptime = Date.now() - connectionStartTime
         const transportType = serverRef.type ?? 'unknown'
 
@@ -1393,6 +1396,7 @@ export const connectToServer = memoize(
       }
 
       const cleanup = async () => {
+        toolChangeDisposers.get(client)?.()
         // In-process servers (e.g. Chrome MCP) don't have child processes or stderr
         if (inProcessServer) {
           try {
@@ -1734,6 +1738,39 @@ export function areMcpConfigsEqual(
 // Max cache size for fetch* caches. Keyed by server name (stable across
 // reconnects), bounded to prevent unbounded growth with many MCP servers.
 const MCP_FETCH_CACHE_SIZE = 20
+const toolChangeDisposers = new WeakMap<Client, () => void>()
+
+export function watchMcpToolChanges(
+  connection: ConnectedMCPServer,
+  onTools: (tools: Tool[]) => void,
+): Promise<void> {
+  toolChangeDisposers.get(connection.client)?.()
+  let active = true
+  let dirty = false
+  let flight: Promise<void> | undefined
+  const refresh = (): Promise<void> => {
+    dirty = true
+    return flight ??= (async () => {
+      while (active && dirty) {
+        dirty = false
+        fetchToolsForClient.cache.delete(connection.name)
+        const tools = await fetchToolsForClient(connection)
+        if (active && !dirty) onTools(tools)
+      }
+    })().finally(() => {
+      flight = undefined
+      if (active && dirty) void refresh()
+    })
+  }
+  const dispose = () => {
+    active = false
+    connection.client.removeNotificationHandler('notifications/tools/list_changed')
+    if (toolChangeDisposers.get(connection.client) === dispose) toolChangeDisposers.delete(connection.client)
+  }
+  toolChangeDisposers.set(connection.client, dispose)
+  connection.client.setNotificationHandler(ToolListChangedNotificationSchema, refresh)
+  return refresh()
+}
 
 /**
  * Encode MCP tool input for the auto-mode security classifier.
@@ -3405,6 +3442,7 @@ export async function setupSdkMcpClients(
           client,
           config: { ...config, scope: 'dynamic' as const },
           cleanup: async () => {
+            toolChangeDisposers.get(client)?.()
             await client.close()
           },
         }

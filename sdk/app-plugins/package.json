@@ -1,0 +1,20 @@
+{
+  "name": "@matcha/app-plugins-sdk",
+  "version": "1.0.0",
+  "description": "Public Matcha application plugin SDK and local development tools",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "engines": { "node": ">=22.15.0" },
+  "bin": { "matcha-app-plugin": "./tooling/cli.mjs" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" },
+    "./package": { "types": "./dist/package.d.ts", "import": "./dist/package.js" },
+    "./build": "./tooling/build.mjs"
+  },
+  "files": ["dist", "tooling", "templates", "README.md"],
+  "scripts": { "build": "node build.mjs", "typecheck": "tsc --noEmit" },
+  "dependencies": { "esbuild": "^0.28.2", "fflate": "^0.8.3" },
+  "devDependencies": { "@types/node": "^22.15.0", "typescript": "^5.9.3", "tar": "^6.2.1" }
+}

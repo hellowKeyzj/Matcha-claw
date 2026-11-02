@@ -5,6 +5,7 @@ pub mod connectors;
 pub mod cron;
 pub mod diagnostics;
 pub mod driver;
+pub mod iab;
 pub mod lifecycle;
 pub mod peer;
 pub mod plugins;

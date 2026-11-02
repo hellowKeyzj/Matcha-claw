@@ -55,6 +55,8 @@ import { registerWorldPrivateHandlers } from '../api/ipc/world-private';
 import { createWorldPrivateOperations } from './world/private-operations';
 import { createChannelAuthorization } from './channels/authorization';
 import { composeLicenseService } from './license/composition';
+import { createIab } from './iab/composition';
+import { registerIabHandlers } from '../api/ipc/iab-ipc';
 
 const isE2EMode = process.env.MATCHACLAW_E2E === '1';
 const e2eStartupOutcomeKey = '__matchaclawE2EStartupOutcome';
@@ -166,6 +168,8 @@ function registerMainWindowLifecycle(deps: {
 export type MainApplication = Readonly<{
   mainWindow: BrowserWindow;
   ready: Promise<void>;
+  prepareQuit: () => Promise<void>;
+  cancelQuit: () => void;
   close: () => Promise<void>;
   forceClose: () => Promise<void>;
   readShutdownStage: () => string;
@@ -274,12 +278,21 @@ export function bootstrapMainApplication(deps: {
   });
   const appPluginAgentGateway = startAppPluginAgentGateway({
     owner: appPlugins, host: appPluginHost,
+    onPreview: (developmentId) => deps.hostEventBus.emit('app-plugins:preview', { developmentId }),
     root: join(app.getPath('userData'), 'app-plugin-agent'),
+    sdkArchive: app.isPackaged ? join(process.resourcesPath, 'app-plugins', 'sdk.tgz') : join(app.getAppPath(), 'sdk', 'app-plugins', 'matcha-app-plugins-sdk-1.0.0.tgz'),
   });
   const appPluginGatewaySettled = appPluginAgentGateway.then(() => undefined, () => {
     logger.warn('[AppPlugins] Agent SDK gateway unavailable; existing runtimes will start without plugin development tools');
   });
   const shutdown = new AbortController();
+  const iab = createIab({
+    window: deps.getMainWindow,
+    emit: (event) => deps.hostEventBus.emit('iab:event', event),
+    isAgentEnabled: async () => (await (await apiRuntime).runtimeHostTransports.settingsDesiredTransport.read())?.browserMode === 'iab',
+    runtime: async () => (await apiRuntime).runtimeHost,
+  });
+  const stopIabIpc = registerIabHandlers(iab, deps.getMainWindow);
   const heldRuntimeHosts = new Set<DirectRuntimeHost>();
   let shutdownStage = 'running';
   let closeTask: Promise<void> | undefined;
@@ -320,6 +333,7 @@ export function bootstrapMainApplication(deps: {
       const bundle = createRuntimeHostTransportBundle({
         issuer: delivery.issuer,
         runtimeHostTransportPort: delivery.runtimeHostTransportPort,
+        onBrowserModeChanging: iab.beginBrowserModeChange,
         reportE2ECronTrace: isE2EMode
           ? async (stage) => {
               await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -343,6 +357,7 @@ export function bootstrapMainApplication(deps: {
         awaitProviderCall,
       });
       subscriptions.push(
+        runtimeHost.onDisconnect(() => iab.invalidateAgentControl()),
         runtimeHost.onExit(() => cloudAccountService.runtimeExited()),
         runtimeHost.onRestart(() => {
           void cloudAccountService.runtimeRestarted().catch(() => logger.warn('Cloud package authorization restore failed'));
@@ -477,6 +492,9 @@ export function bootstrapMainApplication(deps: {
       const appPluginsClosed = appPluginAgentGateway.then((gateway) => gateway.close(), () => undefined)
         .finally(() => appPluginHost.close()).finally(() => appPlugins.close()).finally(() => appPluginPackages.close());
       void appPluginsClosed.catch(() => undefined);
+      stopIabIpc();
+      const iabClosed = iab.close();
+      void iabClosed.catch(() => undefined);
       shutdownStage = 'startup';
       await Promise.allSettled([runtimeSetup, startup]);
       if (!runtimeReady) cloudAccountService.runtimeExited();
@@ -499,9 +517,14 @@ export function bootstrapMainApplication(deps: {
         await channelAuthorization?.drain();
         for (const unsubscribe of subscriptions) unsubscribe();
         try {
-          shutdownStage = 'runtime-host';
-          const runtimeHost = directRuntimeHost ?? startedRuntimeHost;
-          if (runtimeHost) await runtimeHost.stop();
+          try {
+            shutdownStage = 'iab';
+            await iabClosed;
+          } finally {
+            shutdownStage = 'runtime-host';
+            const runtimeHost = directRuntimeHost ?? startedRuntimeHost;
+            if (runtimeHost) await runtimeHost.stop();
+          }
         } finally {
           shutdownStage = 'delivery';
           transportBundle?.close();
@@ -521,7 +544,7 @@ export function bootstrapMainApplication(deps: {
   const forceClose = (): Promise<void> => {
     shutdown.abort();
     forceCloseTask ??= (async () => {
-      const results = await Promise.allSettled([appPluginHost.forceClose(), appPlugins.close(), appPluginPackages.forceClose(), ...[...heldRuntimeHosts].map((host) => host.forceKill())]);
+      const results = await Promise.allSettled([iab.close(), appPluginAgentGateway.then((gateway) => gateway.forceClose(), () => undefined), appPluginHost.forceClose(), appPlugins.close(), appPluginPackages.forceClose(), ...[...heldRuntimeHosts].map((host) => host.forceKill())]);
       const failures = results.filter((result) => result.status === 'rejected');
       if (failures.length > 0) {
         throw new AggregateError(failures.map((result) => result.reason), 'Runtime-host force confirmation failed');
@@ -536,7 +559,7 @@ export function bootstrapMainApplication(deps: {
   });
   cloudAccountService.prewarm();
   loadMainWindowContent(mainWindow);
-  return { mainWindow, ready, close, forceClose, readShutdownStage: () => shutdownStage };
+  return { mainWindow, ready, prepareQuit: () => iab.prepareQuit(), cancelQuit: () => iab.cancelQuit(), close, forceClose, readShutdownStage: () => shutdownStage };
 }
 
 function publishE2ELaunchDiagnostic(error: unknown): void {

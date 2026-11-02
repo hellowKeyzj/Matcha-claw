@@ -1,7 +1,8 @@
 import { createElement, type RefAttributes } from 'react';
 import { LayoutDashboard } from 'lucide-react';
+import i18n from '@/i18n';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
-import { chatSidePanels, type ChatPanelProps } from '@/plugins/chat/extensions';
+import { workspaceLaunchers, type WorkspacePageProps } from '@/plugins/workspace/extensions';
 import { surfaceRenderers, type RuntimeContentProps } from './extensions';
 import type { RuntimeContentHandle } from './content-snapshot';
 
@@ -10,15 +11,17 @@ const NativeRuntimeContent = lazyWithPreload<RuntimeContentProps & RefAttributes
 const BrowserRuntimeSurface = lazyWithPreload(async () => ({
   default: (await import('./BrowserRuntimeSurface')).BrowserRuntimeSurface,
 }));
-const BoardChatPanel = lazyWithPreload<ChatPanelProps>(() =>
+const BoardChatPanel = lazyWithPreload<WorkspacePageProps>(() =>
   import('./chat/BoardChatPanel').then((module) => ({ default: module.BoardChatPanel })));
 
 export const surfacesPlugin = definePlugin({
   id: 'surfaces',
-  requires: ['app-shell', 'chat'],
+  requires: ['app-shell', 'chat', 'workspace'],
   extensionPoints: [surfaceRenderers],
   contributes: [
-    contribute(chatSidePanels, { id: 'board', order: 30, icon: LayoutDashboard, label: 'board.title', defaultLabel: 'Board', component: BoardChatPanel }),
+    contribute(workspaceLaunchers, { id: 'board', order: 30, icon: LayoutDashboard, label: 'chat:board.title', defaultLabel: 'Board',
+      execute: ({ workspace }) => workspace.openPage({ id: 'board', providerId: 'surfaces:board', title: i18n.t('chat:board.title'), icon: LayoutDashboard,
+        render: (props) => createElement(BoardChatPanel, props) }) }),
     contribute(surfaceRenderers, {
       kind: 'canvas',
       priority: -1,

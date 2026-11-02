@@ -37,6 +37,58 @@ pub struct Client {
     inner: Arc<Inner>,
 }
 
+#[derive(Clone)]
+pub(crate) struct IabConnection {
+    connection: Arc<Connection>,
+}
+
+impl IabConnection {
+    pub(crate) fn is_connected(&self) -> bool {
+        self.connection.is_connected()
+    }
+
+    pub(crate) fn same_generation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.connection, &other.connection)
+    }
+
+    pub(crate) async fn closed(&self) {
+        self.connection.closed().await;
+    }
+
+    pub(crate) async fn acquire(&self, params: Value) -> Result<Value, Error> {
+        self.connection
+            .call(
+                next_id()?,
+                "iab.lease.acquire",
+                params,
+                &CancellationToken::new(),
+            )
+            .await
+    }
+
+    pub(crate) async fn wait(&self, params: Value) -> Result<Value, Error> {
+        self.connection
+            .call(
+                next_id()?,
+                "iab.lease.wait",
+                params,
+                &CancellationToken::new(),
+            )
+            .await
+    }
+
+    pub(crate) async fn release(&self, params: Value) -> Result<Value, Error> {
+        self.connection
+            .call(
+                next_id()?,
+                "iab.lease.release",
+                params,
+                &CancellationToken::new(),
+            )
+            .await
+    }
+}
+
 struct Inner {
     address: SocketAddr,
     secret: Arc<Secret>,
@@ -60,6 +112,19 @@ impl Client {
                 tasks: TaskTracker::new(),
             }),
         }
+    }
+
+    pub(crate) fn pin_iab(&self) -> Result<IabConnection, Error> {
+        let connection = self
+            .inner
+            .connected
+            .lock()
+            .expect("connection observation is not poisoned")
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .filter(|connection| !self.inner.stopped.is_cancelled() && connection.is_connected())
+            .ok_or_else(|| Error::local("connection_closed", Delivery::NotSent))?;
+        Ok(IabConnection { connection })
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {

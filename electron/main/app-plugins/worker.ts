@@ -4,7 +4,7 @@ import { isAbsolute, join, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AppMediaModelList, AppMediaModelListRequest, AppModelRequest, AppModelResult, AppTextModelRequest, AppTextModelResult, AppVideoTaskRequest, AppVideoTaskResult, AppPluginModule, AppToolHandler, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
 import type { HostRequest, PluginLoad, WorkerMessage } from './protocol';
-import { isJson, toolError } from './protocol';
+import { isJson, isToolResult, toolError } from './protocol';
 
 const port = process.parentPort;
 if (!port) throw new Error('App plugin worker requires its Electron parent port.');
@@ -16,6 +16,7 @@ interface ActivePlugin {
   schemas: Map<string, { input: ValidateFunction; output?: ValidateFunction }>;
   controller: AbortController;
   dispose?: () => void | Promise<void>;
+  activation?: Promise<void | (() => void | Promise<void>)>;
   retiring?: { state: 'pending'; done: Promise<void> } | { state: 'failed'; error: Error };
 }
 const plugins = new Map<string, ActivePlugin>();
@@ -53,7 +54,13 @@ async function deactivate(pluginId: string): Promise<void> {
         const running = [...calls.values()].filter((call) => call.pluginId === pluginId);
         for (const call of running) call.controller.abort(new Error('App plugin was deactivated.'));
         await Promise.all(running.map((call) => call.done));
-        try { await plugin.dispose?.(); }
+        try {
+          if (plugin.activation) {
+            const dispose = await plugin.activation;
+            if (typeof dispose === 'function') plugin.dispose = dispose;
+          }
+          await plugin.dispose?.();
+        }
         finally {
           plugin.tools.clear();
           for (const path of Object.keys(loadModule.cache)) {
@@ -91,7 +98,7 @@ async function activate(load: PluginLoad): Promise<void> {
   try {
     const module = loadModule(join(load.packagePath, manifest.main!)) as AppPluginModule;
     if (typeof module.activate !== 'function') throw new Error('Plugin main must export activate(context).');
-    const dispose = await module.activate(Object.freeze({
+    plugin.activation = Promise.resolve(module.activate(Object.freeze({
       pluginId: manifest.id, version: manifest.version, storagePath: load.storagePath, packagePath: load.packagePath,
       registerTool(name: string, handler: AppToolHandler) {
         if (plugin.controller.signal.aborted || !manifest.contributes.tools?.some((tool) => tool.name === name)
@@ -128,9 +135,13 @@ async function activate(load: PluginLoad): Promise<void> {
         info: (message: string) => send({ type: 'log', pluginId: manifest.id, level: 'info', message: String(message).slice(0, 2000) }),
         error: (message: string) => send({ type: 'log', pluginId: manifest.id, level: 'error', message: String(message).slice(0, 2000) }),
       }),
-    }));
+    })));
+    let dispose;
+    try { dispose = await plugin.activation; }
+    finally { plugin.activation = undefined; }
     if (dispose !== undefined && typeof dispose !== 'function') throw new Error('Plugin activate must return a cleanup function or void.');
     if (typeof dispose === 'function') plugin.dispose = dispose;
+    if (plugin.controller.signal.aborted) throw new Error('App plugin activation was retired.');
     for (const tool of manifest.contributes.tools ?? []) if (!plugin.tools.has(tool.name)) throw new Error(`Plugin did not register declared tool ${tool.name}.`);
   } catch (error) {
     try { await deactivate(manifest.id); }
@@ -173,11 +184,7 @@ async function dispatch(message: HostRequest): Promise<void> {
               data: { name: message.name, progress, ...(total === undefined ? {} : { total }), ...(text === undefined ? {} : { message: String(text).slice(0, 1000) }) } } });
           },
         });
-        if (!result || !Array.isArray(result.content) || !isJson(result)
-          || !result.content.every((block) => block && typeof block === 'object' && !Array.isArray(block) && typeof block.type === 'string')
-          || (result.isError !== undefined && typeof result.isError !== 'boolean')
-          || (result.structuredContent !== undefined && (!result.structuredContent || typeof result.structuredContent !== 'object' || Array.isArray(result.structuredContent)))
-          || (result._meta !== undefined && (!result._meta || typeof result._meta !== 'object' || Array.isArray(result._meta)))) {
+        if (!isToolResult(result)) {
           throw new Error('Plugin handler must return a JSON AppToolResult with typed content blocks and valid optional fields.');
         }
         if (!result.isError && schema.output && !schema.output(result.structuredContent)) throw new Error('Plugin structuredContent does not match its declared outputSchema.');

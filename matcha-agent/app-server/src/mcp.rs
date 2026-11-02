@@ -4,6 +4,7 @@
 mod oauth;
 mod projection;
 pub use projection::{project, validate_config};
+pub(crate) use projection::project_instance;
 pub(crate) use oauth::{shutdown as shutdown_oauth, stop_agent as stop_agent_oauth};
 
 use std::{

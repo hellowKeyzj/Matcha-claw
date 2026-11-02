@@ -841,6 +841,8 @@
         }
     },
     "sidebar": {
+        "navigation": "Навигация по функциям",
+        "resizeSessions": "Изменить ширину списка сессий",
         "chat": "Чат",
         "newChat": "Новый чат",
         "cronTasks": "Расписание",
@@ -876,8 +878,8 @@
         "deleteSessionDialogDeleting": "Удаление...",
         "noSubagents": "Нет агентов",
         "noAgentSessions": "Нет сессий",
-        "collapseMenu": "Свернуть боковую панель",
-        "expandMenu": "Развернуть боковую панель",
+        "collapseMenu": "Свернуть список сессий",
+        "expandMenu": "Развернуть список сессий",
         "dashboard": "Панель",
         "settings": "Настройки",
         "devConsole": "Консоль разработчика",
@@ -1038,6 +1040,7 @@
         "save": "Сохранить",
         "cancel": "Отмена",
         "delete": "Удалить",
+        "rename": "Переименовать",
         "edit": "Редактировать",
         "refresh": "Обновить",
         "close": "Закрыть",
@@ -1083,6 +1086,27 @@
         "selectAgent": "Выбрать агента"
     },
     "switchboard": {
+        "allAgents": "Все агенты",
+        "allTeams": "Все команды",
+        "searchSessions": "Поиск сессий",
+        "searchPlaceholder": "Поиск сессий…",
+        "noSearchResults": "Подходящие сессии не найдены",
+        "selectAgent": "Выбрать агента",
+        "selectTeam": "Выбрать команду",
+        "addAgent": "Добавить агента",
+        "newSessionForAgent": "Новая сессия с {{name}}",
+        "agentSessionsAria": "Сессии агента {{name}}",
+        "agentActionsAria": "Другие действия для {{name}}",
+        "deleteAllSessions": "Удалить все ({{count}})",
+        "deleteAgentSessionsTitle": "Удалить сессии агента {{name}}",
+        "deleteAgentSessionsDescription": "Будут удалены сессии текущего агента: {{count}}. Это действие нельзя отменить.",
+        "deleteAgentSessionsFailed": "Не все сессии удалось удалить. Некоторые уже могли быть удалены. Обновите список сессий для проверки.",
+        "renameFailed": "Не удалось переименовать",
+        "deleteFailed": "Не удалось удалить",
+        "deleteUnknown": "Результат удаления неизвестен. Обновите список сессий для проверки.",
+        "newSessionFailed": "Не удалось создать беседу",
+        "newRun": "Новый запуск",
+        "newRunFailed": "Не удалось создать запуск",
         "quickSwitch": "Быстрое переключение",
         "runtime": "Runtime",
         "teamSession": "Team session",
@@ -1091,8 +1115,7 @@
             "teams": "Teams",
             "sessions": "Sessions"
         },
-        "normalSessions": "Обычные",
-        "automationSessions": "Automation"
+        "normalSessions": "Обычные"
     },
     "gateway": {
         "notRunning": "Шлюз не запущен",

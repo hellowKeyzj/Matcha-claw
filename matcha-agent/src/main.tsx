@@ -3259,7 +3259,7 @@ async function run(): Promise<CommanderCommand> {
                 clients: prev.mcp.clients.some(c => c.name === client.name)
                   ? prev.mcp.clients.map(c => (c.name === client.name ? client : c))
                   : [...prev.mcp.clients, client],
-                tools: uniqBy([...prev.mcp.tools, ...tools], 'name'),
+                tools: uniqBy([...prev.mcp.tools.filter(t => t.mcpInfo?.serverName !== client.name), ...tools], 'name'),
                 commands: uniqBy([...prev.mcp.commands, ...commands], 'name'),
               },
             }));

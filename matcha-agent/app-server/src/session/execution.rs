@@ -399,6 +399,9 @@ impl Sessions {
         active.record = requested;
         active.budget_expired = true;
         execution.closing = true;
+        if let Some(cli) = &execution.cli {
+            cli.revoke_iab();
+        }
         session.changed.notify_waiters();
         drop(execution);
         let mut interrupted = false;
@@ -652,6 +655,9 @@ impl Sessions {
                 );
             }
             execution.closing = true;
+            if let Some(cli) = &execution.cli {
+                cli.revoke_iab();
+            }
             session.changed.notify_waiters();
             if permanent {
                 let mut closed = execution.record.clone();

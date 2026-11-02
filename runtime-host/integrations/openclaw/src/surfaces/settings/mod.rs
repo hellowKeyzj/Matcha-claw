@@ -17,6 +17,7 @@ use crate::{
 
 pub fn browser_mode_projection(browser_mode: settings_module::BrowserMode) -> OpenClawBrowserMode {
     match browser_mode {
+        settings_module::BrowserMode::Iab => OpenClawBrowserMode::Iab,
         settings_module::BrowserMode::Native => OpenClawBrowserMode::Native,
         settings_module::BrowserMode::Relay => OpenClawBrowserMode::Relay,
         settings_module::BrowserMode::Off => OpenClawBrowserMode::Off,

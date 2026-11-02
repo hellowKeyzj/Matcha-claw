@@ -190,6 +190,11 @@ impl Sessions {
             let mut terminal = None;
             match event {
                 CliEvent::Message(message) => {
+                    execution
+                        .cli
+                        .as_ref()
+                        .expect("observed CLI instance")
+                        .iab_observe(&message)?;
                     if let Some(observed_id) = message.get("session_id").and_then(Value::as_str)
                         && observed_id != session_id
                     {
@@ -278,6 +283,11 @@ impl Sessions {
                     items.push(("native.message".to_owned(), message));
                 }
                 CliEvent::Result(result) => {
+                    execution
+                        .cli
+                        .as_ref()
+                        .expect("observed CLI instance")
+                        .iab_observe(&result)?;
                     if result.get("session_id").and_then(Value::as_str) != Some(session_id.as_str())
                     {
                         return Err(rpc::Error::new(

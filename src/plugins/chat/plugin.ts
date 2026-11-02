@@ -1,12 +1,10 @@
-import { FileCode2, MessageSquare, Paperclip, Settings2, SquareActivity, Target } from 'lucide-react';
+import { MessageSquare, Paperclip, Settings2, Target } from 'lucide-react';
 import { applicationPages } from '@/app/extensions';
 import { contribute, definePlugin, lazyWithPreload } from '@/plugin-host/core';
-import { chatComposerActions, chatComposerContent, chatWorkspaceContent, chatSidePanels, type ChatComposerAction, type ChatPanelProps } from './extensions';
+import { chatComposerActions, chatComposerContent, chatWorkspaceContent, type ChatComposerAction } from './extensions';
 import { subscribeChatHostEvents } from './host-observation';
 
 const ChatPage = lazyWithPreload(() => import('./page'));
-const ArtifactPanel = lazyWithPreload<ChatPanelProps>(() => import('./components/ChatSidePanelContents').then((module) => ({ default: module.ChatArtifactPanel })));
-const RuntimePanel = lazyWithPreload<ChatPanelProps>(() => import('./components/ChatRuntimePanel').then((module) => ({ default: module.ChatRuntimePanel })));
 
 const composerActions: readonly ChatComposerAction[] = [
   { id: 'attach', order: 10, icon: Paperclip, control: 'attach',
@@ -25,13 +23,11 @@ const composerActions: readonly ChatComposerAction[] = [
 
 export const chatPlugin = definePlugin({
   id: 'chat',
-  requires: ['app-shell'],
-  extensionPoints: [chatComposerActions, chatComposerContent, chatWorkspaceContent, chatSidePanels],
+  requires: ['app-shell', 'workspace'],
+  extensionPoints: [chatComposerActions, chatComposerContent, chatWorkspaceContent],
   contributes: [
     contribute(applicationPages, { id: 'chat', path: '/', component: ChatPage, viewport: 'custom', preload: ChatPage.preload }),
     ...composerActions.map((action) => contribute(chatComposerActions, action)),
-    contribute(chatSidePanels, { id: 'artifacts', order: 10, icon: FileCode2, label: 'artifacts.sectionLabel', title: 'artifacts.title', component: ArtifactPanel }),
-    contribute(chatSidePanels, { id: 'runtime', order: 20, icon: SquareActivity, label: 'board.runtimeTab', defaultLabel: 'Runtime', component: RuntimePanel }),
   ],
   activate() {
     const unsubscribe = subscribeChatHostEvents();

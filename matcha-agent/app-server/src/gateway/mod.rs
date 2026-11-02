@@ -38,6 +38,7 @@ pub(super) struct Gateway {
     token: Option<Arc<str>>,
     listen: SocketAddr,
     shutdown: CancellationToken,
+    connections_closed: CancellationToken,
     connections: TaskTracker,
 }
 
@@ -76,15 +77,22 @@ pub async fn serve(
         .local_addr()
         .map_err(|_| rpc::Error::internal("listen_address"))?;
     let shutdown = CancellationToken::new();
+    let connections_closed = CancellationToken::new();
     let connections = TaskTracker::new();
     let stopping = shutdown.clone();
+    let closing_connections = connections_closed.clone();
     let closing_sessions = sessions.clone();
     let cleanup = tokio::spawn(async move {
+        let _close_connections = closing_connections.clone().drop_guard();
         stopping.cancelled().await;
-        let oauth = crate::mcp::shutdown_oauth().await;
+        // Keep authenticated lease cleanup on its original peer until Session drain settles.
         let sessions = closing_sessions.shutdown().await;
+        closing_connections.cancel();
+        let oauth = crate::mcp::shutdown_oauth().await;
         match (oauth, sessions) {
-            (Err(error), Err(sessions)) => Err(error.with_data(json!({"sessionCleanup": sessions}))),
+            (Err(error), Err(sessions)) => {
+                Err(error.with_data(json!({"sessionCleanup": sessions})))
+            }
             (Err(error), _) | (_, Err(error)) => Err(error),
             _ => Ok(()),
         }
@@ -99,6 +107,7 @@ pub async fn serve(
         token,
         listen,
         shutdown: shutdown.clone(),
+        connections_closed,
         connections: connections.clone(),
     };
     let router = Router::new()
@@ -454,6 +463,12 @@ impl Gateway {
     }
 
     fn check_origin(&self, headers: &HeaderMap) -> rpc::Result<()> {
+        if self.shutdown.is_cancelled() {
+            return Err(rpc::Error::unavailable(
+                "server_shutdown",
+                "The server is shutting down",
+            ));
+        }
         let forbidden = || {
             rpc::Error::new(
                 -32007,

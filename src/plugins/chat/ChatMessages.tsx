@@ -308,9 +308,10 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
   const composerInitialization = useComposerDraftStore((state) => currentComposerDraftKey ? state.initializations[currentComposerDraftKey] : undefined);
   const [dismissedComposerInitialization, setDismissedComposerInitialization] = useState<typeof composerInitialization>();
   const composerConfigurationError = composerInitialization === dismissedComposerInitialization ? null
-    : composerInitialization?.kind === 'createUnknown' ? t('input.configurationCreateUnknown')
-      : composerInitialization?.kind === 'pending' && composerInitialization.outcome
-        ? t(`input.configurationOutcome.${composerInitialization.outcome}`) : null;
+    : composerInitialization?.kind === 'createRejected' ? t('input.configurationCreateRejected')
+      : composerInitialization?.kind === 'createUnknown' ? t('input.configurationCreateUnknown')
+        : composerInitialization?.kind === 'pending' && composerInitialization.outcome
+          ? t(`input.configurationOutcome.${composerInitialization.outcome}`) : null;
   const [visibleRuntimeError, setVisibleRuntimeError] = useState<string | null>(null);
   const [exportingMarkdown, setExportingMarkdown] = useState(false);
   const previousRenderedItemsRef = useRef<ChatRenderItem[] | null>(null);
@@ -568,8 +569,8 @@ export const ChatMessages = memo(function ChatMessages({ isActive, renderInput, 
   return (
     <AssistantPendingLabelProvider label={pendingRunProgressLabel}>
       <ChatArtifacts renderItems={renderItems} renderViewport={renderViewport}>
-        {({ viewportPane, sidePanel }) => children({
-          viewportPane, sidePanel, headerProps, input,
+        {({ viewportPane }) => children({
+          viewportPane, headerProps, input,
           isEmptyState: liveView.isEmptyState && chatQuestions.questions.length === 0 && !chatQuestions.error && sessionQuestions.questions.length === 0 && !sessionQuestions.error,
           emptyState: <WelcomeScreen />,
         })}

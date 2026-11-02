@@ -31,7 +31,9 @@ type HostEventName =
   | 'package:changed'
   | 'app-plugins:changed'
   | 'app-plugins:runtime'
+  | 'app-plugins:preview'
   | 'license:gate-changed'
+  | 'iab:event'
   | 'team:event'
   | 'team:changed'
   | 'matcha-agent:status'
@@ -78,7 +80,7 @@ export function registerMainEventBridge(deps: {
   hostEventBus: HostEventBus;
   getMainWindow: () => BrowserWindow | null;
 }): () => void {
-  const unsubscribers = (['package:changed', 'app-plugins:changed', 'app-plugins:runtime', 'license:gate-changed'] as const).map((eventName) =>
+  const unsubscribers = (['package:changed', 'app-plugins:changed', 'app-plugins:runtime', 'app-plugins:preview', 'license:gate-changed', 'iab:event'] as const).map((eventName) =>
     deps.hostEventBus.on(eventName, (payload) => {
       sendRendererHostEvent(deps.getMainWindow(), eventName, payload);
     }),

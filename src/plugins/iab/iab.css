@@ -1,0 +1,11 @@
+.iab-root { -webkit-app-region: no-drag; }
+.iab-icon { display: inline-flex; width: 2rem; height: 2rem; flex-shrink: 0; align-items: center; justify-content: center; border-radius: .5rem; color: hsl(var(--muted-foreground)); }
+.iab-icon:hover:not(:disabled) { background: hsl(var(--secondary)); color: hsl(var(--foreground)); }
+.iab-icon:focus-visible { outline: 1px solid hsl(var(--ring)); outline-offset: 1px; }
+.iab-icon:disabled { cursor: default; opacity: .4; }
+.iab-field { min-width: 0; background: transparent; font-size: 13px; outline: none; }
+.iab-field::placeholder { color: hsl(var(--muted-foreground)); }
+.iab-action { border-radius: .5rem; padding: .5rem .75rem; font-size: 12px; color: hsl(var(--muted-foreground)); }
+.iab-action:hover:not(:disabled) { background: hsl(var(--secondary)); color: hsl(var(--foreground)); }
+.iab-action:focus-visible { outline: 1px solid hsl(var(--ring)); }
+.iab-action:disabled { opacity: .4; }

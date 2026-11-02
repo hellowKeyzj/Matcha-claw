@@ -13,7 +13,7 @@ import {
 
 type Theme = 'light' | 'dark' | 'system';
 type UpdateChannel = 'stable' | 'beta' | 'dev';
-type BrowserMode = 'off' | 'relay' | 'native';
+type BrowserMode = 'iab' | 'native' | 'relay' | 'off';
 
 interface SettingsState {
   // General

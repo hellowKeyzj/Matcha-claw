@@ -1,6 +1,7 @@
 import { createElement, lazy, Suspense } from 'react';
-import { Loader2 } from 'lucide-react';
-import { openChatPanel, type ChatPanelRequest } from '@/plugins/chat/workspace-actions';
+import { Loader2, Workflow } from 'lucide-react';
+import i18n from '@/i18n';
+import { openWorkspacePage, type WorkspacePageRequest } from '@/plugins/workspace/actions';
 import { buildSessionIdentityKey, type SessionIdentity } from '@/types/desktop/runtime-address';
 
 export interface TeamGraphSurface {
@@ -13,14 +14,16 @@ export interface TeamGraphSurface {
 
 const teamGraphRuntimePanel = lazy(() => import('./TeamGraphRuntimePanel').then((module) => ({ default: module.TeamGraphRuntimePanel })));
 
-export function buildTeamGraphPanelRequest(surface: TeamGraphSurface): ChatPanelRequest | null {
+export function buildTeamGraphPageRequest(surface: TeamGraphSurface): WorkspacePageRequest | null {
   if (typeof surface.teamId !== 'string' || !surface.teamId.trim()
     || typeof surface.runId !== 'string' || !surface.runId.trim()) return null;
   return {
-    id: 'runtime',
     sessionIdentity: surface.sourceSessionIdentity,
-    content: {
-      key: JSON.stringify([buildSessionIdentityKey(surface.sourceSessionIdentity), surface.teamId, surface.runId]),
+    page: {
+      id: JSON.stringify(['team-graph', buildSessionIdentityKey(surface.sourceSessionIdentity), surface.teamId, surface.runId]),
+      providerId: 'teams',
+      title: surface.title || i18n.t('teams:run.graph'),
+      icon: Workflow,
       render: () => <Suspense fallback={<div role="status" className="flex min-h-0 flex-1 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>}>
         {createElement(teamGraphRuntimePanel, { surface })}
       </Suspense>,
@@ -29,6 +32,6 @@ export function buildTeamGraphPanelRequest(surface: TeamGraphSurface): ChatPanel
 }
 
 export function openTeamGraph(surface: TeamGraphSurface): void {
-  const request = buildTeamGraphPanelRequest(surface);
-  if (request) openChatPanel(request);
+  const request = buildTeamGraphPageRequest(surface);
+  if (request) openWorkspacePage(request);
 }

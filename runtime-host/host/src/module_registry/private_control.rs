@@ -57,6 +57,9 @@ const COMMANDS: &[PrivateControlDescriptor] = &[
     PrivateControlDescriptor::new(WORLD_EVALUATION_STATUS, true),
     PrivateControlDescriptor::new(WORLD_TRANSFER_PREPARE, true),
     PrivateControlDescriptor::new(WORLD_TRANSFER, true),
+    PrivateControlDescriptor::new("iab.lease.acquire", true),
+    PrivateControlDescriptor::new("iab.lease.wait", true),
+    PrivateControlDescriptor::new("iab.lease.release", true),
 ];
 
 #[derive(Clone)]
@@ -65,6 +68,7 @@ pub(crate) struct PrivateControlRegistry {
     world: world::WorldHandle,
     world_authority: Arc<world::AuthorityRoot>,
     world_storage: Result<Arc<DurableWorldStorage>, world::StoreError>,
+    iab: matcha_agent::iab::Leases,
 }
 
 impl PrivateControlRegistry {
@@ -79,6 +83,7 @@ impl PrivateControlRegistry {
             world,
             world_authority,
             world_storage,
+            iab: matcha_agent::iab::Leases::default(),
         }
     }
 
@@ -97,6 +102,24 @@ impl PrivateControlRegistry {
         match descriptor.name() {
             HOST_HEALTH => host_health(owner),
             HOST_RUNTIME_SNAPSHOT => runtime_snapshot(owner, peer).await,
+            "iab.lease.acquire" => {
+                let Some(input) = command.input().and_then(|input| serde_json::from_value::<matcha_agent::iab::Acquire>(input.0.clone()).ok()) else {
+                    return invalid_input();
+                };
+                iab_outcome(self.iab.acquire(&peer.matcha_client(), input).await)
+            }
+            "iab.lease.wait" => {
+                let Some(input) = command.input().and_then(|input| serde_json::from_value::<matcha_agent::iab::Wait>(input.0.clone()).ok()) else {
+                    return invalid_input();
+                };
+                iab_outcome(self.iab.wait(input).await)
+            }
+            "iab.lease.release" => {
+                let Some(input) = command.input().and_then(|input| serde_json::from_value::<matcha_agent::iab::Release>(input.0.clone()).ok()) else {
+                    return invalid_input();
+                };
+                iab_outcome(self.iab.release(&peer.matcha_client(), input).await)
+            }
             WORLD_STORAGE_CONNECT => {
                 let Some(input) = command.input().and_then(|input| serde_json::from_value::<StorageConnect>(input.0.clone()).ok()) else {
                     return invalid_input();
@@ -317,6 +340,22 @@ pub(crate) fn descriptor() -> ModuleDescriptor {
 
 fn invalid_input() -> CommandOutcome {
     CommandOutcome::rejected(RejectionCode::InvalidInput, INVALID_INPUT_MESSAGE)
+}
+
+fn iab_outcome<T: serde::Serialize>(result: Result<T, matcha_agent::iab::Failure>) -> CommandOutcome {
+    use matcha_agent::iab::Failure;
+    match result {
+        Ok(result) => match serde_json::to_value(result) {
+            Ok(result) => CommandOutcome::succeeded(result),
+            Err(_) => CommandOutcome::rejected(RejectionCode::Failed, "iab_peer_protocol"),
+        },
+        Err(Failure::Unknown | Failure::Protocol) => CommandOutcome::unknown(json!({ "kind": "iab_peer_outcome_unknown" })),
+        Err(error) => CommandOutcome::rejected(match error {
+            Failure::InvalidInput => RejectionCode::InvalidInput,
+            Failure::Unavailable => RejectionCode::Unavailable,
+            _ => RejectionCode::Failed,
+        }, error.kind()),
+    }
 }
 
 fn world_outcome<T: serde::Serialize>(result: Result<T, world::Error>) -> CommandOutcome {

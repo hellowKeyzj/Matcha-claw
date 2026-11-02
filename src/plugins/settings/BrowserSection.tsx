@@ -19,7 +19,7 @@ type BrowserRelayInfo = {
   chromeExtensionsUrl: string;
 };
 
-type BrowserMode = 'off' | 'relay' | 'native';
+type BrowserMode = 'iab' | 'native' | 'relay' | 'off';
 
 export default function BrowserSection({ active }: SettingsSectionProps) {
   const { t } = useTranslation(['settings', 'common']);
@@ -119,14 +119,19 @@ export default function BrowserSection({ active }: SettingsSectionProps) {
                   <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
                     {([
                       {
-                        value: 'relay',
-                        label: t('gateway.browser.modes.relay.title'),
-                        description: t('gateway.browser.modes.relay.description'),
+                        value: 'iab',
+                        label: t('gateway.browser.modes.iab.title'),
+                        description: t('gateway.browser.modes.iab.description'),
                       },
                       {
                         value: 'native',
                         label: t('gateway.browser.modes.native.title'),
                         description: t('gateway.browser.modes.native.description'),
+                      },
+                      {
+                        value: 'relay',
+                        label: t('gateway.browser.modes.relay.title'),
+                        description: t('gateway.browser.modes.relay.description'),
                       },
                       {
                         value: 'off',
@@ -237,6 +242,13 @@ export default function BrowserSection({ active }: SettingsSectionProps) {
                       <p className="text-xs text-muted-foreground">{t('gateway.browser.steps.installHint')}</p>
                     </div>
                   </div>
+                </div>
+                )}
+
+                {browserMode === 'iab' && (
+                <div className="rounded-xl border border-border/60 p-5">
+                  <p className="text-lg font-semibold">{t('gateway.browser.iabModeTitle')}</p>
+                  <p className="mt-2 text-sm text-muted-foreground">{t('gateway.browser.iabModeBody')}</p>
                 </div>
                 )}
 

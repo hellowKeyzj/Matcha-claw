@@ -1,4 +1,7 @@
 import { createElement, useMemo } from 'react';
+import { FileCode2, FolderTree, GitCompare } from 'lucide-react';
+import { workspaceLaunchers } from '@/plugins/workspace/extensions';
+import { openFileWorkspaceSection } from './workspace';
 import { contribute, definePlugin, lazyWithPreload, type ApplicationPlugin } from '@/plugin-host/core';
 import type { AppReaderManifest, InstalledAppPlugin } from '@/types/desktop/app-plugin';
 import { builtinFileFormats, type FileFormatContribution } from './file-types';
@@ -120,9 +123,15 @@ export function createInstalledReaderPlugin(record: InstalledAppPlugin): Applica
 
 export const filesPlugin = definePlugin({
   id: 'files',
-  requires: ['app-shell'],
+  requires: ['app-shell', 'workspace'],
   extensionPoints: [fileFormats, fileReaders],
   contributes: [
+    contribute(workspaceLaunchers, { id: 'files', order: 20, label: 'chat:artifacts.workspaceTab', icon: FolderTree,
+      execute: ({ workspace }) => openFileWorkspaceSection(workspace, 'workspace') }),
+    contribute(workspaceLaunchers, { id: 'artifacts', order: 30, label: 'chat:artifacts.sectionLabel', icon: FileCode2,
+      execute: ({ workspace }) => openFileWorkspaceSection(workspace, 'artifacts') }),
+    contribute(workspaceLaunchers, { id: 'changes', order: 40, label: 'chat:artifacts.changesTab', icon: GitCompare,
+      execute: ({ workspace }) => openFileWorkspaceSection(workspace, 'changes') }),
     ...builtinFileFormats.map((format) => contribute(fileFormats, format)),
     ...builtinFileReaders.map((reader) => contribute(fileReaders, reader)),
   ],

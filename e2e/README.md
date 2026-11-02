@@ -22,6 +22,8 @@ pnpm run test:e2e  # 本地默认 licensed，首次运行前先完成下述激�
 pnpm --dir e2e test --grep "场景名称"
 ```
 
+性能测量可设置 `E2E_TRACE_SCREENSHOTS=0`，关闭 trace 连续截帧，避免录屏影响软件合成；默认仍录制，场景结束截图与其他证据不变。
+
 `check:e2e` 执行结构、ESLint 分层、TypeScript 和规则正反例自检；不启动应用。`test:e2e` 再构建并执行真实 Electron。根应用原有的 Playwright 版本不变，子工程独立锁定 Playwright 1.64.0 / Serenity/JS 3.49.0。
 
 ## Profile 模式与一次性激活

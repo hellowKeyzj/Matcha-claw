@@ -5,7 +5,7 @@
  * Linux: use native title bar for better IME compatibility.
  */
 import { useState, useEffect } from 'react';
-import { Minus, Square, X, Copy, Settings, PanelRight } from 'lucide-react';
+import { Minus, Square, X, Copy, Settings, PanelLeft } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import logoSvg from '@/assets/logo.svg';
@@ -39,11 +39,12 @@ function SidebarToggleButton() {
     <button
       type="button"
       onClick={() => setSidebarVisible(!sidebarVisible)}
-      className="flex h-7 w-7 items-center justify-center rounded-[10px] text-[hsl(var(--shell-icon))] transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))]"
+      className="flex h-7 w-7 items-center justify-center rounded-[10px] text-[hsl(var(--shell-icon))] transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       title={label}
       aria-label={label}
+      aria-expanded={sidebarVisible}
     >
-      <PanelRight className="h-[17px] w-[17px]" />
+      <PanelLeft aria-hidden="true" className="h-[17px] w-[17px]" />
     </button>
   );
 }
@@ -70,8 +71,9 @@ function SettingsButton() {
       onFocus={handleSettingsHover}
       className="flex h-full w-10 items-center justify-center rounded-[10px] text-[hsl(var(--shell-icon))] transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))]"
       title={t('sidebar.settings')}
+      aria-label={t('sidebar.settings')}
     >
-      <Settings className="h-[17px] w-[17px]" />
+      <Settings aria-hidden="true" className="h-[17px] w-[17px]" />
     </button>
   );
 }

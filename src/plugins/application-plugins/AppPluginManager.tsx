@@ -8,12 +8,9 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
 import { hostAppPluginInspect } from '@/lib/host-api';
-import { requestPluginDevelopment } from './development';
+import { stagePluginDevelopmentPrompt } from './development';
 import { PluginIdentity } from './PluginIdentity';
 import { applicationPath } from './plugin';
 import {
@@ -36,10 +33,7 @@ type Confirmation =
   | { kind: 'import'; packageBase64: string; inspection: AppPluginInspection }
   | { kind: 'disable' | 'uninstall' | 'rollback'; record: InstalledAppPlugin };
 type PluginLocation = { kind: 'list' } | { kind: 'detail'; pluginId: string };
-type ManagerView =
-  | PluginLocation
-  | { kind: 'develop'; pluginId: string; from: PluginLocation }
-  | { kind: 'confirmation'; action: Confirmation; from: PluginLocation };
+type ManagerView = PluginLocation | { kind: 'confirmation'; action: Confirmation; from: PluginLocation };
 type PluginAction = 'detail' | 'enable' | 'disable' | 'uninstall' | 'rollback';
 
 function hasOtherKinds(manifest: AppPluginManifest, category: AppPluginKind): boolean {
@@ -68,7 +62,7 @@ function PluginCapabilities({ manifest }: { manifest: AppPluginManifest }) {
       {manifest.contributes.tools?.map((tool) => (
         <li key={`tool:${tool.name}`} className="[overflow-wrap:anywhere]">{t('capability.tool', { description: tool.description })}</li>
       ))}
-      {manifest.main && <li>{t('capability.background')}</li>}
+      {(manifest.main || manifest.backend) && <li>{t('capability.background')}</li>}
     </ul>
   );
 }
@@ -110,9 +104,10 @@ function ApplicationLinks({ record }: { record: InstalledAppPlugin }) {
   return <div className="flex flex-wrap gap-x-4 gap-y-2">
     {applications.map((application) => (
       <Link key={application.id} to={application.placement === 'chat-panel' ? '/' : applicationPath(record.manifest.id, application.id)}
+        state={application.placement === 'chat-panel' ? { applicationWorkspace: { pluginId: record.manifest.id, applicationId: application.id } } : undefined}
         title={application.placement === 'chat-panel' ? `${application.name} · ${t('chatPlacement')}` : undefined}
         className="inline-flex max-w-full items-center gap-1 rounded-sm text-xs font-medium leading-5 text-foreground underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        <span className="[overflow-wrap:anywhere]">{application.placement === 'chat-panel' ? t('goToChat') : applications.length === 1 ? t('open') : t('openNamed', { name: application.name })}</span>
+        <span className="[overflow-wrap:anywhere]">{applications.length === 1 ? t('open') : t('openNamed', { name: application.name })}</span>
         <ArrowUpRight className="size-3.5 shrink-0" aria-hidden="true" />
       </Link>
     ))}
@@ -166,7 +161,6 @@ function AppPluginManagerContent({ category, page = false, onClose }: { category
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [prompt, setPrompt] = useState('');
   const running = useRef(false);
   const packageInput = useRef<HTMLInputElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -180,9 +174,6 @@ function AppPluginManagerContent({ category, page = false, onClose }: { category
   const search = query.trim().toLowerCase();
   const filtered = plugins.filter(({ manifest }) => !search || [manifest.name, manifest.description, manifest.id].some((value) => value?.toLowerCase().includes(search)));
   const selected = view.kind === 'detail' ? plugins.find(({ manifest }) => manifest.id === view.pluginId) : undefined;
-  const developmentTarget = view.kind === 'develop' && view.pluginId ? plugins.find(({ manifest }) => manifest.id === view.pluginId) : undefined;
-  const targetMissing = view.kind === 'develop' && !!view.pluginId && !developmentTarget;
-  const targetMixed = !!developmentTarget && hasOtherKinds(developmentTarget.manifest, category);
   const pending = busy !== null || loading;
   const confirmation = view.kind === 'confirmation' ? view.action : null;
   const confirmationManifest = confirmation?.kind === 'import' ? confirmation.inspection.manifest : confirmation?.record.manifest;
@@ -266,19 +257,13 @@ function AppPluginManagerContent({ category, page = false, onClose }: { category
     });
   }
 
-  function openDevelopment(pluginId = '') {
-    setPrompt('');
-    show({ kind: 'develop', pluginId, from: view.kind === 'detail' ? view : { kind: 'list' } });
-  }
-
-  function develop() {
-    const requirement = prompt.trim();
-    if (view.kind !== 'develop' || !requirement || targetMissing || targetMixed) return;
-    void run(t('sendDevelopment'), async () => {
-      await requestPluginDevelopment(category, view.pluginId || undefined, requirement);
-      onClose?.();
-      navigate('/');
-    });
+  function openDevelopment() {
+    if (!stagePluginDevelopmentPrompt(category)) {
+      setError(t('errors.developmentChatUnavailable'));
+      return;
+    }
+    onClose?.();
+    navigate('/');
   }
 
   const Title = page ? 'h1' : Dialog.Title;
@@ -287,7 +272,7 @@ function AppPluginManagerContent({ category, page = false, onClose }: { category
       {backTo && <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0" aria-label={t(backTo.kind === 'detail' ? 'backDetail' : 'backList')} disabled={busy !== null} onClick={() => show(backTo)}><ArrowLeft className="size-4" aria-hidden="true" /></Button>}
       <div className="min-w-0 flex-1">
         <Title ref={title} tabIndex={-1} className={page ? 'text-2xl font-semibold tracking-[-0.035em] text-foreground outline-none [overflow-wrap:anywhere]' : 'text-base font-semibold tracking-tight outline-none [overflow-wrap:anywhere] sm:text-lg'}>
-          {view.kind === 'list' ? page ? t('title') : t('managerTitle', { category: label }) : view.kind === 'detail' ? t('detailTitle') : view.kind === 'develop' ? t('developTitle') : actionLabel}
+          {view.kind === 'list' ? page ? t('title') : t('managerTitle', { category: label }) : view.kind === 'detail' ? t('detailTitle') : actionLabel}
         </Title>
         {page && view.kind === 'list' && <p className="mt-1 max-w-2xl text-sm text-[hsl(var(--shell-text-muted))]">{t('subtitle')}</p>}
       </div>
@@ -378,7 +363,7 @@ function AppPluginManagerContent({ category, page = false, onClose }: { category
           </div>
           <div className="flex flex-wrap items-center justify-between gap-4 border-y border-border/70 py-5">
             <label className="flex items-center gap-2.5 text-sm text-muted-foreground"><Switch type="button" checked={selected.enabled} aria-label={t('enableName', { name: selected.manifest.name })} disabled={pending} onCheckedChange={(enabled) => act(selected, enabled ? 'enable' : 'disable')} />{t(selected.enabled ? 'enabled' : 'disabled')}</label>
-            <div className="flex flex-wrap gap-2"><Button type="button" variant="outline" size="sm" disabled={pending} onClick={() => packageInput.current?.click()}><Upload className="size-3.5" aria-hidden="true" />{t('update')}</Button><Button type="button" variant="outline" size="sm" disabled={pending || hasOtherKinds(selected.manifest, category)} onClick={() => openDevelopment(selected.manifest.id)}><Sparkles className="size-3.5" aria-hidden="true" />{t('modify')}</Button></div>
+            <Button type="button" variant="outline" size="sm" disabled={pending} onClick={() => packageInput.current?.click()}><Upload className="size-3.5" aria-hidden="true" />{t('update')}</Button>
           </div>
           {hasOtherKinds(selected.manifest, category) && <p className="text-xs leading-5 text-muted-foreground">{t('mixed')}</p>}
           <dl className="grid grid-cols-2 gap-x-6 gap-y-5 text-sm">
@@ -409,23 +394,6 @@ function AppPluginManagerContent({ category, page = false, onClose }: { category
           </div>
           <div className="flex flex-wrap justify-end gap-2 border-t border-border/70 pt-5"><Button type="button" variant="outline" disabled={pending} onClick={() => show(view.from)}>{t('cancel')}</Button><Button type="button" variant={confirmation.kind === 'disable' || confirmation.kind === 'uninstall' ? 'destructive' : 'default'} disabled={pending} onClick={confirm}>{actionLabel}</Button></div>
         </div>
-      )}
-
-      {view.kind === 'develop' && (
-        <form className="mx-auto max-w-2xl space-y-6 py-2 sm:py-4" onSubmit={(event) => { event.preventDefault(); develop(); }}>
-          <div className="space-y-2.5">
-            <Label htmlFor={`${id}-target`}>{t('target')}</Label>
-            <Select id={`${id}-target`} value={view.pluginId} disabled={pending} onChange={(event) => setView({ ...view, pluginId: event.target.value })}>
-              <option value="">{t('newTarget', { category: label })}</option>
-              {targetMissing && <option value={view.pluginId} disabled>{t('missingTarget')}</option>}
-              {plugins.map(({ manifest }) => <option key={manifest.id} value={manifest.id} disabled={hasOtherKinds(manifest, category)}>{t('modifyTarget', { name: manifest.name, id: manifest.id })}</option>)}
-            </Select>
-            {targetMissing && <p role="alert" className="text-xs text-destructive">{t('missingTargetHint')}</p>}
-            {targetMixed && <p role="alert" className="text-xs text-muted-foreground">{t('mixed')}</p>}
-          </div>
-          <div className="space-y-2.5"><Label htmlFor={`${id}-prompt`}>{t('requirement')}</Label><Textarea id={`${id}-prompt`} value={prompt} disabled={pending} onChange={(event) => setPrompt(event.target.value)} aria-describedby={`${id}-scope`} className="min-h-40 resize-y text-sm leading-6" placeholder={t(`placeholder.${category}`)} /></div>
-          <div className="space-y-4"><p id={`${id}-scope`} className="text-xs leading-5 text-muted-foreground">{t(view.pluginId ? 'scopeModify' : 'scopeNew', { category: label })}</p><div className="flex justify-end border-t border-border/70 pt-5"><Button type="submit" disabled={pending || targetMissing || targetMixed || !prompt.trim()}><Sparkles className="size-4" aria-hidden="true" />{t(view.pluginId ? 'modify' : 'make')}</Button></div></div>
-        </form>
       )}
     </div>
   </>;

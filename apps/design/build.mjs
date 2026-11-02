@@ -3,6 +3,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildHtml } from '../../sdk/app-plugins/tooling/build.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -25,6 +26,7 @@ try {
     build({
       entryPoints: [join(root, 'src/activate.ts')], outfile: join(output, 'main.cjs'),
       bundle: true, platform: 'node', format: 'cjs', target: 'node22',
+      alias: { '@matcha/app-plugins-sdk': join(root, '../../sdk/app-plugins/dist/index.js') },
       plugins: [{
         name: 'bundled-skia',
         setup(builder) {
@@ -47,18 +49,7 @@ try {
     copyFile(`${ffmpeg}.LICENSE`, join(output, 'bin/FFMPEG-LICENSE.txt')),
     copyFile(`${ffmpeg}.README`, join(output, 'bin/FFMPEG-README.txt')),
   ]);
-  const ui = await build({
-    entryPoints: [join(root, 'src/ui/main.tsx')], outfile: join(output, 'editor.js'),
-    bundle: true, platform: 'browser', format: 'iife', target: 'chrome140',
-    minify: true, write: false, define: { 'process.env.NODE_ENV': '"production"' },
-  });
-  const script = ui.outputFiles.find((file) => file.path.endsWith('.js'))?.text;
-  const style = ui.outputFiles.find((file) => file.path.endsWith('.css'))?.text ?? '';
-  if (!script) throw new Error('The editor build produced no JavaScript.');
-  const template = await readFile(join(root, 'index.html'), 'utf8');
-  const html = template.replace('</head>', `<style>${style.replaceAll('</style', '<\\/style')}</style></head>`)
-    .replace(/<script type="module" src="\.\/src\/ui\/main\.tsx"><\/script>/,
-      () => `<script>${script.replaceAll('</script', '<\\/script')}</script>`);
+  const html = await buildHtml({ root, source: 'index.html' });
   await writeFile(join(output, 'editor.html'), html);
   await copyFile(join(root, 'manifest.json'), join(output, 'manifest.json'));
   await writeFile(join(output, 'BUILD.txt'), `Matcha Design ${version}\nTarget: ${process.platform}-${process.arch}\nKonva 10.3.0 + Skia Canvas 3.0.4\nFFmpeg: see bin/FFMPEG-README.txt and bin/FFMPEG-LICENSE.txt\n`);

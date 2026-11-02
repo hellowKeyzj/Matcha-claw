@@ -481,23 +481,29 @@
       "modeSaved": "Browser mode saved",
       "modeSaveFailed": "Failed to save browser mode",
       "modes": {
+        "iab": {
+          "title": "Built-in browser",
+          "description": "Let the Agent use MatchaClaw's built-in browser, no extension needed"
+        },
         "relay": {
-          "title": "Browser Relay",
-          "description": "Connect through a browser extension"
+          "title": "Chrome extension",
+          "description": "Connect to external Chrome through an extension"
         },
         "native": {
-          "title": "Native Browser",
-          "description": "No browser extension needed"
+          "title": "Dedicated browser",
+          "description": "Use a dedicated browser managed by OpenClaw, no extension needed"
         },
         "off": {
           "title": "Off",
-          "description": "Disable browser features"
+          "description": "Disable Agent browsing while keeping manual built-in browsing"
         }
       },
-      "nativeModeTitle": "Native Browser is active",
-      "nativeModeBody": "MatchaClaw uses OpenClaw's built-in browser plugin and does not rely on the Browser Relay extension path.",
-      "offModeTitle": "Browser capability is disabled",
-      "offModeBody": "Neither the native Browser plugin nor Browser Relay will be enabled.",
+      "iabModeTitle": "Built-in browser is active",
+      "iabModeBody": "The Agent can interact with pages in MatchaClaw's built-in browser without installing a Chrome extension.",
+      "nativeModeTitle": "Dedicated browser is active",
+      "nativeModeBody": "The Agent uses a dedicated browser managed by OpenClaw, separate from the built-in browser and your everyday Chrome. No extension is needed.",
+      "offModeTitle": "Agent browsing is disabled",
+      "offModeBody": "Browser automation is disabled for the Agent. You can still open and use the built-in browser manually.",
       "copyChromeExtensions": "Copy chrome://extensions",
       "openChromeExtensions": "Open chrome://extensions",
       "revealExtensionDir": "Reveal extension directory",

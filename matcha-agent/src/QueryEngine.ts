@@ -148,6 +148,7 @@ const snipProjection = feature('HISTORY_SNIP')
 export type QueryEngineConfig = {
   cwd: string
   tools: Tools
+  refreshTools?: () => Tools
   commands: Command[]
   mcpClients: MCPServerConnection[]
   agents: AgentDefinition[]
@@ -231,7 +232,8 @@ export class QueryEngine {
     const {
       cwd,
       commands,
-      tools,
+      tools: configuredTools,
+      refreshTools,
       mcpClients,
       verbose = false,
       thinkingConfig,
@@ -252,6 +254,7 @@ export class QueryEngine {
       setSDKStatus,
       orphanedPermission,
     } = this.config
+    const tools = refreshTools?.() ?? configuredTools
 
     this.discoveredSkillNames.clear()
     this.permissionDenials = []
@@ -443,6 +446,7 @@ export class QueryEngine {
         commands,
         debug: false, // we use stdout, so don't want to clobber it
         tools,
+        refreshTools,
         verbose,
         mainLoopModel: initialMainLoopModel,
         thinkingConfig: initialThinkingConfig,
@@ -612,6 +616,7 @@ export class QueryEngine {
         commands,
         debug: false,
         tools,
+        refreshTools,
         verbose,
         mainLoopModel,
         thinkingConfig: initialThinkingConfig,
@@ -1483,6 +1488,7 @@ export async function* ask({
   isMeta,
   cwd,
   tools,
+  refreshTools,
   mcpClients,
   verbose = false,
   thinkingConfig,
@@ -1514,6 +1520,7 @@ export async function* ask({
   isMeta?: boolean
   cwd: string
   tools: Tools
+  refreshTools?: () => Tools
   verbose?: boolean
   mcpClients: MCPServerConnection[]
   thinkingConfig?: ThinkingConfig
@@ -1542,6 +1549,7 @@ export async function* ask({
   const engine = new QueryEngine({
     cwd,
     tools,
+    refreshTools,
     commands,
     mcpClients,
     agents: agents ?? [],

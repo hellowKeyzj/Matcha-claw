@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "rust-echo",
+  "name": "Rust Echo",
+  "version": "0.1.0",
+  "description": "A local Rust MCP backend with a self-contained application UI.",
+  "apiVersion": 1,
+  "backend": {
+    "language": "rust",
+    "entry": "bin/backend.exe",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "contributes": {
+    "applications": [
+      { "id": "echo", "name": "Rust Echo", "entry": "index.html", "placement": "both" }
+    ],
+    "tools": [
+      {
+        "name": "echo",
+        "description": "Echo text locally without calling a model or incurring model charges.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "text": { "type": "string", "maxLength": 4096 } },
+          "required": ["text"],
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string" },
+            "pluginId": { "type": "string" },
+            "version": { "type": "string" }
+          },
+          "required": ["text", "pluginId", "version"],
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}

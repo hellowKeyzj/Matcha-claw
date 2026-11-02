@@ -2,6 +2,26 @@
 
 更新至 2026-10-27。环境：Windows 10 x64、Node 24.15.0、Electron 44.3.0、Playwright 1.64.0、Serenity/JS 3.49.0。
 
+## 2026-11-01：统一工作区工件与 licensed Chat 基础进入
+
+- 工作区迁移后的完整 Renderer noEmit、定向 no-fix ESLint 均 exit0；后者共6条非阻断 warning（Files原有2条hooks、workspace/App内部组件与builder共4条Fast Refresh），未为warning机械拆文件。`check:e2e` exit0：44 scenario files、135 lint cases／64 layer edges／17 structure cases。四语言工作区18个key齐全。[集中台账](../../.scratch/workspace-tabs-20261101/verification.json)
+- 标准 desktop E2E build exit0，1879项输入前后hash无漂移，361项桌面工件已记录。6GiB整树Job硬限、16GiB磁盘底线；峰值3.821GiB，jobActive=0、无强制终止。未更改SDK源码、依赖或锁文件；SDK dist／tgz仅由标准构建重建。[工件核对](../../.scratch/workspace-tabs-20261101/build-integrity.json)
+- 仅执行既有 `chat.spec.ts` 首例「应用真实启动后可进入完整可用的 Chat」：**1 pass／整轮exit0／worker errors=[]**，总77.50秒，单一专用licensed Profile／Electron／worker。原生许可granted／valid／cache，Electron退出0，整树峰值2.138GiB、无强停且jobActive=0；361项工件无漂移，Profile锁正常释放，截图已查看。未发送消息、调用模型、改测试或接入第二driver。[原始结果](../../.scratch/workspace-tabs-20261101/licensed-entry/receipt.json)／[运行日志](../../.scratch/workspace-tabs-20261101/licensed-chat-entry.log)
+- **此轮仅证明真实Chat可进入，不证明新工作区业务已验收。** 多App／多网页、同URL多开、切页保活、收起／关闭guard、preview更新、native显隐及全屏composer仍未实机验证。既有8文件回归为11 pass／8 fail，另4 suites加载失败；删除旧controller/helpers和fixture缺workspace造成的失败保留，3条旧layout断言也未通过。没有恢复兼容入口或改测试洗绿，不沿用r6／r9成绩。
+
+## 2026-11-01：IAB r10 集中检查（尚无本轮运行）
+
+- Main/Worker 最后 noEmit exit0，Main API boundary通过；自有IAB nofix lint 0error／41warning，61个IAB文件空白/冲突检查通过。E2E静态门禁exit0，44 scenario files、135 lint cases／64 layer edges／17 structure cases通过。Renderer r10 noEmit通过后，另一个会话继续统一workspace展示，不能当最终源码成绩。[执行账本](../../.scratch/iab-port-20261101/alignment-r10.md)
+- 既有6文件回归exit1：5文件／67项通过，Chat runtime-surface suite加载时因fixture缺workspace注册报`Plugin files requires workspace`，没有执行该suite的5项。未改测试或生产fallback，不沿用r9的72项通过。
+- 当前尚无r10标准desktop build／真实应用run／IAB业务成绩。licensed旧导航失败与退出旧夹具失败保留，不盲重跑、不绕许可、不抢锁、不使用日常Profile；本轮未新增测试或probe。
+
+## 2026-11-01：IAB r9 冻结工件与既有 licensed 入口
+
+- 最终 Electron／Renderer noEmit、Main API boundary、check:e2e、6 文件 72 项 Chat/dock/Relay 既有回归通过；nofix lint 为 0 error／39 warning。标准 desktop E2E build exit0，2052 项真实输入前后 hash 一致，Worker／React 浮层／preload／guard 工件齐全。构建整树硬限6GiB，峰值3882.80MiB，最低物理可用0.31GiB，不据此声称性能改善。[执行账本](../../.scratch/iab-port-20261101/alignment-r9.md)
+- 单独执行现有 licensed-license.spec.ts，仍为一个专用 Profile／Electron／worker。真实许可 granted/cache，storedKey／usableCache／valid 均 true；fixture 完成本地进入和 session catalog 等待。场景在 StartAtSignIn 的 AccountEntryIsVisible 等待45秒失败，0 pass／1 fail、runner exit1、总119.41秒；results.json另有 maxFailures 停止记录1项。失败截图已查看，为新聊天壳及展开的 Agent 筛选菜单，背景 aria-hidden；旧账号／侧栏 role 入口未匹配。未执行后续设置或 IAB 动作，不称 IAB 业务通过，也不归因为缺许可。[原始证据](../../.scratch/iab-port-20261101/licensed-r9-evidence/receipt.json)
+- 实际 Electron44.10.0／Chromium152.0.7977.169；Electron exit0／signal null，OpenClaw 和 App Server graceful0，Host scope activeProcesses0，应用 shutdown graceful。加载的 Main／preload／Renderer／Host 指纹匹配该次构建，运行后361工件与2052源码无漂移。Profile锁由原owner正常释放，Profile数据保留；运行峰值2391.54MiB。[运行日志](../../.scratch/iab-port-20261101/licensed-r9-final.log)
+- 未新增或修改测试／probe／日志／许可旁路，未复制日常 Profile，未调整断言洗绿。旧退出单测仍6 pass／3 fail／3 unhandled，缺 prepareQuit/cancelQuit 的旧夹具问题保留；本次正常退出不证明下载准备失败恢复、活跃 Worker/CDP drain 或双runtime IAB业务已验收。全部三类报告完整复制至 licensed-r9-evidence/，原件仍留 e2e。
+
 ## 2026-10-28：World 单连接存储启用正式归档
 
 - 正式场景：[world-storage.spec.ts](../src/scenarios/licensed/world-storage.spec.ts)。正常侧栏／存储页输入连接，复用八层及唯一 worker fixture；不导入生产实现、不后台写 World、不使用管理员首配、不逐例重启。首 run 真空库初始化并保安全 baseline，后继独立 run 在输入前核自动恢复；两分支均验证六目录完整分页及重复连接的 World／Storage／Release／完整授权摘要不变。DSN 来自专用 Profile 的 CurrentUser DPAPI 文件，输入期间暂停 trace，清空控件后恢复。

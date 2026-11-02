@@ -83,7 +83,12 @@ export type WorldEvaluationConfiguration = Readonly<{
   }>>;
   retentionPolicies: ReadonlyArray<Readonly<{ scope: string; policy: RetentionPolicy }>>;
 }>;
+export type IabMatchaCapability = Readonly<{ sessionId: string; instanceId: string; token: string }>;
+
 export type RuntimeHostControlCommand =
+  | { readonly name: 'iab.lease.acquire'; readonly input: Readonly<{ capability: IabMatchaCapability; invocationId: string }> }
+  | { readonly name: 'iab.lease.wait'; readonly input: Readonly<{ leaseId: string; invocationId: string }> }
+  | { readonly name: 'iab.lease.release'; readonly input: Readonly<{ invocationId: string; leaseId?: string; drained: true }> }
   | { readonly name: 'host.health' }
   | { readonly name: 'host.runtime.snapshot' }
   | { readonly name: 'world.storage.connect'; readonly input: Readonly<{ connectionString: string }> }
@@ -545,6 +550,19 @@ function decodeEvent(raw: Record<string, unknown>): IncomingMessage | undefined 
 export function isRuntimeHostControlCommand(value: unknown): value is RuntimeHostControlCommand & RuntimeHostJsonObject {
   if (!isRecord(value) || !isJsonValue(value) || typeof value.name !== 'string') return false;
   switch (value.name) {
+    case 'iab.lease.acquire':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['capability', 'invocationId']) && isIabInvocationId(value.input.invocationId)
+        && isIabMatchaCapability(value.input.capability);
+    case 'iab.lease.wait':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['leaseId', 'invocationId'])
+        && isIabInvocationId(value.input.leaseId) && isIabInvocationId(value.input.invocationId);
+    case 'iab.lease.release':
+      return hasExactKeys(value, ['name', 'input']) && isRecord(value.input)
+        && hasExactKeys(value.input, ['invocationId', 'drained', ...(Object.hasOwn(value.input, 'leaseId') ? ['leaseId'] : [])])
+        && isIabInvocationId(value.input.invocationId) && value.input.drained === true
+        && (value.input.leaseId === undefined || isIabInvocationId(value.input.leaseId));
     case 'host.health':
     case 'host.runtime.snapshot':
       return hasExactKeys(value, ['name']);
@@ -670,7 +688,8 @@ function isEvaluationObligation(value: unknown): boolean {
 }
 
 function isMutatingCommand(command: RuntimeHostControlCommand): boolean {
-  return command.name === 'world.storage.connect' || command.name === 'world.initial.provision'
+  return command.name === 'iab.lease.acquire' || command.name === 'iab.lease.release'
+    || command.name === 'world.storage.connect' || command.name === 'world.initial.provision'
     || command.name === 'world.access.grant' || command.name === 'world.evaluation.install'
     || command.name === 'world.storage.transfer.prepare' || command.name === 'world.storage.transfer';
 }
@@ -682,6 +701,15 @@ export function isWorldStorageTransferCut(value: unknown): value is WorldStorage
     && worldIdentifier(value.sourceStorageId) && worldIdentifier(value.targetStorageId)
     && worldEpoch(value.sourceEpoch) && worldEpoch(value.targetEpoch);
 }
+export function isIabInvocationId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+}
+export function isIabMatchaCapability(value: unknown): value is IabMatchaCapability {
+  return isRecord(value) && hasExactKeys(value, ['sessionId', 'instanceId', 'token'])
+    && isIabInvocationId(value.sessionId) && isIabInvocationId(value.instanceId)
+    && typeof value.token === 'string' && /^[0-9a-f]{64}$/.test(value.token);
+}
+
 function worldIdentifier(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(value);
 }

@@ -747,23 +747,29 @@
       "modeSaved": "浏览器模式已保存",
       "modeSaveFailed": "浏览器模式保存失败",
       "modes": {
+        "iab": {
+          "title": "内置浏览器",
+          "description": "让 Agent 操作 MatchaClaw 内置网页，无需扩展"
+        },
         "relay": {
-          "title": "Browser Relay",
-          "description": "通过扩展连接浏览器"
+          "title": "Chrome 扩展",
+          "description": "通过扩展连接外部 Chrome 浏览器"
         },
         "native": {
-          "title": "原生 Browser",
-          "description": "无需安装浏览器扩展"
+          "title": "独立浏览器",
+          "description": "使用 OpenClaw 管理的专用浏览器，无需扩展"
         },
         "off": {
           "title": "关闭",
-          "description": "关闭浏览器功能"
+          "description": "禁用 Agent 浏览器，仍可手动使用内置浏览器"
         }
       },
-      "nativeModeTitle": "当前使用原生 Browser",
-      "nativeModeBody": "MatchaClaw 会启用 OpenClaw 内置 browser 插件，不再使用 Browser Relay 扩展链路。",
-      "offModeTitle": "浏览器能力已关闭",
-      "offModeBody": "当前不会启用原生 Browser，也不会启用 Browser Relay。",
+      "iabModeTitle": "当前使用内置浏览器",
+      "iabModeBody": "Agent 可直接操作 MatchaClaw 内置浏览器中的网页，无需安装 Chrome 扩展。",
+      "nativeModeTitle": "当前使用独立浏览器",
+      "nativeModeBody": "Agent 使用 OpenClaw 管理的专用浏览器，与内置浏览器及日常 Chrome 分开，无需扩展。",
+      "offModeTitle": "Agent 浏览器已禁用",
+      "offModeBody": "Agent 无法使用浏览器自动化；你仍可手动打开和使用内置浏览器。",
       "copyChromeExtensions": "复制 chrome://extensions",
       "openChromeExtensions": "打开 chrome://extensions",
       "revealExtensionDir": "定位扩展目录",

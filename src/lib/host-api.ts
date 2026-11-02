@@ -1,5 +1,6 @@
 import { invokeIpc } from '@/lib/api-client';
 import type { CallReceipt } from '@/types/call-log';
+import type { IabSnapshot, IabUiRequest, IabUiResponse } from '@/types/desktop/iab';
 import type { AppPluginCatalog, AppPluginInspection, InstalledAppPlugin } from '@/types/desktop/app-plugin';
 import type { AppPluginCall, AppToolResult, AppWebviewApi } from '@/types/desktop/app-plugin-sdk';
 import { decodeCallReceipt } from '@/types/call-log/receipt';
@@ -386,6 +387,14 @@ export function hostAppPluginRequest<T>(operation: string, body?: unknown): Prom
   return hostApiFetch<T>(operation ? `/api/app-plugins/${operation}` : '/api/app-plugins', body === undefined
     ? undefined
     : { method: 'POST', body: JSON.stringify(body) });
+}
+
+export function hostIabCommand(request: IabUiRequest): Promise<IabUiResponse> {
+  return invokeIpc<IabUiResponse>('iab:command', request);
+}
+
+export function hostIabSnapshot(): Promise<IabSnapshot> {
+  return invokeIpc<IabSnapshot>('iab:snapshot');
 }
 
 export function hostAppPluginCatalog(): Promise<AppPluginCatalog> {
@@ -2131,12 +2140,16 @@ export async function hostSessionNew(
   }, { traceId: options?.traceId });
 }
 
+export interface HostSessionDeleteResult {
+  outcome: 'succeeded' | 'target_rejected' | 'unknown';
+}
+
 export async function hostSessionDelete(
   payload: {
     sessionIdentity: SessionIdentity;
   },
-): Promise<{ success: boolean; error?: string }> {
-  return sessionIdentityCapabilityExecute<{ success: boolean; error?: string }>({
+): Promise<HostSessionDeleteResult> {
+  return sessionIdentityCapabilityExecute<HostSessionDeleteResult>({
     capabilityId: SESSION_MANAGEMENT_CAPABILITY_ID,
     operationId: 'sessions.delete',
     payload,

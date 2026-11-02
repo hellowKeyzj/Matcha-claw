@@ -3,7 +3,7 @@
   "name": "Browser Relay",
   "version": "0.1.0",
   "category": "tools",
-  "description": "Local Chrome extension relay service for browser control.",
+  "description": "Browser control through the selected in-app browser or local Chrome extension relay.",
   "activation": {
     "onStartup": true
   },
@@ -16,6 +16,11 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["iab", "relay"],
+        "default": "relay"
+      },
       "port": {
         "type": "integer",
         "minimum": 1,

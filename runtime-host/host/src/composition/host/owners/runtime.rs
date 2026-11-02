@@ -667,7 +667,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
     let peer_owner = crate::composition::peer::PeerOwner::new(
         Arc::clone(&admission),
         matcha_startup_diagnostics.clone(),
-        matcha_driver,
+        Arc::clone(&matcha_driver),
         Arc::clone(&open_claw),
         openclaw_startup_diagnostics.clone(),
         provider_handle.clone(),
@@ -692,6 +692,7 @@ pub(in crate::composition::host) fn spawn_runtime_owners(
         Arc::clone(&admission),
         Arc::clone(&runtime_directory),
         Arc::clone(&open_claw),
+        matcha_driver,
     );
     let (search, search_task) = search::spawn_owner(
         &owner_runtime_system,

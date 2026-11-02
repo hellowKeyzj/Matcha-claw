@@ -24,6 +24,7 @@ impl DesiredReadModel {
 
 fn browser_mode(mode: BrowserMode) -> &'static str {
     match mode {
+        BrowserMode::Iab => "iab",
         BrowserMode::Native => "native",
         BrowserMode::Relay => "relay",
         BrowserMode::Off => "off",

@@ -1,20 +1,20 @@
 import { lazy, Suspense, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { ChatPanelLayout, ChatPanelProps } from '@/plugins/chat/extensions';
+import type { WorkspaceLayout, WorkspacePageProps } from '@/plugins/workspace/extensions';
 import type { BoardChatDock, BoardIdentity } from '@/types/board';
 
 const BoardPanel = lazy(() => import('../board/BoardPanel').then((module) => ({ default: module.BoardPanel })));
-const PANEL_POSITION: Record<BoardChatDock, ChatPanelLayout['position']> = {
+const PANEL_POSITION: Record<BoardChatDock, WorkspaceLayout['position']> = {
   left: 'right', right: 'left', bottom: 'top', hidden: 'full',
 };
 
-export function BoardChatPanel({ sessionIdentity, onLayoutChange, onSendMessage, onOpenLink }: ChatPanelProps) {
+export function BoardChatPanel({ sessionIdentity, visible, onLayoutChange, onSendMessage, onOpenLink }: WorkspacePageProps) {
   const { t } = useTranslation('chat');
   const boardIdentity: BoardIdentity | null = sessionIdentity?.endpoint.kind === 'native-runtime'
     && sessionIdentity.endpoint.runtimeAdapterId === 'openclaw'
     ? { ...sessionIdentity, endpoint: sessionIdentity.endpoint } : null;
-  const onChatDockChange = useCallback((dock: BoardChatDock) => onLayoutChange({ position: PANEL_POSITION[dock] }), [onLayoutChange]);
-  const onFullscreenChange = useCallback((fullscreen: boolean) => onLayoutChange({ fullscreen }), [onLayoutChange]);
+  const onChatDockChange = useCallback((dock: BoardChatDock) => { if (visible) onLayoutChange({ position: PANEL_POSITION[dock] }); }, [visible, onLayoutChange]);
+  const onFullscreenChange = useCallback((fullscreen: boolean) => { if (visible) onLayoutChange({ fullscreen }); }, [visible, onLayoutChange]);
   return boardIdentity ? (
     <Suspense fallback={<p role="status" className="p-6 text-sm text-muted-foreground">{t('board.loading', { defaultValue: 'Loading native board…' })}</p>}>
       <BoardPanel identity={boardIdentity} onChatDockChange={onChatDockChange} onFullscreenChange={onFullscreenChange} onSendMessage={onSendMessage} onOpenLink={onOpenLink} />

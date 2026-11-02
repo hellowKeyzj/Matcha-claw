@@ -6,8 +6,13 @@ use wiki::WikiMcpFacade;
 
 use super::{Family, client::Client};
 
+pub fn run() -> ExitCode {
+    let capability = super::iab::consume_capability();
+    run_connection(capability)
+}
+
 #[tokio::main(flavor = "current_thread")]
-pub async fn run() -> ExitCode {
+async fn run_connection(capability: Option<super::iab::Capability>) -> ExitCode {
     let Ok(config) = McpInvocation::parse() else {
         eprintln!("runtime-host mcp: artifact configuration is invalid");
         return ExitCode::FAILURE;
@@ -31,6 +36,14 @@ pub async fn run() -> ExitCode {
         eprintln!("runtime-host mcp: builtin tool catalog is invalid");
         return ExitCode::FAILURE;
     };
+    let iab = match capability {
+        Some(capability) => {
+            super::iab::Iab::attach(config.state_dir.clone(), capability, &registry)
+                .await
+                .ok()
+        }
+        None => None,
+    };
     let Ok(app_plugins) = super::app_plugins::AppPlugins::attach(config.state_dir, &registry)
     else {
         eprintln!("runtime-host mcp: app plugin gateway client is unavailable");
@@ -41,6 +54,7 @@ pub async fn run() -> ExitCode {
     };
     let result = run_stdio_registry(registry, &mut input, tokio::io::stdout()).await;
     drop(app_plugins);
+    drop(iab);
     let closed = input.close();
     match (result, closed) {
         (Ok(()), Ok(())) => ExitCode::SUCCESS,

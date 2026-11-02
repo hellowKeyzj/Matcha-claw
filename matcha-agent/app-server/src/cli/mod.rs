@@ -76,6 +76,7 @@ struct Instance {
     connection_identity: [u8; 32],
     has_autonomous_inputs: bool,
     sealed: Option<crate::sealed::InstanceGuard>,
+    iab: crate::session::iab::InstanceGuard,
     search: tokio::sync::Mutex<search::State>,
     pending: Mutex<Pending>,
     incoming: Mutex<HashSet<String>>,
@@ -101,9 +102,10 @@ struct PendingRequest {
 }
 
 impl Cli {
-    pub async fn start(
+    pub(crate) async fn start(
         spec: LaunchSpec,
         diagnostics: Diagnostics,
+        iab_owner: &crate::session::iab::Owner,
     ) -> rpc::Result<(Self, mpsc::Receiver<CliEvent>)> {
         Uuid::parse_str(&spec.session_id)
             .map_err(|_| Error::invalid("Session ID must be a UUID"))?;
@@ -192,9 +194,21 @@ impl Cli {
         execution_config
             .agents
             .insert(spec.agent_id.clone(), spec.agent.clone());
-        let mut launch =
-            projection::launch(&execution_config, &spec.paths, &spec.agent_id, args).await?;
         let instance_id = Uuid::new_v4().to_string();
+        let iab = iab_owner.register(
+            &spec.agent_id,
+            &spec.session_id,
+            &instance_id,
+            &spec.paths.workspace(&spec.agent_id)?,
+        )?;
+        let mut launch = projection::launch_instance(
+            &execution_config,
+            &spec.paths,
+            &spec.agent_id,
+            args,
+            &iab,
+        )
+        .await?;
         crate::world::inject(&mut launch, &spec, &instance_id)?;
         let sealed = spec.config.private_sealed.acquire(
             &spec.config,
@@ -217,6 +231,7 @@ impl Cli {
             connection_identity,
             has_autonomous_inputs,
             sealed,
+            iab,
             search: tokio::sync::Mutex::new(search::State::default()),
             pending: Mutex::new(Pending::default()),
             incoming: Mutex::new(HashSet::new()),
@@ -281,6 +296,54 @@ impl Cli {
 
     pub fn instance_id(&self) -> &str {
         &self.0.instance.instance_id
+    }
+
+    pub(crate) fn iab_observe(&self, message: &Value) -> rpc::Result<()> {
+        let instance = &self.0.instance;
+        if message.get("type").and_then(Value::as_str) == Some("result")
+            && message.get("session_id").and_then(Value::as_str) != Some(instance.session_id.as_str())
+        {
+            instance
+                .iab
+                .revoke(crate::session::iab::Reason::IdentityChanged);
+            return Err(Error::new(
+                -32004,
+                "native_result_session_mismatch",
+                "CLI result has an unexpected session identity",
+            ));
+        }
+        if let Some(session_id) = message.get("session_id").and_then(Value::as_str)
+            && session_id != instance.session_id
+        {
+            instance
+                .iab
+                .revoke(crate::session::iab::Reason::IdentityChanged);
+            return Err(Error::new(
+                -32004,
+                "native_session_mismatch",
+                "CLI emitted a different native session identity",
+            ));
+        }
+        if message.get("type").and_then(Value::as_str) == Some("system")
+            && message.get("subtype").and_then(Value::as_str) == Some("init")
+        {
+            if message.get("session_id").and_then(Value::as_str) != Some(instance.session_id.as_str()) {
+                instance
+                    .iab
+                    .revoke(crate::session::iab::Reason::IdentityChanged);
+                return Err(Error::new(
+                    -32004,
+                    "native_session_mismatch",
+                    "Native initialization omitted its session identity",
+                ));
+            }
+            instance.iab.admit()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn revoke_iab(&self) {
+        self.0.instance.iab.revoke(crate::session::iab::Reason::Closing);
     }
 
     pub(crate) fn has_autonomous_inputs(&self) -> bool {
@@ -528,6 +591,7 @@ impl Instance {
     }
 
     fn begin_close(self: &Arc<Self>) {
+        self.iab.revoke(crate::session::iab::Reason::Closing);
         if let Some(sealed) = &self.sealed {
             sealed.revoke();
         }
@@ -560,6 +624,7 @@ impl Instance {
                     Err(Error::internal("native_reader_join").with_source(source)),
                 );
             }
+            result = command::combine_cleanup(result, instance.iab.drain().await);
             instance.closed.send_replace(Some(result));
         });
     }
@@ -693,6 +758,7 @@ async fn read_output(
                 );
             }
             Output::Exited { code, signal } => {
+                instance.iab.revoke(crate::session::iab::Reason::Exit);
                 if let Some(sealed) = &instance.sealed {
                     sealed.revoke();
                 }

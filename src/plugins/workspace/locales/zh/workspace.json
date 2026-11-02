@@ -1,0 +1,20 @@
+{
+  "title": "工作区",
+  "tabs": "工作区页签",
+  "addPage": "打开页面",
+  "allTabs": "全部已打开页签（{{count}}）",
+  "closePage": "关闭{{title}}",
+  "preview": "预览",
+  "fullscreen": "全屏",
+  "restore": "恢复工作区大小",
+  "hide": "收起工作区",
+  "noLaunchers": "暂无可打开的页面",
+  "loading": "页面加载中…",
+  "pageFailed": "此页面无法显示。",
+  "retry": "重试",
+  "openFailed": "无法打开页面",
+  "closeFailed": "无法关闭页面",
+  "menuPage": "第 {{current}} / {{total}} 页",
+  "previousPage": "上一页",
+  "nextPage": "下一页"
+}

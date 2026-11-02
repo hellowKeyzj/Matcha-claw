@@ -22,7 +22,8 @@ async function run(request: PackageRequest, port: MessagePort): Promise<void> {
     } else {
       const contents = request.operation === 'inspect' || request.operation === 'import' ? await decodeAppPluginPackage(request.packageBase64)
         : request.operation === 'build' ? await buildAppPluginPackage(request.input)
-          : await readAppPluginPackage(Buffer.from(request.bytes.buffer, request.bytes.byteOffset, request.bytes.byteLength), request.expectedDigest);
+          : await readAppPluginPackage(Buffer.from(request.bytes.buffer, request.bytes.byteOffset, request.bytes.byteLength),
+            request.operation === 'validate' ? undefined : request.expectedDigest);
       const { manifest, digest } = contents;
       if ('expectedManifest' in request && JSON.stringify(manifest) !== JSON.stringify(request.expectedManifest)) {
         throw new Error('Installed app plugin manifest does not match its package.');
@@ -32,17 +33,10 @@ async function run(request: PackageRequest, port: MessagePort): Promise<void> {
         case 'import': reply = { ok: true, operation: 'import', result: { manifest, digest, bytes: transfer(contents.bytes) } }; break;
         case 'build': reply = { ok: true, operation: 'build', result: { manifest, digest, packageBase64: contents.bytes.toString('base64') } }; break;
         case 'files': reply = { ok: true, operation: 'files', result: { manifest, digest, files: new Map([...contents.files].map(([name, bytes]) => [name, transfer(bytes)])) } }; break;
-        case 'source': {
-          const files: Record<string, string> = Object.create(null);
-          for (const [name, bytes] of contents.files) {
-            if (name === 'manifest.json') continue;
-            const text = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8');
-            if (!Buffer.from(text, 'utf8').equals(bytes)) throw new AppPluginError('invalid_package', 'This package contains binary assets. Update it with a complete ZIP through manual installation; UTF-8 source editing cannot preserve its contents.');
-            files[name] = text;
-          }
-          reply = { ok: true, operation: 'source', result: { manifest, digest, files } };
-          break;
-        }
+        case 'validate': reply = { ok: true, operation: 'validate', result: {
+          manifest, digest, bytes: transfer(contents.bytes),
+          files: new Map([...contents.files].map(([name, bytes]) => [name, transfer(bytes)])),
+        } }; break;
         case 'html': {
           const bytes = contents.files.get(request.entry);
           if (!bytes) throw new Error('App plugin HTML entry is missing.');

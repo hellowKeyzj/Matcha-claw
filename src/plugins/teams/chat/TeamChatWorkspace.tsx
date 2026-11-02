@@ -5,10 +5,12 @@ import { Button } from '@/components/ui/button';
 import type { ChatWorkspaceContentProps } from '@/plugins/chat/extensions';
 import { buildSessionIdentityKey } from '@/types/desktop/runtime-address';
 import { useTeamsStore } from '../store';
-import { buildTeamGraphPanelRequest, type TeamGraphSurface } from './runtime-surface';
+import { buildTeamGraphPageRequest, type TeamGraphSurface } from './runtime-surface';
+import { useWorkspace } from '@/plugins/workspace/context';
 
-export const TeamChatWorkspace = memo(function TeamChatWorkspace({ isActive, enabled, visible, sessionIdentity, ownership, openPanel }: ChatWorkspaceContentProps) {
+export const TeamChatWorkspace = memo(function TeamChatWorkspace({ isActive, enabled, visible, sessionIdentity, ownership }: ChatWorkspaceContentProps) {
   const { t } = useTranslation('teams');
+  const { openPage } = useWorkspace();
   const location = useLocation();
   const navigate = useNavigate();
   const designTeamId = ownership?.kind === 'team' && ownership.roleId === 'leader' ? ownership.teamId : null;
@@ -21,11 +23,11 @@ export const TeamChatWorkspace = memo(function TeamChatWorkspace({ isActive, ena
     if (!surface || openedDesignNavigationRef.current === location.key || !enabled || !sessionIdentity
       || surface.teamId !== teamGraphTeamId || surface.runId !== teamGraphRunId
       || buildSessionIdentityKey(surface.sourceSessionIdentity) !== buildSessionIdentityKey(sessionIdentity)) return;
-    const request = buildTeamGraphPanelRequest(surface);
+    const request = buildTeamGraphPageRequest(surface);
     if (!request) return;
     openedDesignNavigationRef.current = location.key;
-    openPanel(request);
-  }, [location.key, location.state, enabled, sessionIdentity, teamGraphTeamId, teamGraphRunId, openPanel]);
+    openPage(request.page);
+  }, [location.key, location.state, enabled, sessionIdentity, teamGraphTeamId, teamGraphRunId, openPage]);
 
   if (!visible || !isActive || !designTeamId || designTeamKnown) return null;
   return <div role="alert" className="flex items-center gap-2 p-3 text-sm text-destructive">

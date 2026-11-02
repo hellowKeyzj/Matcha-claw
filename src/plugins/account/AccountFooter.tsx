@@ -258,28 +258,14 @@ const SidebarAccountCard = memo(function SidebarAccountCard({
     return [];
   }, [subscriptionProgress, subscriptionSummary, t, usage, user]);
 
-  const triggerClassName = 'w-full rounded-[12px] border border-transparent bg-transparent px-2.5 py-2 text-left transition-[background-color,border-color] hover:bg-[hsl(var(--shell-surface-hover))] data-[state=open]:[border-color:hsl(var(--shell-border))] data-[state=open]:bg-[hsl(var(--shell-surface-active))]';
+  const triggerLabel = signedIn ? `${t('sidebar.account.openMenu')} · ${displayName}` : t('sidebar.account.loginAria');
+  const triggerClassName = 'mx-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-transparent transition-[background-color,box-shadow] hover:bg-[hsl(var(--shell-surface-hover))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--shell-surface))] data-[state=open]:bg-[hsl(var(--shell-surface-active))] data-[state=open]:ring-2 data-[state=open]:ring-[hsl(var(--shell-border-strong))]';
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button type="button" className={triggerClassName} aria-label={signedIn ? t('sidebar.account.openMenu') : t('sidebar.account.loginAria')}>
-          <div className="flex min-w-0 items-center gap-2.5">
-            <SidebarAccountAvatar user={user} initial={initial} />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[hsl(var(--shell-icon-active))]">{displayName}</span>
-                {signedIn ? (
-                  <Badge variant={planVariant} className="max-w-[92px] shrink-0 px-2 py-0.5">
-                    {planLabel}
-                  </Badge>
-                ) : null}
-              </div>
-              <div className="mt-0.5 truncate text-xs text-[hsl(var(--shell-text-muted))]">
-                {email ?? statusLabel}
-              </div>
-            </div>
-          </div>
+        <button type="button" className={triggerClassName} title={triggerLabel} aria-label={triggerLabel}>
+          <SidebarAccountAvatar user={user} initial={initial} />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" side="right" className="w-72">

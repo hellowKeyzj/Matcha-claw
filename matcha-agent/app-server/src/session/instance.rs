@@ -231,7 +231,7 @@ impl Sessions {
                     .and_then(|provider| provider.model.clone())
             }));
         let provider = provider.map(|provider| provider.kind);
-        let (cli, receiver) = match Cli::start(spec, self.0.diagnostics.clone()).await {
+        let (cli, receiver) = match Cli::start(spec, self.0.diagnostics.clone(), &self.0.iab).await {
             Ok(started) => started,
             Err(error) => {
                 if error.data.as_ref().is_some_and(|data| {
@@ -246,6 +246,9 @@ impl Sessions {
         };
         let started = {
             let mut execution = session.data.lock().await;
+            if execution.closing {
+                cli.revoke_iab();
+            }
             execution.cli = Some(cli.clone());
             execution.native = native::Snapshot::default();
             execution.idle = super::idle::Idle::Dormant;

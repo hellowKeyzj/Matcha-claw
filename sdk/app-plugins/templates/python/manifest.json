@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "example.python",
+  "name": "Example Python",
+  "version": "1.0.0",
+  "description": "A dependency-free Python 3.12 application plugin.",
+  "backend": {
+    "language": "python",
+    "entry": "main.py",
+    "pythonVersion": "3.12"
+  },
+  "contributes": {
+    "applications": [
+      {
+        "id": "echo",
+        "name": "Example Python",
+        "entry": "index.html",
+        "placement": "both"
+      }
+    ],
+    "tools": [
+      {
+        "name": "echo",
+        "description": "Echo a message locally without calling a model or incurring model charges.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "message": { "type": "string", "maxLength": 4096 } },
+          "required": ["message"],
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": { "message": { "type": "string" } },
+          "required": ["message"],
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}

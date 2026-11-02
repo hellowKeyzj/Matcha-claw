@@ -90,7 +90,7 @@ function normalizeRequest(value: unknown): SettingsDesiredRequest | null {
 }
 
 function isBrowserMode(value: unknown): value is SettingsDesiredRequest['input']['browserMode'] {
-  return value === 'native' || value === 'relay' || value === 'off';
+  return value === 'iab' || value === 'native' || value === 'relay' || value === 'off';
 }
 
 function isText(value: unknown, maxLength: number): value is string {

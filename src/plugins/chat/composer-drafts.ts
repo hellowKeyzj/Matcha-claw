@@ -58,6 +58,7 @@ export type ComposerConfiguration = {
 };
 export type ComposerInitialization =
   | { kind: 'creating'; operationId: string }
+  | { kind: 'createRejected'; operationId: string; error: string }
   | { kind: 'createUnknown'; operationId: string; error: string }
   | {
     kind: 'pending'; operationId: string; sessionRecordKey: string; sessionIdentity: SessionIdentity;

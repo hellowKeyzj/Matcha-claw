@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import { resolve } from 'path';
+import { copyFile, mkdir } from 'node:fs/promises';
+import { build as buildOverlay } from 'esbuild';
 
 const nativeAddonExternal = ['node-llama-cpp', /^@node-llama-cpp\//, '@lydell/node-pty', 'koffi'];
 const qrTerminalExternal = ['qrcode-terminal', /^qrcode-terminal\//];
@@ -104,6 +106,25 @@ export default defineConfig(({ command, mode }) => ({
           options.startup(['.', '--no-sandbox', '--remote-debugging-port=9222']);
         },
         vite: {
+          plugins: [{
+            name: 'iab-overlay-assets',
+            buildStart() {
+              for (const file of ['index.html', 'overlay.css', 'overlay.tsx', 'download-row.tsx', 'labels.ts']) {
+                this.addWatchFile(resolve(__dirname, 'electron/main/iab/overlay', file));
+              }
+            },
+            async writeBundle() {
+              const output = resolve(__dirname, mode === 'e2e' ? 'e2e/.cache/app/dist-electron/main/iab/overlay' : 'dist-electron/main/iab/overlay');
+              await mkdir(output, { recursive: true });
+              await Promise.all(['index.html', 'overlay.css'].map((file) => copyFile(resolve(__dirname, 'electron/main/iab/overlay', file), resolve(output, file))));
+              await buildOverlay({
+                entryPoints: [resolve(__dirname, 'electron/main/iab/overlay/overlay.tsx')],
+                outfile: resolve(output, 'overlay.js'), bundle: true, platform: 'browser', format: 'iife',
+                target: 'chrome152', jsx: 'automatic', minify: command !== 'serve',
+                define: { 'process.env.NODE_ENV': JSON.stringify(command === 'serve' ? 'development' : 'production') },
+              });
+            },
+          }],
           resolve: {
             alias: {
               '@electron/e2e-fixture-loader': resolve(
@@ -130,6 +151,17 @@ export default defineConfig(({ command, mode }) => ({
         },
       },
       {
+        entry: 'electron/main/iab/automation-worker.ts',
+        vite: {
+          build: {
+            outDir: mode === 'e2e' ? 'e2e/.cache/app/dist-electron/main/iab' : 'dist-electron/main/iab',
+            emptyOutDir: false,
+            watch: command === 'serve' ? {} : undefined,
+            rollupOptions: { output: { entryFileNames: 'automation-worker.js', format: 'cjs' } },
+          },
+        },
+      },
+      {
         entry: 'electron/main/app-plugins/worker.ts',
         vite: {
           build: {
@@ -148,6 +180,17 @@ export default defineConfig(({ command, mode }) => ({
             emptyOutDir: false,
             watch: command === 'serve' ? {} : undefined,
             rollupOptions: { output: { entryFileNames: 'package-worker.js', format: 'cjs' } },
+          },
+        },
+      },
+      {
+        entry: 'electron/preload/iab-overlay.ts',
+        vite: {
+          build: {
+            outDir: mode === 'e2e' ? 'e2e/.cache/app/dist-electron/preload' : 'dist-electron/preload',
+            emptyOutDir: false,
+            watch: command === 'serve' ? {} : undefined,
+            rollupOptions: { external: ['electron'], output: { entryFileNames: 'iab-overlay.js', format: 'cjs' } },
           },
         },
       },

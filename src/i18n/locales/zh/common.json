@@ -841,6 +841,8 @@
         }
     },
     "sidebar": {
+        "navigation": "功能导航",
+        "resizeSessions": "调整会话列表宽度",
         "chat": "聊天",
         "newChat": "新对话",
         "cronTasks": "定时任务",
@@ -879,8 +881,8 @@
         "teamLeader": "Leader 会话",
         "teamRoles": "角色会话",
         "noAgentSessions": "暂无会话",
-        "collapseMenu": "收起侧边栏",
-        "expandMenu": "展开侧边栏",
+        "collapseMenu": "收起会话列表",
+        "expandMenu": "展开会话列表",
         "dashboard": "仪表盘",
         "settings": "设置",
         "devConsole": "开发者控制台",
@@ -1041,6 +1043,7 @@
         "save": "保存",
         "cancel": "取消",
         "delete": "删除",
+        "rename": "重命名",
         "edit": "编辑",
         "refresh": "刷新",
         "close": "关闭",
@@ -1086,6 +1089,27 @@
         "selectAgent": "选择 Agent"
     },
     "switchboard": {
+        "allAgents": "全部 Agent",
+        "allTeams": "全部团队",
+        "searchSessions": "搜索会话",
+        "searchPlaceholder": "搜索会话…",
+        "noSearchResults": "未找到匹配会话",
+        "selectAgent": "选择 Agent",
+        "selectTeam": "选择团队",
+        "addAgent": "添加 Agent",
+        "newSessionForAgent": "与 {{name}} 新建会话",
+        "agentSessionsAria": "{{name}} 的会话",
+        "agentActionsAria": "{{name}} 的更多操作",
+        "deleteAllSessions": "全部删除（{{count}}）",
+        "deleteAgentSessionsTitle": "删除 {{name}} 的会话",
+        "deleteAgentSessionsDescription": "将删除当前 Agent 的 {{count}} 个会话，此操作不可撤销。",
+        "deleteAgentSessionsFailed": "仍有会话未能删除，部分会话可能已删除，请刷新会话列表确认。",
+        "renameFailed": "重命名失败",
+        "deleteFailed": "删除失败",
+        "deleteUnknown": "删除结果未知，请刷新会话列表确认",
+        "newSessionFailed": "无法新建会话",
+        "newRun": "新建运行",
+        "newRunFailed": "无法新建运行",
         "quickSwitch": "快速切换",
         "runtime": "运行时",
         "teamSession": "团队会话",
@@ -1094,8 +1118,7 @@
             "teams": "团队",
             "sessions": "会话"
         },
-        "normalSessions": "普通",
-        "automationSessions": "自动化"
+        "normalSessions": "普通"
     },
     "gateway": {
         "notRunning": "网关未运行",

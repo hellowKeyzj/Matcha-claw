@@ -1019,7 +1019,10 @@ export class BrowserControlService {
           cdpUrl,
           targetId,
           mode,
-          fields: payload.fields ?? [],
+          fields: (payload.fields ?? []).map((field) => {
+            if (typeof field.ref !== 'string') throw new Error('ref is required for relay fill fields')
+            return { ...field, ref: field.ref }
+          }),
           timeoutMs,
         })
         return { ok: true, action: 'act.fill', targetId }

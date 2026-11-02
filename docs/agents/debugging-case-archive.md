@@ -181,6 +181,20 @@ DP-001；既有 P4/P6/P7 与 `CODING_CONSTITUTION.md` §26 已覆盖，属于执
 
 用户追问增强提示词来源，确认先前仅参考机制、正文为自行编写后，明确要求直接用Accio原文。静态追到提取包本地默认`xfo.PROMPT_ENHANCE_SYSTEM_PROMPT`与`xza/Sza`最终规则，增强组件现逐字保留1642字符原文，删除旧JSON rewrite与摘要伪领域增强路径。不将单prompt桥冒称原system/user两消息，不复制候选增强器平台或更改服务端。原文逐字比较、定向lint及Renderer noEmit通过，未调用模型；来源hash、必要适配及未验限制见[本轮台账](../../.scratch/design-interaction-20261031/README.md#2026-10-31-直接复用-accio-原增强提示词)。这是既有参考忠实与§26的执行纠偏，不新增同义规则。[VERIFY: src/plugins/chat/components/ComposerPromptEnhancement.tsx]
 
+### 2026-11-01 增强按钮挤占发送槽
+
+用户实际截图与当前登录应用均复现：工具栏只有四列，新增增强按钮没有布局槽，正文非空时自动占第4列，固定第4列的发送按钮被排到下一行。原生 DOM 实测工具栏662px宽、76px高，发送未禁用且中心命中正确；不能把换行直接认定为发送失败。[VERIFY: src/plugins/chat/components/ComposerPromptEnhancement.tsx:118-129] [VERIFY: src/plugins/chat/ChatInput.tsx:1988-2052]
+
+将增强／还原与发送收在唯一右侧操作槽，原四列末列按内容宽度分配，窄容器复用原第二行槽；撤掉发送按钮的独立 grid 定位，不增加第二工具栏、输入框或发送路径。[VERIFY: src/plugins/chat/components/chat-input.css:6-22,41-48] 当前应用清空、重输“你好”后均为36px单行，发送随正文正确启用；1000／900／680px页面宽度无溢出，500px沿原窄容器布局两行、增强与发送同行。380px模拟下固定侧栏仅留53px工具区仍溢出，低于应用960px最小窗口宽度，不扩改全局壳布局。原页面尺寸和草稿已恢复；未调用增强模型或发送收费消息，未实测还原按钮出现和消息态切换。截图见 `.scratch/design-interaction-20261031/chat-toolbar-20261101-{before,after}.png`，Renderer noEmit与三份输入组件no-fix ESLint均exit0；一次页面验证因hidden文档等待animation frame超时，改用有界协议等待后完成，不能抹除首次失败。
+
+同次只读日志核到五次OpenClaw `sessions.create`被原生`UNAVAILABLE — Agent main startup preparation was superseded`拒绝，发生在send.start之前；原生数据库准入准备失效的具体触发项、是否新回归未确认，不改第三方包、数据库或运行doctor／重启。创建明确拒绝后自动恢复纯文本会移除submission，而ChatMessages未消费顶层store.error，源码存在持续错误提示缺口；本轮未复演该失败、不扩大布局修复到下游协议。[VERIFY: src/plugins/chat/store/session-initialization.ts:229-252] [VERIFY: src/plugins/chat/ChatInput.tsx:1596-1616] [VERIFY: src/plugins/chat/ChatMessages.tsx:303-314,454-461] [VERIFY: runtime-host/integrations/openclaw/src/session/adapters/runtime.rs:899-940]
+
+既有§26、P3/P6与真实UI验收规则已覆盖；本次是新增交互只过静态检查、未核实际grid子项及输入前后布局的执行遗漏，不新增同义规则。下次在交互接入与reviewer pass核动态控件的槽位、显隐和实际命中；服务端明确拒绝必须独立归因，不能改按钮gate掩盖。
+
+同日工程复核保留正确的布局操作槽与原增强生命周期，不为“高级实现”制造新框架。已在原 `ComposerInitialization` 增加 `createRejected` 终态，明确创建失败不再清空结果；页面从当前草稿键直接派生已有横幅，纯文字恢复仍删除 submission 并释放发送资格，关闭只隐藏当前结果，显式重试以新 operation 进入 creating，另开新会话退休该结果。`createUnknown` 仍阻止盲重建，pending 配置恢复保持原 operation；未订阅混合了其他操作错误的顶层 store.error、未留失败 submission 堵 gate、未加 toast／平行错误 store。新增文案同步四语言；本块共享状态与直接消费者由单一 writer 修改，检查并行，未另派重复全链调查。[VERIFY: src/plugins/chat/composer-drafts.ts:59-66] [VERIFY: src/plugins/chat/store/session-initialization.ts:211-253] [VERIFY: src/plugins/chat/store/session-actions.ts:1523-1531] [VERIFY: src/plugins/chat/ChatMessages.tsx:308-315]
+
+最终 Renderer noEmit、六文件 no-fix ESLint、四语言 JSON/文案检查与限定 diffcheck 均通过；真实应用只读核当前唯一 composer、1286×824 页面及36px无溢出工具行，未改草稿。未发模型／发送请求、未注入 store 或 mock、未重启；新增创建拒绝→恢复→横幅→关闭／重试状态尚未实机验证，OpenClaw 原生 superseded 拒绝仍未修复。检查与边界见同台账“初始化失败结果归属纠偏”。
+
 ### Archive note
 
 规则已存在且足够明确；保留事故卡，下一次在入口边界冻结及最终结果报告阶段触发，不扩写长期规范。
@@ -1079,3 +1093,45 @@ main 三 crate 生产 cargo check、Windows x64 Host/MCP build exit0，产物已
 ### Archive note
 
 既有规则已覆盖，本卡仅保存执行遗漏和有界事实；最终进展复用模块验证账，不新增同义规则或长篇事故报告。后续 09:09:16Z 同次提交已确认 ID 正确而 native restart-safe admission 拒绝，具体资格子条件仍 OPEN；上轮分类日志误用未传播的 platform task-local 且 exact match 未考虑原生错误包装，已改回 OpenClaw 现有 Session trace 与 requestHash 关联，既有 describe 边界只采安全状态摘要，不重算准入或追加 RPC。后续 09:46:44Z request/rejected 同 requestHash 已证明新日志生效，完整日志的同会话 describe 可见字段未命中不合格项；继续核对已安装插件代码与同次 gateway 初始化日志，确认 memory-lancedb-pro 无条件注册的纯 debug `before_message_write` hook 构成原生 restart-unsafe 的确定充分阻断条件：权限不拦该 hook，原生只检查全局存在性。不是 session busy；未移除 hook、未关闭插件、未重发 Goal，剩余条件及业务恢复仍未验证。证据见模块验证账与 [插件 hook](../../packages/memory-lancedb-pro/index.ts#L2603)、[原生准入](../openclaw-source/src/gateway/server-methods/chat-restart-recovery.ts#L274)。编译与拒绝分类确认均不等于 Goal 创建成功。
+
+## Case: 工作区拖动只查分隔线与录屏干扰归因
+
+### Status
+
+open；原始动态视觉割裂尚未闭合。
+
+### Linked pattern
+
+既有 P3/P6/P7 已覆盖先归属、完整链路与真实结果；不新增同义规则。
+
+### Source incident
+
+2026-11-01，用户要求 GPU 保持关闭，修复 Chat 与工作区左右拖动时的割裂；随后明确指出不能只抓分隔线窄条，应整体考量工作区容器。
+
+### Symptom / real minimum loop
+
+真实鼠标拖动 → Chat/工作区共同布局 → 页签栏、工具栏、正文与原生网页呈现一致；不能以松手后宽度正确、rAF 正常或首 Chat E2E 通过替代。
+
+### Wrong path / missed first probe
+
+先后把重复滚动消除、局部线条与录屏中的约 33ms rAF 当作过强依据，未先校准采集开销与完整容器的呈现链。公开 bounds 回执对应上一条 rAF 记录也不单独证明读取旧布局：回执异步与采样次序均可产生该现象。
+
+### Observed boundary
+
+现有无连续截帧 trace 中，107 批完整 DOM Paint 的 Grid 宽度均等于 Chat + 工作区 + 6px 分隔区，批内绘制跨度中位 0.298ms、p95 0.415ms；这只支持同批 DOM 绘制几何一致，不证明最终像素无割裂。原生网页经 DOM rect → IPC → Main → WebContentsView.setBounds，属于另一呈现面；跨面失同步仍待证。拖动不逐帧发布外壳 dock 布局，也不逐帧 resize BrowserWindow。
+
+### Measurement correction
+
+默认 E2E trace 同时连续截主页面与网页，混入 screencast/CopyOutput。通过现有 runner 的 `E2E_TRACE_SCREENSHOTS=0` 从源头关闭后，同样 GPU 关闭的空态、必应、example.com 完整往返，rAF p50 约16.7ms、p95 约16.8ms，trace 的 screencast/CopyOutput 均为0。旧约33ms不能再归为日常产品瓶颈，也不能由新 rAF 推断已丝滑。活跃布局区间的整窗 DrawAndSwap 耗时 p50 11.663ms、p95 16.530ms；软件 Swap 间隔 p95 21.802ms、最大64.038ms。Browser FramePresented 标记不覆盖全部 Viz swap，不能冒充物理屏幕呈现次数。
+
+### Verification / blocker
+
+截帧选项默认行为不变，`check:e2e` exit0；无截帧拖动为调试观测，runner130、Electron53904/launcher57368 exit0，不标正常 E2E pass。后一次基于最新 quality 工件的完整容器观测，因空态无 browser surface，stdin driver 读取 null.lastElementChild 且未及时捕获异步拒绝，exit1；这是观测工具错误，不是产品失败。Electron44408/runner57572 在故障检查时已不存在，但缺正常 exit.json 且 licensed Profile 的 .owner.lock 残留。按锁存在即 fail-fast，不自动清锁、不重跑、不请 peer 代清、不改 cache。此前 quality 正常 E2E 与本次失败严格分开。
+
+### Fix boundary / reusable rule
+
+本轮未新增产品修复；不凭猜测添加 ResizeObserver、线条遮罩或开启 GPU。视觉性能问题先核完整父容器、DOM 与 native 呈现边界，并校准录屏/截图/trace 开销；区分输入、布局、回执、合成与物理呈现，原始视觉目标未验证就保持 OPEN。
+
+### Evidence
+
+`.scratch/workspace-resize-20261101/verification-progress.json`、`no-screencast/result.json`、`no-screencast/browser-trace.json`、`no-screencast-check.log`、`whole-container/test-results/shared-electron-0/session.json`；失败 runner 输出为该 session 的 `tasks/bli4aj9t6.output`。无录屏 trace 属于 projection 构建，不能借作最新 quality 工件的整体验收。

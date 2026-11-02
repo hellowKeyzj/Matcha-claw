@@ -19,7 +19,7 @@ export class AppPluginPackageWorker {
   process(request: Extract<PackageRequest, { operation: 'build' }>): Promise<PackageResults['build']>;
   process(request: Extract<PackageRequest, { operation: 'read' }>): Promise<PackageResults['read']>;
   process(request: Extract<PackageRequest, { operation: 'files' }>): Promise<PackageResults['files']>;
-  process(request: Extract<PackageRequest, { operation: 'source' }>): Promise<PackageResults['source']>;
+  process(request: Extract<PackageRequest, { operation: 'validate' }>): Promise<PackageResults['validate']>;
   process(request: Extract<PackageRequest, { operation: 'html' }>): Promise<PackageResults['html']>;
   process(request: Extract<PackageRequest, { operation: 'verify' }>): Promise<PackageResults['verify']>;
   process(request: PackageRequest): Promise<PackageResults[PackageRequest['operation']]> {
@@ -88,7 +88,8 @@ export class AppPluginPackageWorker {
     const worker = this.start();
     const transferList: ArrayBuffer[] = [];
     if ('bytes' in request) {
-      // Storage owns these bytes; Node's small pool cannot transfer ownership.
+      // Byte requests consume caller-owned buffers; callers clone once to retain snapshots.
+      // Node's small Buffer pool cannot transfer ownership.
       const bytes = request.bytes.buffer instanceof ArrayBuffer && !isMarkedAsUntransferable(request.bytes.buffer)
         ? request.bytes : new Uint8Array(request.bytes);
       if (bytes.buffer instanceof ArrayBuffer) transferList.push(bytes.buffer);

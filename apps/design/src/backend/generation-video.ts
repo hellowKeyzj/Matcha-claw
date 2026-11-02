@@ -1,5 +1,5 @@
 import { setTimeout } from 'node:timers/promises';
-import type { AppModelRequest, AppPluginContext, AppVideoTaskResult } from '../../../../src/types/desktop/app-plugin-sdk';
+import type { AppModelRequest, AppPluginContext, AppVideoTaskResult } from '@matcha/app-plugins-sdk';
 import type { Asset } from '../document';
 import type { Assets } from './assets';
 import { DesignError } from './files';

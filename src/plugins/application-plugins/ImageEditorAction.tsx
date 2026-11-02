@@ -8,14 +8,15 @@ import { resolveSupportedLanguage } from '@/i18n/language';
 import { usePluginHost } from '@/plugin-host/react';
 import { selectChatSelection } from '@/plugins/chat/chat-session';
 import { useChatStore, type ChatStoreState } from '@/plugins/chat/store';
-import { openChatPanel } from '@/plugins/chat/workspace-actions';
+import { openWorkspacePage } from '@/plugins/workspace/actions';
+import type { AppApplicationManifest, InstalledAppPlugin } from '@/types/desktop/app-plugin';
+import { applicationWorkspacePage } from './application-workspace';
 import { imagePreviewActions, type ImagePreviewAction, type ImagePreviewActionProps } from '@/plugins/message-rendering/extensions';
 import { sessionIdentitiesEqual, validateSessionIdentity, type SessionIdentity } from '@/types/desktop/runtime-address';
 
 interface ImageEditorActionProps extends ImagePreviewActionProps {
-  pluginId: string;
-  digest: string;
-  panelId: string;
+  record: InstalledAppPlugin;
+  application: AppApplicationManifest;
   label: string;
   translations?: Readonly<Record<string, string>>;
   tool: string;
@@ -70,7 +71,7 @@ async function readPreviewImage(src: string, signal: AbortSignal, t: TFunction<'
   return { mimeType, data };
 }
 
-export function ImageEditorAction({ src, fileName, sessionIdentity, onClose, pluginId, digest, panelId, label, translations, tool, action }: ImageEditorActionProps) {
+export function ImageEditorAction({ src, fileName, sessionIdentity, onClose, record, application, label, translations, tool, action }: ImageEditorActionProps) {
   const { t, i18n } = useTranslation('common');
   const actionLabel = translations?.[resolveSupportedLanguage(i18n.resolvedLanguage)] ?? label;
   const host = usePluginHost();
@@ -105,7 +106,7 @@ export function ImageEditorAction({ src, fileName, sessionIdentity, onClose, plu
       if (!isCurrent()) return;
       if (!isSelectedSession(useChatStore.getState(), sessionIdentity)) throw new Error(t('imagePreview.sessionChanged'));
       // Only the image read is abortable here; Main owns the accepted plugin operation.
-      const result = await hostAppPluginCall({ id: pluginId, digest, name: tool, arguments: { name: fileName, mimeType: image.mimeType, data: image.data, sessionIdentity } });
+      const result = await hostAppPluginCall({ id: record.manifest.id, digest: record.digest, name: tool, arguments: { name: fileName, mimeType: image.mimeType, data: image.data, sessionIdentity } });
       if (!isCurrent()) return;
       if (result.isError) {
         const detail = result.content.find((part) => part.type === 'text' && typeof part.text === 'string')?.text;
@@ -115,7 +116,7 @@ export function ImageEditorAction({ src, fileName, sessionIdentity, onClose, plu
         setMessage(t('imagePreview.savedToOriginalSession'));
         return;
       }
-      openChatPanel({ id: panelId, sessionIdentity });
+      openWorkspacePage({ sessionIdentity, page: applicationWorkspacePage(record, application) });
       onClose();
     } catch (error) {
       if (isCurrent()) {

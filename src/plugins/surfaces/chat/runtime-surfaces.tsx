@@ -1,6 +1,8 @@
 import { createElement } from 'react';
+import { AppWindow, Globe, SquareActivity } from 'lucide-react';
+import i18n from '@/i18n';
 import { lazyWithPreload } from '@/plugin-host/core';
-import { openChatPanel } from '@/plugins/chat/workspace-actions';
+import { openWorkspacePage } from '@/plugins/workspace/actions';
 import { buildSessionIdentityKey, sessionIdentitiesEqual, validateSessionIdentity, type SessionIdentity } from '@/types/desktop/runtime-address';
 import { decodeOpenClawRuntimeSurfaceDescriptor, type OpenClawRuntimeSurfaceDescriptor } from '@/types/openclaw-runtime-surface';
 import { RuntimeContentHost } from '../RuntimeContentHost';
@@ -25,13 +27,16 @@ export function openChatRuntimeSurface(surface: ChatRuntimeSurfaceDescriptor): v
   const identity = surface.kind === 'browser-tab' ? surface.sourceSessionIdentity : surface.sessionIdentity;
   if (surface.kind === 'browser-tab' ? validateSessionIdentity(identity) : !decodeOpenClawRuntimeSurfaceDescriptor(surface)) return;
   const identityKey = buildSessionIdentityKey(identity);
-  const key = surface.kind === 'browser-tab' ? identityKey
+  const key = surface.kind === 'browser-tab'
+    ? JSON.stringify([identityKey, surface.kind, surface.target, surface.profile, surface.node ?? null, surface.targetId])
     : JSON.stringify([identityKey, surface.kind, surface.kind === 'mcp-app' ? surface.viewId : surface.documentId]);
-  openChatPanel({
-    id: 'runtime',
+  openWorkspacePage({
     sessionIdentity: identity,
-    content: {
-      key,
+    page: {
+      id: key,
+      providerId: 'surfaces:runtime',
+      title: surface.title || i18n.t(surface.kind === 'browser-tab' ? 'iab:browser' : surface.kind === 'mcp-app' ? 'iab:mcpApp' : 'iab:canvas'),
+      icon: surface.kind === 'browser-tab' ? Globe : surface.kind === 'mcp-app' ? AppWindow : SquareActivity,
       render: ({ sessionIdentity, onSendMessage, onOpenLink }) => {
         if (!sessionIdentity || !sessionIdentitiesEqual(identity, sessionIdentity)) return null;
         return surface.kind === 'browser-tab'

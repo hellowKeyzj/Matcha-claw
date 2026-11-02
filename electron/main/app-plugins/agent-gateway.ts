@@ -1,18 +1,16 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import type { AppPluginDevelopment, AppPluginKind, AppPluginManifest } from '../../../src/types/desktop/app-plugin';
-import { appPluginHasKind } from '../../../src/types/desktop/app-plugin';
+import { AppPluginDevelopmentOwner } from './development';
 import { appPluginResources, appResourceUri, appToolName } from '../../../src/types/desktop/app-plugin-sdk';
 import type { AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
 import type { AppPluginHost } from './host';
 import { sendJson } from '../../api/route-utils';
-import { APP_PLUGIN_TOOLS, callAppPluginTool, type AppPluginToolOperations } from './agent-tools';
+import { APP_PLUGIN_SDK, APP_PLUGIN_TOOLS, callAppPluginTool, type AppPluginToolOperations } from './agent-tools';
 import { publishAppPluginMcp } from './mcp-projection';
 import type { ApplicationPluginOwner } from './owner';
 import { AppPluginError, MAX_APP_PLUGIN_ZIP_BYTES, requireDigest, requireObject, requirePluginId } from './package';
 
-const GRANT_LIFETIME_MS = 30 * 60 * 1000;
-const MAX_GRANTS = 128;
 const MAX_OBSERVATIONS = 128;
 const MAX_REQUEST_BYTES = Math.max(2 * MAX_APP_PLUGIN_ZIP_BYTES, 4 * Math.ceil(MAX_APP_PLUGIN_ZIP_BYTES / 3) + 64 * 1024);
 
@@ -26,19 +24,12 @@ export interface AppPluginRuntimeStatusInput {
 }
 
 export interface AppPluginAgentGateway {
-  createDevelopment(input: { kind: AppPluginKind; pluginId?: string }): AppPluginDevelopment;
+  readonly development: AppPluginDevelopmentOwner;
+  preview(developmentId: string): void;
+  forceClose(): Promise<void>;
   reportRuntimeStatus(input: AppPluginRuntimeStatusInput): Promise<void>;
   changed(): void;
   close(): Promise<void>;
-}
-
-interface DevelopmentGrant {
-  development: AppPluginDevelopment;
-  boundId?: string;
-  sourceDigest?: string;
-  builtSourceDigest?: string;
-  builtDigest?: string;
-  busy: boolean;
 }
 
 type ReaderObservation = Omit<AppPluginRuntimeStatusInput, 'message'> & {
@@ -46,15 +37,6 @@ type ReaderObservation = Omit<AppPluginRuntimeStatusInput, 'message'> & {
   operation: symbol;
   pending: boolean;
 };
-
-function assertScope(manifest: AppPluginManifest, grant: DevelopmentGrant): void {
-  const kinds = (['reader', 'connector', 'application'] as const).filter((kind) => appPluginHasKind(manifest, kind));
-  if (kinds.length !== 1 || kinds[0] !== grant.development.kind) {
-    throw new AppPluginError('invalid_package', 'Development is authorized for one plugin kind only; mixed or other-kind packages are not allowed.');
-  }
-  const id = grant.development.pluginId ?? grant.boundId;
-  if (id && manifest.id !== id) throw new AppPluginError('conflict', 'The development request is bound to a different plugin identifier.');
-}
 
 async function readRequest(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -74,6 +56,8 @@ export async function startAppPluginAgentGateway(input: {
   owner: ApplicationPluginOwner;
   host: AppPluginHost;
   root: string;
+  sdkArchive: string;
+  onPreview(developmentId: string): void;
 }): Promise<AppPluginAgentGateway> {
   const { owner, host } = input;
   const catalogIdentity = randomUUID();
@@ -90,74 +74,30 @@ export async function startAppPluginAgentGateway(input: {
   };
   const token = randomBytes(32).toString('hex');
   const expectedToken = Buffer.from(`Bearer ${token}`);
-  const grants = new Map<string, DevelopmentGrant>();
+  const development = new AppPluginDevelopmentOwner({ root: input.root, owner, host });
   const observations = new Map<string, ReaderObservation>();
   let closed = false;
   let closing: Promise<void> | undefined;
   const ensureOpen = () => {
     if (closed) throw new AppPluginError('closed', 'The app plugin development gateway is closed.');
   };
-  const withGrant = async <T>(requestId: string, action: (grant: DevelopmentGrant) => Promise<T>): Promise<T> => {
+  const preview = (developmentId: string) => {
     ensureOpen();
-    const grant = grants.get(requestId);
-    if (!grant || Date.parse(grant.development.expiresAt) <= Date.now()) {
-      if (grant && !grant.busy) grants.delete(requestId);
-      throw new AppPluginError('conflict', 'The development request has expired, was consumed, or was not issued by the application UI.');
-    }
-    if (grant.busy) throw new AppPluginError('busy', 'Another operation is using this development request.');
-    grant.busy = true;
-    try { return await action(grant); } finally { grant.busy = false; }
+    development.credentials(developmentId);
+    input.onPreview(developmentId);
   };
+  let port = 0;
   const operations: AppPluginToolOperations = {
     owner,
-    inspectInstalled: (requestId, sourceInput) => withGrant(requestId, async (grant) => {
-      if (grant.development.pluginId !== sourceInput.pluginId) throw new AppPluginError('conflict', 'Installed source requires an edit request for this plugin.');
-      const source = await owner.inspectInstalledSource({ id: sourceInput.pluginId, digest: sourceInput.digest });
-      assertScope(source.manifest, grant);
-      grant.sourceDigest = source.digest;
-      return source;
-    }),
-    build: (requestId, buildInput) => withGrant(requestId, async (grant) => {
-      assertScope(buildInput.manifest, grant);
-      if (grant.development.pluginId) {
-        const current = (await owner.list()).plugins.find((plugin) => plugin.manifest.id === grant.development.pluginId);
-        if (!current) throw new AppPluginError('not_found', 'The package selected for editing is no longer installed.');
-        assertScope(current.manifest, grant);
-      }
-      if (!grant.development.pluginId && !grant.boundId) {
-        // Bind before the first await: concurrent builds cannot select different package ids.
-        grant.boundId = buildInput.manifest.id;
-      }
-      if (!grant.development.pluginId && (await owner.list()).plugins.some((plugin) => plugin.manifest.id === grant.boundId)) {
-        throw new AppPluginError('conflict', 'New plugin development cannot replace an already installed package. Start an edit request in the application UI.');
-      }
-      const build = await owner.build(buildInput);
-      grant.builtDigest = build.digest;
-      grant.builtSourceDigest = grant.sourceDigest;
-      return build;
-    }),
-    install: (requestId, packageInput) => withGrant(requestId, async (grant) => {
-      if (grant.development.pluginId && !grant.builtSourceDigest) {
-        throw new AppPluginError('conflict', 'Inspect the installed source before building an edited package.');
-      }
-      if (!grant.builtDigest || grant.builtDigest !== packageInput.digest) {
-        throw new AppPluginError('conflict', 'Install requires the digest returned by the latest successful build for this development request.');
-      }
-      const inspected = await owner.inspect(packageInput.packageBase64);
-      assertScope(inspected.manifest, grant);
-      if (inspected.digest !== packageInput.digest) throw new AppPluginError('conflict', 'The package digest does not match the authorized build.');
-      if (!grant.development.pluginId && (await owner.list()).plugins.some((plugin) => plugin.manifest.id === grant.boundId)) {
-        throw new AppPluginError('conflict', 'A package with the selected identifier is already installed.');
-      }
+    sdk: (developmentId) => {
       ensureOpen();
-      if (Date.parse(grant.development.expiresAt) <= Date.now()) throw new AppPluginError('conflict', 'The development request has expired.');
-      const installed = await owner.importPackage({
-        ...packageInput, origin: 'agent',
-        ...(grant.development.pluginId ? { expectedDigest: grant.builtSourceDigest } : { onlyIfNew: true }),
-      });
-      grants.delete(requestId);
-      return installed;
-    }),
+      const credentials = development.credentials(developmentId ?? development.create().developmentId);
+      const baseUrl = `http://127.0.0.1:${port}/development/${credentials.developmentId}`;
+      return { ...APP_PLUGIN_SDK, development: { ...credentials, baseUrl }, sdk: { url: `${baseUrl}/sdk` } };
+    },
+    build: (developmentId, value) => development.build(developmentId, value),
+    install: (developmentId, value) => development.install(developmentId, value),
+    developmentStatus: (developmentId) => development.status(developmentId),
     status: async (pluginId) => {
       const plugin = (await owner.list()).plugins.find((candidate) => candidate.manifest.id === pluginId);
       if (!plugin) {
@@ -190,20 +130,99 @@ export async function startAppPluginAgentGateway(input: {
   };
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader('Cache-Control', 'no-store');
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const developmentPath = /^\/development\/([a-f0-9-]{36})(?:\/(sdk|package|status|preview|call|install|inspect|act))?$/.exec(url.pathname);
     const presentedToken = Buffer.from(req.headers.authorization ?? '');
-    if (req.headers.origin || presentedToken.length !== expectedToken.length || !timingSafeEqual(presentedToken, expectedToken)) {
+    try {
+      if (req.headers.origin) throw new Error('Origin is not accepted.');
+      if (developmentPath) {
+        const bearer = req.headers.authorization;
+        if (!bearer?.startsWith('Bearer ')) throw new Error('Missing development credential.');
+        development.authorize(developmentPath[1], bearer.slice(7));
+      } else if (presentedToken.length !== expectedToken.length || !timingSafeEqual(presentedToken, expectedToken)) {
+        throw new Error('Missing gateway credential.');
+      }
+    } catch {
       sendJson(res, 403, { error: 'App plugin gateway authorization failed.' });
       return;
     }
     if (closed) { sendJson(res, 503, { error: 'App plugin gateway is closing.' }); return; }
     if (requests.size >= 128) { sendJson(res, 429, { error: 'Too many app plugin gateway requests.' }); return; }
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const controller = new AbortController();
     const abort = () => controller.abort(new Error('App plugin caller disconnected.'));
     requests.add(controller);
     req.once('aborted', abort);
     res.once('close', abort);
     try {
+      if (developmentPath) {
+        const developmentId = developmentPath[1];
+        const operation = developmentPath[2];
+        let result: unknown;
+        if (req.method === 'GET' && operation === 'sdk') {
+          const bytes = await readFile(input.sdkArchive);
+          if (!controller.signal.aborted) {
+            res.writeHead(200, { 'Content-Type': 'application/gzip', 'Content-Length': bytes.length });
+            res.end(bytes);
+          }
+          return;
+        }
+        if (req.method === 'GET' && operation === 'status') result = development.status(developmentId);
+        else if (req.method === 'DELETE' && !operation) {
+          await development.stop(developmentId);
+          result = { state: development.status(developmentId).state };
+        } else if (req.method === 'POST' && operation === 'package') {
+          if (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/zip') {
+            throw new AppPluginError('invalid_package', 'Development uploads require application/zip.');
+          }
+          const chunks: Buffer[] = [];
+          let size = 0;
+          for await (const value of req) {
+            const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+            size += chunk.length;
+            if (size > MAX_APP_PLUGIN_ZIP_BYTES) throw new AppPluginError('invalid_package', 'Development ZIP exceeds the package limit.');
+            chunks.push(chunk);
+          }
+          result = await development.upload(developmentId, Buffer.concat(chunks));
+        } else if (req.method === 'POST' && ['preview', 'call', 'install', 'inspect', 'act'].includes(operation ?? '')) {
+          if (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+            throw new AppPluginError('invalid_package', 'Development commands require application/json.');
+          }
+          const value = await readRequest(req);
+          if (operation === 'preview') {
+            requireObject(value, []);
+            preview(developmentId);
+            result = { success: true };
+          } else if (operation === 'call') {
+            const body = requireObject(value, ['name', 'arguments']);
+            if (typeof body.name !== 'string' || !body.arguments || typeof body.arguments !== 'object' || Array.isArray(body.arguments)) {
+              throw new AppPluginError('invalid_package', 'A development call requires a name and arguments object.');
+            }
+            result = await development.call({ developmentId, name: body.name, arguments: body.arguments as Record<string, unknown> }, controller.signal);
+          } else if (operation === 'install') {
+            const body = requireObject(value, ['digest']);
+            requireDigest(body.digest);
+            result = await development.install(developmentId, { digest: body.digest });
+          } else if (operation === 'inspect') {
+            const body = requireObject(value, ['entry']);
+            if (body.entry !== undefined && typeof body.entry !== 'string') throw new AppPluginError('invalid_package', 'Invalid preview entry.');
+            result = await development.inspect(developmentId, controller.signal, body.entry as string | undefined);
+          } else {
+            const body = requireObject(value, ['type', 'id', 'value', 'entry']);
+            const { entry, ...action } = body;
+            if (entry !== undefined && typeof entry !== 'string') throw new AppPluginError('invalid_package', 'Invalid preview entry.');
+            if ((action.type !== 'click' && action.type !== 'fill') || typeof action.id !== 'string'
+              || (action.value !== undefined && typeof action.value !== 'string')) {
+              throw new AppPluginError('invalid_package', 'Invalid preview action.');
+            }
+            result = await development.act(developmentId, { type: action.type, id: action.id, value: action.value }, controller.signal, entry as string | undefined);
+          }
+        } else {
+          sendJson(res, 404, { error: 'Development endpoint unavailable.' });
+          return;
+        }
+        if (!controller.signal.aborted) sendJson(res, 200, result);
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/catalog') {
         const revision = url.searchParams.get('revision');
         const wake = waitForCatalogChange(revision, controller.signal);
@@ -284,6 +303,7 @@ export async function startAppPluginAgentGateway(input: {
     await closeServer();
     throw new Error('App plugin gateway did not expose a loopback listener.');
   }
+  port = address.port;
   let retire: () => Promise<void>;
   try {
     retire = await publishAppPluginMcp({ ...input, port: address.port, token });
@@ -292,23 +312,9 @@ export async function startAppPluginAgentGateway(input: {
     throw error;
   }
   return {
-    createDevelopment(developmentInput) {
-      ensureOpen();
-      const value = requireObject(developmentInput, ['kind', 'pluginId']);
-      if (value.kind !== 'reader' && value.kind !== 'connector' && value.kind !== 'application') throw new AppPluginError('invalid_package', 'Development requires reader, connector or application kind.');
-      if (value.pluginId !== undefined) requirePluginId(value.pluginId);
-      for (const [id, grant] of grants) {
-        if (!grant.busy && Date.parse(grant.development.expiresAt) <= Date.now()) grants.delete(id);
-      }
-      if (grants.size >= MAX_GRANTS) throw new AppPluginError('busy', 'Too many active plugin development requests.');
-      const development: AppPluginDevelopment = {
-        requestId: randomUUID(), kind: value.kind,
-        ...(value.pluginId === undefined ? {} : { pluginId: value.pluginId }),
-        expiresAt: new Date(Date.now() + GRANT_LIFETIME_MS).toISOString(),
-      };
-      grants.set(development.requestId, { development, busy: false });
-      return { ...development };
-    },
+    development,
+    preview,
+    forceClose: () => development.forceClose(),
     async reportRuntimeStatus(statusInput) {
       ensureOpen();
       const status = requireObject(statusInput, ['pluginId', 'digest', 'entry', 'instanceId', 'state', 'message']);
@@ -353,9 +359,8 @@ export async function startAppPluginAgentGateway(input: {
         closed = true;
         for (const request of requests) request.abort();
         notifyChanged();
-        grants.clear();
         observations.clear();
-        closing = closeServer().finally(retire);
+        closing = closeServer().finally(() => development.close()).finally(retire);
       }
       return closing;
     },

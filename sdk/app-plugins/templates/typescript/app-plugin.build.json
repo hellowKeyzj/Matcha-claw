@@ -1,0 +1,4 @@
+{
+  "backend": "src/activate.ts",
+  "html": { "index.html": "index.html" }
+}

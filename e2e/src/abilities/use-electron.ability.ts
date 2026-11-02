@@ -201,7 +201,7 @@ export class UseElectron extends Ability {
       ...this.versions, profileRoot: this.profileRoot, userData, main: electronMain, renderer: this.primaryWindow.url(),
     }, null, 2));
     if (!this.activation) {
-      await this.app.context().tracing.start({ screenshots: true, snapshots: true, sources: true });
+      await this.app.context().tracing.start({ screenshots: process.env.E2E_TRACE_SCREENSHOTS !== '0', snapshots: true, sources: true });
       this.recording = true;
     }
     // Borrow one session for the worker; per-actor sessions would accumulate context listeners.
@@ -722,7 +722,7 @@ try {
         throw new Error('Private input was not cleared');
       }
     } catch { throw new Error('Private UI input cleanup was not confirmed; recording remains disabled'); }
-    await this.app.context().tracing.start({ screenshots: true, snapshots: true, sources: true });
+    await this.app.context().tracing.start({ screenshots: process.env.E2E_TRACE_SCREENSHOTS !== '0', snapshots: true, sources: true });
     await this.app.context().tracing.startChunk({ title: 'After private UI input' });
     this.recording = true;
     if (failed) throw new Error('Private UI input was not confirmed; secret-bearing diagnostics omitted, no resubmission');

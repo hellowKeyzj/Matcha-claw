@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AppPluginContext, AppToolContext, AppToolHandler, AppToolResult } from '../../../src/types/desktop/app-plugin-sdk';
+import type { AppPluginContext, AppToolContext, AppToolHandler, AppToolResult } from '@matcha/app-plugins-sdk';
 import type { ImageLayer } from './document';
 import { createAssets, decodeBase64 } from './backend/assets';
 import { createAnalysis, extractTextRequest, recommendationRequest } from './backend/analysis';

@@ -1,4 +1,5 @@
 import i18n from '@/i18n';
+import { installAppDevelopmentBridge, type AppDevelopmentAction } from './development-protocol';
 import { validateAppComposeRequest, validateAppWorkspaceFileRequest, type AppComposeRequest, type AppSessionMediaData, type AppSessionMediaList, type AppToolResult, type AppWebviewApi, type AppWebviewContext } from '@/types/desktop/app-plugin-sdk';
 
 declare global {
@@ -12,7 +13,8 @@ export function getAppBridgeMessages(): Record<string, string> {
 }
 
 // Serialized into the iframe: keep this bootstrap independent of Renderer imports and credentials.
-function installAppBridge(pluginId: string, context: AppWebviewContext, validateCompose: typeof validateAppComposeRequest, validateWorkspaceFile: typeof validateAppWorkspaceFileRequest, initialMessages: Record<string, string>): void {
+function installAppBridge(pluginId: string, context: AppWebviewContext, validateCompose: typeof validateAppComposeRequest, validateWorkspaceFile: typeof validateAppWorkspaceFileRequest, initialMessages: Record<string, string>, development?: typeof installAppDevelopmentBridge): void {
+  const developer = development?.();
   if (context.sessionIdentity) {
     Object.freeze(context.sessionIdentity.endpoint);
     Object.freeze(context.sessionIdentity);
@@ -60,6 +62,7 @@ function installAppBridge(pluginId: string, context: AppWebviewContext, validate
     closeRequest?.controller.abort();
     closeRequest = null;
     closeOwner = null;
+    developer?.dispose();
     if (port) { port.onmessage = null; port.onmessageerror = null; port.close(); port = null; }
   };
   const connect = (event: MessageEvent<unknown>) => {
@@ -73,7 +76,20 @@ function installAppBridge(pluginId: string, context: AppWebviewContext, validate
       message.ports.forEach((value) => value.close());
       if (message.ports.length || !message.data || typeof message.data !== 'object') { reportError(text('invalidMessage')); return; }
       const value = message.data as Record<string, unknown>;
-      if (value.type === 'close-request') {
+      if (value.type === 'development-request' && developer) {
+        if (!Number.isSafeInteger(value.id) || Number(value.id) < 1) { reportError(text('invalidRequest')); return; }
+        try {
+          const action = value.action as Record<string, unknown> | undefined;
+          if (value.method !== 'inspect' && (value.method !== 'act' || !action || typeof action !== 'object'
+            || Object.keys(action).some((key) => !['type', 'id', 'value'].includes(key))
+            || (action.type !== 'click' && action.type !== 'fill') || typeof action.id !== 'string'
+            || action.id.length > 80 || (action.value !== undefined && (typeof action.value !== 'string' || action.value.length > 10_000)))) throw new Error(text('invalidRequest'));
+          const result = value.method === 'inspect' ? developer.inspect() : developer.act(action as unknown as AppDevelopmentAction);
+          port?.postMessage({ type: 'development-result', id: value.id, result });
+        } catch (error) {
+          port?.postMessage({ type: 'development-result', id: value.id, error: error instanceof Error ? error.message : text('requestFailed') });
+        }
+      } else if (value.type === 'close-request') {
         if (Object.keys(value).some((key) => !['type', 'id', 'owner'].includes(key)) || !Number.isSafeInteger(value.id) || Number(value.id) <= lastCloseRequest
           || !closeOwner || value.owner !== closeOwner.id) { reportError(text('invalidRequest')); return; }
         closeRequest?.controller.abort();
@@ -132,6 +148,7 @@ function installAppBridge(pluginId: string, context: AppWebviewContext, validate
     port.onmessageerror = () => reportError(text('decodeFailed'));
     port.start();
     connectPort(port);
+    // Connection readiness is not evidence that the application rendered successfully.
     port.postMessage(failure ? { type: 'error', message: failure } : { type: 'ready' });
     sendCloseOwner();
   };
@@ -240,7 +257,7 @@ function installAppBridge(pluginId: string, context: AppWebviewContext, validate
   window.parent.postMessage({ type: 'matcha:app-ready' }, '*');
 }
 
-export function buildAppDocument(pluginId: string, html: string, context: AppWebviewContext): string {
+export function buildAppDocument(pluginId: string, html: string, context: AppWebviewContext, development = false): string {
   const serialize = (value: unknown) => JSON.stringify(value).replaceAll('<', '\\u003c');
-  return `<!doctype html><meta charset="utf-8"><script>(${installAppBridge.toString()})(${serialize(pluginId)},${serialize(context)},${validateAppComposeRequest.toString()},${validateAppWorkspaceFileRequest.toString()},${serialize(getAppBridgeMessages())})</script>${html}`;
+  return `<!doctype html><meta charset="utf-8"><script>(${installAppBridge.toString()})(${serialize(pluginId)},${serialize(context)},${validateAppComposeRequest.toString()},${validateAppWorkspaceFileRequest.toString()},${serialize(getAppBridgeMessages())},${development ? installAppDevelopmentBridge.toString() : 'undefined'})</script>${html}`;
 }

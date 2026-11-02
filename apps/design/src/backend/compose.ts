@@ -1,5 +1,5 @@
-import { appToolName } from '../../../../src/types/desktop/app-plugin-sdk';
-import { validateSessionIdentity } from '../../../../src/types/desktop/runtime-address';
+import { appToolName } from '@matcha/app-plugins-sdk';
+import { validateSessionIdentity } from '@matcha/app-plugins-sdk';
 import type { DesignComposeOperation } from '../compose-operation';
 import type { GenerationRequest } from '../document';
 import { generationRequest, id, invalid, layerPatch, number, object, revision, text } from './validation';

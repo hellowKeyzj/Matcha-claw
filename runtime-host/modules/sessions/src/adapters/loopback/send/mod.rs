@@ -4,9 +4,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    adapters::loopback::key::is_cron_session_key,
     send::{Attachment, SessionSendCommand, SessionSendOutcome},
-    state::{SessionIdentity, SessionProvider},
+    state::SessionIdentity,
 };
 
 pub(crate) mod handler;
@@ -76,10 +75,6 @@ fn valid_endpoint_session_id(value: Option<&str>) -> bool {
     })
 }
 
-fn is_openclaw_cron_session_key(identity: &SessionIdentity) -> bool {
-    identity.provider() == SessionProvider::OpenClaw && is_cron_session_key(identity.session_key())
-}
-
 impl SessionSendRequest {
     pub(crate) fn decode(
         value: Value,
@@ -114,7 +109,6 @@ impl SessionSendRequest {
             && self.scope.identity == self.target.identity
             && self.scope.identity == self.input.identity
             && self.scope.identity.validate().is_ok()
-            && !is_openclaw_cron_session_key(&self.scope.identity)
             && valid_endpoint_session_id(self.input.endpoint_session_id.as_deref()))
         .then_some(())
         .ok_or(RequestError::Invalid)
@@ -199,7 +193,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::state::SessionEndpoint;
+    use crate::state::{SessionEndpoint, SessionProvider};
 
     fn request(provider: SessionProvider) -> Value {
         let session_key = match provider {

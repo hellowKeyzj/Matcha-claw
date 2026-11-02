@@ -166,6 +166,10 @@ impl Connection {
         !self.stopped.is_cancelled()
     }
 
+    pub(super) async fn closed(&self) {
+        self.stopped.cancelled().await;
+    }
+
     pub(super) fn stop(&self) {
         self.stopped.cancel();
     }

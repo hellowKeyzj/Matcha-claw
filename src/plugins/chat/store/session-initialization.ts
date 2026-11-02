@@ -114,11 +114,10 @@ export async function executeSessionThinkingSelection(input: SessionInput, key: 
     : conversation?.kind !== 'session' || conversation.sessionRecordKey !== key
       || !sessionIdentitiesEqual(conversation.sessionIdentity, identity) ? 'target-changed'
       : getSessionRuntime(state, key).runPhase === 'stopping' ? 'closing'
-        : record?.meta.kind === 'automation' ? 'automation-session'
-          : send?.receipt.phase === 'awaiting-receipt' || send?.receipt.phase === 'unknown' ? 'sending'
-            : activeComposerSends.has(key) ? 'composer-busy'
-              : modelSelections.has(buildSessionIdentityKey(identity)) ? 'model-busy'
-                : useComposerDraftStore.getState().initializations[key] ? 'initialization-busy' : null;
+        : send?.receipt.phase === 'awaiting-receipt' || send?.receipt.phase === 'unknown' ? 'sending'
+          : activeComposerSends.has(key) ? 'composer-busy'
+            : modelSelections.has(buildSessionIdentityKey(identity)) ? 'model-busy'
+              : useComposerDraftStore.getState().initializations[key] ? 'initialization-busy' : null;
   logSessionTrace('thinking.write.enter', traceId, () => ({
     owner: summarizeIdentifier(identity ? buildSessionIdentityKey(identity) : null),
     model: summarizeIdentifier(record?.meta.modelState?.selectionId),
@@ -209,7 +208,8 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
       throw error;
     }
   }
-  const operationId = ownsSubmission ? payload.operationId! : initialization?.operationId ?? payload.operationId ?? crypto.randomUUID();
+  const operationId = ownsSubmission ? payload.operationId!
+    : initialization?.kind === 'pending' ? initialization.operationId : payload.operationId ?? crypto.randomUUID();
   let retired = false;
   let phase: 'create' | 'permission' | 'model' | 'thinking' | 'send' = 'create';
   let identity: SessionIdentity | null = gate.kind === 'session' ? gate.sessionIdentity : null;
@@ -247,8 +247,9 @@ export async function executeComposerSend(input: ComposerSendInput, payload: {
       const created = await input.create({ key, operationId, snapshot, isCurrent: () => isCurrent() && sameRevision() });
       if (created.outcome !== 'created') {
         if (useComposerDraftStore.getState().initializations[key]?.operationId === operationId) {
-          useComposerDraftStore.getState().setInitialization(key, created.outcome === 'unknown'
-            ? { kind: 'createUnknown', operationId, error: created.error } : null);
+          useComposerDraftStore.getState().setInitialization(key, {
+            kind: created.outcome === 'unknown' ? 'createUnknown' : 'createRejected', operationId, error: created.error,
+          });
         }
         return fail(created.error, created.outcome);
       }

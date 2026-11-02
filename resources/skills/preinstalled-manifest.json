@@ -83,6 +83,12 @@
       "localDir": "resources/skills/preinstalled-skill-sources/agent-creator",
       "version": "2026-10-03",
       "autoEnable": false
+    },
+    {
+      "slug": "app-plugin-create",
+      "localDir": "resources/skills/preinstalled-skill-sources/app-plugin-create",
+      "version": "2026-11-01",
+      "autoEnable": true
     }
   ]
 }

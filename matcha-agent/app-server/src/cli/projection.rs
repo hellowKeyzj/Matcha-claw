@@ -143,6 +143,7 @@ pub(super) fn provider_environment(
         if reserved_environment(&target)
             || env_name(source.clone()).starts_with("MATCHA_SEALED_")
             || env_name(source.clone()).starts_with("MATCHA_WORLD_")
+            || env_name(source.clone()).starts_with("MATCHA_IAB_")
         {
             return Err(Error::invalid(
                 "CLI environment cannot override the Agent's native directories, initialization, recovery policy, or scoped sealed access",
@@ -244,6 +245,26 @@ pub(crate) async fn launch(
     agent_id: &str,
     args: Vec<String>,
 ) -> rpc::Result<Launch> {
+    launch_with_iab(config, paths, agent_id, args, None).await
+}
+
+pub(crate) async fn launch_instance(
+    config: &Config,
+    paths: &Paths,
+    agent_id: &str,
+    args: Vec<String>,
+    iab: &crate::session::iab::InstanceGuard,
+) -> rpc::Result<Launch> {
+    launch_with_iab(config, paths, agent_id, args, Some(iab)).await
+}
+
+async fn launch_with_iab(
+    config: &Config,
+    paths: &Paths,
+    agent_id: &str,
+    args: Vec<String>,
+    iab: Option<&crate::session::iab::InstanceGuard>,
+) -> rpc::Result<Launch> {
     if config.cli.args.iter().any(|argument| {
         let name = argument.split('=').next().unwrap_or(argument);
         matches!(
@@ -312,7 +333,17 @@ pub(crate) async fn launch(
         .iter()
         .any(|argument| matches!(argument.as_str(), "-p" | "--print"))
     {
-        command_args.extend(crate::mcp::project(config, paths, agent_id, &mut env).await?);
+        let (mcp_args, preset) = crate::mcp::project_instance(config, paths, agent_id, &mut env).await?;
+        command_args.extend(mcp_args);
+        if let (Some(iab), Some((command, args))) = (iab, preset) {
+            env.insert(
+                "MATCHA_IAB_STDIO".into(),
+                serde_json::to_string(&serde_json::json!({
+                    "capability": iab.capability(), "command": command, "args": args,
+                }))
+                .map_err(|source| Error::internal("iab_launch_encode").with_source(source))?,
+            );
+        }
     }
     command_args.extend(args);
     if capability_query {
@@ -391,6 +422,7 @@ pub(crate) fn env_name(name: String) -> String {
 fn reserved_environment(name: &str) -> bool {
     name.starts_with("MATCHA_SEALED_")
         || name.starts_with("MATCHA_WORLD_")
+        || name.starts_with("MATCHA_IAB_")
         || matches!(
             name,
             "CLAUDE_CONFIG_DIR"

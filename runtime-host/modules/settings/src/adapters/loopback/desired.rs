@@ -63,7 +63,7 @@ fn valid(value: &Value) -> bool {
         && input.len() == 4
         && matches!(
             input.get("browserMode").and_then(Value::as_str),
-            Some("native" | "relay" | "off")
+            Some("iab" | "native" | "relay" | "off")
         )
         && input.get("launchAtStartup").is_some_and(Value::is_boolean)
         && input.get("gatewayAutoStart").is_some_and(Value::is_boolean)

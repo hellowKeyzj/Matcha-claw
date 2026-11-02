@@ -5,7 +5,6 @@ import { defineExtensionPoint } from '@/plugin-host/core';
 import type { SessionIdentity } from '@/types/desktop/runtime-address';
 import type { SessionRunPhase } from '@/types/session/runtime-state';
 import type { SessionOwnership } from '@/types/desktop/session-ownership';
-import type { ChatPanelContent, ChatPanelRequest } from './workspace-actions';
 
 export interface ChatComposerActionState {
   readonly t: TFunction<'chat'>;
@@ -71,42 +70,12 @@ export interface ChatWorkspaceContentProps {
   visible: boolean;
   sessionIdentity: SessionIdentity | null;
   ownership: SessionOwnership | null;
-  openPanel: (request: ChatPanelRequest) => void;
 }
 
 export interface ChatContentContribution<P> {
   readonly id: string;
   readonly order: number;
   readonly component: ComponentType<P>;
-}
-
-export interface ChatPanelLayout {
-  readonly position: 'left' | 'right' | 'top' | 'full';
-  readonly fullscreen: boolean;
-  readonly composer?: 'dock';
-}
-
-export interface ChatPanelProps {
-  sessionIdentity?: SessionIdentity;
-  width: number;
-  content: ChatPanelContent | null;
-  layout: ChatPanelLayout;
-  onLayoutChange: (layout: Partial<ChatPanelLayout>) => void;
-  onClose: () => void;
-  registerCloseHandler?: (handler: (signal: AbortSignal) => boolean | Promise<boolean>) => () => void;
-  onSendMessage?: (text: string) => void | Promise<void>;
-  onOpenLink?: (url: string) => void | Promise<void>;
-}
-
-export interface ChatSidePanelContribution {
-  readonly id: string;
-  readonly order: number;
-  readonly keepMounted?: boolean;
-  readonly icon: LucideIcon;
-  readonly label: string;
-  readonly defaultLabel?: string;
-  readonly title?: string;
-  readonly component: ComponentType<ChatPanelProps>;
 }
 
 export interface ChatComposerContribution {
@@ -118,4 +87,3 @@ export interface ChatComposerContribution {
 export const chatComposerActions = defineExtensionPoint<ChatComposerAction>('chat.composer.actions');
 export const chatComposerContent = defineExtensionPoint<ChatComposerContribution>('chat.composer.content');
 export const chatWorkspaceContent = defineExtensionPoint<ChatContentContribution<ChatWorkspaceContentProps>>('chat.workspace.content');
-export const chatSidePanels = defineExtensionPoint<ChatSidePanelContribution>('chat.workspace.side-panels');

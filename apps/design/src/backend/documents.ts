@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { buildSessionIdentityKey, validateSessionIdentity, type SessionIdentity } from '../../../../src/types/desktop/runtime-address';
+import { buildSessionIdentityKey, validateSessionIdentity, type SessionIdentity } from '@matcha/app-plugins-sdk';
 import type { Asset, DesignDocument, DocumentChange, DocumentSummary, Edit, ImageLayer, Layer, VideoLayer } from '../document';
 import type { Assets } from './assets';
 import { DesignError, readJson, requireRevision, writeAtomic } from './files';

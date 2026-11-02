@@ -6,6 +6,7 @@ mod history;
 mod idle;
 mod instance;
 mod investigation;
+pub(crate) mod iab;
 mod native;
 mod observation;
 mod record;
@@ -63,6 +64,7 @@ struct Inner {
     catalog_changes: tokio::sync::watch::Sender<()>,
     shutdown: AtomicBool,
     shutdown_guard: Mutex<()>,
+    iab: iab::Owner,
 }
 
 struct Session {
@@ -135,6 +137,7 @@ impl Sessions {
             catalog_changes: tokio::sync::watch::channel(()).0,
             shutdown: AtomicBool::new(false),
             shutdown_guard: Mutex::new(()),
+            iab: iab::Owner::default(),
         }));
         for record in records {
             let session_id = record.session_id.clone();
@@ -182,6 +185,10 @@ impl Sessions {
             owner.start_executor(session).await;
         }
         Ok(owner)
+    }
+
+    pub(crate) fn iab_peer(&self) -> iab::Peer {
+        self.0.iab.peer()
     }
 
     pub fn catalog_changes(&self) -> tokio::sync::watch::Receiver<()> {
@@ -536,6 +543,7 @@ impl Sessions {
     pub async fn shutdown(&self) -> rpc::Result<()> {
         let _guard = self.0.shutdown_guard.lock().await;
         self.0.shutdown.store(true, Ordering::Release);
+        self.0.iab.shutdown();
         let sessions: Vec<_> = self.0.sessions.read().await.values().cloned().collect();
         let mut closing = tokio::task::JoinSet::new();
         for session in sessions {

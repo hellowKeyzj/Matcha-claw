@@ -1,5 +1,5 @@
 import { useCallback, useEffectEvent, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject, type WheelEvent } from 'react';
-import type { ChatPanelLayout } from '@/plugins/chat/extensions';
+import type { WorkspaceLayout } from '@/plugins/workspace/extensions';
 import { cn } from '@/lib/utils';
 import { CHAT_LAYOUT_TOKENS } from '@/plugins/chat/chat-layout-tokens';
 import { CHAT_WORKSPACE_LAYOUT } from '@/app/layout/workspace';
@@ -22,14 +22,14 @@ interface ChatShellProps {
   sidePanelWidth: number;
   sidePanelMainWidth?: number | null;
   sidePanelVisible?: boolean;
-  artifactWorkbenchFullscreen?: boolean;
-  panelLayout: ChatPanelLayout;
+  panelLayout: WorkspaceLayout;
   onSidePanelResize?: (nextWidth: number) => void;
   onSidePanelResizeCommit?: (nextWidth: number) => void;
   onComposerWheel?: (deltaY: number) => void;
   onComposerGeometryChange?: () => void;
   isEmptyState?: boolean;
   emptyState?: ReactNode;
+  offline?: ReactNode;
   sidePanel: ReactNode;
   header: ReactNode;
   viewportPane: ReactNode;
@@ -43,7 +43,6 @@ export function ChatShell({
   sidePanelWidth,
   sidePanelMainWidth = null,
   sidePanelVisible,
-  artifactWorkbenchFullscreen = false,
   panelLayout,
   onSidePanelResize,
   onSidePanelResizeCommit,
@@ -51,30 +50,30 @@ export function ChatShell({
   onComposerGeometryChange,
   isEmptyState = false,
   emptyState = null,
+  offline = null,
   sidePanel,
   header,
   viewportPane,
   input,
 }: ChatShellProps) {
   const isMac = window.electron?.platform === 'darwin';
+  const isOffline = Boolean(offline);
   const stageRef = useRef<HTMLDivElement>(null);
   const headerOverlayRef = useRef<HTMLDivElement>(null);
   const composerOverlayRef = useRef<HTMLDivElement>(null);
-  const resizeGestureRef = useRef<{ pointerId: number; element: HTMLDivElement; cursor: string; userSelect: string; commit?: () => void } | null>(null);
-  const lastSidePanelResizeWidthRef = useRef(sidePanelWidth);
+  const resizeGestureRef = useRef<{
+    pointerId: number; element: HTMLDivElement; cursor: string; userSelect: string;
+    startX: number; startWidth: number; width: number;
+    frame: number | null; update?: () => void; commit?: (width: number) => void;
+  } | null>(null);
   const [panelHeightPercent, setPanelHeightPercent] = useState(60);
-  const panelLayoutActive = !artifactWorkbenchFullscreen
-    && sidePanelMode === 'docked'
+  const panelLayoutActive = sidePanelMode === 'docked'
     && sidePanelPhase !== 'closed';
   const panelOnly = panelLayoutActive && (panelLayout.fullscreen || panelLayout.position === 'full');
   const panelComposerDocked = panelOnly && panelLayout.composer === 'dock';
   const composerCentered = isEmptyState && !panelOnly;
   const panelTop = panelLayoutActive && !panelOnly && panelLayout.position === 'top';
   const panelBeforeChat = panelLayoutActive && !panelOnly && panelLayout.position === 'left';
-
-  useLayoutEffect(() => {
-    lastSidePanelResizeWidthRef.current = sidePanelWidth;
-  }, [sidePanelWidth]);
 
   const shouldLetNestedScrollableConsumeWheel = (event: WheelEvent<HTMLElement>): boolean => {
     const target = event.target;
@@ -122,7 +121,7 @@ export function ChatShell({
 
     const headerNode = headerOverlayRef.current;
     const composerNode = composerOverlayRef.current;
-    if (!headerNode || !composerNode || isEmptyState || panelOnly || artifactWorkbenchFullscreen) {
+    if (!headerNode || !composerNode || isEmptyState || panelOnly || isOffline) {
       resetOverlayOffsets();
       return;
     }
@@ -165,18 +164,20 @@ export function ChatShell({
       observer.disconnect();
       resetOverlayOffsets();
     };
-  }, [artifactWorkbenchFullscreen, panelOnly, isEmptyState, onComposerGeometryChange]);
+  }, [panelOnly, isEmptyState, isOffline, onComposerGeometryChange]);
 
   const finishSidePanelResize = useCallback(() => {
     const gesture = resizeGestureRef.current;
     if (!gesture) return;
+    if (gesture.frame !== null) window.cancelAnimationFrame(gesture.frame);
+    gesture.update?.();
     resizeGestureRef.current = null;
     if (gesture.element.hasPointerCapture(gesture.pointerId)) {
       gesture.element.releasePointerCapture(gesture.pointerId);
     }
     document.body.style.userSelect = gesture.userSelect;
     document.body.style.cursor = gesture.cursor;
-    gesture.commit?.();
+    gesture.commit?.(gesture.width);
   }, []);
 
   const endSidePanelResize = useEffectEvent((event: PointerEvent) => {
@@ -209,28 +210,43 @@ export function ChatShell({
       element: event.currentTarget,
       cursor: document.body.style.cursor,
       userSelect: document.body.style.userSelect,
-      commit: !panelTop && onSidePanelResizeCommit ? () => onSidePanelResizeCommit(lastSidePanelResizeWidthRef.current) : undefined,
+      startX: event.clientX,
+      startWidth: sidePanelWidth,
+      width: sidePanelWidth,
+      frame: null,
+      commit: panelTop ? undefined : onSidePanelResizeCommit,
     };
     document.body.style.userSelect = 'none';
     document.body.style.cursor = panelTop ? 'row-resize' : 'col-resize';
   };
 
   const handleSidePanelResizeMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (resizeGestureRef.current?.pointerId !== event.pointerId) return;
+    const gesture = resizeGestureRef.current;
+    if (gesture?.pointerId !== event.pointerId) return;
     if (!(event.buttons & 1)) {
       finishSidePanelResize();
       return;
     }
-    const layoutNode = chatLayoutRef.current;
-    if (!layoutNode) return;
-    const rect = layoutNode.getBoundingClientRect();
-    if (panelTop) {
-      setPanelHeightPercent(Math.max(25, Math.min(75, (event.clientY - rect.top) / Math.max(1, rect.height) * 100)));
-      return;
+    const { clientX, clientY } = event;
+    gesture.update = () => {
+      gesture.frame = null;
+      gesture.update = undefined;
+      if (panelTop) {
+        const layoutNode = chatLayoutRef.current;
+        if (!layoutNode) return;
+        const rect = layoutNode.getBoundingClientRect();
+        setPanelHeightPercent(Math.max(25, Math.min(75, (clientY - rect.top) / Math.max(1, rect.height) * 100)));
+        return;
+      }
+      const delta = clientX - gesture.startX;
+      const nextWidth = Math.round(gesture.startWidth + (panelBeforeChat ? delta : -delta));
+      if (gesture.width === nextWidth) return;
+      gesture.width = nextWidth;
+      onSidePanelResize?.(nextWidth);
+    };
+    if (gesture.frame === null) {
+      gesture.frame = window.requestAnimationFrame(() => gesture.update?.());
     }
-    const nextWidth = panelBeforeChat ? event.clientX - rect.left : rect.right - event.clientX;
-    lastSidePanelResizeWidthRef.current = nextWidth;
-    onSidePanelResize?.(nextWidth);
   };
 
   const handleSidePanelResizeEnd = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -238,18 +254,13 @@ export function ChatShell({
   };
 
   const resolvedSidePanelVisible = sidePanelVisible ?? sidePanelPhase === 'open';
-  const dockedSidePanelMounted = !artifactWorkbenchFullscreen
-    && sidePanelMode === 'docked'
+  const dockedSidePanelMounted = sidePanelMode === 'docked'
     && (sidePanelPhase === 'opening' || sidePanelPhase === 'open' || sidePanelPhase === 'closing');
-  const overlaySidePanelMounted = !artifactWorkbenchFullscreen
-    && sidePanelMode === 'overlay'
+  const overlaySidePanelMounted = sidePanelMode === 'overlay'
     && sidePanelPhase === 'open';
-  const sidePanelMounted = artifactWorkbenchFullscreen || dockedSidePanelMounted || overlaySidePanelMounted;
   const [sidePanelContentMounted, setSidePanelContentMounted] = useState(false);
-  // Reopening a layout retains its content; the first opening still waits for the window.
-  const nextSidePanelContentMounted = artifactWorkbenchFullscreen || resolvedSidePanelVisible
-    || ((sidePanelPhase === 'opening' || sidePanelPhase === 'closing') && sidePanelContentMounted);
-  if (nextSidePanelContentMounted !== sidePanelContentMounted) setSidePanelContentMounted(nextSidePanelContentMounted);
+  // Hide the workspace without unmounting its open pages.
+  if (resolvedSidePanelVisible && !sidePanelContentMounted) setSidePanelContentMounted(true);
   const mainTrack = sidePanelMainWidth != null ? `${sidePanelMainWidth}px` : 'minmax(0, 1fr)';
   const panelTrack = sidePanelMainWidth != null ? 'minmax(0, 1fr)' : 'var(--chat-side-panel-width)';
   const gridTemplateColumns = dockedSidePanelMounted && !panelOnly && !panelTop
@@ -275,7 +286,7 @@ export function ChatShell({
         ref={stageRef}
         className={cn(CHAT_LAYOUT_TOKENS.stageSurface, 'chat-scroll-sync', panelComposerDocked && 'pointer-events-none z-10 bg-transparent')}
         style={{ ...CHAT_STAGE_CSS_VARS,
-          display: artifactWorkbenchFullscreen || panelOnly && !panelComposerDocked ? 'none' : undefined,
+          display: panelOnly && !panelComposerDocked ? 'none' : undefined,
           gridColumn: panelTop ? 1 : panelBeforeChat ? 3 : 1,
           gridRow: panelTop ? 3 : 1,
         }}
@@ -302,15 +313,16 @@ export function ChatShell({
             className={CHAT_LAYOUT_TOKENS.stageHeaderOverlay}
           >
             <div className={CHAT_LAYOUT_TOKENS.stageHeaderRail}>
-              <div className="pointer-events-auto">
+              <div className="pointer-events-auto min-w-0 w-full">
                 {header}
               </div>
             </div>
           </div>
 
           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-            <div className={panelOnly ? 'hidden' : 'contents'} inert={panelOnly}>
-              {!artifactWorkbenchFullscreen && !isEmptyState ? viewportPane : null}
+            {offline && !panelOnly ? <div className="min-h-0 flex-1 overflow-auto">{offline}</div> : null}
+            <div className={panelOnly || isOffline ? 'hidden' : 'contents'} inert={panelOnly || isOffline}>
+              {!isEmptyState ? viewportPane : null}
 
               {!isEmptyState ? <div
                 data-testid="chat-stage-bottom-fade"
@@ -320,7 +332,8 @@ export function ChatShell({
 
             <div
               ref={composerOverlayRef}
-              className={panelComposerDocked
+              inert={isOffline}
+              className={isOffline ? 'hidden' : panelComposerDocked
                 ? 'pointer-events-none relative z-20 mt-auto shrink-0 px-3 pb-2.5 md:px-4 md:pb-3'
                 : composerCentered
                   ? 'flex min-h-0 flex-1 flex-col overflow-y-auto px-5 pb-12 pt-20 sm:px-8 md:pb-20'
@@ -357,20 +370,20 @@ export function ChatShell({
       >
         <span
           aria-hidden
-          className={cn('pointer-events-none absolute bg-border/60 transition-colors group-hover:bg-primary/60', panelTop ? 'inset-x-0 top-1/2 h-px -translate-y-1/2' : 'inset-y-0 left-1/2 w-px -translate-x-1/2')}
+          className={cn('pointer-events-none absolute bg-border/60 transition-colors group-hover:bg-primary/60', panelTop ? 'inset-x-0 top-1/2 h-px' : 'inset-y-0 left-1/2 w-px')}
         />
       </div> : null}
 
-      {sidePanelMounted ? (
+      {sidePanelContentMounted ? (
         <div
-          data-testid={artifactWorkbenchFullscreen ? 'chat-artifact-workbench-fullscreen' : overlaySidePanelMounted ? 'chat-side-panel-overlay' : undefined}
-          inert={!artifactWorkbenchFullscreen && !resolvedSidePanelVisible}
+          data-testid={overlaySidePanelMounted ? 'chat-side-panel-overlay' : undefined}
+          inert={!resolvedSidePanelVisible}
           className={cn(
             'min-h-0 min-w-0 overflow-hidden bg-card',
             overlaySidePanelMounted && 'absolute inset-y-3 right-3 z-20 max-w-[calc(100%-1.5rem)]',
-            !artifactWorkbenchFullscreen && !resolvedSidePanelVisible && 'invisible pointer-events-none',
+            !resolvedSidePanelVisible && 'invisible pointer-events-none',
           )}
-          style={artifactWorkbenchFullscreen ? undefined : overlaySidePanelMounted
+          style={overlaySidePanelMounted
             ? { width: `${sidePanelWidth}px` }
             : {
               display: dockedSidePanelMounted ? undefined : 'none',
@@ -378,7 +391,7 @@ export function ChatShell({
               gridRow: 1,
             }}
         >
-          {sidePanelContentMounted ? sidePanel : null}
+          {sidePanel}
         </div>
       ) : null}
     </div>

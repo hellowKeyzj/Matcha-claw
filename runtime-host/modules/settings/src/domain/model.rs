@@ -149,6 +149,7 @@ fn valid_scheme(scheme: &str) -> bool {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BrowserMode {
+    Iab,
     #[default]
     Native,
     Relay,

@@ -2,6 +2,14 @@ import { memo, useCallback, useDeferredValue, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
+import { ShieldCheck } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { useChatStore, type ApprovalItem, type ChatStoreState } from '@/plugins/chat/store';
 import { resolveSessionNavigationTitle, selectPendingApprovalsBySession } from '@/plugins/chat/session-status';
 import { useTeamApprovalProjection } from '@/plugins/teams/approval-projection';
@@ -225,54 +233,70 @@ const SidebarPendingBlockers = memo(function SidebarPendingBlockers() {
     return null;
   }
 
+  const triggerLabel = `${t('sidebar.pendingBlockers')} (${pendingBlockers.length})`;
+
   return (
-    <section className="mt-3 space-y-1.5" aria-label={t('sidebar.pendingBlockers')}>
-      <div className="flex items-center justify-between px-2.5 text-[10.5px] font-medium tracking-[0.04em] text-[hsl(var(--shell-text-muted))]">
-        <span>{t('sidebar.pendingBlockers')}</span>
-        <span>{pendingBlockers.length}</span>
-      </div>
-      <div className="max-h-56 space-y-1 overflow-y-auto pr-0.5">
-        {pendingBlockers.map((card) => (
-          <button
-            key={card.id}
-            type="button"
-            className="w-full rounded-[12px] px-2.5 py-2 text-left transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))]"
-            onClick={() => {
-              if (card.source === 'team_approval') {
-                setActiveTeam(card.teamId);
-                navigate(`/teams/${card.teamId}`);
-                return;
-              }
-              if (card.source === 'chat_approval' && card.sessionKey) {
-                navigate(`/?session=${encodeURIComponent(card.sessionKey)}`);
-                return;
-              }
-              navigate('/tasks');
-            }}
-          >
-            <div className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--shell-icon-active))]">
-              <span className="min-w-0 flex-1 truncate">{card.title}</span>
-              <span className="shrink-0 text-[11px] font-normal text-[hsl(var(--shell-text-muted))]">{formatMessageTime(card.createdAt)}</span>
-            </div>
-            <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[hsl(var(--shell-text-muted))]">
-              <span className="min-w-0 flex-1 truncate">
-                {card.source === 'team_approval'
-                  ? card.teamName
-                  : t('sidebar.pendingBlockerSourceChat')}
-              </span>
-              <span className="shrink-0">
-                {card.source === 'team_approval'
-                  ? t('sidebar.pendingBlockerFrom', { from: card.from })
-                  : t('sidebar.pendingBlockerApprovalId', { id: card.from })}
-              </span>
-            </div>
-            <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[hsl(var(--shell-text-muted))]">
-              {card.content}
-            </div>
-          </button>
-        ))}
-      </div>
-    </section>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title={triggerLabel}
+          aria-label={triggerLabel}
+          className="relative mx-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] text-[hsl(var(--shell-icon))] transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--shell-surface))] data-[state=open]:bg-[hsl(var(--shell-surface-active))] data-[state=open]:text-[hsl(var(--shell-icon-active))]"
+        >
+          <ShieldCheck aria-hidden="true" className="h-[18px] w-[18px]" />
+          <span aria-hidden="true" className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[hsl(var(--shell-icon-active))] px-0.5 text-[9px] font-semibold leading-none text-[hsl(var(--shell-window))]">
+            {pendingBlockers.length}
+          </span>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="right" align="start" className="w-80 max-w-[calc(100vw-24px)]" aria-label={t('sidebar.pendingBlockers')}>
+        <DropdownMenuLabel className="flex items-center justify-between text-[11px] text-[hsl(var(--shell-text-muted))]">
+          <span>{t('sidebar.pendingBlockers')}</span>
+          <span>{pendingBlockers.length}</span>
+        </DropdownMenuLabel>
+        <div className="max-h-56 space-y-1 overflow-y-auto pr-0.5">
+          {pendingBlockers.map((card) => (
+            <DropdownMenuItem
+              key={card.id}
+              className="flex-col items-stretch gap-0 rounded-[12px] text-left data-[highlighted]:bg-[hsl(var(--shell-surface-hover))] data-[highlighted]:text-[hsl(var(--shell-icon-active))]"
+              onSelect={() => {
+                if (card.source === 'team_approval') {
+                  setActiveTeam(card.teamId);
+                  navigate(`/teams/${card.teamId}`);
+                  return;
+                }
+                if (card.source === 'chat_approval' && card.sessionKey) {
+                  navigate(`/?session=${encodeURIComponent(card.sessionKey)}`);
+                  return;
+                }
+                navigate('/tasks');
+              }}
+            >
+              <div className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--shell-icon-active))]">
+                <span className="min-w-0 flex-1 truncate">{card.title}</span>
+                <span className="shrink-0 text-[11px] font-normal text-[hsl(var(--shell-text-muted))]">{formatMessageTime(card.createdAt)}</span>
+              </div>
+              <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[hsl(var(--shell-text-muted))]">
+                <span className="min-w-0 flex-1 truncate">
+                  {card.source === 'team_approval'
+                    ? card.teamName
+                    : t('sidebar.pendingBlockerSourceChat')}
+                </span>
+                <span className="shrink-0">
+                  {card.source === 'team_approval'
+                    ? t('sidebar.pendingBlockerFrom', { from: card.from })
+                    : t('sidebar.pendingBlockerApprovalId', { id: card.from })}
+                </span>
+              </div>
+              <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[hsl(var(--shell-text-muted))]">
+                {card.content}
+              </div>
+            </DropdownMenuItem>
+          ))}
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 });
 

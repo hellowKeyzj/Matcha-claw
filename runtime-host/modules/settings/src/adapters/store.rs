@@ -31,6 +31,7 @@ struct PersistedDesired {
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum PersistedBrowserMode {
+    Iab,
     Native,
     Relay,
     Off,
@@ -39,6 +40,7 @@ enum PersistedBrowserMode {
 impl PersistedBrowserMode {
     const fn into_domain(self) -> BrowserMode {
         match self {
+            Self::Iab => BrowserMode::Iab,
             Self::Native => BrowserMode::Native,
             Self::Relay => BrowserMode::Relay,
             Self::Off => BrowserMode::Off,
@@ -47,6 +49,7 @@ impl PersistedBrowserMode {
 
     const fn from_domain(value: BrowserMode) -> Self {
         match value {
+            BrowserMode::Iab => Self::Iab,
             BrowserMode::Native => Self::Native,
             BrowserMode::Relay => Self::Relay,
             BrowserMode::Off => Self::Off,

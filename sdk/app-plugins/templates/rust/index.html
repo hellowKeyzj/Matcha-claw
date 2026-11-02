@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Rust Echo</title>
+  <style>
+    :root { color-scheme: light dark; font: 15px/1.5 system-ui, sans-serif; }
+    body { max-width: 720px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 1.5rem; margin-bottom: 8px; }
+    label { display: block; margin-bottom: 6px; }
+    input, button { font: inherit; padding: 10px; border: 1px solid #8888; border-radius: 6px; }
+    input { width: 100%; box-sizing: border-box; }
+    button { margin-top: 12px; cursor: pointer; }
+    button:disabled { cursor: wait; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background: #8881; border-radius: 6px; }
+    #status { min-height: 1.5em; }
+  </style>
+</head>
+<body>
+  <h1 id="heading"></h1>
+  <p id="description"></p>
+  <form id="form">
+    <label id="input-label" for="text"></label>
+    <input id="text" name="text" maxlength="4096" autocomplete="off">
+    <button id="send" type="submit"></button>
+  </form>
+  <p id="status" role="status"></p>
+  <h2 id="result-heading"></h2>
+  <pre id="result" aria-labelledby="result-heading"></pre>
+  <h2 id="event-heading"></h2>
+  <pre id="event" aria-labelledby="event-heading"></pre>
+  <script>
+    const translations = {
+      en: { title: 'Rust Echo', description: 'Calls the local Rust backend. No model requests or model charges.', label: 'Text', send: 'Echo', initial: 'Hello from Rust', ready: 'Ready', running: 'Calling Rust…', complete: 'Received a real backend result.', failed: 'Backend request failed', unavailable: 'Open this application inside Matcha to connect to the Rust backend.', result: 'Backend result', event: 'Latest backend event' },
+      zh: { title: 'Rust 回声', description: '调用本地 Rust 后端，不调用模型，不产生模型费用。', label: '文本', send: '发送', initial: '你好，Rust', ready: '已就绪', running: '正在调用 Rust…', complete: '已收到后端的实际结果。', failed: '后端请求失败', unavailable: '请在 Matcha 内打开此应用以连接 Rust 后端。', result: '后端结果', event: '最新后端事件' },
+      ja: { title: 'Rust エコー', description: 'ローカルの Rust バックエンドを呼び出します。モデルの呼び出しや料金は発生しません。', label: 'テキスト', send: '送信', initial: 'こんにちは、Rust', ready: '準備完了', running: 'Rust を呼び出し中…', complete: 'バックエンドから実際の結果を受信しました。', failed: 'バックエンドへのリクエストに失敗しました', unavailable: 'Rust バックエンドに接続するには、Matcha 内でこのアプリを開いてください。', result: 'バックエンドの結果', event: '最新のバックエンドイベント' },
+      ru: { title: 'Rust Эхо', description: 'Вызов локального Rust-бэкенда без запросов к моделям и расходов на них.', label: 'Текст', send: 'Отправить', initial: 'Привет, Rust', ready: 'Готово', running: 'Вызов Rust…', complete: 'Получен реальный результат бэкенда.', failed: 'Ошибка запроса к бэкенду', unavailable: 'Откройте приложение в Matcha для подключения к Rust-бэкенду.', result: 'Результат бэкенда', event: 'Последнее событие бэкенда' }
+    };
+    const bridge = window.matchaApp;
+    const element = id => document.getElementById(id);
+    let language = bridge?.context.language || navigator.language;
+    let messages;
+    let statusKey = bridge ? 'ready' : 'unavailable';
+    const localize = () => {
+      const code = language.split('-')[0];
+      messages = translations[code] || translations.en;
+      document.documentElement.lang = translations[code] ? code : 'en';
+      document.title = messages.title;
+      for (const [id, key] of Object.entries({ heading: 'title', description: 'description', 'input-label': 'label', send: 'send', 'result-heading': 'result', 'event-heading': 'event' })) element(id).textContent = messages[key];
+      element('status').textContent = messages[statusKey];
+    };
+    localize();
+    element('text').value = messages.initial;
+    element('send').disabled = !bridge;
+    const unsubscribe = bridge?.subscribe(event => {
+      if (event.topic === 'locale.changed' && typeof event.data?.language === 'string') {
+        language = event.data.language;
+        localize();
+      } else element('event').textContent = JSON.stringify(event, null, 2);
+    });
+    window.addEventListener('pagehide', () => unsubscribe?.(), { once: true });
+    element('form').addEventListener('submit', async event => {
+      event.preventDefault();
+      if (!bridge || element('send').disabled) return;
+      element('send').disabled = true;
+      statusKey = 'running';
+      element('status').textContent = messages.running;
+      element('result').textContent = '';
+      try {
+        const result = await bridge.call('echo', { text: element('text').value });
+        element('result').textContent = JSON.stringify(result, null, 2);
+        statusKey = result.isError ? 'failed' : 'complete';
+        element('status').textContent = messages[statusKey];
+      } catch (error) {
+        statusKey = 'failed';
+        element('status').textContent = `${messages.failed}: ${error instanceof Error ? error.message : String(error)}`;
+      } finally { element('send').disabled = false; }
+    });
+  </script>
+</body>
+</html>

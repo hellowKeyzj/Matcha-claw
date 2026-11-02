@@ -9,7 +9,7 @@ const SETTINGS_DESIRED_OUTCOME_UNKNOWN = 'Settings desired outcome is unknown; t
 
 let settingsDesiredQueue: Promise<void> = Promise.resolve();
 
-type SettingsBrowserMode = 'native' | 'relay' | 'off';
+type SettingsBrowserMode = 'iab' | 'native' | 'relay' | 'off';
 
 type SettingsDesiredInput = Readonly<{
   browserMode: SettingsBrowserMode;
@@ -111,7 +111,7 @@ export function hostSettingsPutPatch(patch: Record<string, unknown>): Promise<Se
 }
 
 function isSettingsDesiredInput(value: SettingsDesiredInput): value is SettingsDesiredInput {
-  return (value.browserMode === 'native' || value.browserMode === 'relay' || value.browserMode === 'off')
+  return (value.browserMode === 'iab' || value.browserMode === 'native' || value.browserMode === 'relay' || value.browserMode === 'off')
     && typeof value.launchAtStartup === 'boolean'
     && typeof value.gatewayAutoStart === 'boolean'
     && typeof value.proxy.enabled === 'boolean'

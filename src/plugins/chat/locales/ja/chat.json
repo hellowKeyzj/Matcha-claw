@@ -278,6 +278,7 @@
         "thinkingSwitching": "思考強度を切り替え中…",
         "send": "送信",
         "submissionFailed": "送信できませんでした。送信内容は保持されています。",
+        "configurationCreateRejected": "セッションを作成できませんでした。メッセージは送信されていません。ランタイムの状態を確認してから再試行してください。",
         "attachmentReselectionRequired": "未送信の添付ファイルを選び直してください。",
         "stop": "停止",
         "noSkillsFound": "一致するスキルがありません",

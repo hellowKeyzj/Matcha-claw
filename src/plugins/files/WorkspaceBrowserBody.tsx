@@ -23,6 +23,7 @@ interface WorkspaceBrowserBodyProps {
   previewHeaderTrailingAccessory?: ReactNode;
   recoveryAction?: ReactNode;
   className?: string;
+  browseOnly?: boolean;
 }
 
 interface WorkspaceTreeNode {
@@ -298,6 +299,7 @@ export function WorkspaceBrowserBody({
   previewHeaderTrailingAccessory,
   recoveryAction,
   className,
+  browseOnly = false,
 }: WorkspaceBrowserBodyProps) {
   const { t } = useTranslation('chat');
   const supportsInlineDiff = useFilePreviewSupport('diff');
@@ -578,6 +580,7 @@ export function WorkspaceBrowserBody({
     </Button>
   );
   const workspaceBrowserStyle = useMemo<CSSProperties>(() => {
+    if (browseOnly) return { gridTemplateColumns: 'minmax(0,1fr)' };
     if (workspaceLayout.mode === 'split') {
       return {
         gridTemplateColumns: treeCollapsed
@@ -590,7 +593,7 @@ export function WorkspaceBrowserBody({
         ? 'minmax(0,1fr)'
         : `minmax(0, ${WORKSPACE_STACKED_TREE_HEIGHT}px) minmax(0,1fr)`,
     };
-  }, [treeCollapsed, workspaceLayout.mode, workspaceLayout.treeWidth]);
+  }, [browseOnly, treeCollapsed, workspaceLayout.mode, workspaceLayout.treeWidth]);
 
   return (
     <div
@@ -621,7 +624,7 @@ export function WorkspaceBrowserBody({
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-1">
-              {!selectedFile ? <AppPluginManager category="reader" compact /> : null}
+              {browseOnly || !selectedFile ? <AppPluginManager category="reader" compact /> : null}
               <Button
                 type="button"
                 variant="ghost"
@@ -634,7 +637,7 @@ export function WorkspaceBrowserBody({
               >
                 {treeState.status === 'loading' ? <LoadingSpinner size="sm" /> : <RefreshCw className="h-4 w-4" />}
               </Button>
-              {workspaceTreeToggleButton}
+              {!browseOnly ? workspaceTreeToggleButton : null}
             </div>
           </div>
           <div className="min-h-0 flex-1 overflow-auto p-1.5">
@@ -659,7 +662,7 @@ export function WorkspaceBrowserBody({
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {!browseOnly ? <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {selectedFile ? (
           <FilePreviewBody
             key={selectedFile.filePath}
@@ -693,7 +696,7 @@ export function WorkspaceBrowserBody({
             {t('artifacts.selectFile')}
           </div>
         )}
-      </div>
+      </div> : null}
     </div>
   );
 }

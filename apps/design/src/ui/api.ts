@@ -1,5 +1,5 @@
 import { App, PostMessageTransport } from '@modelcontextprotocol/ext-apps';
-import { appToolName, type AppToolResult, type AppWebviewApi } from '../../../../src/types/desktop/app-plugin-sdk';
+import { appToolName, type AppToolResult, type AppWebviewApi } from '@matcha/app-plugins-sdk';
 import { t } from './i18n';
 
 type IncomingToolResult = Omit<AppToolResult, 'structuredContent'> & { readonly structuredContent?: unknown };

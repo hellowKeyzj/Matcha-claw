@@ -3,8 +3,9 @@
  * Navigation sidebar with menu items.
  */
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { ChevronRight } from 'lucide-react';
-import { Suspense, startTransition, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Suspense, startTransition, useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { NAVIGATION_RAIL_WIDTH } from './workspace';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { useLocalLicenseLocked } from '@/plugins/account/stores/license';
@@ -32,11 +33,7 @@ interface NavItemProps {
   onNavigate?: (to: string) => void;
 }
 
-interface SidebarProps {
-  width?: number;
-  overlay?: boolean;
-  showRightDivider?: boolean;
-}
+const NAV_ITEM_CLASS_NAME = 'group flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-45';
 
 const SIDEBAR_PREFETCH_FALLBACK_DELAY_MS = 120;
 const SIDEBAR_PREFETCH_IDLE_TIMEOUT_MS = 400;
@@ -48,9 +45,8 @@ type PrefetchScheduleHandle =
 function NavItem({ to, icon, label, active, end, disabled, onMouseEnter, onFocus, onNavigate }: NavItemProps) {
   if (disabled) {
     return (
-      <button type="button" disabled className="flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-left text-[13px] font-medium text-[hsl(var(--shell-text-muted))] opacity-45">
-        {icon && <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center">{icon}</span>}
-        <span className="min-w-0 flex-1 truncate">{label}</span>
+      <button type="button" disabled title={label} aria-label={label} className={cn(NAV_ITEM_CLASS_NAME, 'text-[hsl(var(--shell-text-muted))]')}>
+        <span aria-hidden="true">{icon}</span>
       </button>
     );
   }
@@ -58,6 +54,8 @@ function NavItem({ to, icon, label, active, end, disabled, onMouseEnter, onFocus
     <NavLink
       to={to}
       end={end}
+      title={label}
+      aria-label={label}
       aria-current={active ? 'page' : undefined}
       onMouseEnter={onMouseEnter}
       onFocus={onFocus}
@@ -80,18 +78,14 @@ function NavItem({ to, icon, label, active, end, disabled, onMouseEnter, onFocus
       }}
       className={({ isActive }) =>
         cn(
-          'group flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-[13px] font-medium tracking-[-0.01em] transition-[background-color,color]',
-          'hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))]',
+          NAV_ITEM_CLASS_NAME,
           (active ?? isActive)
             ? 'bg-[hsl(var(--shell-surface-active))] text-[hsl(var(--shell-icon-active))]'
             : 'text-[hsl(var(--shell-text-muted))]',
         )
       }
     >
-      {icon && <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[hsl(var(--shell-icon))] transition-colors group-hover:text-[hsl(var(--shell-icon-active))] group-aria-[current=page]:text-[hsl(var(--shell-icon-active))]">
-        {icon}
-      </span>}
-      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span aria-hidden="true">{icon}</span>
     </NavLink>
   );
 }
@@ -112,9 +106,7 @@ function NavigationItem({ item, pathname, disabled, onPrefetch, onNavigate }: {
   onNavigate: (path: string) => void;
 }) {
   const { t } = useTranslation();
-  const [expansion, setExpansion] = useState<{ path: string; expanded: boolean } | null>(null);
   const isActive = pathname === item.to || pathname.startsWith(`${item.to}/`) || item.activePaths?.includes(pathname) === true;
-  const expanded = expansion?.path === pathname ? expansion.expanded : isActive;
   const Icon = item.icon;
 
   if (!item.children?.length) {
@@ -132,51 +124,47 @@ function NavigationItem({ item, pathname, disabled, onPrefetch, onNavigate }: {
     );
   }
 
-  const childrenId = `sidebar-${item.id}-pages`;
   return (
-    <div className="shrink-0 space-y-1">
-      <button
-        type="button"
-        disabled={disabled}
-        aria-expanded={expanded}
-        aria-controls={childrenId}
-        onClick={() => setExpansion({ path: pathname, expanded: !expanded })}
-        onMouseEnter={() => onPrefetch(item.to)}
-        onFocus={() => onPrefetch(item.to)}
-        className={cn(
-          'group flex w-full items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-left text-[13px] font-medium tracking-[-0.01em] transition-[background-color,color]',
-          'hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))] disabled:pointer-events-none disabled:opacity-45',
-          isActive ? 'text-[hsl(var(--shell-icon-active))]' : 'text-[hsl(var(--shell-text-muted))]',
-        )}
-      >
-        <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center"><Icon className="h-[17px] w-[17px]" /></span>
-        <span className="min-w-0 flex-1 truncate">{t(item.label)}</span>
-        <ChevronRight aria-hidden="true" className={cn('h-3.5 w-3.5 shrink-0 transition-transform motion-reduce:transition-none', expanded && 'rotate-90')} />
-      </button>
-      <div id={childrenId} hidden={!expanded} className="ml-7 space-y-0.5">
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          title={t(item.label)}
+          aria-label={t(item.label)}
+          onMouseEnter={() => onPrefetch(item.to)}
+          onFocus={() => onPrefetch(item.to)}
+          className={cn(
+            NAV_ITEM_CLASS_NAME,
+            isActive
+              ? 'bg-[hsl(var(--shell-surface-active))] text-[hsl(var(--shell-icon-active))]'
+              : 'text-[hsl(var(--shell-text-muted))]',
+          )}
+        >
+          <Icon aria-hidden="true" className="h-[17px] w-[17px]" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="right" align="start" aria-label={t(item.label)}>
         {item.children.map((page) => (
-          <NavItem
-            key={page.to}
-            to={page.to}
-            icon={null}
-            label={t(page.label)}
-            end
-            disabled={disabled}
-            onMouseEnter={() => onPrefetch(page.to)}
-            onFocus={() => onPrefetch(page.to)}
-            onNavigate={onNavigate}
-          />
+          <DropdownMenuItem key={page.to} asChild>
+            <NavLink
+              to={page.to}
+              end
+              onMouseEnter={() => onPrefetch(page.to)}
+              onFocus={() => onPrefetch(page.to)}
+              className={cn(pathname === page.to && 'bg-accent text-accent-foreground')}
+            >
+              {t(page.label)}
+            </NavLink>
+          </DropdownMenuItem>
         ))}
-      </div>
-    </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
-export function Sidebar({
-  width = 256,
-  overlay = false,
-  showRightDivider = true,
-}: SidebarProps) {
+export function Sidebar() {
+  const { t } = useTranslation();
   const host = usePluginHost();
   const navigation = useContributions(applicationNavigation);
   const navItems = useMemo(() => [...navigation].sort((a, b) => a.order - b.order), [navigation]);
@@ -238,14 +226,10 @@ export function Sidebar({
 
   return (
     <aside
-      className={cn(
-        'relative flex h-full shrink-0 flex-col overflow-hidden bg-[hsl(var(--shell-surface))]',
-        showRightDivider && 'border-r [border-right-color:hsl(var(--shell-border))]',
-        overlay && 'shadow-[0_18px_60px_hsl(var(--shell-shadow-overlay))]',
-      )}
-      style={{ width }}
+      className="flex h-full shrink-0 flex-col overflow-hidden bg-[hsl(var(--shell-surface-muted))]"
+      style={{ width: NAVIGATION_RAIL_WIDTH }}
     >
-      <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-2.5">
+      <nav aria-label={t('common:sidebar.navigation')} className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto overflow-x-hidden px-[7px] py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <SidebarSlot point={sidebarActions} />
         {navItems.map((item) => (
           <NavigationItem
@@ -260,7 +244,7 @@ export function Sidebar({
         {!licenseLocked && <SidebarSlot point={sidebarPanels} />}
       </nav>
 
-      <div className="space-y-1.5 p-2.5 pt-0">
+      <div className="flex shrink-0 flex-col items-center gap-1.5 px-[7px] pb-2 pt-1">
         <SidebarSlot point={sidebarFooter} />
       </div>
     </aside>

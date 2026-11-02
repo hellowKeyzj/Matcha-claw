@@ -37,3 +37,13 @@ export function toolError(message: string): AppToolResult {
 export function isJson(value: unknown): value is AppJson {
   return isJsonValue(value, new Set());
 }
+
+export function isToolResult(value: unknown): value is AppToolResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !isJson(value)) return false;
+  const result = value as Record<string, unknown>;
+  return Array.isArray(result.content)
+    && result.content.every((block) => block && typeof block === 'object' && !Array.isArray(block) && typeof block.type === 'string')
+    && (result.isError === undefined || typeof result.isError === 'boolean')
+    && (result.structuredContent === undefined || (!!result.structuredContent && typeof result.structuredContent === 'object' && !Array.isArray(result.structuredContent)))
+    && (result._meta === undefined || (!!result._meta && typeof result._meta === 'object' && !Array.isArray(result._meta)));
+}

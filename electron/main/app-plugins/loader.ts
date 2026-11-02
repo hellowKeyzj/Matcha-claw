@@ -1,8 +1,18 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { InstalledAppPlugin } from '../../../src/types/desktop/app-plugin';
 import type { PluginLoad } from './protocol';
 import type { AppPluginStorage } from './storage';
+import { isNativeExecutable } from '../runtime-host-delivery/native-artifact.mjs';
+
+export async function preparePluginBackend(load: PluginLoad): Promise<void> {
+  const backend = load.manifest.backend;
+  if (backend?.language !== 'rust') return;
+  if (backend.platform !== process.platform || backend.arch !== process.arch) throw new Error(`This Rust plugin requires ${backend.platform}-${backend.arch}, not ${process.platform}-${process.arch}.`);
+  const executable = join(load.packagePath, backend.entry);
+  if (process.platform !== 'win32') await chmod(executable, 0o700);
+  if (!isNativeExecutable(executable, backend.platform, backend.arch)) throw new Error('The declared Rust backend is not a native executable for this platform and architecture.');
+}
 
 export async function materializePlugin(storage: AppPluginStorage, root: string, plugin: InstalledAppPlugin): Promise<PluginLoad> {
   const contents = await storage.readPackage(plugin.manifest.id, plugin.digest, { operation: 'files' });
@@ -19,7 +29,9 @@ export async function materializePlugin(storage: AppPluginStorage, root: string,
     }
     const storagePath = join(root, 'data', plugin.manifest.id);
     await mkdir(storagePath, { recursive: true, mode: 0o700 });
-    return { manifest: contents.manifest, digest: contents.digest, packagePath, storagePath };
+    const load = { manifest: contents.manifest, digest: contents.digest, packagePath, storagePath };
+    await preparePluginBackend(load);
+    return load;
   } catch (error) {
     await rm(packagePath, { recursive: true, force: true });
     throw error;

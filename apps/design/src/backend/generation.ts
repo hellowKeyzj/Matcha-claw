@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { isAppPixelSizeSupported, type AppModelRequest, type AppPluginContext, type AppToolContext } from '../../../../src/types/desktop/app-plugin-sdk';
+import { isAppPixelSizeSupported, type AppModelRequest, type AppPluginContext, type AppToolContext } from '@matcha/app-plugins-sdk';
 import type { Asset, DesignDocument, GenerationAction, GenerationEditing, GenerationRecord, GenerationRequest, ImageLayer, VideoLayer } from '../document';
 import type { Assets } from './assets';
 import type { Documents } from './documents';

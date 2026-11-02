@@ -1,1464 +1,346 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useId, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Check, ChevronDown, ChevronRight, Pencil, Plus, Trash2, X } from 'lucide-react';
-import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
-import type { AgentAvatarStyle } from '@/types/subagent';
-import { cn } from '@/lib/utils';
-import { createSessionTraceId, isSessionTraceEnabled, logSessionTrace, summarizeIdentifier, summarizeSessionIdentity } from '@/lib/session-trace';
-import { useTeamRunLabels } from '@/plugins/teams/hooks/use-team-run-labels';
-import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
-import {
-  resolveTeamRoleChatTargetFromProbe,
-  selectTeamRoleChatTargetIndex,
-} from '@/plugins/teams/session-ownership';
-import { useTeamSessionProjection } from '@/plugins/teams/session-projection';
-import { useTeamSessionNavigation } from '@/plugins/teams/session-navigation';
-import { useChatStore, type ChatSession } from '@/plugins/chat/store';
-import { selectAgentSessionsPaneState } from '@/plugins/chat/store/selectors';
-import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
-import type { ChatSessionRuntimeEndpointNode } from '@/plugins/chat/store/types';
-import type { AgentSessionsPaneSessionEntry } from '@/plugins/chat/store/selectors';
 import { useTranslation } from 'react-i18next';
+import * as Dialog from '@radix-ui/react-dialog';
+import { Check, ChevronDown, MoreHorizontal, Pencil, Plus, Search, SquarePen, Trash2, Users, X } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
+import { AgentAvatar } from '@/plugins/agents/presentation/AgentAvatar';
+import { useSubagentsStore } from '@/plugins/agents/stores/subagents';
+import { useTeamSessionProjection } from '@/plugins/teams/session-projection';
+import { useChatStore, type ChatSession } from '@/plugins/chat/store';
+import { selectAgentSessionsPaneState, type AgentSessionsPaneSessionEntry } from '@/plugins/chat/store/selectors';
+import { buildRuntimeScopeKey } from '@/plugins/chat/store/session-identity';
+import { isDeletableSession, type ChatSessionRuntimeEndpointNode } from '@/plugins/chat/store/types';
+import type { AgentScope, SessionIdentity } from '@/types/desktop/runtime-address';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { useShallow } from 'zustand/react/shallow';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { cn } from '@/lib/utils';
 import {
-  formatSessionMeta,
-  resolveSessionTitle,
   resolveAgentScopeForRuntimeEndpoint,
-  type SessionBucketId,
+  resolveSessionTitle,
   useAgentSessionsPaneViewModel,
-} from '@/plugins/chat/useAgentSessionsPaneViewModel';
-import {
-  isAgentSessionSwitchboardAutomationSession,
-  type AgentSessionSwitchboardAgentResult,
-  type AgentSessionSwitchboardRuntimeResult,
-  type AgentSessionSwitchboardSessionBucket,
-  type AgentSessionSwitchboardSessionResult,
-  buildAgentSessionSwitchboardModel,
-  type AgentSessionSwitchboardTeamInput,
-  type AgentSessionSwitchboardTeamResult,
-  type AgentSessionSwitchboardTeamRoleResult,
-  type AgentSessionSwitchboardTeamRunResult,
-} from '@/plugins/chat/agent-session-switchboard-model';
-
-const SESSION_BUCKET_COLLAPSE_STORAGE_KEY = 'layout:session-time-bucket-collapsed';
-const RUNTIME_SYMBOLS: Readonly<Record<string, string>> = {
-  openclaw: '🦞',
-  'matcha-agent': '🍵',
-};
-
-type SessionPaneTab = 'agent' | 'team' | 'session';
-type SessionBucketScope = 'session' | 'automation';
-type SessionRenameDraft = { key: string; title: string };
-
-const SESSION_BUCKET_SCOPES: readonly SessionBucketScope[] = ['session', 'automation'];
-
-function countSessionsInBuckets(buckets: readonly AgentSessionSwitchboardSessionBucket[]): number {
-  return buckets.reduce((count, bucket) => count + bucket.sessions.length, 0);
-}
-
-function hasSessionInBuckets(buckets: readonly AgentSessionSwitchboardSessionBucket[], sessionKey: string): boolean {
-  return sessionKey !== '' && buckets.some((bucket) => bucket.sessions.some((entry) => entry.session.key === sessionKey));
-}
-
-function resolveSelectedRuntimeEndpoint(input: {
-  endpoints: readonly ChatSessionRuntimeEndpointNode[];
-  runtimeScopeKey: string | null;
-}): ChatSessionRuntimeEndpointNode | null {
-  if (input.runtimeScopeKey) {
-    const endpoint = input.endpoints.find((candidate) => candidate.runtimeScopeKey === input.runtimeScopeKey);
-    if (endpoint) {
-      return endpoint;
-    }
-  }
-  return null;
-}
-
-function createSessionBucketStateKey(bucketId: SessionBucketId, scope: SessionBucketScope = 'session'): string {
-  return scope === 'session' ? bucketId : `${scope}:${bucketId}`;
-}
-
-function loadCollapsedSessionBucketMap(): Record<string, boolean> {
-  try {
-    const raw = window.localStorage.getItem(SESSION_BUCKET_COLLAPSE_STORAGE_KEY);
-    if (!raw) {
-      return {};
-    }
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object') {
-      return {};
-    }
-    const next: Record<string, boolean> = {};
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!key.trim() || typeof value !== 'boolean') {
-        continue;
-      }
-      next[key] = value;
-    }
-    return next;
-  } catch {
-    return {};
-  }
-}
-
-interface SessionListItemProps {
-  entry: AgentSessionsPaneSessionEntry;
-  formatter: Intl.DateTimeFormat;
-  teamMeta?: string;
-  agentId: string;
-  agentName: string;
-  avatarSeed?: string;
-  avatarStyle?: AgentAvatarStyle;
-  isCurrent: boolean;
-  deleting: boolean;
-  renaming: boolean;
-  editing: boolean;
-  editingTitle: string;
-  readOnly: boolean;
-  onSwitchSession: (sessionKey: string) => void;
-  onStartRename: (session: ChatSession, title: string) => void;
-  onRenameTitleChange: (title: string) => void;
-  onSubmitRename?: () => void;
-  onCancelRename?: () => void;
-  onRequestDelete: (session: ChatSession, title: string) => void;
-  onPick?: () => void;
-}
-
-const SessionListItem = memo(function SessionListItem({
-  entry,
-  formatter,
-  teamMeta,
-  agentId,
-  agentName,
-  avatarSeed,
-  avatarStyle,
-  isCurrent,
-  deleting,
-  renaming,
-  editing,
-  editingTitle,
-  readOnly,
-  onSwitchSession,
-  onStartRename,
-  onRenameTitleChange,
-  onSubmitRename,
-  onCancelRename,
-  onRequestDelete,
-  onPick,
-}: SessionListItemProps) {
-  const { t } = useTranslation();
-  const session = entry.session;
-  const sessionTitle = resolveSessionTitle(entry, t);
-  const sessionMeta = teamMeta ?? `${agentName} / ${formatSessionMeta(entry, formatter)}`;
-  const deleteLabel = t('sidebar.deleteSessionAria', { title: sessionTitle });
-  const renameLabel = t('sidebar.renameSessionAria', { title: sessionTitle });
-  const saveRenameLabel = t('sidebar.saveSessionRenameAria', { title: sessionTitle });
-  const cancelRenameLabel = t('sidebar.cancelSessionRenameAria', { title: sessionTitle });
-  if (editing) {
-    return (
-      <div className="flex items-center gap-1 rounded-[calc(var(--radius-interactive)+2px)] bg-secondary px-1.5 py-1">
-        <Input
-          value={editingTitle}
-          autoFocus
-          disabled={renaming}
-          aria-label={renameLabel}
-          className="h-8 min-w-0 flex-1 text-sm"
-          onChange={(event) => onRenameTitleChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault();
-              onSubmitRename?.();
-              return;
-            }
-            if (event.key === 'Escape') {
-              event.preventDefault();
-              onCancelRename?.();
-            }
-          }}
-        />
-        <button
-          type="button"
-          className="shrink-0 rounded-full p-1 text-current/70 transition hover:bg-card/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-          aria-label={saveRenameLabel}
-          title={saveRenameLabel}
-          disabled={renaming}
-          onMouseDown={(event) => {
-            event.preventDefault();
-            onSubmitRename?.();
-          }}
-        >
-          <Check className="h-3.5 w-3.5" />
-        </button>
-        <button
-          type="button"
-          className="shrink-0 rounded-full p-1 text-current/70 transition hover:bg-card/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-          aria-label={cancelRenameLabel}
-          title={cancelRenameLabel}
-          disabled={renaming}
-          onMouseDown={(event) => {
-            event.preventDefault();
-            onCancelRename?.();
-          }}
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      className={cn(
-        'group flex items-center gap-1 rounded-[calc(var(--radius-interactive)+2px)] transition-[background-color,color,box-shadow]',
-        isCurrent
-          ? 'bg-secondary text-foreground'
-          : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-      )}
-    >
-      <button
-        type="button"
-        className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-sm"
-        onClick={() => {
-          onSwitchSession(session.key);
-          onPick?.();
-        }}
-      >
-        <AgentAvatar
-          agentId={agentId}
-          agentName={agentName}
-          avatarSeed={avatarSeed}
-          avatarStyle={avatarStyle}
-          className="h-4 w-4"
-          dataTestId={`session-avatar-${session.key}`}
-        />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate">{sessionTitle}</span>
-          <span className="mt-0.5 block truncate text-xs text-muted-foreground/80">{sessionMeta}</span>
-        </span>
-      </button>
-      {!readOnly && session.kind !== 'main' && !session.preferred && (
-        <div className="mr-1 flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
-          <button
-            type="button"
-            className="rounded-full p-1 text-current/70 transition hover:bg-card/15 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-            aria-label={renameLabel}
-            title={renameLabel}
-            disabled={deleting || renaming}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onStartRename(session, sessionTitle);
-            }}
-          >
-            <Pencil className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            className="rounded-full p-1 text-current/70 transition hover:bg-destructive/15 hover:text-destructive-foreground disabled:cursor-not-allowed disabled:opacity-40"
-            aria-label={deleteLabel}
-            title={deleteLabel}
-            disabled={deleting || renaming}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onRequestDelete(session, sessionTitle);
-            }}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
-    </div>
-  );
-});
-
-interface TeamListSectionProps {
-  nodes: AgentSessionSwitchboardTeamResult[];
-  expandedTeamIds: Record<string, boolean>;
-  expandedTeamRunIds: Record<string, boolean>;
-  emptyLabel: string;
-  leaderLabel: string;
-  newRunLabel: string;
-  onToggleTeam: (teamId: string) => void;
-  onToggleRun: (runId: string) => void;
-  onSelectRun: (teamId: string, run: AgentSessionSwitchboardTeamRunResult) => void;
-  onCreateRun: (teamId: string) => void;
-  onSelectRole: (teamId: string, runId: string, role: AgentSessionSwitchboardTeamRoleResult) => void;
-  onPick?: () => void;
-}
-
-const TeamListSection = memo(function TeamListSection({
-  nodes,
-  expandedTeamIds,
-  expandedTeamRunIds,
-  emptyLabel,
-  leaderLabel,
-  newRunLabel,
-  onToggleTeam,
-  onToggleRun,
-  onSelectRun,
-  onCreateRun,
-  onSelectRole,
-  onPick,
-}: TeamListSectionProps) {
-  if (nodes.length === 0) {
-    return <p className="px-2 py-1 text-xs text-muted-foreground">{emptyLabel}</p>;
-  }
-  return (
-    <div className="space-y-1">
-      {nodes.map((node) => {
-        const expanded = expandedTeamIds[node.teamId] === true;
-        const previewAgents = node.runs[0]
-          ? [
-            ...(node.runs[0].leader ? [{ key: 'leader', agentId: node.runs[0].leader.agentId, agentName: leaderLabel }] : []),
-            ...node.runs[0].roles.map((role) => ({ key: role.roleId, agentId: role.agentId, agentName: role.roleId })),
-          ]
-          : [];
-        const visiblePreviewAgents = previewAgents.slice(0, 4);
-        const hiddenPreviewAgentCount = previewAgents.length - visiblePreviewAgents.length;
-        return (
-          <div key={node.teamId} className="space-y-1">
-            <div
-              className={cn(
-                'group flex items-center gap-1 rounded-[calc(var(--radius-interactive)+2px)] pr-1 transition-[background-color,color,box-shadow]',
-                expanded
-                  ? 'bg-secondary text-foreground'
-                  : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-              )}
-            >
-              <button
-                type="button"
-                className="flex h-8 w-7 shrink-0 items-center justify-center rounded-[calc(var(--radius-interactive)+2px)] text-current/80 transition hover:bg-card/15 hover:text-foreground"
-                aria-expanded={expanded}
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onToggleTeam(node.teamId);
-                }}
-              >
-                {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-              </button>
-              <button
-                type="button"
-                className="flex min-w-0 flex-1 items-center gap-2 px-1 py-2 text-left text-sm font-medium"
-                onClick={() => onToggleTeam(node.teamId)}
-              >
-                <span className="flex h-5 shrink-0 items-center -space-x-1">
-                  {visiblePreviewAgents.map((agent) => (
-                    <AgentAvatar
-                      key={`${node.teamId}:${agent.key}`}
-                      agentId={agent.agentId}
-                      agentName={agent.agentName}
-                      className="h-5 w-5 border border-card bg-background"
-                    />
-                  ))}
-                  {hiddenPreviewAgentCount > 0 ? (
-                    <span className="flex h-5 min-w-5 items-center justify-center rounded-full border border-card bg-muted px-1 text-[9px] font-semibold text-muted-foreground">
-                      +{hiddenPreviewAgentCount}
-                    </span>
-                  ) : null}
-                </span>
-                <span className="min-w-0 flex-1 truncate">{node.teamName}</span>
-              </button>
-              <button
-                type="button"
-                className="shrink-0 rounded-full p-1 text-current/80 transition hover:bg-card/15 hover:text-foreground"
-                aria-label={`${newRunLabel} ${node.teamName}`}
-                title={`${newRunLabel} ${node.teamName}`}
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onCreateRun(node.teamId);
-                }}
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </button>
-            </div>
-            {expanded && node.runs.length > 0 ? (
-              <div className="ml-3 border-l border-border/60 pl-2 space-y-0.5">
-                {node.runs.map((run) => {
-                  const runExpanded = expandedTeamRunIds[run.runId] === true;
-                  const isActiveRun = node.activeRunId === run.runId;
-                  return (
-                    <div key={`${node.teamId}:${run.runId}`} className="space-y-0.5">
-                      <div className={cn(
-                        'flex items-center gap-0.5 transition-colors',
-                        isActiveRun ? 'text-foreground' : 'text-muted-foreground',
-                      )}
-                      >
-                        <button
-                          type="button"
-                          className="flex h-6 w-5 shrink-0 items-center justify-center rounded-[calc(var(--radius-interactive)+2px)] text-current/80 transition hover:bg-card/15 hover:text-foreground"
-                          aria-expanded={runExpanded}
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            onToggleRun(run.runId);
-                          }}
-                        >
-                          {runExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                        </button>
-                        <button
-                          type="button"
-                          className={cn(
-                            'min-w-0 flex-1 rounded-[calc(var(--radius-interactive)+2px)] px-1 py-1 text-left text-xs transition-colors',
-                            isActiveRun ? 'bg-secondary text-foreground' : 'hover:bg-secondary hover:text-foreground',
-                          )}
-                          onClick={() => {
-                            onSelectRun(node.teamId, run);
-                            onPick?.();
-                          }}
-                        >
-                          <span className="block truncate" title={run.runId}>{run.label}</span>
-                        </button>
-                      </div>
-                      {runExpanded ? (
-                        <div className="ml-3 border-l border-border/50 pl-2 space-y-0.5">
-                          {run.leader ? (
-                            <button
-                              key={`${node.teamId}:${run.runId}:leader`}
-                              type="button"
-                              className="flex w-full items-center gap-1.5 rounded-[calc(var(--radius-interactive)+2px)] px-1.5 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                              onClick={() => {
-                                onSelectRole(node.teamId, run.runId, run.leader!);
-                                onPick?.();
-                              }}
-                            >
-                              <AgentAvatar agentId={run.leader.agentId} agentName={leaderLabel} className="h-4 w-4" />
-                              <span className="min-w-0 flex-1 truncate">{leaderLabel}</span>
-                            </button>
-                          ) : null}
-                          {run.roles.map((role) => (
-                            <button
-                              key={`${node.teamId}:${run.runId}:${role.roleId}`}
-                              type="button"
-                              className="flex w-full items-center gap-1.5 rounded-[calc(var(--radius-interactive)+2px)] px-1.5 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                              onClick={() => {
-                                onSelectRole(node.teamId, run.runId, role);
-                                onPick?.();
-                              }}
-                            >
-                              <AgentAvatar agentId={role.agentId} agentName={role.roleId} className="h-4 w-4" />
-                              <span className="min-w-0 flex-1 truncate">{role.roleId}</span>
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-          </div>
-        );
-      })}
-    </div>
-  );
-});
-
-const AgentSwitchboardSection = memo(function AgentSwitchboardSection({
-  runtimes,
-  endpointByRuntimeScopeKey,
-  managementRuntimeScopeKey,
-  newSessionLabel,
-  state,
-  errorMessage,
-  emptyLabel,
-  loadingLabel,
-  fallbackErrorLabel,
-  onOpenAgent,
-  onCreateSessionForAgent,
-  onPick,
-}: {
-  runtimes: AgentSessionSwitchboardRuntimeResult[];
-  endpointByRuntimeScopeKey: ReadonlyMap<string, ChatSessionRuntimeEndpointNode>;
-  managementRuntimeScopeKey: string | null;
-  newSessionLabel: string;
-  state: 'loading' | 'error' | 'ready';
-  errorMessage: string | null;
-  emptyLabel: string;
-  loadingLabel: string;
-  fallbackErrorLabel: string;
-  onOpenAgent: (agent: AgentSessionSwitchboardAgentResult) => void;
-  onCreateSessionForAgent: (agent: AgentSessionSwitchboardAgentResult) => void;
-  onPick: () => void;
-}) {
-  const visibleRuntimes = runtimes.map((runtime) => {
-    const endpoint = endpointByRuntimeScopeKey.get(runtime.runtimeScopeKey);
-    const runtimeState = runtime.runtimeScopeKey === managementRuntimeScopeKey
-      && endpoint?.target?.agentCatalog.source === 'subagent-management' ? state : 'ready';
-    return {
-      ...runtime,
-      runtimeState,
-      runtimeSymbol: endpoint?.endpoint.kind === 'native-runtime'
-        ? RUNTIME_SYMBOLS[endpoint.endpoint.runtimeAdapterId] : undefined,
-      agents: runtimeState === 'ready' ? runtime.agents : [],
-    };
-  });
-  const hasRuntimeContent = visibleRuntimes.some((runtime) => runtime.runtimeState !== 'ready' || runtime.agents.length > 0);
-  if (!hasRuntimeContent) {
-    return <p className="px-2 py-1 text-xs text-muted-foreground">{emptyLabel}</p>;
-  }
-  return (
-    <div className="space-y-3">
-      {visibleRuntimes.map((runtime) => (
-        <section key={runtime.runtimeScopeKey} className="space-y-1">
-          <h3 className="flex h-7 items-center gap-2 px-2 text-[11px] font-medium text-muted-foreground">
-            <span aria-hidden="true" className="flex h-4 w-4 shrink-0 items-center justify-center text-sm leading-none">
-              {runtime.runtimeSymbol}
-            </span>
-            <span className="min-w-0 truncate">{runtime.runtimeLabel}</span>
-          </h3>
-          {runtime.runtimeState === 'loading' ? (
-            <p data-testid="agent-list-loading" className="px-2 py-1 text-xs text-muted-foreground">
-              {loadingLabel}
-            </p>
-          ) : runtime.runtimeState === 'error' ? (
-            <p data-testid="agent-list-error" className="px-2 py-1 text-xs text-destructive">
-              {errorMessage || fallbackErrorLabel}
-            </p>
-          ) : null}
-          <div>
-            {runtime.agents.map((agent) => {
-              const active = agent.isCurrent;
-              const canCreate = Boolean(endpointByRuntimeScopeKey.get(agent.runtimeScopeKey)?.target);
-              return (
-                <div
-                  key={`${agent.runtimeScopeKey}:${agent.agentId}`}
-                  className={cn(
-                    'group flex h-9 items-center gap-1 rounded-lg pr-1 transition-colors',
-                    active ? 'bg-secondary/70 text-foreground' : 'text-muted-foreground hover:bg-secondary/40 hover:text-foreground',
-                  )}
-                >
-                  <button
-                    type="button"
-                    data-testid={`agent-item-${agent.agentId}`}
-                    className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                    aria-current={active ? 'true' : undefined}
-                    title={agent.agentName}
-                    onClick={() => {
-                      onOpenAgent(agent);
-                      onPick();
-                    }}
-                  >
-                    <AgentAvatar
-                      agentId={agent.agentId}
-                      agentName={agent.agentName}
-                      avatarSeed={agent.avatarSeed}
-                      avatarStyle={agent.avatarStyle}
-                      className="h-5 w-5"
-                      dataTestId={`agent-session-avatar-${agent.agentId}`}
-                    />
-                    <span className={cn('min-w-0 flex-1 truncate', active && 'font-medium')}>{agent.agentName}</span>
-                    {agent.sessionCount > 0 ? (
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
-                        {agent.sessionCount}
-                      </span>
-                    ) : null}
-                    {active ? <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : null}
-                  </button>
-                  <button
-                    type="button"
-                    data-testid={`agent-new-session-${agent.agentId}`}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed [@media(hover:none)]:opacity-100"
-                    aria-label={`${newSessionLabel} ${agent.agentName}`}
-                    title={`${newSessionLabel} ${agent.agentName}`}
-                    disabled={!canCreate}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      onCreateSessionForAgent(agent);
-                      onPick();
-                    }}
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      ))}
-    </div>
-  );
-});
-
-interface SessionListSectionProps {
-  buckets: AgentSessionSwitchboardSessionBucket[];
-  automationBuckets: AgentSessionSwitchboardSessionBucket[];
-  currentSessionKey: string;
-  deletingSessionKeys: Record<string, true>;
-  renamingSessionKeys: Record<string, SessionRenameDraft>;
-  editingSession: SessionRenameDraft | null;
-  collapsedSessionBuckets: Record<string, boolean>;
-  state: 'loading' | 'error' | 'ready';
-  errorMessage: string | null;
-  emptyLabel: string;
-  sessionLabel: string;
-  automationLabel: string;
-  loadingLabel: string;
-  fallbackErrorLabel: string;
-  formatter: Intl.DateTimeFormat;
-  onToggleBucket: (bucketId: SessionBucketId, defaultCollapsed: boolean, scope: SessionBucketScope) => void;
-  onSwitchSession: (sessionKey: string) => void;
-  onStartRename: (session: ChatSession, title: string) => void;
-  onRenameTitleChange: (title: string) => void;
-  onSubmitRename: () => void;
-  onCancelRename: () => void;
-  onRequestDelete: (session: ChatSession, title: string) => void;
-  onPick?: () => void;
-}
-
-const SessionListSection = memo(function SessionListSection({
-  buckets,
-  automationBuckets,
-  currentSessionKey,
-  deletingSessionKeys,
-  renamingSessionKeys,
-  editingSession,
-  collapsedSessionBuckets,
-  state,
-  errorMessage,
-  emptyLabel,
-  sessionLabel,
-  automationLabel,
-  loadingLabel,
-  fallbackErrorLabel,
-  formatter,
-  onToggleBucket,
-  onSwitchSession,
-  onStartRename,
-  onRenameTitleChange,
-  onSubmitRename,
-  onCancelRename,
-  onRequestDelete,
-  onPick,
-}: SessionListSectionProps) {
-  const [activeBucketScope, setActiveBucketScope] = useState<SessionBucketScope>(() => (
-    hasSessionInBuckets(automationBuckets, currentSessionKey) ? 'automation' : 'session'
-  ));
-  const sessionCount = countSessionsInBuckets(buckets);
-  const automationCount = countSessionsInBuckets(automationBuckets);
-  const hasBothScopes = sessionCount > 0 && automationCount > 0;
-  const visibleBucketScope = hasBothScopes
-    ? activeBucketScope
-    : automationCount > 0
-      ? 'automation'
-      : 'session';
-  const visibleBuckets = visibleBucketScope === 'automation' ? automationBuckets : buckets;
-
-  useEffect(() => {
-    if (hasSessionInBuckets(automationBuckets, currentSessionKey)) {
-      setActiveBucketScope('automation');
-      return;
-    }
-    if (hasSessionInBuckets(buckets, currentSessionKey)) {
-      setActiveBucketScope('session');
-    }
-  }, [automationBuckets, buckets, currentSessionKey]);
-
-  if (state === 'loading') {
-    return (
-      <p data-testid="session-list-loading" className="px-2 py-1 text-xs text-muted-foreground">
-        {loadingLabel}
-      </p>
-    );
-  }
-  if (state === 'error') {
-    return (
-      <p data-testid="session-list-error" className="px-2 py-1 text-xs text-destructive">
-        {errorMessage || fallbackErrorLabel}
-      </p>
-    );
-  }
-  if (sessionCount === 0 && automationCount === 0) {
-    return <p className="px-2 py-1 text-xs text-muted-foreground">{emptyLabel}</p>;
-  }
-
-  const renderBuckets = (bucketList: AgentSessionSwitchboardSessionBucket[], scope: SessionBucketScope) => bucketList.map((bucket) => {
-    const bucketStateKey = createSessionBucketStateKey(bucket.id, scope);
-    const bucketCollapsed = Object.prototype.hasOwnProperty.call(collapsedSessionBuckets, bucketStateKey)
-      ? Boolean(collapsedSessionBuckets[bucketStateKey])
-      : bucket.defaultCollapsed;
-    return (
-      <div key={bucket.id} className="space-y-1">
-        <button
-          type="button"
-          onClick={() => onToggleBucket(bucket.id, bucket.defaultCollapsed, scope)}
-          className="flex w-full items-center gap-2 rounded-[calc(var(--radius-interactive)+2px)] px-2.5 py-1.5 text-left text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-        >
-          {bucketCollapsed ? (
-            <ChevronRight className="h-3 w-3 shrink-0" />
-          ) : (
-            <ChevronDown className="h-3 w-3 shrink-0" />
-          )}
-          <span className="truncate">{bucket.label}</span>
-          <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
-            {bucket.sessions.length}
-          </span>
-        </button>
-
-        {!bucketCollapsed && (
-          <div className="space-y-1">
-            {bucket.sessions.map((result) => {
-              const session = result.session;
-              const editing = editingSession?.key === session.key;
-              return (
-                <SessionListItem
-                  key={session.key}
-                  entry={result.entry}
-                  formatter={formatter}
-                  teamMeta={result.source.kind === 'team' ? result.source.label : undefined}
-                  agentId={result.source.agentId}
-                  agentName={result.source.kind === 'team' ? result.source.label : result.source.agentName}
-                  avatarSeed={result.source.kind === 'agent' ? result.source.avatarSeed : undefined}
-                  avatarStyle={result.source.kind === 'agent' ? result.source.avatarStyle : undefined}
-                  isCurrent={currentSessionKey === session.key}
-                  deleting={Boolean(deletingSessionKeys[session.key])}
-                  renaming={Boolean(renamingSessionKeys[session.key])}
-                  editing={editing}
-                  editingTitle={editing ? editingSession.title : ''}
-                  readOnly={result.readOnly}
-                  onSwitchSession={onSwitchSession}
-                  onStartRename={onStartRename}
-                  onRenameTitleChange={onRenameTitleChange}
-                  onSubmitRename={editing ? onSubmitRename : undefined}
-                  onCancelRename={editing ? onCancelRename : undefined}
-                  onRequestDelete={onRequestDelete}
-                  onPick={onPick}
-                />
-              );
-            })}
-          </div>
-        )}
-      </div>
-    );
-  });
-  return (
-    <div className="space-y-2.5">
-      {hasBothScopes ? (
-        <div className="grid grid-cols-2 gap-1 rounded-[calc(var(--radius-interactive)+4px)] bg-secondary p-1" role="tablist">
-          {SESSION_BUCKET_SCOPES.map((scope) => {
-            const selected = visibleBucketScope === scope;
-            const count = scope === 'automation' ? automationCount : sessionCount;
-            const label = scope === 'automation' ? automationLabel : sessionLabel;
-            return (
-              <button
-                key={scope}
-                type="button"
-                role="tab"
-                aria-label={`${label} ${count}`}
-                aria-selected={selected}
-                className={cn(
-                  'flex min-w-0 items-center justify-center gap-1.5 rounded-[var(--radius-interactive)] px-2 py-1.5 text-xs font-medium transition-colors',
-                  selected
-                    ? 'bg-card text-foreground shadow-whisper'
-                    : 'text-muted-foreground hover:text-foreground',
-                )}
-                onClick={() => setActiveBucketScope(scope)}
-              >
-                <span className="truncate">{label}</span>
-                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
-                  {count}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-      {visibleBuckets.length > 0 ? (
-        <div className="space-y-1">{renderBuckets(visibleBuckets, visibleBucketScope)}</div>
-      ) : (
-        <p className="px-2 py-1 text-xs text-muted-foreground">{emptyLabel}</p>
-      )}
-    </div>
-  );
-});
-
-interface IdentityBeaconProps {
-  activeAgentId: string;
-  activeAgentName: string;
-  activeAvatarSeed?: string;
-  activeAvatarStyle?: AgentAvatarStyle;
-  identityLabel: string;
-  runtimeLabel: string;
-  newSessionLabel: string;
-  disabledNewSession: boolean;
-  switchboardOpen: boolean;
-  onNewSession: () => void;
-  onOpenSwitchboard: () => void;
-}
-
-const IdentityBeacon = memo(function IdentityBeacon({
-  activeAgentId,
-  activeAgentName,
-  activeAvatarSeed,
-  activeAvatarStyle,
-  identityLabel,
-  runtimeLabel,
-  newSessionLabel,
-  disabledNewSession,
-  switchboardOpen,
-  onNewSession,
-  onOpenSwitchboard,
-}: IdentityBeaconProps) {
-  return (
-    <div
-      className={cn(
-        'group flex w-12 flex-col items-center gap-0.5 rounded-[21px] border border-border/25 bg-card/40 px-1 py-1 transition-[background-color,border-color] duration-150 hover:border-border/35 hover:bg-card/60',
-        switchboardOpen && 'border-border/45 bg-card/70',
-      )}
-    >
-      <button
-        type="button"
-        data-testid="agent-session-identity-beacon"
-        className={cn(
-          'flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground',
-          switchboardOpen && 'text-foreground',
-        )}
-        onClick={onOpenSwitchboard}
-        aria-label={identityLabel}
-        title={`${identityLabel} · ${runtimeLabel}`}
-      >
-        <AgentAvatar
-          agentId={activeAgentId}
-          agentName={activeAgentName}
-          avatarSeed={activeAvatarSeed}
-          avatarStyle={activeAvatarStyle}
-          className="h-9 w-9 border border-border/60 bg-background shadow-sm"
-          dataTestId="agent-session-identity-avatar"
-        />
-      </button>
-      <button
-        type="button"
-        data-testid="agent-session-new-current"
-        className="flex h-6 w-6 items-center justify-center text-muted-foreground/80 transition-[color,opacity] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
-        onClick={onNewSession}
-        disabled={disabledNewSession}
-        aria-label={newSessionLabel}
-        title={newSessionLabel}
-      >
-        <Plus className="h-[18px] w-[18px] stroke-[2.25]" />
-      </button>
-    </div>
-  );
-});
-
-interface HoverPeekProps {
-  open: boolean;
-  currentIdentityLabel: string;
-  agents: AgentSessionSwitchboardAgentResult[];
-  sessions: AgentSessionSwitchboardSessionBucket[];
-  formatter: Intl.DateTimeFormat;
-  onOpenAgent: (agent: AgentSessionSwitchboardAgentResult) => void;
-  onSwitchSession: (sessionKey: string) => void;
-}
-
-const HoverSessionItem = memo(function HoverSessionItem({ result, formatter, onSwitchSession }: {
-  result: AgentSessionSwitchboardSessionResult;
-  formatter: Intl.DateTimeFormat;
-  onSwitchSession: (sessionKey: string) => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <button
-      type="button"
-      className="flex w-full items-center gap-2 rounded-[calc(var(--radius-interactive)+2px)] px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-      onClick={() => onSwitchSession(result.session.key)}
-    >
-      <AgentAvatar
-        agentId={result.source.agentId}
-        agentName={result.source.label}
-        avatarSeed={result.source.kind === 'agent' ? result.source.avatarSeed : undefined}
-        avatarStyle={result.source.kind === 'agent' ? result.source.avatarStyle : undefined}
-        className="h-5 w-5"
-      />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate">{resolveSessionTitle(result.entry, t)}</span>
-        <span className="mt-0.5 block truncate text-xs text-muted-foreground/80">
-          {result.source.kind === 'team' ? result.source.label : formatSessionMeta(result.entry, formatter)}
-        </span>
-      </span>
-    </button>
-  );
-});
-
-const HoverPeek = memo(function HoverPeek({
-  open,
-  currentIdentityLabel,
-  agents,
-  sessions,
-  formatter,
-  onOpenAgent,
-  onSwitchSession,
-}: HoverPeekProps) {
-  if (!open) {
-    return null;
-  }
-  const quickAgents = agents.filter((agent) => !agent.isCurrent).slice(0, 3);
-  const quickSessions = sessions.flatMap((bucket) => bucket.sessions).slice(0, Math.max(0, 5 - quickAgents.length));
-  const hasQuickItems = quickAgents.length > 0 || quickSessions.length > 0;
-  return (
-    <div
-      data-testid="agent-sessions-hover-peek"
-      className="absolute left-[52px] top-0 z-20 w-64 rounded-[22px] border border-border/75 bg-card/96 p-2 opacity-100 shadow-[0_18px_48px_rgba(0,0,0,0.26),0_5px_14px_rgba(0,0,0,0.18)] backdrop-blur-md transition-[opacity,transform] duration-150"
-    >
-      <p className="px-2 py-1 text-xs font-medium text-muted-foreground">{currentIdentityLabel}</p>
-      {hasQuickItems ? (
-        <div className="mt-1 space-y-1">
-          {quickAgents.map((agent) => (
-          <button
-            key={`agent:${agent.runtimeScopeKey}:${agent.agentId}`}
-            type="button"
-            className="flex w-full items-center gap-2 rounded-[calc(var(--radius-interactive)+2px)] px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-            onClick={() => onOpenAgent(agent)}
-          >
-            <AgentAvatar
-              agentId={agent.agentId}
-              agentName={agent.agentName}
-              avatarSeed={agent.avatarSeed}
-              avatarStyle={agent.avatarStyle}
-              className="h-5 w-5"
-            />
-            <span className="min-w-0 flex-1 truncate">{agent.agentName}</span>
-          </button>
-        ))}
-        {quickSessions.map((result) => (
-          <HoverSessionItem key={result.session.key} result={result} formatter={formatter} onSwitchSession={onSwitchSession} />
-        ))}
-        </div>
-      ) : null}
-    </div>
-  );
-});
-
-type DirectoryContentsProps =
-  | { mode: 'agent'; onPick: () => void }
-  | { mode: 'hover'; currentIdentityLabel: string; onPick: () => void }
-  | ({ mode: 'session' } & Pick<SessionListSectionProps,
-    'deletingSessionKeys' | 'renamingSessionKeys' | 'editingSession' | 'collapsedSessionBuckets'
-    | 'onToggleBucket' | 'onStartRename' | 'onRenameTitleChange' | 'onSubmitRename' | 'onCancelRename' | 'onRequestDelete' | 'onPick'>);
-
-const DirectoryContents = memo(function DirectoryContents(props: DirectoryContentsProps) {
-  const { t, i18n } = useTranslation();
-  const { sessionEntries, sessionsLoadedOnce, sessionsError, currentConversation, sessionRuntimeGraph, currentSessionKey,
-    switchSession, openAgentConversation, newSessionForScope } = useChatStore(useShallow(selectAgentSessionsPaneState));
-  const selectedEndpoint = useChatStore((state) => state.sessionRuntimeCatalog.selectedEndpoint);
-  const managementScope = useSubagentsStore((state) => state.managementScope);
-  const resource = useSubagentsStore((state) => state.agentsResource);
-  const managementRuntimeScopeKey = managementScope ? buildRuntimeScopeKey(managementScope.endpoint) : null;
-  const runtimeEndpoints = sessionRuntimeGraph.endpoints;
-  const availableEndpoints = useMemo(() => runtimeEndpoints.filter((endpoint) => endpoint.target != null), [runtimeEndpoints]);
-  const selectedRuntimeEndpoint = resolveSelectedRuntimeEndpoint({
-    endpoints: availableEndpoints,
-    runtimeScopeKey: currentConversation?.runtimeScopeKey ?? (selectedEndpoint ? buildRuntimeScopeKey(selectedEndpoint) : null),
-  });
-  const pane = useAgentSessionsPaneViewModel({
-    subagentManagementAgents: Array.isArray(resource.data) ? resource.data : EMPTY_AGENTS,
-    subagentManagementAgentsResource: resource,
-    subagentManagementRuntimeScopeKey: managementRuntimeScopeKey,
-    sessionEntries, sessionsLoadedOnce, sessionsError, currentConversation, selectedRuntimeEndpoint, runtimeEndpoints, t,
-  });
-  const formatter = useMemo(() => new Intl.DateTimeFormat(i18n.language, {
-    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-  }), [i18n.language]);
-  const endpointByRuntimeScopeKey = useMemo(() => new Map(availableEndpoints.map((endpoint) => [endpoint.runtimeScopeKey, endpoint])), [availableEndpoints]);
-  const agentResults = pane.switchboard.agentResults.filter((runtime) => endpointByRuntimeScopeKey.has(runtime.runtimeScopeKey));
-  const onPick = props.onPick;
-  const openAgent = useCallback((agent: AgentSessionSwitchboardAgentResult) => {
-    const endpoint = endpointByRuntimeScopeKey.get(agent.runtimeScopeKey);
-    if (endpoint) openAgentConversation(agent.agentId, endpoint.endpoint);
-  }, [endpointByRuntimeScopeKey, openAgentConversation]);
-  const createSession = useCallback((agent: AgentSessionSwitchboardAgentResult) => {
-    const target = endpointByRuntimeScopeKey.get(agent.runtimeScopeKey)?.target;
-    if (!target) return;
-    const scope = resolveAgentScopeForRuntimeEndpoint(target, agent.agentId);
-    if (scope) void newSessionForScope(scope);
-  }, [endpointByRuntimeScopeKey, newSessionForScope]);
-  const hoverOpenAgent = useCallback((agent: AgentSessionSwitchboardAgentResult) => {
-    openAgent(agent);
-    onPick?.();
-  }, [onPick, openAgent]);
-  const hoverSwitchSession = useCallback((sessionKey: string) => {
-    switchSession(sessionKey);
-    onPick?.();
-  }, [onPick, switchSession]);
-  if (props.mode === 'hover') return (
-    <HoverPeek open currentIdentityLabel={props.currentIdentityLabel} agents={agentResults.flatMap((runtime) => runtime.agents)}
-      sessions={pane.switchboard.sessionResults} formatter={formatter} onOpenAgent={hoverOpenAgent} onSwitchSession={hoverSwitchSession} />
-  );
-  if (props.mode === 'agent') return (
-    <AgentSwitchboardSection runtimes={agentResults} endpointByRuntimeScopeKey={endpointByRuntimeScopeKey}
-      managementRuntimeScopeKey={managementRuntimeScopeKey} newSessionLabel={t('sidebar.newSession')}
-      state={pane.agentListState} errorMessage={pane.agentErrorMessage} emptyLabel={t('sidebar.noSubagents')}
-      loadingLabel={t('status.loading')} fallbackErrorLabel={t('status.error')} onOpenAgent={openAgent}
-      onCreateSessionForAgent={createSession} onPick={props.onPick} />
-  );
-  return (
-    <SessionListSection {...props} buckets={pane.switchboard.sessionResults} automationBuckets={pane.switchboard.automationSessionResults}
-      currentSessionKey={currentSessionKey} formatter={formatter} state={pane.sessionListState} errorMessage={pane.sessionErrorMessage}
-      emptyLabel={t('sidebar.noAgentSessions')} sessionLabel={t('switchboard.normalSessions', { defaultValue: 'Normal' })}
-      automationLabel={t('switchboard.automationSessions', { defaultValue: 'Automation' })} loadingLabel={t('status.loading')}
-      fallbackErrorLabel={t('status.error')} onSwitchSession={switchSession} />
-  );
-});
+} from './useAgentSessionsPaneViewModel';
+import { buildSwitchboardAgentKey, type AgentSessionSwitchboardAgentResult } from './agent-session-switchboard-model';
+import { TeamSessionsSidebar } from './TeamSessionsSidebar';
 
 const EMPTY_AGENTS: [] = [];
+const iconClass = 'flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40';
+const pickerItemClass = 'min-h-9 rounded-md py-1.5 text-[13px] leading-5 data-[highlighted]:bg-[hsl(var(--shell-surface-hover))] motion-reduce:transition-none';
+type SidebarMode = 'agents' | 'teams';
+type SessionDraft = { key: string; title: string };
+type SessionMutation =
+  | { kind: 'rename' | 'delete'; draft: SessionDraft }
+  | { kind: 'deleteAgent'; scope: AgentScope; name: string; identities: readonly SessionIdentity[] };
 
-const TeamContents = memo(function TeamContents(props: Pick<TeamListSectionProps,
-  'expandedTeamIds' | 'expandedTeamRunIds' | 'onToggleTeam' | 'onToggleRun' | 'onPick'>) {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const teams = useTeamSessionProjection((state) => state.teams);
-  const runListByTeamId = useTeamSessionProjection((state) => state.runListByTeamId);
-  const runLabels = useTeamRunLabels();
-  const index = useTeamSessionProjection(selectTeamRoleChatTargetIndex);
-  const createRun = useTeamSessionNavigation((state) => state.createRun);
-  const setActiveRun = useTeamSessionNavigation((state) => state.setActiveRun);
-  const syncRunList = useTeamSessionNavigation((state) => state.syncRunList);
-  const refreshSnapshot = useTeamSessionNavigation((state) => state.refreshSnapshot);
-  const openSessionIdentity = useChatStore((state) => state.openSessionIdentity);
-  const teamInputs = useMemo<AgentSessionSwitchboardTeamInput[]>(() => teams.map((team) => ({
-    teamId: team.id, teamName: team.name, activeRunId: team.activeRunId,
-    runs: (runListByTeamId[team.id] ?? []).map((run) => {
-      const sessions = run.sessions ?? [];
-      const toRole = (role: (typeof sessions)[number]) => ({
-        roleId: role.roleId, agentId: role.agentId, sessionIdentity: role.sessionIdentity, localSessionId: role.localSessionId,
-        endpointSessionId: resolveTeamRoleChatTargetFromProbe(index, {
-          sessionIdentity: role.sessionIdentity, sessionKey: role.localSessionId, endpointSessionId: role.endpointSessionId,
-        })?.endpointSessionId ?? role.endpointSessionId,
-      });
-      const leader = sessions.find((role) => role.roleId === 'leader');
-      return { runId: run.runId, label: runLabels[run.runId] ?? t('teams:run.unnamed'), createdAt: run.createdAt, updatedAt: run.updatedAt,
-        leader: leader ? toRole(leader) : null, roles: sessions.filter((role) => role.roleId !== 'leader').map(toRole) };
-    }),
-  })), [index, runLabels, runListByTeamId, t, teams]);
-  const nodes = useMemo(() => buildAgentSessionSwitchboardModel({
-    currentConversation: null, selectedRuntimeEndpoint: null, runtimeResults: [], teamResults: teamInputs, sessionResults: { buckets: [] },
-  }).teamResults, [teamInputs]);
-  const teamSyncKey = teams.map((team) => team.id).join('\n');
-  useEffect(() => {
-    for (const teamId of teamSyncKey ? teamSyncKey.split('\n') : []) void syncRunList(teamId);
-  }, [syncRunList, teamSyncKey]);
-  const selectRole = useCallback((teamId: string, runId: string, role: AgentSessionSwitchboardTeamRoleResult) => {
-    setActiveRun(teamId, runId);
-    openSessionIdentity({ sessionIdentity: role.sessionIdentity });
-    navigate('/', { state: { teamDesignSurface: { kind: 'team-graph', sourceSessionIdentity: role.sessionIdentity, teamId, runId } } });
-    void refreshSnapshot(teamId, { force: true });
-  }, [navigate, openSessionIdentity, refreshSnapshot, setActiveRun]);
-  const selectRun = useCallback((teamId: string, run: AgentSessionSwitchboardTeamRunResult) => {
-    setActiveRun(teamId, run.runId);
-    if (run.leader) {
-      openSessionIdentity({ sessionIdentity: run.leader.sessionIdentity });
-      navigate('/', { state: { teamDesignSurface: { kind: 'team-graph', sourceSessionIdentity: run.leader.sessionIdentity, teamId, runId: run.runId } } });
-    }
-    void refreshSnapshot(teamId, { force: true });
-  }, [navigate, openSessionIdentity, refreshSnapshot, setActiveRun]);
-  const newRun = useCallback((teamId: string) => { void createRun(teamId); }, [createRun]);
-  return <TeamListSection {...props} nodes={nodes} emptyLabel={t('sidebar.noTeams')} leaderLabel={t('sidebar.teamLeader')}
-    newRunLabel={t('teams:run.create')} onSelectRun={selectRun} onCreateRun={newRun} onSelectRole={selectRole} />;
+const SessionRow = memo(function SessionRow({
+  entry, isCurrent, onSwitch, onRename, onDelete,
+}: {
+  entry: AgentSessionsPaneSessionEntry;
+  isCurrent: boolean;
+  onSwitch: (key: string) => void;
+  onRename: (session: ChatSession, title: string, trigger: HTMLButtonElement | null) => void;
+  onDelete: (session: ChatSession, title: string, trigger: HTMLButtonElement | null) => void;
+}) {
+  const { t } = useTranslation('common');
+  const actionRef = useRef<HTMLButtonElement>(null);
+  const title = resolveSessionTitle(entry, t);
+  const editable = isDeletableSession(entry.session);
+  return (
+    <div className={cn('group relative flex min-w-0 items-center rounded-md', isCurrent ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/70')}>
+      <button type="button" className={cn('flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2 text-left text-[13px] leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring', editable && 'group-hover:pr-8 group-focus-within:pr-8 group-has-[[data-state=open]]:pr-8 [@media(hover:none)]:pr-8')}
+        aria-current={isCurrent ? 'true' : undefined} title={title} onClick={() => onSwitch(entry.session.key)}>
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+      </button>
+      {editable && <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button ref={actionRef} type="button" className={cn(iconClass, 'pointer-events-none absolute right-0.5 top-1/2 h-6 w-6 -translate-y-1/2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 data-[state=open]:pointer-events-auto data-[state=open]:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100')}
+            aria-label={t('sidebar.renameSessionAria', { title })}>
+            <MoreHorizontal className="h-3.5 w-3.5" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={() => onRename(entry.session, title, actionRef.current)}><Pencil className="h-3.5 w-3.5" />{t('actions.rename')}</DropdownMenuItem>
+          <DropdownMenuItem className="text-destructive" onSelect={() => onDelete(entry.session, title, actionRef.current)}><Trash2 className="h-3.5 w-3.5" />{t('actions.delete')}</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>}
+    </div>
+  );
+});
+
+const AgentGroup = memo(function AgentGroup({
+  agent, sessions, currentSessionKey, active, endpoint, defaultExpanded,
+  onSwitch, onRename, onDelete, onNewSession, onDeleteAgent,
+}: {
+  agent: AgentSessionSwitchboardAgentResult;
+  sessions: AgentSessionsPaneSessionEntry[];
+  defaultExpanded: boolean;
+  currentSessionKey: string;
+  active: boolean;
+  endpoint: ChatSessionRuntimeEndpointNode | undefined;
+  onSwitch: (key: string) => void;
+  onRename: (session: ChatSession, title: string, trigger: HTMLButtonElement | null) => void;
+  onDelete: (session: ChatSession, title: string, trigger: HTMLButtonElement | null) => void;
+  onNewSession: (scope: AgentScope) => void;
+  onDeleteAgent: (scope: AgentScope, name: string, identities: readonly SessionIdentity[], trigger: HTMLButtonElement | null) => void;
+}) {
+  const { t } = useTranslation('common');
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const actionRef = useRef<HTMLButtonElement>(null);
+  const listId = useId();
+  const open = expanded;
+  const scope = useMemo<AgentScope | null>(() => endpoint
+    ? { kind: 'agent', endpoint: endpoint.endpoint, agentId: agent.agentId } : null, [agent.agentId, endpoint]);
+  const newSessionScope = useMemo(() => endpoint?.target
+    ? resolveAgentScopeForRuntimeEndpoint(endpoint.target, agent.agentId) : null, [agent.agentId, endpoint]);
+  const deletableIdentities = useMemo(() => endpoint?.agents.find((entry) => entry.agentId === agent.agentId)?.sessions
+    .filter(isDeletableSession).map((session) => session.sessionIdentity) ?? [], [agent.agentId, endpoint]);
+  return (
+    <section>
+      <div className={cn('group/agent relative mb-0.5 flex items-center gap-0.5 rounded-md px-1 hover:bg-secondary/70', active && 'bg-secondary/70')}>
+        <button type="button" className="flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 text-left text-[13px] leading-5 font-medium text-foreground outline-none group-hover/agent:pr-14 group-focus-within/agent:pr-14 group-has-[[data-state=open]]/agent:pr-14 [@media(hover:none)]:pr-14 focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label={t('switchboard.agentSessionsAria', { name: agent.agentName })} aria-expanded={open} aria-controls={listId}
+          title={`${agent.runtimeLabel} / ${agent.agentName}`} onClick={() => setExpanded(!open)}>
+          <AgentAvatar agentId={agent.agentId} agentName={agent.agentName} avatarSeed={agent.avatarSeed} avatarStyle={agent.avatarStyle} className="h-5 w-5 shrink-0" />
+          <span className="truncate">{agent.agentName}</span>
+        </button>
+        <div className="pointer-events-none absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 group-hover/agent:pointer-events-auto group-hover/agent:opacity-100 group-focus-within/agent:pointer-events-auto group-focus-within/agent:opacity-100 has-[[data-state=open]]:pointer-events-auto has-[[data-state=open]]:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button ref={actionRef} type="button" className={cn(iconClass, 'h-6 w-6')} aria-label={t('switchboard.agentActionsAria', { name: agent.agentName })}>
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-40">
+              <DropdownMenuItem className="text-destructive" disabled={!scope || deletableIdentities.length === 0}
+                onSelect={() => { if (scope) onDeleteAgent(scope, agent.agentName, deletableIdentities, actionRef.current); }}>
+                <Trash2 className="h-3.5 w-3.5" />{t('switchboard.deleteAllSessions', { count: deletableIdentities.length })}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <button type="button" className={cn(iconClass, 'h-6 w-6')} disabled={!newSessionScope}
+            aria-label={t('switchboard.newSessionForAgent', { name: agent.agentName })} title={t('sidebar.newSession')}
+            onClick={() => { if (newSessionScope) { setExpanded(true); onNewSession(newSessionScope); } }}>
+            <SquarePen className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+      <div id={listId} hidden={!open} className="space-y-0.5">
+        {open && <>
+          {sessions.map((entry) => <SessionRow key={entry.session.key} entry={entry} isCurrent={entry.session.key === currentSessionKey}
+            onSwitch={onSwitch} onRename={onRename} onDelete={onDelete} />)}
+          {sessions.length === 0 && <p className="px-2 py-2 text-xs text-muted-foreground">{t('sidebar.noAgentSessions')}</p>}
+        </>}
+      </div>
+    </section>
+  );
 });
 
 export const AgentSessionsPane = memo(function AgentSessionsPane() {
-  const { t } = useTranslation();
-  const currentConversation = useChatStore((state) => state.currentConversation);
-  const currentSessionKey = currentConversation?.kind === 'session' ? currentConversation.sessionRecordKey : '';
-  const beacon = useChatStore(useShallow((state) => {
-    const candidate = resolveSelectedRuntimeEndpoint({
-      endpoints: state.sessionRuntimeGraph.endpoints,
-      runtimeScopeKey: state.currentConversation?.runtimeScopeKey
-        ?? (state.sessionRuntimeCatalog.selectedEndpoint ? buildRuntimeScopeKey(state.sessionRuntimeCatalog.selectedEndpoint) : null),
-    });
-    const endpoint = candidate?.target ? candidate : null;
-    const agentId = state.currentConversation?.agentId ?? endpoint?.defaultAgentId ?? '';
-    return {
-      runtimeScopeKey: endpoint?.runtimeScopeKey,
-      runtimeLabel: endpoint?.displayName,
-      target: endpoint?.target,
-      agentId,
-      catalogName: endpoint?.agents.find((agent) => agent.agentId === agentId)?.catalogEntry?.name,
-    };
-  }));
-  const activeAgent = useSubagentsStore(useShallow((state) => {
-    const agents = Array.isArray(state.agentsResource.data) ? state.agentsResource.data : EMPTY_AGENTS;
-    const agentId = currentConversation || agents.length > 0 ? beacon.agentId : '';
-    const managementRuntimeScopeKey = state.managementScope ? buildRuntimeScopeKey(state.managementScope.endpoint) : null;
-    const metadata = beacon.runtimeScopeKey === managementRuntimeScopeKey ? agents.find((agent) => agent.id === agentId) : undefined;
-    const seed = beacon.target?.agentCatalog.source === 'subagent-management'
-      ? beacon.target.agentCatalog.seedAgents.find((agent) => agent.id === agentId) : undefined;
-    const managementCatalog = beacon.target?.agentCatalog.source === 'subagent-management';
-    return {
-      id: agentId,
-      name: managementCatalog ? metadata?.name?.trim() || seed?.name?.trim() || agentId : beacon.catalogName?.trim() || agentId,
-      avatarSeed: managementCatalog ? metadata?.avatarSeed : undefined,
-      avatarStyle: managementCatalog ? metadata?.avatarStyle : undefined,
-    };
-  }));
-  const teamIdentityLabel = useTeamSessionProjection((state) => {
-    if (currentConversation?.kind !== 'session') return '';
-    const target = resolveTeamRoleChatTargetFromProbe(selectTeamRoleChatTargetIndex(state), {
-      sessionIdentity: currentConversation.sessionIdentity, sessionKey: currentSessionKey,
-      endpointSessionId: currentConversation.endpointSessionId,
-    });
-    if (!target) return '';
-    const team = state.teams.find((candidate) => candidate.id === target.teamId);
-    return team ? [team.name, target.roleId].map((part) => part.trim()).filter(Boolean).join(' / ') : '';
+  const { t } = useTranslation('common');
+  const navigate = useNavigate();
+  const { sessionEntries, sessionsLoadedOnce, sessionsError, currentConversation, sessionRuntimeGraph, currentSessionKey,
+    switchSession, openAgentConversation, newSessionForScope, renameSession, deleteSession, deleteAgentSessions } = useChatStore(useShallow(selectAgentSessionsPaneState));
+  const managementScope = useSubagentsStore((state) => state.managementScope);
+  const resource = useSubagentsStore((state) => state.agentsResource);
+  const teams = useTeamSessionProjection((state) => state.teams);
+  const runtimeEndpoints = sessionRuntimeGraph.endpoints;
+  const pane = useAgentSessionsPaneViewModel({
+    subagentManagementAgents: Array.isArray(resource.data) ? resource.data : EMPTY_AGENTS,
+    subagentManagementAgentsResource: resource,
+    subagentManagementRuntimeScopeKey: managementScope ? buildRuntimeScopeKey(managementScope.endpoint) : null,
+    sessionEntries, sessionsLoadedOnce, sessionsError, runtimeEndpoints,
   });
-  const newSessionForScope = useChatStore((state) => state.newSessionForScope);
-  const deleteSession = useChatStore((state) => state.deleteSession);
-  const renameSession = useChatStore((state) => state.renameSession);
-  const [activeTab, setActiveTab] = useState<SessionPaneTab>('agent');
-  const [expandedTeamIds, setExpandedTeamIds] = useState<Record<string, boolean>>({});
-  const [expandedTeamRunIds, setExpandedTeamRunIds] = useState<Record<string, boolean>>({});
-  const [collapsedSessionBuckets, setCollapsedSessionBuckets] = useState<Record<string, boolean>>(
-    () => loadCollapsedSessionBucketMap(),
-  );
-  const [deletingSessionKeys, setDeletingSessionKeys] = useState<Record<string, true>>({});
-  const [renamingSessionKeys, setRenamingSessionKeys] = useState<Record<string, SessionRenameDraft>>({});
-  const [editingSession, setEditingSession] = useState<SessionRenameDraft | null>(null);
-  const [pendingDeleteSession, setPendingDeleteSession] = useState<{
-    key: string;
-    title: string;
-  } | null>(null);
-  const [switchboardOpen, setSwitchboardOpen] = useState(false);
-  const [hoverPeekOpen, setHoverPeekOpen] = useState(false);
-  const hoverCloseTimerRef = useRef<number | null>(null);
-  const switchboardTraceStateRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    if (!isSessionTraceEnabled()) return;
-    const detail = {
-      state: switchboardOpen ? 'open' : 'closed', activeTab, hoverPeekOpen,
-      conversationKind: currentConversation?.kind ?? 'none',
-      recordKey: summarizeIdentifier(currentSessionKey),
-      identity: summarizeSessionIdentity(currentConversation?.kind === 'session' ? currentConversation.sessionIdentity : null),
-    };
-    const stateKey = JSON.stringify(detail);
-    if (switchboardTraceStateRef.current === stateKey) return;
-    switchboardTraceStateRef.current = stateKey;
-    logSessionTrace('switchboard.state', createSessionTraceId('switchboard'), () => detail);
-  }, [activeTab, currentConversation, currentSessionKey, hoverPeekOpen, switchboardOpen]);
-
-  const activeAgentId = activeAgent.id;
-  const activeRuntimeLabel = beacon.runtimeLabel ?? t('switchboard.runtime');
-  const activeAgentName = currentConversation
-    ? teamIdentityLabel || `${beacon.runtimeLabel ?? currentConversation.runtimeScopeKey} / ${activeAgent.name || activeAgentId}`
-    : activeAgentId || t('sidebar.agentSessions');
-
-  useEffect(() => {
-    return () => {
-      if (hoverCloseTimerRef.current != null) {
-        window.clearTimeout(hoverCloseTimerRef.current);
-      }
-    };
+  const [mode, setMode] = useState<SidebarMode>('agents');
+  const [menuMode, setMenuMode] = useState<SidebarMode>('agents');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [selectedAgentKey, setSelectedAgentKey] = useState<string | null>(null);
+  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
+  const pickerRef = useRef<HTMLButtonElement>(null);
+  const searchButtonRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const mutationReturnFocusRef = useRef<HTMLElement | null>(null);
+  const [mutation, setMutation] = useState<SessionMutation | null>(null);
+  const [pending, setPending] = useState(false);
+  const [mutationError, setMutationError] = useState<'failed' | 'unknown' | null>(null);
+  const agents = useMemo(() => pane.agentResults.flatMap((runtime) => runtime.agents), [pane.agentResults]);
+  const selectedAgent = agents.find((agent) => agent.key === selectedAgentKey);
+  const selectedTeam = teams.find((team) => team.id === selectedTeamId);
+  const endpointByScope = useMemo(() => new Map(runtimeEndpoints.map((endpoint) => [endpoint.runtimeScopeKey, endpoint])), [runtimeEndpoints]);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleGroups = useMemo(() => agents.filter((agent) => selectedAgentKey === null || agent.key === selectedAgentKey).map((agent) => ({
+    agent,
+    sessions: normalizedQuery ? agent.sessions.filter((entry) => resolveSessionTitle(entry, t).toLocaleLowerCase().includes(normalizedQuery)) : agent.sessions,
+  })).filter((group) => !normalizedQuery || group.sessions.length > 0), [agents, normalizedQuery, selectedAgentKey, t]);
+  const currentAgentKey = currentConversation ? buildSwitchboardAgentKey(currentConversation.runtimeScopeKey, currentConversation.agentId) : null;
+  const startNewSession = useCallback((scope: AgentScope) => {
+    void newSessionForScope(scope);
+  }, [newSessionForScope]);
+  const chooseAgent = (agent: AgentSessionSwitchboardAgentResult) => {
+    setMode('agents');
+    setSelectedAgentKey(agent.key);
+    const endpoint = endpointByScope.get(agent.runtimeScopeKey);
+    if (endpoint) openAgentConversation(agent.agentId, endpoint.endpoint);
+  };
+  const beginMutation = useCallback((kind: 'rename' | 'delete', session: ChatSession, title: string, trigger: HTMLButtonElement | null) => {
+    if (!isDeletableSession(session)) return;
+    mutationReturnFocusRef.current = trigger;
+    setMutationError(null);
+    setMutation({ kind, draft: { key: session.key, title } });
   }, []);
-
-  useEffect(() => {
+  const startRename = useCallback((session: ChatSession, title: string, trigger: HTMLButtonElement | null) => beginMutation('rename', session, title, trigger), [beginMutation]);
+  const requestDelete = useCallback((session: ChatSession, title: string, trigger: HTMLButtonElement | null) => beginMutation('delete', session, title, trigger), [beginMutation]);
+  const requestDeleteAgent = useCallback((scope: AgentScope, name: string, identities: readonly SessionIdentity[], trigger: HTMLButtonElement | null) => {
+    if (identities.length === 0) return;
+    mutationReturnFocusRef.current = trigger;
+    setMutationError(null);
+    setMutation({ kind: 'deleteAgent', scope, name, identities });
+  }, []);
+  const submitMutation = async () => {
+    if (!mutation || pending || mutationError === 'unknown') return;
+    if (mutation.kind === 'rename' && !mutation.draft.title.trim()) return;
+    setPending(true);
+    setMutationError(null);
     try {
-      window.localStorage.setItem(
-        SESSION_BUCKET_COLLAPSE_STORAGE_KEY,
-        JSON.stringify(collapsedSessionBuckets),
-      );
-    } catch {
-      // ignore localStorage failures
-    }
-  }, [collapsedSessionBuckets]);
-
-  const closeSwitchboard = useCallback(() => {
-    setSwitchboardOpen(false);
-    setHoverPeekOpen(false);
-  }, []);
-
-  const openHoverPeek = useCallback(() => {
-    if (hoverCloseTimerRef.current != null) {
-      window.clearTimeout(hoverCloseTimerRef.current);
-      hoverCloseTimerRef.current = null;
-    }
-    if (!switchboardOpen) {
-      setHoverPeekOpen(true);
-    }
-  }, [switchboardOpen]);
-
-  const scheduleCloseHoverPeek = useCallback(() => {
-    if (hoverCloseTimerRef.current != null) {
-      window.clearTimeout(hoverCloseTimerRef.current);
-    }
-    hoverCloseTimerRef.current = window.setTimeout(() => {
-      setHoverPeekOpen(false);
-      hoverCloseTimerRef.current = null;
-    }, 120);
-  }, []);
-
-  const handleNewSession = useCallback(() => {
-    const target = beacon.target;
-    if (!target) return;
-    const scope = currentConversation ? resolveAgentScopeForRuntimeEndpoint(target, currentConversation.agentId) : target.defaultSessionPromptScope;
-    if (scope) void newSessionForScope(scope);
-  }, [beacon.target, currentConversation, newSessionForScope]);
-  const toggleSwitchboard = useCallback(() => {
-    setHoverPeekOpen(false);
-    setSwitchboardOpen((open) => !open);
-  }, []);
-  const closeHoverPeek = useCallback(() => setHoverPeekOpen(false), []);
-
-  const toggleTeam = useCallback((teamId: string) => {
-    setExpandedTeamIds((current) => ({ ...current, [teamId]: current[teamId] !== true }));
-  }, []);
-
-  const toggleRun = useCallback((runId: string) => {
-    setExpandedTeamRunIds((current) => ({ ...current, [runId]: current[runId] !== true }));
-  }, []);
-
-  const toggleSessionBucket = useCallback((bucketId: SessionBucketId, defaultCollapsed: boolean, scope: SessionBucketScope) => {
-    const stateKey = createSessionBucketStateKey(bucketId, scope);
-    setCollapsedSessionBuckets((prev) => {
-      const current = Object.prototype.hasOwnProperty.call(prev, stateKey)
-        ? Boolean(prev[stateKey])
-        : defaultCollapsed;
-      return { ...prev, [stateKey]: !current };
-    });
-  }, []);
-
-  const requestDeleteSession = useCallback((session: ChatSession, title: string) => {
-    if (isAgentSessionSwitchboardAutomationSession(session) || session.kind === 'main' || session.preferred) {
-      return;
-    }
-    setPendingDeleteSession({ key: session.key, title });
-  }, []);
-
-  const changeRenameTitle = useCallback((title: string) => {
-    setEditingSession((current) => current ? { ...current, title } : current);
-  }, []);
-
-  const startRenameSession = useCallback((session: ChatSession, title: string) => {
-    if (isAgentSessionSwitchboardAutomationSession(session) || session.kind === 'main' || session.preferred) {
-      return;
-    }
-    setEditingSession({
-      key: session.key,
-      title,
-    });
-  }, []);
-
-  const submitRenameSession = useCallback(async () => {
-    if (!editingSession) {
-      return;
-    }
-    const normalizedTitle = editingSession.title.trim();
-    if (!normalizedTitle) {
-      setEditingSession(null);
-      return;
-    }
-    const submittedDraft = editingSession;
-    setRenamingSessionKeys((current) => ({ ...current, [submittedDraft.key]: submittedDraft }));
-    try {
-      await renameSession(submittedDraft.key, normalizedTitle);
-      setEditingSession((current) => current === submittedDraft ? null : current);
-    } finally {
-      setRenamingSessionKeys((current) => {
-        if (current[submittedDraft.key] !== submittedDraft) {
-          return current;
+      if (mutation.kind === 'rename') await renameSession(mutation.draft.key, mutation.draft.title.trim());
+      else {
+        const result = mutation.kind === 'deleteAgent'
+          ? await deleteAgentSessions(mutation.scope, mutation.identities)
+          : await deleteSession(mutation.draft.key);
+        if (result.outcome !== 'succeeded') {
+          setMutationError(result.outcome === 'unknown' ? 'unknown' : 'failed');
+          return;
         }
-        const next = { ...current };
-        delete next[submittedDraft.key];
-        return next;
-      });
-    }
-  }, [editingSession, renameSession]);
-
-  const cancelRenameSession = useCallback(() => {
-    if (editingSession && renamingSessionKeys[editingSession.key]) {
-      return;
-    }
-    setEditingSession(null);
-  }, [editingSession, renamingSessionKeys]);
-
-  const closeDeleteDialog = useCallback(() => {
-    if (!pendingDeleteSession) {
-      return;
-    }
-    if (deletingSessionKeys[pendingDeleteSession.key]) {
-      return;
-    }
-    setPendingDeleteSession(null);
-  }, [deletingSessionKeys, pendingDeleteSession]);
-
-  const confirmDeleteSession = useCallback(async () => {
-    if (!pendingDeleteSession) {
-      return;
-    }
-    const sessionKey = pendingDeleteSession.key;
-    setDeletingSessionKeys((prev) => ({ ...prev, [sessionKey]: true }));
-    try {
-      await deleteSession(sessionKey);
-      setPendingDeleteSession(null);
+      }
+      setMutation(null);
+    } catch {
+      setMutationError('failed');
     } finally {
-      setDeletingSessionKeys((prev) => {
-        const next = { ...prev };
-        delete next[sessionKey];
-        return next;
-      });
+      setPending(false);
     }
-  }, [deleteSession, pendingDeleteSession]);
-
+  };
+  const title = mode === 'agents'
+    ? selectedAgentKey === null ? t('switchboard.allAgents') : selectedAgent?.agentName ?? t('switchboard.selectAgent')
+    : selectedTeam?.name ?? t('switchboard.allTeams');
   return (
-    <aside
-      data-testid="agent-sessions-pane"
-      className="relative z-10 flex w-0 shrink-0 flex-col overflow-visible bg-transparent"
-    >
-      <div
-        className="absolute left-2 top-5"
-        onMouseEnter={openHoverPeek}
-        onMouseLeave={scheduleCloseHoverPeek}
-      >
-        <IdentityBeacon
-          activeAgentId={activeAgentId}
-          activeAgentName={activeAgentName}
-          activeAvatarSeed={currentConversation ? activeAgent.avatarSeed : undefined}
-          activeAvatarStyle={currentConversation ? activeAgent.avatarStyle : undefined}
-          identityLabel={activeAgentName}
-          runtimeLabel={activeRuntimeLabel}
-          newSessionLabel={t('sidebar.newSession')}
-          disabledNewSession={!beacon.target}
-          switchboardOpen={switchboardOpen}
-          onNewSession={handleNewSession}
-          onOpenSwitchboard={toggleSwitchboard}
-        />
-        {hoverPeekOpen && !switchboardOpen ? (
-          <DirectoryContents mode="hover" currentIdentityLabel={activeAgentName} onPick={closeHoverPeek} />
-        ) : null}
-      </div>
-
-      {switchboardOpen ? (
-        <div
-          data-testid="chat-switchboard-backdrop"
-          className="fixed inset-0 z-20 bg-transparent"
-          onMouseDown={(event) => {
-            closeSwitchboard();
-            logSessionTrace('switchboard.backdrop.intercept', createSessionTraceId('switchboard-backdrop'), () => ({
-              intercept: true, button: event.button,
-              overComposer: document.elementsFromPoint(event.clientX, event.clientY)
-                .some((element) => element.closest('[data-testid="chat-composer"]') !== null),
-              recordKey: summarizeIdentifier(currentSessionKey),
-              identity: summarizeSessionIdentity(currentConversation?.kind === 'session' ? currentConversation.sessionIdentity : null),
-            }));
-          }}
-        />
-      ) : null}
-
-      {switchboardOpen ? (
-        <section
-          data-testid="chat-switchboard"
-          role="dialog"
-          aria-label={t('switchboard.quickSwitch')}
-          className="absolute left-[52px] top-5 z-30 flex max-h-[min(420px,calc(100vh-32px))] w-[280px] max-w-[calc(100vw-68px)] flex-col overflow-hidden rounded-[22px] border border-border/75 bg-card/96 shadow-[0_18px_48px_rgba(0,0,0,0.26),0_5px_14px_rgba(0,0,0,0.18)] backdrop-blur-md transition-[opacity,transform] duration-150"
-        >
-          <div className="grid grid-cols-3 gap-1 border-b border-border/70 p-2">
-            {(['agent', 'team', 'session'] as const).map((tab) => (
-              <button
-                key={tab}
-                type="button"
-                className={cn(
-                  'rounded-[calc(var(--radius-interactive)+2px)] px-2 py-1.5 text-xs font-medium transition-colors',
-                  activeTab === tab
-                    ? 'bg-secondary text-foreground'
-                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                )}
-                onClick={() => setActiveTab(tab)}
-              >
-                {tab === 'agent'
-                  ? t('switchboard.tabs.agents')
-                  : tab === 'team'
-                    ? t('switchboard.tabs.teams')
-                    : t('switchboard.tabs.sessions')}
-              </button>
-            ))}
-          </div>
-          <div
-            data-testid={activeTab === 'agent'
-              ? 'agent-list-scroll-area'
-              : activeTab === 'team'
-                ? 'team-list-scroll-area'
-                : 'session-list-scroll-area'}
-            className="min-h-0 flex-1 overflow-y-auto p-2.5 pr-2"
-          >
-            {activeTab === 'agent' ? (
-              <DirectoryContents mode="agent" onPick={closeSwitchboard} />
-            ) : activeTab === 'team' ? (
-              <TeamContents
-                expandedTeamIds={expandedTeamIds}
-                expandedTeamRunIds={expandedTeamRunIds}
-                onToggleTeam={toggleTeam}
-                onToggleRun={toggleRun}
-                onPick={closeSwitchboard}
-              />
-            ) : (
-              <DirectoryContents
-                mode="session"
-                deletingSessionKeys={deletingSessionKeys}
-                renamingSessionKeys={renamingSessionKeys}
-                editingSession={editingSession}
-                collapsedSessionBuckets={collapsedSessionBuckets}
-                onToggleBucket={toggleSessionBucket}
-                onStartRename={startRenameSession}
-                onRenameTitleChange={changeRenameTitle}
-                onSubmitRename={submitRenameSession}
-                onCancelRename={cancelRenameSession}
-                onRequestDelete={requestDeleteSession}
-                onPick={closeSwitchboard}
-              />
-            )}
-          </div>
-        </section>
-      ) : null}
-
-      {pendingDeleteSession && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) {
-              closeDeleteDialog();
-            }
-          }}
-        >
-          <section
-            role="dialog"
-            aria-label={t('sidebar.deleteSessionDialogTitle', { title: pendingDeleteSession.title })}
-            className="w-full max-w-md rounded-[1.25rem] border border-border bg-card p-5 shadow-elevated"
-          >
-            <header className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">
-                {t('sidebar.deleteSessionDialogTitle', { title: pendingDeleteSession.title })}
-              </h2>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={t('actions.close')}
-                onClick={closeDeleteDialog}
-                disabled={Boolean(deletingSessionKeys[pendingDeleteSession.key])}
-              >
-                <X className="h-4 w-4" />
-              </Button>
-            </header>
-            <p className="mt-2 text-sm text-muted-foreground">
-              {t('sidebar.deleteSessionDialogDescription', { title: pendingDeleteSession.title })}
-            </p>
-            <div className="mt-4 flex justify-end">
-              <Button
-                variant="destructive"
-                type="button"
-                onClick={() => void confirmDeleteSession()}
-                disabled={Boolean(deletingSessionKeys[pendingDeleteSession.key])}
-              >
-                {deletingSessionKeys[pendingDeleteSession.key]
-                  ? t('sidebar.deleteSessionDialogDeleting')
-                  : t('sidebar.deleteSessionDialogConfirm')}
-              </Button>
+    <aside data-testid="agent-sessions-pane" className="flex h-full min-h-0 w-full min-w-0 flex-col bg-transparent">
+      <header className="flex h-12 shrink-0 items-center gap-1 px-2">
+        <DropdownMenu open={menuOpen} onOpenChange={(open) => { setMenuOpen(open); if (open) setMenuMode(mode); }}>
+          <DropdownMenuTrigger asChild>
+            <button ref={pickerRef} type="button" className="flex min-w-0 items-center gap-1.5 rounded-md px-1 py-1.5 text-left text-sm font-medium text-foreground outline-none transition-colors hover:bg-[hsl(var(--shell-surface-hover))] data-[state=open]:bg-[hsl(var(--shell-surface-hover))] focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+              aria-label={t(mode === 'agents' ? 'switchboard.selectAgent' : 'switchboard.selectTeam')}>
+              <span className="truncate">{title}</span><ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-[260px] max-w-[calc(100vw-24px)] rounded-[10px] border-border/60 p-1.5 shadow-whisper">
+            <div className="flex gap-5 border-b border-border/50 px-2.5">
+              {(['agents', 'teams'] as const).map((tab) => <DropdownMenuItem key={tab}
+                className={cn('rounded-none px-0 py-0 text-[13px] leading-5 text-muted-foreground data-[highlighted]:bg-transparent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring motion-reduce:transition-none', menuMode === tab && 'font-medium text-foreground')}
+                onSelect={(event) => { event.preventDefault(); setMenuMode(tab); }}>
+                <span className={cn('border-b-2 border-transparent py-2', menuMode === tab && 'border-foreground')}>{t(`switchboard.tabs.${tab}`)}</span>
+              </DropdownMenuItem>)}
             </div>
-          </section>
-        </div>
-      )}
+            <div className="max-h-[min(360px,60vh)] overflow-y-auto pt-1">
+              <DropdownMenuItem className={pickerItemClass} onSelect={() => {
+                setMode(menuMode);
+                if (menuMode === 'agents') setSelectedAgentKey(null);
+                else setSelectedTeamId(null);
+              }}>
+                {t(menuMode === 'agents' ? 'switchboard.allAgents' : 'switchboard.allTeams')}
+                {(menuMode === 'agents' ? selectedAgentKey === null : selectedTeamId === null) && <Check className="ml-auto h-3.5 w-3.5" />}
+              </DropdownMenuItem>
+              {menuMode === 'agents' ? <>
+                {pane.agentListState === 'loading' && <div role="status" aria-label={t('status.loading')} className="space-y-1 p-2"><div className="h-6 rounded-md bg-secondary" /><div className="h-6 rounded-md bg-secondary" /></div>}
+                {(pane.agentListState === 'error' || pane.agentErrorMessage) && <p role="alert" className="px-2 py-2 text-xs text-destructive">{pane.agentErrorMessage || t('status.error')}</p>}
+                {pane.agentResults.map((runtime) => runtime.agents.length > 0 && <div key={runtime.runtimeScopeKey}>
+                  <DropdownMenuLabel className="px-2.5 pb-1 pt-3 text-xs font-medium text-muted-foreground">{runtime.runtimeLabel}</DropdownMenuLabel>
+                  {runtime.agents.map((agent) => <DropdownMenuItem key={agent.key}
+                    className={pickerItemClass}
+                    onSelect={() => chooseAgent(agent)}>
+                    <AgentAvatar agentId={agent.agentId} agentName={agent.agentName} avatarSeed={agent.avatarSeed} avatarStyle={agent.avatarStyle} className="h-6 w-6 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{agent.agentName}</span>
+                    <span className="text-xs tabular-nums text-muted-foreground">{agent.sessionCount}</span>
+                    <span className="w-3.5">{agent.key === selectedAgentKey && <Check className="h-3.5 w-3.5" />}</span>
+                  </DropdownMenuItem>)}
+                </div>)}
+                {agents.length === 0 && pane.agentListState === 'ready' && <p className="px-2 py-2 text-xs text-muted-foreground">{t('sidebar.noSubagents')}</p>}
+              </> : <>
+                {teams.map((team) => <DropdownMenuItem key={team.id} className={pickerItemClass}
+                  onSelect={() => { setMode('teams'); setSelectedTeamId(team.id); }}>
+                  <Users className="h-4 w-4 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate">{team.name}</span>
+                  <span className="w-3.5 shrink-0">{selectedTeamId === team.id && <Check className="h-3.5 w-3.5" />}</span>
+                </DropdownMenuItem>)}
+                {teams.length === 0 && <p className="px-2 py-2 text-xs text-muted-foreground">{t('sidebar.noTeams')}</p>}
+              </>}
+            </div>
+            {menuMode === 'agents' && <><DropdownMenuSeparator className="bg-border/50" /><DropdownMenuItem className={pickerItemClass} onSelect={() => navigate('/subagents')}><Plus className="h-3.5 w-3.5" />{t('switchboard.addAgent')}</DropdownMenuItem></>}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <button ref={searchButtonRef} type="button" className={cn(iconClass, 'ml-auto', searchOpen && 'bg-secondary text-foreground')} aria-label={t('switchboard.searchSessions')}
+          aria-expanded={searchOpen} title={t('switchboard.searchSessions')} onClick={() => {
+            if (searchOpen) { setSearchOpen(false); setQuery(''); } else { setSearchOpen(true); }
+          }}><Search className="h-3.5 w-3.5" /></button>
+      </header>
+      {searchOpen && <div className="px-3 pb-2">
+        <Input ref={searchRef} autoFocus type="search" value={query} className="h-8 rounded-md text-[13px]" aria-label={t('switchboard.searchSessions')}
+          placeholder={t('switchboard.searchPlaceholder')} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
+            if (event.key === 'Escape') { event.preventDefault(); setQuery(''); setSearchOpen(false); searchButtonRef.current?.focus(); }
+          }} />
+      </div>}
+      <div data-testid="session-list-scroll-area" className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+        {mode === 'teams' ? <TeamSessionsSidebar selectedTeamId={selectedTeamId} query={query} /> : <>
+          {pane.sessionErrorMessage && <p role="alert" className="px-2 py-2 text-xs text-destructive">{pane.sessionErrorMessage}</p>}
+          {pane.sessionListState === 'loading' && <div role="status" aria-label={t('status.loading')} className="space-y-2 p-2"><div className="h-7 rounded-md bg-secondary" /><div className="ml-6 h-6 rounded-md bg-secondary" /><div className="ml-6 h-6 rounded-md bg-secondary" /></div>}
+          {visibleGroups.length === 0 && pane.sessionListState !== 'loading' && <p className="px-2 py-4 text-xs text-muted-foreground">{t(normalizedQuery ? 'switchboard.noSearchResults' : 'sidebar.noAgentSessions')}</p>}
+          <div className="space-y-3">
+            {visibleGroups.map(({ agent, sessions }, index) => <AgentGroup key={agent.key}
+              agent={agent} sessions={sessions} defaultExpanded={index === 0}
+              currentSessionKey={agent.key === currentAgentKey ? currentSessionKey : ''} active={agent.key === currentAgentKey}
+              endpoint={endpointByScope.get(agent.runtimeScopeKey)}
+              onSwitch={switchSession} onRename={startRename} onDelete={requestDelete}
+              onNewSession={startNewSession} onDeleteAgent={requestDeleteAgent} />)}
+          </div>
+        </>}
+      </div>
+      <Dialog.Root open={mutation !== null} onOpenChange={(open) => { if (!open && !pending) setMutation(null); }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/40" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(420px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border bg-card p-5 shadow-elevated outline-none"
+            aria-busy={pending} onOpenAutoFocus={(event) => { event.preventDefault(); (mutation?.kind === 'rename' ? renameInputRef.current : cancelRef.current)?.focus(); }}
+            onCloseAutoFocus={(event) => { event.preventDefault(); const target = mutationReturnFocusRef.current; if (target?.isConnected) target.focus(); else pickerRef.current?.focus(); }}
+            onEscapeKeyDown={(event) => { if (pending) event.preventDefault(); }} onInteractOutside={(event) => { if (pending) event.preventDefault(); }}>
+            <Dialog.Title className="pr-6 text-sm font-semibold">{mutation?.kind === 'deleteAgent'
+              ? t('switchboard.deleteAgentSessionsTitle', { name: mutation.name })
+              : mutation?.kind === 'rename' ? t('sidebar.renameSessionAria', { title: mutation.draft.title })
+                : t('sidebar.deleteSessionDialogTitle', { title: mutation?.draft.title })}</Dialog.Title>
+            <Dialog.Description className={mutation?.kind === 'rename' ? 'sr-only' : 'mt-2 text-sm text-muted-foreground'}>
+              {mutation?.kind === 'deleteAgent' ? t('switchboard.deleteAgentSessionsDescription', { count: mutation.identities.length })
+                : mutation?.kind === 'rename' ? t('sidebar.renameSessionAria', { title: mutation.draft.title })
+                  : t('sidebar.deleteSessionDialogDescription', { title: mutation?.draft.title })}
+            </Dialog.Description>
+            <Dialog.Close asChild><button type="button" className={cn(iconClass, 'absolute right-3 top-3')} disabled={pending} aria-label={t('actions.close')}><X className="h-4 w-4" /></button></Dialog.Close>
+            <form onSubmit={(event) => { event.preventDefault(); void submitMutation(); }}>
+              {mutation?.kind === 'rename' && <Input ref={renameInputRef} className="mt-3" value={mutation.draft.title} disabled={pending}
+                aria-label={t('sidebar.renameSessionAria', { title: mutation.draft.title })}
+                onChange={(event) => { const title = event.target.value; setMutation((current) => current?.kind === 'rename' ? { ...current, draft: { ...current.draft, title } } : current); }} />}
+              {mutationError && <p role="alert" className="mt-3 text-xs text-destructive">{t(mutationError === 'unknown' ? 'switchboard.deleteUnknown'
+                : mutation?.kind === 'deleteAgent' ? 'switchboard.deleteAgentSessionsFailed'
+                  : mutation?.kind === 'rename' ? 'switchboard.renameFailed' : 'switchboard.deleteFailed')}</p>}
+              <div className="mt-4 flex justify-end gap-2">
+                <Dialog.Close asChild><Button ref={cancelRef} type="button" variant="outline" size="sm" className="motion-reduce:transition-none" disabled={pending}>{t('actions.cancel')}</Button></Dialog.Close>
+                <Button type="submit" size="sm" className="motion-reduce:transition-none" variant={mutation?.kind === 'rename' ? 'default' : 'destructive'}
+                  disabled={pending || mutationError === 'unknown' || (mutation?.kind === 'rename' && !mutation.draft.title.trim())}>
+                  {pending ? t(mutation?.kind === 'rename' ? 'status.loading' : 'sidebar.deleteSessionDialogDeleting') : t(mutation?.kind === 'rename' ? 'actions.save' : 'sidebar.deleteSessionDialogConfirm')}
+                </Button>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </aside>
   );
 });

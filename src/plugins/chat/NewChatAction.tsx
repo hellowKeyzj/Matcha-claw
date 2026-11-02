@@ -2,6 +2,7 @@ import { startTransition } from 'react';
 import { MessageSquare } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { cn } from '@/lib/utils';
 import { useChatStore } from '@/plugins/chat/store';
 import { selectSidebarNewSessionAction } from '@/plugins/chat/store/selectors';
 import { getSessionItemCount } from '@/plugins/chat/store/store-state-helpers';
@@ -18,6 +19,9 @@ export default function NewChatAction() {
     <button
       type="button"
       disabled={licenseLocked}
+      title={t('sidebar.newChat')}
+      aria-label={t('sidebar.newChat')}
+      aria-current={pathname === '/' ? 'page' : undefined}
       onClick={() => {
         const { currentSessionKey, loadedSessions } = useChatStore.getState();
         const hasItems = getSessionItemCount(loadedSessions[currentSessionKey]) > 0;
@@ -28,12 +32,14 @@ export default function NewChatAction() {
           navigate('/');
         });
       }}
-      className="group flex items-center gap-2.5 rounded-[12px] px-2.5 py-2 text-[13px] font-medium tracking-[-0.01em] text-[hsl(var(--shell-text-muted))] transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))] disabled:pointer-events-none disabled:opacity-45"
+      className={cn(
+        'mx-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] transition-[background-color,color] hover:bg-[hsl(var(--shell-surface-hover))] hover:text-[hsl(var(--shell-icon-active))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--shell-surface))] disabled:pointer-events-none disabled:opacity-45',
+        pathname === '/'
+          ? 'bg-[hsl(var(--shell-surface-active))] text-[hsl(var(--shell-icon-active))]'
+          : 'text-[hsl(var(--shell-icon))]',
+      )}
     >
-      <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[hsl(var(--shell-icon))] group-hover:text-[hsl(var(--shell-icon-active))]">
-        <MessageSquare className="h-[17px] w-[17px]" />
-      </span>
-      <span className="min-w-0 flex-1 truncate text-left">{t('sidebar.newChat')}</span>
+      <MessageSquare aria-hidden="true" className="h-[18px] w-[18px]" />
     </button>
   );
 }

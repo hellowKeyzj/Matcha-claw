@@ -1,0 +1,20 @@
+{
+  "title": "Workspace",
+  "tabs": "Workspace tabs",
+  "addPage": "Open a page",
+  "allTabs": "All open tabs ({{count}})",
+  "closePage": "Close {{title}}",
+  "preview": "Preview",
+  "fullscreen": "Full screen",
+  "restore": "Restore workspace",
+  "hide": "Collapse workspace",
+  "noLaunchers": "No pages available",
+  "loading": "Loading page…",
+  "pageFailed": "This page could not be displayed.",
+  "retry": "Try again",
+  "openFailed": "Could not open the page",
+  "closeFailed": "Could not close the page",
+  "menuPage": "Page {{current}} of {{total}}",
+  "previousPage": "Previous page",
+  "nextPage": "Next page"
+}

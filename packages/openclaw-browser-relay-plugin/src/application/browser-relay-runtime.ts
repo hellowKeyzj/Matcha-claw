@@ -4,13 +4,15 @@ import {
   type OpenClawPluginApi,
   type PluginLogger,
 } from 'openclaw/plugin-sdk/plugin-entry'
-import type { BrowserActionParams } from '../browser-action-contract.js'
-import { BROWSER_RELAY_PLUGIN_DESCRIPTION, BROWSER_RELAY_PLUGIN_ID, BROWSER_RELAY_PLUGIN_NAME, DEFAULT_BROWSER_RELAY_PORT } from '../manifest.js'
-import { BrowserRelayServer } from '../relay/server.js'
-import { BrowserControlService } from '../service/browser-control-service.js'
-import { createBrowserRelayTool } from './browser-relay-tool.js'
+import type { BrowserActionContext, BrowserActionParams } from '../browser-action-contract.js'
+import { BROWSER_RELAY_PLUGIN_DESCRIPTION, BROWSER_RELAY_PLUGIN_ID, BROWSER_RELAY_PLUGIN_NAME, DEFAULT_BROWSER_RELAY_PORT, type BrowserBackendMode } from '../manifest.js'
+import { IabBrowserClient } from '../iab/client.js'
+import type { BrowserRelayServer } from '../relay/server.js'
+import type { BrowserControlService } from '../service/browser-control-service.js'
+import { createBrowserRelayTool, type BrowserRelayControl } from './browser-relay-tool.js'
 
 type BrowserRelayPluginConfig = {
+  mode: BrowserBackendMode
   port: number
 }
 
@@ -22,14 +24,27 @@ type GatewayRequestOptions = {
 class BrowserRelayRuntime {
   private server: BrowserRelayServer | null = null
   private control: BrowserControlService | null = null
+  private iab: IabBrowserClient | null = null
+  private stateDir: string | null = null
 
   async start(config: BrowserRelayPluginConfig, logger: PluginLogger, stateDir: string): Promise<void> {
-    if (this.server && this.server.port === config.port && this.control) {
+    if (this.stateDir === stateDir && (config.mode === 'iab'
+      ? this.iab
+      : this.server && this.server.port === config.port && this.control)) {
       return
     }
 
     await this.stop()
+    if (config.mode === 'iab') {
+      this.iab = new IabBrowserClient(stateDir)
+      this.stateDir = stateDir
+      return
+    }
 
+    const [{ BrowserRelayServer }, { BrowserControlService }] = await Promise.all([
+      import('../relay/server.js'),
+      import('../service/browser-control-service.js'),
+    ])
     const server = new BrowserRelayServer({
       port: config.port,
       logger,
@@ -43,24 +58,34 @@ class BrowserRelayRuntime {
       relay: server,
       stateDir,
     })
+    this.stateDir = stateDir
   }
 
   async stop(): Promise<void> {
-    if (this.control) {
-      await this.control.stop()
-      this.control = null
-    }
-    if (this.server) {
-      await this.server.stop()
-      this.server = null
-    }
+    const iab = this.iab
+    const control = this.control
+    const server = this.server
+    this.iab = null
+    this.control = null
+    this.server = null
+    this.stateDir = null
+    iab?.stop()
+    if (control) await control.stop()
+    if (server) await server.stop()
   }
 
-  requireControl(): BrowserControlService {
-    if (!this.control) {
-      throw new Error('browser relay not running')
+  requireControl(mode: BrowserBackendMode): BrowserRelayControl {
+    const control = mode === 'iab' ? this.iab : this.control
+    if (!control) {
+      throw new Error(`browser ${mode} backend not running; refresh the OpenClaw tool context after changing browser settings`)
     }
-    return this.control
+    return control
+  }
+
+  get mode(): BrowserBackendMode {
+    if (this.iab) return 'iab'
+    if (this.control) return 'relay'
+    throw new Error('browser backend not running')
   }
 }
 
@@ -159,8 +184,13 @@ function resolvePluginConfig(config: OpenClawConfig | undefined): BrowserRelayPl
   const entry = entries && isRecord(entries[BROWSER_RELAY_PLUGIN_ID]) ? entries[BROWSER_RELAY_PLUGIN_ID] : null
   const rawConfig = entry && isRecord(entry.config) ? entry.config : null
   const rawPort = typeof rawConfig?.port === 'number' ? rawConfig.port : Number(rawConfig?.port)
+  const mode = rawConfig?.mode ?? 'relay'
+  if (mode !== 'iab' && mode !== 'relay') {
+    throw new Error('Browser backend mode must be iab or relay; no fallback backend was selected.')
+  }
 
   return {
+    mode,
     port:
       Number.isInteger(rawPort) && rawPort > 0 && rawPort <= 65535
         ? rawPort
@@ -195,16 +225,36 @@ export function registerBrowserRelayRuntime(api: OpenClawPluginApi): void {
   })
 
   api.registerGatewayMethod('browser.request', async (options: GatewayRequestOptions) => {
-    await withGatewayGuard(options, async () => (
-      runtime.requireControl().handleRequest(resolveBrowserActionParams(options.params))
-    ))
+    await withGatewayGuard(options, async () => {
+      const mode = runtime.mode
+      const control = runtime.requireControl(mode)
+      if (mode === 'relay') return await control.handleRequest(resolveBrowserActionParams(options.params))
+      const { sessionKey: adminSessionKey, agentId: adminAgentId, workspaceDir, sessionId, ...requestParams } = options.params
+      const sessionKey = asString(adminSessionKey)
+      const agentId = asString(adminAgentId)
+      const adminSessionId = asString(sessionId)
+      if (!sessionKey || !agentId || !adminSessionId) {
+        throw new Error('In-app browser.request requires explicit administrator sessionKey, agentId and sessionId at the request envelope, not inside body or tool parameters.')
+      }
+      const context: BrowserActionContext = {
+        sessionKey,
+        agentId,
+        sessionId: adminSessionId,
+        ...(asString(workspaceDir) ? { workspaceDir: asString(workspaceDir) } : {}),
+      }
+      return await control.handleRequest(resolveBrowserActionParams(requestParams), { context })
+    })
   }, {
     scope: 'operator.admin',
   })
 
-  api.registerTool((toolCtx) =>
-    createBrowserRelayTool(toolCtx, () => runtime.requireControl()),
-  )
+  api.registerTool({
+    contextVersion: 2,
+    create(toolCtx) {
+      const mode = resolvePluginConfig(toolCtx.getRuntimeConfig?.() ?? toolCtx.runtimeConfig ?? toolCtx.config ?? api.config).mode
+      return createBrowserRelayTool(toolCtx, () => runtime.requireControl(mode), mode)
+    },
+  })
 
   api.logger.info('[browser-relay] plugin registered')
 }

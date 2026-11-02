@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import Konva from 'konva';
-import type { AppSessionMediaItem } from '../../../../src/types/desktop/app-plugin-sdk';
+import type { AppSessionMediaItem } from '@matcha/app-plugins-sdk';
 import type { Asset, DesignDocument, Edit, Layer } from '../document';
 import { app, call } from './api';
 import { t } from './i18n';

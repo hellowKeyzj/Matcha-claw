@@ -25,7 +25,8 @@ export const browserToolActions = [
   'close_agent_tabs',
 ] as const
 
-export type BrowserToolAction = typeof browserToolActions[number]
+export const browserIabToolActions = [...browserToolActions, 'utility'] as const
+export type BrowserToolAction = typeof browserIabToolActions[number]
 export type NormalizedBrowserToolAction = Lowercase<BrowserToolAction>
 
 export const browserRequestKinds = [
@@ -45,7 +46,9 @@ export const browserRequestKinds = [
   'scrollIntoView',
 ] as const
 
-export type BrowserRequestKind = typeof browserRequestKinds[number]
+export const browserIabRequestKinds = [...browserRequestKinds, 'hoverCoords', 'dragCoords', 'wheelCoords'] as const
+
+export type BrowserRequestKind = typeof browserIabRequestKinds[number]
 export type NormalizedBrowserRequestKind = Lowercase<BrowserRequestKind>
 
 export const relayDirectActions = [
@@ -104,8 +107,10 @@ export type BrowserCookieInput = {
 }
 
 export type BrowserFillFieldInput = {
-  ref: string
-  type: string
+  ref?: string
+  backendNodeId?: number
+  frameId?: string
+  type?: string
   value?: string | number | boolean
 }
 
@@ -114,10 +119,13 @@ export type BrowserClickRequest = {
   targetId?: string
   timeoutMs?: number
   ref?: string
+  backendNodeId?: number
+  frameId?: string
   selector?: string
   doubleClick?: boolean
   button?: MouseButton
   modifiers?: string[]
+  humanize?: boolean
 }
 
 export type BrowserClickCoordsRequest = {
@@ -129,6 +137,38 @@ export type BrowserClickCoordsRequest = {
   doubleClick?: boolean
   button?: MouseButton
   delayMs?: number
+  modifiers?: string[]
+  humanize?: boolean
+}
+
+export type BrowserHoverCoordsRequest = {
+  kind: 'hoverCoords'
+  targetId?: string
+  timeoutMs?: number
+  x?: number
+  y?: number
+  humanize?: boolean
+}
+
+export type BrowserDragCoordsRequest = {
+  kind: 'dragCoords'
+  targetId?: string
+  timeoutMs?: number
+  from?: { x: number; y: number }
+  to?: { x: number; y: number }
+  steps?: number
+  durationMs?: number
+}
+
+export type BrowserWheelCoordsRequest = {
+  kind: 'wheelCoords'
+  targetId?: string
+  timeoutMs?: number
+  x?: number
+  y?: number
+  deltaX?: number
+  deltaY?: number
+  humanize?: boolean
 }
 
 export type BrowserTypeRequest = {
@@ -136,6 +176,8 @@ export type BrowserTypeRequest = {
   targetId?: string
   timeoutMs?: number
   ref?: string
+  backendNodeId?: number
+  frameId?: string
   text?: string
   submit?: boolean
   slowly?: boolean
@@ -155,6 +197,8 @@ export type BrowserHoverRequest = {
   targetId?: string
   timeoutMs?: number
   ref?: string
+  backendNodeId?: number
+  frameId?: string
 }
 
 export type BrowserScrollIntoViewRequest = {
@@ -162,6 +206,8 @@ export type BrowserScrollIntoViewRequest = {
   targetId?: string
   timeoutMs?: number
   ref?: string
+  backendNodeId?: number
+  frameId?: string
 }
 
 export type BrowserDragRequest = {
@@ -170,6 +216,10 @@ export type BrowserDragRequest = {
   timeoutMs?: number
   startRef?: string
   endRef?: string
+  endX?: number
+  endY?: number
+  steps?: number
+  durationMs?: number
 }
 
 export type BrowserSelectRequest = {
@@ -177,6 +227,8 @@ export type BrowserSelectRequest = {
   targetId?: string
   timeoutMs?: number
   ref?: string
+  backendNodeId?: number
+  frameId?: string
   values?: string[]
 }
 
@@ -215,6 +267,7 @@ export type BrowserEvaluateRequest = {
   ref?: string
   fn?: string
   expression?: string
+  frameId?: string
 }
 
 export type BrowserEvaluateShortcutRequest = {
@@ -224,6 +277,7 @@ export type BrowserEvaluateShortcutRequest = {
   ref?: string
   fn?: string
   expression?: string
+  frameId?: string
 }
 
 export type BrowserCloseRequest = {
@@ -243,6 +297,9 @@ export type BrowserScrollRequest = {
 export type BrowserActRequest =
   | BrowserClickRequest
   | BrowserClickCoordsRequest
+  | BrowserHoverCoordsRequest
+  | BrowserDragCoordsRequest
+  | BrowserWheelCoordsRequest
   | BrowserTypeRequest
   | BrowserPressRequest
   | BrowserHoverRequest
@@ -295,12 +352,19 @@ export type BrowserCloseAction = BrowserExecutionActionBase & {
 export type BrowserConsoleAction = BrowserSaveActionBase & {
   action: 'console'
   expression?: string
+  scriptPath?: string
+  frameId?: string
   ref?: string
   level?: string
 }
 
 export type BrowserSnapshotAction = BrowserExecutionActionBase & {
   action: 'snapshot'
+  limit?: number
+  maxChars?: number
+  mode?: 'efficient'
+  snapshotFormat?: 'ai' | 'aria'
+  refs?: 'role' | 'aria'
   selector?: string
   frame?: string
   interactive?: boolean
@@ -336,13 +400,23 @@ export type BrowserScreenshotAction = BrowserSaveActionBase & {
   omitBackground?: boolean
 }
 
-export type BrowserPdfAction = BrowserSaveActionBase & {
+export type BrowserPdfOptions = {
+  landscape?: boolean
+  printBackground?: boolean
+  paper?: 'a3' | 'a4' | 'a5' | 'letter' | 'legal' | 'tabloid' | 'ledger'
+  scale?: number
+}
+
+export type BrowserPdfAction = BrowserSaveActionBase & BrowserPdfOptions & {
   action: 'pdf'
 }
 
 export type BrowserUploadAction = BrowserExecutionActionBase & {
   action: 'upload'
   paths?: string[]
+  ref?: string
+  backendNodeId?: number
+  frameId?: string
   inputRef?: string
   element?: string
 }
@@ -377,8 +451,8 @@ export type BrowserCookiesAction = BrowserExecutionActionBase & {
 
 export type BrowserStorageAction = BrowserExecutionActionBase & {
   action: 'storage'
-  storageType?: BrowserStorageType
-  operation?: BrowserDataOperation
+  storageType?: BrowserStorageType | 'indexedDB'
+  operation?: BrowserDataOperation | 'remove'
   key?: string
   value?: string | number | boolean
 }
@@ -386,11 +460,92 @@ export type BrowserStorageAction = BrowserExecutionActionBase & {
 export type BrowserHighlightAction = BrowserExecutionActionBase & {
   action: 'highlight'
   ref?: string
+  backendNodeId?: number
+  frameId?: string
   durationMs?: number
 }
 
 export type BrowserCloseAgentTabsAction = {
   action: CloseAgentTabsAction
+}
+
+export const browserUtilityKinds = [
+  'highlight', 'upload', 'dialog', 'errors', 'events', 'requests', 'pdf', 'cookies',
+  'frames', 'a11yTree', 'domTree', 'scripts', 'sourceMap', 'har', 'download', 'settings', 'som', 'intercept', 'metrics', 'emulate', 'goBack', 'goForward', 'reload',
+] as const
+
+export type BrowserRuntimeSettings = {
+  pace?: { minIntervalMs: number; jitterMs?: number } | null
+  humanize?: boolean | null
+  stealth?: { enabled: boolean } | null
+}
+
+export type BrowserInterceptRule = {
+  pattern: string
+  match?: 'substring' | 'glob'
+  action: 'block' | 'mock' | 'modify' | 'continue'
+  status?: number
+  headers?: Record<string, string>
+  body?: string
+  contentType?: string
+  method?: string
+}
+
+export type BrowserUtilityRequest = { targetId?: string; timeoutMs?: number } & (
+  | { kind: 'highlight'; ref?: string; backendNodeId?: number; frameId?: string; durationMs?: number }
+  | { kind: 'upload'; paths?: string[]; ref?: string; backendNodeId?: number; frameId?: string; inputRef?: string; element?: string }
+  | { kind: 'dialog'; accept?: boolean; promptText?: string }
+  | { kind: 'errors'; clear?: boolean }
+  | { kind: 'events'; filter?: string; since?: number; clear?: boolean }
+  | { kind: 'requests'; filter?: string; clear?: boolean; last?: number }
+  | ({ kind: 'pdf'; savePath?: string } & BrowserPdfOptions)
+  | { kind: 'cookies'; operation?: BrowserDataOperation; cookies?: BrowserCookieInput[] }
+  | { kind: 'frames' }
+  | { kind: 'goBack' | 'goForward' }
+  | { kind: 'reload'; ignoreCache?: boolean }
+  | { kind: 'a11yTree'; text?: string; max?: number }
+  | { kind: 'domTree'; scope?: string; text?: string; max?: number; depth?: number; deepText?: boolean; includeHrefInFilter?: boolean }
+  | { kind: 'scripts'; filter?: string; includeSource?: boolean; limit?: number; maxChars?: number }
+  | { kind: 'sourceMap'; scriptId?: string; filter?: string; line?: number; column?: number }
+  | { kind: 'har'; savePath?: string; filter?: string; last?: number; clear?: boolean }
+  | { kind: 'download'; savePath?: string; dir?: string; trigger?: BrowserClickRequest | BrowserClickCoordsRequest }
+  | { kind: 'settings'; settings?: BrowserRuntimeSettings | string }
+  | { kind: 'som'; mode?: 'dom' | 'vision'; maxMarks?: number; selector?: string; screenshot?: boolean }
+  | { kind: 'intercept'; rules?: BrowserInterceptRule[] | string; clear?: boolean; cacheBypass?: boolean }
+  | { kind: 'metrics' }
+  | {
+    kind: 'emulate'
+    action: 'device' | 'timezone' | 'locale' | 'geolocation' | 'colorScheme' | 'userAgent' | 'network' | 'cpu'
+    clear?: boolean
+    device?: string | Record<string, unknown>
+    timezoneId?: string
+    locale?: string
+    latitude?: number
+    longitude?: number
+    accuracy?: number
+    scheme?: 'light' | 'dark'
+    userAgent?: string
+    preset?: string | Record<string, unknown>
+    rate?: number
+  }
+)
+
+export type BrowserUtilityAction = BrowserExecutionActionBase & {
+  action: 'utility'
+  request?: BrowserUtilityRequest
+}
+
+export type BrowserActionContext = {
+  sessionKey: string
+  agentId: string
+  workspaceDir?: string
+  sessionId: string
+}
+
+export type BrowserActionInvocation = {
+  context?: BrowserActionContext
+  signal?: AbortSignal
+  assertInvocationCurrent?: () => void
 }
 
 export type BrowserActionParams =
@@ -417,3 +572,4 @@ export type BrowserActionParams =
   | BrowserStorageAction
   | BrowserHighlightAction
   | BrowserCloseAgentTabsAction
+  | BrowserUtilityAction

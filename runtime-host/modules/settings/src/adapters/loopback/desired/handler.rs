@@ -121,6 +121,7 @@ async fn handle_request(
 fn desired_from_decision(value: &Value) -> Result<Desired, ()> {
     let input = value.get("input").and_then(Value::as_object).ok_or(())?;
     let browser_mode = match input.get("browserMode").and_then(Value::as_str).ok_or(())? {
+        "iab" => BrowserMode::Iab,
         "native" => BrowserMode::Native,
         "relay" => BrowserMode::Relay,
         "off" => BrowserMode::Off,

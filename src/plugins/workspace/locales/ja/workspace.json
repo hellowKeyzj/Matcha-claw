@@ -1,0 +1,20 @@
+{
+  "title": "ワークスペース",
+  "tabs": "ワークスペースのタブ",
+  "addPage": "ページを開く",
+  "allTabs": "開いているすべてのタブ（{{count}}）",
+  "closePage": "「{{title}}」を閉じる",
+  "preview": "プレビュー",
+  "fullscreen": "全画面表示",
+  "restore": "元のサイズに戻す",
+  "hide": "ワークスペースを折りたたむ",
+  "noLaunchers": "開けるページはありません",
+  "loading": "ページを読み込み中…",
+  "pageFailed": "このページを表示できませんでした。",
+  "retry": "再試行",
+  "openFailed": "ページを開けませんでした",
+  "closeFailed": "ページを閉じられませんでした",
+  "menuPage": "{{current}} / {{total}} ページ",
+  "previousPage": "前のページ",
+  "nextPage": "次のページ"
+}

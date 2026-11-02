@@ -68,12 +68,3 @@ export function createContentActions(
 }
 
 export type ContentActions = ReturnType<typeof createContentActions>;
-
-export function contentHostContext(frame: HTMLIFrameElement) {
-  return {
-    theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light',
-    displayMode: 'inline', availableDisplayModes: ['inline'],
-    containerDimensions: { width: Math.max(1, frame.clientWidth), height: Math.max(1, frame.clientHeight) },
-    locale: navigator.language, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, platform: 'desktop',
-  };
-}

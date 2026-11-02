@@ -1,5 +1,5 @@
 import { basename } from 'node:path';
-import type { AppVideoTask, AppVideoTaskResult } from '../../../../src/types/desktop/app-plugin-sdk';
+import type { AppVideoTask, AppVideoTaskResult } from '@matcha/app-plugins-sdk';
 import type { Asset, GenerationEditing, GenerationRecord, GenerationRequest } from '../document';
 import { readJson } from './files';
 import { dimensions, generationActions, generationRequest, id, ids, invalid, number, object, text } from './validation';

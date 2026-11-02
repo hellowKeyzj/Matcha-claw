@@ -35,8 +35,8 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
     : t('toolbar.openSidePanel');
 
   return (
-    <div className="flex items-start justify-end gap-2">
-      <div className="flex items-center gap-1">
+    <div className="flex min-w-0 items-center gap-3">
+      <div className="ml-auto flex shrink-0 items-center gap-1">
         {todoPanel}
         <Tooltip>
           <TooltipTrigger asChild>

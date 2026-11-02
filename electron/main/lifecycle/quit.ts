@@ -73,6 +73,10 @@ export function requestQuitLifecycleAction(state: QuitLifecycleState): QuitLifec
   return 'start-cleanup';
 }
 
+export function cancelQuitCleanup(state: QuitLifecycleState): void {
+  state.cleanupStarted = false;
+}
+
 export function markQuitCleanupCompleted(state: QuitLifecycleState): void {
   state.cleanupCompleted = true;
 }

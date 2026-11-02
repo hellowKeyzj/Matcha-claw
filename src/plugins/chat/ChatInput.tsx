@@ -2015,38 +2015,40 @@ export const ChatInput = memo(function ChatInput({
                 onToggleQuickPhrase={toggleQuickPhrase}
                 onAttachFiles={stageSelectedDialogAttachments}
               />
-              <ComposerPromptEnhancement
-                key={`prompt-enhancement:${draftKey ?? ''}:${sessionIdentityKey ?? ''}`}
-                text={input}
-                disabled={promptEnhancementDisabled}
-                busy={promptEnhancementBusy}
-                onBusyChange={handlePromptEnhancementBusyChange}
-                contexts={contexts}
-                readSnapshot={readPromptSnapshot}
-                replaceText={replacePromptText}
-              />
+              <div className="chat-input-primary-actions">
+                <ComposerPromptEnhancement
+                  key={`prompt-enhancement:${draftKey ?? ''}:${sessionIdentityKey ?? ''}`}
+                  text={input}
+                  disabled={promptEnhancementDisabled}
+                  busy={promptEnhancementBusy}
+                  onBusyChange={handlePromptEnhancementBusyChange}
+                  contexts={contexts}
+                  readSnapshot={readPromptSnapshot}
+                  replaceText={replacePromptText}
+                />
 
-              <Button
-                onClick={effectiveSending ? handleStop : handleSend}
-                data-chat-control="send"
-                disabled={effectiveSending ? !canStop : !canSend}
-                size="icon"
-                className={cn(
-                  CHAT_LAYOUT_TOKENS.inputSendButton,
-                  'chat-send-button rounded-full',
-                )}
-                variant={effectiveSending ? 'destructive' : 'default'}
-                aria-label={t(effectiveSending ? 'input.stop' : 'input.send')}
-                title={t(effectiveSending ? 'input.stop' : 'input.send')}
-              >
-                {stopping && !editingGoal ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : effectiveSending ? (
-                  <Square className="h-4 w-4" />
-                ) : (
-                  <Send className="h-4 w-4" />
-                )}
-              </Button>
+                <Button
+                  onClick={effectiveSending ? handleStop : handleSend}
+                  data-chat-control="send"
+                  disabled={effectiveSending ? !canStop : !canSend}
+                  size="icon"
+                  className={cn(
+                    CHAT_LAYOUT_TOKENS.inputSendButton,
+                    'chat-send-button rounded-full',
+                  )}
+                  variant={effectiveSending ? 'destructive' : 'default'}
+                  aria-label={t(effectiveSending ? 'input.stop' : 'input.send')}
+                  title={t(effectiveSending ? 'input.stop' : 'input.send')}
+                >
+                  {stopping && !editingGoal ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : effectiveSending ? (
+                    <Square className="h-4 w-4" />
+                  ) : (
+                    <Send className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
             </div>
           </div>
           </div>

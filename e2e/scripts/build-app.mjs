@@ -1,4 +1,4 @@
-import { lstat, mkdir, readlink, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readlink, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -7,11 +7,16 @@ import { spawn } from 'node:child_process';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const output = join(root, 'e2e', '.cache', 'app');
 const require = createRequire(join(root, 'package.json'));
+await new Promise((resolve, reject) => {
+  const sdk = spawn(process.execPath, [join(root, 'sdk/app-plugins/build.mjs')], { cwd: root, stdio: 'inherit' });
+  sdk.once('error', reject);
+  sdk.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`Plugin SDK build failed: ${signal ?? code}`)));
+});
 await mkdir(output, { recursive: true });
 const { name, version } = require('./package.json');
 // Keep the production Main/preload CommonJS boundary inside this ESM workspace.
 await writeFile(join(output, 'package.json'), JSON.stringify({ name, version, private: true, type: 'commonjs' }, null, 2));
-for (const name of ['resources', 'node_modules']) {
+for (const name of ['resources', 'node_modules', 'sdk']) {
   const link = join(output, name);
   const target = join(root, name);
   const existing = await lstat(link).catch(error => {
@@ -30,8 +35,10 @@ const child = spawn(process.execPath, [
   join(dirname(require.resolve('vite/package.json')), 'bin/vite.js'),
   'build', '--mode', 'e2e',
 ], { cwd: root, stdio: 'inherit' });
-child.on('error', error => { throw error; });
-child.on('exit', (code, signal) => {
-  if (signal) throw new Error(`E2E application build terminated: ${signal}`);
-  process.exitCode = code ?? 1;
+await new Promise((resolve, reject) => {
+  child.once('error', reject);
+  child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`E2E application build failed: ${signal ?? code}`)));
 });
+const guard = join(output, 'dist-electron', 'main', 'build', 'iab-guard-extension');
+await mkdir(guard, { recursive: true });
+await Promise.all(['manifest.json', 'guard.js'].map(file => copyFile(join(root, 'build', 'iab-guard-extension', file), join(guard, file))));

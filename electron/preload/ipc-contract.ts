@@ -6,6 +6,8 @@ export const INFRASTRUCTURE_TRANSPORT_INVOKE_CHANNELS = [
 ] as const;
 
 export const SHELL_INVOKE_CHANNELS = [
+  'iab:command',
+  'iab:snapshot',
   'app:version',
   'app:name',
   'app:platform',

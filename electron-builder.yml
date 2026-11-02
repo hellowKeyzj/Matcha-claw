@@ -17,6 +17,10 @@ files:
   - package.json
 
 extraResources:
+  - from: build/iab-guard-extension/
+    to: iab-guard-extension/
+  - from: sdk/app-plugins/matcha-app-plugins-sdk-1.0.0.tgz
+    to: app-plugins/sdk.tgz
   - from: resources/
     to: resources/
     filter:

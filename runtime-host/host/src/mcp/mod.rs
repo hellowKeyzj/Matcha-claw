@@ -1,8 +1,9 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod app_plugins;
 mod client;
 mod discovery;
+mod iab;
 pub(crate) mod route;
 mod stdio;
 

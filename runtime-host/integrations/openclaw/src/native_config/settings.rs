@@ -22,6 +22,7 @@ const BYPASS_RULES_NATIVE_KEY: Option<&str> = None;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BrowserMode {
+    Iab,
     Native,
     Relay,
     Off,
@@ -189,7 +190,7 @@ impl SettingsProjection {
 
         let mut plugins = object(document.get("plugins"));
         let mut allow = strings(plugins.get("allow"));
-        let relay = self.browser_mode == BrowserMode::Relay;
+        let relay = matches!(self.browser_mode, BrowserMode::Iab | BrowserMode::Relay);
         if !allow.is_empty() {
             changed |= set_member(&mut allow, BROWSER_RELAY_PLUGIN, relay);
             changed |= replace(
@@ -201,6 +202,16 @@ impl SettingsProjection {
         let mut entries = object(plugins.get("entries"));
         let mut relay_entry = object(entries.get(BROWSER_RELAY_PLUGIN));
         changed |= replace(&mut relay_entry, "enabled", Value::Bool(relay));
+        if relay {
+            let mut config = object(relay_entry.get("config"));
+            let mode = if self.browser_mode == BrowserMode::Iab {
+                "iab"
+            } else {
+                "relay"
+            };
+            changed |= replace(&mut config, "mode", Value::String(mode.into()));
+            changed |= replace(&mut relay_entry, "config", Value::Object(config));
+        }
         changed |= replace(
             &mut entries,
             BROWSER_RELAY_PLUGIN,
@@ -229,7 +240,7 @@ impl SettingsProjection {
 
         let plugins = object(document.get("plugins"));
         let allow = strings(plugins.get("allow"));
-        let relay = self.browser_mode == BrowserMode::Relay;
+        let relay = matches!(self.browser_mode, BrowserMode::Iab | BrowserMode::Relay);
         if !allow.is_empty() && allow.contains(&BROWSER_RELAY_PLUGIN.to_owned()) != relay {
             return false;
         }
@@ -237,6 +248,21 @@ impl SettingsProjection {
         let relay_entry = object(entries.get(BROWSER_RELAY_PLUGIN));
         if relay_entry.get("enabled") != Some(&Value::Bool(relay)) {
             return false;
+        }
+        if relay {
+            let mode = if self.browser_mode == BrowserMode::Iab {
+                "iab"
+            } else {
+                "relay"
+            };
+            if relay_entry
+                .get("config")
+                .and_then(|config| config.get("mode"))
+                .and_then(Value::as_str)
+                != Some(mode)
+            {
+                return false;
+            }
         }
 
         let proxy = object(document.get("proxy"));
@@ -849,7 +875,7 @@ mod tests {
                 "plugins": {
                     "allow": ["other", BROWSER_RELAY_PLUGIN],
                     "entries": {
-                        BROWSER_RELAY_PLUGIN: { "enabled": true }
+                        BROWSER_RELAY_PLUGIN: { "enabled": true, "config": { "mode": "relay" } }
                     }
                 }
             })
@@ -908,7 +934,7 @@ mod tests {
             "plugins": {
                 "allow": ["other", BROWSER_RELAY_PLUGIN],
                 "entries": {
-                    BROWSER_RELAY_PLUGIN: { "enabled": true, "custom": true }
+                    BROWSER_RELAY_PLUGIN: { "enabled": true, "custom": true, "config": { "mode": "relay" } }
                 }
             },
             "proxy": {

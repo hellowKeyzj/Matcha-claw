@@ -26,7 +26,7 @@ import {
   getSessionItems,
   getSessionItemCount,
 } from '@/plugins/chat/store/store-state-helpers';
-import type { ChatSessionHistoryStatus, ChatSessionRecord } from '@/plugins/chat/store/types';
+import type { ChatSessionRecord } from '@/plugins/chat/store/types';
 import {
   areCurrentChatSendGateSourcesEquivalent,
   deriveChatSendGate,
@@ -39,8 +39,6 @@ const EMPTY_AGENT_PANE_SESSION_ENTRIES: AgentSessionsPaneSessionEntry[] = [];
 export interface AgentSessionsPaneSessionEntry {
   session: ChatSession;
   title: string | null;
-  lastActivityAt: number | null;
-  historyStatus: ChatSessionHistoryStatus;
 }
 
 let cachedAgentPaneSessionEntries: AgentSessionsPaneSessionEntry[] = [];
@@ -75,52 +73,35 @@ export function deriveSessionImageGenerationRuntime(record: ChatSessionRecord | 
 function buildAgentPaneSessionEntries(state: ChatStoreState): AgentSessionsPaneSessionEntry[] {
   const sessions = readSessionsFromState(state);
   const titles = readSessionTitlesFromState(state);
-  if (sessions.length === 0) {
-    cachedAgentPaneSessionEntries = EMPTY_AGENT_PANE_SESSION_ENTRIES;
-    cachedAgentPaneSessionEntryByKey = new Map();
-    return cachedAgentPaneSessionEntries;
-  }
-
-  const nextEntries: AgentSessionsPaneSessionEntry[] = [];
-  const nextEntryByKey = new Map<string, AgentSessionsPaneSessionEntry>();
+  let nextEntries: AgentSessionsPaneSessionEntry[] | null = null;
+  let visibleIndex = 0;
 
   for (const session of sessions) {
     const record = state.loadedSessions[session.key];
-    const meta = record?.meta;
     const title = titles[session.key] ?? null;
     if (!record || !hasSessionPaneActivity(record)) {
       continue;
     }
-    const lastActivityAt = typeof meta?.lastActivityAt === 'number' ? meta.lastActivityAt : null;
-    const historyStatus = meta?.historyStatus ?? 'idle';
     const previousEntry = cachedAgentPaneSessionEntryByKey.get(session.key);
     const nextEntry = previousEntry
       && previousEntry.session === session
       && previousEntry.title === title
-      && previousEntry.lastActivityAt === lastActivityAt
-      && previousEntry.historyStatus === historyStatus
       ? previousEntry
-      : {
-          session,
-          title,
-          lastActivityAt,
-          historyStatus,
-        };
-    nextEntries.push(nextEntry);
-    nextEntryByKey.set(session.key, nextEntry);
+      : { session, title };
+    if (!nextEntries && cachedAgentPaneSessionEntries[visibleIndex] !== nextEntry) {
+      nextEntries = cachedAgentPaneSessionEntries.slice(0, visibleIndex);
+    }
+    nextEntries?.push(nextEntry);
+    visibleIndex += 1;
   }
 
-  let changed = cachedAgentPaneSessionEntries.length !== nextEntries.length;
-  if (!changed) {
-    changed = nextEntries.some((entry, index) => cachedAgentPaneSessionEntries[index] !== entry);
-  }
-
-  if (!changed) {
+  if (!nextEntries && visibleIndex === cachedAgentPaneSessionEntries.length) {
     return cachedAgentPaneSessionEntries;
   }
 
-  cachedAgentPaneSessionEntries = nextEntries;
-  cachedAgentPaneSessionEntryByKey = nextEntryByKey;
+  cachedAgentPaneSessionEntries = visibleIndex === 0 ? EMPTY_AGENT_PANE_SESSION_ENTRIES
+    : nextEntries ?? cachedAgentPaneSessionEntries.slice(0, visibleIndex);
+  cachedAgentPaneSessionEntryByKey = new Map(cachedAgentPaneSessionEntries.map((entry) => [entry.session.key, entry]));
   return cachedAgentPaneSessionEntries;
 }
 
@@ -139,6 +120,7 @@ function buildAgentSessionsPaneState(state: ChatStoreState, sessionEntries: Agen
     newSession: state.newSession,
     newSessionForScope: state.newSessionForScope,
     deleteSession: state.deleteSession,
+    deleteAgentSessions: state.deleteAgentSessions,
     renameSession: state.renameSession,
   };
 }
@@ -218,6 +200,7 @@ export function selectAgentSessionsPaneState(state: ChatStoreState) {
     && cachedAgentSessionsPaneState.newSession === state.newSession
     && cachedAgentSessionsPaneState.newSessionForScope === state.newSessionForScope
     && cachedAgentSessionsPaneState.deleteSession === state.deleteSession
+    && cachedAgentSessionsPaneState.deleteAgentSessions === state.deleteAgentSessions
     && cachedAgentSessionsPaneState.renameSession === state.renameSession
   ) {
     return cachedAgentSessionsPaneState;

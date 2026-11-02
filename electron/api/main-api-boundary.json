@@ -90,7 +90,12 @@
     "/api/app-plugins/rollback",
     "/api/app-plugins/bundle",
     "/api/app-plugins/build",
-    "/api/app-plugins/development",
+    "/api/app-plugins/development-list",
+    "/api/app-plugins/development-status",
+    "/api/app-plugins/development-bundle",
+    "/api/app-plugins/development-call",
+    "/api/app-plugins/development-observe",
+    "/api/app-plugins/development-log",
     "/api/app-plugins/runtime-status",
     "/api/app-plugins/call",
     "/api/billing/checkout-info",
@@ -447,7 +452,27 @@
     ],
     [
       "POST",
-      "/api/app-plugins/development"
+      "/api/app-plugins/development-list"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/development-status"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/development-bundle"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/development-call"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/development-observe"
+    ],
+    [
+      "POST",
+      "/api/app-plugins/development-log"
     ],
     [
       "POST",

@@ -358,6 +358,7 @@
         "permissionFullRequiresAccess": "当前无权选择完全访问",
         "permissionLoading": "权限加载中…",
         "permissionPending": "权限切换中…",
+        "configurationCreateRejected": "会话未能创建，消息未发送。请检查运行时状态后重试。",
         "configurationCreateUnknown": "会话创建结果未确认，请勿重复发送",
         "configurationOutcome": {
             "unsupported": "配置尚未应用：运行时不支持此操作",

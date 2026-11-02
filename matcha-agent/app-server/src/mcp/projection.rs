@@ -255,6 +255,15 @@ pub async fn project(
     agent_id: &str,
     env: &mut BTreeMap<String, String>,
 ) -> rpc::Result<Vec<String>> {
+    Ok(project_instance(config, paths, agent_id, env).await?.0)
+}
+
+pub(crate) async fn project_instance(
+    config: &Config,
+    paths: &Paths,
+    agent_id: &str,
+    env: &mut BTreeMap<String, String>,
+) -> rpc::Result<(Vec<String>, Option<(String, Vec<String>)>)> {
     let mut servers = parse(config)?;
     let all_sources = servers
         .values()
@@ -275,7 +284,13 @@ pub async fn project(
                 .any(|source| source == name)
     });
     reject_source_collisions(config, &all_sources)?;
-    add_preset(&mut servers, paths).await?;
+    let preset_added = add_preset(&mut servers, paths).await?;
+    let preset = if preset_added {
+        match &servers["matcha"].server {
+            ServerInput::Stdio { command, args, .. } => Some((command.clone(), args.clone())),
+            _ => None,
+        }
+    } else { None };
     let mut enabled = BTreeMap::new();
     for (name, entry) in servers {
         if !entry.enabled {
@@ -293,7 +308,7 @@ pub async fn project(
         enabled.insert(name, rpc::value(entry.server)?);
     }
     if enabled.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let bytes = serde_json::to_vec(&json!({"mcpServers": enabled}))
         .map_err(|source| Error::internal("mcp_projection_encode").with_source(source))?;
@@ -318,7 +333,7 @@ pub async fn project(
             "The managed MCP projection path is not Unicode",
         )
     })?;
-    Ok(vec!["--mcp-config".into(), path.into()])
+    Ok((vec!["--mcp-config".into(), path.into()], preset))
 }
 
 #[derive(Deserialize)]
@@ -331,13 +346,13 @@ struct Preset {
 async fn add_preset(
     servers: &mut BTreeMap<String, ManagedServer>,
     paths: &Paths,
-) -> rpc::Result<()> {
+) -> rpc::Result<bool> {
     if servers.contains_key("matcha") {
-        return Ok(());
+        return Ok(false);
     }
     let bytes = match tokio::fs::read(paths.root().join("matcha-mcp.json")).await {
         Ok(bytes) => bytes,
-        Err(source) if source.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(source) if source.kind() == ErrorKind::NotFound => return Ok(false),
         Err(source) => {
             return Err(Error::new(
                 -32005,
@@ -370,7 +385,7 @@ async fn add_preset(
     };
     validate_entry("matcha", &entry)?;
     servers.insert("matcha".into(), entry);
-    Ok(())
+    Ok(true)
 }
 
 fn transport(server: &ServerInput) -> &'static str {
